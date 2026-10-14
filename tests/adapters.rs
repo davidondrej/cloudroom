@@ -8,6 +8,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+// Fixture harnesses bypass Command Guard so these tests do not depend on Node.js.
 struct Fixture {
     root: PathBuf,
     config: Config,
@@ -69,7 +70,8 @@ impl Drop for Fixture {
 async fn both_harnesses_obey_request_and_shutdown_contract() {
     for kind in [Kind::Codex, Kind::Pi] {
         let fixture = Fixture::new(kind);
-        let (handle, mut events) = runtime::Handle::spawn(&fixture.config, kind, None).unwrap();
+        let (handle, mut events) =
+            runtime::Handle::spawn_guarded(&fixture.config, kind, None, false, true, None).unwrap();
         let native = handle.start_session().await.unwrap();
         assert!(!native.is_empty());
         handle.send("first", "hello").await.unwrap();
@@ -126,7 +128,8 @@ async fn both_harnesses_obey_request_and_shutdown_contract() {
 #[tokio::test]
 async fn pi_waits_through_retry_and_preserves_tool_snapshots() {
     let fixture = Fixture::new(Kind::Pi);
-    let (handle, mut events) = runtime::Handle::spawn(&fixture.config, Kind::Pi, None).unwrap();
+    let (handle, mut events) =
+        runtime::Handle::spawn_guarded(&fixture.config, Kind::Pi, None, false, true, None).unwrap();
     handle.start_session().await.unwrap();
     handle.send("retry", "retry").await.unwrap();
     let started = std::time::Instant::now();
@@ -187,7 +190,8 @@ async fn pi_waits_through_retry_and_preserves_tool_snapshots() {
 #[tokio::test]
 async fn pi_handles_no_run_dialogs_rejection_and_failure() {
     let fixture = Fixture::new(Kind::Pi);
-    let (handle, mut events) = runtime::Handle::spawn(&fixture.config, Kind::Pi, None).unwrap();
+    let (handle, mut events) =
+        runtime::Handle::spawn_guarded(&fixture.config, Kind::Pi, None, false, true, None).unwrap();
     handle.start_session().await.unwrap();
     for (text, status) in [
         ("handled", "completed"),
@@ -236,7 +240,8 @@ async fn pi_handles_no_run_dialogs_rejection_and_failure() {
 #[tokio::test]
 async fn pi_native_identity_exists_before_first_prompt_and_resume_never_creates_missing_file() {
     let fixture = Fixture::new(Kind::Pi);
-    let (handle, mut events) = runtime::Handle::spawn(&fixture.config, Kind::Pi, None).unwrap();
+    let (handle, mut events) =
+        runtime::Handle::spawn_guarded(&fixture.config, Kind::Pi, None, false, true, None).unwrap();
     let native = handle.start_session().await.unwrap();
     handle.request_shutdown();
     let mut path = None;
@@ -278,8 +283,15 @@ async fn pi_native_identity_exists_before_first_prompt_and_resume_never_creates_
         provider: None,
         reasoning: None,
     };
-    let (handle, mut events) =
-        runtime::Handle::spawn(&fixture.config, Kind::Pi, Some(saved.clone())).unwrap();
+    let (handle, mut events) = runtime::Handle::spawn_guarded(
+        &fixture.config,
+        Kind::Pi,
+        Some(saved.clone()),
+        false,
+        true,
+        None,
+    )
+    .unwrap();
     assert_eq!(handle.start_session().await.unwrap(), native);
     handle.request_shutdown();
     tokio::time::timeout(Duration::from_secs(6), async {
@@ -288,12 +300,35 @@ async fn pi_native_identity_exists_before_first_prompt_and_resume_never_creates_
     .await
     .unwrap();
     fs::remove_file(&path).unwrap();
-    assert!(runtime::Handle::spawn(&fixture.config, Kind::Pi, Some(saved.clone())).is_err());
+    assert!(
+        runtime::Handle::spawn_guarded(
+            &fixture.config,
+            Kind::Pi,
+            Some(saved.clone()),
+            false,
+            true,
+            None
+        )
+        .is_err()
+    );
     assert!(!path.exists());
     fs::write(&path, "not a session\n").unwrap();
-    assert!(runtime::Handle::spawn(&fixture.config, Kind::Pi, Some(saved.clone())).is_err());
+    assert!(
+        runtime::Handle::spawn_guarded(
+            &fixture.config,
+            Kind::Pi,
+            Some(saved.clone()),
+            false,
+            true,
+            None
+        )
+        .is_err()
+    );
     fs::write(&path, original.replace(&native, "wrong-native-id")).unwrap();
-    assert!(runtime::Handle::spawn(&fixture.config, Kind::Pi, Some(saved)).is_err());
+    assert!(
+        runtime::Handle::spawn_guarded(&fixture.config, Kind::Pi, Some(saved), false, true, None)
+            .is_err()
+    );
 }
 
 #[tokio::test]
@@ -301,7 +336,8 @@ async fn both_harnesses_drain_large_native_history_before_exit() {
     use std::io::Write;
     for kind in [Kind::Codex, Kind::Pi] {
         let fixture = Fixture::new(kind);
-        let (handle, mut events) = runtime::Handle::spawn(&fixture.config, kind, None).unwrap();
+        let (handle, mut events) =
+            runtime::Handle::spawn_guarded(&fixture.config, kind, None, false, true, None).unwrap();
         let (location, path) = tokio::sync::oneshot::channel();
         let collected = tokio::spawn(async move {
             let mut location = Some(location);

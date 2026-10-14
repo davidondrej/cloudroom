@@ -8,6 +8,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+// Fixture harnesses bypass Command Guard so these tests do not depend on Node.js.
 struct Directory(PathBuf);
 impl Drop for Directory {
     fn drop(&mut self) {
@@ -64,7 +65,9 @@ async fn capture_stderr(script: &str, shutdown: bool) -> runtime::ExitDetails {
         .get_mut(&runtime::Kind::Codex)
         .unwrap()
         .binary = binary;
-    let (handle, mut events) = runtime::Handle::spawn(&config, runtime::Kind::Codex, None).unwrap();
+    let (handle, mut events) =
+        runtime::Handle::spawn_guarded(&config, runtime::Kind::Codex, None, false, true, None)
+            .unwrap();
     if shutdown {
         handle.request_shutdown();
     }
@@ -271,7 +274,9 @@ async fn workload_cleanup_requires_confirmed_empty_group() {
 #[tokio::test]
 async fn unresponsive_harness_is_not_reported_as_cleanly_closed() {
     let (_dir, config) = fixture();
-    let (handle, mut events) = runtime::Handle::spawn(&config, runtime::Kind::Codex, None).unwrap();
+    let (handle, mut events) =
+        runtime::Handle::spawn_guarded(&config, runtime::Kind::Codex, None, false, true, None)
+            .unwrap();
     let exited = tokio::spawn(async move {
         while let Some(event) = events.recv().await {
             if let runtime::Event::Exited {
@@ -296,7 +301,9 @@ async fn unresponsive_harness_is_not_reported_as_cleanly_closed() {
 #[tokio::test]
 async fn turn_notifications_survive_both_rpc_reply_orders() {
     let (_dir, config) = fixture();
-    let (handle, mut events) = runtime::Handle::spawn(&config, runtime::Kind::Codex, None).unwrap();
+    let (handle, mut events) =
+        runtime::Handle::spawn_guarded(&config, runtime::Kind::Codex, None, false, true, None)
+            .unwrap();
     handle.start_session().await.unwrap();
     for text in ["reply-first", "finish-first", "events-first"] {
         handle.send(text, text).await.unwrap();
@@ -337,7 +344,9 @@ async fn turn_notifications_survive_both_rpc_reply_orders() {
 async fn resume_reattaches_and_continues_the_native_rollout() {
     let (_dir, config) = fixture();
     // First run: start, take a turn, capture the native rollout bytes, then stop.
-    let (handle, mut events) = runtime::Handle::spawn(&config, runtime::Kind::Codex, None).unwrap();
+    let (handle, mut events) =
+        runtime::Handle::spawn_guarded(&config, runtime::Kind::Codex, None, false, true, None)
+            .unwrap();
     let native = handle.start_session().await.unwrap();
     handle.send("hello", "hello").await.unwrap();
     handle.request_shutdown();
@@ -371,7 +380,7 @@ async fn resume_reattaches_and_continues_the_native_rollout() {
     assert!(first_offset > 0);
 
     // Resume seeded at the captured offset: only new appends, contiguously numbered.
-    let (handle, mut events) = runtime::Handle::spawn(
+    let (handle, mut events) = runtime::Handle::spawn_guarded(
         &config,
         runtime::Kind::Codex,
         Some(runtime::Resume {
@@ -382,6 +391,9 @@ async fn resume_reattaches_and_continues_the_native_rollout() {
             provider: None,
             reasoning: None,
         }),
+        false,
+        true,
+        None,
     )
     .unwrap();
     assert_eq!(handle.start_session().await.unwrap(), native);
@@ -422,7 +434,9 @@ async fn dropping_the_last_handle_stops_its_tools() {
 #[tokio::test]
 async fn shutdown_cancels_pending_commands_as_uncertain() {
     let (dir, config) = fixture();
-    let (handle, mut events) = runtime::Handle::spawn(&config, runtime::Kind::Codex, None).unwrap();
+    let (handle, mut events) =
+        runtime::Handle::spawn_guarded(&config, runtime::Kind::Codex, None, false, true, None)
+            .unwrap();
     let drained = tokio::spawn(async move { while events.recv().await.is_some() {} });
     handle.start_session().await.unwrap();
     let caller = handle.clone();
@@ -466,7 +480,8 @@ async fn check_shutdown(model: &str) {
         .unwrap()
         .model = model.into();
     let (handle, mut incoming) =
-        runtime::Handle::spawn(&config, runtime::Kind::Codex, None).unwrap();
+        runtime::Handle::spawn_guarded(&config, runtime::Kind::Codex, None, false, true, None)
+            .unwrap();
     let records = tokio::spawn(async move {
         let mut native = String::new();
         let mut expected = None;
