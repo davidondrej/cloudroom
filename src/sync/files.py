@@ -390,7 +390,8 @@ class Tree:
                 key = re.match(r'^\s*([a-z_]+)\s*=', line)
                 if in_table or not key or key[1] not in PORTABLE['codex']:
                     lines.append(line)
-            prefix = [f'{k} = {json.dumps(v)}' for k, v in sorted(values.items())]
+            # JSON surrogate-pair escapes are not valid TOML Unicode escapes.
+            prefix = [f'{k} = {json.dumps(v, ensure_ascii=False)}' for k, v in sorted(values.items())]
             return ('\n'.join(prefix + lines) + '\n').encode()
         values_before = json.loads(original or b'{}')
         for key in PORTABLE[self.kind]:

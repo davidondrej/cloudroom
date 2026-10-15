@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import subprocess
 import sys
+import tomllib
 import unittest
 from unittest.mock import patch
 
@@ -12,6 +13,17 @@ import core_fixture
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src/sync'))
 from client import cycle, Remote, configure
 from files import Tree, Conflict, atomic_json
+
+
+class SettingsTests(unittest.TestCase):
+    def test_codex_settings_preserve_non_bmp_unicode(self):
+        tree = Tree('/unused', 'codex', 'config.toml')
+        original = b'# Keep local settings\nmodel = "old"\n[projects]\n'
+        values = {'model': 'custom-\U0001f680', 'model_reasoning_effort': 'high'}
+        merged = tree.merged(json.dumps(values).encode(), original)
+        self.assertEqual(tomllib.loads(merged.decode())['model'], values['model'])
+        self.assertEqual(json.loads(tree.projected(merged)), values)
+        self.assertIn(b'# Keep local settings\n[projects]\n', merged)
 
 
 class SyncTests(unittest.TestCase):
