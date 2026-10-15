@@ -713,7 +713,8 @@ impl Handle {
             Kind::Codex => codex::compact(self).await,
             Kind::Pi => pi::compact(self).await,
             Kind::Claude => claude::compact(self).await,
-            Kind::Cursor | Kind::Fx | Kind::OpenCode | Kind::Hermes | Kind::Devin => {
+            Kind::Hermes => hermes::compact(self).await,
+            Kind::Cursor | Kind::Fx | Kind::OpenCode | Kind::Devin => {
                 Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
                     "ACP compaction is not supported",

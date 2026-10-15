@@ -17,6 +17,7 @@ pub(super) const HERMES: cursor::Flavor = cursor::Flavor {
     explain_stops: true,
 };
 const DATABASE: &str = "state.db";
+const COMPRESS_COMMAND: &str = "/compress";
 /// The efforts Local threads offer for Hermes (provider-acp).
 pub const REASONING_LEVELS: &[&str] = &["none", "low", "medium", "high", "xhigh", "max"];
 
@@ -83,6 +84,19 @@ pub(super) async fn start(handle: &Handle) -> io::Result<String> {
             .await?;
     }
     Ok(id)
+}
+
+/// Hermes exposes compression as the documented `/compress` session command.
+/// Send it through the ACP session itself instead of treating a generic ACP
+/// compaction acknowledgement as proof that the native context changed.
+pub(super) async fn compact(handle: &Handle) -> io::Result<()> {
+    cursor::prompt(
+        handle,
+        "cloudroom-hermes-compress",
+        &json!({"text": COMPRESS_COMMAND}),
+        true,
+    )
+    .await
 }
 
 pub(super) fn validate(

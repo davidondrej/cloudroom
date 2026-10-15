@@ -127,6 +127,15 @@ Chats live at `.cursor/chats/<md5 of the working folder>/<chat ID>`. The adapter
 
 Initial sync discovery includes Cursor skills, global rules and the `notifications`, `hints`, and `suggestNextPrompt` preferences. Existing paired roots are preserved. Credentials, session stores, hooks, plugins and MCP configuration do not sync.
 
+## Hermes
+
+Core runs Hermes through its ACP server and implements the `compact` command
+by sending Hermes' native `/compress` session command. This is deliberately
+different from a generic ACP acknowledgement: `/compress` is the operation
+that updates Hermes' native session context. Hermes' own compression model,
+threshold, micro-compaction, and warm context-engine settings remain managed
+in Hermes' `config.yaml`; Core does not overwrite provider configuration.
+
 ## OpenCode
 
 Core discovers `opencode` in the agent account's `.local/bin` or `/usr/local/bin`, with an existing `.local/share/opencode` data folder, and runs `opencode acp` through the shared ACP adapter. Use `harness: "opencode"` in the API; the GUI provider is `acp-opencode`. No Cloudroom service variables are needed. OpenCode 1 (npm `opencode-ai`) and OpenCode 2 (npm `@opencode/cli`) both work; both install `opencode`. OpenCode 2's `acp` starts a private server child, which Core's workload containment stops with the harness. Core sets `OPENCODE_CONFIG_CONTENT` to turn off the question tool (it ends OpenCode 2 turns over ACP) and auto-update.

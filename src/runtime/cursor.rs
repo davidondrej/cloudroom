@@ -46,7 +46,7 @@ pub(super) const CURSOR: Flavor = Flavor {
 
 pub(crate) fn capabilities(kind: Kind) -> Value {
     json!({"resume":true,"interrupt":true,"system_notice":false,"interactive_dialogs":false,
-        "steer":true,"compact":false,"rewind":false,"attachments":true,
+        "steer":true,"compact":kind == Kind::Hermes,"rewind":false,"attachments":true,
         "service_tier":kind.fast(),"subagents":false,"usage":false,"command_guard":false})
 }
 
