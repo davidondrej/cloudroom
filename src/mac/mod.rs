@@ -1,9 +1,14 @@
 //! Two-way Mac ↔ VM access (ADR 0113). VM agents reach the paired Mac through its helper; the Mac runs commands on the VM.
-use crate::{preview::Peer, session::Manager};
+//! The agent socket and command execution are Unix-only; pairing state and the HTTP routes stay portable.
+#[cfg(unix)]
+use crate::preview::Peer;
+use crate::session::Manager;
+#[cfg(unix)]
+use axum::extract::ConnectInfo;
 use axum::{
     Json, Router,
     body::Bytes,
-    extract::{ConnectInfo, DefaultBodyLimit, Path as RoutePath, Query, State},
+    extract::{DefaultBodyLimit, Path as RoutePath, Query, State},
     http::StatusCode,
     response::{
         IntoResponse, Response,
@@ -16,20 +21,28 @@ use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
     convert::Infallible,
-    fs, io,
-    os::unix::{fs::FileTypeExt, fs::PermissionsExt, net::UnixStream as StdUnixStream},
-    process::Stdio,
+    io,
     sync::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
     },
     time::{Duration, Instant},
 };
-use tokio::{
-    io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
-    net::{UnixListener, UnixStream},
-    sync::{mpsc, watch},
+#[cfg(unix)]
+use std::{
+    fs,
+    os::unix::{
+        fs::{FileTypeExt, PermissionsExt},
+        net::UnixStream as StdUnixStream,
+    },
+    process::Stdio,
 };
+#[cfg(unix)]
+use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncRead, AsyncReadExt};
+#[cfg(unix)]
+use tokio::net::{UnixListener, UnixStream};
+use tokio::sync::{mpsc, watch};
 use tokio_stream::wrappers::ReceiverStream;
 
 mod transfer;
@@ -313,6 +326,7 @@ async fn report(
     Ok(Json(json!({"accepted":true})))
 }
 
+#[cfg(unix)]
 fn local_auth(m: &Manager, peer: Peer) -> Result<()> {
     match m.previews.agent() {
         Some((_, uid)) if peer.0 == Some(uid) => Ok(()),
@@ -323,6 +337,7 @@ fn local_auth(m: &Manager, peer: Peer) -> Result<()> {
     }
 }
 
+#[cfg(unix)]
 async fn local_run(
     State(m): State<Arc<Manager>>,
     ConnectInfo(peer): ConnectInfo<Peer>,
@@ -424,6 +439,7 @@ async fn local_run(
     }
 }
 
+#[cfg(unix)]
 async fn local_result(
     State(m): State<Arc<Manager>>,
     ConnectInfo(peer): ConnectInfo<Peer>,
@@ -441,6 +457,7 @@ async fn local_result(
 }
 
 /// The caller has its result: free it now. Big copies confirm each piece, so they never pile up in memory.
+#[cfg(unix)]
 async fn local_forget(
     State(m): State<Arc<Manager>>,
     ConnectInfo(peer): ConnectInfo<Peer>,
@@ -454,6 +471,7 @@ async fn local_forget(
     Ok(Json(json!({"forgotten":true})))
 }
 
+#[cfg(unix)]
 async fn local_status(
     State(m): State<Arc<Manager>>,
     ConnectInfo(peer): ConnectInfo<Peer>,
@@ -465,36 +483,43 @@ async fn local_status(
 }
 
 pub async fn listen(manager: &Arc<Manager>) -> io::Result<()> {
-    let Some((path, _)) = manager.previews.agent() else {
-        return Ok(());
-    };
-    if let Ok(info) = fs::symlink_metadata(&path) {
-        if !info.file_type().is_socket() || StdUnixStream::connect(&path).is_ok() {
-            return Err(io::Error::other("Mac access socket is already occupied"));
+    // Windows: the paired-Mac socket arrives with the named-pipe transport; until
+    // then there is no Unix socket to serve, and the HTTP routes remain idle.
+    #[cfg(unix)]
+    {
+        let Some((path, _)) = manager.previews.agent() else {
+            return Ok(());
+        };
+        if let Ok(info) = fs::symlink_metadata(&path) {
+            if !info.file_type().is_socket() || StdUnixStream::connect(&path).is_ok() {
+                return Err(io::Error::other("Mac access socket is already occupied"));
+            }
+            fs::remove_file(&path)?;
         }
-        fs::remove_file(&path)?;
+        let listener = UnixListener::bind(&path)?;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o666))?;
+        let app = Router::new()
+            .route("/jobs", post(local_run))
+            .route("/jobs/{id}", get(local_result).delete(local_forget))
+            .route("/status", get(local_status))
+            .merge(crate::secrets::agent_routes())
+            .merge(crate::session::thread::agent_routes())
+            .merge(crate::session::report::agent_routes())
+            .merge(crate::session::automation::agent_routes())
+            .merge(crate::computer_use::agent_routes())
+            .layer(DefaultBodyLimit::max(BODY))
+            .with_state(manager.clone());
+        tokio::spawn(async move {
+            if axum::serve(listener, app.into_make_service_with_connect_info::<Peer>())
+                .await
+                .is_err()
+            {
+                eprintln!("Cloudroom Mac access socket stopped");
+            }
+        });
     }
-    let listener = UnixListener::bind(&path)?;
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o666))?;
-    let app = Router::new()
-        .route("/jobs", post(local_run))
-        .route("/jobs/{id}", get(local_result).delete(local_forget))
-        .route("/status", get(local_status))
-        .merge(crate::secrets::agent_routes())
-        .merge(crate::session::thread::agent_routes())
-        .merge(crate::session::report::agent_routes())
-        .merge(crate::session::automation::agent_routes())
-        .merge(crate::computer_use::agent_routes())
-        .layer(DefaultBodyLimit::max(BODY))
-        .with_state(manager.clone());
-    tokio::spawn(async move {
-        if axum::serve(listener, app.into_make_service_with_connect_info::<Peer>())
-            .await
-            .is_err()
-        {
-            eprintln!("Cloudroom Mac access socket stopped");
-        }
-    });
+    #[cfg(not(unix))]
+    let _ = manager;
     Ok(())
 }
 
@@ -530,58 +555,68 @@ async fn vm_run_raw(
 }
 
 async fn execute(m: &Manager, run: Run, stdin: Vec<u8>, gated: bool) -> Result<Json<Value>> {
-    let home = &m.config.account_home;
-    let folder = run.cwd.as_ref().map_or(home.clone(), |d| home.join(d));
-    if !folder.is_dir() {
-        return Err(conflict("VM folder not found"));
+    #[cfg(not(unix))]
+    {
+        let _ = (m, &run, stdin, gated);
+        return Err(conflict(
+            "VM command execution requires a Unix platform on this build",
+        ));
     }
-    let mut command = tokio::process::Command::new("/bin/bash");
-    command
-        .env_clear()
-        .env("PATH", "/usr/local/bin:/usr/bin:/bin")
-        .env("HOME", home)
-        .env("LANG", "C.UTF-8")
-        .args(["-lc", &run.command])
-        .current_dir(folder)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
-    // Plain commands are the emergency way in: they still run while storage is blocked.
-    let spawned = if gated {
-        m.storage.spawn_writer(&mut command)
-    } else {
-        m.storage.spawn_operator(&mut command)
-    };
-    let (mut child, _workload) = spawned.map_err(|error| {
-        Failure(
-            StatusCode::CONFLICT,
-            format!("VM command could not start: {error}"),
-        )
-    })?;
-    let mut input = child.stdin.take().unwrap();
-    tokio::spawn(async move {
-        let _ = input.write_all(&stdin).await;
-    });
-    let (out, err) = (Arc::new(Mutex::default()), Arc::new(Mutex::default()));
-    let readers = [
-        tokio::spawn(capped(child.stdout.take().unwrap(), out.clone())),
-        tokio::spawn(capped(child.stderr.take().unwrap(), err.clone())),
-    ];
-    let status = child.wait().await.map_err(|error| {
-        Failure(
-            StatusCode::CONFLICT,
-            format!("VM command status unavailable: {error}"),
-        )
-    })?;
-    for reader in readers {
-        let _ = tokio::time::timeout(Duration::from_secs(2), reader).await;
-    }
-    let (out, err) = (out.lock().unwrap(), err.lock().unwrap());
-    Ok(Json(
-        json!({"code":status.code(),"stdout":hex(&out.0),"stderr":hex(&err.0),
+    #[cfg(unix)]
+    {
+        let home = &m.config.account_home;
+        let folder = run.cwd.as_ref().map_or(home.clone(), |d| home.join(d));
+        if !folder.is_dir() {
+            return Err(conflict("VM folder not found"));
+        }
+        let mut command = tokio::process::Command::new("/bin/bash");
+        command
+            .env_clear()
+            .env("PATH", "/usr/local/bin:/usr/bin:/bin")
+            .env("HOME", home)
+            .env("LANG", "C.UTF-8")
+            .args(["-lc", &run.command])
+            .current_dir(folder)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        // Plain commands are the emergency way in: they still run while storage is blocked.
+        let spawned = if gated {
+            m.storage.spawn_writer(&mut command)
+        } else {
+            m.storage.spawn_operator(&mut command)
+        };
+        let (mut child, _workload) = spawned.map_err(|error| {
+            Failure(
+                StatusCode::CONFLICT,
+                format!("VM command could not start: {error}"),
+            )
+        })?;
+        let mut input = child.stdin.take().unwrap();
+        tokio::spawn(async move {
+            let _ = input.write_all(&stdin).await;
+        });
+        let (out, err) = (Arc::new(Mutex::default()), Arc::new(Mutex::default()));
+        let readers = [
+            tokio::spawn(capped(child.stdout.take().unwrap(), out.clone())),
+            tokio::spawn(capped(child.stderr.take().unwrap(), err.clone())),
+        ];
+        let status = child.wait().await.map_err(|error| {
+            Failure(
+                StatusCode::CONFLICT,
+                format!("VM command status unavailable: {error}"),
+            )
+        })?;
+        for reader in readers {
+            let _ = tokio::time::timeout(Duration::from_secs(2), reader).await;
+        }
+        let (out, err) = (out.lock().unwrap(), err.lock().unwrap());
+        Ok(Json(
+            json!({"code":status.code(),"stdout":hex(&out.0),"stderr":hex(&err.0),
         "truncated":out.1 || err.1}),
-    ))
+        ))
+    }
 }
 
 /// Mac paths may start with ~; everything else stays literal.
@@ -605,29 +640,39 @@ pub(crate) async fn request(
     path: &str,
     body: Option<Value>,
 ) -> io::Result<Value> {
-    let mut stream = UnixStream::connect(socket).await.map_err(|error| {
-        io::Error::other(format!(
-            "Cloudroom agent access is not installed on this VM ({socket}: {error})"
-        ))
-    })?;
-    let body = body.map(|b| b.to_string()).unwrap_or_default();
-    let head = format!(
-        "{method} {path} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-        body.len()
-    );
-    stream.write_all(head.as_bytes()).await?;
-    stream.write_all(body.as_bytes()).await?;
-    let mut response = Vec::new();
-    stream.read_to_end(&mut response).await?;
-    let split = response
-        .windows(4)
-        .position(|w| w == b"\r\n\r\n")
-        .ok_or_else(|| io::Error::other("invalid Mac access response"))?;
-    let value: Value = serde_json::from_slice(&response[split + 4..])?;
-    if let Some(message) = value.get("error").and_then(Value::as_str) {
-        return Err(io::Error::other(message.to_owned()));
+    #[cfg(not(unix))]
+    {
+        let _ = (socket, method, path, body);
+        return Err(io::Error::other(
+            "Cloudroom agent access requires a Unix platform on this build",
+        ));
     }
-    Ok(value)
+    #[cfg(unix)]
+    {
+        let mut stream = UnixStream::connect(socket).await.map_err(|error| {
+            io::Error::other(format!(
+                "Cloudroom agent access is not installed on this VM ({socket}: {error})"
+            ))
+        })?;
+        let body = body.map(|b| b.to_string()).unwrap_or_default();
+        let head = format!(
+            "{method} {path} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        stream.write_all(head.as_bytes()).await?;
+        stream.write_all(body.as_bytes()).await?;
+        let mut response = Vec::new();
+        stream.read_to_end(&mut response).await?;
+        let split = response
+            .windows(4)
+            .position(|w| w == b"\r\n\r\n")
+            .ok_or_else(|| io::Error::other("invalid Mac access response"))?;
+        let value: Value = serde_json::from_slice(&response[split + 4..])?;
+        if let Some(message) = value.get("error").and_then(Value::as_str) {
+            return Err(io::Error::other(message.to_owned()));
+        }
+        Ok(value)
+    }
 }
 
 /// Returns the finished command's stdout, or an error with its output.

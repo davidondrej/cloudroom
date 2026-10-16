@@ -1,7 +1,7 @@
+use crate::platform::{DirBuilderExt, OpenOptionsExt};
 use std::{
     fs::{self, File, OpenOptions},
     io::{self, Write},
-    os::unix::fs::{DirBuilderExt, OpenOptionsExt},
     path::{Path, PathBuf},
 };
 

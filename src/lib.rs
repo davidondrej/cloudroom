@@ -1,8 +1,13 @@
 pub mod api;
+#[cfg(unix)]
+pub mod computer_use;
+#[cfg(not(unix))]
+#[path = "computer_use/stub.rs"]
 pub mod computer_use;
 pub mod config;
 pub mod mac;
 mod observability;
+pub mod platform;
 pub mod preview;
 pub mod runtime;
 pub mod secrets;
@@ -30,6 +35,7 @@ pub const FEATURES: &[&str] = &[
     "command_guard",
     "strip_ai_co_authors",
     "system_prompt",
+    #[cfg(unix)]
     "computer_use",
     "codex_auth",
     "codex_auth_import",
@@ -85,10 +91,15 @@ pub async fn serve(mut config: config::Config) -> Result<(), Box<dyn std::error:
     let mut changed = manager.subscribe();
     let server = axum::serve(listener, api::router(manager.clone(), config.token))
         .with_graceful_shutdown(async move {
-            let mut terminate =
-                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-                    .expect("signal handler");
-            tokio::select! { _=tokio::signal::ctrl_c()=>{}, _=terminate.recv()=>{} }
+            #[cfg(unix)]
+            {
+                let mut terminate =
+                    tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                        .expect("signal handler");
+                tokio::select! { _=tokio::signal::ctrl_c()=>{}, _=terminate.recv()=>{} }
+            }
+            #[cfg(not(unix))]
+            let _ = tokio::signal::ctrl_c().await;
             shutdown.shutdown().await;
         })
         .into_future();

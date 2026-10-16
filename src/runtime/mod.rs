@@ -26,7 +26,16 @@ mod devin;
 mod files;
 mod fx;
 mod hermes;
+#[cfg(unix)]
 pub(crate) mod linux;
+#[cfg(windows)]
+pub(crate) mod windows;
+/// The platform's workload containment backend. Linux is the reference
+/// implementation; Windows matches its interface (see `runtime::windows`).
+#[cfg(unix)]
+pub(crate) use linux as containment;
+#[cfg(windows)]
+pub(crate) use windows as containment;
 mod opencode;
 mod pi;
 pub(crate) mod pi_auth;
@@ -855,7 +864,7 @@ impl Handle {
     pub async fn pause(&self, paused: bool) -> io::Result<()> {
         self.process.pause(paused).await
     }
-    /// Stops the tool command filling the disk; see `linux::Workload::kill_top_writer`.
+    /// Stops the tool command filling the disk; see `containment::Workload::kill_top_writer`.
     pub fn kill_top_writer(&self) -> io::Result<Option<String>> {
         self.process.kill_top_writer()
     }
@@ -1005,12 +1014,13 @@ pub(super) fn command(binary: &Path, config: &Config) -> Command {
 
 pub async fn reconcile(config: &Config) -> io::Result<()> {
     if let Some(policy) = &config.storage {
-        linux::Workload::clear(policy).await?;
+        containment::Workload::clear(policy).await?;
     }
     Ok(())
 }
 
 /// Unprotected tests never signal a saved PID: ownership cannot be proved after restart.
+#[cfg(unix)]
 pub async fn wait_for_exit(pid: u32) -> io::Result<()> {
     tokio::time::timeout(SHUTDOWN_GRACE, async {
         loop {
@@ -1031,6 +1041,29 @@ pub async fn wait_for_exit(pid: u32) -> io::Result<()> {
             }
             if !output.status.success() {
                 return Err(io::Error::other("previous process ownership is unknown"));
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .map_err(|_| io::Error::other("previous process has not exited; refusing replacement"))?
+}
+
+/// Windows: `tasklist` prints `INFO: no tasks…` when nothing matches the filter and
+/// still exits successfully, so a match on the quoted CSV pid column decides presence.
+#[cfg(windows)]
+pub async fn wait_for_exit(pid: u32) -> io::Result<()> {
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    tokio::time::timeout(SHUTDOWN_GRACE, async {
+        loop {
+            let output = Command::new("tasklist")
+                .args(["/FI", &format!("PID eq {pid}"), "/NH", "/FO", "csv"])
+                .creation_flags(CREATE_NO_WINDOW)
+                .kill_on_drop(true)
+                .output()
+                .await?;
+            if !String::from_utf8_lossy(&output.stdout).contains(&format!("\"{pid}\"")) {
+                return Ok(());
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }

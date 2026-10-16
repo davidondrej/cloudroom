@@ -3,6 +3,9 @@ mod system;
 #[cfg(test)]
 mod tests;
 
+use crate::platform::OpenOptionsExt;
+#[cfg(unix)]
+use crate::platform::{DirBuilderExt, MetadataExt};
 use crate::{
     config::Config,
     runtime::{ExitDetails, Kind},
@@ -14,7 +17,6 @@ use std::{
     fs::{self, OpenOptions},
     hash::BuildHasher,
     io::{self, Write},
-    os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt},
     path::Path,
     sync::{
         Arc,
@@ -419,38 +421,47 @@ impl Observability {
 }
 
 fn write_stderr(state: &Path, captures: Vec<LocalStderr>) -> io::Result<()> {
-    unsafe extern "C" {
-        fn geteuid() -> u32;
-    }
-    let uid = unsafe { geteuid() };
-    let check_directory = |path: &Path, forbidden: u32| -> io::Result<()> {
-        let m = fs::symlink_metadata(path)?;
-        if !m.is_dir() || m.uid() != uid || m.mode() & forbidden != 0 {
-            return Err(io::Error::other("unsafe diagnostic directory"));
-        }
-        Ok(())
-    };
-    check_directory(state, 0o022)?;
     let directory = state.join("harness-diagnostics");
-    match fs::DirBuilder::new().mode(0o700).create(&directory) {
-        Ok(()) => {}
-        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
-        Err(e) => return Err(e),
-    }
-    check_directory(&directory, 0o077)?;
-    // The protected directory prevents agent races after these checks. Never repair unsafe files.
-    for name in ["stderr.jsonl", "stderr.previous.jsonl"] {
-        match fs::symlink_metadata(directory.join(name)) {
-            Ok(m)
-                if m.is_file()
-                    && m.uid() == uid
-                    && m.nlink() == 1
-                    && m.mode() & 0o777 == 0o600
-                    && m.len() <= STDERR_FILE_BYTES => {}
-            Ok(_) => return Err(io::Error::other("unsafe diagnostic file")),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+    #[cfg(unix)]
+    {
+        unsafe extern "C" {
+            fn geteuid() -> u32;
+        }
+        let uid = unsafe { geteuid() };
+        let check_directory = |path: &Path, forbidden: u32| -> io::Result<()> {
+            let m = fs::symlink_metadata(path)?;
+            if !m.is_dir() || m.uid() != uid || m.mode() & forbidden != 0 {
+                return Err(io::Error::other("unsafe diagnostic directory"));
+            }
+            Ok(())
+        };
+        check_directory(state, 0o022)?;
+        match fs::DirBuilder::new().mode(0o700).create(&directory) {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
             Err(e) => return Err(e),
         }
+        check_directory(&directory, 0o077)?;
+        // The protected directory prevents agent races after these checks. Never repair unsafe files.
+        for name in ["stderr.jsonl", "stderr.previous.jsonl"] {
+            match fs::symlink_metadata(directory.join(name)) {
+                Ok(m)
+                    if m.is_file()
+                        && m.uid() == uid
+                        && m.nlink() == 1
+                        && m.mode() & 0o777 == 0o600
+                        && m.len() <= STDERR_FILE_BYTES => {}
+                Ok(_) => return Err(io::Error::other("unsafe diagnostic file")),
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e),
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        // Windows has no mode bits or euid, so the Unix ownership checks above cannot
+        // run: the state directory's ACLs are the only protection until they land.
+        fs::DirBuilder::new().recursive(true).create(&directory)?;
     }
     for capture in captures {
         let mut record = capture.metadata;

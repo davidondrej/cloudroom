@@ -1,9 +1,9 @@
 //! Disk policy and explicitly disposable npm download-cache cleanup, not history retention.
-use crate::{config::Config, observability::now_ms, runtime::linux};
+use crate::platform::MetadataExt;
+use crate::{config::Config, observability::now_ms, runtime::containment};
 use serde::{Deserialize, Serialize};
 use std::{
     fs, io,
-    os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
     sync::{Arc, Mutex, Weak},
     time::{Duration, Instant},
@@ -216,7 +216,7 @@ pub struct Guard {
     policy: Option<Policy>,
     history: PathBuf,
     value: Mutex<(Snapshot, Instant)>,
-    writers: Mutex<Vec<Weak<linux::Workload>>>,
+    writers: Mutex<Vec<Weak<containment::Workload>>>,
     floor: Mutex<Option<u64>>,
 }
 impl Guard {
@@ -273,7 +273,7 @@ impl Guard {
     pub(crate) fn spawn_writer(
         &self,
         command: &mut Command,
-    ) -> io::Result<(tokio::process::Child, Option<Arc<linux::Workload>>)> {
+    ) -> io::Result<(tokio::process::Child, Option<Arc<containment::Workload>>)> {
         self.spawn(command, true)
     }
 
@@ -282,7 +282,7 @@ impl Guard {
     pub(crate) fn spawn_operator(
         &self,
         command: &mut Command,
-    ) -> io::Result<(tokio::process::Child, Option<Arc<linux::Workload>>)> {
+    ) -> io::Result<(tokio::process::Child, Option<Arc<containment::Workload>>)> {
         self.spawn(command, false)
     }
 
@@ -290,7 +290,7 @@ impl Guard {
         &self,
         command: &mut Command,
         gated: bool,
-    ) -> io::Result<(tokio::process::Child, Option<Arc<linux::Workload>>)> {
+    ) -> io::Result<(tokio::process::Child, Option<Arc<containment::Workload>>)> {
         // Serialize admission with pause snapshots so a just-started writer is never missed.
         let mut writers = self.writers.lock().unwrap();
         if gated && self.blocks() {
@@ -303,12 +303,21 @@ impl Guard {
             .policy
             .as_ref()
             .map(|policy| {
-                let group = Arc::new(linux::Workload::create(policy)?);
+                let group = Arc::new(containment::Workload::create(policy)?);
                 group.attach(command, policy)?;
                 Ok::<_, io::Error>(group)
             })
             .transpose()?;
         let child = command.spawn()?;
+        // Windows: contain the writer's whole tree before it can fork anything.
+        #[cfg(windows)]
+        if let Some(group) = workload.as_ref() {
+            group.adopt_raw(
+                child
+                    .raw_handle()
+                    .ok_or_else(|| io::Error::other("writer has no handle"))?,
+            )?;
+        }
         writers.retain(|writer| writer.strong_count() > 0);
         if let Some(group) = workload.as_ref().filter(|_| gated) {
             writers.push(Arc::downgrade(group));
@@ -381,7 +390,7 @@ impl Guard {
             .arg(&p.cache_dir)
             .arg(groups)
             .kill_on_drop(true);
-        linux::as_agent(&mut command, p.agent_uid, p.agent_gid, None, true)?;
+        containment::as_agent(&mut command, p.agent_uid, p.agent_gid, None, true)?;
         let result = tokio::time::timeout(Duration::from_secs(5), command.output())
             .await
             .map_err(|_| io::Error::other("cache cleanup timed out"))??;

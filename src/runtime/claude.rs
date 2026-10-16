@@ -211,12 +211,20 @@ pub(super) async fn run_output(
         .storage
         .as_ref()
         .map(|policy| {
-            let group = super::linux::Workload::create(policy)?;
+            let group = super::containment::Workload::create(policy)?;
             group.attach(&mut command, policy)?;
             Ok::<_, io::Error>(group)
         })
         .transpose()?;
     let mut child = command.spawn()?;
+    #[cfg(windows)]
+    if let Some(group) = &group {
+        group.adopt_raw(
+            child
+                .raw_handle()
+                .ok_or_else(|| io::Error::other("claude has no handle"))?,
+        )?;
+    }
     let mut stdout = child.stdout.take().unwrap().take(65537);
     let result = tokio::time::timeout(std::time::Duration::from_secs(seconds), async {
         let mut bytes = Vec::new();

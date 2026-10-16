@@ -1,14 +1,21 @@
 //! Open agent-controlled files under the agent identity, then retain the opened inode.
+//! Windows opens directly (Core and the agent share the account there; the sandbox is
+//! the boundary), and cannot yet open directories.
 use std::{
     fs::File,
-    io::{self, Read, Write},
+    io::{self, Read},
+    path::Path,
+};
+#[cfg(unix)]
+use std::{
+    io::Write,
     os::{
         fd::{AsRawFd, FromRawFd, OwnedFd},
         unix::net::UnixStream,
     },
-    path::Path,
     process::Stdio,
 };
+#[cfg(unix)]
 use tokio::process::Command;
 
 pub(super) type Identity = Option<(u32, u32)>;
@@ -143,6 +150,28 @@ fn open_entry(root: &Path, path: &Path, identity: Identity, directory: bool) -> 
             "file is outside its allowed directory",
         )
     })?;
+    #[cfg(unix)]
+    return open_agent_entry(&root, relative, identity, directory);
+    #[cfg(not(unix))]
+    {
+        let _ = (relative, identity);
+        // Core and the agent share the account here; the sandbox is the security boundary.
+        if directory {
+            return Err(io::Error::other(
+                "opening directories requires a Unix platform on this build",
+            ));
+        }
+        File::open(&path)
+    }
+}
+
+#[cfg(unix)]
+fn open_agent_entry(
+    root: &Path,
+    relative: &Path,
+    identity: Identity,
+    directory: bool,
+) -> io::Result<File> {
     let (mut socket, child_socket) = UnixStream::pair()?;
     socket.set_read_timeout(Some(super::SHUTDOWN_GRACE))?;
     let mut command = Command::new("python3");
@@ -181,16 +210,16 @@ fn open_entry(root: &Path, path: &Path, identity: Identity, directory: bool) -> 
     result
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 type Length = usize;
-#[cfg(not(target_os = "linux"))]
-type Length = u32;
 
+#[cfg(unix)]
 #[repr(C)]
 struct IoVec {
     base: *mut u8,
     len: usize,
 }
+#[cfg(unix)]
 #[repr(C)]
 struct Message {
     name: *mut u8,
@@ -201,6 +230,7 @@ struct Message {
     control_len: Length,
     flags: i32,
 }
+#[cfg(unix)]
 #[repr(C)]
 struct Rights {
     len: Length,
@@ -209,6 +239,7 @@ struct Rights {
     fd: i32,
 }
 
+#[cfg(unix)]
 fn receive(socket: &mut UnixStream) -> io::Result<File> {
     unsafe extern "C" {
         fn recvmsg(fd: i32, message: *mut Message, flags: i32) -> isize;

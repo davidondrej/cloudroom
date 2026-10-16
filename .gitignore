@@ -6,3 +6,8 @@ private/
 !.env.example
 __pycache__/
 /integrations/bb/dist/
+
+# Local tooling and machine-specific build shims.
+.mimosa/
+.v2c/
+.cargo/config.toml

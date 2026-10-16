@@ -2,7 +2,12 @@
 //! app reconnects. After `101 Switching Protocols` both sides send frames: a kind byte, a big-endian u32
 //! length, then the data. To the app: OUTPUT bytes, EXIT `{"code"}`, HELLO `{"offset","cwd","shell"}` (first,
 //! and again after skipped output), PING. From the app: INPUT bytes, RESIZE (cols, rows as u16), PING.
-use super::{Kind, linux};
+//!
+//! The PTY itself is Unix-only (Windows needs a ConPTY implementation; `Terminals::open` refuses there).
+#[cfg(unix)]
+use super::Kind;
+#[cfg(unix)]
+use super::linux;
 use crate::{config::Config, session::Manager};
 use axum::{
     Json, Router,
@@ -14,8 +19,11 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
+#[cfg(not(unix))]
+use std::io;
+#[cfg(unix)]
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::HashMap,
     ffi::{CStr, c_char},
     fs::{File, OpenOptions},
     io::{self, Read, Write},
@@ -23,18 +31,21 @@ use std::{
         fd::AsRawFd,
         unix::{fs::OpenOptionsExt, process::CommandExt},
     },
-    path::{Path, PathBuf},
+    path::Path,
     process::Stdio,
     sync::{
-        Arc, Mutex,
+        Mutex,
         atomic::{AtomicU64, Ordering},
     },
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{SystemTime, UNIX_EPOCH},
 };
-use tokio::{
-    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, unix::AsyncFd},
-    sync::watch,
-};
+use std::{collections::VecDeque, path::PathBuf, sync::Arc, time::Duration};
+#[cfg(unix)]
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, unix::AsyncFd};
+#[cfg(not(unix))]
+use tokio::io::{AsyncRead, AsyncWrite};
+#[cfg(unix)]
+use tokio::sync::watch;
 
 /// Output kept for a reconnecting app. The app keeps the long scrollback; this covers dropped connections.
 const REPLAY: usize = 1024 * 1024;
@@ -51,7 +62,7 @@ const RESIZE: u8 = 1;
 
 #[cfg(all(target_os = "linux", target_env = "musl"))]
 type IoctlRequest = i32;
-#[cfg(not(all(target_os = "linux", target_env = "musl")))]
+#[cfg(all(unix, not(all(target_os = "linux", target_env = "musl"))))]
 type IoctlRequest = std::ffi::c_ulong;
 #[cfg(target_os = "linux")]
 mod sys {
@@ -60,13 +71,14 @@ mod sys {
     pub const O_NOCTTY: i32 = 0o400;
     pub const O_NONBLOCK: i32 = 0o4000;
 }
-#[cfg(not(target_os = "linux"))]
+#[cfg(all(unix, not(target_os = "linux")))]
 mod sys {
     pub const TIOCSCTTY: super::IoctlRequest = 0x2000_7461;
     pub const TIOCSWINSZ: super::IoctlRequest = 0x8008_7467;
     pub const O_NOCTTY: i32 = 0x20000;
-    pub const O_NONBLOCK: i32 = 0x4;
+    pub const O_NONBLOCK: i32 = 0o4000_0000 >> 12;
 }
+#[cfg(unix)]
 unsafe extern "C" {
     fn grantpt(fd: i32) -> i32;
     fn unlockpt(fd: i32) -> i32;
@@ -78,6 +90,7 @@ unsafe extern "C" {
     fn kill(pid: i32, signal: i32) -> i32;
 }
 
+#[cfg(unix)]
 #[repr(C)]
 struct WindowSize {
     rows: u16,
@@ -86,6 +99,7 @@ struct WindowSize {
     height: u16,
 }
 
+#[cfg(unix)]
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -93,6 +107,7 @@ fn now_ms() -> u64 {
 }
 
 /// The master side and the shell's side. Both close on exec, so no other child keeps the terminal open.
+#[cfg(unix)]
 fn open_pty() -> io::Result<(File, File)> {
     let open = |path: &str| {
         OpenOptions::new()
@@ -117,6 +132,7 @@ fn open_pty() -> io::Result<(File, File)> {
     Ok((master, open(&path)?))
 }
 
+#[cfg(unix)]
 fn set_size(pty: &impl AsRawFd, cols: u16, rows: u16) -> io::Result<()> {
     let size = WindowSize {
         rows: rows.max(1),
@@ -132,6 +148,7 @@ fn set_size(pty: &impl AsRawFd, cols: u16, rows: u16) -> io::Result<()> {
 
 /// `claude`, `codex` and `cursor-agent` start signed in with the logins Core gives its agents, read once when
 /// the shell starts. Only this shell's variables change; the agents' own logins are untouched.
+#[cfg(unix)]
 fn logins(process: &mut tokio::process::Command, config: &Config) {
     if let Some(profile) = config.harnesses.get(&Kind::Claude) {
         super::claude::profile_env(process, config, profile);
@@ -156,6 +173,7 @@ impl Output {
     }
 }
 
+#[cfg(unix)]
 pub struct Terminal {
     pty: AsyncFd<File>,
     pid: u32,
@@ -171,6 +189,7 @@ pub struct Terminal {
     active: AtomicU64,
 }
 
+#[cfg(unix)]
 impl Terminal {
     fn spawn(
         config: &Config,
@@ -391,6 +410,23 @@ impl Terminal {
     }
 }
 
+/// Windows stub: `Terminals::open` refuses before any terminal exists.
+#[cfg(not(unix))]
+pub struct Terminal {
+    _private: (),
+}
+
+#[cfg(not(unix))]
+impl Terminal {
+    /// One app connection. Unreachable on this platform: `open` always refuses.
+    pub async fn serve<S>(self: Arc<Self>, _stream: S, _since: u64)
+    where
+        S: AsyncRead + AsyncWrite + Send + 'static,
+    {
+    }
+}
+
+#[cfg(unix)]
 async fn frame<W: AsyncWrite + Unpin>(to_app: &mut W, kind: u8, data: &[u8]) -> io::Result<()> {
     let mut bytes = Vec::with_capacity(5 + data.len());
     bytes.push(kind);
@@ -407,12 +443,21 @@ async fn frame<W: AsyncWrite + Unpin>(to_app: &mut W, kind: u8, data: &[u8]) -> 
 /// Every terminal in this sandbox, by the app's terminal ID.
 #[derive(Default)]
 pub struct Terminals {
+    #[cfg(unix)]
     open: Mutex<HashMap<String, Arc<Terminal>>>,
+    #[cfg(not(unix))]
+    _private: (),
 }
 
 impl Terminals {
     pub fn get(&self, id: &str) -> Option<Arc<Terminal>> {
-        self.open.lock().unwrap().get(id).cloned()
+        #[cfg(unix)]
+        return self.open.lock().unwrap().get(id).cloned();
+        #[cfg(not(unix))]
+        {
+            let _ = (self, id);
+            None
+        }
     }
 
     /// Starts the shell unless this ID already has one.
@@ -425,47 +470,67 @@ impl Terminals {
         rows: u16,
         command: Option<&str>,
     ) -> io::Result<Arc<Terminal>> {
-        let mut open = self.open.lock().unwrap();
-        if let Some(terminal) = open.get(id) {
-            return Ok(terminal.clone());
-        }
-        let (terminal, mut child) = Terminal::spawn(config, cwd, cols, rows, command)?;
-        let terminal = Arc::new(terminal);
-        open.insert(id.to_owned(), terminal.clone());
-        let owner = terminal.clone();
-        tokio::spawn(async move {
-            let reading = owner.pump();
-            tokio::pin!(reading);
-            let (status, read) = tokio::select! {
-                status = child.wait() => (status, false),
-                () = &mut reading => (child.wait().await, true),
-            };
-            // Keep what the shell wrote, without waiting on background jobs that still hold the terminal.
-            if !read {
-                let _ = tokio::time::timeout(Duration::from_millis(250), &mut reading).await;
+        #[cfg(unix)]
+        {
+            let mut open = self.open.lock().unwrap();
+            if let Some(terminal) = open.get(id) {
+                return Ok(terminal.clone());
             }
-            owner.finish(status.ok().and_then(|status| status.code()));
-        });
-        Ok(terminal)
+            let (terminal, mut child) = Terminal::spawn(config, cwd, cols, rows, command)?;
+            let terminal = Arc::new(terminal);
+            open.insert(id.to_owned(), terminal.clone());
+            let owner = terminal.clone();
+            tokio::spawn(async move {
+                let reading = owner.pump();
+                tokio::pin!(reading);
+                let (status, read) = tokio::select! {
+                    status = child.wait() => (status, false),
+                    () = &mut reading => (child.wait().await, true),
+                };
+                // Keep what the shell wrote, without waiting on background jobs that still hold the terminal.
+                if !read {
+                    let _ = tokio::time::timeout(Duration::from_millis(250), &mut reading).await;
+                }
+                owner.finish(status.ok().and_then(|status| status.code()));
+            });
+            Ok(terminal)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (self, config, cwd, cols, rows, command);
+            Err(io::Error::other(
+                "terminals require a Unix platform on this build",
+            ))
+        }
     }
 
     pub fn close(&self, id: &str) {
+        #[cfg(unix)]
         if let Some(terminal) = self.open.lock().unwrap().remove(id) {
             terminal.kill();
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (self, id);
         }
     }
 
     pub fn summary(&self) -> Value {
-        let open = self.open.lock().unwrap();
-        let running = open
-            .values()
-            .filter(|t| t.output.lock().unwrap().exit.is_none())
-            .count();
-        let last = open
-            .values()
-            .map(|t| t.active.load(Ordering::Relaxed))
-            .max();
-        json!({"open":running,"lastActivity":last})
+        #[cfg(unix)]
+        {
+            let open = self.open.lock().unwrap();
+            let running = open
+                .values()
+                .filter(|t| t.output.lock().unwrap().exit.is_none())
+                .count();
+            let last = open
+                .values()
+                .map(|t| t.active.load(Ordering::Relaxed))
+                .max();
+            json!({"open":running,"lastActivity":last})
+        }
+        #[cfg(not(unix))]
+        json!({"open":0,"lastActivity":None::<u64>})
     }
 }
 

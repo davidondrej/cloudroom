@@ -2,11 +2,11 @@ use super::{
     Adapter, Event, Handle, Progress, Resume, command as child_command, process::MAX_LINE,
 };
 use crate::config::{Config, HarnessConfig};
+use crate::platform::MetadataExt;
 use serde_json::{Value, json};
 use std::{
     fs::{self, File},
     io::{self, BufRead, BufReader, Read, Seek, SeekFrom},
-    os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
 };

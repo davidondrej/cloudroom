@@ -1,5 +1,6 @@
 //! Secure secret requests from cloud agents. The agent asks through the agent socket, the app shows
 //! its secrets form from a session record, and the CLI writes the answer to a dotenv file.
+use crate::platform::OpenOptionsExt;
 use crate::{preview::Peer, session::Manager};
 use axum::{
     Json, Router,
@@ -14,7 +15,6 @@ use std::{
     collections::{BTreeMap, HashMap, HashSet},
     fs,
     io::{self, Write},
-    os::unix::fs::OpenOptionsExt,
     path::Path,
     sync::{
         Arc, Mutex,

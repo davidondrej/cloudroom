@@ -1,11 +1,11 @@
 pub mod files;
 pub mod storage;
 
+use crate::platform::MetadataExt;
 use axum::body::Body;
 use serde::{Deserialize, Serialize};
 use std::{
     fs, io,
-    os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
     process::Stdio,
     sync::Mutex,
@@ -228,7 +228,7 @@ impl Workspaces {
             .stderr(Stdio::null())
             .kill_on_drop(true);
         if let Some(policy) = &self.policy {
-            crate::runtime::linux::as_agent(
+            crate::runtime::containment::as_agent(
                 &mut command,
                 policy.agent_uid,
                 policy.agent_gid,
@@ -264,7 +264,7 @@ impl Workspaces {
                 .stderr(Stdio::null())
                 .kill_on_drop(true);
             if let Some(policy) = &self.policy {
-                crate::runtime::linux::as_agent(
+                crate::runtime::containment::as_agent(
                     &mut command,
                     policy.agent_uid,
                     policy.agent_gid,

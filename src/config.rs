@@ -1,6 +1,12 @@
 use crate::runtime::Kind;
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, env, io, net::SocketAddr, path::PathBuf, time::Duration};
+use std::{
+    collections::BTreeMap,
+    env, io,
+    net::SocketAddr,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct HarnessConfig {
@@ -30,6 +36,29 @@ pub struct Config {
     pub rpc_timeout: Duration,
     /// How often diagnostics are uploaded. Long, so hundreds of idle cores cost the website little.
     pub diagnostic_upload: Duration,
+}
+
+/// System-wide install root for agent CLIs. The account's `.local/bin` follows on every platform.
+#[cfg(unix)]
+const SYSTEM_BIN: &str = "/usr/local/bin";
+#[cfg(windows)]
+const SYSTEM_BIN: &str = "";
+
+/// The harness CLI's name, with the platform's executable suffix.
+fn cli_file(name: &str) -> String {
+    #[cfg(windows)]
+    return format!("{name}.exe");
+    #[cfg(unix)]
+    return name.to_owned();
+}
+
+fn discover(account_home: &Path, name: &str) -> Option<PathBuf> {
+    [
+        account_home.join(".local/bin").join(cli_file(name)),
+        PathBuf::from(SYSTEM_BIN).join(cli_file(name)),
+    ]
+    .into_iter()
+    .find(|path| path.is_file())
 }
 
 impl Config {
@@ -112,12 +141,7 @@ impl Config {
                 );
             }
         }
-        let claude = [
-            account_home.join(".local/bin/claude"),
-            PathBuf::from("/usr/local/bin/claude"),
-        ]
-        .into_iter()
-        .find(|path| path.is_file());
+        let claude = discover(&account_home, "claude");
         if let Some(binary) = claude.filter(|_| account_home.join(".claude").is_dir()) {
             harnesses.insert(
                 Kind::Claude,
@@ -129,12 +153,7 @@ impl Config {
                 },
             );
         }
-        let cursor = [
-            account_home.join(".local/bin/cursor-agent"),
-            PathBuf::from("/usr/local/bin/cursor-agent"),
-        ]
-        .into_iter()
-        .find(|path| path.is_file());
+        let cursor = discover(&account_home, "cursor-agent");
         if let Some(binary) = cursor.filter(|_| account_home.join(".cursor").is_dir()) {
             harnesses.insert(
                 Kind::Cursor,
@@ -154,12 +173,7 @@ impl Config {
             (Kind::Devin, "devin", ".local/share/devin"),
         ] {
             let home = account_home.join(home);
-            let binary = [
-                account_home.join(".local/bin").join(name),
-                PathBuf::from("/usr/local/bin").join(name),
-            ]
-            .into_iter()
-            .find(|path| path.is_file());
+            let binary = discover(&account_home, name);
             if let Some(binary) = binary.filter(|_| home.is_dir()) {
                 harnesses.insert(
                     kind,

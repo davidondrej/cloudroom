@@ -3,10 +3,13 @@
 //! Cursor's ACP mode only runs each model at its default reasoning; print mode honors every variant.
 //! Core starts this as `cloudroom --cursor-driver CURSOR_BINARY` under the agent account.
 use serde_json::{Value, json};
+#[cfg(unix)]
 use std::{
     collections::HashMap,
-    io::{self, BufRead, BufReader, Read, Write},
     os::unix::process::{CommandExt, ExitStatusExt},
+};
+use std::{
+    io::{self, BufRead, BufReader, Read, Write},
     path::PathBuf,
     process::{Command, Stdio},
     sync::{
@@ -18,7 +21,9 @@ use std::{
     time::Duration,
 };
 
+#[cfg(unix)]
 const SIGKILL: i32 = 9;
+#[cfg(unix)]
 const SIGTERM: i32 = 15;
 
 struct State {
@@ -105,7 +110,12 @@ fn cli(args: &[&str], cwd: &str) -> io::Result<String> {
     let (done, result) = mpsc::channel();
     thread::spawn(move || done.send(child.wait_with_output()));
     let Ok(output) = result.recv_timeout(Duration::from_secs(60)) else {
-        unsafe { kill(pid, SIGKILL) };
+        #[cfg(unix)]
+        unsafe {
+            kill(pid, SIGKILL)
+        };
+        #[cfg(not(unix))]
+        terminate_tree(pid, true);
         return Err(io::Error::other("Cursor CLI timed out"));
     };
     let output = output?;
@@ -144,7 +154,8 @@ fn open_session(request: &Value, session: &str, cwd: &str) -> io::Result<()> {
         .collect();
     drop(state);
     // Cursor stores print-mode chats under chats/<md5 of the working folder>/<chat ID>.
-    let store = PathBuf::from(std::env::var_os("HOME").unwrap_or_default())
+    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"));
+    let store = PathBuf::from(home.unwrap_or_default())
         .join(".cursor/chats")
         .join(md5_hex(cwd.as_bytes()))
         .join(session)
@@ -156,6 +167,7 @@ fn open_session(request: &Value, session: &str, cwd: &str) -> io::Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
 fn descendants(pid: i32) -> Vec<i32> {
     let table = Command::new("ps")
         .args(["-A", "-o", "pid=", "-o", "ppid="])
@@ -179,12 +191,14 @@ fn descendants(pid: i32) -> Vec<i32> {
     found
 }
 
+#[cfg(unix)]
 unsafe extern "C" {
     fn kill(pid: i32, signal: i32) -> i32;
     fn getpgid(pid: i32) -> i32;
     fn setsid() -> i32;
 }
 
+#[cfg(unix)]
 fn signal_groups(pids: &[i32], signal: i32) {
     // Cursor starts shell tools in their own process groups, so stop each group.
     for &pid in pids {
@@ -194,6 +208,20 @@ fn signal_groups(pids: &[i32], signal: i32) {
             unsafe { kill(-group, signal) };
         }
     }
+}
+
+/// Windows: `taskkill /T` ends the whole tree. A polite pass first, then a forced
+/// one, mirrors the Unix SIGTERM-then-SIGKILL sequence.
+#[cfg(not(unix))]
+fn terminate_tree(pid: i32, force: bool) {
+    use std::os::windows::process::CommandExt;
+    let mut command = Command::new("taskkill");
+    command.args(["/PID", &pid.to_string(), "/T"]);
+    if force {
+        command.arg("/F");
+    }
+    command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    let _ = command.output();
 }
 
 struct Turn {
@@ -219,6 +247,7 @@ impl Turn {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        #[cfg(unix)]
         unsafe {
             command.pre_exec(|| match setsid() {
                 -1 => Err(io::Error::last_os_error()),
@@ -274,7 +303,10 @@ impl Turn {
         if !outcome.is_null() && !truthy(&outcome["is_error"]) {
             return reply(&self.request, Ok(json!({"stopReason":"end_turn"})));
         }
+        #[cfg(unix)]
         let code = status.map_or(-1, |s| s.code().unwrap_or_else(|| -s.signal().unwrap_or(0)));
+        #[cfg(not(unix))]
+        let code = status.map_or(-1, |s| s.code().unwrap_or(-1));
         let detail = match &outcome["result"] {
             result if truthy(result) => text(result),
             _ if !stderr.trim().is_empty() => tail(stderr.trim(), 500).to_owned(),
@@ -288,13 +320,25 @@ impl Turn {
 
     fn cancel(&self) -> thread::JoinHandle<()> {
         self.cancelled.store(true, Ordering::SeqCst);
-        let mut pids = vec![self.pid];
-        pids.extend(descendants(self.pid));
-        signal_groups(&pids, SIGTERM);
-        thread::spawn(move || {
-            thread::sleep(Duration::from_secs(5));
-            signal_groups(&pids, SIGKILL);
-        })
+        #[cfg(unix)]
+        {
+            let mut pids = vec![self.pid];
+            pids.extend(descendants(self.pid));
+            signal_groups(&pids, SIGTERM);
+            thread::spawn(move || {
+                thread::sleep(Duration::from_secs(5));
+                signal_groups(&pids, SIGKILL);
+            })
+        }
+        #[cfg(not(unix))]
+        {
+            let pid = self.pid;
+            terminate_tree(pid, false);
+            thread::spawn(move || {
+                thread::sleep(Duration::from_secs(5));
+                terminate_tree(pid, true);
+            })
+        }
     }
 }
 

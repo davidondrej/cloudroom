@@ -782,7 +782,7 @@ impl Capture {
                 .policy
                 .as_ref()
                 .map(|policy| {
-                    let group = super::linux::Workload::create(policy)?;
+                    let group = super::containment::Workload::create(policy)?;
                     group.attach(&mut command, policy)?;
                     Ok::<_, io::Error>(group)
                 })
@@ -790,10 +790,15 @@ impl Capture {
             let (sender, receiver) = sync_channel(8);
             self.worker = Some(receiver);
             std::thread::spawn(move || {
-                let _group = group;
+                let group = group;
                 let result = (|| {
                     let mut child = command.as_std_mut().spawn()?;
                     drop(child.stdin.take());
+                    // Windows: contain the capture's whole tree before it forks.
+                    #[cfg(windows)]
+                    if let Some(group) = &group {
+                        group.adopt_process(&child)?;
+                    }
                     let stdout = child
                         .stdout
                         .take()

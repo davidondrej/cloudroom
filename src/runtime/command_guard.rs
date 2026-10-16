@@ -1,20 +1,39 @@
 use super::command as child_command;
 use crate::config::{Config, HarnessConfig};
+#[cfg(unix)]
 use std::path::Path;
 use tokio::process::Command;
 
 pub(super) const SOURCE: &str = include_str!("command-guard.mjs");
 
+/// Windows has no `/bin/sh` wrapper or process-group `exec` yet, so the harness runs
+/// unguarded there: tool calls work, but Command Guard's disaster rules do not apply.
+#[cfg(windows)]
+pub(super) fn codex_command(config: &Config, profile: &HarnessConfig) -> Command {
+    let mut command = child_command(&profile.binary, config);
+    command.env("CODEX_HOME", &profile.home);
+    command.args(["app-server", "--listen", "stdio://"]);
+    command
+}
+
+#[cfg(windows)]
+pub(super) fn claude_command(config: &Config, profile: &HarnessConfig) -> Command {
+    child_command(&profile.binary, config)
+}
+
+#[cfg(unix)]
 pub(super) fn codex_command(config: &Config, profile: &HarnessConfig) -> Command {
     let mut command = guarded_command(config, profile, false);
     command.args(["app-server", "--listen", "stdio://"]);
     command
 }
 
+#[cfg(unix)]
 pub(super) fn claude_command(config: &Config, profile: &HarnessConfig) -> Command {
     guarded_command(config, profile, true)
 }
 
+#[cfg(unix)]
 fn guarded_command(config: &Config, profile: &HarnessConfig, claude: bool) -> Command {
     // Prepare as the agent account, then exec the harness: no persistent wrapper process.
     let prepare = format!(

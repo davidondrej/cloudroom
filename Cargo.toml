@@ -18,3 +18,4 @@ tokio-stream = "0.1"
 # Already built through axum; named here for preview tunnels (HTTP upgrades).
 hyper = { version = "1", default-features = false }
 hyper-util = { version = "0.1", default-features = false, features = ["tokio"] }
+windows-sys = { version = "0.61.2", features = ["Win32_System_JobObjects", "Win32_Foundation", "Win32_System_Threading"] }

@@ -1,9 +1,10 @@
-use super::{Adapter, Event, ExitDetails, Progress, SHUTDOWN_GRACE, linux};
+use super::{Adapter, Event, ExitDetails, Progress, SHUTDOWN_GRACE};
 use crate::config::Config;
 use serde_json::Value;
+#[cfg(unix)]
+use std::os::unix::process::ExitStatusExt;
 use std::{
     io,
-    os::unix::process::ExitStatusExt,
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -15,6 +16,31 @@ use tokio::{
 
 pub(super) const MAX_LINE: usize = 16 * 1024 * 1024;
 const STDERR_BYTES: usize = 16 * 1024;
+
+/// Pausing work must not turn an in-flight native RPC into a timeout/replayed task.
+async fn paused_reply<T>(
+    mut result: tokio::sync::oneshot::Receiver<T>,
+    mut paused: watch::Receiver<bool>,
+    timeout: Duration,
+) -> io::Result<T> {
+    let mut remaining = timeout;
+    loop {
+        if *paused.borrow() {
+            tokio::select! {
+                value = &mut result => return value.map_err(|_| io::Error::other("harness response lost; outcome uncertain")),
+                changed = paused.changed() => if changed.is_err() { return Err(io::Error::other("workload owner lost")); },
+            }
+        } else {
+            let start = tokio::time::Instant::now();
+            tokio::select! {
+                value = &mut result => return value.map_err(|_| io::Error::other("harness response lost; outcome uncertain")),
+                _ = tokio::time::sleep(remaining) => return Err(io::Error::new(io::ErrorKind::TimedOut, "harness response timed out; outcome uncertain")),
+                changed = paused.changed() => if changed.is_err() { return Err(io::Error::other("workload owner lost")); },
+            }
+            remaining = remaining.saturating_sub(start.elapsed());
+        }
+    }
+}
 
 struct StderrCapture {
     task: tokio::task::JoinHandle<()>,
@@ -82,7 +108,7 @@ pub(super) struct Process {
     pub progress: watch::Receiver<Progress>,
     stop: watch::Sender<bool>,
     pid: u32,
-    group: Option<Arc<linux::Workload>>,
+    group: Option<Arc<super::containment::Workload>>,
 }
 
 async fn write(input: &mut tokio::process::ChildStdin, value: &Value) -> io::Result<()> {
@@ -103,13 +129,21 @@ impl Process {
             .storage
             .as_ref()
             .map(|policy| {
-                let group = Arc::new(linux::Workload::create(policy)?);
+                let group = Arc::new(super::containment::Workload::create(policy)?);
                 group.attach(&mut command, policy)?;
                 command.env("npm_config_cache", policy.cache_dir.join("npm"));
                 Ok::<_, io::Error>(group)
             })
             .transpose()?;
         let mut child = command.spawn()?;
+        // Windows: before the harness can create descendants, its whole tree joins the job.
+        #[cfg(windows)]
+        if let Some(group) = &group {
+            let handle = child
+                .raw_handle()
+                .ok_or_else(|| io::Error::other("harness has no handle"))?;
+            group.adopt_raw(handle)?;
+        }
         let pid = child
             .id()
             .ok_or_else(|| io::Error::other("harness has no pid"))?;
@@ -224,7 +258,10 @@ impl Process {
             };
             let mut details = stderr.finish().await;
             details.code = status.and_then(|status| status.code());
-            details.signal = status.and_then(|status| status.signal());
+            #[cfg(unix)]
+            {
+                details.signal = status.and_then(|status| status.signal());
+            }
             let mut reason = reason;
             loop {
                 match adapter.capture() {
@@ -366,7 +403,7 @@ impl Process {
         .map_err(|_| io::Error::other("harness command queue timed out"))?
         .map_err(|_| io::Error::other("harness unavailable"))?;
         if let Some(group) = &self.group {
-            linux::reply(receive, group.paused(), timeout).await?
+            paused_reply(receive, group.paused(), timeout).await?
         } else {
             tokio::time::timeout(timeout, receive)
                 .await

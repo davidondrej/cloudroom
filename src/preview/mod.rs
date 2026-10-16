@@ -1,29 +1,38 @@
 //! Preview registration, not web-server or harness lifecycle ownership.
+//!
+//! The agent-local socket (Unix), SSH revocation (Linux) and listener-ownership check
+//! (/proc) are platform-specific; registry storage and tunnel mode are portable.
 use crate::config::Config;
+use crate::platform::{MetadataExt, OpenOptionsExt};
+#[cfg(unix)]
+use axum::extract::ConnectInfo;
 use axum::{
     Json, Router,
     body::Body,
-    extract::{ConnectInfo, Path as RoutePath, Query, Request, State},
+    extract::{Path as RoutePath, Query, Request, State},
     http::{StatusCode, header},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+#[cfg(unix)]
+use std::os::unix::{
+    fs::{FileTypeExt, PermissionsExt},
+    net::UnixStream as StdUnixStream,
+};
 use std::{
     collections::BTreeMap,
     fs,
     io::{self, Write},
     net::IpAddr,
-    os::unix::{
-        fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt},
-        net::UnixStream as StdUnixStream,
-    },
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use tokio::net::{TcpStream, UnixListener};
+use tokio::net::TcpStream;
+#[cfg(unix)]
+use tokio::net::UnixListener;
 
 const SOCKET: &str = "/run/cloudroom/preview.sock";
 const FRESH_SECONDS: u64 = 15;
@@ -461,37 +470,45 @@ impl Previews {
             .map_err(|_| conflict("The cloud server is not listening"))
     }
     pub async fn listen(self: &Arc<Self>) -> io::Result<()> {
-        let Some(setup) = self.setup.lock().unwrap().clone() else {
-            return Ok(());
-        };
-        let path = &setup.socket;
-        if let Ok(info) = fs::symlink_metadata(path) {
-            if !info.file_type().is_socket() || StdUnixStream::connect(path).is_ok() {
-                return Err(io::Error::other("preview socket is already occupied"));
+        // Windows: no agent-local socket until the named-pipe transport lands; the
+        // registry and tunnel APIs keep working over the main HTTP API.
+        #[cfg(unix)]
+        {
+            let Some(setup) = self.setup.lock().unwrap().clone() else {
+                return Ok(());
+            };
+            let path = &setup.socket;
+            if let Ok(info) = fs::symlink_metadata(path) {
+                if !info.file_type().is_socket() || StdUnixStream::connect(path).is_ok() {
+                    return Err(io::Error::other("preview socket is already occupied"));
+                }
+                fs::remove_file(path)?;
             }
-            fs::remove_file(path)?;
+            let listener = UnixListener::bind(path)?;
+            fs::set_permissions(path, fs::Permissions::from_mode(0o666))?;
+            let app = Router::new()
+                .route("/previews", get(local_list).post(local_open))
+                .route("/previews/{port}", get(local_get).delete(local_close))
+                .layer(axum::extract::DefaultBodyLimit::max(1024))
+                .with_state(self.clone());
+            tokio::spawn(async move {
+                if axum::serve(listener, app.into_make_service_with_connect_info::<Peer>())
+                    .await
+                    .is_err()
+                {
+                    eprintln!("Cloudroom preview socket stopped");
+                }
+            });
         }
-        let listener = UnixListener::bind(path)?;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o666))?;
-        let app = Router::new()
-            .route("/previews", get(local_list).post(local_open))
-            .route("/previews/{port}", get(local_get).delete(local_close))
-            .layer(axum::extract::DefaultBodyLimit::max(1024))
-            .with_state(self.clone());
-        tokio::spawn(async move {
-            if axum::serve(listener, app.into_make_service_with_connect_info::<Peer>())
-                .await
-                .is_err()
-            {
-                eprintln!("Cloudroom preview socket stopped");
-            }
-        });
+        #[cfg(not(unix))]
+        let _ = self;
         Ok(())
     }
 }
 
 #[derive(Clone, Copy)]
 pub(crate) struct Peer(pub(crate) Option<u32>, pub(crate) Option<i32>);
+#[cfg(unix)]
 impl axum::extract::connect_info::Connected<axum::serve::IncomingStream<'_, UnixListener>>
     for Peer
 {
@@ -500,6 +517,7 @@ impl axum::extract::connect_info::Connected<axum::serve::IncomingStream<'_, Unix
         Self(cred.map(|c| c.uid()), cred.and_then(|c| c.pid()))
     }
 }
+#[cfg(unix)]
 fn local_auth(previews: &Previews, peer: Peer) -> Result<()> {
     if peer.0 != Some(previews.setup()?.agent_uid) {
         return Err(Failure(
@@ -509,6 +527,7 @@ fn local_auth(previews: &Previews, peer: Peer) -> Result<()> {
     }
     Ok(())
 }
+#[cfg(unix)]
 async fn local_open(
     State(p): State<Arc<Previews>>,
     ConnectInfo(peer): ConnectInfo<Peer>,
@@ -517,6 +536,7 @@ async fn local_open(
     local_auth(&p, peer)?;
     Ok(Json(p.register(input.port).await?))
 }
+#[cfg(unix)]
 async fn local_list(
     State(p): State<Arc<Previews>>,
     ConnectInfo(peer): ConnectInfo<Peer>,
@@ -524,6 +544,7 @@ async fn local_list(
     local_auth(&p, peer)?;
     Ok(Json(p.list()?))
 }
+#[cfg(unix)]
 async fn local_get(
     State(p): State<Arc<Previews>>,
     ConnectInfo(peer): ConnectInfo<Peer>,
@@ -532,6 +553,7 @@ async fn local_get(
     local_auth(&p, peer)?;
     Ok(Json(p.view(port)?))
 }
+#[cfg(unix)]
 async fn local_close(
     State(p): State<Arc<Previews>>,
     ConnectInfo(peer): ConnectInfo<Peer>,
@@ -642,6 +664,7 @@ async fn report(
     Ok(Json(m.previews.report(input)?))
 }
 
+#[cfg(unix)]
 fn agent_listener(port: u16, uid: u32) -> io::Result<bool> {
     let mut owners: [Vec<u32>; 3] = Default::default();
     for name in ["/proc/net/tcp", "/proc/net/tcp6"] {
@@ -670,6 +693,15 @@ fn agent_listener(port: u16, uid: u32) -> io::Result<bool> {
         .iter()
         .find(|uids| !uids.is_empty())
         .is_some_and(|uids| uids.iter().all(|owner| *owner == uid)))
+}
+
+/// Windows: the /proc listener table needs a GetExtendedTcpTable equivalent; until
+/// then preview registration cannot prove the agent owns the port.
+#[cfg(windows)]
+fn agent_listener(_: u16, _: u32) -> io::Result<bool> {
+    Err(io::Error::other(
+        "listener ownership verification requires Linux on this build",
+    ))
 }
 
 #[cfg(target_os = "linux")]

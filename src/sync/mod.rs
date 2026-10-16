@@ -1,3 +1,4 @@
+use crate::platform::OpenOptionsExt;
 use crate::{config::Config, runtime, session::Manager, workspace::valid_id};
 use axum::{
     Json,
@@ -11,7 +12,6 @@ use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs, io,
-    os::unix::fs::OpenOptionsExt,
     path::PathBuf,
     process::Stdio,
     sync::{Arc, Mutex},
