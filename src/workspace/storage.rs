@@ -114,7 +114,10 @@ impl Policy {
             .cache_dir
             .parent()
             .ok_or_else(|| io::Error::other("invalid cache root"))?;
-        for part in parent.ancestors() {
+        // In a container Core already runs as the agent, so agent-owned ancestors protect nothing, as with
+        // history above. There the cache may live inside the agent's /code volume, which some sandboxes (gVisor)
+        // require: each mount gets its own device, and agent paths must share one.
+        for part in parent.ancestors().filter(|_| !self.container()) {
             let m = fs::symlink_metadata(part)?;
             if m.file_type().is_symlink() || m.uid() == self.agent_uid || m.mode() & 0o022 != 0 {
                 return Err(io::Error::other("cache root requires protected ancestors"));
