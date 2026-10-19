@@ -7,8 +7,8 @@ use super::{
     children::{FINISHED, NOTICE_REPLY_CHARS, derived_id, notice, notice_ids},
     history::ApiError,
     thread::{
-        Failure, archive_under, conflict, deliver, fail, random_key, record, retire,
-        session_failure, website_failure,
+        Failure, archive_under, conflict, deliver, fail, random_key, record, session_failure,
+        website_failure,
     },
 };
 use axum::{
@@ -161,10 +161,32 @@ async fn receive(
         }
         // Like `thread archive --self`: the app archives it whenever it next reads the thread.
         "archive" => {
-            retire(&m, &id)?;
-            archive_under(&m, &id)?;
-            if !archived {
-                let _ = record(&m, &id, "archive", json!({"archived":true}))?;
+            // A repeated request does nothing new. Its own receipt is written last, after every step succeeded, so
+            // a step that fails (a journal error answered 503) is retried in full. The steps are idempotent: the
+            // stop and sleep IDs are derived and the descendants' archive is recorded only once.
+            if m.receipt(&id, &request).is_none() {
+                // The cut comes before the stop, so a turn the stop interrupts is not reported to the parent.
+                if !archived {
+                    let _ = record(&m, &id, "archive", json!({"archived":true,"reports":true}))?;
+                }
+                let _ = m.command(&id, derived_id(&request, "_stop"), "stop", json!({}));
+                let sleep = derived_id(&request, "_sleep");
+                let _ = m.command(&id, sleep, "sleep", json!({}));
+                archive_under(&m, &id)?;
+                record(
+                    &m,
+                    &id,
+                    "receipt",
+                    json!({"request_id":request,"command":"archive","state":"completed","input":{}}),
+                )
+                .map(drop)?;
+                let _ = m.command(&id, derived_id(&request, "_stop"), "stop", json!({}));
+                let sleep = derived_id(&request, "_sleep");
+                let _ = m.command(&id, sleep, "sleep", json!({}));
+                archive_under(&m, &id)?;
+                if !archived {
+                    let _ = record(&m, &id, "archive", json!({"archived":true}))?;
+                }
             }
             return Ok(Json(json!({"id":id,"state":"archived"})));
         }
@@ -419,6 +441,81 @@ mod tests {
             .unwrap_err();
         assert_eq!(status, StatusCode::CONFLICT);
         assert_eq!(body["code"], "request_rejected");
+    }
+
+    #[tokio::test]
+    async fn a_repeated_archive_request_does_nothing_new() {
+        let m = manager("repeated-archive");
+        session(&m, "cr_p", false);
+        for _ in 0..2 {
+            let archive = receive(
+                State(m.clone()),
+                Path("cr_p".into()),
+                Json(relayed("a1", "archive")),
+            );
+            assert!(archive.await.is_ok());
+        }
+        let local = m.local.lock().unwrap();
+        let commands: Vec<&str> = local.sessions["cr_p"]
+            .receipts
+            .values()
+            .map(|r| r.command.as_str())
+            .collect();
+        assert_eq!(commands.iter().filter(|c| **c == "stop").count(), 1);
+        assert_eq!(commands.iter().filter(|c| **c == "sleep").count(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_repeated_archive_is_marked_when_the_session_refuses_its_stop() {
+        let m = manager("archive-refused");
+        session(&m, "cr_p", true);
+        let start = json!({"request_id":"start","command":"start","state":"completed","input":{"harness":"claude-code","parent_session":"cr_p"}});
+        m.note("cr_c", "receipt", start).unwrap();
+        for _ in 0..2 {
+            let archive = receive(
+                State(m.clone()),
+                Path("cr_p".into()),
+                Json(relayed("a1", "archive")),
+            );
+            assert!(archive.await.is_ok());
+        }
+        let local = m.local.lock().unwrap();
+        let stops = local.sessions["cr_c"]
+            .receipts
+            .values()
+            .filter(|r| r.command == "stop")
+            .count();
+        assert_eq!(stops, 1);
+    }
+
+    #[tokio::test]
+    async fn the_archive_receipt_is_written_after_the_archive_record() {
+        let m = manager("archive-order");
+        session(&m, "cr_p", false);
+        let archive = receive(
+            State(m.clone()),
+            Path("cr_p".into()),
+            Json(relayed("a1", "archive")),
+        );
+        assert!(archive.await.is_ok());
+        let local = m.local.lock().unwrap();
+        let (mut record_at, mut stop_at, mut marker_at) = (None, None, None);
+        for sequence in 1..=local.journal.last() {
+            let record: Value =
+                serde_json::from_slice(&local.journal.read(sequence).unwrap()).unwrap();
+            if record["kind"] == "archive" && record["data"]["reports"] == true {
+                record_at = Some(sequence);
+            }
+            if record["kind"] == "receipt" && record["data"]["command"] == "stop" {
+                stop_at = Some(sequence);
+            }
+            if record["kind"] == "receipt" && record["data"]["request_id"] == "a1" {
+                marker_at = Some(sequence);
+            }
+        }
+        assert!(record_at.is_some() && stop_at.is_some() && marker_at.is_some());
+        assert!(record_at < stop_at, "the cut is recorded before the stop");
+        assert!(stop_at < marker_at, "the marker is written after the steps");
     }
 
     #[tokio::test]

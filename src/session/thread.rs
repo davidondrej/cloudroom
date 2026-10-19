@@ -215,10 +215,10 @@ async fn archive(
 /// and it may be offline. An archived thread is stopped again, in case it still runs.
 pub(super) fn archive_under(m: &Arc<Manager>, id: &str) -> Result<(), Failure> {
     for (child, archived) in m.descendants(id) {
-        retire(m, &child)?;
         if !archived {
             let _ = record(m, &child, "archive", json!({"id":child,"archived":true}))?;
         }
+        retire(m, &child)?;
     }
     Ok(())
 }
