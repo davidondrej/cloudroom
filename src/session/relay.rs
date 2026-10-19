@@ -215,7 +215,9 @@ fn next_report(local: &Local) -> Option<(String, String, Value)> {
         .values()
         .filter(|s| !s.archived && s.parent_thread().is_some())
         .find_map(|s| {
-            let r = s.receipts.values().find(|r| {
+            // In finish order; receipts from before that order was recorded follow in request-ID order.
+            let finished = s.finished.iter().filter_map(|id| s.receipts.get(id));
+            let r = finished.chain(s.receipts.values()).find(|r| {
                 r.command == "prompt"
                     && FINISHED.contains(&r.state.as_str())
                     && !s.reported.contains(&r.request_id)
@@ -490,6 +492,20 @@ mod tests {
             .unwrap_err();
         assert_eq!(status, StatusCode::CONFLICT);
         assert_eq!(body["code"], "request_rejected");
+    }
+
+    #[tokio::test]
+    async fn a_child_reports_its_turns_in_finish_order() {
+        let m = manager("finish-order");
+        let start = json!({"request_id":"start","command":"start","input":{"harness":"claude-code","parent_thread":"thr_p"},"state":"completed"});
+        m.note("cr_c", "receipt", start).unwrap();
+        for request in ["z1", "a2"] {
+            let turn = json!({"request_id":request,"command":"prompt","input":{"text":"hi"},"state":"completed"});
+            m.note("cr_c", "receipt", turn).unwrap();
+        }
+        let local = m.local.lock().unwrap();
+        let (_, turn, _) = next_report(&local).expect("two reports are owed");
+        assert_eq!(turn, "z1");
     }
 
     #[test]

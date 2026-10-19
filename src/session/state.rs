@@ -434,6 +434,13 @@ impl Local {
                     session.rewind_request = Some(receipt.request_id.clone());
                     session.state = "rewinding".into();
                 }
+                let was_finished = session
+                    .receipts
+                    .get(&receipt.request_id)
+                    .is_some_and(|r| super::children::FINISHED.contains(&r.state.as_str()));
+                if super::children::FINISHED.contains(&receipt.state.as_str()) && !was_finished {
+                    session.finished.push(receipt.request_id.clone());
+                }
                 prompt::apply(&mut session.prompts, &receipt);
                 session.receipts.insert(receipt.request_id.clone(), receipt);
             }

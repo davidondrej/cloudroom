@@ -124,6 +124,9 @@ pub struct Session {
     // Turns already reported to the parent in another sandbox (relay.rs).
     #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
     pub reported: std::collections::BTreeSet<String>,
+    // Turns in the order they finished, so their reports to the parent go out in that order (relay.rs).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub finished: Vec<String>,
     // What this parent last heard of each child in its own sandbox, by thread ID (relay.rs).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub child_states: BTreeMap<String, String>,
