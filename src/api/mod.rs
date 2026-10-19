@@ -1333,6 +1333,9 @@ async fn attach(
                 error.raw_os_error()
             );
             session::Error::Conflict(match error.kind() {
+                _ if error.to_string() == crate::workspace::CONTENT_CONFLICT => {
+                    crate::workspace::CONTENT_CONFLICT
+                }
                 std::io::ErrorKind::WouldBlock => "storage unsafe; uploads are blocked",
                 std::io::ErrorKind::PermissionDenied => "Cloud folder permission denied",
                 std::io::ErrorKind::FileTooLarge if query.kind == "image" => {

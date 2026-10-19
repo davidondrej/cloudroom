@@ -267,6 +267,28 @@ class WorkspaceTests(unittest.TestCase):
         status, data = post(b'other bytes!')
         self.assertEqual((status, data.get('code')), (409, 'request_conflict'), data)
 
+    def test_concurrent_attaches_with_one_request_and_name_keep_the_winners_file(self):
+        path = self.state.resolve()/'code'/'racing'
+        self.seed('racing', path, 'codex')
+        self.start()
+        until(lambda:self.service.session('cr_racing')['state']=='idle','racing target',10)
+        def post(target, body):
+            connection = http.client.HTTPConnection(self.service.address, timeout=10)
+            connection.request('POST', target, body, {'Authorization':'Bearer '+self.env['CLOUDROOM_TOKEN'],'Content-Type':'application/octet-stream'})
+            response = connection.getresponse(); data = json.loads(response.read()); connection.close()
+            return response.status, data
+        for round in range(20):
+            bodies = [(f'first-{round}\n'*200).encode(), (f'second-{round}\n'*200).encode()]
+            target = f'/v1/sessions/cr_racing/attachments?request_id=race{round}&name=note.txt&kind=file'
+            with concurrent.futures.ThreadPoolExecutor(2) as pool:
+                results = list(pool.map(lambda body: post(target, body), bodies))
+            self.assertEqual(sorted(status for status, _ in results), [202, 409], results)
+            for body, (status, data) in zip(bodies, results):
+                if status == 202:
+                    self.assertEqual(Path(data['receipt']['input']['path']).read_bytes(), body, round)
+                else:
+                    self.assertEqual(data.get('code'), 'request_conflict', results)
+
     def test_a_different_body_under_a_stored_request_is_refused_and_the_original_retry_still_answers(self):
         path = self.state.resolve()/'code'/'ordering'
         self.seed('ordering', path, 'codex')

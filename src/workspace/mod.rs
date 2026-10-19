@@ -509,11 +509,16 @@ pub async fn digest(bytes: &[u8]) -> io::Result<String> {
         .ok_or_else(|| io::Error::other("Cloud folder file operation failed"))
 }
 
+/// The message of the error a concurrent attach carries when another request stored different bytes under its name.
+pub const CONTENT_CONFLICT: &str = "request_id already has different content";
+
 fn file_result(output: std::process::Output) -> io::Result<serde_json::Value> {
     let result: serde_json::Value = serde_json::from_slice(&output.stdout)?;
     if !output.status.success() || result["ok"] != true {
         return Err(if result["error"] == "attachment_too_large" {
             io::ErrorKind::FileTooLarge.into()
+        } else if result["error"] == "request_conflict" {
+            io::Error::other(CONTENT_CONFLICT)
         } else {
             result["errno"]
                 .as_i64()

@@ -46,6 +46,10 @@ class Conflict(Exception):
     pass
 
 
+class ContentConflict(Exception):
+    pass
+
+
 def portable_mcp(name, server):
     if (not re.fullmatch(r'[A-Za-z0-9_-]{1,64}', name) or not isinstance(server, dict) or server.keys() & MCP_LOCAL_KEYS
             or not all(re.fullmatch(r'[A-Za-z0-9_-]+', key) for key in server)):
@@ -157,6 +161,17 @@ def transfer(data, kind, executable, output=None, limit=MAX_FILE_BYTES):
     return {'tag': digest.hexdigest(), 'kind': kind, 'executable': executable, 'size': size}
 
 
+def same_bytes(fd, first, second):
+    flags = os.O_RDONLY | os.O_NOFOLLOW
+    with os.fdopen(os.open(first, flags, dir_fd=fd), 'rb') as left, os.fdopen(os.open(second, flags, dir_fd=fd), 'rb') as right:
+        while True:
+            chunk = left.read(CHUNK)
+            if chunk != right.read(CHUNK):
+                return False
+            if not chunk:
+                return True
+
+
 def swap(fd, first, second, second_fd=None):
     # Exchange preserves the displaced inode, including writes through an already-open fd.
     libc = ctypes.CDLL(None, use_errno=True)
@@ -197,13 +212,6 @@ class Tree:
 
     def attach(self, relative, stream, limit, size):
         with self.parent(relative, create=True) as (fd, name):
-            try:
-                info = os.stat(name, dir_fd=fd, follow_symlinks=False)
-                if not stat.S_ISREG(info.st_mode):
-                    raise ValueError('attachment must be a regular file')
-                return {'size': info.st_size}
-            except FileNotFoundError:
-                pass
             temporary = '.attachment-' + uuid.uuid4().hex
             try:
                 flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
@@ -221,6 +229,9 @@ class Tree:
                     info = os.stat(name, dir_fd=fd, follow_symlinks=False)
                     if not stat.S_ISREG(info.st_mode):
                         raise ValueError('attachment must be a regular file')
+                    # A retry of the same bytes reuses the file; other bytes under this name are refused.
+                    if not same_bytes(fd, temporary, name):
+                        raise ContentConflict()
                     return {'size': info.st_size, 'sha256': digest}
                 os.fsync(fd)
                 return {'size': entry['size'], 'sha256': digest}
@@ -696,6 +707,9 @@ def worker():
             result = tree.attach(request['path'], sys.stdin.buffer, request['limit'], request['size'])
         except Conflict:
             print(json.dumps({'ok': False, 'error': 'attachment_too_large'}), flush=True)
+            return
+        except ContentConflict:
+            print(json.dumps({'ok': False, 'error': 'request_conflict'}), flush=True)
             return
     elif op == 'teleport':
         result = tree.install_transfer(request, sys.stdin.buffer)
