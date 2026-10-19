@@ -144,6 +144,14 @@ pub(crate) fn fail(status: StatusCode, error: &str) -> Failure {
     (status, Json(json!({"error":error})))
 }
 
+/// A 409 with the code the API uses for it (api.md: branch on `code`), so clients do not retry it blindly.
+pub(crate) fn conflict(code: &str, error: &str) -> Failure {
+    (
+        StatusCode::CONFLICT,
+        Json(json!({"error":error,"code":code})),
+    )
+}
+
 pub(super) fn record(
     m: &Manager,
     session: &str,
@@ -605,7 +613,7 @@ async fn tell(
     m.own_child(&parent, &id).map_err(session_failure)?;
     let request =
         random_key().map_err(|e| fail(StatusCode::SERVICE_UNAVAILABLE, &e.to_string()))?;
-    deliver(&m, &id, &request, &input.text).await
+    deliver(&m, &id, &request, &input.text, true).await
 }
 
 /// Sends a message into the session's running turn, or else queues it. A request already delivered stays as it is,
@@ -615,13 +623,28 @@ pub(super) async fn deliver(
     id: &str,
     request: &str,
     text: &str,
+    check_content: bool,
 ) -> Result<Json<Value>, Failure> {
     let steer_id = format!("{request}_steer");
+    // A request ID reused for other text is refused, not answered as if the new text had been delivered.
+    let other = |receipt: &super::Receipt| check_content && receipt.input["text"] != json!(text);
     if let Some(done) = m.receipt(id, request) {
+        if other(&done) {
+            return Err(conflict(
+                "request_conflict",
+                "request_id already has different content",
+            ));
+        }
         return Ok(Json(json!({"id":id,"state":done.state})));
     }
     // A steer that failed falls back to the queue, even on a retry.
     let steered = match m.receipt(id, &steer_id) {
+        Some(s) if other(&s) => {
+            return Err(conflict(
+                "request_conflict",
+                "request_id already has different content",
+            ));
+        }
         Some(s) if s.state != "failed" => return Ok(Json(json!({"id":id,"state":s.state}))),
         Some(_) => None,
         None => steer(m, id, &steer_id, text).await,

@@ -170,7 +170,8 @@ async fn receive(
         }
         _ => return Err(bad("unknown action")),
     };
-    let answer = deliver(&m, &id, &request, &text).await?;
+    // A report's text carries the child's title, which the website may rename. Its request ID is unique per turn.
+    let answer = deliver(&m, &id, &request, &text, heard.is_none()).await?;
     // A steer not yet confirmed may still fail; the sender retries, and a failed steer is then queued instead.
     let steering = m.receipt(&id, &format!("{request}_steer"));
     if m.receipt(&id, &request).is_none() && steering.is_some_and(|s| s.state == "accepted") {
@@ -350,6 +351,49 @@ mod tests {
             error: None,
             reply: None,
         }
+    }
+
+    #[tokio::test]
+    async fn a_retried_tell_with_other_text_is_refused() {
+        let m = manager("retried-tell");
+        session(&m, "cr_p", false);
+        let tell = |text: &str| Relayed {
+            text: Some(text.into()),
+            ..relayed("r1", "tell")
+        };
+        assert!(
+            receive(State(m.clone()), Path("cr_p".into()), Json(tell("A")))
+                .await
+                .is_ok()
+        );
+        assert!(
+            receive(State(m.clone()), Path("cr_p".into()), Json(tell("B")))
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_report_retried_after_a_rename_is_not_refused() {
+        let m = manager("renamed-report");
+        session(&m, "cr_p", false);
+        let report = |title: &str| Relayed {
+            child: Some("thr_abc".into()),
+            title: Some(title.into()),
+            state: Some("completed".into()),
+            reply: Some("done".into()),
+            ..relayed("r1", "report")
+        };
+        assert!(
+            receive(State(m.clone()), Path("cr_p".into()), Json(report("Old")))
+                .await
+                .is_ok()
+        );
+        assert!(
+            receive(State(m.clone()), Path("cr_p".into()), Json(report("New")))
+                .await
+                .is_ok()
+        );
     }
 
     #[tokio::test]
