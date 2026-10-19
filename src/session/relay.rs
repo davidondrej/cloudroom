@@ -610,7 +610,20 @@ mod tests {
             panic!("a stop during a pending close is refused");
         };
         assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["code"], "session_busy");
+    }
+
+    #[test]
+    fn a_refused_relay_stop_carries_a_code() {
+        let (status, Json(body)) = session_failure(crate::session::Error::Conflict(
+            "wait for the pending close or interrupt",
+        ));
+        assert_eq!(status, StatusCode::CONFLICT);
         assert_eq!(body["code"], "request_rejected");
+        let (_, Json(body)) = session_failure(crate::session::Error::Conflict(
+            "request_id already has different content",
+        ));
+        assert_eq!(body["code"], "request_conflict");
     }
 
     #[tokio::test]

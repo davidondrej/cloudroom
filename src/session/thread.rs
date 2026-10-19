@@ -54,7 +54,7 @@ static APP_MISSED: Mutex<Option<Instant>> = Mutex::new(None);
 
 struct Launch {
     content: Value,
-    answer: watch::Receiver<Option<Result<Value, (u16, String)>>>,
+    answer: watch::Receiver<Option<Result<Value, (u16, Value)>>>,
 }
 
 enum Outcome {
@@ -272,6 +272,9 @@ pub(super) fn retire(m: &Arc<Manager>, id: &str) -> Result<(), Failure> {
 }
 
 pub(super) fn session_failure(error: super::Error) -> Failure {
+    if let super::Error::Conflict(message) = error {
+        return conflict(crate::api::conflict_code(message), message);
+    }
     let status = match error {
         super::Error::NotFound | super::Error::RequestNotFound => StatusCode::NOT_FOUND,
         super::Error::Conflict(_) => StatusCode::CONFLICT,
@@ -475,15 +478,17 @@ async fn launch(
         };
         let outcome = match posted {
             Ok(thread) => Ok(thread),
-            Err(super::history::ApiError::Status(status, message)) => Err((status, message)),
+            Err(super::history::ApiError::Status(status, message)) => {
+                Err((status, launch_error(status, &message)))
+            }
             // No answer means the start may or may not have happened: a retry must post again, not get this.
             Err(error) => {
                 LAUNCHES.lock().unwrap().remove(&slot);
                 Err((
-                    503,
-                    format!(
+                    409,
+                    json!({"error":format!(
                         "The top-level thread may not have started: {error}. Run the same command with --request-id {key}; it never starts twice."
-                    ),
+                    ),"code":"session_busy"}),
                 ))
             }
         };
@@ -492,9 +497,22 @@ async fn launch(
     settled(answer).await
 }
 
+/// The body of a refused launch: the website's message, with the code api.md lists for it.
+fn launch_error(status: u16, message: &str) -> Value {
+    if status != 409 {
+        return json!({"error":message});
+    }
+    let code = if message.starts_with("This sandbox is busy") {
+        "session_busy"
+    } else {
+        crate::api::conflict_code(message)
+    };
+    json!({"error":message,"code":code})
+}
+
 /// Waits for the recorded answer of a top-level launch and turns it into the response.
 async fn settled(
-    mut answer: watch::Receiver<Option<Result<Value, (u16, String)>>>,
+    mut answer: watch::Receiver<Option<Result<Value, (u16, Value)>>>,
 ) -> Result<Json<Value>, Failure> {
     let recorded = answer
         .wait_for(Option::is_some)
@@ -503,9 +521,9 @@ async fn settled(
         .and_then(|v| v.clone());
     match recorded {
         Some(Ok(thread)) => Ok(Json(json!({"id":thread["id"],"note":TOP_NOTE}))),
-        Some(Err((status, message))) => Err(fail(
+        Some(Err((status, body))) => Err((
             StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY),
-            &message,
+            Json(body),
         )),
         None => Err(fail(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -653,8 +671,8 @@ async fn answer_child(
                     "This child request already failed in the app's sandbox with a different answer",
                 ))
             } else {
-                Err(fail(
-                    StatusCode::CONFLICT,
+                Err(conflict(
+                    "request_rejected",
                     "This child request already ended: the child runs in the parent's sandbox",
                 ))
             }
@@ -1253,6 +1271,19 @@ mod tests {
         };
         assert_eq!(status, StatusCode::CONFLICT);
         assert_eq!(body.0["code"], "request_conflict");
+    }
+
+    #[test]
+    fn a_refused_launch_carries_the_code_of_its_409() {
+        let busy = launch_error(409, "This sandbox is busy with another request");
+        assert_eq!(busy["code"], "session_busy");
+        let repeated = launch_error(409, "request_id already has different content");
+        assert_eq!(repeated["code"], "request_conflict");
+        let other = launch_error(409, "Pick a project first");
+        assert_eq!(other["code"], "request_rejected");
+        assert_eq!(other["error"], "Pick a project first");
+        let unknown = launch_error(402, "Out of credit");
+        assert!(unknown.get("code").is_none());
     }
 
     #[tokio::test]

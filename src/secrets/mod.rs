@@ -59,7 +59,13 @@ pub struct Answer {
 pub struct Failure(StatusCode, String);
 impl IntoResponse for Failure {
     fn into_response(self) -> Response {
-        (self.0, Json(json!({"error":self.1}))).into_response()
+        // A 409 is a rejection; the code lets clients tell it apart from a temporary failure.
+        let body = if self.0 == StatusCode::CONFLICT {
+            json!({"error":self.1,"code":"request_rejected"})
+        } else {
+            json!({"error":self.1})
+        };
+        (self.0, Json(body)).into_response()
     }
 }
 
@@ -468,4 +474,75 @@ fn reconcile(
         joined.push_str(ending);
     }
     Ok((joined, added, updated, unchanged))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_secret_answer_the_cli_cannot_write_is_refused() {
+        assert!(answer_fits("plain"));
+        assert!(!answer_fits("a'b\"c#d"));
+    }
+
+    #[tokio::test]
+    async fn an_answer_the_cli_cannot_write_is_refused_and_the_request_stays_open() {
+        let root =
+            std::env::temp_dir().join(format!("cloudroom-secret-answer-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let m = Manager::open(crate::config::Config {
+            listen: "127.0.0.1:0".parse().unwrap(),
+            token: String::new(),
+            state_dir: root.join("state"),
+            repository: root.clone(),
+            api_url: Some("http://127.0.0.1:1".into()),
+            store: "test".into(),
+            instance: None,
+            account_home: root.clone(),
+            default_harness: crate::runtime::Kind::Claude,
+            harnesses: Default::default(),
+            storage: None,
+            rpc_timeout: std::time::Duration::from_secs(30),
+            diagnostic_upload: std::time::Duration::from_secs(1),
+        })
+        .unwrap();
+        let (reply, _open) = oneshot::channel();
+        m.secrets.pending.lock().unwrap().insert(
+            "s1".into(),
+            Pending {
+                session: "cr_p".into(),
+                names: vec!["X".into()],
+                reply,
+            },
+        );
+        let bad: Answer = serde_json::from_value(json!({"values":{"X":"a'b\"c#d"}})).unwrap();
+        let refused = answer(
+            State(m.clone()),
+            RoutePath(("cr_p".into(), "s1".into())),
+            Json(bad),
+        )
+        .await;
+        assert!(matches!(refused, Err(Failure(StatusCode::CONFLICT, _))));
+        assert!(m.secrets.pending.lock().unwrap().contains_key("s1"));
+        let good: Answer = serde_json::from_value(json!({"values":{"X":"plain"}})).unwrap();
+        let accepted = answer(
+            State(m.clone()),
+            RoutePath(("cr_p".into(), "s1".into())),
+            Json(good),
+        )
+        .await;
+        assert!(accepted.is_ok());
+        assert!(!m.secrets.pending.lock().unwrap().contains_key("s1"));
+    }
+
+    #[tokio::test]
+    async fn a_refused_secret_answer_carries_a_code() {
+        let response = Failure(StatusCode::CONFLICT, "refused".into()).into_response();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["code"], "request_rejected");
+    }
 }

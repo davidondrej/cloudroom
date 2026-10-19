@@ -526,53 +526,59 @@ impl IntoResponse for session::Error {
                     .into_response();
             }
         };
-        let code = match error {
-            "invalid model" => "invalid_model",
-            "invalid provider" | "provider selection requires Pi" => "invalid_provider",
-            "invalid reasoning effort" => "invalid_reasoning_effort",
-            "invalid service tier" => "invalid_service_tier",
-            "invalid teleport manifest"
-            | "invalid teleport file"
-            | "invalid transfer ID"
-            | "invalid upload offset"
-            | "overlapping upload"
-            | "upload content changed"
-            | "upload checksum changed"
-            | "teleport file validation failed"
-            | "session text is still uploading"
-            | "saved transfer requires recovery"
-            | "native conversation already belongs to a cloud session" => "teleport_rejected",
-            "transfer cancelled" => "teleport_cancelled",
-            "cloud execution already owns this transfer; use Stop" => "teleport_running",
-            "Cloud folder permission denied" => "attachment_permission_denied",
-            "attachment upload failed" => "invalid_attachment",
-            "image exceeds the 10 MiB limit" | "file exceeds the 25 MiB limit" => {
-                "attachment_too_large"
-            }
-            "request_id already has different content"
-            | "session already exists"
-            | "saved session has no matching receipt" => "request_conflict",
-            "agent setup is incomplete" | "harness is not configured" => "harness_not_configured",
-            "invalid workspace" | "workspace mapping unavailable" => "invalid_workspace",
-            "storage unsafe; new execution is blocked" => "storage_blocked",
-            "service is stopping" => "service_stopping",
-            "service is draining" => "service_draining",
-            "this thread was asleep and is waking up; try again in a few seconds" => {
-                "session_waking"
-            }
-            "model catalog unavailable" => "model_catalog_unavailable",
-            "connect Codex before starting cloud work" => "codex_auth_required",
-            "connect Claude Code before starting cloud work" => "claude_auth_required",
-            "Claude account could not be verified" => "claude_auth_unavailable",
-            "Codex usage limit reached" => "codex_usage_limit",
-            "Codex account could not be verified" => "codex_auth_unavailable",
-            "connect Cursor before starting cloud work" => "cursor_auth_required",
-            "Cursor account could not be verified" => "cursor_auth_unavailable",
-            "close Cursor sessions before changing the cloud login" => "cursor_auth_busy",
-            "finish active Codex work before signing in" => "codex_auth_busy",
-            _ => "request_rejected",
-        };
+        let code = conflict_code(error);
         (status, Json(json!({"error":error,"code":code}))).into_response()
+    }
+}
+
+/// The code a rejected session command answers with (api.md: branch on `code`). The session routes and the
+/// relay share it, so a refused relay request carries the same code as the same refusal on `/prompts`.
+pub(crate) fn conflict_code(error: &str) -> &'static str {
+    match error {
+        "invalid model" => "invalid_model",
+        "invalid provider" | "provider selection requires Pi" => "invalid_provider",
+        "invalid reasoning effort" => "invalid_reasoning_effort",
+        "invalid service tier" => "invalid_service_tier",
+        "invalid teleport manifest"
+        | "invalid teleport file"
+        | "invalid transfer ID"
+        | "invalid upload offset"
+        | "overlapping upload"
+        | "upload content changed"
+        | "upload checksum changed"
+        | "teleport file validation failed"
+        | "session text is still uploading"
+        | "saved transfer requires recovery"
+        | "native conversation already belongs to a cloud session"
+        | "session ID belongs to another session" => "teleport_rejected",
+        "transfer cancelled" => "teleport_cancelled",
+        "cloud execution already owns this transfer; use Stop" => "teleport_running",
+        "Cloud folder permission denied" => "attachment_permission_denied",
+        "attachment upload failed" => "invalid_attachment",
+        "image exceeds the 10 MiB limit" | "file exceeds the 25 MiB limit" => {
+            "attachment_too_large"
+        }
+        "request_id already has different content"
+        | "session already exists"
+        | "saved session has no matching receipt" => "request_conflict",
+        "agent setup is incomplete" | "harness is not configured" => "harness_not_configured",
+        "invalid workspace" | "workspace mapping unavailable" => "invalid_workspace",
+        "storage unsafe; new execution is blocked" => "storage_blocked",
+        "service is stopping" => "service_stopping",
+        "service is draining" => "service_draining",
+        "this thread was asleep and is waking up; try again in a few seconds" => "session_waking",
+        "model catalog unavailable" => "model_catalog_unavailable",
+        "connect Codex before starting cloud work" => "codex_auth_required",
+        "connect Claude Code before starting cloud work" => "claude_auth_required",
+        "Claude account could not be verified" => "claude_auth_unavailable",
+        "Codex usage limit reached" => "codex_usage_limit",
+        "Codex account could not be verified" => "codex_auth_unavailable",
+        "connect Cursor before starting cloud work" => "cursor_auth_required",
+        "Cursor account could not be verified" => "cursor_auth_unavailable",
+        "close Cursor sessions before changing the cloud login" => "cursor_auth_busy",
+        "finish active Codex work before signing in" => "codex_auth_busy",
+        "request not found" => "request_not_found",
+        _ => "request_rejected",
     }
 }
 
