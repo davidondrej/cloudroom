@@ -396,12 +396,15 @@ impl Local {
                 {
                     // Listed requests go first in the new order. Anything queued since, or
                     // missing from a stale list, keeps its place after them.
-                    let mut queue: Vec<String> = order
-                        .iter()
-                        .filter_map(Value::as_str)
-                        .filter(|id| session.queue.iter().any(|queued| queued == id))
-                        .map(str::to_owned)
-                        .collect();
+                    let mut queue: Vec<String> = Vec::new();
+                    for id in order.iter().filter_map(Value::as_str) {
+                        // A request listed twice keeps its first place only; a second copy would queue it twice.
+                        if session.queue.iter().any(|queued| queued == id)
+                            && !queue.iter().any(|listed| listed == id)
+                        {
+                            queue.push(id.to_owned());
+                        }
+                    }
                     let rest: Vec<String> = session
                         .queue
                         .iter()
@@ -688,6 +691,67 @@ mod tests {
         drop(restored);
         fs::remove_file(dir.join("snapshot.json")).unwrap();
         assert_eq!(state(&Local::open(&dir).unwrap()), expected);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn cancelling_a_queued_prompt_keeps_the_last_prompt_result() {
+        let dir = std::env::temp_dir().join(format!("cloudroom-cancel-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let mut local = Local::open(&dir).unwrap();
+        let start = json!({"request_id":"s1","command":"start","state":"completed","input":{}});
+        local.append("a", "receipt", start, None).unwrap();
+        let failed = json!({"request_id":"p1","command":"prompt","state":"failed","input":{"text":"x"},"error":"boom"});
+        local.append("a", "receipt", failed, None).unwrap();
+        let cancelled =
+            json!({"request_id":"p2","command":"prompt","state":"cancelled","input":{"text":"y"}});
+        local.append("a", "receipt", cancelled, None).unwrap();
+        let session = &local.sessions["a"];
+        assert_eq!(session.last_prompt_state.as_deref(), Some("failed"));
+        assert_eq!(session.last_prompt_error.as_deref(), Some("boom"));
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_snapshot_from_before_the_close_and_secret_fixes_is_not_used() {
+        // Version 1 was written before `close_request`, `secret_open` and `finished` were rebuilt by `apply`.
+        assert_ne!(SNAPSHOT_VERSION, 1);
+    }
+
+    #[test]
+    fn reorder_lists_each_queued_request_once() {
+        let dir = std::env::temp_dir().join(format!("cloudroom-reorder-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let mut local = Local::open(&dir).unwrap();
+        let receipt = |id: &str, command: &str, input: Value| json!({"request_id":id,"command":command,"state":"accepted","input":input});
+        local
+            .append("a", "receipt", receipt("s1", "start", json!({})), None)
+            .unwrap();
+        local
+            .append(
+                "a",
+                "receipt",
+                receipt("a", "prompt", json!({"text":"a"})),
+                None,
+            )
+            .unwrap();
+        local
+            .append(
+                "a",
+                "receipt",
+                receipt("b", "prompt", json!({"text":"b"})),
+                None,
+            )
+            .unwrap();
+        local
+            .append(
+                "a",
+                "receipt",
+                receipt("r", "reorder", json!({"order":["a","a","b"]})),
+                None,
+            )
+            .unwrap();
+        assert_eq!(local.sessions["a"].queue, ["a", "b"]);
         fs::remove_dir_all(&dir).unwrap();
     }
 
