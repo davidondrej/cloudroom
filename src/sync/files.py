@@ -134,6 +134,16 @@ def ignore_all(fd):
         file.write('*\n')
 
 
+class Digesting:
+    def __init__(self, output):
+        self.output = output
+        self.digest = hashlib.sha256()
+
+    def write(self, data):
+        self.digest.update(data)
+        return self.output.write(data)
+
+
 def transfer(data, kind, executable, output=None, limit=MAX_FILE_BYTES):
     digest = hashlib.sha256((kind + str(executable)).encode())
     size = 0
@@ -198,20 +208,22 @@ class Tree:
             try:
                 flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
                 with os.fdopen(os.open(temporary, flags, 0o600, dir_fd=fd), 'wb') as output:
-                    entry = transfer(stream, 'file', False, output, limit)
+                    tee = Digesting(output)
+                    entry = transfer(stream, 'file', False, tee, limit)
                     if entry['size'] != size:
                         raise ValueError('incomplete attachment')
                     output.flush()
                     os.fsync(output.fileno())
+                digest = tee.digest.hexdigest()
                 try:
                     os.link(temporary, name, src_dir_fd=fd, dst_dir_fd=fd, follow_symlinks=False)
                 except FileExistsError:
                     info = os.stat(name, dir_fd=fd, follow_symlinks=False)
                     if not stat.S_ISREG(info.st_mode):
                         raise ValueError('attachment must be a regular file')
-                    return {'size': info.st_size}
+                    return {'size': info.st_size, 'sha256': digest}
                 os.fsync(fd)
-                return {'size': entry['size']}
+                return {'size': entry['size'], 'sha256': digest}
             finally:
                 try:
                     os.unlink(temporary, dir_fd=fd)
@@ -637,6 +649,11 @@ class Tree:
 
 def worker():
     request = json.loads(sys.stdin.buffer.readline())
+    if request['op'] == 'digest':
+        # Hashes the bytes on stdin; reads no repository path.
+        data = sys.stdin.buffer.read()
+        print(json.dumps({'ok': True, 'size': len(data), 'sha256': hashlib.sha256(data).hexdigest()}), flush=True)
+        return
     tree = Tree(**request['tree'])
     op = request['op']
     if op == 'mkdir':

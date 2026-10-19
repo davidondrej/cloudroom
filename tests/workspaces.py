@@ -225,5 +225,69 @@ class WorkspaceTests(unittest.TestCase):
         self.service.request('POST','/v1/workspaces/old',{},405)
         self.service.request('POST','/v1/workspaces/old/prepare',{},404)
 
+    def test_a_retried_attachment_answers_its_receipt_after_the_file_changes(self):
+        path = self.state.resolve()/'code'/'retried'
+        self.seed('retried', path, 'codex')
+        self.start()
+        until(lambda:self.service.session('cr_retried')['state']=='idle','retried target',10)
+        def post(body):
+            connection = http.client.HTTPConnection(self.service.address, timeout=10)
+            connection.request('POST','/v1/sessions/cr_retried/attachments?request_id=keep&name=note.txt&kind=file',body,
+                {'Authorization':'Bearer '+self.env['CLOUDROOM_TOKEN'],'Content-Type':'application/octet-stream'})
+            response = connection.getresponse(); data = json.loads(response.read()); connection.close()
+            return response.status, data
+        status, first = post(b'original bytes')
+        self.assertEqual(status, 202, first)
+        stored = Path(first['receipt']['input']['path'])
+        # The agent replaces the attachment with a symlink to an endless device: a retry must not read it.
+        stored.unlink()
+        stored.symlink_to('/dev/zero')
+        status, again = post(b'original bytes')
+        self.assertEqual((status, again['receipt']['input']), (202, first['receipt']['input']))
+        status, data = post(b'other bytes!')
+        self.assertEqual((status, data.get('code')), (409, 'request_conflict'), data)
+
+    def test_a_different_body_under_a_stored_request_is_refused_and_the_original_retry_still_answers(self):
+        path = self.state.resolve()/'code'/'ordering'
+        self.seed('ordering', path, 'codex')
+        self.start()
+        until(lambda:self.service.session('cr_ordering')['state']=='idle','ordering target',10)
+        def post(body):
+            connection = http.client.HTTPConnection(self.service.address, timeout=10)
+            connection.request('POST','/v1/sessions/cr_ordering/attachments?request_id=r&name=a.txt&kind=file',body,
+                {'Authorization':'Bearer '+self.env['CLOUDROOM_TOKEN'],'Content-Type':'application/octet-stream'})
+            response = connection.getresponse(); data = json.loads(response.read()); connection.close()
+            return response.status, data
+        status, first = post(b'body A')
+        self.assertEqual(status, 202, first)
+        status, data = post(b'body B!!')
+        self.assertEqual((status, data.get('code')), (409, 'request_conflict'), data)
+        status, again = post(b'body A')
+        self.assertEqual((status, again['receipt']['input']), (202, first['receipt']['input']))
+
+    def test_a_refused_completing_part_is_not_kept_for_the_corrected_retry(self):
+        path = self.state.resolve()/'code'/'partial'
+        self.seed('partial', path, 'codex')
+        self.start()
+        until(lambda:self.service.session('cr_partial')['state']=='idle','partial target',10)
+        folder = path/'.cloudroom/attachments/cr_partial'
+        folder.mkdir(parents=True)
+        def part(offset, body):
+            connection = http.client.HTTPConnection(self.service.address, timeout=10)
+            connection.request('POST', f'/v1/sessions/cr_partial/attachments?request_id=f1&name=f.txt&kind=file&offset={offset}&total=3', body,
+                {'Authorization':'Bearer '+self.env['CLOUDROOM_TOKEN'],'Content-Type':'application/octet-stream'})
+            response = connection.getresponse(); data = json.loads(response.read()); connection.close()
+            return response.status, data
+        self.assertEqual(part(0, b'a')[0], 202)
+        self.assertEqual(part(1, b'b')[0], 202)
+        folder.chmod(0o500)
+        try:
+            self.assertEqual(part(2, b'X')[0], 409)
+        finally:
+            folder.chmod(0o700)
+        status, data = part(2, b'c')
+        self.assertEqual(status, 202, data)
+        self.assertEqual(Path(data['receipt']['input']['path']).read_bytes(), b'abc')
+
 
 if __name__ == '__main__': unittest.main()

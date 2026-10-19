@@ -76,7 +76,7 @@ Harness logins run on the VM. Responses report status and sign-in links, never t
 
 ## Workspaces, sync, previews and transfers
 
-- `GET /v1/workspaces/{id}`: a cloud folder mapping ([cloud folders](setup.md#cloud-folders)).
+- `GET /v1/workspaces/{id}`: a cloud folder mapping ([cloud folders](setup.md#cloud-folders)). A damaged or invalid mapping answers `409` `invalid_workspace` (permanent); a temporary filesystem problem answers `workspace_unavailable`.
 - `GET /v1/settings`, `POST /v1/sync`, `GET /v1/sync/{id}`, `GET|PUT /v1/sync/{id}/file`: skills and settings sync ([sync](setup.md#skills-and-login-sync)).
 - `/v1/previews...`: open cloud web servers on your laptop's localhost ([previews](previews.md)).
 - `GET /v1/terminals/{id}?cols=C&rows=R[&session=S][&since=N][&command=CMD]` with `Upgrade: websocket`: an interactive shell on a PTY, in session `S`'s workspace. After `101`, both sides send frames with no WebSocket framing: a kind byte, a big-endian u32 length, then the data. Core sends `0` output, `1` exit `{"code"}`, `2` hello `{"offset","cwd","shell"}` and `3` ping; the app sends `0` input, `1` resize (cols and rows as u16) and `3` ping. Reconnect with `since` set to the output bytes received; Core replays up to 1 MiB, and a new hello marks skipped output. An unknown ID with `since` above 0 answers `410`: the shell ended when Core restarted. The shell gets the agents' Claude Code, Codex and Cursor logins, read once at start. `DELETE /v1/terminals/{id}` ends the shell and everything it started.

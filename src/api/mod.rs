@@ -1197,6 +1197,11 @@ async fn attach(
     body: Body,
 ) -> Result<impl IntoResponse> {
     key(&query.request_id)?;
+    if query.offset.is_some() != query.total.is_some() {
+        return Err(session::Error::Conflict(
+            "offset and total must be sent together",
+        ));
+    }
     // A part is read before any reply, so a retried last part gets its receipt instead of a reset connection.
     let (body, part) = match query.total {
         Some(_) => (
@@ -1211,6 +1216,23 @@ async fn attach(
     };
     if let Some(receipt) = manager.receipt(&id, &query.request_id) {
         if receipt.command != "attach" {
+            return Err(session::Error::Conflict(
+                "request_id already has different content",
+            ));
+        }
+        let (offset, bytes) = match part {
+            Some(part) => (query.offset.unwrap_or(0), part),
+            None => (
+                0,
+                axum::body::to_bytes(body, 25 << 20)
+                    .await
+                    .map_err(|_| session::Error::Conflict("file exceeds the 25 MiB limit"))?,
+            ),
+        };
+        let matches = stored_matches(&receipt.input, &query, offset, &bytes)
+            .await
+            .map_err(|error| session::Error::Storage(error.to_string()))?;
+        if !matches {
             return Err(session::Error::Conflict(
                 "request_id already has different content",
             ));
@@ -1294,6 +1316,36 @@ async fn attach(
     let receipt = manager.command(&id, query.request_id, "attach", written)?;
     PARTS.lock().unwrap().remove(&key);
     Ok(accepted(&manager, &id, receipt))
+}
+
+/// True when a retry repeats the request that wrote the receipt. The repository file is never read back: the agent
+/// may have edited, moved or replaced it. A whole-body retry compares the digest recorded at write time; a
+/// receipt written before that has only name, kind and size. A part retry compares name, kind, total and range,
+/// since the bytes of a completed upload are no longer held.
+async fn stored_matches(
+    input: &Value,
+    query: &AttachQuery,
+    offset: usize,
+    bytes: &[u8],
+) -> std::io::Result<bool> {
+    if input["name"].as_str() != Some(query.name.as_str())
+        || input["kind"].as_str() != Some(query.kind.as_str())
+    {
+        return Ok(false);
+    }
+    if let Some(total) = query.total {
+        let in_range = offset
+            .checked_add(bytes.len())
+            .is_some_and(|end| end <= total);
+        return Ok(input["size"].as_u64() == u64::try_from(total).ok() && in_range);
+    }
+    if input["size"].as_u64() != u64::try_from(bytes.len()).ok() {
+        return Ok(false);
+    }
+    match input["sha256"].as_str() {
+        Some(stored) => Ok(crate::workspace::digest(bytes).await? == stored),
+        None => Ok(true),
+    }
 }
 
 /// Attachments arriving in parts, by session and request: (total size, bytes so far, last part). Some sandbox
@@ -1422,4 +1474,80 @@ async fn stream(
         }
     });
     Ok(Sse::new(ReceiverStream::new(receiver)).keep_alive(KeepAlive::default()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn query(name: &str, kind: &str, offset: Option<usize>, total: Option<usize>) -> AttachQuery {
+        AttachQuery {
+            request_id: "r1".into(),
+            name: name.into(),
+            kind: kind.into(),
+            offset,
+            total,
+        }
+    }
+
+    fn stored(size: usize, digest: Option<&str>) -> Value {
+        let mut input =
+            json!({"name": "a.txt", "kind": "file", "size": size, "path": "/no/such/file"});
+        if let Some(digest) = digest {
+            input["sha256"] = json!(digest);
+        }
+        input
+    }
+
+    #[tokio::test]
+    async fn a_retry_matches_the_stored_name_kind_size_and_digest() {
+        let digest = crate::workspace::digest(b"x").await.unwrap();
+        let input = stored(1, Some(&digest));
+        let same = query("a.txt", "file", None, None);
+        assert!(stored_matches(&input, &same, 0, b"x").await.unwrap());
+        assert!(
+            !stored_matches(&input, &same, 0, b"y").await.unwrap(),
+            "other bytes, same size"
+        );
+        assert!(
+            !stored_matches(&input, &same, 0, b"yy").await.unwrap(),
+            "other size"
+        );
+        assert!(
+            !stored_matches(&input, &query("b.txt", "file", None, None), 0, b"x")
+                .await
+                .unwrap(),
+            "other name"
+        );
+        assert!(
+            !stored_matches(&input, &query("a.txt", "image", None, None), 0, b"x")
+                .await
+                .unwrap(),
+            "other kind"
+        );
+        let legacy = stored(1, None);
+        assert!(
+            stored_matches(&legacy, &same, 0, b"y").await.unwrap(),
+            "a receipt without a digest"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_retried_part_matches_the_stored_total_and_range() {
+        let input = stored(4, None);
+        let part = query("a.txt", "file", Some(2), Some(4));
+        assert!(stored_matches(&input, &part, 2, b"cd").await.unwrap());
+        assert!(
+            !stored_matches(&input, &part, usize::MAX, b"cd")
+                .await
+                .unwrap(),
+            "offset overflow"
+        );
+        assert!(
+            !stored_matches(&stored(5, None), &part, 2, b"cd")
+                .await
+                .unwrap(),
+            "other total"
+        );
+    }
 }

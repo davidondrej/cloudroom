@@ -444,8 +444,32 @@ impl Workspaces {
             }
         })?;
         Ok(serde_json::json!({"id":request_id,"name":name,"kind":kind,
-            "path":workspace.path.join(relative),"size":result["size"]}))
+            "path":workspace.path.join(relative),"size":result["size"],"sha256":result["sha256"]}))
     }
+}
+
+/// The SHA-256 of bytes a retried upload carries, computed by the same helper that writes attachments. Reads
+/// no repository path, so an agent's edits to a stored attachment cannot change the answer.
+pub async fn digest(bytes: &[u8]) -> io::Result<String> {
+    let mut command = Command::new("python3");
+    command
+        .env_clear()
+        .env("PATH", "/usr/local/bin:/usr/bin:/bin")
+        .args(["-c", include_str!("../sync/files.py")])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    let mut child = command.spawn()?;
+    let mut input = child.stdin.take().unwrap();
+    input.write_all(b"{\"op\":\"digest\"}\n").await?;
+    input.write_all(bytes).await?;
+    drop(input);
+    let result = file_result(child.wait_with_output().await?)?;
+    result["sha256"]
+        .as_str()
+        .map(str::to_owned)
+        .ok_or_else(|| io::Error::other("Cloud folder file operation failed"))
 }
 
 fn file_result(output: std::process::Output) -> io::Result<serde_json::Value> {
