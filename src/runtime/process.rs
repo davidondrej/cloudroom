@@ -210,6 +210,7 @@ impl Process {
                     }
                 }
             };
+            let stop_requested = deadline.is_some();
             drop(input);
             let exited = tokio::time::timeout(Duration::from_millis(250), child.wait()).await;
             let mut status = exited.ok().and_then(Result::ok);
@@ -259,6 +260,7 @@ impl Process {
                 .send(Event::Exited {
                     reason,
                     expected,
+                    stop_requested,
                     cleaned_up,
                     details,
                 })

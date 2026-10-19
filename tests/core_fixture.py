@@ -786,6 +786,16 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(self.status()["state"], "closed")
         self.assertEqual(self.status()["queue"], [])
 
+    def test_unanswered_turn_start_settles_the_session_and_runs_the_queue(self):
+        self.seed(); self.start(); self.ready()
+        self.prompt("silent", "no-reply")
+        self.wait(lambda: (self.repo / "no-reply").exists(), "unanswered turn start")
+        self.prompt("pending", "hello")
+        until(lambda: self.status()["receipts"]["pending"]["state"] == "completed", "queue after an unanswered turn start", 90)
+        self.ready()
+        self.assertEqual(self.status()["receipts"]["silent"]["state"], "unknown")
+        self.assertEqual((self.repo / (self.native + ".requests")).read_text().splitlines(), ["silent", "pending"])
+
     def test_revoked_mac_loses_its_job_stream_and_cannot_pair_again(self):
         previews = self.state / 'previews'
         previews.mkdir(mode=0o700)

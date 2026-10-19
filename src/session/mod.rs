@@ -1470,16 +1470,15 @@ impl Manager {
             };
             // The stored handle keeps the launch level. This copy is only for the turn being started.
             let handle = handle.with_reasoning(reasoning);
-            let result = async {
-                handle.prepare_turn().await?;
-                handle.send_prompt(&request, &input).await
-            }
-            .await;
-            let state = match &result {
-                Ok(_) => "delivered",
-                Err(e) if e.kind() == io::ErrorKind::InvalidInput => "failed",
-                Err(_) => "unknown",
+            // A failed prepare (OpenClaw's refresh, Pi's thinking level, Fx) runs before the prompt is sent.
+            let prepared = handle.prepare_turn().await;
+            let sent = prepared.is_ok();
+            let result = match prepared {
+                Ok(()) => handle.send_prompt(&request, &input).await,
+                Err(error) => Err(error),
             };
+            let state = delivery_state(sent, &result);
+            let advance = state == "failed";
             let mut local = self.local.lock().unwrap();
             if !local.sessions[&id]
                 .handle
@@ -1502,7 +1501,12 @@ impl Manager {
                 receipt.error = Some(error.to_string());
             }
             let _ = local.finish_receipt(&id, &request, state);
-            if result.is_err_and(|e| e.kind() == io::ErrorKind::InvalidInput)
+            if state == "unknown" {
+                // The turn's start is unconfirmed and must not be resent. Stopping the harness sends the
+                // session through its exit path (unknown receipt, one recovery, queue waits) instead of leaving it starting_turn.
+                handle.request_shutdown();
+            }
+            if advance
                 && local.sessions.get(&id).is_some_and(|s| {
                     s.current_request.as_deref() == Some(&request) && s.close_request.is_none()
                 })
@@ -2187,6 +2191,7 @@ impl Manager {
             runtime::Event::Exited {
                 reason,
                 expected,
+                stop_requested,
                 cleaned_up,
                 details,
             } => {
@@ -2250,6 +2255,15 @@ impl Manager {
                 let lost = failed.clone().unwrap_or_else(|| match &cause {
                     Some(cause) => format!("{reason}: {cause} ({exit})"),
                     None => format!("{reason} ({exit})"),
+                });
+                // A turn already settled `unknown` (its start unconfirmed, the harness stopped on purpose) keeps that state.
+                // A harness that died on its own first still settles the turn as lost to the restart.
+                let request = request.filter(|r| {
+                    !stop_requested
+                        || local.sessions[id]
+                            .receipts
+                            .get(r)
+                            .is_none_or(|receipt| receipt.state != "unknown")
                 });
                 if let Some(request) = request {
                     // Keep the cause on the lost turn: an automatic recovery leaves the thread idle and error-free.
@@ -2354,6 +2368,16 @@ impl Manager {
         {
             eprintln!("Cloudroom shutdown cleanup deadline reached");
         }
+    }
+}
+
+/// The receipt state of a delivery. A prompt that was never sent (its prepare failed, or the harness refused the
+/// input) is `failed`; only a send that may have reached the harness is `unknown`, which stops the harness.
+fn delivery_state<T>(sent: bool, result: &io::Result<T>) -> &'static str {
+    match result {
+        Ok(_) => "delivered",
+        Err(e) if !sent || e.kind() == io::ErrorKind::InvalidInput => "failed",
+        Err(_) => "unknown",
     }
 }
 

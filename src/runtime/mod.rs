@@ -236,6 +236,8 @@ pub enum Event {
     Exited {
         reason: &'static str,
         expected: bool,
+        /// The service asked this harness to stop before it exited.
+        stop_requested: bool,
         cleaned_up: bool,
         details: ExitDetails,
     },
