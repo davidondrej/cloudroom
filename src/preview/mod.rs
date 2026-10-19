@@ -212,6 +212,10 @@ impl Previews {
     pub(crate) fn paired(&self, device: &str) -> bool {
         self.saved.lock().unwrap().devices.contains_key(device)
     }
+    /// Whether a Mac is paired with this VM at all.
+    pub(crate) fn any_paired(&self) -> bool {
+        !self.saved.lock().unwrap().devices.is_empty()
+    }
     pub fn enabled(&self) -> bool {
         self.setup.lock().unwrap().is_some()
     }

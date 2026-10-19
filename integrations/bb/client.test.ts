@@ -97,6 +97,19 @@ test("reports allowlisted rejections, keeps temporary conflicts retryable, and s
   assert.equal(service.requests.length, 12);
 });
 
+test("does not retry a vm/run 409, which the core answers for a refused folder or a missing Mac pairing", async (t) => {
+  const service = await fixture((_req, res) => sendJson(res, { error: "No Mac is paired with this VM" }, 409));
+  t.after(() => service.close());
+  await assert.rejects(service.client.runOnVm({ command: "true" }), (error: unknown) => {
+    assert(error instanceof CloudroomError);
+    assert.equal(error.status, 409);
+    assert.equal(error.code, "request_rejected");
+    assert.equal(error.retryable, false);
+    assert.equal(error.message, "No Mac is paired with this VM");
+    return true;
+  });
+});
+
 test("attachment failures distinguish permissions and size without disclosing server details or retrying", async (t) => {
   let code = "";
   const service = await fixture((req, res) => {

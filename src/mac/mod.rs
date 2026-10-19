@@ -529,8 +529,35 @@ async fn vm_run_raw(
     execute(&m, run, stdin.into(), true).await
 }
 
+/// A folder for `vm/run` must resolve inside the agent home. Symlinks are resolved when the folder exists.
+/// This is input hygiene for the request, not isolation: the command runs as the same account.
+fn inside_home(home: &std::path::Path, folder: &str) -> bool {
+    let Ok(home) = home.canonicalize() else {
+        return false;
+    };
+    let target = home.join(folder);
+    match target.canonicalize() {
+        Ok(path) => path.starts_with(&home),
+        // A missing folder is reported by the caller; here it only has to be lexically inside.
+        Err(_) => {
+            target.starts_with(&home)
+                && !target
+                    .components()
+                    .any(|c| matches!(c, std::path::Component::ParentDir))
+        }
+    }
+}
+
 async fn execute(m: &Manager, run: Run, stdin: Vec<u8>, gated: bool) -> Result<Json<Value>> {
+    // Where Mac access is set up, this route serves a paired Mac and refuses while none is paired. Cores without
+    // it keep serving bulk project copies (runOnVm); the bearer token already opens a shell there.
+    if m.previews.enabled() && !m.previews.any_paired() {
+        return Err(conflict("No Mac is paired with this VM"));
+    }
     let home = &m.config.account_home;
+    if run.cwd.as_deref().is_some_and(|d| !inside_home(home, d)) {
+        return Err(conflict("invalid folder"));
+    }
     let folder = run.cwd.as_ref().map_or(home.clone(), |d| home.join(d));
     if !folder.is_dir() {
         return Err(conflict("VM folder not found"));

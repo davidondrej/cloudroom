@@ -362,7 +362,9 @@ export class CloudroomClient {
     }
     const value = await response.json().catch(() => null) as Record<string, unknown> | null;
     if (!response.ok || !value) {
-      throw new CloudroomError(typeof value?.error === "string" ? value.error : `Cloudroom rejected the request (HTTP ${response.status})`, response.status);
+      // The Mac/VM 409s carry no code. Both known ones (no paired Mac, invalid folder) are permanent, so a 409 here is not retried.
+      const code = response.status === 409 ? genericRejection : null;
+      throw new CloudroomError(typeof value?.error === "string" ? value.error : `Cloudroom rejected the request (HTTP ${response.status})`, response.status, code);
     }
     return value as unknown as VmRunResult;
   }
