@@ -1427,8 +1427,8 @@ fn truncate_part(key: &str, before: usize) {
     }
 }
 
-/// Appends one part of an upload that arrives in pieces. A repeated part is ignored, so retrying after a lost
-/// response is safe; a gap or overflow is refused.
+/// Appends one part of an upload that arrives in pieces. A repeated part with the same bytes is ignored, so
+/// retrying after a lost response is safe; different bytes for buffered offsets, a gap or an overflow are refused.
 pub(crate) fn append_part(
     buffer: &mut Vec<u8>,
     offset: usize,
@@ -1443,6 +1443,8 @@ pub(crate) fn append_part(
         buffer.extend_from_slice(part);
     } else if end > buffer.len() {
         return Err("upload part out of order");
+    } else if buffer[offset..end] != *part {
+        return Err("request_id already has different content");
     }
     Ok(())
 }
@@ -1615,6 +1617,22 @@ mod tests {
             Ok(Progress::Complete { .. })
         ));
         PARTS.lock().unwrap().remove(key);
+    }
+
+    #[test]
+    fn a_repeated_part_must_match_the_buffered_bytes() {
+        let mut buffer = Vec::new();
+        append_part(&mut buffer, 0, b"AAAA", 12).unwrap();
+        append_part(&mut buffer, 4, b"BBBB", 12).unwrap();
+        assert!(
+            append_part(&mut buffer, 0, b"AAAA", 12).is_ok(),
+            "a retry of the same bytes"
+        );
+        assert_eq!(
+            append_part(&mut buffer, 4, b"CCCC", 12),
+            Err("request_id already has different content")
+        );
+        assert_eq!(buffer, b"AAAABBBB");
     }
 
     #[test]
