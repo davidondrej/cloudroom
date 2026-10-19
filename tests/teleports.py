@@ -41,6 +41,12 @@ class TeleportTests(unittest.TestCase):
         self.upload('pin', 1, 0, digest, b'0123456789')
         self.assertEqual(self.service.request('GET', '/v1/teleports/pin')['files'][1]['complete'], True)
 
+    def test_legacy_default_folder_prepares_and_retries_do_not_loop_on_503(self):
+        self.start()
+        view = self.service.request('POST', '/v1/teleports', self.manifest('legacy-ws', workspace='legacy'), 202)
+        self.assertEqual(Path(view['workspace']).resolve(), self.repo.resolve())
+        self.service.request('POST', '/v1/teleports', self.manifest('legacy-ws', workspace='legacy'), 202)
+
     def test_cancelled_teleport_removes_its_parts_and_refuses_reuse(self):
         self.start()
         body = b'0123456789'

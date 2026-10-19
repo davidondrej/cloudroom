@@ -486,15 +486,21 @@ impl Manager {
             }
         }
         // A projectless thread (a fork of one) runs in the workspaces root, unregistered like its start.
-        let workspace = if manifest.workspace == workspace::ROOT {
-            workspace::Workspace {
+        let workspace = match manifest.workspace.as_str() {
+            workspace::ROOT => workspace::Workspace {
                 id: "legacy".into(),
                 path: self.workspaces.root().to_path_buf(),
                 parent: None,
-            }
-        } else {
-            self.workspaces
-                .resolve(&manifest.workspace, Some(&manifest.workspace_name))?
+            },
+            // The ID the API reports for the default folder, where a session without a workspace runs.
+            "legacy" => workspace::Workspace {
+                id: "legacy".into(),
+                path: self.config.repository.clone(),
+                parent: None,
+            },
+            _ => self
+                .workspaces
+                .resolve(&manifest.workspace, Some(&manifest.workspace_name))?,
         };
         self.workspaces.ensure_directory(&workspace).await?;
         let transfer = Transfer {

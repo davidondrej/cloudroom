@@ -824,22 +824,23 @@ impl Manager {
         }
         ready?;
         supported?;
-        let workspace = match workspace {
+        let workspace = match workspace.as_deref() {
             // Unregistered like legacy sessions, so no project folder is created.
-            Some(id) if id == crate::workspace::ROOT => crate::workspace::Workspace {
+            Some(crate::workspace::ROOT) => crate::workspace::Workspace {
                 id: "legacy".into(),
                 path: self.workspaces.root().to_path_buf(),
                 parent: None,
             },
-            Some(id) => self
-                .workspaces
-                .resolve(&id, workspace_name.as_deref())
-                .map_err(|_| Error::Conflict("workspace mapping unavailable"))?,
-            None => crate::workspace::Workspace {
+            // The ID the API reports for the default folder, the same mapping Teleport uses.
+            Some("legacy") | None => crate::workspace::Workspace {
                 id: "legacy".into(),
                 path: self.config.repository.clone(),
                 parent: None,
             },
+            Some(id) => self
+                .workspaces
+                .resolve(id, workspace_name.as_deref())
+                .map_err(|_| Error::Conflict("workspace mapping unavailable"))?,
         };
         let receipt = Receipt {
             request_id: request.clone(),

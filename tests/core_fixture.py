@@ -786,6 +786,11 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(self.status()["state"], "closed")
         self.assertEqual(self.status()["queue"], [])
 
+    def test_start_accepts_the_legacy_workspace_id_that_sessions_report(self):
+        self.seed(); self.start(); self.ready()
+        sid = self.service.request("POST", "/v1/sessions", {"request_id": "legacy-id", "workspace": "legacy"}, 202)["session_id"]
+        self.assertEqual(self.service.session(sid)["workspace"]["id"], "legacy")
+
     def test_manual_stop_keeps_queue_paused_across_restart_until_resume(self):
         self.seed(); self.start(); self.ready()
         self.prompt("running", "hold")

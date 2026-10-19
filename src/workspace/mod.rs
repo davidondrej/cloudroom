@@ -149,6 +149,10 @@ impl Workspaces {
     }
 
     pub fn get(&self, id: &str) -> io::Result<Option<Workspace>> {
+        // "legacy" names the default folder, never a registered workspace (an older teleport may have left one).
+        if id == "legacy" {
+            return Ok(None);
+        }
         let workspace = self.read_registered(id)?;
         if let Some(workspace) = &workspace {
             self.validate(workspace)?;
@@ -178,6 +182,9 @@ impl Workspaces {
 
     pub fn resolve(&self, id: &str, name: Option<&str>) -> io::Result<Workspace> {
         valid_id(id)?;
+        if id == "legacy" {
+            return Err(io::Error::other("Invalid workspace ID"));
+        }
         let name = name.unwrap_or(id);
         valid_name(name)?;
         let _guard = self.allocation.lock().unwrap();
