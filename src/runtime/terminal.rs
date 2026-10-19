@@ -39,6 +39,8 @@ use tokio::{
 /// Output kept for a reconnecting app. The app keeps the long scrollback; this covers dropped connections.
 const REPLAY: usize = 1024 * 1024;
 const MAX_FRAME: usize = 1024 * 1024;
+/// An exited terminal keeps its replay buffer this long, so a reattach still sees its output.
+const EXITED_TTL: Duration = Duration::from_secs(30 * 60);
 /// Keeps sandbox proxies from closing a quiet connection, and finds dead ones.
 const PING: Duration = Duration::from_secs(25);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -149,6 +151,8 @@ struct Output {
     replay: VecDeque<u8>,
     written: u64,
     exit: Option<Option<i32>>,
+    /// When the shell exited (ms since the epoch); an exited terminal keeps its replay until it is reaped.
+    ended: u64,
 }
 impl Output {
     fn start(&self) -> u64 {
@@ -157,7 +161,8 @@ impl Output {
 }
 
 pub struct Terminal {
-    pty: AsyncFd<File>,
+    /// The shell's terminal. Taken when the shell exits, so an exited terminal keeps only its output.
+    pty: Mutex<Option<Arc<AsyncFd<File>>>>,
     pid: u32,
     shell: &'static str,
     cwd: PathBuf,
@@ -233,7 +238,7 @@ impl Terminal {
             .id()
             .ok_or_else(|| io::Error::other("the shell has no process ID"))?;
         let terminal = Self {
-            pty: AsyncFd::new(master)?,
+            pty: Mutex::new(Some(Arc::new(AsyncFd::new(master)?))),
             pid,
             shell,
             cwd,
@@ -242,6 +247,7 @@ impl Terminal {
                 replay: VecDeque::new(),
                 written: 0,
                 exit: None,
+                ended: 0,
             }),
             changed: watch::channel(0).0,
             viewer: AtomicU64::new(0),
@@ -267,9 +273,10 @@ impl Terminal {
 
     /// Reads until every process has closed the terminal.
     async fn pump(&self) {
+        let Some(pty) = self.pty() else { return };
         let mut buffer = vec![0; 64 * 1024];
         loop {
-            let Ok(mut ready) = self.pty.readable().await else {
+            let Ok(mut ready) = pty.readable().await else {
                 return;
             };
             match ready.try_io(|pty| pty.get_ref().read(&mut buffer)) {
@@ -280,9 +287,16 @@ impl Terminal {
         }
     }
 
+    fn pty(&self) -> Option<Arc<AsyncFd<File>>> {
+        self.pty.lock().unwrap().clone()
+    }
+
     async fn write(&self, mut bytes: &[u8]) -> io::Result<()> {
+        let pty = self
+            .pty()
+            .ok_or_else(|| io::Error::other("the terminal has ended"))?;
         while !bytes.is_empty() {
-            let mut ready = self.pty.writable().await?;
+            let mut ready = pty.writable().await?;
             match ready.try_io(|pty| pty.get_ref().write(bytes)) {
                 Ok(written) => bytes = &bytes[written?..],
                 Err(_would_block) => {}
@@ -293,7 +307,10 @@ impl Terminal {
     }
 
     pub fn resize(&self, cols: u16, rows: u16) -> io::Result<()> {
-        set_size(self.pty.get_ref(), cols, rows)
+        let pty = self
+            .pty()
+            .ok_or_else(|| io::Error::other("the terminal has ended"))?;
+        set_size(pty.get_ref(), cols, rows)
     }
 
     fn kill(&self) {
@@ -309,7 +326,14 @@ impl Terminal {
     fn finish(&self, code: Option<i32>) {
         // Background jobs the shell left behind end with it.
         self.group.lock().unwrap().take();
-        self.output.lock().unwrap().exit = Some(code);
+        // The pty goes first, so readers that see the exit find no terminal. A reader already in flight may hold
+        // its clone of the master until it returns.
+        self.pty.lock().unwrap().take();
+        {
+            let mut output = self.output.lock().unwrap();
+            output.exit = Some(code);
+            output.ended = now_ms();
+        }
         self.changed();
     }
 
@@ -343,8 +367,7 @@ impl Terminal {
             from_app.read_exact(&mut data).await?;
             match (kind, data.as_slice()) {
                 (INPUT, bytes) => self.write(bytes).await?,
-                (RESIZE, [c1, c2, r1, r2]) => set_size(
-                    self.pty.get_ref(),
+                (RESIZE, [c1, c2, r1, r2]) => self.resize(
                     u16::from_be_bytes([*c1, *c2]),
                     u16::from_be_bytes([*r1, *r2]),
                 )?,
@@ -426,6 +449,16 @@ impl Terminals {
         Some(terminal)
     }
 
+    /// Drops terminals whose shell exited at least `older_than` ago. Their replay buffers (up to 1 MiB each) go
+    /// with them; a later attach to the same ID starts a new shell.
+    pub fn reap_exited(&self, older_than: Duration) {
+        let cutoff = now_ms().saturating_sub(older_than.as_millis() as u64);
+        self.open.lock().unwrap().retain(|_, terminal| {
+            let output = terminal.output.lock().unwrap();
+            output.exit.is_none() || output.ended > cutoff
+        });
+    }
+
     /// Starts the shell unless this ID already has one.
     pub fn open(
         &self,
@@ -436,6 +469,7 @@ impl Terminals {
         rows: u16,
         command: Option<&str>,
     ) -> io::Result<Arc<Terminal>> {
+        self.reap_exited(EXITED_TTL);
         let mut open = self.open.lock().unwrap();
         if let Some(terminal) = open.get(id) {
             // A reconnect with a new size resizes the shell it attaches to.
@@ -623,5 +657,104 @@ mod tests {
         assert_eq!(shell_folder(Some(gone), repository), None);
         assert_eq!(shell_folder(None, repository), Some(repository.to_owned()));
         assert_eq!(shell_folder(Some(repository.to_owned()), Path::new("/")), Some(repository.to_owned()));
+    }
+
+    #[tokio::test]
+    async fn an_exited_terminal_releases_its_pty_and_keeps_its_output() {
+        let _pty = PTY_TESTS.lock().await;
+        let dir = std::env::temp_dir().join(format!("cloudroom-terminal-exit-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = dir.canonicalize().unwrap();
+        let config = Config {
+            listen: "127.0.0.1:0".parse().unwrap(),
+            token: String::new(),
+            state_dir: dir.join("state"),
+            repository: dir.clone(),
+            api_url: Some("http://127.0.0.1:1".into()),
+            store: "fixture".into(),
+            instance: None,
+            account_home: dir.clone(),
+            default_harness: Kind::Codex,
+            harnesses: Default::default(),
+            storage: None,
+            rpc_timeout: Duration::from_secs(30),
+            diagnostic_upload: Duration::from_secs(1),
+        };
+        let terminals = Terminals::default();
+        let terminal = terminals
+            .open(&config, "term_exit", dir.clone(), 80, 24, Some("echo bye"))
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while terminal.output.lock().unwrap().exit.is_none() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(terminal.pty.lock().unwrap().is_none());
+        let replay: Vec<u8> = terminal.output.lock().unwrap().replay.iter().copied().collect();
+        assert!(String::from_utf8_lossy(&replay).contains("bye"));
+        terminals.close("term_exit");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Pseudo-terminal tests that count descriptors in this process run one at a time.
+    static PTY_TESTS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    /// Open pseudo-terminal masters in this process, from /proc.
+    #[cfg(target_os = "linux")]
+    fn master_fds() -> usize {
+        std::fs::read_dir("/proc/self/fd")
+            .unwrap()
+            .filter_map(|entry| std::fs::read_link(entry.ok()?.path()).ok())
+            .filter(|target| target == Path::new("/dev/ptmx"))
+            .count()
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn an_exited_terminal_closes_its_master_descriptor() {
+        let _pty = PTY_TESTS.lock().await;
+        let dir =
+            std::env::temp_dir().join(format!("cloudroom-terminal-fd-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = dir.canonicalize().unwrap();
+        let config = Config {
+            listen: "127.0.0.1:0".parse().unwrap(),
+            token: String::new(),
+            state_dir: dir.join("state"),
+            repository: dir.clone(),
+            api_url: Some("http://127.0.0.1:1".into()),
+            store: "fixture".into(),
+            instance: None,
+            account_home: dir.clone(),
+            default_harness: Kind::Codex,
+            harnesses: Default::default(),
+            storage: None,
+            rpc_timeout: Duration::from_secs(30),
+            diagnostic_upload: Duration::from_secs(1),
+        };
+        let terminals = Terminals::default();
+        let baseline = master_fds();
+        let terminal = terminals
+            .open(&config, "term_fd", dir.clone(), 80, 24, Some("true"))
+            .unwrap();
+        assert_eq!(master_fds(), baseline + 1);
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while terminal.output.lock().unwrap().exit.is_none() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while master_fds() != baseline {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the exited shell's master descriptor is closed");
+        terminals.close("term_fd");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
