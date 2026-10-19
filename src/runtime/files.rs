@@ -6,7 +6,7 @@ use std::{
         fd::{AsRawFd, FromRawFd, OwnedFd},
         unix::net::UnixStream,
     },
-    path::Path,
+    path::{Path, PathBuf},
     process::Stdio,
 };
 use tokio::process::Command;
@@ -122,7 +122,9 @@ pub(super) fn open_directory(root: &Path, path: &Path, identity: Identity) -> io
     open_entry(root, path, identity, true)
 }
 
-fn open_entry(root: &Path, path: &Path, identity: Identity, directory: bool) -> io::Result<File> {
+/// Resolves `path` under `root` and returns the canonical root and the canonical file path.
+/// Fails when the file resolves outside `root`. The final file link is not resolved.
+pub(super) fn confine(root: &Path, path: &Path) -> io::Result<(PathBuf, PathBuf)> {
     let path = if path.is_absolute() {
         path.to_path_buf()
     } else {
@@ -137,6 +139,17 @@ fn open_entry(root: &Path, path: &Path, identity: Identity, directory: bool) -> 
         path.file_name()
             .ok_or_else(|| io::Error::other("file has no name"))?,
     );
+    if !path.starts_with(&root) {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "file is outside its allowed directory",
+        ));
+    }
+    Ok((root, path))
+}
+
+fn open_entry(root: &Path, path: &Path, identity: Identity, directory: bool) -> io::Result<File> {
+    let (root, path) = confine(root, path)?;
     let relative = path.strip_prefix(&root).map_err(|_| {
         io::Error::new(
             io::ErrorKind::PermissionDenied,
@@ -272,4 +285,34 @@ fn receive(socket: &mut UnixStream) -> io::Result<File> {
         .as_i64()
         .map(|code| io::Error::from_raw_os_error(code as i32))
         .unwrap_or_else(|| io::Error::other("agent file path is invalid")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("cloudroom-files-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("repo/images")).unwrap();
+        std::fs::write(dir.join("repo/images/a.png"), b"png").unwrap();
+        std::fs::write(dir.join("outside.png"), b"png").unwrap();
+        dir
+    }
+
+    #[test]
+    fn confine_accepts_only_paths_inside_the_root() {
+        let dir = scratch("confine");
+        let root = dir.join("repo");
+        let (canonical_root, inside) = confine(&root, Path::new("images/a.png")).unwrap();
+        assert_eq!(canonical_root, root.canonicalize().unwrap());
+        assert_eq!(inside, canonical_root.join("images/a.png"));
+        let absolute = confine(&root, &root.join("images/a.png")).unwrap();
+        assert_eq!(absolute.1, inside);
+        assert!(confine(&root, &dir.join("outside.png")).is_err());
+        assert!(confine(&root, Path::new("../outside.png")).is_err());
+        assert!(confine(&root, Path::new("/etc/hostname")).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

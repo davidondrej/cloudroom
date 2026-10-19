@@ -162,6 +162,92 @@ fn prompt_items(input: &Value) -> Vec<Value> {
     items
 }
 
+/// Whether `path`, normalized against `repository` without touching the filesystem, stays inside it.
+/// This runs before any existence check, so a path outside the repository is refused whether or not it exists.
+fn lexically_inside(repository: &Path, path: &Path) -> bool {
+    use std::path::Component;
+    fn normal(path: &Path) -> PathBuf {
+        let mut out = PathBuf::new();
+        for component in path.components() {
+            match component {
+                Component::ParentDir => {
+                    out.pop();
+                }
+                Component::CurDir => {}
+                other => out.push(other),
+            }
+        }
+        out
+    }
+    let joined = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        repository.join(path)
+    };
+    normal(&joined).starts_with(normal(repository))
+}
+
+/// What the model sees in place of an image that is no longer on disk, so the turn does not pretend it was never attached.
+fn missing_image_note(path: &str) -> Value {
+    let name = Path::new(path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(path);
+    json!({
+        "type":"text",
+        "text":format!("image {name} is no longer available"),
+        "text_elements":[]
+    })
+}
+
+/// Codex reads `localImage` paths itself, so each one must resolve inside the repository first.
+/// The final component is resolved too: Codex follows a symlink, and the agent-side readers
+/// (files.py, `O_NOFOLLOW`) would refuse it. An image that does not exist (moved or deleted
+/// attachment, or a URL inside the repository) is replaced by a text note, so it cannot fail the
+/// whole send. A path outside the repository is refused, whether or not it exists.
+fn confine_local_images(repository: &Path, items: &mut Vec<Value>) -> io::Result<()> {
+    let mut kept = Vec::with_capacity(items.len());
+    for mut item in std::mem::take(items) {
+        if item["type"] != "localImage" {
+            kept.push(item);
+            continue;
+        }
+        let path = item["path"].as_str().unwrap_or_default();
+        if !lexically_inside(repository, Path::new(path)) {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "file is outside its allowed directory",
+            ));
+        }
+        let (root, confined) = match super::files::confine(repository, Path::new(path)) {
+            Ok(found) => found,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                kept.push(missing_image_note(path));
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        let target = match confined.canonicalize() {
+            Ok(target) => target,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                kept.push(missing_image_note(path));
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        if !target.starts_with(&root) {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "file is outside its allowed directory",
+            ));
+        }
+        item["path"] = json!(target);
+        kept.push(item);
+    }
+    *items = kept;
+    Ok(())
+}
+
 fn service_tier_for_turn(input: &Value) -> &'static str {
     match input["service_tier"].as_str() {
         Some("fast") => "fast",
@@ -170,10 +256,12 @@ fn service_tier_for_turn(input: &Value) -> &'static str {
 }
 
 pub(super) async fn send(handle: &Handle, request: &str, input: &Value) -> io::Result<()> {
+    let mut items = prompt_items(input);
+    confine_local_images(&handle.repository, &mut items)?;
     let mut params = json!({
         "threadId":handle.native()?,
         "clientUserMessageId":request,
-        "input":prompt_items(input),
+        "input":items,
         "serviceTierForTurn":service_tier_for_turn(input)
     });
     if let Some(reasoning) = handle
@@ -711,5 +799,96 @@ pub(super) fn recover(
         if before == tail.read_offset {
             return Ok(());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn local_images_must_resolve_inside_the_repository() {
+        let dir =
+            std::env::temp_dir().join(format!("cloudroom-codex-images-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("repo")).unwrap();
+        std::fs::write(dir.join("repo/a.png"), b"png").unwrap();
+        let mut items = vec![
+            json!({"type":"localImage","path":dir.join("repo/a.png")}),
+            json!({"type":"text","text":"hi"}),
+        ];
+        confine_local_images(&dir.join("repo"), &mut items).unwrap();
+        assert_eq!(
+            items[0]["path"],
+            json!(dir.join("repo/a.png").canonicalize().unwrap())
+        );
+        let mut outside = vec![json!({"type":"localImage","path":"/etc/hostname"})];
+        assert!(confine_local_images(&dir.join("repo"), &mut outside).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_missing_local_image_is_dropped_and_the_rest_is_sent() {
+        let dir = std::env::temp_dir().join(format!(
+            "cloudroom-codex-images-missing-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("repo")).unwrap();
+        std::fs::write(dir.join("repo/a.png"), b"png").unwrap();
+        let mut items = vec![
+            json!({"type":"localImage","path":dir.join("repo/gone.png")}),
+            json!({"type":"localImage","path":"https://example.test/a.png"}),
+            json!({"type":"localImage","path":dir.join("repo/a.png")}),
+            json!({"type":"text","text":"hi"}),
+        ];
+        confine_local_images(&dir.join("repo"), &mut items).unwrap();
+        assert_eq!(items.len(), 4);
+        assert_eq!(items[0]["text"], "image gone.png is no longer available");
+        assert_eq!(items[1]["text"], "image a.png is no longer available");
+        assert_eq!(items[2]["type"], "localImage");
+        assert_eq!(
+            items[2]["path"],
+            json!(dir.join("repo/a.png").canonicalize().unwrap())
+        );
+        assert_eq!(items[3]["text"], "hi");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_image_outside_the_repository_is_refused_even_when_its_parent_is_missing() {
+        let dir = std::env::temp_dir().join(format!(
+            "cloudroom-codex-images-outside-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("repo")).unwrap();
+        for path in [
+            dir.join("missing/x.png"),
+            PathBuf::from("/nonexistent-cloudroom/x.png"),
+        ] {
+            let mut items = vec![json!({"type":"localImage","path":path})];
+            let error = confine_local_images(&dir.join("repo"), &mut items).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::PermissionDenied, "{path:?}");
+            assert!(items.is_empty());
+        }
+        let mut escape = vec![json!({"type":"localImage","path":"../outside.png"})];
+        assert!(confine_local_images(&dir.join("repo"), &mut escape).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_final_symlink_out_of_the_repository_is_refused() {
+        let dir = std::env::temp_dir().join(format!(
+            "cloudroom-codex-images-link-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("repo")).unwrap();
+        std::fs::write(dir.join("secret.json"), b"{}").unwrap();
+        std::os::unix::fs::symlink(dir.join("secret.json"), dir.join("repo/logo.png")).unwrap();
+        let mut items = vec![json!({"type":"localImage","path":dir.join("repo/logo.png")})];
+        assert!(confine_local_images(&dir.join("repo"), &mut items).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
