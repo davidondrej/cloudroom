@@ -124,8 +124,11 @@ pub struct Session {
     // Turns already reported to the parent in another sandbox (relay.rs).
     #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
     pub reported: std::collections::BTreeSet<String>,
-    // Turns in the order they finished, so their reports to the parent go out in that order (relay.rs).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    // Secret requests the journal shows open. Their waiting command does not survive a restart (secrets/mod.rs).
+    #[serde(skip)]
+    pub secret_open: std::collections::BTreeSet<String>,
+    // Unreported turns of a child with a parent in another sandbox, in the order they finished (relay.rs).
+    #[serde(skip)]
     pub finished: Vec<String>,
     // What this parent last heard of each child in its own sandbox, by thread ID (relay.rs).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -340,6 +343,7 @@ pub struct Manager {
 impl Manager {
     pub fn open(config: Config) -> io::Result<Arc<Self>> {
         let mut local = Local::open(&config.state_dir)?;
+        local.close_orphaned_secrets()?;
         // Resume conversations, not uncertain actions. An interrupted resume attempt
         // is left failed instead of creating a service-restart recovery loop.
         for session in local.sessions.values().cloned().collect::<Vec<_>>() {
@@ -2496,12 +2500,11 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
-    /// A Core over a scratch state directory, with no website reachable.
-    fn manager(name: &str) -> Arc<Manager> {
+    /// Settings for a Core over a scratch directory, with no website reachable.
+    fn config(name: &str) -> crate::config::Config {
         let root =
             std::env::temp_dir().join(format!("cloudroom-mod-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        Manager::open(crate::config::Config {
+        crate::config::Config {
             listen: "127.0.0.1:0".parse().unwrap(),
             token: String::new(),
             state_dir: root.join("state"),
@@ -2515,8 +2518,41 @@ mod tests {
             storage: None,
             rpc_timeout: Duration::from_secs(30),
             diagnostic_upload: Duration::from_secs(1),
-        })
-        .unwrap()
+        }
+    }
+
+    /// A fresh Core over a scratch directory.
+    fn manager(name: &str) -> Arc<Manager> {
+        let config = config(name);
+        let _ = std::fs::remove_dir_all(&config.repository);
+        Manager::open(config).unwrap()
+    }
+
+    #[tokio::test]
+    async fn opening_a_core_closes_a_secret_request_left_open() {
+        let config = config("secret-reopen");
+        let _ = std::fs::remove_dir_all(&config.repository);
+        let mut local = Local::open(&config.state_dir).unwrap();
+        let start = json!({"request_id":"start","command":"start","state":"completed","input":{"harness":"claude-code"}});
+        local.append("cr_p", "receipt", start, None).unwrap();
+        local
+            .append(
+                "cr_p",
+                "secret_request",
+                json!({"id":"s1","state":"open"}),
+                None,
+            )
+            .unwrap();
+        drop(local);
+        let m = Manager::open(config).unwrap();
+        let state = m.local.lock().unwrap();
+        assert!(state.sessions["cr_p"].secret_open.is_empty());
+        let closed = (1..=state.journal.last()).any(|sequence| {
+            let record: Value =
+                serde_json::from_slice(&state.journal.read(sequence).unwrap()).unwrap();
+            record["kind"] == "secret_request" && record["data"]["state"] == "closed"
+        });
+        assert!(closed, "the open secret request is recorded as closed");
     }
 
     #[tokio::test]

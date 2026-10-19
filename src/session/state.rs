@@ -2,7 +2,7 @@
 use super::*;
 
 /// Bump when `apply` builds state differently, so older snapshots are replayed from the journal instead.
-const SNAPSHOT_VERSION: u32 = 3;
+const SNAPSHOT_VERSION: u32 = 4;
 /// A busy sandbox wrote up to ~100k records an hour; this bounds the replay after an unplanned stop.
 const SNAPSHOT_EVERY: u64 = 20_000;
 
@@ -38,6 +38,10 @@ struct Derived {
     usage_limited: bool,
     #[serde(default)]
     archive_cut: Option<usize>,
+    #[serde(default)]
+    secret_open: std::collections::BTreeSet<String>,
+    #[serde(default)]
+    finished: Vec<String>,
 }
 
 impl Derived {
@@ -55,6 +59,8 @@ impl Derived {
             harness_pid: s.harness_pid,
             usage_limited: s.usage_limited,
             archive_cut: s.archive_cut,
+            secret_open: s.secret_open.clone(),
+            finished: s.finished.clone(),
         }
     }
 
@@ -71,6 +77,8 @@ impl Derived {
         s.harness_pid = self.harness_pid;
         s.usage_limited = self.usage_limited;
         s.archive_cut = self.archive_cut;
+        s.secret_open = self.secret_open;
+        s.finished = self.finished;
     }
 }
 
@@ -167,6 +175,29 @@ impl Local {
             counts.last_activity = counts.last_activity.max(session.last_activity);
         }
         counts
+    }
+
+    /// Closes the secret requests the journal shows open. Called at start, when no command waits for them any more:
+    /// a SIGKILL skips the close that would normally record them.
+    pub(super) fn close_orphaned_secrets(&mut self) -> io::Result<()> {
+        let open: Vec<(String, String)> = self
+            .sessions
+            .values()
+            .flat_map(|s| {
+                s.secret_open
+                    .iter()
+                    .map(|id| (s.session_id.clone(), id.clone()))
+            })
+            .collect();
+        for (session, id) in open {
+            self.append(
+                &session,
+                "secret_request",
+                json!({"id":id,"state":"closed"}),
+                None,
+            )?;
+        }
+        Ok(())
     }
 
     pub(super) fn finish_receipt(&mut self, id: &str, request: &str, state: &str) -> Result<()> {
@@ -442,7 +473,12 @@ impl Local {
                     .receipts
                     .get(&receipt.request_id)
                     .is_some_and(|r| super::children::FINISHED.contains(&r.state.as_str()));
-                if super::children::FINISHED.contains(&receipt.state.as_str()) && !was_finished {
+                // Only a child's turns are owed to its parent in another sandbox.
+                if super::children::FINISHED.contains(&receipt.state.as_str())
+                    && !was_finished
+                    && receipt.command == "prompt"
+                    && session.parent_thread().is_some()
+                {
                     session.finished.push(receipt.request_id.clone());
                 }
                 prompt::apply(&mut session.prompts, &receipt);
@@ -582,6 +618,24 @@ impl Local {
             "parent_report" => {
                 if let Some(request) = record.data["request_id"].as_str() {
                     session.reported.insert(request.to_owned());
+                    // A reported turn is no longer owed, so it leaves `finished`; an archive's cut moves with it.
+                    if let Some(at) = session.finished.iter().position(|id| id == request) {
+                        session.finished.remove(at);
+                        session.archive_cut = session
+                            .archive_cut
+                            .map(|cut| if at < cut { cut - 1 } else { cut });
+                    }
+                }
+            }
+            "secret_request" => {
+                if let (Some(id), Some(state)) =
+                    (record.data["id"].as_str(), record.data["state"].as_str())
+                {
+                    if state == "open" {
+                        session.secret_open.insert(id.to_owned());
+                    } else {
+                        session.secret_open.remove(id);
+                    }
                 }
             }
             "usage_limited" => session.usage_limited = true,
@@ -715,6 +769,45 @@ mod tests {
     }
 
     #[test]
+    fn a_child_owes_only_its_unreported_turns_and_the_api_omits_them() {
+        let dir = std::env::temp_dir().join(format!("cloudroom-owed-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let mut local = Local::open(&dir).unwrap();
+        let start = json!({"request_id":"start","command":"start","state":"completed","input":{"parent_thread":"thr_p"}});
+        local.append("cr_c", "receipt", start, None).unwrap();
+        for request in ["t1", "t2"] {
+            let turn = json!({"request_id":request,"command":"prompt","state":"completed","input":{"text":"x"}});
+            local.append("cr_c", "receipt", turn, None).unwrap();
+            if request == "t1" {
+                local
+                    .append(
+                        "cr_c",
+                        "archive",
+                        json!({"archived":true,"reports":true}),
+                        None,
+                    )
+                    .unwrap();
+            }
+        }
+        let session = &local.sessions["cr_c"];
+        assert_eq!(session.finished, ["t1", "t2"]);
+        assert_eq!(session.archive_cut, Some(1));
+        assert!(
+            serde_json::to_value(session)
+                .unwrap()
+                .get("finished")
+                .is_none()
+        );
+        local
+            .append("cr_c", "parent_report", json!({"request_id":"t1"}), None)
+            .unwrap();
+        let session = &local.sessions["cr_c"];
+        assert_eq!(session.finished, ["t2"]);
+        assert_eq!(session.archive_cut, Some(0));
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn a_re_archive_of_a_child_archived_before_the_marker_owes_nothing() {
         let dir = std::env::temp_dir().join(format!("cloudroom-rearchive-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
@@ -799,6 +892,26 @@ mod tests {
             )
             .unwrap();
         assert_eq!(local.sessions["a"].queue, ["a", "b"]);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_restart_closes_a_secret_request_left_open() {
+        let dir =
+            std::env::temp_dir().join(format!("cloudroom-secret-open-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let mut local = Local::open(&dir).unwrap();
+        local
+            .append(
+                "cr_p",
+                "secret_request",
+                json!({"id":"s1","state":"open"}),
+                None,
+            )
+            .unwrap();
+        assert!(local.sessions["cr_p"].secret_open.contains("s1"));
+        local.close_orphaned_secrets().unwrap();
+        assert!(local.sessions["cr_p"].secret_open.is_empty());
         fs::remove_dir_all(&dir).unwrap();
     }
 
