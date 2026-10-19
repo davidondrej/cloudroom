@@ -1014,15 +1014,23 @@ async fn spawn_cli(words: &[&str]) -> io::Result<i32> {
     Ok(0)
 }
 
+/// Whether the words are `tell ID MESSAGE` (or `tell ID --prompt MESSAGE`), where the last word is the message.
+fn tell_takes_message(words: &[&str]) -> bool {
+    matches!(words, ["tell", _, _] | ["tell", _, "--prompt", _])
+}
+
 /// The same `room-cli thread ... --self` forms local threads use. `--json` is accepted and
 /// ignored because the answer is always JSON.
 pub async fn cli(args: &[String]) -> io::Result<i32> {
-    let words: Vec<&str> = args
-        .iter()
-        .map(String::as_str)
-        .filter(|word| *word != "--json")
-        .collect();
-    let help = words.iter().any(|word| matches!(*word, "--help" | "-h"));
+    let raw: Vec<&str> = args.iter().map(String::as_str).collect();
+    // `tell ID MESSAGE` sends the message as given, even when it spells a flag such as -h or --json (F82).
+    let message = tell_takes_message(&raw);
+    let words: Vec<&str> = if message {
+        raw
+    } else {
+        raw.into_iter().filter(|word| *word != "--json").collect()
+    };
+    let help = !message && words.iter().any(|word| matches!(*word, "--help" | "-h"));
     let (path, body) = match words.as_slice() {
         _ if help => {
             println!("{USAGE}");
@@ -1108,6 +1116,14 @@ pub async fn cli(args: &[String]) -> io::Result<i32> {
 mod tests {
     use super::*;
     use crate::config::Config;
+
+    #[test]
+    fn a_tell_message_that_spells_a_flag_is_sent() {
+        assert!(tell_takes_message(&["tell", "thr_x", "-h"]));
+        assert!(tell_takes_message(&["tell", "thr_x", "--json"]));
+        assert!(tell_takes_message(&["tell", "thr_x", "--prompt", "-h"]));
+        assert!(!tell_takes_message(&["tell", "thr_x", "hi", "--json"]));
+    }
 
     #[tokio::test]
     async fn a_retried_spawn_takes_the_outcome_of_the_first() {
