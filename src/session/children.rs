@@ -378,7 +378,12 @@ impl Manager {
         let (kind, input, model, provider, workspace) = {
             let local = self.local.lock().unwrap();
             let p = local.sessions.get(parent).ok_or(Error::NotFound)?;
-            if p.close_request.is_some() || p.state == "closed" {
+            // A retry of a start already accepted gets its receipt, even once the parent has closed.
+            let retried = local
+                .sessions
+                .get(&id)
+                .is_some_and(|s| s.receipts.contains_key(&start_id));
+            if !retried && (p.close_request.is_some() || p.state == "closed") {
                 return Err(Error::Conflict("the parent thread is closed"));
             }
             let kind = spawn.harness.unwrap_or(p.harness);
@@ -841,12 +846,12 @@ mod tests {
         assert_ne!(task_id(&"a".repeat(60)), task_id(&"a".repeat(61)));
     }
 
-    #[tokio::test]
-    async fn a_fork_of_an_unknown_session_is_not_found() {
+    /// A Core over a scratch state directory, with no website reachable.
+    fn manager(name: &str) -> Arc<Manager> {
         let root =
-            std::env::temp_dir().join(format!("cloudroom-fork-unknown-{}", std::process::id()));
+            std::env::temp_dir().join(format!("cloudroom-children-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
-        let m = crate::session::Manager::open(crate::config::Config {
+        Manager::open(crate::config::Config {
             listen: "127.0.0.1:0".parse().unwrap(),
             token: String::new(),
             state_dir: root.join("state"),
@@ -861,7 +866,12 @@ mod tests {
             rpc_timeout: Duration::from_secs(30),
             diagnostic_upload: Duration::from_secs(1),
         })
-        .unwrap();
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_fork_of_an_unknown_session_is_not_found() {
+        let m = manager("fork-unknown");
         let fork = ForkFrom {
             session: "cr_none".into(),
             before: None,
@@ -869,6 +879,50 @@ mod tests {
         };
         let result = m.fork("f".into(), None, fork).await;
         assert!(matches!(result, Err(Error::NotFound)));
-        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn a_retry_of_a_long_key_start_from_before_its_prompt_id_still_matches() {
+        let m = manager("legacy-long-key");
+        let start = json!({"request_id":"start","command":"start","input":{"harness":"claude-code"},"state":"completed"});
+        m.note("cr_p", "receipt", start).unwrap();
+        let key = "k".repeat(60);
+        let input = json!({"harness":runtime::Kind::Claude,"parent_session":"cr_p","prompt":"hi","notify":true,"reasoning":"medium"});
+        let child = json!({"request_id":format!("child_{key}"),"command":"start","input":input,"state":"accepted"});
+        m.note(&format!("cr_child_{key}"), "receipt", child)
+            .unwrap();
+        let spawn = Spawn {
+            harness: None,
+            model: None,
+            reasoning: None,
+            title: None,
+            prompt: "hi".into(),
+            service_tier: None,
+        };
+        let (id, _) = m.spawn_child("cr_p", &key, spawn).await.unwrap();
+        assert_eq!(id, format!("cr_child_{key}"));
+    }
+
+    #[tokio::test]
+    async fn a_retried_child_start_returns_its_receipt_after_the_parent_closes() {
+        let m = manager("retried-start");
+        let start = json!({"request_id":"start","command":"start","input":{"harness":"claude-code"},"state":"completed"});
+        m.note("cr_p", "receipt", start).unwrap();
+        let input = json!({"harness":runtime::Kind::Claude,"parent_session":"cr_p","prompt":"hi","notify":true,"reasoning":"medium"});
+        let child =
+            json!({"request_id":"child_k","command":"start","input":input,"state":"accepted"});
+        m.note("cr_child_k", "receipt", child).unwrap();
+        m.note("cr_p", "state", json!({"state":"closed"})).unwrap();
+        let spawn = Spawn {
+            harness: None,
+            model: None,
+            reasoning: None,
+            title: None,
+            prompt: "hi".into(),
+            service_tier: None,
+        };
+        let (id, receipt) = m.spawn_child("cr_p", "k", spawn).await.unwrap();
+        assert_eq!(id, "cr_child_k");
+        assert_eq!(receipt.request_id, "child_k");
     }
 }
