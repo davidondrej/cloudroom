@@ -1272,7 +1272,9 @@ async fn attach(
                     "file exceeds the 25 MiB limit"
                 }));
             }
-            match attach_part(&key, offset, total, &part).map_err(session::Error::Conflict)? {
+            match attach_part(&key, &query.name, &query.kind, offset, total, &part)
+                .map_err(session::Error::Conflict)?
+            {
                 (_, Some(whole)) => Body::from(whole),
                 (received, None) => {
                     return Ok((StatusCode::ACCEPTED, Json(json!({ "received": received }))));
@@ -1350,33 +1352,51 @@ async fn stored_matches(
 
 /// Attachments arriving in parts, by session and request: (total size, bytes so far, last part). Some sandbox
 /// proxies drop requests over about 8 MB, so clients send large files in 4 MiB parts. Unfinished uploads expire.
-type Partial = (usize, Vec<u8>, Instant);
+struct Partial {
+    total: usize,
+    name: String,
+    kind: String,
+    bytes: Vec<u8>,
+    at: Instant,
+}
 static PARTS: LazyLock<Mutex<HashMap<String, Partial>>> = LazyLock::new(Default::default);
 const PART_BYTES: usize = 8 << 20;
 
 /// Adds one part; returns the bytes received and, once complete, the whole file. The partial stays until its
-/// receipt is recorded, so a retried last part can save it again.
+/// receipt is recorded, so a retried last part can save it again. Every part must name the same file.
 fn attach_part(
     key: &str,
+    name: &str,
+    kind: &str,
     offset: usize,
     total: usize,
     part: &[u8],
 ) -> std::result::Result<(usize, Option<Vec<u8>>), &'static str> {
     let mut parts = PARTS.lock().unwrap();
-    parts.retain(|_, (_, _, at)| at.elapsed() < Duration::from_secs(600));
+    parts.retain(|_, partial| partial.at.elapsed() < Duration::from_secs(600));
     if offset == 0 && !parts.contains_key(key) {
         if parts.len() >= 8 {
             return Err("too many uploads in progress; try again");
         }
-        parts.insert(key.to_owned(), (total, Vec::new(), Instant::now()));
+        parts.insert(
+            key.to_owned(),
+            Partial {
+                total,
+                name: name.to_owned(),
+                kind: kind.to_owned(),
+                bytes: Vec::new(),
+                at: Instant::now(),
+            },
+        );
     }
-    let (size, bytes, at) = parts.get_mut(key).ok_or("upload part out of order")?;
-    if *size != total {
-        return Err("upload size changed");
+    let partial = parts.get_mut(key).ok_or("upload part out of order")?;
+    if partial.total != total || partial.name != name || partial.kind != kind {
+        return Err("request_id already has different content");
     }
-    append_part(bytes, offset, part, total)?;
-    *at = Instant::now();
-    Ok((bytes.len(), (bytes.len() == total).then(|| bytes.clone())))
+    append_part(&mut partial.bytes, offset, part, total)?;
+    partial.at = Instant::now();
+    let received = partial.bytes.len();
+    Ok((received, (received == total).then(|| partial.bytes.clone())))
 }
 
 /// Appends one part of an upload that arrives in pieces. A repeated part is ignored, so retrying after a lost
@@ -1549,5 +1569,23 @@ mod tests {
                 .unwrap(),
             "other total"
         );
+    }
+
+    #[test]
+    fn parts_of_one_upload_must_all_name_the_same_file() {
+        let key = "test-f13/r1";
+        assert_eq!(
+            attach_part(key, "first.txt", "file", 0, 4, b"ab"),
+            Ok((2, None))
+        );
+        assert_eq!(
+            attach_part(key, "second.md", "file", 2, 4, b"cd"),
+            Err("request_id already has different content")
+        );
+        assert_eq!(
+            attach_part(key, "first.txt", "file", 2, 4, b"cd").map(|(n, _)| n),
+            Ok(4)
+        );
+        PARTS.lock().unwrap().remove(key);
     }
 }
