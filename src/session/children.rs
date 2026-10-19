@@ -565,9 +565,7 @@ impl Manager {
         };
         let (kind, input, model, provider, workspace) = {
             let local = self.local.lock().unwrap();
-            let s = local.sessions.get(&fork.session).ok_or(Error::Conflict(
-                "the side chat's source thread was not found",
-            ))?;
+            let s = local.sessions.get(&fork.session).ok_or(Error::NotFound)?;
             let checkpoint_fits = match s.harness {
                 runtime::Kind::Claude => fork.last_turn_id.is_none(),
                 runtime::Kind::Codex => fork.before.is_none(),
@@ -841,5 +839,36 @@ mod tests {
             assert!(id.len() <= 64, "{id} has {} characters", id.len());
         }
         assert_ne!(task_id(&"a".repeat(60)), task_id(&"a".repeat(61)));
+    }
+
+    #[tokio::test]
+    async fn a_fork_of_an_unknown_session_is_not_found() {
+        let root =
+            std::env::temp_dir().join(format!("cloudroom-fork-unknown-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let m = crate::session::Manager::open(crate::config::Config {
+            listen: "127.0.0.1:0".parse().unwrap(),
+            token: String::new(),
+            state_dir: root.join("state"),
+            repository: root.clone(),
+            api_url: Some("http://127.0.0.1:1".into()),
+            store: "test".into(),
+            instance: None,
+            account_home: root.clone(),
+            default_harness: runtime::Kind::Claude,
+            harnesses: Default::default(),
+            storage: None,
+            rpc_timeout: Duration::from_secs(30),
+            diagnostic_upload: Duration::from_secs(1),
+        })
+        .unwrap();
+        let fork = ForkFrom {
+            session: "cr_none".into(),
+            before: None,
+            last_turn_id: None,
+        };
+        let result = m.fork("f".into(), None, fork).await;
+        assert!(matches!(result, Err(Error::NotFound)));
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
