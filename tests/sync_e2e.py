@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import subprocess
 import sys
+import tomllib
 import unittest
 from unittest.mock import patch
 
@@ -312,6 +313,21 @@ class SyncTests(unittest.TestCase):
             (self.local / 'file').write_text('concurrent edit')
             with self.assertRaises(Conflict): tree.apply('file', old, entry, data)
         self.assertEqual((self.local / 'file').read_text(), 'concurrent edit')
+
+
+class CodexSettingsMergeTests(unittest.TestCase):
+    def merge(self, original):
+        return tomllib.loads(Tree('.', kind='codex').merged(json.dumps({'model': 'new-model'}).encode(), original).decode())
+
+    def test_key_after_a_multi_line_array_is_replaced_once(self):
+        parsed = self.merge(b'notify = [\n  ["done"],\n]\nmodel = "old-model"\n\n[profiles.x]\nmodel = "p"\n')
+        self.assertEqual((parsed['model'], parsed['notify'], parsed['profiles']['x']['model']), ('new-model', [['done']], 'p'))
+
+    def test_a_replaced_multi_line_value_is_removed_whole(self):
+        self.assertEqual(self.merge(b'model = """\nold-model\n"""\nhost = "h"\n'), {'model': 'new-model', 'host': 'h'})
+
+    def test_quoted_top_level_key_is_replaced(self):
+        self.assertEqual(self.merge(b'"model" = "old"\nhost = "h"\n'), {'model': 'new-model', 'host': 'h'})
 
 
 if __name__ == '__main__': unittest.main()

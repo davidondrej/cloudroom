@@ -180,6 +180,33 @@ def swap(fd, first, second, second_fd=None):
         raise OSError(ctypes.get_errno(), 'atomic exchange failed')
 
 
+TOML_KEY = re.compile(r'''^\s*(["']?)([a-z_]+)\1\s*=''')
+
+
+def toml_statement_starts(text):
+    # A line starts a statement only outside arrays, inline tables and multi-line strings.
+    depth, closing = 0, None
+    for line in text.splitlines():
+        starts, index = depth == 0 and closing is None, 0
+        while index < len(line):
+            if closing:
+                closing = None if line.startswith(closing, index) else closing
+                index += 3 if closing is None else 1
+            elif line.startswith(('"""', "'''"), index):
+                closing, index = line[index:index + 3], index + 3
+            elif line[index] in '"\'':
+                quote, index = line[index], index + 1
+                while index < len(line) and line[index] != quote:
+                    index += 2 if quote == '"' and line[index] == '\\' else 1
+                index += 1
+            elif line[index] == '#':
+                break
+            else:
+                depth += (line[index] in '[{') - (line[index] in ']}')
+                index += 1
+        yield line, starts
+
+
 class Tree:
     def __init__(self, root, kind='skills', filename=None, create=False):
         self.root, self.kind, self.filename = Path(root), kind, filename
@@ -420,14 +447,19 @@ class Tree:
             raise ValueError('unsupported setting value')
         if self.kind == 'codex':
             tomllib.loads(original.decode())
-            lines, in_table = [], False
-            for line in original.decode().splitlines():
-                in_table = in_table or bool(re.match(r'^\s*\[', line))
-                key = re.match(r'^\s*([a-z_]+)\s*=', line)
-                if in_table or not key or key[1] not in PORTABLE['codex']:
+            lines, in_table, dropped = [], False, False
+            for line, starts in toml_statement_starts(original.decode()):
+                # A dropped statement takes its continuation lines with it, such as a multi-line string's body.
+                if starts:
+                    in_table = in_table or bool(re.match(r'^\s*\[', line))
+                    key = TOML_KEY.match(line)
+                    dropped = not in_table and bool(key) and key[2] in PORTABLE['codex']
+                if not dropped:
                     lines.append(line)
             prefix = [f'{k} = {json.dumps(v)}' for k, v in sorted(values.items())]
-            return ('\n'.join(prefix + lines) + '\n').encode()
+            result = ('\n'.join(prefix + lines) + '\n').encode()
+            tomllib.loads(result.decode())
+            return result
         values_before = json.loads(original or b'{}')
         for key in PORTABLE[self.kind]:
             values_before.pop(key, None)
