@@ -842,6 +842,16 @@ impl Manager {
         }
         ready?;
         supported?;
+        // Refusals come before the workspace is resolved, because resolving records its folder for later starts.
+        {
+            let local = self.local.lock().unwrap();
+            if self.is_stopping() {
+                return Err(Error::Conflict("service is stopping"));
+            }
+            if local.draining {
+                return Err(Error::Conflict("service is draining"));
+            }
+        }
         let workspace = match workspace.as_deref() {
             // Unregistered like legacy sessions, so no project folder is created.
             Some(crate::workspace::ROOT) => crate::workspace::Workspace {

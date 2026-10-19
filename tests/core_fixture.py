@@ -894,6 +894,14 @@ class RecoveryTests(unittest.TestCase):
         self.service.request('POST', '/v1/mac/results/job1', {'device': device, 'state': 'done', 'code': 0}, 403)
         self.service.request('POST', '/v1/previews/device', {'device': device, 'public_key': key}, 403)
 
+    def test_refused_start_while_draining_records_no_workspace(self):
+        self.seed(); self.start(); self.ready()
+        self.assertTrue(self.service.request("POST", "/v1/drain", {"hold": True}, 200)["drained"])
+        self.service.request("POST", "/v1/sessions", {"request_id": "refused", "workspace": "wsone", "workspace_name": "alpha"}, 409)
+        self.service.request("POST", "/v1/drain", {"hold": False}, 200)
+        sid = self.service.request("POST", "/v1/sessions", {"request_id": "next", "workspace": "wsone", "workspace_name": "beta"}, 202)["session_id"]
+        self.assertTrue(self.service.session(sid)["workspace"]["path"].endswith("/beta"), self.service.session(sid)["workspace"])
+
     def test_start_accepts_the_legacy_workspace_id_that_sessions_report(self):
         self.seed(); self.start(); self.ready()
         sid = self.service.request("POST", "/v1/sessions", {"request_id": "legacy-id", "workspace": "legacy"}, 202)["session_id"]
