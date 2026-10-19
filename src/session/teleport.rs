@@ -404,6 +404,9 @@ impl Manager {
                 if saved.manifest != manifest {
                     return Err(Error::Conflict("request_id already has different content"));
                 }
+                if saved.cancelled {
+                    return Err(Error::Conflict("transfer cancelled"));
+                }
                 return self.transfer_view(&saved);
             }
             Err(Error::NotFound) => {}
@@ -775,6 +778,16 @@ impl Manager {
         }
         transfer.cancelled = true;
         self.transfer_save(&transfer)?;
+        // The unfinished uploads are not kept: a cancelled transfer leaves only its record.
+        for index in 0..transfer.manifest.files.len() {
+            if !transfer.files.contains_key(&index) {
+                match fs::remove_file(self.transfer_directory(id)?.join(format!("{index}.part"))) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error.into()),
+                }
+            }
+        }
         self.transfer_view(&transfer)
     }
 

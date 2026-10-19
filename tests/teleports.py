@@ -41,6 +41,18 @@ class TeleportTests(unittest.TestCase):
         self.upload('pin', 1, 0, digest, b'0123456789')
         self.assertEqual(self.service.request('GET', '/v1/teleports/pin')['files'][1]['complete'], True)
 
+    def test_cancelled_teleport_removes_its_parts_and_refuses_reuse(self):
+        self.start()
+        body = b'0123456789'
+        digest = hashlib.sha256(body).hexdigest()
+        project = {'path': 'notes.txt', 'size': 10, 'sha256': digest, 'kind': 'project', 'origin': None}
+        self.service.request('POST', '/v1/teleports', self.manifest('gone', extra_files=[project]), 202)
+        self.upload('gone', 1, 0, digest, body[:5])
+        self.service.request('POST', '/v1/teleports/gone/cancel', None, 202)
+        self.assertEqual(list((self.state / 'teleports' / 'gone').glob('*.part')), [])
+        self.assertEqual(self.service.request('GET', '/v1/teleports/gone')['phase'], 'cancelled')
+        self.service.request('POST', '/v1/teleports', self.manifest('gone', extra_files=[project]), 409)
+
     def test_teleport_does_not_adopt_an_unrelated_session_with_its_id(self):
         self.start()
         self.service.request('POST', '/v1/sessions', {'request_id': 'teleport_abc'}, 202)
