@@ -62,6 +62,9 @@ def codex():
             elif method == 'account/login/cancel':
                 login_cancelled.set()
                 result = {'status': 'canceled'}
+            elif method == "model/list" and Path("catalog-down").exists():
+                send({"id": message["id"], "error": {"code": -32000, "message": "catalog unavailable"}})
+                continue
             elif method == "model/list":
                 result = {"data": [
                     {"model": "fixture", "supportedReasoningEfforts": [{"reasoningEffort": level} for level in ["low", "medium", "high", "xhigh", "max"]]},
@@ -861,6 +864,14 @@ class RecoveryTests(unittest.TestCase):
     def test_cancel_of_an_unknown_request_is_not_found(self):
         self.seed(); self.start(); self.ready()
         self.service.request("POST", "/v1/sessions/cr_seed/cancel", {"request_id": "cancel-none", "target_request_id": "nope"}, 404)
+
+    def test_malformed_effort_is_refused_before_the_catalog_is_consulted(self):
+        self.seed(); self.start(); self.ready()
+        (self.repo / "catalog-down").touch()
+        rejected = self.service.request("POST", "/v1/sessions/cr_seed/edit", {"request_id": "edit-bad", "target_request_id": "queued", "text": "x", "reasoning": "HIGH", "expected_revision": 1}, 409)
+        self.assertEqual(rejected["code"], "invalid_reasoning_effort")
+        rejected = self.service.request("POST", "/v1/sessions/cr_seed/prompts", {"request_id": "prompt-bad", "text": "x", "reasoning": "HIGH"}, 409)
+        self.assertEqual(rejected["code"], "invalid_reasoning_effort")
 
     def test_revoked_mac_loses_its_job_stream_and_cannot_pair_again(self):
         previews = self.state / 'previews'

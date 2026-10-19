@@ -1004,6 +1004,16 @@ fn prompt_input(
     Ok(input)
 }
 
+/// A malformed effort is refused before the catalog is consulted, so a catalog outage cannot mask it.
+fn reasoning_syntax(level: Option<&str>) -> std::result::Result<(), session::Error> {
+    if level.is_some_and(|level| {
+        level.is_empty() || level.len() > 64 || !level.bytes().all(|b| b.is_ascii_lowercase())
+    }) {
+        return Err(session::Error::Conflict("invalid reasoning effort"));
+    }
+    Ok(())
+}
+
 async fn prompt(
     State(manager): State<Arc<Manager>>,
     Path(id): Path<String>,
@@ -1019,11 +1029,7 @@ async fn prompt(
     )?;
     // An accepted retry must not depend on the model catalog still being available.
     if !manager.known_request(&id, &body.request_id) {
-        if body.reasoning.as_deref().is_some_and(|level| {
-            level.is_empty() || level.len() > 64 || !level.bytes().all(|b| b.is_ascii_lowercase())
-        }) {
-            return Err(session::Error::Conflict("invalid reasoning effort"));
-        }
+        reasoning_syntax(body.reasoning.as_deref())?;
         manager
             .check_prompt_reasoning(&id, body.reasoning.as_deref())
             .await?;
@@ -1050,6 +1056,7 @@ async fn edit(
     input["target_request_id"] = json!(body.target_request_id);
     input["expected_revision"] = json!(body.expected_revision);
     if !manager.known_request(&id, &body.request_id) {
+        reasoning_syntax(body.reasoning.as_deref())?;
         manager
             .check_prompt_reasoning(&id, body.reasoning.as_deref())
             .await?;
