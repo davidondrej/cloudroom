@@ -254,8 +254,16 @@ impl Manager {
                 Error::Storage(format!("transfer manifest unreadable: {e}"))
             }
         })?;
-        serde_json::from_slice(&bytes)
-            .map_err(|e| Error::Storage(format!("transfer manifest is invalid JSON: {e}")))
+        let mut transfer: Transfer = serde_json::from_slice(&bytes)
+            .map_err(|e| Error::Storage(format!("transfer manifest is invalid JSON: {e}")))?;
+        // Transfers saved before digests were lowered compare equal to a retried prepare, and uploads check against them.
+        for entry in &mut transfer.manifest.files {
+            entry.sha256.make_ascii_lowercase();
+        }
+        for digest in transfer.digests.values_mut() {
+            digest.make_ascii_lowercase();
+        }
+        Ok(transfer)
     }
 
     fn transfer_save(&self, transfer: &Transfer) -> Result<()> {
@@ -415,7 +423,10 @@ impl Manager {
         }
     }
 
-    pub async fn teleport_prepare(self: &Arc<Self>, manifest: Manifest) -> Result<Value> {
+    pub async fn teleport_prepare(self: &Arc<Self>, mut manifest: Manifest) -> Result<Value> {
+        for entry in &mut manifest.files {
+            entry.sha256.make_ascii_lowercase();
+        }
         validate(&manifest)?;
         let lock = self.teleports.lock(&manifest.request_id);
         let _guard = lock.lock().await;
@@ -547,10 +558,11 @@ impl Manager {
         id: &str,
         index: usize,
         offset: u64,
-        sha256: String,
+        mut sha256: String,
         size: Option<u64>,
         bytes: Bytes,
     ) -> Result<Value> {
+        sha256.make_ascii_lowercase();
         self.transfer_directory(id)?;
         let lock = self.teleports.lock(id);
         let _guard = lock.lock().await;

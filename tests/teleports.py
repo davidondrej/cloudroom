@@ -44,6 +44,30 @@ class TeleportTests(unittest.TestCase):
         self.upload('pin', 1, 0, digest, b'0123456789')
         self.assertEqual(self.service.request('GET', '/v1/teleports/pin')['files'][1]['complete'], True)
 
+    def test_upper_case_sha256_uploads_like_lower_case(self):
+        self.start()
+        body = b'0123456789'
+        digest = hashlib.sha256(body).hexdigest()
+        project = {'path': 'notes.txt', 'size': 10, 'sha256': digest.upper(), 'kind': 'project', 'origin': None}
+        self.service.request('POST', '/v1/teleports', self.manifest('upper', extra_files=[project]), 202)
+        self.upload('upper', 1, 0, digest.upper(), body)
+        self.assertEqual(self.service.request('GET', '/v1/teleports/upper')['files'][1]['complete'], True)
+
+    def test_a_transfer_saved_with_upper_case_digests_retries_and_uploads(self):
+        self.start()
+        body = b'0123456789'
+        digest = hashlib.sha256(body).hexdigest()
+        project = {'path': 'notes.txt', 'size': 10, 'sha256': digest, 'kind': 'project', 'origin': None}
+        self.service.request('POST', '/v1/teleports', self.manifest('legacy', extra_files=[project]), 202)
+        saved = self.state / 'teleports' / 'legacy' / 'manifest.json'
+        data = json.loads(saved.read_text())
+        for entry in data['manifest']['files']:
+            entry['sha256'] = entry['sha256'].upper()
+        saved.write_text(json.dumps(data))
+        self.service.request('POST', '/v1/teleports', self.manifest('legacy', extra_files=[project]), 202)
+        self.upload('legacy', 1, 0, digest, body)
+        self.assertEqual(self.service.request('GET', '/v1/teleports/legacy')['files'][1]['complete'], True)
+
     def test_long_request_ids_prepare_and_activate(self):
         self.start()
         for rid in ('b' * 52, 'c' * 63):
