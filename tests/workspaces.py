@@ -421,6 +421,15 @@ class WorkspaceTests(unittest.TestCase):
         self.assertEqual(response.status, 400)
         self.assertEqual(json.loads(body).get('code'), 'teleport_rejected', body)
 
+    def test_unknown_workspace_answers_not_found_with_a_code(self):
+        self.start()
+        connection = http.client.HTTPConnection(self.service.address, timeout=10)
+        connection.request('GET', '/v1/workspaces/does-not-exist', None, {'Authorization':'Bearer '+self.env['CLOUDROOM_TOKEN']})
+        response = connection.getresponse(); data = json.loads(response.read()); connection.close()
+        self.assertEqual(response.status, 404)
+        self.assertEqual(data.get('error'), 'workspace not found')
+        self.assertIsNotNone(data.get('code'), data)
+
     def test_oversized_part_to_an_unknown_session_answers_not_found(self):
         self.start()
         def part(body):

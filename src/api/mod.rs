@@ -666,14 +666,40 @@ async fn workspace(
 ) -> impl IntoResponse {
     match manager.workspaces.get(&id) {
         Ok(Some(workspace)) => (StatusCode::OK, Json(json!(workspace))),
+        // The same code a missing session carries: no workspace-specific code is documented.
         Ok(None) => (
             StatusCode::NOT_FOUND,
-            Json(json!({"error":"workspace not found"})),
+            Json(json!({"error":"workspace not found","code":"request_rejected"})),
         ),
-        Err(error) => (
-            StatusCode::CONFLICT,
-            Json(json!({"error":format!("workspace unavailable: {error}")})),
-        ),
+        Err(error) => {
+            let code = workspace_refusal(&error);
+            (
+                StatusCode::CONFLICT,
+                Json(json!({"error":format!("workspace unavailable: {error}"),"code":code})),
+            )
+        }
+    }
+}
+
+/// A damaged or invalid registry entry stays invalid until someone repairs it, so it is not temporary. Any other
+/// failure (I/O, filesystem) may clear.
+fn workspace_refusal(error: &std::io::Error) -> &'static str {
+    use std::io::ErrorKind;
+    if matches!(
+        error.kind(),
+        ErrorKind::InvalidData | ErrorKind::UnexpectedEof
+    ) {
+        return "invalid_workspace";
+    }
+    match error.to_string().as_str() {
+        "Invalid workspace ID"
+        | "Invalid workspace path"
+        | "Invalid workspace parent"
+        | "Invalid workspace directory"
+        | "Invalid workspace root"
+        | "Workspace identity mismatch"
+        | "Workspace parent missing" => "invalid_workspace",
+        _ => "workspace_unavailable",
     }
 }
 
@@ -1829,6 +1855,38 @@ mod tests {
             )
             .is_ok(),
             "a retry of an accepted prompt is answered by its receipt, so the input is not refused here"
+        );
+    }
+
+    #[test]
+    fn a_damaged_or_invalid_workspace_entry_is_not_temporary() {
+        let damaged = std::io::Error::from(serde_json::from_slice::<Value>(b"{").unwrap_err());
+        assert_eq!(workspace_refusal(&damaged), "invalid_workspace");
+        let empty = std::io::Error::from(serde_json::from_slice::<Value>(b"").unwrap_err());
+        assert_eq!(workspace_refusal(&empty), "invalid_workspace");
+        for message in [
+            "Invalid workspace ID",
+            "Invalid workspace path",
+            "Invalid workspace parent",
+            "Invalid workspace directory",
+            "Invalid workspace root",
+            "Workspace identity mismatch",
+            "Workspace parent missing",
+        ] {
+            assert_eq!(
+                workspace_refusal(&std::io::Error::other(message)),
+                "invalid_workspace",
+                "{message}"
+            );
+        }
+        assert_eq!(
+            workspace_refusal(&std::io::Error::other("workspace filesystem unavailable")),
+            "workspace_unavailable"
+        );
+        assert_eq!(
+            workspace_refusal(&std::io::Error::from_raw_os_error(5)),
+            "workspace_unavailable",
+            "an I/O failure may clear"
         );
     }
 
