@@ -68,6 +68,10 @@ def codex():
                     {"model": "basic", "supportedReasoningEfforts": [{"reasoningEffort": "high"}]},
                 ], "nextCursor": None}
             elif method == "thread/start":
+                if Path("hold-start").exists():
+                    Path("start-ready").touch()
+                    while not Path("release-start").exists():
+                        time.sleep(.01)
                 with path.open("a") as file:
                     file.write(json.dumps({"fixture": "launch", "reasoning": params.get("config", {}).get("model_reasoning_effort")}) + "\n")
                 slow_exit = params["model"] == "slow-exit"
@@ -819,6 +823,16 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(self.status()["state"], "process_lost")
         rejected = self.service.request("POST", "/v1/sessions/cr_seed/resume", {"request_id": "again"}, 409)
         self.assertNotIn("pending close", rejected["error"])
+
+    def test_close_while_initializing_is_refused_and_the_start_settles(self):
+        self.seed(); self.start(); self.ready()
+        (self.repo / "hold-start").touch()
+        sid = self.service.request("POST", "/v1/sessions", {"request_id": "early"}, 202)["session_id"]
+        self.wait(lambda: (self.repo / "start-ready").exists(), "launch held in thread/start")
+        rejected = self.service.request("POST", f"/v1/sessions/{sid}/close", {"request_id": "early-close"}, 409)
+        self.assertIn("starting", rejected["error"])
+        (self.repo / "release-start").touch()
+        until(lambda: self.service.session(sid)["receipts"]["early"]["state"] == "completed", "start completes after the refused close", 60)
 
     def test_revoked_mac_loses_its_job_stream_and_cannot_pair_again(self):
         previews = self.state / 'previews'

@@ -907,7 +907,7 @@ impl Manager {
             let workspace = {
                 let local = self.local.lock().unwrap();
                 let session = &local.sessions[&id];
-                if self.is_stopping() || session.close_request.is_some() {
+                if self.is_stopping() || session.close_requested() {
                     return;
                 }
                 session.workspace.clone()
@@ -934,7 +934,7 @@ impl Manager {
                 if self.is_stopping() {
                     return Err(io::Error::other("service is stopping"));
                 }
-                if local.sessions[&id].close_request.is_some() { return Ok(()); }
+                if local.sessions[&id].close_requested() { return Ok(()); }
                 let session = &local.sessions[&id];
                 let mut config = self.config.clone();
                 failure_reason = "The selected harness is no longer configured";
@@ -1094,6 +1094,8 @@ impl Manager {
             {
                 return Err(Error::Conflict("wait for the pending close or interrupt"));
             }
+            // A session whose harness is being spawned cannot be closed until it settles. A pending one can: its
+            // start task checks for a close and drops its work, and the close settles the start receipt.
             if command == "close" && session.state == "starting" {
                 return Err(Error::Conflict("session is still starting"));
             }
@@ -1358,6 +1360,21 @@ impl Manager {
                     local.append(id, "state", data, None)?;
                     local.fail_pending(id)?;
                     if handle.is_none() {
+                        // Nothing ran: a start still waiting for its permit or its storage gives up here.
+                        let starts: Vec<String> = local.sessions[id]
+                            .receipts
+                            .values()
+                            .filter(|r| r.command == "start" && r.state == "accepted")
+                            .map(|r| r.request_id.clone())
+                            .collect();
+                        for start in starts {
+                            local.finish_receipt_with(
+                                id,
+                                &start,
+                                "interrupted",
+                                Some("closed before start".into()),
+                            )?;
+                        }
                         local.append(id, "state", json!({"state":"closed"}), None)?;
                         local.finish_receipt(id, &request, "completed")?;
                     }

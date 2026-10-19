@@ -14,7 +14,7 @@ Authenticated `GET /v1/sessions/{id}/workspace` reads the session's cloud direct
 
 HTTP 202 means the close request is saved locally. Wait for its receipt to become `completed` and the session state to become `closed`. New prompts are rejected once close is accepted. Retrying the same request ID returns its receipt without repeating execution.
 
-Close releases the harness slot and preserves history. Start with a new request ID to create another session; closing never resumes or replaces the old one. A session still initializing returns 409 instead of accepting close prematurely.
+Close releases the harness slot and preserves history. Start with a new request ID to create another session; closing never resumes or replaces the old one. A session waiting to start (`pending`) closes at once; its start receipt ends `interrupted` ("closed before start"). A session spawning its harness (`starting`) answers 409 `session_busy`; retry the close.
 
 Runtime closes Codex's stdin, allowing native cleanup, and continues collecting records until exit. A four-second grace bounds an unresponsive harness; forced or unsuccessful exits produce `unknown`, not a successful close receipt. Protected Linux execution also stops the session's workload cgroup and waits until it has no live descendants. Cleanup failure blocks replacement; it is never treated as a successful close.
 
