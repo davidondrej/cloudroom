@@ -69,7 +69,7 @@ Only after the user agrees in first-run setup, the Mac sync helper copies Pi pro
 
 With `pi_setup`, the helper also copies custom providers from `models.json` (Mac wins per provider; VM-only providers stay), syncs `extensions/`, and sends the `packages` list from `settings.json`. `POST /v1/accounts/pi/setup` saves the providers and runs `pi install` in the background for remote packages the VM lacks. Local-path packages stay on the Mac.
 
-`GET /v1/accounts/pi` lists provider names, never secrets. `POST /v1/accounts/pi/import` adds valid missing providers. `POST /v1/accounts/pi/key` with `{"provider","key"}` saves or replaces one API key; the CLI is `room-cli cloud pi key PROVIDER`, reading the key from stdin. Copied OAuth logins refresh separately on each machine, so one side may need to sign in again.
+`GET /v1/accounts/pi` lists provider names, never secrets. `POST /v1/accounts/pi/import` adds valid missing providers. `POST /v1/accounts/pi/key` with `{"provider","key"}` saves or replaces one API key and answers 400 for a key that starts with `!` or `$`, which the VM cannot resolve; the CLI is `room-cli cloud pi key PROVIDER`, reading the key from stdin. Copied OAuth logins refresh separately on each machine, so one side may need to sign in again.
 
 ### Continue after a usage limit
 

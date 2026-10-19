@@ -27,6 +27,16 @@ fn literal(value: &Value) -> bool {
     secret(value) && !value.as_str().is_some_and(|s| s.starts_with(['!', '$']))
 }
 
+/// Every string inside a value, at any depth, is literal (see `literal`).
+fn literal_tree(value: &Value) -> bool {
+    match value {
+        Value::String(text) => !text.starts_with(['!', '$']),
+        Value::Array(items) => items.iter().all(literal_tree),
+        Value::Object(fields) => fields.values().all(literal_tree),
+        _ => true,
+    }
+}
+
 /// A well-formed Pi credential, or None. `!command` keys run Mac-only secret managers, so they stay behind.
 fn entry(value: &Value) -> Option<Value> {
     if serde_json::to_vec(value).ok()?.len() > MAX_ENTRY_BYTES {
@@ -37,17 +47,18 @@ fn entry(value: &Value) -> Option<Value> {
             let mut entry = json!({"type":"api_key","key":value["key"]});
             if let Some(env) = value.get("env") {
                 let env = env.as_object()?;
-                if !env.iter().all(|(k, v)| name(k, &[]) && secret(v)) {
+                if !env.iter().all(|(k, v)| name(k, &[]) && literal(v)) {
                     return None;
                 }
                 entry["env"] = json!(env);
             }
             Some(entry)
         }
-        // OAuth fields vary by provider, so keep the entry as Pi wrote it.
+        // OAuth fields vary by provider, so keep the entry as Pi wrote it, unless any string in it is a command or variable.
         "oauth"
             if literal(&value["access"])
                 && literal(&value["refresh"])
+                && literal_tree(value)
                 && value["expires"].is_number() =>
         {
             Some(value.clone())
@@ -143,22 +154,36 @@ pub(crate) async fn set_key(
     update(config, storage, Map::from_iter([(provider, value)]), true).await
 }
 
-/// A custom provider from the Mac's `models.json`. `!command` values ran on the Mac already;
-/// any left over would run Mac-only secret managers, so they are dropped.
+/// A custom provider from the Mac's `models.json`. `!command` values ran on the Mac already, and `$VAR`
+/// names a Mac shell variable; any left over would be resolved on the VM against the wrong environment, so they are dropped.
 fn provider(value: &Value) -> Option<Value> {
     let mut value = value.clone();
     let provider = value.as_object_mut()?;
-    if provider
-        .get("apiKey")
-        .and_then(Value::as_str)
-        .is_some_and(|key| key.starts_with('!'))
-    {
-        provider.remove("apiKey");
-    }
-    if let Some(headers) = provider.get_mut("headers").and_then(Value::as_object_mut) {
-        headers.retain(|_, value| !value.as_str().is_some_and(|value| value.starts_with('!')));
+    drop_commands(provider);
+    // Pi reads each model's own headers and key, so the same rule applies there.
+    if let Some(models) = provider.get_mut("models").and_then(Value::as_array_mut) {
+        for model in models.iter_mut().filter_map(Value::as_object_mut) {
+            drop_commands(model);
+        }
     }
     (serde_json::to_vec(&value).ok()?.len() <= MAX_PROVIDER_BYTES).then_some(value)
+}
+
+fn drop_commands(object: &mut Map<String, Value>) {
+    if object
+        .get("apiKey")
+        .and_then(Value::as_str)
+        .is_some_and(|key| key.starts_with(['!', '$']))
+    {
+        object.remove("apiKey");
+    }
+    if let Some(headers) = object.get_mut("headers").and_then(Value::as_object_mut) {
+        headers.retain(|_, value| {
+            !value
+                .as_str()
+                .is_some_and(|value| value.starts_with(['!', '$']))
+        });
+    }
 }
 
 /// Package sources the VM can fetch itself. Local paths only exist on the Mac.
@@ -272,5 +297,62 @@ pub(crate) async fn install(
         if let Err(error) = helper(config, storage, "settings.json", request).await {
             eprintln!("Pi package filters failed: {error}");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn provider_drops_command_values_in_models_too() {
+        let value = json!({
+            "apiKey": "!op read secret",
+            "headers": {"X-Top": "!id -u", "X-Plain": "value"},
+            "models": [{"id": "m", "headers": {"X-Id": "!id -u", "X-Plain": "value"}}]
+        });
+        let kept = provider(&value).unwrap();
+        let text = kept.to_string();
+        assert!(!text.contains("!id -u"), "{text}");
+        assert!(!text.contains("!op read"), "{text}");
+        assert_eq!(kept["models"][0]["headers"], json!({"X-Plain": "value"}));
+        assert_eq!(kept["headers"], json!({"X-Plain": "value"}));
+    }
+
+    #[test]
+    fn import_copies_only_literal_credentials() {
+        assert!(entry(&json!({"type":"api_key","key":"$OPENAI_API_KEY"})).is_none());
+        assert!(entry(&json!({"type":"api_key","key":"!id -u"})).is_none());
+        assert!(entry(&json!({"type":"oauth","access":"!id -u","refresh":"r","expires":1})).is_none());
+        assert!(entry(&json!({"type":"oauth","access":"a","refresh":"!id -u","expires":1})).is_none());
+        assert!(entry(&json!({"type":"api_key","key":"sk-literal"})).is_some());
+        assert!(entry(&json!({"type":"oauth","access":"a","refresh":"r","expires":1})).is_some());
+    }
+
+    #[test]
+    fn import_refuses_command_and_variable_values_in_env_and_oauth_fields() {
+        assert!(entry(&json!({"type":"api_key","key":"sk-a","env":{"X":"!id -u"}})).is_none());
+        assert!(entry(&json!({"type":"api_key","key":"sk-a","env":{"X":"$VAR"}})).is_none());
+        assert!(entry(&json!({"type":"api_key","key":"sk-a","env":{"X":"literal"}})).is_some());
+        let oauth =
+            json!({"type":"oauth","access":"a","refresh":"r","expires":1,"extra":{"id":"!id -u"}});
+        assert!(entry(&oauth).is_none());
+        let oauth =
+            json!({"type":"oauth","access":"a","refresh":"r","expires":1,"scopes":["$HOME"]});
+        assert!(entry(&oauth).is_none());
+    }
+
+    #[test]
+    fn a_provider_drops_variable_values_as_well_as_commands() {
+        let kept = provider(&json!({"apiKey": "$OPENAI_API_KEY", "headers": {"X-Var": "$TOKEN"}}))
+            .unwrap();
+        assert!(kept.get("apiKey").is_none());
+        assert_eq!(kept["headers"], json!({}));
+    }
+
+    #[test]
+    fn a_typed_key_that_names_a_command_or_variable_is_refused() {
+        assert!(entry(&json!({"type":"api_key","key":"$OPENAI_API_KEY"})).is_none());
+        assert!(entry(&json!({"type":"api_key","key":"!op read"})).is_none());
     }
 }
