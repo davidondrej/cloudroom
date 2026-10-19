@@ -931,7 +931,7 @@ impl Manager {
             .attach(
                 &transfer.workspace,
                 &Self::transfer_session(id),
-                &format!("teleport_index_{id}"),
+                "teleport_index",
                 "files.json",
                 "file",
                 Body::from(serde_json::to_vec(&index).map_err(std::io::Error::other)?),

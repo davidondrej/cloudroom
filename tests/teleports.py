@@ -12,8 +12,11 @@ from core_e2e import until
 class TeleportTests(unittest.TestCase):
     setUp, tearDown, start = core_fixture.ReplayTests.setUp, core_fixture.ReplayTests.tearDown, core_fixture.ReplayTests.start
 
+    def native(self, rid):
+        return (json.dumps({'type': 'session_meta', 'payload': {'id': 'n' + rid}}) + '\n').encode()
+
     def manifest(self, rid, workspace='root', extra_files=()):
-        native = b'{}\n'
+        native = self.native(rid)
         files = [{'path': 'rollout-x.jsonl', 'size': len(native), 'sha256': hashlib.sha256(native).hexdigest(),
                   'kind': 'native', 'origin': None}]
         files += list(extra_files)
@@ -40,6 +43,14 @@ class TeleportTests(unittest.TestCase):
         self.upload('pin', 1, 5, 'a' * 64, b'12345', expected=409)
         self.upload('pin', 1, 0, digest, b'0123456789')
         self.assertEqual(self.service.request('GET', '/v1/teleports/pin')['files'][1]['complete'], True)
+
+    def test_long_request_ids_prepare_and_activate(self):
+        self.start()
+        for rid in ('b' * 52, 'c' * 63):
+            self.service.request('POST', '/v1/teleports', self.manifest(rid), 202)
+            raw = self.native(rid)
+            self.upload(rid, 0, 0, hashlib.sha256(raw).hexdigest(), raw)
+            self.service.request('POST', f'/v1/teleports/{rid}/activate', {}, 202)
 
     def test_legacy_default_folder_prepares_and_retries_do_not_loop_on_503(self):
         self.start()
