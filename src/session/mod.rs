@@ -517,6 +517,16 @@ impl Manager {
         self.local.lock().unwrap().changed.subscribe()
     }
 
+    /// Whether a close is pending (accepted, not settled) for the session. Attachments are refused then.
+    pub(crate) fn close_pending(&self, id: &str) -> bool {
+        self.local
+            .lock()
+            .unwrap()
+            .sessions
+            .get(id)
+            .is_some_and(|session| session.close_request.is_some())
+    }
+
     pub(crate) fn recording_available(&self) -> bool {
         self.local.lock().unwrap().journal.writable()
     }

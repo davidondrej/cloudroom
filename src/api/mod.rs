@@ -1246,6 +1246,24 @@ async fn attach(
     if workspace.id != "legacy" && manager.workspaces.get(&workspace.id)?.is_none() {
         return Err(session::Error::Conflict("workspace mapping unavailable"));
     }
+    // The same refusals the session gives an attach, checked before the file is written, so a refused upload
+    // does not write bytes that the discard below must then remove.
+    if session.rewind_request.is_some() {
+        return Err(session::Error::Conflict("wait for the pending rewind"));
+    }
+    if manager.close_pending(&id) {
+        return Err(session::Error::Conflict(
+            "wait for the pending close or interrupt",
+        ));
+    }
+    if matches!(
+        session.state.as_str(),
+        "closed" | "process_lost" | "failed" | "saved_history_only"
+    ) {
+        return Err(session::Error::Conflict(
+            "process unavailable; history does not restore execution",
+        ));
+    }
     if !manager.recording_available() {
         return Err(session::Error::Storage(
             "session journal is not writable".into(),
@@ -1323,7 +1341,23 @@ async fn attach(
                 _ => "attachment upload failed",
             })
         })?;
-    let receipt = manager.command(&id, query.request_id, "attach", written)?;
+    let receipt = match manager.command(&id, query.request_id.clone(), "attach", written) {
+        Ok(receipt) => receipt,
+        Err(error) => {
+            // The session refused the file, so it must not stay in the repository.
+            if let Err(error) = manager
+                .workspaces
+                .discard_attachment(&workspace, &query.request_id, &query.name, &manager.storage)
+                .await
+            {
+                eprintln!(
+                    "refused attachment not removed: session={id} request={}: {error}",
+                    query.request_id
+                );
+            }
+            return Err(error);
+        }
+    };
     PARTS.lock().unwrap().remove(&key);
     Ok(accepted(&manager, &id, receipt))
 }

@@ -453,6 +453,36 @@ impl Workspaces {
         Ok(serde_json::json!({"id":request_id,"name":name,"kind":kind,
             "path":workspace.path.join(relative),"size":result["size"],"sha256":result["sha256"]}))
     }
+
+    /// Removes an attachment the session refused, so a refused upload leaves no bytes in the repository.
+    pub async fn discard_attachment(
+        &self,
+        workspace: &Workspace,
+        request_id: &str,
+        name: &str,
+        guard: &storage::Guard,
+    ) -> io::Result<()> {
+        valid_id(request_id)?;
+        let relative = format!(".cloudroom/attachments/{request_id}/{name}");
+        let mut command = Command::new("python3");
+        command
+            .env_clear()
+            .env("PATH", "/usr/local/bin:/usr/bin:/bin")
+            .args(["-c", include_str!("../sync/files.py")])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .kill_on_drop(true);
+        let (mut child, _workload) = guard.spawn_writer(&mut command)?;
+        let mut input = child.stdin.take().unwrap();
+        let request = serde_json::json!({"op":"discard", "tree":{"root":workspace.path},
+            "path":relative});
+        input.write_all(&serde_json::to_vec(&request)?).await?;
+        input.write_all(b"\n").await?;
+        drop(input);
+        file_result(child.wait_with_output().await?)?;
+        Ok(())
+    }
 }
 
 /// The SHA-256 of bytes a retried upload carries, computed by the same helper that writes attachments. Reads

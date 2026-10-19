@@ -678,6 +678,19 @@ def worker():
                         raise ValueError('expected a regular file')
                     send_file(file.fileno())
         return
+    elif op == 'discard':
+        try:
+            with tree.parent(request['path']) as (fd, name):
+                os.unlink(name, dir_fd=fd)
+        except FileNotFoundError:
+            pass
+        # The request's folder goes too once empty; a folder still holding another attachment stays.
+        try:
+            with tree.parent(os.path.dirname(request['path'])) as (fd, name):
+                os.rmdir(name, dir_fd=fd)
+        except (OSError, Conflict, ValueError):
+            pass
+        result = {}
     elif op == 'attach':
         try:
             result = tree.attach(request['path'], sys.stdin.buffer, request['limit'], request['size'])

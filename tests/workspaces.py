@@ -225,6 +225,26 @@ class WorkspaceTests(unittest.TestCase):
         self.service.request('POST','/v1/workspaces/old',{},405)
         self.service.request('POST','/v1/workspaces/old/prepare',{},404)
 
+    def test_refused_attachment_leaves_no_file(self):
+        path = self.state.resolve()/'code'/'refused'
+        self.seed('refused', path, 'codex')
+        self.start()
+        headers = {'Authorization':'Bearer '+self.env['CLOUDROOM_TOKEN'],'Content-Type':'application/octet-stream'}
+        def post(target, body, expected):
+            connection = http.client.HTTPConnection(self.service.address, timeout=10)
+            kind = 'application/json' if body.startswith(b'{') else 'application/octet-stream'
+            connection.request('POST', target, body, {**headers, 'Content-Type': kind})
+            response = connection.getresponse(); data = json.loads(response.read()); connection.close()
+            self.assertEqual(response.status, expected, data)
+            return data
+        until(lambda:self.service.session('cr_refused')['state']=='idle','refused target',10)
+        post('/v1/sessions/cr_refused/close', b'{"request_id":"close"}', 202)
+        until(lambda:self.service.session('cr_refused')['state']=='closed','refused close',10)
+        refused = post('/v1/sessions/cr_refused/attachments?request_id=r9&name=secret.txt&kind=file', b'refused upload', 409)
+        self.assertNotEqual(refused.get('code'), None)
+        self.assertFalse((path/'.cloudroom/attachments/r9/secret.txt').exists())
+        self.assertFalse((path/'.cloudroom/attachments/cr_refused/r9').exists())
+
     def test_a_retried_attachment_answers_its_receipt_after_the_file_changes(self):
         path = self.state.resolve()/'code'/'retried'
         self.seed('retried', path, 'codex')
@@ -288,6 +308,27 @@ class WorkspaceTests(unittest.TestCase):
         status, data = part(2, b'c')
         self.assertEqual(status, 202, data)
         self.assertEqual(Path(data['receipt']['input']['path']).read_bytes(), b'abc')
+
+    def test_a_refused_concurrent_attach_keeps_the_winners_file(self):
+        path = self.state.resolve()/'code'/'discarding'
+        self.seed('discarding', path, 'codex')
+        self.start()
+        until(lambda:self.service.session('cr_discarding')['state']=='idle','discarding target',10)
+        def post(target, body):
+            connection = http.client.HTTPConnection(self.service.address, timeout=10)
+            connection.request('POST', target, body, {'Authorization':'Bearer '+self.env['CLOUDROOM_TOKEN'],'Content-Type':'application/octet-stream'})
+            response = connection.getresponse(); data = json.loads(response.read()); connection.close()
+            return response.status, data
+        for round in range(20):
+            body = (f'same-{round}\n'*100).encode()
+            targets = [f'/v1/sessions/cr_discarding/attachments?request_id=d{round}&name=note.txt&kind={kind}' for kind in ('file', 'image')]
+            with concurrent.futures.ThreadPoolExecutor(2) as pool:
+                results = list(pool.map(lambda target: post(target, body), targets))
+            winners = [data for status, data in results if status == 202]
+            self.assertEqual(len(winners), 1, results)
+            self.assertEqual(Path(winners[0]['receipt']['input']['path']).read_bytes(), body, round)
+            status, again = post(targets[0] if winners[0]['receipt']['input']['kind'] == 'file' else targets[1], body)
+            self.assertEqual(status, 202, again)
 
 
 if __name__ == '__main__': unittest.main()
