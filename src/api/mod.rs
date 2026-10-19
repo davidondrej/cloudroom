@@ -1441,6 +1441,8 @@ struct Partial {
     at: Instant,
 }
 static PARTS: LazyLock<Mutex<HashMap<String, Partial>>> = LazyLock::new(Default::default);
+/// The sizes of all open uploads together, across sessions (the core's memory bound for partial uploads).
+const UPLOAD_BUDGET: usize = 256 << 20;
 const PART_BYTES: usize = 8 << 20;
 
 /// Adds one part; returns the bytes received and, once complete, the whole file. The partial stays until its
@@ -1456,7 +1458,19 @@ fn attach_part(
     let mut parts = PARTS.lock().unwrap();
     parts.retain(|_, partial| partial.at.elapsed() < Duration::from_secs(600));
     if offset == 0 && !parts.contains_key(key) {
-        if parts.len() >= 8 {
+        // Keys are "session/request"; a session may hold eight open uploads, whatever the others hold.
+        let session = key.split('/').next();
+        let open = parts
+            .keys()
+            .filter(|open| open.split('/').next() == session)
+            .count();
+        if open >= 8 {
+            return Err("too many uploads in progress; try again");
+        }
+        // Every open upload holds its whole size in memory once its parts arrive, so the sizes are budgeted
+        // across all sessions as well as per session.
+        let reserved: usize = parts.values().map(|partial| partial.total).sum();
+        if reserved.saturating_add(total) > UPLOAD_BUDGET {
             return Err("too many uploads in progress; try again");
         }
         parts.insert(
@@ -1727,5 +1741,98 @@ mod tests {
         };
         assert_eq!(whole, b"abc");
         PARTS.lock().unwrap().remove(key);
+    }
+
+    #[tokio::test]
+    async fn a_refused_attach_during_a_pending_close_writes_no_file() {
+        let root = std::env::temp_dir().join(format!(
+            "cloudroom-api-pending-attach-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("code")).unwrap();
+        let manager = Manager::open(crate::config::Config {
+            listen: "127.0.0.1:0".parse().unwrap(),
+            token: String::new(),
+            state_dir: root.join("state"),
+            repository: root.clone(),
+            api_url: Some("http://127.0.0.1:1".into()),
+            store: "test".into(),
+            instance: None,
+            account_home: root.clone(),
+            default_harness: crate::runtime::Kind::Claude,
+            harnesses: Default::default(),
+            storage: None,
+            rpc_timeout: Duration::from_secs(30),
+            diagnostic_upload: Duration::from_secs(1),
+        })
+        .unwrap();
+        let start = json!({"request_id":"start","command":"start","input":{"harness":"claude-code"},"state":"completed",
+            "workspace":{"id":"legacy","path":root.join("code")}});
+        manager.note("cr_pending", "receipt", start).unwrap();
+        let close = json!({"request_id":"c1","command":"close","input":{},"state":"accepted"});
+        manager.note("cr_pending", "receipt", close).unwrap();
+        assert!(manager.close_pending("cr_pending"));
+        let attempt = attach(
+            State(manager.clone()),
+            Path("cr_pending".into()),
+            Query(query("secret.txt", "file", None, None)),
+            Body::from("refused upload"),
+        )
+        .await;
+        assert!(
+            matches!(
+                attempt,
+                Err(session::Error::Conflict(
+                    "wait for the pending close or interrupt"
+                ))
+            ),
+            "an attach during a pending close is refused with the pending-close refusal"
+        );
+        assert!(
+            !root.join("code/.cloudroom").exists(),
+            "nothing is written to the workspace for a refused attach"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn open_uploads_share_one_byte_budget_across_sessions() {
+        let (first, second) = ("test-f28-budget-a/open0", "test-f28-budget-b/open0");
+        assert!(attach_part(first, "a.txt", "file", 0, UPLOAD_BUDGET - 1024, b"ab").is_ok());
+        assert_eq!(
+            attach_part(second, "a.txt", "file", 0, 2048, b"ab").err(),
+            Some("too many uploads in progress; try again"),
+            "a second session's upload past the shared budget"
+        );
+        let mut parts = PARTS.lock().unwrap();
+        parts.remove(first);
+        parts.remove(second);
+    }
+
+    #[test]
+    fn open_uploads_are_limited_per_session() {
+        let keys = |session: &str| -> Vec<String> {
+            (0..9).map(|n| format!("{session}/open{n}")).collect()
+        };
+        for key in &keys("test-f28-a")[..8] {
+            assert!(attach_part(key, "a.txt", "file", 0, 4, b"ab").is_ok());
+        }
+        assert_eq!(
+            attach_part("test-f28-a/open8", "a.txt", "file", 0, 4, b"ab").err(),
+            Some("too many uploads in progress; try again"),
+            "a ninth open upload in the same session"
+        );
+        assert!(
+            attach_part("test-f28-b/open0", "a.txt", "file", 0, 4, b"ab").is_ok(),
+            "another session's upload is not blocked"
+        );
+        let mut parts = PARTS.lock().unwrap();
+        for key in keys("test-f28-a")
+            .iter()
+            .chain(&["test-f28-b/open0".to_owned()])
+        {
+            parts.remove(key);
+        }
     }
 }
