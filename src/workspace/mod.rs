@@ -260,6 +260,9 @@ impl Workspaces {
     }
 
     pub async fn checkout(&self, workspace: &Workspace) -> io::Result<serde_json::Value> {
+        if !workspace.path.is_dir() {
+            return Ok(serde_json::json!({"path":workspace.path,"branch":null,"head":null}));
+        }
         let git = async |args: &[&str]| -> io::Result<Option<String>> {
             let mut command = Command::new("git");
             command

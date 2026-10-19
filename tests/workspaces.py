@@ -4,6 +4,7 @@ import http.client
 import json
 from pathlib import Path
 import secrets
+import shutil
 import time
 import unittest
 
@@ -204,6 +205,14 @@ class WorkspaceTests(unittest.TestCase):
         self.assertEqual(run('git','-C',str(path),'show',':file'),before)
         self.assertEqual((path/'.env').read_text(),'SYNTHETIC=keep')
         self.assertIsNotNone(self.service.request('GET','/v1/sessions/cr_dirty/workspace')['head'])
+
+    def test_deleted_workspace_folder_reports_null_metadata(self):
+        path = self.state.resolve()/'code/gone'; path.mkdir(parents=True)
+        self.seed('gone', path); self.start()
+        until(lambda:self.service.session('cr_gone')['receipts']['first']['state']=='completed','gone folder',10)
+        shutil.rmtree(path)
+        view = self.service.request('GET','/v1/sessions/cr_gone/workspace')
+        self.assertEqual((view['path'], view['branch'], view['head']), (str(path), None, None))
 
     def test_path_escape_is_rejected_without_touching_outside_files(self):
         root = self.state.resolve()/'code'; root.mkdir()
