@@ -295,6 +295,10 @@ class ReplayTests(unittest.TestCase):
         native = self.service.session(sid)['native_id']
         self.assertEqual((self.repo / (native + '.requests')).read_text().splitlines(), ['once'])
 
+    def test_pi_account_routes_without_pi_answer_harness_not_configured(self):
+        self.start()
+        self.assertEqual(self.service.request('POST', '/v1/accounts/pi/key', {'provider': 'openai', 'key': 'sk-fixture'}, 409)['code'], 'harness_not_configured')
+
     def test_codex_account_failure_and_limits_are_not_confused_with_login(self):
         for mode, expected in [('offline', 'unavailable'), ('unauthorized', 'missing'), ('limited', 'limited'), ('credits', 'connected')]:
             with self.subTest(mode=mode):

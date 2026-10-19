@@ -214,10 +214,15 @@ async fn claude_account(
 }
 
 fn pi_error(error: std::io::Error) -> session::Error {
-    if error.kind() == std::io::ErrorKind::InvalidInput {
-        session::Error::Conflict("invalid Pi login")
-    } else {
-        error.into()
+    if error
+        .get_ref()
+        .is_some_and(|inner| inner.is::<crate::runtime::pi_auth::NotConfigured>())
+    {
+        return session::Error::Conflict("harness is not configured");
+    }
+    match error.kind() {
+        std::io::ErrorKind::InvalidInput => session::Error::Conflict("invalid Pi login"),
+        _ => error.into(),
     }
 }
 async fn pi_auth(State(manager): State<Arc<Manager>>) -> Result<Json<Value>> {
@@ -1857,6 +1862,27 @@ mod tests {
             )
             .is_ok(),
             "a retry of an accepted prompt is answered by its receipt, so the input is not refused here"
+        );
+    }
+
+    #[test]
+    fn only_a_missing_pi_profile_answers_harness_not_configured() {
+        let configured = |error: std::io::Error| {
+            matches!(
+                pi_error(error),
+                session::Error::Conflict("harness is not configured")
+            )
+        };
+        assert!(configured(std::io::Error::other(
+            crate::runtime::pi_auth::NotConfigured
+        )));
+        assert!(
+            !configured(std::io::Error::from(std::io::ErrorKind::Unsupported)),
+            "std's Unsupported"
+        );
+        assert!(
+            !configured(std::io::Error::from_raw_os_error(38)),
+            "ENOSYS is a filesystem failure"
         );
     }
 

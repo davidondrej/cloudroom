@@ -67,11 +67,24 @@ fn entry(value: &Value) -> Option<Value> {
     }
 }
 
+/// The error a Pi call carries when the configuration has no Pi harness. Typed, because std also reports
+/// `Unsupported` for unrelated failures such as `ENOSYS`.
+#[derive(Debug)]
+pub(crate) struct NotConfigured;
+
+impl std::fmt::Display for NotConfigured {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Pi is not configured")
+    }
+}
+
+impl std::error::Error for NotConfigured {}
+
 fn profile(config: &Config) -> io::Result<&crate::config::HarnessConfig> {
     config
         .harnesses
         .get(&Kind::Pi)
-        .ok_or_else(|| io::Error::other("Pi is not configured"))
+        .ok_or_else(|| io::Error::other(NotConfigured))
 }
 
 /// Runs one private-file operation in `sync/files.py` on a file in Pi's home.
