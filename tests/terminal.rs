@@ -126,3 +126,31 @@ async fn shell_gets_the_agents_claude_and_codex_logins() {
     terminals.close("term_logins");
     let _ = fs::remove_dir_all(&dir);
 }
+
+#[tokio::test]
+async fn reattaching_to_a_live_terminal_applies_the_new_size() {
+    let dir = std::env::temp_dir().join(format!("cloudroom-terminal-size-{}", std::process::id()));
+    fs::create_dir_all(&dir).unwrap();
+    let dir = dir.canonicalize().unwrap();
+    let config = config(&dir);
+    let terminals = runtime::terminal::Terminals::default();
+    terminals
+        .open(&config, "term_size", dir.clone(), 100, 30, None)
+        .unwrap();
+    let terminal = terminals
+        .reattach("term_size", 200, 50)
+        .expect("the live terminal is found");
+    let (mut app, core) = tokio::io::duplex(1 << 20);
+    tokio::spawn(terminal.serve(core, 0));
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let (kind, _) = receive(&mut app).await;
+        assert_eq!(kind, 2);
+        send(&mut app, 0, b"stty size; exit 0\n").await;
+        let (output, _) = until_exit(&mut app).await;
+        assert!(String::from_utf8_lossy(&output).contains("50 200"));
+    })
+    .await
+    .unwrap();
+    terminals.close("term_size");
+    let _ = fs::remove_dir_all(&dir);
+}

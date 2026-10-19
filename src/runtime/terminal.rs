@@ -292,6 +292,10 @@ impl Terminal {
         Ok(())
     }
 
+    pub fn resize(&self, cols: u16, rows: u16) -> io::Result<()> {
+        set_size(self.pty.get_ref(), cols, rows)
+    }
+
     fn kill(&self) {
         match self.group.lock().unwrap().take() {
             Some(group) => drop(group),
@@ -415,6 +419,13 @@ impl Terminals {
         self.open.lock().unwrap().get(id).cloned()
     }
 
+    /// A live terminal for a reconnect, resized to the reconnecting app's size. The attach route uses it.
+    pub fn reattach(&self, id: &str, cols: u16, rows: u16) -> Option<Arc<Terminal>> {
+        let terminal = self.get(id)?;
+        let _ = terminal.resize(cols, rows);
+        Some(terminal)
+    }
+
     /// Starts the shell unless this ID already has one.
     pub fn open(
         &self,
@@ -427,6 +438,8 @@ impl Terminals {
     ) -> io::Result<Arc<Terminal>> {
         let mut open = self.open.lock().unwrap();
         if let Some(terminal) = open.get(id) {
+            // A reconnect with a new size resizes the shell it attaches to.
+            let _ = terminal.resize(cols, rows);
             return Ok(terminal.clone());
         }
         let (terminal, mut child) = Terminal::spawn(config, cwd, cols, rows, command)?;
@@ -533,7 +546,7 @@ async fn attach(
             );
         }
     };
-    let terminal = match manager.terminals.get(&id) {
+    let terminal = match manager.terminals.reattach(&id, input.cols, input.rows) {
         Some(terminal) => terminal,
         None if input.since > 0 => {
             return refuse(
