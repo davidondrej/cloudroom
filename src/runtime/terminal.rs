@@ -41,6 +41,8 @@ const REPLAY: usize = 1024 * 1024;
 const MAX_FRAME: usize = 1024 * 1024;
 /// An exited terminal keeps its replay buffer this long, so a reattach still sees its output.
 const EXITED_TTL: Duration = Duration::from_secs(30 * 60);
+/// A foreground job holds a sandbox awake only while its terminal has had input or output this recently.
+const QUIET_JOB: Duration = Duration::from_secs(10 * 60);
 /// Keeps sandbox proxies from closing a quiet connection, and finds dead ones.
 const PING: Duration = Duration::from_secs(25);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -77,6 +79,7 @@ unsafe extern "C" {
     fn fcntl(fd: i32, command: i32, argument: i32) -> i32;
     fn setsid() -> i32;
     fn geteuid() -> u32;
+    fn tcgetpgrp(fd: i32) -> i32;
     fn kill(pid: i32, signal: i32) -> i32;
 }
 
@@ -164,6 +167,8 @@ pub struct Terminal {
     /// The shell's terminal. Taken when the shell exits, so an exited terminal keeps only its output.
     pty: Mutex<Option<Arc<AsyncFd<File>>>>,
     pid: u32,
+    /// Started with `command=`: it runs until that command exits, whatever is on screen.
+    command: bool,
     shell: &'static str,
     cwd: PathBuf,
     /// Dropping it ends every process the shell started.
@@ -240,6 +245,7 @@ impl Terminal {
         let terminal = Self {
             pty: Mutex::new(Some(Arc::new(AsyncFd::new(master)?))),
             pid,
+            command: command.is_some(),
             shell,
             cwd,
             group: Mutex::new(group),
@@ -258,6 +264,16 @@ impl Terminal {
 
     fn changed(&self) {
         self.changed.send_modify(|n| *n += 1);
+    }
+
+    /// Whether a job other than the shell holds the terminal's foreground process group.
+    fn foreground_job(&self) -> bool {
+        let pty = self.pty.lock().unwrap();
+        let Some(pty) = pty.as_ref() else {
+            return false;
+        };
+        let group = unsafe { tcgetpgrp(pty.get_ref().as_raw_fd()) };
+        group > 0 && group != self.pid as i32
     }
 
     fn append(&self, bytes: &[u8]) {
@@ -432,12 +448,29 @@ async fn frame<W: AsyncWrite + Unpin>(to_app: &mut W, kind: u8, data: &[u8]) -> 
 }
 
 /// Every terminal in this sandbox, by the app's terminal ID.
-#[derive(Default)]
 pub struct Terminals {
     open: Mutex<HashMap<String, Arc<Terminal>>>,
+    /// How long an exited terminal is kept; `open` reaps the ones past it.
+    exited_ttl: Duration,
+    /// How long a foreground job may stay quiet before it stops counting as running.
+    quiet_job: Duration,
+}
+
+impl Default for Terminals {
+    fn default() -> Self {
+        Self::with_timings(EXITED_TTL, QUIET_JOB)
+    }
 }
 
 impl Terminals {
+    pub fn with_timings(exited_ttl: Duration, quiet_job: Duration) -> Self {
+        Self {
+            open: Mutex::new(HashMap::new()),
+            exited_ttl,
+            quiet_job,
+        }
+    }
+
     pub fn get(&self, id: &str) -> Option<Arc<Terminal>> {
         self.open.lock().unwrap().get(id).cloned()
     }
@@ -469,7 +502,7 @@ impl Terminals {
         rows: u16,
         command: Option<&str>,
     ) -> io::Result<Arc<Terminal>> {
-        self.reap_exited(EXITED_TTL);
+        self.reap_exited(self.exited_ttl);
         let mut open = self.open.lock().unwrap();
         if let Some(terminal) = open.get(id) {
             // A reconnect with a new size resizes the shell it attaches to.
@@ -500,6 +533,23 @@ impl Terminals {
         if let Some(terminal) = self.open.lock().unwrap().remove(id) {
             terminal.kill();
         }
+    }
+
+    /// Terminals with work in progress: a `command=` shell that has not exited, or a shell with a job in the
+    /// foreground that was active within `QUIET_JOB`. An idle prompt does not count, and neither does a quiet
+    /// editor or REPL left in the foreground; `lastActivity` says whether a terminal is quiet.
+    pub fn running(&self) -> usize {
+        let cutoff = now_ms().saturating_sub(self.quiet_job.as_millis() as u64);
+        self.open
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|t| {
+                t.output.lock().unwrap().exit.is_none()
+                    && (t.command
+                        || (t.active.load(Ordering::Relaxed) >= cutoff && t.foreground_job()))
+            })
+            .count()
     }
 
     pub fn summary(&self) -> Value {
@@ -588,6 +638,10 @@ async fn attach(
                 "This terminal's shell ended when its cloud sandbox restarted. Open a new terminal.",
             );
         }
+        // A shell started under the hold would be killed by the stop that follows it, so it is refused here.
+        None if manager.is_draining() => {
+            return refuse(StatusCode::CONFLICT, "service is draining");
+        }
         None => {
             let workspace = match &input.session {
                 Some(session) => match manager.session(session).await {
@@ -612,6 +666,11 @@ async fn attach(
                 input.rows,
                 input.command.as_deref(),
             ) {
+                // The hold can start between the check above and the spawn; a shell that starts under it is closed.
+                Ok(_) if manager.is_draining() => {
+                    manager.terminals.close(&id);
+                    return refuse(StatusCode::CONFLICT, "service is draining");
+                }
                 Ok(terminal) => terminal,
                 Err(error) => {
                     return refuse(
@@ -649,6 +708,54 @@ async fn close(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+
+    #[tokio::test]
+    async fn a_held_service_refuses_a_new_shell() {
+        let dir =
+            std::env::temp_dir().join(format!("cloudroom-terminal-hold-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let dir = dir.canonicalize().unwrap();
+        let config = crate::config::Config {
+            listen: "127.0.0.1:0".parse().unwrap(),
+            token: String::new(),
+            state_dir: dir.join("state"),
+            repository: dir.clone(),
+            api_url: Some("http://127.0.0.1:1".into()),
+            store: "fixture".into(),
+            instance: None,
+            account_home: dir.clone(),
+            default_harness: crate::runtime::Kind::Codex,
+            harnesses: Default::default(),
+            storage: None,
+            rpc_timeout: Duration::from_secs(30),
+            diagnostic_upload: Duration::from_secs(1),
+        };
+        let manager = crate::session::Manager::open(config).unwrap();
+        assert_eq!(manager.drain(true)["drained"], true);
+        let request = Request::builder()
+            .header(header::UPGRADE, "cloudroom-tunnel")
+            .body(Body::empty())
+            .unwrap();
+        let attach_input = Attach {
+            session: None,
+            cols: 80,
+            rows: 24,
+            since: 0,
+            command: None,
+        };
+        let response = attach(
+            State(manager.clone()),
+            RoutePath("term_held".into()),
+            Query(attach_input),
+            request,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert!(manager.terminals.get("term_held").is_none());
+        let _ = fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn a_missing_workspace_folder_is_not_replaced_by_the_repository() {

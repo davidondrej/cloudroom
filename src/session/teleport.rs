@@ -239,6 +239,10 @@ fn native_in_use(local: &super::Local, native_id: &str) -> bool {
 }
 
 impl Manager {
+    /// Whether `/v1/drain` has held the service: new shells and transfers are refused until it reopens.
+    pub(crate) fn is_draining(&self) -> bool {
+        self.local.lock().unwrap().draining
+    }
     fn transfer_directory(&self, id: &str) -> Result<PathBuf> {
         if !valid_id(id) {
             return Err(Error::Conflict("invalid transfer ID"));

@@ -132,6 +132,10 @@ impl Manager {
         if super::relay::report_pending(&local) {
             return json!({"drained":false,"reason":"report_pending"});
         }
+        // A terminal shell or its command dies with the sandbox, so it counts as running.
+        if self.terminals.running() > 0 {
+            return json!({"drained":false,"reason":"terminal_running"});
+        }
         // ADR 0031: background jobs keep the sandbox awake. The website stops it two hours after the last activity.
         if local.agent_counts().background > 0 {
             return json!({"drained":false,"reason":"background_jobs"});

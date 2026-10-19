@@ -13,6 +13,7 @@ import threading
 import time
 import unittest
 import uuid
+from urllib.parse import quote
 
 from core_e2e import Service, run, until, next_event
 
@@ -872,6 +873,34 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(rejected["code"], "invalid_reasoning_effort")
         rejected = self.service.request("POST", "/v1/sessions/cr_seed/prompts", {"request_id": "prompt-bad", "text": "x", "reasoning": "HIGH"}, 409)
         self.assertEqual(rejected["code"], "invalid_reasoning_effort")
+
+    def attach(self, terminal, command=None):
+        host, port = self.service.address.rsplit(':', 1)
+        query = 'cols=80&rows=24' + (f'&command={quote(command)}' if command else '')
+        sock = socket.create_connection((host, int(port)), timeout=15)
+        sock.sendall((f'GET /v1/terminals/{terminal}?{query} HTTP/1.1\r\nHost: core\r\nUpgrade: cloudroom-tunnel\r\n'
+                      f'Connection: Upgrade\r\nAuthorization: Bearer {self.service.env["CLOUDROOM_TOKEN"]}\r\n\r\n').encode())
+        head = b''
+        while b'\r\n\r\n' not in head:
+            chunk = sock.recv(4096)
+            if not chunk:
+                break
+            head += chunk
+        return sock, head.split(b'\r\n', 1)[0].decode()
+
+    def test_drain_holds_for_a_terminal_command_until_it_closes(self):
+        self.start()
+        sock, status = self.attach('term_hold', 'sleep 30')
+        self.assertIn(' 101 ', status)
+        held = self.service.request('POST', '/v1/drain', {'hold': True}, 200)
+        self.assertEqual((held['drained'], held['reason']), (False, 'terminal_running'))
+        self.service.request('DELETE', '/v1/terminals/term_hold', None, 200)
+        sock.close()
+        until(lambda: self.service.request('POST', '/v1/drain', {'hold': True}, 200)['drained'], 'drain after terminal close', 15)
+        refused_sock, refused = self.attach('term_new')
+        refused_sock.close()
+        self.assertIn(' 409 ', refused)
+        self.service.request('POST', '/v1/drain', {'hold': False}, 200)
 
     def test_revoked_mac_loses_its_job_stream_and_cannot_pair_again(self):
         previews = self.state / 'previews'

@@ -27,6 +27,8 @@ Update both the core and the laptop sync helper. Stop old sync workers during ro
 
 A previously initialized cloud sync root that disappears is reported unavailable, never silently recreated as empty. Restore the folder and its contents or its mount before retrying. Older paired installations are handled conservatively; missing roots require recovery, not an empty replacement.
 
+A damaged `sync.json` in the state directory is renamed to `sync.json.damaged-<unix time>` and kept; the core does not delete it. The recovered settings are saved at once, with the revision set to the current unix time and the existing roots marked initialized. The device has no pairing after recovery, so it must pair again. Look for the kept file when sync state is unexpectedly reset.
+
 ## Provisioning
 
 Follow [setup](setup.md). `install/configure.py --storage-only DIRECTORY` creates the protected `storage.json` and disposable cache directory. Full managed setup calls the same function. Existing policies are preserved on retry.

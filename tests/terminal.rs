@@ -128,6 +128,164 @@ async fn shell_gets_the_agents_claude_and_codex_logins() {
 }
 
 #[tokio::test]
+async fn a_running_command_counts_until_the_terminal_closes() {
+    let dir =
+        std::env::temp_dir().join(format!("cloudroom-terminal-running-{}", std::process::id()));
+    fs::create_dir_all(&dir).unwrap();
+    let dir = dir.canonicalize().unwrap();
+    let terminals = runtime::terminal::Terminals::default();
+    let _terminal = terminals
+        .open(
+            &config(&dir),
+            "term_running",
+            dir.clone(),
+            80,
+            24,
+            Some("sleep 30"),
+        )
+        .unwrap();
+    assert_eq!(terminals.running(), 1);
+    terminals.close("term_running");
+    assert_eq!(terminals.running(), 0);
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn an_exited_terminal_is_reaped_once_its_grace_has_passed() {
+    let dir = std::env::temp_dir().join(format!("cloudroom-terminal-reap-{}", std::process::id()));
+    fs::create_dir_all(&dir).unwrap();
+    let dir = dir.canonicalize().unwrap();
+    let terminals = runtime::terminal::Terminals::default();
+    terminals
+        .open(
+            &config(&dir),
+            "term_done",
+            dir.clone(),
+            80,
+            24,
+            Some("true"),
+        )
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while terminals.running() != 0 {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the command exits");
+    terminals.reap_exited(Duration::from_secs(3600));
+    assert!(terminals.get("term_done").is_some());
+    terminals.reap_exited(Duration::ZERO);
+    assert!(terminals.get("term_done").is_none());
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn opening_a_terminal_reaps_an_exited_one_past_its_grace() {
+    let dir = std::env::temp_dir().join(format!(
+        "cloudroom-terminal-open-reap-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&dir).unwrap();
+    let dir = dir.canonicalize().unwrap();
+    let terminals =
+        runtime::terminal::Terminals::with_timings(Duration::ZERO, Duration::from_secs(600));
+    terminals
+        .open(
+            &config(&dir),
+            "term_first",
+            dir.clone(),
+            80,
+            24,
+            Some("true"),
+        )
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while terminals.running() != 0 {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the command exits");
+    assert!(terminals.get("term_first").is_some());
+    terminals
+        .open(&config(&dir), "term_second", dir.clone(), 80, 24, None)
+        .unwrap();
+    assert!(terminals.get("term_first").is_none());
+    assert!(terminals.get("term_second").is_some());
+    terminals.close("term_second");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn an_idle_shell_does_not_count_but_a_foreground_job_does() {
+    let dir = std::env::temp_dir().join(format!("cloudroom-terminal-idle-{}", std::process::id()));
+    fs::create_dir_all(&dir).unwrap();
+    let dir = dir.canonicalize().unwrap();
+    let terminals = runtime::terminal::Terminals::default();
+    let terminal = terminals
+        .open(&config(&dir), "term_idle", dir.clone(), 80, 24, None)
+        .unwrap();
+    let (mut app, core) = tokio::io::duplex(1 << 20);
+    tokio::spawn(terminal.serve(core, 0));
+    let (kind, _) = receive(&mut app).await;
+    assert_eq!(kind, 2);
+    assert_eq!(terminals.running(), 0);
+    send(&mut app, 0, b"sleep 30\n").await;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while terminals.running() != 1 {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("a foreground job counts as running");
+    send(&mut app, 0, &[3]).await;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while terminals.running() != 0 {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("an interrupted job stops counting");
+    terminals.close("term_idle");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn a_quiet_foreground_job_stops_counting_as_running() {
+    let dir = std::env::temp_dir().join(format!("cloudroom-terminal-quiet-{}", std::process::id()));
+    fs::create_dir_all(&dir).unwrap();
+    let dir = dir.canonicalize().unwrap();
+    let terminals = runtime::terminal::Terminals::with_timings(
+        Duration::from_secs(600),
+        Duration::from_secs(1),
+    );
+    let terminal = terminals
+        .open(&config(&dir), "term_quiet", dir.clone(), 80, 24, None)
+        .unwrap();
+    let (mut app, core) = tokio::io::duplex(1 << 20);
+    tokio::spawn(terminal.serve(core, 0));
+    let (kind, _) = receive(&mut app).await;
+    assert_eq!(kind, 2);
+    send(&mut app, 0, b"sleep 30\n").await;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while terminals.running() != 1 {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("a foreground job counts while it is active");
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert_eq!(
+        terminals.running(),
+        0,
+        "a quiet job no longer holds the sandbox"
+    );
+    terminals.close("term_quiet");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
 async fn reattaching_to_a_live_terminal_applies_the_new_size() {
     let dir = std::env::temp_dir().join(format!("cloudroom-terminal-size-{}", std::process::id()));
     fs::create_dir_all(&dir).unwrap();

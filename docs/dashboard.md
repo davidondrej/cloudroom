@@ -43,6 +43,6 @@
 
 Core no longer serves `GET /v1/metrics`: Cores don't read the database (ADR 0232). Cloudroom's website charts machines from their uploaded `resources` diagnostics with the same query, in `cloudroom_metrics`: 30-second, 5-minute, 30-minute or 3-hour buckets for 1h, 24h, 7d or 30d, with CPU/memory averages and peaks, last bytes and agent counts, and `gap` over 30 seconds.
 
-- Live dashboard readings retain the percentage-only `resources` contract. Optional `resourceBytes` adds absolute capacity; `agents` supplies current full-registry counts; `terminals` gives `open` (running shells) and `lastActivity` (latest terminal input or output), which keeps a sandbox awake; `diskThresholds` exposes the actual configured warning/pause boundaries (null without disk protection). Older cores omit these fields.
+- Live dashboard readings retain the percentage-only `resources` contract. Optional `resourceBytes` adds absolute capacity; `agents` supplies current full-registry counts; `terminals` gives `open` (live shells, idle ones included; `/v1/drain` counts only shells with a foreground command) and `lastActivity` (latest terminal input or output), which keeps a sandbox awake; `diskThresholds` exposes the actual configured warning/pause boundaries (null without disk protection). Older cores omit these fields.
 
 Verify with `python3 tests/core_fixture.py` after building. It checks authentication, bounded results, resource sampling, old records, and secret exclusion. Run the consuming app against the real core as well as its fixtures.
