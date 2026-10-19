@@ -261,7 +261,7 @@ pub async fn check_in(
     State(manager): State<Arc<Manager>>,
     Json(input): Json<CheckIn>,
 ) -> Result<Json<Value>> {
-    valid_id(&input.device)?;
+    valid_id(&input.device).map_err(|_| failure(StatusCode::BAD_REQUEST, "invalid device ID"))?;
     if !manager.recording_available() || manager.is_stopping() {
         return Err(failure(
             StatusCode::SERVICE_UNAVAILABLE,

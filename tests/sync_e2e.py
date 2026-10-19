@@ -146,6 +146,11 @@ class SyncTests(unittest.TestCase):
         self.assertEqual(self.sync()['state'],'synced')
         self.assertFalse((self.local/'file').exists(), 'ordinary file deletions must still sync')
 
+    def test_malformed_device_id_is_a_client_error_not_an_outage(self):
+        self.prepare()
+        refused = self.service.request('POST', '/v1/sync', {'device': 'bad id'}, 400)
+        self.assertEqual(refused['error'], 'invalid sync request (invalid device ID)')
+
     def test_damaged_sync_state_does_not_stop_the_core(self):
         self.prepare(); self.sync()
         self.assertTrue((self.state/'sync.json').exists())
