@@ -4,11 +4,11 @@
 //! takes it, and stays awake for it.
 use super::{
     Local, Manager,
-    children::{FINISHED, NOTICE_REPLY_CHARS, notice, notice_ids},
+    children::{FINISHED, NOTICE_REPLY_CHARS, derived_id, notice, notice_ids},
     history::ApiError,
     thread::{
-        Failure, archive_under, deliver, fail, random_key, record, retire, session_failure,
-        website_failure,
+        Failure, archive_under, conflict, deliver, fail, random_key, record, retire,
+        session_failure, website_failure,
     },
 };
 use axum::{
@@ -119,12 +119,12 @@ async fn receive(
     let bad = |message: &str| fail(StatusCode::BAD_REQUEST, message);
     let request = input.request_id;
     if request.is_empty()
-        || request.len() > 58
+        || request.len() > 64
         || !request
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b))
     {
-        return Err(bad("invalid request_id"));
+        return Err(conflict("request_rejected", "invalid request_id"));
     }
     let archived = m
         .local
@@ -173,7 +173,7 @@ async fn receive(
     // A report's text carries the child's title, which the website may rename. Its request ID is unique per turn.
     let answer = deliver(&m, &id, &request, &text, heard.is_none()).await?;
     // A steer not yet confirmed may still fail; the sender retries, and a failed steer is then queued instead.
-    let steering = m.receipt(&id, &format!("{request}_steer"));
+    let steering = m.receipt(&id, &derived_id(&request, "_steer"));
     if m.receipt(&id, &request).is_none() && steering.is_some_and(|s| s.state == "accepted") {
         return Err(fail(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -394,6 +394,31 @@ mod tests {
                 .await
                 .is_ok()
         );
+    }
+
+    #[tokio::test]
+    async fn a_64_character_request_id_is_accepted() {
+        let m = manager("long-request");
+        session(&m, "cr_p", false);
+        let request = "r".repeat(64);
+        let tell = Relayed {
+            text: Some("hi".into()),
+            ..relayed(&request, "tell")
+        };
+        assert!(
+            receive(State(m.clone()), Path("cr_p".into()), Json(tell))
+                .await
+                .is_ok()
+        );
+        let too_long = Relayed {
+            text: Some("hi".into()),
+            ..relayed(&"r".repeat(65), "tell")
+        };
+        let (status, Json(body)) = receive(State(m.clone()), Path("cr_p".into()), Json(too_long))
+            .await
+            .unwrap_err();
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["code"], "request_rejected");
     }
 
     #[tokio::test]

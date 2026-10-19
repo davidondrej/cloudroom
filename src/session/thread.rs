@@ -625,7 +625,7 @@ pub(super) async fn deliver(
     text: &str,
     check_content: bool,
 ) -> Result<Json<Value>, Failure> {
-    let steer_id = format!("{request}_steer");
+    let steer_id = super::children::derived_id(request, "_steer");
     // A request ID reused for other text is refused, not answered as if the new text had been delivered.
     let other = |receipt: &super::Receipt| check_content && receipt.input["text"] != json!(text);
     if let Some(done) = m.receipt(id, request) {

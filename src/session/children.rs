@@ -266,6 +266,16 @@ pub(super) fn task_id(key: &str) -> String {
     }
 }
 
+/// The request ID `request` + `suffix`, as a stable hash of `request` when that would be over 64 characters.
+pub(super) fn derived_id(request: &str, suffix: &str) -> String {
+    let id = format!("{request}{suffix}");
+    if id.len() <= 64 {
+        id
+    } else {
+        format!("{}{suffix}", fnv(request))
+    }
+}
+
 /// A start whose prompt ID is not `task_` plus its key says so in its input, since replay derives the ID from the
 /// start's. Starts that are not so are left as they were, so an old retry still matches.
 fn prompt_request_id(input: &mut Value, key: &str) {
