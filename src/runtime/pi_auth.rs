@@ -336,8 +336,12 @@ mod tests {
     fn import_copies_only_literal_credentials() {
         assert!(entry(&json!({"type":"api_key","key":"$OPENAI_API_KEY"})).is_none());
         assert!(entry(&json!({"type":"api_key","key":"!id -u"})).is_none());
-        assert!(entry(&json!({"type":"oauth","access":"!id -u","refresh":"r","expires":1})).is_none());
-        assert!(entry(&json!({"type":"oauth","access":"a","refresh":"!id -u","expires":1})).is_none());
+        assert!(
+            entry(&json!({"type":"oauth","access":"!id -u","refresh":"r","expires":1})).is_none()
+        );
+        assert!(
+            entry(&json!({"type":"oauth","access":"a","refresh":"!id -u","expires":1})).is_none()
+        );
         assert!(entry(&json!({"type":"api_key","key":"sk-literal"})).is_some());
         assert!(entry(&json!({"type":"oauth","access":"a","refresh":"r","expires":1})).is_some());
     }

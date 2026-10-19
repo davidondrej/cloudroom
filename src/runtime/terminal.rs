@@ -763,13 +763,17 @@ mod tests {
         let gone = repository.join("no-such-workspace-folder");
         assert_eq!(shell_folder(Some(gone), repository), None);
         assert_eq!(shell_folder(None, repository), Some(repository.to_owned()));
-        assert_eq!(shell_folder(Some(repository.to_owned()), Path::new("/")), Some(repository.to_owned()));
+        assert_eq!(
+            shell_folder(Some(repository.to_owned()), Path::new("/")),
+            Some(repository.to_owned())
+        );
     }
 
     #[tokio::test]
     async fn an_exited_terminal_releases_its_pty_and_keeps_its_output() {
         let _pty = PTY_TESTS.lock().await;
-        let dir = std::env::temp_dir().join(format!("cloudroom-terminal-exit-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("cloudroom-terminal-exit-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let dir = dir.canonicalize().unwrap();
         let config = Config {
@@ -799,7 +803,14 @@ mod tests {
         .await
         .unwrap();
         assert!(terminal.pty.lock().unwrap().is_none());
-        let replay: Vec<u8> = terminal.output.lock().unwrap().replay.iter().copied().collect();
+        let replay: Vec<u8> = terminal
+            .output
+            .lock()
+            .unwrap()
+            .replay
+            .iter()
+            .copied()
+            .collect();
         assert!(String::from_utf8_lossy(&replay).contains("bye"));
         terminals.close("term_exit");
         let _ = std::fs::remove_dir_all(&dir);
