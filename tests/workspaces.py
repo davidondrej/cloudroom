@@ -374,5 +374,22 @@ class WorkspaceTests(unittest.TestCase):
         self.assertEqual(Path(parent['path']).read_bytes(), b'parent bytes')
         self.assertEqual(Path(child['path']).read_bytes(), b'child bytes')
 
+    def test_partial_upload_with_an_invalid_name_or_kind_is_refused_on_its_first_part(self):
+        path = self.state.resolve()/'code'/'partial-names'
+        self.seed('partial', path, 'codex')
+        self.start()
+        until(lambda:self.service.session('cr_partial')['state']=='idle','partial target',10)
+        def part(query, body):
+            connection = http.client.HTTPConnection(self.service.address, timeout=10)
+            connection.request('POST', '/v1/sessions/cr_partial/attachments?request_id=p1&'+query, body,
+                {'Authorization':'Bearer '+self.env['CLOUDROOM_TOKEN'],'Content-Type':'application/octet-stream'})
+            response = connection.getresponse(); data = json.loads(response.read()); connection.close()
+            return response.status, data
+        for query in ['name=..&kind=file&offset=0&total=4', 'name=a.txt&kind=video&offset=0&total=4']:
+            status, data = part(query, b'ab')
+            self.assertEqual((status, data.get('code')), (409, 'invalid_attachment'), query)
+        self.assertEqual(part('name=a.txt&kind=file&offset=0&total=4', b'ab'), (202, {'received': 2}))
+        self.assertEqual(part('name=a.txt&kind=file&offset=2&total=4', b'cd')[0], 202)
+
 
 if __name__ == '__main__': unittest.main()

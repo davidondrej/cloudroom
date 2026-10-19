@@ -397,14 +397,7 @@ impl Workspaces {
         if kind != "image" && kind != "file" {
             return Err(io::Error::other("attachment kind must be image or file"));
         }
-        if name.is_empty()
-            || name.len() > 200
-            || name.contains('/')
-            || name.contains('\\')
-            || name == "."
-            || name == ".."
-            || name.bytes().any(|b| b < 32 || b == b':')
-        {
+        if !valid_attachment_name(name) {
             return Err(io::Error::other("invalid attachment name"));
         }
         let relative = attachment_path(session_id, request_id, name);
@@ -486,6 +479,16 @@ impl Workspaces {
         file_result(child.wait_with_output().await?)?;
         Ok(())
     }
+}
+
+/// The file name an attachment keeps. Upload handlers check it before a partial upload buffers any bytes.
+pub fn valid_attachment_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 200
+        && !name.contains(['/', '\\'])
+        && name != "."
+        && name != ".."
+        && !name.bytes().any(|b| b < 32 || b == b':')
 }
 
 /// Attachments are kept per session: two sessions in one folder can reuse a request ID and name without sharing a file.

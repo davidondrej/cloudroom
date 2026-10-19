@@ -1289,6 +1289,12 @@ async fn attach(
     let body = match (query.offset, query.total, part) {
         (None, None, _) => body,
         (Some(offset), Some(total), Some(part)) => {
+            // Checked before any part is buffered, so a bad name fails on its first part.
+            if !matches!(query.kind.as_str(), "image" | "file")
+                || !crate::workspace::valid_attachment_name(&query.name)
+            {
+                return Err(session::Error::Conflict("attachment upload failed"));
+            }
             let limit = if query.kind == "image" {
                 10 << 20
             } else {
