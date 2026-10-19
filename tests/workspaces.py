@@ -391,5 +391,16 @@ class WorkspaceTests(unittest.TestCase):
         self.assertEqual(part('name=a.txt&kind=file&offset=0&total=4', b'ab'), (202, {'received': 2}))
         self.assertEqual(part('name=a.txt&kind=file&offset=2&total=4', b'cd')[0], 202)
 
+    def test_oversized_part_to_an_unknown_session_answers_not_found(self):
+        self.start()
+        def part(body):
+            connection = http.client.HTTPConnection(self.service.address, timeout=10)
+            connection.request('POST', '/v1/sessions/cr_nope/attachments?request_id=big&name=x.bin&kind=file&offset=0&total=%d' % len(body), body,
+                {'Authorization':'Bearer '+self.env['CLOUDROOM_TOKEN'],'Content-Type':'application/octet-stream'})
+            response = connection.getresponse(); data = json.loads(response.read()); connection.close()
+            return response.status, data.get('code')
+        self.assertEqual(part(b'x' * 64), (404, 'request_rejected'))
+        self.assertEqual(part(b'x' * (8 * 1024 * 1024 + 1)), (404, 'request_rejected'))
+
 
 if __name__ == '__main__': unittest.main()

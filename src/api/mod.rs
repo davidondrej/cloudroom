@@ -1213,14 +1213,14 @@ async fn attach(
     }
     // A part is read before any reply, so a retried last part gets its receipt instead of a reset connection.
     let (body, part) = match query.total {
-        Some(_) => (
-            Body::empty(),
-            Some(
-                axum::body::to_bytes(body, PART_BYTES)
-                    .await
-                    .map_err(|_| session::Error::Conflict("upload part exceeds 8 MiB"))?,
-            ),
-        ),
+        Some(_) => match axum::body::to_bytes(body, PART_BYTES).await {
+            Ok(part) => (Body::empty(), Some(part)),
+            Err(_) => {
+                // An unknown session answers 404 whatever the size of its part.
+                manager.session(&id).await?;
+                return Err(session::Error::Conflict("upload part exceeds 8 MiB"));
+            }
+        },
         None => (body, None),
     };
     if let Some(receipt) = manager.receipt(&id, &query.request_id) {
