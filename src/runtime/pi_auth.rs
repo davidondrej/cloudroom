@@ -21,13 +21,19 @@ fn secret(value: &Value) -> bool {
         .is_some_and(|s| !s.is_empty() && s.len() <= 8192 && !s.chars().any(char::is_control))
 }
 
+/// A secret the VM can use as written. `!command` runs a Mac-only secret manager, and `$VAR` names a Mac shell
+/// variable; both are resolved on the Mac or not at all (docs/harnesses.md), so neither is copied.
+fn literal(value: &Value) -> bool {
+    secret(value) && !value.as_str().is_some_and(|s| s.starts_with(['!', '$']))
+}
+
 /// A well-formed Pi credential, or None. `!command` keys run Mac-only secret managers, so they stay behind.
 fn entry(value: &Value) -> Option<Value> {
     if serde_json::to_vec(value).ok()?.len() > MAX_ENTRY_BYTES {
         return None;
     }
     match value["type"].as_str()? {
-        "api_key" if secret(&value["key"]) && !value["key"].as_str()?.starts_with('!') => {
+        "api_key" if literal(&value["key"]) => {
             let mut entry = json!({"type":"api_key","key":value["key"]});
             if let Some(env) = value.get("env") {
                 let env = env.as_object()?;
@@ -40,8 +46,8 @@ fn entry(value: &Value) -> Option<Value> {
         }
         // OAuth fields vary by provider, so keep the entry as Pi wrote it.
         "oauth"
-            if secret(&value["access"])
-                && secret(&value["refresh"])
+            if literal(&value["access"])
+                && literal(&value["refresh"])
                 && value["expires"].is_number() =>
         {
             Some(value.clone())
