@@ -74,8 +74,11 @@ test("reports allowlisted rejections, keeps temporary conflicts retryable, and s
     [{ code: "invalid_model" }, "invalid_model", false],
     [{ code: "invalid_provider" }, "invalid_provider", false],
     [{ code: "request_conflict" }, "request_conflict", false],
+    [{ code: "request_rejected", error: "SECRET-CANARY" }, "request_rejected", false],
     [{ code: "storage_blocked" }, "storage_blocked", true],
     [{ error: "storage unsafe; new execution is blocked" }, "storage_blocked", true],
+    [{ code: "session_busy", error: "SECRET-CANARY" }, "session_busy", true],
+    [{ code: "workspace_unavailable", error: "SECRET-CANARY" }, "workspace_unavailable", true],
     [{ code: "service_stopping" }, "service_stopping", true],
     [{ code: "model_catalog_unavailable" }, "model_catalog_unavailable", true],
     [{ code: "SECRET-CANARY", error: "SECRET-CANARY" }, null, true],
@@ -88,13 +91,13 @@ test("reports allowlisted rejections, keeps temporary conflicts retryable, and s
       assert.equal(error.status, 409);
       assert.equal(error.code, code);
       assert.equal(error.retryable, retryable);
-      // Allowlisted codes keep their friendly text; unknown rejections show the core's own error (ADR 0123).
-      const shown = code === null && typeof (value as { error?: unknown }).error === "string";
+      // Allowlisted codes keep their friendly text. request_rejected and unknown rejections show the core's own error (ADR 0123).
+      const shown = (code === null || code === "request_rejected") && typeof (value as { error?: unknown }).error === "string";
       assert.equal(error.message.includes("SECRET-CANARY"), shown);
       return true;
     });
   }
-  assert.equal(service.requests.length, 12);
+  assert.equal(service.requests.length, 15);
 });
 
 test("does not retry a vm/run 409, which the core answers for a refused folder or a missing Mac pairing", async (t) => {
@@ -108,6 +111,38 @@ test("does not retry a vm/run 409, which the core answers for a refused folder o
     assert.equal(error.message, "No Mac is paired with this VM");
     return true;
   });
+});
+
+test("maps retry-telling request_rejected texts from older cores to their temporary codes", async (t) => {
+  let body: unknown;
+  const service = await fixture((_req, res) => sendJson(res, body, 409));
+  t.after(() => service.close());
+  for (const [value, code, retryable] of [
+    [{ code: "request_rejected", error: "wait for the pending close or interrupt" }, "session_busy", true],
+    [{ code: "request_rejected", error: "wait for the pending rewind" }, "session_busy", true],
+    [{ code: "request_rejected", error: "session is still starting" }, "session_busy", true],
+    [{ code: "request_rejected", error: "wait for compaction" }, "session_busy", true],
+    [{ code: "request_rejected", error: "too many uploads in progress; try again" }, "session_busy", true],
+    [{ code: "request_rejected", error: "the agent is starting; try again in a few seconds" }, "session_busy", true],
+    [{ code: "request_rejected", error: "compaction is already running" }, "session_busy", true],
+    [{ code: "request_rejected", error: "harness is not ready to rewind" }, "session_busy", true],
+    [{ code: "request_rejected", error: "wait for child agents before editing a message" }, "session_busy", true],
+    [{ code: "request_rejected", error: "storage unsafe; uploads are blocked" }, "storage_blocked", true],
+    [{ code: "request_rejected", error: "new execution is paused; try again shortly" }, "storage_blocked", true],
+    [{ code: "request_rejected", error: "workload is paused for storage; close it or wait for recovery" }, "storage_blocked", true],
+    [{ code: "request_rejected", error: "send or remove queued messages first" }, "request_rejected", false],
+    [{ code: "request_rejected", error: "SECRET-CANARY" }, "request_rejected", false],
+    [{ error: "too many uploads in progress; try again" }, "session_busy", true],
+  ] as const) {
+    body = value;
+    await assert.rejects(service.client.start("legacy", "codex", { reasoning: "max" }), (error: unknown) => {
+      assert(error instanceof CloudroomError);
+      assert.equal(error.status, 409);
+      assert.equal(error.code, code);
+      assert.equal(error.retryable, retryable);
+      return true;
+    });
+  }
 });
 
 test("attachment failures distinguish permissions and size without disclosing server details or retrying", async (t) => {

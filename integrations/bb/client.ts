@@ -101,6 +101,8 @@ const rejectionMessages: Record<string, string> = {
   service_stopping: "Cloud is restarting. Your request will retry.",
   service_draining: "The cloud sandbox is going to sleep. Your request will wake it and retry.",
   session_waking: "The agent is waking up. Your request will retry.",
+  session_busy: "The agent is still busy with the previous step. Your request will retry.",
+  workspace_unavailable: "The cloud folder mapping is temporarily unavailable. Your request will retry.",
   model_catalog_unavailable: "Cloud model discovery is unavailable. Your request will retry.",
   invalid_service_tier: "This service tier is unavailable for the cloud model.",
   invalid_attachment: "The attachment could not be stored on Cloud.",
@@ -109,7 +111,10 @@ const rejectionMessages: Record<string, string> = {
 };
 // Thread errors with these messages ask the user to connect an account, not retry blindly.
 export const authRequiredMessages = new Set([rejectionMessages.codex_auth_required, rejectionMessages.cursor_auth_required, rejectionMessages.claude_auth_required]);
-const transientRejections = new Set(["storage_blocked", "service_stopping", "service_draining", "session_waking", "model_catalog_unavailable", "codex_auth_unavailable", "claude_auth_unavailable", "cursor_auth_unavailable"]);
+const transientRejections = new Set(["storage_blocked", "service_stopping", "service_draining", "session_waking", "session_busy", "workspace_unavailable", "model_catalog_unavailable", "codex_auth_unavailable", "claude_auth_unavailable", "cursor_auth_unavailable"]);
+// `request_rejected` is the core's permanent catch-all: non-retryable, and its core `error` text is shown.
+const genericRejection = "request_rejected";
+const knownRejections = new Set([...Object.keys(rejectionMessages), genericRejection]);
 
 export class CloudroomError extends Error {
   readonly status: number | null;
@@ -121,7 +126,7 @@ export class CloudroomError extends Error {
     this.name = "CloudroomError";
     this.status = status;
     this.code = code;
-    this.retryable = code && Object.hasOwn(rejectionMessages, code)
+    this.retryable = code !== null && knownRejections.has(code)
       ? transientRejections.has(code)
       : status === null || status >= 500 || [408, 409, 429].includes(status);
   }
@@ -164,12 +169,25 @@ async function rejection(response: Response): Promise<{ code: string | null; err
     let body: { code?: unknown; error?: unknown } | null = null;
     try { body = JSON.parse(text); } catch { return { code: null, error: text.trim().slice(0, 500) || null }; }
     const error = typeof body?.error === "string" ? body.error.slice(0, 500) : null;
-    if (typeof body?.code === "string" && Object.hasOwn(rejectionMessages, body.code)) return { code: body.code, error };
+    const reported = typeof body?.code === "string" && knownRejections.has(body.code) ? body.code : null;
+    if (reported !== null && reported !== genericRejection) return { code: reported, error };
+    // Cores before the typed codes send request_rejected for refusals that tell the user to retry. Map their text here.
     const legacy: Record<string, string> = {
       "invalid reasoning effort": "invalid_reasoning_effort", "invalid model": "invalid_model",
       "storage unsafe; new execution is blocked": "storage_blocked", "service is stopping": "service_stopping", "service is draining": "service_draining",
+      "new execution is paused; try again shortly": "storage_blocked", "workload is paused for storage; close it or wait for recovery": "storage_blocked",
+      "storage unsafe; uploads are blocked": "storage_blocked",
+      "wait for the pending close or interrupt": "session_busy", "wait for the pending rewind": "session_busy",
+      "session is still starting": "session_busy", "the agent is starting; try again in a few seconds": "session_busy",
+      "the turn is still starting; try the interrupt again in a moment": "session_busy", "wait for compaction": "session_busy",
+      "compaction is already running": "session_busy", "harness is not ready for compaction": "session_busy",
+      "harness is not ready to rewind": "session_busy", "too many uploads in progress; try again": "session_busy",
+      "the source agent is busy; fork from an earlier message or try again shortly": "session_busy",
+      "wait for child agents before editing a message": "session_busy",
+      "wait for the active turn to finish before editing a sent message": "session_busy",
     };
-    return { code: error !== null && Object.hasOwn(legacy, error) ? legacy[error] : null, error };
+    const mapped = error !== null && Object.hasOwn(legacy, error) ? legacy[error] : null;
+    return { code: mapped ?? reported, error };
   } catch { return none; }
   finally { await reader.cancel().catch(() => {}); reader.releaseLock(); }
 }
@@ -415,7 +433,8 @@ export class CloudroomClient {
       await response.body?.cancel().catch(() => {});
       // Only 400/409 codes steer retry decisions; other statuses keep status-based rules.
       const code = response.status === 400 || response.status === 409 ? known : null;
-      const message = code ? rejectionMessages[code] : `Cloudroom rejected the request (HTTP ${response.status})${error ? `: ${error}` : ""}`;
+      const fixed = code !== null && code !== genericRejection ? rejectionMessages[code] : undefined;
+      const message = fixed ?? `Cloudroom rejected the request (HTTP ${response.status})${error ? `: ${error}` : ""}`;
       throw new CloudroomError(message, response.status, code);
     }
     return response;

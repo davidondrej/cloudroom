@@ -619,7 +619,7 @@ mod tests {
             "wait for the pending close or interrupt",
         ));
         assert_eq!(status, StatusCode::CONFLICT);
-        assert_eq!(body["code"], "request_rejected");
+        assert_eq!(body["code"], "session_busy");
         let (_, Json(body)) = session_failure(crate::session::Error::Conflict(
             "request_id already has different content",
         ));

@@ -595,7 +595,23 @@ pub(crate) fn conflict_code(error: &str) -> &'static str {
         | "saved session has no matching receipt" => "request_conflict",
         "agent setup is incomplete" | "harness is not configured" => "harness_not_configured",
         "invalid workspace" | "workspace mapping unavailable" => "invalid_workspace",
-        "storage unsafe; new execution is blocked" => "storage_blocked",
+        "storage unsafe; new execution is blocked"
+        | "storage unsafe; uploads are blocked"
+        | "new execution is paused; try again shortly"
+        | "workload is paused for storage; close it or wait for recovery" => "storage_blocked",
+        "wait for the pending close or interrupt"
+        | "wait for the pending rewind"
+        | "session is still starting"
+        | "the agent is starting; try again in a few seconds"
+        | "the turn is still starting; try the interrupt again in a moment"
+        | "wait for compaction"
+        | "compaction is already running"
+        | "harness is not ready for compaction"
+        | "harness is not ready to rewind"
+        | "wait for child agents before editing a message"
+        | "wait for the active turn to finish before editing a sent message"
+        | "the source agent is busy; fork from an earlier message or try again shortly"
+        | "too many uploads in progress; try again" => "session_busy",
         "service is stopping" => "service_stopping",
         "service is draining" => "service_draining",
         "this thread was asleep and is waking up; try again in a few seconds" => "session_waking",
@@ -1814,6 +1830,57 @@ mod tests {
             .is_ok(),
             "a retry of an accepted prompt is answered by its receipt, so the input is not refused here"
         );
+    }
+
+    #[test]
+    fn temporary_refusals_carry_retryable_codes() {
+        for (error, code) in [
+            (
+                "the turn is still starting; try the interrupt again in a moment",
+                "session_busy",
+            ),
+            ("wait for the pending close or interrupt", "session_busy"),
+            ("wait for the pending rewind", "session_busy"),
+            ("session is still starting", "session_busy"),
+            ("wait for compaction", "session_busy"),
+            ("too many uploads in progress; try again", "session_busy"),
+            ("storage unsafe; uploads are blocked", "storage_blocked"),
+            (
+                "the agent is starting; try again in a few seconds",
+                "session_busy",
+            ),
+            ("compaction is already running", "session_busy"),
+            ("harness is not ready for compaction", "session_busy"),
+            ("harness is not ready to rewind", "session_busy"),
+            (
+                "wait for child agents before editing a message",
+                "session_busy",
+            ),
+            (
+                "wait for the active turn to finish before editing a sent message",
+                "session_busy",
+            ),
+            (
+                "the source agent is busy; fork from an earlier message or try again shortly",
+                "session_busy",
+            ),
+            (
+                "new execution is paused; try again shortly",
+                "storage_blocked",
+            ),
+            (
+                "workload is paused for storage; close it or wait for recovery",
+                "storage_blocked",
+            ),
+            (
+                "interrupt target is no longer the active request",
+                "request_rejected",
+            ),
+            ("session ID belongs to another session", "teleport_rejected"),
+            ("request not found", "request_not_found"),
+        ] {
+            assert_eq!(conflict_code(error), code, "{error}");
+        }
     }
 
     #[tokio::test]
