@@ -61,3 +61,135 @@ console.log(process.argv[2] === "claude"
         .arg(&profile.binary);
     command
 }
+
+#[cfg(test)]
+mod tests {
+    use super::SOURCE;
+
+    fn verdict(command: &str) -> String {
+        let script = format!(
+            "{SOURCE}\nconst reason = checkCommand(process.argv[1]);\nprocess.stdout.write(reason ? \"blocked\" : \"allowed\");"
+        );
+        let output = std::process::Command::new("node")
+            .args(["--input-type=module", "-e", &script, command])
+            .output()
+            .expect("node runs the guard");
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    }
+
+    #[test]
+    fn wrapped_forms_of_a_root_or_home_deletion_are_blocked() {
+        for command in [
+            "rm -rf /",
+            "if true; then rm -rf ~; fi",
+            "{ rm -rf ~; }",
+            "sudo -E rm -rf /",
+            "rm -rf \"$HOME\"/",
+        ] {
+            assert_eq!(verdict(command), "blocked", "{command}");
+        }
+    }
+
+    #[test]
+    fn every_bypass_form_from_the_review_is_blocked() {
+        for command in [
+            "if true; then rm -rf ~; fi",
+            "for d in x; do rm -rf ~; done",
+            "{ rm -rf ~; }",
+            "\\rm -rf ~",
+            "env rm -rf ~",
+            "time rm -rf ~",
+            "xargs rm -rf <<< ~",
+            "rm -rf /.",
+            "rm -rf \"$HOME\"/",
+            "nohup rm -rf ~ &",
+            "sudo -E rm -rf /",
+            "find ~ -delete",
+            "sh -c 'rm -rf ~'",
+            "bash -c \"rm -rf ~\"",
+            "sudo -u root rm -rf /",
+            "sudo --user=root rm -rf /",
+            "(rm -rf /)",
+            "$(rm -rf /)",
+            "rm -rf /./",
+            "x=1 rm -rf /",
+            "nice rm -rf /",
+            "nice -n 5 rm -rf /",
+            "timeout 5 rm -rf /",
+            "doas rm -rf /",
+            "bash -lc 'rm -rf ~'",
+            "sh -ec 'rm -rf /'",
+            "find / -xdev -delete",
+            "find ~ -maxdepth 1 -delete",
+            "find ~ -delete -name x",
+            "find / -delete -name core",
+            "find ~ -type f -delete",
+            "find ~ -name '*' -delete",
+            "find ~ -path ~/keep -prune -o -delete",
+            "find ~ -name keep -o -delete",
+            "find ~ -not -name keep -delete",
+            "find ~ ! -name keep -delete",
+            "find ~ -user agent -delete",
+            "find ~ -mtime -100000 -delete",
+            "find ~ -delete # -name x",
+            "find -L ~ -delete",
+            "find -P / -delete",
+            "find ./build ~ -delete",
+            "find ~ -exec rm -rf {} +",
+            "bash -l -c 'rm -rf ~'",
+            "bash -e -c 'rm -rf ~'",
+            "bash --norc -c 'rm -rf ~'",
+            "bash -o pipefail -c 'rm -rf ~'",
+            "sh -c -- 'rm -rf ~'",
+            "bash -c $'rm -rf ~'",
+            "rm -rf \"${HOME:?}\"",
+            "sudo -uroot rm -rf /",
+            "sudo -u root -- rm -rf /",
+        ] {
+            assert_eq!(verdict(command), "blocked", "{command}");
+        }
+    }
+
+    #[test]
+    fn ordinary_removals_are_allowed() {
+        for command in [
+            "rm -rf ./build",
+            "echo rm -rf ~",
+            "ls -la",
+            "echo '{ rm -rf ~; }'",
+            "find ./build -name '*.o' -delete",
+            "find ./build -delete",
+            "find ~ -name '*.pyc' -delete",
+            "find $HOME -maxdepth 1 -name '*.log' -delete",
+            "find / -xdev -name core -delete",
+            "sh -c 'ls -la'",
+            "bash -lc 'ls -la'",
+            "bash -l -c 'ls -la'",
+        ] {
+            assert_eq!(verdict(command), "allowed", "{command}");
+        }
+    }
+
+    #[test]
+    fn a_long_sudo_option_chain_is_checked_in_linear_time() {
+        for option in ["-ua ", "-u -u ", "-- "] {
+            let command = format!("sudo {}x", option.repeat(30));
+            let elapsed = guard_time_ms(&command);
+            assert!(elapsed < 50.0, "{option:?} took {elapsed} ms");
+        }
+    }
+
+    fn guard_time_ms(command: &str) -> f64 {
+        let script = format!(
+            "{SOURCE}\nconst start = performance.now();\ncheckCommand(process.argv[1]);\nprocess.stdout.write(String(performance.now() - start));"
+        );
+        let output = std::process::Command::new("node")
+            .args(["--input-type=module", "-e", &script, command])
+            .output()
+            .expect("node runs the guard");
+        String::from_utf8_lossy(&output.stdout)
+            .trim()
+            .parse()
+            .expect("node prints the elapsed time")
+    }
+}
