@@ -216,15 +216,15 @@ async fn answer(
         ))?;
     if input.values.as_ref().is_some_and(|values| {
         values.len() != request.names.len()
-            || !request.names.iter().all(|n| {
-                values.get(n).is_some_and(|v| {
-                    !v.is_empty() && v.len() <= VALUE_LIMIT && !v.contains(['\n', '\r', '\0'])
-                })
-            })
+            || !request
+                .names
+                .iter()
+                .all(|n| values.get(n).is_some_and(|v| answer_fits(v)))
     }) {
         return Err(Failure(
             StatusCode::CONFLICT,
-            "Answer every requested variable with one non-empty line".into(),
+            "Answer every requested variable with one non-empty line that a dotenv file can hold"
+                .into(),
         ));
     }
     let _ = pending.remove(&id).unwrap().reply.send(input.values);
@@ -383,6 +383,14 @@ fn check_file(content: &str, names: &[String]) -> io::Result<()> {
         }
     }
     Ok(())
+}
+
+/// A value the route accepts: the CLI must be able to write it, or the answer would be consumed and lost (F71).
+fn answer_fits(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= VALUE_LIMIT
+        && !value.contains(['\n', '\r', '\0'])
+        && encode(value).is_ok()
 }
 
 fn encode(value: &str) -> io::Result<String> {
