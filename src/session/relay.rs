@@ -287,6 +287,39 @@ pub(super) fn report_pending(local: &Local) -> bool {
     next_report(local).is_some() && failing.is_none_or(|since| since.elapsed() < GIVE_UP_AWAKE)
 }
 
+/// Taken by the website, or refused with 410 (the parent is gone or archived): such a report is never sent again.
+/// Any other failure is kept and retried (api.md), except a 400 or 403 that repeats `MAX_REFUSALS` times in a row.
+fn settled<T>(sent: &Result<T, ApiError>) -> bool {
+    match sent {
+        Ok(_) | Err(ApiError::Status(410, _)) => true,
+        Err(_) => false,
+    }
+}
+
+/// Refusals with 400 or 403 for one report before it is dropped, so one bad report cannot hold back the others.
+const MAX_REFUSALS: u32 = 10;
+
+/// Counts the refusals of `turn` in a row. Returns the status once the report has been refused `MAX_REFUSALS` times.
+fn refused_for_good<T>(
+    refused: &mut Option<(String, u32)>,
+    turn: &str,
+    sent: &Result<T, ApiError>,
+) -> Option<u16> {
+    let status = match sent {
+        Err(ApiError::Status(status @ (400 | 403), _)) => *status,
+        _ => {
+            *refused = None;
+            return None;
+        }
+    };
+    let count = match refused {
+        Some((last, count)) if last == turn => *count + 1,
+        _ => 1,
+    };
+    *refused = Some((turn.to_owned(), count));
+    (count >= MAX_REFUSALS).then_some(status)
+}
+
 impl Manager {
     /// Reports each finished turn of a child whose parent runs in another sandbox, until the website takes it.
     /// One task for this Core's life: a report that fails waits and retries, so later ones keep their order.
@@ -298,6 +331,7 @@ impl Manager {
         let mut changed = local.changed.subscribe();
         tokio::spawn(async move {
             let mut wait = Duration::from_secs(5);
+            let mut refused = None;
             while !manager.is_stopping() {
                 let due = next_report(&manager.local.lock().unwrap());
                 let Some((session, turn, body)) = due else {
@@ -306,14 +340,29 @@ impl Manager {
                     }
                     continue;
                 };
-                // Taken, or refused for good (410: the parent is gone or archived): never sent again.
-                let done = match api.post_waking("relay", &body).await {
-                    Ok(_) | Err(ApiError::Status(400 | 403 | 410, _)) => manager
-                        .note(&session, "parent_report", json!({"request_id":turn}))
+                let sent = api.post_waking("relay", &body).await;
+                // Counted per session and turn: another session's report with the same request ID starts at 1.
+                let dropped = refused_for_good(&mut refused, &format!("{session}/{turn}"), &sent);
+                let done = match dropped {
+                    Some(status) => manager
+                        .note(
+                            &session,
+                            "parent_report",
+                            json!({"request_id":turn,"dropped":status}),
+                        )
                         .is_ok(),
-                    Err(_) => false,
+                    None => {
+                        settled(&sent)
+                            && manager
+                                .note(&session, "parent_report", json!({"request_id":turn}))
+                                .is_ok()
+                    }
                 };
-                failed(!done);
+                if dropped.is_some() {
+                    refused = None;
+                }
+                // A drop is not a success: the clock keeps running until a report is taken, or the give-up applies.
+                failed(!(done && dropped.is_none()));
                 if done {
                     wait = Duration::from_secs(5);
                     continue;
@@ -439,6 +488,62 @@ mod tests {
         let (status, Json(body)) = receive(State(m.clone()), Path("cr_p".into()), Json(too_long))
             .await
             .unwrap_err();
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["code"], "request_rejected");
+    }
+
+    #[test]
+    fn only_a_410_refusal_ends_a_report_retry() {
+        assert!(settled::<()>(&Ok(())));
+        assert!(settled::<()>(&Err(ApiError::Status(410, String::new()))));
+        assert!(!settled::<()>(&Err(ApiError::Status(400, String::new()))));
+        assert!(!settled::<()>(&Err(ApiError::Status(403, String::new()))));
+        assert!(!settled::<()>(&Err(ApiError::Network(String::new()))));
+    }
+
+    #[test]
+    fn a_report_refused_for_good_is_dropped_after_a_bound() {
+        let refusal: Result<(), ApiError> = Err(ApiError::Status(400, String::new()));
+        let mut refused = None;
+        for _ in 1..MAX_REFUSALS {
+            assert_eq!(refused_for_good(&mut refused, "t1", &refusal), None);
+        }
+        assert_eq!(refused_for_good(&mut refused, "t1", &refusal), Some(400));
+        let mut refused = None;
+        assert_eq!(refused_for_good(&mut refused, "t1", &refusal), None);
+        let server: Result<(), ApiError> = Err(ApiError::Status(500, String::new()));
+        assert_eq!(refused_for_good(&mut refused, "t1", &server), None);
+        assert!(refused.is_none());
+        assert_eq!(refused_for_good(&mut refused, "t1", &refusal), None);
+        assert_eq!(refused_for_good(&mut refused, "t2", &refusal), None);
+    }
+
+    #[test]
+    fn another_sessions_refusal_with_the_same_turn_starts_its_own_count() {
+        let refusal: Result<(), ApiError> = Err(ApiError::Status(403, String::new()));
+        let mut refused = None;
+        for _ in 1..MAX_REFUSALS {
+            assert_eq!(refused_for_good(&mut refused, "cr_a/t1", &refusal), None);
+        }
+        assert_eq!(refused_for_good(&mut refused, "cr_b/t1", &refusal), None);
+        assert_eq!(refused_for_good(&mut refused, "cr_a/t1", &refusal), None);
+    }
+
+    #[tokio::test]
+    async fn a_relay_stop_refused_for_a_pending_close_carries_its_code() {
+        let m = manager("relay-stop-close");
+        session(&m, "cr_p", false);
+        let close = json!({"request_id":"c1","command":"close","input":{},"state":"accepted"});
+        m.note("cr_p", "receipt", close).unwrap();
+        let refused = receive(
+            State(m.clone()),
+            Path("cr_p".into()),
+            Json(relayed("s1", "stop")),
+        )
+        .await;
+        let Err((status, Json(body))) = refused else {
+            panic!("a stop during a pending close is refused");
+        };
         assert_eq!(status, StatusCode::CONFLICT);
         assert_eq!(body["code"], "request_rejected");
     }
