@@ -1275,6 +1275,13 @@ impl Manager {
                 && !session.compacting
                 && session.queue.is_empty();
             if command == "interrupt"
+                && starting_turn_blocks_interrupt(session.harness, &session.state)
+            {
+                return Err(Error::Conflict(
+                    "the turn is still starting; try the interrupt again in a moment",
+                ));
+            }
+            if command == "interrupt"
                 && (!session.ready
                     || handle.is_none()
                     || session.current_request.as_deref() != input["target_request_id"].as_str())
@@ -2429,6 +2436,13 @@ fn delivery_state<T>(sent: bool, result: &io::Result<T>) -> &'static str {
     }
 }
 
+/// Codex has no turn to stop until turn/start answers, so an interrupt during `starting_turn` would be refused and
+/// the turn would run on. OpenClaw's prepare and Gateway refresh can take minutes before the prompt is sent, so the
+/// interrupt waits for it too. The other ACP harnesses can interrupt that phase.
+fn starting_turn_blocks_interrupt(harness: runtime::Kind, state: &str) -> bool {
+    matches!(harness, runtime::Kind::Codex | runtime::Kind::OpenClaw) && state == "starting_turn"
+}
+
 /// Last lines of harness stderr, shown under unexpected exits so the cause is visible in chat (ADR 0123).
 fn stderr_tail(bytes: &[u8]) -> String {
     let text = String::from_utf8_lossy(&bytes[bytes.len().saturating_sub(2000)..]);
@@ -2437,4 +2451,142 @@ fn stderr_tail(bytes: &[u8]) -> String {
         .filter(|line| !line.trim().is_empty())
         .collect();
     lines[lines.len().saturating_sub(20)..].join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    /// A Core over a scratch state directory, with no website reachable.
+    fn manager(name: &str) -> Arc<Manager> {
+        let root =
+            std::env::temp_dir().join(format!("cloudroom-mod-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        Manager::open(crate::config::Config {
+            listen: "127.0.0.1:0".parse().unwrap(),
+            token: String::new(),
+            state_dir: root.join("state"),
+            repository: root.clone(),
+            api_url: Some("http://127.0.0.1:1".into()),
+            store: "test".into(),
+            instance: None,
+            account_home: root.clone(),
+            default_harness: runtime::Kind::Claude,
+            harnesses: Default::default(),
+            storage: None,
+            rpc_timeout: Duration::from_secs(30),
+            diagnostic_upload: Duration::from_secs(1),
+        })
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_pending_close_is_visible_until_it_settles() {
+        let m = manager("close-pending");
+        let start = json!({"request_id":"start","command":"start","input":{"harness":"claude-code"},"state":"completed"});
+        m.note("cr_p", "receipt", start).unwrap();
+        m.note(
+            "cr_p",
+            "receipt",
+            json!({"request_id":"c1","command":"close","input":{},"state":"accepted"}),
+        )
+        .unwrap();
+        assert!(m.close_pending("cr_p"));
+        m.note(
+            "cr_p",
+            "receipt",
+            json!({"request_id":"c1","command":"close","input":{},"state":"completed"}),
+        )
+        .unwrap();
+        assert!(!m.close_pending("cr_p"));
+        assert!(!m.close_pending("cr_none"));
+    }
+
+    #[test]
+    fn a_restart_settles_a_cancelled_prompt_as_cancelled() {
+        let dir =
+            std::env::temp_dir().join(format!("cloudroom-restart-cancel-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut local = Local::open(&dir).unwrap();
+        let start = json!({"request_id":"start","command":"start","input":{"harness":"claude-code"},"state":"completed"});
+        local.append("cr_p", "receipt", start, None).unwrap();
+        let prompt =
+            json!({"request_id":"p1","command":"prompt","input":{"text":"x"},"state":"accepted"});
+        local.append("cr_p", "receipt", prompt, None).unwrap();
+        // A cancel whose target receipt was never settled, as before the cancel settled it.
+        let cancel = json!({"request_id":"c1","command":"cancel","input":{"target_request_id":"p1"},"state":"completed"});
+        local.append("cr_p", "receipt", cancel, None).unwrap();
+        let session = &local.sessions["cr_p"];
+        let receipt = session.receipts["p1"].clone();
+        assert_eq!(restart_state(session, &receipt, true), Some("cancelled"));
+        assert_eq!(restart_state(session, &receipt, false), Some("cancelled"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_pending_session_can_be_closed_and_its_start_settles() {
+        let m = manager("pending-close");
+        let start = json!({"request_id":"start","command":"start","input":{"harness":"claude-code"},"state":"accepted"});
+        m.note("cr_p", "receipt", start).unwrap();
+        m.note("cr_p", "state", json!({"state":"pending"})).unwrap();
+        m.command("cr_p", "close".into(), "close", json!({}))
+            .unwrap();
+        assert_eq!(m.receipt("cr_p", "close").unwrap().state, "completed");
+        let start = m.receipt("cr_p", "start").unwrap();
+        assert_eq!(start.state, "interrupted");
+        assert_eq!(start.error.as_deref(), Some("closed before start"));
+    }
+
+    #[tokio::test]
+    async fn a_session_closed_while_resuming_stays_closed_when_relaunch_runs() {
+        let m = manager("relaunch-closed");
+        let start = json!({"request_id":"start","command":"start","input":{"harness":"claude-code"},"state":"completed"});
+        m.note("cr_r", "receipt", start).unwrap();
+        m.note("cr_r", "state", json!({"state":"resuming"}))
+            .unwrap();
+        m.command("cr_r", "close".into(), "close", json!({}))
+            .unwrap();
+        assert_eq!(m.receipt("cr_r", "close").unwrap().state, "completed");
+        m.clone().relaunch("cr_r".into()).await;
+        let local = m.local.lock().unwrap();
+        assert_eq!(local.sessions["cr_r"].state, "closed");
+    }
+
+    #[test]
+    fn a_prompt_that_was_not_sent_settles_failed_without_a_stop() {
+        let refused: io::Result<Vec<Value>> = Err(io::Error::other("Gateway refresh timed out"));
+        assert_eq!(delivery_state(false, &refused), "failed");
+        let sent_and_lost: io::Result<Vec<Value>> = Err(io::Error::other("connection lost"));
+        assert_eq!(delivery_state(true, &sent_and_lost), "unknown");
+        let rejected: io::Result<Vec<Value>> =
+            Err(io::Error::new(io::ErrorKind::InvalidInput, "bad prompt"));
+        assert_eq!(delivery_state(true, &rejected), "failed");
+        let delivered: io::Result<Vec<Value>> = Ok(Vec::new());
+        assert_eq!(delivery_state(true, &delivered), "delivered");
+    }
+
+    #[test]
+    fn codex_and_openclaw_refuse_an_interrupt_while_the_turn_starts() {
+        assert!(starting_turn_blocks_interrupt(
+            runtime::Kind::Codex,
+            "starting_turn"
+        ));
+        assert!(starting_turn_blocks_interrupt(
+            runtime::Kind::OpenClaw,
+            "starting_turn"
+        ));
+        assert!(!starting_turn_blocks_interrupt(
+            runtime::Kind::OpenClaw,
+            "running"
+        ));
+        assert!(!starting_turn_blocks_interrupt(
+            runtime::Kind::Cursor,
+            "starting_turn"
+        ));
+        assert!(!starting_turn_blocks_interrupt(
+            runtime::Kind::Codex,
+            "busy"
+        ));
+    }
 }

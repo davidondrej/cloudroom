@@ -811,6 +811,13 @@ class RecoveryTests(unittest.TestCase):
         self.wait(lambda: self.status()["receipts"]["active"]["state"] != "accepted", "restart settled the active turn")
         self.assertEqual(self.service.request("GET", "/v1/sessions/cr_seed/requests/queued")["state"], "cancelled")
 
+    def test_interrupt_during_a_starting_turn_is_refused_rather_than_dropped(self):
+        self.seed(); self.start(); self.ready()
+        self.prompt("starting", "no-reply")
+        self.wait(lambda: (self.repo / "no-reply").exists(), "unanswered turn start")
+        rejected = self.service.request("POST", "/v1/sessions/cr_seed/interrupt", {"request_id": "stop", "target_request_id": "starting"}, 409)
+        self.assertIn("starting", rejected["error"])
+
     def test_close_outlasting_the_grace_settles_as_unknown_and_stops_refusing_commands(self):
         self.seed(); self.start(); self.ready()
         (self.repo / "stuck-exit").touch()
