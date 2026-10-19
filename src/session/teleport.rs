@@ -251,11 +251,31 @@ impl Manager {
         format!("cr_teleport_{id}")
     }
 
+    /// A session takes a transfer's ID only through its own start receipt; any other session with
+    /// that ID (an ordinary `teleport_<id>` request, say) is not the transfer's.
+    fn transfer_owns(session: &super::Session, id: &str) -> bool {
+        session.receipts.get(id).is_some_and(|receipt| {
+            receipt.command == "start" && receipt.input["teleport"].as_str() == Some(id)
+        })
+    }
+
+    fn foreign_session(&self, id: &str) -> bool {
+        self.local
+            .lock()
+            .unwrap()
+            .sessions
+            .get(&Self::transfer_session(id))
+            .is_some_and(|session| !Self::transfer_owns(session, id))
+    }
+
     fn transfer_view(&self, transfer: &Transfer) -> Result<Value> {
         let id = &transfer.manifest.request_id;
         let session_id = Self::transfer_session(id);
         let local = self.local.lock().unwrap();
-        let session = local.sessions.get(&session_id);
+        let session = local
+            .sessions
+            .get(&session_id)
+            .filter(|session| Self::transfer_owns(session, id));
         let started = session.is_some();
         let output = session.is_some_and(|s| s.teleport_output);
         let needs_notice = transfer
@@ -388,6 +408,9 @@ impl Manager {
             }
             Err(Error::NotFound) => {}
             Err(error) => return Err(error),
+        }
+        if self.foreign_session(&manifest.request_id) {
+            return Err(Error::Conflict("session ID belongs to another session"));
         }
         if self.is_stopping() || !self.recording_available() {
             return Err(Error::Storage(
@@ -651,7 +674,8 @@ impl Manager {
                 .lock()
                 .unwrap()
                 .sessions
-                .contains_key(&session_id)
+                .get(&session_id)
+                .is_some_and(|session| Self::transfer_owns(session, id))
         {
             let mut local = self.local.lock().unwrap();
             let request = format!("teleport_ready_{id}");
@@ -741,7 +765,8 @@ impl Manager {
             .lock()
             .unwrap()
             .sessions
-            .contains_key(&Self::transfer_session(id))
+            .get(&Self::transfer_session(id))
+            .is_some_and(|session| Self::transfer_owns(session, id))
         {
             return Err(Error::Conflict(
                 "cloud execution already owns this transfer; use Stop",
@@ -771,12 +796,16 @@ impl Manager {
         let _guard = lock.lock().await;
         let transfer = self.transfer_read(id)?;
         let session_id = Self::transfer_session(id);
+        if self.foreign_session(id) {
+            return Err(Error::Conflict("session ID belongs to another session"));
+        }
         if self
             .local
             .lock()
             .unwrap()
             .sessions
-            .contains_key(&session_id)
+            .get(&session_id)
+            .is_some_and(|session| Self::transfer_owns(session, id))
         {
             self.teleport_files_ready(&transfer)?;
             if let Some(request) = retry_request {
@@ -829,6 +858,13 @@ impl Manager {
                 return Err(Error::Conflict(
                     "native conversation already belongs to a cloud session",
                 ));
+            }
+            if local
+                .sessions
+                .get(&session_id)
+                .is_some_and(|session| !Self::transfer_owns(session, id))
+            {
+                return Err(Error::Conflict("session ID belongs to another session"));
             }
             // This single fsynced record includes all queued work and the ownership decision.
             local.append(&session_id, "teleport", json!({"receipt":receipt,"prompts":prompts,"native_id":manifest.native_id,"native_path":native_path}), None)?;
