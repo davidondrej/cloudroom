@@ -240,18 +240,31 @@ fn api_url() -> io::Result<Option<String>> {
             ))
         };
     };
-    let loopback = ["http://127.0.0.1:", "http://localhost:", "http://[::1]:"];
-    let valid = (url.starts_with("https://")
-        || loopback.iter().any(|prefix| url.starts_with(prefix)))
-        && !url.ends_with('/')
-        && !url.contains(['?', '#', '@'])
-        && url.bytes().all(|b| b.is_ascii_graphic());
-    if !valid {
+    if !valid_api_url(&url) {
         return Err(io::Error::other(
-            "CLOUDROOM_API_URL must be an https:// URL without a trailing slash",
+            "CLOUDROOM_API_URL must be an https:// URL, or an http:// loopback URL with a port, without a trailing slash",
         ));
     }
     Ok(Some(url))
+}
+
+fn valid_api_url(url: &str) -> bool {
+    // A loopback URL needs a real port (1-65535) before any path.
+    let loopback_port = ["http://127.0.0.1:", "http://localhost:", "http://[::1]:"]
+        .iter()
+        .find_map(|prefix| url.strip_prefix(prefix))
+        .is_some_and(|rest| {
+            rest.split('/')
+                .next()
+                // Digits only: u16::from_str also accepts a leading '+'.
+                .filter(|port| !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()))
+                .and_then(|port| port.parse::<u16>().ok())
+                .is_some_and(|port| port > 0)
+        });
+    (url.starts_with("https://") || loopback_port)
+        && !url.ends_with('/')
+        && !url.contains(['?', '#', '@'])
+        && url.bytes().all(|b| b.is_ascii_graphic())
 }
 
 fn required(name: &str) -> io::Result<String> {
@@ -259,4 +272,25 @@ fn required(name: &str) -> io::Result<String> {
         .ok()
         .filter(|s| !s.is_empty())
         .ok_or_else(|| io::Error::other(format!("{name} is required")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::valid_api_url;
+
+    #[test]
+    fn api_url_needs_a_port_on_loopback() {
+        assert!(valid_api_url("http://127.0.0.1:9840"));
+        assert!(valid_api_url("http://localhost:8080/api"));
+        assert!(valid_api_url("https://example.invalid"));
+        assert!(!valid_api_url("http://127.0.0.1:"));
+        assert!(!valid_api_url("http://127.0.0.1:/api"));
+        assert!(!valid_api_url("http://127.0.0.1:0"));
+        assert!(!valid_api_url("http://127.0.0.1:70000"));
+        assert!(
+            !valid_api_url("http://127.0.0.1:+80"),
+            "u16 parsing accepts a leading plus"
+        );
+        assert!(!valid_api_url("http://example.invalid"));
+    }
 }
