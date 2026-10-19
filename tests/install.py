@@ -264,5 +264,24 @@ class AgentHomeTests(unittest.TestCase):
         self.setup.check(self.shell, self.agent)
 
 
+class SandboxStartTests(unittest.TestCase):
+    def test_storage_json_spacing_selects_container_mode_and_cache(self):
+        script = Path(__file__).resolve().parents[1] / 'install/sandbox-start.sh'
+        lines = [line for line in script.read_text().splitlines() if line.startswith(('container=', 'cache='))]
+        self.assertEqual(len(lines), 2)
+        cases = [
+            ('{"agent_uid": 1, "cache_dir": "/var/cache/cloudroom", "cgroup_root": null}', '1', '/var/cache/cloudroom'),
+            ('{"cgroup_root":null,"cache_dir":"/var/cache/cloudroom"}', '1', '/var/cache/cloudroom'),
+            ('{"agent_uid": 1, "cache_dir": "/var/cache/cloudroom", "cgroup_root": "/sys/fs/cgroup/agents"}', '', '/var/cache/cloudroom'),
+        ]
+        with tempfile.TemporaryDirectory() as config:
+            for text, container, cache in cases:
+                with self.subTest(text=text):
+                    Path(config, 'storage.json').write_text(text)
+                    shell = '\n'.join(lines) + '\nprintf "%s|%s\\n" "$container" "$cache"\n'
+                    result = subprocess.run(['bash', '-c', shell], env={'PATH': os.environ['PATH'], 'config': config}, capture_output=True, text=True, check=True)
+                    self.assertEqual(result.stdout.strip(), f'{container}|{cache}')
+
+
 if __name__ == '__main__':
     unittest.main()

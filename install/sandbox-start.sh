@@ -31,8 +31,8 @@ for file in "$config/image.env" "$config/core.env"; do
 done
 settings+=("CLOUDROOM_STORAGE_POLICY=$config/storage.json")
 
-container=; grep -q '"cgroup_root":null' "$config/storage.json" && container=1
-cache=$(sed -n 's/.*"cache_dir":"\([^"]*\)".*/\1/p' "$config/storage.json")
+container=; grep -Eq '"cgroup_root"[[:space:]]*:[[:space:]]*null' "$config/storage.json" && container=1
+cache=$(sed -n 's/.*"cache_dir"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$config/storage.json")
 # The core and its agent groups live in one delegated cgroup, as under systemd's Delegate=yes.
 [ -n "$container" ] || mkdir -p "$cgroup/agents"
 install -d -m 0711 -o cloudroom -g cloudroom /run/cloudroom
