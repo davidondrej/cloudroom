@@ -635,7 +635,7 @@ async fn attach(
         None if input.since > 0 => {
             return refuse(
                 StatusCode::GONE,
-                "This terminal's shell ended when its cloud sandbox restarted. Open a new terminal.",
+                "This terminal has ended: it was closed, or its cloud sandbox restarted. Open a new terminal.",
             );
         }
         // A shell started under the hold would be killed by the stop that follows it, so it is refused here.
