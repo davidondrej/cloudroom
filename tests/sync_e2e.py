@@ -146,6 +146,22 @@ class SyncTests(unittest.TestCase):
         self.assertEqual(self.sync()['state'],'synced')
         self.assertFalse((self.local/'file').exists(), 'ordinary file deletions must still sync')
 
+    def test_damaged_sync_state_does_not_stop_the_core(self):
+        self.prepare(); self.sync()
+        self.assertTrue((self.state/'sync.json').exists())
+        self.service.stop()
+        (self.state/'sync.json').write_text('{not json')
+        self.start()
+        self.assertEqual(self.service.request('GET', '/v1/ready'), {'ready': True})
+        kept = list(self.state.glob('sync.json.damaged-*'))
+        self.assertEqual([path.read_text() for path in kept], ['{not json'])
+        revision = self.service.request('GET', '/v1/settings')['revision']
+        self.assertNotEqual(revision, 0)
+        self.assertTrue(json.loads((self.state/'sync.json').read_text())['initialized_roots'])
+        self.service.stop()
+        self.start()
+        self.assertEqual(self.service.request('GET', '/v1/settings')['revision'], revision)
+
     def test_authentication_device_and_path_boundaries(self):
         self.prepare(); self.sync()
         view = self.service.request('GET', '/v1/settings')

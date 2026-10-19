@@ -66,10 +66,10 @@ type Result<T> = std::result::Result<T, Failure>;
 pub struct Failure(StatusCode, String);
 impl IntoResponse for Failure {
     fn into_response(self) -> Response {
-        let base = if self.0 == StatusCode::CONFLICT {
-            "sync conflict; originals preserved"
-        } else {
-            "sync unavailable; check setup, paths, and storage"
+        let base = match self.0 {
+            StatusCode::CONFLICT => "sync conflict; originals preserved",
+            StatusCode::BAD_REQUEST => "invalid sync request",
+            _ => "sync unavailable; check setup, paths, and storage",
         };
         let error = if self.1.is_empty() {
             base.to_owned()
@@ -102,19 +102,49 @@ fn conflict() -> Failure {
 impl Sync {
     pub fn open(config: &Config) -> io::Result<Self> {
         let path = config.state_dir.join("sync.json");
+        let mut recovered = false;
         let settings = match fs::read(&path) {
-            Ok(bytes) => serde_json::from_slice(&bytes)?,
+            Ok(bytes) => match serde_json::from_slice(&bytes) {
+                Ok(settings) => settings,
+                Err(error) => {
+                    // A damaged file cannot say which roots were initialized, so use the conservative legacy set.
+                    // The revision starts at the current unix time, above any revision issued before, and the
+                    // damaged file is kept for inspection instead of being overwritten by the next save.
+                    let now = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .map_or(0, |elapsed| elapsed.as_secs());
+                    let kept = path.with_file_name(format!("sync.json.damaged-{now}"));
+                    eprintln!(
+                        "sync state is damaged; keeping it as {} and starting unpaired: {error}",
+                        kept.display()
+                    );
+                    if let Err(error) = fs::rename(&path, &kept) {
+                        eprintln!("damaged sync state could not be kept: {error}");
+                    }
+                    recovered = true;
+                    Settings {
+                        revision: now,
+                        initialized_roots: existing_roots(),
+                        ..Settings::default()
+                    }
+                }
+            },
             Err(e) if e.kind() == io::ErrorKind::NotFound => Settings::default(),
             Err(e) => return Err(e),
         };
-        Ok(Self {
+        let sync = Self {
             config: config.clone(),
             path,
             settings: Mutex::new(settings),
             gate: tokio::sync::Mutex::new(()),
             scans: Mutex::new(BTreeMap::new()),
             reports: Mutex::new(BTreeMap::new()),
-        })
+        };
+        // The recovered settings must be on disk, or the next start falls back to revision 0 and no initialized roots.
+        if recovered && let Err(error) = sync.save(&sync.settings.lock().unwrap()) {
+            eprintln!("recovered sync state could not be saved: {error}");
+        }
+        Ok(sync)
     }
     fn save(&self, settings: &Settings) -> io::Result<()> {
         use std::io::Write;
