@@ -260,7 +260,8 @@ impl Workspaces {
     }
 
     pub async fn checkout(&self, workspace: &Workspace) -> io::Result<serde_json::Value> {
-        if !workspace.path.is_dir() {
+        // Without its own .git, git would report an enclosing repository's branch.
+        if !workspace.path.join(".git").exists() {
             return Ok(serde_json::json!({"path":workspace.path,"branch":null,"head":null}));
         }
         let git = async |args: &[&str]| -> io::Result<Option<String>> {

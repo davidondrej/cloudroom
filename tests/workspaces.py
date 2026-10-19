@@ -206,6 +206,15 @@ class WorkspaceTests(unittest.TestCase):
         self.assertEqual((path/'.env').read_text(),'SYNTHETIC=keep')
         self.assertIsNotNone(self.service.request('GET','/v1/sessions/cr_dirty/workspace')['head'])
 
+    def test_folder_without_git_does_not_report_the_parent_branch(self):
+        parent = self.state.resolve()/'code'; parent.mkdir(parents=True)
+        run('git','init','-q','-b','parent-branch',str(parent))
+        path = parent/'proj'; path.mkdir()
+        self.seed('nogit', path); self.start()
+        until(lambda:self.service.session('cr_nogit')['receipts']['first']['state']=='completed','folder without git',10)
+        view = self.service.request('GET','/v1/sessions/cr_nogit/workspace')
+        self.assertEqual((view['branch'], view['head']), (None, None))
+
     def test_deleted_workspace_folder_reports_null_metadata(self):
         path = self.state.resolve()/'code/gone'; path.mkdir(parents=True)
         self.seed('gone', path); self.start()
