@@ -4,6 +4,7 @@ import contextlib
 from http.server import BaseHTTPRequestHandler
 import http.client
 import importlib.util
+import json
 from pathlib import Path
 import socketserver
 import tempfile
@@ -109,6 +110,20 @@ class PreviewTests(unittest.TestCase):
             self.assertEqual(self.request()[2], b'ok')
             self.assertLess(time.monotonic() - started, 2)
             self.assertEqual(slow.result()[0], 405)
+
+    def test_sign_in_after_sign_out_mints_a_new_device(self):
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory) / 'preview'
+            connection = Path(directory) / 'connection.json'
+            connection.write_text(json.dumps({'url': 'https://example.test', 'account': {'id': '6f1c2d3e-4a5b-4c6d-8e7f-0a1b2c3d4e5f'}}))
+            connection.chmod(0o600)
+            preview.configure(folder, connection, False, False)
+            first = preview.private_json(folder / 'config.json')['device']
+            config = preview.private_json(folder / 'config.json')
+            config['revoked'] = True
+            preview.save(folder / 'config.json', config)
+            preview.configure(folder, connection, False, False)
+            self.assertNotEqual(preview.private_json(folder / 'config.json')['device'], first)
 
 
 if __name__ == '__main__':

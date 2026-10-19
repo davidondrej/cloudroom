@@ -229,20 +229,6 @@ fn harness_accepts_reasoning(kind: runtime::Kind, level: &str) -> bool {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn each_harness_checks_reasoning_against_its_own_levels() {
-        assert!(harness_accepts_reasoning(runtime::Kind::Cursor, "max"));
-        assert!(!harness_accepts_reasoning(runtime::Kind::Cursor, "minimal"));
-        assert!(harness_accepts_reasoning(runtime::Kind::Pi, "max"));
-        assert!(harness_accepts_reasoning(runtime::Kind::Fx, "minimal"));
-        assert!(!harness_accepts_reasoning(runtime::Kind::Fx, "max"));
-    }
-}
-
 /// A closed session gave its conversation back (Teleport to Local).
 fn native_in_use(local: &super::Local, native_id: &str) -> bool {
     local.sessions.values().any(|s| {
@@ -979,5 +965,21 @@ impl Manager {
             error: None,
         })
         .collect())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn each_harness_checks_reasoning_against_its_own_levels() {
+        assert!(harness_accepts_reasoning(runtime::Kind::Cursor, "max"));
+        assert!(!harness_accepts_reasoning(runtime::Kind::Cursor, "minimal"));
+        assert!(harness_accepts_reasoning(runtime::Kind::Pi, "max"));
+        assert!(harness_accepts_reasoning(runtime::Kind::Fx, "minimal"));
+        assert!(!harness_accepts_reasoning(runtime::Kind::Fx, "max"));
+        assert!(harness_accepts_reasoning(runtime::Kind::OpenClaw, "max"));
+        assert!(!harness_accepts_reasoning(runtime::Kind::OpenClaw, "ultra"));
     }
 }

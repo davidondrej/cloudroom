@@ -786,6 +786,38 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(self.status()["state"], "closed")
         self.assertEqual(self.status()["queue"], [])
 
+    def test_revoked_mac_loses_its_job_stream_and_cannot_pair_again(self):
+        previews = self.state / 'previews'
+        previews.mkdir(mode=0o700)
+        (self.root / 'run').mkdir()
+        setup = previews / 'setup.json'
+        setup.write_text(json.dumps({'socket': str(self.root / 'run' / 'preview.sock'), 'host': None,
+                                     'agent_uid': os.getuid(), 'tunnel': True}))
+        setup.chmod(0o600)
+        self.start()
+        device, key = '0123456789abcdef0123456789abcdef', 'ssh-ed25519 ' + 'A' * 68
+        self.assertEqual(self.service.request('POST', '/v1/previews/device', {'device': device, 'public_key': key}, 200)['tunnel'], True)
+        host, port = self.service.address.rsplit(':', 1)
+        sock = socket.create_connection((host, int(port)), timeout=15)
+        sock.sendall((f'GET /v1/mac/jobs?device={device} HTTP/1.1\r\nHost: core\r\nAccept: text/event-stream\r\n'
+                      f'Authorization: Bearer {self.service.env["CLOUDROOM_TOKEN"]}\r\n\r\n').encode())
+        head = b''
+        while b'\r\n\r\n' not in head:
+            head += sock.recv(4096)
+        self.assertIn(b' 200 ', head.split(b'\r\n', 1)[0])
+        self.service.request('DELETE', f'/v1/previews/device/{device}', None, 200)
+        sock.settimeout(10)
+        tail = b''
+        while not tail.endswith(b'0\r\n\r\n'):
+            chunk = sock.recv(4096)
+            if not chunk:
+                break
+            tail = (tail + chunk)[-16:]
+        self.assertTrue(tail.endswith(b'0\r\n\r\n'), 'the job stream ends at revocation')
+        sock.close()
+        self.service.request('POST', '/v1/mac/results/job1', {'device': device, 'state': 'done', 'code': 0}, 403)
+        self.service.request('POST', '/v1/previews/device', {'device': device, 'public_key': key}, 403)
+
     def test_start_accepts_the_legacy_workspace_id_that_sessions_report(self):
         self.seed(); self.start(); self.ready()
         sid = self.service.request("POST", "/v1/sessions", {"request_id": "legacy-id", "workspace": "legacy"}, 202)["session_id"]

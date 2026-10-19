@@ -1,5 +1,8 @@
 //! Two-way Mac ↔ VM access (ADR 0113). VM agents reach the paired Mac through its helper; the Mac runs commands on the VM.
-use crate::{preview::Peer, session::Manager};
+use crate::{
+    preview::{Peer, lower_device},
+    session::Manager,
+};
 use axum::{
     Json, Router,
     body::Bytes,
@@ -16,21 +19,25 @@ use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
     convert::Infallible,
-    fs, io,
+    fs,
+    future::Future,
+    io,
     os::unix::{fs::FileTypeExt, fs::PermissionsExt, net::UnixStream as StdUnixStream},
+    pin::Pin,
     process::Stdio,
     sync::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
     },
+    task::{Context, Poll},
     time::{Duration, Instant},
 };
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
     net::{UnixListener, UnixStream},
-    sync::{mpsc, watch},
+    sync::{mpsc, oneshot, watch},
 };
-use tokio_stream::wrappers::ReceiverStream;
+use tokio_stream::{Stream, wrappers::ReceiverStream};
 
 mod transfer;
 
@@ -66,6 +73,7 @@ pub struct Run {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Report {
+    #[serde(deserialize_with = "lower_device")]
     device: String,
     state: String,
     code: Option<i32>,
@@ -81,6 +89,7 @@ pub struct Report {
 }
 #[derive(Deserialize)]
 pub struct Device {
+    #[serde(deserialize_with = "lower_device")]
     device: String,
 }
 
@@ -100,9 +109,24 @@ struct Helper {
     stale: bool,
 }
 
+/// The helper a job goes to: its generation, device and job channel.
+type Current = (
+    u64,
+    String,
+    mpsc::Sender<std::result::Result<Event, Infallible>>,
+);
+
+/// An open job stream. Dropping its sender ends the stream; a newer connection does not end it.
+struct OpenStream {
+    generation: u64,
+    device: String,
+    _ended: oneshot::Sender<()>,
+}
+
 pub struct Mac {
     jobs: Mutex<BTreeMap<String, Job>>,
     helper: Mutex<Option<Helper>>,
+    streams: Mutex<Vec<OpenStream>>,
     changed: watch::Sender<u64>,
     next: AtomicU64,
     since: Mutex<Instant>,
@@ -112,6 +136,7 @@ impl Default for Mac {
         Self {
             jobs: Mutex::default(),
             helper: Mutex::default(),
+            streams: Mutex::default(),
             changed: watch::channel(0).0,
             next: AtomicU64::new(0),
             since: Mutex::new(Instant::now()),
@@ -228,17 +253,36 @@ async fn stream(
         ));
     }
     let (events, receiver) = mpsc::channel(64);
+    let (ended, revoked) = oneshot::channel();
     let generation = m.mac.next.fetch_add(1, Ordering::Relaxed);
+    m.mac.streams.lock().unwrap().push(OpenStream {
+        generation,
+        device: input.device.clone(),
+        _ended: ended,
+    });
     *m.mac.helper.lock().unwrap() = Some(Helper {
         generation,
-        device: input.device,
+        device: input.device.clone(),
         events: events.clone(),
         stale: false,
     });
+    // A revoke removes the device before it unpairs, so one that ran after the check above is seen here.
+    if !m.previews.paired(&input.device) {
+        m.mac.unpair(&input.device);
+        return Err(Failure(
+            StatusCode::FORBIDDEN,
+            "This Mac is not paired with the VM".into(),
+        ));
+    }
     m.mac.touch();
     let mac = m.clone();
     tokio::spawn(async move {
         events.closed().await;
+        mac.mac
+            .streams
+            .lock()
+            .unwrap()
+            .retain(|open| open.generation != generation);
         let mut helper = mac.mac.helper.lock().unwrap();
         if helper.as_ref().is_some_and(|h| h.generation == generation) {
             *helper = None;
@@ -247,7 +291,53 @@ async fn stream(
         drop(helper);
         mac.mac.touch();
     });
-    Ok(Sse::new(ReceiverStream::new(receiver)).keep_alive(KeepAlive::default()))
+    let jobs = Jobs {
+        receiver: ReceiverStream::new(receiver),
+        revoked,
+    };
+    Ok(Sse::new(jobs).keep_alive(KeepAlive::default()))
+}
+
+/// A helper's job stream. It ends at revocation even while a job sent just before it still holds a sender.
+struct Jobs {
+    receiver: ReceiverStream<std::result::Result<Event, Infallible>>,
+    revoked: oneshot::Receiver<()>,
+}
+impl Stream for Jobs {
+    type Item = std::result::Result<Event, Infallible>;
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        if Pin::new(&mut self.revoked).poll(cx).is_ready() {
+            return Poll::Ready(None);
+        }
+        Pin::new(&mut self.receiver).poll_next(cx)
+    }
+}
+
+impl Mac {
+    /// The helper that receives jobs. A helper whose device is no longer paired is dropped first,
+    /// so a revoked Mac that stayed connected gets no commands, stdin or cwd.
+    fn current(&self, paired: impl Fn(&str) -> bool) -> Option<Current> {
+        let mut helper = self.helper.lock().unwrap();
+        if helper.as_ref().is_some_and(|h| !paired(&h.device)) {
+            *helper = None;
+        }
+        helper
+            .as_ref()
+            .map(|h| (h.generation, h.device.clone(), h.events.clone()))
+    }
+    /// A revoked device loses its helper: every one of its job streams ends and it receives no further jobs.
+    pub(crate) fn unpair(&self, device: &str) {
+        self.streams
+            .lock()
+            .unwrap()
+            .retain(|open| open.device != device);
+        let mut helper = self.helper.lock().unwrap();
+        if helper.as_ref().is_some_and(|h| h.device == device) {
+            *helper = None;
+        }
+        drop(helper);
+        self.touch();
+    }
 }
 
 async fn report(
@@ -255,6 +345,12 @@ async fn report(
     RoutePath(id): RoutePath<String>,
     Json(input): Json<Report>,
 ) -> Result<Json<Value>> {
+    if !m.previews.paired(&input.device) {
+        return Err(Failure(
+            StatusCode::FORBIDDEN,
+            "This Mac is not paired with the VM".into(),
+        ));
+    }
     // Any answer, even one too late for its job, shows the Mac is awake. A late answer must not leave
     // `mac status` offline until some other job succeeds: agents that wait on status would never send one.
     if let Some(h) = m
@@ -275,6 +371,14 @@ async fn report(
             StatusCode::NOT_FOUND,
             "Unknown or expired Mac job".into(),
         ))?;
+    record(job, input)?;
+    drop(jobs);
+    m.mac.touch();
+    Ok(Json(json!({"accepted":true})))
+}
+
+/// Applies one helper report to its job.
+fn record(job: &mut Job, input: Report) -> Result<()> {
     let output = [input.stdout, input.stderr];
     if output.iter().any(|hex| unhex(hex).is_none()) {
         return Err(conflict("Invalid Mac job report"));
@@ -291,7 +395,8 @@ async fn report(
             job.acked = true;
             job.at = Instant::now();
         }
-        ("done", None) => {
+        // A repeated `done` (a helper that reconnects and resends) must not replace the stored result.
+        ("done", None) if job.result.is_none() => {
             let [stdout, stderr] = std::mem::take(&mut job.parts);
             let [stdout, stderr] =
                 [(stdout, &output[0]), (stderr, &output[1])].map(|(mut parts, rest)| {
@@ -306,11 +411,10 @@ async fn report(
             job.result = Some(json!({"state":"done","code":input.code,"stdout":stdout,
                 "stderr":stderr,"truncated":input.truncated}));
         }
+        ("done", None) => {}
         _ => return Err(conflict("Invalid Mac job report")),
     }
-    drop(jobs);
-    m.mac.touch();
-    Ok(Json(json!({"accepted":true})))
+    Ok(())
 }
 
 fn local_auth(m: &Manager, peer: Peer) -> Result<()> {
@@ -335,8 +439,8 @@ async fn local_run(
     let fresh = mac.since.lock().unwrap().elapsed() < FRESH;
     let wait = Instant::now() + if fresh { ATTACH } else { Duration::ZERO };
     let (generation, device, events) = loop {
-        if let Some(h) = mac.helper.lock().unwrap().as_ref() {
-            break (h.generation, h.device.clone(), h.events.clone());
+        if let Some(current) = mac.current(|device| m.previews.paired(device)) {
+            break current;
         }
         if Instant::now() >= wait {
             return Err(conflict(UNAVAILABLE));
@@ -750,4 +854,185 @@ async fn print_result(value: Value) -> io::Result<i32> {
     std::io::stdout().flush()?;
     std::io::stderr().write_all(&stderr)?;
     Ok(code.unwrap_or(1))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const DEVICE: &str = "0123456789abcdef0123456789abcdef";
+
+    fn job() -> Job {
+        Job {
+            device: DEVICE.into(),
+            acked: false,
+            result: None,
+            at: Instant::now(),
+            parts: Default::default(),
+        }
+    }
+
+    fn done(stdout: &str) -> Report {
+        Report {
+            device: DEVICE.into(),
+            state: "done".into(),
+            code: Some(0),
+            stdout: hex(stdout.as_bytes()),
+            stderr: String::new(),
+            truncated: false,
+            offset: None,
+        }
+    }
+
+    #[test]
+    fn a_repeated_done_report_keeps_the_first_result() {
+        let mut job = job();
+        record(&mut job, done("abc")).unwrap();
+        record(&mut job, done("def")).unwrap();
+        assert_eq!(job.result.unwrap()["stdout"], "616263");
+    }
+
+    #[test]
+    fn a_vm_folder_must_resolve_inside_the_agent_home() {
+        let root =
+            std::env::temp_dir().join(format!("cloudroom-home-folder-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let home = root.join("home");
+        fs::create_dir_all(home.join("project/sub")).unwrap();
+        std::os::unix::fs::symlink("/etc", home.join("link")).unwrap();
+        let inside = home.join("project").display().to_string();
+        assert!(inside_home(&home, "project"));
+        assert!(inside_home(&home, "./project/sub"));
+        assert!(
+            inside_home(&home, &inside),
+            "an absolute path inside the home"
+        );
+        assert!(inside_home(&home, "missing/folder"));
+        assert!(!inside_home(&home, "/etc"));
+        assert!(!inside_home(&home, "../.."));
+        assert!(!inside_home(&home, "project/../../other"));
+        assert!(!inside_home(&home, "link"), "a symlink out of the home");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn revoking_a_device_ends_only_its_streams() {
+        let mac = Mac::default();
+        let (events, _receiver) = mpsc::channel(1);
+        let (ended, mut revoked) = oneshot::channel();
+        mac.streams.lock().unwrap().push(OpenStream {
+            generation: 1,
+            device: DEVICE.into(),
+            _ended: ended,
+        });
+        *mac.helper.lock().unwrap() = Some(Helper {
+            generation: 1,
+            device: DEVICE.into(),
+            events,
+            stale: false,
+        });
+        mac.unpair("ffffffffffffffffffffffffffffffff");
+        assert!(mac.helper.lock().unwrap().is_some());
+        assert!(matches!(
+            revoked.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+        mac.unpair(DEVICE);
+        assert!(mac.helper.lock().unwrap().is_none());
+        assert!(matches!(
+            revoked.try_recv(),
+            Err(oneshot::error::TryRecvError::Closed)
+        ));
+    }
+
+    #[test]
+    fn a_newer_connection_leaves_the_older_stream_open() {
+        let mac = Mac::default();
+        let (older, mut revoked) = oneshot::channel();
+        mac.streams.lock().unwrap().push(OpenStream {
+            generation: 1,
+            device: DEVICE.into(),
+            _ended: older,
+        });
+        let (newer, _newer_revoked) = oneshot::channel();
+        mac.streams.lock().unwrap().push(OpenStream {
+            generation: 2,
+            device: DEVICE.into(),
+            _ended: newer,
+        });
+        assert!(matches!(
+            revoked.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+        mac.unpair(DEVICE);
+        assert!(matches!(
+            revoked.try_recv(),
+            Err(oneshot::error::TryRecvError::Closed)
+        ));
+    }
+
+    #[test]
+    fn a_helper_whose_device_is_no_longer_paired_gets_no_jobs() {
+        let mac = Mac::default();
+        let (events, _receiver) = mpsc::channel(1);
+        *mac.helper.lock().unwrap() = Some(Helper {
+            generation: 7,
+            device: DEVICE.into(),
+            events,
+            stale: false,
+        });
+        assert_eq!(mac.current(|device| device == DEVICE).unwrap().0, 7);
+        assert!(mac.current(|_| false).is_none());
+        assert!(mac.helper.lock().unwrap().is_none());
+    }
+
+    fn vm_run(command: &str) -> Run {
+        Run {
+            command: command.into(),
+            stdin: String::new(),
+            cwd: None,
+            write: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn vm_run_refuses_only_where_mac_access_is_set_up_and_none_is_paired() {
+        let root = std::env::temp_dir().join(format!("cloudroom-vm-run-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let dir = root.join("bare");
+        fs::create_dir_all(&dir).unwrap();
+        let with = root.join("with-setup");
+        fs::create_dir_all(with.join("state/previews")).unwrap();
+        let config = |dir: &std::path::Path| crate::config::Config {
+            listen: "127.0.0.1:0".parse().unwrap(),
+            token: String::new(),
+            state_dir: dir.join("state"),
+            repository: dir.to_owned(),
+            api_url: Some("http://127.0.0.1:1".into()),
+            store: "fixture".into(),
+            instance: None,
+            account_home: dir.to_owned(),
+            default_harness: crate::runtime::Kind::Codex,
+            harnesses: Default::default(),
+            storage: None,
+            rpc_timeout: std::time::Duration::from_secs(30),
+            diagnostic_upload: std::time::Duration::from_secs(1),
+        };
+        let without_setup = crate::session::Manager::open(config(&dir)).unwrap();
+        assert!(
+            execute(&without_setup, vm_run("true"), vec![], false)
+                .await
+                .is_ok()
+        );
+        drop(without_setup);
+        let uid = std::os::unix::fs::MetadataExt::uid(&fs::metadata(&with).unwrap());
+        let setup = json!({"socket": with.join("run/preview.sock"), "host": null, "agent_uid": uid, "tunnel": true});
+        fs::write(with.join("state/previews/setup.json"), setup.to_string()).unwrap();
+        let with_setup = crate::session::Manager::open(config(&with)).unwrap();
+        let refused = execute(&with_setup, vm_run("true"), vec![], false)
+            .await
+            .unwrap_err();
+        assert_eq!(refused.0, StatusCode::CONFLICT);
+        let _ = fs::remove_dir_all(&root);
+    }
 }

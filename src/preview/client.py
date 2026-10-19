@@ -981,7 +981,9 @@ def configure(folder, connection_file, activate, allow_private, mac_access=None,
     if source != target:
         temporary = folder / 'client.pending'
         temporary.write_bytes(source.read_bytes()); temporary.chmod(0o600); temporary.replace(target)
-    config = {'device': old['device'] if old else uuid.uuid4().hex, 'binding': binding, 'connectionFile': str(connection_file),
+    # A revoked device stays refused by every core, so a sign-in after sign-out needs a new device ID.
+    device = old['device'] if old and not old.get('revoked', False) else uuid.uuid4().hex
+    config = {'device': device, 'binding': binding, 'connectionFile': str(connection_file),
               'allowPrivateSsh': allow_private, 'macAccess': mac_access, 'launcher': launcher, 'binary': binary, **({'ownThreads': True} if own else {}),
               **({'website': trusted} if trusted else {})}
     save(folder / 'config.json', config)

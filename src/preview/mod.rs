@@ -11,7 +11,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs,
     io::{self, Write},
     net::IpAddr,
@@ -53,10 +53,14 @@ struct Entry {
 struct Saved {
     previews: BTreeMap<u16, Entry>,
     devices: BTreeMap<String, String>,
+    /// Revoked device IDs are refused again, so a helper that still holds the bearer token cannot re-pair.
+    #[serde(default)]
+    revoked: BTreeSet<String>,
 }
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Report {
+    #[serde(deserialize_with = "lower_device")]
     device: String,
     generation: String,
     port: u16,
@@ -66,6 +70,7 @@ pub struct Report {
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Device {
+    #[serde(deserialize_with = "lower_device")]
     device: String,
     public_key: String,
 }
@@ -82,6 +87,7 @@ pub struct Host {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TunnelDevice {
+    #[serde(deserialize_with = "lower_device")]
     device: String,
 }
 /// An open preview tunnel, closed when its preview or device goes away.
@@ -123,6 +129,13 @@ fn now() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+/// Device IDs are hex. They are stored and compared in lower case, so an ID typed in another case
+/// still names the paired device.
+pub(crate) fn lower_device<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<String, D::Error> {
+    String::deserialize(deserializer).map(|device| device.to_ascii_lowercase())
 }
 fn valid_device(device: &str) -> bool {
     device.len() == 32 && device.bytes().all(|b| b.is_ascii_hexdigit())
@@ -185,7 +198,7 @@ impl Previews {
         }
         let saved = if setup.is_some() {
             match fs::read(directory.join("registry.json")) {
-                Ok(bytes) => serde_json::from_slice(&bytes)?,
+                Ok(bytes) => read_saved(&bytes)?,
                 Err(e) if e.kind() == io::ErrorKind::NotFound => Saved::default(),
                 Err(e) => return Err(e),
             }
@@ -295,7 +308,10 @@ impl Previews {
         next.previews.remove(&port);
         self.save(&next)?;
         *saved = next;
-        self.reports.lock().unwrap().clear();
+        self.reports
+            .lock()
+            .unwrap()
+            .retain(|(_, reported), _| *reported != port);
         self.disconnect(|live| live.port == port)?;
         Ok(json!({"port":port,"state":"closed"}))
     }
@@ -360,39 +376,63 @@ impl Previews {
         {
             return Err(conflict("This preview device already has a different key"));
         }
-        if !saved.devices.contains_key(&device.device) {
-            if !saved.devices.is_empty() {
-                return Err(conflict(
-                    "Previews are paired with another Mac; disconnect its previews first",
-                ));
+        if saved.revoked.contains(&device.device) {
+            return Err(Failure(
+                StatusCode::FORBIDDEN,
+                "This preview device was revoked; sign in again to pair a new one".into(),
+            ));
+        }
+        let known = saved.devices.contains_key(&device.device);
+        if !known && !saved.devices.is_empty() {
+            return Err(conflict(
+                "Previews are paired with another Mac; disconnect its previews first",
+            ));
+        }
+        // Read the host key before keeping the pairing, so a failed read leaves the device unpaired.
+        let host_key = if setup.tunnel {
+            None
+        } else {
+            let text = fs::read_to_string(&setup.host_key_file)?;
+            let host_key = text
+                .split_whitespace()
+                .take(2)
+                .collect::<Vec<_>>()
+                .join(" ");
+            if !valid_key(&host_key) {
+                return Err(conflict("The VM's public SSH host key is unavailable"));
             }
+            Some(host_key)
+        };
+        if !known {
             let mut next = saved.clone();
             next.devices.insert(device.device, device.public_key);
             self.save(&next)?;
             *saved = next;
         }
-        if setup.tunnel {
+        let Some(host_key) = host_key else {
             return Ok(json!({"tunnel":true}));
-        }
-        let text = fs::read_to_string(&setup.host_key_file)?;
-        let host_key = text
-            .split_whitespace()
-            .take(2)
-            .collect::<Vec<_>>()
-            .join(" ");
-        if !valid_key(&host_key) {
-            return Err(conflict("The VM's public SSH host key is unavailable"));
-        }
+        };
         Ok(json!({"host":host,"port":setup.port,"user":"cloudroom-preview","host_key":host_key}))
     }
     pub fn revoke(&self, device: &str) -> Result<Value> {
         self.setup()?;
+        let device = device.to_ascii_lowercase();
         let mut saved = self.saved.lock().unwrap();
+        if !saved.devices.contains_key(&device) {
+            return Err(Failure(
+                StatusCode::NOT_FOUND,
+                "Preview device is not paired".into(),
+            ));
+        }
         let mut next = saved.clone();
-        next.devices.remove(device);
+        next.devices.remove(&device);
+        next.revoked.insert(device.clone());
         self.save(&next)?;
         *saved = next;
-        self.reports.lock().unwrap().clear();
+        self.reports
+            .lock()
+            .unwrap()
+            .retain(|(reported, _), _| *reported != device);
         self.disconnect(|live| live.device == device)?;
         Ok(json!({"revoked":true}))
     }
@@ -504,6 +544,17 @@ impl axum::extract::connect_info::Connected<axum::serve::IncomingStream<'_, Unix
         Self(cred.map(|c| c.uid()), cred.and_then(|c| c.pid()))
     }
 }
+/// A saved registry. Registries written before device IDs were normalised may hold upper-case keys.
+fn read_saved(bytes: &[u8]) -> io::Result<Saved> {
+    let mut saved: Saved = serde_json::from_slice(bytes)?;
+    saved.devices = saved
+        .devices
+        .into_iter()
+        .map(|(device, key)| (device.to_ascii_lowercase(), key))
+        .collect();
+    Ok(saved)
+}
+
 fn local_auth(previews: &Previews, peer: Peer) -> Result<()> {
     if peer.0 != Some(previews.setup()?.agent_uid) {
         return Err(Failure(
@@ -637,7 +688,10 @@ async fn revoke(
     State(m): State<Arc<crate::session::Manager>>,
     RoutePath(id): RoutePath<String>,
 ) -> Result<Json<Value>> {
-    Ok(Json(m.previews.revoke(&id)?))
+    // The helper loses its stream even when the SSH disconnect below fails after the device is removed.
+    let revoked = m.previews.revoke(&id);
+    m.mac.unpair(&id.to_ascii_lowercase());
+    Ok(Json(revoked?))
 }
 async fn report(
     State(m): State<Arc<crate::session::Manager>>,
@@ -881,4 +935,141 @@ pub async fn cli(args: &[String]) -> io::Result<()> {
     }
     println!("{}", serde_json::to_string(&result)?);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    const DEVICE: &str = "0123456789ABCDEF0123456789ABCDEF";
+
+    fn previews(tunnel: bool) -> (Previews, PathBuf) {
+        let directory = std::env::temp_dir().join(format!(
+            "cloudroom-preview-test-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&directory).unwrap();
+        let setup = Setup {
+            socket: directory.join("preview.sock"),
+            host: Some("127.0.0.1".parse().unwrap()),
+            port: 22,
+            host_key_file: directory.join("ssh_host_ed25519_key.pub"),
+            agent_uid: 1000,
+            tunnel,
+        };
+        let previews = Previews {
+            directory: directory.clone(),
+            setup: Mutex::new(Some(setup)),
+            saved: Mutex::new(Saved::default()),
+            reports: Mutex::new(BTreeMap::new()),
+            tunnels: Mutex::new(Vec::new()),
+            core_port: 8080,
+        };
+        (previews, directory)
+    }
+
+    /// Goes through deserialisation, as the HTTP routes do.
+    fn device(id: &str) -> Device {
+        serde_json::from_value(json!({
+            "device": id,
+            "public_key": format!("ssh-ed25519 {}", "A".repeat(68)),
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_device_id_in_either_letter_case_names_the_same_device() {
+        let (previews, directory) = previews(true);
+        previews.pair(device(DEVICE)).unwrap();
+        assert!(previews.paired(&DEVICE.to_ascii_lowercase()));
+        previews.revoke(DEVICE).unwrap();
+        assert!(!previews.paired(&DEVICE.to_ascii_lowercase()));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn a_registry_with_upper_case_device_keys_loads_them_lower_case() {
+        let saved = read_saved(
+            format!(
+                r#"{{"previews":{{}},"devices":{{"{}":"ssh-ed25519 A"}}}}"#,
+                DEVICE
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+        assert!(saved.devices.contains_key(&DEVICE.to_ascii_lowercase()));
+        assert!(!saved.devices.contains_key(DEVICE));
+    }
+
+    #[test]
+    fn a_revoked_device_cannot_pair_again() {
+        let (previews, directory) = previews(true);
+        previews.pair(device(DEVICE)).unwrap();
+        previews.revoke(DEVICE).unwrap();
+        let error = previews.pair(device(DEVICE)).unwrap_err();
+        assert_eq!(error.0, StatusCode::FORBIDDEN);
+        let other = "fedcba9876543210fedcba9876543210";
+        previews.pair(device(other)).unwrap();
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn revoking_a_device_that_is_not_paired_fails() {
+        let (previews, directory) = previews(true);
+        let error = previews.revoke("zzz").unwrap_err();
+        assert_eq!(error.0, StatusCode::NOT_FOUND);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn a_pairing_is_kept_only_when_the_host_key_can_be_read() {
+        let (previews, directory) = previews(false);
+        let error = previews.pair(device(DEVICE)).unwrap_err();
+        assert_eq!(error.0, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(previews.saved.lock().unwrap().devices.is_empty());
+        fs::write(
+            directory.join("ssh_host_ed25519_key.pub"),
+            format!("ssh-ed25519 {} root@vm\n", "A".repeat(68)),
+        )
+        .unwrap();
+        previews.pair(device(DEVICE)).unwrap();
+        assert!(previews.paired(&DEVICE.to_ascii_lowercase()));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn closing_one_preview_keeps_the_reports_of_the_others() {
+        let (previews, directory) = previews(true);
+        previews.pair(device(DEVICE)).unwrap();
+        {
+            let mut saved = previews.saved.lock().unwrap();
+            for port in [3000, 3001] {
+                saved.previews.insert(
+                    port,
+                    Entry {
+                        generation: "g".into(),
+                    },
+                );
+            }
+        }
+        for port in [3000, 3001] {
+            previews
+                .report(Report {
+                    device: DEVICE.to_ascii_lowercase(),
+                    generation: "g".into(),
+                    port,
+                    local_port: Some(port + 1000),
+                    error: None,
+                })
+                .unwrap();
+        }
+        previews.close(3000).unwrap();
+        assert_eq!(previews.view(3001).unwrap()["state"], "ready");
+        fs::remove_dir_all(directory).unwrap();
+    }
 }
