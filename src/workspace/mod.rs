@@ -488,7 +488,13 @@ pub fn valid_attachment_name(name: &str) -> bool {
         && !name.contains(['/', '\\'])
         && name != "."
         && name != ".."
-        && !name.bytes().any(|b| b < 32 || b == b':')
+        && !name.contains(':')
+        && !name.chars().any(|c| c.is_control() || is_bidi_control(c))
+}
+
+/// Marks that reorder the text around them, so `invoice\u{202e}fdp.exe` reads as `invoiceexe.pdf`.
+fn is_bidi_control(c: char) -> bool {
+    matches!(c, '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
 }
 
 /// Attachments are kept per session: two sessions in one folder can reuse a request ID and name without sharing a file.
@@ -613,4 +619,55 @@ pub fn valid_id(id: &str) -> io::Result<()> {
         return Err(io::Error::other("Invalid workspace ID"));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::valid_attachment_name;
+
+    #[test]
+    fn attachment_names_refuse_controls_and_bidi_overrides() {
+        assert!(valid_attachment_name("report 2024.pdf"));
+        assert!(valid_attachment_name("café résumé.txt"));
+        assert!(
+            !valid_attachment_name("invoice\u{202e}fdp.exe"),
+            "right-to-left override"
+        );
+        assert!(!valid_attachment_name("a\u{7f}b"), "DEL");
+        assert!(!valid_attachment_name("a\u{85}b"), "C1 control");
+        assert!(!valid_attachment_name("a\u{2066}b"), "isolate");
+        assert!(!valid_attachment_name("a\u{200e}b"), "left-to-right mark");
+        assert!(!valid_attachment_name("a\tb"), "tab");
+    }
+
+    #[test]
+    fn legacy_is_the_default_folder_and_never_a_registered_workspace() {
+        let dir = std::env::temp_dir().join(format!("cloudroom-legacy-ws-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let config = crate::config::Config {
+            listen: "127.0.0.1:0".parse().unwrap(),
+            token: String::new(),
+            state_dir: dir.join("state"),
+            repository: dir.clone(),
+            api_url: None,
+            store: "fixture".into(),
+            instance: None,
+            account_home: dir.clone(),
+            default_harness: crate::runtime::Kind::Codex,
+            harnesses: Default::default(),
+            storage: None,
+            rpc_timeout: std::time::Duration::from_secs(30),
+            diagnostic_upload: std::time::Duration::from_secs(1),
+        };
+        let workspaces = super::Workspaces::open(&config).unwrap();
+        std::fs::write(
+            dir.join("state/workspaces/legacy.json"),
+            serde_json::json!({"id":"legacy","path":dir.join("gone")}).to_string(),
+        )
+        .unwrap();
+        assert!(workspaces.get("legacy").unwrap().is_none());
+        assert!(workspaces.list().unwrap().iter().all(|w| w.id != "legacy"));
+        assert!(workspaces.resolve("legacy", None).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
