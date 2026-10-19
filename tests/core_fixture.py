@@ -749,7 +749,7 @@ class RecoveryTests(unittest.TestCase):
         self.assertFalse(self.service.request('GET','/v1/ready',expected=503)['ready'])
         self.assertFalse(self.service.request('GET','/v1/dashboard')['runtime']['ready'])
         self.service.request('POST','/v1/sessions/cr_seed/attachments?request_id=blocked&name=note.txt&kind=file',{},503)
-        self.assertFalse((self.repo/'.cloudroom/attachments/blocked/note.txt').exists())
+        self.assertFalse((self.repo/'.cloudroom/attachments/cr_seed/blocked/note.txt').exists())
         self.assertTrue(self.service.records('cr_seed'))
         self.service.stop(crash=True); self.start(); self.ready()
         self.prompt('recovered','hello')

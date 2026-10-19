@@ -145,7 +145,7 @@ try:
         time.sleep(.3)
         checks['active_upload_stops_writing']=staged_size()==before_size
         status,_=request('POST','/v1/sessions/cr_probe/attachments?request_id=blocked&name=note.txt&kind=file',b'no writes')
-        checks['blocked_attachment_rejected']=status==409 and not Path('/code/project/.cloudroom/attachments/blocked/note.txt').exists()
+        checks['blocked_attachment_rejected']=status==409 and not Path('/code/project/.cloudroom/attachments/cr_probe/blocked/note.txt').exists()
         free();sending.result(timeout=10)
     send_chunks(size-6*1024**2);upload.send(b'0\r\n\r\n')
     response=upload.getresponse();result=json.loads(response.read());upload.close()
@@ -190,7 +190,7 @@ try:
     attachment.send(b'x'*1024**2);time.sleep(.2)
     fill();attachment.send(b'x'*1024**2)
     response=attachment.getresponse();response.read();attachment.close()
-    checks['attachment_cannot_start_writer_during_pause']=response.status==409 and not Path('/code/project/.cloudroom/attachments/raced/note.txt').exists()
+    checks['attachment_cannot_start_writer_during_pause']=response.status==409 and not Path('/code/project/.cloudroom/attachments/cr_probe/raced/note.txt').exists()
     free()
     status,value=request('POST','/v1/sessions/cr_probe/attachments?request_id=raced&name=note.txt&kind=file',b'x'*(2*1024**2))
     checks['attachment_retry_after_pause']=status==202 and Path(value['receipt']['input']['path']).read_bytes()==b'x'*(2*1024**2)

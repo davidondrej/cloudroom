@@ -375,9 +375,11 @@ impl Workspaces {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn attach(
         &self,
         workspace: &Workspace,
+        session_id: &str,
         request_id: &str,
         name: &str,
         kind: &str,
@@ -405,7 +407,7 @@ impl Workspaces {
         {
             return Err(io::Error::other("invalid attachment name"));
         }
-        let relative = format!(".cloudroom/attachments/{request_id}/{name}");
+        let relative = attachment_path(session_id, request_id, name);
         let limit = if kind == "image" {
             10 * 1024 * 1024
         } else {
@@ -458,12 +460,13 @@ impl Workspaces {
     pub async fn discard_attachment(
         &self,
         workspace: &Workspace,
+        session_id: &str,
         request_id: &str,
         name: &str,
         guard: &storage::Guard,
     ) -> io::Result<()> {
         valid_id(request_id)?;
-        let relative = format!(".cloudroom/attachments/{request_id}/{name}");
+        let relative = attachment_path(session_id, request_id, name);
         let mut command = Command::new("python3");
         command
             .env_clear()
@@ -483,6 +486,11 @@ impl Workspaces {
         file_result(child.wait_with_output().await?)?;
         Ok(())
     }
+}
+
+/// Attachments are kept per session: two sessions in one folder can reuse a request ID and name without sharing a file.
+fn attachment_path(session_id: &str, request_id: &str, name: &str) -> String {
+    format!(".cloudroom/attachments/{session_id}/{request_id}/{name}")
 }
 
 /// The SHA-256 of bytes a retried upload carries, computed by the same helper that writes attachments. Reads

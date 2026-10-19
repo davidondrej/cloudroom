@@ -1323,6 +1323,7 @@ async fn attach(
         .workspaces
         .attach(
             &workspace,
+            &id,
             &query.request_id,
             &query.name,
             &query.kind,
@@ -1356,14 +1357,28 @@ async fn attach(
     let receipt = match manager.command(&id, query.request_id.clone(), "attach", written) {
         Ok(receipt) => receipt,
         Err(error) => {
-            // The session refused the file, so it must not stay in the repository.
-            if let Err(error) = manager
-                .workspaces
-                .discard_attachment(&workspace, &query.request_id, &query.name, &manager.storage)
-                .await
+            // The session refused the file, so it must not stay in the repository. A concurrent request that won
+            // with this request ID and name already owns the same path, so its file stays.
+            let owned_by_winner = manager
+                .receipt(&id, &query.request_id)
+                .is_some_and(|receipt| {
+                    receipt.command == "attach"
+                        && receipt.input["name"].as_str() == Some(query.name.as_str())
+                });
+            if !owned_by_winner
+                && let Err(discard) = manager
+                    .workspaces
+                    .discard_attachment(
+                        &workspace,
+                        &id,
+                        &query.request_id,
+                        &query.name,
+                        &manager.storage,
+                    )
+                    .await
             {
                 eprintln!(
-                    "refused attachment not removed: session={id} request={}: {error}",
+                    "refused attachment not removed: session={id} request={}: {discard}",
                     query.request_id
                 );
             }

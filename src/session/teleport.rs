@@ -930,6 +930,7 @@ impl Manager {
             .workspaces
             .attach(
                 &transfer.workspace,
+                &Self::transfer_session(id),
                 &format!("teleport_index_{id}"),
                 "files.json",
                 "file",

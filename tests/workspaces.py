@@ -94,8 +94,9 @@ class WorkspaceTests(unittest.TestCase):
             until(lambda:self.service.session('cr_'+kind)['state']=='idle','attachment target',10)
             path.chmod(0o700)
             for index, (blocked, mode) in enumerate([(path, 0o000), (path/'.cloudroom', 0o000),
-                    (path/'.cloudroom/attachments', 0o500), (path/'.cloudroom/attachments/denied-3', 0o500)]):
-                blocked.mkdir(mode=0o700, exist_ok=True)
+                    (path/'.cloudroom/attachments', 0o500), (path/'.cloudroom/attachments'/('cr_'+kind), 0o500)]):
+                if index == 2: shutil.rmtree(path/'.cloudroom/attachments'/('cr_'+kind), ignore_errors=True)
+                blocked.mkdir(mode=0o700, parents=True, exist_ok=True)
                 blocked.chmod(mode)
                 try:
                     denied = upload(kind,'denied-'+str(index),'note.txt',b'retry me',expected=409)
@@ -127,15 +128,16 @@ class WorkspaceTests(unittest.TestCase):
             for media,limit in [('image',10*1024**2),('file',25*1024**2)]:
                 too_large = upload(kind,'large-'+media,'large',b'x'*(limit+1),media,409)
                 self.assertEqual(too_large['code'],'attachment_too_large')
-                self.assertFalse((path/'.cloudroom/attachments'/('large-'+media)/'large').exists())
+                self.assertFalse((path/'.cloudroom/attachments'/('cr_'+kind)/('large-'+media)/'large').exists())
             outside = self.root.resolve()/('outside-'+kind); outside.mkdir()
             (outside/'keep').write_text('untouched')
-            (path/'.cloudroom/attachments/escape').symlink_to(outside)
+            session_folder = path/'.cloudroom/attachments'/('cr_'+kind); session_folder.mkdir(parents=True, exist_ok=True)
+            (session_folder/'escape').symlink_to(outside)
             upload(kind,'escape','keep',b'changed',expected=409)
-            linked = path/'.cloudroom/attachments/linked'; linked.mkdir()
+            linked = session_folder/'linked'; linked.mkdir()
             (linked/'keep').symlink_to(outside/'keep')
             upload(kind,'linked','keep',b'changed',expected=409)
-            temporary = path/'.cloudroom/attachments/temporary'; temporary.mkdir()
+            temporary = session_folder/'temporary'; temporary.mkdir()
             (temporary/'.note.txt.tmp').symlink_to(outside/'keep')
             temporary_upload = upload(kind,'temporary','note.txt',b'normal upload')['receipt']['input']
             self.assertEqual(Path(temporary_upload['path']).read_bytes(),b'normal upload')
@@ -242,7 +244,7 @@ class WorkspaceTests(unittest.TestCase):
         until(lambda:self.service.session('cr_refused')['state']=='closed','refused close',10)
         refused = post('/v1/sessions/cr_refused/attachments?request_id=r9&name=secret.txt&kind=file', b'refused upload', 409)
         self.assertNotEqual(refused.get('code'), None)
-        self.assertFalse((path/'.cloudroom/attachments/r9/secret.txt').exists())
+        self.assertFalse((path/'.cloudroom/attachments/cr_refused/r9/secret.txt').exists())
         self.assertFalse((path/'.cloudroom/attachments/cr_refused/r9').exists())
 
     def test_a_retried_attachment_answers_its_receipt_after_the_file_changes(self):
@@ -351,6 +353,26 @@ class WorkspaceTests(unittest.TestCase):
             self.assertEqual(Path(winners[0]['receipt']['input']['path']).read_bytes(), body, round)
             status, again = post(targets[0] if winners[0]['receipt']['input']['kind'] == 'file' else targets[1], body)
             self.assertEqual(status, 202, again)
+
+    def test_sessions_in_one_folder_do_not_share_attachments_by_request_and_name(self):
+        path = self.state.resolve()/'code'/'shared-folder'
+        self.seed('shared', path, 'codex')
+        self.start()
+        until(lambda:self.service.session('cr_shared')['state']=='idle','shared folder parent',10)
+        child_sid = self.service.request('POST','/v1/sessions',{'request_id':'child','parent_session':'cr_shared','prompt':'hello'},202)['session_id']
+        until(lambda:self.service.session(child_sid)['state']=='idle','shared folder child',10)
+        def upload(sid, body):
+            connection = http.client.HTTPConnection(self.service.address, timeout=10)
+            connection.request('POST',f'/v1/sessions/{sid}/attachments?request_id=same&name=note.txt&kind=file',body,
+                {'Authorization':'Bearer '+self.env['CLOUDROOM_TOKEN'],'Content-Type':'application/octet-stream'})
+            response = connection.getresponse(); data = json.loads(response.read()); connection.close()
+            self.assertEqual(response.status,202,data)
+            return data['receipt']['input']
+        parent = upload('cr_shared', b'parent bytes')
+        child = upload(child_sid, b'child bytes')
+        self.assertNotEqual(parent['path'], child['path'])
+        self.assertEqual(Path(parent['path']).read_bytes(), b'parent bytes')
+        self.assertEqual(Path(child['path']).read_bytes(), b'child bytes')
 
 
 if __name__ == '__main__': unittest.main()
