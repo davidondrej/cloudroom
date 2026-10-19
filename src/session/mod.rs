@@ -226,6 +226,12 @@ impl Session {
         })
     }
 
+    /// A close was requested and recorded, even if it has not settled (`close_request` is only the pending one).
+    /// The close receipt stays after a close that ended `unknown`, so the session still counts as given up.
+    pub(crate) fn close_requested(&self) -> bool {
+        self.state == "closed" || self.receipts.values().any(|r| r.command == "close")
+    }
+
     fn can_resume(&self) -> bool {
         self.native_id.is_some()
             && self.native_path.is_some()
@@ -1865,7 +1871,7 @@ impl Manager {
             loop {
                 {
                     let mut local = self.local.lock().unwrap();
-                    if local.sessions[&id].close_request.is_some() {
+                    if local.sessions[&id].close_requested() {
                         return Ok(());
                     }
                     if self.is_stopping() {
@@ -1889,7 +1895,7 @@ impl Manager {
             let (handle, events, native) = {
                 let mut local = self.local.lock().unwrap();
                 let session = &local.sessions[&id];
-                if session.close_request.is_some() || self.is_stopping() {
+                if session.close_requested() || self.is_stopping() {
                     return Ok(());
                 }
                 let native = session
@@ -1942,7 +1948,7 @@ impl Manager {
             handle.start_session().await?;
             let mut local = self.local.lock().unwrap();
             self.remember_launch_reasoning(&mut local, &id, &handle)?;
-            if local.sessions[&id].close_request.is_some() || self.is_stopping() {
+            if local.sessions[&id].close_requested() || self.is_stopping() {
                 return Ok(());
             }
             if local.sessions[&id].handle.is_none() {
@@ -1985,7 +1991,7 @@ impl Manager {
                 return;
             }
             let mut local = self.local.lock().unwrap();
-            if local.sessions[&id].close_request.is_none() {
+            if !local.sessions[&id].close_requested() {
                 let check = self.recovery_check(&local.sessions[&id]);
                 let (code, reason) = if error.kind() == io::ErrorKind::TimedOut {
                     (

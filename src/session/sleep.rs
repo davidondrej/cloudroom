@@ -109,7 +109,8 @@ impl Manager {
             local.draining = false;
             return json!({"drained": false});
         }
-        // Closed sessions keep their close request forever, but nothing of theirs is running.
+        // Closed sessions are skipped: nothing of theirs is running. A settled close, even one that ended
+        // `unknown`, leaves no pending close request, so only a close still in flight counts as busy here.
         // A low-disk pause may never lift on its own, so it must not keep the machine awake.
         let busy = local
             .sessions

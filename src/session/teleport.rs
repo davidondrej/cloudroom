@@ -229,13 +229,13 @@ fn harness_accepts_reasoning(kind: runtime::Kind, level: &str) -> bool {
     }
 }
 
-/// A closed session gave its conversation back (Teleport to Local).
+/// A session whose close was requested gave its conversation back (Teleport to Local), even one whose close
+/// ended `unknown` and left it `process_lost`.
 fn native_in_use(local: &super::Local, native_id: &str) -> bool {
-    local.sessions.values().any(|s| {
-        s.native_id.as_deref() == Some(native_id)
-            && s.state != "closed"
-            && s.close_request.is_none()
-    })
+    local
+        .sessions
+        .values()
+        .any(|s| s.native_id.as_deref() == Some(native_id) && !s.close_requested())
 }
 
 impl Manager {
@@ -981,5 +981,58 @@ mod tests {
         assert!(!harness_accepts_reasoning(runtime::Kind::Fx, "max"));
         assert!(harness_accepts_reasoning(runtime::Kind::OpenClaw, "max"));
         assert!(!harness_accepts_reasoning(runtime::Kind::OpenClaw, "ultra"));
+    }
+
+    #[test]
+    fn cursor_reasoning_is_checked_per_model_through_the_catalog() {
+        assert!(checks_catalog(runtime::Kind::Cursor));
+        assert!(!checks_catalog(runtime::Kind::Pi));
+        let models = vec![runtime::Model {
+            model: "cheap".into(),
+            reasoning_levels: vec!["low".into(), "high".into()],
+        }];
+        assert!(runtime::supports(runtime::Kind::Cursor, &models, "cheap", "high").is_ok());
+        assert!(runtime::supports(runtime::Kind::Cursor, &models, "cheap", "max").is_err());
+        assert!(runtime::supports(runtime::Kind::Cursor, &models, "absent", "high").is_err());
+    }
+
+    #[test]
+    fn a_close_that_ended_unknown_gives_the_conversation_back() {
+        let dir =
+            std::env::temp_dir().join(format!("cloudroom-native-in-use-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut local = super::super::Local::open(&dir).unwrap();
+        let start = json!({"request_id":"start","command":"start","input":{"harness":"claude-code"},"state":"completed"});
+        local
+            .append("cr_gone", "receipt", start.clone(), None)
+            .unwrap();
+        local
+            .append("cr_gone", "native_identity", json!({"id":"native-1"}), None)
+            .unwrap();
+        local.append("cr_live", "receipt", start, None).unwrap();
+        local
+            .append("cr_live", "native_identity", json!({"id":"native-2"}), None)
+            .unwrap();
+        assert!(
+            native_in_use(&local, "native-1"),
+            "a running conversation is in use"
+        );
+        local
+            .append(
+                "cr_gone",
+                "receipt",
+                json!({"request_id":"c1","command":"close","input":{},"state":"unknown"}),
+                None,
+            )
+            .unwrap();
+        local
+            .append("cr_gone", "state", json!({"state":"process_lost"}), None)
+            .unwrap();
+        assert!(
+            !native_in_use(&local, "native-1"),
+            "a close that ended unknown gave the conversation back"
+        );
+        assert!(native_in_use(&local, "native-2"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

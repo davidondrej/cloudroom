@@ -199,10 +199,10 @@ def codex():
                 native, path = forked, forked_path
             send({"id": message["id"], "result": result})
     finally:
-        if slow_exit:
+        if slow_exit or Path("stuck-exit").exists():
             with open(os.devnull, "w") as sink:
                 os.dup2(sink.fileno(), 1)
-            time.sleep(.6)
+            time.sleep(6 if Path("stuck-exit").exists() else .6)
         for child in children.values():
             child.kill(); child.wait()
         with path.open("a") as file:
@@ -795,6 +795,19 @@ class RecoveryTests(unittest.TestCase):
         self.ready()
         self.assertEqual(self.status()["receipts"]["silent"]["state"], "unknown")
         self.assertEqual((self.repo / (self.native + ".requests")).read_text().splitlines(), ["silent", "pending"])
+
+    def test_close_outlasting_the_grace_settles_as_unknown_and_stops_refusing_commands(self):
+        self.seed(); self.start(); self.ready()
+        (self.repo / "stuck-exit").touch()
+        self.service.request("POST", "/v1/sessions/cr_seed/close", {"request_id": "close"}, 202)
+        until(lambda: self.status()["receipts"]["close"]["state"] == "unknown", "close after the grace period", 30)
+        self.assertEqual(self.status()["state"], "process_lost")
+        rejected = self.service.request("POST", "/v1/sessions/cr_seed/prompts", {"request_id": "late", "text": "hello"}, 409)
+        self.assertNotIn("pending close", rejected["error"])
+        self.service.stop(); self.start()
+        self.assertEqual(self.status()["state"], "process_lost")
+        rejected = self.service.request("POST", "/v1/sessions/cr_seed/resume", {"request_id": "again"}, 409)
+        self.assertNotIn("pending close", rejected["error"])
 
     def test_revoked_mac_loses_its_job_stream_and_cannot_pair_again(self):
         previews = self.state / 'previews'

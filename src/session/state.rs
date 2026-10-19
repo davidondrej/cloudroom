@@ -2,7 +2,7 @@
 use super::*;
 
 /// Bump when `apply` builds state differently, so older snapshots are replayed from the journal instead.
-const SNAPSHOT_VERSION: u32 = 1;
+const SNAPSHOT_VERSION: u32 = 2;
 /// A busy sandbox wrote up to ~100k records an hour; this bounds the replay after an unplanned stop.
 const SNAPSHOT_EVERY: u64 = 20_000;
 
@@ -356,7 +356,10 @@ impl Local {
                     }
                 }
                 if receipt.command == "close" {
-                    session.close_request = Some(receipt.request_id.clone());
+                    // Only an accepted close is pending. A settled one (completed, or unknown after a harness
+                    // that did not exit) must not keep refusing every later command as a pending close.
+                    session.close_request =
+                        (receipt.state == "accepted").then(|| receipt.request_id.clone());
                 }
                 if receipt.command == "prompt" {
                     // Acceptance is also queue insertion: one fsynced record, including

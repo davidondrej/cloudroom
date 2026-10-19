@@ -383,7 +383,7 @@ impl Manager {
                 .sessions
                 .get(&id)
                 .is_some_and(|s| s.receipts.contains_key(&start_id));
-            if !retried && (p.close_request.is_some() || p.state == "closed") {
+            if !retried && p.close_requested() {
                 return Err(Error::Conflict("the parent thread is closed"));
             }
             let kind = spawn.harness.unwrap_or(p.harness);
@@ -704,7 +704,7 @@ impl Manager {
                     else {
                         return;
                     };
-                    if p.close_request.is_some() || p.state == "closed" {
+                    if p.close_requested() {
                         return;
                     }
                     let finished = c.receipts.values().find_map(|r| {
@@ -745,7 +745,7 @@ impl Manager {
                             title(c),
                             p.current_request.clone().filter(|_| steer),
                         )),
-                        None if c.close_request.is_some() || c.state == "closed" => return,
+                        None if c.close_requested() => return,
                         None => None,
                     }
                 };
@@ -924,5 +924,29 @@ mod tests {
         let (id, receipt) = m.spawn_child("cr_p", "k", spawn).await.unwrap();
         assert_eq!(id, "cr_child_k");
         assert_eq!(receipt.request_id, "child_k");
+    }
+
+    #[tokio::test]
+    async fn a_parent_whose_close_ended_unknown_takes_no_child() {
+        let m = manager("unknown-close");
+        let start = json!({"request_id":"start","command":"start","input":{"harness":"claude-code"},"state":"completed"});
+        m.note("cr_p", "receipt", start).unwrap();
+        let close = json!({"request_id":"close","command":"close","input":{},"state":"unknown"});
+        m.note("cr_p", "receipt", close).unwrap();
+        m.note("cr_p", "state", json!({"state":"process_lost"}))
+            .unwrap();
+        let spawn = Spawn {
+            harness: None,
+            model: None,
+            reasoning: None,
+            title: None,
+            prompt: "hi".into(),
+            service_tier: None,
+        };
+        let result = m.spawn_child("cr_p", "k", spawn).await;
+        assert!(matches!(
+            result,
+            Err(Error::Conflict("the parent thread is closed"))
+        ));
     }
 }
