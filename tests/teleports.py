@@ -53,6 +53,23 @@ class TeleportTests(unittest.TestCase):
         self.upload('upper', 1, 0, digest.upper(), body)
         self.assertEqual(self.service.request('GET', '/v1/teleports/upper')['files'][1]['complete'], True)
 
+    def test_file_uploaded_after_the_cloud_session_closed_is_accepted(self):
+        self.start()
+        body = b'0123456789'
+        digest = hashlib.sha256(body).hexdigest()
+        project = {'path': 'notes.txt', 'size': 10, 'sha256': digest, 'kind': 'project', 'origin': None}
+        self.service.request('POST', '/v1/teleports', self.manifest('closed', extra_files=[project]), 202)
+        raw = self.native('closed')
+        self.upload('closed', 0, 0, hashlib.sha256(raw).hexdigest(), raw)
+        self.service.request('POST', '/v1/teleports/closed/activate', {}, 202)
+        until(lambda: self.service.session('cr_teleport_closed')['state'] == 'idle', 'handoff session', 15)
+        self.service.request('POST', '/v1/sessions/cr_teleport_closed/close', {'request_id': 'c1'}, 202)
+        until(lambda: self.service.session('cr_teleport_closed')['state'] == 'closed', 'closed session', 15)
+        self.upload('closed', 1, 0, digest, body)
+        view = self.service.request('GET', '/v1/teleports/closed')
+        self.assertEqual(view['files'][1]['complete'], True)
+        self.assertEqual(view['phase'], 'complete')
+
     def test_a_transfer_saved_with_upper_case_digests_retries_and_uploads(self):
         self.start()
         body = b'0123456789'

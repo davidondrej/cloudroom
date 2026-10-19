@@ -314,8 +314,11 @@ impl Manager {
             .files
             .iter()
             .any(|entry| matches!(entry.kind.as_str(), "project" | "attachment"));
+        // A closed session never runs the notice, so waiting for its receipt would leave the transfer running forever.
         let announced = !needs_notice
-            || session.is_some_and(|s| s.receipts.contains_key(&format!("teleport_ready_{id}")));
+            || session.is_some_and(|s| {
+                s.close_requested() || s.receipts.contains_key(&format!("teleport_ready_{id}"))
+            });
         let complete =
             started && output && announced && transfer.files.len() == transfer.manifest.files.len();
         let error = session.and_then(|s| {
@@ -729,8 +732,9 @@ impl Manager {
             if session.receipts.contains_key(&request) {
                 return Ok(());
             }
-            if session.close_request.is_some() || session.state == "closed" {
-                return Err(Error::Conflict("cloud session is closed"));
+            // A closed session never continues, so the files stay in place with no notice to queue.
+            if session.close_requested() {
+                return Ok(());
             }
             let receipt = Receipt {
                 request_id: request,
