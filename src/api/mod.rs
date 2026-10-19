@@ -1257,6 +1257,8 @@ async fn attach(
         ));
     }
     let key = format!("{id}/{}", query.request_id);
+    // Bytes a completing part added to its partial; dropped again if the file is refused.
+    let mut before_part = None;
     let body = match (query.offset, query.total, part) {
         (None, None, _) => body,
         (Some(offset), Some(total), Some(part)) => {
@@ -1275,8 +1277,11 @@ async fn attach(
             match attach_part(&key, &query.name, &query.kind, offset, total, &part)
                 .map_err(session::Error::Conflict)?
             {
-                (_, Some(whole)) => Body::from(whole),
-                (received, None) => {
+                Progress::Complete { whole, before } => {
+                    before_part = Some(before);
+                    Body::from(whole)
+                }
+                Progress::Received(received) => {
                     return Ok((StatusCode::ACCEPTED, Json(json!({ "received": received }))));
                 }
             }
@@ -1299,6 +1304,9 @@ async fn attach(
         )
         .await
         .map_err(|error| {
+            if let Some(before) = before_part {
+                truncate_part(&key, before);
+            }
             eprintln!(
                 "attachment upload failed: session={id} request={} kind={:?} errno={:?}: {error}",
                 query.request_id,
@@ -1371,7 +1379,7 @@ fn attach_part(
     offset: usize,
     total: usize,
     part: &[u8],
-) -> std::result::Result<(usize, Option<Vec<u8>>), &'static str> {
+) -> std::result::Result<Progress, &'static str> {
     let mut parts = PARTS.lock().unwrap();
     parts.retain(|_, partial| partial.at.elapsed() < Duration::from_secs(600));
     if offset == 0 && !parts.contains_key(key) {
@@ -1393,10 +1401,30 @@ fn attach_part(
     if partial.total != total || partial.name != name || partial.kind != kind {
         return Err("request_id already has different content");
     }
+    let before = partial.bytes.len();
     append_part(&mut partial.bytes, offset, part, total)?;
     partial.at = Instant::now();
     let received = partial.bytes.len();
-    Ok((received, (received == total).then(|| partial.bytes.clone())))
+    Ok(if received == total {
+        Progress::Complete {
+            whole: partial.bytes.clone(),
+            before,
+        }
+    } else {
+        Progress::Received(received)
+    })
+}
+
+enum Progress {
+    Received(usize),
+    Complete { whole: Vec<u8>, before: usize },
+}
+
+/// Drops the bytes a refused completing part added, so a corrected retry is not compared with them.
+fn truncate_part(key: &str, before: usize) {
+    if let Some(partial) = PARTS.lock().unwrap().get_mut(key) {
+        partial.bytes.truncate(before);
+    }
 }
 
 /// Appends one part of an upload that arrives in pieces. A repeated part is ignored, so retrying after a lost
@@ -1574,18 +1602,39 @@ mod tests {
     #[test]
     fn parts_of_one_upload_must_all_name_the_same_file() {
         let key = "test-f13/r1";
-        assert_eq!(
+        assert!(matches!(
             attach_part(key, "first.txt", "file", 0, 4, b"ab"),
-            Ok((2, None))
-        );
+            Ok(Progress::Received(2))
+        ));
         assert_eq!(
-            attach_part(key, "second.md", "file", 2, 4, b"cd"),
-            Err("request_id already has different content")
+            attach_part(key, "second.md", "file", 2, 4, b"cd").err(),
+            Some("request_id already has different content")
         );
-        assert_eq!(
-            attach_part(key, "first.txt", "file", 2, 4, b"cd").map(|(n, _)| n),
-            Ok(4)
-        );
+        assert!(matches!(
+            attach_part(key, "first.txt", "file", 2, 4, b"cd"),
+            Ok(Progress::Complete { .. })
+        ));
+        PARTS.lock().unwrap().remove(key);
+    }
+
+    #[test]
+    fn a_refused_completing_part_leaves_no_bytes_behind() {
+        let key = "test-f93/r1";
+        assert!(matches!(
+            attach_part(key, "ok.txt", "file", 0, 3, b"a"),
+            Ok(Progress::Received(1))
+        ));
+        let Ok(Progress::Complete { before, .. }) = attach_part(key, "ok.txt", "file", 1, 3, b"XY")
+        else {
+            panic!("the last part completes the file");
+        };
+        // The workspace refused the file, so the handler drops the part again.
+        truncate_part(key, before);
+        let Ok(Progress::Complete { whole, .. }) = attach_part(key, "ok.txt", "file", 1, 3, b"bc")
+        else {
+            panic!("the corrected retry completes the file");
+        };
+        assert_eq!(whole, b"abc");
         PARTS.lock().unwrap().remove(key);
     }
 }
