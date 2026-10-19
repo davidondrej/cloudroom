@@ -206,6 +206,43 @@ fn validate(manifest: &Manifest) -> Result<()> {
     Ok(())
 }
 
+/// Harnesses whose reasoning is checked per model against the catalog, as prompts and launches check it.
+fn checks_catalog(kind: runtime::Kind) -> bool {
+    matches!(
+        kind,
+        runtime::Kind::Codex | runtime::Kind::Claude | runtime::Kind::Cursor
+    )
+}
+
+/// The reasoning levels a harness accepts, the same tables the capabilities advertise.
+fn harness_accepts_reasoning(kind: runtime::Kind, level: &str) -> bool {
+    match kind {
+        runtime::Kind::Pi => runtime::pi_reasoning_accepted(level),
+        runtime::Kind::Cursor => runtime::cursor_models::LEVELS.contains(&level),
+        runtime::Kind::OpenCode => runtime::OPENCODE_REASONING_LEVELS.contains(&level),
+        runtime::Kind::Hermes => runtime::HERMES_REASONING_LEVELS.contains(&level),
+        runtime::Kind::Devin => runtime::DEVIN_REASONING_LEVELS.contains(&level),
+        runtime::Kind::OpenClaw => runtime::OPENCLAW_REASONING_LEVELS.contains(&level),
+        runtime::Kind::Fx | runtime::Kind::Codex | runtime::Kind::Claude => {
+            runtime::PI_REASONING_LEVELS.contains(&level)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn each_harness_checks_reasoning_against_its_own_levels() {
+        assert!(harness_accepts_reasoning(runtime::Kind::Cursor, "max"));
+        assert!(!harness_accepts_reasoning(runtime::Kind::Cursor, "minimal"));
+        assert!(harness_accepts_reasoning(runtime::Kind::Pi, "max"));
+        assert!(harness_accepts_reasoning(runtime::Kind::Fx, "minimal"));
+        assert!(!harness_accepts_reasoning(runtime::Kind::Fx, "max"));
+    }
+}
+
 /// A closed session gave its conversation back (Teleport to Local).
 fn native_in_use(local: &super::Local, native_id: &str) -> bool {
     local.sessions.values().any(|s| {
@@ -357,7 +394,7 @@ impl Manager {
             return fail("setting_unavailable", error, None);
         }
         let reasoning = check.reasoning.as_deref();
-        if matches!(check.harness, runtime::Kind::Codex | runtime::Kind::Claude) {
+        if checks_catalog(check.harness) {
             let models = match self.model_catalog(check.harness).await {
                 Ok(models) => models,
                 Err(error) => return fail("models_unavailable", error.message(), None),
@@ -381,10 +418,7 @@ impl Manager {
                 );
             }
         } else if let Some(reasoning) = reasoning
-            && !match check.harness {
-                runtime::Kind::Pi => runtime::pi_reasoning_accepted(reasoning),
-                _ => runtime::PI_REASONING_LEVELS.contains(&reasoning),
-            }
+            && !harness_accepts_reasoning(check.harness, reasoning)
         {
             let error = format!("Cloud {harness} does not support {reasoning} effort");
             return fail("model_unavailable", error, None);

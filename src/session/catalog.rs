@@ -152,6 +152,7 @@ impl Manager {
                         runtime::Kind::OpenCode => runtime::OPENCODE_REASONING_LEVELS,
                         runtime::Kind::Hermes => runtime::HERMES_REASONING_LEVELS,
                         runtime::Kind::Devin => runtime::DEVIN_REASONING_LEVELS,
+                        runtime::Kind::Cursor => &runtime::cursor_models::LEVELS[..],
                         runtime::Kind::OpenClaw => runtime::OPENCLAW_REASONING_LEVELS,
                         _ => runtime::PI_REASONING_LEVELS,
                     });

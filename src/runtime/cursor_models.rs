@@ -12,7 +12,7 @@ const EFFORTS: [(&str, &str); 7] = [
     ("max", "max"),
     ("none", "none"),
 ];
-const LEVELS: [&str; 6] = ["none", "low", "medium", "high", "xhigh", "max"];
+pub(crate) const LEVELS: [&str; 6] = ["none", "low", "medium", "high", "xhigh", "max"];
 
 #[derive(Default)]
 struct Slot {
@@ -158,4 +158,61 @@ pub(crate) async fn list(config: &Config, storage: &Guard) -> io::Result<Vec<Mod
         return Err(io::Error::other("Cursor model list unavailable"));
     }
     Ok(models)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The levels the catalog advertises for Cursor are the ones its model resolver accepts: no Pi-only `minimal`.
+    #[test]
+    fn advertised_levels_are_cursors_own() {
+        assert_eq!(LEVELS, ["none", "low", "medium", "high", "xhigh", "max"]);
+        assert!(!LEVELS.contains(&"minimal"));
+    }
+
+    #[tokio::test]
+    async fn the_capabilities_advertise_cursors_levels() {
+        let dir =
+            std::env::temp_dir().join(format!("cloudroom-cursor-levels-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = dir.canonicalize().unwrap();
+        let mut config = crate::config::Config {
+            listen: "127.0.0.1:0".parse().unwrap(),
+            token: String::new(),
+            state_dir: dir.join("state"),
+            repository: dir.clone(),
+            api_url: Some("http://127.0.0.1:1".into()),
+            store: "fixture".into(),
+            instance: None,
+            account_home: dir.clone(),
+            default_harness: crate::runtime::Kind::Codex,
+            harnesses: Default::default(),
+            storage: None,
+            rpc_timeout: Duration::from_secs(30),
+            diagnostic_upload: Duration::from_secs(1),
+        };
+        config.harnesses.insert(
+            crate::runtime::Kind::Cursor,
+            crate::config::HarnessConfig {
+                binary: dir.join("cursor-agent"),
+                home: dir.clone(),
+                model: "auto".into(),
+                provider: None,
+            },
+        );
+        let manager = crate::session::Manager::open(config).unwrap();
+        let capabilities = manager.capabilities().await;
+        let cursor = capabilities["harnesses"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|harness| harness["id"] == "cursor")
+            .expect("cursor is advertised");
+        let levels = cursor["reasoning_levels"].as_array().unwrap();
+        assert!(levels.contains(&serde_json::json!("max")));
+        assert!(!levels.contains(&serde_json::json!("minimal")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
