@@ -534,6 +534,10 @@ impl Manager {
         self.transfer_directory(id)?;
         let lock = self.teleports.lock(id);
         let _guard = lock.lock().await;
+        // The body is buffered before this handler runs, so a drain may already have answered `drained`.
+        if self.local.lock().unwrap().draining {
+            return Err(Error::Conflict("service is draining"));
+        }
         let mut transfer = self.transfer_read(id)?;
         if transfer.cancelled {
             return Err(Error::Conflict("transfer cancelled"));
