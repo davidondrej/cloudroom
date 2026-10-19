@@ -300,7 +300,10 @@ impl Local {
                         && !session.receipts.contains_key(&receipt.request_id)
                     {
                         let task = Receipt {
-                            request_id: receipt.request_id.replacen("child_", "task_", 1),
+                            request_id: receipt.input["prompt_request_id"].as_str().map_or_else(
+                                || receipt.request_id.replacen("child_", "task_", 1),
+                                str::to_owned,
+                            ),
                             command: "prompt".into(),
                             input: if receipt.input["service_tier"].is_string() {
                                 json!({"text":receipt.input["prompt"],"reasoning":receipt.input["reasoning"],"service_tier":receipt.input["service_tier"]})
@@ -679,6 +682,20 @@ mod tests {
         drop(restored);
         fs::remove_file(dir.join("snapshot.json")).unwrap();
         assert_eq!(state(&Local::open(&dir).unwrap()), expected);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_child_start_replays_the_prompt_request_id_it_recorded() {
+        let dir = std::env::temp_dir().join(format!("cloudroom-child-task-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let task = "task_0123456789abcdef";
+        let start = json!({"request_id":"child_long","command":"start","state":"accepted","input":{"parent_session":"cr_p","prompt":"hi","prompt_request_id":task}});
+        let mut local = Local::open(&dir).unwrap();
+        local
+            .append("cr_child_long", "receipt", start, None)
+            .unwrap();
+        assert!(local.sessions["cr_child_long"].receipts.contains_key(task));
         fs::remove_dir_all(&dir).unwrap();
     }
 }

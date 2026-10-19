@@ -31,11 +31,12 @@ impl Manager {
         }
         let id = format!("cr_child_{key}");
         let start_id = format!("child_{key}");
-        let prompt_id = format!("task_{key}");
+        let prompt_id = task_id(&key);
         let reasoning = prompt::latest(&session.prompts, &session.receipts, &request)
             .and_then(prompt::reasoning)
             .or_else(|| session.reasoning.clone());
         let mut input = json!({"harness":session.harness,"parent_session":parent,"parent_request":request,"tool_call_id":tool_call_id,"prompt":text,"reasoning":reasoning});
+        prompt_request_id(&mut input, &key);
         if !session.command_guard_enabled() {
             input["command_guard_enabled"] = json!(false);
         }
@@ -46,8 +47,13 @@ impl Manager {
             input["system_prompt"] = json!(system_prompt);
         }
         if let Some(existing) = local.sessions.get(&id) {
-            Self::retry(existing, &start_id, "start", &input)?
-                .ok_or(Error::Conflict("child identity conflict"))?;
+            Self::retry(
+                existing,
+                &start_id,
+                "start",
+                &compared_start(existing, &start_id, &input),
+            )?
+            .ok_or(Error::Conflict("child identity conflict"))?;
         } else {
             let start = Receipt {
                 request_id: start_id.clone(),
@@ -245,12 +251,50 @@ pub(super) fn fork_history(
 pub(super) fn notice_ids(child: &str, request: &str) -> (String, String) {
     let mut queued = legacy_notice_id(child, request);
     if queued.len() + "_steer".len() > 64 {
-        let hash = queued.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |h, b| {
-            (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
-        });
-        queued = format!("notice_{hash:016x}");
+        queued = format!("notice_{}", fnv(&queued));
     }
     (format!("{queued}_steer"), queued)
+}
+
+/// The first prompt's request ID of the child started with `key`. It must fit in 64 characters, like any request ID.
+pub(super) fn task_id(key: &str) -> String {
+    let id = format!("task_{key}");
+    if id.len() <= 64 {
+        id
+    } else {
+        format!("task_{}", fnv(&id))
+    }
+}
+
+/// A start whose prompt ID is not `task_` plus its key says so in its input, since replay derives the ID from the
+/// start's. Starts that are not so are left as they were, so an old retry still matches.
+fn prompt_request_id(input: &mut Value, key: &str) {
+    let task = task_id(key);
+    if task != format!("task_{key}") {
+        input["prompt_request_id"] = json!(task);
+    }
+}
+
+/// The input to compare with a start already recorded. A start recorded before `prompt_request_id` existed lacks
+/// that field, so the field is left out of the comparison: a retry of such a start with a long key still matches.
+fn compared_start(existing: &super::Session, start_id: &str, input: &Value) -> Value {
+    let mut input = input.clone();
+    let legacy = existing
+        .receipts
+        .get(start_id)
+        .is_some_and(|r| r.input.get("prompt_request_id").is_none());
+    if legacy && let Some(object) = input.as_object_mut() {
+        object.remove("prompt_request_id");
+    }
+    input
+}
+
+/// A stable FNV-1a hash of `text`, as 16 hex digits.
+fn fnv(text: &str) -> String {
+    let hash = text.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |h, b| {
+        (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
+    });
+    format!("{hash:016x}")
 }
 
 /// Core 0.1.57 and older never shortened it, so a notice they delivered is still found.
@@ -356,6 +400,7 @@ impl Manager {
                 .or((kind != runtime::Kind::Pi).then(|| "medium".into()));
             let mut input =
                 json!({"harness":kind,"parent_session":parent,"prompt":spawn.prompt,"notify":true});
+            prompt_request_id(&mut input, key);
             if let Some(reasoning) = &reasoning {
                 input["reasoning"] = json!(reasoning);
             }
@@ -384,9 +429,14 @@ impl Manager {
                 input["system_prompt"] = json!(system_prompt);
             }
             if let Some(existing) = local.sessions.get(&id) {
-                return Self::retry(existing, &start_id, "start", &input)?
-                    .map(|r| (id.clone(), r))
-                    .ok_or(Error::Conflict("child identity conflict"));
+                return Self::retry(
+                    existing,
+                    &start_id,
+                    "start",
+                    &compared_start(existing, &start_id, &input),
+                )?
+                .map(|r| (id.clone(), r))
+                .ok_or(Error::Conflict("child identity conflict"));
             }
             let provider = chosen_provider.or(same.then(|| p.provider.clone()).flatten());
             (kind, input, model, provider, p.workspace.clone())
@@ -422,9 +472,14 @@ impl Manager {
         {
             let mut local = self.local.lock().unwrap();
             if let Some(existing) = local.sessions.get(&id) {
-                return Self::retry(existing, &start_id, "start", &receipt.input)?
-                    .map(|r| (id.clone(), r))
-                    .ok_or(Error::Conflict("child identity conflict"));
+                return Self::retry(
+                    existing,
+                    &start_id,
+                    "start",
+                    &compared_start(existing, &start_id, &receipt.input),
+                )?
+                .map(|r| (id.clone(), r))
+                .ok_or(Error::Conflict("child identity conflict"));
             }
             if self.is_stopping() || local.draining || self.storage.blocks() {
                 return Err(Error::Conflict(
@@ -762,5 +817,19 @@ impl Manager {
             item["reply"] = json!(reply);
         }
         json!({"children":items})
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_child_first_prompt_id_fits_a_request_id() {
+        for key in ["short", &"a".repeat(59), &"a".repeat(60), &"a".repeat(64)] {
+            let id = task_id(key);
+            assert!(id.len() <= 64, "{id} has {} characters", id.len());
+        }
+        assert_ne!(task_id(&"a".repeat(60)), task_id(&"a".repeat(61)));
     }
 }
