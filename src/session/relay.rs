@@ -134,6 +134,8 @@ async fn receive(
         .get(&id)
         .map(|s| s.archived)
         .ok_or_else(|| fail(StatusCode::NOT_FOUND, "Unknown session"))?;
+    // What the parent learns of a child is recorded only once the report is delivered, not when it is refused.
+    let mut heard = None;
     let text = match input.action.as_str() {
         "tell" => input
             .text
@@ -148,7 +150,7 @@ async fn receive(
                 "interrupted" => "stopped",
                 _ => "error",
             };
-            note_child(&m, &id, &child, known);
+            heard = Some((child.clone(), known));
             notice(&child, input.title, state, input.error, input.reply)
         }
         "stop" => {
@@ -176,6 +178,9 @@ async fn receive(
             StatusCode::SERVICE_UNAVAILABLE,
             "Not confirmed yet. Retry.",
         ));
+    }
+    if let Some((child, state)) = heard {
+        note_child(&m, &id, &child, state);
     }
     Ok(answer)
 }
@@ -294,5 +299,78 @@ impl Manager {
                 wait = (wait * 2).min(Duration::from_secs(300));
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+
+    /// A Core over a scratch state directory, with no website reachable.
+    fn manager(name: &str) -> Arc<Manager> {
+        let root =
+            std::env::temp_dir().join(format!("cloudroom-relay-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        Manager::open(Config {
+            listen: "127.0.0.1:0".parse().unwrap(),
+            token: String::new(),
+            state_dir: root.join("state"),
+            repository: root.clone(),
+            api_url: Some("http://127.0.0.1:1".into()),
+            store: "test".into(),
+            instance: None,
+            account_home: root.clone(),
+            default_harness: crate::runtime::Kind::Claude,
+            harnesses: Default::default(),
+            storage: None,
+            rpc_timeout: Duration::from_secs(30),
+            diagnostic_upload: Duration::from_secs(1),
+        })
+        .unwrap()
+    }
+
+    /// A session created by its start receipt, closed when asked.
+    fn session(m: &Manager, id: &str, closed: bool) {
+        let start = json!({"request_id":"start","command":"start","input":{"harness":"claude-code"},"state":"completed"});
+        m.note(id, "receipt", start).unwrap();
+        if closed {
+            m.note(id, "state", json!({"state":"closed"})).unwrap();
+        }
+    }
+
+    fn relayed(request: &str, action: &str) -> Relayed {
+        Relayed {
+            request_id: request.into(),
+            action: action.into(),
+            text: None,
+            child: None,
+            title: None,
+            state: None,
+            error: None,
+            reply: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_refused_report_does_not_record_the_child_state() {
+        let m = manager("refused-report");
+        session(&m, "cr_p", true);
+        let report = Relayed {
+            child: Some("thr_abc".into()),
+            state: Some("completed".into()),
+            reply: Some("done".into()),
+            ..relayed("r1", "report")
+        };
+        assert!(
+            receive(State(m.clone()), Path("cr_p".into()), Json(report))
+                .await
+                .is_err()
+        );
+        assert!(
+            m.local.lock().unwrap().sessions["cr_p"]
+                .child_states
+                .is_empty()
+        );
     }
 }
