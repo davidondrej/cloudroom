@@ -271,6 +271,8 @@ class ReplayTests(unittest.TestCase):
         self.assertEqual(first['user_code'], 'TEST-1234')
         self.assertEqual(api('POST', '/v1/accounts/codex/login', {'request_id': 'login-one'}, 202), first)
         self.assertEqual(api('POST', '/v1/accounts/codex/cancel', {'request_id': 'stale-login'}, 202), first)
+        for bad in ('', 'x' * 200):
+            self.assertEqual(api('POST', '/v1/accounts/codex/cancel', {'request_id': bad}, 409)['error'], 'invalid request ID')
         self.assertEqual((self.repo / 'auth-attempts').read_text().splitlines(), ['login'])
         self.assertEqual(api('POST', '/v1/accounts/codex/cancel', {'request_id': 'login-one'}, 202)['state'], 'missing')
         second = api('POST', '/v1/accounts/codex/login', {'request_id': 'login-two'}, 202)

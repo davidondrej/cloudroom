@@ -328,11 +328,13 @@ async fn codex_switched(State(manager): State<Arc<Manager>>) -> Json<Value> {
 async fn codex_cancel(
     State(manager): State<Arc<Manager>>,
     Json(input): Json<RequestId>,
-) -> (StatusCode, Json<crate::runtime::auth::Status>) {
-    (
+) -> Result<(StatusCode, Json<crate::runtime::auth::Status>)> {
+    crate::workspace::valid_id(&input.request_id)
+        .map_err(|_| session::Error::Conflict("invalid request ID"))?;
+    Ok((
         StatusCode::ACCEPTED,
         Json(manager.cancel_codex_login(&input.request_id).await),
-    )
+    ))
 }
 
 async fn teleport_prepare(
