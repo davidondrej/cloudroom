@@ -207,8 +207,21 @@ async fn archive(
     ConnectInfo(peer): ConnectInfo<Peer>,
 ) -> Result<Json<Value>, Failure> {
     let session = caller(&m, peer, "thread")?;
-    archive_under(&m, &session)?;
-    record(&m, &session, "archive", json!({"archived":true}))
+    archive_self(&m, &session)
+}
+
+/// The thread archives itself and its children, and stops its own turn even when the app is offline (F79).
+fn archive_self(m: &Arc<Manager>, session: &str) -> Result<Json<Value>, Failure> {
+    // The cut comes before the stop: a turn the stop interrupts ends after the archive and is not reported.
+    let done = record(
+        m,
+        session,
+        "archive",
+        json!({"archived":true,"reports":true}),
+    )?;
+    archive_under(m, session)?;
+    retire(m, session)?;
+    Ok(done)
 }
 
 /// Stops and archives every thread under `id` now: the app archives them too, but never stops them,
@@ -381,6 +394,18 @@ async fn launch(
     key: String,
     input: SpawnBody,
 ) -> Result<Json<Value>, Failure> {
+    let refused = m.local.lock().unwrap().sessions.get(session).and_then(|p| {
+        if p.close_requested() {
+            Some("the parent thread is closed")
+        } else if p.archived {
+            Some("the parent thread is archived")
+        } else {
+            None
+        }
+    });
+    if let Some(message) = refused {
+        return Err(session_failure(super::Error::Conflict(message)));
+    }
     let Some(api) = m.history.api.clone() else {
         return Err(fail(
             StatusCode::CONFLICT,
@@ -949,4 +974,100 @@ pub async fn cli(args: &[String]) -> io::Result<i32> {
     let answer = crate::mac::request(crate::mac::SOCKET, "POST", path, body).await?;
     println!("{answer}");
     Ok(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+
+    /// A Core over a scratch state directory, with no website reachable.
+    fn scratch_manager(name: &str) -> Arc<Manager> {
+        let root =
+            std::env::temp_dir().join(format!("cloudroom-thread-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        Manager::open(Config {
+            listen: "127.0.0.1:0".parse().unwrap(),
+            token: String::new(),
+            state_dir: root.join("state"),
+            repository: root.clone(),
+            api_url: Some("http://127.0.0.1:1".into()),
+            store: "test".into(),
+            instance: None,
+            account_home: root.clone(),
+            default_harness: crate::runtime::Kind::Claude,
+            harnesses: Default::default(),
+            storage: None,
+            rpc_timeout: Duration::from_secs(30),
+            diagnostic_upload: Duration::from_secs(1),
+        })
+        .unwrap()
+    }
+
+    async fn launch_top_level(m: &Arc<Manager>, parent: &str) -> Result<Json<Value>, Failure> {
+        let input: SpawnBody =
+            serde_json::from_value(json!({"prompt":"hi","top_level":true})).unwrap();
+        launch(m, parent, "launch_k".into(), input).await
+    }
+
+    #[tokio::test]
+    async fn a_top_level_launch_from_a_closed_or_archived_thread_is_refused() {
+        let m = scratch_manager("launch-refused");
+        let start = json!({"request_id":"start","command":"start","input":{"harness":"claude-code"},"state":"completed"});
+        m.note("cr_closed", "receipt", start.clone()).unwrap();
+        m.note("cr_closed", "state", json!({"state":"closed"}))
+            .unwrap();
+        m.note("cr_pending", "receipt", start.clone()).unwrap();
+        let close = json!({"request_id":"close","command":"close","input":{},"state":"accepted"});
+        m.note("cr_pending", "receipt", close).unwrap();
+        m.note("cr_archived", "receipt", start).unwrap();
+        m.note("cr_archived", "archive", json!({"archived":true}))
+            .unwrap();
+        for (parent, message) in [
+            ("cr_closed", "the parent thread is closed"),
+            ("cr_pending", "the parent thread is closed"),
+            ("cr_archived", "the parent thread is archived"),
+        ] {
+            let refused = launch_top_level(&m, parent).await;
+            let Err((status, body)) = refused else {
+                panic!("a top-level launch from {parent} was accepted");
+            };
+            assert_eq!(status, StatusCode::CONFLICT);
+            assert_eq!(body.0["error"], message);
+            assert_eq!(body.0["code"], "request_rejected");
+        }
+    }
+
+    #[tokio::test]
+    async fn archive_self_stops_the_threads_own_turn() {
+        let root =
+            std::env::temp_dir().join(format!("cloudroom-archive-self-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let m = Manager::open(Config {
+            listen: "127.0.0.1:0".parse().unwrap(),
+            token: String::new(),
+            state_dir: root.join("state"),
+            repository: root.clone(),
+            api_url: Some("http://127.0.0.1:1".into()),
+            store: "test".into(),
+            instance: None,
+            account_home: root.clone(),
+            default_harness: crate::runtime::Kind::Claude,
+            harnesses: Default::default(),
+            storage: None,
+            rpc_timeout: Duration::from_secs(30),
+            diagnostic_upload: Duration::from_secs(1),
+        })
+        .unwrap();
+        let start = json!({"request_id":"start","command":"start","input":{"harness":"claude-code"},"state":"completed"});
+        m.note("cr_p", "receipt", start).unwrap();
+        let _ = archive_self(&m, "cr_p").unwrap();
+        let stops = m.local.lock().unwrap().sessions["cr_p"]
+            .receipts
+            .values()
+            .filter(|r| r.command == "stop")
+            .count();
+        assert!(stops >= 1, "archive --self left the turn running");
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }
