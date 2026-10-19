@@ -562,11 +562,6 @@ impl Manager {
         }
         entry.size = size;
         entry.sha256 = sha256.clone();
-        if let std::collections::btree_map::Entry::Vacant(entry) = transfer.digests.entry(index) {
-            entry.insert(sha256);
-            transfer.sizes.insert(index, size);
-            self.transfer_save(&transfer)?;
-        }
         if transfer.files.contains_key(&index) {
             self.teleport_files_ready(&transfer)?;
             return self.transfer_view(&transfer);
@@ -584,6 +579,12 @@ impl Manager {
             .ok_or(Error::Conflict("invalid upload offset"))?;
         if end > entry.size || offset > length {
             return Err(Error::Conflict("invalid upload offset"));
+        }
+        // Only an upload that the offset check accepts may pin the digest and size.
+        if let std::collections::btree_map::Entry::Vacant(pinned) = transfer.digests.entry(index) {
+            pinned.insert(sha256);
+            transfer.sizes.insert(index, size);
+            self.transfer_save(&transfer)?;
         }
         file.seek(SeekFrom::Start(offset))?;
         if offset < length {

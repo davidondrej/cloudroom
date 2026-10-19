@@ -32,6 +32,15 @@ class TeleportTests(unittest.TestCase):
         self.assertEqual(response.status, expected, data)
         return data
 
+    def test_refused_first_upload_does_not_pin_the_file_digest(self):
+        self.start()
+        project = {'path': 'notes.txt', 'size': 10, 'sha256': '', 'kind': 'project', 'origin': None}
+        self.service.request('POST', '/v1/teleports', self.manifest('pin', extra_files=[project]), 202)
+        digest = hashlib.sha256(b'0123456789').hexdigest()
+        self.upload('pin', 1, 5, 'a' * 64, b'12345', expected=409)
+        self.upload('pin', 1, 0, digest, b'0123456789')
+        self.assertEqual(self.service.request('GET', '/v1/teleports/pin')['files'][1]['complete'], True)
+
     def test_teleport_does_not_adopt_an_unrelated_session_with_its_id(self):
         self.start()
         self.service.request('POST', '/v1/sessions', {'request_id': 'teleport_abc'}, 202)
