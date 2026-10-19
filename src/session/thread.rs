@@ -236,7 +236,7 @@ pub(super) fn retire(m: &Arc<Manager>, id: &str) -> Result<(), Failure> {
 
 pub(super) fn session_failure(error: super::Error) -> Failure {
     let status = match error {
-        super::Error::NotFound => StatusCode::NOT_FOUND,
+        super::Error::NotFound | super::Error::RequestNotFound => StatusCode::NOT_FOUND,
         super::Error::Conflict(_) => StatusCode::CONFLICT,
         super::Error::Storage(_) => StatusCode::SERVICE_UNAVAILABLE,
     };

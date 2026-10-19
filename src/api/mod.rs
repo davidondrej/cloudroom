@@ -512,6 +512,7 @@ impl IntoResponse for session::Error {
     fn into_response(self) -> Response {
         let (status, error) = match self {
             Self::NotFound => (StatusCode::NOT_FOUND, "session not found"),
+            Self::RequestNotFound => (StatusCode::NOT_FOUND, "request not found"),
             Self::Conflict(message) => (StatusCode::CONFLICT, message),
             Self::Storage(detail) => {
                 eprintln!("storage unavailable: {detail}");

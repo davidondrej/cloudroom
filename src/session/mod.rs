@@ -267,6 +267,8 @@ impl Session {
 #[derive(Debug)]
 pub enum Error {
     NotFound,
+    /// The session exists, but the request ID it names is not one of its requests.
+    RequestNotFound,
     Conflict(&'static str),
     /// Carries the underlying cause so API clients can see why storage failed.
     Storage(String),
@@ -276,6 +278,7 @@ impl Error {
     pub fn message(&self) -> String {
         match self {
             Self::NotFound => "session not found".into(),
+            Self::RequestNotFound => "request not found".into(),
             Self::Conflict(message) => (*message).into(),
             Self::Storage(detail) => format!("storage unavailable ({detail})"),
         }
@@ -1169,6 +1172,10 @@ impl Manager {
                     .is_some_and(|prompt| prompt.cancelled);
                 if target.is_empty() {
                     return Err(Error::Conflict("queued message is no longer pending"));
+                }
+                // A request ID this session never saw is an unknown resource (404), not a stale message (409).
+                if !session.receipts.contains_key(target) {
+                    return Err(Error::RequestNotFound);
                 }
                 if command == "edit" || !cancelled {
                     if !session.queue.contains(&target.to_owned()) {
@@ -2516,6 +2523,34 @@ mod tests {
         .unwrap();
         assert!(!m.close_pending("cr_p"));
         assert!(!m.close_pending("cr_none"));
+    }
+
+    #[tokio::test]
+    async fn an_unknown_request_to_edit_or_cancel_is_not_a_missing_session() {
+        let m = manager("unknown-target");
+        let start = json!({"request_id":"start","command":"start","input":{"harness":"claude-code"},"state":"completed"});
+        m.note("cr_t", "receipt", start).unwrap();
+        for command in ["edit", "cancel"] {
+            let refused = m.command(
+                "cr_t",
+                format!("{command}1"),
+                command,
+                json!({"target_request_id":"nope"}),
+            );
+            assert!(
+                matches!(refused, Err(Error::RequestNotFound)),
+                "{command} with an unknown target answers request not found"
+            );
+        }
+        assert!(matches!(
+            m.command(
+                "cr_missing",
+                "c9".into(),
+                "cancel",
+                json!({"target_request_id":"nope"})
+            ),
+            Err(Error::NotFound)
+        ));
     }
 
     #[test]

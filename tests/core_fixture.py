@@ -858,6 +858,10 @@ class RecoveryTests(unittest.TestCase):
         rejected = self.service.request("POST", "/v1/sessions/cr_seed/prompts", {"request_id": "late", "text": "x"}, 409)
         self.assertIn("process unavailable", rejected["error"])
 
+    def test_cancel_of_an_unknown_request_is_not_found(self):
+        self.seed(); self.start(); self.ready()
+        self.service.request("POST", "/v1/sessions/cr_seed/cancel", {"request_id": "cancel-none", "target_request_id": "nope"}, 404)
+
     def test_revoked_mac_loses_its_job_stream_and_cannot_pair_again(self):
         previews = self.state / 'previews'
         previews.mkdir(mode=0o700)
