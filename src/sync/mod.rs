@@ -250,6 +250,13 @@ pub async fn check_in(
             "this sync worker is outdated; update Cloudroom",
         ));
     }
+    // Validate every state before the pairing is saved, so a refused check-in pairs nothing.
+    for (id, state) in &input.states {
+        manager.sync.tree(id)?;
+        if !["synced", "syncing", "conflict", "offline"].contains(&state.as_str()) {
+            return Err(conflict());
+        }
+    }
     if settings.device.is_none() {
         let next = Settings {
             revision: settings.revision + 1,
@@ -260,12 +267,6 @@ pub async fn check_in(
         *settings = next;
     }
     drop(settings);
-    for (id, state) in &input.states {
-        manager.sync.tree(id)?;
-        if !["synced", "syncing", "conflict", "offline"].contains(&state.as_str()) {
-            return Err(conflict());
-        }
-    }
     if !input.states.is_empty() {
         *manager.sync.reports.lock().unwrap() = input
             .states

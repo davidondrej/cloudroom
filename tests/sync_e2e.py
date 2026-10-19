@@ -163,6 +163,13 @@ class SyncTests(unittest.TestCase):
             self.remote.upload('skills-shared','escape/file',None,{'tag':'x','kind':'file','executable':False,'size':1},io.BytesIO(b'x'))
         self.assertFalse((outside / 'file').exists())
 
+    def test_refused_check_in_does_not_pair_the_device(self):
+        self.start()
+        self.assertEqual(self.service.request('GET', '/v1/settings')['revision'], '0')
+        self.service.request('POST', '/v1/sync', {'device': 'd1', 'states': {'x': 'synced'}}, 410)
+        self.assertEqual(self.service.request('GET', '/v1/settings')['revision'], '0')
+        self.service.request('POST', '/v1/sync', {'device': 'd2'}, 200)
+
     def test_settings_sync_without_copying_codex_logins_and_old_workers_are_denied(self):
         self.prepare()
         local = self.root / 'settings'; local.mkdir()
