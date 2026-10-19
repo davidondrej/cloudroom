@@ -73,6 +73,9 @@ pub struct Device {
     #[serde(deserialize_with = "lower_device")]
     device: String,
     public_key: String,
+    /// The device ID this Mac was paired with before it signed in again. Only that paired device is replaced.
+    #[serde(default)]
+    replaces: Option<String>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -224,6 +227,9 @@ impl Previews {
     }
     pub(crate) fn paired(&self, device: &str) -> bool {
         self.saved.lock().unwrap().devices.contains_key(device)
+    }
+    pub(crate) fn paired_devices(&self) -> Vec<String> {
+        self.saved.lock().unwrap().devices.keys().cloned().collect()
     }
     /// Whether a Mac is paired with this VM at all.
     pub(crate) fn any_paired(&self) -> bool {
@@ -383,7 +389,15 @@ impl Previews {
             ));
         }
         let known = saved.devices.contains_key(&device.device);
-        if !known && !saved.devices.is_empty() {
+        // Sign-out may miss a sleeping sandbox, which keeps the old device ID. The same Mac (same SSH key) signing in
+        // again names that device in `replaces`; any other caller still means another Mac.
+        let takes_over = device.replaces.as_ref().is_some_and(|old| {
+            saved
+                .devices
+                .get(&old.to_ascii_lowercase())
+                .is_some_and(|key| key == &device.public_key)
+        });
+        if !known && !saved.devices.is_empty() && !takes_over {
             return Err(conflict(
                 "Previews are paired with another Mac; disconnect its previews first",
             ));
@@ -405,9 +419,22 @@ impl Previews {
         };
         if !known {
             let mut next = saved.clone();
-            next.devices.insert(device.device, device.public_key);
+            let replaced: Vec<String> = next.devices.keys().cloned().collect();
+            for old in &replaced {
+                next.devices.remove(old);
+                next.revoked.insert(old.clone());
+            }
+            next.devices
+                .insert(device.device.clone(), device.public_key);
             self.save(&next)?;
             *saved = next;
+            if !replaced.is_empty() {
+                self.reports
+                    .lock()
+                    .unwrap()
+                    .retain(|(reported, _), _| !replaced.contains(reported));
+                self.disconnect(|live| replaced.contains(&live.device))?;
+            }
         }
         let Some(host_key) = host_key else {
             return Ok(json!({"tunnel":true}));
@@ -682,7 +709,13 @@ async fn pair(
     State(m): State<Arc<crate::session::Manager>>,
     Json(input): Json<Device>,
 ) -> Result<Json<Value>> {
-    Ok(Json(m.previews.pair(input)?))
+    // A replaced device loses its Mac stream even when the SSH disconnect fails after the swap.
+    let before = m.previews.paired_devices();
+    let paired = m.previews.pair(input);
+    for id in before.iter().filter(|id| !m.previews.paired(id)) {
+        m.mac.unpair(id);
+    }
+    Ok(Json(paired?))
 }
 async fn revoke(
     State(m): State<Arc<crate::session::Manager>>,
@@ -1015,6 +1048,78 @@ mod tests {
         assert_eq!(error.0, StatusCode::FORBIDDEN);
         let other = "fedcba9876543210fedcba9876543210";
         previews.pair(device(other)).unwrap();
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    fn device_replacing(id: &str, replaces: &str) -> Device {
+        serde_json::from_value(json!({
+            "device": id,
+            "public_key": format!("ssh-ed25519 {}", "A".repeat(68)),
+            "replaces": replaces,
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_new_device_id_that_names_the_paired_device_replaces_it() {
+        let (previews, directory) = previews(true);
+        previews.pair(device(DEVICE)).unwrap();
+        let next = "fedcba9876543210fedcba9876543210";
+        previews.pair(device_replacing(next, DEVICE)).unwrap();
+        assert!(previews.paired(next));
+        assert!(!previews.paired(&DEVICE.to_ascii_lowercase()));
+        let error = previews.pair(device(DEVICE)).unwrap_err();
+        assert_eq!(error.0, StatusCode::FORBIDDEN);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn a_new_device_id_that_names_no_paired_device_is_refused() {
+        let (previews, directory) = previews(true);
+        previews.pair(device(DEVICE)).unwrap();
+        let next = "fedcba9876543210fedcba9876543210";
+        let wrong = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        for replaces in [None, Some(wrong)] {
+            let candidate = match replaces {
+                Some(old) => device_replacing(next, old),
+                None => device(next),
+            };
+            let error = previews.pair(candidate).unwrap_err();
+            assert_eq!(error.0, StatusCode::CONFLICT, "{replaces:?}");
+        }
+        assert!(previews.paired(&DEVICE.to_ascii_lowercase()));
+        assert!(!previews.paired(next));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn a_replacement_with_another_key_is_refused() {
+        let (previews, directory) = previews(true);
+        previews.pair(device(DEVICE)).unwrap();
+        let stranger: Device = serde_json::from_value(json!({
+            "device": "fedcba9876543210fedcba9876543210",
+            "public_key": format!("ssh-ed25519 {}", "B".repeat(68)),
+            "replaces": DEVICE,
+        }))
+        .unwrap();
+        let error = previews.pair(stranger).unwrap_err();
+        assert_eq!(error.0, StatusCode::CONFLICT);
+        assert!(previews.paired(&DEVICE.to_ascii_lowercase()));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn a_stale_device_with_another_key_still_blocks_a_different_mac() {
+        let (previews, directory) = previews(true);
+        previews.pair(device(DEVICE)).unwrap();
+        let other: Device = serde_json::from_value(json!({
+            "device": "fedcba9876543210fedcba9876543210",
+            "public_key": format!("ssh-ed25519 {}", "B".repeat(68)),
+        }))
+        .unwrap();
+        let error = previews.pair(other).unwrap_err();
+        assert_eq!(error.0, StatusCode::CONFLICT);
+        assert!(previews.paired(&DEVICE.to_ascii_lowercase()));
         fs::remove_dir_all(directory).unwrap();
     }
 

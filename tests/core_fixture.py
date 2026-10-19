@@ -949,6 +949,42 @@ class RecoveryTests(unittest.TestCase):
         self.service.request('POST', '/v1/mac/results/job1', {'device': device, 'state': 'done', 'code': 0}, 403)
         self.service.request('POST', '/v1/previews/device', {'device': device, 'public_key': key}, 403)
 
+    def test_a_replacement_ends_the_replaced_mac_stream_and_refuses_a_stranger(self):
+        previews = self.state / 'previews'
+        previews.mkdir(mode=0o700)
+        (self.root / 'run').mkdir()
+        setup = previews / 'setup.json'
+        setup.write_text(json.dumps({'socket': str(self.root / 'run' / 'preview.sock'), 'host': None,
+                                     'agent_uid': os.getuid(), 'tunnel': True}))
+        setup.chmod(0o600)
+        self.start()
+        old, new = '0123456789abcdef0123456789abcdef', 'fedcba9876543210fedcba9876543210'
+        key, stranger_key = 'ssh-ed25519 ' + 'A' * 68, 'ssh-ed25519 ' + 'B' * 68
+        self.service.request('POST', '/v1/previews/device', {'device': old, 'public_key': key}, 200)
+        host, port = self.service.address.rsplit(':', 1)
+        sock = socket.create_connection((host, int(port)), timeout=15)
+        sock.sendall((f'GET /v1/mac/jobs?device={old} HTTP/1.1\r\nHost: core\r\nAccept: text/event-stream\r\n'
+                      f'Authorization: Bearer {self.service.env["CLOUDROOM_TOKEN"]}\r\n\r\n').encode())
+        head = b''
+        while b'\r\n\r\n' not in head:
+            head += sock.recv(4096)
+        self.assertIn(b' 200 ', head.split(b'\r\n', 1)[0])
+        self.service.request('POST', '/v1/previews/device', {'device': new, 'public_key': key}, 409)
+        self.service.request('POST', '/v1/previews/device', {'device': new, 'public_key': stranger_key, 'replaces': old}, 409)
+        self.service.request('POST', '/v1/previews/device', {'device': new, 'public_key': key, 'replaces': new}, 409)
+        self.service.request('POST', '/v1/previews/device', {'device': new, 'public_key': key, 'replaces': old}, 200)
+        sock.settimeout(10)
+        tail = b''
+        while not tail.endswith(b'0\r\n\r\n'):
+            chunk = sock.recv(4096)
+            if not chunk:
+                break
+            tail = (tail + chunk)[-16:]
+        self.assertTrue(tail.endswith(b'0\r\n\r\n'), 'the replaced Mac stream ends at the replacement')
+        sock.close()
+        self.service.request('POST', '/v1/mac/results/job1', {'device': old, 'state': 'done', 'code': 0}, 403)
+        self.service.request('POST', '/v1/previews/device', {'device': old, 'public_key': key}, 403)
+
     def test_refused_start_while_draining_records_no_workspace(self):
         self.seed(); self.start(); self.ready()
         self.assertTrue(self.service.request("POST", "/v1/drain", {"hold": True}, 200)["drained"])

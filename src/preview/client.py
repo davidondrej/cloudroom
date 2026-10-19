@@ -678,7 +678,8 @@ class MacJobs:
                 # A new sandbox refuses this Mac until it pairs; pair here instead of backing off until the preview loop does.
                 if getattr(error, 'code', None) == 403:
                     with contextlib.suppress(OSError, ValueError):
-                        core.request('/device', {'device': device, 'public_key': identity(self.folder)})
+                        core.request('/device', {'device': device, 'public_key': identity(self.folder),
+                                                 'replaces': private_json(self.folder / 'config.json').get('previous')})
                         delay = 1
             time.sleep(delay)
 
@@ -809,7 +810,7 @@ def run(folder):
                     # Sandboxes first, so a VM that turns this Mac away can't block their Mac access.
                     for core in sorted(listed, key=lambda core: not core.sandbox):
                         try:
-                            metadata = core.request('/device', {'device': config['device'], 'public_key': identity(folder)})
+                            metadata = core.request('/device', {'device': config['device'], 'public_key': identity(folder), 'replaces': config.get('previous')})
                             for entry in core.request('')['previews']:
                                 port = entry['port']
                                 if type(port) is not int or not 1024 <= port <= 65535 or not isinstance(entry['generation'], str):
@@ -982,10 +983,13 @@ def configure(folder, connection_file, activate, allow_private, mac_access=None,
         temporary = folder / 'client.pending'
         temporary.write_bytes(source.read_bytes()); temporary.chmod(0o600); temporary.replace(target)
     # A revoked device stays refused by every core, so a sign-in after sign-out needs a new device ID.
-    device = old['device'] if old and not old.get('revoked', False) else uuid.uuid4().hex
+    kept = bool(old) and not old.get('revoked', False)
+    device = old['device'] if kept else uuid.uuid4().hex
+    # Cores may still hold the device this Mac signed out of (sign-out can miss a sleeping sandbox); pairing names it.
+    previous = (old.get('previous') if kept else old['device']) if old else None
     config = {'device': device, 'binding': binding, 'connectionFile': str(connection_file),
               'allowPrivateSsh': allow_private, 'macAccess': mac_access, 'launcher': launcher, 'binary': binary, **({'ownThreads': True} if own else {}),
-              **({'website': trusted} if trusted else {})}
+              **({'website': trusted} if trusted else {}), **({'previous': previous} if previous else {})}
     save(folder / 'config.json', config)
     identity(folder)
     if activate:
