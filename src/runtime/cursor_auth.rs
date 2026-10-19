@@ -198,10 +198,16 @@ impl CursorAuth {
             let _ = login.cancel.send(());
             let _ = login.task.await;
             state.checked = None;
-            state.status = Status::new(
-                "missing",
-                Some("Cursor sign-in cancelled. Your task is preserved."),
-            );
+            // A login that already succeeded keeps its result; the next status check confirms it.
+            let finished = login.status.lock().unwrap().clone();
+            state.status = if finished.state == "connected" {
+                finished
+            } else {
+                Status::new(
+                    "missing",
+                    Some("Cursor sign-in cancelled. Your task is preserved."),
+                )
+            };
         }
         state.status.clone()
     }
@@ -285,4 +291,28 @@ async fn login_output(
         }
     }
     Ok(child.wait().await?.success())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn cancelling_a_finished_login_keeps_its_connected_result() {
+        let status = Arc::new(Mutex::new(Status::new("connected", None)));
+        let (cancel, _cancelled) = tokio::sync::oneshot::channel();
+        let auth = CursorAuth {
+            state: AsyncMutex::new(State {
+                status: Status::new("waiting", None),
+                checked: None,
+                login: Some(Login {
+                    id: "login".into(),
+                    status,
+                    task: tokio::spawn(async {}),
+                    cancel,
+                }),
+            }),
+        };
+        assert_eq!(auth.cancel("login").await.state, "connected");
+    }
 }
