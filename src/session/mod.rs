@@ -2384,6 +2384,23 @@ impl Manager {
                         if expected { "completed" } else { "unknown" },
                     )?;
                 }
+                // A sleep accepted while a turn ran, then overtaken by the close or the loss, never applies: settle it.
+                let sleep_end = match state {
+                    "closed" => Some("completed"),
+                    "process_lost" => Some("interrupted"),
+                    _ => None,
+                };
+                if let Some(end) = sleep_end {
+                    let sleeps: Vec<String> = local.sessions[id]
+                        .receipts
+                        .values()
+                        .filter(|r| r.command == "sleep" && r.state == "accepted")
+                        .map(|r| r.request_id.clone())
+                        .collect();
+                    for sleep in sleeps {
+                        local.finish_receipt(id, &sleep, end)?;
+                    }
+                }
                 if state != "suspended" && !preserve_queue {
                     local.fail_pending_because(id, Some(&lost))?;
                 }

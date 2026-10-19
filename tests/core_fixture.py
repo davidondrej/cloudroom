@@ -810,6 +810,15 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(self.status()["receipts"]["silent"]["state"], "unknown")
         self.assertEqual((self.repo / (self.native + ".requests")).read_text().splitlines(), ["silent", "pending"])
 
+    def test_sleep_overtaken_by_a_close_settles(self):
+        self.seed(); self.start(); self.ready()
+        self.prompt("active", "no-reply")
+        self.wait(lambda: (self.repo / "no-reply").exists(), "active native command")
+        self.service.request("POST", "/v1/sessions/cr_seed/sleep", {"request_id": "nap"}, 202)
+        self.service.request("POST", "/v1/sessions/cr_seed/close", {"request_id": "close"}, 202)
+        until(lambda: self.status()["state"] == "closed", "close after the running turn", 30)
+        self.assertNotEqual(self.status()["receipts"]["nap"]["state"], "accepted")
+
     def test_cancelled_queued_prompt_stays_cancelled_across_restart(self):
         self.seed(); self.start(); self.ready()
         self.prompt("active", "no-reply")
