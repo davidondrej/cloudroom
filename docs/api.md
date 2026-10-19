@@ -89,6 +89,7 @@ Harness logins run on the VM. Responses report status and sign-in links, never t
 
 Errors return `{"error": "...", "code": "..."}`. Show `error` to people; branch on `code`.
 
+- `400`: a malformed path or query, such as a teleport file's `offset`, `sha256` or `size`. On the teleport file route the body is JSON with `teleport_rejected`, and a part over 1 MiB answers `413` with the same code. Other `400`s carry no `code`.
 - `401`: missing or wrong token.
 - `404`: unknown session or other resource.
 - `409`: rejected. Some codes are temporary: `storage_blocked`, `service_stopping`, `model_catalog_unavailable`, and the `*_auth_unavailable` codes.

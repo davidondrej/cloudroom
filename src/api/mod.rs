@@ -409,18 +409,50 @@ struct TeleportOffset {
 }
 async fn teleport_upload(
     State(manager): State<Arc<Manager>>,
-    Path((id, index)): Path<(String, usize)>,
-    Query(query): Query<TeleportOffset>,
-    body: Bytes,
-) -> Result<(StatusCode, Json<Value>)> {
-    Ok((
-        StatusCode::ACCEPTED,
-        Json(
-            manager
-                .teleport_upload(&id, index, query.offset, query.sha256, query.size, body)
-                .await?,
-        ),
-    ))
+    path: std::result::Result<Path<(String, String)>, axum::extract::rejection::PathRejection>,
+    query: std::result::Result<Query<TeleportOffset>, axum::extract::rejection::QueryRejection>,
+    body: std::result::Result<Bytes, axum::extract::rejection::BytesRejection>,
+) -> Response {
+    // A malformed path or query, or an oversized part, gets the JSON error shape, not the extractors' plain text.
+    let parsed = match (path, query) {
+        (Ok(Path((id, index))), Ok(Query(query))) => {
+            index.parse::<usize>().ok().map(|index| (id, index, query))
+        }
+        _ => None,
+    };
+    let Some((id, index, query)) = parsed else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error":"invalid teleport file","code":"teleport_rejected"})),
+        )
+            .into_response();
+    };
+    let body = match body {
+        Ok(body) => body,
+        Err(rejection) if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE => {
+            return (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                Json(
+                    json!({"error":"teleport file part exceeds 1 MiB","code":"teleport_rejected"}),
+                ),
+            )
+                .into_response();
+        }
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error":"invalid teleport file","code":"teleport_rejected"})),
+            )
+                .into_response();
+        }
+    };
+    match manager
+        .teleport_upload(&id, index, query.offset, query.sha256, query.size, body)
+        .await
+    {
+        Ok(view) => (StatusCode::ACCEPTED, Json(view)).into_response(),
+        Err(error) => error.into_response(),
+    }
 }
 
 async fn observe(

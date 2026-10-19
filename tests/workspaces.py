@@ -345,6 +345,15 @@ class WorkspaceTests(unittest.TestCase):
         self.assertEqual(status, 202, data)
         self.assertEqual(Path(data['receipt']['input']['path']).read_bytes(), b'abc')
 
+    def test_an_oversized_teleport_part_answers_json(self):
+        self.seed('oversized', self.state.resolve()/'code'/'oversized', 'codex')
+        self.start()
+        connection = http.client.HTTPConnection(self.service.address, timeout=10)
+        connection.request('POST', '/v1/teleports/tp1/files/0?offset=0&sha256=' + '0'*64 + '&size=1', b'x' * (1024*1024 + 1),
+            {'Authorization':'Bearer '+self.env['CLOUDROOM_TOKEN'],'Content-Type':'application/octet-stream'})
+        response = connection.getresponse(); data = json.loads(response.read()); connection.close()
+        self.assertEqual((response.status, data.get('code')), (413, 'teleport_rejected'), data)
+
     def test_a_refused_concurrent_attach_keeps_the_winners_file(self):
         path = self.state.resolve()/'code'/'discarding'
         self.seed('discarding', path, 'codex')
@@ -402,6 +411,15 @@ class WorkspaceTests(unittest.TestCase):
             self.assertEqual((status, data.get('code')), (409, 'invalid_attachment'), query)
         self.assertEqual(part('name=a.txt&kind=file&offset=0&total=4', b'ab'), (202, {'received': 2}))
         self.assertEqual(part('name=a.txt&kind=file&offset=2&total=4', b'cd')[0], 202)
+
+    def test_malformed_teleport_part_index_answers_json_with_a_code(self):
+        self.start()
+        connection = http.client.HTTPConnection(self.service.address, timeout=10)
+        connection.request('POST', '/v1/teleports/abc/files/notanumber?offset=0&sha256='+'0'*64, b'x',
+            {'Authorization':'Bearer '+self.env['CLOUDROOM_TOKEN'],'Content-Type':'application/octet-stream'})
+        response = connection.getresponse(); body = response.read(); connection.close()
+        self.assertEqual(response.status, 400)
+        self.assertEqual(json.loads(body).get('code'), 'teleport_rejected', body)
 
     def test_oversized_part_to_an_unknown_session_answers_not_found(self):
         self.start()
