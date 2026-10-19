@@ -216,7 +216,12 @@ async fn archive(
 pub(super) fn archive_under(m: &Arc<Manager>, id: &str) -> Result<(), Failure> {
     for (child, archived) in m.descendants(id) {
         if !archived {
-            let _ = record(m, &child, "archive", json!({"id":child,"archived":true}))?;
+            let _ = record(
+                m,
+                &child,
+                "archive",
+                json!({"id":child,"archived":true,"reports":true}),
+            )?;
         }
         retire(m, &child)?;
     }
@@ -742,10 +747,16 @@ async fn archive_child(
         return relay::command(&m, &parent, &id, "archive", None).await;
     }
     m.own_child(&parent, &id).map_err(session_failure)?;
-    // A child that already ended has nothing to stop. Stop it first, so it starts no new children.
+    // The cut comes before the stop, so a turn the stop interrupts is not reported to the parent.
+    let done = record(
+        &m,
+        &id,
+        "archive",
+        json!({"id":id,"archived":true,"reports":true}),
+    )?;
     retire(&m, &id)?;
     archive_under(&m, &id)?;
-    record(&m, &id, "archive", json!({"id":id,"archived":true}))
+    Ok(done)
 }
 
 /// Flag value after `name`, for `room-cli thread spawn`.

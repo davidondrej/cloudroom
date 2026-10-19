@@ -164,6 +164,9 @@ pub struct Session {
     // A child's latest completed replies by request, so a queued turn cannot hide them from its parent.
     #[serde(skip)]
     replies: Vec<(String, String)>,
+    // How many entries of `finished` the archive had seen: only those turns are still reported (relay.rs).
+    #[serde(skip)]
+    archive_cut: Option<usize>,
 }
 
 impl Session {

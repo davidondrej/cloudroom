@@ -180,13 +180,6 @@ async fn receive(
                     json!({"request_id":request,"command":"archive","state":"completed","input":{}}),
                 )
                 .map(drop)?;
-                let _ = m.command(&id, derived_id(&request, "_stop"), "stop", json!({}));
-                let sleep = derived_id(&request, "_sleep");
-                let _ = m.command(&id, sleep, "sleep", json!({}));
-                archive_under(&m, &id)?;
-                if !archived {
-                    let _ = record(&m, &id, "archive", json!({"archived":true}))?;
-                }
             }
             return Ok(Json(json!({"id":id,"state":"archived"})));
         }
@@ -213,11 +206,20 @@ fn next_report(local: &Local) -> Option<(String, String, Value)> {
     local
         .sessions
         .values()
-        .filter(|s| !s.archived && s.parent_thread().is_some())
+        // An archived child still owes its parent the reports of turns that finished before the archive.
+        .filter(|s| s.parent_thread().is_some())
         .find_map(|s| {
+            // An archived child owes only the turns that finished before its archive (`archive_cut`). An archive
+            // without that marker predates it and owes nothing: its old turns would arrive weeks late.
+            let cut = match (s.archived, s.archive_cut) {
+                (true, Some(cut)) => cut.min(s.finished.len()),
+                (true, None) => return None,
+                (false, _) => s.finished.len(),
+            };
             // In finish order; receipts from before that order was recorded follow in request-ID order.
-            let finished = s.finished.iter().filter_map(|id| s.receipts.get(id));
-            let r = finished.chain(s.receipts.values()).find(|r| {
+            let finished = s.finished[..cut].iter().filter_map(|id| s.receipts.get(id));
+            let unordered = s.receipts.values().filter(|_| !s.archived);
+            let r = finished.chain(unordered).find(|r| {
                 r.command == "prompt"
                     && FINISHED.contains(&r.state.as_str())
                     && !s.reported.contains(&r.request_id)
@@ -492,6 +494,53 @@ mod tests {
             .unwrap_err();
         assert_eq!(status, StatusCode::CONFLICT);
         assert_eq!(body["code"], "request_rejected");
+    }
+
+    #[tokio::test]
+    async fn an_archived_child_keeps_its_unsent_report() {
+        let m = manager("archived-report");
+        let start = json!({"request_id":"start","command":"start","input":{"harness":"claude-code","parent_thread":"thr_p"},"state":"completed"});
+        m.note("cr_c", "receipt", start).unwrap();
+        let turn =
+            json!({"request_id":"t1","command":"prompt","input":{"text":"hi"},"state":"completed"});
+        m.note("cr_c", "receipt", turn).unwrap();
+        m.note("cr_c", "archive", json!({"archived":true,"reports":true}))
+            .unwrap();
+        let local = m.local.lock().unwrap();
+        let (session, turn, _) = next_report(&local).expect("the report is still owed");
+        assert_eq!((session.as_str(), turn.as_str()), ("cr_c", "t1"));
+    }
+
+    #[tokio::test]
+    async fn an_archive_owes_only_the_turns_finished_before_it() {
+        let m = manager("archive-cut");
+        let start = json!({"request_id":"start","command":"start","input":{"harness":"claude-code","parent_thread":"thr_p"},"state":"completed"});
+        m.note("cr_c", "receipt", start).unwrap();
+        let turn =
+            json!({"request_id":"t1","command":"prompt","input":{"text":"hi"},"state":"completed"});
+        m.note("cr_c", "receipt", turn).unwrap();
+        m.note("cr_c", "archive", json!({"archived":true,"reports":true}))
+            .unwrap();
+        // The turn the archive stops ends after the archive, so it is not reported.
+        let stopped = json!({"request_id":"t2","command":"prompt","input":{"text":"hi"},"state":"interrupted"});
+        m.note("cr_c", "receipt", stopped).unwrap();
+        m.note("cr_c", "parent_report", json!({"request_id":"t1"}))
+            .unwrap();
+        let local = m.local.lock().unwrap();
+        assert!(next_report(&local).is_none());
+    }
+
+    #[tokio::test]
+    async fn an_archive_without_the_marker_owes_nothing() {
+        let m = manager("archive-legacy");
+        let start = json!({"request_id":"start","command":"start","input":{"harness":"claude-code","parent_thread":"thr_p"},"state":"completed"});
+        m.note("cr_c", "receipt", start).unwrap();
+        let turn =
+            json!({"request_id":"t1","command":"prompt","input":{"text":"hi"},"state":"completed"});
+        m.note("cr_c", "receipt", turn).unwrap();
+        m.note("cr_c", "archive", json!({"archived":true})).unwrap();
+        let local = m.local.lock().unwrap();
+        assert!(next_report(&local).is_none());
     }
 
     #[tokio::test]

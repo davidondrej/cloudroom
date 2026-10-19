@@ -2,7 +2,7 @@
 use super::*;
 
 /// Bump when `apply` builds state differently, so older snapshots are replayed from the journal instead.
-const SNAPSHOT_VERSION: u32 = 2;
+const SNAPSHOT_VERSION: u32 = 3;
 /// A busy sandbox wrote up to ~100k records an hour; this bounds the replay after an unplanned stop.
 const SNAPSHOT_EVERY: u64 = 20_000;
 
@@ -36,6 +36,8 @@ struct Derived {
     close_request: Option<String>,
     harness_pid: Option<u32>,
     usage_limited: bool,
+    #[serde(default)]
+    archive_cut: Option<usize>,
 }
 
 impl Derived {
@@ -52,6 +54,7 @@ impl Derived {
             close_request: s.close_request.clone(),
             harness_pid: s.harness_pid,
             usage_limited: s.usage_limited,
+            archive_cut: s.archive_cut,
         }
     }
 
@@ -67,6 +70,7 @@ impl Derived {
         s.close_request = self.close_request;
         s.harness_pid = self.harness_pid;
         s.usage_limited = self.usage_limited;
+        s.archive_cut = self.archive_cut;
     }
 }
 
@@ -555,7 +559,16 @@ impl Local {
                 session.rewind_request = None;
                 session.state = "idle".into();
             }
-            "archive" => session.archived = true,
+            "archive" => {
+                // Only the first archive takes the cut. A re-archive of a session archived before the marker
+                // (no cut, owes nothing) must not make it owe every old finished turn.
+                let first = !session.archived;
+                session.archived = true;
+                // Archives written with the marker keep the reports of the turns finished before them (relay.rs).
+                if first && record.data["reports"] == true && session.archive_cut.is_none() {
+                    session.archive_cut = Some(session.finished.len());
+                }
+            }
             "detach" => session.parent_session = None,
             "child_state" => {
                 if let (Some(child), Some(state)) =
@@ -698,6 +711,33 @@ mod tests {
         drop(restored);
         fs::remove_file(dir.join("snapshot.json")).unwrap();
         assert_eq!(state(&Local::open(&dir).unwrap()), expected);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_re_archive_of_a_child_archived_before_the_marker_owes_nothing() {
+        let dir = std::env::temp_dir().join(format!("cloudroom-rearchive-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let mut local = Local::open(&dir).unwrap();
+        let start = json!({"request_id":"start","command":"start","state":"completed","input":{"parent_thread":"thr_p"}});
+        local.append("cr_c", "receipt", start, None).unwrap();
+        let turn =
+            json!({"request_id":"t1","command":"prompt","state":"completed","input":{"text":"x"}});
+        local.append("cr_c", "receipt", turn, None).unwrap();
+        local
+            .append("cr_c", "archive", json!({"archived":true}), None)
+            .unwrap();
+        local
+            .append(
+                "cr_c",
+                "archive",
+                json!({"archived":true,"reports":true}),
+                None,
+            )
+            .unwrap();
+        let session = &local.sessions["cr_c"];
+        assert_eq!(session.finished, ["t1"]);
+        assert_eq!(session.archive_cut, None);
         fs::remove_dir_all(&dir).unwrap();
     }
 
