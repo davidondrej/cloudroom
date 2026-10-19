@@ -20,7 +20,7 @@ use std::{
     sync::{Arc, LazyLock, Mutex},
     time::{Duration, Instant},
 };
-use tokio::sync::oneshot;
+use tokio::sync::{oneshot, watch};
 
 const USAGE: &str = "room-cli thread update --self --title TITLE
 room-cli thread update --self --reasoning-level LEVEL
@@ -47,7 +47,15 @@ const OUTCOME_KEPT: Duration = Duration::from_secs(3600);
 /// Each child request's outcome, by parent session and request ID. It is decided once, under this lock, so a
 /// child never runs both in its own sandbox and here.
 static CHILDREN: LazyLock<Mutex<HashMap<String, Outcome>>> = LazyLock::new(Mutex::default);
+/// Each top-level launch by parent session and request ID: the content it was asked with, and its answer once the
+/// website gave one. A retry with other content is refused; a retry with the same content takes the same answer.
+static LAUNCHES: LazyLock<Mutex<HashMap<String, Launch>>> = LazyLock::new(Mutex::default);
 static APP_MISSED: Mutex<Option<Instant>> = Mutex::new(None);
+
+struct Launch {
+    content: Value,
+    answer: watch::Receiver<Option<Result<Value, (u16, String)>>>,
+}
 
 enum Outcome {
     /// Waiting for the app: its thread ID, or why it could not start the child.
@@ -56,6 +64,17 @@ enum Outcome {
     Started(String, Instant),
     /// The app did not answer in time (or the agent gave up): the child runs here, and a late start is cancelled.
     Here(Instant),
+    /// The app could not start the child and said why. A retry gets the same refusal, not a new request.
+    Failed(String, Instant),
+}
+
+fn child_failure(error: &str) -> Failure {
+    fail(
+        StatusCode::CONFLICT,
+        &format!(
+            "The child could not start in its own sandbox: {error}. Retry without a repeated --request-id, or add --shared-sandbox to start it here."
+        ),
+    )
 }
 pub(crate) type Failure = (StatusCode, Json<Value>);
 
@@ -394,6 +413,22 @@ async fn launch(
     key: String,
     input: SpawnBody,
 ) -> Result<Json<Value>, Failure> {
+    let slot = format!("{session}/{key}");
+    let body = json!({"request_id":key,"session":session,"prompt":input.prompt,"title":input.title,"harness":input.provider,"model":input.model,"reasoning":input.reasoning,"service_tier":input.service_tier});
+    // A retry gets the first answer, even once the thread has closed, so it never starts a second thread.
+    let known = LAUNCHES
+        .lock()
+        .unwrap()
+        .get(&slot)
+        .map(|l| (l.content == body, l.answer.clone()));
+    if let Some((same, answer)) = known {
+        if !same {
+            return Err(session_failure(super::Error::Conflict(
+                "request_id already has different content",
+            )));
+        }
+        return settled(answer).await;
+    }
     let refused = m.local.lock().unwrap().sessions.get(session).and_then(|p| {
         if p.close_requested() {
             Some("the parent thread is closed")
@@ -412,11 +447,19 @@ async fn launch(
             "Run room-cli thread spawn --top-level from a Cloudroom cloud thread",
         ));
     };
-    let body = json!({"request_id":key,"session":session,"prompt":input.prompt,"title":input.title,"harness":input.provider,"model":input.model,"reasoning":input.reasoning,"service_tier":input.service_tier});
-    let started = Instant::now();
-    let task = tokio::spawn(async move {
+    let (answer_to, answer) = watch::channel(None);
+    LAUNCHES.lock().unwrap().insert(
+        slot.clone(),
+        Launch {
+            content: body.clone(),
+            answer: answer.clone(),
+        },
+    );
+    // The task outlives this request, so a stopped wait still records the answer for the retry.
+    tokio::spawn(async move {
+        let started = Instant::now();
         let mut wait = Duration::from_secs(10);
-        loop {
+        let posted = loop {
             match api.post_waking("launch", &body).await {
                 // The website's time ran out, or the new sandbox is still busy with the last try's wake.
                 Err(super::history::ApiError::Network(_))
@@ -425,25 +468,49 @@ async fn launch(
                 Err(super::history::ApiError::Status(409, message))
                     if message.starts_with("This sandbox is busy")
                         && started.elapsed() < LAUNCH_RETRY => {}
-                other => return other,
+                other => break other,
             }
             tokio::time::sleep(wait).await;
             wait = (wait * 2).min(Duration::from_secs(60));
-        }
+        };
+        let outcome = match posted {
+            Ok(thread) => Ok(thread),
+            Err(super::history::ApiError::Status(status, message)) => Err((status, message)),
+            // No answer means the start may or may not have happened: a retry must post again, not get this.
+            Err(error) => {
+                LAUNCHES.lock().unwrap().remove(&slot);
+                Err((
+                    503,
+                    format!(
+                        "The top-level thread may not have started: {error}. Run the same command with --request-id {key}; it never starts twice."
+                    ),
+                ))
+            }
+        };
+        let _ = answer_to.send(Some(outcome));
     });
-    match task.await {
-        Ok(Ok(answer)) => Ok(Json(json!({"id":answer["id"],"note":TOP_NOTE}))),
-        Ok(Err(super::history::ApiError::Status(status, message))) => Err(fail(
+    settled(answer).await
+}
+
+/// Waits for the recorded answer of a top-level launch and turns it into the response.
+async fn settled(
+    mut answer: watch::Receiver<Option<Result<Value, (u16, String)>>>,
+) -> Result<Json<Value>, Failure> {
+    let recorded = answer
+        .wait_for(Option::is_some)
+        .await
+        .ok()
+        .and_then(|v| v.clone());
+    match recorded {
+        Some(Ok(thread)) => Ok(Json(json!({"id":thread["id"],"note":TOP_NOTE}))),
+        Some(Err((status, message))) => Err(fail(
             StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY),
             &message,
         )),
-        Ok(Err(error)) => Err(fail(
-            StatusCode::SERVICE_UNAVAILABLE,
-            &format!(
-                "The top-level thread may not have started: {error}. Run the same command with --request-id {key}; it never starts twice."
-            ),
+        None => Err(fail(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "The top-level launch stopped before it answered",
         )),
-        Err(error) => Err(fail(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string())),
     }
 }
 
@@ -458,21 +525,24 @@ async fn own_sandbox_child(
     let id = format!("own_{key}");
     let slot = format!("{parent}/{id}");
     let (reply, answer) = oneshot::channel();
-    {
+    let mut reply = Some(reply);
+    // Claims the slot under the lock only when it is empty. Another attempt that claimed it meanwhile is waited for.
+    loop {
+        if let Some(outcome) = join_pending(&slot).await {
+            return outcome;
+        }
         let mut children = CHILDREN.lock().unwrap();
         children.retain(|_, outcome| match outcome {
-            Outcome::Started(_, at) | Outcome::Here(at) => at.elapsed() < OUTCOME_KEPT,
+            Outcome::Started(_, at) | Outcome::Here(at) | Outcome::Failed(_, at) => {
+                at.elapsed() < OUTCOME_KEPT
+            }
             Outcome::Waiting(_) => true,
         });
         match children.get(&slot) {
             Some(Outcome::Started(thread, _)) => return Ok(Some(thread.clone())),
             Some(Outcome::Here(_)) => return Ok(None),
-            Some(Outcome::Waiting(_)) => {
-                return Err(fail(
-                    StatusCode::CONFLICT,
-                    "A child with this request_id is already starting",
-                ));
-            }
+            Some(Outcome::Failed(error, _)) => return Err(child_failure(error)),
+            Some(Outcome::Waiting(_)) => continue,
             None => {}
         }
         if APP_MISSED
@@ -482,7 +552,11 @@ async fn own_sandbox_child(
         {
             return Ok(None);
         }
-        children.insert(slot.clone(), Outcome::Waiting(reply));
+        children.insert(
+            slot.clone(),
+            Outcome::Waiting(reply.take().expect("claimed once")),
+        );
+        break;
     }
     // If the agent stops waiting before the app answers, the child runs nowhere and a late start is cancelled.
     struct Pending(String);
@@ -514,12 +588,7 @@ async fn own_sandbox_child(
             *APP_MISSED.lock().unwrap() = None;
             Ok(Some(thread))
         }
-        Ok(Ok(Err(error))) => Err(fail(
-            StatusCode::CONFLICT,
-            &format!(
-                "The child could not start in its own sandbox: {error}. Retry, or add --shared-sandbox to start it here."
-            ),
-        )),
+        Ok(Ok(Err(error))) => Err(child_failure(&error)),
         // No answer in time: decide under the lock, since the app may be answering right now.
         _ => {
             let mut children = CHILDREN.lock().unwrap();
@@ -556,17 +625,33 @@ async fn answer_child(
                     children.insert(slot, Outcome::Started(thread.clone(), Instant::now()));
                     Ok(thread)
                 }
-                None => Err(input.error.unwrap_or_else(|| "unknown error".into())),
+                None => {
+                    let error = input.error.unwrap_or_else(|| "unknown error".into());
+                    children.insert(slot, Outcome::Failed(error.clone(), Instant::now()));
+                    Err(error)
+                }
             };
             let _ = reply.send(result);
             accepted
         }
         Some(outcome) => {
             // The same answer again (say, after a lost response) is fine; anything else lost the race.
-            let same = matches!((&outcome, &input.thread), (Outcome::Started(started, _), Some(thread)) if started == thread);
+            let same = match (&outcome, &input.thread) {
+                (Outcome::Started(started, _), Some(thread)) => started == thread,
+                (Outcome::Failed(error, _), None) => {
+                    input.error.as_deref().unwrap_or("unknown error") == error
+                }
+                _ => false,
+            };
+            let failed = matches!(outcome, Outcome::Failed(..));
             children.insert(slot, outcome);
             if same {
                 accepted
+            } else if failed {
+                Err(conflict(
+                    "request_rejected",
+                    "This child request already failed in the app's sandbox with a different answer",
+                ))
             } else {
                 Err(fail(
                     StatusCode::CONFLICT,
@@ -644,6 +729,31 @@ async fn tell(
     let request =
         random_key().map_err(|e| fail(StatusCode::SERVICE_UNAVAILABLE, &e.to_string()))?;
     deliver(&m, &id, &request, &input.text, true).await
+}
+
+/// A spawn retried while the first one still waits for the app takes that one's outcome, as a retry should (F81).
+/// Only a wait that outlasts the app's own is refused.
+async fn join_pending(slot: &str) -> Option<Result<Option<String>, Failure>> {
+    let deadline = Instant::now() + APP_WAIT;
+    loop {
+        let waiting = match CHILDREN.lock().unwrap().get(slot) {
+            Some(Outcome::Started(thread, _)) => return Some(Ok(Some(thread.clone()))),
+            Some(Outcome::Here(_)) => return Some(Ok(None)),
+            Some(Outcome::Failed(error, _)) => return Some(Err(child_failure(error))),
+            Some(Outcome::Waiting(_)) => true,
+            None => false,
+        };
+        if !waiting {
+            return None;
+        }
+        if Instant::now() >= deadline {
+            return Some(Err(fail(
+                StatusCode::CONFLICT,
+                "A child with this request_id is already starting",
+            )));
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 }
 
 /// Sends a message into the session's running turn, or else queues it. A request already delivered stays as it is,
@@ -981,6 +1091,80 @@ mod tests {
     use super::*;
     use crate::config::Config;
 
+    #[tokio::test]
+    async fn a_retried_spawn_takes_the_outcome_of_the_first() {
+        const SLOT: &str = "cloudroom-test-parent/join";
+        let (reply, _answer) = oneshot::channel();
+        CHILDREN
+            .lock()
+            .unwrap()
+            .insert(SLOT.into(), Outcome::Waiting(reply));
+        let app = tokio::spawn(async {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            CHILDREN.lock().unwrap().insert(
+                SLOT.into(),
+                Outcome::Started("thr_joined".into(), Instant::now()),
+            );
+        });
+        let joined = join_pending(SLOT).await;
+        app.await.unwrap();
+        CHILDREN.lock().unwrap().remove(SLOT);
+        assert!(matches!(joined, Some(Ok(Some(thread))) if thread == "thr_joined"));
+    }
+
+    #[tokio::test]
+    async fn a_refused_child_start_is_repeated_to_a_retry() {
+        const SLOT: &str = "cloudroom-test-parent/refused";
+        let (reply, answer) = oneshot::channel();
+        CHILDREN
+            .lock()
+            .unwrap()
+            .insert(SLOT.into(), Outcome::Waiting(reply));
+        let answered = answer_child(
+            Path(("cloudroom-test-parent".into(), "refused".into())),
+            Json(serde_json::from_value(json!({"error":"no room"})).unwrap()),
+        )
+        .await;
+        assert!(answered.is_ok());
+        assert!(matches!(answer.await, Ok(Err(error)) if error == "no room"));
+        let retry = join_pending(SLOT).await;
+        CHILDREN.lock().unwrap().remove(SLOT);
+        assert!(matches!(retry, Some(Err(_))));
+    }
+
+    #[tokio::test]
+    async fn the_app_repeating_a_refusal_it_already_sent_is_accepted() {
+        const SLOT: &str = "cloudroom-test-parent/repeated";
+        let (reply, _answer) = oneshot::channel();
+        CHILDREN
+            .lock()
+            .unwrap()
+            .insert(SLOT.into(), Outcome::Waiting(reply));
+        let path = || Path(("cloudroom-test-parent".into(), "repeated".into()));
+        let first = answer_child(
+            path(),
+            Json(serde_json::from_value(json!({"error":"no room"})).unwrap()),
+        )
+        .await;
+        assert!(first.is_ok());
+        let again = answer_child(
+            path(),
+            Json(serde_json::from_value(json!({"error":"no room"})).unwrap()),
+        )
+        .await;
+        let other = answer_child(
+            path(),
+            Json(serde_json::from_value(json!({"error":"disk full"})).unwrap()),
+        )
+        .await;
+        CHILDREN.lock().unwrap().remove(SLOT);
+        assert!(again.is_ok(), "a repeated refusal is answered as accepted");
+        assert!(
+            other.is_err(),
+            "a different refusal on a failed slot is refused"
+        );
+    }
+
     /// A Core over a scratch state directory, with no website reachable.
     fn scratch_manager(name: &str) -> Arc<Manager> {
         let root =
@@ -1036,6 +1220,39 @@ mod tests {
             assert_eq!(body.0["error"], message);
             assert_eq!(body.0["code"], "request_rejected");
         }
+    }
+
+    #[tokio::test]
+    async fn a_top_level_retry_takes_the_first_answer_or_is_refused() {
+        let m = scratch_manager("launch-retry");
+        let start = json!({"request_id":"start","command":"start","input":{"harness":"claude-code"},"state":"completed"});
+        m.note("cr_retry", "receipt", start).unwrap();
+        let first = json!({"request_id":"launch_k","session":"cr_retry","prompt":"hi","title":null,"harness":null,"model":null,"reasoning":null,"service_tier":null});
+        let (answer_to, answer) = watch::channel(None);
+        answer_to.send(Some(Ok(json!({"id":"thr_first"})))).unwrap();
+        LAUNCHES.lock().unwrap().insert(
+            "cr_retry/launch_k".into(),
+            Launch {
+                content: first,
+                answer,
+            },
+        );
+        m.note("cr_retry", "state", json!({"state":"closed"}))
+            .unwrap();
+        let retry = |prompt: &str| {
+            serde_json::from_value::<SpawnBody>(json!({"prompt":prompt,"top_level":true})).unwrap()
+        };
+        let same = launch(&m, "cr_retry", "launch_k".into(), retry("hi")).await;
+        let Ok(Json(answered)) = same else {
+            panic!("a retry with the same content was refused");
+        };
+        assert_eq!(answered["id"], "thr_first");
+        let other = launch(&m, "cr_retry", "launch_k".into(), retry("bye")).await;
+        let Err((status, body)) = other else {
+            panic!("a retry with other content was accepted");
+        };
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body.0["code"], "request_conflict");
     }
 
     #[tokio::test]
