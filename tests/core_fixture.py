@@ -841,6 +841,23 @@ class RecoveryTests(unittest.TestCase):
         (self.repo / "release-start").touch()
         until(lambda: self.service.session(sid)["receipts"]["early"]["state"] == "completed", "start completes after the refused close", 60)
 
+    def test_sleep_during_a_pending_close_is_refused(self):
+        self.seed(); self.start(); self.ready()
+        (self.repo / "stuck-exit").touch()
+        self.service.request("POST", "/v1/sessions/cr_seed/close", {"request_id": "close"}, 202)
+        rejected = self.service.request("POST", "/v1/sessions/cr_seed/sleep", {"request_id": "nap-closing"}, 409)
+        self.assertIn("pending close", rejected["error"])
+        until(lambda: self.status()["receipts"]["close"]["state"] == "unknown", "close after the grace period", 30)
+
+    def test_sleep_and_commands_on_a_closed_session_are_refused_as_closed(self):
+        self.seed(); self.start(); self.ready()
+        self.service.request("POST", "/v1/sessions/cr_seed/close", {"request_id": "close"}, 202)
+        until(lambda: self.status()["state"] == "closed", "deliberate close", 30)
+        rejected = self.service.request("POST", "/v1/sessions/cr_seed/sleep", {"request_id": "nap"}, 409)
+        self.assertIn("process unavailable", rejected["error"])
+        rejected = self.service.request("POST", "/v1/sessions/cr_seed/prompts", {"request_id": "late", "text": "x"}, 409)
+        self.assertIn("process unavailable", rejected["error"])
+
     def test_revoked_mac_loses_its_job_stream_and_cannot_pair_again(self):
         previews = self.state / 'previews'
         previews.mkdir(mode=0o700)

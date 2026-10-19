@@ -1069,6 +1069,15 @@ impl Manager {
                 return Err(Error::Conflict("service is stopping"));
             }
             if command == "sleep" {
+                let session = &local.sessions[id];
+                if session.close_request.is_some() {
+                    return Err(Error::Conflict("wait for the pending close or interrupt"));
+                }
+                if session.state == "closed" {
+                    return Err(Error::Conflict(
+                        "process unavailable; history does not restore execution",
+                    ));
+                }
                 return self.request_sleep(&mut local, id, request);
             }
             if local.draining && !matches!(command, "interrupt" | "close" | "stop" | "cancel") {
@@ -1086,6 +1095,12 @@ impl Manager {
                 ));
             }
             let session = &local.sessions[id];
+            // A closed session answers that it is closed, not that a close is pending.
+            if session.state == "closed" && command != "close" {
+                return Err(Error::Conflict(
+                    "process unavailable; history does not restore execution",
+                ));
+            }
             if session.rewind_request.is_some() {
                 return Err(Error::Conflict("wait for the pending rewind"));
             }
