@@ -796,6 +796,17 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(self.status()["receipts"]["silent"]["state"], "unknown")
         self.assertEqual((self.repo / (self.native + ".requests")).read_text().splitlines(), ["silent", "pending"])
 
+    def test_cancelled_queued_prompt_stays_cancelled_across_restart(self):
+        self.seed(); self.start(); self.ready()
+        self.prompt("active", "no-reply")
+        self.wait(lambda: (self.repo / "no-reply").exists(), "active native command")
+        self.prompt("queued", "hello")
+        self.service.request("POST", "/v1/sessions/cr_seed/cancel", {"request_id": "cancel", "target_request_id": "queued"}, 202)
+        self.assertEqual(self.service.request("GET", "/v1/sessions/cr_seed/requests/queued")["state"], "cancelled")
+        self.service.stop(); self.start()
+        self.wait(lambda: self.status()["receipts"]["active"]["state"] != "accepted", "restart settled the active turn")
+        self.assertEqual(self.service.request("GET", "/v1/sessions/cr_seed/requests/queued")["state"], "cancelled")
+
     def test_close_outlasting_the_grace_settles_as_unknown_and_stops_refusing_commands(self):
         self.seed(); self.start(); self.ready()
         (self.repo / "stuck-exit").touch()

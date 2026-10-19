@@ -941,7 +941,8 @@ async fn request_status(
     key(&request)?;
     let session = manager.session(&id).await?;
     let receipt = session.receipts.get(&request);
-    // A queued prompt the user cancelled keeps its `accepted` receipt; it will never run.
+    // A cancel now writes `cancelled` onto the prompt's own receipt. A receipt journaled before that, or one whose
+    // cancel a restart cut short, still reads `accepted` while the cancel is accepted or completed; this derives its state.
     let cancelled = !session.queue.contains(&request)
         && session.receipts.values().any(|r| {
             r.command == "cancel"

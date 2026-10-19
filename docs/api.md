@@ -8,7 +8,7 @@ Every Cloudroom feature is available over this API. It is plain HTTP on `127.0.0
 - **Commands are asynchronous.** A `POST` returns `202` with `{session_id, receipt, saving}`. `202` means saved, not finished.
 - **Request IDs:** every command carries a `request_id` of 1–64 letters, digits, `_` or `-`. Retrying an ID returns the same receipt and never repeats work. Reusing an ID for different content returns `request_conflict`.
 - **Session IDs** are `cr_` plus the start request's ID. `POST /v1/sessions` with `request_id: "demo"` creates `cr_demo`. A teleport `<id>` runs as `cr_teleport_<id>`, so that ID is reserved: a teleport is refused while another session holds it.
-- **Receipts** move from `accepted` to `delivered`, then end as `completed`, `interrupted`, `failed`, `unknown` or `unknown_after_restart`. Uncertain work is never resent.
+- **Receipts** move from `accepted` to `delivered`, then end as `completed`, `interrupted`, `failed`, `cancelled` (a queued prompt cancelled before it ran), `unknown` or `unknown_after_restart`. Uncertain work is never resent.
 - **Limits:** JSON bodies up to 64 KiB, prompt text up to 32,768 bytes. Check `GET /v1/capabilities` before using optional features; a missing flag means unsupported.
 
 ## Health and discovery

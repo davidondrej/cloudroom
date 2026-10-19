@@ -184,7 +184,7 @@ impl Local {
             .ok_or(Error::NotFound)?;
         if matches!(
             receipt.state.as_str(),
-            "completed" | "interrupted" | "failed" | "unknown_after_restart"
+            "completed" | "interrupted" | "failed" | "cancelled" | "unknown_after_restart"
         ) || receipt.state == state
         {
             return Ok(());
@@ -373,8 +373,11 @@ impl Local {
                     }
                     if !matches!(receipt.state.as_str(), "accepted" | "running" | "delivered") {
                         session.queue.retain(|id| id != &receipt.request_id);
-                        session.last_prompt_state = Some(receipt.state.clone());
-                        session.last_prompt_error = receipt.error.clone();
+                        // A cancelled prompt never ran, so it does not change what the last prompt did (dashboard).
+                        if receipt.state != "cancelled" {
+                            session.last_prompt_state = Some(receipt.state.clone());
+                            session.last_prompt_error = receipt.error.clone();
+                        }
                     }
                     if matches!(receipt.state.as_str(), "completed" | "interrupted") {
                         session.recovery_attempted = false; // Healthy progress permits a later recovery.

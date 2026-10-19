@@ -353,27 +353,26 @@ impl Manager {
             for mut receipt in session.receipts.values().cloned() {
                 let terminal = matches!(
                     receipt.state.as_str(),
-                    "completed" | "interrupted" | "failed" | "unknown" | "unknown_after_restart"
+                    "completed"
+                        | "interrupted"
+                        | "failed"
+                        | "cancelled"
+                        | "unknown"
+                        | "unknown_after_restart"
                 );
                 if terminal {
                     continue;
                 }
-                let queued =
-                    receipt.command == "prompt" && session.queue.contains(&receipt.request_id);
-                if !eligible || !queued {
-                    receipt.state = if queued {
-                        "failed"
-                    } else {
-                        "unknown_after_restart"
-                    }
-                    .into();
-                    local.append(
-                        &session.session_id,
-                        "receipt",
-                        serde_json::to_value(receipt)?,
-                        None,
-                    )?;
-                }
+                let Some(state) = restart_state(&session, &receipt, eligible) else {
+                    continue;
+                };
+                receipt.state = state.into();
+                local.append(
+                    &session.session_id,
+                    "receipt",
+                    serde_json::to_value(receipt)?,
+                    None,
+                )?;
             }
             if !matches!(
                 session.state.as_str(),
@@ -1310,6 +1309,12 @@ impl Manager {
                     Next::None
                 }
                 "edit" | "cancel" | "reorder" | "attach" => {
+                    if command == "cancel"
+                        && let Some(target) = input["target_request_id"].as_str()
+                    {
+                        // The cancelled prompt's own receipt says so, so a restart does not read it as unfinished work.
+                        local.finish_receipt(id, target, "cancelled")?;
+                    }
                     local.finish_receipt(id, &request, "completed")?;
                     Next::None
                 }
@@ -2374,6 +2379,26 @@ impl Manager {
         {
             eprintln!("Cloudroom shutdown cleanup deadline reached");
         }
+    }
+}
+
+/// What an unfinished receipt becomes when its session restarts, or `None` when a queued prompt stays to run.
+fn restart_state(session: &Session, receipt: &Receipt, eligible: bool) -> Option<&'static str> {
+    let queued = receipt.command == "prompt" && session.queue.contains(&receipt.request_id);
+    // A prompt cancelled before its cancel receipt settled (or before an upgrade) never runs.
+    let cancelled = receipt.command == "prompt"
+        && session
+            .prompts
+            .get(&receipt.request_id)
+            .is_some_and(|prompt| prompt.cancelled);
+    if cancelled {
+        Some("cancelled")
+    } else if eligible && queued {
+        None
+    } else if queued {
+        Some("failed")
+    } else {
+        Some("unknown_after_restart")
     }
 }
 
