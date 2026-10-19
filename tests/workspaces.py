@@ -291,6 +291,18 @@ class WorkspaceTests(unittest.TestCase):
                 else:
                     self.assertEqual(data.get('code'), 'request_conflict', results)
 
+    def test_a_rewind_replacement_checks_reasoning_syntax_before_the_catalog(self):
+        path = self.state.resolve()/'code'/'rewinding'
+        self.seed('rewinding', path, 'codex')
+        self.start()
+        until(lambda:self.service.session('cr_rewinding')['state']=='idle','rewinding target',10)
+        connection = http.client.HTTPConnection(self.service.address, timeout=10)
+        body = json.dumps({'request_id':'rw1','replacement':{'request_id':'rp1','text':'again','reasoning':'HIGH'}}).encode()
+        connection.request('POST','/v1/sessions/cr_rewinding/rewind',body,
+            {'Authorization':'Bearer '+self.env['CLOUDROOM_TOKEN'],'Content-Type':'application/json'})
+        response = connection.getresponse(); data = json.loads(response.read()); connection.close()
+        self.assertEqual((response.status, data.get('code')), (409, 'invalid_reasoning_effort'), data)
+
     def test_a_different_body_under_a_stored_request_is_refused_and_the_original_retry_still_answers(self):
         path = self.state.resolve()/'code'/'ordering'
         self.seed('ordering', path, 'codex')

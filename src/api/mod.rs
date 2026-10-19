@@ -554,7 +554,7 @@ pub(crate) fn conflict_code(error: &str) -> &'static str {
         "transfer cancelled" => "teleport_cancelled",
         "cloud execution already owns this transfer; use Stop" => "teleport_running",
         "Cloud folder permission denied" => "attachment_permission_denied",
-        "attachment upload failed" => "invalid_attachment",
+        "attachment upload failed" | "attachments must be an array" => "invalid_attachment",
         "image exceeds the 10 MiB limit" | "file exceeds the 25 MiB limit" => {
             "attachment_too_large"
         }
@@ -1011,6 +1011,14 @@ fn prompt_input(
 }
 
 /// A malformed effort is refused before the catalog is consulted, so a catalog outage cannot mask it.
+/// Checked for a new request only: an accepted retry answers its receipt whatever it sends now.
+fn attachments_array(attachments: Option<&Value>) -> std::result::Result<(), session::Error> {
+    if attachments.is_some_and(|value| !value.is_array()) {
+        return Err(session::Error::Conflict("attachments must be an array"));
+    }
+    Ok(())
+}
+
 fn reasoning_syntax(level: Option<&str>) -> std::result::Result<(), session::Error> {
     if level.is_some_and(|level| {
         level.is_empty() || level.len() > 64 || !level.bytes().all(|b| b.is_ascii_lowercase())
@@ -1026,6 +1034,11 @@ async fn prompt(
     Json(body): Json<Prompt>,
 ) -> Result<impl IntoResponse> {
     key(&body.request_id)?;
+    // An accepted retry must not depend on the model catalog still being available.
+    let known = manager.known_request(&id, &body.request_id);
+    if !known {
+        attachments_array(body.attachments.as_ref())?;
+    }
     let input = prompt_input(
         body.text,
         body.content,
@@ -1033,8 +1046,7 @@ async fn prompt(
         body.reasoning.clone(),
         body.service_tier.clone(),
     )?;
-    // An accepted retry must not depend on the model catalog still being available.
-    if !manager.known_request(&id, &body.request_id) {
+    if !known {
         reasoning_syntax(body.reasoning.as_deref())?;
         manager
             .check_prompt_reasoning(&id, body.reasoning.as_deref())
@@ -1052,6 +1064,10 @@ async fn edit(
 ) -> Result<impl IntoResponse> {
     key(&body.request_id)?;
     key(&body.target_request_id)?;
+    let known = manager.known_request(&id, &body.request_id);
+    if !known {
+        attachments_array(body.attachments.as_ref())?;
+    }
     let mut input = prompt_input(
         body.text,
         body.content,
@@ -1061,7 +1077,7 @@ async fn edit(
     )?;
     input["target_request_id"] = json!(body.target_request_id);
     input["expected_revision"] = json!(body.expected_revision);
-    if !manager.known_request(&id, &body.request_id) {
+    if !known {
         reasoning_syntax(body.reasoning.as_deref())?;
         manager
             .check_prompt_reasoning(&id, body.reasoning.as_deref())
@@ -1186,6 +1202,10 @@ async fn rewind(
     }
     if let Some(prompt) = body.replacement {
         key(&prompt.request_id)?;
+        let known = manager.known_request(&id, &body.request_id);
+        if !known {
+            attachments_array(prompt.attachments.as_ref())?;
+        }
         let payload = prompt_input(
             prompt.text,
             prompt.content,
@@ -1193,7 +1213,8 @@ async fn rewind(
             prompt.reasoning.clone(),
             prompt.service_tier.clone(),
         )?;
-        if !manager.known_request(&id, &body.request_id) {
+        if !known {
+            reasoning_syntax(prompt.reasoning.as_deref())?;
             manager
                 .check_prompt_reasoning(&id, prompt.reasoning.as_deref())
                 .await?;
@@ -1741,6 +1762,26 @@ mod tests {
         };
         assert_eq!(whole, b"abc");
         PARTS.lock().unwrap().remove(key);
+    }
+
+    #[test]
+    fn attachments_in_a_prompt_must_be_an_array() {
+        let refused = |attachments: Value| attachments_array(Some(&attachments)).is_err();
+        assert!(refused(json!("report.pdf")), "a string is refused");
+        assert!(refused(json!({"kind": "file"})), "an object is refused");
+        assert!(!refused(json!([])), "an empty array is accepted");
+        assert!(!refused(json!([{"kind": "file"}])));
+        assert!(
+            prompt_input(
+                "see file".into(),
+                None,
+                Some(json!("report.pdf")),
+                None,
+                None
+            )
+            .is_ok(),
+            "a retry of an accepted prompt is answered by its receipt, so the input is not refused here"
+        );
     }
 
     #[tokio::test]
