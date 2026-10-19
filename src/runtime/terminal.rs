@@ -484,6 +484,15 @@ fn refuse(status: StatusCode, message: impl Into<String>) -> Response {
     (status, Json(json!({"error":message.into()}))).into_response()
 }
 
+/// The folder a new shell starts in: the session's workspace, or the repository when the session has none.
+/// A workspace folder that is gone yields None; the shell must not quietly start in the repository.
+fn shell_folder(workspace: Option<PathBuf>, repository: &Path) -> Option<PathBuf> {
+    match workspace {
+        Some(path) => path.is_dir().then_some(path),
+        None => Some(repository.to_owned()),
+    }
+}
+
 pub fn routes() -> Router<Arc<Manager>> {
     Router::new().route("/v1/terminals/{id}", get(attach).delete(close))
 }
@@ -533,7 +542,7 @@ async fn attach(
             );
         }
         None => {
-            let cwd = match &input.session {
+            let workspace = match &input.session {
                 Some(session) => match manager.session(session).await {
                     Ok(session) => session.workspace.map(|w| w.path),
                     Err(_) => {
@@ -541,9 +550,13 @@ async fn attach(
                     }
                 },
                 None => None,
-            }
-            .filter(|path| path.is_dir())
-            .unwrap_or_else(|| manager.config.repository.clone());
+            };
+            let Some(cwd) = shell_folder(workspace, &manager.config.repository) else {
+                return refuse(
+                    StatusCode::NOT_FOUND,
+                    "This session's workspace folder no longer exists. Restore it, or open a terminal without a session.",
+                );
+            };
             match manager.terminals.open(
                 &manager.config,
                 &id,
@@ -584,4 +597,18 @@ async fn close(
 ) -> Json<Value> {
     manager.terminals.close(&id);
     Json(json!({"closed":true}))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_missing_workspace_folder_is_not_replaced_by_the_repository() {
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let gone = repository.join("no-such-workspace-folder");
+        assert_eq!(shell_folder(Some(gone), repository), None);
+        assert_eq!(shell_folder(None, repository), Some(repository.to_owned()));
+        assert_eq!(shell_folder(Some(repository.to_owned()), Path::new("/")), Some(repository.to_owned()));
+    }
 }
