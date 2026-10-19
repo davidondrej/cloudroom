@@ -4,7 +4,7 @@ Every Cloudroom feature is available over this API. It is plain HTTP on `127.0.0
 
 ## Conventions
 
-- **Auth:** send `Authorization: Bearer CLOUDROOM_TOKEN` on every request, including health checks and streams. Anything else returns `401`.
+- **Auth:** send `Authorization: Bearer CLOUDROOM_TOKEN` on every request, including health checks and streams. A request without the token returns `401`. A sandbox proxy that replaces `Authorization` can carry the same token in `X-Cloudroom-Token` instead; the core accepts a request when either header carries the token, so a wrong `Authorization` does not block a correct `X-Cloudroom-Token`.
 - **Commands are asynchronous.** A `POST` returns `202` with `{session_id, receipt, saving}`. `202` means saved, not finished.
 - **Request IDs:** every command carries a `request_id` of 1–64 letters, digits, `_` or `-`. Retrying an ID returns the same receipt and never repeats work. Reusing an ID for different content returns `request_conflict`.
 - **Session IDs** are `cr_` plus the start request's ID. `POST /v1/sessions` with `request_id: "demo"` creates `cr_demo`. A teleport `<id>` runs as `cr_teleport_<id>`, so that ID is reserved: a teleport is refused while another session holds it.
