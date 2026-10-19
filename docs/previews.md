@@ -61,7 +61,7 @@ All `/v1/previews` operations require the ordinary core bearer token:
 - `POST /v1/previews`: register `{"port":3000}`.
 - `GET` / `DELETE /v1/previews/{port}`: inspect / close.
 - `POST /v1/previews/device`: pair `device` (32 hex characters) and an Ed25519 `public_key`; return SSH connection metadata, never a private key.
-- `DELETE /v1/previews/device/{id}`: revoke future SSH authentication for that device. A revoked ID is refused by `POST /v1/previews/device` (403) until sign-in mints a new device ID; a holder of the bearer token cannot re-pair the old one.
+- `DELETE /v1/previews/device/{id}`: revoke future SSH authentication for that device and end its Mac job stream. An unpaired device answers 404. Device IDs are case-insensitive. A revoked ID is refused by `POST /v1/previews/device` (403) until sign-in mints a new device ID; a holder of the bearer token cannot re-pair the old one.
 - `POST /v1/previews/report`: helper reports `device`, `port`, `generation`, nullable `local_port` and fixed nullable `error`.
 - `POST /v1/previews/host`: operator/managed pairing sets the reachable SSH IP.
 
