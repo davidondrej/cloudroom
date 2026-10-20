@@ -63,6 +63,9 @@ def managed_api(url):
         host = parts.hostname or ''
         if '[' in parts.netloc:  # A bracketed host must be an IPv6 address, not an IPvFuture literal.
             return bool(ipaddress.IPv6Address(host))
+        last = host.rsplit('.', 1)[-1]
+        if last.isdigit() or last.startswith('0x'):  # URL parsers read such hosts as IPv4 addresses.
+            return bool(ipaddress.IPv4Address(host))
         return bool(HOST.fullmatch(host))
     except ValueError:
         return False
