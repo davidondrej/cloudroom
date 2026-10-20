@@ -23,7 +23,8 @@ class InstallerTests(unittest.TestCase):
         self.root = Path(temporary.name)
         self.directory = self.root / 'config'
         self.data = dict(userId='self-hosted-é', coreToken='safe-token-' * 4,
-                         databaseUrl='postgresql://ordinary_user:ordinary%40password@localhost/history', release='test')
+                         databaseUrl='postgresql://ordinary_user:ordinary%40password@localhost/history', release='test',
+                         apiUrl='https://api.cloudroom.test/v1')
         self.calls = []
         environment = patch.dict(os.environ)
         environment.start(); self.addCleanup(environment.stop)
@@ -105,6 +106,24 @@ class InstallerTests(unittest.TestCase):
                 installer.configure({**self.data, field: value}, self.directory)
             self.assertFalse(self.directory.exists())
         self.assertEqual(self.calls, [])
+
+    def test_fresh_managed_setup_requires_api_destination(self):
+        for value in [None, '', ' ', '\t', 'http://api.cloudroom.test', 'https://api.cloudroom.test/', ' https://api.cloudroom.test']:
+            with self.subTest(apiUrl=value), self.assertRaisesRegex(ValueError, 'apiUrl'):
+                installer.configure({**self.data, 'apiUrl': value}, self.directory)
+            self.assertFalse(self.directory.exists())
+        missing = {k: v for k, v in self.data.items() if k != 'apiUrl'}
+        with patch('builtins.print') as output, self.assertRaisesRegex(ValueError, 'apiUrl'):
+            installer.configure(missing, self.directory)
+        output.assert_not_called()
+        self.assertFalse(self.directory.exists())
+        self.assertFalse((self.root / 'code').exists())
+        self.assertFalse((self.root / 'cache').exists())
+        self.assertEqual(self.calls, [])
+        installer.configure(self.data, self.directory)
+        values = dict(line.split('=', 1) for line in (self.directory / 'core.env').read_text().splitlines())
+        self.assertEqual(json.loads(values['CLOUDROOM_API_URL']), self.data['apiUrl'])
+        self.assertNotIn('CLOUDROOM_LOCAL_HISTORY', values)
 
     def test_configuration_symlink_is_rejected(self):
         target = self.root / 'target'; target.mkdir()

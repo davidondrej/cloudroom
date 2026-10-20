@@ -52,7 +52,7 @@ def installed_version():
 def configure(data, directory=Path('/etc/cloudroom')):
     if os.geteuid() != 0:
         raise ValueError('Run as the provisioning administrator')
-    # apiUrl (ADR 0232) is where a new Core saves history; older setup requests don't send it.
+    # apiUrl (ADR 0232) is where a new Core saves history; older retries of an existing setup don't send it.
     if not isinstance(data, dict) or set(data) - {'apiUrl'} != {'userId', 'coreToken', 'databaseUrl', 'release'}:
         raise ValueError('Unexpected setup fields')
     api = data.get('apiUrl')
@@ -77,6 +77,9 @@ def configure(data, directory=Path('/etc/cloudroom')):
     path = directory / 'core.env'
     if not directory.is_absolute() or directory.is_symlink() or path.is_symlink():
         raise ValueError('Configuration paths must not be symlinks')
+    # Core refuses to start without a history destination, so a fresh managed setup must not report success.
+    if api is None and not path.exists():
+        raise ValueError('apiUrl is required for a new managed setup')
     directory.mkdir(mode=0o750, exist_ok=True)
     os.chown(directory, 0, service.pw_gid)
     directory.chmod(0o750)
