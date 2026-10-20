@@ -50,9 +50,14 @@ def installed_version():
 
 
 def managed_api(url):
-    # Core's own rule (src/config.rs) for CLOUDROOM_API_URL, minus its loopback test servers.
-    return (isinstance(url, str) and url.startswith('https://') and not url.endswith('/')
-            and all(33 <= ord(c) < 127 and c not in '?#@' for c in url))
+    # Core's own rule (src/config.rs) for CLOUDROOM_API_URL, minus its loopback test servers, plus a host.
+    if not (isinstance(url, str) and url.startswith('https://') and not url.endswith('/')
+            and all(33 <= ord(c) < 127 and c not in '?#@' for c in url)):
+        return False
+    try:
+        return bool(urlsplit(url).hostname)
+    except ValueError:
+        return False
 
 
 def configure(data, directory=Path('/etc/cloudroom')):
@@ -63,7 +68,7 @@ def configure(data, directory=Path('/etc/cloudroom')):
         raise ValueError('Unexpected setup fields')
     api = data.get('apiUrl')
     if api is not None and not managed_api(api):
-        raise ValueError('apiUrl must be an https:// URL without a trailing slash')
+        raise ValueError('apiUrl must be an https:// URL with a host and no trailing slash')
     owner, token, database, release = (data[k] for k in ('userId', 'coreToken', 'databaseUrl', 'release'))
     if not all(isinstance(v, str) for v in (owner, token, database, release)):
         raise ValueError('Setup fields must be strings')

@@ -109,7 +109,8 @@ class InstallerTests(unittest.TestCase):
 
     def test_fresh_managed_setup_requires_api_destination(self):
         for value in [None, '', ' ', '\t', 'http://api.cloudroom.test', 'https://api.cloudroom.test/', ' https://api.cloudroom.test',
-                      'https://é.cloudroom.test/v1', 'https://api.cloudroom.test/\u00a0']:
+                      'https://é.cloudroom.test/v1', 'https://api.cloudroom.test/\u00a0',
+                      'https:///v1', 'https://:443/v1', 'https://[api/v1']:
             with self.subTest(apiUrl=value), self.assertRaisesRegex(ValueError, 'apiUrl'):
                 installer.configure({**self.data, 'apiUrl': value}, self.directory)
             self.assertFalse(self.directory.exists())
@@ -151,7 +152,8 @@ class InstallerTests(unittest.TestCase):
         lines = [line for line in path.read_bytes().splitlines(True) if not line.startswith(b'CLOUDROOM_API_URL=')]
         legacy = {k: v for k, v in self.data.items() if k != 'apiUrl'}
         for destination in [b'', b'CLOUDROOM_API_URL=""\n', b'CLOUDROOM_API_URL="http://api.cloudroom.test"\n',
-                            b'CLOUDROOM_API_URL=https://api.cloudroom.test\n', b'CLOUDROOM_LOCAL_HISTORY="1"\n']:
+                            b'CLOUDROOM_API_URL=https://api.cloudroom.test\n',
+                            b'CLOUDROOM_API_URL="https:///v1"\n', b'CLOUDROOM_LOCAL_HISTORY="1"\n']:
             saved = b''.join(lines) + destination
             path.write_bytes(saved)
             changes = []
