@@ -16,7 +16,7 @@ One internal module; no alerts, external collector, or new dependency. Diagnosti
 - `storage_stale`: the disk guard loop measured more than five seconds late; `gap_ms` is how long. Recorded only during stalls.
 - `diagnostics`: cumulative dropped-record, local-write-failure and upload-failure counts for this process.
 
-Ordinary local/uploaded diagnostics contain only fixed diagnostic fields and correlation IDs. No credentials, prompts, native history, filesystem paths, request bodies or raw URLs. The separate, protected stderr capture below is the only raw-output exception. History and recovery remain with their existing owners.
+Ordinary local/uploaded diagnostics contain only fixed diagnostic fields and correlation IDs. No credentials, prompts, native history, filesystem paths, request bodies or raw URLs. The separate, protected stderr capture and its bounded owner-visible crash tail (below) are the only raw-output exceptions. History and recovery remain with their existing owners.
 
 ## Storage and limits
 
@@ -42,7 +42,7 @@ Inspect the existing `cloudroom_diagnostics` table with the owner-scoped query i
 
 ## Protected harness stderr
 
-Raw stderr is untrusted and may contain credentials, prompts or private paths. It never enters ordinary logs, uploads, session history, API responses or SSE. Only the protected service account and authorized administrators should inspect it; the core token does not grant access. Do not automatically include it in support bundles or share it without reviewing/redacting it.
+Raw stderr is untrusted and may contain credentials, prompts or private paths. The full capture never enters ordinary logs, diagnostic uploads, session history, API responses or SSE. Only the protected service account and authorized administrators should inspect it; the core token does not grant access. Do not automatically include it in support bundles or share it without reviewing/redacting it.
 
 - Runtime continuously drains each process in 8 KiB chunks, retaining only the last **16 KiB**. Capture uses bytes, not lines. After workload cleanup it waits at most **250 ms** for EOF, then cancels and joins the reader. `stderr_complete: false` means the reader failed or timed out; `stderr_truncated: true` means earlier bytes were discarded. Neither changes recovery behavior.
 - Nonempty tails are saved once at exit, including graceful exits and startup/resume/model-discovery failures. Errors before a process is spawned have no stderr capture. A still-running process's tail stays in memory; abrupt core termination loses it.
@@ -50,6 +50,8 @@ Raw stderr is untrusted and may contain credentials, prompts or private paths. I
 - Files: `$CLOUDROOM_STATE_DIR/harness-diagnostics/stderr.jsonl` and `stderr.previous.jsonl`. Directory **0700**, files **0600**, service-owned. Unsafe existing directories, links, special files, hardlinks or permissions are rejected, never repaired or redirected into ordinary logs. The state directory must already be trusted and protected from agent replacement.
 - Rotation counts encoded bytes and strictly caps each file at **1 MiB**. Retention is size-based, not age-based: quiet machines retain captures until overwritten or explicitly removed. Restart does not erase them. VM snapshots/operator backups can retain additional copies; there is no automatic upload or sync of these files.
 - Private records share the ordinary exit record's `run_id` and `sequence`. Invalid UTF-8 is replaced only when writing JSON; capture is not a byte-exact archive. Avoid raw terminal output: JSON escaping protects against control sequences, and `jq -a` also escapes Unicode controls.
+
+**Exception: the owner-visible crash tail** (ADR 0123). It is not protected by the rules above. When a session ends `failed` or `process_lost`, Session Management takes the last **2000 bytes** of the captured stderr, keeps the last **20 nonempty lines**, and stores them unredacted as `stderr` in that session's `state` record. Like any history record it reaches whoever can read the session, including core-token holders, through the session API, SSE, and saved and uploaded history. Other exits and model discovery show no tail. Treat it as unreviewed stderr: it can still contain secrets, so redact it before sharing.
 
 As the protected service account, inspect a session without decoding raw terminal controls:
 
