@@ -102,7 +102,8 @@ def configure(data, directory=Path('/etc/cloudroom')):
     existing = path.exists()
     if existing:
         # systemd splits only on newlines; any other separator stays inside the value and fails the checks below.
-        previous = dict(line.split('=', 1) for line in path.read_bytes().decode().split('\n') if '=' in line)
+        with path.open(newline='') as file:
+            previous = dict(line.split('=', 1) for line in file.read().split('\n') if '=' in line)
         if any(previous.get(k) != json.dumps(v, ensure_ascii=False) for k, v in {
             'CLOUDROOM_STORE': owner, 'CLOUDROOM_TOKEN': token, 'CLOUDROOM_DATABASE_URL': database,
             **({'CLOUDROOM_API_URL': api} if 'apiUrl' in data else {}),
