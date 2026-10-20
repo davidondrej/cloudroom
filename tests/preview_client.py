@@ -230,11 +230,13 @@ class TransportTests(unittest.TestCase):
             self.assertIn(b'Authorization: Bearer synthetic-token', lines)
             self.assertIn(b'X-Cloudroom-Token: synthetic-token', lines)
             self.assertTrue(remote.sent.endswith(b'\r\n\r\n'))
-        # A caller's own User-Agent wins on both paths, as urllib already lets it, and is never sent twice.
-        preview.control(self.url + '/v1/previews/x', {}, 'POST', {**self.headers, 'User-Agent': 'Caller'})
-        self.assertEqual(Control.seen[1][2], ['Caller'])
-        _, remotes, _, _ = self.relay(b'HTTP/1.1 101 Switching Protocols\r\n\r\n', headers={**self.headers, 'User-Agent': 'Caller'})
-        self.assertEqual([line for line in remotes[0].sent.split(b'\r\n') if line.lower().startswith(b'user-agent:')], [b'User-Agent: Caller'])
+        # A caller's own User-Agent, in any casing, wins on both paths, as urllib already lets it, and is never sent twice.
+        for name in ['User-Agent', 'user-agent', 'USER-AGENT']:
+            Control.seen = []
+            preview.control(self.url + '/v1/previews/x', {}, 'POST', {**self.headers, name: 'Caller'})
+            self.assertEqual(Control.seen[0][2], ['Caller'])
+            _, remotes, _, _ = self.relay(b'HTTP/1.1 101 Switching Protocols\r\n\r\n', headers={**self.headers, name: 'Caller'})
+            self.assertEqual([line for line in remotes[0].sent.split(b'\r\n') if line.lower().startswith(b'user-agent:')], [name.encode() + b': Caller'])
 
 
 if __name__ == '__main__':
