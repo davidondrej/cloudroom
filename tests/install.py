@@ -132,9 +132,10 @@ class InstallerTests(unittest.TestCase):
         installer.configure(self.data, self.directory)
         installer.configure({k: v for k, v in self.data.items() if k != 'apiUrl'}, self.directory)
         self.assertEqual(path.read_bytes(), original)
-        with self.assertRaisesRegex(ValueError, 'differs'):
-            installer.configure({**self.data, 'apiUrl': 'https://other.cloudroom.test'}, self.directory)
-        self.assertEqual(path.read_bytes(), original)
+        for value in ['https://other.cloudroom.test', None]:
+            with self.subTest(apiUrl=value), self.assertRaisesRegex(ValueError, 'differs'):
+                installer.configure({**self.data, 'apiUrl': value}, self.directory)
+            self.assertEqual(path.read_bytes(), original)
         # A file saved without a destination is refused, never repaired.
         broken = b''.join(line for line in original.splitlines(True) if not line.startswith(b'CLOUDROOM_API_URL='))
         path.write_bytes(broken)
