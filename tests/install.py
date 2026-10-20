@@ -111,7 +111,8 @@ class InstallerTests(unittest.TestCase):
         for value in [None, '', ' ', '\t', 'http://api.cloudroom.test', 'https://api.cloudroom.test/', ' https://api.cloudroom.test',
                       'https://é.cloudroom.test/v1', 'https://api.cloudroom.test/\u00a0',
                       'https:///v1', 'https://:443/v1', 'https://[api/v1', 'https://api.cloudroom.test:abc/v1',
-                      'https://api.cloudroom.test:99999/v1']:
+                      'https://api.cloudroom.test:99999/v1', 'https://%zz/v1', 'https://a|b/v1', 'https://ex"ample.test/v1',
+                      'https://api..cloudroom.test/v1', 'https://[::g]/v1']:
             with self.subTest(apiUrl=value), self.assertRaisesRegex(ValueError, 'apiUrl'):
                 installer.configure({**self.data, 'apiUrl': value}, self.directory)
             self.assertFalse(self.directory.exists())
@@ -123,10 +124,14 @@ class InstallerTests(unittest.TestCase):
         self.assertFalse((self.root / 'code').exists())
         self.assertFalse((self.root / 'cache').exists())
         self.assertEqual(self.calls, [])
-        installer.configure(self.data, self.directory)
-        values = dict(line.split('=', 1) for line in (self.directory / 'core.env').read_text().splitlines())
-        self.assertEqual(json.loads(values['CLOUDROOM_API_URL']), self.data['apiUrl'])
-        self.assertNotIn('CLOUDROOM_LOCAL_HISTORY', values)
+        for index, value in enumerate([self.data['apiUrl'], 'https://cloudroom.dev', 'https://api_1.cloudroom.test:443/v1',
+                                       'https://[2001:db8::1]:8443/v1', 'https://10.0.0.1/v1']):
+            directory = self.root / f'valid-{index}'
+            installer.configure({**self.data, 'apiUrl': value}, directory)
+            values = dict(line.split('=', 1) for line in (directory / 'core.env').read_text().splitlines())
+            self.assertEqual(json.loads(values['CLOUDROOM_API_URL']), value)
+            self.assertNotIn('CLOUDROOM_LOCAL_HISTORY', values)
+            installer.configure({k: v for k, v in self.data.items() if k != 'apiUrl'}, directory)
 
     def test_retries_keep_the_saved_api_destination(self):
         installer.configure(self.data, self.directory)
@@ -154,7 +159,7 @@ class InstallerTests(unittest.TestCase):
         legacy = {k: v for k, v in self.data.items() if k != 'apiUrl'}
         for destination in [b'', b'CLOUDROOM_API_URL=""\n', b'CLOUDROOM_API_URL="http://api.cloudroom.test"\n',
                             b'CLOUDROOM_API_URL=https://api.cloudroom.test\n',
-                            b'CLOUDROOM_API_URL="https:///v1"\n', b'CLOUDROOM_API_URL="https:\\/\\/api.cloudroom.test"\n',
+                            b'CLOUDROOM_API_URL="https:///v1"\n', b'CLOUDROOM_API_URL="https:\\/\\/api.cloudroom.test"\n', b'CLOUDROOM_API_URL="https://a|b.test"\n',
                             b'CLOUDROOM_LOCAL_HISTORY="1"\n']:
             saved = b''.join(lines) + destination
             path.write_bytes(saved)

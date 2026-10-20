@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Configure a preinstalled core from private JSON on stdin. Never log that JSON."""
+import ipaddress
 import json
 import os
 from pathlib import Path
 import pwd
+import re
 import subprocess
 import sys
 import tempfile
@@ -11,6 +13,7 @@ from urllib.parse import urlsplit
 
 CODE_ROOT = Path('/code')
 CACHE_ROOT = Path('/var/cache/cloudroom-agent')
+HOST = re.compile(r'[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+)*')
 
 
 def accounts():
@@ -57,7 +60,10 @@ def managed_api(url):
     try:
         parts = urlsplit(url)
         _ = parts.port
-        return bool(parts.hostname)
+        host = parts.hostname or ''
+        if ':' in host:  # Only a bracketed IPv6 address keeps a colon after the port is split off.
+            return bool(ipaddress.IPv6Address(host))
+        return bool(HOST.fullmatch(host))
     except ValueError:
         return False
 
