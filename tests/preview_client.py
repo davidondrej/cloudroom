@@ -227,10 +227,10 @@ class TransportTests(unittest.TestCase):
         preview.control(self.url + '/v1/previews/x', {}, 'POST', self.headers)
         self.assertEqual(Control.seen[0][2], ['Cloudroom-Helper'])
         _, remotes, _, _ = self.relay(b'HTTP/1.1 400 Bad Request\r\n\r\n', b'HTTP/1.1 101 Switching Protocols\r\n\r\n')
-        for remote in remotes:
+        for remote, protocol in zip(remotes, [b'websocket', b'cloudroom-tunnel']):
             lines = remote.sent.split(b'\r\n')
             self.assertEqual([line for line in lines if line.lower().startswith(b'user-agent:')], [b'User-Agent: Cloudroom-Helper'])
-            self.assertEqual(lines[:4], [b'GET /v1/previews/3000/tunnel?device=synthetic-device HTTP/1.1', b'Host: core.example.test', b'Connection: Upgrade', lines[3]])
+            self.assertEqual(lines[:4], [b'GET /v1/previews/3000/tunnel?device=synthetic-device HTTP/1.1', b'Host: core.example.test', b'Connection: Upgrade', b'Upgrade: ' + protocol])
             self.assertIn(b'Authorization: Bearer synthetic-token', lines)
             self.assertIn(b'X-Cloudroom-Token: synthetic-token', lines)
             self.assertTrue(remote.sent.endswith(b'\r\n\r\n'))
@@ -295,6 +295,8 @@ class FakeCore(socketserver.BaseRequestHandler):
         self.server.seen.append(lines)
         if b'Authorization: Bearer synthetic-token' not in lines:
             self.request.sendall(b'HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n'); return
+        if b'/tunnel?' in lines[0] and self.server.legacy and b'Upgrade: websocket' in lines:
+            self.request.sendall(b'HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n'); return
         if b'/tunnel?' in lines[0]:
             self.request.sendall(b'HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n')
             while chunk := self.request.recv(65536):
@@ -338,7 +340,7 @@ class ProxyIntegrationTests(unittest.TestCase):
         servers = []
         for handler in [FakeCore, Edge]:
             server = socketserver.ThreadingTCPServer(('127.0.0.1', 0), handler)
-            server.daemon_threads, server.seen, server.bodies = True, [], []
+            server.daemon_threads, server.seen, server.bodies, server.legacy = True, [], [], False
             threading.Thread(target=server.serve_forever, kwargs={'poll_interval': .01}, daemon=True).start()
             self.addCleanup(server.server_close)
             self.addCleanup(server.shutdown)
@@ -373,13 +375,21 @@ class ProxyIntegrationTests(unittest.TestCase):
             with remote:
                 remote.sendall(b'raw bytes')
                 self.assertEqual(rest + remote.recv(64), b'raw bytes')
+            self.core.legacy = True  # A core before 0.1.35 knows only cloudroom-tunnel.
+            remote, rest = relay.open()
+            with remote:
+                remote.sendall(b'old core')
+                self.assertEqual(rest + remote.recv(64), b'old core')
             # Every request reached the core through the edge, authorized and named.
             for lines in self.core.seen:
                 self.assertIn(b'Authorization: Bearer synthetic-token', lines)
                 self.assertIn(b'X-Cloudroom-Token: synthetic-token', lines)
                 self.assertEqual([line.split(b': ', 1)[1] for line in lines if line.lower().startswith(b'user-agent:')], [b'Cloudroom-Helper'])
+            tunnel = [b'GET', b'/v1/previews/3000/tunnel?device=synthetic-device']
             self.assertEqual([lines[0].split(b' ')[:2] for lines in self.core.seen], [[b'POST', b'/v1/previews/device'],
-                [b'GET', b'/v1/mac/jobs?device=synthetic-device'], [b'GET', b'/v1/previews/3000/tunnel?device=synthetic-device']])
+                [b'GET', b'/v1/mac/jobs?device=synthetic-device'], tunnel, tunnel, tunnel])
+            self.assertEqual([line for lines in self.core.seen[2:] for line in lines if line.startswith(b'Upgrade:')],
+                             [b'Upgrade: websocket', b'Upgrade: websocket', b'Upgrade: cloudroom-tunnel'])
             self.assertIn(f'Host: localhost:{self.edge.server_address[1]}'.encode(), self.core.seen[2])
             # The edge still refuses urllib's signature, and a cross-origin redirect is never followed.
             with self.assertRaises(client.ControlError) as caught:
@@ -387,7 +397,8 @@ class ProxyIntegrationTests(unittest.TestCase):
             self.assertEqual(caught.exception.code, 403)
             with self.assertRaisesRegex(ValueError, 'cannot redirect'):
                 core.fetch(self.url + '/moved', None, 'GET', core.headers)
-            self.assertEqual(len(self.core.seen), 3)
+            self.assertEqual((len(self.edge.seen), len(self.core.seen)), (7, 5))
+            self.assertEqual([lines[0].split(b' ')[1] for lines in self.edge.seen[5:]], [b'/v1/previews/x', b'/moved'])
 
     def test_helper_refuses_an_untrusted_edge(self):
         with mock.patch.dict(os.environ, {'SSL_CERT_FILE': str(self.folder / 'missing.pem')}):  # Trusts no test CA.
