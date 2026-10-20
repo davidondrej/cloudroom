@@ -59,6 +59,9 @@ class ControlError(ValueError):
 
 
 OPENER = urllib.request.build_opener(NoRedirect(), urllib.request.HTTPSHandler(context=ssl.create_default_context()))
+# Proxies such as Cloudflare refuse urllib's default User-Agent, so the helper names itself on every request.
+USER_AGENT = 'Cloudroom-Helper'
+OPENER.addheaders = [('User-Agent', USER_AGENT)]
 
 
 def control(url, body, method, headers, timeout=5):
@@ -341,7 +344,7 @@ class Relay:
         remote = socket.create_connection((url.hostname, url.port or (443 if url.scheme == 'https' else 80)), timeout=10)
         if url.scheme == 'https':
             remote = ssl.create_default_context().wrap_socket(remote, server_hostname=url.hostname)
-        headers = ''.join(f'{key}: {value}\r\n' for key, value in self.core.headers.items())
+        headers = ''.join(f'{key}: {value}\r\n' for key, value in {'User-Agent': USER_AGENT, **self.core.headers}.items())
         remote.sendall(f'GET /v1/previews/{self.port}/tunnel?device={self.device} HTTP/1.1\r\nHost: {url.netloc}\r\n'
                        f'Connection: Upgrade\r\nUpgrade: {protocol}\r\n{headers}\r\n'.encode())
         head = b''

@@ -218,6 +218,24 @@ class TransportTests(unittest.TestCase):
             self.assertNotIsInstance(error, PermissionError)
             self.assertEqual(len(remotes), 1)  # No retry beyond the one protocol fallback.
 
+    def test_control_and_tunnel_identify_the_helper_the_same_way(self):
+        # Proxies such as Cloudflare refuse urllib's default signature (#38); the helper names itself instead.
+        preview.control(self.url + '/v1/previews/x', {}, 'POST', self.headers)
+        self.assertEqual(Control.seen[0][2], ['Cloudroom-Helper'])
+        _, remotes, _, _ = self.relay(b'HTTP/1.1 400 Bad Request\r\n\r\n', b'HTTP/1.1 101 Switching Protocols\r\n\r\n')
+        for remote in remotes:
+            lines = remote.sent.split(b'\r\n')
+            self.assertEqual([line for line in lines if line.lower().startswith(b'user-agent:')], [b'User-Agent: Cloudroom-Helper'])
+            self.assertEqual(lines[:4], [b'GET /v1/previews/3000/tunnel?device=synthetic-device HTTP/1.1', b'Host: core.example.test', b'Connection: Upgrade', lines[3]])
+            self.assertIn(b'Authorization: Bearer synthetic-token', lines)
+            self.assertIn(b'X-Cloudroom-Token: synthetic-token', lines)
+            self.assertTrue(remote.sent.endswith(b'\r\n\r\n'))
+        # A caller's own User-Agent wins on both paths, as urllib already lets it, and is never sent twice.
+        preview.control(self.url + '/v1/previews/x', {}, 'POST', {**self.headers, 'User-Agent': 'Caller'})
+        self.assertEqual(Control.seen[1][2], ['Caller'])
+        _, remotes, _, _ = self.relay(b'HTTP/1.1 101 Switching Protocols\r\n\r\n', headers={**self.headers, 'User-Agent': 'Caller'})
+        self.assertEqual([line for line in remotes[0].sent.split(b'\r\n') if line.lower().startswith(b'user-agent:')], [b'User-Agent: Caller'])
+
 
 if __name__ == '__main__':
     unittest.main()
