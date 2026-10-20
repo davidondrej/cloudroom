@@ -50,12 +50,14 @@ def installed_version():
 
 
 def managed_api(url):
-    # Core's own rule (src/config.rs) for CLOUDROOM_API_URL, minus its loopback test servers, plus a host.
+    # Core's own rule (src/config.rs) for CLOUDROOM_API_URL, minus its loopback test servers, plus a usable host and port.
     if not (isinstance(url, str) and url.startswith('https://') and not url.endswith('/')
             and all(33 <= ord(c) < 127 and c not in '?#@' for c in url)):
         return False
     try:
-        return bool(urlsplit(url).hostname)
+        parts = urlsplit(url)
+        _ = parts.port
+        return bool(parts.hostname)
     except ValueError:
         return False
 
@@ -96,12 +98,14 @@ def configure(data, directory=Path('/etc/cloudroom')):
             **({'CLOUDROOM_API_URL': api} if 'apiUrl' in data else {}),
         }.items()):
             raise ValueError('Existing configuration differs; no changes made')
+        raw = previous.get('CLOUDROOM_API_URL', 'null')
         try:
-            saved = json.loads(previous.get('CLOUDROOM_API_URL', 'null'))
+            saved = json.loads(raw)
         except ValueError:
             saved = None
         # Core refuses to start without a history destination; never repair it or fall back to local-only history.
-        if not managed_api(saved):
+        # Only the exact form written below is trusted: systemd does not decode JSON escapes such as \/.
+        if not managed_api(saved) or raw != json.dumps(saved):
             raise ValueError('Existing configuration has no valid API destination; no changes made')
     elif api is None:
         raise ValueError('apiUrl is required for a new managed setup')
