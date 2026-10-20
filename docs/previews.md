@@ -80,6 +80,6 @@ The narrow Unix socket exposes only registration/status/close. Kernel peer crede
 
 ## Verification
 
-Run `python3 tests/preview_client.py` for real HTTP/Unix-socket proxy regressions. On a disposable Linux machine with OpenSSH and a built core, run `sudo python3 tests/previews_ssh.py --disposable`: it checks the agent CLI, destination ownership, restricted SSH and active revocation. It refuses machines with existing Cloudroom accounts. Both are wired into CI alongside Rust and existing checks.
+Run `python3 tests/preview_client.py` for real HTTP/Unix-socket proxy regressions. It also drives the helper through a local TLS edge proxy that refuses urllib's default User-Agent, using a throwaway CA from `openssl`; no network beyond loopback. On a disposable Linux machine with OpenSSH and a built core, run `sudo python3 tests/previews_ssh.py --disposable`: it checks the agent CLI, destination ownership, restricted SSH and active revocation. It refuses machines with existing Cloudroom accounts. Both are wired into CI alongside Rust and existing checks.
 
 Before rollout, verify browsers, real development-server live reload, streaming, uploads, occupied ports, reconnect and sign-out. macOS 26 supports `.localhost` in Safari; older supported systems need separate verification. A source build changes no production configuration.
