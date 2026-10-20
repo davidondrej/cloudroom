@@ -44,6 +44,19 @@ class InstallerTests(unittest.TestCase):
         ]:
             p = patch(target, value); p.start(); self.addCleanup(p.stop)
 
+    def assert_refused(self, data, message):
+        """A refusal changes no file, mode or ownership, activates nothing, and prints nothing."""
+        snapshot = lambda: {p: (p.lstat().st_mode, p.read_bytes() if p.is_file() else None) for p in self.root.rglob('*')}
+        before, calls = snapshot(), list(self.calls)
+        with patch('os.chown') as chown, patch('os.chmod') as chmod, patch.object(Path, 'chmod') as path_chmod, \
+                patch.object(Path, 'mkdir') as mkdir, patch('builtins.print') as output, \
+                self.assertRaisesRegex(ValueError, message):
+            installer.configure(data, self.directory)
+        for effect in (chown, chmod, path_chmod, mkdir, output):
+            effect.assert_not_called()
+        self.assertEqual(self.calls, calls)
+        self.assertEqual(snapshot(), before)
+
     def test_self_hosted_credentials_and_stable_retries(self):
         installer.configure(self.data, self.directory)
         path = self.directory / 'core.env'
@@ -108,22 +121,17 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(self.calls, [])
 
     def test_fresh_managed_setup_requires_api_destination(self):
-        for value in [None, '', ' ', '\t', 'http://api.cloudroom.test', 'https://api.cloudroom.test/', ' https://api.cloudroom.test',
+        for value in [None, '', ' ', '\t', 'https://api.cloudroom.test/v1\x01', 'https://api.cloudroom.test/ v1',
+                      'https://user@api.cloudroom.test/v1', 'https://api.cloudroom.test/v1?x', 'https://api.cloudroom.test/v1#x',
+                      'http://api.cloudroom.test', 'https://api.cloudroom.test/', ' https://api.cloudroom.test',
                       'https://é.cloudroom.test/v1', 'https://api.cloudroom.test/\u00a0',
                       'https:///v1', 'https://:443/v1', 'https://[api/v1', 'https://api.cloudroom.test:abc/v1',
                       'https://api.cloudroom.test:99999/v1', 'https://%zz/v1', 'https://a|b/v1', 'https://ex"ample.test/v1',
                       'https://api..cloudroom.test/v1', 'https://[::g]/v1']:
-            with self.subTest(apiUrl=value), self.assertRaisesRegex(ValueError, 'apiUrl'):
-                installer.configure({**self.data, 'apiUrl': value}, self.directory)
-            self.assertFalse(self.directory.exists())
-        missing = {k: v for k, v in self.data.items() if k != 'apiUrl'}
-        with patch('builtins.print') as output, self.assertRaisesRegex(ValueError, 'apiUrl'):
-            installer.configure(missing, self.directory)
-        output.assert_not_called()
-        self.assertFalse(self.directory.exists())
-        self.assertFalse((self.root / 'code').exists())
-        self.assertFalse((self.root / 'cache').exists())
-        self.assertEqual(self.calls, [])
+            with self.subTest(apiUrl=value):
+                self.assert_refused({**self.data, 'apiUrl': value}, 'apiUrl')
+        self.assert_refused({k: v for k, v in self.data.items() if k != 'apiUrl'}, 'apiUrl')
+        self.assertEqual(list(self.root.iterdir()), [])
         for index, value in enumerate([self.data['apiUrl'], 'https://cloudroom.dev', 'https://api_1.cloudroom.test:443/v1',
                                        'https://[2001:db8::1]:8443/v1', 'https://10.0.0.1/v1']):
             directory = self.root / f'valid-{index}'
@@ -141,15 +149,12 @@ class InstallerTests(unittest.TestCase):
         installer.configure({k: v for k, v in self.data.items() if k != 'apiUrl'}, self.directory)
         self.assertEqual(path.read_bytes(), original)
         for value in ['https://other.cloudroom.test', None]:
-            with self.subTest(apiUrl=value), self.assertRaisesRegex(ValueError, 'differs'):
-                installer.configure({**self.data, 'apiUrl': value}, self.directory)
-            self.assertEqual(path.read_bytes(), original)
+            with self.subTest(apiUrl=value):
+                self.assert_refused({**self.data, 'apiUrl': value}, 'differs')
         # A file saved without a destination is refused, never repaired.
         broken = b''.join(line for line in original.splitlines(True) if not line.startswith(b'CLOUDROOM_API_URL='))
         path.write_bytes(broken)
-        with self.assertRaisesRegex(ValueError, 'differs'):
-            installer.configure(self.data, self.directory)
-        self.assertEqual(path.read_bytes(), broken)
+        self.assert_refused(self.data, 'differs')
         self.assertEqual(self.calls, [['systemctl', 'enable', '--now', 'cloudroom.service']] * 3)
 
     def test_retry_without_api_needs_a_valid_saved_destination(self):
@@ -163,13 +168,8 @@ class InstallerTests(unittest.TestCase):
                             b'CLOUDROOM_LOCAL_HISTORY="1"\n']:
             saved = b''.join(lines) + destination
             path.write_bytes(saved)
-            changes = []
-            with self.subTest(destination=destination), patch('os.chown', lambda *args: changes.append(args)), \
-                    patch('builtins.print') as output, self.assertRaisesRegex(ValueError, 'destination'):
-                installer.configure(legacy, self.directory)
-            self.assertEqual(path.read_bytes(), saved)
-            self.assertEqual(changes, [])
-            output.assert_not_called()
+            with self.subTest(destination=destination):
+                self.assert_refused(legacy, 'destination')
         self.assertEqual(self.calls, [['systemctl', 'enable', '--now', 'cloudroom.service']])
 
     def test_configuration_symlink_is_rejected(self):
