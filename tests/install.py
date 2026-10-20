@@ -126,7 +126,7 @@ class InstallerTests(unittest.TestCase):
     def test_fresh_managed_setup_requires_api_destination(self):
         for value in [None, '', ' ', '\t', 'https://api.cloudroom.test/v1\x01', 'https://api.cloudroom.test/ v1',
                       'https://user@api.cloudroom.test/v1', 'https://api.cloudroom.test/v1?x', 'https://api.cloudroom.test/v1#x',
-                      'http://api.cloudroom.test', 'https://api.cloudroom.test/', ' https://api.cloudroom.test',
+                      'http://api.cloudroom.test', 'http://127.0.0.1:9840', 'http://localhost:8080', 'http://[::1]:9840', 'https://api.cloudroom.test/', ' https://api.cloudroom.test',
                       'https://é.cloudroom.test/v1', 'https://api.cloudroom.test/\u00a0',
                       'https:///v1', 'https://:443/v1', 'https://[api/v1', 'https://api.cloudroom.test:abc/v1',
                       'https://api.cloudroom.test:99999/v1', 'https://%zz/v1', 'https://a|b/v1', 'https://ex"ample.test/v1',
@@ -154,9 +154,10 @@ class InstallerTests(unittest.TestCase):
         installer.configure(self.data, self.directory)
         installer.configure({k: v for k, v in self.data.items() if k != 'apiUrl'}, self.directory)
         self.assertEqual(path.read_bytes(), original)
-        for value in ['https://other.cloudroom.test', None]:
-            with self.subTest(apiUrl=value):
-                self.assert_refused({**self.data, 'apiUrl': value}, 'differs')
+        for change in [{'apiUrl': 'https://other.cloudroom.test'}, {'apiUrl': None}, {'coreToken': 'another-strong-token-' * 2},
+                       {'userId': 'store-b'}, {'databaseUrl': self.data['databaseUrl'] + '2'}]:
+            with self.subTest(change=change):
+                self.assert_refused({**self.data, **change}, 'differs')
         # A file saved without a destination is refused, never repaired.
         broken = b''.join(line for line in original.splitlines(True) if not line.startswith(b'CLOUDROOM_API_URL='))
         path.write_bytes(broken)
