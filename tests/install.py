@@ -46,8 +46,9 @@ class InstallerTests(unittest.TestCase):
 
     def assert_refused(self, data, message):
         """A refusal changes no file, mode or ownership, activates nothing, and prints nothing."""
-        snapshot = lambda: {p: (p.lstat().st_mode, p.lstat().st_uid, p.lstat().st_gid, p.read_bytes() if p.is_file() else None)
-                            for p in self.root.rglob('*')}
+        def snapshot():
+            return {p: (s.st_mode, s.st_uid, s.st_gid, s.st_ino, s.st_mtime_ns, s.st_ctime_ns, p.read_bytes() if p.is_file() else None)
+                    for p in self.root.rglob('*') for s in [p.lstat()]}
         before, calls = snapshot(), list(self.calls)
         with patch('os.chown') as chown, patch('os.lchown') as lchown, patch('os.fchown') as fchown, \
                 patch('os.chmod') as chmod, patch.object(Path, 'chmod') as path_chmod, \
@@ -131,7 +132,8 @@ class InstallerTests(unittest.TestCase):
                       'https://api.cloudroom.test:99999/v1', 'https://%zz/v1', 'https://a|b/v1', 'https://ex"ample.test/v1',
                       'https://api..cloudroom.test/v1', 'https://[::g]/v1', 'https://[v1.fe]/v1',
                       'https://[::1]x/v1', 'https://a[::1]/v1',
-                      'https://999.1.1.1/v1', 'https://0x7f.1/v1', 'https://1.2.3/v1']:
+                      'https://999.1.1.1/v1', 'https://0x7f.1/v1', 'https://1.2.3/v1',
+                      'https://0x7f/v1', 'https://a.0x7f/v1']:
             with self.subTest(apiUrl=value):
                 self.assert_refused({**self.data, 'apiUrl': value}, 'apiUrl')
         self.assert_refused({k: v for k, v in self.data.items() if k != 'apiUrl'}, 'apiUrl')
