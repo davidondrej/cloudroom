@@ -87,7 +87,8 @@ def configure(data, directory=Path('/etc/cloudroom')):
     if path.exists():
         previous = dict(line.split('=', 1) for line in path.read_text().splitlines() if '=' in line)
         if any(previous.get(k) != json.dumps(v, ensure_ascii=False) for k, v in {
-            'CLOUDROOM_STORE': owner, 'CLOUDROOM_TOKEN': token, 'CLOUDROOM_DATABASE_URL': database
+            'CLOUDROOM_STORE': owner, 'CLOUDROOM_TOKEN': token, 'CLOUDROOM_DATABASE_URL': database,
+            **({'CLOUDROOM_API_URL': api} if api is not None else {}),
         }.items()):
             raise ValueError('Existing configuration differs; no changes made')
     else:
