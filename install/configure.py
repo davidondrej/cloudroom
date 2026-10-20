@@ -57,7 +57,7 @@ def configure(data, directory=Path('/etc/cloudroom')):
         raise ValueError('Unexpected setup fields')
     api = data.get('apiUrl')
     if api is not None and (not isinstance(api, str) or not api.startswith('https://') or api.endswith('/')
-                            or any(ord(c) <= 32 or ord(c) == 127 or c in '?#@' for c in api)):
+                            or any(not 33 <= ord(c) < 127 or c in '?#@' for c in api)):
         raise ValueError('apiUrl must be an https:// URL without a trailing slash')
     owner, token, database, release = (data[k] for k in ('userId', 'coreToken', 'databaseUrl', 'release'))
     if not all(isinstance(v, str) for v in (owner, token, database, release)):

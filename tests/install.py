@@ -108,7 +108,8 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(self.calls, [])
 
     def test_fresh_managed_setup_requires_api_destination(self):
-        for value in [None, '', ' ', '\t', 'http://api.cloudroom.test', 'https://api.cloudroom.test/', ' https://api.cloudroom.test']:
+        for value in [None, '', ' ', '\t', 'http://api.cloudroom.test', 'https://api.cloudroom.test/', ' https://api.cloudroom.test',
+                      'https://é.cloudroom.test/v1', 'https://api.cloudroom.test/\u00a0']:
             with self.subTest(apiUrl=value), self.assertRaisesRegex(ValueError, 'apiUrl'):
                 installer.configure({**self.data, 'apiUrl': value}, self.directory)
             self.assertFalse(self.directory.exists())
