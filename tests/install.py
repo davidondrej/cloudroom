@@ -145,6 +145,24 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(path.read_bytes(), broken)
         self.assertEqual(self.calls, [['systemctl', 'enable', '--now', 'cloudroom.service']] * 3)
 
+    def test_retry_without_api_needs_a_valid_saved_destination(self):
+        installer.configure(self.data, self.directory)
+        path = self.directory / 'core.env'
+        lines = [line for line in path.read_bytes().splitlines(True) if not line.startswith(b'CLOUDROOM_API_URL=')]
+        legacy = {k: v for k, v in self.data.items() if k != 'apiUrl'}
+        for destination in [b'', b'CLOUDROOM_API_URL=""\n', b'CLOUDROOM_API_URL="http://api.cloudroom.test"\n',
+                            b'CLOUDROOM_API_URL=https://api.cloudroom.test\n', b'CLOUDROOM_LOCAL_HISTORY="1"\n']:
+            saved = b''.join(lines) + destination
+            path.write_bytes(saved)
+            changes = []
+            with self.subTest(destination=destination), patch('os.chown', lambda *args: changes.append(args)), \
+                    patch('builtins.print') as output, self.assertRaisesRegex(ValueError, 'destination'):
+                installer.configure(legacy, self.directory)
+            self.assertEqual(path.read_bytes(), saved)
+            self.assertEqual(changes, [])
+            output.assert_not_called()
+        self.assertEqual(self.calls, [['systemctl', 'enable', '--now', 'cloudroom.service']])
+
     def test_configuration_symlink_is_rejected(self):
         target = self.root / 'target'; target.mkdir()
         self.directory.symlink_to(target)

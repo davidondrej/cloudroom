@@ -49,6 +49,12 @@ def installed_version():
     return output.split()[1]
 
 
+def managed_api(url):
+    # Core's own rule (src/config.rs) for CLOUDROOM_API_URL, minus its loopback test servers.
+    return (isinstance(url, str) and url.startswith('https://') and not url.endswith('/')
+            and all(33 <= ord(c) < 127 and c not in '?#@' for c in url))
+
+
 def configure(data, directory=Path('/etc/cloudroom')):
     if os.geteuid() != 0:
         raise ValueError('Run as the provisioning administrator')
@@ -56,8 +62,7 @@ def configure(data, directory=Path('/etc/cloudroom')):
     if not isinstance(data, dict) or set(data) - {'apiUrl'} != {'userId', 'coreToken', 'databaseUrl', 'release'}:
         raise ValueError('Unexpected setup fields')
     api = data.get('apiUrl')
-    if api is not None and (not isinstance(api, str) or not api.startswith('https://') or api.endswith('/')
-                            or any(not 33 <= ord(c) < 127 or c in '?#@' for c in api)):
+    if api is not None and not managed_api(api):
         raise ValueError('apiUrl must be an https:// URL without a trailing slash')
     owner, token, database, release = (data[k] for k in ('userId', 'coreToken', 'databaseUrl', 'release'))
     if not all(isinstance(v, str) for v in (owner, token, database, release)):
@@ -77,21 +82,28 @@ def configure(data, directory=Path('/etc/cloudroom')):
     path = directory / 'core.env'
     if not directory.is_absolute() or directory.is_symlink() or path.is_symlink():
         raise ValueError('Configuration paths must not be symlinks')
-    # Core refuses to start without a history destination, so a fresh managed setup must not report success.
-    if api is None and not path.exists():
-        raise ValueError('apiUrl is required for a new managed setup')
-    directory.mkdir(mode=0o750, exist_ok=True)
-    os.chown(directory, 0, service.pw_gid)
-    directory.chmod(0o750)
     # Reruns never replace settings, rotate credentials, or restart existing workloads.
-    if path.exists():
+    existing = path.exists()
+    if existing:
         previous = dict(line.split('=', 1) for line in path.read_text().splitlines() if '=' in line)
         if any(previous.get(k) != json.dumps(v, ensure_ascii=False) for k, v in {
             'CLOUDROOM_STORE': owner, 'CLOUDROOM_TOKEN': token, 'CLOUDROOM_DATABASE_URL': database,
             **({'CLOUDROOM_API_URL': api} if 'apiUrl' in data else {}),
         }.items()):
             raise ValueError('Existing configuration differs; no changes made')
-    else:
+        try:
+            saved = json.loads(previous.get('CLOUDROOM_API_URL', 'null'))
+        except ValueError:
+            saved = None
+        # Core refuses to start without a history destination; never repair it or fall back to local-only history.
+        if not managed_api(saved):
+            raise ValueError('Existing configuration has no valid API destination; no changes made')
+    elif api is None:
+        raise ValueError('apiUrl is required for a new managed setup')
+    directory.mkdir(mode=0o750, exist_ok=True)
+    os.chown(directory, 0, service.pw_gid)
+    directory.chmod(0o750)
+    if not existing:
         settings = {
             'CLOUDROOM_STORE': owner, 'CLOUDROOM_TOKEN': token, 'CLOUDROOM_DATABASE_URL': database,
             'CLOUDROOM_LISTEN': os.environ.get('CLOUDROOM_LISTEN', '127.0.0.1:9840'), 'CLOUDROOM_ACCOUNT_HOME': agent.pw_dir,
