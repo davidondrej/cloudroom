@@ -46,13 +46,15 @@ class InstallerTests(unittest.TestCase):
 
     def assert_refused(self, data, message):
         """A refusal changes no file, mode or ownership, activates nothing, and prints nothing."""
-        snapshot = lambda: {p: (p.lstat().st_mode, p.read_bytes() if p.is_file() else None) for p in self.root.rglob('*')}
+        snapshot = lambda: {p: (p.lstat().st_mode, p.lstat().st_uid, p.lstat().st_gid, p.read_bytes() if p.is_file() else None)
+                            for p in self.root.rglob('*')}
         before, calls = snapshot(), list(self.calls)
-        with patch('os.chown') as chown, patch('os.chmod') as chmod, patch.object(Path, 'chmod') as path_chmod, \
+        with patch('os.chown') as chown, patch('os.lchown') as lchown, patch('os.fchown') as fchown, \
+                patch('os.chmod') as chmod, patch.object(Path, 'chmod') as path_chmod, \
                 patch.object(Path, 'mkdir') as mkdir, patch('builtins.print') as output, \
                 self.assertRaisesRegex(ValueError, message):
             installer.configure(data, self.directory)
-        for effect in (chown, chmod, path_chmod, mkdir, output):
+        for effect in (chown, lchown, fchown, chmod, path_chmod, mkdir, output):
             effect.assert_not_called()
         self.assertEqual(self.calls, calls)
         self.assertEqual(snapshot(), before)
