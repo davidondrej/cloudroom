@@ -219,7 +219,7 @@ class ReplayTests(unittest.TestCase):
         home = self.root / "home"
         (home / ".codex").mkdir(parents=True)
         self.state = self.root / "state"
-        self.state.mkdir()
+        self.state.mkdir(mode=0o700)  # Core rejects group-writable state, so permissive umasks must not leak in.
         # History stays in the journal unless a test starts the fake API (WorkspaceTests.api).
         self.env = {
             "PATH": "/usr/local/bin:/usr/bin:/bin", "CLOUDROOM_UNPROTECTED_TEST_MODE": "1", "CLOUDROOM_LISTEN": "127.0.0.1:0",
