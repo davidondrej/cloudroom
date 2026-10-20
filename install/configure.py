@@ -98,7 +98,8 @@ def configure(data, directory=Path('/etc/cloudroom')):
     # Reruns never replace settings, rotate credentials, or restart existing workloads.
     existing = path.exists()
     if existing:
-        previous = dict(line.split('=', 1) for line in path.read_text().splitlines() if '=' in line)
+        # systemd splits only on newlines; any other separator stays inside the value and fails the checks below.
+        previous = dict(line.split('=', 1) for line in path.read_bytes().decode().split('\n') if '=' in line)
         if any(previous.get(k) != json.dumps(v, ensure_ascii=False) for k, v in {
             'CLOUDROOM_STORE': owner, 'CLOUDROOM_TOKEN': token, 'CLOUDROOM_DATABASE_URL': database,
             **({'CLOUDROOM_API_URL': api} if 'apiUrl' in data else {}),
@@ -107,7 +108,7 @@ def configure(data, directory=Path('/etc/cloudroom')):
         raw = previous.get('CLOUDROOM_API_URL', 'null')
         try:
             saved = json.loads(raw)
-        except ValueError:
+        except (ValueError, RecursionError):
             saved = None
         # Core refuses to start without a history destination; never repair it or fall back to local-only history.
         # Only the exact form written below is trusted: systemd does not decode JSON escapes such as \/.
