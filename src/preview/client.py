@@ -345,7 +345,7 @@ class Relay:
         if url.scheme == 'https':
             remote = ssl.create_default_context().wrap_socket(remote, server_hostname=url.hostname)
         # Like urllib: header names match case-insensitively and the last value given wins, so a caller's User-Agent replaces ours.
-        sent = {key.lower(): (key, value) for key, value in {'User-Agent': USER_AGENT, **self.core.headers}.items()}
+        sent = {key.lower(): (key, value) for key, value in [('User-Agent', USER_AGENT), *self.core.headers.items()]}
         headers = ''.join(f'{key}: {value}\r\n' for key, value in sent.values())
         remote.sendall(f'GET /v1/previews/{self.port}/tunnel?device={self.device} HTTP/1.1\r\nHost: {url.netloc}\r\n'
                        f'Connection: Upgrade\r\nUpgrade: {protocol}\r\n{headers}\r\n'.encode())

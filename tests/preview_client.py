@@ -241,12 +241,13 @@ class TransportTests(unittest.TestCase):
             self.assertEqual(Control.seen[0][2], ['Caller'])
             _, remotes, _, _ = self.relay(b'HTTP/1.1 101 Switching Protocols\r\n\r\n', headers={**self.headers, name: 'Caller'})
             self.assertEqual([line for line in remotes[0].sent.split(b'\r\n') if line.lower().startswith(b'user-agent:')], [name.encode() + b': Caller'])
-        # Case variants of one name collapse as urllib collapses them: one header, the last value given.
-        Control.seen = []
-        preview.control(self.url + '/v1/previews/x', {}, 'POST', {**self.headers, 'User-Agent': 'First', 'user-agent': 'Last'})
-        self.assertEqual(Control.seen[0][2], ['Last'])
-        _, remotes, _, _ = self.relay(b'HTTP/1.1 101 Switching Protocols\r\n\r\n', headers={**self.headers, 'User-Agent': 'First', 'user-agent': 'Last'})
-        self.assertEqual([line for line in remotes[0].sent.split(b'\r\n') if line.lower().startswith(b'user-agent:')], [b'user-agent: Last'])
+        # Case variants of one name collapse as urllib collapses them: one header, the last value given, in either order.
+        for first, last in [('User-Agent', 'user-agent'), ('user-agent', 'User-Agent')]:
+            Control.seen = []
+            preview.control(self.url + '/v1/previews/x', {}, 'POST', {**self.headers, first: 'First', last: 'Last'})
+            self.assertEqual(Control.seen[0][2], ['Last'])
+            _, remotes, _, _ = self.relay(b'HTTP/1.1 101 Switching Protocols\r\n\r\n', headers={**self.headers, first: 'First', last: 'Last'})
+            self.assertEqual([line for line in remotes[0].sent.split(b'\r\n') if line.lower().startswith(b'user-agent:')], [last.encode() + b': Last'])
 
     def test_mac_jobs_stream_identifies_the_helper(self):
         folder = tempfile.TemporaryDirectory(prefix='cr-preview-', dir='/tmp')
