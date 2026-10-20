@@ -126,7 +126,7 @@ class Control(BaseHTTPRequestHandler):
         body = self.rfile.read(int(self.headers.get('Content-Length', 0)))
         Control.seen.append((self.command, self.path, self.headers.get_all('User-Agent'), dict(self.headers), body))
         reply = {'/redirect': (302, b''), '/401': (401, b''), '/403': (403, b'error code: 1010'),
-                 '/big': (200, b'"' + b'x' * (256 * 1024) + b'"'), '/bad': (200, b'{nope')}.get(self.path, (200, b'{"ok": true}'))
+                 '/big': (200, b'"' + b'x' * (256 * 1024) + b'"'), '/bad': (200, b'{nope'), '/v1/mac/jobs?device=synthetic-device': (200, b': ping\n')}.get(self.path, (200, b'{"ok": true}'))
         self.send_response(reply[0])
         if reply[0] == 302:
             self.send_header('Location', 'https://elsewhere.invalid/steal')
@@ -237,6 +237,21 @@ class TransportTests(unittest.TestCase):
             self.assertEqual(Control.seen[0][2], ['Caller'])
             _, remotes, _, _ = self.relay(b'HTTP/1.1 101 Switching Protocols\r\n\r\n', headers={**self.headers, name: 'Caller'})
             self.assertEqual([line for line in remotes[0].sent.split(b'\r\n') if line.lower().startswith(b'user-agent:')], [name.encode() + b': Caller'])
+
+    def test_mac_jobs_stream_identifies_the_helper(self):
+        folder = tempfile.TemporaryDirectory(prefix='cr-preview-', dir='/tmp')
+        self.addCleanup(folder.cleanup)
+        connection = Path(folder.name) / 'connection.json'
+        preview.save(connection, {'url': self.url, 'token': 'synthetic-token'})
+        core = preview.Core({'connectionFile': str(connection), 'binding': [self.url, None]})
+        jobs = preview.MacJobs.__new__(preview.MacJobs)
+        jobs.wanted = {core.key}
+        jobs.enabled = lambda: jobs.wanted.clear()  # Stop after the first keepalive.
+        with mock.patch.object(preview.time, 'sleep'):
+            jobs.follow(core, 'synthetic-device')
+        method, path, agents, sent, _ = Control.seen[0]
+        self.assertEqual((method, path, agents, sent['Accept'], sent['Authorization']),
+                         ('GET', '/v1/mac/jobs?device=synthetic-device', ['Cloudroom-Helper'], 'text/event-stream', 'Bearer synthetic-token'))
 
 
 if __name__ == '__main__':
