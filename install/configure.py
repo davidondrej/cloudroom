@@ -61,7 +61,7 @@ def managed_api(url):
         parts = urlsplit(url)
         _ = parts.port
         host = parts.hostname or ''
-        if ':' in host:  # Only a bracketed IPv6 address keeps a colon after the port is split off.
+        if '[' in parts.netloc:  # A bracketed host must be an IPv6 address, not an IPvFuture literal.
             return bool(ipaddress.IPv6Address(host))
         return bool(HOST.fullmatch(host))
     except ValueError:

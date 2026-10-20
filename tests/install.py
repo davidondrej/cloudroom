@@ -127,7 +127,7 @@ class InstallerTests(unittest.TestCase):
                       'https://é.cloudroom.test/v1', 'https://api.cloudroom.test/\u00a0',
                       'https:///v1', 'https://:443/v1', 'https://[api/v1', 'https://api.cloudroom.test:abc/v1',
                       'https://api.cloudroom.test:99999/v1', 'https://%zz/v1', 'https://a|b/v1', 'https://ex"ample.test/v1',
-                      'https://api..cloudroom.test/v1', 'https://[::g]/v1']:
+                      'https://api..cloudroom.test/v1', 'https://[::g]/v1', 'https://[v1.fe]/v1']:
             with self.subTest(apiUrl=value):
                 self.assert_refused({**self.data, 'apiUrl': value}, 'apiUrl')
         self.assert_refused({k: v for k, v in self.data.items() if k != 'apiUrl'}, 'apiUrl')
