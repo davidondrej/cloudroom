@@ -231,15 +231,16 @@ def preview_state(values):
     return Path(values.get('CLOUDROOM_STATE_DIR', '/srv/cloudroom/core/history')) / 'previews'
 
 
-def previews(values):
-    run('python3', str(ROOT / 'previews.py'), str(preview_state(values).parent))
+def previews(values, *flags):
+    run('python3', str(ROOT / 'previews.py'), str(preview_state(values).parent), *flags)
 
 
 def refresh_previews(values):
-    """Upgrades rerun only an operator's SSH preview setup; no setup or a tunnel-only one gets no SSH changes."""
+    """Upgrades rerun only an operator's SSH preview setup; elsewhere, including tunnel-only, they add agent skills, never SSH."""
     setup = preview_state(values) / 'setup.json'
     if setup.is_file() and not json.loads(setup.read_text()).get('tunnel'):
-        previews(values)
+        return previews(values)
+    previews(values, '--skills-only')
 
 
 def restarts():

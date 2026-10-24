@@ -292,11 +292,11 @@ class UpdaterTests(unittest.TestCase):
 
         def run(*args, **kwargs):
             calls.append(args)
-            if args[0] == 'python3':  # previews.py: the preview account, setup.json and SSH policy.
-                if preview_fails:
-                    raise subprocess.CalledProcessError(1, args)
+            if args[0] == 'python3' and preview_fails:
+                raise subprocess.CalledProcessError(1, args)
+            if args[0] == 'python3' and '--skills-only' not in args:  # previews.py leaves an SSH setup.json behind.
                 (state / 'previews').mkdir(exist_ok=True)
-                (state / 'previews/setup.json').touch()
+                (state / 'previews/setup.json').write_text(self.SSH)
             return '0'
 
         def verify(values, before, expected, *rest):
@@ -309,34 +309,57 @@ class UpdaterTests(unittest.TestCase):
                             sessions=lambda values: ({}, {}), gate=lambda values, on: None, ensure_claude=lambda values: None), \
                 patch.object(updater, 'open', create=True, side_effect=lambda path, *args: lock if path == '/run/lock/cloudroom-update.lock' else open(path, *args)), \
                 patch.object(sys, 'argv', ['update.py', command, str(stage)]), patch('os.geteuid', return_value=0), \
+                patch('shutil.disk_usage', return_value=SimpleNamespace(free=10**12)), \
                 patch('os.fchown'), patch('time.sleep'), patch('builtins.print'), contextlib.suppress(SystemExit):
             updater.main()
         files = {path.name: path.read_text() for path in (state / 'previews').glob('*')}
-        return root, json.loads((root / 'update/state.json').read_text()), files, [c for c in calls if c[0] == 'python3']
+        # previews.py flags per run; any other command line is left out, so the run counts would not match.
+        runs = [c[3:] for c in calls if c[:3] == ('python3', str(lib / 'previews.py'), str(state))]
+        return root, json.loads((root / 'update/state.json').read_text()), files, runs
 
-    def test_upgrades_set_up_previews_only_where_an_operator_configured_ssh(self):
-        for name, previews, runs in [('never enabled', {}, 0), ('runtime files only', {'registry.json': '{}'}, 0),
-                                     ('ssh', {'setup.json': self.SSH}, 1), ('tunnel only', {'setup.json': self.TUNNEL}, 0)]:
+    def test_upgrades_add_preview_ssh_only_where_an_operator_set_it_up(self):
+        for name, previews, flags in [('never enabled', {}, ('--skills-only',)), ('runtime files only', {'registry.json': '{}'}, ('--skills-only',)),
+                                      ('ssh', {'setup.json': self.SSH}, ()), ('tunnel only', {'setup.json': self.TUNNEL}, ('--skills-only',))]:
             with self.subTest(name):
-                root, result, files, calls = self.update(previews)
+                root, result, files, runs = self.update(previews)
                 self.assertEqual(result['result'], 'updated')
-                self.assertEqual(calls, [('python3', str(root / 'lib/previews.py'), str(root / 'history'))] * runs)
+                self.assertEqual(runs, [flags])
                 self.assertEqual(files, previews)
+                self.assertEqual((root / 'history/previews').exists(), bool(previews))
 
     def test_fresh_installs_still_set_up_previews(self):
-        root, result, files, calls = self.update({}, 'install')
+        root, result, files, runs = self.update({}, 'install')
         self.assertEqual(result['result'], 'installed')
-        self.assertEqual(calls, [('python3', str(root / 'lib/previews.py'), str(root / 'history'))])
+        self.assertEqual(runs, [()])
 
-    def test_rollback_keeps_preview_state_as_it_was(self):
-        for previews, preview_fails in [({'setup.json': self.SSH}, True), ({}, False)]:
-            with self.subTest(configured=bool(previews)):
-                root, result, files, calls = self.update(previews, preview_fails=preview_fails, core_fails=True)
-                self.assertEqual(result['result'], 'rolled_back')
-                self.assertEqual((root / 'lib/cloudroom').read_text(), 'old core')
+    def test_failed_preview_setup_is_a_note_and_rollbacks_neither_add_nor_move_preview_setup(self):
+        for previews, core_fails, outcome in [({'setup.json': self.SSH}, False, 'updated'), ({'setup.json': self.SSH}, True, 'rolled_back'),
+                                              ({}, True, 'rolled_back')]:
+            with self.subTest(configured=bool(previews), core_fails=core_fails):
+                root, result, files, runs = self.update(previews, preview_fails=True, core_fails=core_fails)
+                self.assertEqual(result['result'], outcome)
+                self.assertEqual(result.get('notes', ['previews: CalledProcessError']), ['previews: CalledProcessError'])
+                self.assertEqual((root / 'lib/cloudroom').read_text(), 'new core' if outcome == 'updated' else 'old core')
                 self.assertEqual(files, previews)
                 self.assertEqual(list(root.glob('backups/*/previews-failed')), [])
-                self.assertEqual(len(calls), len(previews))
+                self.assertEqual(runs, [() if previews else ('--skills-only',)])
+
+    def test_skills_only_adds_agent_skills_and_cli_links_without_ssh(self):
+        spec = importlib.util.spec_from_file_location('previews', Path(__file__).resolve().parents[1] / 'install/previews.py')
+        previews = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(previews)
+        root = Path(self.enterContext(tempfile.TemporaryDirectory(prefix='cloudroom-previews-')))
+        (root / 'usr/local/bin').mkdir(parents=True)
+        calls = []
+        account = lambda name: SimpleNamespace(pw_name=name, pw_uid=54321, pw_gid=54321, pw_dir='/home/' + name)
+        # Root-owned system paths pass the protection check; every path the script itself names lands under root.
+        with patch('os.geteuid', return_value=0), patch('pwd.getpwnam', account), patch('subprocess.check_output', return_value='skill'), \
+                patch('subprocess.run', lambda args, **kwargs: calls.append(args)), patch.object(previews, 'Path', lambda path: root / str(path).lstrip('/')):
+            previews.configure(Path('/usr'), Path('/usr/bin/env'), ssh=False)
+        self.assertEqual({args[0] for args in calls}, {'sudo'})  # Skill copies as the agent; no useradd, sshd or systemctl.
+        self.assertEqual(sorted(Path(args[-1]).name for args in calls), sorted(['cloud-mac', 'cloud-preview', 'cloud-secrets', 'room-cli'] * 4))
+        self.assertEqual({p.name: os.readlink(p) for p in (root / 'usr/local/bin').iterdir()}, {'cloudroom': '/usr/bin/env', 'room-cli': '/usr/bin/env'})
+        self.assertEqual([p.name for p in root.iterdir()], ['usr'])
 
 
 if __name__ == '__main__':

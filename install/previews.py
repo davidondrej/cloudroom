@@ -23,7 +23,7 @@ def atomic(path, text, mode=0o600, uid=0, gid=0):
         Path(name).unlink(missing_ok=True)
 
 
-def configure(state, binary, reload=True):
+def configure(state, binary, reload=True, ssh=True):
     if os.geteuid() != 0:
         raise ValueError('Run as the provisioning administrator')
     if not all(re.fullmatch(r'/[a-zA-Z0-9_./-]+', str(p)) for p in (state, binary)):
@@ -34,6 +34,8 @@ def configure(state, binary, reload=True):
             info = parent.lstat()
             if parent.is_symlink() or info.st_uid == agent.pw_uid or info.st_mode & 0o022:
                 raise ValueError('Installation paths must be protected from agent writes')
+    if not ssh:
+        return skills(binary, agent)
     try:
         preview = pwd.getpwnam('cloudroom-preview')
     except KeyError:
@@ -101,6 +103,12 @@ Match all
         else:
             atomic(lookup, previous_lookup, mode=0o755)
         raise ValueError('SSH validation/reload failed; previous configuration restored') from None
+    skills(binary, agent)
+    print('Preview SSH access configured. The desktop supplies its own public key through the core API.')
+
+
+def skills(binary, agent):
+    """Agent skills, never overwritten, and missing CLI links. Upgrades without SSH previews get only these."""
     # Mac access (ADR 0113) and secret requests share the preview pairing's agent socket, so their skills install here too.
     for name, flag in [('cloud-preview', '--preview-skill'), ('cloud-mac', '--mac-skill'), ('cloud-secrets', '--secrets-skill'), ('room-cli', '--room-cli-skill')]:
         skill = subprocess.check_output([str(binary), flag], text=True)
@@ -113,7 +121,6 @@ Match all
     for link in [Path('/usr/local/bin/cloudroom'), Path('/usr/local/bin/room-cli')]:
         if not link.exists() and not link.is_symlink():
             link.symlink_to(binary)
-    print('Preview SSH access configured. The desktop supplies its own public key through the core API.')
 
 
 if __name__ == '__main__':
@@ -121,5 +128,6 @@ if __name__ == '__main__':
     parser.add_argument('state', type=Path)
     parser.add_argument('--binary', type=Path, default=Path('/usr/local/lib/cloudroom/cloudroom'))
     parser.add_argument('--no-reload', action='store_true', help='Only for an isolated SSH test server that will be started separately')
+    parser.add_argument('--skills-only', action='store_true', help='No preview account, setup or SSH change: for upgrades without SSH previews')
     args = parser.parse_args()
-    configure(args.state.resolve(), args.binary.resolve(), not args.no_reload)
+    configure(args.state.resolve(), args.binary.resolve(), not args.no_reload, not args.skills_only)
