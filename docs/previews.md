@@ -23,7 +23,7 @@ Write `previews/setup.json` with `"tunnel": true` and no SSH fields. Pairing the
 
 - `src/preview/mod.rs`: registry, agent-only Unix socket, authenticated HTTP API, public SSH-key authorization, and CLI. Runs inside the existing core service. Registry writes stay in the protected state directory; no SQL.
 - `src/preview/client.py`: independent Mac helper. Reuses authenticated HTTPS, prepares managed SSH metadata automatically, owns forwarding/local listeners, and reports actual URLs. Closing the GUI does not stop it. Sign-out stops it and revokes access on every reachable core; an unreachable VM or sandbox never blocks sign-out. Desktop updates pause it without losing pairing.
-- `install/previews.py`: operator-only setup of the dedicated forwarding account and SSH policy. Existing VM upgrades require an explicit operator setup; ordinary `configure.py` retries do not change SSH.
+- `install/previews.py`: operator-only setup of the dedicated forwarding account and SSH policy. Existing VM upgrades require an explicit operator setup, then rerun it while `previews/setup.json` exists without `"tunnel": true`; ordinary `configure.py` retries do not change SSH.
 - `src/preview/cloud-preview/SKILL.md`: instructions for agents. The installer copies it into supported harness skill directories without overwriting existing files.
 
 ## Installation

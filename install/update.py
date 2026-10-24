@@ -235,6 +235,13 @@ def previews(values):
     run('python3', str(ROOT / 'previews.py'), str(preview_state(values).parent))
 
 
+def refresh_previews(values):
+    """Upgrades rerun only an operator's SSH preview setup; no setup or a tunnel-only one gets no SSH changes."""
+    setup = preview_state(values) / 'setup.json'
+    if setup.is_file() and not json.loads(setup.read_text()).get('tunnel'):
+        previews(values)
+
+
 def restarts():
     return int(run('systemctl', 'show', 'cloudroom.service', '-p', 'NRestarts', '--value'))
 
@@ -330,7 +337,6 @@ def upgrade(stage, manifest):
         old = sha(BINARY)
         backup = BACKUPS / f'auto-{time.strftime("%Y%m%d-%H%M%S")}-{old[:12]}'
         backup.mkdir(mode=0o700, parents=True)
-        had_previews = preview_state(values).exists()
         for path in [BINARY, *(ROOT / name for name in FILES)]:
             if path.exists():
                 shutil.copy2(path, backup / path.name)
@@ -338,13 +344,11 @@ def upgrade(stage, manifest):
             run('systemctl', 'stop', 'cloudroom.service')
             copy_release(stage, manifest)
             guard_guide()
-            optional('previews', lambda: previews(values), notes)
+            optional('previews', lambda: refresh_previews(values), notes)
             verify(values, before, manifest['sha256'], manifest.get('features', []), start())
         except Exception as error:
             try:
                 run('systemctl', 'stop', 'cloudroom.service')
-                if not had_previews and preview_state(values).exists():  # A new preview setup may be what failed.
-                    shutil.move(preview_state(values), backup / 'previews-failed')
                 for name in FILES:
                     if not (backup / name).exists():
                         (ROOT / name).unlink(missing_ok=True)

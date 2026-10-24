@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Installer contract checks using a temporary directory, never host configuration."""
+import contextlib
 import importlib.util
 import errno
 import json
@@ -7,6 +8,7 @@ import os
 from pathlib import Path
 import tempfile
 import subprocess
+import sys
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -262,6 +264,79 @@ class AgentHomeTests(unittest.TestCase):
         self.assertEqual((self.archive / 'operator/.codex/auth.json').read_text(), 'shell-synthetic-login')
         self.assertFalse(auth.exists())
         self.setup.check(self.shell, self.agent)
+
+
+class UpdaterTests(unittest.TestCase):
+    """update.py on a synthetic VM: host commands are recorded, never run."""
+    SSH = json.dumps({'socket': '/run/cloudroom/preview.sock', 'host': None, 'port': 22, 'agent_uid': 1001})
+    TUNNEL = json.dumps({'socket': '/run/cloudroom/preview.sock', 'agent_uid': 1001, 'tunnel': True})
+
+    def update(self, previews, command='upgrade', preview_fails=False, core_fails=False):
+        spec = importlib.util.spec_from_file_location('updater', Path(__file__).resolve().parents[1] / 'install/update.py')
+        updater = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(updater)
+        root = Path(self.enterContext(tempfile.TemporaryDirectory(prefix='cloudroom-updater-')))
+        state, stage, lib = root / 'history', root / 'stage', root / 'lib'
+        for path in (state, stage / 'install', lib):
+            path.mkdir(parents=True)
+        for name, text in previews.items():
+            (state / 'previews').mkdir(exist_ok=True)
+            (state / 'previews' / name).write_text(text)
+        (lib / 'cloudroom').write_text('old core')
+        (stage / 'cloudroom').write_text('new core')
+        for name in updater.FILES:
+            (stage / 'install' / name).write_text(name)
+        manifest = {'commit': 'new', 'version': '0.2.0', 'sha256': updater.sha(stage / 'cloudroom')}
+        (stage / 'update-manifest.json').write_text(json.dumps(manifest))
+        calls, lock = [], self.enterContext(open(root / 'lock', 'a'))
+
+        def run(*args, **kwargs):
+            calls.append(args)
+            if args[0] == 'python3':  # previews.py: the preview account, setup.json and SSH policy.
+                if preview_fails:
+                    raise subprocess.CalledProcessError(1, args)
+                (state / 'previews').mkdir(exist_ok=True)
+                (state / 'previews/setup.json').touch()
+            return '0'
+
+        def verify(values, before, expected, *rest):
+            if core_fails and expected == manifest['sha256']:
+                raise RuntimeError('new core failed')
+
+        with patch.multiple(updater, ROOT=lib, BINARY=lib / 'cloudroom', STATE=root / 'update', BACKUPS=root / 'backups',
+                            GUIDE=root / 'guide.conf', run=run, verify=verify, service_env=lambda: {'CLOUDROOM_STATE_DIR': str(state)},
+                            api=lambda values, path: {'runtime': {'version': '0.1.0'}}, busy=lambda values: None,
+                            sessions=lambda values: ({}, {}), gate=lambda values, on: None, ensure_claude=lambda values: None), \
+                patch.object(updater, 'open', create=True, side_effect=lambda path, *args: lock if path == '/run/lock/cloudroom-update.lock' else open(path, *args)), \
+                patch.object(sys, 'argv', ['update.py', command, str(stage)]), patch('os.geteuid', return_value=0), \
+                patch('os.fchown'), patch('time.sleep'), patch('builtins.print'), contextlib.suppress(SystemExit):
+            updater.main()
+        files = {path.name: path.read_text() for path in (state / 'previews').glob('*')}
+        return root, json.loads((root / 'update/state.json').read_text()), files, [c for c in calls if c[0] == 'python3']
+
+    def test_upgrades_set_up_previews_only_where_an_operator_configured_ssh(self):
+        for name, previews, runs in [('never enabled', {}, 0), ('runtime files only', {'registry.json': '{}'}, 0),
+                                     ('ssh', {'setup.json': self.SSH}, 1), ('tunnel only', {'setup.json': self.TUNNEL}, 0)]:
+            with self.subTest(name):
+                root, result, files, calls = self.update(previews)
+                self.assertEqual(result['result'], 'updated')
+                self.assertEqual(calls, [('python3', str(root / 'lib/previews.py'), str(root / 'history'))] * runs)
+                self.assertEqual(files, previews)
+
+    def test_fresh_installs_still_set_up_previews(self):
+        root, result, files, calls = self.update({}, 'install')
+        self.assertEqual(result['result'], 'installed')
+        self.assertEqual(calls, [('python3', str(root / 'lib/previews.py'), str(root / 'history'))])
+
+    def test_rollback_keeps_preview_state_as_it_was(self):
+        for previews, preview_fails in [({'setup.json': self.SSH}, True), ({}, False)]:
+            with self.subTest(configured=bool(previews)):
+                root, result, files, calls = self.update(previews, preview_fails=preview_fails, core_fails=True)
+                self.assertEqual(result['result'], 'rolled_back')
+                self.assertEqual((root / 'lib/cloudroom').read_text(), 'old core')
+                self.assertEqual(files, previews)
+                self.assertEqual(list(root.glob('backups/*/previews-failed')), [])
+                self.assertEqual(len(calls), len(previews))
 
 
 if __name__ == '__main__':
