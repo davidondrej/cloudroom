@@ -635,6 +635,7 @@ process.stderr.write("requested\n");
         // Pi keeps running while Core is slow: the frames are queued at once, not written once Core reads.
         if queued.recv_timeout(Duration::from_secs(30)).is_err() {
             let _ = child.kill();
+            let _ = child.wait();
             panic!("child requests did not queue\n{}", log.join().unwrap());
         }
         let output = child.wait_with_output().unwrap();
