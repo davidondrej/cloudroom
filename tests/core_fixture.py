@@ -213,6 +213,8 @@ def codex():
             time.sleep(.6)
         for child in children.values():
             child.kill(); child.wait()
+        while Path("hold-exit").exists():
+            time.sleep(.01)
         with path.open("a") as file:
             file.write('{"fixture":"shutdown"}\n')
 
@@ -840,8 +842,11 @@ class RecoveryTests(unittest.TestCase):
         self.state.chmod(0o500)
         try:
             (self.repo/'release-crash').touch()
-            time.sleep(1.5)  # The exit fails, then at least one retry.
-            ready = self.service.request('GET','/v1/ready',expected=None)['ready']
+            for _ in range(30):  # Its exit fails within 3 s. Upstream never notices.
+                ready = self.service.request('GET','/v1/ready',expected=None)['ready']
+                if not ready: break
+                time.sleep(.1)
+            time.sleep(1.2)  # A retry fails too.
             self.assertEqual(self.status()['receipts']['queued']['state'],'accepted')
         finally:
             self.state.chmod(0o700)
@@ -858,10 +863,35 @@ class RecoveryTests(unittest.TestCase):
         until(crashes,'crash reported',5); time.sleep(1.2)
         self.assertEqual(len(crashes()),1)
 
+    @unittest.skipIf(os.geteuid() == 0, "root writes to a read-only directory")
+    def test_unrecordable_turn_recovers_even_after_a_crash_recovery(self):
+        self.seed(); self.start(); self.ready()
+        requests, rollout = self.repo/(self.native+'.requests'), Path(self.status()['native_path'])
+        self.prompt('crash','crash')
+        self.wait(lambda:(self.repo/'crash-ready').exists(),'crash gate')
+        self.prompt('cut','delay'); self.prompt('queued','hello')
+        (self.repo/'release-crash').touch()
+        # The crash used the one automatic recovery, which dispatched the next queued prompt.
+        self.wait(lambda:requests.read_text().splitlines()==['crash','cut'],'recovered and dispatched')
+        self.state.chmod(0o500)
+        try:
+            (self.repo/'release').touch()
+            self.wait(lambda:b'"shutdown"' in rollout.read_bytes(),'agent stopped')
+        finally:
+            self.state.chmod(0o700)
+        self.wait(lambda:self.status()['receipts']['queued']['state']=='completed','queue after the journal recovered')
+        self.assertEqual(self.status()['receipts']['cut']['state'],'failed')
+        self.ready()
+
     def test_sleep_settles_and_queued_work_wakes_the_session(self):
         self.seed(); self.start(); self.ready()
+        (self.repo/'hold-exit').touch()
         self.service.request('POST','/v1/sessions/cr_seed/sleep',{'request_id':'nap'},202)
-        self.prompt('during','hello')  # Usually queued while the harness exits, so its exit wakes it.
+        self.prompt('during','hello')
+        # Queued while the released harness exits, so its exit wakes the session again.
+        self.assertEqual(self.status()['receipts']['during']['state'],'accepted')
+        self.assertNotEqual(self.status()['state'],'sleeping')
+        (self.repo/'hold-exit').unlink()
         self.wait(lambda:self.status()['receipts']['during']['state']=='completed','woken by queued work')
         self.assertEqual(self.status()['receipts']['nap']['state'],'completed')
         self.ready()

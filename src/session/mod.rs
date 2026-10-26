@@ -1106,6 +1106,17 @@ impl Manager {
             if local.draining && !matches!(command, "interrupt" | "close" | "stop" | "cancel") {
                 return Err(Error::Conflict("service is draining"));
             }
+            // Its stopped harness still holds the session until the exit is recorded (`watch_events`).
+            if session.exit_unrecorded()
+                && matches!(
+                    command,
+                    "interrupt" | "stop" | "steer" | "compact" | "goal" | "rewind"
+                )
+            {
+                return Err(Error::Conflict(
+                    "the agent stopped and Cloudroom is recording it; try again in a few seconds",
+                ));
+            }
             // The app retries this answer until the harness is back.
             if matches!(command, "compact" | "rewind" | "goal")
                 && matches!(session.state.as_str(), "sleeping" | "resuming")
@@ -1743,9 +1754,13 @@ impl Manager {
     /// out a pending interrupt, or return to idle. `turn_ended` bypasses the active
     /// turn guard when the just-finished turn is the reason for advancing.
     fn advance(self: &Arc<Self>, local: &mut Local, id: &str, turn_ended: bool) {
+        let _ = self.try_advance(local, id, turn_ended);
+    }
+
+    /// `advance` for harness events: a failed write stops the harness, whose exit settles the queue (`watch_events`).
+    fn try_advance(self: &Arc<Self>, local: &mut Local, id: &str, turn_ended: bool) -> Result<()> {
         if local.sessions[id].state == "sleeping" {
-            let _ = self.wake(local, id);
-            return;
+            return self.wake(local, id);
         }
         let session = &local.sessions[id];
         if session.close_request.is_some()
@@ -1754,14 +1769,14 @@ impl Manager {
             || session.exit_unrecorded()
             || self.is_stopping()
         {
-            return;
+            return Ok(());
         }
         if !turn_ended && session.current_request.is_some() {
-            return; // a turn is still active; wait for its completion
+            return Ok(()); // a turn is still active; wait for its completion
         }
         if session.interrupt_pending() {
-            let _ = local.append(id, "state", json!({"state":"interrupting"}), None);
-            return;
+            local.append(id, "state", json!({"state":"interrupting"}), None)?;
+            return Ok(());
         }
         if self.storage.blocks()
             || session.storage_paused
@@ -1773,17 +1788,18 @@ impl Manager {
             } else {
                 "idle"
             };
-            let _ = local.append(id, "state", json!({"state":state}), None);
-            return;
+            local.append(id, "state", json!({"state":state}), None)?;
+            return Ok(());
         }
         if let Some(next) = session.queue.first().cloned()
             && let Some(handle) = session.handle.clone()
-            && self.begin_turn(local, id, &next).is_ok()
         {
+            self.begin_turn(local, id, &next)?;
             self.clone().deliver(id.to_owned(), next, handle);
-            return;
+            return Ok(());
         }
-        let _ = local.append(id, "state", json!({"state":"idle"}), None);
+        local.append(id, "state", json!({"state":"idle"}), None)?;
+        Ok(())
     }
 
     fn snapshot_usage(self: Arc<Self>, id: String, handle: runtime::Handle) {
@@ -2189,7 +2205,7 @@ impl Manager {
                     }
                     local.finish_receipt(id, &request, status)?;
                     self.clone().snapshot_usage(id.to_owned(), handle.clone());
-                    self.advance(&mut local, id, false);
+                    self.try_advance(&mut local, id, false)?;
                 }
             }
             runtime::Event::Started {
@@ -2265,7 +2281,7 @@ impl Manager {
                                 .drain(..session.replies.len().saturating_sub(8));
                         }
                     }
-                    self.advance(&mut local, id, true);
+                    self.try_advance(&mut local, id, true)?;
                 }
             }
             runtime::Event::Exited {
@@ -2306,9 +2322,10 @@ impl Manager {
                     && ((session.ready && session.can_resume())
                         || (self.is_stopping() && restoring));
                 // An archived thread that crashes stays down: nothing waits for it (feedback #614).
+                // A record that failed is not a crash: it recovers even after the one crash recovery.
                 let recover = resumable
                     && !self.is_stopping()
-                    && !session.recovery_attempted
+                    && (!session.recovery_attempted || session.unrecorded.is_some())
                     && !session.archived;
                 // Launch already recorded the real cause; stopping its harness must not hide it.
                 let failed = session
