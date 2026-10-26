@@ -14,7 +14,7 @@ Every Cloudroom feature is available over this API. It is plain HTTP on `127.0.0
 ## Health and discovery
 
 - `GET /v1/health`: service status and disk safety snapshot.
-- `GET /v1/ready`: `200` only when storage and the database are usable, otherwise `503`.
+- `GET /v1/ready`: `200` only when storage and the local journal are usable and every harness exit is recorded, otherwise `503`.
 - `GET /v1/capabilities`: feature flags, plus each configured harness with its models, reasoning levels and options.
 - `GET /v1/dashboard`: safe machine and session summaries for dashboards ([dashboard API](dashboard.md)).
 

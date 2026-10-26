@@ -233,12 +233,8 @@ impl Manager {
     }
 
     /// The released harness exited; history stays on disk for the next resume.
+    /// Records first, memory last, like any exit: after a failed write the retry still finds this harness.
     pub(super) fn slept(self: &Arc<Self>, local: &mut Local, id: &str) -> Result<()> {
-        let session = local.sessions.get_mut(id).ok_or(Error::NotFound)?;
-        session.handle = None;
-        session.ready = false;
-        session.releasing = false;
-        session.awake = None;
         local.append(id, "harness", json!({"pid":null}), None)?;
         local.append(id, "state", json!({"state":"sleeping"}), None)?;
         let pending: Vec<_> = local.sessions[id]
@@ -250,7 +246,15 @@ impl Manager {
         for request in pending {
             local.finish_receipt(id, &request, "completed")?;
         }
-        self.wake(local, id)
+        // Work queued during the release wakes it again (`wake`, before the harness is forgotten).
+        let s = &local.sessions[id];
+        if s.has_work() && s.can_resume() {
+            self.schedule_resume(local, id, false)?;
+        }
+        let session = local.sessions.get_mut(id).ok_or(Error::NotFound)?;
+        session.exited();
+        session.awake = None;
+        Ok(())
     }
 
     /// Work arrived for a sleeping session: resume its native conversation.

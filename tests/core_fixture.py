@@ -618,6 +618,15 @@ class RecoveryTests(unittest.TestCase):
     def wait(self, check, label):
         return until(check, label, 6)
 
+    def diagnostics(self):
+        records = []
+        for line in (self.state / "diagnostics.jsonl").read_text().splitlines():
+            try:
+                records.append(json.loads(line))
+            except json.JSONDecodeError:
+                pass  # The writer may still be appending the last line.
+        return records
+
     def ready(self):
         self.wait(lambda: self.status()["state"] == "idle", "resumed idle session")
         self.assertEqual(self.status()["native_id"], self.native)
@@ -788,6 +797,78 @@ class RecoveryTests(unittest.TestCase):
         self.service.stop(crash=True); self.start(); self.ready()
         self.prompt('recovered','hello')
         self.wait(lambda:self.status()['receipts']['recovered']['state']=='completed','recording recovered')
+
+    @unittest.skipIf(os.geteuid() == 0, "root writes to a read-only directory")
+    def test_unrecordable_turn_settles_once_the_journal_takes_records_again(self):
+        self.seed(); self.start(); self.ready()
+        requests, rollout = self.repo/(self.native+'.requests'), Path(self.status()['native_path'])
+        self.prompt('cut','delay')
+        self.wait(lambda:requests.exists() and requests.read_text().splitlines()==['cut'],'dispatched turn')
+        self.prompt('queued','hello')
+        # Read-only like a full or remounted disk: the turn's next record fails, so Cloudroom stops the agent.
+        self.state.chmod(0o500)
+        try:
+            (self.repo/'release').touch()
+            self.wait(lambda:b'"shutdown"' in rollout.read_bytes(),'agent stopped')
+            ready = self.service.request('GET','/v1/ready',expected=None)['ready'], self.service.request('GET','/v1/dashboard')['runtime']['ready']
+            self.assertEqual(self.status()['receipts']['queued']['state'],'accepted')
+        finally:
+            self.state.chmod(0o700)
+        self.wait(lambda:self.status()['receipts']['queued']['state']=='completed','queue after the journal recovered')
+        self.assertEqual(ready,(False,False),'unready while the exit was unrecorded')
+        cut = self.status()['receipts']['cut']
+        self.assertEqual(cut['state'],'failed')
+        self.assertIn('could not record',cut['error'])
+        self.ready()
+        self.assertTrue(self.service.request('GET','/v1/ready')['ready'])
+        self.prompt('after','hello')
+        self.wait(lambda:self.status()['receipts']['after']['state']=='completed','work after recovery')
+        self.assertEqual(requests.read_text().splitlines(),['cut','queued','after'])
+        self.service.request('POST','/v1/sessions/cr_seed/close',{'request_id':'close'},202)
+        self.wait(lambda:self.status()['state']=='closed','close after recovery')
+        until(lambda:any(r['kind']=='diagnostics' and r['local_write_failures']>0 for r in self.diagnostics()),'journal failure counted',15)
+
+    @unittest.skipIf(os.geteuid() == 0, "root writes to a read-only directory")
+    def test_unrecordable_exit_is_retried_until_the_journal_takes_records_again(self):
+        self.seed(); self.start(); self.ready()
+        rollout = Path(self.status()['native_path'])
+        self.prompt('crash','crash')
+        self.wait(lambda:(self.repo/'crash-ready').exists(),'crash gate')
+        self.prompt('queued','hello')
+        self.wait(lambda:self.status()['native_offset']==rollout.stat().st_size,'turn recorded')
+        # The harness exits with nothing else to record, so its exit is the first record to fail.
+        self.state.chmod(0o500)
+        try:
+            (self.repo/'release-crash').touch()
+            time.sleep(1.5)  # The exit fails, then at least one retry.
+            ready = self.service.request('GET','/v1/ready',expected=None)['ready']
+            self.assertEqual(self.status()['receipts']['queued']['state'],'accepted')
+        finally:
+            self.state.chmod(0o700)
+        self.wait(lambda:self.status()['receipts']['queued']['state']=='completed','queue after the exit was recorded')
+        self.assertFalse(ready,'unready while the exit was unrecorded')
+        crash = self.status()['receipts']['crash']
+        self.assertEqual(crash['state'],'unknown_after_restart')
+        self.assertIn('(exit code 1)',crash['error'])
+        self.ready()
+        self.assertTrue(self.service.request('GET','/v1/ready')['ready'])
+        # The retries recorded and reported the exit once.
+        self.assertEqual(len([r for r in self.service.records('cr_seed') if r['kind']=='state' and r['data'].get('diagnostic_id')]),1)
+        crashes = lambda:[r for r in self.diagnostics() if r['kind']=='agent_exit' and not r['expected']]
+        until(crashes,'crash reported',5); time.sleep(1.2)
+        self.assertEqual(len(crashes()),1)
+
+    def test_sleep_settles_and_queued_work_wakes_the_session(self):
+        self.seed(); self.start(); self.ready()
+        self.service.request('POST','/v1/sessions/cr_seed/sleep',{'request_id':'nap'},202)
+        self.prompt('during','hello')  # Usually queued while the harness exits, so its exit wakes it.
+        self.wait(lambda:self.status()['receipts']['during']['state']=='completed','woken by queued work')
+        self.assertEqual(self.status()['receipts']['nap']['state'],'completed')
+        self.ready()
+        self.service.request('POST','/v1/sessions/cr_seed/sleep',{'request_id':'nap2'},202)
+        self.wait(lambda:self.status()['state']=='sleeping','asleep')
+        self.prompt('after','hello')
+        self.wait(lambda:self.status()['receipts']['after']['state']=='completed','woken by new work')
 
     def test_partial_acceptance_and_legacy_enqueue_run_once(self):
         receipt = {"request_id": "pending", "command": "prompt", "input": {"text": "hello"}, "state": "accepted"}

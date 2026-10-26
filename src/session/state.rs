@@ -189,6 +189,11 @@ impl Local {
         counts
     }
 
+    /// A harness's exit waits to be recorded after a failed write (`Manager::watch_events`).
+    pub(super) fn exit_unrecorded(&self) -> bool {
+        self.sessions.values().any(Session::exit_unrecorded)
+    }
+
     pub(super) fn finish_receipt(&mut self, id: &str, request: &str, state: &str) -> Result<()> {
         self.finish_receipt_with(id, request, state, None)
     }

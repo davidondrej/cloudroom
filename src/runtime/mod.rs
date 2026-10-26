@@ -243,7 +243,8 @@ pub enum Event {
 
 /// Stderr is untrusted, local-only diagnostic data, never a native/session record.
 /// Intentionally neither Serialize nor Debug: only Observability's private writer formats it.
-#[derive(Default)]
+/// Cloned only to retry recording an exit (`Manager::watch_events`).
+#[derive(Clone, Default)]
 pub struct ExitDetails {
     /// Core-side error behind the exit reason (not harness output), shown to users (ADR 0123).
     pub cause: Option<String>,

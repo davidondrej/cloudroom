@@ -178,9 +178,29 @@ pub struct Session {
     // A child's latest completed replies by request, so a queued turn cannot hide them from its parent.
     #[serde(skip)]
     replies: Vec<(String, String)>,
+    // A harness event could not be recorded, so its harness was stopped: why, until its exit is recorded.
+    #[serde(skip)]
+    unrecorded: Option<String>,
+    // The exit was reported but its records failed: the retry keeps this report (`watch_events`).
+    #[serde(skip)]
+    exit_diagnostic: Option<String>,
 }
 
 impl Session {
+    /// Forgets the exited harness: after its exit is recorded, or at shutdown when it cannot be.
+    fn exited(&mut self) {
+        self.handle = None;
+        self.ready = false;
+        self.releasing = false;
+        self.unrecorded = None;
+        self.exit_diagnostic = None;
+    }
+
+    /// Its harness is gone or stopping, but the exit waits to be recorded after a failed write (`watch_events`).
+    fn exit_unrecorded(&self) -> bool {
+        self.unrecorded.is_some() || self.exit_diagnostic.is_some()
+    }
+
     fn dashboard_state(&self) -> &'static str {
         if self.storage_paused {
             return "waiting";
@@ -542,7 +562,10 @@ impl Manager {
 
     pub async fn ready(&self) -> bool {
         // Local only: the journal is the source of truth, and uploads catch up whenever the API answers.
-        !self.is_stopping() && !self.storage.blocks() && self.recording_available()
+        !self.is_stopping()
+            && !self.storage.blocks()
+            && self.recording_available()
+            && !self.local.lock().unwrap().exit_unrecorded()
     }
 
     pub fn saving(&self) -> Value {
@@ -1277,6 +1300,7 @@ impl Manager {
             }
             let deliver_now = command == "prompt"
                 && session.ready
+                && !session.exit_unrecorded()
                 && session.state == "idle"
                 && !session.queue_paused
                 && !session.compacting
@@ -1727,6 +1751,7 @@ impl Manager {
         if session.close_request.is_some()
             || session.rewind_request.is_some()
             || !session.ready
+            || session.exit_unrecorded()
             || self.is_stopping()
         {
             return;
@@ -1794,19 +1819,60 @@ impl Manager {
     ) {
         let manager = self.clone();
         tokio::spawn(async move {
+            let mut failed = false;
             while let Some(event) = events.recv().await {
-                if manager.record_native(&id, &handle, event).is_err() {
-                    if let Some(handle) = manager
-                        .local
-                        .lock()
-                        .unwrap()
-                        .sessions
-                        .get(&id)
-                        .and_then(|s| s.handle.clone())
-                    {
+                let runtime::Event::Exited {
+                    reason,
+                    expected,
+                    cleaned_up,
+                    details,
+                } = event
+                else {
+                    // A failed record stops the harness and fails its turn, so its later events are not recorded.
+                    if !failed && let Err(error) = manager.record_native(&id, &handle, event) {
+                        failed = true;
+                        if matches!(error, Error::Storage(_)) {
+                            manager.observability.local_write_failed();
+                        }
+                        if let Some(session) = manager.local.lock().unwrap().sessions.get_mut(&id) {
+                            session.unrecorded = Some(format!(
+                                "Cloudroom could not record this turn, so it stopped the agent: {}",
+                                error.message()
+                            ));
+                        }
                         handle.request_shutdown();
                     }
-                    break;
+                    continue;
+                };
+                // Only the exit settles the turn, queue and any close: retry it until the journal takes records again.
+                loop {
+                    let exit = runtime::Event::Exited {
+                        reason,
+                        expected,
+                        cleaned_up,
+                        details: details.clone(),
+                    };
+                    let Err(error) = manager.record_native(&id, &handle, exit) else {
+                        break;
+                    };
+                    if matches!(error, Error::Storage(_)) {
+                        manager.observability.local_write_failed();
+                    }
+                    if manager.is_stopping() {
+                        // Shutdown waits for every harness to be gone. The next start recovers this one from its journal.
+                        let mut local = manager.local.lock().unwrap();
+                        if let Some(session) = local.sessions.get_mut(&id)
+                            && session
+                                .handle
+                                .as_ref()
+                                .is_some_and(|current| current.same_process(&handle))
+                        {
+                            session.exited();
+                            local.changed.send_replace(local.journal.last());
+                        }
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_secs(1)).await;
                 }
             }
         });
@@ -2215,26 +2281,24 @@ impl Manager {
                 };
                 let stderr = stderr_tail(details.stderr());
                 let cause = details.cause.clone();
-                let diagnostic_id = self.observability.agent_exit(
-                    Some(id),
-                    local.sessions[id].harness,
-                    reason,
-                    expected,
-                    details,
-                );
-                if expected && cleaned_up && local.sessions[id].rewind_request.is_some() {
-                    let session = local.sessions.get_mut(id).ok_or(Error::NotFound)?;
-                    session.handle = None;
-                    session.ready = false;
+                // Records first, memory last: after a failed write the retry (watch_events) still finds this harness.
+                let session = local.sessions.get_mut(id).ok_or(Error::NotFound)?;
+                let harness = session.harness;
+                let diagnostic_id = session
+                    .exit_diagnostic
+                    .get_or_insert_with(|| {
+                        self.observability
+                            .agent_exit(Some(id), harness, reason, expected, details)
+                    })
+                    .clone();
+                if expected && cleaned_up && session.rewind_request.is_some() {
                     local.append(id, "harness", json!({"pid":null}), None)?;
+                    local.sessions.get_mut(id).ok_or(Error::NotFound)?.exited();
                     return Ok(());
                 }
-                let session = &local.sessions[id];
                 if session.releasing && cleaned_up && session.close_request.is_none() {
                     return self.slept(&mut local, id);
                 }
-                let session = local.sessions.get_mut(id).ok_or(Error::NotFound)?;
-                session.releasing = false;
                 let restoring = session.state == "resuming"
                     && session.native_id.is_some()
                     && session.native_path.is_some();
@@ -2251,8 +2315,7 @@ impl Manager {
                     .failure
                     .clone()
                     .filter(|_| session.state == "failed");
-                session.handle = None;
-                session.ready = false;
+                let unrecorded = session.unrecorded.clone();
                 let request = session.current_request.clone();
                 let close = session.close_request.clone();
                 let preserve_queue = session.startup_error.as_deref() == Some("startup_timeout");
@@ -2265,21 +2328,26 @@ impl Manager {
                     })
                     .map(|r| r.request_id.clone())
                     .collect();
-                let lost = failed.clone().unwrap_or_else(|| match &cause {
-                    Some(cause) => format!("{reason}: {cause} ({exit})"),
-                    None => format!("{reason} ({exit})"),
-                });
+                let lost = failed
+                    .clone()
+                    .or_else(|| unrecorded.clone())
+                    .unwrap_or_else(|| match &cause {
+                        Some(cause) => format!("{reason}: {cause} ({exit})"),
+                        None => format!("{reason} ({exit})"),
+                    });
                 if let Some(request) = request {
                     // Keep the cause on the lost turn: an automatic recovery leaves the thread idle and error-free.
                     local.finish_receipt_with(
                         id,
                         &request,
-                        if self.is_stopping() || close.is_some() {
+                        if unrecorded.is_some() {
+                            "failed"
+                        } else if self.is_stopping() || close.is_some() {
                             "unknown"
                         } else {
                             "unknown_after_restart"
                         },
-                        (!expected).then(|| lost.clone()),
+                        (!expected || unrecorded.is_some()).then(|| lost.clone()),
                     )?;
                 }
                 for request in interrupts {
@@ -2317,6 +2385,7 @@ impl Manager {
                 if recover {
                     self.schedule_resume(&mut local, id, true)?;
                 }
+                local.sessions.get_mut(id).ok_or(Error::NotFound)?.exited();
             }
         }
         Ok(())

@@ -22,7 +22,7 @@ impl Manager {
             })
             .collect();
         json!({"version":1,"sampledAt":sampled_at,
-            "runtime":{"ready":!self.is_stopping() && storage.level != Level::Blocked && local.journal.writable(),"version":crate::VERSION,"commit":crate::COMMIT,
+            "runtime":{"ready":!self.is_stopping() && storage.level != Level::Blocked && local.journal.writable() && !local.exit_unrecorded(),"version":crate::VERSION,"commit":crate::COMMIT,
                 "configured":!self.config.harnesses.is_empty()},
             "appConnectivity":"unknown",
             "resources":{"cpu":resources["cpu"],"memory":resources["memory"],"disk":resources["disk"]},

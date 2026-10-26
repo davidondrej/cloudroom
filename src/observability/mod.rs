@@ -130,6 +130,7 @@ pub(crate) struct Observability {
     run_id: Arc<String>,
     sequence: Arc<AtomicU64>,
     dropped: Arc<AtomicU64>,
+    local_write_failures: Arc<AtomicU64>,
     stop: watch::Sender<bool>,
     finished: watch::Receiver<bool>,
     resources: watch::Sender<(Option<u64>, Value)>,
@@ -171,6 +172,7 @@ impl Observability {
             )),
             sequence: Arc::new(AtomicU64::new(0)),
             dropped: Arc::new(AtomicU64::new(0)),
+            local_write_failures: Arc::new(AtomicU64::new(0)),
             stop,
             finished,
             resources: watch::channel((None, json!({"cpu":null,"memory":null,"disk":null}))).0,
@@ -231,6 +233,11 @@ impl Observability {
         self.submit(record)
     }
 
+    /// A local diagnostic or journal write failed.
+    pub fn local_write_failed(&self) {
+        self.local_write_failures.fetch_add(1, Ordering::Relaxed);
+    }
+
     fn submit(&self, record: Record) -> String {
         let id = format!("{}-{}", record.run_id, record.sequence);
         if self.sender.try_send(record).is_err() {
@@ -267,7 +274,7 @@ impl Observability {
         let mut summaries = BTreeMap::new();
         let mut summary_at = Instant::now() + SUMMARY_INTERVAL;
         let mut upload_at = Instant::now() + config.diagnostic_upload;
-        let (mut local_write_failures, mut upload_failures) = (0, 0);
+        let mut upload_failures = 0;
         loop {
             if !*stop.borrow() {
                 tokio::select! { _ = tick.tick() => {}, _ = stop.changed() => {} }
@@ -301,7 +308,7 @@ impl Observability {
                 batch.push(self.make_record(Signal::Resources(resources)));
                 batch.push(self.make_record(Signal::Diagnostics {
                     dropped: self.dropped.load(Ordering::Relaxed),
-                    local_write_failures,
+                    local_write_failures: self.local_write_failures.load(Ordering::Relaxed),
                     upload_failures,
                 }));
                 sample_at = Instant::now() + Duration::from_secs(10);
@@ -322,7 +329,7 @@ impl Observability {
                     .await,
                     Ok(Ok(()))
                 ) {
-                    local_write_failures += 1;
+                    self.local_write_failed();
                     eprintln!("Cloudroom diagnostic file write failed");
                 }
                 for record in batch {
@@ -395,7 +402,7 @@ impl Observability {
                     tokio::task::spawn_blocking(move || write_stderr(&directory, local)).await,
                     Ok(Ok(()))
                 ) {
-                    local_write_failures += 1;
+                    self.local_write_failed();
                     eprintln!("Cloudroom private harness diagnostic write failed");
                 }
             }

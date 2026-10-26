@@ -144,7 +144,7 @@ class Service:
         response = connection.getresponse()
         data = response.read()
         connection.close()
-        assert response.status == expected, (method, path, response.status, data[:700])
+        assert expected is None or response.status == expected, (method, path, response.status, data[:700])
         assert response.getheader("Cache-Control") == "no-store"
         self.diagnostic_id = response.getheader("X-Cloudroom-Diagnostic-Id")
         assert self.diagnostic_id
