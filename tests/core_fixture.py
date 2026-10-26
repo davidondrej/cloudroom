@@ -886,12 +886,14 @@ class RecoveryTests(unittest.TestCase):
     def test_sleep_settles_and_queued_work_wakes_the_session(self):
         self.seed(); self.start(); self.ready()
         (self.repo/'hold-exit').touch()
-        self.service.request('POST','/v1/sessions/cr_seed/sleep',{'request_id':'nap'},202)
-        self.prompt('during','hello')
-        # Queued while the released harness exits, so its exit wakes the session again.
-        self.assertEqual(self.status()['receipts']['during']['state'],'accepted')
-        self.assertNotEqual(self.status()['state'],'sleeping')
-        (self.repo/'hold-exit').unlink()
+        try:
+            self.service.request('POST','/v1/sessions/cr_seed/sleep',{'request_id':'nap'},202)
+            self.prompt('during','hello')
+            # Queued while the released harness exits, so its exit wakes the session again.
+            self.assertEqual(self.status()['receipts']['during']['state'],'accepted')
+            self.assertNotEqual(self.status()['state'],'sleeping')
+        finally:
+            (self.repo/'hold-exit').unlink()
         self.wait(lambda:self.status()['receipts']['during']['state']=='completed','woken by queued work')
         self.assertEqual(self.status()['receipts']['nap']['state'],'completed')
         self.ready()
