@@ -602,10 +602,13 @@ const tools = [];
 const write = process.stdout.write.bind(process.stdout);
 process.stdout.write = chunk => process.stderr.write(chunk);
 write(JSON.stringify({ type: "before", text: "x".repeat(Number(process.argv[2])) }) + "\n");
-for (const id of ["a", "b"]) tools[0].execute(id, { prompt: id.repeat(200000) }).catch(error => console.error(error.code));
+for (const id of ["a", "b"]) tools[0].execute(id, { prompt: id + Array.from({ length: 200000 }, (_, i) => i % 10).join("") }).catch(error => console.error(error.code));
 write(JSON.stringify({ type: "after" }) + "\n");
 process.stderr.write("requested\n");
 "#;
+    let digits: String = (0..200_000)
+        .map(|i| char::from_digit(i % 10, 10).unwrap())
+        .collect();
     // Core is slow to read: the frames are queued behind a full stdout pipe, alone or behind a Pi line still being written.
     for padding in [0, 100_000] {
         let mut child = Command::new("node")
@@ -646,19 +649,18 @@ process.stderr.write("requested\n");
         let frames: Vec<_> = lines
             .iter()
             .map(|line| {
-                (
-                    line["type"].as_str(),
-                    line["tool_call_id"].as_str(),
-                    line["prompt"].as_str().map(str::len),
-                )
+                let id = line["tool_call_id"].as_str();
+                let whole =
+                    id.map(|id| line["prompt"].as_str() == Some(format!("{id}{digits}").as_str()));
+                (line["type"].as_str(), id, whole)
             })
             .collect();
         assert_eq!(
             frames,
             [
                 (Some("before"), None, None),
-                (Some("cloudroom_child_request"), Some("a"), Some(200_000)),
-                (Some("cloudroom_child_request"), Some("b"), Some(200_000)),
+                (Some("cloudroom_child_request"), Some("a"), Some(true)),
+                (Some("cloudroom_child_request"), Some("b"), Some(true)),
                 (Some("after"), None, None),
             ],
             "{log}"
