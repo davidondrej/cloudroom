@@ -1,6 +1,7 @@
-import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, writeFileSync, writeSync } from "node:fs";
+import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { randomUUID } from "node:crypto";
+import { Writable } from "node:stream";
 import { Type } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
@@ -67,9 +68,10 @@ export default function (pi: ExtensionAPI) {
           abort = () => reject(new Error("Parent task interrupted; child history remains in Cloudroom"));
           signal?.addEventListener("abort", abort, { once: true });
           // RPC stdout is the existing private channel to the owning core, not an HTTP credential.
-          const frame = Buffer.from(JSON.stringify({ type: "cloudroom_child_request", id, tool_call_id: toolCallId, prompt }) + "\n");
-          let offset = 0;
-          while (offset < frame.length) offset += writeSync(1, frame, offset);
+          // Pi's RPC mode points process.stdout.write at stderr, so use the stream's own write, the queue Pi's lines use.
+          // The stream sends each line whole and waits out a full pipe; writing fd 1 directly can cut or split a line.
+          const frame = JSON.stringify({ type: "cloudroom_child_request", id, tool_call_id: toolCallId, prompt }) + "\n";
+          Writable.prototype.write.call(process.stdout, frame, (error) => { if (error) reject(error); });
         });
       } finally {
         pending.delete(id);

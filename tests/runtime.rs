@@ -1,10 +1,14 @@
 use cloudroom::{config::Config, runtime};
 use std::{
     fs,
+    io::{BufRead, BufReader},
     os::unix::fs::PermissionsExt,
     path::PathBuf,
-    process::Command,
-    sync::atomic::{AtomicU64, Ordering},
+    process::{Command, Stdio},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        mpsc,
+    },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -581,4 +585,83 @@ for (const command of [
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+#[test]
+fn pi_child_requests_stay_whole_when_stdout_is_full() {
+    let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/runtime/pi-context.ts");
+    let script = r#"
+import { registerHooks } from "node:module";
+registerHooks({ resolve: (specifier, context, next) => specifier === "@earendil-works/pi-ai"
+  ? { url: "data:text/javascript,export const Type = { Object() {}, String() {} };", shortCircuit: true }
+  : next(specifier, context) });
+globalThis.commandGuardEnabled = false;
+const tools = [];
+(await import("file://" + process.argv[1])).default({ on() {}, registerCommand() {}, registerTool: tool => tools.push(tool) });
+// Like Pi's RPC mode: its own lines use the stdout stream; stray stdout writes go to stderr.
+const write = process.stdout.write.bind(process.stdout);
+process.stdout.write = chunk => process.stderr.write(chunk);
+write(JSON.stringify({ type: "before", text: "x".repeat(Number(process.argv[2])) }) + "\n");
+for (const id of ["a", "b"]) tools[0].execute(id, { prompt: id.repeat(200000) }).catch(error => console.error(error.code));
+write(JSON.stringify({ type: "after" }) + "\n");
+process.stderr.write("requested\n");
+"#;
+    // Core is slow to read: the frames are queued behind a full stdout pipe, alone or behind a Pi line still being written.
+    for padding in [0, 100_000] {
+        let mut child = Command::new("node")
+            .args(["--input-type=module", "-e", script])
+            .arg(&source)
+            .arg(padding.to_string())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let stderr = child.stderr.take().unwrap();
+        let (sender, queued) = mpsc::channel();
+        let log = std::thread::spawn(move || {
+            let mut log = String::new();
+            for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                if line == "requested" {
+                    let _ = sender.send(());
+                }
+                log += &line;
+                log.push('\n');
+            }
+            log
+        });
+        // Read once the frames are queued, or after a while for a writer that blocks until Core reads.
+        let _ = queued.recv_timeout(Duration::from_secs(5));
+        let output = child.wait_with_output().unwrap();
+        let log = log.join().unwrap();
+        assert!(output.status.success(), "{log}");
+        let lines: Vec<serde_json::Value> = String::from_utf8(output.stdout)
+            .unwrap()
+            .lines()
+            .map(|line| {
+                serde_json::from_str(line).unwrap_or_else(|error| {
+                    panic!("broken {}-byte stdout line: {error}\n{log}", line.len())
+                })
+            })
+            .collect();
+        let frames: Vec<_> = lines
+            .iter()
+            .map(|line| {
+                (
+                    line["type"].as_str(),
+                    line["tool_call_id"].as_str(),
+                    line["prompt"].as_str().map(str::len),
+                )
+            })
+            .collect();
+        assert_eq!(
+            frames,
+            [
+                (Some("before"), None, None),
+                (Some("cloudroom_child_request"), Some("a"), Some(200_000)),
+                (Some("cloudroom_child_request"), Some("b"), Some(200_000)),
+                (Some("after"), None, None),
+            ],
+            "{log}"
+        );
+    }
 }
