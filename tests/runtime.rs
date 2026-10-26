@@ -610,7 +610,7 @@ process.stderr.write("requested\n");
         .map(|i| char::from_digit(i % 10, 10).unwrap())
         .collect();
     // Core is slow to read: the frames are queued behind a full stdout pipe, alone or behind a Pi line still being written.
-    for padding in [0, 100_000] {
+    for padding in [0, 2_000_000] {
         let mut child = Command::new("node")
             .args(["--input-type=module", "-e", script])
             .arg(&source)
@@ -632,8 +632,11 @@ process.stderr.write("requested\n");
             }
             log
         });
-        // Read once the frames are queued, or after a while for a writer that blocks until Core reads.
-        let _ = queued.recv_timeout(Duration::from_secs(5));
+        // Pi keeps running while Core is slow: the frames are queued at once, not written once Core reads.
+        if queued.recv_timeout(Duration::from_secs(30)).is_err() {
+            let _ = child.kill();
+            panic!("child requests did not queue\n{}", log.join().unwrap());
+        }
         let output = child.wait_with_output().unwrap();
         let log = log.join().unwrap();
         assert!(output.status.success(), "{log}");
