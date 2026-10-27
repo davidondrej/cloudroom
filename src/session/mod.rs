@@ -50,6 +50,10 @@ impl Record {
     // Preserve the existing wire format without storing params twice alongside the native frame.
     fn for_client(mut self) -> Result<Self> {
         runtime::for_client(&mut self.data, self.native.as_deref())?;
+        // Saved history drops Claude's raw output (history.rs `for_database`), so clients already do without it.
+        if self.kind != "native_record" && self.data["harness"] == "claude-code" {
+            self.native = None;
+        }
         Ok(self)
     }
 }
