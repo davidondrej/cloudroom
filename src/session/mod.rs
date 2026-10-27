@@ -313,6 +313,17 @@ pub const MAX_PROMPT: usize = 256 * 1024;
 pub(crate) const PLAN_ONLY_REFUSED: &str = "extra credits are off for loops";
 pub(crate) const PLAN_ONLY_STOPPED: &str =
     "Stopped: this loop run would spend extra credits, and Stop at plan limit is on.";
+
+/// Queued deltas saved with one directory sync. Each still syncs its own file under the session lock,
+/// so this bounds how long a batch holds that lock and delays the stream: 16 already saves ~94% of the directory syncs.
+const DELTA_BATCH: usize = 16;
+
+/// A streamed text or thinking delta, which `record_native` only appends.
+fn is_delta(event: &runtime::Event) -> bool {
+    matches!(event, runtime::Event::Record { kind: "text_delta" | "thinking_delta", data, .. }
+        if data["usage"].is_null())
+}
+
 const JOURNAL_UNWRITABLE: &str = "session journal is not writable";
 type Result<T> = std::result::Result<T, Error>;
 
@@ -1860,12 +1871,32 @@ impl Manager {
         let manager = self.clone();
         tokio::spawn(async move {
             let mut failed = false;
-            while let Some(event) = events.recv().await {
+            let mut next = None;
+            while let Some(event) = match next.take() {
+                Some(event) => Some(event),
+                None => events.recv().await,
+            } {
                 // After a failed record, only the harness exit still matters: it settles the turn (core #55).
                 if failed && !matches!(event, runtime::Event::Exited { .. }) {
                     continue;
                 }
-                if manager.record_native(&id, &handle, event).is_err() && !failed {
+                let result = if is_delta(&event) {
+                    // Deltas that queued while the disk was busy share one directory sync. Nothing waits for more.
+                    let mut deltas = vec![event];
+                    while deltas.len() < DELTA_BATCH
+                        && let Ok(event) = events.try_recv()
+                    {
+                        if !is_delta(&event) {
+                            next = Some(event);
+                            break;
+                        }
+                        deltas.push(event);
+                    }
+                    manager.record_deltas(&id, &handle, deltas)
+                } else {
+                    manager.record_native(&id, &handle, event)
+                };
+                if result.is_err() && !failed {
                     failed = true;
                     if let Some(handle) = manager
                         .local
@@ -2112,6 +2143,29 @@ impl Manager {
                 handle.request_shutdown();
             }
         }
+    }
+
+    /// Saves deltas as `record_native` would, with one directory sync for all of them.
+    fn record_deltas(
+        &self,
+        id: &str,
+        handle: &runtime::Handle,
+        deltas: Vec<runtime::Event>,
+    ) -> Result<()> {
+        let mut local = self.local.lock().unwrap();
+        if !local.sessions[id]
+            .handle
+            .as_ref()
+            .is_some_and(|current| current.same_process(handle))
+        {
+            return Ok(());
+        }
+        let records = deltas.into_iter().filter_map(|event| match event {
+            runtime::Event::Record { kind, data, native } => Some((kind, data, native)),
+            _ => None,
+        });
+        local.append_all(id, records)?;
+        Ok(())
     }
 
     fn record_native(

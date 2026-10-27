@@ -102,10 +102,18 @@ impl Journal {
     }
 
     pub fn append(&mut self, record: &[u8]) -> io::Result<u64> {
-        let id = self.next;
-        self.write_atomic(&record_name(id), record)?;
-        self.next += 1;
-        Ok(id)
+        self.append_all(&[record])
+    }
+
+    /// Saves records in order with one directory sync for all of them, and returns the last one's id.
+    pub fn append_all(&mut self, records: &[&[u8]]) -> io::Result<u64> {
+        let files: Vec<_> = (self.next..)
+            .map(record_name)
+            .zip(records.iter().copied())
+            .collect();
+        self.write_atomic(&files)?;
+        self.next += records.len() as u64;
+        Ok(self.next - 1)
     }
 
     /// The replay snapshot (`Local::save_snapshot`), if one was saved.
@@ -152,7 +160,7 @@ impl Journal {
         if end <= self.saved || end >= self.next {
             return Err(io::Error::other("invalid upload batch"));
         }
-        self.write_atomic("uploading", end.to_string().as_bytes())?;
+        self.write_atomic(&[("uploading".into(), end.to_string().as_bytes())])?;
         self.uploading = Some(end);
         Ok(())
     }
@@ -173,31 +181,39 @@ impl Journal {
         if id < self.saved || id >= self.next {
             return Err(io::Error::other("invalid acknowledgement"));
         }
-        self.write_atomic("saved", id.to_string().as_bytes())?;
+        self.write_atomic(&[("saved".into(), id.to_string().as_bytes())])?;
         self.saved = id;
         Ok(())
     }
 
-    fn write_atomic(&mut self, name: &str, bytes: &[u8]) -> io::Result<()> {
+    fn write_atomic(&mut self, files: &[(String, &[u8])]) -> io::Result<()> {
         if !self.writable {
             return Err(io::Error::other(
                 "journal requires recovery after a write failure",
             ));
         }
-        // A failure before the rename leaves the journal as it was (a full disk fails here), so only that write fails.
-        let temporary = self.directory.join("pending.tmp");
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&temporary)?;
-        file.write_all(bytes)?;
-        file.sync_all()?;
+        // Every file is synced before the first rename, so a failure before it leaves the journal as it was
+        // (a full disk fails here), and only this write fails.
+        let temporary = |i: usize| match i {
+            0 => self.directory.join("pending.tmp"),
+            _ => self.directory.join(format!("pending.{i}.tmp")),
+        };
+        for (i, (_, bytes)) in files.iter().enumerate() {
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(temporary(i))?;
+            file.write_all(bytes)?;
+            file.sync_all()?;
+        }
         // A rename followed by a failed directory fsync has an uncertain outcome.
         // Refuse further writes until reopening, rather than overwrite that record.
         self.writable = false;
-        fs::rename(temporary, self.directory.join(name))?;
+        for (i, (name, _)) in files.iter().enumerate() {
+            fs::rename(temporary(i), self.directory.join(name))?;
+        }
         File::open(&self.directory)?.sync_all()?;
         self.writable = true;
         Ok(())
