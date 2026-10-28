@@ -31,6 +31,8 @@ export interface CloudroomStatus {
   macAccess?: boolean | null;
   /** How much cloud agents may do on this computer (ADR 0186); null until first-run setup asks. */
   macAccessLevel?: MacAccessLevel | null;
+  /** False where cloud agents can't use this computer yet (Windows); hide Mac access there. */
+  macAccessSupported?: boolean;
   /** The levels this computer supports: macOS has all four, Linux only Off and Full. Missing from older servers. */
   macAccessLevels?: readonly MacAccessLevel[];
   /** Copy this computer's logins, API keys, and model providers to the VM (ADR 0130); null until first-run setup asks. */
@@ -43,8 +45,9 @@ export interface CloudroomStatus {
   cloudQueue?: { position: number; total: number; regionBlocked: boolean } | null;
   /** The account's plan (free, pro, super, ultra) from the website's mode check; null while billing is off or unknown. */
   plan?: string | null;
-  /** The account's 30-day usage: Free's sidebar card, paid plans' meter from 75%. Null while billing is off or in the cloud queue. */
-  planUsage?: { plan: string; agents: number; agentsLimit: number; cpuHours: number | null; cpuHoursLimit: number; og?: { name: string | null; endsAt: string } | null } | null;
+  /** The account's Cloud Credits in the rolling 30 days: Free's sidebar card, paid plans' meter from 75%. Null while billing is
+   *  off or in the cloud queue; null credits while metering is stale. */
+  planUsage?: { plan: string; credits: number | null; creditsLimit: number; og?: { name: string | null; endsAt: string } | null } | null;
 }
 
 export interface CloudroomCodexAuth {

@@ -1,4 +1,5 @@
 import type { MarkdownLinkRouting } from "./markdown-link-routing";
+import { isWindowsHostPath } from "@cloudroom/domain";
 import {
   getAbsoluteDirname,
   buildAbsoluteFilePath,
@@ -50,8 +51,13 @@ export function buildMarkdownFileImageRouting({
         if (sourceKind === "absolute" && threadId !== null) {
           return buildThreadHostFileContentUrl(threadId, image.path);
         }
+        const relativePath = image.path.slice(
+          root === "/" ? 1 : root.length + 1,
+        );
         return resolveRelativeSrc(
-          image.path.slice(root === "/" ? 1 : root.length + 1),
+          isWindowsHostPath(root)
+            ? relativePath.replaceAll("\\", "/")
+            : relativePath,
           image.path,
         );
       },

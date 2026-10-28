@@ -7,7 +7,7 @@ import {
 } from "@cloudroom/server-contract";
 import { ApiError } from "../errors.js";
 import type { AppDeps } from "../types.js";
-import { toThreadQueuedMessage } from "../services/threads/thread-queued-messages.js";
+import { toListedThreadQueuedMessages } from "../services/threads/thread-queued-messages.js";
 
 /**
  * The cross-thread queue list.
@@ -26,12 +26,15 @@ export function registerQueueRoutes(app: Hono, deps: AppDeps): void {
 
   get(publicApiRoutes.queue.list, (context, query) => {
     return context.json(
-      listQueuedThreadMessagesForApi(deps.db, {
-        ...(query.threadId !== undefined ? { threadId: query.threadId } : {}),
-        ...(query.waitHolder !== undefined
-          ? { waitHolder: query.waitHolder }
-          : {}),
-      }).map(toThreadQueuedMessage),
+      toListedThreadQueuedMessages(
+        deps.db,
+        listQueuedThreadMessagesForApi(deps.db, {
+          ...(query.threadId !== undefined ? { threadId: query.threadId } : {}),
+          ...(query.waitHolder !== undefined
+            ? { waitHolder: query.waitHolder }
+            : {}),
+        }),
+      ),
     );
   });
 }

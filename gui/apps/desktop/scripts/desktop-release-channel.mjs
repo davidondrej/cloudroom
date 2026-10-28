@@ -24,9 +24,12 @@ export function resolveDesktopBuildPlatform(nodePlatform) {
   if (nodePlatform === "linux") {
     return "linux";
   }
+  if (nodePlatform === "win32") {
+    return "windows";
+  }
 
   throw new Error(
-    `Desktop builds support darwin and linux only, got ${nodePlatform}.`,
+    `Desktop builds support darwin, linux, and win32 only, got ${nodePlatform}.`,
   );
 }
 
@@ -46,7 +49,11 @@ export function createDesktopReleaseConfig(channel) {
       updateMetadataFileNames: {
         linux: "nightly-linux.yml",
         macos: "nightly-mac.yml",
+        windows: "nightly.yml",
       },
+      // electron-builder names the per-user install folder after the package:
+      // %LOCALAPPDATA%\Programs\Cloudroom-Nightly.
+      windowsInstallName: "Cloudroom-Nightly",
     };
   }
 
@@ -62,6 +69,8 @@ export function createDesktopReleaseConfig(channel) {
     updateMetadataFileNames: {
       linux: "latest-linux.yml",
       macos: "latest-mac.yml",
+      windows: "latest.yml",
     },
+    windowsInstallName: "Cloudroom",
   };
 }

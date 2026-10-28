@@ -204,7 +204,13 @@ describe("desktop preload browser API", () => {
       action: "clearSelection" as const,
     };
 
+    const importKeys = [
+      "importCookies",
+      "listImportSources",
+      "openFullDiskAccessSettings",
+    ];
     expect(Object.keys(api.browser).sort()).toEqual([
+      ...[
       "attach",
       "detach",
       "findInPage",
@@ -232,6 +238,9 @@ describe("desktop preload browser API", () => {
       "setVisibleWithoutFocus",
       "stop",
       "stopFindInPage",
+      ].filter(
+        (key) => process.platform !== "win32" || !importKeys.includes(key),
+      ),
     ]);
     expect(api.browser).not.toHaveProperty("send");
     expect(api.browser).not.toHaveProperty("invoke");
@@ -319,6 +328,29 @@ describe("desktop preload browser API", () => {
       BB_DESKTOP_INSTALL_UPDATE_CHANNEL,
     );
   }, 10_000);
+
+  it.each([
+    { platform: "win32" as const, offered: false },
+    { platform: "darwin" as const, offered: true },
+  ])(
+    "offers browser cookie import only off Windows ($platform)",
+    async ({ platform, offered }) => {
+      const original = Object.getOwnPropertyDescriptor(process, "platform");
+      Object.defineProperty(process, "platform", { value: platform });
+      try {
+        const loaded = await loadPreload();
+        for (const key of [
+          "importCookies",
+          "listImportSources",
+          "openFullDiskAccessSettings",
+        ]) {
+          expect(Object.hasOwn(loaded.browser, key)).toBe(offered);
+        }
+      } finally {
+        if (original) Object.defineProperty(process, "platform", original);
+      }
+    },
+  );
 
   it("converts zoomed renderer bounds to native window coordinates", () => {
     electronMock.setZoomFactor(1.25);

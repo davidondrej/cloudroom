@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { promisify } from "node:util";
 import { getProject, getThread, listProjectSourcesByProjectIds, setProjectGitRemoteUrlIfMissing } from "@cloudroom/db";
+import { tarCommand } from "@cloudroom/process-utils";
 import type { ProjectCopyProgress } from "@cloudroom/domain";
 import type { AppDeps } from "../../types.js";
 import { CloudroomError, UPLOAD_PART, type CloudroomClient } from "./client.js";
@@ -150,6 +151,9 @@ async function run(deps: Deps, client: CloudroomClient, job: ProjectCopyJob, rep
     if (cloneError) cloneError = await clone(deps, client, target, job.repository, branch);
   }
   const cloned = job.clone && !cloneError;
+  // Git for Windows checks text files out with CRLF, so the cloud checkout must ignore line-ending-only changes.
+  if (cloned && job.teleport && job.localPath && process.platform === "win32" && await checksOutCrlf(job.localPath))
+    await vm(client, `git -C ${quote(target)} config core.autocrlf input`);
   if (!cloned) report({ phase: "uploading", completed: 0, total: 0 });
   // A failed clone of a small project falls back to uploading it, like a project not on GitHub.
   const scope = job.teleport ? (cloned ? "changed" : "all") : job.copyAll || (cloneError && job.localPath && await smallProject(job.localPath)) ? "all" : "env";
@@ -256,6 +260,11 @@ function cloneHint(error: string, login: string): string {
     : `The cloud's GitHub login can't see this repository, or it doesn't exist. Check the account ${fix}.`;
 }
 
+/** Whether this checkout writes CRLF line endings: core.autocrlf is true in any of Git's spellings (yes, on, 1). `input` writes LF. */
+export async function checksOutCrlf(path: string): Promise<boolean> {
+  return (await git(path, ["config", "--bool", "--get", "core.autocrlf"]))?.trim() === "true";
+}
+
 const isEnv = (path: string) => basename(path).startsWith(".env");
 
 /** `all`: every project file; `changed`: uncommitted and untracked files; `env`: only `.env` files. Ignored `.env` files always count.
@@ -310,7 +319,7 @@ async function packProject(root: string, scope: "all" | "changed" | "env", archi
 async function pack(root: string, files: string[], archive: string): Promise<void> {
   await new Promise<void>((resolve, reject) => {
     let stderr = "";
-    const tar = spawn("tar", ["--no-xattrs", "-czf", archive, "--null", "-T", "-"], { cwd: root, env: { ...process.env, COPYFILE_DISABLE: "1" }, stdio: ["pipe", "ignore", "pipe"] });
+    const tar = spawn(tarCommand(), ["--no-xattrs", "-czf", archive, "--null", "-T", "-"], { cwd: root, env: { ...process.env, COPYFILE_DISABLE: "1" }, stdio: ["pipe", "ignore", "pipe"] });
     tar.stderr.on("data", (chunk: Buffer) => { stderr = (stderr + chunk.toString()).slice(-300); });
     tar.on("error", reject).on("close", (code) => code === 0 ? resolve() : reject(new Error(`Could not pack the project files. ${stderr.trim()}`.trim())));
     tar.stdin.end(files.map((path) => `${path}\0`).join(""));

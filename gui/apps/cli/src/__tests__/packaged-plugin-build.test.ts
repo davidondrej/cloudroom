@@ -11,7 +11,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
-import { readBbAppVersion } from "./bb-app-version.js";
+import { expectedCliVersion } from "./bb-app-version.js";
 
 const execFileAsync = promisify(execFile);
 const testDir = dirname(fileURLToPath(import.meta.url));
@@ -106,7 +106,7 @@ describe("packaged CLI plugin build", () => {
       [cliEntry, "--version"],
       { cwd: workspaceRoot, env: childEnv },
     );
-    expect(versionOutput.trim()).toBe(await readBbAppVersion());
+    expect(versionOutput.trim()).toBe(await expectedCliVersion());
 
     await execFileAsync(
       process.execPath,

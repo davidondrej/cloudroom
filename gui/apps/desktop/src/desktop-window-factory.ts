@@ -82,6 +82,7 @@ interface CreateDesktopWindowFactoryArgs {
   icon: DesktopWindowIcon;
   isLinuxTransparent: boolean;
   isMac: boolean;
+  isWindows?: boolean;
   isLinuxFrameless: boolean;
   isQuitting(): boolean;
   openExternalUrl(args: OpenExternalUrlArgs): void;
@@ -134,6 +135,7 @@ interface CreateWindowOptionsArgs {
   icon: DesktopWindowIcon;
   isLinuxTransparent: boolean;
   isMac: boolean;
+  isWindows: boolean;
   isLinuxFrameless: boolean;
   preloadPath: string;
 }
@@ -176,6 +178,7 @@ function createWindowOptions(
           trafficLightPosition: MACOS_TRAFFIC_LIGHT_POSITION,
         }
       : {}),
+    ...(args.isWindows ? { autoHideMenuBar: true } : {}),
     height: args.bounds.height,
     icon: args.icon,
     minHeight: MIN_WINDOW_HEIGHT,
@@ -269,6 +272,7 @@ export function createDesktopWindowFactory(
           icon: args.icon,
           isLinuxTransparent: args.isLinuxTransparent,
           isMac: args.isMac,
+          isWindows: args.isWindows === true,
           isLinuxFrameless: args.isLinuxFrameless,
           preloadPath: args.preloadPath,
         }),

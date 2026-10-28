@@ -4,6 +4,7 @@ import type {
   UpdateDownloadedEvent,
   UpdateInfo,
 } from "electron-updater";
+import { existsSync } from "node:fs";
 import type { BbDesktopInfo } from "@cloudroom/desktop-contract";
 import {
   DESKTOP_AUTO_UPDATE_FEED_CONFIG,
@@ -50,11 +51,14 @@ export interface DesktopAutoUpdaterAdapter {
   setFeedURL(config: DesktopAutoUpdateFeedConfig): void;
   setForceDevUpdateConfig(enabled: boolean): void;
   setLogger(logger: DesktopAutoUpdateLogger): void;
+  // The downloaded installer electron-updater would run, or null when none is staged.
+  stagedInstallerPath(): string | null;
 }
 
 interface CreateDesktopAutoUpdateServiceArgs {
   currentVersion: string;
   enabled: boolean;
+  fileExists?: (path: string) => boolean;
   forceDevUpdateConfig: boolean;
   installNeedsPassword?: boolean;
   logger: DesktopAutoUpdateLogger;
@@ -84,7 +88,20 @@ interface ApplyUpdateNotAvailableArgs {
 }
 
 export interface DesktopAutoUpdateService extends DesktopUpdateService {
-  installUpdate(): void;
+  /**
+   * Windows: holds off new checks and downloads until the install hands off or
+   * ends, since a new download deletes the staged installer. False while a
+   * download is running. Always true elsewhere.
+   */
+  beginInstall(): boolean;
+  /** Windows: lets checks and downloads run again after an install that didn't hand off. */
+  endInstall(): void;
+  /** False when the install is declined (nothing downloaded). */
+  installUpdate(): boolean;
+  /** Windows: whether the downloaded installer is still on disk. If not, offers the download again. */
+  installerReady(): boolean;
+  /** The last Restart to update didn't change the version: offer the download again. */
+  markInstallFailed(version: string): void;
 }
 
 function createBaseInfo(
@@ -156,7 +173,9 @@ export function createElectronAutoUpdaterAdapter(
       squirrel.on("update-downloaded", () => handler());
     },
     quitAndInstall() {
-      updater.quitAndInstall();
+      // Windows: install silently, then reopen Cloudroom, so Relaunch feels like macOS.
+      if (process.platform === "win32") updater.quitAndInstall(true, true);
+      else updater.quitAndInstall();
     },
     setAutoDownload(enabled) {
       updater.autoDownload = enabled;
@@ -173,6 +192,9 @@ export function createElectronAutoUpdaterAdapter(
     setLogger(logger) {
       updater.logger = logger;
     },
+    stagedInstallerPath() {
+      return (updater as unknown as { installerPath?: string | null }).installerPath ?? null;
+    },
   };
 }
 
@@ -181,6 +203,7 @@ export function createDesktopAutoUpdateService(
 ): DesktopAutoUpdateService {
   const now = args.now ?? (() => Date.now());
   let downloadInFlight: Promise<Array<string>> | null = null;
+  let installing = false;
   const scheduler = createDesktopUpdateScheduler({
     enabled: args.enabled,
     initialInfo: createBaseInfo(
@@ -239,12 +262,14 @@ export function createDesktopAutoUpdateService(
   }
 
   function startDownload(): void {
-    if (downloadInFlight !== null) {
+    if (downloadInFlight !== null || installing) {
       return;
     }
+    // NSIS keeps one installer: a new download deletes the staged one, so it's no longer ready.
     scheduler.updateInfo({
       ...scheduler.getInfo(),
       downloadState: "downloading",
+      ...(args.platform === "windows" ? { pendingVersion: null, updateDownloaded: false } : {}),
     });
     try {
       downloadInFlight = args.updater.downloadUpdate();
@@ -272,6 +297,9 @@ export function createDesktopAutoUpdateService(
   }
 
   async function runCheck(checkedAt: string): Promise<void> {
+    if (installing) {
+      return;
+    }
     let result: UpdateCheckResult | null;
     try {
       result = await args.updater.checkForUpdates();
@@ -393,14 +421,54 @@ export function createDesktopAutoUpdateService(
 
   return {
     ...scheduler,
-    installUpdate(): void {
+    beginInstall(): boolean {
+      if (args.platform !== "windows") {
+        return true;
+      }
+      if (installing) {
+        return false;
+      }
+      if (downloadInFlight !== null) {
+        args.logger.warn("Desktop auto-update install requested while a download is replacing the installer; ignoring.");
+        return false;
+      }
+      installing = true;
+      return true;
+    },
+    endInstall(): void {
+      installing = false;
+    },
+    installerReady(): boolean {
+      if (args.platform !== "windows" || !scheduler.getInfo().updateDownloaded) {
+        return true;
+      }
+      const installer = args.updater.stagedInstallerPath();
+      if (installer !== null && (args.fileExists ?? existsSync)(installer)) {
+        return true;
+      }
+      args.logger.error(`Desktop auto-update installer is missing (${installer ?? "none staged"}); offering the download again.`);
+      scheduler.updateInfo({ ...scheduler.getInfo(), downloadState: "failed", pendingVersion: null, updateDownloaded: false });
+      return false;
+    },
+    markInstallFailed(version: string): void {
+      scheduler.updateInfo({
+        ...scheduler.getInfo(),
+        downloadState: "failed",
+        latestVersion: version,
+        pendingVersion: null,
+        updateAvailable: true,
+        updateDownloaded: false,
+      });
+    },
+    installUpdate(): boolean {
       if (!scheduler.getInfo().updateDownloaded) {
         args.logger.warn(
           "Desktop auto-update install requested before an update was downloaded; ignoring.",
         );
-        return;
+        return false;
       }
       args.updater.quitAndInstall();
+      return true;
     },
   };
 }

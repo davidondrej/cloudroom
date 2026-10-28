@@ -100,6 +100,29 @@ export async function noteUpdateAttempt(dataDir: string, note: AttemptNote): Pro
   await writeFile(file, JSON.stringify({ ...attempt, ...note }));
 }
 
+// Windows: electron-updater quits before the installer has started, so a failed start can't be caught in
+// this process. Restart to update leaves this marker; still on the old version at the next launch means it failed.
+const WINDOWS_UPDATE_FILE_NAME = "update-pending.json";
+const windowsUpdateSchema = z.object({ from: z.string(), to: z.string() });
+
+export async function saveWindowsUpdateMarker(userDataPath: string, from: string, to: string): Promise<void> {
+  await writeFile(join(userDataPath, WINDOWS_UPDATE_FILE_NAME), JSON.stringify({ from, to }));
+}
+
+/** The version a failed Restart to update meant to install, or null. Reads the marker once. */
+export async function takeFailedWindowsUpdate(userDataPath: string, currentVersion: string): Promise<string | null> {
+  const file = join(userDataPath, WINDOWS_UPDATE_FILE_NAME);
+  const text = await readFile(file, "utf8").catch(() => null);
+  if (text === null) return null;
+  await rm(file, { force: true });
+  try {
+    const marker = windowsUpdateSchema.parse(JSON.parse(text));
+    return marker.from === currentVersion ? marker.to : null;
+  } catch {
+    return null;
+  }
+}
+
 export async function reportDesktopUpdate(
   serverUrl: string,
   version: string,

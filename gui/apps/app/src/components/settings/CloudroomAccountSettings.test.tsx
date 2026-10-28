@@ -48,14 +48,14 @@ it("shows identity/offline status and signs out locally without a machine creati
   await screen.findByText("Not signed in to Cloudroom");
 });
 it("opens the settings account menu and confirms before signing out", async () => {
-  vi.mocked(sdk.cloudroom.status).mockResolvedValue({ ...signedOut, ready: true, error: null, plan: "pro", planUsage: { plan: "pro", agents: 3, agentsLimit: 1000, cpuHours: 88.4, cpuHoursLimit: 300 }, account: { id: "account", email: "member@example.invalid" } });
+  vi.mocked(sdk.cloudroom.status).mockResolvedValue({ ...signedOut, ready: true, error: null, plan: "pro", planUsage: { plan: "pro", credits: 12_300, creditsLimit: 50_000 }, account: { id: "account", email: "member@example.invalid" } });
   vi.mocked(sdk.cloudroom.logout).mockImplementation(async () => { vi.mocked(sdk.cloudroom.status).mockResolvedValue(signedOut); });
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
   clients.push(client);
   render(<QueryClientProvider client={client}><MemoryRouter><SidebarProvider><SettingsAccountMenu usagePage /></SidebarProvider></MemoryRouter></QueryClientProvider>);
   fireEvent.pointerDown(await screen.findByRole("button", { name: /member@example\.invalid/u }), { button: 0 });
   expect(await screen.findByText("Pro plan · Cloud connected")).toBeDefined();
-  expect(screen.getByRole("menuitem", { name: /Usage/u }).textContent).toContain("211h left");
+  expect(screen.getByRole("menuitem", { name: /Usage/u }).textContent).toContain("37,700 credits left");
   fireEvent.click(screen.getByRole("menuitem", { name: "Sign out" }));
   fireEvent.click(within(await screen.findByRole("dialog", { name: "Sign out of this app?" })).getByRole("button", { name: "Sign out" }));
   await waitFor(() => expect(sdk.cloudroom.logout).toHaveBeenCalledOnce());

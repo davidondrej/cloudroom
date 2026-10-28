@@ -392,3 +392,11 @@ it("sleeping cloud threads share one awake-list check per app, and a thread woke
     coreServer.close(); websiteServer.close();
   }
 }, 20_000);
+
+it("Windows MCP paths and %VARIABLES% stay on this PC", async () => {
+  const { WINDOWS_LOCAL_PATH } = await import("../../src/services/cloudroom/sandboxes.js");
+  for (const local of ["C:\\tools\\server.js", "--root=D:/data", "\\\\server\\share", "%USERPROFILE%\\x", "%ProgramFiles(x86)%\\x", "%MCP_HOME2%"])
+    expect(WINDOWS_LOCAL_PATH.test(local), local).toBe(true);
+  for (const portable of ["npx", "-y", "@acme/mcp", "https://mcp.example.com/mcp", "50%"])
+    expect(WINDOWS_LOCAL_PATH.test(portable), portable).toBe(false);
+});

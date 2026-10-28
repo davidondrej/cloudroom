@@ -39,7 +39,7 @@ describe("isPluginSdkRangeSatisfied", () => {
 
 describe("bbCompatAppVersion", () => {
   it("reports the BB release that matches the SDK, not the bb-app package version", () => {
-    expect(bbCompatAppVersion("0.43.1")).toBe(BB_APP_COMPAT_VERSION);
+    expect(bbCompatAppVersion("126.0.0")).toBe(BB_APP_COMPAT_VERSION);
   });
 
   it("keeps dev builds in dev mode", () => {

@@ -414,6 +414,7 @@ const hostDaemonOnlineRpcResponseSuccessSchema = z.discriminatedUnion(
     onlineRpcResponseSuccessSchemaFor("host.list_files"),
     onlineRpcResponseSuccessSchemaFor("host.list_paths"),
     onlineRpcResponseSuccessSchemaFor("host.mkdir"),
+    onlineRpcResponseSuccessSchemaFor("claude.setup_token"),
     onlineRpcResponseSuccessSchemaFor("host.move_path"),
     onlineRpcResponseSuccessSchemaFor("host.remove_path"),
     onlineRpcResponseSuccessSchemaFor("host.browse_directory"),
@@ -549,6 +550,12 @@ const hostDaemonTerminalOpenMessageSchema = z
           .object({
             mode: z.literal("command"),
             command: z.string().min(1),
+          })
+          .strict(),
+        z
+          .object({
+            mode: z.literal("argv"),
+            argv: z.array(z.string().max(10_000)).min(1).max(256),
           })
           .strict(),
       ])

@@ -112,9 +112,9 @@ export function SettingsAccountMenu({ usagePage }: { usagePage: boolean }) {
     : null;
   const connection = ready ? "Cloud connected" : "Cloud unavailable";
   const usage = status?.planUsage;
-  const hoursLeft =
-    usage && usage.cpuHours !== null
-      ? Math.max(0, Math.floor(usage.cpuHoursLimit - usage.cpuHours))
+  const creditsLeft =
+    usage && usage.credits !== null
+      ? Math.max(0, Math.floor(usage.creditsLimit - usage.credits))
       : null;
   const go = (to: string) => {
     navigate(to);
@@ -170,9 +170,9 @@ export function SettingsAccountMenu({ usagePage }: { usagePage: boolean }) {
               icon="ChartColumn"
               label="Usage"
               detail={
-                hoursLeft === null ? null : (
+                creditsLeft === null ? null : (
                   <span className="shrink-0 text-xs text-muted-foreground tabular-nums">
-                    {hoursLeft.toLocaleString("en-US")}h left
+                    {creditsLeft.toLocaleString("en-US")} credits left
                   </span>
                 )
               }

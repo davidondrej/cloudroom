@@ -2,6 +2,20 @@
 
 Also on [cloudroom.dev/changelog](https://www.cloudroom.dev/changelog).
 
+## 127
+
+Cloudroom comes to Windows (2026-10-27)
+
+### Changes
+
+- Cloudroom now runs on Windows 11 x64, in beta.
+- Your cloud usage is one number now: Cloud Credits, shown in the sidebar.
+- A new Scans tab in Loops finds the loops that would save you the most time.
+- Claude Code reconnects MCP servers that failed before each new turn.
+- Loops no longer reset a thread's permission mode.
+- Messages held by Stop now show as paused.
+- Phone access reconnects faster after a dropped connection.
+
 ## 126
 
 Cloud threads ready before you click (2026-10-26)

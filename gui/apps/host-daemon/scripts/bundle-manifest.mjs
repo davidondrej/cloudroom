@@ -14,13 +14,32 @@ const NODE_ESM_REQUIRE_BANNER = [
   "const __dirname = __pathDirname(__filename);",
 ].join("");
 
-// Inside Cloudroom.app or the Linux app, run room-cli on the app's own runtime,
-// so the computer needs no Node (ADR 0202). Elsewhere, use `node`. Line 2 is
-// valid sh and, to JS, a string plus a comment.
-const ROOM_CLI_HASHBANG = [
+// Inside Cloudroom.app, the Linux app, or the Windows app (Git Bash), run room-cli
+// on the app's own runtime, so the computer needs no Node (ADR 0202). Elsewhere,
+// use `node`. Line 2 is valid sh and, to JS, a string plus a comment.
+export const ROOM_CLI_HASHBANG = [
   "#!/bin/sh",
-  '":" //; f=$(realpath "$0" 2>/dev/null || readlink "$0" || echo "$0"); for e in "${f%/Contents/Resources/app.asar.unpacked/*}"/Contents/MacOS/* "${f%/resources/app.asar.unpacked/*}"/gui-cloudroom "${f%/resources/app.asar.unpacked/*}"/gui-cloudroom-nightly; do [ -x "$e" ] && ELECTRON_RUN_AS_NODE=1 exec "$e" "$f" "$@"; done; exec node "$f" "$@"',
+  '":" //; f=$(realpath "$0" 2>/dev/null || readlink "$0" || echo "$0"); for e in "${f%/Contents/Resources/app.asar.unpacked/*}"/Contents/MacOS/* "${f%/resources/app.asar.unpacked/*}"/gui-cloudroom "${f%/resources/app.asar.unpacked/*}"/gui-cloudroom-nightly "${f%/resources/app.asar.unpacked/*}"/Cloudroom.exe "${f%/resources/app.asar.unpacked/*}/Cloudroom Nightly.exe"; do [ -x "$e" ] && ELECTRON_RUN_AS_NODE=1 exec "$e" "$f" "$@"; done; exec node "$f" "$@"',
 ].join("\n");
+
+// The same for cmd.exe and PowerShell, from
+// <app>\resources\app.asar.unpacked\node_modules\bb-app\host-daemon\dist.
+// %* stays outside parentheses: a ")" in an argument would end the block.
+const APP_DIR = '"%~dp0..\\..\\..\\..\\..\\..\\';
+export const ROOM_CLI_CMD = [
+  "@echo off",
+  "setlocal",
+  'set "ROOM_CLI_APP="',
+  `for %%e in (${APP_DIR}Cloudroom.exe" ${APP_DIR}Cloudroom Nightly.exe") do if not defined ROOM_CLI_APP if exist %%e set "ROOM_CLI_APP=%%~fe"`,
+  "if defined ROOM_CLI_APP goto app",
+  'node "%~dp0room-cli" %*',
+  "exit /b %ERRORLEVEL%",
+  ":app",
+  "set ELECTRON_RUN_AS_NODE=1",
+  '"%ROOM_CLI_APP%" "%~dp0room-cli" %*',
+  "exit /b %ERRORLEVEL%",
+  "",
+].join("\r\n");
 
 export const bundleTargets = [
   {

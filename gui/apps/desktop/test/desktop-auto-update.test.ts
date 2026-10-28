@@ -45,6 +45,7 @@ class DesktopAutoUpdaterAdapterStub implements DesktopAutoUpdaterAdapter {
   forceDevUpdateConfig: boolean | null = null;
   logger: DesktopAutoUpdateLogger | null = null;
   quitAndInstallCalls = 0;
+  stagedInstaller: string | null = null;
   updateCheckResult: UpdateCheckResult | null = null;
   updateCheckError: Error | null = null;
 
@@ -142,6 +143,10 @@ class DesktopAutoUpdaterAdapterStub implements DesktopAutoUpdaterAdapter {
 
   setLogger(logger: DesktopAutoUpdateLogger): void {
     this.logger = logger;
+  }
+
+  stagedInstallerPath(): string | null {
+    return this.stagedInstaller;
   }
 }
 
@@ -425,6 +430,118 @@ describe("desktop auto-update service", () => {
 
     updater.emitUpdateAvailable(createUpdateInfo("0.0.3"));
     expect(updater.downloadUpdateCalls).toBe(2);
+  });
+
+  it("on Windows, a newer download replaces the staged installer, so Restart waits for it", async () => {
+    const updater = new DesktopAutoUpdaterAdapterStub();
+    const download = createDeferredDownload();
+    const service = createDesktopAutoUpdateService({
+      currentVersion: "0.0.1",
+      enabled: true,
+      forceDevUpdateConfig: false,
+      logger: createLogger(createLoggerMessages()),
+      now: () => Date.parse(checkedAt),
+      platform: "windows",
+      updater,
+    });
+
+    updater.emitUpdateAvailable(createUpdateInfo("0.0.2"));
+    updater.emitUpdateDownloaded(createDownloadedEvent("0.0.2"));
+    expect(service.getInfo().updateDownloaded).toBe(true);
+
+    updater.downloadUpdateResult = download.promise;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    updater.emitUpdateAvailable(createUpdateInfo("0.0.3"));
+    expect(service.getInfo()).toMatchObject({ downloadState: "downloading", pendingVersion: null, updateDownloaded: false });
+  });
+
+  it("on Windows, refuses Restart when the staged installer is gone and offers the download again", () => {
+    const updater = new DesktopAutoUpdaterAdapterStub();
+    const existing = new Set(["C:\\pending\\Cloudroom-v2-x64.exe"]);
+    const service = createDesktopAutoUpdateService({
+      currentVersion: "0.0.1",
+      enabled: true,
+      fileExists: (path) => existing.has(path),
+      forceDevUpdateConfig: false,
+      logger: createLogger(createLoggerMessages()),
+      now: () => Date.parse(checkedAt),
+      platform: "windows",
+      updater,
+    });
+    updater.emitUpdateAvailable(createUpdateInfo("0.0.2"));
+    updater.emitUpdateDownloaded(createDownloadedEvent("0.0.2"));
+
+    updater.stagedInstaller = "C:\\pending\\Cloudroom-v2-x64.exe";
+    expect(service.installerReady()).toBe(true);
+    existing.clear();
+    expect(service.installerReady()).toBe(false);
+    expect(service.getInfo()).toMatchObject({ downloadState: "failed", updateAvailable: true, updateDownloaded: false });
+  });
+
+  it("on Windows, an install holds off checks and downloads until it hands off or ends", async () => {
+    const updater = new DesktopAutoUpdaterAdapterStub();
+    const service = createDesktopAutoUpdateService({
+      currentVersion: "0.0.1",
+      enabled: true,
+      forceDevUpdateConfig: false,
+      logger: createLogger(createLoggerMessages()),
+      now: () => Date.parse(checkedAt),
+      platform: "windows",
+      updater,
+    });
+    updater.emitUpdateAvailable(createUpdateInfo("0.0.2"));
+    updater.emitUpdateDownloaded(createDownloadedEvent("0.0.2"));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const downloads = updater.downloadUpdateCalls;
+
+    expect(service.beginInstall()).toBe(true);
+    expect(service.beginInstall()).toBe(false);
+    updater.updateCheckResult = createUpdateCheckResult("0.0.3");
+    await service.checkForUpdates();
+    updater.emitUpdateAvailable(createUpdateInfo("0.0.3"));
+    expect(updater.checkForUpdatesCalls).toBe(0);
+    expect(updater.downloadUpdateCalls).toBe(downloads);
+    expect(service.getInfo()).toMatchObject({ pendingVersion: "0.0.2", updateDownloaded: true });
+    expect(service.installUpdate()).toBe(true);
+    expect(updater.quitAndInstallCalls).toBe(1);
+
+    service.endInstall();
+    updater.downloadUpdateResult = createDeferredDownload().promise;
+    updater.emitUpdateAvailable(createUpdateInfo("0.0.3"));
+    expect(updater.downloadUpdateCalls).toBe(downloads + 1);
+    expect(service.beginInstall()).toBe(false);
+    expect(service.installUpdate()).toBe(false);
+    expect(updater.quitAndInstallCalls).toBe(1);
+  });
+
+  it("on macOS, an install doesn't hold off checks", async () => {
+    const updater = new DesktopAutoUpdaterAdapterStub();
+    const service = createDesktopAutoUpdateService({
+      currentVersion: "0.0.1",
+      enabled: true,
+      forceDevUpdateConfig: false,
+      logger: createLogger(createLoggerMessages()),
+      now: () => Date.parse(checkedAt),
+      platform: "macos",
+      updater,
+    });
+    expect(service.beginInstall()).toBe(true);
+    await service.checkForUpdates();
+    expect(updater.checkForUpdatesCalls).toBe(1);
+  });
+
+  it("offers the download again after a Restart to update that didn't install", () => {
+    const service = createDesktopAutoUpdateService({
+      currentVersion: "0.0.1",
+      enabled: true,
+      forceDevUpdateConfig: false,
+      logger: createLogger(createLoggerMessages()),
+      now: () => Date.parse(checkedAt),
+      platform: "windows",
+      updater: new DesktopAutoUpdaterAdapterStub(),
+    });
+    service.markInstallFailed("0.0.2");
+    expect(service.getInfo()).toMatchObject({ downloadState: "failed", latestVersion: "0.0.2", updateAvailable: true, updateDownloaded: false });
   });
 
   it("does not initialize electron-updater in dev mode without the override", async () => {

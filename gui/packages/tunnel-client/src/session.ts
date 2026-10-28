@@ -118,6 +118,8 @@ interface TunnelSessionOptions {
   resolveOrigin: (target: string | undefined) => StreamOriginResult;
   onRemoteClientsChange?: (remoteClients: number) => void;
   onActivity?: (at: number) => void;
+  /** ws only emits "close" once its receiver drains, which can stall; recover from here too. */
+  onHeartbeatMissed?: () => void;
 }
 
 export class TunnelSession {
@@ -125,6 +127,7 @@ export class TunnelSession {
   private readonly wsStreams = new Map<number, WsStream>();
   private lastAck = Date.now();
   private heartbeat: ReturnType<typeof setInterval> | undefined;
+  private disposed = false;
   private remoteClientCount = 0;
   lastRemoteActivityAt: number | null = null;
 
@@ -139,13 +142,16 @@ export class TunnelSession {
     this.heartbeat = setInterval(() => {
       if (Date.now() - this.lastAck > HEARTBEAT_DEADLINE_MS) {
         this.options.log.warn("tunnel heartbeat missed; reconnecting");
+        this.dispose();
         tunnel.terminate();
+        this.options.onHeartbeatMissed?.();
         return;
       }
       tunnel.send(HEARTBEAT_REQUEST);
     }, HEARTBEAT_INTERVAL_MS);
 
     tunnel.on("message", (data: Buffer, isBinary: boolean) => {
+      if (this.disposed) return;
       if (!isBinary) {
         if (data.toString() === HEARTBEAT_RESPONSE) this.lastAck = Date.now();
         return;
@@ -160,6 +166,7 @@ export class TunnelSession {
   }
 
   dispose(): void {
+    this.disposed = true;
     if (this.heartbeat) clearInterval(this.heartbeat);
     for (const s of this.httpStreams.values()) s.abort.abort();
     for (const s of this.wsStreams.values())

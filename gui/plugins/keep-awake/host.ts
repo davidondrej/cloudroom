@@ -9,6 +9,9 @@ import { keepAwakeHostContract } from "./contract.js";
 const CAFFEINATE_COMMAND = "/usr/bin/caffeinate";
 const SYSTEMD_INHIBIT_COMMAND = "/usr/bin/systemd-inhibit";
 const RESTART_DELAY_MS = 1_000;
+const MAX_RESTART_DELAY_MS = 60_000;
+const SETTLED_CHILD_MS = 10_000;
+const WINDOWS_AWAKE_STATE = 0x80000001;
 
 interface KeepAwakeChild {
   kill(signal: NodeJS.Signals): boolean;
@@ -19,10 +22,11 @@ interface KeepAwakeHostDependencies {
   readonly pid: number;
   readonly platform: NodeJS.Platform;
   readonly hasSystemdInhibit?: boolean;
+  now?(): number;
   spawn(
     command: string,
     args: readonly string[],
-    options: { readonly stdio: "ignore" },
+    options: { readonly stdio: "ignore"; readonly windowsHide: true },
   ): KeepAwakeChild;
 }
 
@@ -48,6 +52,22 @@ function keepAwakeCommand(
       ],
     ];
   }
+  if (deps.platform === "win32") {
+    return [
+      `${process.env.SystemRoot ?? "C:\\Windows"}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe`,
+      [
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        [
+          "$ErrorActionPreference = 'Stop'",
+          "$power = Add-Type -Name KeepAwake -Namespace Cloudroom -PassThru -MemberDefinition '[DllImport(\"kernel32.dll\")] public static extern uint SetThreadExecutionState(uint flags);'",
+          `if ($power::SetThreadExecutionState(${WINDOWS_AWAKE_STATE}) -eq 0) { exit 1 }`,
+          `Wait-Process -Id ${pid}`,
+        ].join("; "),
+      ],
+    ];
+  }
   return null;
 }
 
@@ -57,7 +77,9 @@ export function createKeepAwakeHostEntry(deps: KeepAwakeHostDependencies) {
   let lifecycleSignal: AbortSignal | null = null;
   let desiredEnabled = false;
   let restartTimer: ReturnType<typeof setTimeout> | null = null;
+  let restartDelayMs = RESTART_DELAY_MS;
   let workerLease: ExperimentalHostWorkerLease | null = null;
+  const now = deps.now ?? Date.now;
 
   function clearRestart(): void {
     if (restartTimer === null) return;
@@ -85,10 +107,14 @@ export function createKeepAwakeHostEntry(deps: KeepAwakeHostDependencies) {
     ) {
       return;
     }
+    const delayMs = restartDelayMs;
+    if (deps.platform === "win32") {
+      restartDelayMs = Math.min(restartDelayMs * 2, MAX_RESTART_DELAY_MS);
+    }
     restartTimer = setTimeout(() => {
       restartTimer = null;
       start();
-    }, RESTART_DELAY_MS);
+    }, delayMs);
   }
 
   function start(): void {
@@ -103,15 +129,22 @@ export function createKeepAwakeHostEntry(deps: KeepAwakeHostDependencies) {
     }
     let next: KeepAwakeChild;
     try {
-      next = deps.spawn(command[0], command[1], { stdio: "ignore" });
+      next = deps.spawn(command[0], command[1], {
+        stdio: "ignore",
+        windowsHide: true,
+      });
     } catch {
       scheduleRestart();
       return;
     }
     child = next;
+    const startedAt = now();
     const clear = (): void => {
       if (child !== next) return;
       child = null;
+      if (now() - startedAt >= SETTLED_CHILD_MS) {
+        restartDelayMs = RESTART_DELAY_MS;
+      }
       scheduleRestart();
     };
     next.once("error", clear);
@@ -142,6 +175,7 @@ export function createKeepAwakeHostEntry(deps: KeepAwakeHostDependencies) {
         bindLifecycle(context.lifecycle.signal);
         desiredEnabled = command !== null && input.enabled;
         if (!desiredEnabled) {
+          restartDelayMs = RESTART_DELAY_MS;
           clearRestart();
           stop();
           releaseWorkerLease();

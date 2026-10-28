@@ -11,6 +11,7 @@ import {
   type WorkspaceOpenTargetId,
 } from "@cloudroom/host-daemon-contract";
 import {
+  execPortableFile,
   pathExists,
   sanitizeInheritedChildProcessEnv,
 } from "@cloudroom/process-utils";
@@ -25,6 +26,12 @@ import {
   buildLocalTerminalShellArgs,
   buildRemoteTerminalSshArgs,
 } from "./terminal.js";
+import {
+  buildWindowsDefaultOpenInvocation,
+  buildWindowsFileManagerOpenInvocation,
+  buildWindowsTerminalOpenInvocation,
+  type WindowsTerminalProgram,
+} from "./windows-open-targets.js";
 import type {
   BuildMacRemoteSshOpenArgs,
   BuildMacTerminalOpenArgs,
@@ -305,6 +312,45 @@ async function getFileManagerExecutable(
   return null;
 }
 
+async function getWindowsTerminalProgram(
+  runtime: WorkspaceOpenTargetRuntime,
+): Promise<WindowsTerminalProgram> {
+  return (await isExecutableAvailable("wt", runtime))
+    ? "windows-terminal"
+    : "powershell";
+}
+
+async function listWindowsPlatformWorkspaceOpenTargets(
+  runtime: WorkspaceOpenTargetRuntime,
+): Promise<WorkspaceOpenTarget[]> {
+  return [
+    {
+      id: "default-app",
+      label: "Default App",
+      kind: "default-app",
+      icon: { kind: "symbol", name: "default-app" },
+      capabilities: BASIC_FILE_OPEN_CAPABILITIES,
+    },
+    {
+      id: "file-manager",
+      label: "File Explorer",
+      kind: "file-manager",
+      icon: { kind: "symbol", name: "file-manager" },
+      capabilities: FILE_MANAGER_OPEN_CAPABILITIES,
+    },
+    {
+      id: "terminal",
+      label:
+        (await getWindowsTerminalProgram(runtime)) === "windows-terminal"
+          ? "Windows Terminal"
+          : "PowerShell",
+      kind: "terminal",
+      icon: { kind: "symbol", name: "terminal" },
+      capabilities: FILE_MANAGER_OPEN_CAPABILITIES,
+    },
+  ];
+}
+
 async function getTerminalExecutable(
   runtime: WorkspaceOpenTargetRuntime,
 ): Promise<string | null> {
@@ -492,9 +538,17 @@ async function defaultExecFile(
   args: string[],
   options?: ExecFileOptions,
 ): Promise<ExecFileResult> {
-  const result = await execFileAsync(file, args, {
-    env: sanitizeInheritedChildProcessEnv({ env: options?.env ?? process.env }),
+  const env = sanitizeInheritedChildProcessEnv({
+    env: options?.env ?? process.env,
   });
+  if (process.platform === "win32") {
+    const result = await execPortableFile(file, args, {
+      cwd: os.homedir(),
+      env,
+    });
+    return { stdout: result.stdout };
+  }
+  const result = await execFileAsync(file, args, { env });
   return {
     stdout: result.stdout,
   };
@@ -922,6 +976,12 @@ export async function listWorkspaceOpenTargetsWithRuntime(
   runtime: WorkspaceOpenTargetRuntime,
   options: ListWorkspaceOpenTargetsOptions = {},
 ): Promise<WorkspaceOpenTarget[]> {
+  if (runtime.platform === "win32") {
+    return [
+      ...(await listCliWorkspaceOpenTargets(runtime)),
+      ...(await listWindowsPlatformWorkspaceOpenTargets(runtime)),
+    ];
+  }
   if (runtime.platform !== "darwin") {
     if (runtime.platform !== "linux") {
       return [];
@@ -1036,7 +1096,11 @@ async function isExecutableAvailable(
   runtime: WorkspaceOpenTargetRuntime,
 ): Promise<boolean> {
   try {
-    await runtime.execFile("which", [executable], { env: runtime.env });
+    await runtime.execFile(
+      runtime.platform === "win32" ? "where.exe" : "which",
+      [executable],
+      { env: runtime.env },
+    );
     return true;
   } catch {
     return false;
@@ -1832,7 +1896,7 @@ async function resolvePlatformOpenInvocation(
   args: OpenPathInTargetArgs,
   runtime: WorkspaceOpenTargetRuntime,
 ): Promise<ExecFileInvocation> {
-  if (runtime.platform !== "linux") {
+  if (runtime.platform !== "linux" && runtime.platform !== "win32") {
     throw new WorkspaceOpenTargetError({
       code: "unsupported_platform",
       message: "Workspace open targets are not supported on this platform",
@@ -1908,6 +1972,22 @@ async function resolvePlatformOpenInvocation(
       },
       runtime,
     );
+  }
+
+  if (runtime.platform === "win32") {
+    const windowsArgs = { env: runtime.env, existingPath };
+    if (args.targetId === "default-app") {
+      return buildWindowsDefaultOpenInvocation(windowsArgs);
+    }
+    if (args.targetId === "file-manager") {
+      return buildWindowsFileManagerOpenInvocation(windowsArgs);
+    }
+    if (args.targetId === "terminal") {
+      return buildWindowsTerminalOpenInvocation({
+        ...windowsArgs,
+        terminal: await getWindowsTerminalProgram(runtime),
+      });
+    }
   }
 
   if (args.targetId === "default-app") {

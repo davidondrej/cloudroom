@@ -5,7 +5,9 @@ import {
 
 type DesktopReleaseChannel = "latest" | "nightly";
 
+// BB_DESKTOP_UPDATE_BASE_URL is set only at build time, for update tests against a local feed.
 export const CLOUDROOM_UPDATE_BASE_URL =
+  process.env.BB_DESKTOP_UPDATE_BASE_URL ||
   "https://github.com/davidondrej/cloudroom-gui/releases/latest/download/";
 
 interface DesktopReleaseInfo {
@@ -87,7 +89,8 @@ interface ResolveDesktopUpdateSupportArgs {
 export function resolveDesktopUpdateSupport(
   args: ResolveDesktopUpdateSupportArgs,
 ): DesktopUpdateSupport {
-  if (args.platform === "macos") {
+  // The NSIS installer replaces the per-user install in place, as Squirrel.Mac does on macOS.
+  if (args.platform === "macos" || args.platform === "windows") {
     return { autoUpdate: true, versionCheck: true };
   }
 

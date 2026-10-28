@@ -7,7 +7,8 @@ const PROJECT_ID = "proj_test";
 const THREAD_ID = "thr_target";
 
 async function createHost(
-  threadReadError = new Error("temporary thread read failure"),
+  threadRead: Error | object = new Error("temporary thread read failure"),
+  sent: unknown[] = [],
 ) {
   const host = createFakePluginHost({
     pluginId: "automations",
@@ -34,9 +35,11 @@ async function createHost(
       },
       threads: {
         async get() {
-          throw threadReadError;
+          if (threadRead instanceof Error) throw threadRead;
+          return threadRead;
         },
-        async send() {
+        async send(args) {
+          sent.push(args);
           return { ok: true };
         },
         async spawn() {
@@ -158,6 +161,25 @@ describe("target thread read failures", () => {
         lastError: "target thread deleted",
       },
     ]);
+
+    await host.harness.dispose();
+  });
+});
+
+describe("target thread sends", () => {
+  it("keeps the target thread's own permission mode", async () => {
+    const sent: unknown[] = [];
+    const host = await createHost(
+      { id: THREAD_ID, status: "idle", archivedAt: null, deletedAt: null },
+      sent,
+    );
+    const service = createService(host);
+    const automation = await createTargetAutomation(service, "Target");
+
+    await service.run({ projectId: PROJECT_ID, automationId: automation.id });
+
+    await vi.waitFor(() => expect(sent).toHaveLength(1));
+    expect(sent[0]).not.toHaveProperty("permissionMode");
 
     await host.harness.dispose();
   });

@@ -19,7 +19,8 @@ import {
   threadPluginMetadata,
   threads,
 } from "@cloudroom/db";
-import { PERSONAL_PROJECT_ID, type PromptInput, type TeleportLocalStep, type Thread, COMPUTER } from "@cloudroom/domain";
+import { getHostPathComparisonKey, PERSONAL_PROJECT_ID, type PromptInput, type TeleportLocalStep, type Thread, COMPUTER } from "@cloudroom/domain";
+import { folderOpenerCommand, tarCommand } from "@cloudroom/process-utils";
 import type { CreateThreadEnvironmentArgs } from "@cloudroom/server-contract";
 import type { AppDeps } from "../../types.js";
 import { ApiError } from "../../errors.js";
@@ -53,10 +54,22 @@ const CHUNK = 8 * 1024 * 1024;
 const PREVIEW_MB = 20;
 const DOWNLOAD_MB = 200;
 const exec = promisify(execFile);
+// User-facing wording: Windows says "PC", as in claude-token.ts.
+const computer = process.platform === "win32" ? "PC" : COMPUTER;
 const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
 // Cloud files must never land in a .git folder, where Git runs hooks and config commands on the Mac.
 // Lowercase and NFC, because macOS treats ".GIT" as ".git".
 const inGit = (path: string) => path.normalize("NFC").toLowerCase().split(/[\\/]/).includes(".git");
+/** Packs the NUL-separated paths on stdin in the cloud. Windows can't make symlinks without Developer Mode, so a Windows
+ *  host gets copies of what changed links point to, and only dangling links are left out. A folder link would arrive
+ *  empty, and a link out of the project would copy cloud files (say, credentials) into it, so either fails the pack with
+ *  its path, like any other unreadable file: Teleport stops and the thread stays in Cloud. */
+export function packChangesCommand(archive: string, windows = process.platform === "win32"): string {
+  if (!windows) return `tar -czf ${archive} --null -T -`;
+  const refuse = (why: string) => `printf '%s ${why}. Remove it in the cloud, then try again. The thread stays in Cloud.\\n' "$f" >&2; exit 3`;
+  const add = `add() { [ -L "$f" ] && [ ! -e "$f" ] && return; if [ -L "$f" ] && [ -d "$f" ]; then ${refuse("is a folder link, which this Windows PC cannot create")}; fi; case "$(realpath -- "$f")" in "$root"/*) ;; *) ${refuse("points outside the project, so Teleport will not copy it to this Windows PC")};; esac; printf '%s\\0' "$f"; }`;
+  return `( set -o pipefail; root=$(pwd -P); ${add}; { while IFS= read -r -d '' f; do if [ -d "$f" ] && [ ! -L "$f" ]; then find "$f" -name .git -prune -o \\( -type f -o -type l \\) -print0 | { while IFS= read -r -d '' f; do add; done; } || exit; else add; fi; done; } | tar -czhf ${archive} --no-recursion --hard-dereference --null -T - )`;
+}
 
 export const teleportingToLocal = (threadId: string) => localTeleports.has(threadId);
 
@@ -141,7 +154,7 @@ function requireThisMac(deps: AppDeps, requested: CreateThreadEnvironmentArgs): 
     : requested.type === "host" ? requested.hostId
     : requested.type === "provider" ? requested.machine && (requested.machine.type === "existing" ? requested.machine.hostId : "new") : undefined;
   if (target !== undefined && target !== resolvePrimaryHostId(deps))
-    throw new ApiError(409, "fork_unavailable", `A Cloud thread forks to Local only on this ${COMPUTER}. Pick a folder or worktree on this ${COMPUTER}.`);
+    throw new ApiError(409, "fork_unavailable", `A Cloud thread forks to Local only on this ${computer}. Pick a folder or worktree on this ${computer}.`);
 }
 
 export async function prepareLocalFork(deps: AppDeps, source: Thread, request: { sourceSeqEnd?: number; environment: CreateThreadEnvironmentArgs }): Promise<{ fork: ThreadForkPoint; environment: CreateThreadEnvironmentArgs; note: PromptInput }> {
@@ -149,7 +162,7 @@ export async function prepareLocalFork(deps: AppDeps, source: Thread, request: {
   const saved = binding(deps.db, source.id);
   const harness = source.providerId as Harness;
   if (!saved?.sessionId || !saved.nativeId || !/^[A-Za-z0-9_-]+$/.test(saved.nativeId) || !FORK_HARNESSES.includes(harness))
-    throw new ApiError(409, "fork_source_unavailable", `Only a started Claude Code or Codex Cloud thread can be forked to this ${COMPUTER}.`);
+    throw new ApiError(409, "fork_source_unavailable", `Only a started Claude Code or Codex Cloud thread can be forked to this ${computer}.`);
   const point = cloudForkPoint(deps.db, source, request.sourceSeqEnd);
   const client = await cloudroom(deps).threadClient(source.id);
   const vmPath = (await vm(client, findNative(harness, saved.nativeId))).toString().trim();
@@ -181,7 +194,7 @@ export async function prepareLocalForkCode(deps: AppDeps, source: Thread, folder
   const code = await landLocalForkCode(deps, client, source, cloud.path, folder ?? await localForkFolder(deps, source), requested);
   return {
     environment: code.environment,
-    note: { type: "text", text: `[Local fork]\nThis conversation was forked from a Cloud thread and now runs on the user's ${COMPUTER}. ${code.note}`, mentions: [], visibility: "agent-only" },
+    note: { type: "text", text: `[Local fork]\nThis conversation was forked from a Cloud thread and now runs on the user's ${computer}. ${code.note}`, mentions: [], visibility: "agent-only" },
   };
 }
 
@@ -191,7 +204,7 @@ async function localForkFolder(deps: AppDeps, source: Thread): Promise<string> {
   if (hostId && project) await ensureProjectCheckoutForThread(deps, { project, hostId });
   return (await localEnvironment(deps, source).catch((error: unknown) => {
     throw error instanceof ApiError && error.body.code === "teleport_unavailable"
-      ? new ApiError(409, "fork_unavailable", `This project has no folder on this ${COMPUTER} and no GitHub repo to clone. Add its folder here, or fork to Cloud.`)
+      ? new ApiError(409, "fork_unavailable", `This project has no folder on this ${computer} and no GitHub repo to clone. Add its folder here, or fork to Cloud.`)
       : error;
   })).path;
 }
@@ -229,7 +242,7 @@ async function landLocalForkCode(deps: AppDeps, client: CloudroomClient, source:
     await fetch().catch(async () => { await exec("git", ["-C", folder, "fetch", "-q", "origin"]).catch(() => {}); await fetch(); });
   } catch (error) {
     const reason = error instanceof Error && "stderr" in error ? String(error.stderr).trim() : "";
-    throw new ApiError(409, "fork_code_unavailable", `The Cloud thread's code could not be copied to this ${COMPUTER}: ${reason || "git fetch failed"}`);
+    throw new ApiError(409, "fork_code_unavailable", `The Cloud thread's code could not be copied to this ${computer}: ${reason || "git fetch failed"}`);
   } finally {
     await rm(temporary, { recursive: true, force: true });
   }
@@ -245,10 +258,10 @@ export async function copyToMac(deps: AppDeps, threadId: string): Promise<{ bran
   const thread = getThread(deps.db, threadId);
   const saved = binding(deps.db, threadId);
   if (!thread || thread.executionTarget !== "cloud" || thread.parentThreadId || thread.deletedAt || !saved?.sessionId)
-    throw new ApiError(409, "copy_unavailable", `Copy to ${COMPUTER} needs a started cloud thread.`);
+    throw new ApiError(409, "copy_unavailable", `Copy to ${computer} needs a started cloud thread.`);
   const environment = await localEnvironment(deps, thread);
   if (await git(environment.path, ["rev-parse", "--git-dir"]) === null)
-    throw new ApiError(409, "copy_unavailable", `This project's folder on this ${COMPUTER} is not a Git repository.`);
+    throw new ApiError(409, "copy_unavailable", `This project's folder on this ${computer} is not a Git repository.`);
   const client = await cloudroom(deps).teleportClient(threadId);
   const cloud = await client.sessionWorkspace(saved.sessionId);
   const folder = await mkdtemp(join(tmpdir(), "cloudroom-copy-"));
@@ -275,7 +288,7 @@ export async function copyToMac(deps: AppDeps, threadId: string): Promise<{ bran
       catch (error) {
         const reason = error instanceof Error && "stderr" in error ? String(error.stderr).trim() : "";
         throw new ApiError(409, "copy_unavailable", /checked out|rejected|non-fast-forward/.test(reason)
-          ? `Your ${COMPUTER}'s ${branch} is checked out or has other commits. Switch branches or rename it, then retry.`
+          ? `Your ${computer}'s ${branch} is checked out or has other commits. Switch branches or rename it, then retry.`
           : `The branch could not be copied: ${reason || "git fetch failed"}`);
       }
       return { branch };
@@ -298,8 +311,8 @@ export async function openOnMac(deps: AppDeps, threadId: string, path: string): 
   let target = join(folder, name);
   for (let copy = 2; existsSync(target); copy++) target = join(folder, `${stem} ${copy}${extname(name)}`);
   await writeFile(target, data, { flag: "wx" });
-  if (process.platform === "linux") spawn("xdg-open", [folder], { detached: true, stdio: "ignore" }).on("error", () => {}).unref();
-  else await exec("open", ["-R", target]);
+  if (process.platform === "darwin") await exec("open", ["-R", target]);
+  else spawn(folderOpenerCommand(), [folder], { detached: true, stdio: "ignore" }).on("error", () => {}).unref();
   return { path: target };
 }
 
@@ -422,7 +435,7 @@ export async function download(client: CloudroomClient, path: string, maxMb = In
   return Buffer.concat(parts);
 }
 
-async function cloudChanges(client: CloudroomClient, workspace: string, localHead: string | null, since: number): Promise<{ archive: Buffer; base: string | null }> {
+export async function cloudChanges(client: CloudroomClient, workspace: string, localHead: string | null, since: number): Promise<{ archive: Buffer; base: string | null }> {
   const head = localHead?.trim();
   const archive = `.cache/cloudroom/teleport-local-${randomUUID()}.tgz`;
   const skipped = [...SKIPPED, ".cloudroom"].map((name) => `-name ${quote(name)}`).join(" -o ");
@@ -432,9 +445,9 @@ async function cloudChanges(client: CloudroomClient, workspace: string, localHea
     "if git rev-parse --git-dir >/dev/null 2>&1; then",
     "  proven=0; base=$(git reflog --format=%H HEAD 2>/dev/null | tail -n 1); [ -n \"$base\" ] || base=HEAD",
     head && /^[0-9a-f]{40,64}$/.test(head) ? `  git cat-file -e '${head}^{commit}' 2>/dev/null && shared=$(git merge-base HEAD ${head} 2>/dev/null) && { base=$shared; proven=1; }` : "",
-    `  { git diff -z --name-only --no-renames --diff-filter=d "$base"; git ls-files -z --others --exclude-standard; } | tar -czf ~/${archive} --null -T - || exit 1`,
+    `  { git diff -z --name-only --no-renames --diff-filter=d "$base"; git ls-files -z --others --exclude-standard; } | ${packChangesCommand(`~/${archive}`)} || exit 1`,
     "else",
-    `  proven=0; find . \\( ${skipped} \\) -prune -o \\( -type f -o -type l \\) -newermt @${Math.floor(since / 1000) - 600} -print0 | tar -czf ~/${archive} --null -T - || exit 1`,
+    `  proven=0; find . \\( ${skipped} \\) -prune -o \\( -type f -o -type l \\) -newermt @${Math.floor(since / 1000) - 600} -print0 | ${packChangesCommand(`~/${archive}`)} || exit 1`,
     "fi",
     `echo "$proven" "$base" ~/${archive}`,
   ].join("\n"))).toString().trim();
@@ -458,18 +471,27 @@ export async function applyChanges(root: string, archive: Buffer, id: string, ba
     const staged = join(folder, "files");
     await writeFile(file, archive);
     await mkdir(staged);
-    await exec("tar", ["-xzf", file, "-C", staged]);
-    const paths = (await exec("tar", ["-tzf", file], { maxBuffer: 64 * 1024 * 1024 })).stdout.split("\n")
+    await exec(tarCommand(), ["-xzf", file, "-C", staged]);
+    const paths = (await exec(tarCommand(), ["-tzf", file], { maxBuffer: 64 * 1024 * 1024 })).stdout.split(process.platform === "win32" ? /\r?\n/ : "\n")
       .map((path) => path.replace(/^\.\//, "")).filter((path) => path && !path.endsWith("/") && !isAbsolute(path) && !path.split("/").includes("..") && !inGit(path));
     const top = (await git(root, ["rev-parse", "--show-toplevel"]))?.trim();
     const dirty = base && top && (await realpath(top).catch(() => null)) === real ? await dirtyPaths(root, base) : null;
+    const keys = await Promise.all(paths.map((path) => landsAt(root, path)));
+    const dirtyKeys = dirty && new Set(await Promise.all([...dirty].map((path) => landsAt(root, path))));
+    const first = new Map<string, string>();
+    for (const [index, key] of keys.entries()) {
+      const other = first.get(key);
+      if (other !== undefined)
+        throw new ApiError(409, "teleport_unavailable", `The cloud files ${other} and ${paths[index]} are the same file on this ${process.platform === "win32" ? "PC" : COMPUTER}. Rename one in the cloud, then try again. The thread stays in Cloud.`);
+      first.set(key, paths[index]!);
+    }
     let conflicts = 0;
-    for (const path of paths) {
+    for (const [index, path] of paths.entries()) {
       const incoming = join(staged, path);
       let target = join(root, path);
       const existing = await lstat(target).catch(() => null);
       if (existing && (await same(incoming, target))) continue;
-      const replace = !existing || (dirty !== null && !dirty.has(path) && !existing.isSymbolicLink());
+      const replace = !existing || (dirtyKeys !== null && !dirtyKeys.has(keys[index]!) && !existing.isSymbolicLink());
       if (!replace || !(await inside(real, target))) {
         target = join(aside, path);
         conflicts++;
@@ -481,6 +503,17 @@ export async function applyChanges(root: string, archive: Buffer, id: string, ba
   } finally {
     await rm(folder, { recursive: true, force: true });
   }
+}
+
+async function landsAt(root: string, path: string): Promise<string> {
+  let folder = join(root, path);
+  const rest: string[] = [];
+  while (!(await lstat(folder).catch(() => null)) && dirname(folder) !== folder) {
+    rest.unshift(basename(folder));
+    folder = dirname(folder);
+  }
+  const real = join(await realpath(folder).catch(() => folder), ...rest);
+  return getHostPathComparisonKey(real) ?? real;
 }
 
 async function inside(root: string, path: string): Promise<boolean> {
@@ -576,7 +609,7 @@ async function installCursor(nativeId: string, archive: Buffer, cwd: string) {
   await mkdir(staged, { recursive: true, mode: 0o700 });
   try {
     await writeFile(`${staged}.tgz`, archive, { mode: 0o600 });
-    await exec("tar", ["-xzf", `${staged}.tgz`, "-C", staged]);
+    await exec(tarCommand(), ["-xzf", `${staged}.tgz`, "-C", staged]);
     const meta = join(staged, "meta.json");
     await writeFile(meta, JSON.stringify({ ...JSON.parse(await readFile(meta, "utf8")), cwd }));
     if (existsSync(target)) await rename(target, `${target}.before-teleport-${Date.now()}`);

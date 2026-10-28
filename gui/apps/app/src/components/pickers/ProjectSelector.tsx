@@ -1,3 +1,4 @@
+import { useThisComputer } from "@/hooks/useHostDaemon";
 import { COMPUTER_TITLE } from "@cloudroom/domain";
 import { useMemo, useRef, useState } from "react";
 import type { RepoSuggestion } from "@cloudroom/sdk/browser";
@@ -375,6 +376,7 @@ function RepoSuggestionsGroup({
   onAdd,
 }: RepoSuggestionsGroupProps) {
   const now = Date.now();
+  const computer = useThisComputer() === "this PC" ? "PC" : COMPUTER_TITLE;
   const emptyMessage = suggestions.isLoading
     ? "Looking for repos…"
     : filter === "github" && !suggestions.githubConnected
@@ -404,7 +406,7 @@ function RepoSuggestionsGroup({
                 aria-hidden
               />
             )}
-            {label}
+            {id === "mac" ? computer : label}
           </button>
         ))}
       </div>

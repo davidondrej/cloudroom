@@ -3,7 +3,11 @@ import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { ROOM_CLI_REEXEC_ENV, maybeReexecViaRoomCli } from "../room-cli-reexec.js";
+import {
+  ROOM_CLI_REEXEC_ENV,
+  maybeReexecViaRoomCli,
+  resolveRoomCliLaunch,
+} from "../room-cli-reexec.js";
 
 describe("maybeReexecViaRoomCli", () => {
   let tempRoot: string;
@@ -87,5 +91,40 @@ describe("maybeReexecViaRoomCli", () => {
       reexec,
     });
     expect(reexec).not.toHaveBeenCalled();
+  });
+});
+
+describe("resolveRoomCliLaunch", () => {
+  it("runs an extensionless ROOM_CLI script through Node on Windows", () => {
+    expect(
+      resolveRoomCliLaunch({
+        argv: ["status"],
+        nodePath: "C:\\node\\node.exe",
+        platform: "win32",
+        target: "C:\\cloudroom\\host-daemon\\dist\\room-cli",
+      }),
+    ).toEqual({
+      command: "C:\\node\\node.exe",
+      args: ["C:\\cloudroom\\host-daemon\\dist\\room-cli", "status"],
+    });
+  });
+
+  it("executes ROOM_CLI directly when the platform can run it", () => {
+    expect(
+      resolveRoomCliLaunch({
+        argv: ["status"],
+        nodePath: "C:\\node\\node.exe",
+        platform: "win32",
+        target: "C:\\tools\\room-cli.exe",
+      }),
+    ).toEqual({ command: "C:\\tools\\room-cli.exe", args: ["status"] });
+    expect(
+      resolveRoomCliLaunch({
+        argv: ["status"],
+        nodePath: "/usr/bin/node",
+        platform: "darwin",
+        target: "/opt/cloudroom/host-daemon/dist/room-cli",
+      }),
+    ).toEqual({ command: "/opt/cloudroom/host-daemon/dist/room-cli", args: ["status"] });
   });
 });

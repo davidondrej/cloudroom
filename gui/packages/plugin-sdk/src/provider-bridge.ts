@@ -281,7 +281,8 @@ export { spawnPortableProcess as experimental_spawnPortableProcess } from "@clou
  * Ends a child started with `experimental_spawnPortableProcess`. On Windows it
  * terminates the child's whole process tree, because an npm `.cmd` shim makes
  * the child a `cmd.exe` wrapper and Windows delivers no signals; elsewhere it
- * sends `signal` to the child. Use it in place of `child.kill(signal)`.
+ * sends `signal` to the child. Use it in place of `child.kill(signal)`. Only
+ * a Windows stop whose tree is seen to end resolves "confirmed".
  */
 export { killPortableProcess as experimental_killPortableProcess } from "@cloudroom/process-utils";
 

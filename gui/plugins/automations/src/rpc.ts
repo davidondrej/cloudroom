@@ -19,10 +19,12 @@ import {
   updateAutomationInputSchema,
 } from "./rpc-types.js";
 import { z } from "zod";
+import { PERSONAL_PROJECT_ID } from "@cloudroom/domain";
 import { defineRpcContract, type BbPluginApi } from "@get-bb/plugin-sdk";
 import type { AutomationService } from "./service.js";
 import type { Db } from "./data.js";
 import { cloudLoopUsage, localLoopUsage } from "./usage.js";
+import { agentSessions, agentSessionsSchema } from "./agent-sessions.js";
 
 const cloudAutomationInputSchema = z
   .object({
@@ -130,6 +132,14 @@ export const automationRpcContract = defineRpcContract({
   account_plan: {
     input: z.null(),
     output: z.object({ plan: z.string().nullable() }).strict(),
+  },
+  scans_agent_sessions: {
+    input: z.null(),
+    output: agentSessionsSchema,
+  },
+  scans_start: {
+    input: z.null(),
+    output: z.object({ threadId: z.string() }).strict(),
   },
 });
 
@@ -251,6 +261,9 @@ export async function cloudTemplateHost(
   }
 }
 
+const connected = (auth: { state: string } | null) =>
+  auth?.state === "connected" || auth?.state === "limited";
+
 export function createRpcHandlers(
   service: AutomationService,
   sdk?: Sdk,
@@ -291,6 +304,32 @@ export function createRpcHandlers(
         reasoning: input.reasoningLevel,
         priority: input.priority,
       });
+    },
+    scans_agent_sessions() {
+      return agentSessions();
+    },
+    async scans_start() {
+      if (!sdk) throw new Error("Scans are unavailable.");
+      const [claude, codex] = await Promise.all([
+        sdk.cloudroom.claudeAuth().catch(() => null),
+        sdk.cloudroom.codexAuth().catch(() => null),
+      ]);
+      const lead =
+        !connected(claude) && connected(codex)
+          ? { providerId: "codex", model: "gpt-6.1-sol" }
+          : { providerId: "claude-code", model: "claude-opus-5-5" };
+      const thread = z.object({ id: z.string() }).passthrough().parse(
+        await sdk.threads.spawn({
+          projectId: PERSONAL_PROJECT_ID,
+          executionTarget: "local",
+          environment: { type: "project-default" },
+          ...lead,
+          reasoningLevel: "xhigh",
+          title: "Workflow scan",
+          prompt: "Scan my workflow. Follow the workflow-scan skill.",
+        }),
+      );
+      return { threadId: thread.id };
     },
     async account_plan() {
       const status = await sdk?.cloudroom.status().catch(() => null);

@@ -257,6 +257,12 @@ export function buildApplicationMenuTemplate(
         { role: "zoomIn" },
         { role: "zoomOut" },
         ...(args.isLinux ? LINUX_EXTRA_ZOOM_ITEMS : []),
+        ...(args.isMac || args.isLinux
+          ? []
+          : [
+              { type: "separator" as const },
+              { role: "togglefullscreen" as const },
+            ]),
         ...createServerDaemonLogsMenuItems(args),
       ],
     },

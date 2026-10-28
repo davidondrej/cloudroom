@@ -246,6 +246,12 @@
       "outputs": ["release.noindex/**"],
       "passThroughEnv": ["*"]
     },
+    "@cloudroom/desktop#desktop:build:win": {
+      "dependsOn": ["bb-app#build", "@cloudroom/desktop#build"],
+      "cache": false,
+      "outputs": ["release.noindex/**"],
+      "passThroughEnv": ["*"]
+    },
     "@cloudroom/desktop#install:macos": {
       "cache": false,
       "outputs": []
@@ -267,6 +273,12 @@
       "passThroughEnv": ["*"]
     },
     "@cloudroom/desktop#package:linux": {
+      "dependsOn": [],
+      "cache": false,
+      "outputs": ["release.noindex/**"],
+      "passThroughEnv": ["*"]
+    },
+    "@cloudroom/desktop#package:win": {
       "dependsOn": [],
       "cache": false,
       "outputs": ["release.noindex/**"],
@@ -681,6 +693,11 @@
     },
     "smoke:tarball": {
       "dependsOn": ["build"],
+      "cache": false,
+      "outputs": []
+    },
+    "smoke:boot": {
+      "dependsOn": ["build", "//#ensure-native-modules"],
       "cache": false,
       "outputs": []
     },

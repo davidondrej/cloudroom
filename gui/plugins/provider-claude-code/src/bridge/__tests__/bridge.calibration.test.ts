@@ -233,6 +233,7 @@ function createScriptedClaudeQuery(call: ScriptedClaudeQueryCall) {
     }),
     initializationResult: vi.fn(),
     interrupt: vi.fn(async () => {}),
+    mcpServerStatus: vi.fn(async () => []),
     setModel: vi.fn(async () => {}),
     setPermissionMode: vi.fn(async () => {}),
     [Symbol.asyncIterator]() {

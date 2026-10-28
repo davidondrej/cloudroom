@@ -18,6 +18,13 @@ const archives = [
   ["git-build-source.tar.gz", "https://github.com/desktop/dugite-native/archive/refs/tags/v2.53.0-4.tar.gz", "6600bdf3c7e2cbb127ac63d9d38da3a91267610c6034ecb8ff73e94f89508f33"],
   ["cacert.pem", "https://curl.se/ca/cacert-2026-10-20.pem", "796f1389bfea13c0ed78f663b765baaff54a508e5483786bd6ece73c5e3e3cbe"],
 ];
+// Windows bundles only Python; Git for Windows is required instead (scope decision, #323).
+const windowsArchives = [
+  ["python-windows.tar.gz", pythonRelease + "cpython-3.12.13+20260510-x86_64-pc-windows-msvc-install_only_stripped.tar.gz", "24168aff2e7d93784c6a436124c4ebb79b076a4e289bde4902c08333507b71d0"],
+  ["python-windows-full.tar.zst", pythonRelease + "cpython-3.12.13+20260510-x86_64-pc-windows-msvc-pgo-full.tar.zst", "e6dd25775677966bde76d1764cabd81be87611cbe5c3ce0a91b69ee1ac686a3d"],
+  archives.at(-1),
+];
+const pythonCheck = "import ssl, sqlite3, sys, tomllib; assert ssl.create_default_context(cafile=sys.prefix + '/cacert.pem').cert_store_stats()['x509_ca'] > 100";
 
 async function checksum(path) {
   const hash = createHash("sha256");
@@ -43,7 +50,20 @@ async function download([name, url, sha256]) {
   }
 }
 
+async function prepareWindowsPython() {
+  await mkdir(root, { recursive: true });
+  await Promise.all(windowsArchives.map(download));
+  await rm(join(root, "python"), { recursive: true, force: true });
+  const tar = join(process.env.SystemRoot ?? "C:\\Windows", "System32", "tar.exe");
+  execFileSync(tar, ["-xf", join(root, "python-windows.tar.gz"), "-C", root]);
+  execFileSync(tar, ["-xf", join(root, "python-windows-full.tar.zst"), "-C", root, "python/licenses"]);
+  await cp(join(root, "cacert.pem"), join(root, "python/cacert.pem"));
+  execFileSync(join(root, "python/python.exe"), ["-I", "-B", "-c", pythonCheck], { stdio: "inherit" });
+  console.log("Bundled Python 3.12.13 for Windows x64: checksums verified; licenses included.");
+}
+
 export async function prepareRuntimes() {
+  if (process.platform === "win32" && process.arch === "x64") return prepareWindowsPython();
   if (process.platform !== "darwin" || process.arch !== "arm64") {
     throw new Error("Bundled runtimes require an Apple Silicon macOS build host.");
   }
@@ -74,7 +94,7 @@ export async function prepareRuntimes() {
   await writeFile(join(git, "COPYING"), execFileSync("/usr/bin/tar", ["-xOf", join(root, "git-source.tar.gz"), `git-${gitCommit}/COPYING`]));
   await writeFile(join(git, "sources/BUILD.txt"), "Git 2.53.0, unmodified core binaries from desktop/dugite-native v2.53.0-4.\nCorresponding Git sources and compilation scripts are included here.\nGit LFS and Git Credential Manager are not bundled.\n");
   await rm(staging, { recursive: true, force: true });
-  execFileSync(join(root, "python/bin/python3"), ["-I", "-B", "-c", "import ssl, sqlite3, sys, tomllib; assert ssl.create_default_context(cafile=sys.prefix + '/cacert.pem').cert_store_stats()['x509_ca'] > 100"], { stdio: "inherit" });
+  execFileSync(join(root, "python/bin/python3"), ["-I", "-B", "-c", pythonCheck], { stdio: "inherit" });
   execFileSync(join(git, "bin/git"), ["--version"], { stdio: "inherit" });
   console.log("Bundled Python 3.12.13 and Git 2.53.0: checksums verified; licenses and Git sources included.");
 }

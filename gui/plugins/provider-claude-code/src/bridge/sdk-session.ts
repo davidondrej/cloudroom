@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { type ChildProcess, spawn } from "node:child_process";
 import {
   query,
   type CanUseTool,
@@ -13,7 +13,9 @@ import {
 } from "@anthropic-ai/claude-agent-sdk";
 import {
   experimental_isProviderBridgeRecording,
+  experimental_killPortableProcess,
   experimental_recordProviderChildIo,
+  experimental_spawnPortableProcess,
 } from "@get-bb/plugin-sdk/provider-bridge";
 import type { ClaudePermissionMode } from "../interactive-contract.js";
 import {
@@ -89,6 +91,8 @@ interface BuildSdkDoneErrorMessageArgs {
 }
 
 const SDK_STDERR_TAIL_MAX_CHARS = 4_000;
+const MCP_RECONNECT_MIN_COOLDOWN_MS = 60_000;
+const MCP_RECONNECT_COOLDOWN_ATTEMPT_MULTIPLIER = 10;
 
 function isCurrentProcessRoot(): boolean {
   return process.getuid?.() === 0;
@@ -118,23 +122,96 @@ function buildSdkDoneErrorMessage(args: BuildSdkDoneErrorMessageArgs): string {
   return `${errorMessage}\n\nClaude Code stderr:\n${stderrTail}`;
 }
 
-function spawnRecordedClaudeProcess(args: {
+function spawnClaudeProcess(args: {
+  onSpawn?: (child: ChildProcess) => void;
   onStderr: (data: string) => void;
+  record: boolean;
   spawnOptions: SpawnOptions;
   threadId: string | null;
 }): SpawnedProcess {
-  const child = spawn(args.spawnOptions.command, args.spawnOptions.args, {
-    cwd: args.spawnOptions.cwd,
-    env: args.spawnOptions.env,
-    signal: args.spawnOptions.signal,
-    stdio: ["pipe", "pipe", "pipe"],
-    windowsHide: true,
-  });
+  const { command, cwd, env, signal } = args.spawnOptions;
+  // On Windows, Claude runs through the portable launcher (npm `.cmd` shims
+  // work), and stopping it ends its whole process tree, so tool shells and
+  // MCP servers don't outlive the thread. Ported from get-bb/bb#4661.
+  const windows = process.platform === "win32";
+  const child = windows
+    ? experimental_spawnPortableProcess({
+        command,
+        args: args.spawnOptions.args,
+        cwd,
+        env,
+        stdio: ["pipe", "pipe", "pipe"],
+        windowsHide: true,
+      })
+    : spawn(command, args.spawnOptions.args, {
+        cwd,
+        env,
+        signal,
+        stdio: ["pipe", "pipe", "pipe"],
+        windowsHide: true,
+      });
   child.stderr?.setEncoding("utf8").on("data", (data: string) => {
     args.onStderr(data);
   });
-  experimental_recordProviderChildIo(child, { threadId: args.threadId });
-  return child as SpawnedProcess;
+  if (args.record) {
+    experimental_recordProviderChildIo(child, { threadId: args.threadId });
+  }
+  if (!windows) return child as SpawnedProcess;
+  args.onSpawn?.(child);
+  signal.addEventListener("abort", () => void stopClaudeTree(child), {
+    once: true,
+  });
+  return new Proxy(child, {
+    get: (target, property) =>
+      property === "kill"
+        ? () => {
+            void stopClaudeTree(target);
+            return true;
+          }
+        : Reflect.get(target, property, target),
+  }) as SpawnedProcess;
+}
+
+type ClaudeTreeStop = ReturnType<typeof experimental_killPortableProcess>;
+
+const claudeTreeStops = new WeakMap<ChildProcess, ClaudeTreeStop>();
+
+function stopClaudeTree(child: ChildProcess): ClaudeTreeStop {
+  let stop = claudeTreeStops.get(child);
+  if (!stop) {
+    stop = experimental_killPortableProcess(child, "SIGTERM").then((result) => {
+      if (result.treeTermination !== "confirmed") {
+        claudeTreeStops.delete(child);
+      }
+      return result;
+    });
+    claudeTreeStops.set(child, stop);
+  }
+  return stop;
+}
+
+/**
+ * The SDK spawn hook Claude needs: always on Windows (portable launch and
+ * tree kill), and when recording provider I/O. Empty otherwise, so macOS and
+ * Linux keep the SDK's own spawn.
+ */
+export function claudeSpawnOptions(args: {
+  onSpawn?: (child: ChildProcess) => void;
+  onStderr: (data: string) => void;
+  record: boolean;
+  threadId: () => string | null;
+}): Pick<Options, "spawnClaudeCodeProcess"> {
+  if (!args.record && process.platform !== "win32") return {};
+  return {
+    spawnClaudeCodeProcess: (spawnOptions: SpawnOptions) =>
+      spawnClaudeProcess({
+        onSpawn: args.onSpawn,
+        onStderr: args.onStderr,
+        record: args.record,
+        spawnOptions,
+        threadId: args.threadId(),
+      }),
+  };
 }
 
 function buildSdkPermissionOptions(
@@ -167,6 +244,11 @@ export class SdkSession {
   private readonly completion: Promise<void>;
   private complete: (() => void) | null = null;
   private stderrTail = "";
+  /** Windows only: Claude's launcher, whose tree a stop ends first. */
+  private windowsChild: ChildProcess | null = null;
+  private stopping = false;
+  private mcpReconnecting = false;
+  private readonly mcpRetryAt = new Map<string, number>();
 
   constructor(
     private readonly options: SdkSessionOptions,
@@ -183,7 +265,7 @@ export class SdkSession {
   }
 
   canPushInput(): boolean {
-    return !this.inputDone;
+    return !this.inputDone && !this.stopping;
   }
 
   async setPermissionMode(mode: ClaudePermissionMode): Promise<void> {
@@ -198,6 +280,45 @@ export class SdkSession {
   async setModel(model: string | undefined): Promise<void> {
     await this.query?.setModel(model);
     this.options.model = model;
+  }
+
+  async reconnectFailedMcpServers(): Promise<void> {
+    const q = this.query;
+    if (!q || this.mcpReconnecting) return;
+    this.mcpReconnecting = true;
+    let reconnects: Promise<void>[] = [];
+    try {
+      const now = Date.now();
+      reconnects = (await q.mcpServerStatus())
+        .filter(
+          (server) =>
+            server.status === "failed" &&
+            now >= (this.mcpRetryAt.get(server.name) ?? 0),
+        )
+        .map((server) => this.reconnectMcpServer(q, server.name));
+    } finally {
+      void Promise.all(reconnects).then(() => {
+        this.mcpReconnecting = false;
+      });
+    }
+  }
+
+  private async reconnectMcpServer(q: Query, name: string): Promise<void> {
+    const startedAt = Date.now();
+    try {
+      await q.reconnectMcpServer(name);
+      this.mcpRetryAt.delete(name);
+    } catch {
+      const failedAt = Date.now();
+      this.mcpRetryAt.set(
+        name,
+        failedAt +
+          Math.max(
+            MCP_RECONNECT_MIN_COOLDOWN_MS,
+            MCP_RECONNECT_COOLDOWN_ATTEMPT_MULTIPLIER * (failedAt - startedAt),
+          ),
+      );
+    }
   }
 
   async applyMutableSettings(args: {
@@ -238,16 +359,14 @@ export class SdkSession {
       cwd: this.options.cwd,
       systemPrompt: this.options.systemPrompt,
       ...permissionOptions,
-      ...(experimental_isProviderBridgeRecording()
-        ? {
-            spawnClaudeCodeProcess: (spawnOptions: SpawnOptions) =>
-              spawnRecordedClaudeProcess({
-                onStderr,
-                spawnOptions,
-                threadId: recordThreadId?.() ?? null,
-              }),
-          }
-        : {}),
+      ...claudeSpawnOptions({
+        onSpawn: (child) => {
+          this.windowsChild = child;
+        },
+        onStderr,
+        record: experimental_isProviderBridgeRecording(),
+        threadId: () => recordThreadId?.() ?? null,
+      }),
       includePartialMessages: true,
       settingSources: ["user", "project", "local"],
       persistSession: true,
@@ -314,7 +433,7 @@ export class SdkSession {
       ...(promptId !== undefined ? { uuid: promptId } : {}),
     };
 
-    if (this.inputDone) {
+    if (this.inputDone || this.stopping) {
       return Promise.reject(new Error("Claude SDK input stream is closed"));
     }
 
@@ -341,7 +460,36 @@ export class SdkSession {
     return consumed;
   }
 
-  stop(): void {
+  /**
+   * On Windows, Claude's whole tree ends before its stdin closes: once Claude
+   * exits, taskkill can no longer find the tool shells it left behind.
+   */
+  stop(): Promise<void> {
+    if (process.platform !== "win32") {
+      this.endSession();
+      return Promise.resolve();
+    }
+    return this.stopWindowsTree();
+  }
+
+  private async stopWindowsTree(): Promise<void> {
+    this.stopping = true;
+    this.rejectQueuedInputs("Claude SDK session stopped before input consumed");
+    const child = this.windowsChild;
+    let stopped: Awaited<ClaudeTreeStop> = { treeTermination: "confirmed" };
+    try {
+      if (child) stopped = await stopClaudeTree(child);
+    } finally {
+      this.endSession();
+    }
+    if (stopped.treeTermination !== "confirmed") {
+      throw new Error(
+        "Claude stopped, but Cloudroom could not confirm its tool processes ended. Some may still be running.",
+      );
+    }
+  }
+
+  private endSession(): void {
     this.inputDone = true;
     this.rejectQueuedInputs("Claude SDK session stopped before input consumed");
     this.resolveInputDone();
@@ -351,6 +499,10 @@ export class SdkSession {
   }
 
   async closeGracefully(timeoutMs: number): Promise<void> {
+    if (process.platform === "win32") {
+      await this.stop();
+      return;
+    }
     this.inputDone = true;
     this.rejectQueuedInputs("Claude SDK session closed before input consumed");
     this.resolveInputDone();
@@ -374,7 +526,7 @@ export class SdkSession {
         }),
       ]);
     } catch {
-      this.stop();
+      void this.stop();
     } finally {
       if (timeout) {
         clearTimeout(timeout);

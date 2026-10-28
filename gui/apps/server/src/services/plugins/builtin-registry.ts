@@ -128,7 +128,7 @@ export const BUILTIN_PLUGINS = [
   {
     name: "computer-use",
     pluginId: "computer-use",
-    defaultEnabled: true,
+    defaultEnabled: process.platform !== "win32",
   },
   {
     name: "keep-awake",

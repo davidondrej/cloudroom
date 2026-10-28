@@ -67,7 +67,7 @@ describe("room-cli thread tell command output", () => {
     await runCommand(["thread", "tell", "thread-blocked", "hello"], register);
 
     expect(vi.mocked(console.log).mock.calls[0]?.[0]).toBe(
-      "Thread thread-blocked message queued (waiting for a pending interaction); it dispatches when that clears",
+      "Thread thread-blocked message queued (waiting for a pending interaction); it dispatches when that clears unless Stop pauses the queue, then run `room-cli thread queue send thread-blocked qm_1`",
     );
   });
 
@@ -90,7 +90,7 @@ describe("room-cli thread tell command output", () => {
     await runCommand(["thread", "tell", "thread-limited", "hello"], register);
 
     expect(vi.mocked(console.log).mock.calls[0]?.[0]).toBe(
-      "Thread thread-limited message queued (concurrency-limit: 4 of 4 running); it dispatches when that clears",
+      "Thread thread-limited message queued (concurrency-limit: 4 of 4 running); it dispatches when that clears unless Stop pauses the queue, then run `room-cli thread queue send thread-limited qm_2`",
     );
   });
 

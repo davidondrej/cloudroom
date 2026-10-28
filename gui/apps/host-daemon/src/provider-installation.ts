@@ -1,4 +1,9 @@
 import { PassThrough, type Readable } from "node:stream";
+import {
+  normalizeWindowsEnv,
+  preparePortablePtyCommand,
+  resolvePortableCommand,
+} from "@cloudroom/process-utils";
 import type { ProviderInstallationCommand } from "@cloudroom/provider-bridge-protocol";
 import {
   providerCliInstallEventSchema,
@@ -45,16 +50,36 @@ export class ProviderInstallationInProgressError extends Error {
   }
 }
 
+function windowsPtyLaunch(
+  command: string,
+  args: string[],
+  cwd: string,
+  inheritedEnv: NodeJS.ProcessEnv,
+): { command: string; args: string[] | string; env: NodeJS.ProcessEnv } {
+  const env = normalizeWindowsEnv(inheritedEnv);
+  const resolved = resolvePortableCommand(command, { cwd, env });
+  if (resolved === undefined) {
+    throw new Error(`Command not found: ${command}`);
+  }
+  return { ...preparePortablePtyCommand({ command: resolved, args, cwd, env }), env };
+}
+
 function createPtyProviderInstallationProcessSpawner(): ProviderInstallationProcessSpawner {
   return {
     spawn(args) {
       const stdout = new PassThrough();
       const stderr = new PassThrough();
+      const cwd = process.cwd();
+      const env = args.env ?? process.env;
+      const launch =
+        process.platform === "win32"
+          ? windowsPtyLaunch(args.command, args.args, cwd, env)
+          : { command: args.command, args: args.args, env };
       ensureNodePtySpawnHelperExecutable(nodePtyLogger);
-      const pty = spawnPty(args.command, args.args, {
+      const pty = spawnPty(launch.command, launch.args, {
         cols: 120,
-        cwd: process.cwd(),
-        env: args.env ?? process.env,
+        cwd,
+        env: launch.env,
         name: "xterm-256color",
         rows: 30,
       });

@@ -1,11 +1,13 @@
 import { COMPUTER } from "@cloudroom/domain";
 import { execFile } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
+import { readFile, rm } from "node:fs/promises";
 import { basename } from "node:path";
 import { promisify } from "node:util";
 import { and, asc, eq } from "drizzle-orm";
 import { events, findLastCompletedRootStoredTurn, findLastRootStoredTurnStarted, getEnvironment, getThread, listStoredTurnCompletedRowsByTurnIds, type DbConnection } from "@cloudroom/db";
 import type { Thread } from "@cloudroom/domain";
+import { gitShell, msysPathToWindows } from "@cloudroom/process-utils";
 import { z } from "zod";
 import type { AppDeps } from "../../types.js";
 import { ApiError } from "../../errors.js";
@@ -290,10 +292,21 @@ export async function sourceCode(from: CloudroomClient, workspace: string, id: s
 
 async function localCode(workspace: string, id: string): Promise<Code | null> {
   if (await exec("git", ["-C", workspace, "rev-parse", "-q", "--verify", "HEAD"]).then(() => false, () => true)) return null;
+  if (process.platform === "win32") return windowsLocalCode(workspace, id);
   return packCode({
     run: async (script) => (await exec("sh", ["-c", script], { maxBuffer: 1024 * 1024 })).stdout,
     read: async (path) => (await exec("cat", [path], { encoding: "buffer", maxBuffer: 1024 * 1024 * 1024 })).stdout,
     remove: (path) => exec("rm", ["-f", path]),
+  }, workspace, id);
+}
+
+/** Windows runs the same script with Git for Windows' shell, which prints MSYS paths such as `/c/Users/…`. */
+async function windowsLocalCode(workspace: string, id: string): Promise<Code | null> {
+  const shell = await gitShell();
+  return packCode({
+    run: async (script) => (await exec(shell.command, ["-c", script], { env: shell.env, maxBuffer: 1024 * 1024 })).stdout,
+    read: (path) => readFile(msysPathToWindows(path)),
+    remove: (path) => rm(msysPathToWindows(path), { force: true }),
   }, workspace, id);
 }
 

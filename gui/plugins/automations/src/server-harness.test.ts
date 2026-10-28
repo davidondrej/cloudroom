@@ -41,6 +41,8 @@ const rpcMethods = [
   "cloud_automations",
   "cloud_template_add",
   "account_plan",
+  "scans_agent_sessions",
+  "scans_start",
 ].sort();
 
 function project(projectId = PROJECT_ID) {

@@ -34,6 +34,7 @@ const hostCommandWakePolicy = {
   "host.list_files": "work",
   "host.list_paths": "work",
   "host.mkdir": "work",
+  "claude.setup_token": "work",
   "host.move_path": "work",
   "host.remove_path": "work",
   "host.browse_directory": "work",

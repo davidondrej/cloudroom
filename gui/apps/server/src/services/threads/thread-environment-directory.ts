@@ -9,7 +9,13 @@ import {
   getThread,
   updateThread,
 } from "@cloudroom/db";
-import { turnScope } from "@cloudroom/domain";
+import {
+  canonicalizeHostPath,
+  isAbsoluteHostPath,
+  isHostPathRoot,
+  turnScope,
+  type HostPathFlavor,
+} from "@cloudroom/domain";
 import type { DynamicTool, Thread, ToolCallResponse } from "@cloudroom/domain";
 import type { AppDeps } from "../../types.js";
 import { runLiveHostCommand } from "../hosts/live-command.js";
@@ -17,6 +23,10 @@ import { appendThreadEventInTransaction } from "./thread-events.js";
 import { buildEnvironmentProvisionCommand } from "./thread-create-helpers.js";
 import { findHostDataDir } from "../lib/entity-lookup.js";
 import { foreignProviderOwnedPathRefusal } from "./workspace-path-claims.js";
+import {
+  getHostPathFlavorForHost,
+  invalidHostPathMessage,
+} from "../lib/host-path.js";
 
 export const UPDATE_ENVIRONMENT_DIRECTORY_TOOL_NAME =
   "update_environment_directory";
@@ -86,19 +96,25 @@ function toolCallSuccess(text: string): ToolCallResponse {
   return toolCallTextResponse(true, text);
 }
 
-function normalizeDirectoryPath(path: string): string {
+function normalizeDirectoryPath(
+  path: string,
+  flavor: HostPathFlavor,
+): string {
   const trimmed = path.trim();
-  if (trimmed === "/") {
-    return trimmed;
+  if (flavor === "windows") {
+    return canonicalizeHostPath(trimmed, flavor);
   }
-  return trimmed.replace(/\/+$/u, "");
+  return trimmed === "/" ? trimmed : trimmed.replace(/\/+$/u, "");
 }
 
-function validateDirectoryPath(path: string): string | null {
-  if (!path.startsWith("/")) {
-    return "Path must be an absolute path on the current host.";
+function validateDirectoryPath(
+  path: string,
+  flavor: HostPathFlavor,
+): string | null {
+  if (!isAbsoluteHostPath(path, flavor)) {
+    return invalidHostPathMessage(flavor);
   }
-  if (path === "/") {
+  if (flavor === "windows" ? isHostPathRoot(path) : path === "/") {
     return "Path must name a project directory, not the filesystem root.";
   }
   if (path.includes("\0")) {
@@ -269,8 +285,9 @@ export async function handleUpdateEnvironmentDirectoryToolCall(
     );
   }
 
-  const normalizedPath = normalizeDirectoryPath(input.data.path);
-  const pathFailure = validateDirectoryPath(normalizedPath);
+  const flavor = getHostPathFlavorForHost(deps, args.currentEnvironment.hostId);
+  const normalizedPath = normalizeDirectoryPath(input.data.path, flavor);
+  const pathFailure = validateDirectoryPath(normalizedPath, flavor);
   if (pathFailure) {
     return toolCallFailure(pathFailure);
   }

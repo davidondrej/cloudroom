@@ -21,7 +21,11 @@ type Context = { threadId: string; projectId: string };
 export function cloudroomSystemPrompt(db: DbConnection): string | undefined {
   const settings = getAppSettings(db);
   return settings.systemPromptEnabled
-    ? renderTemplate("standardAgentAppendInstructions", { bugReports: settings.bugReportsEnabled ? "on" : "" })
+    ? renderTemplate("standardAgentAppendInstructions", {
+        bugReports: settings.bugReportsEnabled ? "on" : "",
+        mac: process.platform === "win32" ? "" : "on",
+        windows: process.platform === "win32" ? "on" : "",
+      })
     : undefined;
 }
 type Input = { input: PromptInput[]; inputGroups?: PromptInput[][] };

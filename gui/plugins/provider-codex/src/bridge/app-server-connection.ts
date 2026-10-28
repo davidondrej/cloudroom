@@ -1,12 +1,22 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { createInterface, type Interface } from "node:readline";
-import { experimental_recordProviderChildIo } from "@get-bb/plugin-sdk/provider-bridge";
+import {
+  experimental_killPortableProcess,
+  experimental_recordProviderChildIo,
+  experimental_spawnPortableProcess,
+} from "@get-bb/plugin-sdk/provider-bridge";
 import type { z } from "zod";
 
 const STDERR_TAIL_MAX_CHUNKS = 40;
 const CLOSE_AFTER_EXIT_GRACE_MS = 1_000;
 const KILL_ESCALATION_MS = 4_000;
-const CLOSED_STDIN_ERROR_CODES = new Set(["EPIPE", "ERR_STREAM_DESTROYED"]);
+// Same codes as process-utils' isClosedPipeError. Plugins only see the plugin
+// SDK (pinned to BB's 0.6.49), so this is a copy. Windows reports EOF.
+const CLOSED_STDIN_ERROR_CODES = new Set([
+  "EPIPE",
+  "ERR_STREAM_DESTROYED",
+  ...(process.platform === "win32" ? ["EOF"] : []),
+]);
 
 export interface CodexAppServerRequestResponder {
   result(value: unknown): void;
@@ -100,11 +110,21 @@ function isClosedChildStdinError(error: Error): boolean {
 export function createCodexAppServerConnection(
   options: CreateCodexAppServerConnectionOptions,
 ): CodexAppServerConnection {
-  const child: ChildProcess = spawn(options.command, options.args, {
-    cwd: options.cwd,
-    env: options.env,
-    stdio: ["pipe", "pipe", "pipe"],
-  });
+  const child: ChildProcess =
+    process.platform === "win32"
+      ? experimental_spawnPortableProcess({
+          command: options.command,
+          args: options.args,
+          cwd: options.cwd,
+          env: options.env,
+          stdio: ["pipe", "pipe", "pipe"],
+          windowsHide: true,
+        })
+      : spawn(options.command, options.args, {
+          cwd: options.cwd,
+          env: options.env,
+          stdio: ["pipe", "pipe", "pipe"],
+        });
   experimental_recordProviderChildIo(child, {
     threadId: options.recordThreadId,
   });
@@ -151,11 +171,11 @@ export function createCodexAppServerConnection(
     killStarted = true;
     const escalation = setTimeout(() => {
       if (!finalized) {
-        child.kill("SIGKILL");
+        experimental_killPortableProcess(child, "SIGKILL");
       }
     }, KILL_ESCALATION_MS);
     escalation.unref?.();
-    child.kill("SIGTERM");
+    experimental_killPortableProcess(child, "SIGTERM");
     return exitPromise;
   }
 
@@ -171,7 +191,7 @@ export function createCodexAppServerConnection(
     stdinFailure = new CodexAppServerExitedError(`codex app-server ${detail}`);
     pushStderrChunk(detail);
     killStarted = true;
-    child.kill("SIGKILL");
+    experimental_killPortableProcess(child, "SIGKILL");
   }
 
   function writeLine(message: object): void {

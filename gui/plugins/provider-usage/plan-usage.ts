@@ -13,33 +13,25 @@ export interface PlanSummary {
   meters: PlanMeter[];
 }
 
-const agentsAndHoursSchema = z.object({
+// Cloud Credits in the rolling 30 days (ADR 0307); null credits while metering is stale.
+const creditsSchema = z.object({
   plan: z.string(),
-  agents: z.number(),
-  agentsLimit: z.number(),
-  cpuHours: z.nullable(z.number()),
-  cpuHoursLimit: z.number(),
+  credits: z.nullable(z.number()),
+  creditsLimit: z.number(),
 });
 
-export function fromAgentsAndHours(
-  usage: z.infer<typeof agentsAndHoursSchema>,
-): PlanSummary {
+export function fromCredits(usage: z.infer<typeof creditsSchema>): PlanSummary {
   return {
     plan: usage.plan,
     period: "last 30 days",
-    meters: [
-      ...(usage.agentsLimit >= Number.MAX_SAFE_INTEGER
-        ? []
-        : [{ label: "agents", used: usage.agents, limit: usage.agentsLimit, unit: "" }]),
-      ...(usage.cpuHours === null
-        ? []
-        : [{ label: "hours", used: usage.cpuHours, limit: usage.cpuHoursLimit, unit: "h" }]),
-    ],
+    meters: usage.credits === null
+      ? []
+      : [{ label: "credits", used: usage.credits, limit: usage.creditsLimit, unit: " credits" }],
   };
 }
 
 const accountStatusSchema = z.object({
-  planUsage: z.optional(z.nullable(agentsAndHoursSchema)),
+  planUsage: z.optional(z.nullable(creditsSchema)),
 });
 
 export async function loadPlanSummary(
@@ -49,7 +41,7 @@ export async function loadPlanSummary(
   if (!response.ok) throw new Error(`Plan usage returned HTTP ${response.status}.`);
   const parsed = accountStatusSchema.safeParse(await response.json());
   const usage = parsed.success ? parsed.data.planUsage : null;
-  return usage ? fromAgentsAndHours(usage) : null;
+  return usage ? fromCredits(usage) : null;
 }
 
 export function planMeterPercent(meter: PlanMeter): number {

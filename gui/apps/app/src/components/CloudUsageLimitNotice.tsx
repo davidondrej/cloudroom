@@ -16,12 +16,12 @@ async function askForMoreUsage() {
 
 /** The next plan up at a cloud limit (docs/scopes/pricing.md). Ultra has none, so it only asks the team. */
 const UPGRADES: Record<string, { name: string; price: string; pitch: string }> = {
-  free: { name: "Pro", price: "$50/mo", pitch: "Pro gives you unlimited cloud agents and 10× more agent hours." },
-  pro: { name: "Super", price: "$150/mo", pitch: "Super gives you 3× more agent hours." },
-  super: { name: "Ultra", price: "$500/mo", pitch: "Ultra gives you 3× more agent hours." },
+  free: { name: "Pro", price: "$50/mo", pitch: "Pro gives you 50,000 Cloud Credits a month." },
+  pro: { name: "Super", price: "$150/mo", pitch: "Super gives you 3× more Cloud Credits." },
+  super: { name: "Ultra", price: "$500/mo", pitch: "Ultra gives you 3× more Cloud Credits." },
 };
 
-/** Free only upgrades. Paid plans also ask the team, which counts demand for compute credits (ADR 0235).
+/** Free only upgrades. Paid plans also ask the team, which counts demand for credit packs (ADR 0299).
  *  No ask until the plan is known, so a Free account never sees it while its plan loads. */
 export function CloudUsageLimitNotice() {
   const ask = useMutation({ mutationFn: askForMoreUsage });

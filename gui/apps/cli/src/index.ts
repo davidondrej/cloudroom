@@ -7,7 +7,7 @@ import {
   pluginProxyCandidate,
   selectCommandGroups,
 } from "./command-groups.js";
-import { resolveBbCliVersion } from "./version.js";
+import { formatCloudroomVersion, resolveBbCliVersion } from "./version.js";
 import type { CliRuntimeContext } from "./context-env.js";
 
 maybeReexecViaRoomCli();
@@ -22,7 +22,7 @@ program
   .name("room-cli")
   .description("Cloudroom CLI - manage your local and cloud agents")
   .enablePositionalOptions()
-  .version(resolveBbCliVersion());
+  .version(formatCloudroomVersion(resolveBbCliVersion()));
 
 const KNOWN_COMMAND_NAMES: ReadonlySet<string> = new Set([
   ...CORE_COMMAND_GROUPS.map((group) => group.name),

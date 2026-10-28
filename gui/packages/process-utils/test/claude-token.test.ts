@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { readClaudeToken } from "../src/claude-token.js";
+import { claudeInstallerCommand, readClaudeToken, screenText } from "../src/claude-token.js";
 
 // Built from the 2026-10-07 incident (docs/incidents/2026-10-07-onboarding-could-not-connect-agents.md), not live captures.
 const TOKEN = `sk-ant-oat01-${"Ab3_-x".repeat(16)}AA`;
@@ -23,7 +23,27 @@ describe("readClaudeToken", () => {
     for (const size of [1, 7, output.length]) expect(firstToken(output, size)).toBe(TOKEN);
   });
 
+  it("applies absolute cursor moves only for ConPTY, so macOS and Linux parse as before", () => {
+    expect(screenText("ab\x1b[Hc")).toBe("abc");
+    expect(screenText("ab\x1b[Hc", true)).toBe("cb");
+    const conpty = `${intro}\x1b[H\x1b[3;1H${TOKEN}\x1b[K\r\n`;
+    expect(readClaudeToken(conpty, true)).toBe(TOKEN);
+  });
+
   it("reads nothing before the token is on screen", () => {
     expect(readClaudeToken(intro)).toBeUndefined();
+  });
+});
+
+describe("claudeInstallerCommand", () => {
+  it("keeps the macOS and Linux installer, and uses PowerShell on Windows", () => {
+    expect(claudeInstallerCommand("darwin")).toEqual({
+      command: "/bin/bash",
+      args: ["-c", "curl -fsSL https://claude.ai/install.sh | bash"],
+      display: "curl -fsSL https://claude.ai/install.sh | bash",
+    });
+    const windows = claudeInstallerCommand("win32");
+    expect(windows.command).toMatch(/WindowsPowerShell\\v1\.0\\powershell\.exe$/);
+    expect(windows.args.at(-1)).toBe("irm https://claude.ai/install.ps1 | iex");
   });
 });

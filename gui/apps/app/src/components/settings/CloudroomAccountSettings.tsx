@@ -97,7 +97,7 @@ export function CloudroomAccountSettings() {
       </div>
     </SettingsSection>}
     {signedIn && <BillingRow />}
-    {signedIn && <MacAccessRow />}
+    {signedIn && status.data?.macAccessSupported !== false && <MacAccessRow />}
   </>;
 }
 

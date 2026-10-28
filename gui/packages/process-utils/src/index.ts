@@ -3,9 +3,14 @@ export * from "./event-loop-delay.js";
 export * from "./plugin-process-paths.js";
 export * from "./process-info.js";
 export * from "./socket-type-of-service.js";
-import type { ChildProcess, StdioOptions } from "node:child_process";
+export * from "./windows.js";
+import {
+  execFile,
+  type ChildProcess,
+  type StdioOptions,
+} from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { access, lstat, readdir, readlink, realpath } from "node:fs/promises";
 import {
   basename,
@@ -15,9 +20,12 @@ import {
   relative,
   resolve,
   sep,
+  win32,
 } from "node:path";
 import type { Readable, Writable } from "node:stream";
+import { promisify } from "node:util";
 import crossSpawn from "cross-spawn";
+import { normalizeWindowsEnv } from "./windows.js";
 
 interface PortableSpawnRequest {
   command: string;
@@ -26,6 +34,8 @@ interface PortableSpawnRequest {
   detached?: boolean;
   env?: NodeJS.ProcessEnv;
   stdio?: StdioOptions;
+  timeout?: number;
+  windowsHide?: boolean;
 }
 
 export type PortableChildProcess = ChildProcess;
@@ -53,6 +63,8 @@ interface PortableOutputChildProcess extends PortableChildProcess {
 interface KillProcessGroupArgs {
   child: {
     pid?: number | undefined;
+    exitCode?: number | null;
+    signalCode?: NodeJS.Signals | null;
     kill: (signal: NodeJS.Signals) => unknown;
   };
   signal: NodeJS.Signals;
@@ -139,12 +151,26 @@ type UncaughtExceptionMonitorHandler = (
 export function spawnPortableProcess(
   request: PortableSpawnRequest,
 ): PortableChildProcess {
-  return crossSpawn(request.command, request.args, {
+  // Node's own timeout ends only the direct child, which for an npm `.cmd`
+  // shim is cmd.exe; on Windows the whole tree ends first instead.
+  const treeTimeout =
+    process.platform === "win32" ? request.timeout : undefined;
+  const child = crossSpawn(request.command, request.args, {
     cwd: request.cwd,
     detached: request.detached,
-    env: request.env,
+    env: request.env && normalizeWindowsEnv(request.env),
     stdio: request.stdio,
+    timeout: treeTimeout === undefined ? request.timeout : undefined,
+    windowsHide: request.windowsHide,
   });
+  if (treeTimeout !== undefined) {
+    const timer = setTimeout(
+      () => killPortableProcess(child, "SIGTERM"),
+      treeTimeout,
+    );
+    child.once("exit", () => clearTimeout(timer));
+  }
+  return child;
 }
 
 function assertPortablePipedProcess(
@@ -180,6 +206,7 @@ export function spawnPortableOutputProcess(
   const child = spawnPortableProcess({
     ...request,
     stdio: ["ignore", "pipe", "pipe"],
+    windowsHide: true,
   });
   assertPortableOutputProcess(child);
   return child;
@@ -190,6 +217,18 @@ export function supportsProcessGroups(): boolean {
 }
 
 export function killProcessGroup(args: KillProcessGroupArgs): void {
+  if (process.platform === "win32") {
+    // Windows has no process groups: end the tree first, then the root. Never
+    // after the root exited: Windows may have given its PID to another process.
+    const exited =
+      (args.child.exitCode ?? null) !== null ||
+      (args.child.signalCode ?? null) !== null;
+    if (args.child.pid === undefined || exited) return;
+    void terminateWindowsProcessTrees([args.child.pid]).finally(() => {
+      args.child.kill(args.signal);
+    });
+    return;
+  }
   if (supportsProcessGroups() && args.child.pid !== undefined) {
     try {
       process.kill(-args.child.pid, args.signal);
@@ -199,11 +238,13 @@ export function killProcessGroup(args: KillProcessGroupArgs): void {
   args.child.kill(args.signal);
 }
 
-export function killPortableProcess(
+export async function killPortableProcess(
   child: ChildProcess,
   signal: NodeJS.Signals,
-): void {
+): Promise<ProcessStopResult> {
+  if (process.platform === "win32") return stopWindowsProcessTree(child);
   child.kill(signal);
+  return { treeTermination: "unverified" };
 }
 
 export function isProcessGroupAlive(child: {
@@ -224,16 +265,238 @@ function hasChildExited(child: ChildProcess): boolean {
   return child.exitCode !== null || child.signalCode !== null;
 }
 
+// Windows helpers, hand-ported from get-bb/bb#4610, #4658 and #5429 (MIT).
+
+export interface ProcessStopResult {
+  treeTermination: "confirmed" | "unverified";
+}
+
+const WINDOWS_TREE_KILL_TIMEOUT_MS = 2_000;
+const WINDOWS_ROOT_EXIT_TIMEOUT_MS = 1_000;
+
+/** Ends each process and all its descendants with `taskkill /T /F`. */
+export function terminateWindowsProcessTrees(
+  pids: readonly number[],
+): Promise<boolean> {
+  if (pids.length === 0) return Promise.resolve(true);
+  return new Promise((resolveTerminated) => {
+    let settled = false;
+    const finish = (terminated: boolean): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolveTerminated(terminated);
+    };
+    const killer = execFile(
+      join(process.env.SystemRoot ?? "C:\\Windows", "System32", "taskkill.exe"),
+      [...pids.flatMap((pid) => ["/pid", String(pid)]), "/T", "/F"],
+      { windowsHide: true },
+      (error) => finish(error === null),
+    );
+    const timer = setTimeout(() => {
+      finish(false);
+      killer.kill("SIGKILL");
+    }, WINDOWS_TREE_KILL_TIMEOUT_MS);
+  });
+}
+
+/**
+ * Ends a child's whole tree, then the child itself. The tree goes first:
+ * once the root is gone, taskkill can no longer find its descendants. Skips a
+ * root that already exited, whose PID Windows may have reused. "confirmed"
+ * only when taskkill succeeded and the root is seen to exit.
+ */
+async function stopWindowsProcessTree(
+  child: ChildProcess,
+): Promise<ProcessStopResult> {
+  if (child.pid === undefined || hasChildExited(child)) {
+    return { treeTermination: "unverified" };
+  }
+  const treeEnded = await terminateWindowsProcessTrees([child.pid]);
+  if (!hasChildExited(child)) child.kill("SIGKILL");
+  const rootExited =
+    hasChildExited(child) ||
+    (await new Promise<boolean>((resolveExit) => {
+      const timer = setTimeout(
+        () => resolveExit(false),
+        WINDOWS_ROOT_EXIT_TIMEOUT_MS,
+      );
+      child.once("exit", () => {
+        clearTimeout(timer);
+        resolveExit(true);
+      });
+    }));
+  return {
+    treeTermination: treeEnded && rootExited ? "confirmed" : "unverified",
+  };
+}
+
+/** Errors from writing to a child whose stdin closed. Windows reports EOF. */
+const CLOSED_PIPE_ERROR_CODES = new Set([
+  "EPIPE",
+  "ERR_STREAM_DESTROYED",
+  ...(process.platform === "win32" ? ["EOF"] : []),
+]);
+
+export function isClosedPipeError(error: Error): boolean {
+  return (
+    "code" in error &&
+    typeof error.code === "string" &&
+    CLOSED_PIPE_ERROR_CODES.has(error.code)
+  );
+}
+
+/** Windows' own bsdtar. Git for Windows' GNU tar may come first on PATH, and it reads `C:\…` as a remote host. */
+export function tarCommand(platform: NodeJS.Platform = process.platform): string {
+  return platform === "win32"
+    ? `${process.env.SystemRoot ?? "C:\\Windows"}\\System32\\tar.exe`
+    : "tar";
+}
+
+/**
+ * Git for Windows' shell (`findGitShellPath`), with its own tools
+ * (mkdir, cp, mktemp) on PATH: they sit next to it, outside the Windows PATH.
+ */
+export async function gitShell(
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<{ command: string; env: NodeJS.ProcessEnv }> {
+  const command = await findGitShellPath(env);
+  if (command === null) {
+    throw new Error(
+      "Cloudroom needs Git for Windows 2.0 or later, and it could not find Git's shell.",
+    );
+  }
+  return {
+    command,
+    env: normalizeWindowsEnv({
+      ...env,
+      PATH: `${win32.dirname(command)};${env.PATH ?? ""}`,
+    }),
+  };
+}
+
+/** A path as Git for Windows' shell prints it (`/c/Users/…`), as Windows reads it. */
+export const msysPathToWindows = (path: string): string =>
+  path.replace(/^\/([a-z])\//i, "$1:/");
+
+/** The command that opens a folder in this OS's file manager. */
+export function folderOpenerCommand(
+  platform: NodeJS.Platform = process.platform,
+): string {
+  if (platform === "darwin") return "open";
+  return platform === "win32" ? "explorer.exe" : "xdg-open";
+}
+
+/**
+ * Runs a command to completion and returns its output. Unlike `execFile`, it
+ * runs npm `.cmd` shims on Windows. Rejects on a non-zero exit or timeout;
+ * like `execFile`, a non-zero exit's error carries `stdout` and `stderr`.
+ */
+export function execPortableFile(
+  command: string,
+  args: readonly string[],
+  options: {
+    timeoutMs?: number;
+    cwd?: string;
+    env?: NodeJS.ProcessEnv;
+    signal?: AbortSignal;
+    /** Bytes per stream, as `execFile`'s option; unlimited when unset. */
+    maxBuffer?: number;
+  },
+): Promise<{ stdout: string; stderr: string }> {
+  if (process.platform !== "win32") {
+    try {
+      return promisify(execFile)(command, [...args], {
+        cwd: options.cwd,
+        encoding: "utf8",
+        env: options.env,
+        signal: options.signal,
+        ...(options.maxBuffer === undefined ? {} : { maxBuffer: options.maxBuffer }),
+        ...(options.timeoutMs === undefined ? {} : { timeout: options.timeoutMs }),
+      });
+    } catch (error) {
+      return Promise.reject(error);
+    }
+  }
+  return new Promise((resolveOutput, reject) => {
+    if (options.signal?.aborted) {
+      reject(options.signal.reason);
+      return;
+    }
+    const child = spawnPortableOutputProcess({
+      command,
+      args: [...args],
+      cwd: options.cwd,
+      env: options.env,
+    });
+    let stdout = "";
+    let stderr = "";
+    const bytes = { stdout: 0, stderr: 0 };
+    const stop = (error: unknown): void => {
+      killPortableProcess(child, "SIGKILL");
+      reject(error);
+    };
+    const read = (name: "stdout" | "stderr") => (chunk: string) => {
+      bytes[name] += Buffer.byteLength(chunk);
+      if (options.maxBuffer !== undefined && bytes[name] > options.maxBuffer) {
+        settle();
+        stop(
+          Object.assign(new RangeError(`${name} maxBuffer length exceeded`), {
+            code: "ERR_CHILD_PROCESS_STDIO_MAXBUFFER",
+          }),
+        );
+        return;
+      }
+      if (name === "stdout") stdout += chunk;
+      else stderr += chunk;
+    };
+    child.stdout.setEncoding("utf8").on("data", read("stdout"));
+    child.stderr.setEncoding("utf8").on("data", read("stderr"));
+    const onAbort = (): void => stop(options.signal?.reason);
+    const timer =
+      options.timeoutMs === undefined
+        ? undefined
+        : setTimeout(() => {
+            stop(
+              new Error(`${command} timed out after ${options.timeoutMs}ms`),
+            );
+          }, options.timeoutMs);
+    options.signal?.addEventListener("abort", onAbort, { once: true });
+    const settle = (): void => {
+      clearTimeout(timer);
+      options.signal?.removeEventListener("abort", onAbort);
+    };
+    child.once("error", (error) => {
+      settle();
+      reject(error);
+    });
+    child.once("close", (code) => {
+      settle();
+      if (code === 0) {
+        resolveOutput({ stdout, stderr });
+        return;
+      }
+      reject(
+        Object.assign(
+          new Error(`${command} exited with code ${String(code)}`),
+          { code, stdout, stderr },
+        ),
+      );
+    });
+  });
+}
+
 const PROCESS_GROUP_EXIT_POLL_MS = 100;
 
 export function stopProcessGroupLeaderFirst(
   args: StopProcessGroupLeaderFirstArgs,
-): Promise<void> {
+): Promise<ProcessStopResult> {
   const { child, timeoutMs, killGraceMs } = args;
+  if (process.platform === "win32") return stopWindowsProcessTree(child);
   if (hasChildExited(child) && !isProcessGroupAlive(child)) {
-    return Promise.resolve();
+    return Promise.resolve({ treeTermination: "confirmed" });
   }
-  return new Promise<void>((resolveStop) => {
+  return new Promise<ProcessStopResult>((resolveStop) => {
     let settled = false;
     let hardTimer: NodeJS.Timeout | undefined;
     let poll: NodeJS.Timeout | undefined;
@@ -249,7 +512,9 @@ export function stopProcessGroupLeaderFirst(
       if (poll !== undefined) {
         clearInterval(poll);
       }
-      resolveStop();
+      resolveStop({
+        treeTermination: groupGone() ? "confirmed" : "unverified",
+      });
     };
     const groupGone = (): boolean =>
       hasChildExited(child) && !isProcessGroupAlive(child);
@@ -353,6 +618,25 @@ async function resolveSweepDirectory(
     }
   } catch {}
   return canonical;
+}
+
+export async function findGitShellPath(
+  env: NodeJS.ProcessEnv = process.env,
+  signal?: AbortSignal,
+): Promise<string | null> {
+  const git = (args: string[]): Promise<string | null> =>
+    execPortableFile("git", args, { env, signal, timeoutMs: 10_000 }).then(
+      (result) => win32.normalize(result.stdout.trim() || "."),
+      () => null,
+    );
+  const isDrivePath = (path: string | null): path is string =>
+    path !== null && /^[A-Za-z]:\\/u.test(path);
+  const reported = await git(["var", "GIT_SHELL_PATH"]);
+  if (isDrivePath(reported) && existsSync(reported)) return reported;
+  const execPath = await git(["--exec-path"]);
+  if (!isDrivePath(execPath)) return null;
+  const sh = win32.join(execPath, "..", "..", "..", "usr", "bin", "sh.exe");
+  return existsSync(sh) ? sh : null;
 }
 
 export async function listProcessesWithCwdUnder(
@@ -464,7 +748,9 @@ export function isPathWithinDirectory(
   const relativePath = relative(directoryPath, candidatePath);
   return (
     relativePath === "" ||
-    (!relativePath.startsWith("..") && !isAbsolute(relativePath))
+    (relativePath !== ".." &&
+      !relativePath.startsWith(`..${sep}`) &&
+      !isAbsolute(relativePath))
   );
 }
 
@@ -485,7 +771,11 @@ export function sanitizeInheritedChildProcessEnv(
     if (value === undefined) {
       continue;
     }
-    if (key === "NODE_ENV" || key.startsWith("BB_") || key.startsWith("ROOM_")) {
+    if (
+      key === "NODE_ENV" ||
+      key.startsWith("BB_") ||
+      key.startsWith("ROOM_")
+    ) {
       continue;
     }
     sanitizedEnv[key] = value;

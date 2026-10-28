@@ -708,7 +708,7 @@ export function describeThreadTellOutcome(
     // The server says WHY it is waiting, so the CLI does not have to guess
     // from the flags it happened to send. `room-cli thread queue list` shows the
     // same reason for the row afterwards.
-    return `Thread ${threadId} message queued (${describeQueueWait(response.queuedMessage)}); it dispatches when that clears`;
+    return `Thread ${threadId} message queued (${describeQueueWait(response.queuedMessage)}); it dispatches when that clears unless Stop pauses the queue, then run \`room-cli thread queue send ${threadId} ${response.queuedMessage.id}\``;
   }
   return response.mode === "steer"
     ? `Thread ${threadId} steered`
@@ -733,9 +733,13 @@ function describeThreadRetryOutcome(
 /** One short phrase for a queued row's wait, shared by `tell` and `queue`. */
 export function describeQueueWait(row: {
   hardQueue?: boolean;
+  pausedByStop?: boolean;
   sendAt: number | null;
   waitingOn: QueuedMessageWaitingOn | null;
 }): string {
+  if (row.pausedByStop === true) {
+    return "paused by Stop; run `queue send`";
+  }
   const waitingOn = row.waitingOn ?? { kind: "thread-busy" as const };
   if (row.hardQueue === true && waitingOn.kind === "thread-busy") {
     return "hard queue: waiting for the thread and its child threads";

@@ -1,5 +1,4 @@
-import { execFile } from "node:child_process";
-import { findCliExecutable } from "@cloudroom/process-utils";
+import { execPortableFile, findCliExecutable } from "@cloudroom/process-utils";
 import type { AppDeps } from "../../types.js";
 import { claudeBinary } from "./claude-token.js";
 import type { CloudroomClient } from "./client.js";
@@ -9,14 +8,9 @@ export type HarnessVersions = { codex?: string; claude?: string; opencode?: stri
 
 function versionOf(binary: string | undefined): Promise<string | undefined> {
   if (!binary) return Promise.resolve(undefined);
-  return new Promise((resolve) => {
-    // execFile throws, rather than calling back, for some spawn errors (an Intel binary on a Mac without Rosetta).
-    try {
-      execFile(binary, ["--version"], { timeout: 10_000 }, (error, stdout) => {
-        resolve(error ? undefined : /(\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?)/.exec(stdout)?.[1]);
-      });
-    } catch { resolve(undefined); }
-  });
+  // A spawn error (an Intel binary on a Mac without Rosetta) rejects too.
+  return execPortableFile(binary, ["--version"], { timeoutMs: 10_000, maxBuffer: 1024 * 1024 })
+    .then(({ stdout }) => /(\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?)/.exec(stdout)?.[1], () => undefined);
 }
 
 let cached: { at: number; versions: Promise<HarnessVersions> } | undefined;

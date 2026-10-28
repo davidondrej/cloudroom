@@ -1,5 +1,5 @@
 const { execFileSync, spawn } = require("node:child_process");
-const { chmod, readFile, readdir, writeFile } = require("node:fs/promises");
+const { chmod, cp, readFile, readdir, writeFile } = require("node:fs/promises");
 const { createRequire } = require("node:module");
 const path = require("node:path");
 
@@ -8,9 +8,11 @@ const desktopPackageRoot = path.resolve(__dirname, "..");
 const NODE_MODULES_DIRECTORY = "node_modules";
 const NODE_PTY_PACKAGE_NAME = "node-pty";
 const BETTER_SQLITE3_PACKAGE_NAME = "better-sqlite3";
+const PARCEL_WATCHER_PACKAGE_NAME = "@parcel/watcher";
 const PACKAGED_NATIVE_PACKAGE_NAMES = [
   NODE_PTY_PACKAGE_NAME,
   BETTER_SQLITE3_PACKAGE_NAME,
+  PARCEL_WATCHER_PACKAGE_NAME,
 ];
 
 const NODE_PTY_PREBUILD_PLATFORMS = ["darwin-arm64", "darwin-x64"];
@@ -220,6 +222,52 @@ async function prepareBetterSqlite3PackageDirectory(packageDirectory, options) {
   if (canVerify) verify();
 }
 
+// electron-builder leaves out @parcel/watcher-win32-x64, so the file watcher
+// can't start (BB #4662). Copy it from the workspace and load it once.
+async function prepareParcelWatcherPackageDirectory(packageDirectory, options) {
+  const platformPackageName = `${PARCEL_WATCHER_PACKAGE_NAME}-${options.platform}-${options.arch}`;
+  const packagedPlatformDirectory = path.join(
+    path.dirname(packageDirectory),
+    path.basename(platformPackageName),
+  );
+  if (!(await isDirectory(packagedPlatformDirectory))) {
+    const resolveFrom = (packageName, directory) =>
+      path.dirname(
+        createRequire(path.join(directory, "package.json")).resolve(
+          `${packageName}/package.json`,
+        ),
+      );
+    const workspaceWatcherDirectory = resolveFrom(
+      PARCEL_WATCHER_PACKAGE_NAME,
+      path.join(desktopPackageRoot, NODE_MODULES_DIRECTORY, "bb-app"),
+    );
+    await cp(
+      resolveFrom(platformPackageName, workspaceWatcherDirectory),
+      packagedPlatformDirectory,
+      { dereference: true, recursive: true },
+    );
+  }
+  if (
+    options.platform !== process.platform ||
+    options.arch !== process.arch ||
+    options.electronVersion !== resolveElectronVersion()
+  ) {
+    return;
+  }
+  const electron = createRequire(path.join(desktopPackageRoot, "package.json"))(
+    "electron",
+  );
+  execFileSync(
+    electron,
+    ["-e", "require(process.argv[1]);", packagedPlatformDirectory],
+    {
+      env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
+      stdio: "pipe",
+      timeout: 30_000,
+    },
+  );
+}
+
 async function preparePackagedNativeModules(appOutDir, options = {}) {
   if (!(await isDirectory(appOutDir))) {
     throw new Error(`Packaged app output does not exist: ${appOutDir}`);
@@ -261,6 +309,20 @@ async function preparePackagedNativeModules(appOutDir, options = {}) {
     ),
   );
 
+  if (options.platform === "win32") {
+    const parcelWatcherDirectories = packageDirectories.get(
+      PARCEL_WATCHER_PACKAGE_NAME,
+    );
+    if (parcelWatcherDirectories.length === 0) {
+      throw new Error(
+        `Unable to find ${PARCEL_WATCHER_PACKAGE_NAME} under ${appOutDir}`,
+      );
+    }
+    for (const packageDirectory of parcelWatcherDirectories) {
+      await prepareParcelWatcherPackageDirectory(packageDirectory, options);
+    }
+  }
+
   return { betterSqlite3Directories, nodePtyDirectories };
 }
 
@@ -285,12 +347,25 @@ function resolveArchName(context) {
   return process.arch;
 }
 
+async function stampBbAppVersion(appOutDir, version) {
+  const directories = (await findPackageDirectories(appOutDir, ["bb-app"])).get("bb-app");
+  if (directories.length === 0) {
+    throw new Error(`Unable to find bb-app under ${appOutDir}`);
+  }
+  for (const directory of directories) {
+    const packageJsonPath = path.join(directory, "package.json");
+    const packageJson = JSON.parse(await readFile(packageJsonPath, "utf8"));
+    await writeFile(packageJsonPath, `${JSON.stringify({ ...packageJson, version }, null, 2)}\n`);
+  }
+}
+
 async function afterPack(context) {
   const arch = resolveArchName(context);
   const platform = context.electronPlatformName ?? process.platform;
   if (platform !== process.platform || arch !== process.arch) {
     throw new Error("Packaged npm verification requires a native target host");
   }
+  await stampBbAppVersion(context.appOutDir, context.packager.appInfo.version);
   await preparePackagedNativeModules(context.appOutDir, {
     arch,
     electronVersion: resolveElectronVersion(),
@@ -307,7 +382,9 @@ async function afterPack(context) {
           "MacOS",
           productName,
         )
-      : path.join(context.appOutDir, context.packager.executableName);
+      : platform === "win32"
+        ? path.join(context.appOutDir, `${productName}.exe`)
+        : path.join(context.appOutDir, context.packager.executableName);
   await smokePackagedNpm(appBinary);
 }
 

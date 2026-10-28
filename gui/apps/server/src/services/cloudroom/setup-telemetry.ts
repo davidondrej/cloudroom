@@ -1,10 +1,9 @@
-import { execFile } from "node:child_process";
 import { existsSync, readdirSync, statSync, statfsSync } from "node:fs";
 import { readFile, rm, writeFile } from "node:fs/promises";
 import { cpus, homedir, release, totalmem } from "node:os";
 import { delimiter, join } from "node:path";
 import { getAppSettings } from "@cloudroom/db";
-import { findCliExecutable, type KnownCli } from "@cloudroom/process-utils";
+import { execPortableFile, findCliExecutable, type KnownCli } from "@cloudroom/process-utils";
 import { readOrCreateSecretFile } from "@cloudroom/secret-storage";
 import type { AppDeps } from "../../types.js";
 import { TELEMETRY_ID_FILE_NAME, type TelemetryValue } from "../system/telemetry.js";
@@ -151,9 +150,7 @@ function save(event: string, context: Record<string, TelemetryValue>): Promise<b
   }).catch(error => { deps?.logger.debug({ err: error, event }, "Setup event not saved"); return false; });
 }
 
-const run = (file: string, args: string[]) => new Promise<string>(resolve => {
-  execFile(file, args, { timeout: 8_000 }, (_error, stdout) => resolve(String(stdout ?? "").trim()));
-});
+const run = (file: string, args: string[]) => execPortableFile(file, args, { timeoutMs: 8_000 }).then(({ stdout }) => stdout.trim(), (error: { stdout?: unknown }) => (process.platform === "win32" ? "" : String(error.stdout ?? "").trim()));
 const version = (text: string) => text.match(/\d+\.\d+(?:\.\d+)?/)?.[0] ?? null;
 const home = (...parts: string[]) => join(homedir(), ...parts);
 const onPath = (cli: string) => (process.env.PATH ?? "").split(delimiter).some(dir => dir && existsSync(join(dir, cli)));

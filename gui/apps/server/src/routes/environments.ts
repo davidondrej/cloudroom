@@ -1,5 +1,5 @@
+import { joinHostPathSegments } from "../services/lib/host-path.js";
 import { parsePaginationQuery } from "../services/lib/validation.js";
-import path from "node:path";
 import {
   countLiveThreadsInEnvironment,
   listEnvironments,
@@ -556,7 +556,10 @@ export function registerEnvironmentRoutes(app: Hono, deps: AppDeps): void {
     ) {
       throw new ApiError(400, "invalid_request", "Invalid path");
     }
-    const absolutePath = path.join(environment.path, repoRelativePath);
+    const absolutePath = joinHostPathSegments(
+      environment.path,
+      repoRelativePath,
+    );
     const ref = resolveDiffFileRef(query);
     const result = await callHostRetryableOnlineRpc(deps, {
       hostId: environment.hostId,

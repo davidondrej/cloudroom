@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { and, asc, eq, gte, isNull, notLike } from "drizzle-orm";
 import { events, projects, threads } from "@cloudroom/db";
+import { folderOpenerCommand } from "@cloudroom/process-utils";
 import type { AppDeps } from "../../types.js";
 import { ApiError } from "../../errors.js";
 import { threadMessages } from "../threads/thread-transcript.js";
@@ -64,6 +65,6 @@ export async function exportChats(deps: Pick<AppDeps, "db">, input: ChatExportIn
     await mkdir(dir, { recursive: true });
     await writeFile(unique(join(dir, `${day(thread.createdAt)} ${safeName(title)}`), ext), (input.format === "json" ? json : markdown)(deps, thread, title));
   }
-  await promisify(execFile)(process.platform === "darwin" ? "open" : "xdg-open", [folder]).catch(() => {});
+  await promisify(execFile)(folderOpenerCommand(), [folder]).catch(() => {});
   return { folder, count: list.length };
 }

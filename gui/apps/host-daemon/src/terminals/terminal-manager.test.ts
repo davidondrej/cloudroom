@@ -387,6 +387,10 @@ async function openTerminal(
   return spawned.pty;
 }
 
+// node-pty's spawn-helper only exists on macOS/Linux; Windows uses ConPTY and
+// has no execute bit to set.
+const posixOnly = it.skipIf(process.platform === "win32");
+
 describe("TerminalManager", () => {
   afterEach(async () => {
     vi.useRealTimers();
@@ -936,7 +940,7 @@ describe("TerminalManager", () => {
     expect(env?.NODE_ENV).toBeUndefined();
   });
 
-  it("makes every available node-pty spawn-helper executable", async () => {
+  posixOnly("makes every available node-pty spawn-helper executable", async () => {
     const logger = createFakeLogger();
     const packageDirectory = await makeTempDir("bb-node-pty-package-");
     const buildNativePath = path.join(
@@ -988,7 +992,7 @@ describe("TerminalManager", () => {
     expect(logger.warn).not.toHaveBeenCalled();
   });
 
-  it("makes an available prebuild-only node-pty spawn-helper executable", async () => {
+  posixOnly("makes an available prebuild-only node-pty spawn-helper executable", async () => {
     const logger = createFakeLogger();
     const packageDirectory = await makeTempDir("bb-node-pty-package-");
     const prebuildHelperPath = path.join(
@@ -1409,54 +1413,6 @@ describe("TerminalManager", () => {
         terminalId: "term-1",
         exitCode: null,
         closeReason: "daemon-disconnect",
-      },
-    ]);
-  });
-
-  it("rejects native Windows opens", async () => {
-    const harness = createHarness();
-    const manager = new TerminalManager({
-      logger: {
-        debug: vi.fn(),
-        error: vi.fn(),
-        info: vi.fn(),
-        warn: vi.fn(),
-      },
-      platform: "win32",
-      ptyAdapter: harness.adapter,
-      runtimeManager: harness.runtimeManager,
-      sendMessage: (message) => {
-        harness.messages.push(message);
-        return true;
-      },
-    });
-
-    await manager.handleMessage({
-      type: "terminal.open",
-      contributedEnv: [],
-      requestId: "open-1",
-      terminalId: "term-1",
-      threadId: "thr-1",
-      target: {
-        kind: "workspace",
-        environmentId: "env-1",
-        workspaceContext: {
-          workspacePath: "/tmp/terminal-workspace",
-        },
-      },
-      cols: 100,
-      rows: 30,
-      start: DEFAULT_TERMINAL_START,
-    });
-
-    expect(harness.adapter.spawned).toHaveLength(0);
-    expect(harness.messages).toEqual([
-      {
-        type: "terminal.error",
-        requestId: "open-1",
-        terminalId: "term-1",
-        code: "unsupported_platform",
-        message: "Native Windows terminals are not supported",
       },
     ]);
   });

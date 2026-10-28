@@ -86,6 +86,9 @@ const commonOptions = {
       desktopReleaseChannel,
     ),
     "process.env.BB_DESKTOP_VERSION": JSON.stringify(desktopVersion),
+    "process.env.BB_DESKTOP_UPDATE_BASE_URL": JSON.stringify(
+      process.env.BB_DESKTOP_UPDATE_BASE_URL?.trim() ?? "",
+    ),
   },
   legalComments: "none",
   platform: "node",

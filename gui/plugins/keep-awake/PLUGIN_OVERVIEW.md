@@ -20,4 +20,4 @@ Add `--json` to any command for machine-readable output.
 
 ## Requirements
 
-macOS hosts and Linux hosts with systemd are supported. On other hosts, the plugin does nothing and writes a warning to the log.
+macOS hosts, Linux hosts with systemd, and Windows hosts are supported. On Windows the plugin holds a system-required execution state from a PowerShell process. On other hosts, the plugin does nothing and writes a warning to the log.

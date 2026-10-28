@@ -41,7 +41,7 @@ describe("builtin Keep Awake host entry", () => {
     expect(spawn).toHaveBeenCalledWith(
       "/usr/bin/caffeinate",
       ["-d", "-i", "-s", "-w", "1234"],
-      { stdio: "ignore" },
+      { stdio: "ignore", windowsHide: true },
     );
     expect(harness.experimental_getRetainedWorkerLeaseCount()).toBe(1);
 
@@ -77,6 +77,75 @@ describe("builtin Keep Awake host entry", () => {
       harness.experimental_call("setEnabled", { enabled: true }),
     ).resolves.toEqual({ enabled: true, supported: true });
 
+    await harness.experimental_dispose();
+  });
+
+  it("holds a Windows execution state for the worker's lifetime", async () => {
+    const spawn = vi.fn(() => createChild());
+    const harness = experimental_createHostEntryHarness(
+      createKeepAwakeHostEntry({ platform: "win32", pid: 4321, spawn }),
+    );
+
+    await expect(
+      harness.experimental_call("setEnabled", { enabled: true }),
+    ).resolves.toEqual({ enabled: true, supported: true });
+    expect(spawn).toHaveBeenCalledExactlyOnceWith(
+      expect.stringMatching(/\\System32\\WindowsPowerShell\\v1\.0\\powershell\.exe$/u),
+      [
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        expect.stringMatching(
+          /SetThreadExecutionState\(2147483649\).*Wait-Process -Id 4321$/u,
+        ),
+      ],
+      { stdio: "ignore", windowsHide: true },
+    );
+    await harness.experimental_dispose();
+  });
+
+  it("waits longer between restarts while the child keeps exiting at once", async () => {
+    vi.useFakeTimers();
+    const children = [createChild(), createChild(), createChild()];
+    const spawn = vi
+      .fn()
+      .mockReturnValueOnce(children[0])
+      .mockReturnValueOnce(children[1])
+      .mockReturnValueOnce(children[2]);
+    const harness = experimental_createHostEntryHarness(
+      createKeepAwakeHostEntry({ platform: "win32", pid: 4321, spawn }),
+    );
+
+    await harness.experimental_call("setEnabled", { enabled: true });
+    children[0]?.emit("exit");
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(spawn).toHaveBeenCalledTimes(2);
+    children[1]?.emit("exit");
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(spawn).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(spawn).toHaveBeenCalledTimes(3);
+    await harness.experimental_dispose();
+  });
+
+  it("keeps main's flat 1 s restart off Windows", async () => {
+    vi.useFakeTimers();
+    const children = [createChild(), createChild(), createChild()];
+    const spawn = vi
+      .fn()
+      .mockReturnValueOnce(children[0])
+      .mockReturnValueOnce(children[1])
+      .mockReturnValueOnce(children[2]);
+    const harness = experimental_createHostEntryHarness(
+      createKeepAwakeHostEntry({ platform: "darwin", pid: 1234, spawn }),
+    );
+
+    await harness.experimental_call("setEnabled", { enabled: true });
+    children[0]?.emit("exit");
+    await vi.advanceTimersByTimeAsync(1_000);
+    children[1]?.emit("exit");
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(spawn).toHaveBeenCalledTimes(3);
     await harness.experimental_dispose();
   });
 

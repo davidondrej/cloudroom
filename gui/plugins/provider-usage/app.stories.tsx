@@ -4,7 +4,7 @@ import {
   UsagePageContent,
   type UsageStoreSnapshot,
 } from "./app.js";
-import { fromAgentsAndHours, type PlanSummary } from "./plan-usage.js";
+import { fromCredits, type PlanSummary } from "./plan-usage.js";
 import type {
   ProviderUsage,
   UsageMachine,
@@ -218,7 +218,7 @@ function SettingsPreview({ scenario }: { scenario: ScenarioName }) {
     <div className="w-full max-w-3xl rounded-lg bg-background p-5">
       <UsagePageContent
         snapshot={storySnapshot(scenario)}
-        plan={fromAgentsAndHours(plans[1]!)}
+        plan={fromCredits(plans[1]!)}
         refreshEnabled={false}
       />
     </div>
@@ -297,19 +297,19 @@ export function Disclosure() {
 }
 
 const plans = [
-  { plan: "free", agents: 31, agentsLimit: 50, cpuHours: 41, cpuHoursLimit: 50 },
-  { plan: "pro", agents: 412, agentsLimit: Number.MAX_SAFE_INTEGER, cpuHours: 114, cpuHoursLimit: 300 },
-  { plan: "business", agents: 980, agentsLimit: Number.MAX_SAFE_INTEGER, cpuHours: 445, cpuHoursLimit: 450 },
-  { plan: "super", agents: 1_240, agentsLimit: Number.MAX_SAFE_INTEGER, cpuHours: 812, cpuHoursLimit: 900 },
-  { plan: "ultra", agents: 2_310, agentsLimit: Number.MAX_SAFE_INTEGER, cpuHours: 640, cpuHoursLimit: 3_000 },
+  { plan: "free", credits: 2_460, creditsLimit: 3_000 },
+  { plan: "pro", credits: 19_000, creditsLimit: 50_000 },
+  { plan: "business", credits: 89_000, creditsLimit: 100_000 },
+  { plan: "super", credits: 121_800, creditsLimit: 150_000 },
+  { plan: "ultra", credits: 128_000, creditsLimit: 500_000 },
 ];
 
 export function CloudroomPlan() {
   return (
     <StoryCard labelWidth="180px">
       {plans.map((usage) => (
-        <StoryRow key={usage.plan} label={usage.plan} hint="Last 30 days. Paid plans have unlimited cloud agents.">
-          <FooterPreview scenario="local" plan={fromAgentsAndHours(usage)} />
+        <StoryRow key={usage.plan} label={usage.plan} hint="Cloud Credits used in the last 30 days.">
+          <FooterPreview scenario="local" plan={fromCredits(usage)} />
         </StoryRow>
       ))}
     </StoryCard>
@@ -317,7 +317,7 @@ export function CloudroomPlan() {
 }
 
 export function SidebarWidths() {
-  const plan = fromAgentsAndHours(plans[4]!);
+  const plan = fromCredits(plans[4]!);
   return (
     <StoryCard labelWidth="180px">
       {[400, 303, 260, 220, 190].map((width) => (

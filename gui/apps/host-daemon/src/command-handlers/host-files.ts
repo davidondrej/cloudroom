@@ -1,6 +1,8 @@
+import { realpath as resolveSymlinksPreservingDrive } from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { promisify } from "node:util";
 import type {
   DirectoryEntry,
   HostDaemonOnlineRpcResult,
@@ -25,6 +27,11 @@ import {
   readRootRelativeFileForTransport,
   type ReadFileContentForTransportResult,
 } from "./file-read.js";
+import {
+  isNetworkDriveReachable,
+  listFilesystemRoots,
+  readWindowsDriveTypes,
+} from "./filesystem-roots.js";
 import { resolveNonSymlinkDirectoryPath } from "./root-path.js";
 
 const SAFE_GIT_REF_REGEX = /^[A-Za-z0-9_./~^@-]+$/;
@@ -127,6 +134,7 @@ export async function listHostPaths(
 }
 
 const DIRECTORY_BROWSE_SKIP_NAMES = new Set(["node_modules"]);
+const resolveBrowsedDirectory = promisify(resolveSymlinksPreservingDrive);
 
 function compareDirectoryEntries(a: DirectoryEntry, b: DirectoryEntry): number {
   if (a.kind !== b.kind) {
@@ -143,6 +151,18 @@ export async function browseHostDirectory(
     throw new CommandDispatchError("invalid_path", "Path must be absolute");
   }
 
+  const driveTypes =
+    process.platform === "win32" ? readWindowsDriveTypes() : null;
+  const readDriveTypes = async () => (await driveTypes) ?? null;
+  if (
+    process.platform === "win32" &&
+    !(await isNetworkDriveReachable(requestedPath, readDriveTypes))
+  ) {
+    throw new CommandDispatchError(
+      "invalid_path",
+      `The drive for "${requestedPath}" isn't responding`,
+    );
+  }
   const stat = await fs.stat(requestedPath);
   if (!stat.isDirectory()) {
     throw new CommandDispatchError(
@@ -150,7 +170,10 @@ export async function browseHostDirectory(
       `Path "${requestedPath}" is not a directory`,
     );
   }
-  const directory = await fs.realpath(requestedPath);
+  const directory =
+    process.platform === "win32"
+      ? await resolveBrowsedDirectory(requestedPath)
+      : await fs.realpath(requestedPath);
 
   const dirents = await fs.readdir(directory, { withFileTypes: true });
   const entries: DirectoryEntry[] = [];
@@ -184,6 +207,7 @@ export async function browseHostDirectory(
     directory,
     parent: parent === directory ? null : parent,
     entries,
+    roots: await listFilesystemRoots({ readDriveTypes }),
   };
 }
 

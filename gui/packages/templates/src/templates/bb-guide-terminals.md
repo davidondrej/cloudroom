@@ -35,6 +35,16 @@ ROOM_ENVIRONMENT_ID, and ROOM_THREAD_STORAGE. Use room-cli status or --self
 without setting context manually. Environment-only and machine-only terminals
 have no current thread and do not inherit another thread's context.
 
+A terminal runs the machine's own shell: $SHELL (then zsh, bash, sh) on macOS
+and Linux; on Windows, PowerShell 7 when `pwsh` is on PATH, otherwise Windows
+PowerShell, otherwise cmd. Write --command in that shell's syntax. To run a
+program with arguments without knowing the shell, pass them after `--`
+(`room-cli terminal create --thread <id> -- pnpm test "my file.ts"`): the machine
+quotes each argument for its own shell. On Windows it runs the program directly,
+so shell built-ins (`echo`, `dir`, PowerShell cmdlets) need --command instead. `send --enter` appends a newline; on Windows
+it sends a carriage return, as the Enter key does. The terminal's exit code is
+the command's own exit code on every shell.
+
 All other operations need only the terminal ID:
 
   room-cli terminal show <terminal-id>

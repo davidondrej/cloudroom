@@ -19,6 +19,17 @@ function releaseNumber(version: string | null | undefined): number {
   return Number(/^v?(\d+)$/.exec(version ?? "")?.[1] ?? Number.NaN);
 }
 
+export function applyWebsiteRelease(
+  info: BbDesktopInfo | null,
+  latestVersion: string | null | undefined,
+): BbDesktopInfo | null {
+  if (info === null || info.platform === "windows") return info;
+  const latest = releaseNumber(latestVersion);
+  return latest > releaseNumber(info.version)
+    ? { ...info, latestVersion: `v${latest}`, updateAvailable: true }
+    : info;
+}
+
 async function fetchLatestDesktopVersion(
   signal: AbortSignal,
 ): Promise<string | null> {
@@ -36,7 +47,7 @@ export function useDesktopUpdateInfo(): DesktopUpdateInfo {
   const latestQuery = useQuery({
     queryKey: LATEST_DESKTOP_RELEASE_QUERY_KEY,
     queryFn: ({ signal }) => fetchLatestDesktopVersion(signal),
-    enabled: desktopApi !== null,
+    enabled: desktopApi !== null && desktopApi.platform !== "windows",
     refetchInterval: 15 * 60 * 1000,
     retry: false,
     staleTime: 15 * 60 * 1000,
@@ -67,11 +78,9 @@ export function useDesktopUpdateInfo(): DesktopUpdateInfo {
     };
   }, []);
 
-  const latest = releaseNumber(latestQuery.data);
-  const info =
-    desktopInfo !== null && latest > releaseNumber(desktopInfo.version)
-      ? { ...desktopInfo, latestVersion: `v${latest}`, updateAvailable: true }
-      : desktopInfo;
-
-  return { desktopApi, desktopInfo: info, isDesktop: desktopApi !== null };
+  return {
+    desktopApi,
+    desktopInfo: applyWebsiteRelease(desktopInfo, latestQuery.data),
+    isDesktop: desktopApi !== null,
+  };
 }

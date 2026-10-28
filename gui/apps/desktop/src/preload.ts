@@ -335,25 +335,36 @@ const bbBrowserApi: BbDesktopBrowserApi = {
   onFindResult(listener): BbDesktopBrowserUnsubscribe {
     return addListener(browserFindResultListeners, listener);
   },
-  async listImportSources() {
-    const payload: unknown = await ipcRenderer.invoke(
-      BB_DESKTOP_BROWSER_LIST_IMPORT_SOURCES_CHANNEL,
-    );
-    return z
-      .object({ sources: z.array(desktopBrowserImportSourceSchema) })
-      .parse(payload);
-  },
-  async importCookies(request) {
-    const payload: unknown = await ipcRenderer.invoke(
-      BB_DESKTOP_BROWSER_IMPORT_COOKIES_CHANNEL,
-      request,
-    );
-    return desktopBrowserImportOutcomeSchema.parse(payload);
-  },
-  openFullDiskAccessSettings() {
-    ipcRenderer.send(BB_DESKTOP_BROWSER_OPEN_FULL_DISK_ACCESS_SETTINGS_CHANNEL);
-  },
+  ...(process.platform === "win32" ? {} : browserImportApi()),
 };
+
+function browserImportApi(): Pick<
+  BbDesktopBrowserApi,
+  "listImportSources" | "importCookies" | "openFullDiskAccessSettings"
+> {
+  return {
+    async listImportSources() {
+      const payload: unknown = await ipcRenderer.invoke(
+        BB_DESKTOP_BROWSER_LIST_IMPORT_SOURCES_CHANNEL,
+      );
+      return z
+        .object({ sources: z.array(desktopBrowserImportSourceSchema) })
+        .parse(payload);
+    },
+    async importCookies(request) {
+      const payload: unknown = await ipcRenderer.invoke(
+        BB_DESKTOP_BROWSER_IMPORT_COOKIES_CHANNEL,
+        request,
+      );
+      return desktopBrowserImportOutcomeSchema.parse(payload);
+    },
+    openFullDiskAccessSettings() {
+      ipcRenderer.send(
+        BB_DESKTOP_BROWSER_OPEN_FULL_DISK_ACCESS_SETTINGS_CHANNEL,
+      );
+    },
+  };
+}
 
 const bbDesktopApi: BbDesktopApi = {
   browser: bbBrowserApi,

@@ -190,8 +190,24 @@ function parseLineSuffix(value: string): LocalFileHrefParts | null {
   };
 }
 
+const WINDOWS_DRIVE_PATH_PATTERN = /^[A-Za-z]:[\\/]/u;
+const FILE_URL_WINDOWS_DRIVE_PATHNAME_PATTERN = /^\/[A-Za-z]:\//u;
+
+export function isWindowsDriveLocalFilePath(path: string): boolean {
+  return WINDOWS_DRIVE_PATH_PATTERN.test(path);
+}
+
+function isAbsoluteLocalFilePathStart(path: string): boolean {
+  return (
+    (path.startsWith("/") && !path.startsWith("//")) ||
+    isWindowsDriveLocalFilePath(path)
+  );
+}
+
 function hasLikelyFileBasename(path: string): boolean {
-  const segments = path.split("/");
+  const segments = isWindowsDriveLocalFilePath(path)
+    ? path.split(/[\\/]/u)
+    : path.split("/");
   const basename = segments[segments.length - 1] ?? "";
   return basename.startsWith(".") || basename.includes(".");
 }
@@ -212,10 +228,10 @@ function isValidAbsoluteLocalFilePath({
   requireLikelyFileBasename,
 }: LocalFilePathValidationArgs): boolean {
   return (
-    path.startsWith("/") &&
-    !path.startsWith("//") &&
+    isAbsoluteLocalFilePathStart(path) &&
     path !== "/" &&
     !path.endsWith("/") &&
+    !(isWindowsDriveLocalFilePath(path) && path.endsWith("\\")) &&
     !path.includes("\n") &&
     !path.includes("\r") &&
     !path.includes("?") &&
@@ -232,8 +248,7 @@ function parseAbsoluteLocalFileHref(
   if (
     href.length === 0 ||
     href.trim() !== href ||
-    !href.startsWith("/") ||
-    href.startsWith("//")
+    !isAbsoluteLocalFilePathStart(href)
   ) {
     return null;
   }
@@ -356,8 +371,13 @@ export function parseLocalFileHref({
       if (url.search.length > 0) {
         return null;
       }
+      const pathname = FILE_URL_WINDOWS_DRIVE_PATHNAME_PATTERN.test(
+        url.pathname,
+      )
+        ? url.pathname.slice(1)
+        : url.pathname;
       link = parseAbsoluteLocalFileHref(
-        url.pathname + url.hash,
+        pathname + url.hash,
         requireLikelyFileBasename,
       );
     } catch {
@@ -397,6 +417,12 @@ export function buildLocalFileAnchorHref(
   link: MarkdownPreviewLocalFileLink | null,
   originalHref: string | undefined,
 ): string | undefined {
+  if (link && isWindowsDriveLocalFilePath(link.path)) {
+    const [drive = "", ...segments] = link.path.split(/[\\/]+/u);
+    return `file:///${drive}/${segments
+      .map(encodeURIComponent)
+      .join("/")}${buildLineRangeAnchorFragment(link.lineRange)}`;
+  }
   if (!link || !link.path.startsWith("/")) {
     return originalHref;
   }

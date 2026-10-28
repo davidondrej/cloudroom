@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import { constants } from "node:fs";
 import {
+  chmod,
   copyFile,
   lstat,
   mkdir,
@@ -225,6 +226,7 @@ async function runCapture(
         const temporary = `${frozen}.${randomUUID()}`;
         try {
           await copyFile(file.source, temporary, constants.COPYFILE_EXCL);
+          if (process.platform === "win32") await chmod(temporary, 0o600);
           if (signature(await lstat(file.source)) !== signature(before))
             return { pending: true };
           await syncPath(temporary);
@@ -758,7 +760,12 @@ function mentionedPaths(workspace: string, texts: string[]): Set<string> {
 }
 
 async function syncPath(path: string) {
-  const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  // Windows flushes only through a writable handle and can't open a folder to flush it; NTFS journals the rename itself.
+  if (process.platform === "win32" && (await lstat(path)).isDirectory()) return;
+  const file = await open(
+    path,
+    process.platform === "win32" ? "r+" : constants.O_RDONLY | constants.O_NOFOLLOW,
+  );
   try {
     await file.sync();
   } finally {

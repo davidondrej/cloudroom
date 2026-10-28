@@ -1,5 +1,7 @@
 import { z } from "zod";
 import {
+  canonicalizeHostPath,
+  isWindowsHostPath,
   contextSnapshotSchema,
   BRANCH_LIST_QUERY_MAX_LENGTH,
   changedMessageLenientSchema,
@@ -63,7 +65,11 @@ export type UnmanagedBranchSpec = z.infer<typeof unmanagedBranchSpecSchema>;
 
 export const unmanagedWorkspaceSchema = z.object({
   type: z.literal("unmanaged"),
-  path: z.string().min(1).nullable(),
+  path: z
+    .string()
+    .min(1)
+    .transform((path) => (isWindowsHostPath(path) ? canonicalizeHostPath(path) : path))
+    .nullable(),
   branch: unmanagedBranchSpecSchema.optional(),
 });
 

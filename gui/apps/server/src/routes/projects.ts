@@ -45,7 +45,14 @@ import {
   requirePublicProject,
   requirePublicStandardProject,
 } from "../services/lib/entity-lookup.js";
-import { PROMPT_HISTORY_ENTRY_LIMIT } from "@cloudroom/domain";
+import {
+  isAbsoluteHostPath,
+  isWindowsHostPath,
+  isWindowsNetworkOrDevicePath,
+  PROMPT_HISTORY_ENTRY_LIMIT,
+  UNSUPPORTED_WINDOWS_NETWORK_PROJECT_PATH_MESSAGE,
+} from "@cloudroom/domain";
+import { getHostPathFlavorForHost } from "../services/lib/host-path.js";
 import { toThreadListEntryResponses } from "../services/threads/thread-runtime-display.js";
 import { callHostRetryableOnlineRpc } from "../services/hosts/online-rpc.js";
 import {
@@ -304,6 +311,34 @@ function requireProjectSource(
   return source;
 }
 
+function assertPathMatchesHostPlatform(
+  deps: Pick<AppDeps, "db" | "hub">,
+  args: { hostId: string; path: string },
+): void {
+  const flavor = getHostPathFlavorForHost(deps, args.hostId);
+  if (flavor === "windows" && isWindowsNetworkOrDevicePath(args.path)) {
+    throw new ApiError(
+      400,
+      "invalid_request",
+      UNSUPPORTED_WINDOWS_NETWORK_PROJECT_PATH_MESSAGE,
+    );
+  }
+  if (flavor === "windows" && !isAbsoluteHostPath(args.path, flavor)) {
+    throw new ApiError(
+      400,
+      "invalid_request",
+      "This machine uses Windows paths. Use an absolute path like C:\\Users\\me\\repo.",
+    );
+  }
+  if (flavor === "posix" && isWindowsHostPath(args.path)) {
+    throw new ApiError(
+      400,
+      "invalid_request",
+      "This machine uses POSIX paths. Use an absolute path like /home/me/repo.",
+    );
+  }
+}
+
 export function registerProjectRoutes(app: Hono, deps: AppDeps): void {
   const { get, post, patch, del } = typedRoutes<PublicApiSchema>(app, {
     onValidationError: (msg) => new ApiError(400, "invalid_request", msg),
@@ -343,6 +378,7 @@ export function registerProjectRoutes(app: Hono, deps: AppDeps): void {
     if (source.type === "local_path") {
       requireNonDestroyedHostWithStatus(deps, source.hostId);
       assertUsableHostId(deps, { hostId: source.hostId });
+      assertPathMatchesHostPlatform(deps, source);
     }
     const existingProject = getPublicProjectByLocalPathSource(deps.db, source);
     if (existingProject) {
@@ -448,6 +484,14 @@ export function registerProjectRoutes(app: Hono, deps: AppDeps): void {
     if (getProjectSourceByHost(deps.db, projectId, payload.hostId)) {
       throw projectSourceHostConflict();
     }
+    const requestedPath =
+      payload.type === "clone" ? payload.targetPath : payload.path;
+    if (requestedPath !== undefined) {
+      assertPathMatchesHostPlatform(deps, {
+        hostId: payload.hostId,
+        path: requestedPath,
+      });
+    }
     const source =
       payload.type === "clone"
         ? await cloneProjectSourceOnHost(deps, {
@@ -480,6 +524,12 @@ export function registerProjectRoutes(app: Hono, deps: AppDeps): void {
     });
     if (existing.type === "local_path") {
       assertUsableHostId(deps, { hostId: existing.hostId });
+      if (payload.path) {
+        assertPathMatchesHostPlatform(deps, {
+          hostId: existing.hostId,
+          path: payload.path,
+        });
+      }
     }
     if (payload.type !== existing.type) {
       throw new ApiError(

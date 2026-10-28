@@ -2,6 +2,7 @@ import { type AvailableModel } from "@get-bb/plugin-sdk/provider-bridge";
 import { query, type Options } from "@anthropic-ai/claude-agent-sdk";
 import { buildClaudeCodeModels } from "../model-list.js";
 import { translateMissingClaudeCliError } from "./missing-cli-error.js";
+import { claudeSpawnOptions } from "./sdk-session.js";
 import { resolveClaudeCodeExecutable } from "./session-options.js";
 
 function buildModelProbeOptions(env: NodeJS.ProcessEnv): Options {
@@ -14,6 +15,11 @@ function buildModelProbeOptions(env: NodeJS.ProcessEnv): Options {
     permissionMode: "bypassPermissions",
     settingSources: [],
     ...(pathToClaudeCodeExecutable ? { pathToClaudeCodeExecutable } : {}),
+    ...claudeSpawnOptions({
+      onStderr: () => undefined,
+      record: false,
+      threadId: () => null,
+    }),
   };
 }
 

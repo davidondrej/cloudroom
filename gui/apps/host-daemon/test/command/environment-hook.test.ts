@@ -245,38 +245,42 @@ it.each(["setup", "teardown"] as const)(
   },
 );
 
-it("applies hook NODE_ENV and PATH contributions after sanitizing inherited state", async () => {
-  const path = await makeTempDir("bb-hook-overrides-");
-  await writeFile(
-    join(path, ".bb-env-setup.sh"),
-    'printf "NODE_ENV=%s\\nPATH=%s\\n" "$NODE_ENV" "$PATH"; sleep 0.1\n',
-  );
-  const output: string[] = [];
-  const options = createHarness().dispatchOptions({ dataDir: path });
-  options.emitEnvironmentHookProgress = (message) => {
-    output.push(message.entry.text);
-  };
-  const contributedEnv = Object.entries({
-    NODE_ENV: "production",
-    PATH: "/review-toolchain:/usr/bin:/bin",
-  }).map(([name, value]) => ({
-    name,
-    value,
-    source: { core: "machine-environment" as const },
-    reason: "test",
-  }));
-  await dispatchOnlineRpcCommand(
-    {
-      type: "environment.hook.run",
-      contributedEnv,
-      resumeOnly: false,
-      operationId: "overrides",
-      path,
-      kind: "setup",
-      timeoutMs: 5000,
-    },
-    options,
-  );
-  expect(output).toContain("NODE_ENV=production");
-  expect(output).toContain("PATH=/review-toolchain:/usr/bin:/bin");
-});
+// A POSIX PATH fixture: on Windows it hides Git, so the hook (rightly) won't start.
+it.skipIf(process.platform === "win32")(
+  "applies hook NODE_ENV and PATH contributions after sanitizing inherited state",
+  async () => {
+    const path = await makeTempDir("bb-hook-overrides-");
+    await writeFile(
+      join(path, ".bb-env-setup.sh"),
+      'printf "NODE_ENV=%s\\nPATH=%s\\n" "$NODE_ENV" "$PATH"; sleep 0.1\n',
+    );
+    const output: string[] = [];
+    const options = createHarness().dispatchOptions({ dataDir: path });
+    options.emitEnvironmentHookProgress = (message) => {
+      output.push(message.entry.text);
+    };
+    const contributedEnv = Object.entries({
+      NODE_ENV: "production",
+      PATH: "/review-toolchain:/usr/bin:/bin",
+    }).map(([name, value]) => ({
+      name,
+      value,
+      source: { core: "machine-environment" as const },
+      reason: "test",
+    }));
+    await dispatchOnlineRpcCommand(
+      {
+        type: "environment.hook.run",
+        contributedEnv,
+        resumeOnly: false,
+        operationId: "overrides",
+        path,
+        kind: "setup",
+        timeoutMs: 5000,
+      },
+      options,
+    );
+    expect(output).toContain("NODE_ENV=production");
+    expect(output).toContain("PATH=/review-toolchain:/usr/bin:/bin");
+  },
+);

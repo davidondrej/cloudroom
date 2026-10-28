@@ -550,6 +550,25 @@ const hostListPathsCommandSchema = z
     message: "At least one path kind must be included",
   });
 
+/** Windows: `claude setup-token` in the daemon's own pseudo-terminal, readable only through this command (Connect Claude). */
+const claudeSetupTokenCommandSchema = z
+  .object({
+    type: z.literal("claude.setup_token"),
+    action: z.enum(["start", "read", "cancel"]),
+    runId: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/),
+    binary: z.string().min(1).optional(),
+  })
+  .strict();
+
+const claudeSetupTokenResultSchema = z
+  .object({
+    state: z.enum(["running", "exited", "missing"]),
+    url: z.string().nullable(),
+    token: z.string().nullable(),
+    screen: z.array(z.string()).max(20),
+  })
+  .strict();
+
 const hostMkdirCommandSchema = z
   .object({
     type: z.literal("host.mkdir"),
@@ -695,6 +714,7 @@ const directoryListingSchema = z.object({
   directory: z.string(),
   parent: z.string().nullable(),
   entries: z.array(directoryEntrySchema),
+  roots: z.array(z.string()),
 });
 
 const hostCommandSourceSchema = z.enum(["skill", "command"]);
@@ -1616,6 +1636,15 @@ export const hostDaemonCommandRegistry = {
     resultSchema: pathListResultSchema,
     transport: "onlineRpc",
     retryable: true,
+    flushEventsBeforeResult: false,
+    envLane: null,
+  }),
+  "claude.setup_token": defineHostDaemonCommandDescriptor({
+    type: "claude.setup_token",
+    schema: claudeSetupTokenCommandSchema,
+    resultSchema: claudeSetupTokenResultSchema,
+    transport: "onlineRpc",
+    retryable: false,
     flushEventsBeforeResult: false,
     envLane: null,
   }),

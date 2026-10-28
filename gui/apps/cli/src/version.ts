@@ -88,3 +88,9 @@ export function resolveBbCliVersion(): string {
     fromDir: dirname(fileURLToPath(import.meta.url)),
   });
 }
+
+export function formatCloudroomVersion(version: string): string {
+  if (version.startsWith("0.0.0")) return "dev";
+  const release = /^([1-9]\d*)\.0\.0$/.exec(version);
+  return release ? `v${release[1]}` : version;
+}

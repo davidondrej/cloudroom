@@ -292,7 +292,6 @@ async function reuseTargetThreadForRun(
         mentions: [],
       },
     ],
-    permissionMode: args.execution.permissionMode,
   });
 }
 

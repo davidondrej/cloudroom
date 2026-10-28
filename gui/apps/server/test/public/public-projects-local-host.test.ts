@@ -4,8 +4,10 @@ import {
   ensurePersonalProject,
   getThread,
   listPublicProjects,
+  openSession,
   setExperiments,
 } from "@cloudroom/db";
+import { HOST_DAEMON_PROTOCOL_VERSION } from "@cloudroom/host-daemon-contract";
 import { defaultExperiments, PERSONAL_PROJECT_ID } from "@cloudroom/domain";
 import {
   reportQueuedCommandSuccess,
@@ -72,6 +74,139 @@ describe("public project local host routes", () => {
       expect(listPublicProjects(harness.db)).toEqual([
         expect.objectContaining({ id: project.id }),
       ]);
+    });
+  });
+
+  it("keeps one project for every spelling of a Windows folder", async () => {
+    await withTestHarness(async (harness) => {
+      const offlinePrimary = seedHost(harness.deps, {
+        id: "host-windows-project",
+      });
+      seedPrimaryHost(harness.deps, offlinePrimary.id);
+      openSession(harness.db, {
+        hostId: offlinePrimary.id,
+        instanceId: "instance-1",
+        hostName: "Windows PC",
+        dataDir: "C:\\Users\\me\\.gui-cloudroom",
+        protocolVersion: HOST_DAEMON_PROTOCOL_VERSION,
+        heartbeatIntervalMs: 5_000,
+        leaseTimeoutMs: 30_000,
+      });
+
+      const create = (path: string) =>
+        harness.app.request("/api/v1/projects", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            name: "Windows Project",
+            source: { type: "local_path", hostId: offlinePrimary.id, path },
+          }),
+        });
+
+      const projects = [];
+      for (const path of [
+        "C:\\src\\repo",
+        "c:/src/Repo/",
+        "C:\\SRC\\repo\\.",
+      ]) {
+        const response = await create(path);
+        expect(response.status).toBe(201);
+        projects.push(projectResponseSchema.parse(await readJson(response)));
+      }
+
+      expect(new Set(projects.map((project) => project.id)).size).toBe(1);
+      expect(projects[0]?.sources[0]?.path).toBe("C:\\src\\repo");
+      expect(listPublicProjects(harness.db)).toHaveLength(1);
+    });
+  });
+
+  it("refuses a Windows folder on an offline machine with no Windows session", async () => {
+    await withTestHarness(async (harness) => {
+      const offline = seedHost(harness.deps, { id: "host-offline-mac" });
+      seedPrimaryHost(harness.deps, offline.id);
+
+      const response = await harness.app.request("/api/v1/projects", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          name: "Offline Mac",
+          source: { type: "local_path", hostId: offline.id, path: "C:\\src\\repo" },
+        }),
+      });
+
+      expect(response.status).toBe(400);
+      expect(listPublicProjects(harness.db)).toEqual([]);
+    });
+  });
+
+  it("refuses a Windows folder on a machine that reported a POSIX platform", async () => {
+    await withTestHarness(async (harness) => {
+      const { host } = seedHostSession(harness.deps, {
+        id: "host-posix-project",
+      });
+      seedPrimaryHost(harness.deps, host.id);
+
+      const response = await harness.app.request("/api/v1/projects", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          name: "Wrong Platform",
+          source: {
+            type: "local_path",
+            hostId: host.id,
+            path: "C:\\src\\repo",
+          },
+        }),
+      });
+
+      expect(response.status).toBe(400);
+      await expect(readJson(response)).resolves.toMatchObject({
+        message: expect.stringContaining("This machine uses POSIX paths"),
+      });
+      expect(listPublicProjects(harness.db)).toEqual([]);
+    });
+  });
+
+  it("refuses a POSIX folder on a machine that reported Windows", async () => {
+    await withTestHarness(async (harness) => {
+      const { host } = seedHostSession(harness.deps, {
+        id: "host-windows-platform",
+        platform: "win32",
+      });
+      seedPrimaryHost(harness.deps, host.id);
+
+      const create = (path: string) =>
+        harness.app.request("/api/v1/projects", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            name: "Windows Machine",
+            source: { type: "local_path", hostId: host.id, path },
+          }),
+        });
+
+      const refused = await create("/home/me/repo");
+      expect(refused.status).toBe(400);
+      await expect(readJson(refused)).resolves.toMatchObject({
+        message: expect.stringContaining("This machine uses Windows paths"),
+      });
+      for (const path of [
+        "\\\\server\\share\\repo",
+        "//server/share/repo",
+        "\\\\?\\C:\\src\\repo",
+        "//?/C:/src/repo",
+        "\\\\.\\C:\\src\\repo",
+        "//./C:/src/repo",
+      ]) {
+        const network = await create(path);
+        expect(network.status, path).toBe(400);
+        await expect(readJson(network)).resolves.toMatchObject({
+          message: expect.stringContaining(
+            "Windows network paths are not supported",
+          ),
+        });
+      }
+      expect(listPublicProjects(harness.db)).toEqual([]);
     });
   });
 

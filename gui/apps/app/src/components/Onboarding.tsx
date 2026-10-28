@@ -3,7 +3,7 @@ import { atom, useAtom, useSetAtom } from "jotai";
 import { atomWithStorage } from "jotai/utils";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
-import { deriveProjectNameFromPath, COMPUTER } from "@cloudroom/domain";
+import { deriveProjectNameFromPath } from "@cloudroom/domain";
 import { Icon } from "@cloudroom/shared-ui/icon";
 import { cn } from "@cloudroom/shared-ui/lib/utils";
 import { ClaudeConnectionButton, useClaudeConnection } from "@/components/ClaudeConnection";
@@ -16,7 +16,8 @@ import { useCreateProject } from "@/hooks/mutations/project-mutations";
 import { useUpdateGeneralSettings } from "@/hooks/mutations/settings-mutations";
 import { cloudCanRunHarness, useCloudroomAccount, useCloudroomSignIn, useImportBb, useMacAgents, useNativeSessions, useProjectSuggestions, useSetCopyLogins, useSetMacAccess } from "@/hooks/queries/cloudroom-queries";
 import { useSidebarNavigation } from "@/hooks/queries/sidebar-navigation-query";
-import { useHostDaemon } from "@/hooks/useHostDaemon";
+import { useHostDaemon, useThisComputer } from "@/hooks/useHostDaemon";
+import { GitForWindowsBanner } from "@/components/layout/DesktopUpdateBanner";
 import { usePathPickerHost } from "@/hooks/useLocalPathPicker";
 import { useQuickCreateProjectController } from "@/hooks/useQuickCreateProject";
 import { usePromptBoxProviderPreference } from "@/hooks/thread-creation-options/persisted-selection-fields";
@@ -105,7 +106,7 @@ function Setup({ locked, close }: { locked: boolean; close: () => void }) {
   const saveMacAccess = useSetMacAccess();
   const saveCopyLogins = useSetCopyLogins();
   const leave = () => {
-    if (account.data?.account && account.data.macAccess == null) saveMacAccess.mutate(choices.macAccess);
+    if (account.data?.account && account.data.macAccessSupported !== false && account.data.macAccess == null) saveMacAccess.mutate(choices.macAccess);
     if (account.data?.account && account.data.copyLogins == null) saveCopyLogins.mutate(choices.copyLogins);
     close();
   };
@@ -162,6 +163,7 @@ function Setup({ locked, close }: { locked: boolean; close: () => void }) {
   return (
     <div role="dialog" aria-modal="true" aria-label="Set up Cloudroom" style={PALETTE} className="fixed inset-0 z-50 flex flex-col bg-(--ob-bg) text-(--ob-ink) duration-300 animate-in fade-in-0">
       <div className={cn("h-10 shrink-0 border-b border-(--ob-line) bg-(--ob-rail)", MACOS_WINDOW_DRAG_CLASS)} />
+      <GitForWindowsBanner pinned={false} />
       <div className="flex min-h-0 flex-1">
         <aside className="flex w-[300px] shrink-0 flex-col border-r border-(--ob-line) bg-(--ob-rail) px-[22px] pt-7 pb-6">
           <div className="flex items-center gap-2.5 text-base font-semibold tracking-tight">
@@ -384,6 +386,7 @@ function AgentStep({ progress, next, stamped, left, choices, setChoices }: { pro
   const { account, agents, codex, ready, offline } = progress;
   const defaultAgent = useSystemConfig().data?.generalSettings.defaultProviderId;
   const { localHostId } = useHostDaemon();
+  const here = useThisComputer();
   const claudeLocal = useClaudeConnection({ target: "local", hostId: localHostId });
   const macAgents = useMacAgents();
   const detected = useRef(false);
@@ -408,7 +411,7 @@ function AgentStep({ progress, next, stamped, left, choices, setChoices }: { pro
   const client = useQueryClient();
   const saveMacAccess = useSetMacAccess();
   const saveCopyLogins = useSetCopyLogins();
-  const [ask] = useState(() => ({ mac: account.data?.macAccess == null, logins: account.data?.copyLogins == null }));
+  const [ask] = useState(() => ({ mac: account.data?.macAccessSupported !== false && account.data?.macAccess == null, logins: account.data?.copyLogins == null }));
   const { macAccess, copyLogins } = choices;
   // Save whenever a box differs from the saved choice, so re-checking it after a Connect works.
   const saveChoices = () =>
@@ -442,10 +445,10 @@ function AgentStep({ progress, next, stamped, left, choices, setChoices }: { pro
         </div>
       ) : <Heading lead="Connect an" mark="agent" />}
       <div className="mt-8 flex flex-col gap-3">
-        <Card on={agents.claude} isDefault={agents.claude && defaultAgent === "claude-code"} logo={<AgentLogo id="claude-code" className="bg-[#f4e4d6]" />} name="Claude Code" detail={claudeLocal.data?.state === "connected" ? `Found on this ${COMPUTER}` : "Uses your Claude plan"}>
+        <Card on={agents.claude} isDefault={agents.claude && defaultAgent === "claude-code"} logo={<AgentLogo id="claude-code" className="bg-[#f4e4d6]" />} name="Claude Code" detail={claudeLocal.data?.state === "connected" ? `Found on ${here}` : "Uses your Claude plan"}>
           {action(agents.claude, <span onClickCapture={() => started("claude")}><ClaudeConnectionButton target="cloud" presentation="inline" className={CONNECT} /></span>)}
         </Card>
-        <Card on={agents.codex} isDefault={agents.codex && defaultAgent === "codex"} logo={<AgentLogo id="codex" className="bg-black text-white" />} name="Codex" detail={account.data?.localLogins?.codex ? `Found on this ${COMPUTER}` : "Uses your ChatGPT plan"}>
+        <Card on={agents.codex} isDefault={agents.codex && defaultAgent === "codex"} logo={<AgentLogo id="codex" className="bg-black text-white" />} name="Codex" detail={account.data?.localLogins?.codex ? `Found on ${here}` : "Uses your ChatGPT plan"}>
           {action(agents.codex, codexBrowser ? (
             <Note>
               Finish in your browser.{" "}
@@ -511,10 +514,11 @@ function AgentLogo({ id, className, small = false }: { id: string; className: st
 function MoreAgents({ agents, picked, pick }: { agents: string[]; picked: string | null; pick: (agent: string) => void }) {
   const providers = useSystemProviders().data ?? [];
   const shown = agents.flatMap((id) => providers.filter((provider) => provider.id === id));
+  const here = useThisComputer();
   if (!shown.length) return null;
   return (
     <div className="mt-3.5 flex flex-wrap items-center gap-1.5 text-[13px]">
-      <span className="mr-1 text-(--ob-muted)">Also on this {COMPUTER}</span>
+      <span className="mr-1 text-(--ob-muted)">Also on {here}</span>
       {shown.map(({ id, displayName }) => {
         const on = id === picked;
         return (
@@ -550,6 +554,7 @@ const openGithub = (url: string) => { if (new URL(url).origin === "https://githu
 
 function GithubStep({ progress, next }: { progress: ReturnType<typeof useSetupProgress>; next: () => void }) {
   const { github, account, ready, offline } = progress;
+  const here = useThisComputer();
   const client = useQueryClient();
   const requestId = useRef<string | null>(null);
   const [copied, setCopied] = useState(false);
@@ -598,7 +603,7 @@ function GithubStep({ progress, next }: { progress: ReturnType<typeof useSetupPr
   };
   const detail = connected
     ? "Cloud agents can use your repos."
-    : !account.data?.account ? "Log in first" : offline ? "Cloud unreachable" : !ready ? "Starting your cloud…" : `Not found on this ${COMPUTER}. You'll copy a code, then paste it on github.com.`;
+    : !account.data?.account ? "Log in first" : offline ? "Cloud unreachable" : !ready ? "Starting your cloud…" : `Not found on ${here}. You'll copy a code, then paste it on github.com.`;
   if (code) {
     return (
       <>
@@ -670,6 +675,7 @@ function ProjectStep({ close, added, setAdded, imported, setImported }: {
   const setProjectId = useSetRootComposeProjectId();
   const quickCreate = useQuickCreateProjectController();
   const { canUseNativeFolderPicker, clientHostId, hostId } = usePathPickerHost();
+  const here = useThisComputer();
   const { localHostId } = useHostDaemon();
   const importBb = useImportBb();
   const sessions = useNativeSessions().data?.sessions;
@@ -703,7 +709,7 @@ function ProjectStep({ close, added, setAdded, imported, setImported }: {
     quickCreate.openCreateDialog();
   };
   const bringWorkOver = () => {
-    if (!localHostId) return appToast.error(`This ${COMPUTER} is not connected yet. Try again in a moment.`);
+    if (!localHostId) return appToast.error(`${here[0]!.toUpperCase()}${here.slice(1)} is not connected yet. Try again in a moment.`);
     track("project", "started", "bb_import");
     importBb.mutate(localHostId, {
       onSuccess: ({ imported }) => {
@@ -737,7 +743,7 @@ function ProjectStep({ close, added, setAdded, imported, setImported }: {
       </div>
       {recent.length > 0 && (
         <div className="mt-9 max-w-[640px]">
-          <p className="mb-2.5 text-[11.5px] tracking-[0.12em] text-(--ob-muted) uppercase">{empty ? `Recent on this ${COMPUTER}` : "Or add a recent folder"}</p>
+          <p className="mb-2.5 text-[11.5px] tracking-[0.12em] text-(--ob-muted) uppercase">{empty ? `Recent on ${here}` : "Or add a recent folder"}</p>
           <ul className="divide-y divide-(--ob-line) border-[1.5px] border-(--ob-ink) bg-(--ob-card)">
             {recent.map((repo) => (
               <li key={repo.path} className="flex items-center gap-4 px-5 py-3.5">

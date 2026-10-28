@@ -52,6 +52,7 @@ import {
   readHostRelativeFile,
 } from "./command-handlers/host-files.js";
 import { writeHostFile } from "./command-handlers/file-write.js";
+import { claudeSetupToken } from "./command-handlers/claude-setup-token.js";
 import {
   mkdirHostPath,
   moveHostPath,
@@ -640,6 +641,7 @@ const onlineRpcHandlers: OnlineRpcHandlerMap = {
   "host.list_files": listHostFiles,
   "host.list_paths": listHostPaths,
   "host.mkdir": mkdirHostPath,
+  "claude.setup_token": claudeSetupToken,
   "host.move_path": moveHostPath,
   "host.remove_path": removeHostPath,
   "host.browse_directory": browseHostDirectory,

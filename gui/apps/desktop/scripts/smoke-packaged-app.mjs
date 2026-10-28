@@ -7,6 +7,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   createDesktopReleaseConfig,
+  resolveDesktopBuildPlatform,
   resolveDesktopReleaseChannel,
 } from "./desktop-release-channel.mjs";
 import { createPackagedAppLaunchArguments } from "./packaged-app-launch.mjs";
@@ -308,10 +309,6 @@ async function stopPackagedApp(child) {
 }
 
 async function smokePackagedApp() {
-  if (process.platform !== "darwin" && process.platform !== "linux") {
-    throw new Error("Packaged desktop smoke only runs on macOS or Linux.");
-  }
-
   const appBinary = await resolvePackagedAppBinary({
     executableName: releaseConfig.linuxExecutableName,
     platform: process.platform,
@@ -323,7 +320,7 @@ async function smokePackagedApp() {
 
 async function runPackagedSmoke(appBinary, smokeRoot) {
   const desktopVersion = await readDesktopPackageVersion(appBinary);
-  const desktopPlatform = process.platform === "darwin" ? "macos" : "linux";
+  const desktopPlatform = resolveDesktopBuildPlatform(process.platform);
   await smokePackagedNpm(appBinary);
   const dataDir = join(smokeRoot, "data");
   const userDataDir = join(smokeRoot, "user-data");

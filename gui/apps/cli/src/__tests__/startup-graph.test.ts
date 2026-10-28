@@ -7,7 +7,7 @@ import { promisify } from "node:util";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { z } from "zod";
 import { CORE_COMMAND_GROUPS } from "../command-groups.js";
-import { readBbAppVersion } from "./bb-app-version.js";
+import { expectedCliVersion } from "./bb-app-version.js";
 
 const execFileAsync = promisify(execFile);
 const cliRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -112,7 +112,7 @@ describe("cloudroom startup module graph", () => {
   it("answers --version from commander and node builtins alone", async () => {
     const run = await runCli("source", ["--version"]);
 
-    expect(run.stdout.trim()).toBe(await readBbAppVersion());
+    expect(run.stdout.trim()).toBe(await expectedCliVersion());
 
     expect(loaded(run, "/apps/cli/src/index.ts")).toHaveLength(1);
     expect(loaded(run, "/commander/")).not.toHaveLength(0);
@@ -201,7 +201,7 @@ describe("cloudroom startup module graph", () => {
     it("answers --version from the entry and its shared chunks alone", async () => {
       const run = await runCli("dist", ["--version"]);
 
-      expect(run.stdout.trim()).toBe(await readBbAppVersion());
+      expect(run.stdout.trim()).toBe(await expectedCliVersion());
       expect(loaded(run, pathToFileURL(distEntry).href)).toHaveLength(1);
 
       const chunks = loaded(run, chunkDirUrl);

@@ -1,3 +1,4 @@
+import { hostPathEquals } from "./host-path-sql.js";
 import { and, asc, desc, eq, isNotNull, isNull } from "drizzle-orm";
 import { PERSONAL_PROJECT_ID } from "@cloudroom/domain";
 import type {
@@ -130,7 +131,7 @@ function getPublicProjectWithLocalPathSource(
           publicProjectFilter(),
           eq(projectSources.type, source.type),
           eq(projectSources.hostId, source.hostId),
-          eq(projectSources.path, source.path),
+          hostPathEquals(projectSources.path, source.path),
         ),
       )
       .orderBy(asc(projects.sortKey), asc(projects.id))

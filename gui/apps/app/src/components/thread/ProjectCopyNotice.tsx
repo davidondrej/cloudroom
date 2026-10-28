@@ -5,6 +5,7 @@ import { Icon } from "@cloudroom/shared-ui/icon";
 import { GithubFaviconIcon } from "@/components/pull-request/GithubFaviconIcon";
 import { PromptStackCard } from "@/components/promptbox/banner/PromptStackCard";
 import { useRetryProjectCopy } from "@/hooks/queries/cloudroom-queries";
+import { useThisComputer } from "@/hooks/useHostDaemon";
 import { useClipboardCopy } from "@/lib/clipboard";
 import { projectFilesFixPrompt } from "@/lib/fix-prompts";
 
@@ -14,6 +15,7 @@ const timeLeft = (seconds: number) => seconds < 60 ? "under a minute left" : `ab
 export function ProjectCopyNotice({ thread }: { thread: Thread }) {
   const [, rerender] = useReducer((count: number) => count + 1, 0);
   const retry = useRetryProjectCopy(thread.id);
+  const computer = useThisComputer() === "this PC" ? "your PC" : `your ${COMPUTER}`;
   const progress = thread.projectCopy;
   const fixPrompt = useClipboardCopy({ text: projectFilesFixPrompt(thread.id, progress?.error) });
   const dismissKey = `cloudroom.project-copy.dismissed.${thread.id}`;
@@ -28,8 +30,8 @@ export function ProjectCopyNotice({ thread }: { thread: Thread }) {
       : cloning
         ? ["Cloning from GitHub", "New Cloud project"]
         : progress.total
-          ? [`Copying from your ${COMPUTER}`, `${megabytes(progress.completed)} of ${megabytes(progress.total)} MB${progress.secondsLeft === undefined ? "" : ` · ${timeLeft(progress.secondsLeft)}`}`]
-          : [`Preparing files on your ${COMPUTER}`, "New Cloud project"];
+          ? [`Copying from ${computer}`, `${megabytes(progress.completed)} of ${megabytes(progress.total)} MB${progress.secondsLeft === undefined ? "" : ` · ${timeLeft(progress.secondsLeft)}`}`]
+          : [`Preparing files on ${computer}`, "New Cloud project"];
     return (
       <PromptStackCard ariaLabel="Project copy progress" className="ml-auto mr-3 w-fit max-w-[calc(100%-1.5rem)] overflow-hidden sm:mr-4">
         <div role="status" className="flex min-w-0 items-center gap-2.5 px-3 py-2 text-sm">

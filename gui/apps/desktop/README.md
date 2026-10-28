@@ -1,6 +1,6 @@
 # @cloudroom/desktop
 
-macOS and Linux Electron shell for bb. The desktop app loads the existing bb
+macOS, Linux, and Windows Electron shell for bb. The desktop app loads the existing bb
 web UI and uses the packaged `bb-app` launcher for server and host-daemon
 lifecycle.
 
@@ -115,6 +115,38 @@ The bb-app tarball smoke covers a different packaging pipeline and cannot
 detect Electron artifact omissions. A source build or `npm --version` alone
 does not verify a desktop plugin dependency install.
 
+### Windows (NSIS, x64)
+
+Windows packaging needs a Windows x64 host: `afterPack` loads the packaged
+native modules to verify them. Install with
+`pnpm install --frozen-lockfile --ignore-scripts`, then
+`node apps\desktop\node_modules\electron\install.js`, then from `gui/`:
+
+```powershell
+pnpm --dir apps\desktop run package:win        # release.noindex\win-unpacked\Cloudroom.exe
+pnpm --dir apps\desktop run smoke:packaged
+pnpm --dir apps\desktop run desktop:build:win  # Cloudroom-vN-x64.exe + latest.yml
+```
+
+The installer is a one-click, per-user NSIS installer: no admin prompt, and it
+installs to `%LOCALAPPDATA%\Programs\Cloudroom` (`Cloudroom-Nightly` on the
+nightly channel). `/S` installs or uninstalls silently. It bundles Python for
+the preview helper, but not Git: users install Git for Windows. The detached
+preview helper keeps that `python.exe` open, so before the installer replaces
+or removes files, `build/installer.nsh` asks the helper to `pause`, then
+force-stops any `python*.exe` still running from the install folder.
+electron-builder's own check misses a single process on Windows PowerShell 5.1.
+
+Without `WIN_CSC_LINK` and `WIN_CSC_KEY_PASSWORD` the installer is unsigned,
+and SmartScreen warns before it runs. The release workflow passes them from
+the `WINDOWS_CERTIFICATE_PFX` and `WINDOWS_CERTIFICATE_PASSWORD` secrets.
+
+`afterPack` copies `@parcel/watcher-win32-x64` into the package, because
+electron-builder leaves it out, and loads it with the packaged Electron.
+
+Inside the installed app, `room-cli.cmd` runs on `Cloudroom.exe` with
+`ELECTRON_RUN_AS_NODE=1`, so the PC needs no Node.
+
 ### Linux (AppImage, x64)
 
 Linux packaging targets x64 glibc-based distributions. Install `python3`,
@@ -183,23 +215,7 @@ push code to Linux clients. Treat the release token accordingly.
 
 ## Releasing
 
-`bb-app` and `@cloudroom/desktop` versions are LOCKED in lockstep. The desktop package
-depends on `bb-app: workspace:*`, and the displayed release version string must
-match `packages/bb-app/package.json`.
-
-To bump for a release:
-
-```bash
-node scripts/bump-version.mjs <new-version>
-```
-
-Then commit and ship through the normal `sawyer-next` → `main` flow. You can also
-use `--patch`, `--minor`, or `--major` instead of an explicit version.
-
-CI enforces this lockstep. Direct edits that leave
-`packages/bb-app/package.json` and `apps/desktop/package.json` with different
-versions fail the build. Never edit either package version directly for a
-release; use `scripts/bump-version.mjs` so both files move together.
+The release version is the `vN` from `web/app/changelog/releases.ts`. Release builds stamp it into the app bundle (`N.0.0`) and the bundled `bb-app/package.json`; source checkouts stay `0.0.0-dev`.
 
 Cloudroom releases are built and published by the root
 `.github/workflows/release-gui.yml` workflow (see the `release-gui` skill and
@@ -273,6 +289,15 @@ builds write `latest-*.yml`, so releases must be marked latest, not prerelease. 
 `cloudroom.dev/download/latest` version check stays as the fallback: it shows
 **Download** when the in-app updater cannot install. Local dev builds skip
 Electron auto-update unless `BB_DESKTOP_AUTO_UPDATE=1` is set.
+
+Windows reads `latest.yml` from the same release, downloads the `.exe` in the
+background, and runs it silently on quit. **Relaunch** installs silently and
+reopens Cloudroom. Before anything stops, it checks the downloaded installer
+is still on disk. If the installer can't start, Cloudroom reopens on the old
+version; if that failure comes after Cloudroom has quit, the next launch sees
+the old version and offers the download again. To test updates against a local feed, build both versions with
+`BB_DESKTOP_UPDATE_BASE_URL=http://127.0.0.1:PORT/`; it is read only at build
+time.
 
 `bb Nightly` follows the equivalent isolated `desktop-nightly` release and
 `nightly-mac.yml`; it never reads or moves the stable feed.

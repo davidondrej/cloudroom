@@ -266,6 +266,7 @@ describe("desktop window factory", () => {
     expect(createdWindows[0]?.options.minHeight).toBe(MIN_WINDOW_HEIGHT);
     expect(createdWindows[0]?.options.minWidth).toBe(MIN_WINDOW_WIDTH);
     expect(createdWindows[0]?.options.titleBarStyle).toBe("hiddenInset");
+    expect(createdWindows[0]?.options).not.toHaveProperty("autoHideMenuBar");
     expect(createdWindows[0]?.options.webPreferences?.spellcheck).toBe(true);
     expect(createdWindows[0]?.webContents.spellCheckerEnabledValues).toEqual([
       true,
@@ -467,10 +468,45 @@ describe("desktop window factory", () => {
     await factory.createWindow({ initialUrl: null, stateKey: null });
 
     expect(createdWindows[0]?.options).not.toHaveProperty("frame");
+    expect(createdWindows[0]?.options).not.toHaveProperty("autoHideMenuBar");
     expect(createdWindows[0]?.options).not.toHaveProperty("titleBarStyle");
     expect(createdWindows[0]?.options).not.toHaveProperty(
       "trafficLightPosition",
     );
+  });
+
+  it("auto-hides the menu bar on Windows", async () => {
+    const tempDir = await createTempDir();
+    const createdWindows: FakeDesktopWindow[] = [];
+    const factory = createDesktopWindowFactory({
+      browserWindowCreator: {
+        create(options) {
+          const browserWindow = new FakeDesktopWindow({ options });
+          createdWindows.push(browserWindow);
+          return browserWindow;
+        },
+      },
+      createWindowStateKey() {
+        return "windows-window";
+      },
+      displayWorkAreas: [{ height: 900, width: 1440, x: 0, y: 0 }],
+      icon: undefined,
+      isMac: false,
+      isWindows: true,
+      isLinuxTransparent: false,
+      isLinuxFrameless: false,
+      isQuitting() {
+        return false;
+      },
+      openExternalUrl() {},
+      preloadPath: "/tmp/preload.cjs",
+      userDataPath: tempDir.path,
+    });
+
+    await factory.createWindow({ initialUrl: null, stateKey: null });
+
+    expect(createdWindows[0]?.options.autoHideMenuBar).toBe(true);
+    expect(createdWindows[0]?.options).not.toHaveProperty("frame");
   });
 
   it("enables transparent Linux windows when requested", async () => {

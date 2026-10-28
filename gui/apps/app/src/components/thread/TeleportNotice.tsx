@@ -14,20 +14,22 @@ import {
 } from "@/components/promptbox/banner/prompt-banner-actions";
 import { useTeleportThread } from "@/hooks/queries/cloudroom-queries";
 import { useStopThread } from "@/hooks/mutations/thread-runtime-mutations";
+import { useThisComputer } from "@/hooks/useHostDaemon";
 import { RouteAnchor } from "@/components/ui/app-route-anchor";
 import { FixPrompt } from "@/components/ui/fix-prompt";
 import { projectFilesFixPrompt } from "@/lib/fix-prompts";
 import { getThreadRoutePath } from "@/lib/route-paths";
 
-const LOCAL_STEPS: [TeleportLocalStep, string][] = [
+export const teleportLocalSteps = (here: string): [TeleportLocalStep, string][] => [
   ["stopping", "Stop cloud agent"],
   ["downloading", "Download chat"],
   ["copying", "Copy code"],
-  ["switching", `Switch to ${COMPUTER_TITLE}`],
+  ["switching", here === "this PC" ? "Switch to PC" : `Switch to ${COMPUTER_TITLE}`],
 ];
 
 export function TeleportLocalNotice({ step = "stopping" }: { step?: TeleportLocalStep }) {
-  const current = LOCAL_STEPS.findIndex(([id]) => id === step);
+  const steps = teleportLocalSteps(useThisComputer());
+  const current = steps.findIndex(([id]) => id === step);
   return (
     <PromptStackCard
       ariaLabel="Teleport to Local progress"
@@ -36,11 +38,11 @@ export function TeleportLocalNotice({ step = "stopping" }: { step?: TeleportLoca
     >
       <div
         role="status"
-        aria-label={`Teleporting to Local: ${LOCAL_STEPS[current]?.[1]}`}
+        aria-label={`Teleporting to Local: ${steps[current]?.[1]}`}
         className="p-0.5 text-xs"
       >
         <ol className={cn("flex min-w-0 items-center gap-1.5", PROMPT_STACK_INLAY_SEGMENT_CLASS)}>
-          {LOCAL_STEPS.map(([id, label], index) => (
+          {steps.map(([id, label], index) => (
             <li
               key={id}
               className={cn(

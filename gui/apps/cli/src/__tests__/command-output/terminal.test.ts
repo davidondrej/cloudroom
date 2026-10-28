@@ -133,6 +133,34 @@ describe("room-cli terminal command output", () => {
     },
   );
 
+  it("sends positional command arguments unquoted for the machine to quote", async () => {
+    const create = vi.fn(async () => makeTerminalSession());
+    stubServerApi({ "v1.terminals.$post": create });
+
+    await runCommand(
+      [
+        "terminal",
+        "create",
+        "--thread",
+        "thr-1",
+        "--",
+        "C:\\Program Files\\tool.exe",
+        "hello world",
+        "it's",
+      ],
+      register,
+    );
+
+    expect(create).toHaveBeenCalledWith({
+      json: expect.objectContaining({
+        start: {
+          mode: "argv",
+          argv: ["C:\\Program Files\\tool.exe", "hello world", "it's"],
+        },
+      }),
+    });
+  });
+
   it("creates a machine terminal at host home with an explicit host ID", async () => {
     const hosts = vi.fn(async () => [makeHost()]);
     const create = vi.fn(async () =>
@@ -311,6 +339,20 @@ describe("room-cli terminal command output", () => {
     );
 
     expect(result).toEqual(Buffer.concat([input, Buffer.from("\n")]));
+  });
+
+  it("presses Enter with a carriage return on Windows", async () => {
+    const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
+    Object.defineProperty(process, "platform", { ...platform, value: "win32" });
+    try {
+      const result = await resolveSendData(
+        { enter: true, text: "dir" },
+        Readable.from([]),
+      );
+      expect(result).toEqual(Buffer.from("dir\r"));
+    } finally {
+      Object.defineProperty(process, "platform", platform);
+    }
   });
 
   it("splits large input into sequential requests at the wire byte limit", async () => {

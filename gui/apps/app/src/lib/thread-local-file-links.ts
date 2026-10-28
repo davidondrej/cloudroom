@@ -1,6 +1,11 @@
 import type { ThreadTimelineLocalFileLink } from "@/components/thread/timeline";
 import type { FilePreviewLineRange } from "@cloudroom/client-core";
 import {
+  areHostPathsEqual,
+  getRelativeHostPath,
+  isWindowsHostPath,
+} from "@cloudroom/domain";
+import {
   isAbsoluteFilePathWithinRoot,
   normalizeAbsoluteFilePath,
 } from "./absolute-file-path";
@@ -92,18 +97,25 @@ function normalizeLocalFilePathWithinRoot(
     return null;
   }
 
+  const windows = isWindowsHostPath(normalizedRootPath);
   if (
     !isAbsoluteFilePathWithinRoot({
       candidatePath: normalizedPath,
       rootPath: normalizedRootPath,
     }) ||
-    normalizedPath === normalizedRootPath
+    (windows
+      ? areHostPathsEqual(normalizedPath, normalizedRootPath)
+      : normalizedPath === normalizedRootPath)
   ) {
     return null;
   }
 
-  const relativePath =
-    normalizedRootPath === "/"
+  const relativePath = windows
+    ? (getRelativeHostPath({
+        rootPath: normalizedRootPath,
+        candidatePath: normalizedPath,
+      }) ?? "")
+    : normalizedRootPath === "/"
       ? normalizedPath.slice(1)
       : normalizedPath.slice(normalizedRootPath.length + 1);
 

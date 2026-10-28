@@ -8,6 +8,7 @@ import {
   type DbNotifier,
 } from "@cloudroom/db";
 import {
+  canonicalizeHostPath,
   threadScope,
   type ProvisioningTranscriptEntry,
   type Thread,
@@ -251,7 +252,7 @@ export async function ensureThreadProvisionEnvironmentReady(
     findEnvironmentPathClaim(
       deps.db,
       environment.hostId,
-      environment.path.replace(/\/+$/u, "") || "/",
+      canonicalizeHostPath(environment.path),
       getPreparingEnvironment(deps.db, thread.id),
     ) !== null
   )

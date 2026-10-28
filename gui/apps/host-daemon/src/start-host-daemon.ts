@@ -23,6 +23,7 @@ import {
   createUserShellEnvResolver,
   prepareRuntimeShellEnv,
   providerEnvFromUserShell,
+  resolvePowerShellExecutionPolicyDefault,
   resolveBbExecutablePathInDirectory,
   resolveLocalBbExecutablePath,
 } from "./runtime-shell-env.js";
@@ -160,6 +161,13 @@ export async function startHostDaemon(
       },
     );
     const resolveUserShellEnv = createUserShellEnvResolver();
+    let powershellExecutionPolicy: string | null = null;
+    void resolvePowerShellExecutionPolicyDefault().then(
+      (policy) => {
+        powershellExecutionPolicy = policy;
+      },
+      () => undefined,
+    );
     let providerUserEnv: Record<string, string> = {};
     const resolveRuntimeShellEnv = async () => {
       const userShellEnv = await resolveUserShellEnv();
@@ -172,6 +180,7 @@ export async function startHostDaemon(
         dataDir,
         hostDaemonPort: localApiConfig.port,
         inheritedPath: userShellEnv?.PATH ?? process.env.PATH,
+        powershellExecutionPolicy,
         serverUrl: machineAuthProxy?.serverUrl ?? serverUrl,
         toolsDirectory,
       });

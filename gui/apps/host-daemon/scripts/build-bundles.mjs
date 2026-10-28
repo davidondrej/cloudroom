@@ -11,7 +11,7 @@ import {
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
-import { bundleTargets } from "./bundle-manifest.mjs";
+import { bundleTargets, ROOM_CLI_CMD } from "./bundle-manifest.mjs";
 import {
   createNativeExternalPatterns,
   externalPackagePatterns,
@@ -103,6 +103,7 @@ async function main() {
   const outputTitleCommandPath = resolve(packageRoot, "dist", "title");
   await copyFile(titleCommandPath, outputTitleCommandPath);
   await chmod(outputTitleCommandPath, 0o755);
+  await writeFile(resolve(packageRoot, "dist", "room-cli.cmd"), ROOM_CLI_CMD);
 }
 
 void main().catch((error) => {

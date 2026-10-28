@@ -180,6 +180,7 @@ export function createHostEntry() {
   const home = () => join(paths!.dataDir, "home");
 
   function unsupported(): string | null {
+    if (process.platform === "win32") return "Computer use isn't available on Windows yet.";
     if (!assetFor(process.platform, process.arch))
       return `Computer use is not available on ${process.platform}-${process.arch}.`;
     if (process.platform === "linux" && !process.env.DISPLAY && !process.env.WAYLAND_DISPLAY)

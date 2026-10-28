@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Button } from "@cloudroom/shared-ui/button";
+import { Dialog, DialogContent, DialogTitle } from "@cloudroom/shared-ui/dialog";
 import { Icon } from "@cloudroom/shared-ui/icon";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@cloudroom/shared-ui/tooltip";
 import { SidebarMenuItem } from "@/components/ui/sidebar";
@@ -55,62 +56,97 @@ export function CloudQueueCard({ queue, onUseLocal }: { queue: CloudQueue; onUse
 
 const share = (used: number, limit: number) => limit > 0 ? Math.min(used / limit, 1) : 1;
 
-/** Free accounts always see their usage card. Paid plans see a quiet meter once a limit is 75% used. */
+/** Free accounts always see their Cloud Credits left (ADR 0307). Paid plans see a quiet meter once 75% are used. */
 export function PlanCard() {
   const usage = useCloudroomAccount().data?.planUsage ?? null;
+  const used = usage?.credits ?? null, limit = usage?.creditsLimit ?? 0;
   const free = usage?.plan === "free";
-  const rows = usage ? [
-    { label: "cloud agents", used: usage.agents, limit: usage.agentsLimit },
-    ...(usage.cpuHours === null ? [] : [{ label: "agent hours", used: usage.cpuHours, limit: usage.cpuHoursLimit }]),
-  ] : [];
-  const near = rows.filter(({ used, limit }) => share(used, limit) >= 0.75);
-  const hidden = !usage || (!free && !near.length);
+  const hidden = !usage || used === null || (!free && share(used, limit) < 0.75);
   useUpgradePromptViewed(hidden ? null : "plan_card");
-  if (!usage || hidden) return null;
-  if (!free) return <PlanMeter plan={usage.plan} rows={near} />;
+  if (!usage || used === null || hidden) return null;
+  if (!free) return <PlanMeter plan={usage.plan} used={used} limit={limit} />;
+  const low = share(used, limit) >= 0.8;
   return (
     <section aria-label="Free plan" className="rounded-lg border border-border bg-surface-raised-solid p-3">
       <p className="text-xs text-muted-foreground">Free plan</p>
-      {rows.map(({ label, used, limit }) => {
-        const low = share(used, limit) >= 0.8;
-        return (
-          <div key={label} className="mt-2.5">
-            <p className="mb-1.5 text-sm text-foreground"><span className={cn("font-semibold", low && "text-warning")}>{Math.max(0, Math.floor(limit - used)).toLocaleString("en-US")}</span> {label} left</p>
-            <div className="h-1 overflow-hidden rounded-full bg-foreground/10"><div className={cn("h-full rounded-full", low ? "bg-warning" : "bg-primary")} style={{ width: `${share(used, limit) * 100}%` }} /></div>
-          </div>
-        );
-      })}
+      <div className="mt-2.5">
+        <p className="mb-1.5 text-sm text-foreground"><span className={cn("font-semibold", low && "text-warning")}>{Math.max(0, Math.floor(limit - used)).toLocaleString("en-US")}</span> Cloud Credits left</p>
+        <div className="h-1 overflow-hidden rounded-full bg-foreground/10"><div className={cn("h-full rounded-full", low ? "bg-warning" : "bg-primary")} style={{ width: `${share(used, limit) * 100}%` }} /></div>
+      </div>
       <Button type="button" size="sm" className="mt-3 w-full justify-start" onClick={() => openUpgrade("plan_card")}>
-        <span className="min-w-0 truncate">Unlimited agents with Pro</span><span className="ml-auto shrink-0 font-normal opacity-70">$50/mo</span><Icon name="ArrowRight" aria-hidden />
+        <span className="min-w-0 truncate">Upgrade to Pro</span><span className="ml-auto shrink-0 font-normal opacity-70">$50/mo</span><Icon name="ArrowRight" aria-hidden />
       </Button>
     </section>
   );
 }
 
-/** "Super 812 / 900 agent hours" over a thin bar: amber from 75%, red at the limit. Opens /billing. */
-function PlanMeter({ plan, rows }: { plan: string; rows: { label: string; used: number; limit: number }[] }) {
+/** "Super 120,000 / 150,000 credits" over a thin bar: amber from 75%, red at the limit. Opens /billing. */
+function PlanMeter({ plan, used, limit }: { plan: string; used: number; limit: number }) {
   const name = plan.charAt(0).toUpperCase() + plan.slice(1);
+  const full = used >= limit;
   return (
-    <button type="button" aria-label={`${name} plan usage`} className="w-full space-y-2 px-2 pb-1 text-left" onClick={() => openUpgrade("plan_card")}>
-      {rows.map(({ label, used, limit }) => {
-        const full = used >= limit;
-        return (
-          <div key={label}>
-            <p className="flex items-baseline justify-between gap-2 text-xs">
-              <span className="text-muted-foreground">{name}</span>
-              <span><span className={cn("font-semibold", full ? "text-destructive" : "text-warning")}>{Math.floor(used).toLocaleString("en-US")}</span><span className="text-muted-foreground"> / {Math.round(limit).toLocaleString("en-US")} {label}</span></span>
-            </p>
-            <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-foreground/10"><div className={cn("h-full rounded-full", full ? "bg-destructive" : "bg-warning")} style={{ width: `${share(used, limit) * 100}%` }} /></div>
-          </div>
-        );
-      })}
+    <button type="button" aria-label={`${name} plan usage`} className="w-full px-2 pb-1 text-left" onClick={() => openUpgrade("plan_card")}>
+      <p className="flex items-baseline justify-between gap-2 text-xs">
+        <span className="text-muted-foreground">{name}</span>
+        <span><span className={cn("font-semibold", full ? "text-destructive" : "text-warning")}>{Math.floor(used).toLocaleString("en-US")}</span><span className="text-muted-foreground"> / {Math.round(limit).toLocaleString("en-US")} credits</span></span>
+      </p>
+      <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-foreground/10"><div className={cn("h-full rounded-full", full ? "bg-destructive" : "bg-warning")} style={{ width: `${share(used, limit) * 100}%` }} /></div>
     </button>
   );
 }
 
+const EXPLAINER_SEEN_KEY = "cloudroom.creditsExplainerSeen";
+const FREE_WITHOUT_CREDITS = ["starting new cloud threads", "idle cloud threads", "sleeping sandboxes", "waiting for your reply", "your ai tokens", "local threads", "chat history and files"];
+
+/** Once per Mac, the first time a paying account opens the app with Cloud Credits (ADR 0307): what changed, the one
+ *  thing that uses credits, and the one-time reset (ADR 0308). Free accounts and OGs on the free Pro never see it. */
+export function CreditsExplainer() {
+  const usage = useCloudroomAccount().data?.planUsage ?? null;
+  const [seen, setSeen] = useState(() => localStorage.getItem(EXPLAINER_SEEN_KEY) === "1");
+  if (!usage || usage.plan === "free" || usage.og || seen) return null;
+  const close = () => { localStorage.setItem(EXPLAINER_SEEN_KEY, "1"); setSeen(true); };
+  const used = usage.credits ?? 0, mono = "font-mono text-[11px] leading-[1.9]";
+  return (
+    <Dialog open onOpenChange={(open) => { if (!open) close(); }}>
+      <DialogContent hideCloseButton aria-describedby={undefined} className="max-w-[540px] gap-0 rounded-none border-white/15 p-0 sm:rounded-none">
+        <div className="px-8 pb-7 pt-8">
+          <DialogTitle className="text-3xl font-semibold tracking-tight">We simplified your usage</DialogTitle>
+          <p className={cn("mt-5 flex items-center gap-2", mono)}>
+            <span className="border border-white/15 px-2 text-muted-foreground line-through">agent hours</span>+
+            <span className="border border-white/15 px-2 text-muted-foreground line-through">cloud agents</span>→
+            <span className="border border-foreground/60 px-2">cloud credits</span>
+          </p>
+        </div>
+        <div className="border-t border-white/10 px-8 py-7">
+          <p className="flex items-baseline justify-between">
+            <span className="flex items-baseline gap-2"><span className="text-5xl font-semibold tabular-nums tracking-tight">{usage.creditsLimit.toLocaleString("en-US")}</span><span className="text-sm text-muted-foreground">credits a month</span></span>
+            <span className={cn("uppercase text-muted-foreground", mono)}>{usage.plan}</span>
+          </p>
+          <div className="mt-4 h-1 bg-foreground/10"><div className="h-full min-w-[3%] bg-primary" style={{ width: `${share(used, usage.creditsLimit) * 100}%` }} /></div>
+          <p className={cn("mt-2.5 flex justify-between text-muted-foreground", mono)}><span>{Math.floor(used).toLocaleString("en-US")} used</span><span>refills on a rolling 30 days</span></p>
+        </div>
+        <div className={cn("grid grid-cols-[0.8fr_1.2fr] border-t border-white/10", mono)}>
+          <div className="border-r border-dashed border-white/10 py-6 pl-8 pr-4">
+            <p className="mb-2 flex items-center gap-2"><span className="bg-primary px-1.5 text-[10px] font-bold text-primary-foreground">PAID</span><span className="text-muted-foreground">uses credits</span></p>
+            <p className="font-bold"><span className="font-normal text-muted-foreground">└ </span>agents actively running</p>
+          </div>
+          <div className="py-6 pl-6 pr-8">
+            <p className="mb-2 flex items-center gap-2"><span className="bg-success px-1.5 text-[10px] font-bold text-background">FREE</span><span className="text-muted-foreground">0 credits</span></p>
+            <ul>{FREE_WITHOUT_CREDITS.map((item, i) => <li key={item} className="flex justify-between gap-3"><span><span className="text-muted-foreground">{i === FREE_WITHOUT_CREDITS.length - 1 ? "└ " : "├ "}</span>{item}</span><span className="font-bold text-success">0</span></li>)}</ul>
+          </div>
+        </div>
+        <p className="flex gap-3 border-t border-white/10 px-8 py-5 text-sm leading-relaxed">
+          <Icon name="RotateCcw" className="mt-0.5 size-4 shrink-0 text-muted-foreground" aria-hidden />
+          <span><span className="font-medium">One-time reset, on us.</span> <span className="text-muted-foreground">We set everyone's usage back to 0 for free when Cloud Credits launched. Your plan, price and monthly refill don't change.</span></span>
+        </p>
+        <div className="px-8 pb-8 pt-1"><Button type="button" className="w-full rounded-none" onClick={close}>Got it</Button></div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 const PRO_REASONS = [
-  "Pro gives you unlimited cloud agents. Free gives you 50 a month.",
-  "Pro gives you 300 agent hours every month.",
+  "Pro gives you 50,000 Cloud Credits a month. Free gives you 3,000.",
   "Pro keeps cloud agents awake 4× longer, so they reply faster.",
   "Pro cloud agents never get paused when the cloud gets busy.",
   "Pro keeps your chat history up to 1 year. Free keeps 7 days.",

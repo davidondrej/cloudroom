@@ -33,6 +33,13 @@ const electronBuilderBin = resolve(
   ".bin",
   "electron-builder",
 );
+// On Windows .bin/electron-builder is a .cmd shim that spawn can't run.
+const electronBuilderCli = resolve(
+  desktopPackageRoot,
+  "node_modules",
+  "electron-builder",
+  "cli.js",
+);
 
 const codeSigningKeys = ["CSC_LINK", "CSC_KEY_PASSWORD"];
 const notarizationKeys = [
@@ -46,6 +53,8 @@ const requiredSigningEnvironmentKeys = [
 ];
 
 const printConfigFlag = "--print-config";
+// Same as BB_CLOUDROOM_STAMP=1, for package scripts that run in cmd.exe.
+const stampFlag = "--stamp";
 
 function envValueIsSet(value) {
   return typeof value === "string" && value.trim().length > 0;
@@ -179,10 +188,14 @@ function resolveElectronBuilderConfig(
   env,
   adHoc = false,
   cloudroomVersion,
+  windows = false,
 ) {
-  const signingPlan = adHoc
-    ? { mode: "ad-hoc", identityName: "-", notarizationEnabled: false }
-    : createSigningPlan(env);
+  // Windows signs with WIN_CSC_* or CSC_* itself; the Apple signing rules don't apply.
+  const signingPlan = windows === "only"
+    ? { mode: "windows", identityName: undefined, notarizationEnabled: false }
+    : adHoc
+      ? { mode: "ad-hoc", identityName: "-", notarizationEnabled: false }
+      : createSigningPlan(env);
   const releaseChannel = resolveDesktopReleaseChannel(env);
   const releaseConfig = createDesktopReleaseConfig(releaseChannel);
   const config = cloneJson(baseConfig);
@@ -210,6 +223,11 @@ function resolveElectronBuilderConfig(
     executableName: releaseConfig.linuxExecutableName,
     icon: "assets/" + releaseConfig.iconFileName,
   };
+  if (windows) {
+    config.win = { ...config.win, icon: "assets/" + releaseConfig.iconFileName };
+    // The one-click per-user installer names %LOCALAPPDATA%\Programs\<folder> after the package.
+    config.extraMetadata = { ...config.extraMetadata, name: releaseConfig.windowsInstallName };
+  }
   config.appId = releaseConfig.appId;
   config.artifactName = releaseConfig.artifactName;
   config.productName = releaseConfig.applicationName;
@@ -242,6 +260,9 @@ function createElectronBuilderEnv(signingPlan) {
   const childEnv = {
     ...process.env,
   };
+  if (signingPlan.mode === "windows") {
+    return childEnv;
+  }
 
   childEnv.CSC_IDENTITY_AUTO_DISCOVERY =
     signingPlan.mode !== "disabled" && !signingPlan.identityName
@@ -279,9 +300,10 @@ async function removeGeneratedConfig() {
 }
 
 async function runElectronBuilder(args, signingPlan) {
+  const builderArgs = ["--config", generatedConfigPath, ...args];
   const child = spawn(
-    electronBuilderBin,
-    ["--config", generatedConfigPath, ...args],
+    process.platform === "win32" ? process.execPath : electronBuilderBin,
+    process.platform === "win32" ? [electronBuilderCli, ...builderArgs] : builderArgs,
     {
       cwd: desktopPackageRoot,
       env: createElectronBuilderEnv(signingPlan),
@@ -308,9 +330,14 @@ async function main() {
   const args = process.argv.slice(2);
   const printConfig = args.includes(printConfigFlag);
   const adHoc = args.includes("--ad-hoc");
-  const electronBuilderArgs = args.filter((arg) => arg !== printConfigFlag && arg !== "--ad-hoc");
+  const electronBuilderArgs = args.filter(
+    (arg) => arg !== printConfigFlag && arg !== "--ad-hoc" && arg !== stampFlag,
+  );
+  const windows = !electronBuilderArgs.includes("--win")
+    ? false
+    : electronBuilderArgs.includes("--mac") ? "with-mac" : "only";
   const baseConfig = await readBaseConfig();
-  const cloudroomVersion = stampRequested(process.env)
+  const cloudroomVersion = stampRequested(process.env) || args.includes(stampFlag)
     ? await readCloudroomVersion()
     : undefined;
   const { config, signingPlan } = resolveElectronBuilderConfig(
@@ -318,6 +345,7 @@ async function main() {
     process.env,
     adHoc,
     cloudroomVersion,
+    windows,
   );
 
   if (printConfig) {
@@ -330,6 +358,12 @@ async function main() {
     !electronBuilderArgs.includes("--mac")
   ) {
     console.log("macOS signing is not applicable for Linux-only builds.");
+  } else if (windows === "only") {
+    console.log(
+      process.env.WIN_CSC_LINK?.trim()
+        ? "Windows code signing enabled with WIN_CSC_LINK."
+        : "Windows installer is unsigned; SmartScreen warns before it runs.",
+    );
   } else {
     logSigningPlan(signingPlan);
   }

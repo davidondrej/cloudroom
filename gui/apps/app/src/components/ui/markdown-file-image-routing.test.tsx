@@ -191,6 +191,19 @@ describe("Markdown file preview image routing", () => {
     ).toBe("/api/v1/threads/thr_preview/worktree/files/docs/assets/chart.png");
   });
 
+  it("routes file-relative images in Markdown under a Windows root with forward slashes", () => {
+    renderMarkdownFilePreview({
+      content: "![relative](chart.svg)",
+      imageContent: { kind: "worktree", threadId: "thr_preview" },
+      path: "reports/status.md",
+      rootPath: "C:\\Users\\me\\project",
+    });
+
+    expect(
+      screen.getByRole("img", { name: "relative" }).getAttribute("src"),
+    ).toBe("/api/v1/threads/thr_preview/worktree/files/reports/chart.svg");
+  });
+
   it("does not rewrite relative images that escape the workspace root", () => {
     renderMarkdownFilePreview({
       content: "![escape](../../outside.png)",

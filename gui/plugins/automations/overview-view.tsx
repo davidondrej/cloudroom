@@ -19,6 +19,7 @@ import type {
   ReviewResponse,
 } from "./src/rpc-types.js";
 import { AutomationLifecycleControl } from "./detail-view.js";
+import { ScansView } from "./scans-view.js";
 import { Icon } from "@cloudroom/shared-ui/icon";
 import { DelayedLoading } from "@cloudroom/shared-ui/delayed-loading";
 import { COARSE_POINTER_ICON_SIZE_SHRINK_CLASS } from "@cloudroom/shared-ui/coarse-pointer-sizing";
@@ -112,7 +113,7 @@ type OverviewEntry = AutomationsOverviewResponse["automations"][number];
 type AutomationSortMode = "next" | "project" | "alpha";
 type ProviderList = PluginProvidersState["providers"];
 type AutomationSortDirection = "asc" | "desc";
-export type AutomationCollectionMode = "installed" | "review" | "templates";
+export type AutomationCollectionMode = "installed" | "review" | "templates" | "scans";
 
 export interface LoopReviewState {
   data: ReviewResponse | null;
@@ -1927,11 +1928,6 @@ export function AutomationOverviewView({
   return (
     <ResourceCollectionPage
       id="automations-collection"
-      description={
-        entries !== null && entries.length + cloudRows.length === 0
-          ? "Loops run agents and scripts on a schedule, locally or in the cloud, without you prompting each step."
-          : undefined
-      }
       underlineTabs
       modes={[
         {
@@ -1946,6 +1942,7 @@ export function AutomationOverviewView({
           count: review?.data?.toReview || undefined,
         },
         { id: "templates", label: "Templates" },
+        { id: "scans", label: "Scans" },
       ]}
       activeMode={activeMode}
       onModeChange={onModeChange}
@@ -2006,7 +2003,11 @@ export function AutomationOverviewView({
         </>
       }
     >
-      {activeMode === "review" && review ? (
+      {activeMode === "scans" ? (
+        <ResourceCollectionViewport scrollId="automations-scans">
+          <ScansView />
+        </ResourceCollectionViewport>
+      ) : activeMode === "review" && review ? (
         <ResourceCollectionViewport scrollId="automations-review-results">
           <LoopReviewView
             review={review.data}

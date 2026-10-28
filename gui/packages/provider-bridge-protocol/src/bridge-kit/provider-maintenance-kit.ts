@@ -6,6 +6,10 @@ import { promisify } from "node:util";
 import semverCompare from "semver/functions/compare.js";
 import semverValid from "semver/functions/valid.js";
 import { z } from "zod";
+import {
+  execPortableFile,
+  windowsExecutableExtensions,
+} from "@cloudroom/process-utils";
 import type {
   ProviderInstallationCommand,
   ProviderInstallationSource,
@@ -19,6 +23,25 @@ const execFileAsync = promisify(execFile);
 
 const CLI_PROBE_TIMEOUT_MS = 5_000;
 const INSTALLATION_CHECK_TIMEOUT_MS = 15_000;
+
+export function selectResolvedExecutable(args: {
+  candidates: readonly string[];
+  platform: NodeJS.Platform;
+  pathExt: string | undefined;
+}): string | null {
+  const candidates = args.candidates
+    .map((candidate) => candidate.trim())
+    .filter((candidate) => candidate.length > 0);
+  if (args.platform !== "win32") {
+    return candidates[0] ?? null;
+  }
+  const extensions = windowsExecutableExtensions({ PATHEXT: args.pathExt });
+  return (
+    candidates.find((candidate) =>
+      extensions.includes(path.win32.extname(candidate).toLowerCase()),
+    ) ?? null
+  );
+}
 
 export async function resolveExecutablePath(
   command: string,
@@ -36,12 +59,11 @@ export async function resolveExecutablePath(
     const { stdout } = await execFileAsync(lookup, [command], {
       timeout: CLI_PROBE_TIMEOUT_MS,
     });
-    return (
-      stdout
-        .split(/\r?\n/u)
-        .find((line) => line.trim())
-        ?.trim() ?? null
-    );
+    return selectResolvedExecutable({
+      candidates: stdout.split(/\r?\n/u),
+      platform: process.platform,
+      pathExt: process.env.PATHEXT,
+    });
   } catch {
     return null;
   }
@@ -52,9 +74,15 @@ export async function commandOutput(
   args: readonly string[],
 ): Promise<string | null> {
   try {
-    const { stdout, stderr } = await execFileAsync(command, [...args], {
-      timeout: INSTALLATION_CHECK_TIMEOUT_MS,
-    });
+    // execFile can't run npm `.cmd` shims on Windows.
+    const { stdout, stderr } =
+      process.platform === "win32"
+        ? await execPortableFile(command, args, {
+            timeoutMs: INSTALLATION_CHECK_TIMEOUT_MS,
+          })
+        : await execFileAsync(command, [...args], {
+            timeout: INSTALLATION_CHECK_TIMEOUT_MS,
+          });
     return `${stdout}\n${stderr}`.trim();
   } catch {
     return null;
@@ -70,6 +98,14 @@ export function versionFrom(value: string | null): string | null {
 
 export async function readCliVersion(command: string): Promise<string | null> {
   try {
+    if (process.platform === "win32") {
+      const { stdout, stderr } = await execPortableFile(
+        command,
+        ["--version"],
+        { timeoutMs: CLI_PROBE_TIMEOUT_MS },
+      );
+      return versionFrom(`${stdout}\n${stderr}`);
+    }
     const probe = execFileAsync(command, ["--version"], {
       timeout: CLI_PROBE_TIMEOUT_MS,
     });
@@ -211,7 +247,25 @@ export function installationVerification(
 
 export function downloadedInstallerCommand(
   url: string,
+  options: { platform?: NodeJS.Platform; powershellUrl?: string } = {},
 ): ProviderInstallationCommand {
+  if (
+    (options.platform ?? process.platform) === "win32" &&
+    options.powershellUrl !== undefined
+  ) {
+    const powershellScript = `irm ${options.powershellUrl} | iex`;
+    return {
+      command: "powershell.exe",
+      args: [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-Command",
+        powershellScript,
+      ],
+      displayCommand: powershellScript,
+    };
+  }
   const script = [
     'tmp=$(mktemp "${TMPDIR:-/tmp}/provider-installation.XXXXXX")',
     "trap 'rm -f \"$tmp\"' EXIT",

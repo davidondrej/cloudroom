@@ -190,8 +190,8 @@ function KeepAwakeSettings() {
                 <span>
                   <span className="block text-sm font-medium">All hosts</span>
                   <span className="block text-xs text-muted-foreground">
-                    Include hosts added in the future. Only macOS and Linux
-                    hosts are supported.
+                    Include hosts added in the future. Only macOS, Linux and
+                    Windows hosts are supported.
                   </span>
                 </span>
               </label>

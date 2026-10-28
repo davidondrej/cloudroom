@@ -363,6 +363,7 @@ export const threadQueuedMessageSchema = z.object({
    * typed carry no reason at all, and inventing one for them would be a lie.
    */
   waitingOn: queuedMessageWaitingOnSchema.nullable(),
+  pausedByStop: z.boolean().optional(),
   /**
    * Why this row's last DRAIN attempt failed outright, or null when it has not
    * failed one — which is every row that has never been re-attempted, and

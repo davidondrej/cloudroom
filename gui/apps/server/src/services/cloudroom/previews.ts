@@ -44,6 +44,8 @@ export async function previewStatus(deps: Deps, freshMs = 15_000) {
 }
 
 /** How much cloud agents may do on this computer (ADR 0113, levels in ADR 0186), or null until first-run setup asks. The preview helper runs Mac access. */
+/** The preview helper that runs Mac access is macOS and Linux only for now. */
+export const macAccessSupported = process.platform !== "win32";
 const macAccessFile = (deps: Deps) => join(deps.config.dataDir, "cloudroom-mac-access.json");
 export async function macAccess(deps: Deps): Promise<MacAccessLevel | null> {
   return readFile(macAccessFile(deps), "utf8").then((text) => {
@@ -52,6 +54,7 @@ export async function macAccess(deps: Deps): Promise<MacAccessLevel | null> {
   }, () => null);
 }
 export async function setMacAccess(deps: Deps, level: MacAccessLevel): Promise<void> {
+  if (!macAccessSupported) throw new ApiError(409, "mac_access_unsupported", "Cloud agents can't use a Windows computer yet.");
   if (!supportedMacAccessLevels.includes(level)) throw new ApiError(400, "mac_access_unsupported", "Read and Ask need macOS. Pick Off or Full.");
   await writeFile(macAccessFile(deps), JSON.stringify({ level }), { mode: 0o600 });
   if (await readFile(join(folder(deps), "config.json")).then(() => true, () => false)) await setupPreviews(deps);

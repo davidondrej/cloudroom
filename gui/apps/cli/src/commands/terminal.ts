@@ -76,9 +76,10 @@ interface TerminalCloseOptions extends TerminalJsonOptions {
   ifClean?: boolean;
 }
 
-interface TerminalStartResolution {
-  command: string | null;
-}
+type TerminalStartResolution =
+  | { mode: "shell" }
+  | { mode: "command"; command: string }
+  | { mode: "argv"; argv: string[] };
 
 export function registerTerminalCommands(
   program: Command,
@@ -132,10 +133,7 @@ export function registerTerminalCommands(
         rows: parsePositiveInteger(opts.rows, DEFAULT_ROWS, "--rows"),
         scope: await resolveTerminalCreateScope(opts, getUrl()),
         title: opts.title,
-        start:
-          resolvedStart.command === null
-            ? { mode: "shell" }
-            : { mode: "command", command: resolvedStart.command },
+        start: resolvedStart,
       });
       if (outputJson(opts, session)) return;
       console.log(`Created terminal ${session.id} (${session.title})`);
@@ -413,20 +411,12 @@ function resolveTerminalStart(args: {
     if (command.length === 0) {
       throw new Error("--command must not be empty");
     }
-    return { command };
+    return { mode: "command", command };
   }
   if (args.commandParts.length > 0) {
-    return {
-      command: args.commandParts.map(shellQuoteArg).join(" "),
-    };
+    return { mode: "argv", argv: [...args.commandParts] };
   }
-  return { command: null };
-}
-
-function shellQuoteArg(value: string): string {
-  if (value.length === 0) return "''";
-  if (/^[A-Za-z0-9_@%+=:,./-]+$/.test(value)) return value;
-  return `'${value.replaceAll("'", `'"'"'`)}'`;
+  return { mode: "shell" };
 }
 
 function parsePositiveInteger(
@@ -466,7 +456,10 @@ export async function resolveSendData(
           stdin.on("end", () => resolve(Buffer.concat(chunks)));
         });
   return opts.enter
-    ? Buffer.concat([baseData, Buffer.from("\n", "utf8")])
+    ? Buffer.concat([
+        baseData,
+        Buffer.from(process.platform === "win32" ? "\r" : "\n", "utf8"),
+      ])
     : baseData;
 }
 

@@ -250,7 +250,9 @@ export function BrowserSettingsSectionContent({
       >
         {!supported ? (
           <p className="text-sm text-subtle-foreground">
-            Only available in the Cloudroom desktop app.
+            {desktopBrowser
+              ? "Importing browser sessions isn't available on this computer yet."
+              : "Only available in the Cloudroom desktop app."}
           </p>
         ) : state.status === "loading" ? (
           <p className="text-sm text-muted-foreground">Loading…</p>

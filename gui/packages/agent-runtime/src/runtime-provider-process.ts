@@ -7,6 +7,7 @@ import {
   spawnPortablePipedProcess,
   stopProcessGroupLeaderFirst,
   supportsProcessGroups,
+  type ProcessStopResult,
 } from "@cloudroom/process-utils";
 import type { BridgeProtocolAdapter } from "./bridge-protocol-adapter.js";
 import type { CreateBridgeAdapterOptions } from "./provider-adapter.js";
@@ -331,7 +332,7 @@ export class RuntimeProviderProcessManager {
             child: providerProcess.child,
             timeoutMs: 5000,
             killGraceMs: 0,
-          }),
+          }).then((result) => this.reportUnconfirmedStop(result)),
         );
       }
       for (const [, pending] of providerProcess.pending) {
@@ -534,11 +535,26 @@ export class RuntimeProviderProcessManager {
       return;
     }
 
-    await stopProcessGroupLeaderFirst({
-      child: args.providerProcess.child,
-      timeoutMs: args.timeoutMs ?? 5000,
-      killGraceMs: 1000,
-    });
+    this.reportUnconfirmedStop(
+      await stopProcessGroupLeaderFirst({
+        child: args.providerProcess.child,
+        timeoutMs: args.timeoutMs ?? 5000,
+        killGraceMs: 1000,
+      }),
+    );
+  }
+
+  // Windows can't always confirm a process tree ended (taskkill failed, or
+  // the root didn't exit). Say so instead of reporting a clean stop.
+  private reportUnconfirmedStop(result: ProcessStopResult): void {
+    if (
+      process.platform === "win32" &&
+      result.treeTermination !== "confirmed"
+    ) {
+      this.args.onStderr?.(
+        "Provider process stop could not be confirmed; some of its processes may still be running",
+      );
+    }
   }
 
   private handleProviderProcessError(args: ProviderProcessErrorArgs): void {

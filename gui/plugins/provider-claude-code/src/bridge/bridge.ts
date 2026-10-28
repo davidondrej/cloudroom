@@ -387,6 +387,7 @@ const { send, sendResult, sendError } = createBridgeIo<
 
 const threadAttachments = new Map<string, ThreadAttachment>();
 const closingSessions = new Map<string, Promise<void>>();
+const unconfirmedSessionStops = new Map<string, Set<SdkSession>>();
 const toolCallTracker = createPendingToolCallTracker({ sendToolCall: send });
 const { forwardToolCall, handleToolCallResponse } = toolCallTracker;
 
@@ -504,7 +505,7 @@ async function closeThreadSession(args: {
 
   const attachment = threadAttachments.get(args.threadId);
   if (!attachment) {
-    return;
+    return retryUnconfirmedSessionStops(args.threadId);
   }
 
   attachment.closing = true;
@@ -516,8 +517,22 @@ async function closeThreadSession(args: {
   const closePromise = Promise.resolve()
     .then(async () => {
       if (threadSession) {
-        await closeClaudeThreadSession(threadSession, args.graceful !== false);
+        await closeClaudeThreadSession(
+          threadSession,
+          args.graceful !== false,
+        ).catch((error: unknown) => {
+          if (process.platform === "win32") {
+            holdUnconfirmedSessionStop(args.threadId, threadSession.session);
+            emitSessionError(
+              threadSession,
+              args.threadId,
+              error instanceof Error ? error.message : String(error),
+            );
+          }
+          throw error;
+        });
       }
+      await retryUnconfirmedSessionStops(args.threadId);
     })
     .finally(() => {
       if (threadAttachments.get(args.threadId) === attachment) {
@@ -529,12 +544,52 @@ async function closeThreadSession(args: {
   return closePromise;
 }
 
-async function closeThreadSessionsGracefully(message: string): Promise<void> {
-  await Promise.all(
-    Array.from(threadAttachments.keys()).map((threadId) =>
-      closeThreadSession({ graceful: true, message, threadId }),
-    ),
+function holdUnconfirmedSessionStop(
+  threadId: string,
+  session: SdkSession,
+): void {
+  const sessions = unconfirmedSessionStops.get(threadId) ?? new Set();
+  sessions.add(session);
+  unconfirmedSessionStops.set(threadId, sessions);
+}
+
+async function retryUnconfirmedSessionStops(threadId: string): Promise<void> {
+  const sessions = unconfirmedSessionStops.get(threadId);
+  if (!sessions) return;
+  const results = await Promise.allSettled(
+    Array.from(sessions, async (session) => {
+      await session.stop();
+      sessions.delete(session);
+    }),
   );
+  if (sessions.size === 0) unconfirmedSessionStops.delete(threadId);
+  const failure = results.find(
+    (result): result is PromiseRejectedResult => result.status === "rejected",
+  );
+  if (failure) {
+    const message =
+      failure.reason instanceof Error
+        ? failure.reason.message
+        : String(failure.reason);
+    throw new Error(`${message} Restart Cloudroom to try again.`);
+  }
+}
+
+async function closeThreadSessionsGracefully(message: string): Promise<void> {
+  const closes = Array.from(threadAttachments.keys()).map((threadId) =>
+    closeThreadSession({ graceful: true, message, threadId }),
+  );
+  if (process.platform === "win32") await Promise.allSettled(closes);
+  else await Promise.all(closes);
+}
+
+async function closeReplacedThreadSession(threadId: string): Promise<void> {
+  const close = closeThreadSession({
+    graceful: false,
+    message: "Thread session replaced while awaiting permission approval",
+    threadId,
+  });
+  await (process.platform === "win32" ? close.catch(() => {}) : close);
 }
 
 function permissionPathCovers(
@@ -1293,7 +1348,18 @@ function replaceThreadSession(args: ReplaceThreadSessionArgs): ThreadSession {
     threadId: args.threadId,
     threadSession: args.threadSession,
   });
-  args.threadSession.session.stop();
+  if (process.platform === "win32") {
+    holdUnconfirmedSessionStop(args.threadId, args.threadSession.session);
+    void args.threadSession.session.stop().catch((error: unknown) => {
+      emitSessionError(
+        args.threadSession,
+        args.threadId,
+        error instanceof Error ? error.message : String(error),
+      );
+    });
+  } else {
+    void args.threadSession.session.stop();
+  }
 
   const replacementSession = createThreadSession(args.attachment);
   args.attachment.residentSession = replacementSession;
@@ -1529,7 +1595,7 @@ async function closeClaudeThreadSession(
   if (graceful) {
     await threadSession.session.closeGracefully(THREAD_STOP_CLOSE_TIMEOUT_MS);
   } else {
-    threadSession.session.stop();
+    await threadSession.session.stop();
   }
 }
 
@@ -2240,11 +2306,7 @@ async function handleThreadStart(
 ): Promise<void> {
   const existing = threadAttachments.get(params.threadId);
   if (existing) {
-    await closeThreadSession({
-      graceful: false,
-      message: "Thread session replaced while awaiting permission approval",
-      threadId: params.threadId,
-    });
+    await closeReplacedThreadSession(params.threadId);
   }
 
   attachThreadSession(id, params, randomUUID(), false);
@@ -2305,11 +2367,7 @@ async function handleThreadResume(
         threadSession: existingSession,
       });
     }
-    await closeThreadSession({
-      graceful: false,
-      message: "Thread session replaced while awaiting permission approval",
-      threadId,
-    });
+    await closeReplacedThreadSession(threadId);
   }
 
   attachThreadSession(id, params, requestedProviderThreadId, true);
@@ -2323,11 +2381,7 @@ async function handleThreadFork(
 
   const existing = threadAttachments.get(threadId);
   if (existing) {
-    await closeThreadSession({
-      graceful: false,
-      message: "Thread session replaced while awaiting permission approval",
-      threadId,
-    });
+    await closeReplacedThreadSession(threadId);
   }
 
   let forkedProviderThreadId: string;
@@ -2412,6 +2466,14 @@ async function runTurnInput(
     const message = error instanceof Error ? error.message : String(error);
     sendError(id, -32000, message);
     return;
+  }
+
+  if (intent === "new-turn") {
+    await threadSession.session.reconnectFailedMcpServers().catch((error) => {
+      logBridgeError(
+        `Failed to check MCP servers: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    });
   }
 
   try {

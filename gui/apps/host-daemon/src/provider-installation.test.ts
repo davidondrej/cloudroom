@@ -1,5 +1,8 @@
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { PassThrough } from "node:stream";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   ProviderInstallationInProgressError,
   streamProviderInstallation,
@@ -113,5 +116,155 @@ describe("streamProviderInstallation", () => {
     });
     secondProcess.close(0);
     await readEvents(second);
+  });
+});
+
+describe("streamProviderInstallation with node-pty", () => {
+  const tempDirs: string[] = [];
+
+  afterEach(async () => {
+    await Promise.all(
+      tempDirs
+        .splice(0)
+        .map((dir) => fs.rm(dir, { recursive: true, force: true })),
+    );
+  });
+
+  async function scratchBin(): Promise<{ root: string; binDir: string }> {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "bb-provider-cli-"));
+    tempDirs.push(root);
+    const binDir = path.join(root, "Program Files", "Example CLI");
+    await fs.mkdir(binDir, { recursive: true });
+    return { root, binDir };
+  }
+
+  function envWithPath(
+    binDir: string,
+    extra: NodeJS.ProcessEnv = {},
+  ): NodeJS.ProcessEnv {
+    const env = Object.fromEntries(
+      Object.entries(process.env).filter(
+        ([key]) => key.toUpperCase() !== "PATH",
+      ),
+    );
+    return {
+      ...env,
+      ...extra,
+      PATH: [binDir, process.env.PATH ?? process.env.Path ?? ""].join(
+        path.delimiter,
+      ),
+    };
+  }
+
+  async function runPlan(env: NodeJS.ProcessEnv, command = "example-cli") {
+    const events = await readEvents(
+      streamProviderInstallation({
+        providerId: "example-provider",
+        plan: {
+          command,
+          args: ["update"],
+          displayCommand: `${command} update`,
+        },
+        env,
+      }),
+    );
+    const output = events
+      .filter((event) => event.type === "output")
+      .map((event) => event.text)
+      .join("")
+      .replace(/\u001b\[[0-9;?]*[A-Za-z]/gu, "");
+    return { events, output };
+  }
+
+  it.runIf(process.platform !== "win32")(
+    "launches a bare command found on PATH",
+    async () => {
+      const { binDir } = await scratchBin();
+      await fs.writeFile(
+        path.join(binDir, "example-cli"),
+        '#!/bin/sh\necho "example-cli $*"\n',
+        { mode: 0o755 },
+      );
+
+      const { events, output } = await runPlan(envWithPath(binDir));
+
+      expect(output).toContain("example-cli update");
+      expect(events.at(-1)).toMatchObject({ type: "completed", success: true });
+    },
+  );
+
+  it.runIf(process.platform === "win32")(
+    "launches a .cmd shim instead of the extensionless npm shim",
+    async () => {
+      const { binDir } = await scratchBin();
+      await fs.writeFile(
+        path.join(binDir, "example-cli"),
+        '#!/bin/sh\nexec node "$basedir/cli.js" "$@"\n',
+      );
+      await fs.writeFile(
+        path.join(binDir, "example-cli.cmd"),
+        "@echo off\r\necho example-cli-cmd %~1\r\n",
+      );
+
+      const { events, output } = await runPlan(envWithPath(binDir));
+
+      expect(output).toContain("example-cli-cmd update");
+      expect(events.at(-1)).toMatchObject({ type: "completed", success: true });
+    },
+  );
+
+  it.runIf(process.platform === "win32")(
+    "launches Windows command shims with a quoted command line",
+    async () => {
+      const { root } = await scratchBin();
+      const binDir = path.join(root, "Example&CLI");
+      await fs.mkdir(binDir);
+      for (const extension of ["cmd", "bat"]) {
+        const command = `example-${extension}`;
+        await fs.writeFile(
+          path.join(binDir, `${command}.${extension}`),
+          "@echo off\r\necho example-cli %~1\r\n",
+        );
+
+        const { events, output } = await runPlan(envWithPath(binDir), command);
+
+        expect(output).toContain("example-cli update");
+        expect(events.at(-1)).toMatchObject({ type: "completed", success: true });
+      }
+    },
+  );
+
+  it.runIf(process.platform === "win32")(
+    "launches a native .exe found on PATH",
+    async () => {
+      const { root, binDir } = await scratchBin();
+      await fs.copyFile(process.execPath, path.join(binDir, "example-cli.exe"));
+      const preload = path.join(root, "preload.cjs");
+      await fs.writeFile(
+        preload,
+        'console.log(`example-cli-exe ${require("node:path").basename(process.argv[1])}`);\nprocess.exit(0);\n',
+      );
+
+      const { events, output } = await runPlan(
+        envWithPath(binDir, {
+          NODE_OPTIONS: `--require "${preload.replaceAll("\\", "/")}"`,
+        }),
+      );
+
+      expect(output).toContain("example-cli-exe update");
+      expect(events.at(-1)).toMatchObject({ type: "completed", success: true });
+    },
+  );
+
+  it.skipIf(process.platform !== "win32")("reports a command missing from PATH", async () => {
+    const { binDir } = await scratchBin();
+
+    const { events } = await runPlan(envWithPath(binDir), "missing-cli");
+
+    expect(events.at(-1)).toEqual({
+      type: "error",
+      provider: "example-provider",
+      message: "Command not found: missing-cli",
+    });
   });
 });

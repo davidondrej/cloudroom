@@ -368,7 +368,7 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps): void {
     if (problem) return context.json({ message: "Use the local Cloudroom app." }, problem.status);
     const { requestId } = z.object({ requestId: z.string().regex(/^[a-zA-Z0-9_-]{1,64}$/) }).strict().parse(await context.req.json());
     await ensureClaudeCli((error) => deps.logger.warn({ error }, "Claude Code could not be installed in the background"));
-    await startClaudeToken(requestId, async token => cloudroom(deps).claudeAuth("token", requestId, token, await claudePlan()));
+    await startClaudeToken(requestId, async token => cloudroom(deps).claudeAuth("token", requestId, token, await claudePlan()), deps);
     return context.json(await claudeStatus());
   });
   // The Accounts plugin saves the account in use as the Cloud login (ADR 0197).

@@ -4,7 +4,6 @@ import argparse
 import base64
 import concurrent.futures
 import contextlib
-import fcntl
 import http.client
 import hashlib
 import http.server
@@ -14,7 +13,6 @@ import json
 import os
 from pathlib import Path
 import plistlib
-import pwd
 import random
 import select
 import shlex
@@ -30,22 +28,42 @@ import urllib.parse
 import urllib.request
 import uuid
 
+WINDOWS = sys.platform == 'win32'
+if WINDOWS:
+    import msvcrt
+else:
+    import fcntl
+    import pwd
+# Windows files have no owner IDs or mode bits; the user's profile folder ACL keeps this folder private there.
+NOFOLLOW = getattr(os, 'O_NOFOLLOW', 0)
+
 
 def private_json(path):
-    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    fd = os.open(path, os.O_RDONLY | NOFOLLOW)
     with os.fdopen(fd) as file:
         info = os.fstat(file.fileno())
-        if info.st_uid != os.getuid() or info.st_mode & 0o077:
+        if not WINDOWS and (info.st_uid != os.getuid() or info.st_mode & 0o077):
             raise ValueError('Preview configuration must be private and owned by this user')
         return json.load(file)
 
 
 def save(path, value):
     temporary = path.with_suffix('.pending')
-    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | NOFOLLOW, 0o600)
     with os.fdopen(fd, 'w') as file:
         json.dump(value, file); file.flush(); os.fsync(file.fileno())
     temporary.replace(path)
+
+
+def exclusive(file):
+    """Locks `file` for this process, or raises BlockingIOError while another process holds it."""
+    if not WINDOWS:
+        return fcntl.flock(file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    file.seek(0)
+    try:
+        msvcrt.locking(file.fileno(), msvcrt.LK_NBLCK, 1)
+    except OSError:
+        raise BlockingIOError('Locked by another process') from None
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -159,6 +177,7 @@ PROBLEMS, ISSUERS = {}, {}
 # Show only problems that outlast the next minute's check: by then a sandbox that fell asleep has left the list,
 # and a short network drop has passed. Never ask the website more often (db-load-budget).
 PROBLEM_SECONDS = AWAKE_SECONDS + 15
+HERE = 'this PC' if WINDOWS else 'this Mac'
 
 
 def cause(error):
@@ -184,16 +203,16 @@ def describe(step, error, url):
         message = 'Sign out of Cloudroom and sign in again.' if code == 401 else "Cloudroom didn't answer as expected. This is usually temporary."
         detail += f' HTTP {code}'
     elif isinstance(reason, ssl.SSLCertVerificationError):
-        message = 'A VPN, proxy, or antivirus on this Mac may be intercepting secure connections.'
+        message = f'A VPN, proxy, or antivirus on {HERE} may be intercepting secure connections.'
         detail += f' {reason.verify_code} {reason.verify_message}' + (f'; {issuer(url)}' if step == 'list' else '')
     elif isinstance(reason, socket.gaierror):
-        message = "This Mac can't look up Cloudroom. Check the internet connection or VPN."
+        message = f"{HERE[0].upper() + HERE[1:]} can't look up Cloudroom. Check the internet connection or VPN."
         detail += ' ' + str(reason)[:100]
     elif unsent(error):
-        message = 'A firewall, VPN, or proxy on this Mac may be blocking Cloudroom.'
+        message = f'A firewall, VPN, or proxy on {HERE} may be blocking Cloudroom.'
         detail += ' ' + str(reason)[:100]
     elif isinstance(reason, (OSError, http.client.HTTPException)):  # A drop, timeout, or garbled answer may be our side too.
-        message = "The connection to Cloudroom keeps failing. It may be this Mac's network, or a temporary problem."
+        message = f"The connection to Cloudroom keeps failing. It may be {HERE}'s network, or a temporary problem."
         detail += ' ' + str(reason)[:100]
     else:
         message = "Cloudroom didn't answer as expected. This is usually temporary."
@@ -292,9 +311,16 @@ class Upstream(http.client.HTTPConnection):
         self.path = path
 
     def connect(self):
-        self.sock = socket.socket(socket.AF_UNIX)
-        self.sock.settimeout(self.timeout)
-        self.sock.connect(str(self.path))
+        if WINDOWS:
+            relay = RELAYS.get(self.path)
+            if relay is None:
+                raise ConnectionRefusedError('Preview tunnel closed')
+            self.sock = relay.client()
+            self.sock.settimeout(self.timeout)
+        else:
+            self.sock = socket.socket(socket.AF_UNIX)
+            self.sock.settimeout(self.timeout)
+            self.sock.connect(str(self.path))
         self.transport = self.sock
 
 
@@ -415,12 +441,33 @@ class Proxy(http.server.BaseHTTPRequestHandler):
 
 class Server(http.server.ThreadingHTTPServer):
     daemon_threads = True
-    allow_reuse_address = True
+    # Windows lets a second program bind a port in use: always with SO_REUSEADDR, and on 127.0.0.1 over another program's
+    # 0.0.0.0 or :: listener. Either would take over the user's own local server, so a port that answers counts as taken.
+    allow_reuse_address = not WINDOWS
+
+    def server_bind(self):
+        if WINDOWS:
+            port = self.server_address[1]
+            with socket.socket() as probe:
+                probe.settimeout(.5)
+                if port and probe.connect_ex(('127.0.0.1', port)) == 0:
+                    raise OSError(f'Port {port} is in use by another program')
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
 
     def get_request(self):
         connection, address = super().get_request()
         connection.settimeout(15)
         return connection, address
+
+
+# Windows' Python has no Unix sockets, so there each relay is found by its tunnel's socket path and hands out socket pairs.
+RELAYS = {}
+
+
+def reachable(path):
+    """The tunnel's local end is there: its Unix socket, or on Windows its relay."""
+    return path in RELAYS if WINDOWS else path.exists()
 
 
 class Relay:
@@ -429,6 +476,10 @@ class Relay:
     def __init__(self, core, port, device, path):
         self.core, self.port, self.device, self.stopped = core, port, device, False
         self.stderr = io.BytesIO()
+        self.path, self.listener = path, None
+        if WINDOWS:
+            RELAYS[path] = self
+            return
         self.listener = socket.socket(socket.AF_UNIX)
         self.listener.bind(str(path)); os.chmod(path, 0o600); self.listener.listen(32)
         threading.Thread(target=self.serve, daemon=True).start()
@@ -440,6 +491,11 @@ class Relay:
             except OSError:
                 return
             threading.Thread(target=self.pipe, args=(client,), daemon=True).start()
+
+    def client(self):
+        local, relayed = socket.socketpair()
+        threading.Thread(target=self.pipe, args=(relayed,), daemon=True).start()
+        return local
 
     def open(self):
         # Some sandbox proxies relay bytes only after a WebSocket handshake; cores before 0.1.35 know only cloudroom-tunnel.
@@ -494,7 +550,8 @@ class Relay:
 
     def terminate(self):
         self.stopped = True
-        with contextlib.suppress(OSError):
+        RELAYS.pop(self.path, None)
+        with contextlib.suppress(OSError, AttributeError):
             self.listener.close()
     kill = terminate
 
@@ -522,6 +579,8 @@ class Tunnel:
         self.listen(port, device, local_port)
 
     def ssh(self, folder, port, metadata, allow_private):
+        if WINDOWS:
+            raise OSError('SSH previews (VMs) need macOS or Linux')
         address = ipaddress.ip_address(metadata['host'])
         if not address.is_global and not allow_private:
             raise ValueError('Private SSH addresses require explicit self-hosted setup')
@@ -562,7 +621,7 @@ class Tunnel:
             raise
 
     def healthy(self):
-        if self.process.poll() is not None or not self.socket_path.exists():
+        if self.process.poll() is not None or not reachable(self.socket_path):
             return False
         try:
             with contextlib.closing(http.client.HTTPConnection('127.0.0.1', self.server.server_port, timeout=10)) as connection:
@@ -593,9 +652,10 @@ def identity(folder):
     key = folder / 'id_ed25519'
     public = folder / 'id_ed25519.pub'
     if not key.exists() and not public.exists():
-        subprocess.run(['/usr/bin/ssh-keygen', '-q', '-t', 'ed25519', '-N', '', '-f', str(key)], check=True, capture_output=True)
+        # Windows 10 and 11 include OpenSSH's ssh-keygen on PATH.
+        subprocess.run(['ssh-keygen' if WINDOWS else '/usr/bin/ssh-keygen', '-q', '-t', 'ed25519', '-N', '', '-f', str(key)], check=True, capture_output=True)
     info = key.lstat()
-    if key.is_symlink() or info.st_uid != os.getuid() or info.st_mode & 0o077 or public.is_symlink():
+    if key.is_symlink() or not WINDOWS and (info.st_uid != os.getuid() or info.st_mode & 0o077) or public.is_symlink():
         raise ValueError('Unsafe preview SSH key')
     return ' '.join(public.read_text().split()[:2])
 
@@ -976,9 +1036,13 @@ def run(folder):
     def stop(*_):
         raise KeyboardInterrupt()
     signal.signal(signal.SIGTERM, stop)
-    threading.Thread(target=MacJobs(folder).serve, daemon=True).start()
+    if not WINDOWS:  # Mac access is macOS and Linux only (macAccessSupported).
+        threading.Thread(target=MacJobs(folder).serve, daemon=True).start()
     with (folder / 'lock').open('a') as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        if WINDOWS:
+            claim(folder, lock)
+        else:
+            exclusive(lock)
         try:
             while True:
                 try:
@@ -1055,7 +1119,7 @@ def run(folder):
                         if not ready:
                             if tunnel.process.poll() is not None:
                                 error = 'Tunnel unavailable' if tunnel.relay else 'SSH connection unavailable'
-                            elif tunnel.socket_path.exists():
+                            elif reachable(tunnel.socket_path):
                                 error = 'Cloud HTTP server unavailable'
                         try:
                             tunnel.core.request('/report', {'device': config['device'], 'port': tunnel.port, 'generation': tunnel.generation,
@@ -1128,9 +1192,101 @@ LAUNCHER = ("const e={...process.env};delete e.ELECTRON_RUN_AS_NODE;"
             "for(const s of['SIGTERM','SIGINT','SIGHUP'])process.on(s,()=>c.kill(s));c.on('exit',code=>process.exit(code??1))")
 
 
+def running(folder):
+    """Whether a helper holds this folder's lock."""
+    with (folder / 'lock').open('a') as lock:
+        try:
+            exclusive(lock)
+        except BlockingIOError:
+            return True
+        lock.seek(0)
+        msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)
+        return False
+
+
+def claim(folder, lock):
+    """Windows: take the folder's lock (a running() check may hold it for a moment), drop an old stop request, confirm the
+    start to the launcher, and exit as soon as a stop request arrives."""
+    deadline = time.monotonic() + 5
+    while True:
+        try:
+            exclusive(lock)
+            break
+        except BlockingIOError:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(.05)
+    (folder / 'stop').unlink(missing_ok=True)
+    if os.environ.get('CLOUDROOM_PREVIEW_START'):
+        (folder / 'started').write_text(os.environ['CLOUDROOM_PREVIEW_START'])
+    def watch():
+        while not (folder / 'stop').exists():
+            time.sleep(.2)
+        os._exit(0)
+    threading.Thread(target=watch, daemon=True).start()
+
+
+@contextlib.contextmanager
+def serialized(folder):
+    """Windows: one start or stop at a time."""
+    with (folder / 'control.lock').open('a') as lock:
+        deadline = time.monotonic() + 30
+        while True:
+            try:
+                exclusive(lock)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise OSError('Another preview start or stop is still running')
+                time.sleep(.1)
+        try:
+            yield
+        finally:
+            lock.seek(0)
+            msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)
+
+
+def windows(folder, stop):
+    """Windows has no launchd: a detached helper runs until sign-out or logoff, and each app launch restarts it. A start
+    waits for the helper to confirm; a stop asks it to exit. Nothing is ended by a process id read from a file."""
+    with serialized(folder):
+        if stop:
+            if running(folder):
+                (folder / 'stop').write_text('')
+            deadline = time.monotonic() + 10
+            while running(folder):
+                if time.monotonic() >= deadline:
+                    raise OSError('Preview helper did not stop')
+                time.sleep(.1)
+            return
+        start = uuid.uuid4().hex
+        (folder / 'started').unlink(missing_ok=True)
+        command = [sys.executable, '-B', '-E', '-s', str(folder / 'client.py'), 'run', str(folder)]
+        flags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+        for extra in (subprocess.CREATE_BREAKAWAY_FROM_JOB, 0):  # Outlive the app's job object when it allows that.
+            try:
+                process = subprocess.Popen(command, creationflags=flags | extra, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                           stderr=subprocess.DEVNULL, close_fds=True, env={**os.environ, 'CLOUDROOM_PREVIEW_START': start})
+                break
+            except OSError:
+                if not extra:
+                    raise
+        deadline = time.monotonic() + 15
+        while True:
+            with contextlib.suppress(OSError):
+                if (folder / 'started').read_text() == start:
+                    return
+            if process.poll() is not None or time.monotonic() >= deadline:
+                process.kill()  # Our own child's handle, never a stale id: a helper that missed its start never runs late.
+                raise OSError('Preview helper did not start')
+            time.sleep(.1)
+
+
 def launch(folder, stop=False):
     if sys.platform.startswith('linux'):
         return systemd(folder, label(folder), stop)
+    if WINDOWS:
+        return windows(folder, stop)
     if sys.platform != 'darwin':
         raise ValueError('Use run for foreground helpers outside macOS and Linux')
     name = label(folder)
@@ -1146,7 +1302,7 @@ def launch(folder, stop=False):
         with (folder / 'lock').open('a') as lock:
             while True:
                 try:
-                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    exclusive(lock)
                     break
                 except BlockingIOError:
                     if time.monotonic() >= deadline:
@@ -1189,10 +1345,13 @@ def configure(folder, connection_file, activate, allow_private, mac_access=None,
             and old.get('allowPrivateSsh', False) == allow_private and old.get('macAccess') == mac_access
             and old.get('launcher') == launcher and old.get('binary') == binary and old.get('ownThreads', False) == own
             and old.get('website') == trusted and target.is_file() and target.read_bytes() == source.read_bytes()):
-        check = ['systemctl', '--user', 'is-active', '--quiet', label(folder) + '.service'] if sys.platform.startswith('linux') else ['launchctl', 'print', f'gui/{os.getuid()}/' + label(folder)]
-        active = subprocess.run(check, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        if active.returncode == 0:
-            return {'enabled': True}
+        if WINDOWS:
+            if running(folder):
+                return {'enabled': True}
+        else:
+            check = ['systemctl', '--user', 'is-active', '--quiet', label(folder) + '.service'] if sys.platform.startswith('linux') else ['launchctl', 'print', f'gui/{os.getuid()}/' + label(folder)]
+            if subprocess.run(check, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0:
+                return {'enabled': True}
     if activate:
         launch(folder, stop=True)
     if source != target:

@@ -563,6 +563,45 @@ describe("electron-builder signing config", () => {
     ).resolves.toBeUndefined();
   });
 
+  it("packages a per-user NSIS installer for Windows x64 in a Cloudroom folder", async () => {
+    const win = await runConfigScript({}, ["--win", "--x64"]);
+    const linux = await runConfigScript({}, ["--linux", "--x64"]);
+    expect(win.exitCode).toBe(0);
+    const config = JSON.parse(win.stdout);
+
+    expect(config.win.target).toEqual([{ arch: ["x64"], target: "nsis" }]);
+    expect(config.nsis).toEqual({ include: "build/installer.nsh", oneClick: true, perMachine: false });
+    expect(config.win.extraResources[0].to).toBe(
+      "app.asar.unpacked/node_modules/bb-app/server/dist/assets/python",
+    );
+    expect(config.extraMetadata.name).toBe("Cloudroom");
+    expect(JSON.parse(linux.stdout).extraMetadata.name).toBeUndefined();
+  });
+
+  it("stops the preview helper in the NSIS hooks without quoting the install path into PowerShell", async () => {
+    const script = await readFile(resolve(desktopPackageRoot, "build", "installer.nsh"), "utf8");
+    const powershell = script.split("\n").find((line) => line.includes("powershell.exe"));
+
+    expect(script).toMatch(/!macro customInit\s+!insertmacro stopPreviewHelper/);
+    expect(script).toMatch(/!macro customUnInit\s+!insertmacro stopPreviewHelper/);
+    expect(powershell).toContain("$$env:CLOUDROOM_INSTALL_DIR");
+    expect(powershell).not.toContain("$INSTDIR");
+    // Windows PowerShell 5.1: a lone match unrolls to one object, so count through @(...).
+    expect(powershell?.match(/@\(& \$\$left\)\.Count/g)).toHaveLength(2);
+    expect(powershell).not.toMatch(/[^@]\(& \$\$left\)\.Count/);
+    expect(script).toContain("${If} $0 == 1");
+  });
+
+  it("signs Windows-only builds with CSC_LINK without asking for Apple credentials", async () => {
+    const env = { CSC_LINK: "base64-pfx", CSC_KEY_PASSWORD: "secret" };
+    const win = await runConfigScript(env, ["--win", "--x64"]);
+    const mac = await runConfigScript(env, ["--mac", "--arm64"]);
+
+    expect(win.exitCode).toBe(0);
+    expect(mac.exitCode).not.toBe(0);
+    expect(mac.stderr).toContain("Incomplete macOS signing/notarization environment");
+  });
+
   it("grants audio input to the signed app and helper processes", async () => {
     const configText = await readFile(
       resolve(desktopPackageRoot, "electron-builder.config.json"),

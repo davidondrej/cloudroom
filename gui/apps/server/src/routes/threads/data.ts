@@ -58,7 +58,7 @@ import {
   serveDaemonFileContent,
 } from "../../services/hosts/daemon-file-response.js";
 import { requireThreadStoragePath } from "../../services/threads/thread-storage.js";
-import { toThreadQueuedMessage } from "../../services/threads/thread-queued-messages.js";
+import { toListedThreadQueuedMessages } from "../../services/threads/thread-queued-messages.js";
 import {
   toThreadEventWithMeta,
   buildThreadConversationOutlineProjectionKey,
@@ -586,7 +586,10 @@ export function registerThreadDataRoutes(app: Hono, deps: AppDeps): void {
     const thread = requirePublicThread(deps.db, threadId);
     if (isCloudThread(thread)) return context.json(cloudroom(deps).queue(threadId));
     return context.json(
-      listQueuedThreadMessages(deps.db, threadId).map(toThreadQueuedMessage),
+      toListedThreadQueuedMessages(
+        deps.db,
+        listQueuedThreadMessages(deps.db, threadId),
+      ),
     );
   });
 

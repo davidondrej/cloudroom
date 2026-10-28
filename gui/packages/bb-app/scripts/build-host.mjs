@@ -80,6 +80,10 @@ await copyFile(
   resolve(hostDaemonTarget, "room-cli"),
 );
 await chmod(resolve(hostDaemonTarget, "room-cli"), 0o755);
+await copyFile(
+  resolve(hostDaemonSource, "room-cli.cmd"),
+  resolve(hostDaemonTarget, "room-cli.cmd"),
+);
 await copyDirectory({
   from: resolve(hostDaemonSource, "room-cli-chunks"),
   to: resolve(hostDaemonTarget, "room-cli-chunks"),

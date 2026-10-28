@@ -147,9 +147,11 @@ function ComputerUseSettings() {
           </p>
           {status.hint ? <p className="text-xs text-muted-foreground">{status.hint}</p> : null}
           {status.platform === "darwin" ? <PermissionRows permissions={status.permissions} onChange={setSettings} /> : null}
-          <Button size="sm" variant="ghost" onClick={() => void load(rpc.call("restart", null))}>
-            Restart driver
-          </Button>
+          {status.supported ? (
+            <Button size="sm" variant="ghost" onClick={() => void load(rpc.call("restart", null))}>
+              Restart driver
+            </Button>
+          ) : null}
         </div>
       ) : (
         <p className="text-sm text-destructive">{settings.error}</p>

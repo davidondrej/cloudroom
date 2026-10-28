@@ -1,6 +1,7 @@
 import { accessSync, constants, existsSync, lstatSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { delimiter, isAbsolute, join } from "node:path";
+import { windowsExecutableExtensions } from "./windows.js";
 
 export type KnownCli = "codex" | "claude" | "opencode" | "fx";
 
@@ -22,10 +23,36 @@ function isDanglingLink(candidate: string): boolean {
 }
 
 function pathCandidates(cli: string, env: NodeJS.ProcessEnv): string[] {
-  return (env.PATH ?? "")
+  return (env.PATH ?? env.Path ?? "")
     .split(delimiter)
     .filter((dir) => isAbsolute(dir))
     .map((dir) => join(dir, cli));
+}
+
+// Windows runs `codex.cmd` or `claude.exe`, never npm's extensionless POSIX
+// shim, so each candidate becomes one path per PATHEXT extension.
+function withWindowsExtensions(
+  candidates: string[],
+  env: NodeJS.ProcessEnv,
+): string[] {
+  if (process.platform !== "win32") return candidates;
+  const extensions = windowsExecutableExtensions(env);
+  return candidates.flatMap((candidate) =>
+    extensions.map((extension) => `${candidate}${extension}`),
+  );
+}
+
+// Claude's native installer and npm's global bin, neither always on PATH.
+function windowsFallbackCandidates(
+  cli: string,
+  env: NodeJS.ProcessEnv,
+): string[] {
+  const home = env.USERPROFILE?.trim() || homedir();
+  const appData = env.APPDATA?.trim();
+  return [
+    join(home, ".local", "bin", cli),
+    ...(appData ? [join(appData, "npm", cli)] : []),
+  ];
 }
 
 function codexAppBundlePaths(home: string): string[] {
@@ -59,6 +86,7 @@ export function officialCodexPath(
 }
 
 function fallbackCandidates(cli: string, env: NodeJS.ProcessEnv): string[] {
+  if (process.platform === "win32") return windowsFallbackCandidates(cli, env);
   if (process.getuid?.() === 0) return [];
   const home = homeDir(env);
   const binDirs = [
@@ -92,11 +120,14 @@ export function findCliExecutable(
   const official =
     cli === "codex" && process.getuid?.() !== 0 ? [officialCodexPath(env)] : [];
   return (
-    [
-      ...official,
-      ...pathCandidates(cli, env),
-      ...fallbackCandidates(cli, env),
-    ].find(isExecutableFile) ?? null
+    withWindowsExtensions(
+      [
+        ...official,
+        ...pathCandidates(cli, env),
+        ...fallbackCandidates(cli, env),
+      ],
+      env,
+    ).find(isExecutableFile) ?? null
   );
 }
 

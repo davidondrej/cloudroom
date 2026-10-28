@@ -1016,7 +1016,7 @@ function AutomationsPanel({ subPath }: PluginNavPanelProps) {
   const navigate = useBbNavigate();
   const parsedRoute = useMemo(() => parseSubPath(subPath), [subPath]);
   const collectionMode: AutomationCollectionMode =
-    subPath === "review" || subPath === "templates"
+    subPath === "review" || subPath === "templates" || subPath === "scans"
       ? subPath
       : subPath === "browse"
         ? "templates"

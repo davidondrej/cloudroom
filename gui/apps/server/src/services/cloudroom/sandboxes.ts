@@ -1,4 +1,4 @@
-import { execFile, spawn, type ChildProcess } from "node:child_process";
+import { execFile, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { access, mkdir, readdir, readFile, realpath, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -6,7 +6,7 @@ import { dirname, join, sep } from "node:path";
 import { promisify } from "node:util";
 import { gzipSync } from "node:zlib";
 import type { HostDaemonContributedEnvEntry } from "@cloudroom/host-daemon-contract";
-import { findCliExecutable } from "@cloudroom/process-utils";
+import { cursorAuthFile, execPortableFile, findCliExecutable, killPortableProcess, spawnPortableProcess, tarCommand, userEnvironmentEntries } from "@cloudroom/process-utils";
 import { rawThreadIdSchema, reasoningLevelSchema, COMPUTER } from "@cloudroom/domain";
 import { z } from "zod";
 import { hasSupportedFrontmatterDelimiter, parseFrontmatter } from "../skills/injected-skills.js";
@@ -49,9 +49,9 @@ const RECHECK_MS = 60_000;
 const PRELOAD_BATCH = 10, PRELOADS_PER_HOUR = 30, PRELOAD_AGAIN_MS = 3_600_000;
 const placeOf = (thread: string, project: SandboxProject) => ({ thread, project: project.id, ...(project.repository ? { repository: project.repository, folder: project.folder } : {}) });
 export type CloudQueue = { position: number; total: number; regionBlocked: boolean };
-/** A Free or Pro account's 30-day usage, for the sidebar upgrade card. The website sends `cpu_hours` as agent hours (ADR 0275).
+/** The account's Cloud Credits in the rolling 30 days (ADR 0307), for the sidebar card; null credits while metering is stale.
  *  `og` is the OG letter, which the website sends only to OGs still on the free Pro it gave them (ADR 0218). */
-export type PlanUsage = { plan: string; agents: number; agentsLimit: number; cpuHours: number | null; cpuHoursLimit: number; og: { name: string | null; endsAt: string } | null };
+export type PlanUsage = { plan: string; credits: number | null; creditsLimit: number; og: { name: string | null; endsAt: string } | null };
 const USAGE_LIMIT = "cloud_usage_limit";
 const AGENT_LIMIT = "cloud_agent_limit";
 const CLOUD_QUEUE = "cloud_queue";
@@ -91,7 +91,7 @@ let macCodexLoginRun: MacCodexLogin | null = null;
 /** Runs `codex login` on this Mac. Codex opens the default browser and saves the login itself; one run at a time, 10 minutes at most. */
 export function startMacCodexLogin(): MacCodexLogin {
   if (macCodexLoginRun && !macCodexLoginRun.done) return macCodexLoginRun;
-  const child = spawn(findCliExecutable("codex") ?? "codex", ["login"], { stdio: ["ignore", "pipe", "pipe"], timeout: 10 * 60_000 });
+  const child = spawnPortableProcess({ command: findCliExecutable("codex") ?? "codex", args: ["login"], stdio: ["ignore", "pipe", "pipe"], timeout: 10 * 60_000 });
   const run: MacCodexLogin = { child, url: null, error: null, done: false };
   let output = "";
   const read = (chunk: Buffer) => { output += chunk.toString(); run.url ??= output.match(/https:\/\/auth\.openai\.com\/\S+/)?.[0] ?? null; };
@@ -113,7 +113,7 @@ export function macCodexLogin(): MacCodexLogin | null {
   return run;
 }
 export function cancelMacCodexLogin(): void {
-  macCodexLoginRun?.child.kill();
+  if (macCodexLoginRun) killPortableProcess(macCodexLoginRun.child, "SIGTERM");
   macCodexLoginRun = null;
 }
 
@@ -131,8 +131,8 @@ export async function macCodexLoginExpired(): Promise<boolean> {
   const expiry = codexTokenExpiry(await readFile(codexAuthPath(), "utf8").catch(() => ""));
   if (expiry === null || Date.now() < expiry) return false;
   return new Promise(resolve => {
-    const child = spawn(findCliExecutable("codex") ?? "codex", ["app-server"], { stdio: ["pipe", "pipe", "ignore"], timeout: 20_000 });
-    const end = (expired: boolean) => { resolve(expired); child.kill(); };
+    const child = spawnPortableProcess({ command: findCliExecutable("codex") ?? "codex", args: ["app-server"], stdio: ["pipe", "pipe", "ignore"], timeout: 20_000 });
+    const end = (expired: boolean) => { resolve(expired); killPortableProcess(child, "SIGTERM"); };
     const send = (message: object) => child.stdin?.write(`${JSON.stringify(message)}\n`);
     child.stdin?.on("error", () => end(false));
     child.on("error", () => end(false));
@@ -171,7 +171,7 @@ export async function macOpencodeLogin(): Promise<string | null> {
   const binary = findCliExecutable("opencode");
   const version = (await macHarnessVersions()).opencode;
   const value = binary && version && !version.startsWith("1.")
-    ? (await promisify(execFile)(binary, ["auth", "export", "--standalone"], { timeout: 20_000 }).catch(() => null))?.stdout ?? null
+    ? (await execPortableFile(binary, ["auth", "export", "--standalone"], { timeoutMs: 20_000, maxBuffer: 1024 * 1024 }).catch(() => null))?.stdout ?? null
     : await readFile(join(process.env.XDG_DATA_HOME || join(homedir(), ".local/share"), "opencode/auth.json"), "utf8").catch(() => null);
   try { const parsed: unknown = value && JSON.parse(value); return parsed && (!Array.isArray(parsed) || parsed.length) ? value : null; } catch { return null; }
 }
@@ -266,8 +266,8 @@ export async function macOpenclawLogin(): Promise<string | null> {
 export async function macCursorLogin(): Promise<string | null> {
   const login = (accessToken: unknown, refreshToken: unknown) =>
     typeof accessToken === "string" && accessToken && typeof refreshToken === "string" && refreshToken ? JSON.stringify({ accessToken, refreshToken }, null, 2) : null;
-  if (process.platform === "linux") {
-    const file = join(process.env.XDG_CONFIG_HOME || join(homedir(), ".config"), "cursor", "auth.json");
+  const file = cursorAuthFile();
+  if (file) {
     const saved = await readFile(file, "utf8").then(text => JSON.parse(text) as { accessToken?: unknown; refreshToken?: unknown } | null, () => null);
     return login(saved?.accessToken, saved?.refreshToken);
   }
@@ -283,7 +283,7 @@ export async function cursorKeyRejected(apiKey: string): Promise<boolean> {
   const binary = findCliExecutable("cursor-agent");
   if (!binary) return false;
   try {
-    await promisify(execFile)(binary, ["--disable-auto-update", "--list-models"], { timeout: 30_000, env: { ...process.env, CURSOR_API_KEY: apiKey } });
+    await execPortableFile(binary, ["--disable-auto-update", "--list-models"], { timeoutMs: 30_000, maxBuffer: 1024 * 1024, env: { ...process.env, CURSOR_API_KEY: apiKey } });
     return false;
   } catch (error) {
     const { stdout = "", stderr = "" } = error as { stdout?: string; stderr?: string };
@@ -326,11 +326,16 @@ export type CloudEnvironmentRequest = z.infer<typeof cloudEnvironmentRequestSche
 
 /** API keys, tokens, and secrets exported in this Mac's login shell (say, ~/.zshrc): what local agents get (ADR 0130). */
 export async function macVariables(): Promise<Record<string, string>> {
+  // Windows apps get the user's variables from the system, not from a shell profile.
+  if (process.platform === "win32") return secretVariables(userEnvironmentEntries());
   const marker = "__CLOUDROOM_ENV__";
   const run = promisify(execFile)(process.env.SHELL || "/bin/zsh", ["-ilc", `printf '${marker}\\0'; env -0`], { timeout: 15_000, maxBuffer: 8 * 1024 * 1024 });
   run.child.stdin?.end();
   const output = await run.then(result => result.stdout, () => "");
-  const entries = output.slice(output.indexOf(`${marker}\0`) + marker.length + 1).split("\0");
+  return secretVariables(output.slice(output.indexOf(`${marker}\0`) + marker.length + 1).split("\0"));
+}
+
+function secretVariables(entries: string[]): Record<string, string> {
   return Object.fromEntries(entries.flatMap(entry => {
     const at = entry.indexOf("="), name = entry.slice(0, at), value = entry.slice(at + 1);
     const wanted = at > 0 && /^[A-Za-z_][A-Za-z0-9_]*$/.test(name) && /KEY|TOKEN|SECRET/i.test(name) && !/^(BB|ROOM|CLOUDROOM|ELECTRON)_/.test(name);
@@ -366,7 +371,7 @@ async function configFiles(home: string, paths: string[]): Promise<string[]> {
       if (!target || (target !== root && !target.startsWith(root + sep)) || ancestors.has(target)) return;
       const info = await stat(full);
       if (!info.isFile() && !info.isDirectory()) return;
-      files.push(path);
+      files.push(path.split(sep).join("/"));
       if (!info.isDirectory()) return;
       ancestors.add(target);
       for (const name of await readdir(full)) {
@@ -383,11 +388,22 @@ export type MacMcpServer = { name: string; server: McpServer | null };
 const texts = (value: unknown) => Object.fromEntries(Object.entries(value && typeof value === "object" ? value : {}).filter((entry): entry is [string, string] => typeof entry[1] === "string"));
 const list = (value: unknown) => Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
 // Paths that exist only on this Mac, and servers running on it.
-const MAC_PATH = /(^|[\s=:'"])(~\/|\/Users\/|\/Volumes\/|\/Applications\/|\/Library\/|\/opt\/homebrew\/|\/private\/)/;
+/** Windows paths and %VARIABLES% (digits and parentheses too, like %ProgramFiles(x86)%) that exist only on this PC. */
+export const WINDOWS_LOCAL_PATH = /(^|[\s=:'"])([A-Za-z]:[\\/]|\\\\|~[\\/]|%[A-Za-z_][A-Za-z0-9_()]*%)/;
+const MAC_PATH = process.platform === "win32"
+  ? WINDOWS_LOCAL_PATH
+  : /(^|[\s=:'"])(~\/|\/Users\/|\/Volumes\/|\/Applications\/|\/Library\/|\/opt\/homebrew\/|\/private\/)/;
 const LOCAL_URL = /^https?:\/\/(localhost|127\.|0\.0\.0\.0|\[::1\])/i;
 const portable = (server: McpServer) => server.type === "stdio"
-  ? !server.command.includes("/") && ![...server.args, ...Object.values(server.env)].some(text => MAC_PATH.test(text))
+  ? !server.command.includes("/") && !(process.platform === "win32" && (server.command.includes("\\") || MAC_PATH.test(server.command))) && ![...server.args, ...Object.values(server.env)].some(text => MAC_PATH.test(text))
   : !LOCAL_URL.test(server.url);
+/** On Windows, Claude Code runs npx through `cmd /c` and Codex may name `npx.cmd`. Sandboxes run the command itself. */
+function windowsCommand(server: McpServer): McpServer {
+  if (process.platform !== "win32" || server.type !== "stdio") return server;
+  const wrapped = /^cmd(\.exe)?$/i.test(server.command) && /^\/c$/i.test(server.args[0] ?? "") && server.args[1];
+  const [command, args] = wrapped ? [server.args[1]!, server.args.slice(2)] : [server.command, server.args];
+  return { ...server, command: command.replace(/\.(cmd|exe|bat)$/i, ""), args };
+}
 /** Claude Code's user-scope MCP servers; `${VAR}` stays as typed and is filled in the sandbox from the API keys. */
 function claudeServer(value: Record<string, unknown>): McpServer | null {
   const type = value.type ?? (value.command ? "stdio" : undefined);
@@ -414,6 +430,7 @@ function codexServer(transport: Record<string, unknown>): McpServer | null {
 export async function macMcpServers(): Promise<MacMcpServer[]> {
   const found = new Map<string, McpServer | null>();
   const add = (name: string, server: McpServer | null) => {
+    server = server && windowsCommand(server);
     if (/^[A-Za-z0-9_-]{1,64}$/.test(name) && name !== "cloudroom" && !found.has(name)) found.set(name, server && portable(server) ? server : null);
   };
   const claudeFile = join(process.env.CLAUDE_CONFIG_DIR || homedir(), ".claude.json");
@@ -422,7 +439,7 @@ export async function macMcpServers(): Promise<MacMcpServer[]> {
   for (const [name, value] of Object.entries(servers && typeof servers === "object" ? servers : {})) add(name, value && typeof value === "object" ? claudeServer(value as Record<string, unknown>) : null);
   const codex = findCliExecutable("codex");
   if (codex) {
-    const listed = await promisify(execFile)(codex, ["mcp", "list", "--json"], { timeout: 15_000, maxBuffer: 4 * 1024 * 1024 })
+    const listed = await execPortableFile(codex, ["mcp", "list", "--json"], { timeoutMs: 15_000, maxBuffer: 4 * 1024 * 1024 })
       .then(({ stdout }) => z.array(z.object({ name: z.string(), enabled: z.boolean().default(true), transport: z.record(z.string(), z.unknown()) })).parse(JSON.parse(stdout)), () => []);
     for (const { name, enabled, transport } of listed) if (enabled) add(name, codexServer(transport));
   }
@@ -715,11 +732,12 @@ export class SandboxDirectory {
     if (!this.checkingUsage && Date.now() >= (this.usage?.next ?? 0)) {
       this.checkingUsage = true;
       void this.call({ action: "usage" }).then((value) => {
-        const parsed = z.object({ plan: z.string(), agents: z.number(), agents_limit: z.number(), cpu_hours: z.number().nullable(), cpu_hours_limit: z.number(),
+        // A website without credits (say, rolled back) shows no card rather than old units.
+        const parsed = z.object({ plan: z.string(), credits: z.number().nullable(), credits_limit: z.number(),
           og: z.object({ name: z.string().nullable(), ends_at: z.string() }).nullable().catch(null) }).safeParse(value);
         const recheck = z.object({ recheck_seconds: z.number().default(600) }).parse(value).recheck_seconds;
         this.usage = {
-          value: parsed.success ? { plan: parsed.data.plan, agents: parsed.data.agents, agentsLimit: parsed.data.agents_limit, cpuHours: parsed.data.cpu_hours, cpuHoursLimit: parsed.data.cpu_hours_limit,
+          value: parsed.success ? { plan: parsed.data.plan, credits: parsed.data.credits, creditsLimit: parsed.data.credits_limit,
             og: parsed.data.plan === "pro" && parsed.data.og ? { name: parsed.data.og.name, endsAt: parsed.data.og.ends_at } : null } : null,
           next: Date.now() + Math.max(recheck, 60) * 1000,
         };
@@ -1021,7 +1039,7 @@ export class SandboxDirectory {
     const instructions = (await Promise.all(INSTRUCTION_FILES.map(path => stat(join(home, path)).then(() => path, () => null)))).filter((path): path is string => path !== null);
     const present = [...(await macSkills()).filter(skill => inCloud(skill.name)).flatMap(skill => skill.paths), ...instructions];
     const files = await configFiles(home, present);
-    const run = files.length ? promisify(execFile)("tar", ["-c", "-h", "--no-recursion", "--format", "ustar", "-C", home, "--null", "-T", "-"],
+    const run = files.length ? promisify(execFile)(tarCommand(), ["-c", "-h", "--no-recursion", "--format", "ustar", "-C", home, "--null", "-T", "-"],
       { encoding: "buffer", maxBuffer: 4 * CONFIG_LIMIT, timeout: 30_000, env: { ...process.env, COPYFILE_DISABLE: "1" } }) : null;
     run?.child.stdin?.on("error", () => {}).end(files.join("\0") + "\0");
     const tar = run ? (await run).stdout : Buffer.alloc(1024);

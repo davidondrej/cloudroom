@@ -322,7 +322,7 @@ class Teleport {
       .filter((other) => !all.some((source) => source.id === other.id)).length;
     const warnings = [
       ...(all.length > 1 ? [`${all.length - 1} child thread(s) move to Cloud with it.`] : []),
-      ...(sharing ? [`${sharing} other open thread(s) use this folder; they stay on this ${COMPUTER}.`] : []),
+      ...(sharing ? [`${sharing} other open thread(s) use this folder; they stay on this ${process.platform === "win32" ? "PC" : COMPUTER}.`] : []),
     ];
     return { model: execution.model, reasoning: execution.reasoning, warnings };
   }

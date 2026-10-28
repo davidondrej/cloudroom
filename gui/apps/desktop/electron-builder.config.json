@@ -74,6 +74,23 @@
     "syncDesktopName": true,
     "target": [{ "target": "AppImage", "arch": ["x64"] }]
   },
+  "win": {
+    "icon": "assets/icon.png",
+    "extraResources": [
+      {
+        "from": ".bundled-runtimes/python",
+        "to": "app.asar.unpacked/node_modules/bb-app/server/dist/assets/python",
+        "filter": ["**/*", "!**/__pycache__/**", "!**/*.pyc"]
+      },
+      { "from": "../../LICENSE", "to": "LICENSE.cloudroom.txt" }
+    ],
+    "target": [{ "target": "nsis", "arch": ["x64"] }]
+  },
+  "nsis": {
+    "oneClick": true,
+    "perMachine": false,
+    "include": "build/installer.nsh"
+  },
   "dmg": {
     "sign": false,
     "title": "Cloudroom",

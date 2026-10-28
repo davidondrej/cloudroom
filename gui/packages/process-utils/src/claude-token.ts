@@ -19,8 +19,9 @@ export function spawnInTerminal(command: string, env: NodeJS.ProcessEnv) {
   return spawn("/bin/sh", ["-c", `sleep 600 | { ${tty}; kill 0; }`], { env: { ...env, SHELL: "/bin/sh" }, stdio: ["ignore", "pipe", "ignore"], detached: true });
 }
 
-/** Rebuilds the terminal screen from raw `script` output, applying cursor moves and line clears. */
-export function screenText(output: string): string {
+/** Rebuilds the terminal screen from raw `script` output, applying cursor moves and line clears. `conpty`: Windows'
+ *  ConPTY also repaints with absolute cursor moves. */
+export function screenText(output: string, conpty = false): string {
   const rows: string[][] = [];
   let row = 0, col = 0;
   for (const [, params = "", command, char] of output.matchAll(/\x1b\[([0-9;?<>=]*)([A-Za-z@`])|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[()*+]?[^\[\]]|([^])/gu)) {
@@ -30,6 +31,7 @@ export function screenText(output: string): string {
     else if (command === "D") col = Math.max(0, col - n);
     else if (command === "A") row = Math.max(0, row - n);
     else if (command === "B") row += n;
+    else if (conpty && command === "H") [row, col] = [0, 1].map(index => (Number(params.split(";")[index]) || 1) - 1) as [number, number];
     else if (command === "K") rows[row] = params === "2" ? [] : (rows[row] ?? []).slice(0, col);
     else if (char === "\r") col = 0;
     else if (char === "\n") row++;
@@ -42,5 +44,15 @@ export function screenText(output: string): string {
  * The one-year token in `claude setup-token` output, or undefined.
  * Claude Code (2.1.220 and later) skips characters already on screen, so the token is only whole on the rebuilt screen.
  */
-export const readClaudeToken = (output: string): string | undefined =>
-  (screenText(output).match(TOKEN) ?? output.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "").match(TOKEN))?.[1];
+export const readClaudeToken = (output: string, conpty = false): string | undefined =>
+  (screenText(output, conpty).match(TOKEN) ?? output.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "").match(TOKEN))?.[1];
+
+/** Anthropic's official Claude Code installer for this OS. It needs no terminal and puts `claude` in ~/.local/bin. */
+export function claudeInstallerCommand(platform: NodeJS.Platform = process.platform): { command: string; args: string[]; display: string } {
+  if (platform === "win32") {
+    const display = "irm https://claude.ai/install.ps1 | iex";
+    return { command: `${process.env.SystemRoot ?? "C:\\Windows"}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe`, args: ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", display], display };
+  }
+  const display = "curl -fsSL https://claude.ai/install.sh | bash";
+  return { command: "/bin/bash", args: ["-c", display], display };
+}

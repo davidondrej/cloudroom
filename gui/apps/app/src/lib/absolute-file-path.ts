@@ -1,3 +1,11 @@
+import {
+  getHostPathDirname,
+  isHostPathWithin,
+  isWindowsHostPath,
+  joinHostPath,
+  normalizeHostPath,
+} from "@cloudroom/domain";
+
 interface ResolveAbsoluteFilePathArgs {
   path: string;
   rootPath: string | null | undefined;
@@ -33,13 +41,16 @@ function trimLeadingSlash(path: string): string {
 }
 
 function isAbsoluteFilePath(path: string): boolean {
-  return path.startsWith("/");
+  return path.startsWith("/") || isWindowsHostPath(path);
 }
 
 export function normalizeAbsoluteFilePath({
   path,
 }: NormalizeAbsoluteFilePathArgs): string | null {
-  if (!isAbsoluteFilePath(path)) {
+  if (isWindowsHostPath(path)) {
+    return normalizeHostPath(path);
+  }
+  if (!path.startsWith("/")) {
     return null;
   }
 
@@ -66,6 +77,9 @@ export function isAbsoluteFilePathWithinRoot({
   candidatePath,
   rootPath,
 }: IsAbsoluteFilePathWithinRootArgs): boolean {
+  if (isWindowsHostPath(candidatePath) || isWindowsHostPath(rootPath)) {
+    return isHostPathWithin({ rootPath, candidatePath });
+  }
   const normalizedCandidatePath = normalizeAbsoluteFilePath({
     path: candidatePath,
   });
@@ -92,6 +106,10 @@ export function buildAbsoluteFilePath({
     return path;
   }
 
+  if (isWindowsHostPath(rootPath)) {
+    return joinHostPath({ rootPath, relativePath: path }) ?? path;
+  }
+
   const normalizedRootPath = trimTrailingSlash(rootPath);
   const relativePath = trimLeadingSlash(path);
   if (normalizedRootPath === "/") {
@@ -114,6 +132,9 @@ export function resolveAbsoluteFilePath({
 }
 
 export function getAbsoluteDirname({ path }: GetAbsoluteDirnameArgs): string {
+  if (isWindowsHostPath(path)) {
+    return getHostPathDirname(path) ?? path;
+  }
   const trimmed = trimTrailingSlash(path);
   const lastSlashIndex = trimmed.lastIndexOf("/");
   return lastSlashIndex <= 0 ? "/" : trimmed.slice(0, lastSlashIndex);

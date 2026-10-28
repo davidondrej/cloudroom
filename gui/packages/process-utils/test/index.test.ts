@@ -6,12 +6,13 @@ import {
   readFileSync,
   writeFileSync,
 } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { describe, expect, it } from "vitest";
 import {
   findCliExecutable,
   installSafeProcessDiagnostics,
+  isPathWithinDirectory,
   officialCodexPath,
   resolveContainedPath,
   sanitizeInheritedChildProcessEnv,
@@ -268,7 +269,7 @@ describe("process utils", () => {
         rootPath: "/tmp/root",
         candidatePath: "/tmp/root/child/file.txt",
       }),
-    ).toBe("/tmp/root/child/file.txt");
+    ).toBe(resolve("/tmp/root/child/file.txt"));
   });
 
   it("rejects root and escaped paths", () => {
@@ -284,6 +285,20 @@ describe("process utils", () => {
         candidatePath: "/tmp/root/../escape",
       }),
     ).toBeNull();
+  });
+
+  it("keeps children whose names start with two dots inside the directory", () => {
+    const root = join(tmpdir(), "root");
+    expect(isPathWithinDirectory(root, root)).toBe(true);
+    expect(
+      isPathWithinDirectory(root, join(root, "..assets", "logo.svg")),
+    ).toBe(true);
+    expect(isPathWithinDirectory(root, join(root, "..."))).toBe(true);
+    expect(isPathWithinDirectory(root, join(root, ".."))).toBe(false);
+    expect(isPathWithinDirectory(root, join(root, "..", "escape"))).toBe(false);
+    expect(isPathWithinDirectory(root, join(tmpdir(), "root-sibling"))).toBe(
+      false,
+    );
   });
 
   it("scrubs inherited bb runtime env vars and node mode", () => {
@@ -347,12 +362,14 @@ describe("process utils", () => {
 
   it("prefers OpenAI's official Codex over a codex on PATH", () => {
     const home = mkdtempSync(join(tmpdir(), "codex-pick-"));
-    const pathCodex = join(home, "bin", "codex");
+    // Windows only runs a file with a PATHEXT extension.
+    const extension = process.platform === "win32" ? ".exe" : "";
+    const pathCodex = join(home, "bin", `codex${extension}`);
     mkdirSync(join(home, "bin"));
     writeFileSync(pathCodex, "", { mode: 0o755 });
     const env = { HOME: home, PATH: join(home, "bin") };
     expect(findCliExecutable("codex", env)).toBe(pathCodex);
-    const official = officialCodexPath(env);
+    const official = `${officialCodexPath(env)}${extension}`;
     mkdirSync(join(official, ".."), { recursive: true });
     writeFileSync(official, "", { mode: 0o755 });
     expect(findCliExecutable("codex", env)).toBe(official);

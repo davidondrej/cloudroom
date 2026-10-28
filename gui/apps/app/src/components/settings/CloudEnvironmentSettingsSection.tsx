@@ -15,6 +15,7 @@ import { copyToClipboardWithToast } from "@/lib/clipboard";
 import { openUrlInExternalBrowser } from "@/lib/url-open-routing";
 import { formatRelativeTime } from "@/lib/relative-time";
 import { MAC_MCP_KEY, useMcpSignIn } from "@/components/CloudMcpSignIn";
+import { useThisComputer } from "@/hooks/useHostDaemon";
 
 const ENVIRONMENT_KEY = ["cloudroom-environment"];
 const SKILLS_KEY = ["cloudroom-cloud-skills"];
@@ -203,6 +204,7 @@ function VariablesCard({
   onChange: (change: CloudEnvironmentChange) => Promise<unknown>;
   onImported: (data: CloudEnvironment) => void;
 }) {
+  const here = useThisComputer();
   const [adding, setAdding] = useState(false);
   const [name, setName] = useState("");
   const [value, setValue] = useState("");
@@ -261,7 +263,7 @@ function VariablesCard({
         <>
           <div className="flex items-center justify-between gap-3 border-t border-border bg-primary/5 px-4 py-2">
             <p className="text-xs text-foreground">
-              <span className="font-semibold">{missing.length} more on this {COMPUTER}</span>
+              <span className="font-semibold">{missing.length} more on {here}</span>
               <span className="text-subtle-foreground"> · from your shell</span>
             </p>
             <Button size="sm" disabled={locked} onClick={() => importKeys.mutate(missing)}>
@@ -332,6 +334,7 @@ function VariablesCard({
 function SkillsCard() {
   const queryClient = useQueryClient();
   const [search, setSearch] = useState("");
+  const here = useThisComputer();
   // Refreshes, so skills added on this Mac and background upload problems show up.
   const skills = useQuery({ queryKey: SKILLS_KEY, queryFn: ({ signal }) => sdk.cloudroom.cloudSkills(signal), refetchInterval: 15_000, retry: false });
   const change = useMutation({
@@ -368,11 +371,11 @@ function SkillsCard() {
     >
       {!data ? (
         <p role={skills.isError ? "alert" : "status"} className="border-t border-border px-4 py-3 text-xs text-subtle-foreground">
-          {skills.isError ? errorText(skills.error) : `Looking for skills on this ${COMPUTER}…`}
+          {skills.isError ? errorText(skills.error) : `Looking for skills on ${here}…`}
         </p>
       ) : !all.length ? (
         <p className="border-t border-border px-4 py-3 text-xs text-subtle-foreground">
-          No skills on this {COMPUTER} yet. Add them to <code>~/.agents/skills</code>.
+          No skills on {here} yet. Add them to <code>~/.agents/skills</code>.
         </p>
       ) : (
         <>
@@ -431,6 +434,7 @@ function SkillsCard() {
 
 /** MCP servers from this Mac's Claude Code and Codex. The Cloud environment says which ones are in the cloud. */
 function McpCard({ inCloud, onSaved }: { inCloud: string[]; onSaved: (data: CloudEnvironment) => void }) {
+  const here = useThisComputer();
   const mac = useQuery({ queryKey: MAC_MCP_KEY, queryFn: ({ signal }) => sdk.cloudroom.macMcpServers(signal), refetchInterval: 15_000, retry: false });
   const signIn = useMcpSignIn();
   const change = useMutation({ mutationFn: (change: { names: string[]; cloud: boolean }) => sdk.cloudroom.setCloudMcp(change), onSuccess: onSaved });
@@ -446,14 +450,14 @@ function McpCard({ inCloud, onSaved }: { inCloud: string[]; onSaved: (data: Clou
     if (names.length) change.mutate({ names, cloud });
   };
   return (
-    <Card icon="Plug02" title="MCP servers" description={`Your ${COMPUTER}'s MCP servers from Claude Code and Codex. Click one to add it to every new cloud thread.`}>
+    <Card icon="Plug02" title="MCP servers" description={`${here === "this PC" ? "Your PC" : `Your ${COMPUTER}`}'s MCP servers from Claude Code and Codex. Click one to add it to every new cloud thread.`}>
       {!mac.data ? (
         <p role={mac.isError ? "alert" : "status"} className="border-t border-border px-4 py-3 text-xs text-subtle-foreground">
-          {mac.isError ? errorText(mac.error) : `Looking for MCP servers on this ${COMPUTER}…`}
+          {mac.isError ? errorText(mac.error) : `Looking for MCP servers on ${here}…`}
         </p>
       ) : !servers.length ? (
         <p className="border-t border-border px-4 py-3 text-xs text-subtle-foreground">
-          No MCP servers on this {COMPUTER} yet. Add one with <code>claude mcp add --scope user</code>.
+          No MCP servers on {here} yet. Add one with <code>claude mcp add --scope user</code>.
         </p>
       ) : (
         <>
@@ -462,11 +466,11 @@ function McpCard({ inCloud, onSaved }: { inCloud: string[]; onSaved: (data: Clou
               server.macOnly ? (
                 <span
                   key={server.name}
-                  title={`It runs a program or uses a folder that only this ${COMPUTER} has.`}
+                  title={`It runs a program or uses a folder that only ${here} has.`}
                   className="inline-flex items-center gap-1 rounded-full border border-dashed border-border px-2.5 py-1 font-mono text-xs text-subtle-foreground/60"
                 >
                   {server.name}
-                  <span className="font-sans text-2xs">· {COMPUTER_TITLE} only</span>
+                  <span className="font-sans text-2xs">· {here === "this PC" ? "PC" : COMPUTER_TITLE} only</span>
                 </span>
               ) : (
                 <button

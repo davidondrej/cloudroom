@@ -334,20 +334,24 @@ async function warnIfSdkVersionUnpublished(): Promise<void> {
   );
 }
 
+async function execNpm(
+  args: readonly string[],
+  options: { cwd?: string; timeout?: number; killSignal?: NodeJS.Signals },
+): Promise<{ stdout: string; stderr: string }> {
+  const { exec, execFile } = await import("node:child_process");
+  const { promisify } = await import("node:util");
+  if (process.platform === "win32") {
+    return promisify(exec)(["npm", ...args].join(" "), options);
+  }
+  return promisify(execFile)("npm", [...args], options);
+}
+
 async function probeSdkVersionPublished(): Promise<
   "published" | "missing" | "unknown"
 > {
-  const { execFile } = await import("node:child_process");
-  const { promisify } = await import("node:util");
   try {
-    const { stdout } = await promisify(execFile)(
-      "npm",
-      [
-        "view",
-        `@get-bb/plugin-sdk@${PLUGIN_SDK_NPM_VERSION}`,
-        "version",
-        "--json",
-      ],
+    const { stdout } = await execNpm(
+      ["view", `@get-bb/plugin-sdk@${PLUGIN_SDK_NPM_VERSION}`, "version", "--json"],
       { timeout: 5_000, killSignal: "SIGKILL" },
     );
     return stdout.trim().length === 0 ? "missing" : "published";
@@ -387,14 +391,10 @@ function npmFailureDetail(cause: unknown): string {
 async function installScaffoldDependencies(
   targetDir: string,
 ): Promise<boolean> {
-  const { execFile } = await import("node:child_process");
-  const { promisify } = await import("node:util");
   try {
-    await promisify(execFile)(
-      "npm",
-      ["install", "--include=dev", "--no-fund", "--no-audit"],
-      { cwd: targetDir },
-    );
+    await execNpm(["install", "--include=dev", "--no-fund", "--no-audit"], {
+      cwd: targetDir,
+    });
   } catch (cause) {
     console.warn(
       `Could not run npm install — run it in the plugin directory before \`room-cli plugin build\`.${npmFailureDetail(cause)}`,

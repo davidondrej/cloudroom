@@ -28,7 +28,7 @@ import { inferThreadMetadata, queueThreadTitle } from "../threads/thread-metadat
 import { getLastThreadOutput } from "../threads/thread-data.js";
 import { cliPlace, reportAgentConnect, reportMacHelperProblem } from "./setup-telemetry.js";
 import { cloudSkills, copyLogins, copyMacGithub, importCodexLogin, importPiLogin, macPiSetup, setupSync, skillInCloud, stopSync, syncStatus } from "./sync.js";
-import { macAccess, noteWake, setupPreviews, stopPreviews, previewStatus } from "./previews.js";
+import { macAccess, macAccessSupported, noteWake, setupPreviews, stopPreviews, previewStatus } from "./previews.js";
 import { CloudSecrets } from "./secrets.js";
 import { CodexAccounts } from "./codex-accounts.js";
 import { cancelMacCodexLogin, hasMacCodexLogin, macCodexLogin, macCodexLoginExpired, cursorKeyRejected, macCursorLogin, revokeDesktopToken, startMacCodexLogin, SANDBOX_PREFIX, SandboxAsleep, SandboxDirectory, sandboxThread, type AutomationRun, type SandboxProject, type SandboxTrigger, type SandboxWakeTrigger } from "./sandboxes.js";
@@ -900,7 +900,7 @@ class CloudroomService {
     const sandboxes = this.sandboxes.awakeSandboxes().filter(({ thread }) => getThread(this.deps.db, thread));
     if (!sandboxes.length) return this.macReports.clear();
     const status = await previewStatus(this.deps, 60_000);
-    const report = { access: await macAccess(this.deps) ?? "off", problem: status.state === "offline" && status.detail ? status.message : null };
+    const report = { access: macAccessSupported ? await macAccess(this.deps) ?? "off" : "off", problem: status.state === "offline" && status.detail ? status.message : null };
     const key = JSON.stringify(report), sent = this.macReports;
     this.macReports = new Map();
     for (const { url, token } of sandboxes) {

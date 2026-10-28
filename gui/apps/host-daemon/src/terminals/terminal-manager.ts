@@ -11,6 +11,9 @@ import type { TerminalSessionCloseReason } from "@cloudroom/domain";
 import type { HostDaemonDaemonWsMessage } from "@cloudroom/host-daemon-contract";
 import {
   killProcessGroup,
+  normalizeWindowsEnv,
+  preparePortablePtyCommand,
+  resolvePortableCommand,
   sanitizeInheritedChildProcessEnv,
 } from "@cloudroom/process-utils";
 import type { HostDaemonServerTerminalMessage } from "../server-connection-support.js";
@@ -20,6 +23,12 @@ import { runtimeErrorLogFields } from "../error-utils.js";
 import { requireResolvedWorkspaceForCommand } from "../workspace-resolution.js";
 import { ExpectedCommandDispatchError } from "../command-dispatch-support.js";
 import { openCloudPty } from "./cloud-pty.js";
+import {
+  resolveWindowsTerminalShell,
+  terminalShellArgs,
+  terminalShellTitle,
+  terminalStartCommandText,
+} from "./terminal-shell.js";
 
 const DEFAULT_SCROLLBACK_MAX_BYTES = 4 * 1024 * 1024;
 const DEFAULT_SCROLLBACK_MAX_CHUNKS = 10_000;
@@ -60,7 +69,7 @@ export interface TerminalPtyProcess {
 }
 
 export interface SpawnTerminalPtyArgs {
-  args: string[];
+  args: string[] | string;
   cols: number;
   cwd: string;
   env: NodeJS.ProcessEnv;
@@ -86,7 +95,6 @@ type TerminalAttachMessage = Extract<
 export interface TerminalManagerOptions {
   closeGracePeriodMs?: number;
   logger: HostDaemonLogger;
-  platform?: NodeJS.Platform;
   ptyAdapter?: TerminalPtyAdapter;
   resolveShell?: ResolveTerminalShell;
   runtimeManager: RuntimeManager;
@@ -211,11 +219,16 @@ const nodePtyAdapter: TerminalPtyAdapter = {
     });
     return {
       dispose: () => disposeNodePty(pty),
-      kill: (signal) =>
+      kill: (signal) => {
+        if (process.platform === "win32") {
+          pty.kill();
+          return;
+        }
         killProcessGroup({
           child: { pid: pty.pid, kill: (groupSignal) => pty.kill(groupSignal) },
           signal: signal ?? "SIGHUP",
-        }),
+        });
+      },
       onData: (listener) => pty.onData(listener),
       onExit: (listener) =>
         pty.onExit((event) =>
@@ -332,6 +345,12 @@ function isNonEmptyString(value: string | undefined): value is string {
 }
 
 async function resolveDefaultTerminalShell(): Promise<string> {
+  if (process.platform === "win32") {
+    return resolveWindowsTerminalShell({
+      env: process.env,
+      fileExists: pathIsExecutable,
+    });
+  }
   const candidates = [
     process.env.SHELL,
     "/bin/zsh",
@@ -376,8 +395,36 @@ function buildTerminalEnv(args: BuildTerminalEnvArgs): NodeJS.ProcessEnv {
   };
 }
 
-function terminalTitleFromShell(shell: string): string {
-  return path.basename(shell) || "Terminal";
+/**
+ * On Windows an argument list runs its program directly, not through a shell:
+ * Windows PowerShell 5.1 mangles quotes in native arguments, and cmd expands
+ * `%VAR%` even inside quotes. A `.cmd`/`.bat` still needs cmd, quoted the way
+ * cross-spawn quotes it.
+ */
+function windowsArgvLaunch(args: {
+  argv: readonly string[];
+  cwd: string;
+  env: NodeJS.ProcessEnv;
+}): { file: string; args: string[] | string } {
+  const [program = "", ...programArgs] = args.argv;
+  const resolved = resolvePortableCommand(program, {
+    cwd: args.cwd,
+    env: args.env,
+  });
+  if (resolved === undefined) {
+    throw new Error(`Command not found: ${program}`);
+  }
+  const launch = preparePortablePtyCommand({
+    command: resolved,
+    args: programArgs,
+    cwd: args.cwd,
+    env: args.env,
+  });
+  return { file: launch.command, args: launch.args };
+}
+
+function posixShellArgs(start: TerminalOpenMessage["start"]): string[] {
+  return start.mode === "shell" ? [] : ["-lc", terminalStartCommandText(start)];
 }
 
 function terminalTitleFromCommand(command: string): string {
@@ -388,24 +435,19 @@ function terminalTitleFromCommand(command: string): string {
   return `${normalized.slice(0, 77)}...`;
 }
 
-function terminalSpawnArgsForStart(message: TerminalOpenMessage): string[] {
-  switch (message.start.mode) {
-    case "shell":
-      return [];
-    case "command":
-      return ["-lc", message.start.command];
-  }
-}
-
 function terminalTitleForStart(
   message: TerminalOpenMessage,
   shell: string,
 ): string {
   switch (message.start.mode) {
     case "shell":
-      return terminalTitleFromShell(shell);
+      return process.platform === "win32"
+        ? terminalShellTitle(shell)
+        : path.basename(shell) || "Terminal";
     case "command":
       return terminalTitleFromCommand(message.start.command);
+    case "argv":
+      return terminalTitleFromCommand(message.start.argv.join(" "));
   }
 }
 
@@ -463,7 +505,6 @@ function consumePrimaryDeviceAttributesQueries(
 
 export class TerminalManager {
   private readonly closeGracePeriodMs: number;
-  private readonly platform: NodeJS.Platform;
   private readonly ptyAdapter: TerminalPtyAdapter;
   private readonly resolveShell: ResolveTerminalShell;
   private readonly terminalOperations = new Map<string, Promise<void>>();
@@ -477,7 +518,6 @@ export class TerminalManager {
   constructor(private readonly options: TerminalManagerOptions) {
     this.closeGracePeriodMs =
       options.closeGracePeriodMs ?? DEFAULT_TERMINAL_CLOSE_GRACE_PERIOD_MS;
-    this.platform = options.platform ?? process.platform;
     this.ptyAdapter = options.ptyAdapter ?? nodePtyAdapter;
     this.resolveShell = options.resolveShell ?? resolveDefaultTerminalShell;
   }
@@ -540,16 +580,6 @@ export class TerminalManager {
       this.sendTerminalError({
         code: "terminal_exists",
         message: "Terminal session is already open",
-        requestId: message.requestId,
-        terminalId: message.terminalId,
-      });
-      return;
-    }
-
-    if (this.platform === "win32") {
-      this.sendTerminalError({
-        code: "unsupported_platform",
-        message: "Native Windows terminals are not supported",
         requestId: message.requestId,
         terminalId: message.terminalId,
       });
@@ -641,7 +671,9 @@ export class TerminalManager {
       const cloud = await openCloudPty({
         cols: message.cols,
         command:
-          message.start.mode === "command" ? message.start.command : null,
+          message.start.mode === "shell"
+            ? null
+            : terminalStartCommandText(message.start),
         rows: message.rows,
         target: message.target,
         terminalId: message.terminalId,
@@ -653,12 +685,8 @@ export class TerminalManager {
       };
     }
     const target = await this.resolveTerminalOpenTarget(message);
-    const shell = await this.resolveShell();
-    const pty = this.ptyAdapter.spawn({
-      args: terminalSpawnArgsForStart(message),
-      cols: message.cols,
-      cwd: target.cwd,
-      env: buildTerminalEnv({
+    const env = normalizeWindowsEnv(
+      buildTerminalEnv({
         shellEnv: operationEnvironment(
           message.contributedEnv,
           this.options.runtimeManager.getShellEnv(),
@@ -669,7 +697,27 @@ export class TerminalManager {
         projectId: message.projectId,
         threadStoragePath: message.threadStoragePath,
       }),
-      file: shell,
+    );
+    const shell = await this.resolveShell();
+    const launch =
+      process.platform !== "win32"
+        ? { file: shell, args: posixShellArgs(message.start) }
+        : message.start.mode === "argv"
+          ? windowsArgvLaunch({
+              argv: message.start.argv,
+              cwd: target.cwd,
+              env,
+            })
+          : {
+              file: shell,
+              args: terminalShellArgs({ shell, start: message.start }),
+            };
+    const pty = this.ptyAdapter.spawn({
+      args: launch.args,
+      cols: message.cols,
+      cwd: target.cwd,
+      env,
+      file: launch.file,
       logger: this.options.logger,
       rows: message.rows,
     });

@@ -8,6 +8,7 @@ import { z } from "zod";
 import type { ServerLogger } from "../../types.js";
 import { isFsErrorWithCode } from "../lib/fs-errors.js";
 import { isRecord } from "./registry-parse.js";
+import { joinHostPathSegments } from "../lib/host-path.js";
 import { REGISTRY_SKILL_PROVENANCE_FILE_NAME } from "./registry-skill-provenance.js";
 import { readSharedBuiltinSkillNames } from "./builtin-skills-copy.js";
 
@@ -448,7 +449,7 @@ export function resolveProjectSkillSourceFromContent(
     name: frontmatter.data.name,
     description: frontmatter.data.description,
     sourceRootPath: args.candidatePath,
-    skillFilePath: toSkillFilePath(args.candidatePath),
+    skillFilePath: joinHostPathSegments(args.candidatePath, SKILL_FILE_NAME),
   };
 }
 

@@ -11,6 +11,10 @@ import { withEnvironmentCleanupSlot } from "./cleanup-concurrency.js";
 import { ensureHostSessionReadyForWork } from "../hosts/host-lifecycle.js";
 import { foreignProviderOwnedPathRefusal } from "../threads/workspace-path-claims.js";
 import {
+  getHostPathFlavorForHost,
+  invalidHostPathMessage,
+} from "../lib/host-path.js";
+import {
   cancelPendingEnvironmentHook,
   runEnvironmentHook,
   ENVIRONMENT_HOOK_TIMEOUT_MS,
@@ -39,6 +43,8 @@ import {
   threads,
 } from "@cloudroom/db";
 import {
+  canonicalizeHostPath,
+  isAbsoluteHostPath,
   jsonValueSchema,
   type Environment,
   type EnvironmentMachineSelection,
@@ -351,6 +357,7 @@ async function runCreate(
   outerSignal: AbortSignal,
 ): Promise<void> {
   const signal = outerSignal;
+  const flavor = getHostPathFlavorForHost(deps, context.host.id);
   let changed = false;
   mutateProvisioning(deps, provisioning, ["creating"], (row) => {
     row.hostId = context.host.id;
@@ -385,14 +392,14 @@ async function runCreate(
               const path = z
                 .string()
                 .min(1)
-                .startsWith("/")
+                .refine((path) => isAbsoluteHostPath(path, flavor))
                 .refine((path) => !path.includes("\0"))
                 .parse(value);
               if (signal.aborted) return false;
               return claimEnvironmentPath(
                 deps.db,
                 provisioning,
-                path.replace(/\/+$/u, "") || "/",
+                canonicalizeHostPath(path, flavor),
               );
             },
             previous:
@@ -410,7 +417,11 @@ async function runCreate(
           });
     if (result.status === "created") {
       try {
-        const producedPath = result.path.replace(/\/+$/u, "") || "/";
+        if (flavor === "windows" && !isAbsoluteHostPath(result.path, flavor))
+          throw new Error(
+            `The environment provider returned an invalid workspace path. ${invalidHostPathMessage(flavor)}`,
+          );
+        const producedPath = canonicalizeHostPath(result.path, flavor);
         const { dataDir } = await ensureHostSessionReadyForWork(deps, {
           hostId: context.host.id,
         });

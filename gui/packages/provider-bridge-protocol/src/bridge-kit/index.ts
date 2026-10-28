@@ -17,3 +17,5 @@ export * from "./provider-visibility.js";
 export * from "./provider-visibility-helpers.js";
 export * from "./runtime-json-rpc.js";
 export * from "./tool-arg-schemas.js";
+
+export { isClosedPipeError } from "@cloudroom/process-utils";

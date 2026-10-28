@@ -1,10 +1,11 @@
 import { readFile, realpath, stat } from "node:fs/promises";
-import { isAbsolute, resolve, sep } from "node:path";
+import { isAbsolute, resolve } from "node:path";
 import {
   isPluginOwnedIconPath,
   pluginPackageJsonSchema,
   type PluginPackageJson,
 } from "@cloudroom/domain";
+import { isPathWithinDirectory } from "@cloudroom/process-utils";
 import {
   assertValidPluginCompactIconSvg,
   assertValidPluginIconSvg,
@@ -40,9 +41,7 @@ export function resolveManifestPath(
     throw new Error(`manifest ${label} must be relative, got "${entry}"`);
   }
   const resolved = resolve(rootDir, entry);
-  // Use the platform separator: on win32 resolve() returns backslash paths,
-  // so a "/"-suffixed prefix never matches and every entry "escapes".
-  if (resolved !== rootDir && !resolved.startsWith(rootDir + sep)) {
+  if (!isPathWithinDirectory(resolve(rootDir), resolved)) {
     throw new Error(
       `manifest ${label} escapes the plugin directory: "${entry}"`,
     );
@@ -82,7 +81,7 @@ export async function resolveManifestAssetFile(
     realpath(rootDir),
     realpath(assetPath),
   ]);
-  if (realAsset !== realRoot && !realAsset.startsWith(realRoot + "/")) {
+  if (!isPathWithinDirectory(realRoot, realAsset)) {
     throw new Error(
       `manifest ${label} escapes the plugin directory through a symlink`,
     );

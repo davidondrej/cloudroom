@@ -1124,7 +1124,10 @@ function NonThreadPaneContent({
         <AppPageHeader
           isWindowDragRegion={isTopRow}
           ownsWindowTopLeft={ownsWindowTopLeft}
-          className={isBoundedPane ? "z-[21]" : undefined}
+          className={cn(
+            isBoundedPane && "z-[21]",
+            content.kind === "plugin-panel" && "border-b-0",
+          )}
           center={
             <div
               data-pane-header-focus-tab={

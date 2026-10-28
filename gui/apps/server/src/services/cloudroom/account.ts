@@ -7,7 +7,7 @@ import type { AppDeps } from "../../types.js";
 import { ApiError } from "../../errors.js";
 import { cloudroom, configuredWebsite, trustedWebsite } from "./commands.js";
 import { cancelGithubLogin } from "./github-login.js";
-import { macAccess, supportedMacAccessLevels } from "./previews.js";
+import { macAccess, macAccessSupported, supportedMacAccessLevels } from "./previews.js";
 import { hasMacCodexLogin } from "./sandboxes.js";
 import { copyLogins } from "./sync.js";
 import { linkInstall, reportSignInFailed } from "./setup-telemetry.js";
@@ -61,7 +61,7 @@ export class CloudroomAccountService {
   async status() {
     const status = await cloudroom(this.deps).status();
     const macAccessLevel = await macAccess(this.deps);
-    return { ...status, macAccess: macAccessLevel === null ? null : macAccessLevel !== "off", macAccessLevel, macAccessLevels: supportedMacAccessLevels, copyLogins: await copyLogins(this.deps), localLogins: { codex: await hasMacCodexLogin() }, signingIn: this.pending !== null, signInError: this.error };
+    return { ...status, macAccess: macAccessLevel === null ? null : macAccessLevel !== "off", macAccessLevel, macAccessSupported, macAccessLevels: supportedMacAccessLevels, copyLogins: await copyLogins(this.deps), localLogins: { codex: await hasMacCodexLogin() }, signingIn: this.pending !== null, signInError: this.error };
   }
 
 

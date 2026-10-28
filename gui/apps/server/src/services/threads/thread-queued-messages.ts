@@ -1,4 +1,10 @@
 import {
+  isOrdinaryTurnEndQueuedMessage,
+  isThreadQueueAutoSendPaused,
+  type DbQueryConnection,
+  type QueuedThreadMessageRow,
+} from "@cloudroom/db";
+import {
   promptInputSchema,
   queuedMessageWaitingOnSchema,
   threadQueuedMessageSchema,
@@ -148,5 +154,26 @@ export function toThreadQueuedMessage(
     editable: row.payloadKind === "inline" && row.claimedAt === null,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
+  });
+}
+
+export function toListedThreadQueuedMessages(
+  db: DbQueryConnection,
+  rows: QueuedThreadMessageRow[],
+): ThreadQueuedMessage[] {
+  const pausedThreads = new Map<string, boolean>();
+  return rows.map((row) => {
+    let paused = pausedThreads.get(row.threadId);
+    if (paused === undefined) {
+      paused = isThreadQueueAutoSendPaused(db, row.threadId);
+      pausedThreads.set(row.threadId, paused);
+    }
+    return {
+      ...toThreadQueuedMessage(row),
+      pausedByStop:
+        paused &&
+        row.failureReason === null &&
+        isOrdinaryTurnEndQueuedMessage(row),
+    };
   });
 }

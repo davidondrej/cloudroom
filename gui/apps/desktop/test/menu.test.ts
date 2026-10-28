@@ -256,4 +256,22 @@ describe("application menu", () => {
     closeWindow?.click?.({} as never, null as never, {} as never);
     expect(Menu.sendActionToFirstResponder).not.toHaveBeenCalled();
   });
+
+  it.each([
+    { platform: "Windows", isLinux: false, isMac: false, fullScreen: true },
+    { platform: "macOS", isLinux: false, isMac: true, fullScreen: false },
+    { platform: "Linux", isLinux: true, isMac: false, fullScreen: false },
+  ])(
+    "offers Toggle Full Screen in the View menu only on Windows ($platform)",
+    ({ isLinux, isMac, fullScreen }) => {
+      const template = buildApplicationMenuTemplate(
+        menuArgs(() => {}, { isLinux, isMac }),
+      );
+      const viewSubmenu = template.find((item) => item.label === "View")
+        ?.submenu as MenuItemConstructorOptions[];
+      expect(
+        viewSubmenu.some((item) => item.role === "togglefullscreen"),
+      ).toBe(fullScreen);
+    },
+  );
 });

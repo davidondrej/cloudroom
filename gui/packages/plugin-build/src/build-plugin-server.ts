@@ -1,5 +1,6 @@
-import { mkdir, mkdtemp, rename, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { renameIntoPlace } from "./rename-into-place.js";
 import { createPluginArtifactMeta } from "./plugin-artifact-meta.js";
 import {
   isRecord,
@@ -151,9 +152,9 @@ export async function buildPluginServer(
       ) + "\n",
     );
 
-    await rename(stagedJsPath, jsPath);
-    await rename(join(stageDir, "server.js.map"), mapPath);
-    await rename(stagedMetaPath, metaPath);
+    await renameIntoPlace(stagedJsPath, jsPath);
+    await renameIntoPlace(join(stageDir, "server.js.map"), mapPath);
+    await renameIntoPlace(stagedMetaPath, metaPath);
   } finally {
     await rm(stageDir, { recursive: true, force: true });
   }

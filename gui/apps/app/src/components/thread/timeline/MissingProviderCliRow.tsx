@@ -1,4 +1,3 @@
-import { COMPUTER } from "@cloudroom/domain";
 import { useEffect, useRef } from "react";
 import { useMutation } from "@tanstack/react-query";
 import { Button } from "@cloudroom/shared-ui/button";
@@ -13,6 +12,7 @@ import { autoStartProviderCliInstall, providerCliJobKey } from "@/components/pro
 import { useEnvironment } from "@/hooks/queries/environment-queries";
 import { useHostProviderCliStatus } from "@/hooks/queries/system-queries";
 import { useThread } from "@/hooks/queries/thread-queries";
+import { useThisComputer } from "@/hooks/useHostDaemon";
 import { sdk } from "@/lib/sdk";
 
 const MISSING_CLI = /Cloudroom could not find the (Claude Code|Codex) CLI/;
@@ -37,6 +37,7 @@ export function MissingProviderCliRow({
   className?: string;
 }) {
   const thread = useThread(threadId);
+  const here = useThisComputer();
   const environment = useEnvironment(thread.data?.environmentId);
   const hostId = environment.data?.hostId ?? null;
   const cliStatus = useHostProviderCliStatus({ hostId });
@@ -83,8 +84,8 @@ export function MissingProviderCliRow({
         {status?.installed
           ? `${name} CLI is installed`
           : installing
-            ? `Installing ${name} CLI on this ${COMPUTER}…`
-            : `${name} CLI isn't installed on this ${COMPUTER}`}
+            ? `Installing ${name} CLI on ${here}…`
+            : `${name} CLI isn't installed on ${here}`}
       </p>
       <div className="flex flex-wrap items-center gap-2 pl-7">
         {hostId &&

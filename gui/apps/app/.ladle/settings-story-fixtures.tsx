@@ -306,7 +306,7 @@ function createSettingsStoryQueryClient() {
     ready: true,
     account: { id: "account", email: "you@example.com" },
     plan: "pro",
-    planUsage: { plan: "pro", agents: 42, agentsLimit: Number.MAX_SAFE_INTEGER, cpuHours: 88.4, cpuHoursLimit: 300 },
+    planUsage: { plan: "pro", credits: 17_680, creditsLimit: 50_000 },
     projectId: null,
     repository: null,
     model: null,

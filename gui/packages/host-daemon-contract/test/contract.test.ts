@@ -254,6 +254,7 @@ const ONLINE_RPC_RESPONSE_RESULT_FIXTURES: OnlineRpcResponseResultFixtures = {
     truncated: false,
   },
   "host.mkdir": { ok: true },
+  "claude.setup_token": { state: "running", url: null, token: null, screen: [] },
   "host.move_path": { ok: true },
   "host.remove_path": { ok: true },
   "host.browse_directory": {
@@ -263,6 +264,7 @@ const ONLINE_RPC_RESPONSE_RESULT_FIXTURES: OnlineRpcResponseResultFixtures = {
       { kind: "directory", name: "src", path: "/home/me/project/src" },
       { kind: "file", name: "README.md", path: "/home/me/project/README.md" },
     ],
+    roots: ["/"],
   },
   "host.paths_exist": {
     existence: {

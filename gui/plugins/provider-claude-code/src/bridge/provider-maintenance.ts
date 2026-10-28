@@ -34,6 +34,7 @@ const CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage";
 const CLAUDE_KEYCHAIN_SERVICE = "Claude Code-credentials";
 const CLAUDE_NPM_PACKAGE = "@anthropic-ai/claude-code";
 const CLAUDE_INSTALL_SCRIPT_URL = "https://claude.ai/install.sh";
+const CLAUDE_POWERSHELL_INSTALL_SCRIPT_URL = "https://claude.ai/install.ps1";
 const CLAUDE_MINIMUM_SUPPORTED_VERSION = "2.1.280";
 
 const claudeCredentialsSchema = z.object({
@@ -63,6 +64,21 @@ export function claudeExecutable(): string {
     findCliExecutable("claude") ||
     "claude"
   );
+}
+
+function claudeInstallerCommand(): ProviderInstallationCommand {
+  return downloadedInstallerCommand(CLAUDE_INSTALL_SCRIPT_URL, {
+    powershellUrl: CLAUDE_POWERSHELL_INSTALL_SCRIPT_URL,
+  });
+}
+
+// Windows' native installer leaves claude.exe off PATH, so sign in with the
+// path we found. The sign-in terminal runs PowerShell: `&` runs a quoted path,
+// and a `'` inside single quotes is doubled (C:\Users\O'Brien).
+function claudeLoginCommand(command: string): string {
+  return process.platform === "win32" && path.win32.isAbsolute(command)
+    ? `& '${command.replaceAll("'", "''")}' /login`
+    : "claude /login";
 }
 
 function claudeDistTags(value: string | null): {
@@ -230,8 +246,7 @@ async function claudeInstallation(): Promise<{
               label: actionKind === "install" ? "Install" : "Update",
               command:
                 actionKind === "install"
-                  ? downloadedInstallerCommand(CLAUDE_INSTALL_SCRIPT_URL)
-                      .displayCommand
+                  ? claudeInstallerCommand().displayCommand
                   : (update?.displayCommand ?? ""),
             },
       needsUpdate,
@@ -256,10 +271,7 @@ function buildClaudeProviderInstallationRun(
   action: "install" | "update",
   update: ProviderInstallationCommand | null = null,
 ): ProviderInstallationRunResult {
-  const command =
-    action === "install"
-      ? downloadedInstallerCommand(CLAUDE_INSTALL_SCRIPT_URL)
-      : update;
+  const command = action === "install" ? claudeInstallerCommand() : update;
   if (status.installAction?.kind !== action || command === null) {
     return {
       available: false,
@@ -357,6 +369,7 @@ function planLabel(credentials: ClaudeCredentials): string | null {
 }
 
 function healthResult(
+  command: string,
   status: "ready" | "not_installed" | "unauthenticated" | "expired" | "unknown",
   args: {
     accountEmail?: string | null;
@@ -376,7 +389,7 @@ function healthResult(
       minimumSupportedVersion: null,
       canInstall: true,
       canUpdate: status !== "not_installed",
-      loginCommand: "claude /login",
+      loginCommand: claudeLoginCommand(command),
     },
   };
 }
@@ -384,7 +397,7 @@ function healthResult(
 export async function getClaudeProviderHealth(): Promise<ProviderHealthResult> {
   const command = claudeExecutable();
   if ((await resolveExecutablePath(command)) === null) {
-    return healthResult("not_installed");
+    return healthResult(command, "not_installed");
   }
   const version = await readCliVersion(command);
   try {
@@ -393,7 +406,9 @@ export async function getClaudeProviderHealth(): Promise<ProviderHealthResult> {
       readAccountEmail(),
     ]);
     if (!credentials) {
-      return healthResult("unauthenticated", { installedVersion: version });
+      return healthResult(command, "unauthenticated", {
+        installedVersion: version,
+      });
     }
     const known = {
       accountEmail: email,
@@ -401,10 +416,10 @@ export async function getClaudeProviderHealth(): Promise<ProviderHealthResult> {
       installedVersion: version,
     };
     return credentials.expiresAt != null && Date.now() >= credentials.expiresAt
-      ? healthResult("expired", known)
-      : healthResult("ready", known);
+      ? healthResult(command, "expired", known)
+      : healthResult(command, "ready", known);
   } catch (error) {
-    return healthResult("unknown", {
+    return healthResult(command, "unknown", {
       installedVersion: version,
       statusMessage: error instanceof Error ? error.message : String(error),
     });

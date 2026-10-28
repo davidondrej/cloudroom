@@ -54,6 +54,7 @@ describe("thread storage host routing", () => {
       kind: "text",
       content: "saved text",
       absolutePath: `${storageRootPath}/notes/document.txt`,
+      relativePath: "notes/document.txt",
     });
   });
 

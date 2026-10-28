@@ -75,6 +75,6 @@ export function MacAccessMenuItems({ current, select }: Pick<ReturnType<typeof u
 
 export function MacAccessChip() {
   const status = useCloudroomAccount();
-  if (!status.data?.account) return null;
+  if (!status.data?.account || status.data.macAccessSupported === false) return null;
   return <SidebarMenuItem data-footer-item="mac-access"><MacAccessMenu /></SidebarMenuItem>;
 }

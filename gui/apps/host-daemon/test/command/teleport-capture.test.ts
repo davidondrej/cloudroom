@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
@@ -46,4 +46,12 @@ it("keeps a fork's embedded images in its transcript instead of splitting them o
 
   const teleport = await capture("teleport_one");
   expect(teleport.files.map((file) => file.kind)).toEqual(["native", "attachment"]);
+});
+
+it("captures a read-only file (Windows copies the read-only flag)", async () => {
+  const transcript = join(root, "claude", "projects", "workspace", `${nativeId}.jsonl`);
+  await chmod(transcript, 0o444);
+  const teleport = await capture("teleport_read_only");
+  expect(teleport.files.map((file) => file.kind)).toContain("native");
+  await chmod(transcript, 0o644);
 });

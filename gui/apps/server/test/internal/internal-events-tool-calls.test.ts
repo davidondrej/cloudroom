@@ -12,7 +12,11 @@ import {
   listQueuedThreadMessages,
   threads,
 } from "@cloudroom/db";
-import { threadScope, turnScope, type ToolCallResponse } from "@cloudroom/domain";
+import {
+  threadScope,
+  turnScope,
+  type ToolCallResponse,
+} from "@cloudroom/domain";
 import {
   groupHostDaemonEvents,
   hostDaemonEventBatchResponseSchema,
@@ -1528,6 +1532,115 @@ describe("internal event and tool-call routes", () => {
     });
   });
 
+  it("keeps a POSIX path with a leading double slash on a POSIX machine", async () => {
+    await withTestHarness(async (harness) => {
+      const { host, session } = seedHostSession(harness.deps);
+      const { project } = seedProjectWithSource(harness.deps, {
+        hostId: host.id,
+      });
+      const environment = seedEnvironment(harness.deps, {
+        hostId: host.id,
+        projectId: project.id,
+      });
+      const thread = seedThread(harness.deps, {
+        projectId: project.id,
+        environmentId: environment.id,
+      });
+
+      seedEvent(harness.deps, {
+        threadId: thread.id,
+        environmentId: environment.id,
+        providerThreadId: "provider-tool-call",
+        sequence: 1,
+        type: "turn/started",
+        scope: turnScope("turn-double-slash"),
+        data: { providerThreadId: "provider-tool-call" },
+      });
+
+      const responsePromise = postToolCall({
+        harness,
+        sessionId: session.id,
+        threadId: thread.id,
+        turnId: "turn-double-slash",
+        tool: "update_environment_directory",
+        arguments: { path: "//tmp/double-slash-checkout/" },
+      });
+      const provisionCommand = await waitForQueuedCommand(
+        harness,
+        ({ command }) =>
+          command.type === "environment.attach" &&
+          command.path === "//tmp/double-slash-checkout",
+      );
+      await reportQueuedCommandSuccess(harness, provisionCommand, {
+        path: "//tmp/double-slash-checkout",
+        isGitRepo: true,
+        isWorktree: false,
+        branchName: "main",
+        defaultBranch: "main",
+        transcript: [],
+      });
+
+      await expect(readJson(await responsePromise)).resolves.toMatchObject({
+        success: true,
+      });
+    });
+  });
+
+  it("refuses Windows network and device paths on a Windows machine", async () => {
+    await withTestHarness(async (harness) => {
+      const { host, session } = seedHostSession(harness.deps, {
+        platform: "win32",
+      });
+      const { project } = seedProjectWithSource(harness.deps, {
+        hostId: host.id,
+        path: "C:\\src\\project",
+      });
+      const environment = seedEnvironment(harness.deps, {
+        hostId: host.id,
+        projectId: project.id,
+        path: "C:\\src\\project",
+      });
+      const thread = seedThread(harness.deps, {
+        projectId: project.id,
+        environmentId: environment.id,
+      });
+
+      for (const path of [
+        "\\\\server\\share\\repo",
+        "//server/share/repo",
+        "\\\\?\\C:\\src\\repo",
+        "//?/C:/src/repo",
+        "\\\\.\\C:\\src\\repo",
+        "//./C:/src/repo",
+      ]) {
+        const response = await postToolCall({
+          harness,
+          sessionId: session.id,
+          threadId: thread.id,
+          tool: "update_environment_directory",
+          arguments: { path },
+        });
+        await expect(readJson(response)).resolves.toMatchObject({
+          success: false,
+          contentItems: [
+            {
+              type: "inputText",
+              text: expect.stringContaining(
+                "Windows network and device paths are not supported",
+              ),
+            },
+          ],
+        });
+      }
+      expect(getThread(harness.db, thread.id)?.environmentId).toBe(
+        environment.id,
+      );
+      expect(
+        listEnvironments(harness.db, { projectId: project.id }),
+      ).toHaveLength(1);
+    });
+  });
+
   it("rejects relative update_environment_directory paths without changing the thread", async () => {
     await withTestHarness(async (harness) => {
       const { host, session } = seedHostSession(harness.deps);
@@ -1557,7 +1670,9 @@ describe("internal event and tool-call routes", () => {
         contentItems: [
           {
             type: "inputText",
-            text: "Path must be an absolute path on the current host.",
+            text: expect.stringContaining(
+              "Path must be an absolute path on the current host.",
+            ),
           },
         ],
       });

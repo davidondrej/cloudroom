@@ -166,7 +166,9 @@ import {
   runningLocalThreadIds,
   noteUpdateAttempt,
   saveUpdateAttempt,
+  saveWindowsUpdateMarker,
   stopThreadsForUpdate,
+  takeFailedWindowsUpdate,
 } from "./desktop-update-resume.js";
 import {
   installNeedsPassword,
@@ -667,7 +669,9 @@ function createDesktopPathContext(): DesktopPathContext {
 
 function shouldEnableServerDaemonLogsMenu(): boolean {
   return (
-    (process.platform === "darwin" || process.platform === "linux") &&
+    (process.platform === "darwin" ||
+      process.platform === "linux" ||
+      process.platform === "win32") &&
     currentRuntime?.ownership === "spawned"
   );
 }
@@ -1085,8 +1089,8 @@ function startRemoteSystemConfigSync(serverUrl: string): void {
 
 const pendingOpenLinks: string[] = [];
 
-function deliverLinuxShareLink(argv: readonly string[]): void {
-  if (process.platform !== "linux") return;
+function deliverArgvShareLink(argv: readonly string[]): void {
+  if (process.platform === "darwin") return;
   const url = argv.find((arg) => arg.startsWith("cloudroom://share/"));
   if (url !== undefined) deliverOpenLink(url);
 }
@@ -1819,6 +1823,10 @@ async function installDownloadedUpdate(): Promise<void> {
     desktopAutoUpdateService.installUpdate();
     return;
   }
+  // Before anything stops: a newer download may have deleted the staged installer.
+  if (!desktopAutoUpdateService.installerReady()) {
+    return;
+  }
   const appImagePath = process.env.APPIMAGE?.trim() ?? "";
   if (
     process.platform === "linux" &&
@@ -1841,13 +1849,27 @@ async function installDownloadedUpdate(): Promise<void> {
   if (process.platform === "darwin") {
     for (const window of BrowserWindow.getAllWindows()) window.hide();
   }
+  // Windows: no check or download may replace the staged installer while the backend stops.
+  if (!desktopAutoUpdateService.beginInstall()) {
+    return;
+  }
   const reopens =
     process.platform === "darwin" &&
     app.isPackaged &&
     reopenAfterExit(process.execPath, process.pid);
+  let handedOff = false;
   const attemptDir = resolveDataDirFromEnv({ env: process.env, homeDir: homedir() });
   try {
     const pendingVersion = desktopAutoUpdateService.getInfo().pendingVersion;
+    if (process.platform === "win32" && pendingVersion) {
+      await saveWindowsUpdateMarker(
+        app.getPath("userData"),
+        getDesktopVersion(process.env.BB_DESKTOP_VERSION),
+        pendingVersion,
+      ).catch((error: unknown) => {
+        desktopLogger.error(`Saving the update marker failed: ${String(error)}`);
+      });
+    }
     if (process.platform === "darwin" && pendingVersion) {
       // Where the app runs and whether this user can replace it are the usual
       // reasons Squirrel.Mac never installs, so the failure report carries them.
@@ -1875,8 +1897,28 @@ async function installDownloadedUpdate(): Promise<void> {
     quitting = true;
     stoppingForQuit = true;
     await finishQuit();
-    desktopAutoUpdateService.installUpdate();
+    if (process.platform === "win32") {
+      // electron-updater quits as soon as it asks Windows to start the NSIS installer,
+      // so a failed start would leave Cloudroom closed (BB #5528). Reopen this version.
+      autoUpdater.once("error", (error: Error) => {
+        desktopLogger.error(`The update installer didn't start; reopening Cloudroom: ${String(error?.message ?? error)}`);
+        autoUpdater.autoInstallOnAppQuit = false;
+        app.relaunch();
+        app.exit(0);
+      });
+    }
+    handedOff = desktopAutoUpdateService.installUpdate();
   } finally {
+    // Windows: the backend may already be stopped, so an install that didn't hand off reopens this version.
+    if (process.platform === "win32" && !handedOff) {
+      desktopAutoUpdateService.endInstall();
+      if (stoppingForQuit) {
+        desktopLogger.error("The update didn't start after Cloudroom stopped; reopening Cloudroom.");
+        autoUpdater.autoInstallOnAppQuit = false;
+        app.relaunch();
+        app.exit(0);
+      }
+    }
     // The server is already stopped, so never stay hidden if Squirrel.Mac
     // hangs: exit, and reopenAfterExit brings Cloudroom back.
     if (reopens) {
@@ -2347,7 +2389,7 @@ async function runDesktopApp(): Promise<void> {
   }
 
   app.on("second-instance", (_event, argv) => {
-    deliverLinuxShareLink(argv);
+    deliverArgvShareLink(argv);
     if (desktopWindowFactory?.focusFirstWindow() === true) {
       return;
     }
@@ -2362,7 +2404,7 @@ async function runDesktopApp(): Promise<void> {
     if (url.startsWith("cloudroom://share/")) deliverOpenLink(url);
     desktopWindowFactory?.focusFirstWindow();
   });
-  deliverLinuxShareLink(process.argv);
+  deliverArgvShareLink(process.argv);
   app.on("before-quit", handleBeforeQuit);
   app.on("window-all-closed", () => {
     if (process.platform !== "darwin") {
@@ -2637,6 +2679,15 @@ async function runDesktopApp(): Promise<void> {
   desktopUpdateService.subscribe(() => {
     sendDesktopInfoChanged();
   });
+  if (process.platform === "win32") {
+    void takeFailedWindowsUpdate(userDataPath, desktopVersion)
+      .then((version) => {
+        if (version === null) return;
+        desktopLogger.error(`Restart to update didn't install ${version}; offering the download again.`);
+        desktopAutoUpdateService?.markInstallFailed(version);
+      })
+      .catch(() => undefined);
+  }
   desktopAutoUpdateService.subscribe(() => {
     sendDesktopInfoChanged();
   });
@@ -2692,15 +2743,18 @@ async function runDesktopApp(): Promise<void> {
     },
   });
   registerDesktopBrowserIpc(desktopBrowserViewManager, isPrivilegedAppSender);
-  const browserImportService = createBrowserImportService({
-    context: { platform: process.platform, home: homedir() },
-    resolveIcon: (appPath) => readMacAppIcon(appPath),
-    log(message, details) {
-      desktopLogger.info(
-        `[desktop] ${message}${details ? ` ${JSON.stringify(details)}` : ""}`,
-      );
-    },
-  });
+  const browserImportService =
+    process.platform === "win32"
+      ? undefined
+      : createBrowserImportService({
+          context: { platform: process.platform, home: homedir() },
+          resolveIcon: (appPath) => readMacAppIcon(appPath),
+          log(message, details) {
+            desktopLogger.info(
+              `[desktop] ${message}${details ? ` ${JSON.stringify(details)}` : ""}`,
+            );
+          },
+        });
   desktopBrowserBroker = createDesktopBrowserBroker({
     manager: desktopBrowserViewManager,
     product: `Chrome/${process.versions.chrome}`,
@@ -2709,7 +2763,7 @@ async function runDesktopApp(): Promise<void> {
   ipcMain.handle(
     BB_DESKTOP_BROWSER_LIST_IMPORT_SOURCES_CHANNEL,
     async (event) => {
-      if (!isPrivilegedAppSender(event)) return null;
+      if (!browserImportService || !isPrivilegedAppSender(event)) return null;
       return { sources: await browserImportService.listSources() };
     },
   );
@@ -2718,7 +2772,12 @@ async function runDesktopApp(): Promise<void> {
     async (event, payload: unknown) => {
       const parsed =
         bbDesktopBrowserImportCookiesRequestSchema.safeParse(payload);
-      if (!parsed.success || !isPrivilegedAppSender(event)) return null;
+      if (
+        !browserImportService ||
+        !parsed.success ||
+        !isPrivilegedAppSender(event)
+      )
+        return null;
       const manager = desktopBrowserViewManager;
       if (!manager) return null;
       return browserImportService.importCookies(
@@ -2812,6 +2871,7 @@ async function runDesktopApp(): Promise<void> {
       platform: process.platform,
     }),
     isMac: process.platform === "darwin",
+    isWindows: process.platform === "win32",
     isLinuxFrameless: hasLinuxWindowArgument({
       argument: LINUX_FRAMELESS_WINDOW_ARGUMENT,
       argv: process.argv,

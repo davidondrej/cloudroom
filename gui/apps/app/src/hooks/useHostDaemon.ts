@@ -1,3 +1,4 @@
+import { COMPUTER } from "@cloudroom/domain";
 import { useCallback } from "react";
 import { useSetAtom } from "jotai";
 import {
@@ -40,6 +41,11 @@ export function useHostDaemon() {
     platform,
     isLocalDaemonHost,
   };
+}
+
+export function useThisComputer(): string {
+  const status = useAsyncAtomValue(localHostStatusAtom, null);
+  return status?.platform === "win32" ? "this PC" : `this ${COMPUTER}`;
 }
 
 export function useLocalHostDaemonAccess() {

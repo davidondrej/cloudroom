@@ -279,7 +279,8 @@ Messaging:
   turn. A target that is awaiting user interaction (an open question or
   approval) cannot take a prompt; tell then adds the message to the thread's
   queue and dispatches it once the interaction settles. That outcome is not a
-  failure, so do not resend. `--json` reports `delivery` as `sent` or `queued`,
+  failure, so do not resend. If a Stop cancels the interaction, the message
+  stays paused like the rest of the queue; send it with `queue send`. `--json` reports `delivery` as `sent` or `queued`,
   and a queued answer carries the complete row as `queuedMessage`, including
   its `id`, `waitingOn`, and `sendAt`. A deferred message waits for a thread
   that failed while it was deferred, and delivers when the thread is retried.
@@ -388,7 +389,9 @@ Queued messages:
   A queued message is one that could not dispatch yet. Every one carries a
   typed reason in its `Waiting on` column: waiting for the current turn to
   finish, for the workspace, for a pending interaction, for a clock (`Send at`),
-  or for a plugin that has queued it. `queue list` with no thread id lists every
+  or for a plugin that has queued it. After a Stop, rows the Stop paused show
+  `paused by Stop` (`pausedByStop` in JSON) until you `queue send` one or a new
+  message starts a turn. `queue list` with no thread id lists every
   queued row in the workspace; `--wait-holder plugin:<plugin-id>` narrows it to
   the rows one plugin is holding.
 

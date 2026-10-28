@@ -36,6 +36,7 @@ import {
   resolveBbAppStartContext,
   resolveBbAppCommand,
   resolveServerListenerUrl,
+  resolveBundledCliLaunch,
   resolveWorktreeRuntimePolicy,
   runBbApp,
   runBundledCliCommand,
@@ -2223,6 +2224,36 @@ describe("bb-app launcher", () => {
     );
   });
 
+  it("runs the extensionless bundled CLI through Node on Windows", () => {
+    expect(
+      resolveBundledCliLaunch({
+        args: ["status"],
+        cliPath: "C:\\cloudroom\\host-daemon\\dist\\room-cli",
+        nodePath: "C:\\node\\node.exe",
+        platform: "win32",
+      }),
+    ).toEqual({
+      command: "C:\\node\\node.exe",
+      args: ["C:\\cloudroom\\host-daemon\\dist\\room-cli", "status"],
+    });
+    expect(
+      resolveBundledCliLaunch({
+        args: ["status"],
+        cliPath: "C:\\tools\\room-cli.exe",
+        nodePath: "C:\\node\\node.exe",
+        platform: "win32",
+      }),
+    ).toEqual({ command: "C:\\tools\\room-cli.exe", args: ["status"] });
+    expect(
+      resolveBundledCliLaunch({
+        args: ["status"],
+        cliPath: "/opt/cloudroom/host-daemon/dist/room-cli",
+        nodePath: "/usr/bin/node",
+        platform: "linux",
+      }),
+    ).toEqual({ command: "/opt/cloudroom/host-daemon/dist/room-cli", args: ["status"] });
+  });
+
   it("limits npm package metadata to documented runtimes", () => {
     const metadata = readPackageMetadata();
 
@@ -2231,6 +2262,7 @@ describe("bb-app launcher", () => {
       "host-daemon/dist/bb-plugin-host-worker.mjs",
     );
     expect(metadata.files).toContain("host-daemon/dist/room-cli");
+    expect(metadata.files).toContain("host-daemon/dist/room-cli.cmd");
     expect(metadata.files).toContain("host-daemon/dist/room-cli-chunks");
     expect(metadata.os).toEqual(["darwin", "linux"]);
   });

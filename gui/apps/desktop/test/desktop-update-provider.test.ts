@@ -12,6 +12,9 @@ describe("desktop update feed url", () => {
     expect(createDesktopUpdateFeedUrl("linux")).toBe(
       "https://github.com/davidondrej/cloudroom-gui/releases/latest/download/desktop-version-linux.json",
     );
+    expect(createDesktopUpdateFeedUrl("windows")).toBe(
+      "https://github.com/davidondrej/cloudroom-gui/releases/latest/download/desktop-version-windows.json",
+    );
   });
 });
 
@@ -26,6 +29,16 @@ describe("desktop update support", () => {
         canReplaceAppImage: neverReplaceable,
         env: {},
         platform: "macos",
+      }),
+    ).toEqual({ autoUpdate: true, versionCheck: true });
+  });
+
+  it("installs updates on Windows like macOS", () => {
+    expect(
+      resolveDesktopUpdateSupport({
+        canReplaceAppImage: neverReplaceable,
+        env: {},
+        platform: "windows",
       }),
     ).toEqual({ autoUpdate: true, versionCheck: true });
   });

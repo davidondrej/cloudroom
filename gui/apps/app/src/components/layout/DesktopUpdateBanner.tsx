@@ -9,20 +9,32 @@ import {
 } from "@/hooks/useDesktopUpdateInfo";
 import { useSidebarNavigationThreadSelection } from "@/hooks/queries/sidebar-navigation-query";
 import { rawStringLocalStorage } from "@/lib/browser-storage";
+import { localHostStatusAtom } from "@/lib/system-config-atoms";
 import { openUrlInExternalBrowser } from "@/lib/url-open-routing";
+import { useAsyncAtomValue } from "@/lib/use-async-atom-value";
 
 const DISMISSED_VERSION_KEY = "cloudroom.update-banner.dismissed-version";
 const DISMISSED_AT_KEY = "cloudroom.update-banner.dismissed-at";
 const REMIND_AFTER_MS = 8 * 60 * 60 * 1000;
 const HEIGHT_VAR = "--bb-update-banner-height";
+const GIT_FOR_WINDOWS_URL = "https://git-scm.com/downloads/win";
 
-// Window-pinned controls (e.g. the home right-panel toggle) read this to sit below the banner.
+// Window-pinned controls (e.g. the home right-panel toggle) read this to sit below the banners.
+const shownBanners = new Set<HTMLDivElement>();
+function publishBannersHeight() {
+  const style = document.documentElement.style;
+  const height = [...shownBanners].reduce((sum, banner) => sum + banner.offsetHeight, 0);
+  if (shownBanners.size) style.setProperty(HEIGHT_VAR, `${height}px`);
+  else style.removeProperty(HEIGHT_VAR);
+}
+
 export function publishBannerHeight(element: HTMLDivElement | null) {
   if (!element) return;
-  const style = document.documentElement.style;
-  style.setProperty(HEIGHT_VAR, `${element.offsetHeight}px`);
+  shownBanners.add(element);
+  publishBannersHeight();
   return () => {
-    style.removeProperty(HEIGHT_VAR);
+    shownBanners.delete(element);
+    publishBannersHeight();
   };
 }
 
@@ -68,6 +80,28 @@ function useDismissal(version: string | null | undefined) {
   return { hidden, dismiss };
 }
 
+export function GitForWindowsBanner({ pinned = true }: { pinned?: boolean }) {
+  const status = useAsyncAtomValue(localHostStatusAtom, null);
+  if (!status?.gitMissing) return null;
+  return (
+    <div
+      ref={pinned ? publishBannerHeight : undefined}
+      role="alert"
+      data-testid="git-for-windows-banner"
+      className="flex shrink-0 items-center gap-3 border-b border-destructive/30 bg-destructive/10 px-4 py-2 text-sm"
+    >
+      <Icon name="AlertTriangle" className="size-4 shrink-0 text-destructive-text" />
+      <span className="min-w-0 flex-1 truncate">
+        <strong>Cloudroom needs Git for Windows.</strong> Install it, then
+        restart Cloudroom.
+      </span>
+      <Button size="sm" onClick={() => openUrlInExternalBrowser(GIT_FOR_WINDOWS_URL)}>
+        Download Git
+      </Button>
+    </div>
+  );
+}
+
 // App-wide notice: Restart once the in-app update is ready; the website link only when the app can't update itself.
 export function DesktopUpdateBanner() {
   const { desktopApi, desktopInfo } = useDesktopUpdateInfo();
@@ -98,7 +132,10 @@ export function DesktopUpdateBanner() {
   };
   const restart = () => {
     setRestarting(true);
-    void desktopApi?.installUpdate().catch(() => setRestarting(false));
+    void desktopApi
+      ?.installUpdate()
+      .catch(() => undefined)
+      .finally(() => setRestarting(false));
   };
 
   return (

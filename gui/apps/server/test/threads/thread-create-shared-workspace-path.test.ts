@@ -199,6 +199,60 @@ describe("thread creation on a path another project already uses", () => {
     });
   });
 
+  it("refuses device-path aliases of another project's worktree on a Windows machine", async () => {
+    await withTestHarness(async (harness) => {
+      const { host } = seedHostSession(harness.deps, {
+        id: "host-windows-alias",
+        platform: "win32",
+      });
+      const { project: owner } = seedProjectWithSource(harness.deps, {
+        hostId: host.id,
+        name: "Owning Project",
+        path: "C:\\src\\owner",
+      });
+      seedEnvironment(harness.deps, {
+        hostId: host.id,
+        projectId: owner.id,
+        path: "C:\\worktrees\\owned",
+        environmentProviderId: "git-worktree",
+        providerOwnsPath: true,
+      });
+      const { project } = seedProjectWithSource(harness.deps, {
+        hostId: host.id,
+        name: "Aliasing Project",
+        path: "C:\\src\\aliasing",
+      });
+
+      for (const path of [
+        "\\\\?\\C:\\worktrees\\owned",
+        "//?/C:/worktrees/owned",
+        "\\\\.\\C:\\worktrees\\owned",
+        "//./C:/worktrees/owned",
+        "//server/share/owned",
+      ]) {
+        await expect(
+          createThreadFromRequest(harness.deps, {
+            environment: {
+              type: "host",
+              hostId: host.id,
+              workspace: { type: "unmanaged", path },
+            },
+            input: textInput("Attach through a device path"),
+            origin: "app",
+            projectId: project.id,
+            providerId: "codex",
+            startedOnBehalfOf: null,
+          }),
+          path,
+        ).rejects.toThrow("Windows network and device paths are not supported");
+      }
+
+      expect(
+        listEnvironments(harness.deps.db, { projectId: project.id }),
+      ).toEqual([]);
+    });
+  });
+
   it("refuses a managed path whose owner has not stored it yet", async () => {
     await withTestHarness(async (harness) => {
       const { host, session } = seedHostSession(harness.deps, {

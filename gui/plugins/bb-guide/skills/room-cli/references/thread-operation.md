@@ -58,6 +58,11 @@
   and `Send at` columns. Several queued rows on one thread are normal. The SDK
   equivalents are `threads.queue.list` (cross-thread) and
   `threads.queuedMessages.list/send/update/delete` (one thread).
+- Stop pauses a Local thread's queue too, including a message that was waiting
+  on a pending interaction the Stop cancelled. `queue list` shows these rows as
+  `paused by Stop` (`pausedByStop: true` in JSON). Send one with `queue send` or
+  discard it with `queue delete`; do not re-send it with `tell`, because the
+  next turn resumes the queue and the paused copy would send too.
 - `room-cli thread queue send <thread-id> <message-id> --mode steer` re-attempts the
   row as a steer with the same send-now behavior: it bypasses the row's schedule
   and plugin waits, while core waits still apply. During provisioning it reports
@@ -90,9 +95,10 @@ hostId, providerId, projectId, parentThreadId, groupBy })`.
   thread's queue with `waitingOn.kind: "interaction"` and dispatches once the
   interaction settles; the CLI prints that it is queued and why. That outcome is
   not a failure, so do not resend. For a hard stop use `room-cli thread stop
-<thread-id>`. `--json` reports `delivery` as `sent` or `queued`. If the thread
-  fails while the message is queued (its provider exited), the message waits
-  until somebody retries the thread.
+<thread-id>`; Stop pauses the message, so send it with `queue send`. `--json`
+  reports `delivery` as `sent` or `queued`. If the thread fails while the
+  message is queued (its provider exited), the message waits until somebody
+  retries the thread.
 
 ## Inspecting Results
 

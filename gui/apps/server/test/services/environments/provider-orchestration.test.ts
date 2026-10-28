@@ -1,3 +1,4 @@
+import type { HostPlatform } from "@cloudroom/host-daemon-contract";
 import { appendThreadProvisioningEvent } from "../../../src/services/threads/thread-events.js";
 import { requestThreadStopForCurrentState } from "../../../src/services/threads/thread-lifecycle.js";
 import { prepareProviderEnvironment } from "../../../src/services/threads/thread-environment-placement.js";
@@ -74,8 +75,12 @@ import {
 function setup(
   harness: TestAppHarness,
   overrides: Partial<PluginEnvironmentProviderDeclaration> = {},
+  platform?: HostPlatform,
 ) {
-  const { host, session } = seedHostSession(harness.deps, { id: "host_test" });
+  const { host, session } = seedHostSession(harness.deps, {
+    id: "host_test",
+    platform,
+  });
   const { project, source } = seedProjectWithSource(harness.deps, {
     hostId: host.id,
     path: "/tmp/project",
@@ -867,6 +872,45 @@ describe("core environment orchestration", () => {
       expect(claimEnvironmentPath(harness.db, second, "/tmp/project")).toBe(
         true,
       );
+    }));
+
+  it("refuses Windows network and device paths from a provider on a Windows host", async () =>
+    withTestHarness(async (harness) => {
+      const spellings = [
+        "\\\\server\\share\\repo",
+        "//server/share/repo",
+        "\\\\?\\C:\\src\\repo",
+        "//?/C:/src/repo",
+        "\\\\.\\C:\\src\\repo",
+        "//./C:/src/repo",
+      ];
+      const claimed: boolean[] = [];
+      const fixture = setup(
+        harness,
+        {
+          create: async (context) => {
+            for (const path of spellings) {
+              claimed.push(
+                await context.experimental_claimPath(path).catch(() => false),
+              );
+            }
+            return {
+              status: "created",
+              path: "//?/C:/src/repo",
+              ownsPath: false,
+            };
+          },
+        },
+        "win32",
+      );
+      fixture.ask();
+      await fixture.settled();
+      expect(claimed).toEqual(spellings.map(() => false));
+      expect(fixture.row()).toMatchObject({
+        status: "error",
+        path: null,
+        claimPath: null,
+      });
     }));
 
   it("normalizes trailing slashes on claimed paths", async () =>

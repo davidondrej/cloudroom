@@ -30,6 +30,7 @@ import {
   type OpenPathInTargetArgs,
   WorkspaceOpenTargetError,
 } from "@cloudroom/local-open-targets";
+import { resolvePortableCommand } from "@cloudroom/process-utils";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { HTTPException } from "hono/http-exception";
@@ -256,6 +257,14 @@ export async function startLocalApiServer(
 
   const { get, post } = typedRoutes<HostDaemonLocalSchema>(app);
   const platform = resolveHostPlatform();
+  let gitFound = platform !== "win32";
+  const gitMissing = () => {
+    gitFound ||=
+      resolvePortableCommand("git", {
+        env: options.shellEnv?.() ?? process.env,
+      }) !== undefined;
+    return !gitFound;
+  };
 
   get("/status", (c) =>
     c.json({
@@ -265,6 +274,7 @@ export async function startLocalApiServer(
       serverUrl: options.serverUrl,
       supportsNativeFolderPicker: platform === "darwin",
       platform,
+      ...(gitMissing() ? { gitMissing: true } : {}),
     }),
   );
 

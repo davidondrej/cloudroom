@@ -140,7 +140,13 @@ export const pathsExistResponseSchema = z.object({
 });
 export type PathsExistResponse = z.infer<typeof pathsExistResponseSchema>;
 
-export const hostPlatformSchema = z.enum(["darwin", "linux", "wsl", "unknown"]);
+export const hostPlatformSchema = z.enum([
+  "darwin",
+  "linux",
+  "wsl",
+  "win32",
+  "unknown",
+]);
 export type HostPlatform = z.infer<typeof hostPlatformSchema>;
 
 export const statusResponseSchema = z.object({
@@ -150,6 +156,8 @@ export const statusResponseSchema = z.object({
   serverUrl: z.string(),
   supportsNativeFolderPicker: z.boolean(),
   platform: hostPlatformSchema,
+  /** Windows only: no Git for Windows on PATH. Cloudroom bundles Git only on macOS. */
+  gitMissing: z.boolean().optional(),
 });
 export type StatusResponse = z.infer<typeof statusResponseSchema>;
 

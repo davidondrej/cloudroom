@@ -363,6 +363,10 @@ export class ConnectTunnelClient {
             this.options.logger.warn({ label: identity.label }, message),
         },
         resolveOrigin: (target) => this.resolveOrigin(target),
+        onHeartbeatMissed: () => {
+          this.lastError = "machine tunnel heartbeat missed";
+          socketGone(1006, Buffer.alloc(0));
+        },
       });
       this.session = socketSession;
       socketSession.start();
@@ -399,7 +403,8 @@ export class ConnectTunnelClient {
       );
       this.publish();
     });
-    socket.on("close", (code: number, reason: Buffer) => {
+    // Runs on "close", or earlier on a missed heartbeat; the first call wins.
+    const socketGone = (code: number, reason: Buffer): void => {
       socketSession?.dispose();
       if (this.session === socketSession) {
         this.session = undefined;
@@ -422,7 +427,8 @@ export class ConnectTunnelClient {
       this.state = "reconnecting";
       this.scheduleReconnect(connectedAt === 0 ? 0 : Date.now() - connectedAt);
       this.publish();
-    });
+    };
+    socket.on("close", socketGone);
     this.publish();
   }
 

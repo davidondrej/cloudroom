@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { cp, mkdtemp, rm, symlink } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -88,7 +89,12 @@ describe("builtin host artifacts", () => {
 
     expect(result).toEqual({
       enabled: false,
-      supported: process.platform === "darwin",
+      // Linux is supported where systemd-inhibit exists.
+      supported:
+        process.platform === "darwin" ||
+        process.platform === "win32" ||
+        (process.platform === "linux" &&
+          existsSync("/usr/bin/systemd-inhibit")),
     });
   }, 20_000);
 

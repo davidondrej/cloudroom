@@ -41,6 +41,11 @@ import { getProjectSourceByHost, type EnvironmentRow } from "@cloudroom/db";
 import { z } from "zod";
 import { DEFAULT_ENVIRONMENT_PROVIDER_ID } from "../environments/environment-provider-ids.js";
 import {
+  getHostPathFlavorForHost,
+  invalidHostPathMessage,
+} from "../lib/host-path.js";
+import {
+  isAbsoluteHostPath,
   jsonValueSchema,
   PERSONAL_PROJECT_ID,
   isLocalPathProjectSource,
@@ -548,6 +553,13 @@ export async function resolveThreadEnvironmentPlacement(
           hostId: resolvedEnvironment.hostId,
         })
       ).dataDir;
+      const flavor = getHostPathFlavorForHost(deps, resolvedEnvironment.hostId);
+      if (
+        flavor === "windows" &&
+        !isAbsoluteHostPath(resolvedEnvironment.unmanagedPath, flavor)
+      ) {
+        throw new ApiError(400, "invalid_request", invalidHostPathMessage(flavor));
+      }
       const refusal = foreignProviderOwnedPathRefusal(deps.db, {
         dataDir,
         hostId: resolvedEnvironment.hostId,

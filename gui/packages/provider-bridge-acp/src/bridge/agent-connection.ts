@@ -1,11 +1,13 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { createInterface } from "node:readline";
-import { experimental_recordProviderChildIo } from "@cloudroom/provider-bridge-protocol/bridge-kit";
+import {
+  experimental_recordProviderChildIo,
+  isClosedPipeError,
+} from "@cloudroom/provider-bridge-protocol/bridge-kit";
 import type { z } from "zod";
 import { ACP_PROTOCOL_VERSION, acpInitializeResultSchema } from "../wire.js";
 
 const STDERR_TAIL_MAX_CHUNKS = 40;
-const CLOSED_STDIN_ERROR_CODES = new Set(["EPIPE", "ERR_STREAM_DESTROYED"]);
 
 export interface AcpAgentRequestResponder {
   result(value: unknown): void;
@@ -80,14 +82,6 @@ interface AgentErrorObject {
   code?: number;
   message?: string;
   data?: unknown;
-}
-
-function isClosedAgentStdinError(error: Error): boolean {
-  return (
-    "code" in error &&
-    typeof error.code === "string" &&
-    CLOSED_STDIN_ERROR_CODES.has(error.code)
-  );
 }
 
 export function formatAgentError(error: AgentErrorObject): string {
@@ -192,7 +186,7 @@ export function createAcpAgentConnection(
   }
 
   child.stdin?.on("error", (error) => {
-    if (!isClosedAgentStdinError(error)) {
+    if (!isClosedPipeError(error)) {
       throw error;
     }
     if (stopping) {

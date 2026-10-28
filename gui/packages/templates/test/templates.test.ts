@@ -53,6 +53,8 @@ describe("@cloudroom/templates", () => {
   it("renders standardAgentAppendInstructions without user-question guidance", () => {
     const rendered = renderTemplate("standardAgentAppendInstructions", {
       bugReports: "",
+      mac: "on",
+      windows: "",
     });
 
     expect(rendered).toContain("You are working inside Cloudroom");
@@ -62,6 +64,21 @@ describe("@cloudroom/templates", () => {
     expect(rendered).not.toContain(
       "Ask the user a blocking question only when",
     );
+  });
+
+  it("offers Mac access and Local computer use only off Windows", () => {
+    const render = (windows: boolean) =>
+      renderTemplate("standardAgentAppendInstructions", {
+        bugReports: "",
+        mac: windows ? "" : "on",
+        windows: windows ? "on" : "",
+      });
+
+    expect(render(false)).toContain("room-cli mac pull");
+    expect(render(false)).toContain("in Local threads Cloudroom asks the user");
+    expect(render(true)).not.toMatch(/room-cli mac (pull|push)|run it on their Mac/u);
+    expect(render(true)).not.toContain("in Local threads Cloudroom asks the user");
+    expect(render(true)).toContain("save lasting skills in the repo.");
   });
 
   it("renders child thread needs-attention messages with blocker summaries", () => {

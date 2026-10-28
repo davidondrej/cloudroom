@@ -347,6 +347,10 @@ export class ConnectTunnel {
         onActivity: (at) => {
           this.lastRemoteActivityAt = at;
         },
+        onHeartbeatMissed: () => {
+          this.lastError = `can't reach ${connectApexHost(credential.serverUrl)} — heartbeat missed`;
+          scheduleReconnect(this.lastError);
+        },
       });
       this.session.start();
       this.publish();

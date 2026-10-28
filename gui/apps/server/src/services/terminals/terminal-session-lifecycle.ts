@@ -361,6 +361,9 @@ function initialTitleForTerminal(
   if (payload.start?.mode === "command") {
     return titleFromCommand(payload.start.command);
   }
+  if (payload.start?.mode === "argv") {
+    return titleFromCommand(payload.start.argv.join(" "));
+  }
   return `Terminal ${existingSessionCount + 1}`;
 }
 
