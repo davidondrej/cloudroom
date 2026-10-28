@@ -1,0 +1,23 @@
+{
+  "name": "@cloudroom/demo-server",
+  "version": "0.0.1",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@cloudroom/domain": "workspace:*",
+    "@cloudroom/server-contract": "workspace:*",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@cloudroom/tsconfig": "workspace:*",
+    "@cloudflare/workers-types": "^4.20260610.0",
+    "@types/node": "^22.0.0",
+    "typescript": "npm:@typescript/typescript6@^6.0.2",
+    "wrangler": "^4.100.0"
+  }
+}

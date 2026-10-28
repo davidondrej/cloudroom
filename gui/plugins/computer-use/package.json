@@ -1,0 +1,45 @@
+{
+  "name": "bb-plugin-computer-use",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Built-in computer use: agents see and control desktop apps through Cua Driver, with per-app approvals.",
+  "engines": {
+    "bb": ">=0.41",
+    "bbPluginSdk": ">=0.4.48"
+  },
+  "bb": {
+    "name": "Computer Use",
+    "description": "Agents see and control desktop apps. Cloudroom asks before each new app.",
+    "branding": {
+      "icon": "Cursor"
+    },
+    "server": "./server.ts",
+    "host": "./host.ts",
+    "app": "./app.tsx",
+    "skills": [
+      "skills"
+    ]
+  },
+  "keywords": [
+    "bb-plugin"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --config vitest.config.ts",
+    "prepare:bundled": "bb-plugin-build prepare-bundled"
+  },
+  "dependencies": {
+    "@cloudroom/shared-ui": "workspace:*",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@cloudroom/plugin-build": "workspace:*",
+    "@get-bb/plugin-sdk": "workspace:*",
+    "@types/node": "^22.0.0",
+    "@types/react": "^19.0.0",
+    "react": "^19.0.0",
+    "typescript": "npm:@typescript/typescript6@^6.0.2",
+    "vitest": "^4.1.1"
+  }
+}

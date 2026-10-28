@@ -1,0 +1,157 @@
+{
+  "accounts": {
+    "category": "agents-and-providers",
+    "screenshots": []
+  },
+  "ask-user-question": {
+    "category": "thread-content",
+    "screenshots": []
+  },
+  "automations": {
+    "category": "tasks-and-workflows",
+    "screenshots": [
+      "https://getbb.app/marketplace/v2/screenshots/automations/automations-catalog.png",
+      "https://getbb.app/marketplace/v2/screenshots/automations/automations-sidebar.png"
+    ]
+  },
+  "connect": {
+    "category": "cloud-and-remote",
+    "screenshots": []
+  },
+  "custom-instructions": {
+    "category": "memory-and-context",
+    "screenshots": []
+  },
+  "plugin-api-tester": {
+    "category": "plugin-development",
+    "screenshots": []
+  },
+  "inline-vis": {
+    "category": "thread-content",
+    "screenshots": []
+  },
+  "monaco-editor": {
+    "category": "file-viewers-and-editors",
+    "screenshots": []
+  },
+  "pdf-preview": {
+    "category": "file-viewers-and-editors",
+    "screenshots": []
+  },
+  "provider-codex": {
+    "category": "agents-and-providers",
+    "screenshots": []
+  },
+  "provider-claude-code": {
+    "category": "agents-and-providers",
+    "screenshots": []
+  },
+  "provider-pi": {
+    "category": "agents-and-providers",
+    "screenshots": []
+  },
+  "provider-acp": {
+    "category": "agents-and-providers",
+    "screenshots": []
+  },
+  "keep-awake": {
+    "category": "utilities",
+    "screenshots": []
+  },
+  "computer-use": {
+    "category": "utilities",
+    "screenshots": []
+  },
+  "machine-ssh": {
+    "category": "cloud-and-remote",
+    "screenshots": []
+  },
+  "plugin-api-docs": {
+    "category": "plugin-development",
+    "screenshots": [
+      "https://getbb.app/marketplace/v2/screenshots/plugin-api-docs/plugin-guide-map.png",
+      "https://getbb.app/marketplace/v2/screenshots/plugin-api-docs/plugin-guide-surfaces.png",
+      "https://getbb.app/marketplace/v2/screenshots/plugin-api-docs/plugin-guide-reference.png"
+    ]
+  },
+  "provider-retry": {
+    "category": "agents-and-providers",
+    "screenshots": []
+  },
+  "provider-usage": {
+    "category": "agents-and-providers",
+    "screenshots": []
+  },
+  "organization": {
+    "category": "cloud-and-remote",
+    "screenshots": []
+  },
+  "time-in-cloudroom": {
+    "category": "utilities",
+    "screenshots": []
+  },
+  "secrets": {
+    "category": "security",
+    "screenshots": []
+  },
+  "scheduled-send": {
+    "category": "tasks-and-workflows",
+    "screenshots": []
+  },
+  "drafts": {
+    "category": "tasks-and-workflows",
+    "screenshots": []
+  },
+  "side-chat": {
+    "category": "thread-content",
+    "screenshots": []
+  },
+  "workflows": {
+    "category": "tasks-and-workflows",
+    "screenshots": []
+  },
+  "github": {
+    "category": "code-and-reviews",
+    "screenshots": []
+  },
+  "docs": {
+    "category": "file-viewers-and-editors",
+    "screenshots": []
+  },
+  "memory": {
+    "category": "memory-and-context",
+    "screenshots": []
+  },
+  "tasks": {
+    "category": "tasks-and-workflows",
+    "screenshots": []
+  },
+  "theme-preview": {
+    "category": "themes-and-appearance",
+    "screenshots": []
+  },
+  "push-notifications": {
+    "category": "notifications",
+    "screenshots": []
+  },
+  "environment-project-checkout": {
+    "category": "environments",
+    "screenshots": []
+  },
+  "environment-git-worktree": {
+    "category": "environments",
+    "screenshots": []
+  },
+  "environment-personal-workspace": {
+    "category": "environments",
+    "screenshots": []
+  },
+  "bb-guide": {
+    "category": "memory-and-context",
+    "screenshots": []
+  },
+  "environment-modal-sandbox": {
+    "category": "environments",
+    "screenshots": []
+  }
+}

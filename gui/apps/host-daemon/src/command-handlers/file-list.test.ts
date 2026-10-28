@@ -1,0 +1,428 @@
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { describe, expect, it } from "vitest";
+import {
+  finalizeListedFiles,
+  finalizeListedPaths,
+  listPathsRecursively,
+  normalizeListedPath,
+} from "./file-list.js";
+
+describe("finalizeListedFiles", () => {
+  it("preserves walk order for an empty query", () => {
+    const result = finalizeListedFiles({
+      filePaths: ["src/z.ts", "src/a.ts", "src/m.ts"],
+      limit: 2,
+    });
+
+    expect(result.files.map((file) => file.path)).toEqual([
+      "src/z.ts",
+      "src/a.ts",
+    ]);
+    expect(result.truncated).toBe(true);
+  });
+
+  it("sets the display name from the path basename", () => {
+    const result = finalizeListedFiles({
+      filePaths: ["src/components/PromptBox.tsx"],
+      limit: 5,
+    });
+
+    expect(result.files).toEqual([
+      {
+        path: "src/components/PromptBox.tsx",
+        name: "PromptBox.tsx",
+      },
+    ]);
+    expect(result.truncated).toBe(false);
+  });
+
+  it("does not report truncation below the limit", () => {
+    const result = finalizeListedFiles({
+      filePaths: ["a.ts", "b.ts"],
+      limit: 3,
+    });
+
+    expect(result.files.map((file) => file.path)).toEqual(["a.ts", "b.ts"]);
+    expect(result.truncated).toBe(false);
+  });
+
+  it("does not report truncation exactly at the limit", () => {
+    const result = finalizeListedFiles({
+      filePaths: ["a.ts", "b.ts", "c.ts"],
+      limit: 3,
+    });
+
+    expect(result.files.map((file) => file.path)).toEqual([
+      "a.ts",
+      "b.ts",
+      "c.ts",
+    ]);
+    expect(result.truncated).toBe(false);
+  });
+
+  it("reports truncation above the limit", () => {
+    const result = finalizeListedFiles({
+      filePaths: ["a.ts", "b.ts", "c.ts", "d.ts"],
+      limit: 3,
+    });
+
+    expect(result.files.map((file) => file.path)).toEqual([
+      "a.ts",
+      "b.ts",
+      "c.ts",
+    ]);
+    expect(result.truncated).toBe(true);
+  });
+
+  it("applies query matching before truncating", () => {
+    const result = finalizeListedFiles({
+      filePaths: [
+        "src/a.ts",
+        "src/b.ts",
+        "apps/app/src/components/promptbox/PromptBox.tsx",
+      ],
+      query: "PromptBox",
+      limit: 1,
+    });
+
+    expect(result.files.map((file) => file.path)).toEqual([
+      "apps/app/src/components/promptbox/PromptBox.tsx",
+    ]);
+    expect(result.truncated).toBe(false);
+  });
+
+  it("reports truncation after query matching when more matches remain", () => {
+    const result = finalizeListedFiles({
+      filePaths: ["src/prompt-a.ts", "src/prompt-b.ts", "src/prompt-c.ts"],
+      query: "prompt",
+      limit: 2,
+    });
+
+    expect(result.files).toHaveLength(2);
+    expect(result.truncated).toBe(true);
+  });
+
+  it("returns an empty untruncated list when a query has no matches", () => {
+    const result = finalizeListedFiles({
+      filePaths: ["src/a.ts", "src/b.ts"],
+      query: "prompt",
+      limit: 2,
+    });
+
+    expect(result.files).toEqual([]);
+    expect(result.truncated).toBe(false);
+  });
+});
+
+describe("finalizeListedPaths", () => {
+  it("excludes directories when directory results are disabled", () => {
+    const result = finalizeListedPaths({
+      paths: [
+        { kind: "directory", path: "src", name: "src" },
+        { kind: "file", path: "src/index.ts", name: "index.ts" },
+      ],
+      includeFiles: true,
+      includeDirectories: false,
+      limit: 10,
+    });
+
+    expect(result.paths).toEqual([
+      {
+        kind: "file",
+        path: "src/index.ts",
+        name: "index.ts",
+        score: 0,
+        positions: [],
+      },
+    ]);
+    expect(result.truncated).toBe(false);
+  });
+
+  it("includes directories with typed path metadata when requested", () => {
+    const result = finalizeListedPaths({
+      paths: [
+        { kind: "directory", path: "src", name: "src" },
+        { kind: "file", path: "src/index.ts", name: "index.ts" },
+      ],
+      includeFiles: true,
+      includeDirectories: true,
+      limit: 10,
+    });
+
+    expect(result.paths.map((pathEntry) => pathEntry.kind)).toEqual([
+      "directory",
+      "file",
+    ]);
+    expect(result.paths[0]).toEqual({
+      kind: "directory",
+      path: "src",
+      name: "src",
+      score: 0,
+      positions: [],
+    });
+  });
+
+  it("applies fuzzy ranking before truncating mixed path results", () => {
+    const result = finalizeListedPaths({
+      paths: [
+        {
+          kind: "file",
+          path: "src/components/Button.tsx",
+          name: "Button.tsx",
+        },
+        {
+          kind: "directory",
+          path: "apps/app/src/components/promptbox",
+          name: "promptbox",
+        },
+        {
+          kind: "file",
+          path: "apps/app/src/components/promptbox/PromptBox.tsx",
+          name: "PromptBox.tsx",
+        },
+      ],
+      query: "prompt",
+      includeFiles: true,
+      includeDirectories: true,
+      limit: 1,
+    });
+
+    expect(result.paths).toHaveLength(1);
+    expect(result.paths[0]?.path).toBe(
+      "apps/app/src/components/promptbox/PromptBox.tsx",
+    );
+    expect(result.paths[0]?.score).toBeGreaterThan(0);
+    expect(result.paths[0]?.positions.length).toBeGreaterThan(0);
+    expect(result.truncated).toBe(true);
+  });
+});
+
+describe("listPathsRecursively", () => {
+  it.skipIf(process.getuid?.() === 0)(
+    "skips unreadable subfolders but fails on an unreadable root",
+    async () => {
+      const root = await fs.mkdtemp(path.join(os.tmpdir(), "bb-file-list-"));
+      const locked = path.join(root, "locked");
+      try {
+        await fs.mkdir(locked);
+        await fs.writeFile(path.join(locked, "secret.txt"), "");
+        await fs.writeFile(path.join(root, "calc.py"), "");
+        await fs.chmod(locked, 0o000);
+
+        const listPaths = (dir: string) =>
+          listPathsRecursively({
+            dir,
+            root: dir,
+            includeFiles: true,
+            includeDirectories: true,
+            includeHidden: false,
+            ignoredPaths: new Set<string>(),
+            excludeNames: new Set<string>(),
+          });
+
+        const listed = await listPaths(root);
+        expect(listed.map((entry) => entry.path).sort()).toEqual([
+          "calc.py",
+          "locked",
+        ]);
+        await expect(listPaths(locked)).rejects.toMatchObject({
+          code: "EACCES",
+        });
+      } finally {
+        await fs.chmod(locked, 0o755).catch(() => undefined);
+        await fs.rm(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it("returns slash-separated relative paths for nested entries", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "bb-file-list-"));
+    try {
+      await fs.mkdir(path.join(root, "src", "components"), {
+        recursive: true,
+      });
+      await fs.writeFile(
+        path.join(root, "src", "components", "Button.tsx"),
+        "",
+      );
+
+      const result = await listPathsRecursively({
+        dir: root,
+        root,
+        includeFiles: true,
+        includeDirectories: true,
+        includeHidden: false,
+        ignoredPaths: new Set<string>(),
+        excludeNames: new Set<string>(),
+      });
+
+      expect(result).toEqual([
+        { kind: "directory", path: "src", name: "src" },
+        {
+          kind: "directory",
+          path: "src/components",
+          name: "components",
+        },
+        {
+          kind: "file",
+          path: "src/components/Button.tsx",
+          name: "Button.tsx",
+        },
+      ]);
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("lists dot-prefixed entries only when hidden entries are included", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "bb-file-list-"));
+    try {
+      await fs.mkdir(path.join(root, ".github", "workflows"), {
+        recursive: true,
+      });
+      await fs.writeFile(path.join(root, ".github", "workflows", "ci.yml"), "");
+      await fs.writeFile(path.join(root, ".env"), "");
+      await fs.writeFile(path.join(root, "README.md"), "");
+
+      const listPaths = (includeHidden: boolean) =>
+        listPathsRecursively({
+          dir: root,
+          root,
+          includeFiles: true,
+          includeDirectories: true,
+          includeHidden,
+          ignoredPaths: new Set<string>(),
+          excludeNames: new Set<string>(),
+        }).then((entries) => entries.map((entry) => entry.path).sort());
+
+      expect(await listPaths(true)).toEqual([
+        ".env",
+        ".github",
+        ".github/workflows",
+        ".github/workflows/ci.yml",
+        "README.md",
+      ]);
+      expect(await listPaths(false)).toEqual(["README.md"]);
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("skips excluded names at any depth and never lists .git", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "bb-file-list-"));
+    try {
+      await fs.mkdir(path.join(root, ".git"), { recursive: true });
+      await fs.writeFile(path.join(root, ".git", "HEAD"), "");
+      await fs.mkdir(path.join(root, "node_modules", "pkg"), {
+        recursive: true,
+      });
+      await fs.writeFile(
+        path.join(root, "node_modules", "pkg", "index.js"),
+        "",
+      );
+      await fs.mkdir(path.join(root, "apps", "web", ".turbo"), {
+        recursive: true,
+      });
+      await fs.writeFile(path.join(root, "apps", "web", ".turbo", "log"), "");
+      await fs.writeFile(path.join(root, "apps", "web", ".DS_Store"), "");
+      await fs.writeFile(path.join(root, "apps", "web", "index.ts"), "");
+
+      const listPaths = (excludeNames: string[]) =>
+        listPathsRecursively({
+          dir: root,
+          root,
+          includeFiles: true,
+          includeDirectories: true,
+          includeHidden: true,
+          ignoredPaths: new Set<string>(),
+          excludeNames: new Set(excludeNames),
+        }).then((entries) => entries.map((entry) => entry.path).sort());
+
+      expect(await listPaths(["node_modules", ".turbo", ".DS_Store"])).toEqual([
+        "apps",
+        "apps/web",
+        "apps/web/index.ts",
+      ]);
+      expect(await listPaths([])).toEqual([
+        "apps",
+        "apps/web",
+        "apps/web/.DS_Store",
+        "apps/web/.turbo",
+        "apps/web/.turbo/log",
+        "apps/web/index.ts",
+        "node_modules",
+        "node_modules/pkg",
+        "node_modules/pkg/index.js",
+      ]);
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("does not return symlinked files as regular path entries", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "bb-file-list-"));
+    try {
+      await fs.writeFile(path.join(root, "state.json"), "{}");
+      await fs.symlink(
+        path.join(root, "state.json"),
+        path.join(root, "logo.svg"),
+      );
+
+      const result = await listPathsRecursively({
+        dir: root,
+        root,
+        includeFiles: true,
+        includeDirectories: false,
+        includeHidden: false,
+        ignoredPaths: new Set<string>(),
+        excludeNames: new Set<string>(),
+      });
+
+      expect(result).toEqual([
+        { kind: "file", path: "state.json", name: "state.json" },
+      ]);
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("normalizes Windows separators before returning paths", () => {
+    expect(normalizeListedPath("src\\components\\Button.tsx")).toBe(
+      "src/components/Button.tsx",
+    );
+  });
+
+  it("does not overflow the call stack merging a large subdirectory", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "bb-file-list-"));
+    try {
+      const nested = path.join(root, "many");
+      await fs.mkdir(nested, { recursive: true });
+      const fileCount = 150_000;
+      const batchSize = 500;
+      for (let start = 0; start < fileCount; start += batchSize) {
+        const end = Math.min(start + batchSize, fileCount);
+        await Promise.all(
+          Array.from({ length: end - start }, (_, offset) =>
+            fs.writeFile(path.join(nested, `f${start + offset}.txt`), ""),
+          ),
+        );
+      }
+
+      const result = await listPathsRecursively({
+        dir: root,
+        root,
+        includeFiles: true,
+        includeDirectories: false,
+        includeHidden: false,
+        ignoredPaths: new Set<string>(),
+        excludeNames: new Set<string>(),
+      });
+
+      expect(result).toHaveLength(fileCount);
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  }, 60_000);
+});

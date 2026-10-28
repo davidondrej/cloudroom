@@ -1,0 +1,34 @@
+{
+  "name": "bb-plugin-time-in-cloudroom",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "See how much time you spend in Cloudroom, as a year of days like GitHub's contribution graph.",
+  "engines": {
+    "bb": ">=0.0"
+  },
+  "bb": {
+    "name": "Time in Cloudroom",
+    "description": "See how much time you spend in Cloudroom, as a year of days like GitHub's contribution graph.",
+    "branding": {
+      "icon": "Clock"
+    },
+    "server": "./server.ts",
+    "app": "./app.tsx"
+  },
+  "keywords": [
+    "bb-plugin"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "prepare:bundled": "bb-plugin-build prepare-bundled"
+  },
+  "devDependencies": {
+    "@cloudroom/plugin-build": "workspace:*",
+    "@get-bb/plugin-sdk": "workspace:*",
+    "@types/node": "^22.0.0",
+    "@types/react": "^19.0.0",
+    "react": "^19.0.0",
+    "typescript": "npm:@typescript/typescript6@^6.0.2"
+  }
+}

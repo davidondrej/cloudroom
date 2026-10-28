@@ -1,0 +1,1 @@
+ALTER TABLE `cloudroom_threads` ADD `account_id` text;
