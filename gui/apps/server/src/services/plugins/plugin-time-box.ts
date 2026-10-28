@@ -6,6 +6,8 @@ export function nextCronRunAt(cron: string, now: number): number {
     .getTime();
 }
 
+export class TimeoutError extends Error {}
+
 export async function raceTimeout<T>(
   promise: Promise<T>,
   timeoutMs: number,
@@ -16,7 +18,7 @@ export async function raceTimeout<T>(
     return await Promise.race([
       promise,
       new Promise<never>((_resolve, reject) => {
-        timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+        timer = setTimeout(() => reject(new TimeoutError(message)), timeoutMs);
         timer.unref?.();
       }),
     ]);

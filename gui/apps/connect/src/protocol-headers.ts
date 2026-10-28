@@ -6,3 +6,4 @@ export const GATE_AUTH_HEADER = "x-bb-gate-auth";
 export const GATE_MACHINE_ID_HEADER = "x-bb-gate-machine-id";
 export const SESSION_COOKIE = "__Host-cloudroom";
 export const PHONE_SESSION_HEADER = "x-cloudroom-phone-session";
+export const TUNNEL_VPS_HEADER = "x-cloudroom-tunnel-vps";

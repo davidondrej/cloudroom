@@ -952,9 +952,14 @@ class MacJobs:
             review(core, job, mac_level(self.enabled() or {}), not refused)
         sandboxed = not refused and not job.get('write') and mac_level(self.enabled() or {}) != 'full'
         login = pwd.getpwuid(os.getuid()).pw_shell or '/bin/zsh'
-        # Cloudroom's own tools (browser-harness) come first, as in Local threads, after the user's profile sets PATH.
+        # As in Local threads, Cloudroom's own tools (browser-harness) come first, then the PATH the app read from an
+        # interactive login shell, so tools set up in ~/.zshrc are found, all after the user's profile sets PATH. On macOS
+        # that lookup always uses /bin/zsh, so other shells keep their own PATH. The shell stays non-interactive: rc files
+        # could print into a `mac pull` archive or wait on a prompt (#338).
         data = Path(core.config['connectionFile']).parent
-        tools = shlex.quote(str(data / 'bin'))
+        tools, saved = shlex.quote(str(data / 'bin')), core.config.get('shellPath')
+        if saved and (sys.platform != 'darwin' or login.endswith('/zsh')):
+            tools += (' ' if login.endswith('/fish') else ':') + shlex.quote(saved)
         path = f'set -gx PATH {tools} $PATH; ' if login.endswith('/fish') else f'PATH={tools}:"$PATH"; '
         shell = [login, '-lc', path + job['command']]
         try:
@@ -990,11 +995,18 @@ class MacJobs:
             with self.lock:
                 self.running.pop(job['id'], None)
             # Blocked local connections fail as EPERM, or as curl's "couldn't connect".
-            if sandboxed and result['code'] and any(sign in output['stderr'].lower() for sign in (b'not permitted', b'eperm', b"couldn't connect")):
+            if sandboxed and result['code'] and any(sign in output['stderr'].lower() for sign in (b'not permitted', b'eperm', b"couldn't connect")) and b'deadlock avoided' not in output['stderr'].lower():
                 output['stderr'] += (b"\nCloudroom: Mac access is Read-only, so commands cannot change the Mac, reach its local servers or sockets, or read Cloudroom's files.\n"
                                      if mac_level(self.enabled() or {}) == 'read-only' else
                                      b"\nCloudroom: this ran read-only, without this Mac's local servers, sockets, or Cloudroom's files. To change the Mac or reach them, "
                                      b'rerun with `room-cli mac run --write ...`; the user approves it first.\n')
+            # Reading an iCloud file that "Optimize Mac Storage" moved off the Mac downloads it, which the sandbox blocks (#144).
+            if sandboxed and result['code'] and b'deadlock avoided' in output['stderr'].lower():
+                output['stderr'] += b"\nCloudroom: this iCloud file isn't downloaded to the Mac, and read-only commands cannot download it. " + (
+                    b"Mac access is Read-only, so ask the user to download it in Finder: Download Now, or Keep Downloaded so macOS doesn't move it off again.\n"
+                    if mac_level(self.enabled() or {}) == 'read-only' else
+                    b'Rerun your command with `room-cli mac run --write ...`: a read outside the sandbox downloads the file and waits for it. '
+                    b"Or download it first with `room-cli mac run --write 'brctl download PATH'`. The user approves either.\n")
             result['truncated'] = any(len(value) > MAC_LIMIT for value in output.values())
             result.update({name: bytes(value[:MAC_LIMIT]).hex() for name, value in output.items()})
         # The result survives disconnects: retry until the VM accepts it, forgets the job, or an hour passes.
@@ -1341,10 +1353,14 @@ def configure(folder, connection_file, activate, allow_private, mac_access=None,
     # A self-hosted website (the app's CLOUDROOM_WEBSITE_URL); launchd starts the helper without the app's environment.
     trusted = os.environ.get('CLOUDROOM_WEBSITE_URL', '').strip().rstrip('/')
     trusted = trusted if trusted.startswith('https://') else None
+    # The PATH the app read from an interactive login shell (/bin/zsh on macOS), without the app's own entries such as its
+    # bundled git. launchd starts the helper with a bare PATH, so Mac jobs add this one. A failed lookup (unset) keeps the
+    # last good one, so a slow launch neither loses it nor restarts the helper (#338).
+    shell_path = os.environ.get('CLOUDROOM_SHELL_PATH') or (old or {}).get('shellPath')
     if (activate and not restart and old and old['binding'] == binding and old.get('connectionFile') == str(connection_file)
             and old.get('allowPrivateSsh', False) == allow_private and old.get('macAccess') == mac_access
             and old.get('launcher') == launcher and old.get('binary') == binary and old.get('ownThreads', False) == own
-            and old.get('website') == trusted and target.is_file() and target.read_bytes() == source.read_bytes()):
+            and old.get('website') == trusted and old.get('shellPath') == shell_path and target.is_file() and target.read_bytes() == source.read_bytes()):
         if WINDOWS:
             if running(folder):
                 return {'enabled': True}
@@ -1359,7 +1375,7 @@ def configure(folder, connection_file, activate, allow_private, mac_access=None,
         temporary.write_bytes(source.read_bytes()); temporary.chmod(0o600); temporary.replace(target)
     config = {'device': old['device'] if old else uuid.uuid4().hex, 'binding': binding, 'connectionFile': str(connection_file),
               'allowPrivateSsh': allow_private, 'macAccess': mac_access, 'launcher': launcher, 'binary': binary, **({'ownThreads': True} if own else {}),
-              **({'website': trusted} if trusted else {})}
+              **({'shellPath': shell_path} if shell_path else {}), **({'website': trusted} if trusted else {})}
     save(folder / 'config.json', config)
     identity(folder)
     if activate:

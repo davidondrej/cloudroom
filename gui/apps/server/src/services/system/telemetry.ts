@@ -105,13 +105,21 @@ export type TelemetryEvent =
     }
   | { name: "upgrade_prompt"; properties: { where: (typeof UPGRADE_PROMPTS)[number]; action: "viewed" | "clicked" } }
   | { name: "activation_step"; properties: { step: ActivationStep; action: "clicked" | "done" | "hidden" } }
-  | { name: "starter_prompt"; properties: { starter: StarterPrompt } };
+  | { name: "starter_prompt"; properties: { starter: StarterPrompt } }
+  | { name: "popup"; properties: { popup: Popup; action: "viewed" | "closed" | PopupDetail } }
+  | { name: "cloud_choice"; properties: { action: (typeof CLOUD_CHOICE_ACTIONS)[number]; reason: (typeof CLOUD_CHOICE_REASONS)[number] | null } };
 
+export const CLOUD_CHOICE_ACTIONS = ["picked_local", "cloud_blocked", "forced_local"] as const;
+export const CLOUD_CHOICE_REASONS = ["signed_out", "agent_unsupported", "agent_not_in_cloud", "queue", "region"] as const;
 export const UPGRADE_PROMPTS = ["limit_notice", "queue", "queue_badge", "plan_card", "free_tip", "auto_delete", "try_cloud", "new_thread_cloud", "og_letter"] as const;
 export const ACTIVATION_STEPS = ["cloud", "subagents", "second", "phone", "loop"] as const;
 export type ActivationStep = (typeof ACTIVATION_STEPS)[number];
 export const STARTER_PROMPTS = ["security", "keys", "packages", "mac"] as const;
 export type StarterPrompt = (typeof STARTER_PROMPTS)[number];
+export const POPUPS = ["credits", "star", "install"] as const;
+export type Popup = (typeof POPUPS)[number];
+export const POPUP_DETAILS = ["starred", "opened", "already", "migrated"] as const;
+export type PopupDetail = (typeof POPUP_DETAILS)[number];
 const PLANS = ["free", "pro", "super", "ultra"];
 
 export type PluginTelemetryProperties = Record<string, TelemetryValue>;

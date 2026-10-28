@@ -79,7 +79,7 @@ export function ScansView() {
             type="button"
             size="lg"
             className="h-10 gap-2 px-5 font-semibold"
-            disabled={starting || !agents?.length}
+            disabled={starting || plan === undefined || !agents?.length}
             onClick={start}
           >
             <Icon name="Play" className="size-4" aria-hidden />

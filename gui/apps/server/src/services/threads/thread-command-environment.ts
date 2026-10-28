@@ -1,4 +1,7 @@
-import { assertEnvironmentPathAvailable } from "../environments/path-admission.js";
+import {
+  assertEnvironmentPathAvailable,
+  waitForEnvironmentPathAvailable,
+} from "../environments/path-admission.js";
 import type { EnvironmentRow } from "@cloudroom/db";
 import type { Thread } from "@cloudroom/domain";
 import type { DbConnection } from "@cloudroom/db";
@@ -14,6 +17,7 @@ type ThreadCommandEnvironmentSource = Pick<Thread, "environmentId">;
 
 interface RequireThreadCommandEnvironmentArgs {
   thread: ThreadCommandEnvironmentSource & Pick<Thread, "id">;
+  waitForPathClaim?: boolean;
 }
 
 interface RequireThreadHostCommandEnvironmentArgs {
@@ -62,10 +66,12 @@ export async function requireThreadCommandEnvironment(
     if (goneDetails && environment.environmentProviderId === null) {
       throwThreadEnvironmentUnavailable(goneDetails);
     }
-    assertEnvironmentPathAvailable(deps, {
-      ...environment,
-      threadId: args.thread.id,
-    });
+    const admission = { ...environment, threadId: args.thread.id };
+    if (args.waitForPathClaim === true) {
+      await waitForEnvironmentPathAvailable(deps, admission);
+      return requireEnvironment(deps.db, environment.id);
+    }
+    assertEnvironmentPathAvailable(deps, admission);
     return environment;
   }
 

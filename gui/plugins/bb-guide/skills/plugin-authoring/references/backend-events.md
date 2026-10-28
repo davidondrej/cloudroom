@@ -443,9 +443,11 @@ this attempt already reserved another path. Repeating the same claim succeeds.
 Core retains the durable claim through attachment or completed cancellation
 cleanup, including after failed creation. Check existing attached threads after
 claiming and before mutating a shared checkout. Core normalizes trailing slashes
-on claims. Reuse, directory switching and restored dispatch enforce claims;
-only the owning launch is exempt. `bb.sdk.environments.list({ hostId, path })`
-compares stored paths in the database and does not contact hosts.
+on claims. Reuse, directory switching and other thread commands enforce claims.
+Sends, retries and queued sends wait up to 15 seconds for a setup in progress,
+and fail at once on a claim whose setup failed. Only the owning launch is
+exempt. `bb.sdk.environments.list({ hostId, path })` compares stored paths in
+the database and does not contact hosts.
 Scoped discovery omits providers whose declared requirements are unmet without
 running Git inspection or plugin availability. Without a machine scope,
 discovery includes providers structurally eligible on any persistent machine.

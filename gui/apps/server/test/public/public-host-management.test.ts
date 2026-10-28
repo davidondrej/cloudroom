@@ -553,7 +553,59 @@ describe("public host management", () => {
         "revokeMachine",
         revokeRecord,
         { machineId: "machine-cloud-remove" },
+        { kind: "client" },
       );
+    });
+  }, 30_000);
+
+  it("keeps remote hosts away from the connect plugin's relay key, machines, and Mac setup", async () => {
+    await withTestHarness(async (harness) => {
+      const connect = await harness.pluginService.install("builtin:connect", {
+        kind: "root",
+      });
+      expect(connect.status).toBe("running");
+      const call = (
+        method: string,
+        input: unknown,
+        gate?: "session" | "machine",
+      ) =>
+        harness.app.request(`${API}/plugins/${connect.id}/rpc/${method}`, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            ...(gate === undefined ? {} : { "x-bb-gate-auth": gate }),
+          },
+          body: JSON.stringify(input),
+        });
+      const emptySetup = { command: [], stdin: "" };
+      for (const method of [
+        "relayCredential",
+        "revokeMachine",
+        "macs",
+        "runSetupJob",
+        "setupJobStatus",
+      ]) {
+        expect((await call(method, emptySetup, "machine")).status, method).toBe(
+          403,
+        );
+      }
+      expect(
+        await (await call("%72elayCredential", null, "machine")).json(),
+      ).toEqual({
+        ok: false,
+        error:
+          'plugin "connect" rpc method "relayCredential" can\'t be called through Cloudroom Connect',
+      });
+      expect((await call("relayCredential", null, "session")).status).toBe(403);
+      expect(
+        (await call("revokeMachine", { machineId: "m" }, "session")).status,
+      ).toBe(403);
+      expect((await call("runSetupJob", emptySetup, "session")).status).toBe(
+        400,
+      );
+      expect((await call("macs", null, "session")).status).toBe(200);
+      expect((await call("relayCredential", null)).status).toBe(200);
+      expect((await call("status", null, "machine")).status).toBe(200);
     });
   }, 30_000);
 });

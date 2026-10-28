@@ -310,6 +310,12 @@ export function createRpcHandlers(
     },
     async scans_start() {
       if (!sdk) throw new Error("Scans are unavailable.");
+      const plan = (await sdk.cloudroom.status().catch(() => null))?.plan;
+      if (!plan || plan === "free") {
+        throw new Error(
+          "Scans need a paid plan. Upgrade at https://www.cloudroom.dev/billing",
+        );
+      }
       const [claude, codex] = await Promise.all([
         sdk.cloudroom.claudeAuth().catch(() => null),
         sdk.cloudroom.codexAuth().catch(() => null),
@@ -329,6 +335,7 @@ export function createRpcHandlers(
           prompt: "Scan my workflow. Follow the workflow-scan skill.",
         }),
       );
+      await sdk.threads.pin({ threadId: thread.id }).catch(() => null);
       return { threadId: thread.id };
     },
     async account_plan() {

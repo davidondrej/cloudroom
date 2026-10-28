@@ -872,71 +872,77 @@ describe("internal event and tool-call routes", () => {
     });
   });
 
-  it("notifies a parent when a hidden delegated child root turn completes", async () => {
-    await withTestHarness(async (harness) => {
-      const { session } = seedHostSession(harness.deps);
-      const { project } = seedProjectWithSource(harness.deps, {
-        hostId: session.hostId,
-      });
-      const environment = seedEnvironment(harness.deps, {
-        hostId: session.hostId,
-        projectId: project.id,
-      });
-      const parentThread = seedThread(harness.deps, {
-        projectId: project.id,
-        environmentId: environment.id,
-        providerId: "codex",
-        status: "idle",
-      });
-      seedThreadRuntimeState(harness.deps, {
-        environmentId: environment.id,
-        inputText: "Coordinate hidden child work",
-        providerThreadId: "provider-hidden-parent",
-        threadId: parentThread.id,
-      });
-      const childThread = seedThread(harness.deps, {
-        projectId: project.id,
-        environmentId: environment.id,
-        parentThreadId: parentThread.id,
-        providerId: "codex",
-        status: "active",
-        visibility: "hidden",
-      });
+  for (const { parentVisibility, notices } of [
+    { parentVisibility: "visible", notices: 0 },
+    { parentVisibility: "hidden", notices: 1 },
+  ] as const) {
+    it(`sends ${notices} completion notice(s) to a ${parentVisibility} parent when a hidden delegated child root turn completes`, async () => {
+      await withTestHarness(async (harness) => {
+        const { session } = seedHostSession(harness.deps);
+        const { project } = seedProjectWithSource(harness.deps, {
+          hostId: session.hostId,
+        });
+        const environment = seedEnvironment(harness.deps, {
+          hostId: session.hostId,
+          projectId: project.id,
+        });
+        const parentThread = seedThread(harness.deps, {
+          projectId: project.id,
+          environmentId: environment.id,
+          providerId: "codex",
+          status: "idle",
+          visibility: parentVisibility,
+        });
+        seedThreadRuntimeState(harness.deps, {
+          environmentId: environment.id,
+          inputText: "Coordinate hidden child work",
+          providerThreadId: "provider-hidden-parent",
+          threadId: parentThread.id,
+        });
+        const childThread = seedThread(harness.deps, {
+          projectId: project.id,
+          environmentId: environment.id,
+          parentThreadId: parentThread.id,
+          providerId: "codex",
+          status: "active",
+          visibility: "hidden",
+        });
 
-      const response = await postEventBatch({
-        harness,
-        sessionId: session.id,
-        events: [
-          {
-            threadId: childThread.id,
-            event: {
-              type: "turn/started",
+        const response = await postEventBatch({
+          harness,
+          sessionId: session.id,
+          events: [
+            {
               threadId: childThread.id,
-              providerThreadId: "provider-hidden-child",
-              scope: turnScope("hidden-child-root-turn"),
+              event: {
+                type: "turn/started",
+                threadId: childThread.id,
+                providerThreadId: "provider-hidden-child",
+                scope: turnScope("hidden-child-root-turn"),
+              },
             },
-          },
-          {
-            threadId: childThread.id,
-            event: {
-              type: "turn/completed",
+            {
               threadId: childThread.id,
-              providerThreadId: "provider-hidden-child",
-              scope: turnScope("hidden-child-root-turn"),
-              status: "completed",
+              event: {
+                type: "turn/completed",
+                threadId: childThread.id,
+                providerThreadId: "provider-hidden-child",
+                scope: turnScope("hidden-child-root-turn"),
+                status: "completed",
+              },
             },
-          },
-        ],
-      });
+          ],
+        });
 
-      expect(response.status).toBe(200);
-      await flushDeferredChildThreadNotifications();
-      expect(getThread(harness.db, childThread.id)?.status).toBe("idle");
-      expect(
-        listQueuedThreadCommands(harness, "turn.submit", parentThread.id),
-      ).toHaveLength(1);
+        expect(response.status).toBe(200);
+        await flushDeferredChildThreadNotifications();
+        expect(getThread(harness.db, childThread.id)?.status).toBe("idle");
+        expect(
+          listQueuedThreadCommands(harness, "turn.submit", parentThread.id),
+        ).toHaveLength(notices);
+      });
     });
-  });
+  }
 
   it("does not notify a parent when a side-chat child root turn completes", async () => {
     await withTestHarness(async (harness) => {

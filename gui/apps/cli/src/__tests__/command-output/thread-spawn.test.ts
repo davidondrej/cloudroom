@@ -1144,6 +1144,23 @@ describe("room-cli thread spawn command output", () => {
     expect(post).not.toHaveBeenCalled();
   });
 
+  it("room-cli thread spawn requires --provider for Cloud instead of defaulting to Codex", async () => {
+    const post = vi.fn();
+    stubServerApi({ "v1.threads.$post": post });
+
+    await expect(
+      runCommand(
+        ["thread", "spawn", "--project", "proj-1", "--machine", "cloud", "--model", "claude-fable-5-1", "--prompt", "hello"],
+        register,
+      ),
+    ).rejects.toThrow("process.exit:1");
+
+    expect(console.error).toHaveBeenCalledWith(
+      "Error: Select a provider with --provider for Cloud, such as claude-code or codex.",
+    );
+    expect(post).not.toHaveBeenCalled();
+  });
+
   describe("--environment-provider", () => {
     const providers = [
       {

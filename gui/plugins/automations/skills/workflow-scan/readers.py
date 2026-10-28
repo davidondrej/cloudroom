@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-"""Workflow scan readers: one cloud thread per slice, never linked to the lead, so finished readers don't wake it.
+"""Workflow scan readers: one hidden cloud child of the lead per slice. Hidden children never wake their parent;
+the sidebar shows them as one progress grid under the lead.
 
-  readers.py spawn DIR PROVIDER MODEL  -> starts a reader per DIR/slices/slice-NN.txt, saves DIR/readers.json
+  readers.py spawn DIR PROVIDER MODEL  -> starts a reader per DIR/slices/slice-NN.txt, saving DIR/readers.json after each;
+                                          run it again after a failure to start only the missing readers
   readers.py wait DIR [--max 540]      -> blocks until every reader is done or --max seconds pass; restarts a failed
                                           or archived reader once; prints "done" (and writes DIR/lines.txt) or "running N/M"
   readers.py archive DIR               -> archives every reader thread
 """
-import glob, json, os, subprocess, sys, time
+import glob, hashlib, json, os, subprocess, sys, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PROJECT = os.environ.get("ROOM_PROJECT_ID") or "proj_personal"
@@ -21,29 +23,38 @@ def load(d):
 
 
 def save(d, state):
-    json.dump(state, open(os.path.join(d, "readers.json"), "w"), indent=1)
+    path = os.path.join(d, "readers.json")
+    with open(path + ".tmp", "w") as f:
+        json.dump(state, f, indent=1)
+    os.replace(path + ".tmp", path)
 
 
 def start(d, state, n):
     prompt = open(os.path.join(HERE, "reader.md")).read() + open(os.path.join(d, "slices", f"slice-{n}.txt")).read()
-    thread = room("thread", "spawn", "--project", PROJECT, "--machine", "cloud", "--provider", state["provider"],
+    parent = ["--parent-self"] if os.environ.get("ROOM_THREAD_ID") else []
+    tries = state["readers"].get(n, {}).get("tries", 0) + 1
+    request = f"scan-{hashlib.sha1(os.path.abspath(d).encode()).hexdigest()[:12]}-{n}-{tries}"
+    thread = room("thread", "spawn", *parent, "--request-id", request, "--visibility", "hidden", "--project", PROJECT, "--machine", "cloud", "--provider", state["provider"],
                   "--model", state["model"], "--reasoning-level", "low", "--title", f"Workflow scan · reader {n}", "--prompt", prompt)
-    state["readers"][n] = {"id": thread["id"], "tries": state["readers"].get(n, {}).get("tries", 0) + 1}
+    state["readers"][n] = {"id": thread["id"], "tries": tries}
     state["all"].append(thread["id"])
 
 
 def spawn(d, provider, model):
-    state = {"provider": provider, "model": model, "readers": {}, "all": []}
+    started = os.path.exists(os.path.join(d, "readers.json"))
+    state = load(d) if started else {"provider": provider, "model": model, "readers": {}, "all": []}
     for path in sorted(glob.glob(os.path.join(d, "slices", "slice-*.txt"))):
-        start(d, state, os.path.basename(path)[6:-4])
-    save(d, state)
+        n = os.path.basename(path)[6:-4]
+        if n not in state["readers"]:
+            start(d, state, n)
+            save(d, state)
     print(f"{len(state['readers'])} readers started")
 
 
 def wait(d, limit=540):
     state, end = load(d), time.time() + limit
     while True:
-        status = {t["id"]: t["status"] for t in room("thread", "list", "--project", PROJECT)}
+        status = {t["id"]: t["status"] for t in room("thread", "list", "--project", PROJECT, "--include-hidden")}
         for n, r in list(state["readers"].items()):
             now = status.get(r["id"], "error")
             if "output" in r or now not in ("idle", "error"):
@@ -52,6 +63,7 @@ def wait(d, limit=540):
             if " | " in output or r["tries"] >= 2:
                 r["output"] = output
             else:
+                subprocess.run(["room-cli", "thread", "archive", r["id"]], capture_output=True)
                 start(d, state, n)
         save(d, state)
         done = sum("output" in r for r in state["readers"].values())

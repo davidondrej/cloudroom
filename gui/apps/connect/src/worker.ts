@@ -1,5 +1,5 @@
 import { serveWithCache } from "./cache.js";
-import { codePage, messagePage, offlinePage } from "./pages.js";
+import { OFFLINE_HEADER, codePage, messagePage, offlinePage } from "./pages.js";
 import {
   GATE_AUTH_HEADER,
   GATE_MACHINE_ID_HEADER,
@@ -9,6 +9,7 @@ import {
   TUNNEL_MACHINE_HEADER,
   TUNNEL_SESSION_HEADER,
   TUNNEL_TARGET_HEADER,
+  TUNNEL_VPS_HEADER,
 } from "./protocol-headers.js";
 import {
   DESKTOP_SESSION_TTL_MS,
@@ -25,10 +26,12 @@ import {
   deleteMachine,
   formatCode,
   machineByCredential,
+  newHandle,
   normalizeCode,
   phoneUser,
   pickServer,
   registerServer,
+  registerVps,
   retireServer,
   revokeSessions,
   serverByCredential,
@@ -51,8 +54,15 @@ const TOKEN = /^[a-f0-9]{64}$/;
 const HANDLE = /^[a-z0-9]{1,63}$/;
 const PUBLIC_APP_FILES =
   /^\/(?:manifest[\w-]*\.webmanifest|apple-touch-icon[\w-]*\.png|icon-[\w-]+\.png|favicon[\w.-]*)$/;
-/** What a new remote host downloads before it has a credential. The Mac checks the one-time enrollment itself. */
-const INSTALL_PATHS = new Set(["/install.sh", "/install/version", "/install/bb-app.tgz"]);
+/** What a new remote host downloads before it has a credential, and its type. The Mac checks the one-time enrollment itself. */
+const INSTALL_FILES = new Map([
+  ["/install.sh", "text/x-shellscript; charset=utf-8"],
+  ["/install/version", "application/json"],
+  ["/install/bb-app.tgz", "application/gzip"],
+]);
+/** The only Mac headers a download keeps, so no Mac can answer it with a web page or a cookie for cloudroom.run. */
+const INSTALL_HEADERS = new Set(["cache-control", "content-encoding", "content-length", "etag", "vary", "x-bb-artifact-sha256"]);
+const MAC_ONLY_CONNECT_RPCS = new Set(["relayCredential", "revokeMachine", "runSetupJob", "setupJobStatus", "macs"]);
 const APP_HANDLE = "app";
 const LOGIN_TOKEN = /^[\w-]+\.[\w-]+\.[\w-]+$/;
 const MAC_HEADER = "x-cloudroom-mac";
@@ -176,6 +186,7 @@ export function requestForTunnelDo(
     MACHINE_CREDENTIAL_HEADER,
     GATE_AUTH_HEADER,
     GATE_MACHINE_ID_HEADER,
+    TUNNEL_VPS_HEADER,
   ]) {
     headers.delete(name);
   }
@@ -200,17 +211,31 @@ export function requestForTunnelDo(
   return new Request(request, { headers });
 }
 
-/** Remote hosts may run threads but not change which machines this Mac trusts. */
-function isHostManagementMutation(request: Request, pathname: string): boolean {
-  if (request.method === "POST" && (pathname === "/internal/hosts/enroll-key" || pathname === "/api/v1/hosts/join-codes")) {
-    return true;
+function decodedPath(pathname: string): string | null {
+  try {
+    return decodeURI(pathname);
+  } catch {
+    return null;
   }
-  if (request.method === "PATCH" && /^\/api\/v1\/hosts\/[^/]+\/permission-ceiling$/u.test(pathname)) return true;
-  return (request.method === "PATCH" || request.method === "DELETE") && /^\/api\/v1\/hosts\/[^/]+$/u.test(pathname);
 }
 
-export function safeReturnPath(value: string | null): string {
-  return value && /^\/(?![/\\])/.test(value) ? value : "/";
+/** Remote hosts may run threads but not change which machines this Mac trusts, read its relay key, or reach its other Macs. */
+function isHostManagement(method: string, pathname: string): boolean {
+  if (method === "POST" && (pathname === "/internal/hosts/enroll-key" || pathname === "/api/v1/hosts/join-codes")) {
+    return true;
+  }
+  const connectRpc = /^\/api\/v1\/plugins\/connect\/rpc\/([^/]+)$/u.exec(pathname)?.[1];
+  if (method === "POST" && connectRpc !== undefined && MAC_ONLY_CONNECT_RPCS.has(connectRpc)) return true;
+  if (method === "PATCH" && /^\/api\/v1\/hosts\/[^/]+\/permission-ceiling$/u.test(pathname)) return true;
+  return (method === "PATCH" || method === "DELETE") && /^\/api\/v1\/hosts\/[^/]+$/u.test(pathname);
+}
+
+export function returnUrl(origin: string, value: string | null): string {
+  try {
+    const href = new URL(value ?? "/", origin).href;
+    if (href.startsWith(`${origin}/`)) return href;
+  } catch {}
+  return `${origin}/`;
 }
 
 function sessionCookie(token: string): string {
@@ -284,6 +309,41 @@ async function removeMachine(request: Request, env: Env, owner: Server): Promise
   return json({ ok: true });
 }
 
+/** A user's VPS gets its address once the website confirms its token (ADR 0319). The website saves the handle first. */
+async function vpsRegister(request: Request, env: Env): Promise<Response> {
+  const token = bearer(request);
+  if (!/^[a-f0-9]{64}$/.test(token)) return json({ error: "Unknown VPS." }, 401);
+  const name = computerName((await readJson(request)).name);
+  const handle = newHandle();
+  const verified = await fetch(`${env.WEBSITE_URL}/api/connect/vps`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+    body: JSON.stringify({ handle }),
+    redirect: "manual",
+  }).catch(() => null);
+  if (verified?.status === 401) return json({ error: "Unknown VPS." }, 401);
+  const userId = verified?.ok
+    ? ((await verified.json().catch(() => null)) as { userId?: unknown } | null)?.userId
+    : undefined;
+  if (typeof userId !== "string" || !userId) {
+    return json({ error: "Cloudroom could not verify this VPS. Try again soon." }, 503);
+  }
+  const credential = await registerVps(env.DB, userId, handle, name);
+  return json({ handle, credential, baseDomain: env.BASE_DOMAIN });
+}
+
+/** A VPS's ports are its sandboxes' Cores and its service's API, which check their own tokens (ADR 0319). The relay
+ *  only carries the bytes: no phone session, cookie, or cache, since cached responses would skip those tokens. */
+function vpsForward(request: Request, env: Env, server: Server, target: string): Promise<Response> {
+  const headers = new Headers(request.headers);
+  for (const name of [TUNNEL_SESSION_HEADER, TUNNEL_MACHINE_HEADER, MACHINE_CREDENTIAL_HEADER, GATE_AUTH_HEADER, GATE_MACHINE_ID_HEADER, "cookie"]) {
+    headers.delete(name);
+  }
+  headers.set(TUNNEL_TARGET_HEADER, target);
+  headers.set(TUNNEL_VPS_HEADER, "1");
+  return env.TUNNEL_DO.get(env.TUNNEL_DO.idFromName(server.handle)).fetch(new Request(request, { headers }));
+}
+
 /** A remote host's daemon asks for its own address, which carries the ports it shares. */
 async function machineLabel(request: Request, env: Env): Promise<Response> {
   const machine = await machineByCredential(env.DB, request.headers.get(MACHINE_CREDENTIAL_HEADER) ?? "");
@@ -300,6 +360,9 @@ async function apex(request: Request, url: URL, env: Env): Promise<Response> {
   if (request.method === "POST" && url.pathname === "/api/connect/machine-label") {
     return machineLabel(request, env);
   }
+  if (request.method === "POST" && url.pathname === "/api/vps/register") {
+    return vpsRegister(request, env);
+  }
   if (request.method === "GET" && url.pathname === "/api/phone-session") {
     const token = bearer(request);
     const userId = TOKEN.test(token) ? await phoneUser(env.DB, token) : null;
@@ -307,7 +370,7 @@ async function apex(request: Request, url: URL, env: Env): Promise<Response> {
   }
   if (request.method === "POST" && url.pathname.startsWith("/api/")) {
     const server = await serverByCredential(env.DB, bearer(request));
-    if (!server || server.ownerServerId !== null) return json({ error: "Unknown Mac." }, 401);
+    if (!server || server.ownerServerId !== null || server.vps) return json({ error: "Unknown Mac." }, 401);
     if (url.pathname === "/api/computers") return computers(request, env, server);
     if (url.pathname === "/api/computers/open") return openComputer(request, env, server);
     if (url.pathname === "/api/machines") return addMachine(request, env, server);
@@ -371,6 +434,23 @@ function shareHop(mac: Server, port: string, returnPath: string, env: Env, machi
   return next.toString();
 }
 
+/** Icons and manifests come from the relay's own copy, so a Mac never answers a visitor who is not signed in. */
+function publicAppFile(request: Request, url: URL, env: Env): Promise<Response> | null {
+  return env.ASSETS && request.method === "GET" && PUBLIC_APP_FILES.test(url.pathname) ? env.ASSETS.fetch(request) : null;
+}
+
+/** A browser can only save an install download, never open it as a page on cloudroom.run. */
+function installFile(response: Response, contentType: string): Response {
+  const download = new Response(response.body, response);
+  for (const name of [...download.headers.keys()]) {
+    if (!INSTALL_HEADERS.has(name)) download.headers.delete(name);
+  }
+  download.headers.set("content-type", contentType);
+  download.headers.set("content-security-policy", "sandbox");
+  download.headers.set("x-content-type-options", "nosniff");
+  return download;
+}
+
 async function visitor(
   request: Request,
   url: URL,
@@ -397,19 +477,24 @@ async function visitor(
     return stub.fetch(new Request(forward, request));
   }
 
+  // `/__` paths are the tunnel's own controls (close, revoke), never a sandbox's.
+  if (server.vps) return target === null || url.pathname.startsWith("/__") ? text("Not found\n", 404) : vpsForward(request, env, server, target);
+
   if (server.ownerServerId === null && target === null) {
-    if (request.method === "GET" && INSTALL_PATHS.has(url.pathname)) {
-      return stub.fetch(requestForTunnelDo(request, null));
+    const installType = request.method === "GET" ? INSTALL_FILES.get(url.pathname) : undefined;
+    if (installType !== undefined) {
+      return installFile(await stub.fetch(requestForTunnelDo(request, null)), installType);
     }
     const presented = request.headers.get(MACHINE_CREDENTIAL_HEADER);
-    const machinePath =
-      url.pathname.startsWith("/internal") || url.pathname === "/api/v1" || url.pathname.startsWith("/api/v1/");
     if (presented !== null) {
       const machine = await machineByCredential(env.DB, presented);
+      const path = decodedPath(url.pathname);
+      const machinePath =
+        path !== null && (path.startsWith("/internal") || path === "/api/v1" || path.startsWith("/api/v1/"));
       if (!machine || machine.ownerServerId !== server.id || !machinePath) {
         return text("Machine not authorized\n", 403);
       }
-      if (isHostManagementMutation(request, url.pathname)) {
+      if (isHostManagement(request.method, path)) {
         return text("Remote hosts cannot manage machines\n", 403);
       }
       return stub.fetch(requestForTunnelDo(request, null, machine.id));
@@ -426,7 +511,7 @@ async function visitor(
         : messagePage("Link expired", "Open the link again.", 400);
     }
     const token = await createSession(env.DB, server.id, target, SESSION_TTL_MS, used.userId);
-    return redirect(safeReturnPath(url.searchParams.get("return")), sessionCookie(token));
+    return redirect(returnUrl(serverOrigin(server, target, env), url.searchParams.get("return")), sessionCookie(token));
   }
 
   const token = sessionToken(request);
@@ -462,9 +547,9 @@ async function visitor(
   }
   if (url.pathname.startsWith("/__")) return text("Not found\n", 404);
 
-  const publicFile =
-    target === null && request.method === "GET" && PUBLIC_APP_FILES.test(url.pathname);
-  if (!signedIn && !publicFile) {
+  if (!signedIn) {
+    const file = target === null ? publicAppFile(request, url, env) : null;
+    if (file) return file;
     if (request.method !== "GET" || !wantsHtml(request)) return text("Sign in required\n", 401);
     if (target === null) return codePage("/__pair");
     return redirect(shareHop(server, target, url.pathname + url.search, env));
@@ -486,7 +571,7 @@ async function shareRedirect(env: Env, mac: Server, url: URL): Promise<Response>
   const { code } = await createCode(env.DB, host.id, port, SHARE_CODE_TTL_MS, mac.userId);
   const next = new URL(`${serverOrigin(host, port, env)}/__pair`);
   next.searchParams.set("code", code);
-  next.searchParams.set("return", safeReturnPath(url.searchParams.get("return")));
+  next.searchParams.set("return", url.searchParams.get("return") ?? "/");
   return redirect(next.toString());
 }
 
@@ -614,9 +699,8 @@ async function phoneApp(request: Request, url: URL, env: Env, ctx: ExecutionCont
         `${NEXT_COOKIE}=${encodeURIComponent(url.pathname + url.search)}; Path=/; Secure; HttpOnly; SameSite=None; Max-Age=900`,
       );
     }
-    if (request.method === "GET" && PUBLIC_APP_FILES.test(url.pathname) && env.ASSETS) {
-      return env.ASSETS.fetch(request);
-    }
+    const file = publicAppFile(request, url, env);
+    if (file) return file;
     if (request.method !== "GET" || !wantsHtml(request)) return text("Sign in required\n", 401);
     return redirect(`${new URL(env.WEBSITE_URL).origin}/m`);
   }
@@ -646,13 +730,33 @@ async function phoneApp(request: Request, url: URL, env: Env, ctx: ExecutionCont
   return scoped;
 }
 
+/**
+ * Every cloudroom.run address is one browser site, and any account can serve pages on its own. So no other address may
+ * frame ours. A page opened from another address also never gets the offline mark: with it, the phone's service worker
+ * shows its saved copy instead, and copies saved before this rule have no frame rule.
+ */
+function guardFromOtherAddresses(request: Request, response: Response): Response {
+  if (response.webSocket) return response;
+  const guarded = new Response(response.body, response);
+  guarded.headers.append("content-security-policy", "frame-ancestors 'self'");
+  if (request.headers.get("sec-fetch-mode") === "navigate" && request.headers.get("sec-fetch-site") === "same-site") {
+    guarded.headers.delete(OFFLINE_HEADER);
+    guarded.headers.delete(TUNNEL_OFFLINE_HEADER);
+  }
+  return guarded;
+}
+
+/** Port shares serve the owner's own dev servers, which set their own rules. */
 function route(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
   const url = new URL(request.url);
   const host = url.hostname.toLowerCase();
-  if (host === env.BASE_DOMAIN) return apex(request, url, env);
-  if (host === `${APP_HANDLE}.${env.BASE_DOMAIN}`) return phoneApp(request, url, env, ctx);
+  const guard = (response: Response) => guardFromOtherAddresses(request, response);
+  if (host === env.BASE_DOMAIN) return apex(request, url, env).then(guard);
+  if (host === `${APP_HANDLE}.${env.BASE_DOMAIN}`) return phoneApp(request, url, env, ctx).then(guard);
   const parsed = parseVisitorHost(host, env.BASE_DOMAIN);
-  return parsed ? visitor(request, url, env, ctx, parsed) : Promise.resolve(text("Not found\n", 404));
+  if (!parsed) return Promise.resolve(text("Not found\n", 404));
+  const response = visitor(request, url, env, ctx, parsed);
+  return parsed.target === null ? response.then(guard) : response;
 }
 
 export default {

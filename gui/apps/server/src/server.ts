@@ -163,6 +163,7 @@ interface StaticResponseHeadersArgs {
 const STATIC_INDEX_CACHE_CONTROL = "no-cache";
 const STATIC_ASSET_CACHE_CONTROL = "public, max-age=31536000, immutable";
 const STATIC_PUBLIC_FILE_CACHE_CONTROL = "public, max-age=86400";
+const APP_SHELL_FRAME_POLICY = "frame-ancestors 'self'";
 const WEB_SOCKET_SHUTDOWN_CODE = 1001;
 const WEB_SOCKET_SHUTDOWN_FORCE_CLOSE_MS = 1_000;
 const WEB_SOCKET_SHUTDOWN_REASON = "server-shutdown";
@@ -203,6 +204,9 @@ function createStaticResponseHeaders(args: StaticResponseHeadersArgs): Headers {
   const headers = new Headers();
   headers.set("content-type", args.contentType);
   headers.set("cache-control", staticCacheControlForPath(args.urlPath));
+  if (args.contentType === "text/html") {
+    headers.set("content-security-policy", APP_SHELL_FRAME_POLICY);
+  }
   if (args.etag !== undefined) {
     headers.set("etag", args.etag);
   }
@@ -282,6 +286,7 @@ export function registerStaticAppRoutes(app: Hono, staticDir: string): void {
     ) {
       const headers = new Headers();
       headers.set("cache-control", staticCacheControlForPath(args.urlPath));
+      headers.set("content-security-policy", APP_SHELL_FRAME_POLICY);
       headers.set("etag", etag);
       return new Response(null, { status: 304, headers });
     }

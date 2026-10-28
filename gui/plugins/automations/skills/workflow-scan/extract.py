@@ -5,7 +5,7 @@ Reads local agent chats (Claude Code, Codex, Pi, OpenCode, Hermes), keeps only t
 (trimmed, secrets masked), flags automated chats, and writes small text files for cloud readers.
 
   extract.py index OUT [--days 90]                      -> OUT/index.jsonl, OUT/stats.json
-  extract.py slices OUT [--n 30] [--chars 900]          -> OUT/slices/slice-NN.txt (all kept chats)
+  extract.py slices OUT [--n 30] [--chars 900]          -> OUT/slices/slice-NN.txt (all kept chats, at most 100 KB each)
   extract.py groups OUT [--top 12] [--per 15] [--chars 2500] -> OUT/groups/group-NN.txt + OUT/groups/overview.txt
   extract.py sessions OUT --ids c-1a2b3c4d,x-... [--chars 6000]  -> prints those chats
   extract.py reduce OUT [--top 25]                       -> counts the tags in OUT/reports/*.txt, prints a compact digest
@@ -14,8 +14,13 @@ import glob, hashlib, json, os, re, sqlite3, sys, time
 from collections import Counter, defaultdict
 
 H = os.path.expanduser("~")
-SECRET = re.compile(r"(sk-[A-Za-z0-9_\-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|AKIA[0-9A-Z]{16}"
-                    r"|xox[abpr]-[A-Za-z0-9\-]{10,}|eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}|\b[A-Za-z0-9_\-]{40,}\b)")
+SECRET = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----"
+                    r"|(sk-[A-Za-z0-9_\-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|AKIA[0-9A-Z]{16}"
+                    r"|xox[abpr]-[A-Za-z0-9\-]{10,}|eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}|\b[A-Za-z0-9_\-]{40,}\b)"
+                    r"|AIza[0-9A-Za-z_\-]{35}|\b[rsp]k_(?:live|test)_[0-9A-Za-z]{16,}|\bBearer\s+[A-Za-z0-9._~+/\-]{12,}=*")
+URL_PASSWORD = re.compile(r"(\b[a-z][a-z0-9+.\-]*://[^\s:/@]+:)[^\s@/]+(@)", re.I)
+SECRET_VALUE = re.compile(r"(?i)(\b[\w.\-]*(?:passw(?:or)?d|pwd|secret|token|api[_\-]?key|access[_\-]?key|auth|credential)s?[\w.\-]*[\"']?\s*[:=]\s*[\"']?)"
+                          r"(?!\[masked\])[^\s\"'&,;]{6,}")
 NOISE = re.compile(r"\[MESSAGE FROM NON-USER SOURCE - NOT USER INPUT\]\s*Automatic Cloudroom note: this session has started or resumed\. Messages after this note come from the user\."
                    r"|<system-reminder>.*?</system-reminder>|<(local-)?command-[a-z-]+>.*?</(local-)?command-[a-z-]+>"
                    r"|<environment_context>.*?</environment_context>|<user_instructions>.*?</user_instructions>"
@@ -27,7 +32,8 @@ AUTO = ["Loop note", "room-cli loop report", "<webhook_events>", "[Local fork]",
 
 def clean(text):
     text = NOISE.sub(" ", text or "")
-    return SECRET.sub("[masked]", re.sub(r"\s+", " ", text)).strip()
+    text = SECRET.sub("[masked]", re.sub(r"\s+", " ", text))
+    return SECRET_VALUE.sub(r"\1[masked]", URL_PASSWORD.sub(r"\1[masked]\2", text)).strip()
 
 
 def cut(text, n):
@@ -265,17 +271,22 @@ def cmd_index(out, days=90):
     print(json.dumps(stats, indent=1))
 
 
-def cmd_slices(out, n=30, chars=900):
+def cmd_slices(out, n=30, chars=900, max_bytes=100_000):
     keep = sorted(kept(load(out)), key=lambda c: (c["repo"], c["ts"]))
     os.makedirs(os.path.join(out, "slices"), exist_ok=True)
-    size = -(-len(keep) // n)
-    for i in range(n):
-        part = keep[i * size:(i + 1) * size]
-        if not part:
-            break
-        with open(os.path.join(out, "slices", f"slice-{i + 1:02d}.txt"), "w") as f:
-            f.write("".join(chat_block(c, chars) for c in part))
-    print(f"{min(n, -(-len(keep) // size))} slices, {size} chats each, {sum(os.path.getsize(p) for p in glob.glob(os.path.join(out, 'slices', '*.txt')))} bytes")
+    blocks = [chat_block(c, chars).encode() for c in keep]
+    target = min(max_bytes, -(-sum(map(len, blocks)) // n))
+    slices, current = [], b""
+    for block in blocks:
+        if current and len(current) + len(block) > target:
+            slices.append(current)
+            current = b""
+        current += block
+    slices += [current] if current else []
+    for i, data in enumerate(slices, 1):
+        with open(os.path.join(out, "slices", f"slice-{i:02d}.txt"), "wb") as f:
+            f.write(data)
+    print(f"{len(slices)} slices, {len(keep)} chats, {sum(map(len, slices))} bytes, largest {max(map(len, slices), default=0)}")
 
 
 STOP = set("""the and for that this with you your are was have from not but all can will just what when how then they them there

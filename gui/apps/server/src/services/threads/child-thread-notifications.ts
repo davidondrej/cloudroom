@@ -3,7 +3,10 @@ import type {
   SystemMessageSubject,
   ThreadEventTurnStatus,
 } from "@cloudroom/domain";
-import { listActiveBackgroundTaskCountsByThreadIds } from "@cloudroom/db";
+import {
+  getThread,
+  listActiveBackgroundTaskCountsByThreadIds,
+} from "@cloudroom/db";
 import { renderTemplate } from "@cloudroom/templates";
 import type { LoggedPendingInteractionWorkSessionDeps } from "../../types.js";
 import {
@@ -465,11 +468,22 @@ function queueChildThreadTurnNotificationBatchItem(
   });
 }
 
+function isQuietChildThread(
+  deps: LoggedPendingInteractionWorkSessionDeps,
+  args: QueueChildThreadTurnNotificationArgs,
+): boolean {
+  return (
+    getThread(deps.db, args.childThread.id)?.visibility === "hidden" &&
+    getThread(deps.db, args.parentThreadId)?.visibility === "visible"
+  );
+}
+
 export async function queueChildThreadTurnNotificationBestEffort(
   deps: LoggedPendingInteractionWorkSessionDeps,
   args: QueueChildThreadTurnNotificationArgs,
 ): Promise<void> {
   try {
+    if (isQuietChildThread(deps, args)) return;
     queueChildThreadTurnNotificationBatchItem(deps, args);
   } catch (error) {
     deps.logger.error(

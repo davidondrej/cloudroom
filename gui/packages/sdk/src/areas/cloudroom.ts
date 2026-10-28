@@ -111,6 +111,14 @@ export type AutoDeleteLimit = { name: string; days: number; label: string };
 /** The setting, the days unused threads really stay, the plan limit that caps them, and the plan that allows longer. Null from older websites. */
 export type AutoDeleteSetting = { days: AutoDeleteDays; kept: number | null; plan: AutoDeleteLimit | null; upgrade: AutoDeleteLimit | null };
 
+/** The user's own VPS for Cloud threads (ADR 0319). `health` is live, null while the VPS is offline; `busy` names what
+ *  is over its limit, when new threads would go to Cloud instead. */
+export type CloudVps = {
+  connected: boolean; name: string | null; useForCloud: boolean; fallback: boolean; busy: string | null;
+  health: { cpu: number; memory: { used: number; total: number }; disk: { used: number; total: number }; running: number } | null;
+};
+export type CloudVpsAction = { action: "code" } | { action: "disconnect" } | { action: "settings"; useForCloud?: boolean; fallback?: boolean };
+
 /** An automation that runs in the cloud (ADR 0212): the website re-prompts a Cloud thread on a schedule. */
 export interface CloudAutomation {
   id: string;
@@ -260,6 +268,9 @@ export interface CloudroomArea {
   environment(signal?: AbortSignal): Promise<CloudEnvironment>;
   updateEnvironment(change: CloudEnvironmentChange): Promise<CloudEnvironment>;
   autoDelete(signal?: AbortSignal): Promise<AutoDeleteSetting>;
+  vps(signal?: AbortSignal): Promise<CloudVps>;
+  /** `code` returns the one-time install command; `settings` and `disconnect` return the new state. */
+  vpsAction(input: CloudVpsAction): Promise<CloudVps | { code: string; expiresAt: number; command: string } | { ok: true }>;
   /** Lists, creates, changes, runs, or deletes cloud automations. */
   automations(input: CloudAutomationRequest): Promise<CloudAutomationResponse>;
   /** Loop usage estimates (docs/scopes/loops.md): tokens a loop's runs used, and all of the provider's. */
@@ -394,6 +405,8 @@ export function createCloudroomArea({ transport }: CreateSdkAreaArgs): Cloudroom
     environment: (signal) => transport.readJson(request("/environment", undefined, signal)) as Promise<CloudEnvironment>,
     updateEnvironment: (change) => transport.readJson(request("/environment", change)) as Promise<CloudEnvironment>,
     autoDelete: (signal) => transport.readJson(request("/auto-delete", undefined, signal)) as Promise<AutoDeleteSetting>,
+    vps: (signal) => transport.readJson(request("/vps", undefined, signal)) as Promise<CloudVps>,
+    vpsAction: (input) => transport.readJson(request("/vps", input)) as Promise<CloudVps | { code: string; expiresAt: number; command: string } | { ok: true }>,
     automations: (input) => transport.readJson(request("/automations", input)) as Promise<CloudAutomationResponse>,
     tokenUsage: (input) => transport.readJson(request("/token-usage", input)) as Promise<TokenUsageResponse>,
     org: (input) => transport.readJson(request("/org", input)),

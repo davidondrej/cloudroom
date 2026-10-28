@@ -1,12 +1,13 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { gzipSync } from "node:zlib";
 import { build } from "esbuild";
 import { Miniflare, Response as MiniflareResponse } from "miniflare";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { decodeFrame, encodeFrame, type Frame } from "@cloudroom/tunnel-contract";
 import { OFFLINE_HEADER } from "./pages";
 import { GATE_AUTH_HEADER, GATE_MACHINE_ID_HEADER, MACHINE_CREDENTIAL_HEADER, PHONE_SESSION_HEADER, SESSION_COOKIE, TUNNEL_SESSION_HEADER, TUNNEL_TARGET_HEADER } from "./protocol-headers";
-import { parseVisitorHost, requestForTunnelDo, safeReturnPath } from "./worker";
+import { parseVisitorHost, requestForTunnelDo, returnUrl } from "./worker";
 import { sha256Hex } from "./store";
 
 type ClientWebSocket = NonNullable<
@@ -17,6 +18,14 @@ const BASE = "cloudroom.test";
 const INSTALL_ID = "0123456789abcdef0123456789abcdef";
 const DESKTOP_AUTH = `Basic ${Buffer.from("user:token").toString("base64")}`;
 const HTML = { accept: "text/html" };
+const DIGEST = "a".repeat(64);
+const MAC_HEADERS: [string, string][] = [
+  ["content-type", "text/html"],
+  ["cache-control", "no-store"],
+  ["set-cookie", `planted=1; Domain=${BASE}; Path=/`],
+  ["clear-site-data", '"cookies"'],
+  ["x-bb-artifact-sha256", DIGEST],
+];
 const seen: { path: string; headers: Record<string, string>; target?: string }[] = [];
 let website: (request: Request) => MiniflareResponse = () => MiniflareResponse.json({ userId: "user-1" });
 let mf: Miniflare;
@@ -62,33 +71,30 @@ function serveMac(ws: ClientWebSocket): void {
     if (typeof event.data === "string") return;
     const frame = decodeFrame(event.data as ArrayBuffer);
     const send = (out: Frame) => ws.send(new Uint8Array(encodeFrame(out)));
-    if (frame.type === "open-http" || frame.type === "open-ws") {
-      seen.push({
-        path: frame.path,
-        headers: Object.fromEntries(frame.headers.map(([k, v]) => [k.toLowerCase(), v])),
-        ...(frame.target ? { target: frame.target } : {}),
-      });
-    }
-    if (frame.type === "open-ws") {
-      send({ type: "ws-open-ack", streamId: frame.streamId, protocol: null });
-      return;
-    }
     if (frame.type === "ws-data") {
       send(frame);
       return;
     }
-    if (frame.type !== "open-http") return;
-    send({
-      type: "resp-head",
-      streamId: frame.streamId,
-      status: 200,
-      headers: [["content-type", "text/plain"], ["cache-control", "no-store"]],
-    });
-    send({
-      type: "body-chunk",
-      streamId: frame.streamId,
-      data: new TextEncoder().encode(`mac:${frame.target ?? "app"}:${frame.path}`),
-    });
+    if (frame.type !== "open-http" && frame.type !== "open-ws") return;
+    const asked = Object.fromEntries(frame.headers.map(([k, v]) => [k.toLowerCase(), v]));
+    seen.push({ path: frame.path, headers: asked, ...(frame.target ? { target: frame.target } : {}) });
+    if (frame.type === "open-ws") {
+      send({ type: "ws-open-ack", streamId: frame.streamId, protocol: null });
+      return;
+    }
+    if (asked["if-none-match"]) {
+      send({ type: "resp-head", streamId: frame.streamId, status: 304, headers: [["etag", asked["if-none-match"]]] });
+      send({ type: "body-end", streamId: frame.streamId });
+      return;
+    }
+    const gzip = (asked["accept-encoding"] ?? "").includes("gzip");
+    const headers: [string, string][] = frame.path.startsWith("/assets/")
+      ? [["cache-control", "public, max-age=31536000"]]
+      : [...MAC_HEADERS];
+    if (gzip) headers.push(["content-encoding", "gzip"]);
+    send({ type: "resp-head", streamId: frame.streamId, status: 200, headers });
+    const body = new TextEncoder().encode(`mac:${frame.target ?? "app"}:${frame.path}`);
+    send({ type: "body-chunk", streamId: frame.streamId, data: gzip ? gzipSync(body) : body });
     send({ type: "body-end", streamId: frame.streamId });
   });
 }
@@ -119,7 +125,7 @@ async function signInPhone(server = { handle, credential }): Promise<string> {
   expect(new URL(next).host).toBe(`${server.handle}.${BASE}`);
   const paired = await fetchRelay(next);
   expect(paired.status).toBe(302);
-  expect(paired.headers.get("location")).toBe("/");
+  expect(paired.headers.get("location")).toBe(`https://${server.handle}.${BASE}/`);
   return cookieFrom(paired);
 }
 
@@ -133,10 +139,11 @@ beforeAll(async () => {
     durableObjects: { TUNNEL_DO: "TunnelDO" },
     d1Databases: { DB: "relay-test" },
     bindings: { BASE_DOMAIN: BASE, WEBSITE_URL: "https://website.test" },
+    serviceBindings: { ASSETS: (request: { url: string }) => new MiniflareResponse(`asset:${new URL(request.url).pathname}`) },
     outboundService: (request: unknown) => website(request as Request),
   });
   const db = await mf.getD1Database("DB");
-  const migration = ["0001_init.sql", "0002_server_name.sql", "0003_machines.sql", "0004_account_sessions.sql"]
+  const migration = ["0001_init.sql", "0002_server_name.sql", "0003_machines.sql", "0004_account_sessions.sql", "0005_vps.sql"]
     .map((file) => readFileSync(fileURLToPath(new URL(`../migrations/${file}`, import.meta.url)), "utf8"))
     .join(";\n");
   for (const statement of migration.replace(/--.*$/gm, "").split(";")) {
@@ -191,6 +198,54 @@ describe("Cloudroom Connect relay", () => {
     expect(api.status).toBe(401);
   });
 
+  it("never lets a Mac show a page or set a cookie for a visitor who is not signed in", async () => {
+    const mac = `https://${handle}.${BASE}`;
+    for (const url of [`${mac}/favicon.html`, `${mac}/manifest.webmanifest`, `https://app.${BASE}/icon-192.png`]) {
+      expect(await (await fetchRelay(url)).text()).toBe(`asset:${new URL(url).pathname}`);
+    }
+    const downloads = {
+      "/install.sh": "text/x-shellscript; charset=utf-8",
+      "/install/version": "application/json",
+      "/install/bb-app.tgz": "application/gzip",
+    };
+    for (const [path, type] of Object.entries(downloads)) {
+      const download = await fetchRelay(`${mac}${path}`, { headers: { "accept-encoding": "gzip" } });
+      expect(await download.text()).toBe(`mac:app:${path}`);
+      expect(Object.fromEntries(download.headers)).toMatchObject({
+        "content-type": type,
+        "content-security-policy": "sandbox, frame-ancestors 'self'",
+        "x-content-type-options": "nosniff",
+        "x-bb-artifact-sha256": DIGEST,
+      });
+      expect(download.headers.get("set-cookie")).toBeNull();
+      expect(download.headers.get("clear-site-data")).toBeNull();
+    }
+    const unchanged = await fetchRelay(`${mac}/install/bb-app.tgz`, { headers: { "if-none-match": '"sha256-1"' } });
+    expect(unchanged.status).toBe(304);
+    expect(unchanged.headers.get("etag")).toBe('"sha256-1"');
+  });
+
+  it("lets no other cloudroom.run address frame the app, a Mac, or a relay page", async () => {
+    const appCookie = cookieFrom(await fetchRelay(`https://app.${BASE}/__signin`, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded", origin: "https://website.test" },
+      body: new URLSearchParams({ token: "a.b.c" }).toString(),
+    }));
+    const policies: (string | null)[] = [];
+    for (const [url, cookie] of [[`https://${handle}.${BASE}/assets/mac.js`, await signInPhone()], [`https://app.${BASE}/assets/app.js`, appCookie]]) {
+      for (const cache of ["miss", "hit"]) {
+        const asset = await fetchRelay(url, { headers: { cookie, "accept-encoding": "gzip" } });
+        expect(asset.headers.get("x-bb-cache")).toBe(cache);
+        expect(await asset.text()).toBe(`mac:app:${new URL(url).pathname}`);
+        policies.push(asset.headers.get("content-security-policy"));
+      }
+    }
+    for (const page of [await fetchRelay(`https://app.${BASE}/`, { headers: HTML }), await fetchRelay(`https://${BASE}/pair`)]) {
+      policies.push(page.headers.get("content-security-policy"));
+    }
+    expect(policies).toEqual(Array(6).fill("frame-ancestors 'self'"));
+  });
+
   it("signs a phone in with one code and relays it to the Mac", async () => {
     const cookie = await signInPhone();
     const response = await fetchRelay(`https://${handle}.${BASE}/api/v1/threads`, {
@@ -227,13 +282,43 @@ describe("Cloudroom Connect relay", () => {
     const ticket = await fetchRelay(legacy, { headers: { cookie } });
     expect(ticket.status).toBe(302);
     const pair = await fetchRelay(ticket.headers.get("location")!);
-    expect(pair.headers.get("location")).toBe("/page?x=1");
+    expect(pair.headers.get("location")).toBe(`${share}/page?x=1`);
     const shareCookie = cookieFrom(pair);
     const page = await fetchRelay(`${share}/page?x=1`, { headers: { cookie: shareCookie } });
     expect(await page.text()).toBe("mac:3000:/page?x=1");
+    expect(page.headers.get("content-security-policy")).toBeNull();
     expect(seen.at(-1)!.headers[TUNNEL_TARGET_HEADER]).toBeUndefined();
     const app = await fetchRelay(`https://${handle}.${BASE}/`, { headers: { cookie: shareCookie } });
     expect(app.status).toBe(401);
+  });
+
+  it("sends a phone back only to the shared port's own host after the code", async () => {
+    const app = `https://app.${BASE}`;
+    const cookie = cookieFrom(await fetchRelay(`${app}/__signin`, {
+      method: "POST",
+      headers: { origin: "https://website.test", "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ token: "a.b.c" }).toString(),
+    }));
+    const share = `https://${handle}--3000.${BASE}`;
+    const ticket = async (query = "") =>
+      (await fetchRelay(`${app}/__share?mac=${handle}&port=3000${query}`, { headers: { cookie } })).headers.get("location")!;
+    const reported = await fetchRelay(await ticket("&return=%2F%09%2Fevil.example"));
+    expect(reported.status).toBe(302);
+    expect(reported.headers.get("location")).toBe(`${share}/`);
+    for (const [back, lands] of [
+      ["/\n/evil.example", `${share}/`],
+      [`blob:${share}/id`, `${share}/`],
+      ["/a/..//evil.example", `${share}//evil.example`],
+      ["/page\u0000\u007f?x", `${share}/page%00%7F?x`],
+    ]) {
+      const link = new URL(await ticket());
+      link.searchParams.set("return", back);
+      const pair = await fetchRelay(link.toString());
+      expect(pair.status).toBe(302);
+      expect(pair.headers.get("location")).toBe(lands);
+      const page = await fetchRelay(lands, { headers: { cookie: cookieFrom(pair) } });
+      expect(page.status).toBe(200);
+    }
   });
 
   it("signs every phone out when the Mac asks", async () => {
@@ -442,6 +527,48 @@ describe("Cloudroom Connect relay", () => {
     machineTunnel.webSocket!.close();
   });
 
+  it("keeps a remote host away from the Mac's relay key and its other Macs, however the path is written", async () => {
+    const added = await fetchRelay(`https://${BASE}/api/machines`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${credential}`, "content-type": "application/json" },
+      body: JSON.stringify({ name: "Build box" }),
+    });
+    const machine = (await added.json()) as { credential: string };
+    const call = (path: string, headers: Record<string, string> = {}) =>
+      fetchRelay(`https://${handle}.${BASE}${path}`, {
+        method: "POST",
+        headers: { [MACHINE_CREDENTIAL_HEADER]: machine.credential, "content-type": "application/json", ...headers },
+        body: "null",
+      });
+    for (const path of [
+      "/api/v1/plugins/connect/rpc/relayCredential",
+      "/api/v1/plugins/connect/rpc/%72elayCredential",
+      "/api/v1/plugins/%63onnect/rpc/revokeMachine",
+      "/api/v1/plugins/connect/rpc/runSetupJob",
+      "/api/v1/plugins/connect/rpc/setupJobStatus",
+      "/api/v1/plugins/connect/rpc/macs",
+      "/api/v1/host%73/join-codes",
+      "/api/v1/plugins/connect/rpc/%E0%A4%A",
+    ]) {
+      expect((await call(path)).status, path).toBe(403);
+    }
+    const forged = await call("/api/v1/plugins/connect/rpc/status", { [GATE_AUTH_HEADER]: "session" });
+    expect(await forged.text()).toBe("mac:app:/api/v1/plugins/connect/rpc/status");
+    expect(seen.at(-1)!.headers[GATE_AUTH_HEADER]).toBe("machine");
+
+    const cookie = await signInPhone();
+    for (const method of ["macs", "runSetupJob", "setupJobStatus"]) {
+      const path = `/api/v1/plugins/connect/rpc/${method}`;
+      const phone = await fetchRelay(`https://${handle}.${BASE}${path}`, {
+        method: "POST",
+        headers: { cookie, "content-type": "application/json" },
+        body: "null",
+      });
+      expect(await phone.text()).toBe(`mac:app:${path}`);
+      expect(seen.at(-1)!.headers[GATE_AUTH_HEADER]).toBe("session");
+    }
+  });
+
   it("signs phones in with the account only from the website, keeps them to its Macs, and signs them all out", async () => {
     const app = `https://app.${BASE}`;
     const signIn = (origin?: string) => fetchRelay(`${app}/__signin`, {
@@ -510,6 +637,12 @@ describe("Cloudroom Connect relay", () => {
     expect(page.status).toBe(503);
     expect(page.headers.get(OFFLINE_HEADER)).toBe("1");
     expect(await page.text()).toContain("Your Mac is offline");
+    const fromOtherAddress = await fetchRelay(`https://${handle}.${BASE}/`, {
+      headers: { ...HTML, cookie, "mf-sec-fetch-mode": "navigate", "sec-fetch-site": "same-site" },
+    });
+    expect(fromOtherAddress.status).toBe(503);
+    expect(fromOtherAddress.headers.get(OFFLINE_HEADER)).toBeNull();
+    expect(fromOtherAddress.headers.get("content-security-policy")).toBe("frame-ancestors 'self'");
   });
 });
 
@@ -522,11 +655,31 @@ describe("host and path parsing", () => {
     expect(parseVisitorHost(`evil.com`, BASE)).toBeNull();
   });
 
-  it("only returns to paths on the same host", () => {
-    expect(safeReturnPath("/thread/1?x=2")).toBe("/thread/1?x=2");
-    expect(safeReturnPath("//evil.com")).toBe("/");
-    expect(safeReturnPath("/\\evil.com")).toBe("/");
-    expect(safeReturnPath("https://evil.com")).toBe("/");
+  it("only returns to pages on the same host, read the way a browser reads them", () => {
+    const origin = `https://abc--3000.${BASE}`;
+    expect(returnUrl(origin, "/thread/1?x=2")).toBe(`${origin}/thread/1?x=2`);
+    expect(returnUrl(origin, null)).toBe(`${origin}/`);
+    for (const offHost of [
+      "//evil.com",
+      "/\\evil.com",
+      "https://evil.com",
+      "/\t/evil.com",
+      "/\t\\evil.com",
+      "/\n/evil.com",
+      "/\r/evil.com",
+      "javascript:alert(1)",
+      `http://abc--3000.${BASE}/x`,
+      `blob:${origin}/id`,
+      `https://user:pass@abc--3000.${BASE}/x`,
+      `${origin}@evil.com/`,
+      `${origin}.evil.com/`,
+      "https://[",
+    ]) {
+      expect(returnUrl(origin, offHost)).toBe(`${origin}/`);
+    }
+    expect(returnUrl(origin, "/a/..//evil.com")).toBe(`${origin}//evil.com`);
+    expect(returnUrl(origin, "/x?")).toBe(`${origin}/x?`);
+    expect(returnUrl(origin, "/a\u0000b\u007f/é")).toBe(`${origin}/a%00b%7F/%C3%A9`);
     expect(SESSION_COOKIE.startsWith("__Host-")).toBe(true);
   });
 });

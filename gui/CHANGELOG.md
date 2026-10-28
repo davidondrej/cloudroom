@@ -2,6 +2,20 @@
 
 Also on [cloudroom.dev/changelog](https://www.cloudroom.dev/changelog).
 
+## 128
+
+Start threads on your other machines (2026-10-28)
+
+### Changes
+
+- The new-thread picker now lists your other machines, so you can start a thread on any of them.
+- A project that only lives on another machine now starts there by default.
+- Workflow scans stay pinned while they run and show their progress in the sidebar.
+- Pop-ups like the GitHub star prompt show at most once a day and remember your answer on every device.
+- Mac access finds tools set up in your shell, like Homebrew and nvm.
+- Agents can now read iCloud files that aren't downloaded yet.
+- Security fixes.
+
 ## 127
 
 Cloudroom comes to Windows (2026-10-27)

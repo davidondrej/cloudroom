@@ -11,6 +11,8 @@ import { AppLayout } from "./components/layout/AppLayout";
 import { CloudroomAccountPanels } from "./components/CloudroomAccountPanels";
 import { Onboarding } from "./components/Onboarding";
 import { InviteOffer } from "./components/InviteOffer";
+import { StarPrompt } from "./components/StarPrompt";
+import { CreditsExplainer } from "./components/CloudQueue";
 import { ActivationChecklist } from "./components/ActivationChecklist";
 import { SharedThreadOpener } from "./components/SharedThreadOpener";
 import { InstallAppSheet } from "./components/InstallAppSheet";
@@ -451,6 +453,8 @@ export function App() {
               <ActivationChecklist />
               <Onboarding />
               <InviteOffer />
+              <CreditsExplainer />
+              <StarPrompt />
               <SharedThreadOpener />
               <InstallAppSheet />
               <CloudroomAccountPanels />

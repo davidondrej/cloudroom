@@ -629,6 +629,7 @@ export function createPluginService(deps: PluginServiceDeps): PluginService {
     ),
     machineEnrollments: deps.machineEnrollments ?? null,
     settingsChanged: notifyPluginsChanged,
+    loadRetried: () => void syncCliSkill().then(notifyPluginsChanged),
   });
 
   let managedValidateInstallDir!: (

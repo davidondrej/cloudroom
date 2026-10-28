@@ -86,6 +86,7 @@ export interface EnvironmentPickerUIProps {
     unavailableReason: string | null;
     note?: string;
     onSelect: () => void;
+    vps?: { selected: boolean; busy: boolean; description: string; onSelect: () => void };
   };
   onRequestMachineSetup?: (host: Host) => void;
   providers?: readonly SystemEnvironmentProvider[];
@@ -108,6 +109,14 @@ export const PROVIDER_INPUTS_CONTROL_MISSING_REASON =
   "Needs its plugin's control";
 
 const NO_INPUTS_CONTROL_PROVIDER_IDS: ReadonlySet<string> = new Set();
+
+function machineOptionLabel(
+  providerId: string,
+  projectless: boolean,
+): string | null {
+  if (providerId === "git-worktree") return "Worktree";
+  return providerId === "project-checkout" || projectless ? "Primary" : null;
+}
 
 function localPresentation(providerId: string, projectless: boolean) {
   return (
@@ -287,6 +296,26 @@ export function EnvironmentPickerUI({
         usePlaceIcon: true,
       };
     }
+    if (cloud?.vps?.selected) {
+      return { modeLabel: "VPS", compactModeLabel: "VPS", icon: "Server", usePlaceIcon: true };
+    }
+    if (
+      cloud &&
+      selectedProvider &&
+      selectedMachineName !== null &&
+      selectedProviderHostId !== availableMachines?.localDaemonHostId
+    ) {
+      const label =
+        selectedProvider.id === "git-worktree"
+          ? `${selectedMachineName} · Worktree`
+          : selectedMachineName;
+      return {
+        modeLabel: label,
+        compactModeLabel: selectedMachineName,
+        icon: "Laptop",
+        usePlaceIcon: true,
+      };
+    }
     if (cloud && selectedProvider) {
       const presentation = localPresentation(selectedProvider.id, projectless);
       if (presentation !== null) {
@@ -344,6 +373,8 @@ export function EnvironmentPickerUI({
     cloudLabel,
     projectless,
     parsed,
+    availableMachines,
+    selectedProviderHostId,
     hostUnavailableReason,
     availableHost,
     selectedMachineName,
@@ -488,63 +519,89 @@ export function EnvironmentPickerUI({
             >
               {cloud ? (
                 <>
-                  <CommandGroup>
-                    {hostUnavailableReason !== null ? (
-                      <CommandItem
-                        value="host-unavailable"
-                        disabled
-                        className="whitespace-normal break-words text-xs text-muted-foreground"
-                      >
-                        {hostUnavailableReason}
-                      </CommandItem>
-                    ) : onSelectProvider !== undefined && hostId !== null ? (
-                      scopedProviders(
-                        environmentProviders,
-                        providersByHostId,
-                        hostId,
-                        { value, selectedProviderHostId },
-                      )
-                        .flatMap((provider) => {
-                          const presentation = localPresentation(
-                            provider.id,
-                            projectless,
-                          );
-                          return presentation === null
-                            ? []
-                            : [{ provider, presentation }];
-                        })
-                        .sort(
-                          (left, right) =>
-                            Number(left.provider.id !== "project-checkout") -
-                            Number(right.provider.id !== "project-checkout"),
+                  {isMachineMenu && availableMachines ? (
+                    <MachineGroupedEnvironmentOptions
+                      machines={availableMachines}
+                      sources={sources}
+                      value={cloud.selected || cloud.vps?.selected ? "" : value}
+                      onRequestMachineSetup={
+                        onRequestMachineSetup ? requestMachineSetup : undefined
+                      }
+                      environmentProviders={environmentProviders.filter(
+                        (provider) =>
+                          machineOptionLabel(provider.id, projectless) !== null,
+                      )}
+                      providerLabel={(provider) =>
+                        machineOptionLabel(provider.id, projectless) ??
+                        provider.displayName
+                      }
+                      providersByHostId={providersByHostId}
+                      selectedProviderHostId={selectedProviderHostId}
+                      inputsControlProviderIds={inputsControlProviderIds}
+                      onSelectProvider={
+                        onSelectProvider ? selectProvider : undefined
+                      }
+                    />
+                  ) : (
+                    <CommandGroup>
+                      {hostUnavailableReason !== null ? (
+                        <CommandItem
+                          value="host-unavailable"
+                          disabled
+                          className="whitespace-normal break-words text-xs text-muted-foreground"
+                        >
+                          {hostUnavailableReason}
+                        </CommandItem>
+                      ) : onSelectProvider !== undefined && hostId !== null ? (
+                        scopedProviders(
+                          environmentProviders,
+                          providersByHostId,
+                          hostId,
+                          { value, selectedProviderHostId },
                         )
-                        .map(({ provider, presentation }) => {
-                          const disabledReason = providerDisabledReason(
-                            provider,
-                            inputsControlProviderIds,
-                          );
-                          return (
-                            <EnvironmentMenuItem
-                              key={provider.id}
-                              value={`provider:${hostId}:${provider.id}`}
-                              label={presentation.label}
-                              description={providerDescription(
-                                provider,
-                                inputsControlProviderIds,
-                              )}
-                              icon={presentation.icon}
-                              selected={
-                                !cloud.selected &&
-                                providerValueSelected(value, provider) &&
-                                selectedProviderHostId === hostId
-                              }
-                              disabled={disabledReason !== null}
-                              onSelect={() => selectProvider(provider, hostId)}
-                            />
-                          );
-                        })
-                    ) : null}
-                  </CommandGroup>
+                          .flatMap((provider) => {
+                            const presentation = localPresentation(
+                              provider.id,
+                              projectless,
+                            );
+                            return presentation === null
+                              ? []
+                              : [{ provider, presentation }];
+                          })
+                          .sort(
+                            (left, right) =>
+                              Number(left.provider.id !== "project-checkout") -
+                              Number(right.provider.id !== "project-checkout"),
+                          )
+                          .map(({ provider, presentation }) => {
+                            const disabledReason = providerDisabledReason(
+                              provider,
+                              inputsControlProviderIds,
+                            );
+                            return (
+                              <EnvironmentMenuItem
+                                key={provider.id}
+                                value={`provider:${hostId}:${provider.id}`}
+                                label={presentation.label}
+                                description={providerDescription(
+                                  provider,
+                                  inputsControlProviderIds,
+                                )}
+                                icon={presentation.icon}
+                                selected={
+                                  !cloud.selected &&
+                                  !cloud.vps?.selected &&
+                                  providerValueSelected(value, provider) &&
+                                  selectedProviderHostId === hostId
+                                }
+                                disabled={disabledReason !== null}
+                                onSelect={() => selectProvider(provider, hostId)}
+                              />
+                            );
+                          })
+                      ) : null}
+                    </CommandGroup>
+                  )}
                   <CommandSeparator className="mx-0 shrink-0" />
                   <CommandGroup>
                     <EnvironmentMenuItem
@@ -559,6 +616,19 @@ export function EnvironmentPickerUI({
                         handleOpenChange(false);
                       }}
                     />
+                    {cloud.vps ? (
+                      <EnvironmentMenuItem
+                        value="cloud:vps"
+                        label="VPS"
+                        icon="Server"
+                        selected={cloud.vps.selected}
+                        description={cloud.vps.description}
+                        onSelect={() => {
+                          cloud.vps?.onSelect();
+                          handleOpenChange(false);
+                        }}
+                      />
+                    ) : null}
                   </CommandGroup>
                 </>
               ) : isMachineMenu && availableMachines ? (
@@ -776,6 +846,7 @@ interface MachineGroupedEnvironmentOptionsProps {
   providersByHostId?: EnvironmentPickerUIProps["providersByHostId"];
   selectedProviderHostId: string | null;
   inputsControlProviderIds: ReadonlySet<string>;
+  providerLabel?: (provider: SystemEnvironmentProvider) => string;
   onSelectProvider:
     | ((provider: SystemEnvironmentProvider, hostId: string | null) => void)
     | undefined;
@@ -790,6 +861,7 @@ function MachineGroupedEnvironmentOptions({
   providersByHostId,
   selectedProviderHostId,
   inputsControlProviderIds,
+  providerLabel,
   onSelectProvider,
 }: MachineGroupedEnvironmentOptionsProps) {
   const now = Date.now();
@@ -818,6 +890,7 @@ function MachineGroupedEnvironmentOptions({
           )}
           selectedProviderHostId={selectedProviderHostId}
           inputsControlProviderIds={inputsControlProviderIds}
+          providerLabel={providerLabel}
           onSelectProvider={onSelectProvider}
         />
       ))}
@@ -1034,6 +1107,7 @@ interface MachineSectionProps {
   environmentProviders: readonly SystemEnvironmentProvider[];
   selectedProviderHostId: string | null;
   inputsControlProviderIds: ReadonlySet<string>;
+  providerLabel?: (provider: SystemEnvironmentProvider) => string;
   contextual?: boolean;
   onSelectProvider:
     | ((provider: SystemEnvironmentProvider, hostId: string | null) => void)
@@ -1050,6 +1124,7 @@ function MachineSection({
   environmentProviders,
   selectedProviderHostId,
   inputsControlProviderIds,
+  providerLabel,
   contextual = false,
   onSelectProvider,
 }: MachineSectionProps) {
@@ -1096,7 +1171,7 @@ function MachineSection({
               <EnvironmentMenuItem
                 key={provider.id}
                 value={`provider:${host.id}:${provider.id}`}
-                label={provider.displayName}
+                label={providerLabel?.(provider) ?? provider.displayName}
                 description={
                   connected
                     ? providerDescription(provider, inputsControlProviderIds)

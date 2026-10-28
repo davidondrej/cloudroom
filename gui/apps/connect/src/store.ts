@@ -17,6 +17,8 @@ export interface Server {
   name: string | null;
   /** Set for a remote host: the Mac it runs threads for. */
   ownerServerId: string | null;
+  /** An account's own VPS (ADR 0319): not a Mac, and its ports pass straight to the VPS. */
+  vps: boolean;
 }
 
 export interface Session {
@@ -90,6 +92,7 @@ interface ServerRow {
   last_seen_at: number | null;
   name?: string | null;
   owner_server_id?: string | null;
+  kind?: string | null;
 }
 
 function toServer(row: ServerRow | null): Server | null {
@@ -102,6 +105,7 @@ function toServer(row: ServerRow | null): Server | null {
         lastSeenAt: row.last_seen_at,
         name: row.name ?? null,
         ownerServerId: row.owner_server_id ?? null,
+        vps: row.kind === "vps",
       }
     : null;
 }
@@ -165,7 +169,7 @@ export async function serverById(db: D1Database, id: string): Promise<Server | n
 /** Every Mac on one Cloudroom account, oldest first. Remote hosts are not Macs you switch to. */
 export async function accountServers(db: D1Database, userId: string): Promise<Server[]> {
   const { results } = await db
-    .prepare("SELECT * FROM server WHERE user_id = ? AND owner_server_id IS NULL ORDER BY created_at")
+    .prepare("SELECT * FROM server WHERE user_id = ? AND owner_server_id IS NULL AND kind IS NULL ORDER BY created_at")
     .bind(userId)
     .all<ServerRow>();
   return results.map((row) => toServer(row)!);
@@ -265,6 +269,22 @@ export async function registerServer(
     .bind(crypto.randomUUID(), userId, installId, handle, credentialHash, Date.now())
     .run();
   return { handle, credential };
+}
+
+export const newHandle = () => randomString(HANDLE_ALPHABET, 10);
+
+/** Gives an account's VPS its address (ADR 0319). Registering again replaces the old row, so the website's saved
+ *  handle, which it got before this ran, is always the live one. */
+export async function registerVps(db: D1Database, userId: string, handle: string, name: string | null): Promise<string> {
+  const installId = `vps-${userId}`;
+  const credential = randomToken();
+  const old = await db.prepare("DELETE FROM server WHERE user_id = ? AND install_id = ? RETURNING handle").bind(userId, installId).first<{ handle: string }>();
+  if (old) servers.delete(old.handle);
+  await db
+    .prepare("INSERT INTO server (id, user_id, install_id, handle, credential_hash, name, kind, created_at) VALUES (?, ?, ?, ?, ?, ?, 'vps', ?)")
+    .bind(crypto.randomUUID(), userId, installId, handle, await sha256Hex(credential), name, Date.now())
+    .run();
+  return credential;
 }
 
 export async function markServerSeen(

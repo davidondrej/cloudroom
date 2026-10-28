@@ -130,5 +130,6 @@ export function ensurePackagedUserShellPath(
   }
 
   args.env.PATH = shellPath;
+  args.env.CLOUDROOM_SHELL_PATH = shellPath;
   return { kind: "updated", path: shellPath };
 }

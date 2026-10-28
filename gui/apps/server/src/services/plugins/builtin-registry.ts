@@ -8,6 +8,7 @@ export interface BundledPluginDefinition {
   autoInstall: boolean;
   defaultEnabled: boolean;
   alwaysEnabled?: boolean;
+  relayRefusedRpcs?: Readonly<Record<string, "machine" | "all">>;
 }
 
 export interface BundledPluginRegistration extends BundledPluginDefinition {
@@ -49,6 +50,13 @@ export const BUILTIN_PLUGINS = [
     name: "connect",
     pluginId: "connect",
     defaultEnabled: true,
+    relayRefusedRpcs: {
+      relayCredential: "all",
+      revokeMachine: "all",
+      macs: "machine",
+      runSetupJob: "machine",
+      setupJobStatus: "machine",
+    } as const,
   },
   {
     name: "environment-project-checkout",

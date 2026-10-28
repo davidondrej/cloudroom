@@ -1,6 +1,7 @@
 import type { IconSvgElement } from "@hugeicons/react";
 import {
   AiBrain01Icon,
+  ServerStack01Icon,
   AiBrowserIcon,
   AiContentGenerator01Icon,
   ArrowDataTransferHorizontalIcon,
@@ -299,6 +300,7 @@ export const EXTENDED_ICON_MAP: ExtendedIconMap = {
   GridView: GridViewIcon,
   Image: Image01Icon,
   Laptop: SoftLaptopIcon,
+  Server: ServerStack01Icon,
   Layers: Layers01Icon,
   Limitation: LimitationIcon,
   Link: Link01Icon,

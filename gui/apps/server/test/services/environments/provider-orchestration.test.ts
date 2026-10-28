@@ -560,7 +560,7 @@ describe("core environment orchestration", () => {
     }));
 
   it.each(["new reuse", "reuse", "directory", "restored dispatch"])(
-    "refuses %s admission while another environment preparation owns the checkout",
+    "blocks %s admission while another environment preparation owns the checkout",
     async (admission) =>
       withTestHarness(async (harness) => {
         const fixture = setup(harness, {
@@ -626,9 +626,18 @@ describe("core environment orchestration", () => {
             contentItems: [{ type: "inputText", text: busy }],
           });
         } else if (admission === "restored dispatch") {
-          await expect(
-            requireThreadCommandEnvironment(harness.deps, { thread }),
-          ).rejects.toThrow(busy);
+          const sent = requireThreadCommandEnvironment(harness.deps, {
+            thread,
+            waitForPathClaim: true,
+          });
+          const pending = new Promise((resolve) => setTimeout(resolve, 300));
+          expect(await Promise.race([sent, pending])).toBeUndefined();
+          markProviderEnvironmentAttached(
+            harness.db,
+            fixture.thread.id,
+            target.id,
+          );
+          await expect(sent).resolves.toMatchObject({ id: target.id });
           await expect(
             requireThreadCommandEnvironment(harness.deps, {
               thread: { ...fixture.thread, environmentId: target.id },

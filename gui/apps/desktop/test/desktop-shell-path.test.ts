@@ -87,6 +87,7 @@ describe("desktop shell PATH loading", () => {
 
     expect(result).toEqual({ kind: "updated", path: shellPath });
     expect(env.PATH).toBe(shellPath);
+    expect(env.CLOUDROOM_SHELL_PATH).toBe(shellPath);
     expect(warningLogger.warnings).toEqual([]);
     expect(fakeSpawn.calls).toEqual([
       {
@@ -156,6 +157,7 @@ describe("desktop shell PATH loading", () => {
 
     expect(result).toEqual({ kind: "unchanged", reason: "shell-error" });
     expect(env.PATH).toBe("/usr/bin:/bin");
+    expect(env.CLOUDROOM_SHELL_PATH).toBeUndefined();
     expect(warningLogger.warnings[0]).toContain("ETIMEDOUT");
   });
 

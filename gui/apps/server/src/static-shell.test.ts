@@ -30,6 +30,7 @@ describe("app shell serving", () => {
       expect(res.headers.get("content-encoding")).toBe("br");
       expect(res.headers.get("content-type")).toBe("text/html");
       expect(res.headers.get("cache-control")).toBe("no-cache");
+      expect(res.headers.get("content-security-policy")).toBe("frame-ancestors 'self'");
       expect(res.headers.get("etag")).toMatch(/^W\/"[0-9a-f]{32}"$/u);
       expect(Buffer.from(await res.arrayBuffer())).toEqual(shellBrotli);
     }
@@ -55,6 +56,7 @@ describe("app shell serving", () => {
       expect(res.status).toBe(304);
       expect(res.headers.get("etag")).toBe(etag);
       expect(res.headers.get("cache-control")).toBe("no-cache");
+      expect(res.headers.get("content-security-policy")).toBe("frame-ancestors 'self'");
       expect((await res.arrayBuffer()).byteLength).toBe(0);
     }
   });

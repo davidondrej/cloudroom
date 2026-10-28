@@ -2,7 +2,6 @@ import { AutoDeleteSettingsSection } from "@/components/settings/AutoDeleteSetti
 import { CloudEnvironmentSettingsSection } from "@/components/settings/CloudEnvironmentSettingsSection";
 import { DefaultsSettingsSection } from "@/components/settings/DefaultsSettingsSection";
 import { MachineEnvironmentSettings } from "@/components/settings/MachineEnvironmentSettings";
-import { MachineAccessSettings } from "@/components/settings/MachineAccessSettings";
 import { useMemo, useRef, useState, type ReactNode } from "react";
 import {
   Link,
@@ -44,6 +43,7 @@ import {
 } from "@cloudroom/shared-ui/dropdown-menu";
 import { PageShell } from "@/components/ui/page-shell.js";
 import {
+  SETTINGS_CARD_CLASS,
   SETTINGS_CARD_ROW_CLASS,
   SettingsSection,
   SettingsWithControl,
@@ -90,7 +90,8 @@ import { CommunitySettingsSection } from "@/components/settings/CommunitySetting
 import { UpdatesSettingsSection } from "@/components/settings/UpdatesSettingsSection";
 import { KeyboardSettingsSection } from "@/components/settings/KeyboardSettingsSection";
 import { BrowserSettingsSection } from "@/components/settings/BrowserSettingsSection";
-import { MachinesSettingsSection } from "@/components/settings/MachinesSettingsSection";
+import { AdvancedMachineSettings, MachinesSettingsSection } from "@/components/settings/MachinesSettingsSection";
+import { VpsSettingsSection } from "@/components/settings/VpsSettings";
 import { CloudroomAccountSettings, CloudroomSignOut } from "@/components/settings/CloudroomAccountSettings";
 import { InviteSettingsCard } from "@/components/InviteOffer";
 import { ProjectsSettingsSection } from "@/components/settings/ProjectsSettingsSection";
@@ -1569,7 +1570,8 @@ export function MachinesSettingsPage() {
     <div className="space-y-6">
       <CloudroomAccountSettings />
       <MachinesSettingsSection />
-      <MachineAccessSettings>
+      <VpsSettingsSection />
+      <div className={SETTINGS_CARD_CLASS}>
         <details
           id="advanced-machine-settings"
           open={location.hash === "#advanced-machine-settings" || undefined}
@@ -1587,11 +1589,12 @@ export function MachinesSettingsPage() {
               className="size-4 text-muted-foreground transition-transform group-open:rotate-90"
             />
           </summary>
-          <div className="border-t border-border px-4 py-4">
+          <div className="space-y-6 border-t border-border px-4 py-4">
+            <AdvancedMachineSettings />
             <MachineEnvironmentSettings />
           </div>
         </details>
-      </MachineAccessSettings>
+      </div>
       <CloudroomSignOut />
     </div>
   );

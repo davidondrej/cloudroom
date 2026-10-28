@@ -1,13 +1,9 @@
 import { type ReactNode, useEffect, useState, useSyncExternalStore } from "react";
-import { useAtom } from "jotai";
-import { atomWithStorage } from "jotai/utils";
 import { Button } from "@cloudroom/shared-ui/button";
 import { useMediaQuery } from "@cloudroom/shared-ui/hooks/use-media-query";
 import { BbLogo } from "@/components/ui/bb-logo";
 import { getAppSurface } from "@/lib/app-surface";
-import { booleanLocalStorage } from "@/lib/browser-storage";
-
-const dismissedAtom = atomWithStorage("cloudroom.installApp.dismissed", false, booleanLocalStorage, { getOnInit: true });
+import { usePopup } from "@/lib/popups";
 
 type InstallPromptEvent = Event & { prompt: () => Promise<void>; userChoice: Promise<{ outcome: "accepted" | "dismissed" }> };
 
@@ -52,20 +48,19 @@ function installGuide(): InstallGuide | null {
 }
 
 export function InstallAppSheet() {
-  const [dismissed, setDismissed] = useAtom(dismissedAtom);
   const installed = useMediaQuery("(display-mode: standalone)") || (navigator as { standalone?: boolean }).standalone === true;
   const prompt = useInstallPrompt();
   const [guide] = useState(installGuide);
   const [visible, setVisible] = useState(false);
-  const eligible = guide !== null && !installed && !dismissed && getAppSurface() === "web";
+  const popup = usePopup("install", guide !== null && !installed && getAppSurface() === "web");
   useEffect(() => {
-    if (!eligible) return;
+    if (!popup.open) return;
     const timer = setTimeout(() => setVisible(true), 1_200);
     return () => clearTimeout(timer);
-  }, [eligible]);
-  if (!eligible || !visible) return null;
+  }, [popup.open]);
+  if (!popup.open || !visible || guide === null) return null;
 
-  const close = () => setDismissed(true);
+  const close = () => popup.close();
   const install = async () => {
     if (prompt === null) return;
     await prompt.prompt();

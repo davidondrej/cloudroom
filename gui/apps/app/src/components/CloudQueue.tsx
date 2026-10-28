@@ -9,6 +9,7 @@ import { appToast } from "@/components/ui/app-toast";
 import { useCloudroomAccount } from "@/hooks/queries/cloudroom-queries";
 import { UpgradeTip } from "@/components/UpgradeTip";
 import { openUpgrade, useUpgradePromptViewed } from "@/lib/upgrade-prompt";
+import { useCreditsCohort, usePopup } from "@/lib/popups";
 
 // The cloud queue (docs/scopes/public-launch.md): Free accounts wait in line to start Cloud threads. Everything else,
 // including Local threads, works as usual. The website decides; these only show it.
@@ -95,16 +96,16 @@ function PlanMeter({ plan, used, limit }: { plan: string; used: number; limit: n
   );
 }
 
-const EXPLAINER_SEEN_KEY = "cloudroom.creditsExplainerSeen";
 const FREE_WITHOUT_CREDITS = ["starting new cloud threads", "idle cloud threads", "sleeping sandboxes", "waiting for your reply", "your ai tokens", "local threads", "chat history and files"];
 
-/** Once per Mac, the first time a paying account opens the app with Cloud Credits (ADR 0307): what changed, the one
- *  thing that uses credits, and the one-time reset (ADR 0308). Free accounts and OGs on the free Pro never see it. */
+/** Once per account, ever (ADR 0307, 0321): what changed, the one thing that uses credits, and the one-time reset
+ *  (ADR 0308). Only accounts that paid before Cloud Credits see it; new users, new payers, and OGs on the free Pro never do. */
 export function CreditsExplainer() {
   const usage = useCloudroomAccount().data?.planUsage ?? null;
-  const [seen, setSeen] = useState(() => localStorage.getItem(EXPLAINER_SEEN_KEY) === "1");
-  if (!usage || usage.plan === "free" || usage.og || seen) return null;
-  const close = () => { localStorage.setItem(EXPLAINER_SEEN_KEY, "1"); setSeen(true); };
+  const cohort = useCreditsCohort();
+  const popup = usePopup("credits", cohort === false ? false : cohort && usage ? usage.plan !== "free" && !usage.og : null);
+  if (!usage || !popup.open) return null;
+  const close = () => popup.close();
   const used = usage.credits ?? 0, mono = "font-mono text-[11px] leading-[1.9]";
   return (
     <Dialog open onOpenChange={(open) => { if (!open) close(); }}>

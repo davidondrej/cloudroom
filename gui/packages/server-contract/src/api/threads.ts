@@ -113,6 +113,8 @@ export const createThreadRequestSchema = z
     requestId: z.string().regex(/^[a-zA-Z0-9_-]{1,64}$/).optional(),
     /** Cloud only: the GitHub branch the sandbox starts from. Omitted means the default branch. */
     baseBranch: z.string().regex(/^(?!-)[\w./-]{1,255}$/).optional(),
+    /** Cloud only: the user picked their own VPS or Cloud (ADR 0319). Omitted lets the account's VPS setting decide. */
+    cloudTarget: z.enum(["vps", "cloud"]).optional(),
     providerId: z.string().min(1).optional(),
     origin: threadCreateOriginSchema,
     originPluginId: z.string().min(1).optional(),

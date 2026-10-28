@@ -295,6 +295,36 @@ describe("EnvironmentPickerUI Cloudroom checkout menu", () => {
     const local = screen.getByRole("option", { name: "Local" });
     expect(local.getAttribute("aria-disabled")).not.toBe("true");
   });
+
+  it("lists every machine with Primary and Worktree, and names a picked remote machine", () => {
+    const vm = makeHost({ id: "host_vm", name: "debian-vm" });
+    const onSelectProvider = vi.fn();
+    renderPicker(
+      <EnvironmentPickerUI
+        value="provider:project-checkout"
+        sources={[...sources, { ...sources[0]!, id: "src_vm", hostId: vm.id }]}
+        host={vm}
+        isLocal={false}
+        machines={{ hosts: [host, vm], localDaemonHostId: host.id, primaryHostId: host.id }}
+        providers={[checkoutProvider, worktreeProvider, sandboxProvider]}
+        selectedProviderHostId={vm.id}
+        cloud={{ selected: false, unavailableReason: null, onSelect: vi.fn() }}
+        onSelectProvider={onSelectProvider}
+      />,
+    );
+    const trigger = screen.getByRole("button", { name: "Environment" });
+    expect(trigger.textContent).toContain("debian-vm");
+    fireEvent.click(trigger);
+    expect(screen.getAllByRole("option").map((item) => item.textContent)).toEqual([
+      "Primary",
+      "Worktree",
+      "Primary",
+      "Worktree",
+      "Cloud",
+    ]);
+    fireEvent.click(screen.getAllByRole("option", { name: "Primary" })[1]!);
+    expect(onSelectProvider).toHaveBeenCalledWith(checkoutProvider, vm.id);
+  });
 });
 
 describe("EnvironmentPickerUI", () => {

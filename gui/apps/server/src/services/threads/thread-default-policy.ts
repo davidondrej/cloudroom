@@ -7,14 +7,19 @@ import type {
   ServiceTier,
   Thread,
 } from "@cloudroom/domain";
-import { getEnvironment } from "@cloudroom/db";
+import { getEnvironment, getProjectSourceByHost } from "@cloudroom/db";
 import { DEFAULT_ENVIRONMENT_PROVIDER_ID } from "../environments/environment-provider-ids.js";
-import { PERSONAL_PROJECT_ID, clampPermissionModeToCeiling } from "@cloudroom/domain";
+import {
+  PERSONAL_PROJECT_ID,
+  clampPermissionModeToCeiling,
+  isLocalPathProjectSource,
+} from "@cloudroom/domain";
 import type {
   EnvironmentArgs,
   ProviderEnvironmentArgs,
 } from "@cloudroom/server-contract";
 import { COMMAND_TIMEOUT_MS } from "../../constants.js";
+import { resolveGitCheckoutAvailability } from "../environments/provider-availability.js";
 import type { WorkSessionDeps } from "../../types.js";
 import type { ProviderRegistryService } from "../providers/provider-registry.js";
 import { ApiError } from "../../errors.js";
@@ -243,6 +248,19 @@ function requireDefaultEnvironmentProvider(id: string): string {
   return id;
 }
 
+async function hasUsableGitCheckout(
+  deps: WorkSessionDeps,
+  args: { hostId: string; projectId: string },
+): Promise<boolean> {
+  const source = getProjectSourceByHost(deps.db, args.projectId, args.hostId);
+  if (source === null || !isLocalPathProjectSource(source)) return true;
+  const availability = await resolveGitCheckoutAvailability(deps, {
+    hostId: args.hostId,
+    path: source.path,
+  });
+  return availability.status === "available";
+}
+
 export async function resolveProjectDefaultThreadEnvironment(
   deps: WorkSessionDeps,
   args: { projectId: string },
@@ -330,6 +348,14 @@ export async function resolveCreateThreadEnvironment(
     if (parentEnvironment === null) {
       throw new Error("Parent thread environment is missing");
     }
+    if (
+      !(await hasUsableGitCheckout(deps, {
+        hostId: parentEnvironment.hostId,
+        projectId: args.projectId,
+      }))
+    ) {
+      return { type: "reuse", environmentId: parentEnvironment.id };
+    }
     return {
       type: "provider",
       environmentProviderId: requireDefaultEnvironmentProvider(
@@ -381,7 +407,12 @@ export async function resolveCreateThreadEnvironment(
     environment.type === "provider" &&
     environment.environmentProviderId ===
       DEFAULT_ENVIRONMENT_PROVIDER_ID.projectCheckout &&
-    args.requestedEnvironment.type === "project-default"
+    args.requestedEnvironment.type === "project-default" &&
+    environment.machine?.type === "existing" &&
+    (await hasUsableGitCheckout(deps, {
+      hostId: environment.machine.hostId,
+      projectId: args.projectId,
+    }))
   ) {
     return {
       type: "provider",

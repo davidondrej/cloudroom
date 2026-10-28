@@ -36,10 +36,12 @@ import { continueShare, shareThread, stopSharing, threadShare } from "./shares.j
 import { connectAccount, registerConnect } from "./connect-relay.js";
 import { getGateAuthKind } from "../../request-context.js";
 import { noteActiveMinute, timeInApp } from "./time-in-app.js";
+import { starPrompt, starRepo } from "./star-prompt.js";
+import { popupState, recordPopup } from "./popups.js";
 import { activation } from "./activation.js";
 import { disconnectGithub, githubAccount, githubAuth } from "./github-login.js";
 import { addGithubRepo, githubBranches, repoSuggestions } from "./repo-suggestions.js";
-import { ACTIVATION_STEPS, SETUP_ACTIONS, SETUP_AGENTS, SETUP_DETAILS, SETUP_STEPS, STARTER_PROMPTS, UPGRADE_PROMPTS } from "../system/telemetry.js";
+import { ACTIVATION_STEPS, CLOUD_CHOICE_ACTIONS, CLOUD_CHOICE_REASONS, POPUP_DETAILS, POPUPS, SETUP_ACTIONS, SETUP_AGENTS, SETUP_DETAILS, SETUP_STEPS, STARTER_PROMPTS, UPGRADE_PROMPTS } from "../system/telemetry.js";
 
 const SAFE_SETTINGS_SEARCH = /^(?=.{2,40}$)\p{L}+(?: \p{L}+){0,3}$/u;
 
@@ -159,6 +161,16 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps): void {
     await noteActiveMinute(deps);
     return context.json({ ok: true });
   });
+  app.get("/api/v1/cloudroom/popups", async (context) => context.json(await popupState(deps)));
+  app.post("/api/v1/cloudroom/popups", async (context) => {
+    const input = z.object({ popup: z.enum(POPUPS), event: z.enum(["shown", "closed"]), detail: z.enum(POPUP_DETAILS).optional() }).strict().parse(await context.req.json());
+    return context.json({ ok: await recordPopup(deps, input.popup, input.event, input.detail) });
+  });
+  app.get("/api/v1/cloudroom/star-prompt", async (context) => context.json(await starPrompt(deps)));
+  app.post("/api/v1/cloudroom/star-prompt", async (context) => {
+    z.object({}).strict().parse(await context.req.json());
+    return context.json(await starRepo());
+  });
   let desktopUpdate: { version: string; installAt: number | null; seenAt: number; install: boolean } | null = null;
   app.post("/api/v1/cloudroom/desktop-update", async (context) => {
     const input = z.object({ version: z.string().min(1).max(40), installAt: z.number().nullable() }).strict().parse(await context.req.json());
@@ -205,6 +217,17 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps): void {
     }
     return context.json({ ok: true });
   });
+  const sentCloudChoices = new Set<string>();
+  app.post("/api/v1/cloudroom/cloud-choice", async (context) => {
+    const parsed = z.object({ action: z.enum(CLOUD_CHOICE_ACTIONS), reason: z.enum(CLOUD_CHOICE_REASONS).nullable() }).strict().safeParse(await context.req.json().catch(() => null));
+    if (!parsed.success) throw new ApiError(400, "invalid_cloud_choice", "Invalid cloud choice.");
+    const key = `${parsed.data.action}:${parsed.data.reason}`;
+    if (parsed.data.action === "picked_local" || !sentCloudChoices.has(key)) {
+      sentCloudChoices.add(key);
+      deps.telemetry.capture({ name: "cloud_choice", properties: parsed.data });
+    }
+    return context.json({ ok: true });
+  });
   app.post("/api/v1/cloudroom/bug-reports", async (context) => {
     const input = z.object({ message: z.string().trim().min(1).max(4000), threadId: z.string().min(1).max(200).optional() }).strict().parse(await context.req.json());
     return context.json(await reportBug(deps, input));
@@ -240,6 +263,15 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps): void {
     const { days } = z.object({ days: autoDeleteDaysSchema }).strict().parse(await context.req.json());
     return context.json(await autoDelete(saveAutoDelete(deps, days)));
   });
+  // The user's own VPS (ADR 0319) lives on the website, which routes Cloud threads to it.
+  const vps = (body: Parameters<ReturnType<typeof cloudroom>["sandboxes"]["vps"]>[0]) => cloudroom(deps).sandboxes.vps(body).catch((error: unknown) => {
+    throw new ApiError(error instanceof CloudroomError && error.status ? 400 : 503, "cloud_vps", error instanceof Error ? error.message : String(error));
+  });
+  app.get("/api/v1/cloudroom/account/vps", async (context) => context.json(await vps({ action: "status" })));
+  app.post("/api/v1/cloudroom/account/vps", async (context) => context.json(await vps(z.discriminatedUnion("action", [
+    z.object({ action: z.enum(["code", "disconnect"]) }).strict(),
+    z.object({ action: z.literal("settings"), useForCloud: z.boolean().optional(), fallback: z.boolean().optional() }).strict(),
+  ]).parse(await context.req.json()))));
   // Cloud automations (ADR 0212): the website stores and runs them, so they keep running while this Mac is off.
   // A child Cloud thread shares its parent's sandbox, so the website gets the parent and the child's own session.
   app.post("/api/v1/cloudroom/account/automations", async (context) => {

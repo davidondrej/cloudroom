@@ -26,6 +26,7 @@ import type {
 import { PluginSettingsValidationError } from "../services/plugins/plugin-settings.js";
 import { BUNDLED_PLUGINS } from "../services/plugins/builtin-registry.js";
 import { PLUGIN_RPC_CALLER_HEADER } from "../services/plugins/plugin-rpc-caller.js";
+import { getGateAuthKind } from "../request-context.js";
 import {
   createAppAssetCompressionCache,
   type AppAssetCompressionCache,
@@ -826,6 +827,23 @@ export function registerPluginRoutes(
     const problem = localAuthProblem(context, deps);
     if (problem) {
       return context.json({ ok: false, error: problem.error }, problem.status);
+    }
+    const gate = getGateAuthKind(context);
+    const refused = BUNDLED_PLUGINS.find((bundled) => bundled.pluginId === id)
+      ?.relayRefusedRpcs?.[method];
+    if (
+      gate !== null &&
+      (refused === "all" || (refused === "machine" && gate === "machine"))
+    ) {
+      return context.json(
+        {
+          ok: false,
+          error: `plugin "${id}" rpc method "${method}" can't be called through Cloudroom Connect${
+            refused === "machine" ? " by a remote host" : ""
+          }`,
+        },
+        403,
+      );
     }
     const rawBody = await context.req.text();
     let input: unknown;

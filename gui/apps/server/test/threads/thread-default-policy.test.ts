@@ -496,59 +496,72 @@ describe("resolveCreateThreadEnvironment", () => {
     );
   });
 
-  it("gives a sub-thread of a project with no commits a worktree of the source", async () => {
-    await withTestHarness(async (harness) => {
-      installFakeGitWorktreeProvider();
-      const { host, session } = seedHostSession(harness.deps, {
-        id: "host-default-order",
-      });
-      seedPrimaryHost(harness.deps, host.id);
-      const { project } = seedProjectWithSource(harness.deps, {
-        hostId: host.id,
-        path: "/tmp/default-order-source",
-      });
-      const parentEnvironment = createEnvironment(harness.db, harness.hub, {
-        projectId: project.id,
-        hostId: host.id,
-        path: "/tmp/parent-environment",
-        providerOwnsPath: true,
-        status: "ready",
-        environmentProvider: null,
-      });
-      registerHostRpcResponder(harness, {
-        hostId: host.id,
-        sessionId: session.id,
-        handle: () => ({
-          ok: true,
-          result: {
-            checkout: { kind: "unborn" as const, branchName: "main" },
-            defaultBranch: null,
-            defaultBranchRelation: null,
-            isWorktree: false,
-            hasUncommittedChanges: false,
-            operation: { kind: "none" as const },
-            originDefaultBranch: null,
-          } satisfies GitSourceInspection,
-        }),
-      });
-
-      await expect(
-        resolveCreateThreadEnvironment(harness.deps, {
-          parentThread: makeParentThread({
-            projectId: project.id,
-            environmentId: parentEnvironment.id,
-          }),
+  it.each([
+    {
+      name: "is not a git repository",
+      checkout: {
+        kind: "unknown" as const,
+        reason: "Path is not a git repository",
+      },
+    },
+    {
+      name: "has no commits",
+      checkout: { kind: "unborn" as const, branchName: "main" },
+    },
+  ])(
+    "shares the parent's environment when the project $name",
+    async ({ checkout }) => {
+      await withTestHarness(async (harness) => {
+        installFakeGitWorktreeProvider();
+        const { host, session } = seedHostSession(harness.deps, {
+          id: "host-default-order",
+        });
+        seedPrimaryHost(harness.deps, host.id);
+        const { project } = seedProjectWithSource(harness.deps, {
+          hostId: host.id,
+          path: "/tmp/default-order-source",
+        });
+        const parentEnvironment = createEnvironment(harness.db, harness.hub, {
           projectId: project.id,
-          requestedEnvironment: { type: "project-default" },
-        }),
-      ).resolves.toEqual({
-        type: "provider",
-        environmentProviderId: "git-worktree",
-        machine: { type: "existing", hostId: host.id },
-        inputs: { branch: { kind: "default" } },
+          hostId: host.id,
+          path: "/tmp/parent-environment",
+          providerOwnsPath: true,
+          status: "ready",
+          environmentProvider: null,
+        });
+        registerHostRpcResponder(harness, {
+          hostId: host.id,
+          sessionId: session.id,
+          handle: () => ({
+            ok: true,
+            result: {
+              checkout,
+              defaultBranch: null,
+              defaultBranchRelation: null,
+              isWorktree: false,
+              hasUncommittedChanges: false,
+              operation: { kind: "none" as const },
+              originDefaultBranch: null,
+            } satisfies GitSourceInspection,
+          }),
+        });
+
+        await expect(
+          resolveCreateThreadEnvironment(harness.deps, {
+            parentThread: makeParentThread({
+              projectId: project.id,
+              environmentId: parentEnvironment.id,
+            }),
+            projectId: project.id,
+            requestedEnvironment: { type: "project-default" },
+          }),
+        ).resolves.toEqual({
+          type: "reuse",
+          environmentId: parentEnvironment.id,
+        });
       });
-    });
-  });
+    },
+  );
 });
 
 describe("resolveProjectDefaultThreadEnvironment", () => {

@@ -18,13 +18,15 @@ export const pluginInstructionMaxChars = (pluginId: string) => (pluginId === "or
 
 type Context = { threadId: string; projectId: string };
 
-export function cloudroomSystemPrompt(db: DbConnection): string | undefined {
+/** `vps`: the account has its own VPS connected (ADR 0319), so its Cloud threads may run there. */
+export function cloudroomSystemPrompt(db: DbConnection, options: { vps?: boolean } = {}): string | undefined {
   const settings = getAppSettings(db);
   return settings.systemPromptEnabled
     ? renderTemplate("standardAgentAppendInstructions", {
         bugReports: settings.bugReportsEnabled ? "on" : "",
         mac: process.platform === "win32" ? "" : "on",
         windows: process.platform === "win32" ? "on" : "",
+        vps: options.vps ? "on" : "",
       })
     : undefined;
 }

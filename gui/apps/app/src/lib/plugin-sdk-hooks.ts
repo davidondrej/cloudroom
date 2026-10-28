@@ -841,7 +841,7 @@ export function useComposer(): PluginComposerApi {
 
   const view = useComposerView();
   return useMemo(
-    () => ({
+    (): CloudroomComposerApi => ({
       scope:
         composerScope ??
         (threadId !== undefined
@@ -875,16 +875,6 @@ export function useComposer(): PluginComposerApi {
       submit: experimental_submit,
       experimental_openPopup: () => false,
       experimental_closePopup: () => false,
-      replace: () => unsupportedComposerMember("replace"),
-      insert: () => unsupportedComposerMember("insert"),
-      removeMention: () => unsupportedComposerMember("removeMention"),
-      experimental_removeMention: () =>
-        unsupportedComposerMember("removeMention"),
-      onSubmitted: () => unsupportedComposerMember("onSubmitted"),
-      experimental_onSubmitted: () => unsupportedComposerMember("onSubmitted"),
-      setSelection: async () => unsupportedComposerMember("setSelection"),
-      experimental_setSelection: async () =>
-        unsupportedComposerMember("setSelection"),
     }),
     [
       addQuote,
@@ -904,7 +894,7 @@ export function useComposer(): PluginComposerApi {
       updateText,
       view,
     ],
-  );
+  ) as PluginComposerApi;
 }
 
 type LegacyComposerDraftSnapshot = ComposerDraftSnapshot & {
@@ -1000,6 +990,19 @@ function composerMention({
   }
 }
 
-function unsupportedComposerMember(name: string): never {
-  throw new Error(`useComposer().${name} is not supported in Cloudroom yet.`);
-}
+type UnsupportedComposerMember =
+  | "replace"
+  | "insert"
+  | "removeMention"
+  | "experimental_removeMention"
+  | "onSubmitted"
+  | "experimental_onSubmitted"
+  | "setSelection"
+  | "experimental_setSelection";
+
+type CloudroomComposerApi = Omit<
+  PluginComposerApi,
+  UnsupportedComposerMember
+> & {
+  setThreadRowStatus?(status: unknown): void;
+};

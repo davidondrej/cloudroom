@@ -67,6 +67,7 @@ import {
   nextCronRunAt,
   raceTimeout,
   settledWithin,
+  TimeoutError,
 } from "./plugin-time-box.js";
 import type {
   PluginHookName,
@@ -278,6 +279,7 @@ const DEFAULT_SERVICE_STOP_TIMEOUT_MS = 5_000;
 const DEFAULT_SERVICE_RESTART_BASE_MS = 1_000;
 const SERVICE_RESTART_MAX_MS = 60_000;
 const SERVICE_HEALTHY_RESET_MS = 5 * 60_000;
+const LOAD_RETRY_ATTEMPTS = 5;
 
 interface ServiceInstance {
   id: string;
@@ -292,6 +294,7 @@ interface PluginRuntimeContext {
   /** Bundled plugins that ship with the app; safe mode keeps them running. */
   includedBuiltinNames: ReadonlySet<string>;
   settingsChanged?: () => void;
+  loadRetried?: () => void;
 }
 
 export interface SafeModeActivationRefusalArgs {
@@ -306,6 +309,7 @@ const PLUGIN_SAFE_MODE_DETAIL = "safe mode is on";
 export function createPluginRuntime(context: PluginRuntimeContext) {
   const { deps } = context;
   const settingsChanged = context.settingsChanged ?? (() => {});
+  const loadRetried = context.loadRetried ?? (() => {});
   const logger = deps.logger;
   const loadTimeoutMs = deps.loadTimeoutMs ?? DEFAULT_LOAD_TIMEOUT_MS;
   const serviceStopTimeoutMs =
@@ -359,6 +363,10 @@ export function createPluginRuntime(context: PluginRuntimeContext) {
   const needsConfiguration = new Map<string, string>();
   const agentToolProblems = new Map<string, string>();
   const handlerStats = new Map<string, PluginHandlerStats>();
+  const loadRetries = new Map<
+    string,
+    { attempt: number; timer: NodeJS.Timeout }
+  >();
   let boundSdk: BbSdk | undefined;
   let boundLoopbackBaseUrl: string | undefined;
 
@@ -864,6 +872,36 @@ export function createPluginRuntime(context: PluginRuntimeContext) {
       return pluginSdkRangeProblem(manifest.bbPluginSdkRange);
     }
     return undefined;
+  }
+
+  function cancelLoadRetry(id: string): void {
+    const retry = loadRetries.get(id);
+    if (retry !== undefined) clearTimeout(retry.timer);
+    loadRetries.delete(id);
+  }
+
+  function scheduleLoadRetry(id: string): number | null {
+    const attempt = (loadRetries.get(id)?.attempt ?? 0) + 1;
+    cancelLoadRetry(id);
+    if (attempt > LOAD_RETRY_ATTEMPTS) return null;
+    const delayMs = calculateExponentialBackoffDelay({
+      attempt,
+      baseDelayMs: serviceRestartBaseMs,
+      maxDelayMs: SERVICE_RESTART_MAX_MS,
+    });
+    const timer = setTimeout(() => {
+      void withLifecycleLock(id, async () => {
+        const row = getInstalledPlugin(deps.db, id);
+        if (row !== undefined && !loaded.has(id)) await loadOne(row);
+      }).then(loadRetried, (error: unknown) =>
+        logger.warn(
+          `plugin ${id} load retry failed: ${error instanceof Error ? error.message : String(error)}`,
+        ),
+      );
+    }, delayMs);
+    timer.unref?.();
+    loadRetries.set(id, { attempt, timer });
+    return delayMs;
   }
 
   async function runFactoryTimeBoxed(
@@ -1659,7 +1697,15 @@ export function createPluginRuntime(context: PluginRuntimeContext) {
       if (previous !== undefined) {
         setStatus(row.id, "running", `reload failed: ${message}`);
       } else {
-        setStatus(row.id, "error", message);
+        const retryMs =
+          error instanceof TimeoutError ? scheduleLoadRetry(row.id) : null;
+        setStatus(
+          row.id,
+          "error",
+          retryMs === null
+            ? message
+            : `${message}; retrying in ${Math.ceil(retryMs / 1000)}s`,
+        );
       }
       logger.warn(
         `plugin ${row.id} failed to load: ${statuses.get(row.id)?.detail}`,
@@ -1713,6 +1759,7 @@ export function createPluginRuntime(context: PluginRuntimeContext) {
     }
     disposeUnavailableProviderRegistrations(row.id);
     loaded.set(row.id, plugin);
+    cancelLoadRetry(row.id);
     appBundles.set(row.id, appBundleCandidate.snapshot);
     if (hostArtifactCandidate === null) hostArtifacts.delete(row.id);
     else hostArtifacts.set(row.id, hostArtifactCandidate);
@@ -1806,6 +1853,7 @@ export function createPluginRuntime(context: PluginRuntimeContext) {
   }
 
   async function disposeOne(id: string): Promise<void> {
+    cancelLoadRetry(id);
     disposeUnavailableProviderRegistrations(id);
     const plugin = loaded.get(id);
     if (!plugin) return;
@@ -1816,6 +1864,7 @@ export function createPluginRuntime(context: PluginRuntimeContext) {
   }
 
   async function disposeAll(): Promise<void> {
+    for (const id of [...loadRetries.keys()]) cancelLoadRetry(id);
     const pluginIds = new Set([
       ...loaded.keys(),
       ...unavailableProviderRegistrations.keys(),

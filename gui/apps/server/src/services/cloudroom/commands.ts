@@ -254,7 +254,12 @@ function validateReasoning(harness: string, model: string, reasoning: string, ca
   // Claude runs exact models its catalog omits, such as claude-opus-5-5[1m]; core allows any VM level (ADR 0133).
   const anyLevel = harness === "claude-code" ? [...new Set(profile?.models?.flatMap((item) => item.reasoning_levels))] : undefined;
   const levels = profile?.models ? (profile.models.find((item) => item.model === model)?.reasoning_levels ?? anyLevel) : profile?.reasoning_levels;
-  if (profile?.models && !levels) throw new ApiError(400, "invalid_model", "This model is unavailable on Cloud. Refresh the model selection.");
+  if (profile?.models && !levels) {
+    const name = HARNESS_NAMES[harness as CloudProvider] ?? harness;
+    const offers = profile.models.slice(0, 4).map((item) => item.model).join(", ");
+    const claudeHint = harness !== "claude-code" && model.startsWith("claude") ? " Use the claude-code provider for Claude." : "";
+    throw new ApiError(400, "invalid_model", `${model} is not a ${name} model on Cloud.${offers ? ` ${name} offers ${offers}.` : ""}${claudeHint}`);
+  }
   if (!levels?.includes(reasoning)) throw new ApiError(400, "invalid_reasoning_effort", "This reasoning level is unavailable for the cloud model. Select a supported level.");
 }
 
@@ -1366,7 +1371,7 @@ class CloudroomService {
           ...payload, ...workspace, provider: remoteModel?.provider,
           command_guard_enabled: getAppSettings(this.deps.db).commandGuardEnabled,
           strip_ai_co_authors: getAppSettings(this.deps.db).stripAiCoAuthorsEnabled,
-          system_prompt: [cloudroomSystemPrompt(this.deps.db), cloudPluginInstructions({ threadId: thread.id, projectId: thread.projectId }), projectNote].filter(Boolean).join("\n\n") || undefined,
+          system_prompt: [cloudroomSystemPrompt(this.deps.db, { vps: this.sandboxes.vpsConnected }), cloudPluginInstructions({ threadId: thread.id, projectId: thread.projectId }), projectNote].filter(Boolean).join("\n\n") || undefined,
           ...(request.serviceTier && request.serviceTier !== "default" ? { service_tier: request.serviceTier } : {}),
           ...(request.baseBranch ? { base_branch: request.baseBranch } : {}),
           ...(codeFrom ? { code_from: codeFrom } : {}),
@@ -1394,6 +1399,7 @@ class CloudroomService {
         appendStartProgress(tx, thread.id, [cloudStep(Boolean(sandbox))], "active", true);
       });
     }
+    if (created && request.cloudTarget) this.sandboxes.target(thread.id, request.cloudTarget);
     this.notify(thread.id, ["client/turn/requested", "system/thread-provisioning"]);
     void this.selectOnboardingProject(project.id).catch(() => {});
     this.start();
@@ -1438,7 +1444,7 @@ class CloudroomService {
           ...payload, ...workspace, fork,
           command_guard_enabled: getAppSettings(this.deps.db).commandGuardEnabled,
           strip_ai_co_authors: getAppSettings(this.deps.db).stripAiCoAuthorsEnabled,
-          system_prompt: [cloudroomSystemPrompt(this.deps.db), cloudPluginInstructions({ threadId: thread.id, projectId: thread.projectId }), projectNote].filter(Boolean).join("\n\n") || undefined,
+          system_prompt: [cloudroomSystemPrompt(this.deps.db, { vps: this.sandboxes.vpsConnected }), cloudPluginInstructions({ threadId: thread.id, projectId: thread.projectId }), projectNote].filter(Boolean).join("\n\n") || undefined,
           ...(request.serviceTier && request.serviceTier !== "default" ? { service_tier: request.serviceTier } : {}),
           ...(this.heldStarts.has(startRequestId) ? { awaiting_core: true } : {}),
         })),

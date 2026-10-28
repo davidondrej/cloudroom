@@ -278,6 +278,9 @@ it.each(["invalid_reasoning_effort", "codex_auth_required"])("holds rejected clo
     await service.configure({ url: `http://127.0.0.1:${address.port}`, token: "x".repeat(40), projectId: project.id });
     const invalid = await request("/threads", { ...input, reasoningLevel: "ultra" });
     expect(invalid.status).toBe(400);
+    const wrongModel = await request("/threads", { ...input, model: "claude-fable-5-1" });
+    expect(wrongModel.status).toBe(400);
+    expect((await wrongModel.json()).message).toBe("claude-fable-5-1 is not a Codex model on Cloud. Codex offers test-model. Use the claude-code provider for Claude.");
     expect(attempts).toEqual({});
     expect(harness.deps.db.select().from(cloudroomThreads).all()).toHaveLength(0);
     expect((await request("/threads", input)).status).toBe(201);

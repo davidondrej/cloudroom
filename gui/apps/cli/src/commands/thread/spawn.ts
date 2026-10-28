@@ -38,7 +38,7 @@ import {
 import { SEND_AT_HELP, parseSendAt } from "./send-time.js";
 
 const PROVIDER_HELP =
-  "Provider ID for the thread. Omit to use the project's remembered provider choice";
+  "Provider ID for the thread, such as claude-code or codex. Required with --machine cloud; otherwise omit to use the project's remembered provider choice";
 
 interface ThreadSpawnCommandOptions {
   prompt: string;
@@ -436,6 +436,7 @@ export function registerSpawnCommand(
         const machineTarget = resolveMachineTargetOption(opts);
         const cloudTarget = machineTarget === "cloud";
         if (cloudTarget && (environmentValue || opts.newEnvironment || opts.environmentProvider || opts.newMachine || opts.machineInputs || opts.environmentInputs)) throw new Error("Cloud uses its prepared repository; native environment and machine options cannot be combined with --machine cloud.");
+        if (cloudTarget && !opts.provider?.trim()) throw new Error("Select a provider with --provider for Cloud, such as claude-code or codex.");
         if (cloudTarget && !opts.model) throw new Error("Select a model with --model for Cloud.");
         if (!cloudTarget && opts.requestId) throw new Error("--request-id currently applies only to Cloud.");
         if (machineTarget && opts.newMachine) {
@@ -569,7 +570,7 @@ export function registerSpawnCommand(
         }
         const sendAt =
           opts.sendAt === undefined ? undefined : parseSendAt(opts.sendAt);
-        const providerId = opts.provider?.trim() ?? (cloudTarget ? "codex" : undefined);
+        const providerId = opts.provider?.trim();
         const startedOnBehalfOf =
           !cloudTarget &&
           opts.originKind === undefined &&

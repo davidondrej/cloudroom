@@ -21,6 +21,8 @@ import {
   TooltipTrigger,
 } from "@cloudroom/shared-ui/tooltip";
 import { AddMachineDialog } from "@/components/dialogs/AddMachineDialog";
+import { MachineAccessControls } from "@/components/settings/MachineAccessSettings";
+import { VpsMachineRows } from "@/components/settings/VpsSettings";
 import { appToast } from "@/components/ui/app-toast";
 import { MachineLifecycleActions } from "@/components/machines/MachineLifecycleActions";
 import { MachineRemoveDialog } from "@/components/machines/MachineRemoveDialog";
@@ -276,7 +278,6 @@ export function MachinesSettingsSection() {
   const suspendHost = useSuspendHost();
   const resumeHost = useResumeHost();
   const retryHostCleanup = useRetryHostCleanup();
-  const [addDialogOpen, setAddDialogOpen] = useState(false);
   const [showAllMachines, setShowAllMachines] = useState(false);
   const [renameTarget, setRenameTarget] = useState<Host | null>(null);
   const [removeTarget, setRemoveTarget] = useState<Host | null>(null);
@@ -396,19 +397,7 @@ export function MachinesSettingsSection() {
       {otherMacs.map((mac) => (
         <YourMacRow key={mac.handle} mac={mac} />
       ))}
-      <button
-        type="button"
-        onClick={() => setAddDialogOpen(true)}
-        className={cn(
-          SETTINGS_CARD_ROW_CLASS,
-          "w-full text-left text-foreground transition-colors hover:bg-state-hover",
-        )}
-      >
-        <span className="grid size-8 shrink-0 place-items-center rounded-lg border border-border">
-          <Icon name="Plus" className="size-4" />
-        </span>
-        Add a machine
-      </button>
+      <VpsMachineRows />
     </div>
   );
 
@@ -451,8 +440,6 @@ export function MachinesSettingsSection() {
         ) : null}
       </SettingsSection>
 
-      <AddMachineDialog open={addDialogOpen} onOpenChange={setAddDialogOpen} />
-
       <MachineRenameDialog
         target={renameTarget}
         pending={renameHost.isPending}
@@ -482,5 +469,24 @@ export function MachinesSettingsSection() {
         }}
       />
     </>
+  );
+}
+
+export function AdvancedMachineSettings() {
+  const [addDialogOpen, setAddDialogOpen] = useState(false);
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between gap-3">
+        <div className="min-w-0">
+          <p className="text-sm text-foreground">Remote hosts</p>
+          <p className="text-xs text-subtle-foreground/75">Run Local threads on another computer, through this app.</p>
+        </div>
+        <Button variant="outline" size="sm" onClick={() => setAddDialogOpen(true)}>
+          Add a machine
+        </Button>
+      </div>
+      <MachineAccessControls />
+      <AddMachineDialog open={addDialogOpen} onOpenChange={setAddDialogOpen} />
+    </div>
   );
 }

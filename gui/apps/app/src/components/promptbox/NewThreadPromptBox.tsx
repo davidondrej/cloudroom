@@ -163,9 +163,12 @@ function promptLocationCommands(
   environment: NewThreadEnvironmentConfig,
   projectless: boolean,
 ): PromptLocationCommand[] | undefined {
-  const { cloud, host, onSelectProvider } = environment;
+  const { cloud, machines, onSelectProvider } = environment;
   if (!cloud || environment.disabled) return undefined;
   const commands: PromptLocationCommand[] = [];
+  const host =
+    machines?.hosts.find((h) => h.id === machines.localDaemonHostId) ??
+    environment.host;
   const hostId =
     host?.type !== "ephemeral" && host?.status === "connected"
       ? host.id

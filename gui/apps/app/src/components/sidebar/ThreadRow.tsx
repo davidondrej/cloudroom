@@ -63,6 +63,7 @@ import {
   type ThreadListIndicatorState,
 } from "@cloudroom/client-core";
 import { getThreadDisplayTitle } from "@/lib/thread-title";
+import { ChildProgressGrid, useHiddenChildCells } from "./ChildProgressGrid";
 import { getThreadRoutePath } from "@/lib/route-paths";
 import { cn } from "@cloudroom/shared-ui/lib/utils";
 import { LIST_HOVER_TRANSITION } from "@cloudroom/shared-ui/motion";
@@ -958,4 +959,18 @@ function ThreadRowComponent({
   );
 }
 
-export const ThreadRow = memo(ThreadRowComponent);
+function ThreadRowWithChildProgress(props: ThreadRowProps) {
+  const cells = useHiddenChildCells(props.thread);
+  if (!cells) return <ThreadRowComponent {...props} />;
+  return (
+    <div>
+      <ThreadRowComponent {...props} />
+      <ChildProgressGrid
+        cells={cells}
+        paddingLeft={getSidebarThreadRowPaddingLeft(props.options.depth) + 22}
+      />
+    </div>
+  );
+}
+
+export const ThreadRow = memo(ThreadRowWithChildProgress);

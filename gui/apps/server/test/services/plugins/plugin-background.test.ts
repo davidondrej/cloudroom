@@ -362,6 +362,31 @@ describe("plugin background services", () => {
     });
   });
 
+  it("retries a first load that timed out, as after the Mac slept mid-startup", async () => {
+    const rootDir = await writePlugin(workDir, {
+      name: "bb-plugin-sleepy",
+      serverSource: `
+        export default function plugin() {
+          const g = globalThis as any;
+          g.__sleepyLoads = (g.__sleepyLoads ?? 0) + 1;
+          if (g.__sleepyLoads === 1) return new Promise(() => {});
+        }
+      `,
+    });
+    const entry = await service.installPath(rootDir);
+    expect(entry.status).toBe("error");
+    expect(entry.statusDetail).toContain("retrying in");
+    await vi.waitFor(
+      () => {
+        expect(service.list().find((p) => p.id === "sleepy")?.status).toBe(
+          "running",
+        );
+      },
+      { timeout: 5000 },
+    );
+    expect(globals.__sleepyLoads).toBe(2);
+  });
+
   it("routes an uncaught exception from a service's async context to the supervisor", async () => {
     const rootDir = await writePlugin(workDir, {
       name: "bb-plugin-emitter",

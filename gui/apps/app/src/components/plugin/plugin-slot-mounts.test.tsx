@@ -1326,6 +1326,30 @@ describe("useComposer", () => {
     );
     expect(submit).toHaveBeenCalledTimes(2);
   });
+
+  it("leaves unsupported composer members undefined so plugins can feature-detect them", () => {
+    let captured: Record<string, unknown> | null = null;
+    registerComposerProbe("unsupported", (composer) => {
+      captured = composer as unknown as Record<string, unknown>;
+    });
+    render(
+      <MemoryRouter initialEntries={["/threads/thr_unsupported"]}>
+        <ComposerCustomizationMount />
+      </MemoryRouter>,
+    );
+    for (const member of [
+      "replace",
+      "insert",
+      "removeMention",
+      "experimental_removeMention",
+      "onSubmitted",
+      "experimental_onSubmitted",
+      "setSelection",
+      "experimental_setSelection",
+    ]) {
+      expect(typeof captured![member], member).toBe("undefined");
+    }
+  });
 });
 
 describe("PluginNavSidebarItems + PluginPanelView", () => {

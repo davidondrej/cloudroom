@@ -603,7 +603,20 @@ async function runDispatchAttempt(
     return { kind: "dispatched" };
   }
 
-  const environment = await requireThreadCommandEnvironment(deps, { thread });
+  const environment = await requireThreadCommandEnvironment(deps, {
+    thread,
+    waitForPathClaim: true,
+  });
+  const afterWait = getThread(deps.db, thread.id);
+  if (
+    afterWait === null ||
+    afterWait.status !== thread.status ||
+    afterWait.archivedAt !== thread.archivedAt ||
+    afterWait.deletedAt !== thread.deletedAt ||
+    afterWait.environmentId !== thread.environmentId
+  ) {
+    return reattemptDispatchForThreadChange(deps, args, afterWait, reattempted);
+  }
   try {
     await sendThreadMessage(deps, {
       environment,

@@ -100,6 +100,9 @@ import {
 import { usePromptMentions } from "@/hooks/usePromptMentions";
 import { usePromptBoxMachinePreference } from "@/hooks/thread-creation-options/persisted-selection-fields";
 import { agentExecutionTarget, startingExecutionTarget } from "@/hooks/useStartingMachine";
+import { useCloudVps, vpsSummary } from "@/components/settings/VpsSettings";
+
+const CLOUD_TARGET_KEY = "cloudroom.cloudTarget";
 import { useThreadCreationOptions } from "@/hooks/useThreadCreationOptions";
 import { useComposerTextEffects } from "@/lib/composer-text-effects";
 import { getMutationErrorMessage } from "@/lib/mutation-errors";
@@ -119,6 +122,7 @@ import {
   isProjectlessProjectId,
 } from "@/lib/route-paths";
 import { sdk } from "@/lib/sdk";
+import { reportCloudChoice, type CloudChoiceReason } from "@/lib/upgrade-prompt";
 import {
   buildReuseThreadOptions,
   resolveHostEnvironmentProvider,
@@ -220,6 +224,7 @@ export function resolveSubmittedExecutionSources(
 export interface NewThreadComposerSubmission extends NewThreadRequest {
   pluginSubmission?: CreateThreadRequest["pluginSubmission"];
   sendAt?: number;
+  cloudTarget?: "vps" | "cloud";
 }
 
 export interface NewThreadComposerProps {
@@ -455,6 +460,19 @@ export function NewThreadComposer({
   const [cloudPicked, setCloudPicked] = useState(
     seed?.executionTarget === "cloud",
   );
+  const vps = useCloudVps();
+  const vpsConnected = vps.data?.connected === true;
+  const [cloudTarget, setCloudTarget] = useState<"vps" | "cloud" | null>(() => {
+    const saved = localStorage.getItem(CLOUD_TARGET_KEY);
+    return saved === "vps" || saved === "cloud" ? saved : null;
+  });
+  const wantedCloudTarget = !vpsConnected ? "cloud" : cloudTarget ?? (vps.data?.useForCloud ? "vps" : "cloud");
+  const vpsBusy = vpsConnected && (vps.data?.health === null || vps.data?.busy != null);
+  const landsOnVps = wantedCloudTarget === "vps" && !(vpsBusy && vps.data?.fallback);
+  const pickCloudTarget = (target: "vps" | "cloud") => {
+    setCloudTarget(target);
+    localStorage.setItem(CLOUD_TARGET_KEY, target);
+  };
   const [cloudBranch, setCloudBranch] = useState<{
     projectId: string | null;
     branch: string | null;
@@ -692,15 +710,32 @@ export function NewThreadComposer({
       if (usable(candidate?.hostId ?? null)) {
         return { provider, machine: candidate };
       }
+      const usableHostIds = [
+        primaryHostId,
+        ...availableHosts
+          .filter((host) => connectedHostIds.has(host.id))
+          .map((host) => host.id),
+      ].filter((hostId): hostId is string => usable(hostId));
+      const fallbackHostId =
+        usableHostIds.find(
+          (hostId) =>
+            findLocalPathProjectSourceForHost(projectSources, hostId) !==
+            undefined,
+        ) ??
+        usableHostIds[0] ??
+        null;
       return {
         provider,
         machine:
-          primaryHostId !== null && usable(primaryHostId)
-            ? { type: "existing", hostId: primaryHostId }
-            : null,
+          fallbackHostId === null
+            ? null
+            : { type: "existing", hostId: fallbackHostId },
       };
     },
     [
+      availableHosts,
+      connectedHostIds,
+      projectSources,
       seedOverridden,
       environmentSeed,
       environmentProviders,
@@ -720,6 +755,7 @@ export function NewThreadComposer({
         environmentProviders,
         isProjectless,
         knownHostIds,
+        connectedHostIds,
         primaryHostId,
         projectGitRemoteUrl,
         projectSources,
@@ -738,6 +774,7 @@ export function NewThreadComposer({
         : {};
     },
     [
+      connectedHostIds,
       environmentProviders,
       isProjectless,
       knownHostIds,
@@ -843,6 +880,28 @@ export function NewThreadComposer({
   const cloudLevels = cloudReasoningLevels(cloudConnection.data, selectedProviderId, selectedThreadModel);
   const cloudFastSupported = executionTarget === "cloud" && cloudServiceTierSupported(cloudConnection.data, selectedProviderId);
   const cloudKnown = executionTarget === "cloud" && cloudCatalogKnown(cloudConnection.data);
+  // The cloud queue (docs/scopes/public-launch.md): the card under the composer explains, and Send waits.
+  const cloudQueue = executionTarget === "cloud" ? cloudConnection.data?.cloudQueue ?? null : null;
+  const cloudAgentMissing = cloudKnown && !cloudHarness(cloudConnection.data, selectedProviderId);
+  const cloudChoiceReason: CloudChoiceReason | null = cloudLocked
+    ? "signed_out"
+    : storedExecutionTarget === "cloud" && executionTarget === "local"
+      ? "agent_unsupported"
+      : cloudAgentMissing
+        ? "agent_not_in_cloud"
+        : cloudQueue
+          ? cloudQueue.regionBlocked ? "region" : "queue"
+          : null;
+  const cloudChoiceAction = selectionScope !== "new-thread" || cloudChoiceReason === null
+    ? null
+    : executionTarget === "cloud"
+      ? "cloud_blocked"
+      : storedExecutionTarget === "cloud"
+        ? "forced_local"
+        : null;
+  useEffect(() => {
+    if (cloudChoiceAction) reportCloudChoice(cloudChoiceAction, cloudChoiceReason);
+  }, [cloudChoiceAction, cloudChoiceReason]);
   // Sandboxes upgrade to the Mac's harness version before the agent starts (ADR 0133), so a model the saved cloud
   // catalog lacks, such as one released today, keeps the Mac's levels; Core still rejects an unsupported one.
   const cloudFiltered = cloudKnown && cloudLevels.length > 0;
@@ -921,6 +980,7 @@ export function NewThreadComposer({
         environmentProviders,
         isProjectless,
         knownHostIds,
+        connectedHostIds,
         primaryHostId,
         projectGitRemoteUrl,
         projectSources,
@@ -928,6 +988,7 @@ export function NewThreadComposer({
         reuseThreadOptionsLoading,
       }),
     [
+      connectedHostIds,
       environmentSelectionValue,
       environmentProviders,
       isProjectless,
@@ -978,6 +1039,7 @@ export function NewThreadComposer({
   }, [cloudLocked, snapshotDraftBeforeOptionChange]);
   const handleSelectProvider = useCallback(
     (provider: SystemEnvironmentProvider, hostId: string | null) => {
+      if (selectionScope === "new-thread" && executionTarget === "cloud") reportCloudChoice("picked_local", cloudChoiceReason);
       setExecutionTarget("local");
       localStorage.setItem("cloudroom.executionTarget", "local");
       changeEnvironment(
@@ -985,7 +1047,7 @@ export function NewThreadComposer({
         hostId === null ? null : { type: "existing", hostId },
       );
     },
-    [changeEnvironment],
+    [changeEnvironment, selectionScope, executionTarget, cloudChoiceReason],
   );
   const handleSelectHost = useCallback(
     (hostId: string) => {
@@ -1551,10 +1613,8 @@ export function NewThreadComposer({
     selectedThreadModel,
     submissionEnvironmentUnavailable: submissionEnvironment === null,
   });
-  // The cloud queue (docs/scopes/public-launch.md): the card under the composer explains, and Send waits.
-  const cloudQueue = executionTarget === "cloud" ? cloudConnection.data?.cloudQueue ?? null : null;
   // Shown as a banner too, so an unavailable agent is never a silent greyed-out button.
-  const cloudBlockedReason = !cloudKnown || cloudHarness(cloudConnection.data, selectedProviderId)
+  const cloudBlockedReason = !cloudAgentMissing
     ? null
     : selectedProviderId === "claude-code"
       ? "Claude Code is not configured in Cloud yet."
@@ -1612,7 +1672,7 @@ export function NewThreadComposer({
         reasoningLevel: starterHigh && submittedDraft.text === starterRef.current ? "high" : reasoningLevel,
         permissionMode: executionTarget === "cloud" ? "full" : permissionMode,
         ...(executionTarget === "cloud"
-          ? { executionTarget, serviceTier: cloudFastSupported && serviceTier ? serviceTier : "default", ...(cloudBaseBranch ? { baseBranch: cloudBaseBranch } : {}) }
+          ? { executionTarget, serviceTier: cloudFastSupported && serviceTier ? serviceTier : "default", ...(cloudBaseBranch ? { baseBranch: cloudBaseBranch } : {}), ...(vpsConnected ? { cloudTarget: wantedCloudTarget } : {}) }
           : supportsServiceTier && serviceTier
             ? { serviceTier }
             : {}),
@@ -1678,6 +1738,8 @@ export function NewThreadComposer({
       supportsServiceTier,
       cloudFastSupported,
       cloudBaseBranch,
+      vpsConnected,
+      wantedCloudTarget,
       starterHigh,
     ],
   );
@@ -1814,10 +1876,28 @@ export function NewThreadComposer({
           modeConfig={{
             environment: {
               cloud: {
-                selected: executionTarget === "cloud",
+                selected: executionTarget === "cloud" && !landsOnVps,
                 unavailableReason: null,
                 ...(cloudLocked ? { note: CLOUD_LOCKED_REASON } : {}),
-                onSelect: selectCloudTarget,
+                onSelect: () => {
+                  selectCloudTarget();
+                  if (vpsConnected && !cloudLocked) pickCloudTarget("cloud");
+                },
+                ...(vpsConnected && vps.data
+                  ? {
+                      vps: {
+                        selected: executionTarget === "cloud" && landsOnVps,
+                        busy: vpsBusy,
+                        description: vpsBusy
+                          ? `${vpsSummary(vps.data)}. ${vps.data.fallback ? "New threads start in Cloud until it frees up." : "Pick Cloud, or turn on \"Use Cloud when it's busy\"."}`
+                          : `${vps.data.name?.split(".")[0] ?? "VPS"} · ${vpsSummary(vps.data)}`,
+                        onSelect: () => {
+                          selectCloudTarget();
+                          pickCloudTarget("vps");
+                        },
+                      },
+                    }
+                  : {}),
               },
               ...(executionTarget === "local" && !cloudLocked && !locks.environment && cloudCanRunHarness(selectedProviderId)
                 ? { hint: <TryCloudHint draftLength={promptDraft.text.trim().length} onUseCloud={selectCloudTarget} /> }
@@ -2046,6 +2126,10 @@ export function NewThreadComposer({
       machineProviderInputs.control,
       cloudBranchPickerShown,
       cloudBaseBranch,
+      vps.data,
+      vpsBusy,
+      vpsConnected,
+      landsOnVps,
       primaryHostId,
       inputsControlProviderIds,
       providerHostId,

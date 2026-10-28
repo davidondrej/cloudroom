@@ -8,7 +8,7 @@ import {
   type HeaderPair,
 } from "@cloudroom/tunnel-contract";
 import { relayedResponse } from "./response-encoding.js";
-import { TUNNEL_MACHINE_HEADER, TUNNEL_SESSION_HEADER, TUNNEL_TARGET_HEADER } from "./protocol-headers.js";
+import { TUNNEL_MACHINE_HEADER, TUNNEL_SESSION_HEADER, TUNNEL_TARGET_HEADER, TUNNEL_VPS_HEADER } from "./protocol-headers.js";
 import { machineOwner, markServerSeen, sessionByToken } from "./store.js";
 
 export interface Env {
@@ -144,6 +144,10 @@ export class TunnelDO {
 
     if (request.headers.get("upgrade")?.toLowerCase() === "websocket") {
       return this.state.blockConcurrencyWhile(async () => {
+        // Only the Worker sets this, for a VPS's ports: its Cores check their own tokens (ADR 0319).
+        if (request.headers.get(TUNNEL_VPS_HEADER) === "1" && target !== undefined) {
+          return this.openVisitorWebSocket(request, url, tunnel, target);
+        }
         const machineId = request.headers.get(TUNNEL_MACHINE_HEADER);
         const token = request.headers.get(TUNNEL_SESSION_HEADER);
         if (!machineId && (!token || !/^[a-f0-9]{64}$/.test(token))) {

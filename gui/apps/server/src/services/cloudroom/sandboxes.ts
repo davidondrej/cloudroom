@@ -23,6 +23,8 @@ const viewSchema = z.object({
   thread: z.string(), state: z.enum(["new", "awake", "asleep", "archived", "deleted", "failed"]), generation: z.number(),
   issue: z.string().nullable(), origin: z.string().url().optional(), token: z.string().optional(),
   startup: z.object({ source: z.enum(["spare", "image", "template", "backup", "resume", "restart", "reuse"]), duration_ms: z.number().nonnegative() }).optional().catch(undefined),
+  /** The sandbox runs on the user's own VPS (ADR 0319). */
+  vps: z.boolean().optional(),
 });
 type View = z.infer<typeof viewSchema>;
 // Threads the website started (ADR 0239, 0267): `source` is the automation's own Cloud thread or the thread that
@@ -457,6 +459,10 @@ export function revokeDesktopToken(account: SandboxAccount): void {
 /** Each cloud thread's own sandbox, managed by the website (docs/scopes/sandboxes.md). Lookups never wake it. */
 export class SandboxDirectory {
   private readonly views = new Map<string, View>();
+  /** A new thread's VPS-or-Cloud pick, sent with its first wake (ADR 0319). */
+  private readonly targets = new Map<string, "vps" | "cloud">();
+  /** Whether the account has a VPS connected, from its last status check: VPS accounts' prompts explain VPS threads. */
+  vpsConnected = false;
   private readonly wakes = new Map<string, Promise<View>>();
   private readonly wakeStarts = new Map<string, number>();
   private readonly wakeHarnesses = new Map<string, Awaited<ReturnType<typeof macHarnessVersions>>>();
@@ -525,6 +531,10 @@ export class SandboxDirectory {
     const value = await this.call({ action }, "invites");
     const joined = z.object({ name: z.string().nullable(), at: z.string() }).optional();
     return z.object({ codes: z.array(z.object({ code: z.string(), used: z.boolean(), url: z.string().optional(), joined })), left: z.number(), created: z.string().nullable(), waiting: z.number().nullable().default(null) }).parse(value);
+  }
+
+  popups(body: Record<string, string>): Promise<unknown> {
+    return this.call(body, "popups");
   }
 
   /** Whether the website judges a generated thread title too vague to keep, at the user's sensitivity (2–5). */
@@ -631,8 +641,10 @@ export class SandboxDirectory {
       // The Mac's harness versions: the sandbox upgrades to them before its agent starts (ADR 0133).
       pending = macHarnessVersions().then(harnesses => {
         this.wakeHarnesses.set(thread, harnesses);
-        return this.call({ action: "wake", ...place, harnesses, ...(this.backoff.has(thread) ? { trigger: "retry" } : trigger ? { trigger } : {}) });
+        const target = this.targets.get(thread);
+        return this.call({ action: "wake", ...place, ...(target ? { target } : {}), harnesses, ...(this.backoff.has(thread) ? { trigger: "retry" } : trigger ? { trigger } : {}) });
       }).then(value => this.remember(viewSchema.parse(value))).then(view => {
+        this.targets.delete(thread);
         this.woke(view.thread);
         this.backoff.delete(thread);
         this.capped.delete(thread);
@@ -846,6 +858,19 @@ export class SandboxDirectory {
 
   async autoDelete(body: { action: "get" | "deleted" } | { action: "set"; days: number | null }): Promise<unknown> {
     return this.call(body, "auto-delete");
+  }
+
+  /** The user's own VPS (ADR 0319): status with live health, a pairing code, the two switches, or disconnect. */
+  async vps(body: { action: "status" | "code" | "disconnect" } | { action: "settings"; useForCloud?: boolean; fallback?: boolean }): Promise<unknown> {
+    const value = await this.call(body, "vps");
+    if (body.action === "disconnect") this.vpsConnected = false;
+    else if (typeof (value as { connected?: unknown }).connected === "boolean") this.vpsConnected = (value as { connected: boolean }).connected;
+    return value;
+  }
+
+  /** Remembers a new Cloud thread's VPS-or-Cloud pick until its first wake sends it. */
+  target(thread: string, target: "vps" | "cloud"): void {
+    this.targets.set(thread, target);
   }
 
   /** Cloud automations live on the website, which runs them while this Mac is off (ADR 0212). */
