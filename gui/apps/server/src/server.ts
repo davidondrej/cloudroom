@@ -68,6 +68,7 @@ import {
   resolveRequestAppSurface,
 } from "./request-context.js";
 import { notePhoneUse } from "./services/cloudroom/activation.js";
+import { startWindowsSetupToken } from "./services/cloudroom/claude-token.js";
 import { runEventLoopWork } from "./services/system/event-loop-work.js";
 import { runWithTelemetryAppSurface } from "./services/system/telemetry.js";
 import {
@@ -606,6 +607,9 @@ export function createApp(
         }),
       ),
     callPluginHost: (args) => callPluginHostRpc(deps, args),
+    ...(process.platform === "win32" && {
+      claudeSetupToken: () => startWindowsSetupToken(deps),
+    }),
     disposePluginHost: (args) => disposePluginHostWorkers(deps, args),
     onSettingsChanged: (pluginId) => {
       deps.providerNativeRoots.invalidate(pluginId);

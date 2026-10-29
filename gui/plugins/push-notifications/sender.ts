@@ -281,7 +281,11 @@ export function createPushSender(args: CreatePushSenderArgs): PushSender {
         null;
       if (!interaction) kinds.delete("pending-interaction");
     }
-    if (kinds.has("turn-finished") && thread.status !== "idle") {
+    if (
+      kinds.has("turn-finished") &&
+      (thread.status !== "idle" ||
+        (thread.lastReadAt ?? 0) >= thread.latestAttentionAt)
+    ) {
       kinds.delete("turn-finished");
     }
     if (kinds.has("thread-error") && thread.status !== "error") {

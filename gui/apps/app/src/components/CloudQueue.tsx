@@ -57,7 +57,8 @@ export function CloudQueueCard({ queue, onUseLocal }: { queue: CloudQueue; onUse
 
 const share = (used: number, limit: number) => limit > 0 ? Math.min(used / limit, 1) : 1;
 
-/** Free accounts always see their Cloud Credits left (ADR 0307). Paid plans see a quiet meter once 75% are used. */
+/** Free accounts always see their Cloud Credits left (ADR 0307). Paid plans see a quiet meter once 75% are used, and
+ *  while running on pack credits. */
 export function PlanCard() {
   const usage = useCloudroomAccount().data?.planUsage ?? null;
   const used = usage?.credits ?? null, limit = usage?.creditsLimit ?? 0;
@@ -65,7 +66,7 @@ export function PlanCard() {
   const hidden = !usage || used === null || (!free && share(used, limit) < 0.75);
   useUpgradePromptViewed(hidden ? null : "plan_card");
   if (!usage || used === null || hidden) return null;
-  if (!free) return <PlanMeter plan={usage.plan} used={used} limit={limit} />;
+  if (!free) return <PlanMeter plan={usage.plan} used={used} limit={limit} extra={usage.extraCredits ?? 0} extraTotal={usage.extraCreditsTotal ?? 0} />;
   const low = share(used, limit) >= 0.8;
   return (
     <section aria-label="Free plan" className="rounded-lg border border-border bg-surface-raised-solid p-3">
@@ -81,18 +82,24 @@ export function PlanCard() {
   );
 }
 
-/** "Super 120,000 / 150,000 credits" over a thin bar: amber from 75%, red at the limit. Opens /billing. */
-function PlanMeter({ plan, used, limit }: { plan: string; used: number; limit: number }) {
+/** "Pro · 9,000 credits left" over a thin bar: amber from 75%, red at 0. While packs carry the account (ADR 0317) it
+ *  shows their credits left in gray. The white "+ buy more" chip opens /billing: a pack or the next plan. */
+function PlanMeter({ plan, used, limit, extra, extraTotal }: { plan: string; used: number; limit: number; extra: number; extraTotal: number }) {
   const name = plan.charAt(0).toUpperCase() + plan.slice(1);
-  const full = used >= limit;
+  const onExtra = used >= limit && extra > 0, out = used >= limit && !onExtra;
+  const left = onExtra ? extra : Math.max(0, limit - used);
   return (
-    <button type="button" aria-label={`${name} plan usage`} className="w-full px-2 pb-1 text-left" onClick={() => openUpgrade("plan_card")}>
-      <p className="flex items-baseline justify-between gap-2 text-xs">
-        <span className="text-muted-foreground">{name}</span>
-        <span><span className={cn("font-semibold", full ? "text-destructive" : "text-warning")}>{Math.floor(used).toLocaleString("en-US")}</span><span className="text-muted-foreground"> / {Math.round(limit).toLocaleString("en-US")} credits</span></span>
+    <div className="w-full px-2 pb-1">
+      <p className="flex items-center justify-between gap-2 text-xs">
+        <span className="min-w-0 truncate text-muted-foreground">
+          {name} · <span className={cn("font-semibold tabular-nums", onExtra ? "text-foreground" : out ? "text-destructive" : "text-warning-text")}>{Math.floor(left).toLocaleString("en-US")}</span> {onExtra ? "extra credits left" : "credits left"}
+        </span>
+        <button type="button" className="shrink-0 border border-foreground/30 px-1.5 leading-5 text-foreground hover:bg-foreground/5" onClick={() => openUpgrade("plan_card")}>+ buy more</button>
       </p>
-      <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-foreground/10"><div className={cn("h-full rounded-full", full ? "bg-destructive" : "bg-warning")} style={{ width: `${share(used, limit) * 100}%` }} /></div>
-    </button>
+      <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-foreground/10">
+        <div className={cn("h-full rounded-full", onExtra ? "bg-foreground/70" : out ? "bg-destructive" : "bg-warning")} style={{ width: `${(onExtra ? share(extra, extraTotal) : share(used, limit)) * 100}%` }} />
+      </div>
+    </div>
   );
 }
 

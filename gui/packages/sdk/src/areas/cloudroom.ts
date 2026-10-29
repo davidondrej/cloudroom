@@ -47,7 +47,7 @@ export interface CloudroomStatus {
   plan?: string | null;
   /** The account's Cloud Credits in the rolling 30 days: Free's sidebar card, paid plans' meter from 75%. Null while billing is
    *  off or in the cloud queue; null credits while metering is stale. */
-  planUsage?: { plan: string; credits: number | null; creditsLimit: number; og?: { name: string | null; endsAt: string } | null } | null;
+  planUsage?: { plan: string; credits: number | null; creditsLimit: number; extraCredits?: number; extraCreditsTotal?: number; og?: { name: string | null; endsAt: string } | null } | null;
 }
 
 export interface CloudroomCodexAuth {
@@ -112,9 +112,11 @@ export type AutoDeleteLimit = { name: string; days: number; label: string };
 export type AutoDeleteSetting = { days: AutoDeleteDays; kept: number | null; plan: AutoDeleteLimit | null; upgrade: AutoDeleteLimit | null };
 
 /** The user's own VPS for Cloud threads (ADR 0319). `health` is live, null while the VPS is offline; `busy` names what
- *  is over its limit, when new threads would go to Cloud instead. */
+ *  is over its limit, when new threads would go to Cloud instead. `critical`: memory or disk so full that its threads
+ *  may break, so the app offers to move them to Cloud. */
 export type CloudVps = {
   connected: boolean; name: string | null; useForCloud: boolean; fallback: boolean; busy: string | null;
+  critical?: { kind: "memory" | "disk"; used: number; total: number } | null;
   health: { cpu: number; memory: { used: number; total: number }; disk: { used: number; total: number }; running: number; os?: string | null } | null;
 };
 export type CloudVpsAction = { action: "code" } | { action: "disconnect" } | { action: "settings"; useForCloud?: boolean; fallback?: boolean };

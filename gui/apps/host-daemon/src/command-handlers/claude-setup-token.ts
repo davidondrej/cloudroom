@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import type { HostDaemonOnlineRpcResult } from "@cloudroom/host-daemon-contract";
@@ -8,7 +8,9 @@ import {
 } from "@cloudroom/process-utils";
 import {
   readClaudeToken,
+  readOpenedUrl,
   screenText,
+  writeBrowserOpener,
 } from "@cloudroom/process-utils/claude-token";
 import { spawn as spawnPty, type IPty } from "node-pty";
 import type { HostDaemonLogger } from "../logger.js";
@@ -63,16 +65,7 @@ function stop(runId: string): void {
 function start(runId: string, binary: string): Run {
   const windows = process.platform === "win32";
   const dir = mkdtempSync(join(tmpdir(), "cloudroom-claude-"));
-  // As on macOS, BROWSER hands back Claude's own link, which returns to this
-  // computer by itself; the link Claude prints instead needs a pasted code.
-  const browser = join(dir, windows ? "open.cmd" : "open");
-  writeFileSync(
-    browser,
-    windows
-      ? '@echo off\r\n>"%~dp0open.url" echo(%*\r\n'
-      : "#!/bin/sh\nprintf '%s' \"$1\" > \"$0.url\"\n",
-    { mode: 0o700 },
-  );
+  const browser = writeBrowserOpener(dir, windows);
   const cwd = homedir();
   const env = normalizeWindowsEnv({ ...process.env, BROWSER: browser });
   const launch = preparePortablePtyCommand({
@@ -120,15 +113,7 @@ function start(runId: string, binary: string): Run {
 
 function read(run: Run | undefined): Result {
   if (!run) return { state: "missing", url: null, token: null, screen: [] };
-  let url: string | null = null;
-  try {
-    url =
-      readFileSync(join(run.dir, "open.url"), "utf8")
-        .trim()
-        .replace(/^"|"$/g, "") || null;
-  } catch {
-    // Claude has not asked for the browser yet.
-  }
+  const url = readOpenedUrl(run.dir);
   const token = readClaudeToken(run.output, true);
   const settled = run.exited || token === run.lastToken;
   run.lastToken = token;

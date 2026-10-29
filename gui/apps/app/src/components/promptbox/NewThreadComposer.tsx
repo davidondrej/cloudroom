@@ -19,6 +19,7 @@ import { StarterPrompts } from "@/components/ActivationChecklist";
 import { TryCloudHint } from "@/components/promptbox/TryCloudHint";
 import { CloudBranchPicker } from "./CloudBranchPicker";
 import { Button } from "@cloudroom/shared-ui/button";
+import { Icon } from "@cloudroom/shared-ui/icon";
 import {
   getPluginConfigurationRoutePath,
   getSettingsRoutePath,
@@ -881,7 +882,7 @@ export function NewThreadComposer({
   const cloudFastSupported = executionTarget === "cloud" && cloudServiceTierSupported(cloudConnection.data, selectedProviderId);
   const cloudKnown = executionTarget === "cloud" && cloudCatalogKnown(cloudConnection.data);
   // The cloud queue (docs/scopes/public-launch.md): the card under the composer explains, and Send waits.
-  const cloudQueue = executionTarget === "cloud" ? cloudConnection.data?.cloudQueue ?? null : null;
+  const cloudQueue = executionTarget === "cloud" && !landsOnVps ? cloudConnection.data?.cloudQueue ?? null : null;
   const cloudAgentMissing = cloudKnown && !cloudHarness(cloudConnection.data, selectedProviderId);
   const cloudChoiceReason: CloudChoiceReason | null = cloudLocked
     ? "signed_out"
@@ -1957,7 +1958,12 @@ export function NewThreadComposer({
                   localStorage.setItem("cloudroom.executionTarget", "local");
                 }}
               />
-            ) : <><StarterPrompts onPick={pickStarter} /><OgLetter /><FreePlanTip /></>,
+            ) : <>{executionTarget === "cloud" && wantedCloudTarget === "vps" && !landsOnVps && vps.data ? (
+              <p className="flex items-center gap-1.5 px-3.5 pt-1.5 text-xs text-muted-foreground">
+                <Icon name="AlertTriangle" className="size-3.5 shrink-0 text-warning-text" aria-hidden />
+                {vps.data.health ? `Your VPS is busy (${vps.data.busy}), so this thread starts in Cloud.` : "Your VPS is offline, so this thread starts in Cloud."}
+              </p>
+            ) : null}<StarterPrompts onPick={pickStarter} /><OgLetter /><FreePlanTip /></>,
             banner:
               executionTarget === "cloud" ? (
                 cloudBlockedReason === null ? null : (
@@ -2130,6 +2136,7 @@ export function NewThreadComposer({
       vpsBusy,
       vpsConnected,
       landsOnVps,
+      wantedCloudTarget,
       primaryHostId,
       inputsControlProviderIds,
       providerHostId,

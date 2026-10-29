@@ -559,6 +559,47 @@ describe("web and desktop delivery", () => {
     }
   });
 
+  it("skips idle threads with no unread attention, such as imported chats", async () => {
+    const host = await setup();
+    try {
+      await host.addSubscription();
+      const readAt = Date.now() - 50;
+      const settled = host.setThread({
+        lastReadAt: readAt,
+        latestAttentionAt: readAt,
+      });
+      await host.harness.behavior.emitThreadEvent("thread.idle", {
+        thread: settled,
+        lastAssistantText: "Old reply",
+      });
+      await waitForCoalesce();
+      expect(host.harness.realtimeSignals).toHaveLength(0);
+      expect(host.expo.requests).toHaveLength(0);
+
+      const finished = host.setThread({
+        lastReadAt: readAt,
+        latestAttentionAt: readAt + 10,
+      });
+      await host.harness.behavior.emitThreadEvent("thread.idle", {
+        thread: finished,
+        lastAssistantText: "New reply",
+      });
+      await waitForCoalesce();
+      expect(host.harness.realtimeSignals).toEqual([
+        {
+          channel: "notification",
+          payload: expect.objectContaining({
+            threadId: finished.id,
+            body: "New reply",
+          }),
+        },
+      ]);
+      expect(host.expo.requests).toHaveLength(1);
+    } finally {
+      await host.cleanup();
+    }
+  });
+
   it("does not broadcast read, archived, or resumed threads", async () => {
     const host = await setup();
     try {

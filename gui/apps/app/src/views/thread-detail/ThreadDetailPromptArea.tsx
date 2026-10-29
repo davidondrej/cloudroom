@@ -25,6 +25,7 @@ import { Icon, type IconName } from "@cloudroom/shared-ui/icon";
 import { Button } from "@cloudroom/shared-ui/button";
 import { PromptStackCard } from "@/components/promptbox/banner/PromptStackCard";
 import { CloudDiskNotice, CloudUsageLimitNotice } from "@/components/CloudUsageLimitNotice";
+import { VpsThreadNotice } from "@/components/VpsThreadNotice";
 import type { PromptMentionLinkResolver } from "@/components/promptbox/editor/prompt-mention-link";
 import {
   getFollowUpPromptPlaceholder,
@@ -425,6 +426,8 @@ export function ThreadDetailPromptArea({
   const teleporting = Boolean(thread.teleport && !["complete", "cancelled"].includes(thread.teleport.phase));
   const transferredChild = Boolean(thread.teleport?.phase === "complete" && thread.teleport.owner !== thread.id);
   const cloudState = useCloudroomThread(thread.id, isCloud);
+  const onVps = isCloud && cloudState.data?.vps === true;
+  const cloudPlace = onVps ? "VPS" : CLOUDROOM_CLOUD_PRIMARY;
   const teleport = useTeleportThread(thread.id);
   const canTeleport = canTeleportThread(thread);
   const cloudLocked = useCloudLocked();
@@ -1639,14 +1642,14 @@ export function ThreadDetailPromptArea({
         <ThreadEnvironmentSummary
           projectName={projectName}
           environmentLabel={
-            teleporting || movingToLocal ? "Teleporting" : isCloud ? CLOUDROOM_CLOUD_PRIMARY : environmentLabel
+            teleporting || movingToLocal ? "Teleporting" : isCloud ? cloudPlace : environmentLabel
           }
           environmentCompactLabel={
-            teleporting || movingToLocal ? "Teleporting" : isCloud ? CLOUDROOM_CLOUD_PRIMARY : environmentCompactLabel
+            teleporting || movingToLocal ? "Teleporting" : isCloud ? cloudPlace : environmentCompactLabel
           }
           environmentHost={isCloud ? undefined : environmentHost}
-          environmentIcon={movingToLocal ? "Loading" : teleporting ? "Laptop" : isCloud ? "Cloud" : environmentIcon}
-          environmentProviderName={isCloud ? "Cloud" : environmentProviderName}
+          environmentIcon={movingToLocal ? "Loading" : teleporting ? "Laptop" : isCloud ? (onVps ? "Server" : "Cloud") : environmentIcon}
+          environmentProviderName={isCloud ? cloudPlace : environmentProviderName}
           environmentMachineProvider={isCloud ? undefined : environmentMachineProvider}
           environmentCheckout={isCloud ? cloudCheckout : environmentCheckout}
           onCreateNewThreadInEnvironment={
@@ -2153,9 +2156,10 @@ export function ThreadDetailPromptArea({
 
   const cloudFetchFailed = cloudState.error instanceof TypeError;
   const cloudOffline = cloudFetchFailed || (typeof navigator !== "undefined" && !navigator.onLine);
-  const cloudError = retryCloudStart.error?.message ?? (cloudFetchFailed ? undefined : cloudState.error?.message) ?? cloudState.data?.error;
+  const cloudError = cloudState.data?.move === "moving" ? undefined : retryCloudStart.error?.message ?? (cloudFetchFailed ? undefined : cloudState.error?.message) ?? cloudState.data?.error;
   const cloudReconnecting = !cloudError && (cloudOffline || cloudState.data?.reconnecting);
-  const cloudLimitNotice = isCloud && !shouldHideComposer ? cloudState.data?.usageLimit ? <CloudUsageLimitNotice /> : cloudState.data?.disk ? <CloudDiskNotice disk={cloudState.data.disk} /> : null : null;
+  const vpsNotice = cloudState.data?.vps || cloudState.data?.move ? <VpsThreadNotice threadId={thread.id} move={cloudState.data.move} outOfMemory={cloudState.data.outOfMemory} /> : null;
+  const cloudLimitNotice = isCloud && !shouldHideComposer ? cloudState.data?.usageLimit ? <CloudUsageLimitNotice /> : cloudState.data?.disk ? <><CloudDiskNotice disk={cloudState.data.disk} />{vpsNotice}</> : vpsNotice : null;
   const cloudFixPrompt = cloudError || cloudState.data?.failedStart ? cloudThreadFixPrompt(thread.id, thread.providerId, cloudError) : null;
   const cloudStatusKey = `${thread.id}|${cloudState.data?.failedStart ? "failed" : ""}|${cloudError ?? ""}`;
   const cloudStatusDismissed = dismissedCloudStatus === cloudStatusKey;

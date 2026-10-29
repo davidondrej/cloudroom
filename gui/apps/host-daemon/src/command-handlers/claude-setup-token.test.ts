@@ -5,7 +5,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { claudeSetupToken } from "./claude-setup-token.js";
 
 const TOKEN = `sk-ant-oat01-${"A".repeat(40)}`;
-// No % signs: the Windows fake runs BROWSER through `call`, which expands them again (real Claude passes the link as is).
+// No % signs: the Windows fake's `cmd /c` expands them. Like Claude, it starts the
+// opener as its own `cmd`, whose command line the opener saves.
 const LINK = "https://claude.com/cai/oauth/authorize?code=true&state=fake";
 const folders: string[] = [];
 
@@ -18,7 +19,7 @@ function fakeClaude(): string {
     const file = join(folder, "claude.cmd");
     writeFileSync(
       file,
-      `@echo off\r\ncall "%BROWSER%" "${LINK}"\r\necho Your OAuth token (valid for 1 year):\r\necho ${TOKEN}\r\necho Store this token securely.\r\n`,
+      `@echo off\r\ncmd /d /s /c ^""%BROWSER%" "${LINK}"^"\r\necho Your OAuth token (valid for 1 year):\r\necho ${TOKEN}\r\necho Store this token securely.\r\n`,
     );
     return file;
   }

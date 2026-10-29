@@ -76,11 +76,16 @@
   },
   "win": {
     "icon": "assets/icon.png",
+    "files": [
+      "!node_modules/date-fns/fp{,/**/*}",
+      "!node_modules/date-fns/locale/!(_lib|en-US|en-US.cjs){,/**/*}",
+      "!node_modules/date-fns/**/*.{js,d.ts,d.cts}"
+    ],
     "extraResources": [
       {
         "from": ".bundled-runtimes/python",
         "to": "app.asar.unpacked/node_modules/bb-app/server/dist/assets/python",
-        "filter": ["**/*", "!**/__pycache__/**", "!**/*.pyc"]
+        "filter": ["**/*", "!**/__pycache__/**", "!**/*.pyc", "!{include,tcl}/**", "!Lib/{idlelib,tkinter,turtledemo}/**"]
       },
       { "from": "../../LICENSE", "to": "LICENSE.cloudroom.txt" }
     ],

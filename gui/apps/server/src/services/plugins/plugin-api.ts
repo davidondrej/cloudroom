@@ -63,6 +63,7 @@ import type {
   PluginProviders,
   PluginRealtime,
   PluginRpc,
+  PluginClaudeSetupTokenRun,
   PluginServerApi,
   PluginSettingDescriptors,
   PluginSettingValue,
@@ -492,6 +493,7 @@ export function createPluginApi(options: {
   getMachineEnrollments: () => MachineEnrollments;
   getAppUrl: () => string | null;
   getLoopbackBaseUrl: () => string | undefined;
+  claudeSetupToken?: () => PluginClaudeSetupTokenRun;
   rpcCaller: PluginRpcCallerCredential;
   publishSignal: (channel: string, payload: unknown) => void;
   settingsChanged: () => void;
@@ -567,6 +569,7 @@ export function createPluginApi(options: {
     getSdk,
     getAppUrl,
     getLoopbackBaseUrl,
+    claudeSetupToken,
     rpcCaller,
     publishSignal,
     settingsChanged,
@@ -1022,6 +1025,12 @@ export function createPluginApi(options: {
       assertLive();
       return dataDir;
     },
+    ...(claudeSetupToken && {
+      experimental_claudeSetupToken: () => {
+        assertLive();
+        return claudeSetupToken();
+      },
+    }),
   };
 
   const hosts: PluginHosts = {

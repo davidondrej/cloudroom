@@ -578,18 +578,62 @@ describe("electron-builder signing config", () => {
     expect(JSON.parse(linux.stdout).extraMetadata.name).toBeUndefined();
   });
 
-  it("stops the preview helper in the NSIS hooks without quoting the install path into PowerShell", async () => {
+  it("stops the preview helper and finds Cloudroom in the NSIS hooks without quoting the install path into PowerShell", async () => {
     const script = await readFile(resolve(desktopPackageRoot, "build", "installer.nsh"), "utf8");
-    const powershell = script.split("\n").find((line) => line.includes("powershell.exe"));
+    const powershell = script.split("\n").filter((line) => line.includes("powershell.exe"));
 
     expect(script).toMatch(/!macro customInit\s+!insertmacro stopPreviewHelper/);
     expect(script).toMatch(/!macro customUnInit\s+!insertmacro stopPreviewHelper/);
-    expect(powershell).toContain("$$env:CLOUDROOM_INSTALL_DIR");
-    expect(powershell).not.toContain("$INSTDIR");
-    // Windows PowerShell 5.1: a lone match unrolls to one object, so count through @(...).
-    expect(powershell?.match(/@\(& \$\$left\)\.Count/g)).toHaveLength(2);
-    expect(powershell).not.toMatch(/[^@]\(& \$\$left\)\.Count/);
+    expect(script).toMatch(/!macro customCheckAppRunning[\s\S]*!insertmacro cloudroomAppCheck/);
+    expect(powershell).toHaveLength(2);
+    for (const line of powershell) {
+      expect(line).toContain("$$env:CLOUDROOM_INSTALL_DIR");
+      expect(line).not.toContain("$INSTDIR");
+      // Windows PowerShell 5.1: a lone match unrolls to one object, so count through @(...).
+      expect(line.match(/@\(& \$\$left\)\.Count/g)).toHaveLength(2);
+      expect(line).not.toMatch(/[^@]\(& \$\$left\)\.Count/);
+    }
     expect(script).toContain("${If} $0 == 1");
+  });
+
+  it("keeps every date-fns file pino-roll loads in the slimmer Windows build", async () => {
+    const config = JSON.parse(
+      await readFile(resolve(desktopPackageRoot, "electron-builder.config.json"), "utf8"),
+    );
+    const builderRequire = createRequire(require.resolve("electron-builder/package.json"));
+    const { getNodeModuleFileMatcher } = builderRequire("app-builder-lib/out/fileMatcher.js");
+    const keep: (file: string, stat: object) => boolean = getNodeModuleFileMatcher(
+      desktopPackageRoot,
+      "/out",
+      (value: string) => value,
+      config.win,
+      { config, debugLogger: { isEnabled: false } },
+    ).createFilter();
+    const pinoRoll = createRequire(resolve(desktopPackageRoot, "node_modules/bb-app/package.json")).resolve("pino-roll");
+    const dateFnsRoot = dirname(createRequire(pinoRoll).resolve("date-fns/package.json"));
+    const loaded = await new Promise<string>((done, fail) => {
+      const child = spawn(process.execPath, [
+        "-e",
+        `require(${JSON.stringify(resolve(dirname(pinoRoll), "lib/utils.js"))}); console.log(JSON.stringify(Object.keys(require.cache)))`,
+      ]);
+      let out = "";
+      child.stdout.on("data", (chunk) => (out += chunk));
+      child.on("error", fail);
+      child.on("close", () => done(out));
+    });
+    const files = (JSON.parse(loaded) as string[])
+      .filter((file) => file.startsWith(dateFnsRoot))
+      .map((file) => file.slice(dateFnsRoot.length + 1).replaceAll("\\", "/"));
+    const kept = (file: string) =>
+      keep(resolve(dateFnsRoot, file), {
+        isDirectory: () => false,
+        moduleFullFilePath: `node_modules/date-fns/${file}`,
+      });
+
+    expect(files.length).toBeGreaterThan(100);
+    expect(files.filter((file) => !kept(file))).toEqual([]);
+    expect(kept("package.json")).toBe(true);
+    expect(kept("fp/format.cjs") || kept("locale/de.cjs") || kept("format.js") || kept("format.d.ts")).toBe(false);
   });
 
   it("signs Windows-only builds with CSC_LINK without asking for Apple credentials", async () => {

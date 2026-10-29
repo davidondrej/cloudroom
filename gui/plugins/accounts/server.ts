@@ -28,7 +28,7 @@ import {
   type Provider,
   type UsageWindow,
 } from "./src/contract.js";
-import { prepareProfile } from "./src/profile.js";
+import { prepareProfile, releaseProfile } from "./src/profile.js";
 import { SignInAgainError, type Secret, type SignedIn } from "./src/tokens.js";
 
 const USAGE_EVERY_MS = 5 * 60_000;
@@ -95,6 +95,14 @@ export default async function plugin(bb: BbPluginApi) {
   const profilesDir = path.join(path.dirname(secretsDir), "profiles");
   const profilePath = (profile: string) => path.join(profilesDir, profile);
   const dropProfile = async (profile: string) => {
+    try {
+      await releaseProfile(profilePath(profile));
+    } catch (error) {
+      bb.log.warn(
+        `Claude account folder kept: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return;
+    }
     await signOut(profilePath(profile));
     await fs.rm(profilePath(profile), { recursive: true, force: true });
   };
@@ -123,7 +131,9 @@ export default async function plugin(bb: BbPluginApi) {
   let inCloud = z.string().nullable().catch(null).parse(await kv.get("cloud:v1"));
   const usage = new Map<string, Usage>();
   const threadAccount = new Map<string, string>();
-  const claudeLogin = new ClaudeLogin();
+  const claudeLogin = new ClaudeLogin(() =>
+    bb.server.experimental_claudeSetupToken?.(),
+  );
   const adding = new Map<string, Adding>();
   void fs.readdir(profilesDir).then(
     (found) =>

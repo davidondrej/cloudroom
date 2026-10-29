@@ -55,7 +55,8 @@ const placeOf = (thread: string, project: SandboxProject) => ({ thread, project:
 export type CloudQueue = { position: number; total: number; regionBlocked: boolean };
 /** The account's Cloud Credits in the rolling 30 days (ADR 0307), for the sidebar card; null credits while metering is stale.
  *  `og` is the OG letter, which the website sends only to OGs still on the free Pro it gave them (ADR 0218). */
-export type PlanUsage = { plan: string; credits: number | null; creditsLimit: number; og: { name: string | null; endsAt: string } | null };
+/** Plan credits used in the rolling 30 days, and credits left in live packs (ADR 0317): 0 from older websites. */
+export type PlanUsage = { plan: string; credits: number | null; creditsLimit: number; extraCredits: number; extraCreditsTotal: number; og: { name: string | null; endsAt: string } | null };
 const USAGE_LIMIT = "cloud_usage_limit";
 const AGENT_LIMIT = "cloud_agent_limit";
 const CLOUD_QUEUE = "cloud_queue";
@@ -574,8 +575,10 @@ export class SandboxDirectory {
     return this.call(body, "shares");
   }
 
-  private remember(view: View): View {
+  /** `known`: the view is the website's answer, so it says whether the thread runs on the VPS. */
+  private remember(view: View, known = true): View {
     this.views.set(view.thread, view);
+    if (known) this.placed.set(view.thread, view.vps === true);
     return view;
   }
 
@@ -639,7 +642,7 @@ export class SandboxDirectory {
     const place = placeOf(thread, project);
     if (!wake && view?.state !== "awake") {
       const found = (await this.awakeList(fresh)).get(thread);
-      if (found) view = this.remember({ thread, state: "awake", generation: view?.generation ?? 0, issue: null, ...found });
+      if (found) view = this.remember({ thread, state: "awake", generation: view?.generation ?? 0, issue: null, ...found }, false);
       else if (this.awakeIssue) throw this.awakeIssue;
     }
     if (view?.state === "awake" && view.origin && view.token) return { url: view.origin, token: view.token };
@@ -669,7 +672,9 @@ export class SandboxDirectory {
         const tries = (previous?.tries ?? 0) + 1;
         // A 4xx answer (say, usage limit) won't fix itself in 2 s, so it backs off at once.
         const quick = tries <= 3 && error instanceof CloudroomError && error.status === null;
-        const delay = quick ? 2_000 : Math.min(Math.max(previous?.delay ?? 0, 2_500) * 2, 300_000);
+        // A thread moving to Cloud continues there in about a minute: keep checking.
+        const moving = error instanceof CloudroomError && error.code === "sandbox_moving";
+        const delay = quick ? 2_000 : moving ? 5_000 : Math.min(Math.max(previous?.delay ?? 0, 2_500) * 2, 300_000);
         this.backoff.set(thread, { until: Date.now() + delay, delay, tries });
         throw error;
       }).finally(() => this.wakes.delete(thread));
@@ -767,10 +772,12 @@ export class SandboxDirectory {
       void this.call({ action: "usage" }).then((value) => {
         // A website without credits (say, rolled back) shows no card rather than old units.
         const parsed = z.object({ plan: z.string(), credits: z.number().nullable(), credits_limit: z.number(),
+          extra_credits: z.number().catch(0), extra_credits_total: z.number().catch(0),
           og: z.object({ name: z.string().nullable(), ends_at: z.string() }).nullable().catch(null) }).safeParse(value);
         const recheck = z.object({ recheck_seconds: z.number().default(600) }).parse(value).recheck_seconds;
         this.usage = {
           value: parsed.success ? { plan: parsed.data.plan, credits: parsed.data.credits, creditsLimit: parsed.data.credits_limit,
+            extraCredits: parsed.data.extra_credits, extraCreditsTotal: parsed.data.extra_credits_total,
             og: parsed.data.plan === "pro" && parsed.data.og ? { name: parsed.data.og.name, endsAt: parsed.data.og.ends_at } : null } : null,
           next: Date.now() + Math.max(recheck, 60) * 1000,
         };
@@ -837,6 +844,39 @@ export class SandboxDirectory {
 
   /** A broken stream or failed request may mean the sandbox went to sleep; look it up again next time. */
   forget(thread: string): void { this.views.delete(thread); this.awake.delete(thread); }
+
+  /** Whether each thread runs on the user's own VPS (ADR 0319), from the website's last answer about it. */
+  private placed = new Map<string, boolean>();
+  onVps(thread: string): boolean {
+    const known = this.placed.get(thread);
+    if (known !== undefined || !thread || !this.vpsConnected) return known === true;
+    // Found only through the awake list (say, after the app restarted), which doesn't say: a lookup, once.
+    this.placed.set(thread, false);
+    void this.call({ action: "lookup", thread }).then(value => this.remember(viewSchema.parse(value)), () => {});
+    return false;
+  }
+  /** A VPS thread's move to Cloud: under way, or failed (the copy didn't finish, so it stayed on the VPS). */
+  private moves = new Map<string, "moving" | "failed">();
+  moveState(thread: string): "moving" | "failed" | null { return this.moves.get(thread) ?? null; }
+  /** Moves a VPS thread to Cloud: the website copies it off the VPS, and its next wake starts it in Cloud. Looks it up
+   *  every 5 s (a lookup never wakes) until it lands in Cloud or the copy fails, for up to 35 minutes. */
+  async move(thread: string): Promise<void> {
+    const view = this.remember(viewSchema.parse(await this.call({ action: "move", thread })));
+    this.awake.delete(thread);
+    this.backoff.delete(thread);
+    if (!view.vps) { this.moves.delete(thread); return; }
+    this.moves.set(thread, "moving");
+    const until = Date.now() + 35 * 60_000;
+    const check = () => void this.call({ action: "lookup", thread }).then(value => viewSchema.parse(value), () => null).then(found => {
+      if (found) this.remember(found);
+      // Copying keeps the row awake on the VPS. Anything else there means the copy failed and it went to sleep.
+      if (found && !found.vps) this.moves.delete(thread);
+      else if (found && found.state !== "awake") this.moves.set(thread, "failed");
+      else if (Date.now() < until) setTimeout(check, 5_000).unref();
+      else this.moves.delete(thread);
+    });
+    setTimeout(check, 5_000).unref();
+  }
   coolingDown(thread: string | null): boolean { return Boolean(thread && (this.backoff.get(thread)?.until ?? 0) > Date.now()); }
 
   /** Saves a thread's title, project name, harness, model, Core session ID, and the thread that started it on the

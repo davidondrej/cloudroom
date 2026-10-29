@@ -16,7 +16,7 @@ import { sdk } from "@/lib/sdk";
 
 const KEY = ["cloudroom-vps"];
 const GB = 1024 ** 3;
-export function useCloudVps({ poll = false }: { poll?: boolean } = {}) {
+export function useCloudVps({ poll = false }: { poll?: boolean | number } = {}) {
   const account = useCloudroomAccount();
   return useQuery({
     queryKey: KEY,
@@ -24,7 +24,7 @@ export function useCloudVps({ poll = false }: { poll?: boolean } = {}) {
     enabled: Boolean(account.data?.account),
     retry: false,
     staleTime: 30_000,
-    refetchInterval: poll ? 3_000 : false,
+    refetchInterval: poll === true ? 3_000 : poll,
   });
 }
 
@@ -37,7 +37,7 @@ export function VpsMachineRow() {
   const vps = useCloudVps();
   const [open, setOpen] = useState(false);
   if (!vps.data?.connected) return null;
-  const { name, health, busy } = vps.data;
+  const { name, health, busy, fallback } = vps.data;
   const os = health?.os ?? null;
   const label = name?.split(".")[0] ?? "VPS";
   return (
@@ -56,7 +56,12 @@ export function VpsMachineRow() {
           <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-subtle-foreground/75">
             <span className="inline-flex min-w-0 items-center gap-1.5">
               <MachineStatusDot connected={health !== null} />
-              <span className={cn("min-w-0 truncate", busy && "text-warning-text")}>{health === null ? "Offline" : busy ? `Busy: ${busy}` : "Online"}</span>
+              {health !== null && busy ? (
+                <span className="inline-flex min-w-0 items-center gap-1 text-warning-text">
+                  <Icon name="AlertTriangle" className="size-3.5 shrink-0" aria-hidden />
+                  <span className="min-w-0 truncate">{busy[0]!.toUpperCase() + busy.slice(1)}{fallback ? " · new threads start in Cloud" : ""}</span>
+                </span>
+              ) : <span className="min-w-0 truncate">{health === null ? "Offline" : "Online"}</span>}
             </span>
             {os ? <span className="truncate">{shortOsName(os)}</span> : null}
             {health ? <span className="shrink-0">{health.running} {health.running === 1 ? "agent" : "agents"} running</span> : null}

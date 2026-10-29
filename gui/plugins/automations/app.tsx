@@ -25,14 +25,14 @@ import type {
 import {
   automationEnvironmentLabel,
   providerModelRouting,
-  RunRow,
   ScriptAutomationDefinition,
 } from "./detail-view";
 import {
-  Field,
   LoopDialog,
   type LoopDialogChanges,
+  type LoopDialogContext,
   type LoopDialogLoop,
+  type LoopDialogRun,
   type Priority,
 } from "./loop-dialog";
 import { replaceWebhookUrl, useCloudAutomations } from "./cloud-view";
@@ -313,96 +313,28 @@ function useAutomation(route: DetailRoute): {
   return { ...state, refetch };
 }
 
-interface RunsState {
-  runs: AutomationRunResponse[];
-  nextCursor: string | null;
-  loading: boolean;
-  loadingMore: boolean;
-  error: string | null;
-}
-
-function useRuns(
-  route: DetailRoute,
-): RunsState & { loadMore: () => void; retry: () => void } {
+function useRuns(route: DetailRoute): AutomationRunResponse[] | null {
   const rpc = useRpc<typeof automationRpcContract>();
   const { projectId, automationId } = route;
-  const [state, setState] = useState<RunsState>({
-    runs: [],
-    nextCursor: null,
-    loading: true,
-    loadingMore: false,
-    error: null,
-  });
+  const [runs, setRuns] = useState<AutomationRunResponse[] | null>(null);
   const requestRef = useRef(0);
-  const loadMoreInFlightRef = useRef(false);
 
-  const loadFirstPage = useCallback(() => {
+  const load = useCallback(() => {
     const requestId = ++requestRef.current;
-    setState((prev) => ({ ...prev, loading: true, error: null }));
     rpc.call("automations_runs", { projectId, automationId }).then(
       (result) => {
-        if (requestRef.current !== requestId) return;
-        const page = result as AutomationRunListResponse;
-        setState({
-          runs: page.runs,
-          nextCursor: page.nextCursor,
-          loading: false,
-          loadingMore: false,
-          error: null,
-        });
+        if (requestRef.current === requestId)
+          setRuns((result as AutomationRunListResponse).runs);
       },
-      (error: unknown) => {
-        if (requestRef.current !== requestId) return;
-        setState({
-          runs: [],
-          nextCursor: null,
-          loading: false,
-          loadingMore: false,
-          error: errorText(error),
-        });
+      () => {
+        if (requestRef.current === requestId) setRuns([]);
       },
     );
   }, [rpc, projectId, automationId]);
 
-  const loadMore = useCallback(() => {
-    if (
-      state.nextCursor === null ||
-      state.loadingMore ||
-      loadMoreInFlightRef.current
-    ) {
-      return;
-    }
-    const cursor = state.nextCursor;
-    const requestId = requestRef.current;
-    loadMoreInFlightRef.current = true;
-    setState((prev) => ({ ...prev, loadingMore: true }));
-    rpc
-      .call("automations_runs", { projectId, automationId, cursor })
-      .then(
-        (result) => {
-          if (requestRef.current !== requestId) return;
-          const page = result as AutomationRunListResponse;
-          setState((current) => ({
-            ...current,
-            runs: [...current.runs, ...page.runs],
-            nextCursor: page.nextCursor,
-            loadingMore: false,
-          }));
-        },
-        (error: unknown) => {
-          if (requestRef.current !== requestId) return;
-          toast.error(errorText(error));
-          setState((current) => ({ ...current, loadingMore: false }));
-        },
-      )
-      .finally(() => {
-        loadMoreInFlightRef.current = false;
-      });
-  }, [rpc, projectId, automationId, state.nextCursor, state.loadingMore]);
-
   useEffect(() => {
-    loadFirstPage();
-  }, [loadFirstPage]);
+    load();
+  }, [load]);
   useRealtime("automations", (payload) => {
     const signal = asSignal(payload);
     if (
@@ -410,10 +342,32 @@ function useRuns(
       signal.kind === "automation-runs-changed" &&
       signal.projectId === projectId
     ) {
-      loadFirstPage();
+      load();
     }
   });
-  return { ...state, loadMore, retry: loadFirstPage };
+  return runs;
+}
+
+function localRun(run: AutomationRunResponse): LoopDialogRun[] {
+  if (run.status === "skipped") return [];
+  const line = (run.error ?? run.output)?.trim().split("\n")[0];
+  return [
+    {
+      id: run.id,
+      at: run.startedAt,
+      status: run.status === "succeeded" ? "done" : run.status,
+      text:
+        line ||
+        (run.status === "running"
+          ? "Running"
+          : run.status === "failed"
+            ? "Failed"
+            : run.runMode === "script"
+              ? "Script ran"
+              : "Agent run finished"),
+      threadId: run.runMode === "agent" ? run.threadId : null,
+    },
+  ];
 }
 
 function useMutations() {
@@ -698,10 +652,11 @@ function OverviewView({
           : {
               projectId: openRoute.projectId,
               automationId: openRoute.automationId,
-              render: (priority, onPriorityChange) => (
+              render: (priority, onPriorityChange, context) => (
                 <LocalLoopDialog
                   key={openRoute.automationId}
                   route={openRoute}
+                  context={context}
                   priority={priority}
                   onPriorityChange={onPriorityChange}
                   onClose={onCloseRoute}
@@ -757,19 +712,20 @@ function localLoop(automation: AutomationResponse): LoopDialogLoop {
 
 function LocalLoopDialog({
   route,
+  context,
   priority,
   onPriorityChange,
   onClose,
 }: {
   route: DetailRoute;
+  context: LoopDialogContext;
   priority: Priority;
   onPriorityChange: (priority: Priority) => void;
   onClose: () => void;
 }) {
-  const navigate = useBbNavigate();
   const rpc = useRpc<typeof automationRpcContract>();
   const { automation, error, refetch } = useAutomation(route);
-  const runsState = useRuns(route);
+  const ownRuns = useRuns(route);
   const mutations = useMutations();
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [deleting, setDeleting] = useState(false);
@@ -897,6 +853,14 @@ function LocalLoopDialog({
     <>
       <LoopDialog
         loop={loop}
+        context={{
+          ...context,
+          runs: context.runs?.length
+            ? context.runs
+            : ownRuns
+              ? ownRuns.flatMap(localRun)
+              : context.runs,
+        }}
         priority={priority}
         onPriorityChange={onPriorityChange}
         onEnabledChange={(enabled) => void runAction(enabled ? "resume" : "pause")}
@@ -904,19 +868,14 @@ function LocalLoopDialog({
         onDelete={() => setDeleteOpen(true)}
         onSave={save}
         onClose={onClose}
-        body={
-          readable.execution.mode === "script" ? (
-            <Field label="Script">
-              <ScriptAutomationDefinition execution={readable.execution} />
-            </Field>
-          ) : undefined
-        }
-      >
-        <LoopRuns
-          state={runsState}
-          onOpenThread={(threadId) => navigate.toThread(threadId)}
-        />
-      </LoopDialog>
+        {...(readable.execution.mode === "script"
+          ? {
+              script: (
+                <ScriptAutomationDefinition execution={readable.execution} />
+              ),
+            }
+          : {})}
+      />
       {deleteDialog}
     </>
   );
@@ -943,51 +902,6 @@ function LoopStatusDialog({
         {children ? <DialogFooter>{children}</DialogFooter> : null}
       </DialogContent>
     </Dialog>
-  );
-}
-
-function LoopRuns({
-  state,
-  onOpenThread,
-}: {
-  state: ReturnType<typeof useRuns>;
-  onOpenThread: (threadId: string) => void;
-}) {
-  return (
-    <div className="flex min-w-0 flex-col gap-1.5">
-      <span className="text-xs text-muted-foreground">Runs</span>
-      {state.error !== null ? (
-        <div className="flex items-center justify-between gap-3 rounded-md border border-border px-3 py-2 text-sm text-muted-foreground">
-          Runs unavailable.
-          <Button type="button" variant="outline" size="sm" onClick={state.retry}>
-            Retry
-          </Button>
-        </div>
-      ) : state.loading ? null : state.runs.length === 0 ? (
-        <div className="rounded-md border border-border px-3 py-2 text-sm text-muted-foreground">
-          No runs yet.
-        </div>
-      ) : (
-        <div className="max-h-72 divide-y divide-border/60 overflow-y-auto rounded-md border border-border">
-          {state.runs.map((run) => (
-            <RunRow key={run.id} run={run} onOpenThread={onOpenThread} />
-          ))}
-          {state.nextCursor !== null ? (
-            <div className="flex justify-center py-1.5">
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                disabled={state.loadingMore}
-                onClick={state.loadMore}
-              >
-                {state.loadingMore ? "Loading…" : "Load more"}
-              </Button>
-            </div>
-          ) : null}
-        </div>
-      )}
-    </div>
   );
 }
 

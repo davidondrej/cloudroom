@@ -447,6 +447,7 @@ class CloudroomService {
   private readonly connectionIssues = new Map<string, Partial<Record<ConnectionPhase, ConnectionIssue>>>();
   private readonly sentQueues = new Map<string, string>();
   /** Threads whose cloud disk is full or low, from Core's storage records. The composer shows one live card for it. */
+  private readonly outOfMemory = new Set<string>();
   private readonly disk = new Map<string, { paused: boolean; reason: "disk_capacity" | "measurement_unavailable"; usedBytes: number | null; totalBytes: number | null }>();
   private readonly deliveries = new Map<string, Promise<void>>();
   private timer: ReturnType<typeof setInterval> | null = null;
@@ -1341,7 +1342,7 @@ class CloudroomService {
     const serviceTier = input.service_tier === "fast" ? "fast" : "default";
     const initial = prompts.find(item => item.id === `first_${threadId}`);
     const issues = Object.values(this.connectionIssues.get(threadId) ?? {});
-    return { authRequired: !saved.sessionId && authRequiredMessages.has(saved.error ?? ""), starting: !saved.queuePaused && Boolean(initial && ["sending", "accepted"].includes(initial.state)), sessionId: saved.sessionId, paused: saved.queuePaused, failedStart: !saved.sessionId && initial?.state === "failed", model: saved.model, reasoning, serviceTier, error: saved.error ?? issues.find(issue => !issue.reconnecting)?.message ?? null, reconnecting: issues.some(issue => issue.reconnecting), usageLimit: Boolean(sandboxThread(saved.coreUrl)) && (this.sandboxes.usageLimited() || this.sandboxes.agentLimited(sandboxThread(saved.coreUrl) ?? "")), disk: this.disk.get(threadId) ?? null, awake: !sandboxThread(saved.coreUrl) || this.sandboxes.isAwake(sandboxThread(saved.coreUrl) ?? ""), pendingDelivery: commands(this.deps.db, threadId).filter((c) => c.state === "sending").length };
+    return { authRequired: !saved.sessionId && authRequiredMessages.has(saved.error ?? ""), starting: !saved.queuePaused && Boolean(initial && ["sending", "accepted"].includes(initial.state)), sessionId: saved.sessionId, paused: saved.queuePaused, failedStart: !saved.sessionId && initial?.state === "failed", model: saved.model, reasoning, serviceTier, error: saved.error ?? issues.find(issue => !issue.reconnecting)?.message ?? null, reconnecting: issues.some(issue => issue.reconnecting), usageLimit: Boolean(sandboxThread(saved.coreUrl)) && (this.sandboxes.usageLimited() || this.sandboxes.agentLimited(sandboxThread(saved.coreUrl) ?? "")), disk: this.disk.get(threadId) ?? null, awake: !sandboxThread(saved.coreUrl) || this.sandboxes.isAwake(sandboxThread(saved.coreUrl) ?? ""), vps: this.sandboxes.onVps(sandboxThread(saved.coreUrl) ?? ""), move: this.sandboxes.moveState(sandboxThread(saved.coreUrl) ?? ""), outOfMemory: this.outOfMemory.has(threadId), pendingDelivery: commands(this.deps.db, threadId).filter((c) => c.state === "sending").length };
   }
 
   async create(request: CreateThreadRequest, awaitingCore = false, fork?: { sourceThreadId: string; endSequence: number }): Promise<Thread> {
@@ -2801,6 +2802,12 @@ class CloudroomService {
           this.setConnectionIssue(saved.threadId, "replay");
           if (record.kind === "rewind") this.deps.hub.notifyThread(saved.threadId, ["history-rewritten"]);
           if (record.kind === "storage_recovered") this.disk.delete(saved.threadId);
+          // The agent died for lack of memory (Core sets this); its next turn clears it.
+          if (record.kind === "state") {
+            const data = record.data as { state?: unknown; out_of_memory?: unknown };
+            if (data.out_of_memory === true) this.outOfMemory.add(saved.threadId);
+            else if (data.state === "running") this.outOfMemory.delete(saved.threadId);
+          }
           if (record.kind === "storage_warning" || record.kind === "storage_pause") this.noteDisk(saved.threadId, client, record.data);
           this.notify(saved.threadId, eventTypes, ["state", "receipt", "native_identity", "storage_warning", "storage_pause", "storage_recovered"].includes(record.kind));
         }
@@ -2871,6 +2878,13 @@ class CloudroomService {
   }
 
   /** "Try again" on a failed project copy: plans it again from the thread's first message, so it also works after a restart. */
+  /** Moves a VPS thread to Cloud (ADR 0319), when its VPS runs low. */
+  async moveToCloud(threadId: string): Promise<void> {
+    const sandbox = sandboxThread(binding(this.deps.db, threadId)?.coreUrl ?? "");
+    if (!sandbox) throw new ApiError(409, "cloudroom_unsupported", "Only Cloud threads can move to Cloud.");
+    await this.sandboxes.move(sandbox);
+  }
+
   async retryCopy(threadId: string): Promise<void> {
     const saved = binding(this.deps.db, threadId);
     const input = command(this.deps.db, `first_${threadId}`)?.input;

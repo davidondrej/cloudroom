@@ -8,6 +8,7 @@
     "./detail-view": "./detail-view.tsx",
     "./overview-view": "./overview-view.tsx",
     "./cloud-view": "./cloud-view.tsx",
+    "./loop-dialog": "./loop-dialog.tsx",
     "./rpc-types": "./src/rpc-types.ts"
   },
   "engines": {

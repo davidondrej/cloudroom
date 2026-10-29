@@ -1,4 +1,4 @@
-import { and, eq, getTableColumns, isNull, sql } from "drizzle-orm";
+import { and, eq, getTableColumns, inArray, isNull, sql } from "drizzle-orm";
 import { cloudroomCommands, cloudroomThreads, threads, threadPluginMetadata, type DbQueryConnection } from "@cloudroom/db";
 import type { ProjectCopyProgress, TeleportLocalStep } from "@cloudroom/domain";
 import { emitPluginThreadStatusEntered } from "../plugins/plugin-thread-events.js";
@@ -38,6 +38,29 @@ export function projectCopyProgress(db: DbQueryConnection, threadId: string): Pr
 export function saveProjectCopyProgress(db: DbQueryConnection, threadId: string, value: ProjectCopyProgress): void {
   db.insert(threadPluginMetadata).values({ threadId, pluginId: projectCopyNamespace, metadataJson: JSON.stringify(value) })
     .onConflictDoUpdate({ target: [threadPluginMetadata.threadId, threadPluginMetadata.pluginId], set: { metadataJson: JSON.stringify(value) } }).run();
+}
+
+const TRANSFER_PROGRESS_BATCH_SIZE = 900;
+
+export function listThreadTransferProgress(db: DbQueryConnection, threadIds: readonly string[]) {
+  const result = new Map<string, { teleport?: TeleportProgress; projectCopy?: ProjectCopyProgress }>();
+  for (let offset = 0; offset < threadIds.length; offset += TRANSFER_PROGRESS_BATCH_SIZE) {
+    const rows = db.select({ threadId: threadPluginMetadata.threadId, pluginId: threadPluginMetadata.pluginId, value: threadPluginMetadata.metadataJson })
+      .from(threadPluginMetadata)
+      .where(and(
+        inArray(threadPluginMetadata.threadId, threadIds.slice(offset, offset + TRANSFER_PROGRESS_BATCH_SIZE)),
+        inArray(threadPluginMetadata.pluginId, [teleportNamespace, projectCopyNamespace]),
+      )).all();
+    for (const row of rows) {
+      const value = JSON.parse(row.value);
+      if (!value) continue;
+      const progress = result.get(row.threadId) ?? {};
+      if (row.pluginId === teleportNamespace) progress.teleport = value as TeleportProgress;
+      else progress.projectCopy = value as ProjectCopyProgress;
+      result.set(row.threadId, progress);
+    }
+  }
+  return result;
 }
 
 // The saved Git status can be large, and bindings are read every 1.5 s, so only lastGitStatus() reads it.

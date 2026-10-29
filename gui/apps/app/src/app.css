@@ -823,10 +823,24 @@
   }
 }
 
-[data-unfocused-paused],
-[data-unfocused-paused]::before,
-[data-unfocused-paused]::after {
+[data-window-blurred]
+  :is(
+    .animate-shine,
+    .animate-shine-icon,
+    .animate-spin,
+    .animate-pulse,
+    .motion-safe\:animate-pulse,
+    .animate-indeterminate-progress,
+    .bb-teleport-up,
+    .bb-teleport-down,
+    .bb-hero-chip,
+    .prompt-ultracode-highlight,
+    [data-scan-wave]
+  ),
+[data-window-blurred] :is(.prompt-ultracode-highlight, .bb-beam)::before,
+[data-window-blurred] :is(.prompt-ultracode-highlight, .bb-beam)::after {
   animation-play-state: paused !important;
+  will-change: auto;
 }
 
 .bb-search-flash {

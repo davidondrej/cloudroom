@@ -291,8 +291,9 @@ builds write `latest-*.yml`, so releases must be marked latest, not prerelease. 
 Electron auto-update unless `BB_DESKTOP_AUTO_UPDATE=1` is set.
 
 Windows reads `latest.yml` from the same release, downloads the `.exe` in the
-background, and runs it silently on quit. **Relaunch** installs silently and
-reopens Cloudroom. Before anything stops, it checks the downloaded installer
+background, and runs it silently on quit. **Restart to update** keeps Cloudroom
+open until the installer's progress window shows (the installer then closes it),
+and reopens Cloudroom when it finishes. Before anything stops, it checks the downloaded installer
 is still on disk. If the installer can't start, Cloudroom reopens on the old
 version; if that failure comes after Cloudroom has quit, the next launch sees
 the old version and offers the download again. To test updates against a local feed, build both versions with

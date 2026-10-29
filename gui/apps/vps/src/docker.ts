@@ -14,6 +14,9 @@ const SHM_BYTES = 1024 ** 3;
 // The process cap stops a runaway agent from exhausting the VPS's process table.
 const OOM_SCORE_ADJ = 500;
 const PIDS_LIMIT = 8192;
+// All sandboxes share this systemd slice; the installer caps it at 90% of the VPS's memory, so together they can't
+// starve the VPS itself. Only with Docker's systemd cgroup driver (the default on current Debian and Ubuntu).
+const SLICE = "cloudroom.slice";
 
 export type Status = "running" | "stopped" | "missing";
 export type ExecResult = { exitCode: number | null; stdout: string | null; timedOut: boolean };
@@ -96,6 +99,7 @@ export function create(name: string, image: string): Promise<{ created: boolean 
         Memory: memory,
         OomScoreAdj: OOM_SCORE_ADJ,
         PidsLimit: PIDS_LIMIT,
+        ...((await hostInfo()).CgroupDriver === "systemd" ? { CgroupParent: SLICE } : {}),
         RestartPolicy: { Name: "no" },
       },
     };
@@ -244,26 +248,31 @@ async function memoryInfo(): Promise<{ used: number; total: number }> {
   return { used: total - kb("MemAvailable"), total };
 }
 
-// CPU over the last minute, from /proc/stat samples every 5 s. /proc shows the whole VPS, even from a container.
+// CPU over the last minute and memory over the last 2, from /proc samples every 5 s. /proc shows the whole VPS, even
+// from a container.
 const samples: { busy: number; total: number }[] = [];
-async function sampleCpu(): Promise<void> {
+const memorySamples: number[] = [];
+async function sample(): Promise<void> {
   const [, ...fields] = (await readFile("/proc/stat", "utf8")).split("\n")[0]!.trim().split(/\s+/);
   const values = fields.map(Number);
   const idle = (values[3] ?? 0) + (values[4] ?? 0);
   const total = values.reduce((sum, value) => sum + value, 0);
   samples.push({ busy: total - idle, total });
   if (samples.length > 13) samples.shift();
+  memorySamples.push((await memoryInfo()).used);
+  if (memorySamples.length > 24) memorySamples.shift();
 }
-void sampleCpu();
-setInterval(() => void sampleCpu().catch(() => {}), 5_000).unref();
+void sample();
+setInterval(() => void sample().catch(() => {}), 5_000).unref();
 
 /** What the website checks before it starts a thread here (ADR 0319). Disk is the folder Docker and this service share. */
-// The VPS's own OS ("Ubuntu 24.04.5 LTS"), for its logo in Settings. Docker reports the host's: this service runs in a
-// container, whose /etc/os-release is the image's. It never changes while the service runs.
-let hostOs: Promise<string | null> | undefined;
-const osName = () => (hostOs ??= ok(api("GET", "/info"), "Info").then((info) => json<{ OperatingSystem?: string }>(info).OperatingSystem ?? null).catch(() => {
-  hostOs = undefined;
-  return null;
+// Docker's view of the host: its OS ("Ubuntu 24.04.5 LTS", for its logo in Settings; this service's own container
+// would report the image's) and cgroup driver. It never changes while the service runs.
+type HostInfo = { OperatingSystem?: string; CgroupDriver?: string };
+let host: Promise<HostInfo> | undefined;
+const hostInfo = (): Promise<HostInfo> => (host ??= ok(api("GET", "/info"), "Info").then((info) => json<HostInfo>(info)).catch(() => {
+  host = undefined;
+  return {} as HostInfo;
 }));
 
 export async function health() {
@@ -271,11 +280,13 @@ export async function health() {
   const cpu = first && last && last.total > first.total ? (last.busy - first.busy) / (last.total - first.total) : 0;
   const disk = await statfs(process.env.DATA_DIR ?? "/data");
   const running = (await containers()).filter((each) => each.State === "running").length;
+  const memory = await memoryInfo();
   return {
     cpu: Math.round(cpu * 1000) / 1000,
-    memory: await memoryInfo(),
+    // `sustained`: the least used in the last 2 minutes, so a short spike never reads as a full VPS.
+    memory: { ...memory, sustained: memorySamples.length >= 24 ? Math.min(...memorySamples) : 0 },
     disk: { used: (disk.blocks - disk.bavail) * disk.bsize, total: disk.blocks * disk.bsize },
     running,
-    os: await osName(),
+    os: (await hostInfo()).OperatingSystem ?? null,
   };
 }

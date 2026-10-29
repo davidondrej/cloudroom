@@ -528,6 +528,12 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: Plugin
     await cloudroom(deps).retryStart(context.req.param("id"));
     return context.json({ ok: true });
   });
+  app.post("/api/v1/cloudroom/threads/:id/move", async (context) => {
+    const problem = browserRequestProblem(context, deps, { requireJsonForMutation: true });
+    if (problem) return context.json({ message: "Use the local Cloudroom app or CLI." }, problem.status);
+    await cloudroom(deps).moveToCloud(context.req.param("id"));
+    return context.json({ ok: true });
+  });
   app.post("/api/v1/cloudroom/threads/:id/retry-copy", async (context) => {
     await cloudroom(deps).retryCopy(context.req.param("id"));
     return context.json({ ok: true });

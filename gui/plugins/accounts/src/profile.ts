@@ -30,6 +30,42 @@ const claudeConfig = () =>
   path.join(process.env.CLAUDE_CONFIG_DIR || os.homedir(), ".claude.json");
 const synced = new Map<string, number>();
 
+async function keepNewer(target: string, link: string): Promise<boolean> {
+  const [from, to] = await Promise.all([
+    fs.stat(target, { bigint: true }),
+    fs.lstat(link, { bigint: true }).catch(() => null),
+  ]);
+  if (!to?.isFile()) return false;
+  if (to.ino === from.ino && to.dev === from.dev) return true;
+  if (to.mtimeMs > from.mtimeMs)
+    await fs.cp(link, target, { preserveTimestamps: true });
+  return false;
+}
+
+async function linkOnWindows(target: string, link: string): Promise<void> {
+  if ((await fs.stat(target)).isDirectory())
+    return fs.symlink(target, link, "junction");
+  if (await keepNewer(target, link)) return;
+  await fs.rm(link, { force: true });
+  await fs
+    .link(target, link)
+    .catch((error: NodeJS.ErrnoException) =>
+      error.code === "EXDEV"
+        ? fs.cp(target, link, { preserveTimestamps: true })
+        : Promise.reject(error),
+    );
+}
+
+export async function releaseProfile(profile: string): Promise<void> {
+  if (process.platform !== "win32") return;
+  const home = claudeHome();
+  for (const name of SHARED) {
+    const target = path.join(home, name);
+    if (await fs.lstat(target).catch(() => null))
+      await keepNewer(target, path.join(profile, name));
+  }
+}
+
 export async function prepareProfile(profile: string): Promise<void> {
   const home = claudeHome();
   await fs.mkdir(profile, { recursive: true, mode: 0o700 });
@@ -42,11 +78,14 @@ export async function prepareProfile(profile: string): Promise<void> {
     SHARED.map(async (name) => {
       const target = path.join(home, name);
       if (!(await fs.lstat(target).catch(() => null))) return;
-      await fs
-        .symlink(target, path.join(profile, name))
-        .catch((error: NodeJS.ErrnoException) => {
-          if (error.code !== "EEXIST") throw error;
-        });
+      const link = path.join(profile, name);
+      await (
+        process.platform === "win32"
+          ? linkOnWindows(target, link)
+          : fs.symlink(target, link)
+      ).catch((error: NodeJS.ErrnoException) => {
+        if (error.code !== "EEXIST") throw error;
+      });
     }),
   );
   const changed = (await fs.stat(claudeConfig()).catch(() => null))?.mtimeMs;

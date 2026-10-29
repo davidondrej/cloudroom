@@ -12,19 +12,30 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
+import type { PluginClaudeSetupTokenRun } from "@get-bb/plugin-sdk";
 import { z } from "zod";
+import {
+  execPortableFile,
+  findCliExecutable,
+  killPortableProcess,
+  spawnPortableProcess,
+} from "@cloudroom/process-utils";
 import {
   NO_TERMINAL,
   readClaudeToken,
+  readOpenedUrl,
   spawnInTerminal,
+  writeBrowserOpener,
 } from "@cloudroom/process-utils/claude-token";
 import type { UsageWindow } from "./contract.js";
 import { readReset, SignInAgainError, type Secret } from "./tokens.js";
 
 const YEAR_MS = 365 * 24 * 60 * 60_000;
 const LIMITS = "anthropic-ratelimit-unified";
+const windows = process.platform === "win32";
 
 function claudeBinary(): string | null {
+  if (windows) return findCliExecutable("claude");
   const dirs = [
     ...(process.env.PATH ?? "").split(path.delimiter),
     path.join(os.homedir(), ".local/bin"),
@@ -62,8 +73,94 @@ interface Run {
   stop: () => void;
 }
 
+function windowsLogin(binary: string, profile: string): Run {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "cloudroom-claude-"));
+  const browser = writeBrowserOpener(dir);
+  const child = spawnPortableProcess({
+    command: binary,
+    args: ["auth", "login", "--claudeai"],
+    env: { ...profileEnv(profile), BROWSER: browser },
+    stdio: ["pipe", "pipe", "ignore"],
+    windowsHide: true,
+  });
+  const run: Run = { url: null, result: null, error: null, stop: () => {} };
+  let done = false;
+  const finish = (error: string | null) => {
+    if (run.result === null) run.error ??= error;
+    if (done) return;
+    done = true;
+    clearTimeout(timer);
+    clearInterval(poll);
+    void killPortableProcess(child, "SIGKILL").finally(() =>
+      rmSync(dir, { recursive: true, force: true }),
+    );
+  };
+  run.stop = () => finish("Claude sign-in was cancelled.");
+  const timer = setTimeout(
+    () => finish("Claude sign-in timed out. Try again."),
+    10 * 60_000,
+  );
+  const poll = setInterval(() => {
+    run.url ??= readOpenedUrl(dir);
+  }, 250);
+  let output = "";
+  child.stdout?.on("data", (chunk: Buffer) => {
+    output = (output + chunk.toString()).slice(-65536);
+  });
+  child.on("error", () => finish("Could not start Claude Code."));
+  child.on("close", (code) => {
+    if (code === 0 || output.includes("Login successful"))
+      run.result ??= profile;
+    finish("Claude sign-in did not finish. Try again.");
+  });
+  return run;
+}
+
 export class ClaudeLogin {
   private readonly runs = new Map<string, Run>();
+
+  constructor(
+    private readonly setupToken: () =>
+      | PluginClaudeSetupTokenRun
+      | undefined = () => undefined,
+  ) {}
+
+  private windowsToken(): Run {
+    const token = this.setupToken();
+    if (!token) throw new Error("Update Cloudroom, then try again.");
+    return {
+      get url() {
+        return token.url;
+      },
+      get result() {
+        return token.token;
+      },
+      get error() {
+        return token.error;
+      },
+      stop: () => token.stop(),
+    };
+  }
+
+  private async startWindows(
+    binary: string,
+    profile?: string,
+  ): Promise<{ sessionId: string; authorizeUrl: string }> {
+    const run = profile ? windowsLogin(binary, profile) : this.windowsToken();
+    const sessionId = randomUUID();
+    this.runs.set(sessionId, run);
+    for (
+      let waited = 0;
+      !run.url && !run.error && waited < 15_000;
+      waited += 250
+    )
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    if (run.url) return { sessionId, authorizeUrl: run.url };
+    const error = run.error ?? "Claude did not open its sign-in page.";
+    run.stop();
+    this.runs.delete(sessionId);
+    throw new Error(error);
+  }
 
   async start(
     profile?: string,
@@ -71,6 +168,7 @@ export class ClaudeLogin {
     const binary = claudeBinary();
     if (!binary)
       throw new Error("Install Claude Code on this computer, then try again.");
+    if (windows) return this.startWindows(binary, profile);
     const dir = mkdtempSync(path.join(os.tmpdir(), "cloudroom-claude-"));
     const browser = path.join(dir, "open");
     writeFileSync(browser, `#!/bin/sh\nprintf '%s' "$1" > "$0.url"\n`, {
@@ -225,15 +323,25 @@ export async function localClaudeEmail(): Promise<string | null> {
   }
 }
 
-const run = promisify(execFile);
+const execClaude = (binary: string, args: string[], profile: string) =>
+  windows
+    ? execPortableFile(binary, args, {
+        env: profileEnv(profile),
+        timeoutMs: 30_000,
+      })
+    : promisify(execFile)(binary, args, {
+        env: profileEnv(profile),
+        timeout: 30_000,
+      });
 
 export async function profileAccount(profile: string) {
   const binary = claudeBinary();
   if (!binary) throw new Error("Install Claude Code on this computer, then try again.");
-  const { stdout } = await run(binary, ["auth", "status", "--json"], {
-    env: profileEnv(profile),
-    timeout: 30_000,
-  });
+  const { stdout } = await execClaude(
+    binary,
+    ["auth", "status", "--json"],
+    profile,
+  );
   const status = z
     .object({
       loggedIn: z.literal(true),
@@ -252,10 +360,7 @@ export async function profileAccount(profile: string) {
 export async function signOut(profile: string): Promise<void> {
   const binary = claudeBinary();
   if (binary)
-    await run(binary, ["auth", "logout"], {
-      env: profileEnv(profile),
-      timeout: 30_000,
-    }).catch(() => {});
+    await execClaude(binary, ["auth", "logout"], profile).catch(() => {});
 }
 
 // Every Anthropic reply names the token's organization. Listing models uses no usage.

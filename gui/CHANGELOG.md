@@ -2,6 +2,18 @@
 
 Also on [cloudroom.dev/changelog](https://www.cloudroom.dev/changelog).
 
+## 130
+
+Top up Cloud credits anytime (2026-10-28)
+
+### Changes
+
+- You can now buy extra Cloud credits from the sidebar, the account menu, or the usage limit notice.
+- Cloudroom stays responsive with hundreds of threads and pauses animations while its window is in the background.
+- Loops have a new details view that works the same for Local and Cloud loops.
+- Importing past chats no longer sends one notification per chat.
+- Setup now fits small screens, and Windows updates show their progress.
+
 ## 129
 
 One open-source home for Cloudroom (2026-10-28)

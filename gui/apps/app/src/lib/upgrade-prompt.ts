@@ -2,7 +2,7 @@ import { useEffect } from "react";
 import { fetchWithAppSurface } from "@/lib/app-surface";
 import { openUrlInExternalBrowser } from "@/lib/url-open-routing";
 
-export type UpgradePrompt = "limit_notice" | "queue" | "queue_badge" | "plan_card" | "free_tip" | "auto_delete" | "try_cloud" | "new_thread_cloud" | "og_letter";
+export type UpgradePrompt = "limit_notice" | "queue" | "queue_badge" | "plan_card" | "free_tip" | "auto_delete" | "try_cloud" | "new_thread_cloud" | "og_letter" | "limit_notice_pack";
 
 export type CloudChoiceReason = "signed_out" | "agent_unsupported" | "agent_not_in_cloud" | "queue" | "region";
 export type CloudChoiceAction = "picked_local" | "cloud_blocked" | "forced_local";

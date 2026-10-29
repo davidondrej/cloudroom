@@ -165,7 +165,7 @@ function Setup({ locked, close }: { locked: boolean; close: () => void }) {
       <div className={cn("h-10 shrink-0 border-b border-(--ob-line) bg-(--ob-rail)", MACOS_WINDOW_DRAG_CLASS)} />
       <GitForWindowsBanner pinned={false} />
       <div className="flex min-h-0 flex-1">
-        <aside className="flex w-[300px] shrink-0 flex-col border-r border-(--ob-line) bg-(--ob-rail) px-[22px] pt-7 pb-6">
+        <aside className="hidden w-[300px] shrink-0 flex-col border-r border-(--ob-line) bg-(--ob-rail) px-[22px] pt-7 pb-6 md:flex">
           <div className="flex items-center gap-2.5 text-base font-semibold tracking-tight">
             <BbLogo className="size-7" />
             cloudroom
@@ -211,7 +211,7 @@ function Setup({ locked, close }: { locked: boolean; close: () => void }) {
           </ol>
           <p className="mt-auto px-3 text-[12.5px] text-(--ob-muted)">Reopen setup anytime from the account button in the sidebar.</p>
         </aside>
-        <main className="relative flex min-w-0 flex-1 overflow-y-auto px-[110px] py-10">
+        <main className="relative flex min-w-0 flex-1 overflow-y-auto px-6 pt-16 pb-8 md:px-[110px] md:py-10">
           {!locked && (
             <button type="button" onClick={() => { track(STEP_IDS[step] ?? "project", "closed"); leave(); }} className={cn("absolute top-5 right-6 flex items-center gap-1.5 text-[13px] text-(--ob-muted) hover:text-(--ob-ink)", MACOS_APP_REGION_NO_DRAG_CLASS)}>
               Skip setup

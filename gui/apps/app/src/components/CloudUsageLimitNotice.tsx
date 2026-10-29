@@ -21,12 +21,14 @@ const UPGRADES: Record<string, { name: string; price: string; pitch: string }> =
   super: { name: "Ultra", price: "$500/mo", pitch: "Ultra gives you 3× more Cloud Credits." },
 };
 
-/** Free only upgrades. Paid plans also ask the team, which counts demand for credit packs (ADR 0299).
- *  No ask until the plan is known, so a Free account never sees it while its plan loads. */
+/** Free only upgrades. Paid plans also buy a one-time pack (ADR 0317): the link starts its checkout on the website.
+ *  Plans with no upgrade (Ultra, Business) still ask the team. No pack or ask until the plan is known, so a Free
+ *  account never sees them while its plan loads. */
 export function CloudUsageLimitNotice() {
   const ask = useMutation({ mutationFn: askForMoreUsage });
   const plan = useCloudroomAccount().data?.plan ?? null;
   const upgrade = plan ? UPGRADES[plan] : undefined;
+  const paid = Boolean(plan && plan !== "free");
   useUpgradePromptViewed(upgrade ? "limit_notice" : null);
   return (
     <PromptStackCard ariaLabel="Cloud usage limit" className="space-y-2 p-3 text-xs">
@@ -38,10 +40,16 @@ export function CloudUsageLimitNotice() {
             Upgrade to {upgrade.name}<span className="font-normal opacity-70">{upgrade.price}</span><Icon name="ArrowRight" aria-hidden />
           </Button>
         )}
-        {plan && plan !== "free" && (ask.isSuccess
+        {paid && (
+          <Button type="button" size="sm" variant={upgrade ? "outline" : "default"} onClick={() => openUpgrade("limit_notice_pack", "https://www.cloudroom.dev/billing?buy=50000")}>
+            Buy 50,000 credits<span className="font-normal opacity-70">$50 once</span>
+          </Button>
+        )}
+        {paid && !upgrade && (ask.isSuccess
           ? <p role="status" className="text-muted-foreground">Sent. The Cloudroom team will reach out to set up a quick call.</p>
-          : <Button type="button" size="sm" variant={upgrade ? "outline" : "default"} disabled={ask.isPending} onClick={() => ask.mutate()}>Ask for more usage</Button>)}
+          : <Button type="button" size="sm" variant="outline" disabled={ask.isPending} onClick={() => ask.mutate()}>Ask for more usage</Button>)}
       </div>
+      {paid && <p className="text-muted-foreground">One-time credits never refill. They last 12 months and are used after your plan's credits.</p>}
       {ask.error && <p role="alert" className="text-destructive">{ask.error.message}</p>}
     </PromptStackCard>
   );

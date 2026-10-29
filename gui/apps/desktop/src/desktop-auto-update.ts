@@ -173,8 +173,8 @@ export function createElectronAutoUpdaterAdapter(
       squirrel.on("update-downloaded", () => handler());
     },
     quitAndInstall() {
-      // Windows: install silently, then reopen Cloudroom, so Relaunch feels like macOS.
-      if (process.platform === "win32") updater.quitAndInstall(true, true);
+      // Windows: show only the installer's progress window, then reopen Cloudroom.
+      if (process.platform === "win32") updater.quitAndInstall(false, true);
       else updater.quitAndInstall();
     },
     setAutoDownload(enabled) {

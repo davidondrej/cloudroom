@@ -67,6 +67,7 @@ const EXPECTED_BACKEND_ROOT_TYPE_EXPORTS = [
   "PluginAgentToolSelection",
   "PluginBackground",
   "PluginBbSdk",
+  "PluginClaudeSetupTokenRun",
   "PluginCli",
   "PluginCliCommandInfo",
   "PluginCliContext",

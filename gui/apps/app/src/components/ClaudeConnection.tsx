@@ -9,6 +9,7 @@ import { useCloudroomAccount } from "@/hooks/queries/cloudroom-queries";
 import { sdk } from "@/lib/sdk";
 import { openUrlInExternalBrowser } from "@/lib/url-open-routing";
 import { ClaudeApiKeyForm } from "./ClaudeApiKeyForm";
+import { CopyableInlineLabel } from "@/components/ui/copy-button";
 
 export interface ClaudeConnectionTarget {
   target: "local" | "cloud";
@@ -345,10 +346,24 @@ function ClaudeConnectionPanel({
       {state === "waiting" ? (
         <>
           <p className="text-muted-foreground">
-            {pasteCode
-              ? "Approve in your browser, then paste the one-time code."
-              : "Approve in your browser. This updates automatically."}
+            {!signInUrl
+              ? "Getting the sign-in link…"
+              : pasteCode
+                ? "Approve in your browser, then paste the one-time code."
+                : "Approve in your browser. This updates automatically."}
           </p>
+          {signInUrl && (
+            <div className="space-y-0.5">
+              <p className="text-muted-foreground">Browser didn't open? Copy this link:</p>
+              <div className="rounded-md border border-input px-2 py-1">
+                <CopyableInlineLabel
+                  text={signInUrl}
+                  label="Copy sign-in link"
+                  successMessage="Sign-in link copied."
+                />
+              </div>
+            </div>
+          )}
           {pasteCode && (
             <form
               className="flex gap-1.5"

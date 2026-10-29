@@ -1939,6 +1939,26 @@ export interface PluginServerApi {
    * not a place to write.
    */
   readonly experimental_dataDir: string;
+
+  /**
+   * Windows only, and only for the built-in Accounts plugin; undefined
+   * elsewhere. Runs `claude setup-token` in this PC's host daemon
+   * pseudo-terminal, the run Connect Claude uses, because Windows has no
+   * `script` to give Claude a terminal. The one-year token goes to the caller,
+   * never to a terminal session or the renderer.
+   */
+  readonly experimental_claudeSetupToken?: () => PluginClaudeSetupTokenRun;
+}
+
+/** One `claude setup-token` run from `bb.server.experimental_claudeSetupToken`. */
+export interface PluginClaudeSetupTokenRun {
+  /** Claude's sign-in link, once Claude asks for a browser. */
+  readonly url: string | null;
+  /** The one-year token, once the user approves. */
+  readonly token: string | null;
+  /** Why the run ended without a token. */
+  readonly error: string | null;
+  stop(): void;
 }
 
 // ---------------------------------------------------------------------------

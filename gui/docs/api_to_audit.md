@@ -1029,6 +1029,17 @@ value. Plugins can read it before the server starts to listen.
 connect URL should supply this value when `BB_APP_URL` is empty. Confirm that
 one public URL has clear behavior when a server has several access paths.
 
+## `bb.server.experimental_claudeSetupToken`
+
+**What it does.** Windows only, and only for the built-in Accounts plugin. It
+runs `claude setup-token` in the host daemon's pseudo-terminal, the run
+Connect Claude uses, and gives the plugin the one-year token. Windows has no
+`script`, so the plugin can't give Claude a terminal itself.
+
+**Audit before stabilizing.** It exists because macOS and Linux still run
+`setup-token` in two places (Connect Claude and Accounts). Merge those runners
+into one server-side runner, then delete this member instead of stabilizing it.
+
 ## Bridge record mode (`experimental_recordProviderChildIo` and `experimental_isProviderBridgeRecording`)
 
 **Kept experimental (2026-08-22).** the recording entry shape is now consumed by the public testing kit, so it is a de-facto fixture format that must be frozen together with `experimental_readBridgeRecording` / `replayRecording`; the `{ threadId | null }` scope is untested against a multiplexing bridge.

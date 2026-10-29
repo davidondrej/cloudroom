@@ -133,6 +133,7 @@ export interface PluginServiceDeps {
     path: string;
   }) => Promise<void>;
   onArtifactMaterialize?: (args: { path: string }) => void;
+  claudeSetupToken?: () => import("@get-bb/plugin-sdk").PluginClaudeSetupTokenRun;
   callPluginHost?: (args: {
     pluginId: string;
     contract: import("@get-bb/plugin-sdk").PluginRpcContract;

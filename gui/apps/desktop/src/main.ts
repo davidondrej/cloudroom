@@ -1914,6 +1914,9 @@ async function installDownloadedUpdate(): Promise<void> {
         app.relaunch();
         app.exit(0);
       });
+      session.defaultSession.flushStorageData();
+      app.once("before-quit", (event) => event.preventDefault());
+      setTimeout(() => app.exit(0), UPDATE_QUIT_TIMEOUT_MS);
     }
     handedOff = desktopAutoUpdateService.installUpdate();
   } finally {
@@ -1936,6 +1939,7 @@ async function installDownloadedUpdate(): Promise<void> {
       }, UPDATE_QUIT_TIMEOUT_MS);
     }
   }
+  if (process.platform === "win32" && handedOff) await new Promise<never>(() => {});
 }
 
 function registerDesktopUpdateIpc(): void {

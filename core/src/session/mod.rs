@@ -2327,10 +2327,16 @@ impl Manager {
                 cleaned_up,
                 details,
             } => {
+                // Signal 9 that Core didn't send, with the kernel's OOM kill count up: the sandbox ran out of memory.
+                let out_of_memory = details.code.is_none()
+                    && details.signal == Some(9)
+                    && !details.killed
+                    && oom_kills_grew();
                 let exit = match (details.code, details.signal) {
                     (Some(code), _) => format!("exit code {code}"),
                     // Core's own kill is signal 9 too; saying so keeps it from reading as out of memory.
                     (None, Some(_)) if details.killed => "stopped by Core".into(),
+                    (None, Some(_)) if out_of_memory => "out of memory".into(),
                     (None, Some(signal)) => format!("signal {signal}"),
                     _ => "no exit status".into(),
                 };
@@ -2429,7 +2435,7 @@ impl Manager {
                 local.append(
                     id,
                     "state",
-                    json!({"state":state,"reason":lost,"diagnostic_id":diagnostic_id,"stderr":(lost_or_failed && !stderr.is_empty()).then_some(stderr)}),
+                    json!({"state":state,"reason":lost,"diagnostic_id":diagnostic_id,"stderr":(lost_or_failed && !stderr.is_empty()).then_some(stderr),"out_of_memory":out_of_memory.then_some(true)}),
                     None,
                 )?;
                 if let Some(request) = close {
@@ -2512,4 +2518,19 @@ fn stderr_tail(bytes: &[u8]) -> String {
         .filter(|line| !line.trim().is_empty())
         .collect();
     lines[lines.len().saturating_sub(20)..].join("\n")
+}
+
+/// Whether the kernel killed a process in this sandbox for lack of memory since the last check: cgroup v2's
+/// `memory.events`, which counts kills from this sandbox's own limit and the whole machine's alike.
+fn oom_kills_grew() -> bool {
+    static SEEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let count = std::fs::read_to_string("/sys/fs/cgroup/memory.events")
+        .ok()
+        .and_then(|text| {
+            text.lines()
+                .find_map(|line| line.strip_prefix("oom_kill "))
+                .and_then(|value| value.trim().parse::<u64>().ok())
+        })
+        .unwrap_or(0);
+    SEEN.swap(count, Ordering::Relaxed) < count
 }

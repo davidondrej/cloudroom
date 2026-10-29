@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { claudeInstallerCommand, readClaudeToken, screenText } from "../src/claude-token.js";
+import { claudeInstallerCommand, openerUrl, readClaudeToken, screenText } from "../src/claude-token.js";
 
 // Built from the 2026-10-07 incident (docs/incidents/2026-10-07-onboarding-could-not-connect-agents.md), not live captures.
 const TOKEN = `sk-ant-oat01-${"Ab3_-x".repeat(16)}AA`;
@@ -45,5 +45,17 @@ describe("claudeInstallerCommand", () => {
     const windows = claudeInstallerCommand("win32");
     expect(windows.command).toMatch(/WindowsPowerShell\\v1\.0\\powershell\.exe$/);
     expect(windows.args.at(-1)).toBe("irm https://claude.ai/install.ps1 | iex");
+  });
+
+  describe("openerUrl", () => {
+    it("digs Claude's link out of the Windows opener's command line", () => {
+      const link = "https://claude.com/cai/oauth/authorize?code=true&client_id=c&redirect_uri=http%3A%2F%2Flocalhost%3A60909%2Fcallback&state=s";
+      const escaped = link.replace(/[?&%]/g, "^$&");
+      const opener = String.raw`C:\Users\a b\AppData\Local\Temp\cloudroom-claude-x\open.cmd`;
+      expect(openerUrl(String.raw`C:\WINDOWS\system32\cmd.exe /q /d /s /c "${opener} ^"${escaped}^""` + "\r\n")).toBe(link);
+      expect(openerUrl(String.raw`C:\WINDOWS\system32\cmd.exe /q /d /s /c "${opener} ^"\^"${escaped}\^"^""` + "\r\n")).toBe(link);
+      expect(openerUrl(link)).toBe(link);
+      expect(openerUrl(String.raw`C:\WINDOWS\system32\cmd.exe /c "${opener}"`)).toBeNull();
+    });
   });
 });

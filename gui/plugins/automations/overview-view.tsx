@@ -68,7 +68,13 @@ import {
   type CloudAutomation,
   type CloudAutomationActions,
 } from "./cloud-view.js";
-import { CloudLoopDialog } from "./loop-dialog.js";
+import {
+  CloudLoopDialog,
+  LoopRunDots,
+  useMinuteClock,
+  type LoopDialogContext,
+  type RunTick,
+} from "./loop-dialog.js";
 import {
   LoopReviewView,
   OFFSCREEN_ROW_CLASSES,
@@ -367,15 +373,6 @@ function automationNextRunText(
   return formatScheduleStatusLabel({ ...automation, now }).split(" — ")[0]!;
 }
 
-function useMinuteClock(): number {
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    const timer = setInterval(() => setNow(Date.now()), 30_000);
-    return () => clearInterval(timer);
-  }, []);
-  return now;
-}
-
 export function automationProjectLabel(
   project: OverviewEntry["project"],
 ): string {
@@ -489,7 +486,7 @@ function NeedsYouBadge({ count }: { count: number }) {
   );
 }
 
-type OrbitTick = "done" | "needs-you" | "failed" | null;
+type OrbitTick = RunTick | null;
 
 const ORBIT_SIZE = 236;
 const ORBIT_TICKS = 40;
@@ -761,46 +758,6 @@ function LoopLocation({ cloud }: { cloud: boolean }) {
       <span aria-hidden className="text-muted-foreground/40">
         ·
       </span>
-    </>
-  );
-}
-
-type RunTick = Exclude<OrbitTick, null>;
-
-const CARD_RUNS = 10;
-const RUN_DOT = {
-  done: "bg-foreground/70",
-  "needs-you": "bg-warning-text/80",
-  failed: "bg-destructive-text/80",
-} as const;
-
-function LoopRunDots({ runs }: { runs: readonly RunTick[] }) {
-  const last = runs.slice(-CARD_RUNS);
-  const done = runs.filter((run) => run === "done").length;
-  return (
-    <>
-      <span
-        role="img"
-        aria-label={`Last ${last.length} runs`}
-        className="flex shrink-0 items-center gap-1"
-      >
-        {[...Array<null>(CARD_RUNS - last.length).fill(null), ...last].map(
-          (run, index) => (
-            <span
-              key={index}
-              className={cn(
-                "size-1.5 rounded-full",
-                run === null ? "bg-foreground/10" : RUN_DOT[run],
-              )}
-            />
-          ),
-        )}
-      </span>
-      {runs.length >= 3 ? (
-        <span className="tabular-nums">
-          {Math.round((100 * done) / runs.length)}%
-        </span>
-      ) : null}
     </>
   );
 }
@@ -1408,6 +1365,7 @@ export function AutomationOverviewView({
     render: (
       priority: LoopPriority,
       onPriorityChange: (priority: LoopPriority) => void,
+      context: LoopDialogContext,
     ) => ReactNode;
   };
 }) {
@@ -1542,6 +1500,41 @@ export function AutomationOverviewView({
       github,
     };
   };
+  const dialogContext = (
+    key: string,
+    projectId: string | null | undefined,
+    close: () => void,
+  ): LoopDialogContext => ({
+    repo: repoOf(
+      projectId,
+      entries?.find((entry) => entry.project.id === projectId)?.project.name,
+    ),
+    runs: review?.data
+      ? review.data.items
+          .filter(
+            (item) =>
+              (item.loop.id ??
+                cloudLoopKey(item.loop.projectId, item.loop.name)) === key,
+          )
+          .sort((a, b) => b.at - a.at)
+          .map((item) => ({
+            id: item.id,
+            at: item.at,
+            status: item.status,
+            text: item.report ?? item.title,
+            threadId: item.threadId,
+          }))
+      : null,
+    ...(review
+      ? {
+          onOpenThread: review.onOpenThread,
+          onOpenReview: () => {
+            close();
+            onModeChange("review");
+          },
+        }
+      : {}),
+  });
   const repos = new Map<LoopScope, LoopMenuItem<LoopScope>>();
   let offCount = 0;
   const countRepo = (
@@ -2043,6 +2036,9 @@ export function AutomationOverviewView({
       {openCloud && cloud ? (
         <CloudLoopDialog
           automation={openCloud}
+          context={dialogContext(cloudKey(openCloud), openCloud.project_id, () =>
+            setOpenCloudId(null),
+          )}
           priority={cloudPriority(openCloud)}
           onPriorityChange={(priority) => setCloudPriority(openCloud, priority)}
           actions={cloud.actions}
@@ -2050,8 +2046,14 @@ export function AutomationOverviewView({
         />
       ) : null}
       {localDialog
-        ? localDialog.render(localPriority(localDialog), (priority) =>
-            setLocalPriority(localDialog, priority),
+        ? localDialog.render(
+            localPriority(localDialog),
+            (priority) => setLocalPriority(localDialog, priority),
+            dialogContext(
+              localDialog.automationId,
+              localDialog.projectId,
+              () => {},
+            ),
           )
         : null}
     </ResourceCollectionPage>

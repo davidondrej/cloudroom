@@ -27,14 +27,12 @@ import { applyCachedAppThemeCss } from "./lib/themes";
 import { installPerfMonitor } from "./lib/perf";
 import { installNewThreadKeyboardPrimer } from "./lib/new-thread-keyboard-primer";
 import { installTimeInApp } from "./lib/time-in-app";
-import { installUnfocusedAnimationPause } from "./lib/unfocused-animation-pause";
 import "./app.css";
 
 installForeignDomMutationGuard();
 installPerfMonitor();
 installNewThreadKeyboardPrimer();
 installTimeInApp();
-installUnfocusedAnimationPause();
 
 Error.stackTraceLimit = 50;
 
@@ -49,11 +47,18 @@ window.addEventListener("vite:preloadError", () => {
   window.location.reload();
 });
 
-getBbDesktopInfo()?.onWindowStateChange?.((state) => {
+const desktopApi = getBbDesktopInfo();
+const updateWindowFocus = (isFocused: boolean | undefined) => {
   document.documentElement.toggleAttribute(
     "data-window-blurred",
-    state.isFocused === false,
+    isFocused === false,
   );
+};
+desktopApi?.onWindowStateChange?.(({ isFocused }) => {
+  updateWindowFocus(isFocused);
+});
+void desktopApi?.getWindowState?.().then(({ isFocused }) => {
+  updateWindowFocus(isFocused);
 });
 
 installAppQueryClientBrowserEvents(appQueryClient);

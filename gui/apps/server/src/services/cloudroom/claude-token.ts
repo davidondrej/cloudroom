@@ -1,5 +1,6 @@
 import { COMPUTER } from "@cloudroom/domain";
 import { execFile } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { accessSync, constants, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
@@ -152,18 +153,18 @@ type SetupTokenStep = (action: "start" | "read" | "cancel") => Promise<HostDaemo
 
 /** Windows has no `script`, so setup-token runs in a private pseudo-terminal in this PC's host daemon. Its output never
  *  becomes a terminal session; the daemon hands back only Claude's link and, once approved, the token. */
-function runWindowsSetupToken(deps: AppDeps, id: string, binary: string, save: (token: string) => Promise<unknown>): TokenRun {
+function runWindowsSetupToken(deps: AppDeps, id: string, binary: string, save: (token: string) => Promise<unknown>, report = true): TokenRun {
   const hostId = resolvePrimaryHostId(deps);
   if (!hostId) throw failed("This PC's local host is not ready yet. Try again in a moment.");
   return runDaemonSetupToken(id, binary, save, (action) => callHostOnlineRpc(deps, {
     hostId,
     timeoutMs: 15_000,
     command: { type: "claude.setup_token", action, runId: id, ...(action === "start" ? { binary } : {}) },
-  }));
+  }), report);
 }
 
 /** Polls the daemon's setup-token run. A failed call (the daemon disconnected) ends the sign-in at once. */
-export function runDaemonSetupToken(id: string, binary: string, save: (token: string) => Promise<unknown>, step: SetupTokenStep): TokenRun {
+export function runDaemonSetupToken(id: string, binary: string, save: (token: string) => Promise<unknown>, step: SetupTokenStep, report = true): TokenRun {
   const run: TokenRun = { id, url: null, error: null, done: false, stop: () => finish("Claude sign-in was cancelled.") };
   let screen: string[] = [];
   let next: NodeJS.Timeout | undefined;
@@ -171,7 +172,7 @@ export function runDaemonSetupToken(id: string, binary: string, save: (token: st
   const finish = (error: string | null) => {
     if (run.done) return;
     Object.assign(run, { done: true, error });
-    try { reportSetupToken(error, screen.join("\n"), binary, Date.now() - started); } catch { /* telemetry never blocks sign-in */ }
+    if (report) try { reportSetupToken(error, screen.join("\n"), binary, Date.now() - started); } catch { /* telemetry never blocks sign-in */ }
     clearTimeout(timer);
     clearTimeout(next);
     void step("cancel").catch(() => {});
@@ -192,6 +193,19 @@ export function runDaemonSetupToken(id: string, binary: string, save: (token: st
   }, () => finish(action === "start" ? "Could not start Claude Code on this computer." : "Cloudroom lost this PC's host during Claude sign-in. Try again."));
   check("start");
   return run;
+}
+
+export function startWindowsSetupToken(deps: AppDeps) {
+  const binary = claudeBinary();
+  if (!binary) throw failed(`Claude Code isn't installed on ${here}.`);
+  let token: string | null = null;
+  const run = runWindowsSetupToken(deps, randomUUID(), binary, async (value) => { token = value; }, false);
+  return {
+    get url() { return run.url; },
+    get token() { return token; },
+    get error() { return run.error; },
+    stop: () => run.stop(),
+  };
 }
 
 const SETUP_TOKEN_CODES: Record<string, string> = {
