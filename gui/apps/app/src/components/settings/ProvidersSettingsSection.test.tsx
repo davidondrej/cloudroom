@@ -8,6 +8,7 @@ import {
   within,
 } from "@testing-library/react";
 import type { ReactNode } from "react";
+import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { ProviderInfo } from "@cloudroom/domain";
@@ -61,7 +62,9 @@ afterEach(cleanup);
 
 function withQueryClient({ children }: { children: ReactNode }) {
   return (
-    <QueryClientProvider client={new QueryClient()}>{children}</QueryClientProvider>
+    <MemoryRouter>
+      <QueryClientProvider client={new QueryClient()}>{children}</QueryClientProvider>
+    </MemoryRouter>
   );
 }
 
@@ -102,9 +105,11 @@ describe("ProvidersSettingsSection", () => {
       "group/provider-row",
     );
 
-    fireEvent.click(
-      screen.getAllByRole("button", { name: "Make default" })[1]!,
+    fireEvent.pointerDown(
+      screen.getByRole("button", { name: "Gamma actions" }),
+      { button: 0 },
     );
+    fireEvent.click(screen.getByRole("menuitem", { name: "Make default" }));
     expect(onChange).toHaveBeenLastCalledWith({
       ...defaultAppSettings,
       defaultProviderId: "gamma",
@@ -125,12 +130,14 @@ describe("ProvidersSettingsSection", () => {
       { wrapper: withQueryClient },
     );
     expect(screen.getByText("Unavailable")).toBeTruthy();
+    fireEvent.pointerDown(
+      screen.getByRole("button", { name: "Beta actions" }),
+      { button: 0 },
+    );
     expect(
-      (
-        screen.getByRole("button", {
-          name: "Make default",
-        }) as HTMLButtonElement
-      ).disabled,
+      screen
+        .getByRole("menuitem", { name: "Make default" })
+        .hasAttribute("data-disabled"),
     ).toBe(true);
   });
 

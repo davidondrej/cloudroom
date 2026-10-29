@@ -310,8 +310,15 @@ export function useThreadCreationOptions(
     usesLocalThreadSelections,
   ]);
 
+  const systemConfig = useSystemConfig();
+  const hiddenProviderIds = usesStoredCreateSelections
+    ? (systemConfig.data?.generalSettings.hiddenProviderIds ?? [])
+    : [];
+  const visibleProvider = (id: string | null | undefined) =>
+    id && !hiddenProviderIds.includes(id) ? id : "";
   const selectedProviderIdBeforeReadyFallback = usesStoredCreateSelections
-    ? storedProviderId || renderedThreadSelections.selectedProviderId
+    ? visibleProvider(storedProviderId) ||
+      visibleProvider(renderedThreadSelections.selectedProviderId)
     : renderedThreadSelections.selectedProviderId;
   const rawPermissionMode = usesStoredCreateSelections
     ? storedPermissionMode || renderedThreadSelections.permissionMode
@@ -351,7 +358,9 @@ export function useThreadCreationOptions(
   });
   const queriedReadyProviderId = shouldResolveReadyProvider
     ? providerStatesQuery.data?.providers.find(
-        (provider) => provider.status === "ready",
+        (provider) =>
+          provider.status === "ready" &&
+          visibleProvider(provider.providerId) !== "",
       )?.providerId
     : undefined;
   const readyProviderId =
@@ -386,7 +395,6 @@ export function useThreadCreationOptions(
     providerId: executionOptionsProviderId,
   });
   const hostsQuery = useHosts();
-  const systemConfig = useSystemConfig();
   const providers = executionOptionsQuery.data?.providers ?? EMPTY_PROVIDERS;
   const isLoadingModels =
     executionOptionsQueryEnabled &&

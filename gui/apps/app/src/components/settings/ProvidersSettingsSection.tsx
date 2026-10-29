@@ -3,8 +3,9 @@ import {
   useClaudeConnection,
 } from "@/components/ClaudeConnection";
 import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { useNavigate } from "react-router-dom";
 import { arrayMove } from "@dnd-kit/sortable";
-import { useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { invalidateHostProviderCliStatus } from "@/hooks/cache-owners/provider-cli-status-cache-owner";
 import { COMPUTER, COMPUTER_TITLE, type AppSettings, type CompletedTurnDisplay, type ProviderInfo } from "@cloudroom/domain";
 import type { ProviderCliStatus } from "@cloudroom/host-daemon-contract";
@@ -12,6 +13,20 @@ import type { SystemProviderState } from "@cloudroom/server-contract";
 import { Button } from "@cloudroom/shared-ui/button";
 import { COARSE_POINTER_ICON_SIZE_CLASS } from "@cloudroom/shared-ui/coarse-pointer-sizing";
 import { Icon } from "@cloudroom/shared-ui/icon";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@cloudroom/shared-ui/dropdown-menu";
+import {
+  ConfirmDeleteDialog,
+  ConfirmDeleteDialogContent,
+} from "@/components/dialogs/ConfirmDeleteDialog";
+import { getPluginConfigurationRoutePath } from "@/lib/route-paths";
+import { sdk } from "@/lib/sdk";
+import { systemConfigQueryKey } from "@/hooks/queries/query-keys";
 import {
   ResourceDetailConfigurationSection,
   ResourceDetailPanel,
@@ -71,6 +86,7 @@ const CELL = {
   cloud: "sm:w-24",
   auto: "sm:w-24",
   status: "sm:w-20",
+  menu: "sm:w-7",
 } as const;
 
 const TABLE_BUTTON = "h-7 px-2.5 text-xs";
@@ -178,12 +194,14 @@ function Cells({
   cloud,
   auto,
   status,
+  menu,
 }: {
   showCloud: boolean;
   mac: ReactNode;
   cloud: ReactNode;
   auto: ReactNode;
   status: ReactNode;
+  menu: ReactNode;
 }) {
   return (
     <span className="flex w-full flex-wrap items-center gap-x-3 gap-y-2 pl-8 sm:contents">
@@ -199,6 +217,7 @@ function Cells({
         {auto}
       </Cell>
       <Cell className={cn("max-sm:ml-auto", CELL.status)}>{status}</Cell>
+      <Cell className={CELL.menu}>{menu}</Cell>
     </span>
   );
 }
@@ -439,7 +458,153 @@ function FailedNote({
   );
 }
 
+const SIGNS_OUT = new Set(["claude-code", "codex"]);
+
+function useAgentAction(onDone: () => void) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async ({
+      provider,
+      action,
+    }: {
+      provider: ProviderInfo;
+      action: "disconnect" | "remove" | "restore";
+    }) => {
+      if (action === "restore") return sdk.cloudroom.restoreAgent(provider.id);
+      await sdk.cloudroom.disconnectAgent(provider.id, {
+        remove: action === "remove",
+      });
+    },
+    onSettled: async () => {
+      onDone();
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: systemConfigQueryKey() }),
+        queryClient.invalidateQueries({ queryKey: ["claude-connection"] }),
+        queryClient.invalidateQueries({ queryKey: ["cloudroom-codex-auth"] }),
+      ]);
+    },
+  });
+}
+
+function ProviderMenu({
+  canRemove,
+  isDefault,
+  onDone,
+  onMakeDefault,
+  provider,
+}: {
+  canRemove: boolean;
+  isDefault: boolean;
+  onDone: () => void;
+  onMakeDefault: (() => void) | null;
+  provider: ProviderInfo;
+}) {
+  const navigate = useNavigate();
+  const action = useAgentAction(onDone);
+  const [confirm, setConfirm] = useState<"disconnect" | "remove" | null>(null);
+  const signsOut = SIGNS_OUT.has(provider.id);
+  const name = provider.displayName;
+  const run = (kind: "disconnect" | "remove") =>
+    action.mutate(
+      { provider, action: kind },
+      { onSettled: () => setConfirm(null) },
+    );
+  return (
+    <>
+      <DropdownMenu modal={false}>
+        <DropdownMenuTrigger asChild>
+          <Button
+            variant="ghost"
+            size="icon"
+            className="size-7 text-muted-foreground"
+            aria-label={`${name} actions`}
+            disabled={action.isPending}
+          >
+            <Icon name="MoreHorizontal" />
+          </Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end" className="w-72">
+          {onMakeDefault ? (
+            <DropdownMenuItem
+              disabled={isDefault || !provider.available}
+              onSelect={onMakeDefault}
+            >
+              <Icon name="Star" /> {isDefault ? "Default agent" : "Make default"}
+            </DropdownMenuItem>
+          ) : null}
+          {signsOut ? (
+            <DropdownMenuItem
+              onSelect={() =>
+                navigate(
+                  getPluginConfigurationRoutePath({ pluginId: provider.pluginId }),
+                )
+              }
+            >
+              <Icon name="UserRound" /> Accounts…
+            </DropdownMenuItem>
+          ) : null}
+          {onMakeDefault || signsOut ? <DropdownMenuSeparator /> : null}
+          {signsOut ? (
+            <DropdownMenuItem onSelect={() => setConfirm("disconnect")}>
+              <Icon name="LogOut" />
+              <span className="flex min-w-0 flex-col">
+                <span>Disconnect</span>
+                <span className="truncate text-xs text-muted-foreground">
+                  Signs out on this {COMPUTER} and in Cloud
+                </span>
+              </span>
+            </DropdownMenuItem>
+          ) : null}
+          <DropdownMenuItem
+            variant="destructive"
+            disabled={!canRemove}
+            onSelect={() => (signsOut ? setConfirm("remove") : run("remove"))}
+          >
+            <Icon name="Trash2" />
+            <span className="flex min-w-0 flex-col">
+              <span>Remove from Cloudroom</span>
+              <span className="truncate text-xs text-muted-foreground">
+                {signsOut ? "Signs out and hides it" : "Hides it from new threads"}
+              </span>
+            </span>
+          </DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
+      <ConfirmDeleteDialog
+        open={confirm !== null}
+        onOpenChange={(open) => {
+          if (!open && !action.isPending) setConfirm(null);
+        }}
+      >
+        <ConfirmDeleteDialogContent
+          title={
+            confirm === "remove"
+              ? `Remove ${name} from Cloudroom?`
+              : `Disconnect ${name}?`
+          }
+          description={`Signs ${name} out on this ${COMPUTER}, including in Terminal, removes its Cloud login, and removes any accounts you added.${
+            confirm === "remove"
+              ? " It also disappears from new threads. Add it back from this list anytime."
+              : " Connect again anytime."
+          }`}
+          confirmLabel={
+            action.isPending
+              ? "Working…"
+              : confirm === "remove"
+                ? "Remove"
+                : "Disconnect"
+          }
+          pending={action.isPending}
+          onCancel={() => setConfirm(null)}
+          onConfirm={() => confirm && run(confirm)}
+        />
+      </ConfirmDeleteDialog>
+    </>
+  );
+}
+
 interface ProviderRowProps {
+  canRemove: boolean;
   disabled: boolean;
   generalSettings: AppSettings;
   hostId: string | null;
@@ -453,6 +618,7 @@ interface ProviderRowProps {
 }
 
 function SortableProviderRow({
+  canRemove,
   disabled,
   generalSettings,
   hostId,
@@ -483,34 +649,36 @@ function SortableProviderRow({
       {handle}
       <ProviderRowIcon provider={provider} />
       <span className="flex min-w-0 flex-1 items-center gap-2">
-        <span className="truncate font-medium">{provider.displayName}</span>
+        <span className="max-w-[60%] shrink-0 truncate font-medium">
+          {provider.displayName}
+        </span>
         <RowVersions
           current={status?.currentVersion ?? null}
           latest={status?.latestVersion ?? null}
         />
         <FailedNote hostId={hostId} provider={provider} status={status} />
         {!provider.available ? <SettingsBadge>Unavailable</SettingsBadge> : null}
-        {isDefault ? (
-          <SettingsBadge>Default</SettingsBadge>
-        ) : (
-          <Button
-            variant="ghost"
-            size="sm"
-            className="h-6 px-2 text-xs text-muted-foreground opacity-0 group-hover/provider-row:opacity-100 focus-visible:opacity-100 max-sm:opacity-100"
-            disabled={disabled || !provider.available}
-            onClick={() =>
-              onGeneralSettingsChange({
-                ...generalSettings,
-                defaultProviderId: provider.id,
-              })
-            }
-          >
-            Make default
-          </Button>
-        )}
+        {isDefault ? <SettingsBadge>Default</SettingsBadge> : null}
       </span>
       <Cells
         showCloud={showCloud}
+        menu={
+          <ProviderMenu
+            canRemove={canRemove && !disabled}
+            isDefault={isDefault}
+            onDone={onLoginChange}
+            onMakeDefault={
+              disabled
+                ? null
+                : () =>
+                    onGeneralSettingsChange({
+                      ...generalSettings,
+                      defaultProviderId: provider.id,
+                    })
+            }
+            provider={provider}
+          />
+        }
         mac={
           notInstalled ? (
             DASH
@@ -599,10 +767,12 @@ function hiddenProviderTarget(
 function NotInstalledRow({
   hostId,
   installable: { provider, target },
+  onDone,
   showCloud,
 }: {
   hostId: string;
   installable: InstallableProvider;
+  onDone: () => void;
   showCloud: boolean;
 }) {
   const { busy, startInstall } = useCliJob(hostId, provider.id);
@@ -620,6 +790,15 @@ function NotInstalledRow({
         mac={DASH}
         cloud={<CloudLogin provider={provider} />}
         auto={DASH}
+        menu={
+          <ProviderMenu
+            canRemove
+            isDefault={false}
+            onDone={onDone}
+            onMakeDefault={null}
+            provider={provider}
+          />
+        }
         status={
           busy ? (
             <RowStateControl live state="in-progress" />
@@ -647,6 +826,7 @@ function TableHeader({ showCloud }: { showCloud: boolean }) {
       ) : null}
       <span className={cn("text-center", CELL.auto)}>Auto-update</span>
       <span className={cn("text-center", CELL.status)}>Status</span>
+      <span className={CELL.menu} />
     </div>
   );
 }
@@ -725,7 +905,10 @@ export function ProvidersSettingsSection({
   const [optimisticOrder, setOptimisticOrder] = useState<string[] | null>(null);
   const allProviders = applyProviderOrder(serverProviders, optimisticOrder);
   const allIds = allProviders.map((provider) => provider.id);
-  const providers = allProviders.filter(isInstalled);
+  const hidden = new Set(generalSettings.hiddenProviderIds);
+  const providers = allProviders.filter(
+    (provider) => isInstalled(provider) && !hidden.has(provider.id),
+  );
   const ids = providers.map((provider) => provider.id);
   const defaultProviderId =
     generalSettings.defaultProviderId ?? allProviders[0]?.id ?? null;
@@ -766,7 +949,12 @@ export function ProvidersSettingsSection({
       provider,
       target: hiddenProviderTarget(provider),
     })),
-  ];
+  ].filter(({ provider }) => !hidden.has(provider.id));
+  const removed = [...allProviders, ...hiddenInstallable].filter(
+    (provider, index, list) =>
+      hidden.has(provider.id) &&
+      list.findIndex((entry) => entry.id === provider.id) === index,
+  );
 
   const handleReorder = (activeId: string, overId: string): void => {
     const reordered = reorderProviderIds(ids, activeId, overId);
@@ -828,6 +1016,7 @@ export function ProvidersSettingsSection({
               {providers.map((provider) => (
                 <SortableProviderRow
                   key={provider.id}
+                  canRemove={providers.length > 1}
                   disabled={disabled}
                   generalSettings={generalSettings}
                   hostId={hostId}
@@ -853,7 +1042,24 @@ export function ProvidersSettingsSection({
                     key={entry.provider.id}
                     hostId={hostId}
                     installable={entry}
+                    onDone={refreshStates}
                     showCloud={showCloud}
+                  />
+                ))}
+              </SettingsRowList>
+            </>
+          )}
+          {removed.length === 0 ? null : (
+            <>
+              <div className="mt-2.5 border-t border-border pb-2.5 pt-3 text-2xs font-medium uppercase tracking-wide text-muted-foreground">
+                Removed
+              </div>
+              <SettingsRowList>
+                {removed.map((provider) => (
+                  <RemovedRow
+                    key={provider.id}
+                    onDone={refreshStates}
+                    provider={provider}
                   />
                 ))}
               </SettingsRowList>
@@ -862,6 +1068,41 @@ export function ProvidersSettingsSection({
         </>
       )}
     </SettingsSection>
+  );
+}
+
+function RemovedRow({
+  onDone,
+  provider,
+}: {
+  onDone: () => void;
+  provider: ProviderInfo;
+}) {
+  const action = useAgentAction(onDone);
+  return (
+    <SettingsRow>
+      <span className="-ml-2 w-7 shrink-0" />
+      <span className="opacity-50">
+        <ProviderRowIcon provider={provider} />
+      </span>
+      <span className="min-w-0 flex-1 truncate font-medium text-muted-foreground">
+        {provider.displayName}
+      </span>
+      <span className="text-xs text-muted-foreground max-sm:hidden">
+        Hidden from new threads
+      </span>
+      <Button
+        type="button"
+        variant="outline"
+        size="sm"
+        className={TABLE_BUTTON}
+        aria-label={`Add ${provider.displayName} back`}
+        disabled={action.isPending}
+        onClick={() => action.mutate({ provider, action: "restore" })}
+      >
+        Add back
+      </Button>
+    </SettingsRow>
   );
 }
 

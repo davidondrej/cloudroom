@@ -8,7 +8,7 @@ type DesktopReleaseChannel = "latest" | "nightly";
 // BB_DESKTOP_UPDATE_BASE_URL is set only at build time, for update tests against a local feed.
 export const CLOUDROOM_UPDATE_BASE_URL =
   process.env.BB_DESKTOP_UPDATE_BASE_URL ||
-  "https://github.com/davidondrej/cloudroom-gui/releases/latest/download/";
+  "https://github.com/davidondrej/cloudroom/releases/latest/download/";
 
 interface DesktopReleaseInfo {
   applicationName: "Cloudroom" | "Cloudroom Nightly";

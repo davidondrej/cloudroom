@@ -19,7 +19,7 @@ import type {
   ReviewResponse,
 } from "./src/rpc-types.js";
 import { AutomationLifecycleControl } from "./detail-view.js";
-import { ScansView } from "./scans-view.js";
+import { ScansTabLabel, ScansView } from "./scans-view.js";
 import { Icon } from "@cloudroom/shared-ui/icon";
 import { DelayedLoading } from "@cloudroom/shared-ui/delayed-loading";
 import { COARSE_POINTER_ICON_SIZE_SHRINK_CLASS } from "@cloudroom/shared-ui/coarse-pointer-sizing";
@@ -1942,7 +1942,7 @@ export function AutomationOverviewView({
           count: review?.data?.toReview || undefined,
         },
         { id: "templates", label: "Templates" },
-        { id: "scans", label: "Scans" },
+        { id: "scans", label: <ScansTabLabel /> },
       ]}
       activeMode={activeMode}
       onModeChange={onModeChange}

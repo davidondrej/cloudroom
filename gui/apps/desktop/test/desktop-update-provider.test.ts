@@ -7,13 +7,13 @@ import {
 describe("desktop update feed url", () => {
   it("gives each platform its own feed file inside one release tag", () => {
     expect(createDesktopUpdateFeedUrl("macos")).toBe(
-      "https://github.com/davidondrej/cloudroom-gui/releases/latest/download/desktop-version.json",
+      "https://github.com/davidondrej/cloudroom/releases/latest/download/desktop-version.json",
     );
     expect(createDesktopUpdateFeedUrl("linux")).toBe(
-      "https://github.com/davidondrej/cloudroom-gui/releases/latest/download/desktop-version-linux.json",
+      "https://github.com/davidondrej/cloudroom/releases/latest/download/desktop-version-linux.json",
     );
     expect(createDesktopUpdateFeedUrl("windows")).toBe(
-      "https://github.com/davidondrej/cloudroom-gui/releases/latest/download/desktop-version-windows.json",
+      "https://github.com/davidondrej/cloudroom/releases/latest/download/desktop-version-windows.json",
     );
   });
 });

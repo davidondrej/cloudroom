@@ -137,14 +137,15 @@ export default async function plugin(bb: BbPluginApi) {
   let codexInUse = LOCAL;
   let codexAccounts = 0;
 
-  const changed = async () => {
+  // `connect` marks the user adding, picking, or moving an account, which connects Claude again (ADR 0327).
+  const changed = async (connect = false) => {
     await Promise.all([
       kv.set("accounts:v1", accounts),
       kv.set("order:v1", order),
       kv.set("limits:v1", limits),
     ]);
     bb.realtime.publish(ACCOUNTS_CHANGED, {});
-    void followInCloud();
+    void followInCloud(connect);
   };
   const ids = (): string[] => {
     const saved = accounts.map((account) => account.id);
@@ -179,18 +180,21 @@ export default async function plugin(bb: BbPluginApi) {
       JSON.parse(await fs.readFile(secretPath(account.id), "utf8")),
     );
   // Cloud keeps one Claude login per user, so it follows the account in use (ADR 0197).
-  const followInCloud = async () => {
+  const followInCloud = async (connect: boolean) => {
     const id = current("claude-code");
     const account = accounts.find((entry) => entry.id === id);
     if (!account || id === inCloud) return;
     try {
       const secret = await readSecret(account);
-      await bb.sdk.cloudroom.claudeAuth({
+      const status = await bb.sdk.cloudroom.claudeAuth({
         action: "token",
         requestId: randomUUID(),
         token: secret.accessToken,
         ...(account.plan ? { plan: account.plan } : {}),
+        follow: !connect,
       });
+      // A disconnected Claude skips background saves, so Cloud is still not on this account.
+      if (status.state !== "connected") return;
       inCloud = id;
       await kv.set("cloud:v1", id);
     } catch (error) {
@@ -262,7 +266,7 @@ export default async function plugin(bb: BbPluginApi) {
     accounts = [...accounts, account];
     ids();
     if (use) move(account.id, 0);
-    await changed();
+    await changed(true);
     void refreshUsage(account, true);
   };
 
@@ -405,8 +409,25 @@ export default async function plugin(bb: BbPluginApi) {
     if (old) void dropProfile(old);
     if (existing.id === inCloud) inCloud = null;
     if (state.mac) move(existing.id, 0);
-    await changed();
+    await changed(true);
     void refreshUsage(existing, true);
+  };
+
+  const remove = async (provider: Provider, id: string) => {
+    stored(id);
+    delete limits[`${provider}:${id}`];
+    if (provider === "codex") {
+      await codex({ action: "remove", id });
+      await kv.set("limits:v1", limits);
+      return;
+    }
+    const removed = accounts.find((account) => account.id === id);
+    if (removed?.profile) void dropProfile(removed.profile);
+    accounts = accounts.filter((account) => account.id !== id);
+    order["claude-code"] = order["claude-code"].filter((entry) => entry !== id);
+    usage.delete(id);
+    await fs.rm(secretPath(id), { force: true });
+    await changed();
   };
 
   bb.rpc.register(
@@ -422,7 +443,7 @@ export default async function plugin(bb: BbPluginApi) {
           return null;
         }
         move(id, 0);
-        await changed();
+        await changed(true);
         const account = accounts.find((entry) => entry.id === id);
         if (account) void refreshUsage(account, true);
         return null;
@@ -433,26 +454,21 @@ export default async function plugin(bb: BbPluginApi) {
           return null;
         }
         move(id, ids().indexOf(id) + (direction === "up" ? -1 : 1));
-        await changed();
+        await changed(true);
         return null;
       },
       "accounts.remove": async ({ provider, id }) => {
-        stored(id);
-        delete limits[`${provider}:${id}`];
-        if (provider === "codex") {
-          await codex({ action: "remove", id });
-          await kv.set("limits:v1", limits);
-          return null;
-        }
-        const removed = accounts.find((account) => account.id === id);
-        if (removed?.profile) void dropProfile(removed.profile);
-        accounts = accounts.filter((account) => account.id !== id);
-        order["claude-code"] = order["claude-code"].filter(
-          (entry) => entry !== id,
-        );
-        usage.delete(id);
-        await fs.rm(secretPath(id), { force: true });
-        await changed();
+        await remove(provider, id);
+        return null;
+      },
+      "accounts.clear": async ({ provider }) => {
+        const views =
+          provider === "codex" ? await codexView() : await claudeView();
+        // The account in use goes last, so Cloud never switches to another one on the way.
+        const added = views
+          .filter((view) => view.id !== LOCAL)
+          .sort((a, b) => Number(a.inUse) - Number(b.inUse));
+        for (const view of added) await remove(provider, view.id);
         return null;
       },
       "accounts.rename": async ({ provider, id, name }) => {

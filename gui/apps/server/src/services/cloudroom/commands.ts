@@ -27,11 +27,12 @@ import { assertValidParentThread, isParentNotifiableChildThread } from "../threa
 import { inferThreadMetadata, queueThreadTitle } from "../threads/thread-metadata-inference.js";
 import { getLastThreadOutput } from "../threads/thread-data.js";
 import { cliPlace, reportAgentConnect, reportMacHelperProblem } from "./setup-telemetry.js";
-import { cloudSkills, copyLogins, copyMacGithub, importCodexLogin, importPiLogin, macPiSetup, setupSync, skillInCloud, stopSync, syncStatus } from "./sync.js";
+import { cloudSkills, copyLogins, copyMacGithub, importCodexLogin, importPiLogin, loginMarkers, macPiSetup, markLogin, setupSync, skillInCloud, stopSync, syncStatus } from "./sync.js";
+import { macClaudeSignedIn } from "./claude-token.js";
 import { macAccess, macAccessSupported, noteWake, setupPreviews, stopPreviews, previewStatus } from "./previews.js";
 import { CloudSecrets } from "./secrets.js";
 import { CodexAccounts } from "./codex-accounts.js";
-import { cancelMacCodexLogin, hasMacCodexLogin, macCodexLogin, macCodexLoginExpired, cursorKeyRejected, macCursorLogin, revokeDesktopToken, startMacCodexLogin, SANDBOX_PREFIX, SandboxAsleep, SandboxDirectory, sandboxThread, type AutomationRun, type SandboxProject, type SandboxTrigger, type SandboxWakeTrigger } from "./sandboxes.js";
+import { cancelMacCodexLogin, hasMacCodexLogin, macCodexLogin, macCodexLoginExpired, cursorKeyRejected, macCursorLogin, revokeDesktopToken, startMacCodexLogin, CLOUD_REGION, SANDBOX_PREFIX, SandboxAsleep, SandboxDirectory, sandboxThread, startRefused, type AutomationRun, type SandboxProject, type SandboxTrigger, type SandboxWakeTrigger } from "./sandboxes.js";
 import type { AppDeps, LoggedWorkSessionDeps } from "../../types.js";
 import { markMinutesSent, unsentMinutes } from "./time-in-app.js";
 import { emitPluginThreadCreated } from "../plugins/plugin-thread-events.js";
@@ -471,6 +472,20 @@ class CloudroomService {
       this.macReportDue = 0;
     });
     this.sandboxes.onRuns = runs => { for (const run of runs) this.adoptRun(run); };
+    this.sandboxes.skipLogins = async () => {
+      const markers = await loginMarkers(deps);
+      // Disconnect signed these CLIs out, so a login on this Mac now is a new sign-in (ADR 0327).
+      const signedInAgain = { codex: hasMacCodexLogin, claude: async () => await macClaudeSignedIn() === true };
+      for (const [name, signedIn] of Object.entries(signedInAgain)) {
+        if (markers[name] === "signed-out" && await signedIn()) {
+          await markLogin(deps, name, null);
+          delete markers[name];
+        }
+      }
+      const skip = new Set(Object.keys(markers));
+      if (!await copyMacGithub(deps)) skip.add("github");
+      return skip;
+    };
     this.codexAccounts = new CodexAccounts(body => this.sandboxes.codexAccounts(body), async () => (await this.sandboxes.account())?.userId ?? null,
       join(deps.config.dataDir, "cloudroom-codex-accounts.json"), () => this.restartAwake("codex"));
     // Renames, generated titles, agent renames, and new parents (a promoted subagent loses its parent's access) all
@@ -1041,11 +1056,12 @@ class CloudroomService {
   private async syncLogins(cloudChanged = false): Promise<void> {
     if (!await this.sandboxMode() || await copyLogins(this.deps) !== true) return;
     void this.sandboxes.copyCloudLogins(cloudChanged).catch(error => this.warn("Cloud logins could not be copied to this Mac", error));
-    await this.sandboxes.copyMacLogins(false, await copyMacGithub(this.deps)).catch(error => this.warn("Logins could not be copied to cloud sandboxes", error));
+    await this.sandboxes.copyMacLogins().catch(error => this.warn("Logins could not be copied to cloud sandboxes", error));
   }
 
-  async claudeAuth(action?: "login" | "cancel" | "complete" | "token" | "key", requestId?: string, code?: string, state?: string) {
-    const status = await this.claudeAuthStatus(action, requestId, code, state);
+  /** `follow` marks the Accounts plugin keeping Cloud on the account in use, not the user connecting (ADR 0327). */
+  async claudeAuth(action?: "login" | "cancel" | "complete" | "token" | "key", requestId?: string, code?: string, state?: string, follow = false) {
+    const status = await this.claudeAuthStatus(action, requestId, code, state, follow);
     const connected = status.state === "connected";
     // The code sign-in finishes in the background, so a status check that first sees Claude connected also resumes.
     if (connected && (action || !this.claudeConnected)) this.resumeClaudeStarts();
@@ -1084,12 +1100,15 @@ class CloudroomService {
     }
   }
 
-  private async claudeAuthStatus(action?: "login" | "cancel" | "complete" | "token" | "key", requestId?: string, code?: string, state?: string) {
+  private async claudeAuthStatus(action?: "login" | "cancel" | "complete" | "token" | "key", requestId?: string, code?: string, state?: string, follow = false) {
     const sandbox = await this.sandboxLogin("claude");
     if (sandbox) {
-      if (action === "token" && code) await this.sandboxes.saveLogin("claude", JSON.stringify({ token: code, ...(state ? { plan: state } : {}) }));
-      else if (action === "key" && code) await this.sandboxes.saveLogin("claude", JSON.stringify({ apiKey: code }));
-      else if (action === "login" || action === "complete") throw new ApiError(409, "claude_auth_unsupported", `Cloud sandboxes connect Claude with a one-year token from this ${COMPUTER}. Use Connect Claude.`);
+      if ((action === "token" || action === "key") && code) {
+        if (!follow) await markLogin(this.deps, "claude", null);
+        const value = action === "token" ? { token: code, ...(state ? { plan: state } : {}) } : { apiKey: code };
+        if (!await this.sandboxes.saveLogin("claude", JSON.stringify(value), undefined, follow)) return sandbox;
+      }
+      if (action === "login" || action === "complete") throw new ApiError(409, "claude_auth_unsupported", `Cloud sandboxes connect Claude with a one-year token from this ${COMPUTER}. Use Connect Claude.`);
       if ((action === "token" || action === "key") && code) {
         void this.syncLogins(true);
         if ((await this.savedConnection())?.token) await this.vmClaudeAuth(action, requestId, code, state).catch(error => this.warn("Claude could not be connected on the VM", error));
@@ -1151,6 +1170,7 @@ class CloudroomService {
       let copied = false;
       if (action === "cancel") cancelMacCodexLogin();
       if (action === "login") {
+        await markLogin(this.deps, "codex", null);
         const account = sandbox.state === "connected" ? await this.codexAccounts.selected() : null;
         if (account) throw new ApiError(409, "codex_account_rejected", `Cloud uses your Codex account ${account}. Sign in to it again with Add in Settings → Agents → Codex, or pick This ${COMPUTER_TITLE} there.`);
         if (await copyLogins(this.deps) !== true) {
@@ -1159,13 +1179,13 @@ class CloudroomService {
         }
         // Signed out or expired here, or the cloud rejected the saved login: sign in on this Mac first, then the next status check copies the new login.
         if (sandbox.state !== "connected" && await hasMacCodexLogin() && !await macCodexLoginExpired()) {
-          await this.sandboxes.copyMacLogins(true, await copyMacGithub(this.deps));
+          await this.sandboxes.copyMacLogins(true);
           copied = true;
         } else startMacCodexLogin();
       }
       const run = macCodexLogin();
       if (run?.done && !run.error) {
-        await this.sandboxes.copyMacLogins(true, await copyMacGithub(this.deps));
+        await this.sandboxes.copyMacLogins(true);
         copied = true;
       }
       const status = copied ? (await this.sandboxLogin("codex"))! : sandbox;
@@ -2414,6 +2434,7 @@ class CloudroomService {
         this.setConnectionIssue(threadId, "delivery");
         this.notify(threadId);
       }
+      if (startRefused(error) && !binding(this.deps.db, threadId)?.sessionId) void this.noticeCloudParent(threadId, error.code === CLOUD_REGION ? "blocked" : "refused", "refused", message).catch((error: unknown) => this.warn("A child report could not be sent", error, { threadId }));
       throw new ApiError(permanent ? 400 : 503, error instanceof CloudroomError ? error.code ?? "cloudroom_unavailable" : "cloudroom_unavailable", message);
     } finally { releaseCopy?.(); }
   }
@@ -2505,17 +2526,19 @@ class CloudroomService {
    *  Core reports a child a Cloud parent started through the website instead (ADR 0259), Mac on or off, when its
    *  current parent has a sandbox of its own; this covers every other child.
    *  A parent in another Cloudroom account never hears from it. */
-  private async noticeCloudParent(threadId: string, status: ThreadEventTurnStatus | "not_started", turn: string, cause?: string): Promise<void> {
+  private async noticeCloudParent(threadId: string, status: ThreadEventTurnStatus | "not_started" | "refused" | "blocked", turn: string, cause?: string): Promise<void> {
     const child = getThread(this.deps.db, threadId);
     const parent = this.reportedParent(child);
     if (!child || !parent || !isCloudThread(parent)) return;
     const parentSaved = binding(this.deps.db, parent.id);
     if (parentSaved && await this.otherAccountThread(parentSaved)) return;
     const first = command(this.deps.db, `first_${child.id}`);
-    if (status !== "not_started" && first && JSON.parse(first.input).parent_thread && parentSaved?.coreUrl === SANDBOX_PREFIX + parent.id) return;
+    if (status !== "not_started" && status !== "refused" && status !== "blocked" && first && JSON.parse(first.input).parent_thread && parentSaved?.coreUrl === SANDBOX_PREFIX + parent.id) return;
     const name = child.title ? `"${child.title}" (${child.id})` : child.id;
     const reply = getLastThreadOutput(this.deps.db, child.id)?.trim();
-    const text = status === "completed"
+    const text = status === "refused" || status === "blocked"
+      ? `[Cloudroom] Child thread ${name} has not started: ${cause} ${status === "refused" ? "It starts by itself once that clears, so don't spawn a replacement. If it can't wait, ask" : "That may not change soon, so ask"} the user to archive it, then spawn it again with --shared-sandbox.`
+      : status === "completed"
       ? `[Cloudroom] Child thread ${name} completed:\n\n${reply ? reply.length > 4000 ? `${reply.slice(0, 4000)}\n\n[... reply truncated. Read all of it with \`room-cli thread output ${child.id}\` ...]` : reply : "No final output was recorded."}`
       : status === "interrupted"
         ? `[Cloudroom] Child thread ${name} was interrupted. If the user stopped it, do not restart or replace its work unless they ask.`
@@ -2561,6 +2584,8 @@ class CloudroomService {
     let answer: { thread: string } | { error: string };
     try {
       if (!child) {
+        const refusal = await this.sandboxes.startRefusal();
+        if (refusal) throw new ApiError(429, "cloud_start_refused", refusal.replace(/\.$/, ""));
         const providerId = input.provider ? (Object.keys(CLOUD_HARNESSES) as CloudProvider[]).find(id => CLOUD_HARNESSES[id] === input.provider) : parentThread.providerId;
         if (!providerId) throw new ApiError(400, "cloudroom_unsupported", `Cloud has no ${input.provider} agent.`);
         const same = providerId === parentThread.providerId;

@@ -41,11 +41,21 @@ export function ScanProgress({ threadId }: { threadId: string }) {
   );
 }
 
-function ScanProgressLoader({ threadId, busy }: { threadId: string; busy: boolean }) {
+function ScanProgressLoader({
+  threadId,
+  busy,
+}: {
+  threadId: string;
+  busy: boolean;
+}) {
   const { data } = useQuery({
     queryKey: ["workflow-scan-progress", threadId],
     queryFn: ({ signal }) =>
-      sdk.threads.getPluginMetadata({ threadId, pluginId: LOOPS_PLUGIN_ID, signal }),
+      sdk.threads.getPluginMetadata({
+        threadId,
+        pluginId: LOOPS_PLUGIN_ID,
+        signal,
+      }),
     refetchInterval: busy ? 3_000 : false,
   });
   const raw = data?.workflowScan;
@@ -58,13 +68,18 @@ function useScrollCollapse() {
   const [collapse, setCollapse] = useState(0);
   useEffect(() => {
     let scroller = ref.current?.parentElement ?? null;
-    while (scroller && !/(auto|scroll)/.test(getComputedStyle(scroller).overflowY)) {
+    while (
+      scroller &&
+      !/(auto|scroll)/.test(getComputedStyle(scroller).overflowY)
+    ) {
       scroller = scroller.parentElement;
     }
     if (!scroller) return;
     const element = scroller;
     const update = () =>
-      setCollapse(Math.min(1, Math.max(0, element.scrollTop / COLLAPSE_SCROLL_PX)));
+      setCollapse(
+        Math.min(1, Math.max(0, element.scrollTop / COLLAPSE_SCROLL_PX)),
+      );
     update();
     element.addEventListener("scroll", update, { passive: true });
     return () => element.removeEventListener("scroll", update);
@@ -76,11 +91,14 @@ function ScanProgressCard({ scan, busy }: { scan: Scan; busy: boolean }) {
   const { ref, collapse } = useScrollCollapse();
   const read = scan.read.reduce((sum, n) => sum + n, 0);
   const finished = scan.stage === "patterns";
-  const status = busy
-    ? `${scan.readers ? Math.round((scan.readersDone / scan.readers) * 100) : 0}%`
-    : finished
-      ? "Done"
-      : "Stopped";
+  const waiting = busy && scan.chats === 0;
+  const status = waiting
+    ? ""
+    : busy
+      ? `${scan.readers ? Math.round((scan.readersDone / scan.readers) * 100) : 0}%`
+      : finished
+        ? "Done"
+        : "Stopped";
   return (
     <div
       ref={ref}
@@ -109,34 +127,66 @@ function ScanProgressCard({ scan, busy }: { scan: Scan; busy: boolean }) {
           <span className="ml-auto flex items-center gap-3">
             <span
               className="flex items-center gap-3"
-              style={{ opacity: collapse, transform: `translateY(${(1 - collapse) * 6}px)` }}
+              style={{
+                opacity: collapse,
+                transform: `translateY(${(1 - collapse) * 6}px)`,
+              }}
             >
-              <Heatmap scan={scan} cell={4} gap={1} />
-              <span className="text-[12px] font-semibold text-foreground tabular-nums">{fmt(read)}</span>
+              <Heatmap scan={scan} cell={4} gap={1} waiting={waiting} />
+              {waiting ? null : (
+                <span className="text-[12px] font-semibold text-foreground tabular-nums">
+                  {fmt(read)}
+                </span>
+              )}
             </span>
             <span className="text-muted-foreground tabular-nums">{status}</span>
           </span>
         </div>
         <div
           className="overflow-hidden"
-          style={{ height: BODY_HEIGHT * (1 - collapse), opacity: 1 - collapse * 1.4 }}
+          style={{
+            height: BODY_HEIGHT * (1 - collapse),
+            opacity: 1 - collapse * 1.4,
+          }}
         >
           <div
             className="flex items-end gap-4 pt-3"
-            style={{ transform: `scale(${1 - 0.15 * collapse})`, transformOrigin: "top left" }}
+            style={{
+              transform: `scale(${1 - 0.15 * collapse})`,
+              transformOrigin: "top left",
+            }}
           >
-            <Heatmap scan={scan} cell={11} gap={3} />
-            <div className="min-w-0 pb-0.5">
-              <div className="text-[26px] leading-none font-semibold text-foreground tabular-nums">
-                {scan.chats ? fmt(read) : "—"}
-                <span className="text-[15px] text-muted-foreground"> / {scan.chats ? fmt(scan.chats) : "—"}</span>
+            <Heatmap scan={scan} cell={11} gap={3} waiting={waiting} />
+            {waiting ? (
+              <div className="min-w-0 pb-1">
+                <div className="text-[17px] leading-none font-semibold text-foreground">
+                  Finding your chats
+                </div>
+                <div className="mt-2 text-[11px] text-muted-foreground">
+                  Looking through 13 weeks on this computer
+                </div>
+                <div className="mt-1 text-[11px] text-muted-foreground">
+                  Secrets are masked before anything leaves it
+                </div>
               </div>
-              <div className="mt-1 text-[11px] text-muted-foreground">chats read across 13 weeks</div>
-              <div className="mt-2 text-[11px] text-muted-foreground tabular-nums">
-                <span className="text-primary">{scan.readersDone}</span>/{scan.readers} readers ·{" "}
-                {fmt(scan.secrets)} secrets masked
+            ) : (
+              <div className="min-w-0 pb-0.5">
+                <div className="text-[26px] leading-none font-semibold text-foreground tabular-nums">
+                  {scan.chats ? fmt(read) : "—"}
+                  <span className="text-[15px] text-muted-foreground">
+                    {" "}
+                    / {scan.chats ? fmt(scan.chats) : "—"}
+                  </span>
+                </div>
+                <div className="mt-1 text-[11px] text-muted-foreground">
+                  chats read across 13 weeks
+                </div>
+                <div className="mt-2 text-[11px] text-muted-foreground tabular-nums">
+                  <span className="text-primary">{scan.readersDone}</span>/
+                  {scan.readers} readers · {fmt(scan.secrets)} secrets masked
+                </div>
               </div>
-            </div>
+            )}
           </div>
         </div>
       </div>
@@ -144,8 +194,46 @@ function ScanProgressCard({ scan, busy }: { scan: Scan; busy: boolean }) {
   );
 }
 
-function Heatmap({ scan, cell, gap }: { scan: Scan; cell: number; gap: number }) {
+const WAVE_KEYFRAMES =
+  "@keyframes scan-progress-wave{0%,28%,100%{opacity:.07}11%{opacity:.6}}@media (prefers-reduced-motion:reduce){[data-scan-wave]{animation:none!important;opacity:.12}}";
+
+function Heatmap({
+  scan,
+  cell,
+  gap,
+  waiting,
+}: {
+  scan: Scan;
+  cell: number;
+  gap: number;
+  waiting: boolean;
+}) {
   const max = Math.max(1, ...scan.days);
+  if (waiting) {
+    return (
+      <div className="flex" style={{ gap }} aria-hidden>
+        <style>{WAVE_KEYFRAMES}</style>
+        {Array.from({ length: DAYS / 7 }, (_, week) => (
+          <div key={week} className="flex flex-col" style={{ gap }}>
+            {Array.from({ length: 7 }, (_, weekday) => (
+              <span
+                key={weekday}
+                data-scan-wave=""
+                className="rounded-[2px] bg-primary"
+                style={{
+                  width: cell,
+                  height: cell,
+                  opacity: 0.07,
+                  animation: "scan-progress-wave 2.2s ease-in-out infinite",
+                  animationDelay: `${week * 0.08 + weekday * 0.025}s`,
+                }}
+              />
+            ))}
+          </div>
+        ))}
+      </div>
+    );
+  }
   return (
     <div className="flex" style={{ gap }} aria-hidden>
       {Array.from({ length: DAYS / 7 }, (_, week) => (
@@ -159,7 +247,10 @@ function Heatmap({ scan, cell, gap }: { scan: Scan; cell: number; gap: number })
             return (
               <span
                 key={weekday}
-                className={cn("rounded-[2px]", lit ? "bg-primary" : "bg-foreground")}
+                className={cn(
+                  "rounded-[2px]",
+                  lit ? "bg-primary" : "bg-foreground",
+                )}
                 style={{
                   width: cell,
                   height: cell,

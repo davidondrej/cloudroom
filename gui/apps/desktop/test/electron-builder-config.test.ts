@@ -686,7 +686,7 @@ describe("electron-builder signing config", () => {
       expect(release.exitCode).toBe(0);
       expect(JSON.parse(release.stdout).publish).toEqual({
         provider: "generic",
-        url: "https://github.com/davidondrej/cloudroom-gui/releases/latest/download/",
+        url: "https://github.com/davidondrej/cloudroom/releases/latest/download/",
         channel: "latest",
       });
     } finally {

@@ -46,7 +46,7 @@ export function registerProviderCommands(
 ): void {
   const provider = program
     .command("provider")
-    .description("Inspect available providers and models");
+    .description("Inspect, disconnect, remove, and restore providers");
 
   addProviderRoutingOptions(provider.command("list"))
     .description("List available providers")
@@ -141,6 +141,46 @@ export function registerProviderCommands(
         },
       ),
     );
+
+  provider
+    .command("disconnect <providerId>")
+    .description(
+      "Sign Claude Code or Codex out on this computer and in Cloud, and remove added accounts",
+    )
+    .action(
+      action(async (providerId: string) => {
+        await disconnectAgent(getUrl(), providerId, false);
+        console.log(`${providerId} disconnected`);
+      }),
+    );
+
+  provider
+    .command("remove <providerId>")
+    .description("Disconnect an agent and hide it from new threads")
+    .action(
+      action(async (providerId: string) => {
+        await disconnectAgent(getUrl(), providerId, true);
+        console.log(`${providerId} removed. Undo with: provider restore ${providerId}`);
+      }),
+    );
+
+  provider
+    .command("restore <providerId>")
+    .description("Show a removed agent again and let its login copy again")
+    .action(
+      action(async (providerId: string) => {
+        await createCliBbSdk(getUrl()).cloudroom.restoreAgent(providerId);
+        console.log(`${providerId} restored`);
+      }),
+    );
+}
+
+async function disconnectAgent(
+  serverUrl: string,
+  providerId: string,
+  remove: boolean,
+): Promise<void> {
+  await createCliBbSdk(serverUrl).cloudroom.disconnectAgent(providerId, { remove });
 }
 
 function includeSelectedOnlyModel(

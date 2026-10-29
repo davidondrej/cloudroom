@@ -52,6 +52,8 @@ export const accountsRpcContract = defineRpcContract({
     output: ok,
   },
   "accounts.remove": { input: target, output: ok },
+  // Disconnect in Settings → Providers removes every added account first (ADR 0327).
+  "accounts.clear": { input: z.object({ provider: providerSchema }), output: ok },
   "accounts.rename": {
     input: target.extend({ name: z.string().max(60) }),
     output: ok,

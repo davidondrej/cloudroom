@@ -489,6 +489,10 @@ async function resolveExecutionOptions(
     await earlyModelResultPromise?.catch(() => undefined);
     throw error;
   }
+  if (access.kind === "picker") {
+    const hidden = getAppSettings(deps.db).hiddenProviderIds;
+    providers = providers.filter((provider) => !hidden.includes(provider.id));
+  }
   providers = includeRequestedRegisteredProvider(
     deps,
     providers,

@@ -1480,7 +1480,7 @@ Ask Cloudroom to write plugins for you: the \`plugin-authoring\` skill documents
 the whole surface with examples.
 
 Confused by the API, or need something the types don't explain? Clone the Cloudroom
-repo and read the source: <https://github.com/davidondrej/cloudroom-gui>.
+repo and read the source: <https://github.com/davidondrej/cloudroom>.
 `;
 }
 

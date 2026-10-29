@@ -2,6 +2,18 @@
 
 Also on [cloudroom.dev/changelog](https://www.cloudroom.dev/changelog).
 
+## 129
+
+One open-source home for Cloudroom (2026-10-28)
+
+### Changes
+
+- The app, Core, and skills now live in one open-source repo, and app updates come from it.
+- Each agent in Settings has a new menu to make it the default, disconnect it, or remove it.
+- Cloudroom uses less CPU while it sits idle.
+- Stopping a sleeping Cloud thread no longer wakes it up.
+- A new setting collapses subagents in the sidebar.
+
 ## 128
 
 Start threads on your other machines (2026-10-28)

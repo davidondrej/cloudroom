@@ -75,8 +75,8 @@ export function InviteSettingsCard() {
     <div data-testid="settings-invite-card" className="flex min-h-13 items-center gap-3 rounded-lg bg-surface-recessed py-2 pr-2.5 pl-4">
       <TicketIcon className="text-muted-foreground" />
       <p className="min-w-0 flex-1 text-sm">
-        <span className="font-medium text-foreground">Enjoying Cloudroom?</span>{" "}
-        <span className="text-muted-foreground">Share it with a friend.</span>
+        <span className="font-medium text-foreground">Invite a friend</span>{" "}
+        <span className="text-muted-foreground">and get up to $400 of Cloud credits</span>
       </p>
       <button type="button" onClick={() => open(true)} className="h-8 shrink-0 rounded-md bg-primary px-3 text-xs font-semibold text-primary-foreground hover:brightness-95">
         Invite a friend
@@ -122,7 +122,8 @@ function InviteTickets({ data, finish }: { data: Invites; finish: () => void }) 
   const done = <button type="button" onClick={finish} className="h-[50px] border border-[#3a372f] px-6 text-[15px] font-semibold text-[#d8d0bd] transition-transform hover:scale-105 hover:border-[#5a564b]">Done</button>;
   const send = {
     title: <>Your {number === 1 ? "first" : "next"}<br /><em>ticket</em>.</>,
-    lede: "Send it to a friend who builds with agents.",
+    // The reward (ADR 0328): the friend's first month is 20% off, and their first payment becomes your credits.
+    lede: "They get 20% off their first month. You get Cloud credits worth what they pay, up to $400.",
   };
   const final = state === "joined" ? {
     title: <>{ticket!.joined?.name ?? "Your friend"}<br />is <em>in</em>.</>,

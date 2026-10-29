@@ -33,7 +33,7 @@ does not cover:
 plugin migrate` converts such a plugin to the npm package (it prints the plan
      and asks first, and needs `--yes` when stdin is not a terminal). Never
      migrate a plugin the user did not ask you to migrate.
-3. **`git clone --depth 1 https://github.com/davidondrej/cloudroom-gui`** for host behavior or
+3. **`git clone --depth 1 https://github.com/davidondrej/cloudroom`** for host behavior or
    a reference implementation: `packages/plugin-sdk/src/`,
    `apps/server/src/services/plugins/`, `plugins/`.
 

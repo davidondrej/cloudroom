@@ -694,7 +694,7 @@ export function createApp(
   registerPluginCatalogRoutes(publicApi, pluginCatalogService);
   registerPluginRoutes(publicApi, deps, pluginService, upgradeWebSocket);
   registerSkillsRegistryRoutes(publicApi, deps);
-  installCloudroomRoutes(app, deps);
+  installCloudroomRoutes(app, deps, pluginService);
   registerUiPerfRoutes(app, deps);
   app.route("/api/v1", publicApi);
   app.use("/api/v1/*", () => {

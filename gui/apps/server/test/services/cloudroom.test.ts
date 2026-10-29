@@ -8,6 +8,7 @@ import { listQueuedCommands } from "../helpers/commands.js";
 import { cloudroom } from "../../src/services/cloudroom/commands.js";
 import { command, saveTeleportProgress } from "../../src/services/cloudroom/store.js";
 import { teleports } from "../../src/services/cloudroom/teleport.js";
+import { SandboxDirectory } from "../../src/services/cloudroom/sandboxes.js";
 import { createTestAppHarness } from "../helpers/test-app.js";
 import { seedEnvironment, seedHostSession, seedPrimaryHost, seedProjectWithSource, seedThread, seedThreadRuntimeState } from "../helpers/seed.js";
 import { archiveThread, createThread, getThread, setProjectGitRemoteUrlIfMissing, events, cloudroomThreads, cloudroomCommands } from "@cloudroom/db";
@@ -1243,7 +1244,117 @@ it("shows Teleport the moment it starts, and never leaves a failed or interrupte
     const response = await stopped;
     expect(response.status).toBe(409);
     expect(await response.json()).toMatchObject({ code: "teleport_interrupted", message: expect.stringContaining("stopped or archived") });
+
+    harness.db
+      .insert(events)
+      .values({
+        id: "big",
+        threadId: thread.id,
+        scopeKind: "thread",
+        sequence: 99,
+        type: "item/completed",
+        data: JSON.stringify({ text: "x".repeat(64 * 1024 * 1024) }),
+        createdAt: 0,
+      })
+      .run();
+    for (const action of ["check", "start"])
+      expect(
+        await (
+          await api(`/cloudroom/threads/${thread.id}/teleport`, { action })
+        ).json(),
+      ).toMatchObject({ code: "teleport_history_size" });
+    expect(heldChecks).toHaveLength(2);
   } finally {
     service.stop(); core.closeAllConnections(); await new Promise<void>((resolve) => core.close(() => resolve())); await harness.cleanup();
+  }
+});
+
+it("Remove stops copying an agent's login and hides it until Add back; unknown or login-less agents are refused", async () => {
+  const harness = await createTestAppHarness();
+  const service = cloudroom(harness.deps);
+  const post = (path: string, body: unknown = {}) => harness.app.request(`/api/v1/cloudroom/account/agents/${path}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  const settings = async () => (await (await harness.app.request("/api/v1/system/config")).json() as { generalSettings: { hiddenProviderIds: string[]; defaultProviderId: string | null } }).generalSettings;
+  try {
+    expect((await post("nope/disconnect")).status).toBe(404);
+    expect((await post("pi/disconnect")).status).toBe(400);
+    await harness.app.request("/api/v1/settings/general", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...await settings(), defaultProviderId: "pi" }) });
+    expect((await settings()).defaultProviderId).toBe("pi");
+
+    expect((await post("pi/disconnect", { remove: true })).status).toBe(200);
+    expect(await service.sandboxes.skipLogins()).toContain("pi");
+    expect(await settings()).toMatchObject({ hiddenProviderIds: ["pi"] });
+    expect((await settings()).defaultProviderId).not.toBe("pi");
+
+    expect((await post("pi/restore")).status).toBe(200);
+    expect(await service.sandboxes.skipLogins()).not.toContain("pi");
+    expect(await settings()).toMatchObject({ hiddenProviderIds: [] });
+  } finally {
+    service.stop(); await harness.cleanup();
+  }
+});
+
+/** A fake website that keeps the account's logins in memory. `refuse` answers every removal with an error. */
+async function fakeLoginsWebsite(refuse = false) {
+  const logins = new Map<string, string>();
+  const server = createServer(async (req, res) => {
+    let text = ""; for await (const chunk of req) text += chunk;
+    const body = JSON.parse(text) as { action?: string; name: string; value?: string };
+    const reply = (status: number, value: unknown) => { res.writeHead(status, { "Content-Type": "application/json" }); res.end(JSON.stringify(value)); };
+    if (body.action === "remove") {
+      if (refuse) return reply(400, { error: "Invalid login." });
+      logins.delete(body.name);
+      return reply(200, { removed: true });
+    }
+    logins.set(body.name, body.value ?? "");
+    reply(200, { saved: true });
+  });
+  server.listen(0, "127.0.0.1"); await once(server, "listening");
+  const address = server.address(); if (!address || typeof address === "string") throw new Error("fixture did not listen");
+  return { logins, account: { website: `http://127.0.0.1:${address.port}`, userId: "user", token: "token" }, close: () => new Promise<void>(resolve => { server.closeAllConnections(); server.close(() => resolve()); }) };
+}
+
+it("Disconnect changes nothing when the website refuses to remove the login", async () => {
+  const harness = await createTestAppHarness();
+  const service = cloudroom(harness.deps);
+  const website = await fakeLoginsWebsite(true);
+  (service.sandboxes as { account: () => Promise<unknown> }).account = async () => website.account;
+  try {
+    const response = await harness.app.request("/api/v1/cloudroom/account/agents/pi/disconnect", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ remove: true }) });
+    expect(response.status).toBe(503);
+    expect(await sync.loginMarkers(harness.deps)).toEqual({});
+    expect((await (await harness.app.request("/api/v1/system/config")).json() as { generalSettings: { hiddenProviderIds: string[] } }).generalSettings.hiddenProviderIds).toEqual([]);
+  } finally {
+    service.stop(); await website.close(); await harness.cleanup();
+  }
+});
+
+it("a background login save never brings back a login Disconnect removed, whether it starts before or during it", async () => {
+  const website = await fakeLoginsWebsite();
+  const sandboxes = new SandboxDirectory(async () => website.account);
+  const skip = new Set<string>();
+  sandboxes.skipLogins = async () => skip;
+  try {
+    await sandboxes.saveLogin("claude", "first");
+    let release = () => {};
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const before = sandboxes.saveLogin("claude", "before", undefined, true);
+    const disconnect = sandboxes.withLogins(async () => { skip.add("claude"); await gate; await sandboxes.removeLogin("claude"); });
+    const during = sandboxes.saveLogin("claude", "during", undefined, true);
+    release();
+    await disconnect;
+    expect([await before, await during]).toEqual([true, false]);
+    expect(website.logins.has("claude")).toBe(false);
+  } finally {
+    await website.close();
+  }
+});
+
+it("concurrent Disconnects keep every marker", async () => {
+  const harness = await createTestAppHarness();
+  try {
+    await Promise.all(["codex", "claude", "pi", "opencode"].map(name => sync.markLogin(harness.deps, name, "blocked")));
+    expect(Object.keys(await sync.loginMarkers(harness.deps)).sort()).toEqual(["claude", "codex", "opencode", "pi"]);
+  } finally {
+    await harness.cleanup();
   }
 });

@@ -1,6 +1,7 @@
 import { COMPUTER } from "@cloudroom/domain";
 import type { Hono, MiddlewareHandler } from "hono";
 import type { AppDeps } from "../../types.js";
+import type { PluginService } from "../plugins/plugin-service.js";
 import { ApiError } from "../../errors.js";
 import { getThread, getThreadSectionById } from "@cloudroom/db";
 import { z } from "zod";
@@ -10,7 +11,7 @@ import { cloudGitResponse } from "./git.js";
 import { cloudroom, isCloudThread } from "./commands.js";
 import { cloudroomAccount } from "./account.js";
 import { checkPreviewsNow, macAccess, macAccessLevels, setMacAccess } from "./previews.js";
-import { cloudSkills, copyLogins, setCloudSkills, setCopyLogins, skillInCloud } from "./sync.js";
+import { cloudSkills, copyLogins, markLogin, setCloudSkills, setCopyLogins, skillInCloud } from "./sync.js";
 import { secondsSinceFirstLaunch } from "./setup-telemetry.js";
 import { teleports } from "./teleport.js";
 import { binding, teleportBlocked, teleportProgress } from "./store.js";
@@ -18,6 +19,7 @@ import { browserRequestProblem } from "../../browser-request-guard.js";
 import { cancelClaudeToken, claudePlan, ensureClaudeCli, isClaudeApiKey, startClaudeToken, withClaudeTokenRun } from "./claude-token.js";
 import { startClaudeVersionSync } from "./harness-versions.js";
 import { macSignedInAgents } from "./mac-agents.js";
+import { disconnectAgent, restoreAgent } from "./agent-logins.js";
 import { autoDeleteDaysSchema, readAutoDelete, saveAutoDelete, startAutoDeleteSync } from "./auto-delete.js";
 import { importBbThreads } from "./bb-import.js";
 import { importNativeSessions, listNativeSessions } from "./session-import.js";
@@ -45,7 +47,7 @@ import { ACTIVATION_STEPS, CLOUD_CHOICE_ACTIONS, CLOUD_CHOICE_REASONS, POPUP_DET
 
 const SAFE_SETTINGS_SEARCH = /^(?=.{2,40}$)\p{L}+(?: \p{L}+){0,3}$/u;
 
-export function installCloudroomRoutes(app: Hono, deps: AppDeps): void {
+export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: PluginService): void {
   cloudroom(deps).teleportRecovery = () => teleports(deps).recover();
   cloudroom(deps).archiveRequest = (threadId) => {
     const thread = getThread(deps.db, threadId);
@@ -407,8 +409,8 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps): void {
   app.post("/api/v1/cloudroom/account/claude/token", async context => {
     const problem = browserRequestProblem(context, deps, { requireJsonForMutation: true });
     if (problem) return context.json({ message: "Use the local Cloudroom app." }, problem.status);
-    const input = z.object({ requestId: z.string().regex(/^[a-zA-Z0-9_-]{1,64}$/), token: z.string().regex(/^sk-ant-oat[A-Za-z0-9_-]{20,}$/), plan: z.string().regex(/^[a-z_]{1,32}$/).optional() }).strict().parse(await context.req.json());
-    const status = await cloudroom(deps).claudeAuth("token", input.requestId, input.token, input.plan);
+    const input = z.object({ requestId: z.string().regex(/^[a-zA-Z0-9_-]{1,64}$/), token: z.string().regex(/^sk-ant-oat[A-Za-z0-9_-]{20,}$/), plan: z.string().regex(/^[a-z_]{1,32}$/).optional(), follow: z.boolean().optional() }).strict().parse(await context.req.json());
+    const status = await cloudroom(deps).claudeAuth("token", input.requestId, input.token, input.plan, input.follow);
     cloudroom(deps).restartAwake("claude-code");
     return context.json(status);
   });
@@ -454,7 +456,10 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps): void {
       z.object({ action: z.literal("move"), id, direction: z.enum(["up", "down"]) }).strict(),
     ]).safeParse(await context.req.json().catch(() => null));
     if (!parsed.success) throw new ApiError(400, "invalid_codex_accounts", "Invalid Codex accounts request.");
-    return context.json(await cloudroom(deps).codexAccounts.request(parsed.data));
+    const result = await cloudroom(deps).codexAccounts.request(parsed.data);
+    // Adding or picking a Codex account connects Codex again (ADR 0327).
+    if (parsed.data.action === "use" || (parsed.data.action === "poll" && (result as { status?: string }).status === "complete")) await markLogin(deps, "codex", null);
+    return context.json(result);
   });
   for (const action of ["login", "cancel"] as const) {
     app.post(`/api/v1/cloudroom/account/codex/${action}`, async context => {
@@ -464,12 +469,25 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps): void {
   }
   const macCodexStatus = (run: ReturnType<typeof macCodexLogin>) =>
     !run ? { state: "idle" as const } : !run.done ? { state: "waiting" as const } : run.error ? { state: "error" as const, message: run.error } : { state: "done" as const };
-  app.post("/api/v1/cloudroom/mac/codex-login", context => context.json(macCodexStatus(startMacCodexLogin())));
+  app.post("/api/v1/cloudroom/mac/codex-login", async context => {
+    await markLogin(deps, "codex", null);
+    return context.json(macCodexStatus(startMacCodexLogin()));
+  });
   app.get("/api/v1/cloudroom/mac/codex-login", context => context.json(macCodexStatus(macCodexLogin())));
   app.get("/api/v1/cloudroom/mac/agents", async context => context.json({ agents: await macSignedInAgents() }));
   app.get("/api/v1/cloudroom/account/github", async context => context.json(await githubAuth(deps)));
   app.get("/api/v1/cloudroom/account/github/account", async context => context.json(await githubAccount(deps)));
   app.post("/api/v1/cloudroom/account/github/disconnect", async context => { await disconnectGithub(deps); return context.json({ ok: true }); });
+  const agentId = (context: { req: { param: (name: string) => string | undefined } }) => z.string().min(1).max(100).parse(context.req.param("providerId"));
+  app.post("/api/v1/cloudroom/account/agents/:providerId/disconnect", async context => {
+    const { remove } = z.object({ remove: z.boolean().default(false) }).strict().parse(await context.req.json().catch(() => ({})));
+    await disconnectAgent(deps, plugins, agentId(context), remove);
+    return context.json({ ok: true });
+  });
+  app.post("/api/v1/cloudroom/account/agents/:providerId/restore", async context => {
+    await restoreAgent(deps, agentId(context));
+    return context.json({ ok: true });
+  });
   app.post("/api/v1/cloudroom/account/previews/check", async context => { await checkPreviewsNow(deps); return context.json({ ok: true }); });
   app.get("/api/v1/cloudroom/account/repo-suggestions", async context => context.json(await repoSuggestions(deps)));
   app.get("/api/v1/cloudroom/account/github-branches", async context => {

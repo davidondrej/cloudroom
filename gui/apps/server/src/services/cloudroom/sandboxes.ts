@@ -1,6 +1,7 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { execFile, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
-import { access, mkdir, readdir, readFile, realpath, stat, writeFile } from "node:fs/promises";
+import { access, mkdir, readdir, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, sep } from "node:path";
 import { promisify } from "node:util";
@@ -48,6 +49,7 @@ export type SandboxLogin = "claude" | "codex" | "pi" | "github" | "cursor" | "op
 /** GitHub projects also name their repository and cloud folder, so the website can build a template. */
 export type SandboxProject = { id: string; repository: string | null; folder: string };
 const RECHECK_MS = 60_000;
+const insideLoginLock = new AsyncLocalStorage<true>();
 const PRELOAD_BATCH = 10, PRELOADS_PER_HOUR = 30, PRELOAD_AGAIN_MS = 3_600_000;
 const placeOf = (thread: string, project: SandboxProject) => ({ thread, project: project.id, ...(project.repository ? { repository: project.repository, folder: project.folder } : {}) });
 export type CloudQueue = { position: number; total: number; regionBlocked: boolean };
@@ -57,13 +59,16 @@ export type PlanUsage = { plan: string; credits: number | null; creditsLimit: nu
 const USAGE_LIMIT = "cloud_usage_limit";
 const AGENT_LIMIT = "cloud_agent_limit";
 const CLOUD_QUEUE = "cloud_queue";
-const CLOUD_REGION = "cloud_region";
+export const CLOUD_REGION = "cloud_region";
+export const startRefused = (error: unknown): error is CloudroomError & { code: string } => error instanceof CloudroomError && [USAGE_LIMIT, AGENT_LIMIT, CLOUD_QUEUE, CLOUD_REGION].includes(error.code ?? "");
 // The Mac's skills and global instructions that sandboxes receive, one way (docs/scopes/sandboxes.md).
 const SKILL_ROOTS = [".agents/skills", ".claude/skills", ".codex/skills", ".pi/agent/skills"];
 const INSTRUCTION_FILES = [".claude/CLAUDE.md", ".codex/AGENTS.md", ".pi/agent/AGENTS.md", ".config/opencode/AGENTS.md"];
 const CONFIG_LIMIT = 45 * 1024 * 1024;
 const codexAuthPath = () => join(process.env.CODEX_HOME || join(homedir(), ".codex"), "auth.json");
 export const hasMacCodexLogin = () => access(codexAuthPath()).then(() => true, () => false);
+/** What `codex logout` does, for a Mac without the Codex CLI. */
+export const removeMacCodexLogin = () => rm(codexAuthPath(), { force: true });
 
 /** The account's cloud Claude login while this Mac's Claude Code is signed out (ADR 0175). */
 let cloudClaude: Record<string, string> | null = null;
@@ -594,6 +599,7 @@ export class SandboxDirectory {
       const check: Promise<void> = this.call({ action: "awake" }).then(value => awakeSchema.parse(value)).then(listed => {
         if (this.awakeCheck !== check) return;
         this.awake = new Map(listed.sandboxes.map(({ thread, origin, token }) => [thread, { origin, token }]));
+        if (this.refused && this.awake.has(this.refused.thread)) this.refused = null;
         if (listed.runs.length) this.onRuns(listed.runs);
         this.awakeEvery = listed.recheck_ms;
         this.awakeIssue = null;
@@ -648,10 +654,12 @@ export class SandboxDirectory {
         this.woke(view.thread);
         this.backoff.delete(thread);
         this.capped.delete(thread);
+        if (this.refused?.thread === thread) this.refused = null;
         if (this.limit?.on) this.limit = { on: false, at: Date.now() };
         return view;
       }, error => {
         if (error instanceof CloudroomError && error.code === AGENT_LIMIT) this.capped.add(thread);
+        if (startRefused(error)) this.refused = { thread, code: error.code, message: error.message, at: Date.now() };
         const previous = this.backoff.get(thread);
         const tries = (previous?.tries ?? 0) + 1;
         // A 4xx answer (say, usage limit) won't fix itself in 2 s, so it backs off at once.
@@ -682,6 +690,8 @@ export class SandboxDirectory {
       plan: z.string().nullable().default(null), preload: z.boolean().default(false),
     }).parse(await this.call({ action: "mode" }));
     this.plan = value.plan;
+    const code = this.refused?.code;
+    if ((code === USAGE_LIMIT && !value.limited) || (code === AGENT_LIMIT && value.plan && value.plan !== "free") || (code === CLOUD_QUEUE && !value.queue) || (code === CLOUD_REGION && !value.region_blocked)) this.refused = null;
     this.preloadOn = value.preload;
     this.mode = { on: value.sandboxes, at: Date.now() };
     this.limit = { on: value.limited, at: Date.now() };
@@ -730,6 +740,12 @@ export class SandboxDirectory {
   private readonly capped = new Set<string>();
   /** Whether this new thread was refused for its plan's launch cap; cleared when it starts. */
   agentLimited(thread: string): boolean { return this.capped.has(thread); }
+  private refused: { thread: string; code: string; message: string; at: number } | null = null;
+  async startRefusal(): Promise<string | null> {
+    if (this.refused) await this.forNewThreads();
+    const refused = this.refused, day = (at: number) => new Date(at).toISOString().slice(0, 10);
+    return refused && Date.now() - refused.at < 360_000 && day(refused.at) === day(Date.now()) ? refused.message : null;
+  }
   /** Whether this run last saw the sandbox awake, without asking the website. */
   isAwake(thread: string): boolean { return this.views.get(thread)?.state === "awake" || this.awake.has(thread); }
 
@@ -804,6 +820,7 @@ export class SandboxDirectory {
     this.preloadQueue.length = 0;
     this.usage = null;
     this.capped.clear();
+    this.refused = null;
     this.warmed = null;
     this.copiedAt = 0;
     this.pulledAt = 0;
@@ -837,7 +854,17 @@ export class SandboxDirectory {
   async remove(thread: string): Promise<void> { this.forget(thread); await this.call({ action: "remove", thread }); }
 
   /** Saves a login for every sandbox of this account (ADR 0145), skipping values already uploaded. */
-  async saveLogin(name: SandboxLogin, value: string, only?: AccountRequest): Promise<void> {
+  /** A `background` save (not one the user just asked for) is dropped while the login is disconnected (ADR 0327).
+   *  Answers whether the website now holds the value. */
+  saveLogin(name: SandboxLogin, value: string, only?: AccountRequest, background = false): Promise<boolean> {
+    return this.withLogins(async () => {
+      if (background && (await this.skipLogins()).has(name)) return false;
+      await this.putLogin(name, value, only);
+      return true;
+    });
+  }
+
+  private async putLogin(name: SandboxLogin, value: string, only?: AccountRequest): Promise<void> {
     const digest = createHash("sha256").update(value).digest("hex");
     if (this.uploaded.get(name) === digest) return;
     await this.call({ name, value }, "logins", only);
@@ -954,7 +981,8 @@ export class SandboxDirectory {
     for (let tries = 1; ; tries++) {
       const others = Object.entries(await this.cloudMcpSignIns(true, only)).filter(([, saved]) => (saved as Partial<McpSignIn> | null)?.serverName !== name);
       try {
-        return await this.saveLogin("mcp", JSON.stringify({ mcpOAuth: { ...Object.fromEntries(others), [mcpSignInKey(name, server)]: signIn } }), only);
+        await this.saveLogin("mcp", JSON.stringify({ mcpOAuth: { ...Object.fromEntries(others), [mcpSignInKey(name, server)]: signIn } }), only);
+        return;
       } catch (error) {
         // Usually a sandbox saved its refreshed sign-ins first.
         if (tries >= 3) throw error;
@@ -973,32 +1001,53 @@ export class SandboxDirectory {
     return z.object({ account: githubAccountSchema.nullable() }).parse(await this.call({ action: "github" }, "logins")).account;
   }
 
-  /** Forgets the account's GitHub login for every sandbox. */
-  async removeGithubLogin(): Promise<void> {
-    await this.call({ action: "remove", name: "github" }, "logins");
-    this.uploaded.delete("github");
+  /** Forgets one of the account's logins for every sandbox. */
+  removeLogin(name: Exclude<SandboxLogin, "mcp">): Promise<void> {
+    return this.withLogins(async () => {
+      await this.call({ action: "remove", name }, "logins");
+      this.uploaded.delete(name);
+      if (name === "claude") cloudClaude = null;
+    });
+  }
+
+  /** Logins never copied either way: GitHub after the user picked another account, and agents the user disconnected (ADR 0327).
+   *  Read inside the login lock, so Disconnect can't change it halfway through a copy. */
+  skipLogins: () => Promise<ReadonlySet<string>> = async () => new Set();
+  private loginQueue: Promise<unknown> = Promise.resolve();
+  /** Copies, saves, removals, and Disconnect run one at a time. Work already inside the lock runs at once. */
+  withLogins<T>(work: () => Promise<T>): Promise<T> {
+    if (insideLoginLock.getStore()) return work();
+    const run = this.loginQueue.then(() => insideLoginLock.run(true, work));
+    this.loginQueue = run.catch(() => {});
+    return run;
   }
 
   private copiedAt = 0;
   get loginsCopied(): boolean { return this.copiedAt > 0; }
-  /** Copies this Mac's Codex, Pi, opencode, Hermes, Devin, Cursor, and GitHub logins when the user allowed it (ADRs 0128, 0130).
-  /** Copies this Mac's Codex, Pi, opencode, Hermes, OpenClaw, Cursor, and GitHub logins when the user allowed it (ADRs 0128, 0130).
-   *  At most once a minute, unless the user just clicked Connect. `github` is false after the user picked another GitHub account. */
-  async copyMacLogins(force = false, github = true): Promise<void> {
-    if (!force && Date.now() - this.copiedAt < RECHECK_MS) return;
+  /** Copies this Mac's Codex, Pi, opencode, Hermes, Devin, OpenClaw, Cursor, and GitHub logins when the user allowed it (ADRs 0128, 0130).
+   *  At most once a minute, unless the user just clicked Connect. */
+  copyMacLogins(force = false): Promise<void> {
+    if (!force && Date.now() - this.copiedAt < RECHECK_MS) return Promise.resolve();
     this.copiedAt = Date.now();
+    return this.withLogins(() => this.uploadMacLogins());
+  }
+
+  private async uploadMacLogins(): Promise<void> {
+    const skip = await this.skipLogins();
     const piHome = process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi/agent");
     const files = [["codex", codexAuthPath()], ["pi", join(piHome, "auth.json")]] as const;
     // One failed login never stops the others; all failures are reported together.
     const failed: string[] = [];
-    const save = (name: "codex" | "pi" | "opencode" | "hermes" | "devin" | "openclaw" | "cursor" | "github", value: string) => this.saveLogin(name, value).catch((error: unknown) => { failed.push(`${name}: ${error instanceof Error ? error.message : String(error)}`); });
+    const save = (name: "codex" | "pi" | "opencode" | "hermes" | "devin" | "openclaw" | "cursor" | "github", value: string) => this.putLogin(name, value).catch((error: unknown) => { failed.push(`${name}: ${error instanceof Error ? error.message : String(error)}`); });
     for (const [name, path] of files) {
+      if (skip.has(name)) continue;
       const value = await readFile(path, "utf8").catch(() => null);
       if (!value) continue;
       try { JSON.parse(value); } catch { continue; }
       await save(name, value);
     }
     const copy = async (name: "opencode" | "hermes" | "devin" | "openclaw" | "cursor", read: () => Promise<string | null>) => {
+      if (skip.has(name)) return;
       const value = await read().catch((error: unknown) => { failed.push(`${name}: ${error instanceof Error ? error.message : String(error)}`); return null; });
       if (value) await save(name, value);
     };
@@ -1007,7 +1056,7 @@ export class SandboxDirectory {
     await copy("devin", macDevinLogin);
     await copy("openclaw", macOpenclawLogin);
     await copy("cursor", macCursorLogin);
-    const githubToken = github ? await macGithubToken() : "";
+    const githubToken = skip.has("github") ? "" : await macGithubToken();
     if (githubToken) await save("github", await sandboxGithubLogin(githubToken));
     if (failed.length) throw new CloudroomError(`Some logins could not be copied to cloud sandboxes. ${failed.join("; ")}`);
   }
@@ -1015,18 +1064,25 @@ export class SandboxDirectory {
   private pulledAt = 0;
   /** Fills in the Claude and Codex logins this Mac lacks from the account's cloud logins (ADR 0175).
    *  At most once a minute, unless a cloud login just changed. */
-  async copyCloudLogins(force = false): Promise<void> {
-    if (!force && Date.now() - this.pulledAt < RECHECK_MS) return;
+  copyCloudLogins(force = false): Promise<void> {
+    if (!force && Date.now() - this.pulledAt < RECHECK_MS) return Promise.resolve();
     this.pulledAt = Date.now();
+    return this.withLogins(() => this.downloadCloudLogins());
+  }
+
+  private async downloadCloudLogins(): Promise<void> {
+    const skip = await this.skipLogins();
     const [claudeHere, codexHere] = await Promise.all([macClaudeSignedIn(), hasMacCodexLogin()]);
-    if (claudeHere) cloudClaude = null;
-    if (claudeHere !== false && codexHere) return;
+    if (claudeHere || skip.has("claude")) cloudClaude = null;
+    const claude = claudeHere === false && !skip.has("claude");
+    const codex = !codexHere && !skip.has("codex");
+    if (!claude && !codex) return;
     const saved = await this.logins();
-    if (claudeHere === false) {
+    if (claude) {
       const value = saved.claude ? await this.cloudLogin("claude") : null;
       cloudClaude = value ? claudeVariables(value) : null;
     }
-    if (!codexHere && saved.codex) {
+    if (codex && saved.codex) {
       const value = await this.cloudLogin("codex");
       if (!value) return;
       await mkdir(dirname(codexAuthPath()), { recursive: true, mode: 0o700 });

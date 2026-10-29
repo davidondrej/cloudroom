@@ -756,7 +756,7 @@ type-only devDependencies, or rewriting types/ for a plugin that still
 vendors them. Run it in a cloned or older plugin, and `room-cli
 plugin types --check` in CI. `room-cli plugin build` and `room-cli plugin dev` keep a
 vendored plugin in step for you. Need a symbol the types
-don't explain? Clone the repo: https://github.com/davidondrej/cloudroom-gui. The API in
+don't explain? Clone the repo: https://github.com/davidondrej/cloudroom. The API in
 one line each — bb.log (plugin-scoped logger behind `room-cli plugin logs`);
 bb.settings.define (declarative settings incl. secrets, editable via
 `room-cli plugin config`); bb.storage.kv (JSON rows ≤256KB) and

@@ -24,6 +24,17 @@ const COLORS: Record<string, string> = {
 const card = "rounded-xl border border-border bg-surface-raised";
 const fmt = (n: number) => n.toLocaleString("en-US");
 
+export function ScansTabLabel() {
+  return (
+    <span className="inline-flex items-center gap-1.5">
+      Scans
+      <span className="inline-flex h-4 items-center rounded-full border border-primary/50 bg-primary/10 px-2 text-[9px] leading-none font-bold tracking-wider text-primary uppercase">
+        New
+      </span>
+    </span>
+  );
+}
+
 export function ScansView() {
   const rpc = useRpc<typeof automationRpcContract>();
   const navigate = useBbNavigate();

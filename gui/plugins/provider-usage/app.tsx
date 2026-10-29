@@ -265,6 +265,17 @@ function PlanUsage({
         <span className="min-w-0 truncate text-subtle-foreground">
           {plan.plan}
         </span>
+        {/* Paid plans buy credit packs or upgrade on the billing page (ADR 0317). */}
+        {plan.plan === "free" ? null : (
+          <UrlLink
+            href={BILLING_URL}
+            target="_blank"
+            rel="noreferrer"
+            className="ml-auto shrink-0 border border-primary/60 px-1.5 leading-5 text-primary-text no-underline hover:bg-primary/10"
+          >
+            + buy more
+          </UrlLink>
+        )}
       </h2>
       {plan.meters.map((meter, index) => (
         <p

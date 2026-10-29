@@ -8,7 +8,7 @@ import { openUrlInExternalBrowser } from "@/lib/url-open-routing";
 import { CHANGELOG_LINKS } from "./changelog-preview";
 
 const WEBSITE_URL = "https://www.cloudroom.dev";
-const GITHUB_REPO_URL = "https://github.com/davidondrej/cloudroom-gui";
+const GITHUB_REPO_URL = "https://github.com/davidondrej/cloudroom";
 const BB_CREDIT_URL = "https://github.com/get-bb/bb";
 
 interface CommunityLinkRowProps {

@@ -66,7 +66,7 @@ export async function disconnectGithub(deps: AppDeps): Promise<void> {
   // Stop the copy first, so it can't put the login back right after the removal.
   const mac = await copyMacGithub(deps);
   await setCopyMacGithub(deps, false);
-  await cloudroom(deps).sandboxes.removeGithubLogin().catch(async (error: unknown) => {
+  await cloudroom(deps).sandboxes.removeLogin("github").catch(async (error: unknown) => {
     await setCopyMacGithub(deps, mac);
     throw new ApiError(503, "github_auth_unavailable", error instanceof Error ? error.message : String(error));
   });

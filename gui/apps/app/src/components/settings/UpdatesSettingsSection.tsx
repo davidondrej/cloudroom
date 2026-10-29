@@ -235,6 +235,10 @@ function UpdatesRow({
   );
 }
 
+function shortVersion(version: string): string {
+  return /^v?\d+(?:\.\d+)*/.exec(version)?.[0] ?? version;
+}
+
 export function RowVersions({
   current,
   latest,
@@ -245,16 +249,20 @@ export function RowVersions({
   if (current === null) {
     return null;
   }
+  const shown = shortVersion(current);
+  const next = latest === null ? null : shortVersion(latest);
+  const upgrade = next !== null && next !== shown;
   return (
     <span
       data-version-metadata
-      className="min-w-0 shrink text-2xs text-muted-foreground"
+      title={upgrade ? `${current} → ${latest}` : current}
+      className="min-w-0 shrink truncate text-2xs text-muted-foreground"
     >
-      {current}
-      {latest !== null && latest !== current ? (
+      {shown}
+      {upgrade ? (
         <>
           <span className="px-1">→</span>
-          <span className="font-semibold text-version-upgrade">{latest}</span>
+          <span className="font-semibold text-version-upgrade">{next}</span>
         </>
       ) : null}
     </span>

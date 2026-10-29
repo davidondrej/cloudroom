@@ -159,6 +159,32 @@ export function SettingsAccountMenu({ usagePage }: { usagePage: boolean }) {
               </span>
             </span>
           </div>
+          {/* Paid plans see their credits and buy packs or upgrade on the billing page (ADR 0317). */}
+          {usage && usage.plan !== "free" && creditsLeft !== null && (
+            <div className="px-2 pb-2.5">
+              <div className="flex items-baseline justify-between gap-2 text-xs">
+                <span className="text-muted-foreground tabular-nums">
+                  <span className="font-semibold text-foreground">
+                    {creditsLeft.toLocaleString("en-US")}
+                  </span>{" "}
+                  of {usage.creditsLimit.toLocaleString("en-US")} credits left
+                </span>
+                <button
+                  type="button"
+                  className="shrink-0 border border-primary/60 px-1.5 leading-5 text-primary-text hover:bg-primary/10"
+                  onClick={() => openUrlInExternalBrowser(BILLING_URL)}
+                >
+                  + buy more
+                </button>
+              </div>
+              <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-foreground/10">
+                <div
+                  className="h-full rounded-full bg-primary"
+                  style={{ width: `${usage.creditsLimit > 0 ? Math.min(100, (creditsLeft / usage.creditsLimit) * 100) : 0}%` }}
+                />
+              </div>
+            </div>
+          )}
           <DropdownMenuSeparator />
           <MenuItem
             icon="UserRound"

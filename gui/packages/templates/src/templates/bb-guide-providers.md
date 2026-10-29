@@ -13,6 +13,12 @@ Providers are agent backends (e.g., codex, claude-code). Each supports different
                                           List available providers
   room-cli provider models [providerId] [--machine <id-or-name> | --environment <id>] [--restart]
                                           List models for a provider
+  room-cli provider disconnect <claude-code|codex>
+                                          Sign it out on this computer and in Cloud, and remove added accounts
+  room-cli provider remove <providerId>   Disconnect it and hide it from new threads
+  room-cli provider restore <providerId>  Show a removed provider again
+
+Disconnect and remove change the user's logins. Run them only when the user asks.
 
 Cloud Codex uses a separate VM login. Check it with `room-cli cloud codex status --json`; start official device-code sign-in with `room-cli cloud codex login --request-id ID`, or cancel that attempt with `room-cli cloud codex cancel ID`. Keep the temporary code private. Verify `connected` before retrying a saved task. This does not authenticate Pi or switch local accounts.
 

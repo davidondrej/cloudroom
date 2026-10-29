@@ -1,7 +1,7 @@
 import { COMPUTER } from "@cloudroom/domain";
 import { randomUUID } from "node:crypto";
 import { isAbsolute, join } from "node:path";
-import { and, asc, desc, eq, inArray, isNull, like } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNull, like, sql } from "drizzle-orm";
 import {
   cloudroomThreads,
   cloudroomCommands,
@@ -96,6 +96,8 @@ const openCloudChild = (child: { id: string; title: string | null }) =>
   );
 // Session text: the cloud agent starts only after these files arrive.
 const TEXT = ["native", "lineage", "context"];
+const HISTORY_LIMIT = 64 * 1024 * 1024;
+const HOST_MESSAGE_LIMIT = 96 * 1024 * 1024;
 const services = new WeakMap<AppDeps["db"], Teleport>();
 export function teleports(deps: AppDeps): Teleport {
   let service = services.get(deps.db);
@@ -289,6 +291,27 @@ class Teleport {
         409,
         "teleport_in_progress",
         "This thread already has cloud ownership metadata.",
+      );
+    const historyBytes =
+      (this.deps.db
+        .select({
+          bytes: sql<number>`sum(octet_length(${events.data}) + octet_length(${events.type}) + 40)`,
+        })
+        .from(events)
+        .where(
+          inArray(
+            events.threadId,
+            sessions.map((source) => source.threadId),
+          ),
+        )
+        .get()?.bytes ?? 0) +
+      sessions.length * 64 * 1024 +
+      queuedRows.reduce((sum, row) => sum + Buffer.byteLength(row.content), 0);
+    if (historyBytes > HISTORY_LIMIT)
+      throw new ApiError(
+        409,
+        "teleport_history_size",
+        `This chat's history${all.length > 1 ? " with its children" : ""} is ${Math.ceil(historyBytes / 1024 / 1024)} MB; Teleport carries at most ${HISTORY_LIMIT / 1024 / 1024} MB. Nothing was stopped. Start a new Cloud thread for the next part of the work.`,
       );
     return {
       thread,
@@ -856,7 +879,10 @@ class Teleport {
         queued: state.queuedDisplay,
         goals,
       });
-      if (Buffer.byteLength(extraText) > 32 * 1024 * 1024)
+      if (
+        Buffer.byteLength(extraText) > HISTORY_LIMIT ||
+        Buffer.byteLength(JSON.stringify(extraText)) > HOST_MESSAGE_LIMIT
+      )
         throw new ApiError(
           409,
           "teleport_history_size",

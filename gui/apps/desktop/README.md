@@ -283,7 +283,7 @@ auto-discovery and skip notarization.
 ## Auto-update
 
 Cloudroom updates itself. `electron-updater` reads `latest-mac.yml` from the latest public release of
-`davidondrej/cloudroom-gui`, downloads the zip in the background, and shows
+`davidondrej/cloudroom` (core releases there are never Latest), downloads the zip in the background, and shows
 **Relaunch** in Settings and the update banner. Only stamped stable release
 builds write `latest-*.yml`, so releases must be marked latest, not prerelease. The
 `cloudroom.dev/download/latest` version check stays as the fallback: it shows

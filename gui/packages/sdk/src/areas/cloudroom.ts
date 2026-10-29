@@ -227,7 +227,7 @@ export type CodexAccountsResult =
   | { sessionId: string; verificationUri: string; userCode: string; expiresAt: number }
   | { status: "pending" | "complete" | "error"; message: string | null };
 
-export interface ClaudeAccountInput { action?: "login" | "cancel" | "complete" | "setup-token" | "key" | "token"; requestId?: string; code?: string; state?: string; apiKey?: string; token?: string; plan?: string }
+export interface ClaudeAccountInput { action?: "login" | "cancel" | "complete" | "setup-token" | "key" | "token"; requestId?: string; code?: string; state?: string; apiKey?: string; token?: string; plan?: string; follow?: boolean }
 
 export interface CloudroomArea {
   claudeAuth(input?: ClaudeAccountInput, signal?: AbortSignal): Promise<CloudroomCodexAuth>;
@@ -250,6 +250,10 @@ export interface CloudroomArea {
   githubAccount(signal?: AbortSignal): Promise<CloudroomGithubAccount | null>;
   /** Removes the cloud GitHub login and stops copying this Mac's `gh` login. */
   disconnectGithub(): Promise<void>;
+  /** Disconnect: signs the agent's login out on this Mac and removes it from Cloud. `remove` also hides the agent (ADR 0327). */
+  disconnectAgent(providerId: string, input?: { remove?: boolean }): Promise<void>;
+  /** Shows a removed agent again and lets its login copy again. */
+  restoreAgent(providerId: string): Promise<void>;
   checkPreviews(): Promise<void>;
   /** Recently updated repos on this Mac and GitHub that no project uses yet. */
   repoSuggestions(signal?: AbortSignal): Promise<{ githubConnected: boolean; repos: RepoSuggestion[] }>;
@@ -377,7 +381,7 @@ export function createCloudroomArea({ transport }: CreateSdkAreaArgs): Cloudroom
     ...(body === undefined ? {} : { headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }),
   });
   return {
-    claudeAuth: (input, signal) => transport.readJson(request(`/claude${input?.action ? `/${input.action}` : ""}`, input?.action ? { requestId: input.requestId, ...(input.action === "complete" ? { code: input.code, state: input.state } : {}), ...(input.action === "key" ? { apiKey: input.apiKey } : {}), ...(input.action === "token" ? { token: input.token, plan: input.plan } : {}) } : undefined, signal)) as Promise<CloudroomCodexAuth>,
+    claudeAuth: (input, signal) => transport.readJson(request(`/claude${input?.action ? `/${input.action}` : ""}`, input?.action ? { requestId: input.requestId, ...(input.action === "complete" ? { code: input.code, state: input.state } : {}), ...(input.action === "key" ? { apiKey: input.apiKey } : {}), ...(input.action === "token" ? { token: input.token, plan: input.plan, ...(input.follow ? { follow: true } : {}) } : {}) } : undefined, signal)) as Promise<CloudroomCodexAuth>,
     codexAccounts: (input, signal) => transport.readJson(request("/codex-accounts", input, signal)) as Promise<CodexAccountsResult>,
     cursorAuth: (signal) => transport.readJson(request("/cursor", undefined, signal)) as Promise<CloudroomCodexAuth>,
     cursorLogin: (requestId) => transport.readJson(request("/cursor/login", { requestId })) as Promise<CloudroomCodexAuth>,
@@ -395,6 +399,8 @@ export function createCloudroomArea({ transport }: CreateSdkAreaArgs): Cloudroom
     cancelGithubLogin: (requestId) => transport.readJson(request("/github/cancel", { requestId })) as Promise<CloudroomCodexAuth>,
     githubAccount: (signal) => transport.readJson(request("/github/account", undefined, signal)) as Promise<CloudroomGithubAccount | null>,
     disconnectGithub: () => transport.readVoid(request("/github/disconnect", {})),
+    disconnectAgent: (providerId, input = {}) => transport.readVoid(request(`/agents/${encodeURIComponent(providerId)}/disconnect`, input)),
+    restoreAgent: (providerId) => transport.readVoid(request(`/agents/${encodeURIComponent(providerId)}/restore`, {})),
     checkPreviews: () => transport.readVoid(request("/previews/check", {})),
     status: (signal) => transport.readJson(request("", undefined, signal)) as Promise<CloudroomStatus>,
     signIn: (input = {}) => transport.readJson(request("/sign-in", input)) as Promise<{ url: string }>,

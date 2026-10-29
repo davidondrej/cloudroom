@@ -1,7 +1,7 @@
 const DESKTOP_RELEASE_CHANNEL_ENV_NAME = "BB_DESKTOP_RELEASE_CHANNEL";
 
 export const CLOUDROOM_UPDATE_BASE_URL =
-  "https://github.com/davidondrej/cloudroom-gui/releases/latest/download/";
+  "https://github.com/davidondrej/cloudroom/releases/latest/download/";
 
 export function resolveDesktopReleaseChannel(env) {
   const rawChannel = env[DESKTOP_RELEASE_CHANNEL_ENV_NAME]?.trim();

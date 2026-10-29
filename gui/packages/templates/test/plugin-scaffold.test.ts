@@ -72,7 +72,7 @@ describe("scaffoldPlugin SDK dependency", () => {
       "sync this plugin's SDK surface to the running Cloudroom",
     );
     expect(readme).not.toContain("rewrite types/");
-    expect(readme).toContain("https://github.com/davidondrej/cloudroom-gui");
+    expect(readme).toContain("https://github.com/davidondrej/cloudroom");
 
     const components = JSON.parse(
       await readFile(join(targetDir, "components.json"), "utf8"),

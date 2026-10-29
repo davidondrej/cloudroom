@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
-import { readFile, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { readFile, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { z } from "zod";
@@ -39,6 +40,29 @@ export async function copyMacGithub(deps: Deps): Promise<boolean> {
 }
 export async function setCopyMacGithub(deps: Deps, mac: boolean): Promise<void> {
   await writeFile(macGithubFile(deps), JSON.stringify({ mac }), { mode: 0o600 });
+}
+
+/** Agent logins the user disconnected or removed (ADR 0327). They never copy between this Mac and the cloud until the user
+ *  connects again. "signed-out" means Disconnect signed the CLI out, so a later login on this Mac is a new sign-in. */
+export type LoginMarker = "blocked" | "signed-out";
+const markersFile = (deps: Deps) => join(deps.config.dataDir, "cloudroom-disconnected-logins.json");
+export async function loginMarkers(deps: Deps): Promise<Record<string, LoginMarker>> {
+  return readFile(markersFile(deps), "utf8").then((text) => z.record(z.string(), z.enum(["blocked", "signed-out"])).parse(JSON.parse(text)), () => ({}));
+}
+let markerWrites: Promise<unknown> = Promise.resolve();
+/** One write at a time, through a temporary file, so concurrent changes never lose a marker. */
+export function markLogin(deps: Deps, name: string, marker: LoginMarker | null): Promise<void> {
+  const run = markerWrites.then(async () => {
+    const markers = await loginMarkers(deps);
+    if ((markers[name] ?? null) === marker) return;
+    if (marker) markers[name] = marker;
+    else delete markers[name];
+    const file = markersFile(deps), temp = `${file}.${randomUUID()}.tmp`;
+    await writeFile(temp, JSON.stringify(markers), { mode: 0o600 });
+    await rename(temp, file);
+  });
+  markerWrites = run.catch(() => {});
+  return run;
 }
 
 /** Which of this Mac's skills cloud sandboxes get. `chosen` holds the user's clicks; skills never clicked follow `auto`. */

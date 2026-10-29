@@ -278,6 +278,7 @@ export function registerSystemRoutes(
       agentQuestionsEnabled: settings.agentQuestionsEnabled ?? current.agentQuestionsEnabled,
       stripAiCoAuthorsEnabled: settings.stripAiCoAuthorsEnabled ?? current.stripAiCoAuthorsEnabled,
       providerAutoUpdate: settings.providerAutoUpdate ?? current.providerAutoUpdate,
+      hiddenProviderIds: settings.hiddenProviderIds ?? current.hiddenProviderIds,
       worktreeRetention: settings.worktreeRetention ?? current.worktreeRetention,
       showDiagnosticEvents:
         diagnosticValue === undefined ||

@@ -2,7 +2,7 @@ import { COMPUTER } from "@cloudroom/domain";
 
 const CLI_PATH =
   "/Applications/Cloudroom.app/Contents/Resources/app.asar.unpacked/node_modules/bb-app/host-daemon/dist/room-cli";
-const RELEASES_URL = "https://github.com/davidondrej/cloudroom-gui/releases";
+const RELEASES_URL = "https://github.com/davidondrej/cloudroom/releases/latest";
 
 const said = (text?: string | null) =>
   text?.trim() ? `: "${text.trim().replace(/\s+/g, " ").slice(0, 400)}".` : ".";

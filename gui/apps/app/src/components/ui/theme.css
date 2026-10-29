@@ -126,6 +126,7 @@
    * never paired with a tier below --subtle-foreground or it fails AA at 10px. */
   --text-2xs: 0.625rem;
   --text-2xs--line-height: 0.875rem;
+  --animate-spin: spin 1.5s steps(30) infinite;
 }
 
 @media (max-width: 767px) and (pointer: coarse) {
@@ -952,7 +953,7 @@ body.sidebar-resizing [data-sidebar="panel"] {
     background-clip: text;
     -webkit-background-clip: text;
     -webkit-text-fill-color: transparent;
-    animation: shine 2s linear infinite;
+    animation: shine 2s steps(40) infinite;
     will-change: transform;
   }
 
@@ -978,7 +979,7 @@ body.sidebar-resizing [data-sidebar="panel"] {
     );
     -webkit-mask-size: 200% 100%;
     mask-size: 200% 100%;
-    animation: shine-mask 2.6s linear infinite;
+    animation: shine-mask 2.6s steps(52) infinite;
     will-change: transform;
   }
 
