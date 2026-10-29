@@ -58,6 +58,7 @@ interface SessionState {
 }
 
 const INTERACTIVE_INTERRUPT_RETRY_DELAY_MS = 1_000;
+const INTERACTIVE_INTERRUPT_MAX_WAIT_MS = 10_000;
 const IDLE_PROVIDER_SESSION_REAP_AFTER_MS = 30 * 60 * 1000;
 const IDLE_PROVIDER_SESSION_REAP_INTERVAL_MS = 5 * 60 * 1000;
 const RUNTIME_SHELL_ENV_REFRESH_TTL_MS = 10_000;
@@ -140,6 +141,7 @@ export interface HostDaemonApp {
 
 interface PendingInteractiveInterruptRequest {
   providerId: string;
+  providerRequestId?: string;
   reason: string;
   threadIds: readonly string[];
 }
@@ -227,6 +229,7 @@ export async function createHostDaemonApp(
     string,
     PendingInteractiveInterruptRequest
   >();
+  const interactiveInterruptsSent = new Map<string, () => void>();
   let runtimeManager: RuntimeManager;
   let watchManager: WatchManager;
   let flushPendingInteractiveInterruptsPromise: Promise<void> | null = null;
@@ -295,6 +298,7 @@ export async function createHostDaemonApp(
   ): string {
     return [
       request.providerId,
+      request.providerRequestId ?? "",
       request.reason,
       [...request.threadIds].sort().join(","),
     ].join("|");
@@ -344,6 +348,8 @@ export async function createHostDaemonApp(
             request: () => serverClient.interruptInteractiveRequests(request),
           });
           pendingInteractiveInterrupts.delete(key);
+          interactiveInterruptsSent.get(key)?.();
+          interactiveInterruptsSent.delete(key);
         } catch (error) {
           options.logger.warn(
             {
@@ -368,12 +374,19 @@ export async function createHostDaemonApp(
 
   function enqueueInteractiveInterrupt(
     request: PendingInteractiveInterruptRequest,
-  ): void {
-    pendingInteractiveInterrupts.set(
-      buildInteractiveInterruptKey(request),
-      request,
-    );
+  ): Promise<void> {
+    const key = buildInteractiveInterruptKey(request);
+    pendingInteractiveInterrupts.set(key, request);
+    const sent = new Promise<void>((resolve) => {
+      const timeout = setTimeout(resolve, INTERACTIVE_INTERRUPT_MAX_WAIT_MS);
+      timeout.unref();
+      interactiveInterruptsSent.set(key, () => {
+        clearTimeout(timeout);
+        resolve();
+      });
+    });
     void flushPendingInteractiveInterrupts();
+    return sent;
   }
 
   eventSink = createEventSink({
@@ -392,9 +405,17 @@ export async function createHostDaemonApp(
         source: "registerInteractiveRequest",
         request: () => serverClient.registerInteractiveRequest(request),
       }),
-    onRegistrationFailure: ({ error, request }) => {
+    onCancel: (request) =>
       enqueueInteractiveInterrupt({
         providerId: request.providerId,
+        providerRequestId: request.providerRequestId,
+        reason: "The agent cancelled this request",
+        threadIds: [request.threadId],
+      }),
+    onRegistrationFailure: ({ error, request }) => {
+      void enqueueInteractiveInterrupt({
+        providerId: request.providerId,
+        providerRequestId: request.providerRequestId,
         reason: `Failed to register interactive request while provider was waiting: ${error.message}`,
         threadIds: [request.threadId],
       });
@@ -548,10 +569,16 @@ export async function createHostDaemonApp(
         throw error;
       }
     },
-    onInteractiveRequest: async (request) => {
+    onInteractiveRequest: async (request, signal) => {
       try {
-        return await interactiveRequestRegistry.registerAndWait(request);
+        return await interactiveRequestRegistry.registerAndWait(
+          request,
+          signal,
+        );
       } catch (error) {
+        if (signal?.aborted) {
+          throw error;
+        }
         if (
           error instanceof InteractiveRequestRegistryError &&
           error.code === "interactive_request_rejected"
@@ -608,7 +635,7 @@ export async function createHostDaemonApp(
         reason,
       });
 
-      enqueueInteractiveInterrupt({
+      void enqueueInteractiveInterrupt({
         providerId: info.providerId,
         threadIds,
         reason,

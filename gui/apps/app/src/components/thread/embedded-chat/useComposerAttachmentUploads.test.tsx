@@ -70,22 +70,22 @@ describe("useComposerAttachmentUploads", () => {
       inlineUpload.reject(new Error("inline failed"));
       await inlinePromise;
     });
-    expect(result.current.inlineAttachmentError).toBe(
-      "Failed to attach: inline.txt",
-    );
-    expect(result.current.bottomAttachmentError).toBeNull();
+    expect(result.current.inlineAttachmentFailures).toEqual([
+      { name: "inline.txt", reason: "Upload failed" },
+    ]);
+    expect(result.current.bottomAttachmentFailures).toEqual([]);
     expect(result.current.isAttachingBottomFiles).toBe(true);
 
     await act(async () => {
       bottomUpload.reject(new Error("bottom failed"));
       await bottomPromise;
     });
-    expect(result.current.bottomAttachmentError).toBe(
-      "Failed to attach: bottom.txt",
-    );
-    expect(result.current.inlineAttachmentError).toBe(
-      "Failed to attach: inline.txt",
-    );
+    expect(result.current.bottomAttachmentFailures).toEqual([
+      { name: "bottom.txt", reason: "Upload failed" },
+    ]);
+    expect(result.current.inlineAttachmentFailures).toEqual([
+      { name: "inline.txt", reason: "Upload failed" },
+    ]);
   });
 
   it("does not leak a dismissed upload into a later queued edit", async () => {
@@ -122,7 +122,7 @@ describe("useComposerAttachmentUploads", () => {
     inlineRef.current = null;
     rerender({ inline: null });
     expect(result.current.isAttachingInlineFiles).toBe(false);
-    expect(result.current.inlineAttachmentError).toBeNull();
+    expect(result.current.inlineAttachmentFailures).toEqual([]);
 
     const secondEdit = makeInlineSession(2, setDraft);
     inlineRef.current = secondEdit;
@@ -133,7 +133,7 @@ describe("useComposerAttachmentUploads", () => {
     });
 
     expect(result.current.isAttachingInlineFiles).toBe(false);
-    expect(result.current.inlineAttachmentError).toBeNull();
+    expect(result.current.inlineAttachmentFailures).toEqual([]);
     expect(setDraft).not.toHaveBeenCalled();
   });
 
@@ -164,9 +164,10 @@ describe("useComposerAttachmentUploads", () => {
       ]);
     });
 
-    expect(result.current.attachmentError).toBe(
-      `Failed to attach IMG_0001.heic, shot.png: ${message}`,
-    );
+    expect(result.current.attachmentFailures).toEqual([
+      { name: "IMG_0001.heic", reason: message },
+      { name: "shot.png", reason: "Upload failed" },
+    ]);
   });
 
   it("does not leak a dismissed upload into a later independent draft", async () => {
@@ -217,7 +218,7 @@ describe("useComposerAttachmentUploads", () => {
 
     expect(addFirstAttachment).not.toHaveBeenCalled();
     expect(addSecondAttachment).not.toHaveBeenCalled();
-    expect(result.current.attachmentError).toBeNull();
+    expect(result.current.attachmentFailures).toEqual([]);
     expect(result.current.isAttachingFiles).toBe(false);
   });
 });

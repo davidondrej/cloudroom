@@ -54,6 +54,7 @@ import type {
 import type { ExperimentalComposerSubmitOptions } from "@get-bb/plugin-sdk";
 import type { ChildThreadPendingAttention } from "@/hooks/queries/child-thread-pending-interactions";
 import { ThreadPendingInteractionBanner } from "@/components/thread/pending-interactions/ThreadPendingInteractionBanner";
+import { isModalPluginInteraction } from "@/lib/plugin-slot-resolvers";
 import {
   type PluginComposerHost,
   useComposerHostDraftNotifier,
@@ -603,12 +604,12 @@ export function ThreadDetailPromptArea({
     [updateSentMessageEditDraft],
   );
   const {
-    bottomAttachmentError,
-    setBottomAttachmentError,
+    bottomAttachmentFailures,
+    dismissBottomAttachmentFailures,
     handleAttachBottomFiles,
     isAttachingBottomFiles,
-    inlineAttachmentError,
-    setInlineAttachmentError,
+    inlineAttachmentFailures,
+    dismissInlineAttachmentFailures,
     handleAttachInlineFiles,
     isAttachingInlineFiles,
   } = useComposerAttachmentUploads({
@@ -618,7 +619,8 @@ export function ThreadDetailPromptArea({
     inlineSessionRef: inlineDraftSessionRef,
   });
   const {
-    attachmentError: sentMessageAttachmentError,
+    attachmentFailures: sentMessageAttachmentFailures,
+    dismissAttachmentFailures: dismissSentMessageAttachmentFailures,
     handleAttachFiles: handleAttachSentMessageFiles,
     isAttachingFiles: isAttachingSentMessageFiles,
   } = useDraftAttachmentUploads({
@@ -632,8 +634,8 @@ export function ThreadDetailPromptArea({
   });
   useLayoutEffect(() => {
     clearInlineAttachmentErrorRef.current = () =>
-      setInlineAttachmentError(null);
-  }, [setInlineAttachmentError]);
+      dismissInlineAttachmentFailures();
+  }, [dismissInlineAttachmentFailures]);
   const promptTextEffects = useComposerTextEffects(promptDraft.storageKey);
   const queuedComposerTextEffects = useComposerTextEffects(
     inlineEditingQueuedMessage
@@ -885,8 +887,8 @@ export function ThreadDetailPromptArea({
     threadId: thread.id,
     queuedMessages,
     sendProcessingPersistence: "until-left-queue",
-    onSendSuccess: () => setInlineAttachmentError(null),
-    onSaveSuccess: () => setInlineAttachmentError(null),
+    onSendSuccess: () => dismissInlineAttachmentFailures(),
+    onSaveSuccess: () => dismissInlineAttachmentFailures(),
     inlineEditingQueuedMessage,
     dismissInlineQueuedMessageEditor,
     activeComposerDraftInput,
@@ -1045,7 +1047,7 @@ export function ThreadDetailPromptArea({
     }
 
     promptDraft.clearIfCurrentMatches(submittedDraft);
-    setBottomAttachmentError(null);
+    dismissBottomAttachmentFailures();
 
     try {
       if (isQueuingMessage) {
@@ -1088,7 +1090,7 @@ export function ThreadDetailPromptArea({
     isDefaultExecutionOptionsLoading,
     promptDraft,
     sendMessage,
-    setBottomAttachmentError,
+    dismissBottomAttachmentFailures,
     thread.id,
     runtimeDisplayStatus,
   ]);
@@ -1102,7 +1104,7 @@ export function ThreadDetailPromptArea({
     });
     if (!request) return;
     promptDraft.clearIfCurrentMatches(submittedDraft);
-    setBottomAttachmentError(null);
+    dismissBottomAttachmentFailures();
     try {
       await createQueuedMessage.mutateAsync({ ...request, hardQueue: true });
     } catch (nextError) {
@@ -1120,7 +1122,7 @@ export function ThreadDetailPromptArea({
     followUpExecutionSelection,
     isExecutionUpdatePending,
     promptDraft,
-    setBottomAttachmentError,
+    dismissBottomAttachmentFailures,
     thread.id,
   ]);
   const submitProgrammatically = useCallback(
@@ -1147,7 +1149,7 @@ export function ThreadDetailPromptArea({
       }
       const clearedSubmittedDraft =
         promptDraft.clearIfCurrentMatches(submittedDraft);
-      setBottomAttachmentError(null);
+      dismissBottomAttachmentFailures();
       try {
         await sendMessage.mutateAsync({
           ...request,
@@ -1176,7 +1178,7 @@ export function ThreadDetailPromptArea({
       movingToLocal,
       promptDraft,
       sendMessage,
-      setBottomAttachmentError,
+      dismissBottomAttachmentFailures,
       thread.id,
     ],
   );
@@ -1207,7 +1209,7 @@ export function ThreadDetailPromptArea({
 
     if (shortcutRequest.kind === "draft") {
       promptDraft.clearIfCurrentMatches(submittedDraft);
-      setBottomAttachmentError(null);
+      dismissBottomAttachmentFailures();
       await runWhileFollowUpShortcutSending(
         setIsFollowUpShortcutSending,
         async () => {
@@ -1252,7 +1254,7 @@ export function ThreadDetailPromptArea({
     sendCloudDraft,
     sendMessage,
     sendQueuedMessageById,
-    setBottomAttachmentError,
+    dismissBottomAttachmentFailures,
     thread.id,
   ]);
 
@@ -1287,12 +1289,14 @@ export function ThreadDetailPromptArea({
       items: currentPromptDraft.attachments,
       projectId,
       isAttaching: isAttachingBottomFiles,
-      error: bottomAttachmentError,
+      failures: bottomAttachmentFailures,
+      onDismissFailure: dismissBottomAttachmentFailures,
       onAttachFiles: handleAttachBottomFiles,
       onRemove: promptDraft.removeAttachment,
     }),
     [
-      bottomAttachmentError,
+      bottomAttachmentFailures,
+      dismissBottomAttachmentFailures,
       currentPromptDraft.attachments,
       handleAttachBottomFiles,
       isAttachingBottomFiles,
@@ -1781,7 +1785,8 @@ export function ThreadDetailPromptArea({
           items: activeComposerDraft.attachments,
           projectId,
           isAttaching: isAttachingInlineFiles,
-          error: inlineAttachmentError,
+          failures: inlineAttachmentFailures,
+          onDismissFailure: dismissInlineAttachmentFailures,
           onAttachFiles: handleAttachInlineFiles,
           onRemove: removeActiveComposerAttachment,
         },
@@ -1819,7 +1824,8 @@ export function ThreadDetailPromptArea({
     handleAttachInlineFiles,
     handleComposerMessageChange,
     handleInlineComposerSubmit,
-    inlineAttachmentError,
+    inlineAttachmentFailures,
+    dismissInlineAttachmentFailures,
     inlineEditingQueuedMessage,
     inlineExecutionConfig,
     inlinePermissionConfig,
@@ -1886,7 +1892,8 @@ export function ThreadDetailPromptArea({
             items: draft.attachments,
             projectId,
             isAttaching: isAttachingSentMessageFiles,
-            error: sentMessageAttachmentError,
+            failures: sentMessageAttachmentFailures,
+            onDismissFailure: dismissSentMessageAttachmentFailures,
             onAttachFiles: handleAttachSentMessageFiles,
             onRemove: (path) => {
               sentMessageEdit.updateDraft((current) => ({
@@ -1949,7 +1956,8 @@ export function ThreadDetailPromptArea({
     projectId,
     inlinePromptActions,
     runtimeDisplayStatus,
-    sentMessageAttachmentError,
+    sentMessageAttachmentFailures,
+    dismissSentMessageAttachmentFailures,
     sentMessageComposerTextEffects,
     sentMessageEdit,
     sentMessageEditSubmitMode,
@@ -2137,6 +2145,10 @@ export function ThreadDetailPromptArea({
       />
     );
   }, [activePendingInteraction, shouldHideComposer, thread.id]);
+  // A pop-up request (a GPU) floats over the app and leaves the composer in place.
+  const pendingInteractionIsModal =
+    activePendingInteraction?.origin?.kind === "plugin" &&
+    isModalPluginInteraction(activePendingInteraction.origin.pluginId);
   const pendingInteractionStack = useMemo(
     () => (
       <>
@@ -2202,8 +2214,8 @@ export function ThreadDetailPromptArea({
     <FollowUpPromptBox
       id={THREAD_DETAIL_COMPOSER_TEXTAREA_ID}
       attachments={bottomAttachmentsConfig}
-      stack={<>{!isCloud && !teleporting && <TeleportCheckCard error={teleport.error} models={[...modelOptions, ...moreModelOptions]} reasoning={reasoningLevel} usedTokens={contextWindowUsage?.usedTokens ?? null} levelsFor={(model) => cloudReasoningLevels(cloudConnection.data, thread.providerId, model)} onTeleport={(choice) => teleport.mutate(choice)} onDismiss={teleport.reset} />}{!isCloud && !teleporting && canTeleport && !shouldHideComposer && <TryCloudCard threadId={thread.id} active={thread.status === "active"} attached={queuedMessageCount === 0} onMove={startTeleport} />}{thread.teleport && !movingToLocal && <TeleportNotice thread={thread} pendingDelivery={cloudState.data?.pendingDelivery} paused={cloudState.data?.paused} sending={sendMessage.isPending} />}{movingToLocal && <TeleportLocalNotice step={thread.teleportLocalStep} />}{thread.projectCopy && <ProjectCopyNotice thread={thread} />}{cloudNotice}{isCloud && claudeThread && !shouldHideComposer && <CloudMcpSignInNotice />}{!isCloud && !shouldHideComposer && <LocalSignInNotice threadId={thread.id} providerId={thread.providerId} hostId={environmentHostId} environmentId={thread.environmentId} authFailed={providerAuthFailed} started={thread.status !== "pending"} />}{pendingInteractionNode ? pendingInteractionStack : promptStack}</>}
-      pendingInteraction={pendingInteractionNode}
+      stack={<>{!isCloud && !teleporting && <TeleportCheckCard error={teleport.error} models={[...modelOptions, ...moreModelOptions]} reasoning={reasoningLevel} usedTokens={contextWindowUsage?.usedTokens ?? null} levelsFor={(model) => cloudReasoningLevels(cloudConnection.data, thread.providerId, model)} onTeleport={(choice) => teleport.mutate(choice)} onDismiss={teleport.reset} />}{!isCloud && !teleporting && canTeleport && !shouldHideComposer && <TryCloudCard threadId={thread.id} active={thread.status === "active"} attached={queuedMessageCount === 0} onMove={startTeleport} />}{thread.teleport && !movingToLocal && <TeleportNotice thread={thread} pendingDelivery={cloudState.data?.pendingDelivery} paused={cloudState.data?.paused} sending={sendMessage.isPending} />}{movingToLocal && <TeleportLocalNotice step={thread.teleportLocalStep} />}{thread.projectCopy && <ProjectCopyNotice thread={thread} />}{cloudNotice}{isCloud && claudeThread && !shouldHideComposer && <CloudMcpSignInNotice />}{!isCloud && !shouldHideComposer && <LocalSignInNotice threadId={thread.id} providerId={thread.providerId} hostId={environmentHostId} environmentId={thread.environmentId} authFailed={providerAuthFailed} started={thread.status !== "pending"} />}{pendingInteractionNode && !pendingInteractionIsModal ? pendingInteractionStack : promptStack}{pendingInteractionIsModal && pendingInteractionNode}</>}
+      pendingInteraction={pendingInteractionIsModal ? undefined : pendingInteractionNode}
       activePromptMode={activePromptMode}
       composer={shouldHideComposer || (teleporting && !movingToLocal) || transferredChild ? null : bottomComposerConfig}
       pluginComposerHost={normalPluginComposerHost}

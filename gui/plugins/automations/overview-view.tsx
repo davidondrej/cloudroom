@@ -557,13 +557,13 @@ function OrbitStat({
       <div className="truncate text-[11px] font-semibold uppercase tracking-[0.07em] text-muted-foreground">
         {label}
       </div>
-      <div className="mt-2 font-mono text-[26px] font-semibold tabular-nums leading-tight">
+      <div className="mt-1 font-mono text-[19px] font-semibold tabular-nums leading-tight">
         {value}
       </div>
-      <div className="mt-2.5 h-1 overflow-hidden rounded-full bg-foreground/10">
+      <div className="mt-2 h-1 overflow-hidden rounded-full bg-foreground/10">
         {bar}
       </div>
-      <div className="mt-2 truncate text-xs text-muted-foreground">{hint}</div>
+      <div className="mt-1.5 truncate text-[11.5px] text-muted-foreground">{hint}</div>
     </button>
   );
 }
@@ -598,9 +598,9 @@ function LoopOrbit({
   return (
     <section
       aria-label="Loops at a glance"
-      className="relative flex items-center gap-10 overflow-hidden rounded-2xl border border-foreground/10 bg-linear-to-b from-foreground/[0.035] to-foreground/[0.012] px-8 pt-7 pb-11 @max-2xl:flex-col @max-2xl:items-stretch"
+      className="relative flex items-center gap-7 overflow-hidden rounded-[14px] border border-foreground/10 bg-linear-to-b from-foreground/[0.035] to-foreground/[0.012] px-6 pt-[18px] pb-9 @max-lg:flex-col @max-lg:items-stretch"
     >
-      <div className="relative mx-auto size-[236px] shrink-0">
+      <div className="relative mx-auto size-[168px] shrink-0">
         <svg
           viewBox={`0 0 ${ORBIT_SIZE} ${ORBIT_SIZE}`}
           className="size-full overflow-visible"
@@ -648,10 +648,10 @@ function LoopOrbit({
         </svg>
         <div className="absolute inset-0 grid place-items-center text-center">
           <div>
-            <div className="font-mono text-[27px] font-semibold tabular-nums">
+            <div className="font-mono text-[18px] font-semibold tabular-nums">
               {Math.round(runsPerDay).toLocaleString("en-US")}
             </div>
-            <div className="mt-0.5 text-[11px] uppercase tracking-[0.06em] text-muted-foreground">
+            <div className="mt-0.5 text-[9px] uppercase tracking-[0.06em] text-muted-foreground">
               Runs a day
             </div>
           </div>
@@ -662,14 +662,14 @@ function LoopOrbit({
           <span className="size-1.5 rounded-full bg-primary shadow-[0_0_10px_var(--primary)]" />
           LIVE
         </div>
-        <div className="mt-3.5 text-[40px] font-semibold leading-none tracking-[-0.035em]">
+        <div className="mt-2 text-[26px] font-semibold leading-none tracking-[-0.03em]">
           {running} {running === 1 ? "loop" : "loops"} running
         </div>
-        <div className="mt-2.5 text-sm text-muted-foreground">
+        <div className="mt-1.5 text-[12.5px] text-muted-foreground">
           {cloud} in Cloud · {running - cloud} on this Mac · every ring is a
           loop, every tick a run
         </div>
-        <div className="mt-7 grid grid-cols-3 gap-6">
+        <div className="mt-3.5 grid grid-cols-3 gap-5">
           <OrbitStat
             label="Runs so far"
             value={totalRuns.toLocaleString("en-US")}
@@ -713,7 +713,7 @@ function LoopOrbit({
           />
         </div>
         {next ? (
-          <div className="mt-6 truncate border-t border-foreground/10 pt-4 text-sm text-muted-foreground">
+          <div className="mt-3.5 truncate border-t border-foreground/10 pt-2.5 text-[12.5px] text-muted-foreground">
             Next up:{" "}
             <span className="font-medium text-foreground">
               {next.name} {formatTimeUntil(next.at, now)}
@@ -721,7 +721,7 @@ function LoopOrbit({
           </div>
         ) : null}
       </div>
-      <div className="absolute bottom-4 left-8 flex gap-3.5 text-[11px] text-muted-foreground">
+      <div className="absolute bottom-3 left-6 flex gap-3.5 text-[10.5px] text-muted-foreground">
         {(
           [
             ["On its own", "bg-primary"],
@@ -849,7 +849,7 @@ function LoopCard({
     <div
       data-loop-card=""
       className={cn(
-        "group/card relative flex min-w-0 flex-col rounded-xl border border-foreground/10 bg-surface-raised px-[18px] pt-[18px] pb-4 transition-colors hover:border-foreground/20 [contain-intrinsic-size:auto_220px] [content-visibility:auto]",
+        "group/card relative flex min-w-0 flex-col rounded-xl border border-foreground/10 bg-surface-raised px-3.5 pt-3 pb-2.5 transition-colors hover:border-foreground/20 [contain-intrinsic-size:auto_150px] [content-visibility:auto]",
         muted && "opacity-60",
       )}
     >
@@ -857,7 +857,7 @@ function LoopCard({
         <button
           type="button"
           onClick={onOpen}
-          className="min-w-0 flex-1 cursor-pointer text-left text-lg font-semibold leading-snug tracking-[-0.015em] text-foreground after:absolute after:inset-0 after:rounded-xl focus-visible:outline-none focus-visible:after:ring-1 focus-visible:after:ring-ring"
+          className="min-w-0 flex-1 cursor-pointer text-left text-[14px] font-semibold leading-[1.35] tracking-[-0.005em] text-foreground after:absolute after:inset-0 after:rounded-xl focus-visible:outline-none focus-visible:after:ring-1 focus-visible:after:ring-ring"
         >
           <span className="line-clamp-2">{name}</span>
         </button>
@@ -870,15 +870,15 @@ function LoopCard({
           {toggle}
         </div>
       </div>
-      <div className="mt-2.5 flex min-w-0 items-center gap-2">
-        <span className="inline-flex min-w-0 items-center rounded-full border border-foreground/10 bg-foreground/[0.06] py-1 pr-2.5 pl-2 text-[12.5px] font-medium text-foreground/85">
+      <div className="mt-2 flex min-w-0 items-center gap-2">
+        <span className="inline-flex min-w-0 items-center rounded-full border border-foreground/10 bg-foreground/[0.06] py-0.5 pr-2 pl-1.5 text-[11.5px] font-medium text-foreground/85">
           {agent}
         </span>
         {badges}
       </div>
       <p
         className={cn(
-          "mt-3 line-clamp-2 text-[13.5px] leading-normal",
+          "mt-2 line-clamp-2 text-[12.5px] leading-normal",
           report === null
             ? "italic text-subtle-foreground"
             : "text-muted-foreground",
@@ -887,12 +887,12 @@ function LoopCard({
         {report ?? "No reviewed runs yet."}
       </p>
       <div className="flex-1" />
-      <div className="mt-3 flex min-w-0 items-center gap-1.5 text-xs text-subtle-foreground">
+      <div className="mt-2 flex min-w-0 items-center gap-1.5 text-[11.5px] text-subtle-foreground">
         <LoopLocation cloud={cloud} />
         <span className="min-w-0 truncate">{schedule}</span>
         {repo}
       </div>
-      <div className="mt-3 flex items-center gap-2 border-t border-foreground/[0.06] pt-3 text-xs text-subtle-foreground">
+      <div className="mt-2 flex items-center gap-2 border-t border-foreground/[0.06] pt-2 text-[11.5px] text-subtle-foreground">
         <LoopRunDots runs={runs} />
         <span
           className={cn(
@@ -1709,7 +1709,7 @@ export function AutomationOverviewView({
       ) : null,
     });
     const grid = (items: readonly ListItem[]) => (
-      <div className="grid grid-cols-1 gap-3.5 @2xl:grid-cols-2">
+      <div className="grid grid-cols-1 gap-2.5 @2xl:grid-cols-2">
         {items.map((item) => item.node)}
       </div>
     );

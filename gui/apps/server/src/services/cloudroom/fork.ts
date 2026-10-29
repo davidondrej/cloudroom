@@ -40,11 +40,19 @@ export const isFiles = (data: Buffer) => data[0] === 0x1f && data[1] === 0x8b;
 const skippedNames = () => [...SKIPPED, ".cloudroom"].map((name) => `-name ${quote(name)}`).join(" -o ");
 /** `applyForkCode`'s exit code when the folder lacks history the bundle needs. */
 const MISSING_HISTORY = 3;
-/** Before unpacking a source's files: removes the folder's files the archive lacks, and folders it holds as files.
- *  Exact names, so any file name works. Skipped names (dependencies, build output, `.cloudroom`) stay. */
+/** Before unpacking a source's files: removes symlinks on the way to an archive file, so tar never writes through them.
+ *  A folder with no Git repository also loses the files the archive lacks, and folders it holds as files. Exact names,
+ *  so any file name works. Skipped names (dependencies, build output, `.cloudroom`) stay. An empty archive removes nothing. */
 const PRUNE = `import os,shutil,sys,tarfile
 root,skip=sys.argv[1],set(sys.argv[3:])
 with tarfile.open(sys.argv[2]) as t: names={os.path.normpath(m.name) for m in t if not m.isdir()}
+if not names: sys.exit()
+for n in names:
+    parts=n.split(os.sep)
+    for i in range(1,len(parts)):
+        p=os.path.join(root,*parts[:i])
+        if os.path.islink(p): os.remove(p)
+if os.path.lexists(os.path.join(root,".git")): sys.exit()
 for d,dirs,files in os.walk(root):
     links=[x for x in dirs if os.path.islink(os.path.join(d,x))]
     dirs[:]=[x for x in dirs if x not in skip and x not in links]
@@ -376,8 +384,9 @@ export async function landForkCode(client: CloudroomClient, started: { sessionId
 }
 
 /** Moves the fork's branch to the source's commit and leaves the source's uncommitted changes uncommitted, unless
- *  the folder already has changes. A folder with no Git repository gets one. Plain files replace the folder's files,
- *  so files the source deleted are gone here too; dependencies, build output and `.cloudroom` stay. */
+ *  the folder already has changes. A folder with no Git repository gets one. Plain files go on top of a GitHub clone
+ *  and delete only symlinks in their way; with no clone they replace the folder's files, so files the source deleted are gone here too;
+ *  dependencies, build output and `.cloudroom` stay. */
 async function applyForkCode(client: CloudroomClient, workspace: string, id: string, code: Code): Promise<void> {
   const files = isFiles(code.data);
   const file = `.cache/cloudroom/${id}.${files ? "tgz" : "bundle"}`;
@@ -397,7 +406,7 @@ async function applyForkCode(client: CloudroomClient, workspace: string, id: str
       `if git rev-parse -q --verify HEAD >/dev/null && ! git diff --quiet HEAD; then echo 'The folder already had changes, so they were kept and the code was not copied in' >&2; rm -f ~/${file}; exit 1; fi`,
       // A thin bundle leaves out commits the source's remote has: fetch them, or ask for a complete bundle.
       `git bundle verify -q ~/${file} >/dev/null 2>&1 || GIT_TERMINAL_PROMPT=0 git fetch -q origin >/dev/null 2>&1; git bundle verify -q ~/${file} >/dev/null 2>&1 || { rm -f ~/${file}; exit ${MISSING_HISTORY}; }`,
-      `git fetch -q ~/${file} refs/cloudroom/${id} && git reset -q --hard FETCH_HEAD && git reset -q HEAD~1`,
+      `git fetch -q ~/${file} refs/cloudroom/${id} && git reset -q --hard FETCH_HEAD && git reset -q --soft HEAD~1 && git read-tree -m HEAD`,
       `code=$?; rm -f ~/${file}; exit $code`,
     ].join("\n"),
     stdin: "",

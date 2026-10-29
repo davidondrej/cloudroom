@@ -1559,6 +1559,78 @@ describe("bridge", () => {
     }
   });
 
+  it("tells the host when Claude cancels a forwarded permission request", async () => {
+    const bridge = createBridgeJsonRpcTestHarness(handleLine);
+    const queries: ControlledClaudeQuery[] = [];
+    queryMock.mockImplementation(() => {
+      const query = createControlledClaudeQuery();
+      queries.push(query);
+      return query;
+    });
+    const askForNetwork = (signal: AbortSignal, toolUseID: string) =>
+      getLastCanUseTool()(
+        "SandboxNetworkAccess",
+        { host: "registry.npmjs.org" },
+        {
+          description: "Allow network connection to registry.npmjs.org?",
+          requestId: "control-request",
+          signal,
+          suggestions: [
+            {
+              type: "addRules",
+              rules: [
+                {
+                  toolName: "WebFetch",
+                  ruleContent: "domain:registry.npmjs.org",
+                },
+              ],
+              behavior: "allow",
+              destination: "localSettings",
+            },
+          ],
+          toolUseID,
+        },
+      );
+
+    try {
+      const threadId = "thread-cancelled-permission";
+      const toolUseID = "tool-cancelled-permission";
+      await startBridgeThread({ bridge, threadId });
+
+      const earlyAbort = new AbortController();
+      const earlyResult = askForNetwork(earlyAbort.signal, "tool-early-abort");
+      earlyAbort.abort();
+      await expect(earlyResult).resolves.toMatchObject({ behavior: "deny" });
+      expect(bridge.messages.some(isApprovalInteraction)).toBe(false);
+
+      const abortController = new AbortController();
+      const resultPromise = askForNetwork(abortController.signal, toolUseID);
+      await bridge.flushWork();
+
+      const permissionRequest = bridge.messages.find((message) =>
+        isApprovalInteraction(message),
+      );
+      if (permissionRequest?.id === undefined) {
+        throw new Error("Expected forwarded permission request");
+      }
+
+      abortController.abort();
+      await expect(resultPromise).resolves.toMatchObject({
+        behavior: "deny",
+        toolUseID,
+      });
+      expect(bridge.messages).toContainEqual({
+        jsonrpc: "2.0",
+        method: "notifications/cancelled",
+        params: { requestId: permissionRequest.id },
+      });
+
+      await stopBridgeThread({ bridge, queries, threadId });
+    } finally {
+      bridge.restore();
+    }
+  });
+
   it("forwards AskUserQuestion through canUseTool and returns the answer payload", async () => {
     const bridge = createBridgeJsonRpcTestHarness(handleLine);
     const queries: ControlledClaudeQuery[] = [];

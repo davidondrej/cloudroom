@@ -106,6 +106,7 @@ async function answerDirectRequest(args: {
   try {
     handleRuntimeProviderRequest({
       toolCalls: new RuntimeToolCalls(),
+      interactiveRequests: new RuntimeToolCalls(),
       getActiveTurnId: args.getActiveTurnId ?? (() => "bb-turn-1"),
       getThreadExecutionOptions:
         args.getThreadExecutionOptions ?? (() => undefined),
@@ -489,6 +490,7 @@ describe("createAgentRuntime interactive requests", () => {
       expect.objectContaining({
         payload: expect.objectContaining({ kind: "secrets/secret-request" }),
       }),
+      expect.any(AbortSignal),
     );
     expect(answer).toMatchObject({
       jsonrpc: "2.0",

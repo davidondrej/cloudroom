@@ -3,6 +3,7 @@ import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
+import { zstdCompressSync } from "node:zlib";
 import { getEnvironment, getThread } from "@cloudroom/db";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { importNativeSessions, listNativeSessions } from "../../src/services/cloudroom/session-import.js";
@@ -49,6 +50,18 @@ async function fixtures() {
   ].map((line) => JSON.stringify(line)).join("\n"));
   await writeFile(join(piDir, "2026-09-02_bad.jsonl"), JSON.stringify({ type: "session", id: "../victim", cwd: project }) + "\n" + JSON.stringify({ type: "message", id: "x", parentId: null, message: { role: "user", content: "Escape" } }));
   await mkdir(join(piDir, "unreadable.jsonl"));
+  const codexItem = (type: string, text: string) => ({ type: "event_msg", payload: { type: "item_completed", item: { type, content: [{ text }] } } });
+  const codexDir = join(root, "codex", "sessions", "2026", "09", "01");
+  await mkdir(codexDir, { recursive: true });
+  const codexRollout = (id: string, question: string) => [
+    { type: "session_meta", payload: { id, cwd: project, source: "cli", originator: "codex_cli_rs" } },
+    codexItem("UserMessage", question),
+    codexItem("AgentMessage", "Compressed Codex answer"),
+  ].map((line) => JSON.stringify(line)).join("\n");
+  const rollout = (id: string) => join(codexDir, `rollout-2026-09-01T10-00-00-${id}.jsonl`);
+  await writeFile(`${rollout("0199a000-0000-7000-8000-00000000000c")}.zst`, zstdCompressSync(codexRollout("0199a000-0000-7000-8000-00000000000c", "Compressed Codex question")));
+  await writeFile(`${rollout("0199a000-0000-7000-8000-00000000000d")}.zst`, zstdCompressSync(codexRollout("0199a000-0000-7000-8000-00000000000d", "Stale compressed copy")));
+  await writeFile(rollout("0199a000-0000-7000-8000-00000000000d"), codexRollout("0199a000-0000-7000-8000-00000000000d", "Plain Codex question"));
   const db = new Database(join(root, "hermes", "state.db"));
   db.exec(`CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT NOT NULL, model TEXT, started_at REAL NOT NULL, title TEXT, cwd TEXT, archived INTEGER NOT NULL DEFAULT 0);
     CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL, role TEXT NOT NULL, content TEXT, timestamp REAL NOT NULL);`);
@@ -155,6 +168,8 @@ describe("Pi, Hermes, and T3 Code chat import", () => {
       const { host } = seedHostSession(harness.deps, { id: "host-import-more" });
       const sessions = await listNativeSessions(harness.deps);
       expect(sessions.map(({ harness: app, id, title, cwd }) => [app, id, title, cwd]).sort((a, b) => a[1]!.localeCompare(b[1]!))).toEqual([
+        ["codex", "0199a000-0000-7000-8000-00000000000c", "Compressed Codex question", project],
+        ["codex", "0199a000-0000-7000-8000-00000000000d", "Plain Codex question", project],
         ["claude-code", "claude-1", "Refactor the API", join(root, "claude-project")],
         ["acp-hermes-agent", "h-cli", "Deploy plan", join(root, "hermes-project")],
         ["acp-hermes-agent", "h-telegram", "Hi from Telegram", homedir()],
@@ -174,6 +189,8 @@ describe("Pi, Hermes, and T3 Code chat import", () => {
       })();
       const result = await importNativeSessions(harness.deps, host.id, [
         { harness: "claude-code", id: "claude-1" },
+        { harness: "codex", id: "0199a000-0000-7000-8000-00000000000c" },
+        { harness: "codex", id: "0199a000-0000-7000-8000-00000000000d" },
         { harness: "pi", id: "pi-1" },
         { harness: "pi", id: "pi-old" },
         { harness: "acp-hermes-agent", id: "h-cli" },
@@ -189,6 +206,14 @@ describe("Pi, Hermes, and T3 Code chat import", () => {
       expect(claude.startFork).toEqual({ sourceProviderThreadId: "claude-1" });
       expect(claude.sent).toBe("What's next?");
 
+      expect(threadMessages(harness.deps.db, threadId("0199a000-0000-7000-8000-00000000000c"))).toEqual([
+        { role: "user", text: "Compressed Codex question" },
+        { role: "agent", text: "Compressed Codex answer" },
+      ]);
+      expect(threadMessages(harness.deps.db, threadId("0199a000-0000-7000-8000-00000000000d"))).toEqual([
+        { role: "user", text: "Plain Codex question" },
+        { role: "agent", text: "Compressed Codex answer" },
+      ]);
       expect(threadMessages(harness.deps.db, threadId("pi-1"))).toEqual([
         { role: "user", text: "Fix the login bug" },
         { role: "agent", text: "Fixed it." },

@@ -52,6 +52,7 @@
     "@types/better-sqlite3": "^7.6.12",
     "@types/node": "^22.0.0",
     "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
     "better-sqlite3": "12.10.0",
     "jsdom": "^29.0.1",
     "react": "^19.0.0",

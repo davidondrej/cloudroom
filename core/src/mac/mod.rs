@@ -625,6 +625,7 @@ pub async fn listen(manager: &Arc<Manager>) -> io::Result<()> {
         .merge(crate::session::report::agent_routes())
         .merge(crate::session::automation::agent_routes())
         .merge(crate::computer_use::agent_routes())
+        .merge(crate::gpu::agent_routes())
         .layer(DefaultBodyLimit::max(BODY))
         .with_state(manager.clone());
     tokio::spawn(async move {

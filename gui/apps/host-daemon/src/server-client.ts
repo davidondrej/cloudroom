@@ -194,6 +194,7 @@ export interface ServerClient {
   ): Promise<HostDaemonInteractiveRequestResponse>;
   interruptInteractiveRequests(args: {
     providerId: string;
+    providerRequestId?: string;
     reason: string;
     threadIds: readonly string[];
   }): Promise<HostDaemonInteractiveInterruptResponse>;
@@ -642,6 +643,7 @@ export function createServerClient(
       const payload: HostDaemonInteractiveInterruptRequest = {
         sessionId: requireSessionId(),
         providerId: args.providerId,
+        providerRequestId: args.providerRequestId,
         threadIds: [...args.threadIds],
         reason: args.reason,
       };

@@ -55,6 +55,7 @@ interface CreateFetchRecorderArgs {
   inactiveSessionOnFirstEventPost?: boolean;
   interactiveRequestError?: Error;
   interactiveRequestResponse?: HostDaemonInteractiveRequestResponse;
+  interruptAck?: Promise<void>;
   retiredEnvironmentIds?: string[];
   sessionIds?: string[];
 }
@@ -180,6 +181,7 @@ function createFetchRecorder(
       return Response.json(response);
     }
     if (url.pathname === "/internal/session/interactive-request/interrupt") {
+      await args.interruptAck;
       return Response.json({
         ok: true,
         interactionIds: ["pint_app_test"],
@@ -1091,6 +1093,53 @@ describe("createHostDaemonApp", () => {
         reason: 'Provider "codex" exited while awaiting user interaction',
       });
     } finally {
+      await app.daemon.shutdown("test", 0);
+    }
+  });
+
+  it("holds a thread's next approval until its cancelled one is interrupted", async () => {
+    const interruptAck = createDeferredPromise<void>();
+    const { app, fetchRecorder, runtimeOptions } = await createAppFixture({
+      interruptAck: interruptAck.promise,
+    });
+    const requestsTo = (pathname: string) =>
+      fetchRecorder.requests.filter((record) => record.pathname === pathname);
+    const registrations = () =>
+      requestsTo("/internal/session/interactive-request");
+    const interrupts = () =>
+      requestsTo("/internal/session/interactive-request/interrupt");
+    try {
+      await app.connection.start();
+      await app.runtimeManager.ensureEnvironment({
+        environmentId: "env-app-cancel",
+        workspacePath: await makeTempDir("bb-host-daemon-app-cancel-"),
+      });
+      const onInteractiveRequest = runtimeOptions.current?.onInteractiveRequest;
+      if (!onInteractiveRequest) throw new Error("Expected runtime callbacks");
+
+      const cancelled = createCommandApprovalRequest();
+      const controller = new AbortController();
+      const rejection = expect(
+        onInteractiveRequest(cancelled, controller.signal),
+      ).rejects.toThrow("Interactive request cancelled");
+      await vi.waitFor(() => expect(registrations()).toHaveLength(1));
+      controller.abort();
+      await rejection;
+      void onInteractiveRequest({
+        ...cancelled,
+        providerRequestId: "provider-request-app-next",
+      }).catch(() => undefined);
+
+      await vi.waitFor(() => expect(interrupts()).toHaveLength(1));
+      expect(JSON.parse(interrupts()[0]?.body ?? "{}")).toMatchObject({
+        providerRequestId: cancelled.providerRequestId,
+        threadIds: [cancelled.threadId],
+      });
+      expect(registrations()).toHaveLength(1);
+      interruptAck.resolve();
+      await vi.waitFor(() => expect(registrations()).toHaveLength(2));
+    } finally {
+      interruptAck.resolve();
       await app.daemon.shutdown("test", 0);
     }
   });

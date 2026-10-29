@@ -305,6 +305,18 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: Plugin
       throw new ApiError(status === 403 || status === 404 || status === 409 ? status : status ? 400 : 503, "cloud_org", error instanceof Error ? error.message : String(error));
     }) as Record<string, unknown>);
   });
+  // GPUs (docs/scopes/gpus.md): the GPU plugin's `room-cli gpu` steps, passed to the website as this account. Never
+  // an approval: this server sends those itself, after a click on the card it shows (services/cloudroom/gpu.ts).
+  app.post("/api/v1/cloudroom/account/gpu", async (context) => {
+    const body = z.object({ argv: z.array(z.string().max(32_768)).max(200), thread: z.string().max(100).optional() }).strict().parse(await context.req.json());
+    const service = cloudroom(deps);
+    const reply = await service.sandboxes.gpu(body).catch((error: unknown) => {
+      const status = error instanceof CloudroomError ? error.status : null;
+      throw new ApiError(status === 403 || status === 404 || status === 409 ? status : status ? 400 : 503, "cloud_gpu", error instanceof Error ? error.message : String(error));
+    }) as Record<string, unknown>;
+    if (body.thread && reply.approval) service.gpuApprovals.show(body.thread, reply.approval);
+    return context.json(reply);
+  });
   // Import from this Mac: the list shows names only, and values go straight to the website.
   app.get("/api/v1/cloudroom/account/environment/mac", async (context) => context.json({ names: Object.keys(await macVariables()).sort() }));
   app.post("/api/v1/cloudroom/account/environment/mac", async (context) => {

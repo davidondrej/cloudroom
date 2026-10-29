@@ -394,9 +394,10 @@ const { forwardToolCall, handleToolCallResponse } = toolCallTracker;
 function resolvePendingSessionWork(
   threadSession: ThreadSession,
   message: string,
+  notifyHost = true,
 ): void {
   toolCallTracker.resolvePendingToolCalls(threadSession, message);
-  resolvePendingInteractiveRequests(threadSession, message);
+  resolvePendingInteractiveRequests(threadSession, message, notifyHost);
 }
 
 function applyChromeSetting(
@@ -496,6 +497,7 @@ function createForwardToolCall(getThreadId: () => string): ToolCallForwarder {
 async function closeThreadSession(args: {
   graceful?: boolean;
   message: string;
+  notifyHost?: boolean;
   threadId: string;
 }): Promise<void> {
   const existingClose = closingSessions.get(args.threadId);
@@ -512,7 +514,11 @@ async function closeThreadSession(args: {
   const threadSession = attachment.residentSession;
   if (threadSession) {
     threadSession.closing = true;
-    resolvePendingSessionWork(threadSession, args.message);
+    resolvePendingSessionWork(
+      threadSession,
+      args.message,
+      args.notifyHost === true,
+    );
   }
   const closePromise = Promise.resolve()
     .then(async () => {
@@ -587,6 +593,7 @@ async function closeReplacedThreadSession(threadId: string): Promise<void> {
   const close = closeThreadSession({
     graceful: false,
     message: "Thread session replaced while awaiting permission approval",
+    notifyHost: true,
     threadId,
   });
   await (process.platform === "win32" ? close.catch(() => {}) : close);
@@ -1573,12 +1580,24 @@ function findSessionByPendingInteractiveRequest(
   return undefined;
 }
 
+function sendInteractiveRequestCancelled(requestId: string | number): void {
+  send({
+    jsonrpc: "2.0",
+    method: "notifications/cancelled",
+    params: { requestId },
+  });
+}
+
 function resolvePendingInteractiveRequests(
   threadSession: ThreadSession,
   message: string,
+  notifyHost: boolean,
 ): void {
   for (const [requestId, pending] of threadSession.pendingInteractiveRequests) {
     threadSession.pendingInteractiveRequests.delete(requestId);
+    if (notifyHost) {
+      sendInteractiveRequestCancelled(requestId);
+    }
     pending.resolve({
       behavior: "deny",
       interrupt: true,
@@ -1806,6 +1825,15 @@ function createForwardInteractiveRequest(
         return;
       }
 
+      if (args.signal.aborted) {
+        resolve({
+          behavior: "deny",
+          message: "Interactive request cancelled",
+          toolUseID: args.toolUseId,
+        });
+        return;
+      }
+
       let params: ClaudePermissionRequestApprovalParams;
       try {
         params = buildInteractiveRequestParams(args);
@@ -1829,6 +1857,7 @@ function createForwardInteractiveRequest(
         if (!threadSession.pendingInteractiveRequests.delete(requestId)) {
           return;
         }
+        sendInteractiveRequestCancelled(requestId);
         finish({
           behavior: "deny",
           message: "Interactive request cancelled",
@@ -1881,6 +1910,15 @@ function createForwardUserQuestionRequest(
         return;
       }
 
+      if (args.signal.aborted) {
+        resolve({
+          behavior: "deny",
+          message: "User question request cancelled",
+          toolUseID: args.toolUseId,
+        });
+        return;
+      }
+
       const params = buildUserQuestionRequestParams(args);
       const requestId = nextInteractiveRequestId();
 
@@ -1893,6 +1931,7 @@ function createForwardUserQuestionRequest(
         if (!threadSession.pendingInteractiveRequests.delete(requestId)) {
           return;
         }
+        sendInteractiveRequestCancelled(requestId);
         finish({
           behavior: "deny",
           message: "User question request cancelled",

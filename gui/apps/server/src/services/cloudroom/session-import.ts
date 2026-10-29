@@ -3,6 +3,8 @@ import { open, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
 import { createInterface } from "node:readline";
+import { pipeline } from "node:stream";
+import { createZstdDecompress } from "node:zlib";
 import { randomUUID } from "node:crypto";
 import { isNotNull } from "drizzle-orm";
 import { events, findOrCreateProjectByLocalPathSource, getThread, type StoredEventRow } from "@cloudroom/db";
@@ -82,7 +84,7 @@ async function findSessions(deps: AppDeps): Promise<Found[]> {
   const [claude, codex] = await Promise.all([claudeFiles(), codexFiles()]);
   const files = new Map<string, string>([
     ...claude.map((path) => [`claude-code:${basename(path, ".jsonl")}`, path] as const),
-    ...codex.map((path) => [`codex:${basename(path, ".jsonl").slice(-36)}`, path] as const),
+    ...codex.map((path) => [`codex:${basename(path.replace(/\.zst$/, ""), ".jsonl").slice(-36)}`, path] as const),
   ]);
   const sessions = [...await claudeSessions(claude), ...await codexSessions(codex), ...await moreSessions(deps)];
   const claimed = t3Claims(deps);
@@ -102,7 +104,9 @@ async function claudeFiles(): Promise<string[]> {
 
 async function codexFiles(): Promise<string[]> {
   const root = join(codexHome(), "sessions");
-  return (await readdir(root, { recursive: true }).catch(() => [] as string[])).filter((file) => /rollout-.*\.jsonl$/.test(file)).map((file) => join(root, file));
+  const files = (await readdir(root, { recursive: true }).catch(() => [] as string[])).filter((file) => /rollout-.*\.jsonl(\.zst)?$/.test(file));
+  const plain = new Set(files);
+  return files.filter((file) => !file.endsWith(".zst") || !plain.has(file.slice(0, -4))).map((file) => join(root, file));
 }
 
 async function claudeSessions(files: string[]): Promise<Found[]> {
@@ -238,7 +242,8 @@ function historyRows(session: Found, turns: Turn[]): StoredEventRow[] {
 }
 
 export async function* readLines(path: string, bytes?: number): AsyncGenerator<Line> {
-  const input = createReadStream(path, { end: bytes === undefined ? undefined : bytes - 1 });
+  const file = createReadStream(path, { end: bytes === undefined ? undefined : bytes - 1 });
+  const input = path.endsWith(".zst") ? pipeline(file, createZstdDecompress(), () => {}) : file;
   try {
     for await (const text of createInterface({ input, crlfDelay: Infinity })) {
       const line = parseLine(text);
@@ -250,7 +255,7 @@ export async function* readLines(path: string, bytes?: number): AsyncGenerator<L
 }
 
 export async function headLines(path: string, bytes: number): Promise<Line[]> {
-  const text = await readSlice(path, 0, bytes);
+  const text = path.endsWith(".zst") ? await zstdHead(path, bytes).catch(() => "") : await readSlice(path, 0, bytes);
   return compact(text.split("\n").slice(0, text.length < bytes ? undefined : -1).map(parseLine));
 }
 
@@ -269,6 +274,16 @@ async function readSlice(path: string, start: number, bytes: number): Promise<st
   } finally {
     await file.close();
   }
+}
+
+async function zstdHead(path: string, bytes: number): Promise<string> {
+  const chunks: Buffer[] = [];
+  let size = 0;
+  for await (const chunk of pipeline(createReadStream(path), createZstdDecompress(), () => {})) {
+    chunks.push(chunk);
+    if ((size += chunk.length) >= bytes) break;
+  }
+  return Buffer.concat(chunks).subarray(0, bytes).toString("utf8");
 }
 
 export function parseLine(text: string): Line | null {

@@ -396,6 +396,7 @@ async function runCell(
   const rawRequest = interactionRequest(requestId, payload);
   handleRuntimeProviderRequest({
     toolCalls: new RuntimeToolCalls(),
+    interactiveRequests: new RuntimeToolCalls(),
     getActiveTurnId: () => "turn-1",
     getThreadExecutionOptions: () => executionOptions,
     onInteractiveRequest,

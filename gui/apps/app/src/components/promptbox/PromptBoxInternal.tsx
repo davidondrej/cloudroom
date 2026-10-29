@@ -418,10 +418,17 @@ export const INERT_TYPEAHEAD_COMMAND_CONFIG: TypeaheadCommandConfig = {
   onQueryChange: () => {},
 };
 
+export interface AttachmentFailure {
+  name: string;
+  reason: string;
+}
+
 export interface AttachmentsConfig {
   items?: PromptDraftAttachment[];
   isAttaching?: boolean;
   error?: string | null;
+  failures?: readonly AttachmentFailure[];
+  onDismissFailure?: (index: number) => void;
   onAttachFiles?: (files: File[]) => void | Promise<void>;
   onRemove?: (path: string) => void;
   projectId?: string;
@@ -1334,6 +1341,8 @@ export function PromptBoxInternal({
     items: attachments = [],
     isAttaching = false,
     error: attachmentError = null,
+    failures: attachmentFailures = [],
+    onDismissFailure: onDismissAttachmentFailure,
     onAttachFiles,
     onRemove: onRemoveAttachment,
     projectId: attachmentProjectId,
@@ -3517,6 +3526,34 @@ export function PromptBoxInternal({
                   onExpandedImageIndexChange={setExpandedImageIndex}
                   onRemoveAttachment={onRemoveAttachment}
                 />
+
+                {attachmentFailures.length > 0 ? (
+                  <div className="mx-3 mb-1 mt-1 flex flex-wrap gap-1.5">
+                    {attachmentFailures.map((failure, index) => (
+                      <div
+                        key={`${failure.name}-${index}`}
+                        title={`${failure.name}: ${failure.reason}`}
+                        className="inline-flex h-7 max-w-full items-center gap-1.5 rounded-lg border border-destructive/40 bg-destructive/10 pl-2 pr-1.5 text-xs"
+                      >
+                        <Icon name="File" className="size-3.5 shrink-0 text-destructive" />
+                        <span className="max-w-[200px] truncate text-foreground line-through decoration-destructive/60">
+                          {failure.name}
+                        </span>
+                        <span className="truncate text-destructive">{failure.reason}</span>
+                        {onDismissAttachmentFailure ? (
+                          <button
+                            type="button"
+                            aria-label={`Dismiss ${failure.name}`}
+                            onClick={() => onDismissAttachmentFailure(index)}
+                            className="inline-flex size-4 shrink-0 items-center justify-center rounded text-destructive hover:bg-state-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring max-md:pointer-coarse:size-7"
+                          >
+                            <Icon name="X" className="size-3" />
+                          </button>
+                        ) : null}
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
 
                 {attachmentError ? (
                   <div className="mx-3 mb-1 mt-1 text-xs text-destructive">

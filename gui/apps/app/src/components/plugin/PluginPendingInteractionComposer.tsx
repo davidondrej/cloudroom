@@ -4,9 +4,10 @@ import {
 } from "@/components/thread/pending-interactions/PendingInteractionShell";
 import { useCallback, useMemo, useState } from "react";
 import { Button } from "@cloudroom/shared-ui/button";
+import { Dialog, DialogContent, DialogTitle } from "@cloudroom/shared-ui/dialog";
 import type { JsonValue, PendingInteraction } from "@cloudroom/domain";
 import { PluginSlotMount } from "./PluginSlotMount";
-import { resolvePendingInteraction } from "@/lib/plugin-slot-resolvers";
+import { isModalPluginInteraction, resolvePendingInteraction } from "@/lib/plugin-slot-resolvers";
 import { usePluginSlots } from "@/lib/plugin-slots";
 import { useStopThread } from "@/hooks/mutations/thread-runtime-mutations";
 import { sdk } from "@/lib/sdk";
@@ -88,6 +89,79 @@ export function PluginPendingInteractionComposer({
   }, [dismissal, interaction.id, interaction.threadId, stopThread]);
   const dismissLabel = dismissal === "cancel" ? "Cancel" : "Stop turn";
 
+  const form = (
+    slot ? (
+      <PluginSlotMount
+        pluginId={slot.pluginId}
+        slotKind="pendingInteraction"
+        slotId={slot.id}
+        crashFallback={
+          <div className="space-y-3">
+            <p className="text-sm text-muted-foreground">
+              The plugin form crashed. {dismissLabel} to continue.
+            </p>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => void cancel()}
+              disabled={submitting}
+            >
+              {dismissLabel}
+            </Button>
+          </div>
+        }
+      >
+        <fieldset disabled={submitting}>
+          <slot.component
+            interaction={{
+              id: interaction.id,
+              threadId: interaction.threadId,
+              title: request.title,
+              payload: request.data,
+              createdAt: interaction.createdAt,
+              expiresAt: interaction.expiresAt ?? null,
+            }}
+            submit={submit}
+            cancel={cancel}
+          />
+        </fieldset>
+      </PluginSlotMount>
+    ) : (
+      <div className="space-y-3">
+        <p className="text-sm text-muted-foreground">
+          The plugin form is unavailable. {dismissLabel} to continue.
+        </p>
+        <Button
+          type="button"
+          variant="outline"
+          onClick={() => void cancel()}
+          disabled={submitting}
+        >
+          {dismissLabel}
+        </Button>
+      </div>
+    )
+  );
+
+  if (isModalPluginInteraction(request.pluginId)) {
+    return (
+      <Dialog open>
+        <DialogContent
+          hideCloseButton
+          aria-describedby={undefined}
+          overlayClassName="bg-black/35 backdrop-blur-sm"
+          className="max-w-[520px] gap-0 rounded-[14px] border-white/15 p-7 sm:rounded-[14px]"
+          onEscapeKeyDown={(event) => event.preventDefault()}
+          onInteractOutside={(event) => event.preventDefault()}
+        >
+          <DialogTitle className="sr-only">{request.title}</DialogTitle>
+          {form}
+          {error ? <p className="mt-4 text-sm text-destructive">{error}</p> : null}
+        </DialogContent>
+      </Dialog>
+    );
+  }
+
   return (
     <PendingInteractionShell
       key={interaction.id}
@@ -105,57 +179,7 @@ export function PluginPendingInteractionComposer({
               : "The agent asks through "}
             <span className="capitalize">{request.pluginId}</span>
           </p>
-          {slot ? (
-            <PluginSlotMount
-              pluginId={slot.pluginId}
-              slotKind="pendingInteraction"
-              slotId={slot.id}
-              crashFallback={
-                <div className="space-y-3">
-                  <p className="text-sm text-muted-foreground">
-                    The plugin form crashed. {dismissLabel} to continue.
-                  </p>
-                  <Button
-                    type="button"
-                    variant="outline"
-                    onClick={() => void cancel()}
-                    disabled={submitting}
-                  >
-                    {dismissLabel}
-                  </Button>
-                </div>
-              }
-            >
-              <fieldset disabled={submitting}>
-                <slot.component
-                  interaction={{
-                    id: interaction.id,
-                    threadId: interaction.threadId,
-                    title: request.title,
-                    payload: request.data,
-                    createdAt: interaction.createdAt,
-                    expiresAt: interaction.expiresAt ?? null,
-                  }}
-                  submit={submit}
-                  cancel={cancel}
-                />
-              </fieldset>
-            </PluginSlotMount>
-          ) : (
-            <div className="space-y-3">
-              <p className="text-sm text-muted-foreground">
-                The plugin form is unavailable. {dismissLabel} to continue.
-              </p>
-              <Button
-                type="button"
-                variant="outline"
-                onClick={() => void cancel()}
-                disabled={submitting}
-              >
-                {dismissLabel}
-              </Button>
-            </div>
-          )}
+          {form}
         </>
       )}
     </PendingInteractionShell>

@@ -20,6 +20,7 @@ const files = import.meta.glob<{ title?: string; names: string[] }>(
     "../src/**/*.stories.tsx",
     "../../../plugins/workflows/**/*.stories.tsx",
     "../../../plugins/ask-user-question/*.stories.tsx",
+    "../../../plugins/gpu/*.stories.tsx",
     "../../../plugins/provider-usage/*.stories.tsx",
   ],
   { query: "?names", import: "default", eager: true },
@@ -28,6 +29,7 @@ const modules = import.meta.glob<Record<string, StoryComponent>>([
   "../src/**/*.stories.tsx",
   "../../../plugins/workflows/**/*.stories.tsx",
   "../../../plugins/ask-user-question/*.stories.tsx",
+  "../../../plugins/gpu/*.stories.tsx",
   "../../../plugins/provider-usage/*.stories.tsx",
 ]);
 

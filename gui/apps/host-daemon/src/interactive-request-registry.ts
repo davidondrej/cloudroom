@@ -22,6 +22,7 @@ interface InteractiveRequestRegistrationFailure {
 }
 
 interface InteractiveRequestRegistryOptions {
+  onCancel?: (request: PendingInteractionCreate) => Promise<void>;
   onRegistrationFailure?: (
     failure: InteractiveRequestRegistrationFailure,
   ) => void;
@@ -100,11 +101,13 @@ export class InteractiveRequestRegistry {
     string,
     PendingInteractiveRequestEntry
   >();
+  private readonly threadCancels = new Map<string, Promise<unknown>>();
 
   constructor(private readonly options: InteractiveRequestRegistryOptions) {}
 
   async registerAndWait(
     request: PendingInteractionCreate,
+    signal?: AbortSignal,
   ): Promise<PendingInteractionResolution> {
     const key = buildInteractiveRequestKey(request);
     const existing = this.pendingEntries.get(key);
@@ -130,8 +133,43 @@ export class InteractiveRequestRegistry {
       request,
     };
     this.pendingEntries.set(key, entry);
+    const registered = this.register(key, entry);
+    signal?.addEventListener(
+      "abort",
+      () => {
+        if (this.pendingEntries.get(key) !== entry) {
+          return;
+        }
+        this.pendingEntries.delete(key);
+        entry.reject(new Error("Interactive request cancelled"));
+        const cancelled = Promise.allSettled([
+          this.threadCancels.get(request.threadId),
+          registered.then(() => this.options.onCancel?.(request)),
+        ]).finally(() => {
+          if (this.threadCancels.get(request.threadId) === cancelled) {
+            this.threadCancels.delete(request.threadId);
+          }
+        });
+        this.threadCancels.set(request.threadId, cancelled);
+      },
+      { once: true },
+    );
+    return promise;
+  }
 
+  private async register(
+    key: string,
+    entry: PendingInteractiveRequestEntry,
+  ): Promise<void> {
+    const { request } = entry;
     try {
+      const cancelling = this.threadCancels.get(request.threadId);
+      if (cancelling) {
+        await cancelling;
+        if (this.pendingEntries.get(key) !== entry) {
+          return;
+        }
+      }
       const response = await this.options.registerRequest(request);
       if (response.outcome === "rejected") {
         this.pendingEntries.delete(key);
@@ -141,7 +179,7 @@ export class InteractiveRequestRegistry {
             response.reason,
           ),
         );
-        return promise;
+        return;
       }
 
       entry.interactionId = response.interactionId;
@@ -162,8 +200,6 @@ export class InteractiveRequestRegistry {
       });
       entry.reject(registrationError);
     }
-
-    return promise;
   }
 
   resolve(request: InteractiveResolveCommandInput): void {

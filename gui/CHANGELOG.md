@@ -2,6 +2,20 @@
 
 Also on [cloudroom.dev/changelog](https://www.cloudroom.dev/changelog).
 
+## 131
+
+Agents can ask for a GPU (2026-10-29)
+
+### Changes
+
+- Agents can now ask for a cloud GPU for heavy work, and you approve the cost first in a pop-up.
+- When a loop pauses, a card shows why, with a Resume button.
+- Quitting the Linux app no longer shows a crash dialog.
+- Claude Code no longer gets stuck on approvals after Claude cancels a prompt.
+- Codex chats saved in compressed form now import.
+- Forks and child threads copy their files more reliably.
+- A failed attachment now shows as a chip you can dismiss.
+
 ## 130
 
 Top up Cloud credits anytime (2026-10-28)

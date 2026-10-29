@@ -25,6 +25,12 @@ import type { AutomationService } from "./service.js";
 import type { Db } from "./data.js";
 import { cloudLoopUsage, localLoopUsage } from "./usage.js";
 import { agentSessions, agentSessionsSchema } from "./agent-sessions.js";
+import {
+  forgetCloud,
+  pausedCloud,
+  pausedLocal,
+  pausedLoopSchema,
+} from "./paused.js";
 
 const cloudAutomationInputSchema = z
   .object({
@@ -116,6 +122,11 @@ export const automationRpcContract = defineRpcContract({
   cloud_automations: {
     input: cloudAutomationInputSchema,
     output: z.unknown(),
+  },
+  // Loops their own failures paused, local and Cloud, for the app's paused-loop card (ADR 0338).
+  paused_loops: {
+    input: z.null(),
+    output: z.object({ loops: z.array(pausedLoopSchema) }).strict(),
   },
   // Usage estimates (docs/scopes/loops.md): each schedule's rough share of the weekly Claude or Codex limit.
   automations_usage: {
@@ -281,12 +292,21 @@ export function createRpcHandlers(
       input: z.output<typeof cloudAutomationInputSchema>,
     ) {
       if (!sdk) throw new Error("Cloud automations are unavailable.");
+      if (input.action !== "list") forgetCloud();
       const result = await sdk.cloudroom.automations(
         input as Parameters<Cloud["automations"]>[0],
       );
       return input.action === "list"
         ? withCloudAgents(sdk.threads, result)
         : result;
+    },
+    async paused_loops() {
+      const now = Date.now();
+      const loops = [
+        ...(db ? pausedLocal(db, now) : []),
+        ...(sdk ? await pausedCloud(sdk.cloudroom, now) : []),
+      ];
+      return { loops: loops.sort((a, b) => b.at - a.at) };
     },
     async cloud_template_add(
       input: z.output<typeof cloudTemplateInputSchema>,

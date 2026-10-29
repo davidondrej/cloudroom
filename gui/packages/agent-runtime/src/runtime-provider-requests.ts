@@ -33,7 +33,10 @@ export class RuntimeToolCalls {
     >
   >();
 
-  start(scope: string, request: ToolCallRequest): AbortController | null {
+  start(
+    scope: string,
+    request: Pick<ToolCallRequest, "requestId" | "threadId" | "turnId">,
+  ): AbortController | null {
     let calls = this.pending.get(scope);
     if (!calls) {
       calls = new Map();
@@ -108,6 +111,7 @@ interface HandleRuntimeProviderRequestArgs extends RuntimeProviderRequestArgs {
   getThreadExecutionOptions: (
     threadId: string,
   ) => AgentRuntimeExecutionOptions | undefined;
+  interactiveRequests: RuntimeToolCalls;
   onInteractiveRequest: AgentRuntimeOptions["onInteractiveRequest"];
   onToolCall: AgentRuntimeOptions["onToolCall"];
   toolCalls: RuntimeToolCalls;
@@ -342,9 +346,17 @@ function handleInteractiveProviderRequest(
     return true;
   }
 
+  const scope = args.providerProcess.interactiveRequestScope;
+  const controller = args.interactiveRequests.start(scope, {
+    requestId: interactiveReq.requestId,
+    threadId: resolvedThreadId,
+    turnId: resolvedTurnId,
+  });
+  if (!controller) return true;
   void args
-    .onInteractiveRequest(scopedInteractiveReq)
+    .onInteractiveRequest(scopedInteractiveReq, controller.signal)
     .then((resolution) => {
+      if (controller.signal.aborted) return;
       const result = buildInteractiveResponse({
         request: resolvedInteractiveReq,
         resolution,
@@ -356,6 +368,7 @@ function handleInteractiveProviderRequest(
       });
     })
     .catch((err) => {
+      if (controller.signal.aborted) return;
       if (
         sendProviderResponseEncodeErrorIfKnown({
           child: args.providerProcess.child,
@@ -370,7 +383,14 @@ function handleInteractiveProviderRequest(
         id: args.parsedId,
         message: err instanceof Error ? err.message : String(err),
       });
-    });
+    })
+    .finally(() =>
+      args.interactiveRequests.finish(
+        scope,
+        interactiveReq.requestId,
+        controller,
+      ),
+    );
   return true;
 }
 

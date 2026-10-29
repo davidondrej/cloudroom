@@ -14,6 +14,11 @@ const pendingInteractionIdSchema = z
   .string()
   .regex(/^pint_[23456789abcdefghijkmnpqrstuvwxyz]{10}$/);
 
+/** Cards only the user answers, in the app window: paid GPU sessions (ADR 0331). The app's requests always carry an
+ *  Origin header, which the browser guard has already checked; `room-cli thread interactions respond` sends none, so
+ *  an agent can't approve its own GPU that way. */
+const APP_ONLY_PLUGINS = new Set(["gpu"]);
+
 function parsePendingInteractionId(rawInteractionId: string): string {
   const parsedInteractionId =
     pendingInteractionIdSchema.safeParse(rawInteractionId);
@@ -70,6 +75,21 @@ export function registerThreadInteractionRoutes(
 
   post(routes.respondToInteraction, (context, payload) => {
     const thread = requirePublicThread(deps.db, context.req.param("id"));
+    const current = deps.pendingInteractions.getThreadInteraction({
+      threadId: thread.id,
+      interactionId: parsePendingInteractionId(context.req.param("interactionId")),
+    });
+    if (
+      current.origin?.kind === "plugin" &&
+      APP_ONLY_PLUGINS.has(current.origin.pluginId) &&
+      !context.req.header("origin")
+    ) {
+      throw new ApiError(
+        403,
+        "invalid_request",
+        "Only the user can answer this card, in the Cloudroom app.",
+      );
+    }
     if (
       Buffer.byteLength(JSON.stringify(payload.value), "utf8") >
       PLUGIN_INTERACTION_MAX_PAYLOAD_BYTES

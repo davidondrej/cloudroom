@@ -304,6 +304,7 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
   const threadGoalState = new RuntimeThreadGoalState();
   const turnState = new RuntimeTurnState();
   const toolCalls = new RuntimeToolCalls();
+  const interactiveRequests = new RuntimeToolCalls();
   const backgroundWorkState = new RuntimeBackgroundWorkState();
   const threadEventGrammar = new ThreadEventGrammar();
   const bridgeNodeEnv = defaultBridgeNodeEnv();
@@ -1261,6 +1262,10 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
           args.proc.interactiveRequestScope,
           cancellation.data.requestId,
         );
+        interactiveRequests.cancel(
+          args.proc.interactiveRequestScope,
+          cancellation.data.requestId,
+        );
       }
       return;
     }
@@ -1320,6 +1325,7 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
         getActiveTurnId: (threadId) => turnState.getActiveTurnId(threadId),
         getThreadExecutionOptions: (threadId) =>
           threadRuntimeConfigs.get(threadId)?.options,
+        interactiveRequests,
         onInteractiveRequest: options.onInteractiveRequest,
         onToolCall: options.onToolCall,
         toolCalls,

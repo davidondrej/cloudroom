@@ -129,14 +129,22 @@ async function checkProjectPaths(cliEnv) {
 async function waitForBuiltinPlugins(cliEnv) {
   const deadline = Date.now() + PLUGIN_LOAD_TIMEOUT_MS;
   let lastSummary = "no plugin list output yet";
+  const retrying = new Set();
   while (Date.now() <= deadline) {
     const plugins =
       JSON.parse(await runCli(["plugin", "list", "--json"], cliEnv)).plugins ??
       [];
-    const failed = plugins.filter(
-      (plugin) =>
-        plugin.status === "error" && plugin.statusDetail !== "not loaded",
-    );
+    const failed = [];
+    for (const plugin of plugins) {
+      if (plugin.status !== "error" || plugin.statusDetail === "not loaded") {
+        continue;
+      }
+      if (/; retrying in \d+s$/.test(plugin.statusDetail ?? "")) {
+        retrying.add(plugin.id);
+      } else {
+        failed.push(plugin);
+      }
+    }
     if (failed.length > 0) {
       throw new Error(
         `Builtin plugins failed to load:\n${failed
@@ -145,9 +153,9 @@ async function waitForBuiltinPlugins(cliEnv) {
       );
     }
     const byId = new Map(plugins.map((plugin) => [plugin.id, plugin]));
-    const pending = EXPECTED_RUNNING_BUILTIN_PLUGINS.filter(
-      (id) => byId.get(id)?.status !== "running",
-    );
+    const pending = [
+      ...new Set([...EXPECTED_RUNNING_BUILTIN_PLUGINS, ...retrying]),
+    ].filter((id) => byId.get(id)?.status !== "running");
     if (pending.length === 0) {
       return plugins.length;
     }

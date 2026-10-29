@@ -1,6 +1,7 @@
 pub mod api;
 pub mod computer_use;
 pub mod config;
+pub mod gpu;
 pub mod mac;
 mod observability;
 pub mod preview;
@@ -32,6 +33,7 @@ pub const FEATURES: &[&str] = &[
     "strip_ai_co_authors",
     "system_prompt",
     "computer_use",
+    "gpu",
     "codex_auth",
     "codex_auth_import",
     "cursor_auth",

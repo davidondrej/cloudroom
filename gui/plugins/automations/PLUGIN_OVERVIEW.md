@@ -3,6 +3,7 @@ Loops run agents and scripts on a schedule, once or on a repeat, or when a webho
 ## What you get
 
 - A Loops panel in the sidebar. Create, edit, pause, resume, and run loops there. Each loop shows its run history.
+- A card in the top-right corner when a loop's own failures pause it, with the error, Open loop, and Resume.
 - Review. One timeline of what your loops did on their own in the last 7 days, newest first, as a List or a Board. A thread the agent archived is Done; one it left open Needs you. Click "Looks good" to clear an item.
 - Priorities. Every loop is P1 (essential) to P4 (niche), saved with the loop, so the CLI, your phone, and other Macs see it.
 - Templates. Ready-made loops in categories and priority groups (P1 to P4). Add one to any repos from its dropdown; the prompt, schedule, and agent are preset.

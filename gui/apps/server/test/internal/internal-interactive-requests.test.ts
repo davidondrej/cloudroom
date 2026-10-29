@@ -905,6 +905,85 @@ describe("internal interactive request lifecycle", () => {
     });
   });
 
+  it("interrupts only a cancelled request so the next approval can register", async () => {
+    await withTestHarness(async (harness) => {
+      const { session, thread } = seedThreadFixture(harness, {
+        session: {
+          id: "host-interaction-cancelled-request",
+        },
+      });
+      const cancelled = buildCommandApprovalInteractiveRequest({
+        sessionId: session.id,
+        suffix: "cancelled",
+        threadId: thread.id,
+      });
+      const next = buildCommandApprovalInteractiveRequest({
+        sessionId: session.id,
+        suffix: "next",
+        threadId: thread.id,
+      });
+      const interruptCancelled = () =>
+        harness.app.request("/internal/session/interactive-request/interrupt", {
+          method: "POST",
+          headers: internalAuthHeaders(harness),
+          body: JSON.stringify({
+            sessionId: session.id,
+            providerId: "codex",
+            providerRequestId: cancelled.interaction.providerRequestId,
+            threadIds: [thread.id],
+            reason: "The agent cancelled this request",
+          }),
+        });
+
+      await expect(
+        readJson(
+          await registerInteractiveRequest({ body: cancelled, harness }),
+        ),
+      ).resolves.toMatchObject({ outcome: "created", status: "pending" });
+      await expect(
+        readJson(await registerInteractiveRequest({ body: next, harness })),
+      ).resolves.toEqual({
+        outcome: "rejected",
+        reason: `Thread ${thread.id} is already awaiting user interaction`,
+      });
+
+      await expect(readJson(await interruptCancelled())).resolves.toEqual({
+        ok: true,
+        interactionIds: [expect.any(String)],
+      });
+      expect(
+        harness.deps.pendingInteractions.listPendingThreadInteractions(
+          thread.id,
+        ),
+      ).toEqual([]);
+
+      await expect(
+        readJson(await registerInteractiveRequest({ body: next, harness })),
+      ).resolves.toMatchObject({ outcome: "created", status: "pending" });
+      await expect(readJson(await interruptCancelled())).resolves.toEqual({
+        ok: true,
+        interactionIds: [],
+      });
+      const interactions = listPendingInteractionsByThread(harness.db, {
+        threadId: thread.id,
+      }).map(toPendingInteraction);
+      expect(interactions).toHaveLength(2);
+      expect(interactions).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            providerRequestId: "request-cancelled",
+            status: "interrupted",
+            statusReason: "The agent cancelled this request",
+          }),
+          expect.objectContaining({
+            providerRequestId: "request-next",
+            status: "pending",
+          }),
+        ]),
+      );
+    });
+  });
+
   it("interrupts pending interactive requests before deleting threads", async () => {
     await withTestHarness(async (harness) => {
       const { session, environment, thread } = seedThreadFixture(harness, {

@@ -30,6 +30,7 @@ import { cliPlace, reportAgentConnect, reportMacHelperProblem } from "./setup-te
 import { cloudSkills, copyLogins, copyMacGithub, importCodexLogin, importPiLogin, loginMarkers, macPiSetup, markLogin, setupSync, skillInCloud, stopSync, syncStatus } from "./sync.js";
 import { macClaudeSignedIn } from "./claude-token.js";
 import { macAccess, macAccessSupported, noteWake, setupPreviews, stopPreviews, previewStatus } from "./previews.js";
+import { GpuApprovals } from "./gpu.js";
 import { CloudSecrets } from "./secrets.js";
 import { CodexAccounts } from "./codex-accounts.js";
 import { cancelMacCodexLogin, hasMacCodexLogin, macCodexLogin, macCodexLoginExpired, cursorKeyRejected, macCursorLogin, revokeDesktopToken, startMacCodexLogin, CLOUD_REGION, SANDBOX_PREFIX, SandboxAsleep, SandboxDirectory, sandboxThread, startRefused, type AutomationRun, type SandboxProject, type SandboxTrigger, type SandboxWakeTrigger } from "./sandboxes.js";
@@ -474,6 +475,7 @@ class CloudroomService {
   /** What sandboxes run, kept apart from a VM's: an account with both starts new threads in sandboxes. */
   private sandboxCapabilities: Capabilities | null = null;
   private readonly secrets: CloudSecrets;
+  readonly gpuApprovals: GpuApprovals;
   readonly sandboxes: SandboxDirectory;
   readonly codexAccounts: CodexAccounts;
   constructor(private readonly deps: Deps) {
@@ -500,6 +502,7 @@ class CloudroomService {
       if (!await copyMacGithub(deps)) skip.add("github");
       return skip;
     };
+    this.gpuApprovals = new GpuApprovals(deps, (id, approve) => this.sandboxes.gpu({ decide: { id, approve } }));
     this.codexAccounts = new CodexAccounts(body => this.sandboxes.codexAccounts(body), async () => (await this.sandboxes.account())?.userId ?? null,
       join(deps.config.dataDir, "cloudroom-codex-accounts.json"), () => this.restartAwake("codex"));
     // Renames, generated titles, agent renames, and new parents (a promoted subagent loses its parent's access) all
@@ -2799,6 +2802,7 @@ class CloudroomService {
           if (record.kind === "archive") this.archiveRequest?.(saved.threadId);
           if (move && move.success) this.moveRequest?.(saved.threadId, move.data.project);
           if (record.kind === "secret_request") this.secrets.follow(client, saved.threadId, record);
+          if (record.kind === "gpu_request" && fresh) this.gpuApprovals.follow(saved.threadId, record);
           this.setConnectionIssue(saved.threadId, "replay");
           if (record.kind === "rewind") this.deps.hub.notifyThread(saved.threadId, ["history-rewritten"]);
           if (record.kind === "storage_recovered") this.disk.delete(saved.threadId);

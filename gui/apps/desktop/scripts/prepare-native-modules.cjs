@@ -2,6 +2,7 @@ const { execFileSync, spawn } = require("node:child_process");
 const { chmod, cp, readFile, readdir, writeFile } = require("node:fs/promises");
 const { createRequire } = require("node:module");
 const path = require("node:path");
+const { installLinuxLauncher } = require("./linux-launcher.cjs");
 
 const desktopPackageRoot = path.resolve(__dirname, "..");
 
@@ -386,6 +387,9 @@ async function afterPack(context) {
         ? path.join(context.appOutDir, `${productName}.exe`)
         : path.join(context.appOutDir, context.packager.executableName);
   await smokePackagedNpm(appBinary);
+  if (platform === "linux") {
+    await installLinuxLauncher(context.appOutDir, context.packager.executableName);
+  }
 }
 
 function parseStandaloneArguments(argv) {

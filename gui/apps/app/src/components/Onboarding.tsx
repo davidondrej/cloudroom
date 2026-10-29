@@ -22,7 +22,7 @@ import { usePathPickerHost } from "@/hooks/useLocalPathPicker";
 import { useQuickCreateProjectController } from "@/hooks/useQuickCreateProject";
 import { usePromptBoxProviderPreference } from "@/hooks/thread-creation-options/persisted-selection-fields";
 import { booleanLocalStorage } from "@/lib/browser-storage";
-import { MACOS_APP_REGION_NO_DRAG_CLASS, MACOS_WINDOW_DRAG_CLASS } from "@/lib/bb-desktop";
+import { getBbDesktopInfo, MACOS_APP_REGION_NO_DRAG_CLASS, MACOS_WINDOW_DRAG_CLASS } from "@/lib/bb-desktop";
 import { copyTextToClipboard, copyToClipboardWithToast } from "@/lib/clipboard";
 import { fetchWithAppSurface } from "@/lib/app-surface";
 import { useSystemConfig, useSystemProviders } from "@/hooks/queries/system-queries";
@@ -88,7 +88,8 @@ export function Onboarding() {
   const projects = useSidebarNavigation().data?.projects;
   const account = useCloudroomAccount();
   const locked = account.isSuccess && !account.data.account && !account.data.selfHosted;
-  const firstRun = !dismissed && projects !== undefined && projects.length === 0;
+  // Only the desktop app opens setup by itself: "skipped" is saved per browser, so phones and other browsers would see it again.
+  const firstRun = !dismissed && getBbDesktopInfo() !== null && projects !== undefined && projects.length === 0;
   // Stay open once shown: adding a folder or importing chats creates projects, which would otherwise end the first run mid-step.
   useEffect(() => { if (firstRun) setOpen(true); }, [firstRun, setOpen]);
   const visible = locked || open || firstRun;

@@ -247,6 +247,7 @@ describe("createAgentRuntime tool calls", () => {
     try {
       handleRuntimeProviderRequest({
         toolCalls: new RuntimeToolCalls(),
+        interactiveRequests: new RuntimeToolCalls(),
         getActiveTurnId: () => null,
         getThreadExecutionOptions: () => undefined,
         onInteractiveRequest: async () => ({
@@ -311,6 +312,7 @@ describe("createAgentRuntime tool calls", () => {
     try {
       handleRuntimeProviderRequest({
         toolCalls: new RuntimeToolCalls(),
+        interactiveRequests: new RuntimeToolCalls(),
         getActiveTurnId: () => "turn-1",
         getThreadExecutionOptions: () => undefined,
         onInteractiveRequest: async () => ({

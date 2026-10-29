@@ -387,12 +387,12 @@ function EmbeddedThreadChatWithComposer({
     inlineSessionRef: inlineDraftSessionRef,
   });
   const {
-    bottomAttachmentError,
-    setBottomAttachmentError,
+    bottomAttachmentFailures,
+    dismissBottomAttachmentFailures,
     handleAttachBottomFiles,
     isAttachingBottomFiles,
-    inlineAttachmentError,
-    setInlineAttachmentError,
+    inlineAttachmentFailures,
+    dismissInlineAttachmentFailures,
     handleAttachInlineFiles,
     isAttachingInlineFiles,
   } = useComposerAttachmentUploads({
@@ -401,7 +401,7 @@ function EmbeddedThreadChatWithComposer({
     inlineEditSessionId: queuedMessageDraftSession?.editSessionId ?? null,
     inlineSessionRef: inlineDraftSessionRef,
   });
-  clearInlineAttachmentErrorRef.current = () => setInlineAttachmentError(null);
+  clearInlineAttachmentErrorRef.current = () => dismissInlineAttachmentFailures();
   const { typeaheadConfig, promptActions } = useComposerTypeahead({
     projectId,
     providerId,
@@ -435,7 +435,7 @@ function EmbeddedThreadChatWithComposer({
     threadId,
     queuedMessages,
     sendProcessingPersistence: "clear-on-settle",
-    onSaveSuccess: () => setInlineAttachmentError(null),
+    onSaveSuccess: () => dismissInlineAttachmentFailures(),
     inlineEditingQueuedMessage,
     dismissInlineQueuedMessageEditor,
     activeComposerDraftInput,
@@ -503,7 +503,7 @@ function EmbeddedThreadChatWithComposer({
       return;
     }
     promptDraft.clearIfCurrentMatches(submittedDraft);
-    setBottomAttachmentError(null);
+    dismissBottomAttachmentFailures();
     setIsTurnSubmitting(true);
     void defaultSendOrQueueInput(submittedInput)
       .catch((error) => {
@@ -532,7 +532,7 @@ function EmbeddedThreadChatWithComposer({
     isTurnSubmitting,
     promptDraft,
     runCopyCommand,
-    setBottomAttachmentError,
+    dismissBottomAttachmentFailures,
   ]);
 
   const isQueueMutationPending =
@@ -576,7 +576,7 @@ function EmbeddedThreadChatWithComposer({
     }
 
     promptDraft.clearIfCurrentMatches(submittedDraft);
-    setBottomAttachmentError(null);
+    dismissBottomAttachmentFailures();
     setIsTurnSubmitting(true);
     void sendThreadMessage
       .mutateAsync({
@@ -613,7 +613,7 @@ function EmbeddedThreadChatWithComposer({
     queuedMessages,
     sendQueuedMessageById,
     sendThreadMessage,
-    setBottomAttachmentError,
+    dismissBottomAttachmentFailures,
     threadId,
   ]);
 
@@ -877,12 +877,14 @@ function EmbeddedThreadChatWithComposer({
       items: currentPromptDraft.attachments,
       projectId,
       isAttaching: isAttachingBottomFiles,
-      error: bottomAttachmentError,
+      failures: bottomAttachmentFailures,
+      onDismissFailure: dismissBottomAttachmentFailures,
       onAttachFiles: handleAttachBottomFiles,
       onRemove: promptDraft.removeAttachment,
     }),
     [
-      bottomAttachmentError,
+      bottomAttachmentFailures,
+      dismissBottomAttachmentFailures,
       currentPromptDraft.attachments,
       handleAttachBottomFiles,
       isAttachingBottomFiles,
@@ -895,13 +897,15 @@ function EmbeddedThreadChatWithComposer({
       items: activeComposerDraft.attachments,
       projectId,
       isAttaching: isAttachingInlineFiles,
-      error: inlineAttachmentError,
+      failures: inlineAttachmentFailures,
+      onDismissFailure: dismissInlineAttachmentFailures,
       onAttachFiles: handleAttachInlineFiles,
       onRemove: removeActiveComposerAttachment,
     }),
     [
       activeComposerDraft.attachments,
-      inlineAttachmentError,
+      inlineAttachmentFailures,
+      dismissInlineAttachmentFailures,
       handleAttachInlineFiles,
       isAttachingInlineFiles,
       projectId,

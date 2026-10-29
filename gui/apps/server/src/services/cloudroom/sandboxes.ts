@@ -955,6 +955,11 @@ export class SandboxDirectory {
     return this.call(body, "org");
   }
 
+  /** GPU sessions live on the website (docs/scopes/gpus.md): `room-cli gpu` steps, and the approvals GpuApprovals sends. */
+  async gpu(body: Record<string, unknown>): Promise<unknown> {
+    return this.call(body, "gpu");
+  }
+
   private member: { userId: string; value: boolean; at: number } | null = null;
   /** Whether the account is in an organization (ADR 0277): false when signed out, null when the website can't say.
    *  Asks the website at once for a newly signed-in account, then every 15 minutes for members and every hour for

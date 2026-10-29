@@ -1,0 +1,42 @@
+{
+  "name": "bb-plugin-gpu",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Built-in GPUs: agents rent a GPU box for heavy GPU work, after the user approves its Cloud Credits.",
+  "engines": {
+    "bb": ">=0.41",
+    "bbPluginSdk": ">=0.4.48"
+  },
+  "bb": {
+    "name": "GPUs",
+    "description": "Agents can rent a GPU for heavy GPU work. Cloudroom asks you first and shows the Cloud Credits it will use.",
+    "branding": {
+      "icon": "Zap"
+    },
+    "server": "./server.ts",
+    "app": "./app.tsx",
+    "skills": [
+      "skills"
+    ]
+  },
+  "keywords": [
+    "bb-plugin"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "prepare:bundled": "bb-plugin-build prepare-bundled"
+  },
+  "dependencies": {
+    "@cloudroom/shared-ui": "workspace:*",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@cloudroom/plugin-build": "workspace:*",
+    "@get-bb/plugin-sdk": "workspace:*",
+    "@types/node": "^22.0.0",
+    "@types/react": "^19.0.0",
+    "react": "^19.0.0",
+    "typescript": "npm:@typescript/typescript6@^6.0.2"
+  }
+}

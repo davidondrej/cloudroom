@@ -41,6 +41,7 @@ const rpcMethods = [
   "cloud_automations",
   "cloud_template_add",
   "account_plan",
+  "paused_loops",
   "scans_agent_sessions",
   "scans_start",
 ].sort();

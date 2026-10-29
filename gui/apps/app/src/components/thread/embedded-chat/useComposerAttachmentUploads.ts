@@ -7,6 +7,7 @@ import {
   PROMPT_FILE_ATTACHMENT_LIMIT_BYTES,
   PROMPT_IMAGE_ATTACHMENT_LIMIT_BYTES,
 } from "@cloudroom/domain";
+import type { AttachmentFailure } from "@/components/promptbox/PromptBoxInternal";
 import type { InlineComposerDraftSession } from "./useActiveComposerDraft";
 
 interface UseComposerAttachmentUploadsArgs {
@@ -17,12 +18,12 @@ interface UseComposerAttachmentUploadsArgs {
 }
 
 interface UseComposerAttachmentUploadsResult {
-  bottomAttachmentError: string | null;
-  setBottomAttachmentError: (error: string | null) => void;
+  bottomAttachmentFailures: readonly AttachmentFailure[];
+  dismissBottomAttachmentFailures: (index?: number) => void;
   handleAttachBottomFiles: (files: File[]) => Promise<void>;
   isAttachingBottomFiles: boolean;
-  inlineAttachmentError: string | null;
-  setInlineAttachmentError: (error: string | null) => void;
+  inlineAttachmentFailures: readonly AttachmentFailure[];
+  dismissInlineAttachmentFailures: (index?: number) => void;
   handleAttachInlineFiles: (files: File[]) => Promise<void>;
   isAttachingInlineFiles: boolean;
 }
@@ -38,43 +39,36 @@ interface UseDraftAttachmentUploadsArgs {
 }
 
 interface UseDraftAttachmentUploadsResult {
-  attachmentError: string | null;
-  setAttachmentError: (error: string | null) => void;
+  attachmentFailures: readonly AttachmentFailure[];
+  /** Dismisses one failed file, or all of them without an index. */
+  dismissAttachmentFailures: (index?: number) => void;
   handleAttachFiles: (files: File[]) => Promise<void>;
   isAttachingFiles: boolean;
 }
 
 interface DraftAttachmentOperationState {
-  error: string | null;
+  failures: readonly AttachmentFailure[];
   pendingCount: number;
   targetKey: string | null;
 }
 
-function uploadRejectionReason(error: unknown): string | null {
+function uploadRejectionReason(error: unknown): string {
   return error instanceof BbHttpError
-    ? getMutationErrorMessage({ error, fallbackMessage: "Request failed" })
-    : null;
+    ? getMutationErrorMessage({ error, fallbackMessage: "Upload failed" })
+    : "Upload failed";
 }
 
-/** Fails oversized files before uploading them, with the server's message. */
+/** Fails oversized files before uploading them. */
 function oversizedFileReason(file: File): string | null {
   const limit = file.type.startsWith("image/")
     ? PROMPT_IMAGE_ATTACHMENT_LIMIT_BYTES
     : PROMPT_FILE_ATTACHMENT_LIMIT_BYTES;
   return file.size > limit
-    ? `Attachment exceeds ${limit / (1024 * 1024)}MB limit`
+    ? `Too big, ${limit / (1024 * 1024)}MB max`
     : null;
 }
 
-function attachFailureMessage(
-  failedFiles: readonly string[],
-  reason: string | null,
-): string {
-  const names = failedFiles.join(", ");
-  return reason === null
-    ? `Failed to attach: ${names}`
-    : `Failed to attach ${names}: ${reason}`;
-}
+const NO_FAILURES: readonly AttachmentFailure[] = [];
 
 export function useDraftAttachmentUploads({
   projectId,
@@ -84,17 +78,20 @@ export function useDraftAttachmentUploads({
   const targetRef = useRef(target);
   targetRef.current = target;
   const [operation, setOperation] = useState<DraftAttachmentOperationState>({
-    error: null,
+    failures: [],
     pendingCount: 0,
     targetKey: null,
   });
   const targetKey = target?.key ?? null;
   const isCurrentOperation = operation.targetKey === targetKey;
 
-  const setAttachmentError = useCallback(
-    (error: string | null) => {
+  const dismissAttachmentFailures = useCallback(
+    (index?: number) => {
       setOperation((current) => ({
-        error,
+        failures:
+          index === undefined || current.targetKey !== targetKey
+            ? []
+            : current.failures.filter((_, i) => i !== index),
         pendingCount:
           current.targetKey === targetKey ? current.pendingCount : 0,
         targetKey,
@@ -108,21 +105,19 @@ export function useDraftAttachmentUploads({
       if (!activeTarget || files.length === 0) return;
       const capturedTargetKey = activeTarget.key;
       setOperation((current) => ({
-        error: null,
+        failures: [],
         pendingCount:
           current.targetKey === capturedTargetKey
             ? current.pendingCount + 1
             : 1,
         targetKey: capturedTargetKey,
       }));
-      const failedFiles: string[] = [];
-      let rejectionReason: string | null = null;
+      const failures: AttachmentFailure[] = [];
       try {
         for (const file of files) {
           const oversized = oversizedFileReason(file);
           if (oversized !== null) {
-            failedFiles.push(file.name);
-            rejectionReason ??= oversized;
+            failures.push({ name: file.name, reason: oversized });
             continue;
           }
           try {
@@ -135,19 +130,18 @@ export function useDraftAttachmentUploads({
               currentTarget.addAttachment(uploaded);
             }
           } catch (error) {
-            failedFiles.push(file.name);
-            rejectionReason ??= uploadRejectionReason(error);
+            failures.push({ name: file.name, reason: uploadRejectionReason(error) });
           }
         }
       } finally {
         setOperation((current) =>
           current.targetKey === capturedTargetKey
             ? {
-                error:
-                  failedFiles.length > 0 &&
+                failures:
+                  failures.length > 0 &&
                   targetRef.current?.key === capturedTargetKey
-                    ? attachFailureMessage(failedFiles, rejectionReason)
-                    : current.error,
+                    ? failures
+                    : current.failures,
                 pendingCount: Math.max(0, current.pendingCount - 1),
                 targetKey: capturedTargetKey,
               }
@@ -159,8 +153,8 @@ export function useDraftAttachmentUploads({
   );
 
   return {
-    attachmentError: isCurrentOperation ? operation.error : null,
-    setAttachmentError,
+    attachmentFailures: isCurrentOperation ? operation.failures : NO_FAILURES,
+    dismissAttachmentFailures,
     handleAttachFiles,
     isAttachingFiles: isCurrentOperation && operation.pendingCount > 0,
   };
@@ -173,8 +167,8 @@ export function useComposerAttachmentUploads({
   inlineSessionRef,
 }: UseComposerAttachmentUploadsArgs): UseComposerAttachmentUploadsResult {
   const {
-    attachmentError: bottomAttachmentError,
-    setAttachmentError: setBottomAttachmentError,
+    attachmentFailures: bottomAttachmentFailures,
+    dismissAttachmentFailures: dismissBottomAttachmentFailures,
     handleAttachFiles: handleAttachBottomFiles,
     isAttachingFiles: isAttachingBottomFiles,
   } = useDraftAttachmentUploads({
@@ -196,8 +190,8 @@ export function useComposerAttachmentUploads({
     [inlineEditSessionId, inlineSessionRef],
   );
   const {
-    attachmentError: inlineAttachmentError,
-    setAttachmentError: setInlineAttachmentError,
+    attachmentFailures: inlineAttachmentFailures,
+    dismissAttachmentFailures: dismissInlineAttachmentFailures,
     handleAttachFiles: handleAttachInlineFiles,
     isAttachingFiles: isAttachingInlineFiles,
   } = useDraftAttachmentUploads({
@@ -212,12 +206,12 @@ export function useComposerAttachmentUploads({
   });
 
   return {
-    bottomAttachmentError,
-    setBottomAttachmentError,
+    bottomAttachmentFailures,
+    dismissBottomAttachmentFailures,
     handleAttachBottomFiles,
     isAttachingBottomFiles,
-    inlineAttachmentError,
-    setInlineAttachmentError,
+    inlineAttachmentFailures,
+    dismissInlineAttachmentFailures,
     handleAttachInlineFiles,
     isAttachingInlineFiles,
   };

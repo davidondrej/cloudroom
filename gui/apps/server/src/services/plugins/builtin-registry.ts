@@ -139,6 +139,11 @@ export const BUILTIN_PLUGINS = [
     defaultEnabled: process.platform !== "win32",
   },
   {
+    name: "gpu",
+    pluginId: "gpu",
+    defaultEnabled: true,
+  },
+  {
     name: "keep-awake",
     pluginId: "keep-awake",
     defaultEnabled: true,

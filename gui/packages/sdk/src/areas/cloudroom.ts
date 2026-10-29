@@ -283,6 +283,8 @@ export interface CloudroomArea {
   tokenUsage(input: TokenUsageRequest): Promise<TokenUsageResponse>;
   /** Organizations (docs/scopes/organizations.md): passes one request to the website's `/api/desktop/org`, signed in as this account. */
   org(input: { action: string } & Record<string, unknown>): Promise<unknown>;
+  /** GPUs (docs/scopes/gpus.md): one `room-cli gpu` step for `/api/desktop/gpu`, signed in as this account. */
+  gpu(input: { argv: string[]; thread?: string }): Promise<unknown>;
   setAutoDelete(days: AutoDeleteDays): Promise<AutoDeleteSetting>;
   /** Names of API keys and tokens set in this Mac's login shell, never their values. */
   macVariables(signal?: AbortSignal): Promise<{ names: string[] }>;
@@ -418,6 +420,7 @@ export function createCloudroomArea({ transport }: CreateSdkAreaArgs): Cloudroom
     automations: (input) => transport.readJson(request("/automations", input)) as Promise<CloudAutomationResponse>,
     tokenUsage: (input) => transport.readJson(request("/token-usage", input)) as Promise<TokenUsageResponse>,
     org: (input) => transport.readJson(request("/org", input)),
+    gpu: (input) => transport.readJson(request("/gpu", input)),
     setAutoDelete: (days) => transport.readJson(request("/auto-delete", { days })) as Promise<AutoDeleteSetting>,
     macVariables: (signal) => transport.readJson(request("/environment/mac", undefined, signal)) as Promise<{ names: string[] }>,
     importMacVariables: (names) => transport.readJson(request("/environment/mac", { names })) as Promise<CloudEnvironment>,

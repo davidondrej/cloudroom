@@ -7,6 +7,7 @@ import { expect, it } from "vitest";
 import { tarCommand } from "@cloudroom/process-utils";
 import type { CloudroomClient } from "../../src/services/cloudroom/client.js";
 import { checksOutCrlf } from "../../src/services/cloudroom/project-copy.js";
+import { landForkCode, sourceCode } from "../../src/services/cloudroom/fork.js";
 import { applyChanges, cloudChanges, packChangesCommand } from "../../src/services/cloudroom/teleport-local.js";
 
 it("Teleport to Local never overwrites Mac work and never writes into .git", async () => {
@@ -46,14 +47,51 @@ it("Teleport to Local never overwrites Mac work and never writes into .git", asy
 });
 
 // Runs cloud commands in a local folder, the way the sandbox's `bash -lc` does. Cloud packing runs on Linux only.
-function localCloud(home: string) {
+function localCloud(home: string, workspace = home) {
   return {
-    runOnVm: async ({ command }: { command: string }) => {
-      const run = spawnSync("bash", ["-lc", command], { cwd: home, env: { HOME: home, PATH: process.env.PATH }, encoding: "buffer" });
+    runOnVm: async ({ command, stdin }: { command: string; stdin?: string }, _signal?: AbortSignal, bytes?: Uint8Array) => {
+      const run = spawnSync("bash", ["-lc", command], { cwd: home, env: { HOME: home, PATH: process.env.PATH }, input: bytes ?? Buffer.from(stdin ?? "", "hex"), encoding: "buffer" });
       return { code: run.status ?? 1, stdout: run.stdout.toString("hex"), stderr: run.stderr.toString("hex"), truncated: false };
     },
+    sessionWorkspace: async () => ({ path: workspace, branch: null, head: null }),
   } as unknown as CloudroomClient;
 }
+
+it.skipIf(process.platform === "win32")("A child's blobless clone lands its parent's code and uncommitted changes", async () => {
+  const home = await mkdtemp(join(tmpdir(), "fork-code-"));
+  const git = (dir: string, ...args: string[]) => execFileSync("git", ["-C", join(home, dir), "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false", ...args], { env: { ...process.env, HOME: home }, stdio: "pipe" }).toString().trimEnd();
+  const lines = (text: string) => Array.from({ length: 60 }, (_, i) => `${text} ${i}\n`).join("");
+  try {
+    git(".", "init", "-q", "--bare", "origin.git");
+    git("origin.git", "config", "uploadpack.allowFilter", "true");
+    git("origin.git", "config", "uploadpack.allowAnySHA1InWant", "true");
+    git(".", "clone", "-q", join(home, "origin.git"), "parent");
+    await writeFile(join(home, "parent/a"), lines("original line"));
+    await writeFile(join(home, "parent/b"), "xyz\n");
+    await writeFile(join(home, "parent/c"), "c\n");
+    git("parent", "add", "-A");
+    git("parent", "commit", "-qm", "c0");
+    git("parent", "push", "-q", "origin", "HEAD");
+    git(".", "clone", "-q", "--filter=blob:none", `file://${join(home, "origin.git")}`, "child");
+    await writeFile(join(home, "parent/b"), "xyzz\n");
+    git("parent", "commit", "-qam", "c1");
+    git("parent", "push", "-q", "origin", "HEAD");
+    await writeFile(join(home, "parent/a"), lines("totally different content"));
+    await writeFile(join(home, "parent/b"), "xyzzz\n");
+    await writeFile(join(home, "parent/d"), "new\n");
+    git("parent", "add", "d");
+    await rm(join(home, "parent/c"));
+
+    const code = await sourceCode(localCloud(home), join(home, "parent"), "fork1");
+    expect(await landForkCode(localCloud(home, join(home, "child")), { sessionId: "s", transfer: "fork1", code: Promise.resolve(code) })).toBeNull();
+    expect(git("child", "rev-parse", "HEAD")).toBe(git("parent", "rev-parse", "HEAD"));
+    expect(existsSync(join(home, "child/.git/index.lock"))).toBe(false);
+    expect(git("child", "status", "--porcelain").split("\n")).toEqual([" M a", " M b", " D c", "?? d"]);
+    for (const file of ["a", "b", "d"]) expect(readFileSync(join(home, "child", file), "utf8")).toBe(readFileSync(join(home, "parent", file), "utf8"));
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
 
 it.skipIf(process.platform === "win32")("Teleport packs fail on an unreadable file and skip only dangling links on Windows", async () => {
   const root = await mkdtemp(join(tmpdir(), "teleport-pack-"));

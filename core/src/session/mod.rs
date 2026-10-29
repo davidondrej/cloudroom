@@ -332,7 +332,7 @@ struct Local {
 pub struct Manager {
     pub(crate) config: Config,
     local: Arc<Mutex<Local>>,
-    history: history::History,
+    pub(crate) history: history::History,
     pub(crate) observability: Observability,
     pub(crate) storage: Arc<Guard>,
     pub(crate) workspaces: crate::workspace::Workspaces,
