@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { BbDesktopWindowState } from "@cloudroom/desktop-contract";
 import {
   DEFAULT_DESKTOP_WINDOW_STATE,
@@ -6,8 +6,8 @@ import {
 } from "@/lib/bb-desktop";
 
 export function useDesktopWindowState(): BbDesktopWindowState {
-  const [windowState, setWindowState] = useState<BbDesktopWindowState>(
-    DEFAULT_DESKTOP_WINDOW_STATE,
+  const [isFullScreen, setIsFullScreen] = useState(
+    DEFAULT_DESKTOP_WINDOW_STATE.isFullScreen,
   );
 
   useEffect(() => {
@@ -15,12 +15,12 @@ export function useDesktopWindowState(): BbDesktopWindowState {
     let cancelled = false;
 
     const unsubscribe = desktopApi?.onWindowStateChange?.((nextState) => {
-      setWindowState(nextState);
+      setIsFullScreen(nextState.isFullScreen);
     });
 
     void desktopApi?.getWindowState?.().then((nextState) => {
       if (!cancelled) {
-        setWindowState(nextState);
+        setIsFullScreen(nextState.isFullScreen);
       }
     });
 
@@ -30,5 +30,5 @@ export function useDesktopWindowState(): BbDesktopWindowState {
     };
   }, []);
 
-  return windowState;
+  return useMemo(() => ({ isFullScreen }), [isFullScreen]);
 }

@@ -14,7 +14,7 @@ import { mentionsOpenAISide401 } from "./codex-errors.js";
 import { codexOutage } from "./openai-status.js";
 import { buildThreadStatusChangeMetadata } from "../threads/thread-runtime-display.js";
 import { cloudPluginInstructions, cloudroomSystemPrompt, prepareCloudInstructionInput, resolveCustomInstructions } from "../threads/custom-instructions.js";
-import { baseBranch, binding, bindings, command, commands, coreInUse, localTeleports, openBindingIds, queuedPrompts, saveBinding, saveCommandState, saveStatus, effectivePrompt, projectCopyProgress, stampBindings, teleportBlocked, unstartedTurn, type Binding, type Command } from "./store.js";
+import { baseBranch, binding, bindings, command, commands, coreInUse, localTeleports, openBindings, queuedPrompts, saveBinding, saveCommandState, saveStatus, effectivePrompt, projectCopyProgress, stampBindings, teleportBlocked, unstartedTurn, type Binding, type Command, type OpenBinding } from "./store.js";
 import { copyProject, copyRunning, githubRepository, localProjectNote, planProjectCopy, planProjectCopyOrThrow, reportProjectCopy, writeFilesState, type ProjectCopyJob } from "./project-copy.js";
 import { CHILD_HINT, cloudForkOf, cloudForkPoint, codeFromOf, FORK_HARNESSES, FORK_HINT, landForkCode, localForkPoint, startCloudFork, threadCode, uploadInParts } from "./fork.js";
 import { copyForkSourceHistory } from "../threads/thread-fork-history.js";
@@ -419,7 +419,20 @@ class CloudroomService {
     this.streamErrors.delete(threadId);
     this.connectionIssues.delete(threadId);
   }
+  /** The 1.5 s tick skips threads with nothing to do: a live stream with nothing unsent, or a sandbox found asleep
+   *  since the last awake-list check, failed or not, and not woken here since. Everything else goes through deliver() as before. */
+  private needsDelivery(row: OpenBinding): boolean {
+    if (!row.sessionId || row.sending || this.connectionIssues.get(row.threadId)?.delivery) return true;
+    const live = this.streams.has(row.threadId);
+    if (!live && ["pending", "starting", "active", "stopping"].includes(row.status)) return true;
+    const sandbox = sandboxThread(row.coreUrl);
+    if (!live && sandbox && this.slept.get(row.threadId) === this.sandboxes.awakeChecks && !this.sandboxes.isAwake(sandbox)) return false;
+    if (sandbox && sandbox !== row.threadId && !row.parentThreadId && this.leftParent.get(row.threadId) !== row.sessionId) return true;
+    return !live;
+  }
+  private readonly slept = new Map<string, number>();
   private asleep(threadId: string): void {
+    this.slept.set(threadId, this.sandboxes.awakeChecks);
     this.detach(threadId);
     const status = getThread(this.deps.db, threadId)?.status;
     if (status && status !== "idle" && status !== "error" && !commands(this.deps.db, threadId).some(c => c.state === "sending")) {
@@ -2139,8 +2152,7 @@ class CloudroomService {
       if (this.lastCapabilities) void this.ensurePreviews(this.lastCapabilities);
       void this.sandboxes.discover().catch(() => {});
       void this.reportMacAccess().catch(() => {});
-      // Archived threads take no work. Asleep ones share one awake-list check per app (sandboxes.ts).
-      for (const threadId of openBindingIds(this.deps.db)) void this.deliver(threadId).catch(() => {});
+      for (const row of openBindings(this.deps.db)) if (this.needsDelivery(row)) void this.deliver(row.threadId).catch(() => {});
     }, 1500);
     this.timer.unref();
     const epoch = this.epoch;
@@ -2166,6 +2178,7 @@ class CloudroomService {
     for (const controller of this.streams.values()) controller.abort();
     this.streams.clear();
     this.connectionIssues.clear();
+    this.slept.clear();
   }
 
   /** Compact, rewind and goal wait while Core wakes a sleeping agent; the 1.5 s timer keeps retrying them meanwhile. */
@@ -2186,6 +2199,7 @@ class CloudroomService {
   }
 
   private async deliverPending(threadId: string): Promise<void> {
+    this.slept.delete(threadId);
     this.holdRejectedStart(threadId);
     let saved = binding(this.deps.db, threadId);
     if (!saved || this.stopped || await this.otherAccountThread(saved)) return;

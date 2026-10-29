@@ -176,7 +176,7 @@ Never use `tailscale funnel` for Core: it opens the API to the whole internet.
 
 ## Connect the desktop app
 
-In the [Cloudroom app](https://github.com/davidondrej/cloudroom-gui/releases) (v83 or newer), open **Settings → Cloudroom account → Connect your own Core**. Enter the HTTPS URL and the token from `sudo grep ^CLOUDROOM_TOKEN= /etc/cloudroom/core.env`. No Cloudroom account is needed. Cloud threads then run on this machine and share its files.
+In the [Cloudroom app](https://www.cloudroom.dev/download) (v83 or newer), open **Settings → Cloudroom account → Connect your own Core**. Enter the HTTPS URL and the token from `sudo grep ^CLOUDROOM_TOKEN= /etc/cloudroom/core.env`. No Cloudroom account is needed. Cloud threads then run on this machine and share its files.
 
 ## Upgrade
 

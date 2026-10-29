@@ -823,6 +823,12 @@
   }
 }
 
+[data-unfocused-paused],
+[data-unfocused-paused]::before,
+[data-unfocused-paused]::after {
+  animation-play-state: paused !important;
+}
+
 .bb-search-flash {
   border-radius: var(--radius-lg, 0.5rem);
   animation: bb-search-flash 1.6s ease-out;

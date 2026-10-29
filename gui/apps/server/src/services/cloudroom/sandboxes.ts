@@ -587,6 +587,9 @@ export class SandboxDirectory {
     }
     return [...awake.values()];
   }
+  /** Counts awake-list checks, failed ones too, so a thread found asleep is checked again after each one and a
+   *  failed check shows on it as before. */
+  awakeChecks = 0;
   private awakeNext = 0;
   private awakeEvery = 60_000;
   private awakeIssue: CloudroomError | null = null;
@@ -600,6 +603,7 @@ export class SandboxDirectory {
         if (this.awakeCheck !== check) return;
         this.awake = new Map(listed.sandboxes.map(({ thread, origin, token }) => [thread, { origin, token }]));
         if (this.refused && this.awake.has(this.refused.thread)) this.refused = null;
+        this.awakeChecks++;
         if (listed.runs.length) this.onRuns(listed.runs);
         this.awakeEvery = listed.recheck_ms;
         this.awakeIssue = null;
@@ -607,6 +611,7 @@ export class SandboxDirectory {
       }, (error: unknown) => {
         if (this.awakeCheck !== check) return;
         this.awakeIssue = error instanceof CloudroomError ? error : new CloudroomError("The website's list of awake cloud sandboxes was unreadable.");
+        this.awakeChecks++;
         this.awakeNext = Date.now() + Math.min(this.awakeEvery, 10_000);
       }).finally(() => { if (this.awakeCheck === check) this.awakeCheck = null; });
       this.awakeCheck = check;

@@ -990,6 +990,11 @@ body.sidebar-resizing [data-sidebar="panel"] {
    * every frame. The rightmost compound is a class, so toggling `inert` or
    * `aria-hidden` on the host invalidates only these elements.
    */
+  [data-window-blurred] .animate-shine,
+  [data-window-blurred] .animate-shine-icon,
+  [data-window-blurred] .animate-spin,
+  [data-window-blurred] .animate-pulse,
+  [data-window-blurred] .motion-safe\:animate-pulse,
   [inert] .animate-shine,
   [inert] .animate-shine-icon,
   [aria-hidden="true"] .animate-shine,

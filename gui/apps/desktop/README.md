@@ -272,7 +272,7 @@ failing the build.
 ## macOS signing + notarization
 
 Cloudroom releases are built, signed, and notarized by GitHub Actions (see the
-`release-gui` skill). The [signing wrapper](scripts/run-electron-builder.mjs)
+`release` skill). The [signing wrapper](scripts/run-electron-builder.mjs)
 signs and notarizes when `CSC_LINK`, `CSC_KEY_PASSWORD`, `APPLE_ID`,
 `APPLE_APP_SPECIFIC_PASSWORD`, and `APPLE_TEAM_ID` are all set, then notarizes
 and staples the DMG too. A partial set fails before packaging. Locally,

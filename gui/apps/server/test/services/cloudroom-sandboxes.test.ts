@@ -393,11 +393,78 @@ it("sleeping cloud threads share one awake-list check per app, and a thread woke
     expect(count("awake") - failedFrom).toBeGreaterThan(0);
     expect(count("awake") - failedFrom).toBeLessThanOrEqual(3);
     expect(count("register")).toBe(0);
+
+    const deliveries = vi.spyOn(service as unknown as { deliverPending: (id: string) => Promise<void> }, "deliverPending");
+    const failing = count("awake");
+    await waitFor(() => count("awake") > failing, "another failed awake check");
+    await new Promise(resolve => setTimeout(resolve, 1_600));
+    expect(deliveries.mock.calls.some(([id]) => id === threads[2]!.id)).toBe(true);
   } finally {
     service.stop();
     coreServer.close(); websiteServer.close();
   }
 }, 20_000);
+
+it("a sleeping thread costs no delivery work until it wakes, and opening it connects without waiting for the awake list", async () => {
+  const harness = await createTestAppHarness();
+  const { host } = seedHostSession(harness.deps);
+  const { project } = seedProjectWithSource(harness.deps, { hostId: host.id });
+  const service = cloudroom(harness.deps);
+  const streams: import("node:http").ServerResponse[] = [];
+  const cursors: number[] = [];
+  let coreUrl = "";
+  const coreServer = createServer((req, res) => {
+    if (req.url === "/v1/sessions/cr_0") {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      return res.end(JSON.stringify({ session: { session_id: "cr_0", harness: "codex", state: "idle", native_id: null, current_request: null, last_sequence: 0, queue: [], receipts: {} } }));
+    }
+    if (req.url?.includes("/stream?")) {
+      cursors.push(Number(new URL(req.url, "http://localhost").searchParams.get("after")));
+      res.writeHead(200, { "Content-Type": "text/event-stream" });
+      res.write(": connected\n\n");
+      streams.push(res);
+      return;
+    }
+    res.writeHead(404, { "Content-Type": "application/json" }); res.end("{}");
+  });
+  const websiteServer = createServer(async (req, res) => {
+    const input = await body(req);
+    res.writeHead(200, { "Content-Type": "application/json" });
+    if (req.url === "/api/desktop/logins") return res.end(JSON.stringify({ claude: false, codex: false, pi: false, github: false }));
+    if (input.action === "awake") return res.end(JSON.stringify({ sandboxes: [], recheck_ms: 60_000 }));
+    if (input.action === "wake") return res.end(JSON.stringify({ thread: input.thread, state: "awake", generation: 1, issue: null, origin: coreUrl, token: "t".repeat(64) }));
+    res.end(JSON.stringify({ thread: input.thread, state: "asleep", generation: 1, issue: null }));
+  });
+  coreUrl = await listen(coreServer);
+  const websiteUrl = await listen(websiteServer);
+  const cursor = (threadId: string) => harness.deps.db.select().from(cloudroomThreads).all().find(row => row.threadId === threadId)?.cursor;
+  try {
+    await service.configure(null, { id: "11111111-1111-4111-8111-111111111111", email: "sandbox@example.com" }, undefined, websiteUrl, "a".repeat(64));
+    const threads = Array.from({ length: 3 }, () => createThread(harness.deps.db, harness.deps.hub, { executionTarget: "cloud", projectId: project.id, providerId: "codex", status: "idle" }));
+    harness.deps.db.insert(cloudroomThreads).values(threads.map((thread, i) => ({ threadId: thread.id, coreUrl: `sandbox:${thread.id}`, sessionId: `cr_${i}`, startRequestId: `start_${i}`, model: "test-model", reasoning: "medium" }))).run();
+    const deliveries = vi.spyOn(service as unknown as { deliverPending: (id: string) => Promise<void> }, "deliverPending");
+
+    await new Promise(resolve => setTimeout(resolve, 4_000));
+    expect(deliveries.mock.calls.map(([id]) => id).sort()).toEqual(threads.map(thread => thread.id).sort());
+    expect(streams).toEqual([]);
+
+    await service.wakeAhead(threads[0]!.id, "thread_view");
+    await waitFor(() => streams.length === 1, "stream for the thread opened here");
+    streams[0]!.write(`id: 1\nevent: record\ndata: ${JSON.stringify({ sequence: 1, session_id: "cr_0", kind: "state", data: { state: "idle" } })}\n\n`);
+    await waitFor(() => cursor(threads[0]!.id) === 1, "the stream's record to be saved");
+    const settled = deliveries.mock.calls.length;
+    await new Promise(resolve => setTimeout(resolve, 3_200));
+    expect(deliveries.mock.calls.length).toBe(settled);
+    expect(streams).toHaveLength(1);
+
+    streams[0]!.destroy();
+    await waitFor(() => streams.length === 2, "the dropped stream to reconnect");
+    expect(cursors).toEqual([0, 1]);
+  } finally {
+    service.stop();
+    coreServer.closeAllConnections(); coreServer.close(); websiteServer.close();
+  }
+}, 25_000);
 
 it("Windows MCP paths and %VARIABLES% stay on this PC", async () => {
   const { WINDOWS_LOCAL_PATH } = await import("../../src/services/cloudroom/sandboxes.js");

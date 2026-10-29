@@ -22,16 +22,19 @@ import { initializeFavicon } from "./lib/favicon-color-preference";
 import { installForeignDomMutationGuard } from "./lib/foreign-dom-mutation-guard";
 import { installAppQueryClientBrowserEvents } from "./lib/query-client";
 import { appQueryClient } from "./lib/app-query-client";
+import { getBbDesktopInfo } from "./lib/bb-desktop";
 import { applyCachedAppThemeCss } from "./lib/themes";
 import { installPerfMonitor } from "./lib/perf";
 import { installNewThreadKeyboardPrimer } from "./lib/new-thread-keyboard-primer";
 import { installTimeInApp } from "./lib/time-in-app";
+import { installUnfocusedAnimationPause } from "./lib/unfocused-animation-pause";
 import "./app.css";
 
 installForeignDomMutationGuard();
 installPerfMonitor();
 installNewThreadKeyboardPrimer();
 installTimeInApp();
+installUnfocusedAnimationPause();
 
 Error.stackTraceLimit = 50;
 
@@ -44,6 +47,13 @@ window.addEventListener("vite:preloadError", () => {
   if (Date.now() - lastReload < 60_000) return;
   sessionStorage.setItem("cloudroom:preload-reload", String(Date.now()));
   window.location.reload();
+});
+
+getBbDesktopInfo()?.onWindowStateChange?.((state) => {
+  document.documentElement.toggleAttribute(
+    "data-window-blurred",
+    state.isFocused === false,
+  );
 });
 
 installAppQueryClientBrowserEvents(appQueryClient);

@@ -583,10 +583,11 @@ function sendDesktopInfoChanged(): void {
 }
 
 function getDesktopWindowState(
-  browserWindow: Pick<DesktopBrowserWindow, "isFullScreen"> | null,
+  browserWindow: Pick<BrowserWindow, "isFullScreen" | "isFocused"> | null,
 ): BbDesktopWindowState {
   return {
     isFullScreen: browserWindow?.isFullScreen() ?? false,
+    isFocused: browserWindow?.isFocused() ?? true,
   };
 }
 
@@ -602,7 +603,7 @@ function sendDesktopWindowStateChanged(
   sendToApplicationRenderer(
     browserWindow as BrowserWindow,
     BB_DESKTOP_WINDOW_STATE_CHANGED_CHANNEL,
-    getDesktopWindowState(browserWindow),
+    getDesktopWindowState(browserWindow as BrowserWindow),
   );
 }
 
@@ -1123,6 +1124,12 @@ function registerApplicationWindow(browserWindow: DesktopBrowserWindow): void {
     sendDesktopWindowStateChanged(browserWindow);
   });
   browserWindow.on("leave-full-screen", () => {
+    sendDesktopWindowStateChanged(browserWindow);
+  });
+  (browserWindow as BrowserWindow).on("focus", () => {
+    sendDesktopWindowStateChanged(browserWindow);
+  });
+  (browserWindow as BrowserWindow).on("blur", () => {
     sendDesktopWindowStateChanged(browserWindow);
   });
   browserWindow.on("closed", () => {

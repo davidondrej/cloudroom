@@ -49,6 +49,7 @@ export type BbDesktopInfo = z.infer<typeof bbDesktopInfoSchema>;
 export const bbDesktopWindowStateSchema = z
   .object({
     isFullScreen: z.boolean(),
+    isFocused: z.boolean().optional(),
   })
   .strict();
 export type BbDesktopWindowState = z.infer<typeof bbDesktopWindowStateSchema>;

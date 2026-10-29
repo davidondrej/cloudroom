@@ -53,9 +53,15 @@ export function bindings(db: DbQueryConnection): Binding[] {
   return db.select(bindingColumns).from(cloudroomThreads).all();
 }
 
-export function openBindingIds(db: DbQueryConnection): string[] {
-  return db.select({ id: cloudroomThreads.threadId }).from(cloudroomThreads).innerJoin(threads, eq(threads.id, cloudroomThreads.threadId))
-    .where(and(isNull(threads.archivedAt), isNull(threads.deletedAt))).all().map(row => row.id);
+export type OpenBinding = ReturnType<typeof openBindings>[number];
+
+export function openBindings(db: DbQueryConnection) {
+  return db.select({
+    threadId: cloudroomThreads.threadId, sessionId: cloudroomThreads.sessionId, coreUrl: cloudroomThreads.coreUrl,
+    status: threads.status, parentThreadId: threads.parentThreadId,
+    sending: sql<number>`exists (select 1 from ${cloudroomCommands} where ${cloudroomCommands.threadId} = ${cloudroomThreads.threadId} and ${cloudroomCommands.state} = 'sending')`,
+  }).from(cloudroomThreads).innerJoin(threads, eq(threads.id, cloudroomThreads.threadId))
+    .where(and(isNull(threads.archivedAt), isNull(threads.deletedAt))).all();
 }
 
 export function lastGitStatus(db: DbQueryConnection, threadId: string): string | null {
