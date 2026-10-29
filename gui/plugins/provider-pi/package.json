@@ -1,0 +1,50 @@
+{
+  "name": "bb-plugin-provider-pi",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Run Cloudroom threads with Pi.",
+  "engines": {
+    "bb": ">=0.0"
+  },
+  "bb": {
+    "name": "Pi provider",
+    "description": "Run Cloudroom threads with Pi.",
+    "branding": {
+      "icon": "./icons/pi.svg"
+    },
+    "server": "./server.ts",
+    "host": "./src/host.ts",
+    "app": "./app.tsx"
+  },
+  "keywords": [
+    "bb-plugin"
+  ],
+  "scripts": {
+    "test": "vitest run --config vitest.config.ts",
+    "typecheck": "tsc --noEmit",
+    "prepare:bundled": "bb-plugin-build prepare-bundled"
+  },
+  "dependencies": {
+    "@cloudroom/shared-ui": "workspace:*",
+    "@get-bb/plugin-sdk": "workspace:*",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@cloudroom/domain": "workspace:*",
+    "@cloudroom/plugin-build": "workspace:*",
+    "@cloudroom/provider-bridge-protocol": "workspace:*",
+    "@earendil-works/pi-ai": "0.84.0",
+    "@earendil-works/pi-coding-agent": "0.84.0",
+    "@testing-library/react": "^16.3.2",
+    "@types/node": "^22.0.0",
+    "@types/react": "^19.0.0",
+    "jsdom": "^29.0.1",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "typebox": "1.3.7",
+    "typescript": "npm:@typescript/typescript6@^6.0.2",
+    "typescript-7": "npm:typescript@^7.0.2",
+    "vitest": "^4.1.1"
+  }
+}

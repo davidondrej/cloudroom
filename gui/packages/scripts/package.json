@@ -1,0 +1,52 @@
+{
+  "name": "@cloudroom/scripts",
+  "version": "0.0.1",
+  "type": "module",
+  "private": true,
+  "bin": {
+    "bb-script-archive-codex-tmp-bb-sessions": "./dist/commands/archive-codex-tmp-bb-sessions.js",
+    "bb-script-request-dev-restart": "./dist/commands/request-dev-restart.js",
+    "bb-script-reset-bb-data": "./dist/commands/reset-bb-data.js",
+    "bb-script-run-cli": "./dist/commands/run-cli.js",
+    "bb-script-run-host-daemon": "./dist/commands/run-host-daemon.js",
+    "bb-script-seed-perf-db": "./dist/commands/seed-perf-db.js"
+  },
+  "exports": {
+    "./lib/run-dev-supervisor": {
+      "source": "./src/lib/run-dev-supervisor.ts",
+      "types": "./src/lib/run-dev-supervisor.ts",
+      "import": "./dist/lib/run-dev-supervisor.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "node ../../scripts/build-package.mjs",
+    "clean": "rimraf dist tsconfig.tsbuildinfo",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --config vitest.config.ts",
+    "cli": "node dist/commands/run-cli.js",
+    "dev:host-daemon": "node dist/commands/run-host-daemon.js --auto-join",
+    "dev:restart": "node dist/commands/request-dev-restart.js both",
+    "dev:restart-host-daemon": "node dist/commands/request-dev-restart.js host-daemon",
+    "dev:restart-server": "node dist/commands/request-dev-restart.js server",
+    "reset": "node dist/commands/reset-bb-data.js",
+    "codex:archive-tmp-bb-sessions": "node dist/commands/archive-codex-tmp-bb-sessions.js"
+  },
+  "dependencies": {
+    "@cloudroom/config": "workspace:*",
+    "@cloudroom/db": "workspace:*",
+    "@cloudroom/domain": "workspace:*",
+    "@cloudroom/host-daemon-contract": "workspace:*",
+    "@cloudroom/process-utils": "workspace:*",
+    "picocolors": "^1.1.1"
+  },
+  "devDependencies": {
+    "@cloudroom/tsconfig": "workspace:*",
+    "@types/node": "^22.0.0",
+    "typescript": "npm:@typescript/typescript6@^6.0.2",
+    "typescript-7": "npm:typescript@^7.0.2",
+    "vitest": "^4.1.1"
+  }
+}

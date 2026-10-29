@@ -1,0 +1,257 @@
+import { fuzzyMatchText } from "@cloudroom/fuzzy-match";
+import {
+  providerCommandSection,
+  providerCommandSectionRank,
+  type ProviderCommand,
+  type ProviderCommandOrigin,
+  type ProviderCommandSection,
+  type ProviderCommandSource,
+} from "@cloudroom/server-contract";
+import type { PromptMentionCommandTrigger } from "@cloudroom/domain";
+import type { ThreadListIndicatorState } from "../../thread/thread-activity.js";
+import type { PluginMentionTrigger } from "./plugin-mention-triggers.js";
+import type { OrderedMentionSuggestions } from "./mention-candidates.js";
+
+type PromptPathMentionSource = "workspace" | "thread-storage";
+type PromptPathMentionEntryKind = "file" | "directory";
+
+export type PromptMentionSuggestion =
+  | {
+      kind: "path";
+      source: PromptPathMentionSource;
+      entryKind: PromptPathMentionEntryKind;
+      path: string;
+      name: string;
+      replacement: string;
+    }
+  | {
+      kind: "thread";
+      path: string;
+      replacement: string;
+      projectId: string;
+      projectName?: string;
+      threadId: string;
+      title?: string;
+      executionTarget?: "local" | "cloud";
+      indicator?: ThreadListIndicatorState;
+      lastActivityAt?: number;
+    }
+  | {
+      kind: "project";
+      path: string;
+      replacement: string;
+      projectId: string;
+      name: string;
+    }
+  | {
+      kind: "section";
+      path: string;
+      replacement: string;
+      sectionId: string;
+      name: string;
+    }
+  | {
+      kind: "plugin";
+      pluginId: string;
+      providerId: string;
+      itemId: string;
+      providerLabel: string;
+      title: string;
+      subtitle: string | null;
+      icon: string | null;
+      replacement: string;
+    };
+
+export interface ProviderCommandSuggestion {
+  kind: "command";
+  name: string;
+  source: ProviderCommandSource;
+  origin: ProviderCommandOrigin;
+  description: string | null;
+  argumentHint: string | null;
+  pluginId?: string;
+  usage?: number;
+}
+
+export function toProviderCommandSuggestion(
+  command: ProviderCommand,
+): ProviderCommandSuggestion {
+  return {
+    kind: "command",
+    name: command.name,
+    source: command.source,
+    origin: command.origin,
+    description: command.description,
+    argumentHint: command.argumentHint,
+    ...(command.pluginId !== undefined ? { pluginId: command.pluginId } : {}),
+    ...(command.usage !== undefined ? { usage: command.usage } : {}),
+  };
+}
+
+function matchingCommandNames(
+  suggestions: readonly ProviderCommandSuggestion[],
+  query: string,
+): Set<ProviderCommandSuggestion> {
+  return new Set(
+    fuzzyMatchText({
+      items: suggestions,
+      query,
+      getText: (suggestion) => suggestion.name,
+      limit: suggestions.length,
+    }).map((match) => match.item),
+  );
+}
+
+export function filterCommandSuggestions(
+  suggestions: readonly ProviderCommandSuggestion[],
+  query: string,
+): ProviderCommandSuggestion[] {
+  const normalizedQuery = query.trim().toLowerCase();
+  const nameMatches = matchingCommandNames(suggestions, normalizedQuery);
+  return suggestions.filter(
+    (suggestion) =>
+      nameMatches.has(suggestion) ||
+      [suggestion.description ?? "", suggestion.argumentHint ?? ""].some(
+        (text) => text.toLowerCase().includes(normalizedQuery),
+      ),
+  );
+}
+
+function compareCommandSuggestionSections(
+  left: ProviderCommandSuggestion,
+  right: ProviderCommandSuggestion,
+): number {
+  return providerCommandSectionRank(left) - providerCommandSectionRank(right);
+}
+
+function commandSuggestionSearchNames(
+  suggestion: ProviderCommandSuggestion,
+): string[] {
+  const name = suggestion.name.toLowerCase();
+  if (suggestion.source !== "skill") {
+    return [name];
+  }
+  const separatorIndex = name.lastIndexOf(":");
+  return separatorIndex < 0 ? [name] : [name, name.slice(separatorIndex + 1)];
+}
+
+function commandSuggestionMatchRank(
+  suggestion: ProviderCommandSuggestion,
+  normalizedQuery: string,
+  nameMatches: ReadonlySet<ProviderCommandSuggestion>,
+): number {
+  const canonicalName = suggestion.name.toLowerCase();
+  if (canonicalName === normalizedQuery) {
+    return 0;
+  }
+  const names = commandSuggestionSearchNames(suggestion);
+  // Keep the room-cli skill first for partial queries like "/r".
+  if (names.includes("room-cli") && "room-cli".startsWith(normalizedQuery)) {
+    return 0.5;
+  }
+  if (names.includes(normalizedQuery)) {
+    return 1;
+  }
+  if (names.some((name) => name.startsWith(normalizedQuery))) {
+    return 2;
+  }
+  if (names.some((name) => name.includes(normalizedQuery))) {
+    return 3;
+  }
+  return nameMatches.has(suggestion) ? 4 : 5;
+}
+
+// Usage only counts in steps of 3, so one stray pick never reorders the menu
+// and two equally used rows don't swap back and forth.
+const COMMAND_USAGE_STEP = 3;
+
+function commandSuggestionUsageRank(
+  suggestion: ProviderCommandSuggestion,
+): number {
+  return Math.floor((suggestion.usage ?? 0) / COMMAND_USAGE_STEP);
+}
+
+function compareCommandSuggestions(
+  left: ProviderCommandSuggestion,
+  right: ProviderCommandSuggestion,
+  normalizedQuery: string,
+  nameMatches: ReadonlySet<ProviderCommandSuggestion>,
+): number {
+  const byMatch =
+    commandSuggestionMatchRank(left, normalizedQuery, nameMatches) -
+    commandSuggestionMatchRank(right, normalizedQuery, nameMatches);
+  if (byMatch !== 0) return byMatch;
+  // A better name match always wins; usage only breaks ties within a tier.
+  const byUsage =
+    commandSuggestionUsageRank(right) - commandSuggestionUsageRank(left);
+  return byUsage !== 0
+    ? byUsage
+    : compareCommandSuggestionSections(left, right);
+}
+
+export function orderCommandSuggestions(
+  suggestions: readonly ProviderCommandSuggestion[],
+  query: string,
+): ProviderCommandSuggestion[] {
+  const normalizedQuery = query.trim().toLowerCase();
+  const nameMatches = matchingCommandNames(suggestions, normalizedQuery);
+  const ranked = [...suggestions].sort((left, right) =>
+    compareCommandSuggestions(left, right, normalizedQuery, nameMatches),
+  );
+
+  const bySection = new Map<
+    ProviderCommandSection,
+    ProviderCommandSuggestion[]
+  >();
+  for (const suggestion of ranked) {
+    const section = providerCommandSection(suggestion);
+    const existing = bySection.get(section);
+    if (existing) {
+      existing.push(suggestion);
+      continue;
+    }
+    bySection.set(section, [suggestion]);
+  }
+  return [...bySection.values()].flat();
+}
+
+export type TypeaheadTrigger =
+  | { char: PluginMentionTrigger; kind: "mention" }
+  | { char: PromptMentionCommandTrigger; kind: "command" };
+
+export type ActiveTrigger =
+  | {
+      char: PluginMentionTrigger;
+      kind: "mention";
+      query: string;
+      from: number;
+      to: number;
+    }
+  | {
+      char: PromptMentionCommandTrigger;
+      kind: "command";
+      query: string;
+      from: number;
+      to: number;
+    };
+
+export type MentionMenuState =
+  | { kind: "hint" }
+  | { kind: "loading" }
+  | { kind: "error" }
+  | {
+      kind: "results";
+      results: OrderedMentionSuggestions;
+    };
+
+export type CommandMenuState =
+  | { kind: "loading" }
+  | { kind: "error" }
+  | {
+      kind: "results";
+      suggestions: readonly ProviderCommandSuggestion[];
+    };
+
+export type TypeaheadMenuState =
+  | { trigger: "mention"; state: MentionMenuState }
+  | { trigger: "command"; state: CommandMenuState };

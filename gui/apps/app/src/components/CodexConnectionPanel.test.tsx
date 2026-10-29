@@ -1,0 +1,102 @@
+// @vitest-environment jsdom
+import type { ReactNode } from "react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { afterEach, expect, it, vi } from "vitest";
+import { sdk } from "@/lib/sdk";
+import { openUrlInExternalBrowser } from "@/lib/url-open-routing";
+import { CodexConnectionPanel, CursorConnectionPanel, openCodexConnection, openCursorConnection } from "./CodexConnectionPanel";
+
+vi.mock("@/lib/sdk", () => ({ sdk: { cloudroom: { codexAuth: vi.fn(), codexLogin: vi.fn(), cancelCodexLogin: vi.fn(), cursorAuth: vi.fn(), cursorLogin: vi.fn(), cancelCursorLogin: vi.fn(), cursorApiKey: vi.fn(), retryStart: vi.fn() } } }));
+vi.mock("@/hooks/queries/cloudroom-queries", () => ({ useCloudroomAccount: () => ({ data: { ready: true, account: { id: "member" } } }) }));
+vi.mock("@/lib/url-open-routing", () => ({ openUrlInExternalBrowser: vi.fn() }));
+vi.mock("@cloudroom/shared-ui/responsive-overlay", () => ({ PersistentResponsiveDrawerShell: ({ open, children }: { open: boolean; children: ReactNode }) => open ? <div role="dialog">{children}</div> : null }));
+type Status = Awaited<ReturnType<typeof sdk.cloudroom.codexAuth>>;
+const missing: Status = { state: "missing", email: null, plan: null, message: null, login_id: null, verification_url: null, user_code: null };
+const waiting: Status = { ...missing, state: "waiting", login_id: "attempt", verification_url: "https://auth.openai.com/codex/device", user_code: "TEST-1234" };
+const connected: Status = { ...missing, state: "connected", email: "member@example.invalid", plan: "plus" };
+const clients: QueryClient[] = [];
+afterEach(() => { cleanup(); clients.forEach(client => client.clear()); clients.length = 0; vi.resetAllMocks(); });
+function mount(cursor = false) {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+  clients.push(client);
+  render(<QueryClientProvider client={client}>{cursor ? <CursorConnectionPanel /> : <CodexConnectionPanel />}</QueryClientProvider>);
+  return client;
+}
+it("shows Cursor browser login without a device code and retains the task", async () => {
+  let current = missing;
+  vi.mocked(sdk.cloudroom.cursorAuth).mockImplementation(async () => current);
+  const cursorWaiting = { ...waiting, user_code: null, verification_url: "https://cursor.com/loginDeepControl?challenge=fixture" };
+  vi.mocked(sdk.cloudroom.cursorLogin).mockImplementation(async () => { current = cursorWaiting; return current; });
+  const client = mount(true);
+  expect(screen.queryByRole("dialog")).toBeNull();
+  openCursorConnection("cursor-pending");
+  fireEvent.click(await screen.findByRole("button", { name: "Sign in with Cursor" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Open sign-in page" }));
+  expect(openUrlInExternalBrowser).toHaveBeenCalledExactlyOnceWith(cursorWaiting.verification_url);
+  expect(screen.queryByText("TEST-1234")).toBeNull();
+  expect(sdk.cloudroom.retryStart).not.toHaveBeenCalled();
+  current = connected;
+  await client.invalidateQueries({ queryKey: ["cloudroom-cursor-auth"] });
+  fireEvent.click(await screen.findByRole("button", { name: "Continue to task" }));
+  await waitFor(() => expect(sdk.cloudroom.retryStart).toHaveBeenCalledExactlyOnceWith("cursor-pending"));
+});
+it("clears a Cursor API key from the form immediately after submission", async () => {
+  vi.mocked(sdk.cloudroom.cursorAuth).mockResolvedValue(missing);
+  vi.mocked(sdk.cloudroom.cursorApiKey).mockResolvedValue({ ...missing, state: "error", message: "Invalid key" });
+  mount(true);
+  openCursorConnection();
+  const input = await screen.findByLabelText("Cursor user API key");
+  fireEvent.change(input, { target: { value: "private-test-canary" } });
+  fireEvent.click(screen.getByRole("button", { name: "Connect with key", hidden: true }));
+  await waitFor(() => expect(sdk.cloudroom.cursorApiKey).toHaveBeenCalledWith(expect.any(String), "private-test-canary"));
+  expect((input as HTMLInputElement).value).toBe("");
+  expect(sdk.cloudroom.retryStart).not.toHaveBeenCalled();
+});
+it("keeps the saved task pending until cloud verification, then retries it once", async () => {
+  let current = missing;
+  vi.mocked(sdk.cloudroom.codexAuth).mockImplementation(async () => current);
+  vi.mocked(sdk.cloudroom.codexLogin).mockImplementation(async () => { current = waiting; return current; });
+  const client = mount();
+  openCodexConnection("thread-pending");
+  fireEvent.click(await screen.findByRole("button", { name: "Sign in with ChatGPT" }));
+  await screen.findByText("TEST-1234");
+  expect(sdk.cloudroom.codexLogin).toHaveBeenCalledOnce();
+  expect(openUrlInExternalBrowser).toHaveBeenCalledWith(waiting.verification_url);
+  expect(sdk.cloudroom.retryStart).not.toHaveBeenCalled();
+  expect(screen.queryByRole("button", { name: "Continue to task" })).toBeNull();
+  current = connected;
+  await client.invalidateQueries({ queryKey: ["cloudroom-codex-auth"] });
+  fireEvent.click(await screen.findByRole("button", { name: "Continue to task" }));
+  await waitFor(() => expect(sdk.cloudroom.retryStart).toHaveBeenCalledExactlyOnceWith("thread-pending"));
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+});
+it("cancels only the pending login and never sends the task", async () => {
+  let current = waiting;
+  vi.mocked(sdk.cloudroom.codexAuth).mockImplementation(async () => current);
+  vi.mocked(sdk.cloudroom.cancelCodexLogin).mockImplementation(async () => { current = missing; return current; });
+  mount();
+  openCodexConnection();
+  fireEvent.click(await screen.findByRole("button", { name: "Cancel sign-in" }));
+  await screen.findByRole("button", { name: "Sign in with ChatGPT" });
+  expect(sdk.cloudroom.cancelCodexLogin).toHaveBeenCalledExactlyOnceWith("attempt");
+  expect(sdk.cloudroom.retryStart).not.toHaveBeenCalled();
+  expect(openUrlInExternalBrowser).not.toHaveBeenCalled();
+});
+it("offers retry for expired login, another account for quota, and no login for network failures", async () => {
+  let current: Status = { ...missing, state: "expired", message: "Sign-in expired. Try again." };
+  vi.mocked(sdk.cloudroom.codexAuth).mockImplementation(async () => current);
+  const client = mount();
+  openCodexConnection();
+  await screen.findByRole("button", { name: "Sign in with ChatGPT" });
+  current = { ...missing, state: "unavailable", message: "Network unavailable" };
+  await client.invalidateQueries({ queryKey: ["cloudroom-codex-auth"] });
+  await screen.findByText(current.message!);
+  expect(screen.queryByRole("button", { name: /Sign in/u })).toBeNull();
+  expect(screen.getByRole("button", { name: "Check again" })).toBeDefined();
+  current = { ...missing, state: "limited", message: "Usage limit reached" };
+  await client.invalidateQueries({ queryKey: ["cloudroom-codex-auth"] });
+  await screen.findByText(current.message!);
+  expect(screen.getByRole("button", { name: "Sign in with another account" })).toBeDefined();
+  expect(screen.getByRole("button", { name: "Check again" })).toBeDefined();
+});

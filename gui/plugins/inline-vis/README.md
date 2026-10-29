@@ -1,0 +1,71 @@
+# bb-plugin-inline-vis
+
+Builtin plugin for the assistant **message directive** slot
+(`app.slots.messageDirective`). When the model emits:
+
+```text
+::inline-vis{file="demo.html"}
+::inline-vis{file="notes.md"}
+```
+
+The omitted `source` defaults to `workspace`; `source="workspace"` is equivalent.
+For a read-only artifact in the current thread's storage directory, use:
+
+```text
+::inline-vis{source="thread-storage" file="reports/result.html"}
+```
+
+HTML frames grow to fit the page, up to 2000px. An optional `height` caps an
+HTML frame and sets a Markdown preview's height (default 224px). Accepted values
+are whole numbers from 120 through 2000:
+
+```text
+::inline-vis{file="demo.html" height="480"}
+```
+
+bb replaces that leaf with this plugin's React component, which:
+
+1. Validates the untrusted `source` and `file` attributes.
+2. Calls the plugin RPC `preparePreview` with the message `threadId`, source,
+   and file path to validate the target and surface clean inline errors.
+3. Shows loading / error states. Workspace previews include an action that
+   opens the source file in bb's sidebar workspace viewer (on hover for HTML);
+   thread-storage previews do not.
+4. Renders HTML as a borderless `srcdoc` iframe. A `<base>` tag points at bb's
+   path-shaped worktree or thread storage route, so relative sibling assets
+   work. A small injected script sets the app's theme variables, follows
+   light/dark changes, reports the page height so the frame fits it, and sends
+   link clicks to the app's browser. The iframe keeps an opaque origin (no
+   `allow-same-origin`) so scripts cannot access the bb page, its cookies, or
+   storage. Remote scripts, styles, images, fonts, media, fetches, and
+   WebSockets work subject to ordinary browser CORS, mixed-content, and
+   remote-server policies.
+5. Renders Markdown files with bb's Markdown renderer. Raw HTML is disabled.
+
+## Backend security
+
+`preparePreview` narrows `unknown` input immediately (rejects unknown keys and
+source values). Workspace previews load the thread with
+`include: "environment"` and require its live `path` and `hostId`. Thread
+storage previews use `bb.sdk.threads.storageLocation` instead and do not resolve
+the workspace. Both sources confine the relative `.html`, `.htm`, `.md`, or
+`.markdown` path under the returned root and read it through `bb.sdk.files`
+(host-routed). Absolute paths, traversal, unsupported extensions, missing files,
+non-UTF-8 content, and files over 5 MiB are rejected. Both kinds render the
+validated content returned by the RPC; HTML pages load relative assets through
+bb's confined worktree or thread-storage route.
+
+It ships with bb and is reconciled through the builtin plugin lifecycle. Ship
+a supported file in either source, then ask the agent to show it with the
+directive (see the bundled `inline-vis` skill).
+
+## Tests
+
+```bash
+pnpm exec turbo run test typecheck --filter=bb-plugin-inline-vis
+```
+
+Markdown links and images resolve relative to the document's directory in the
+selected source. For `::inline-vis{source="thread-storage" file="reports/report.md"}`,
+`[Notes](notes.md)` and `![Chart](chart.svg)` refer to files under `reports/`
+in that thread's storage. The same rule applies to workspace reports.

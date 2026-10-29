@@ -1,0 +1,44 @@
+{
+  "name": "@cloudroom/cli",
+  "version": "0.0.1",
+  "type": "module",
+  "bin": {
+    "room-cli": "./bin/room-cli",
+    "title": "./bin/title"
+  },
+  "scripts": {
+    "build": "node ../../scripts/build-node-entry.mjs src/index.ts dist/index.js --clean-dist --split",
+    "start": "node dist/index.js",
+    "clean": "rimraf dist",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@cloudroom/client-core": "workspace:*",
+    "@cloudroom/config": "workspace:*",
+    "@cloudroom/core-ui": "workspace:*",
+    "@cloudroom/domain": "workspace:*",
+    "@cloudroom/host-daemon-contract": "workspace:*",
+    "@cloudroom/plugin-build": "workspace:*",
+    "@cloudroom/sdk": "workspace:*",
+    "@cloudroom/server-contract": "workspace:*",
+    "@cloudroom/templates": "workspace:*",
+    "@cloudroom/thread-view": "workspace:*",
+    "cli-table3": "^0.6.5",
+    "commander": "^13.0.0",
+    "mime-types": "^3.0.2",
+    "undici": "^7.28.0",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@cloudroom/tsconfig": "workspace:*",
+    "@tailwindcss/node": "^4.3.0",
+    "@tailwindcss/oxide": "^4.3.0",
+    "@types/mime-types": "^3.0.1",
+    "@types/node": "^22.0.0",
+    "esbuild": "^0.28.0",
+    "tailwindcss": "^4.3.0",
+    "typescript": "npm:@typescript/typescript6@^6.0.2",
+    "typescript-7": "npm:typescript@^7.0.2"
+  }
+}

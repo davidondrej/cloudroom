@@ -1,0 +1,22 @@
+{
+  "name": "@cloudroom/vps",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "build": "node ../../scripts/build-node-entry.mjs src/main.ts dist/main.js --clean-dist",
+    "image": "pnpm build && docker build -t ghcr.io/cloudroom-dev/vps:$npm_package_version .",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@cloudroom/tunnel-client": "workspace:*",
+    "@cloudroom/tunnel-contract": "workspace:*",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@cloudroom/tsconfig": "workspace:*",
+    "@types/node": "^22.0.0",
+    "@types/ws": "^8.18.1",
+    "typescript": "npm:@typescript/typescript6@^6.0.2"
+  }
+}

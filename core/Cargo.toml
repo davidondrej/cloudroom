@@ -1,0 +1,20 @@
+[package]
+name = "cloudroom"
+version = "0.1.86"
+edition = "2024"
+rust-version = "1.89"
+license = "Apache-2.0"
+publish = false
+
+[dependencies]
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "json", "query", "matched-path"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "process", "io-util", "sync", "time", "signal"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# History, diagnostics, and feedback go to the website over HTTPS (ADR 0232); history files are gzip (ADR 0237).
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+flate2 = "1"
+tokio-stream = "0.1"
+# Already built through axum; named here for preview tunnels (HTTP upgrades).
+hyper = { version = "1", default-features = false }
+hyper-util = { version = "0.1", default-features = false, features = ["tokio"] }

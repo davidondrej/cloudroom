@@ -1,0 +1,227 @@
+import { describe, expect, it, vi } from "vitest";
+import type { ThreadQueuedMessage } from "@cloudroom/domain";
+import {
+  runCommand,
+  setupCommandOutputTestEnvironment,
+  stubServerApi,
+} from "../helpers/command-output-harness.js";
+import type { CommandRegistrar } from "../helpers/command-output-harness.js";
+import { registerThreadCommands } from "../../commands/thread/index.js";
+
+function queuedMessage(
+  overrides: Partial<ThreadQueuedMessage>,
+): ThreadQueuedMessage {
+  return {
+    id: "queued-1",
+    initiator: "user",
+    senderThreadId: null,
+    threadId: "thread-1",
+    content: [{ type: "text", text: "Follow up", mentions: [] }],
+    model: "gpt-5",
+    reasoningLevel: "medium",
+    permissionMode: "auto",
+    serviceTier: "default",
+    sendAt: null,
+    waitingOn: null,
+    failureReason: null,
+    payload: { kind: "inline" },
+    editable: true,
+    createdAt: 1,
+    updatedAt: 1,
+    ...overrides,
+  };
+}
+
+describe("room-cli thread organization commands", () => {
+  setupCommandOutputTestEnvironment();
+
+  const register: CommandRegistrar = (program) =>
+    registerThreadCommands(program, () => "http://server");
+
+  it("creates a named thread section", async () => {
+    const create = vi.fn(async () => ({
+      id: "section-review",
+      name: "Review",
+      createdAt: 1,
+      updatedAt: 1,
+    }));
+    stubServerApi({ "v1.thread-sections.$post": create });
+
+    await runCommand(["thread", "section", "create", "Review"], register);
+
+    expect(create).toHaveBeenCalledWith({ json: { name: "Review" } });
+  });
+
+  it("creates an explicitly queued message", async () => {
+    const create = vi.fn(async () => ({
+      id: "queued-1",
+      threadId: "thread-1",
+      position: 1,
+      payload: {
+        input: [{ type: "text", text: "next task", mentions: [] }],
+      },
+      createdAt: 1,
+      updatedAt: 1,
+    }));
+    stubServerApi({ "v1.threads.:id.queued-messages.$post": create });
+
+    await runCommand(
+      ["thread", "queue", "create", "thread-1", "next task"],
+      register,
+    );
+
+    expect(create).toHaveBeenCalledWith({
+      param: { id: "thread-1" },
+      json: {
+        input: [{ type: "text", text: "next task", mentions: [] }],
+      },
+    });
+  });
+
+  it("shows agent and system senders in queued message rows", async () => {
+    const list = vi.fn(async () => [
+      queuedMessage({ id: "queued-user" }),
+      queuedMessage({
+        id: "queued-agent",
+        initiator: "agent",
+        senderThreadId: "thr_sender",
+      }),
+      queuedMessage({ id: "queued-system", initiator: "system" }),
+    ]);
+    stubServerApi({ "v1.queued-messages.$get": list });
+
+    await runCommand(["thread", "queue", "list"], register);
+
+    const output = vi
+      .mocked(console.log)
+      .mock.calls.map((args) => args.join(" "))
+      .join("\n");
+    expect(output).toContain("Sender");
+    expect(output).toContain("thr_sender");
+    expect(output).toContain("System");
+  });
+
+  it("updates a queued message in place", async () => {
+    const list = vi.fn(async () => [
+      { id: "queued-1", updatedAt: 42 },
+      { id: "queued-2", updatedAt: 43 },
+    ]);
+    const update = vi.fn(async () => ({ id: "queued-1" }));
+    stubServerApi({
+      "v1.threads.:id.queued-messages.$get": list,
+      "v1.threads.:id.queued-messages.:queuedMessageId.$patch": update,
+    });
+
+    await runCommand(
+      [
+        "thread",
+        "queue",
+        "update",
+        "thread-1",
+        "queued-1",
+        "revised task",
+        "--file",
+        "uploaded-spec.md",
+        "--file",
+        "uploaded-data.json",
+        "--image",
+        "mock-uploaded.png",
+        "--image",
+        "detail-uploaded.png",
+      ],
+      register,
+    );
+
+    expect(list).toHaveBeenCalledWith({ param: { id: "thread-1" } });
+    expect(update).toHaveBeenCalledWith({
+      param: { id: "thread-1", queuedMessageId: "queued-1" },
+      json: {
+        expectedUpdatedAt: 42,
+        input: [
+          { type: "text", text: "revised task", mentions: [] },
+          { type: "localFile", path: "uploaded-spec.md" },
+          { type: "localFile", path: "uploaded-data.json" },
+          { type: "localImage", path: "mock-uploaded.png" },
+          { type: "localImage", path: "detail-uploaded.png" },
+        ],
+      },
+    });
+    expect(list.mock.invocationCallOrder[0]).toBeLessThan(
+      update.mock.invocationCallOrder[0],
+    );
+  });
+
+  it("rejects an update when the queued message is absent", async () => {
+    const list = vi.fn(async () => [{ id: "queued-2", updatedAt: 43 }]);
+    const update = vi.fn();
+    stubServerApi({
+      "v1.threads.:id.queued-messages.$get": list,
+      "v1.threads.:id.queued-messages.:queuedMessageId.$patch": update,
+    });
+
+    await expect(
+      runCommand(
+        ["thread", "queue", "update", "thread-1", "queued-1", "revised"],
+        register,
+      ),
+    ).rejects.toThrow("process.exit:1");
+
+    expect(console.error).toHaveBeenCalledWith(
+      "Error: Queued message queued-1 not found on thread thread-1.",
+    );
+    expect(update).not.toHaveBeenCalled();
+  });
+
+  it("reports when sending a queued message leaves it waiting", async () => {
+    const send = vi.fn(async () => ({
+      ok: true,
+      delivery: "queued",
+      queuedMessage: {
+        waitingOn: { kind: "provisioning" },
+        sendAt: null,
+      },
+    }));
+    stubServerApi({
+      "v1.threads.:id.queued-messages.:queuedMessageId.send.$post": send,
+    });
+
+    await runCommand(
+      ["thread", "queue", "send", "thread-1", "queued-1", "--mode", "steer"],
+      register,
+    );
+
+    expect(send).toHaveBeenCalledWith({
+      param: { id: "thread-1", queuedMessageId: "queued-1" },
+      json: { mode: "steer" },
+    });
+    expect(console.log).toHaveBeenCalledWith(
+      "Queued message queued-1 is still queued (waiting for the workspace)",
+    );
+  });
+
+  it("reorders pinned threads with explicit neighbors", async () => {
+    const reorder = vi.fn(async () => []);
+    stubServerApi({ "v1.threads.:id.pin-order.$patch": reorder });
+
+    await runCommand(
+      [
+        "thread",
+        "reorder-pinned",
+        "thread-2",
+        "--after",
+        "thread-1",
+        "--before",
+        "thread-3",
+      ],
+      register,
+    );
+
+    expect(reorder).toHaveBeenCalledWith({
+      param: { id: "thread-2" },
+      json: {
+        previousThreadId: "thread-1",
+        nextThreadId: "thread-3",
+      },
+    });
+  });
+});

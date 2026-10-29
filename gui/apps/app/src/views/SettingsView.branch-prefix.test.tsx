@@ -1,0 +1,135 @@
+// @vitest-environment jsdom
+import {
+  cleanup,
+  render,
+  screen,
+  fireEvent,
+  waitFor,
+} from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { GeneralSettingsSection, PrivacySettingsSection } from "./SettingsView";
+
+afterEach(cleanup);
+
+function renderSection(overrides?: {
+  telemetryEnabled?: boolean;
+  onTelemetryEnabledChange?: (enabled: boolean) => void;
+  managedBranchPrefix?: string;
+  onManagedBranchPrefixChange?: (prefix: string) => void;
+}) {
+  return render(
+    <>
+      <GeneralSettingsSection
+        desktopBrowserAvailable={false}
+        generalSettingsDisabled={false}
+        managedBranchPrefix={overrides?.managedBranchPrefix ?? "bb/"}
+        navigateToThreadAfterCreate={false}
+        onManagedBranchPrefixChange={
+          overrides?.onManagedBranchPrefixChange ?? vi.fn()
+        }
+        onNavigateToThreadAfterCreateChange={vi.fn()}
+        onOpenLinksInAppBrowserChange={vi.fn()}
+        onRewriteLocalhostLinksChange={vi.fn()}
+        onRichTextEditingChange={vi.fn()}
+        onSteerActiveThreadOnEnterChange={vi.fn()}
+        openLinksInAppBrowser={false}
+        rewriteLocalhostLinks={false}
+        richTextEditing={false}
+        steerActiveThreadOnEnter={false}
+        worktreeRetention="30d"
+        onWorktreeRetentionChange={vi.fn()}
+      />
+      <PrivacySettingsSection
+        disabled={false}
+        enabled={false}
+        onEnabledChange={vi.fn()}
+        onStreamerModeChange={vi.fn()}
+        streamerMode={false}
+        telemetryEnabled={overrides?.telemetryEnabled ?? true}
+        onTelemetryEnabledChange={
+          overrides?.onTelemetryEnabledChange ?? vi.fn()
+        }
+        bugReportsEnabled
+        onBugReportsEnabledChange={vi.fn()}
+      />
+    </>,
+  );
+}
+
+function branchPrefixInput() {
+  const input = screen.getByLabelText("New branch prefix");
+  if (!(input instanceof HTMLInputElement)) {
+    throw new Error("New branch prefix control is not an input");
+  }
+  return input;
+}
+
+describe("new branch prefix setting", () => {
+  it("saves a valid prefix on Enter", () => {
+    const onChange = vi.fn();
+    renderSection({ onManagedBranchPrefixChange: onChange });
+    const input = branchPrefixInput();
+    fireEvent.change(input, { target: { value: "sawyer/wt-" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(onChange).toHaveBeenCalledWith("sawyer/wt-");
+  });
+
+  it("saves an empty prefix", () => {
+    const onChange = vi.fn();
+    renderSection({ onManagedBranchPrefixChange: onChange });
+    const input = branchPrefixInput();
+    fireEvent.change(input, { target: { value: "" } });
+    fireEvent.blur(input);
+    expect(onChange).toHaveBeenCalledWith("");
+  });
+
+  it("restores the saved value when saving fails", async () => {
+    const failedSave = Promise.reject(new Error("write failed"));
+    void failedSave.catch(() => undefined);
+    const onChange = vi.fn(() => failedSave);
+    renderSection({ onManagedBranchPrefixChange: onChange });
+    const input = branchPrefixInput();
+    fireEvent.change(input, { target: { value: "team/" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    await waitFor(() => expect(input.value).toBe("bb/"));
+  });
+
+  it("refuses an invalid prefix and restores the saved value", () => {
+    const onChange = vi.fn();
+    renderSection({ onManagedBranchPrefixChange: onChange });
+    const input = branchPrefixInput();
+    fireEvent.change(input, { target: { value: "bad prefix/" } });
+    expect(input.getAttribute("aria-invalid")).toBe("true");
+    fireEvent.blur(input);
+    expect(onChange).not.toHaveBeenCalled();
+    expect(input.value).toBe("bb/");
+  });
+
+  it("reverts the draft on Escape", () => {
+    const onChange = vi.fn();
+    renderSection({ onManagedBranchPrefixChange: onChange });
+    const input = branchPrefixInput();
+    fireEvent.change(input, { target: { value: "sawyer/" } });
+    fireEvent.keyDown(input, { key: "Escape" });
+    expect(input.value).toBe("bb/");
+    expect(onChange).not.toHaveBeenCalled();
+  });
+});
+
+it("shows the saved telemetry preference and allows opting out", () => {
+  const onChange = vi.fn();
+  renderSection({ onTelemetryEnabledChange: onChange });
+  const toggle = screen.getByRole("switch", {
+    name: "Share usage data and setup errors",
+  });
+  expect(toggle.getAttribute("aria-checked")).toBe("true");
+  fireEvent.click(toggle);
+  expect(onChange).toHaveBeenCalledWith(false);
+  cleanup();
+  renderSection({ telemetryEnabled: false });
+  expect(
+    screen
+      .getByRole("switch", { name: "Share usage data and setup errors" })
+      .getAttribute("aria-checked"),
+  ).toBe("false");
+});

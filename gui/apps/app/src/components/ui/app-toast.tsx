@@ -1,0 +1,407 @@
+import {
+  useLayoutEffect,
+  useRef,
+  useState,
+  type MouseEvent,
+  type ReactNode,
+} from "react";
+import { toast as sonnerToast, type Action, type ExternalToast } from "sonner";
+import { Button } from "@cloudroom/shared-ui/button";
+import { Icon, type IconName } from "@cloudroom/shared-ui/icon";
+import { cn } from "@cloudroom/shared-ui/lib/utils";
+import {
+  openNotificationCenter,
+  recordNotification,
+} from "@/lib/notifications/notification-store";
+
+export type AppToastTone =
+  | "message"
+  | "success"
+  | "warning"
+  | "error"
+  | "loading";
+
+type AppToastForwardedOptionKey =
+  | "className"
+  | "classNames"
+  | "dismissible"
+  | "duration"
+  | "id"
+  | "invert"
+  | "onAutoClose"
+  | "onDismiss"
+  | "position"
+  | "richColors"
+  | "style"
+  | "unstyled";
+
+export interface AppToastOptions extends Pick<
+  ExternalToast,
+  AppToastForwardedOptionKey
+> {
+  action?: Action;
+  cancel?: Action;
+  /** One row: dot, title, muted description, actions. No close button. */
+  compact?: boolean;
+  description?: ReactNode;
+  /** Runs only when the user clicks X, unlike Sonner's onDismiss, which also fires on programmatic dismissals. */
+  onClose?: () => void;
+}
+
+interface AppToastContentProps {
+  action?: Action;
+  cancel?: Action;
+  compact?: boolean;
+  description?: ReactNode;
+  dismissible?: boolean;
+  id?: number | string;
+  notificationId?: string | null;
+  onDismiss?: () => void;
+  title: ReactNode;
+  tone: AppToastTone;
+}
+
+interface AppToastOverflowTextProps {
+  className?: string;
+  content: ReactNode;
+  notificationId: string | null;
+  onShowMore: () => void;
+  testId: string;
+}
+
+interface ShowAppToastParams {
+  options?: AppToastOptions;
+  title: ReactNode;
+  tone: AppToastTone;
+}
+
+interface AppToastActionButtonProps {
+  action: Action;
+  className?: string;
+  id?: number | string;
+  priority: "primary" | "secondary";
+}
+
+type AppToastMethod = (
+  title: ReactNode,
+  options?: AppToastOptions,
+) => string | number;
+
+const DEFAULT_TOAST_DURATION = 4000;
+const ERROR_TOAST_DURATION = 10000;
+
+export function iconForTone(tone: AppToastTone): IconName {
+  switch (tone) {
+    case "success":
+      return "CircleCheck";
+    case "warning":
+      return "AlertTriangle";
+    case "error":
+      return "AlertCircle";
+    case "loading":
+      return "Loading";
+    case "message":
+      return "Info";
+  }
+}
+
+function dismissToast(id: number | string | undefined): void {
+  if (id === undefined) {
+    return;
+  }
+  sonnerToast.dismiss(id);
+}
+
+function AppToastActionButton({
+  action,
+  className,
+  id,
+  priority,
+}: AppToastActionButtonProps) {
+  const handleClick = (event: MouseEvent<HTMLButtonElement>) => {
+    action.onClick(event);
+    if (priority === "primary" && event.defaultPrevented) {
+      return;
+    }
+    dismissToast(id);
+  };
+
+  return (
+    <Button
+      type="button"
+      variant="ghost"
+      size="sm"
+      className={cn("h-6 shrink-0 px-2 text-xs font-medium", className)}
+      onClick={handleClick}
+    >
+      {action.label}
+    </Button>
+  );
+}
+
+function AppToastOverflowText({
+  className,
+  content,
+  notificationId,
+  onShowMore,
+  testId,
+}: AppToastOverflowTextProps) {
+  const bodyRef = useRef<HTMLDivElement | null>(null);
+  const [truncated, setTruncated] = useState(false);
+
+  useLayoutEffect(() => {
+    const body = bodyRef.current;
+    if (body === null) {
+      return;
+    }
+    const measure = () => {
+      setTruncated(
+        body.scrollHeight - body.clientHeight > 1 ||
+          body.scrollWidth - body.clientWidth > 1,
+      );
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(body);
+    return () => observer.disconnect();
+  }, [content]);
+
+  return (
+    <div className="min-w-0 w-full">
+      <div
+        ref={bodyRef}
+        data-testid={testId}
+        className={cn(
+          "line-clamp-4 whitespace-pre-wrap break-words [overflow-wrap:anywhere]",
+          className,
+        )}
+      >
+        {content}
+      </div>
+      {truncated && notificationId !== null ? (
+        <Button
+          type="button"
+          variant="link"
+          size="sm"
+          className="h-auto shrink-0 px-0 py-0 text-xs text-muted-foreground underline underline-offset-4"
+          onClick={onShowMore}
+        >
+          Show more
+        </Button>
+      ) : null}
+    </div>
+  );
+}
+
+export function AppToastContent({
+  action,
+  cancel,
+  compact = false,
+  description,
+  dismissible = true,
+  id,
+  notificationId = null,
+  onDismiss,
+  title,
+  tone,
+}: AppToastContentProps) {
+  const hasActions = action !== undefined || cancel !== undefined;
+  const showNotification = () => {
+    dismissToast(id);
+    openNotificationCenter(notificationId);
+  };
+  const actionClassName = compact
+    ? "h-7 px-2.5 text-[13px] text-primary-text hover:text-primary-text"
+    : undefined;
+  const actions = hasActions ? (
+    <>
+      {action ? (
+        <AppToastActionButton
+          action={action}
+          className={actionClassName}
+          id={id}
+          priority="primary"
+        />
+      ) : null}
+      {cancel ? (
+        <AppToastActionButton
+          action={cancel}
+          className={actionClassName}
+          id={id}
+          priority="secondary"
+        />
+      ) : null}
+    </>
+  ) : null;
+
+  if (compact) {
+    return (
+      <div className="flex h-10 w-[var(--width,320px)] max-w-[calc(100vw-32px)] shrink-0 items-center gap-2.5 rounded-lg border border-foreground/10 bg-popover pl-3.5 pr-1.5 text-[13px] text-popover-foreground shadow-md max-[600px]:w-[calc(100vw-32px)]">
+        <span
+          className="size-1.5 shrink-0 rounded-full bg-primary"
+          aria-hidden
+        />
+        <span className="shrink-0 font-medium" data-testid="app-toast-title">
+          {title}
+        </span>
+        <span
+          className="min-w-0 flex-1 truncate text-muted-foreground"
+          data-testid="app-toast-description"
+        >
+          {description}
+        </span>
+        {hasActions ? (
+          <>
+            <span className="h-4 w-px shrink-0 bg-foreground/15" aria-hidden />
+            <div className="flex shrink-0 items-center">{actions}</div>
+          </>
+        ) : null}
+      </div>
+    );
+  }
+
+  return (
+    <div className="w-[var(--width,320px)] max-w-[calc(100vw-32px)] shrink-0 rounded-lg border border-border bg-popover py-2.5 pl-3 pr-2 text-popover-foreground shadow-md max-[600px]:w-[calc(100vw-32px)]">
+      <div className="flex min-w-0 items-start gap-2.5">
+        <div className="mt-0.5 flex size-4 shrink-0 items-center justify-center text-muted-foreground">
+          <Icon
+            name={iconForTone(tone)}
+            className={cn("size-4", tone === "loading" && "animate-spin")}
+            style={{ margin: 0 }}
+            aria-hidden
+          />
+        </div>
+        <div className="min-w-0 flex-1">
+          <AppToastOverflowText
+            className="text-[13px] font-medium leading-5"
+            content={title}
+            notificationId={notificationId}
+            onShowMore={showNotification}
+            testId="app-toast-title"
+          />
+          {description ? (
+            <div className="min-w-0 text-xs leading-4 text-muted-foreground">
+              <AppToastOverflowText
+                content={description}
+                notificationId={notificationId}
+                onShowMore={showNotification}
+                testId="app-toast-description"
+              />
+            </div>
+          ) : null}
+        </div>
+        {hasActions ? (
+          <div className="flex shrink-0 items-center">{actions}</div>
+        ) : null}
+        {dismissible ? (
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            className="size-6 shrink-0 text-muted-foreground"
+            aria-label="Dismiss notification"
+            onClick={() => (onDismiss ? onDismiss() : dismissToast(id))}
+          >
+            <Icon
+              name="X"
+              className="size-3.5"
+              style={{ margin: 0 }}
+              aria-hidden
+            />
+          </Button>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+function showAppToast({
+  options,
+  title,
+  tone,
+}: ShowAppToastParams): string | number {
+  const {
+    action,
+    cancel,
+    className,
+    compact,
+    description,
+    dismissible = true,
+    duration,
+    onClose,
+    ...sonnerOptions
+  } = options ?? {};
+  const nextDuration =
+    duration ??
+    (tone === "loading"
+      ? Infinity
+      : tone === "error"
+        ? ERROR_TOAST_DURATION
+        : DEFAULT_TOAST_DURATION);
+  const notificationId =
+    tone === "loading"
+      ? null
+      : recordNotification({
+          toastId: sonnerOptions.id ?? null,
+          tone,
+          title,
+          description: description ?? null,
+          createdAt: Date.now(),
+        });
+
+  return sonnerToast.custom(
+    (id) => (
+      <AppToastContent
+        action={action}
+        cancel={cancel}
+        compact={compact}
+        description={description}
+        dismissible={dismissible}
+        id={id}
+        notificationId={notificationId}
+        onDismiss={
+          onClose
+            ? () => {
+                onClose();
+                dismissToast(id);
+              }
+            : undefined
+        }
+        title={title}
+        tone={tone}
+      />
+    ),
+    {
+      ...sonnerOptions,
+      className: cn("bb-app-toast", className),
+      dismissible,
+      duration: nextDuration,
+    },
+  );
+}
+
+const showMessageToast: AppToastMethod = (title, options) =>
+  showAppToast({ options, title, tone: "message" });
+
+const showSuccessToast: AppToastMethod = (title, options) =>
+  showAppToast({ options, title, tone: "success" });
+
+const showWarningToast: AppToastMethod = (title, options) =>
+  showAppToast({ options, title, tone: "warning" });
+
+const showErrorToast: AppToastMethod = (title, options) =>
+  showAppToast({ options, title, tone: "error" });
+
+const showLoadingToast: AppToastMethod = (title, options) =>
+  showAppToast({ options, title, tone: "loading" });
+
+export const appToast = {
+  dismiss: sonnerToast.dismiss,
+  isOpen: (id: number | string) =>
+    sonnerToast.getToasts().some((toast) => toast.id === id),
+  error: showErrorToast,
+  loading: showLoadingToast,
+  message: showMessageToast,
+  success: showSuccessToast,
+  warning: showWarningToast,
+};

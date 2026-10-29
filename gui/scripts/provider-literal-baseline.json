@@ -1,0 +1,141 @@
+{
+  "_comment": "Provider-literal ratchet (G1). Per-file occurrence count of provider-ID references in core. May only go DOWN. Regenerate: node scripts/check-provider-literal-ratchet.mjs --write. Every counted file must have an `allowlist` entry (count, reason, owner, diesAt); the entries are authored by hand and survive --write. Delete this file and the guard when empty.",
+  "total": 102,
+  "files": {
+    "apps/app/src/components/CodexConnectionPanel.tsx": 2,
+    "apps/app/src/components/promptbox/NewThreadComposer.tsx": 1,
+    "apps/app/src/components/thread/ThreadActionsMenu.tsx": 2,
+    "apps/app/src/hooks/queries/cloudroom-queries.ts": 2,
+    "apps/app/src/views/thread-detail/ThreadDetailPromptArea.tsx": 4,
+    "apps/cli/src/commands/cloudroom.ts": 1,
+    "apps/cli/src/commands/thread/spawn.ts": 1,
+    "apps/host-daemon/src/command-handlers/teleport.ts": 7,
+    "apps/server/src/services/cloudroom/client.ts": 11,
+    "apps/server/src/services/cloudroom/commands.ts": 30,
+    "apps/server/src/services/cloudroom/events.ts": 12,
+    "apps/server/src/services/cloudroom/teleport.ts": 13,
+    "packages/host-daemon-contract/src/commands.ts": 2,
+    "apps/demo-server/src/fixtures/providers.ts": 3,
+    "apps/demo-server/src/fixtures/world.ts": 2,
+    "apps/server/src/services/threads/thread-edit-message.ts": 1,
+    "packages/config/src/bb-app-managed-config.ts": 4,
+    "packages/scripts/src/commands/archive-codex-tmp-bb-sessions.ts": 1,
+    "packages/scripts/src/lib/seed-perf-fixture.ts": 3
+  },
+  "allowlist": {
+    "apps/app/src/components/CodexConnectionPanel.tsx": {
+      "count": 2,
+      "reason": "Explicit Codex and Cursor account flows use different native login protocols; tokens remain outside conversation history.",
+      "owner": "Cloudroom GUI",
+      "diesAt": "when core account capabilities provide the login presentation contract"
+    },
+    "apps/app/src/components/thread/ThreadActionsMenu.tsx": {
+      "count": 2,
+      "reason": "Teleport is approved only for local Codex and Pi parents, not every installed provider.",
+      "owner": "Cloudroom GUI",
+      "diesAt": "when provider capabilities advertise portable native histories"
+    },
+    "apps/app/src/views/thread-detail/ThreadDetailPromptArea.tsx": {
+      "count": 4,
+      "reason": "Route rejected cloud starts to the correct login panel and keep Cursor reasoning fixed per session.",
+      "owner": "Cloudroom GUI",
+      "diesAt": "when core capabilities expose account actions and mutable session settings"
+    },
+    "apps/cli/src/commands/cloudroom.ts": {
+      "count": 1,
+      "reason": "The cloud account command selects between the distinct native Codex and Cursor login APIs.",
+      "owner": "Cloudroom GUI",
+      "diesAt": "when the core exposes a shared account command contract"
+    },
+    "apps/host-daemon/src/command-handlers/teleport.ts": {
+      "count": 7,
+      "reason": "Capture Codex and Pi native transcript formats, child references, and Pi startup instructions without truncating history.",
+      "owner": "Cloudroom Teleport",
+      "diesAt": "when provider adapters own native history capture"
+    },
+    "apps/server/src/services/cloudroom/teleport.ts": {
+      "count": 13,
+      "reason": "Enforce the Codex/Pi Teleport scope and translate native identities, child traces, and model selectors into the core manifest.",
+      "owner": "Cloudroom Teleport",
+      "diesAt": "when core portability capabilities replace explicit native-format handling"
+    },
+    "packages/host-daemon-contract/src/commands.ts": {
+      "count": 2,
+      "reason": "The Teleport wire contract accepts only its two implemented native transcript formats.",
+      "owner": "Cloudroom Teleport",
+      "diesAt": "when a versioned generic native-history contract replaces the closed harness union"
+    },
+    "apps/app/src/components/promptbox/NewThreadComposer.tsx": {
+      "count": 1,
+      "reason": "Preserve the existing Claude Code configuration hint when the VM does not advertise that harness.",
+      "owner": "Cloudroom GUI",
+      "diesAt": "when missing-harness guidance is provider-neutral"
+    },
+    "apps/app/src/hooks/queries/cloudroom-queries.ts": {
+      "count": 2,
+      "reason": "Translate Pi model selectors and Cursor provider IDs while preserving per-harness capability restrictions.",
+      "owner": "Cloudroom GUI",
+      "diesAt": "when the remote model contract no longer needs this Pi-specific translation"
+    },
+    "apps/cli/src/commands/thread/spawn.ts": {
+      "count": 1,
+      "reason": "Existing Codex default for Cloudroom-targeted CLI starts only; local provider defaults are unaffected.",
+      "owner": "Cloudroom GUI",
+      "diesAt": "when the Cloudroom API supplies the default harness"
+    },
+    "apps/server/src/services/cloudroom/client.ts": {
+      "count": 11,
+      "reason": "Vendored canonical Cloudroom API client: wire types, default harness, and response validation.",
+      "owner": "Cloudroom core integration client",
+      "diesAt": "when the canonical core API client no longer requires these harness discriminators"
+    },
+    "apps/server/src/services/cloudroom/commands.ts": {
+      "count": 30,
+      "reason": "Cloudroom adapter translates remote model/skill requests and rejects unsupported cloud harnesses instead of falling back to local execution.",
+      "owner": "Cloudroom GUI",
+      "diesAt": "when the Cloudroom wire contract no longer needs these harness-specific translations"
+    },
+    "apps/server/src/services/cloudroom/events.ts": {
+      "count": 12,
+      "reason": "Translate the core's Codex, Pi, Claude Code, and Cursor event payloads into the existing GUI timeline.",
+      "owner": "Cloudroom GUI",
+      "diesAt": "when core events no longer require harness-specific timeline translation"
+    },
+    "apps/demo-server/src/fixtures/providers.ts": {
+      "count": 3,
+      "reason": "demo fixtures: the demo server's static provider roster.",
+      "owner": "owner-accepted (demo fixture)",
+      "diesAt": "never (demo fixture)"
+    },
+    "apps/demo-server/src/fixtures/world.ts": {
+      "count": 2,
+      "reason": "demo fixtures: the demo world's default provider.",
+      "owner": "owner-accepted (demo fixture)",
+      "diesAt": "never (demo fixture)"
+    },
+    "apps/server/src/services/threads/thread-edit-message.ts": {
+      "count": 1,
+      "reason": "legacy persisted data: pre-v3 codex timelines recorded the native turn id with no checkpoint; the fallback reads them.",
+      "owner": "provider-codex",
+      "diesAt": "legacy-tool-item-backfill migration (stamps the checkpoint onto old rows)"
+    },
+    "packages/config/src/bb-app-managed-config.ts": {
+      "count": 4,
+      "reason": "BUNDLED_PROVIDER_IDS: the legacy `customAcpAgents` reader refuses an agent id that shadows a bundled provider, AND `customModelProviderIdSchema` (live `customModels` config) accepts only a bundled id or an `acp-*` id, so a third-party provider cannot carry custom models today (documented DEBT in the file).",
+      "owner": "provider-acp (legacy reader); core config (customModels enum)",
+      "diesAt": "the reader with LEGACY_CUSTOM_AGENTS_REMOVED_IN (0.41); the enum when customModels accepts any registered provider id"
+    },
+    "packages/scripts/src/commands/archive-codex-tmp-bb-sessions.ts": {
+      "count": 1,
+      "reason": "ops script for codex temp sessions: names the `codex` executable, not a provider branch.",
+      "owner": "owner-accepted (ops script)",
+      "diesAt": "never (ops script)"
+    },
+    "packages/scripts/src/lib/seed-perf-fixture.ts": {
+      "count": 3,
+      "reason": "perf fixture generator: seeds threads for two providers so the timeline benchmark covers both shapes.",
+      "owner": "owner-accepted (fixture)",
+      "diesAt": "never (fixture)"
+    }
+  }
+}

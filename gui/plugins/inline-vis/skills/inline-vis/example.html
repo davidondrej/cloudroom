@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<style>
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  .report { display: grid; gap: 28px; }
+  section { display: grid; gap: 12px; }
+  h2 { margin: 0; font-size: 15px; font-weight: 600; }
+  h3 { margin: 0; font-size: 14px; font-weight: 600; }
+  p { margin: 0; color: var(--muted-foreground); }
+  .note { font-size: 12px; }
+  code, .mono { font-family: var(--font-mono); font-size: 12px; }
+  code { padding: 1px 6px; border-radius: 6px; background: var(--muted); color: var(--foreground); }
+
+  .tabs { display: flex; flex-wrap: wrap; gap: 6px; }
+  .tab { display: inline-flex; align-items: center; gap: 8px; padding: 4px 12px 4px 5px; border: 1px solid var(--border); border-radius: 999px; background: none; color: var(--muted-foreground); font: inherit; font-size: 13px; cursor: pointer; }
+  .tab b { display: grid; place-items: center; width: 20px; height: 20px; border-radius: 999px; background: var(--muted); color: var(--foreground); font-size: 11px; }
+  .tab[aria-selected="true"] { border-color: var(--muted-foreground); background: var(--surface-raised); color: var(--foreground); font-weight: 500; }
+  .panel { display: grid; gap: 16px; }
+
+  .timeline { --max: 180; display: grid; gap: 6px; }
+  .row { display: grid; grid-template-columns: 140px 1fr; gap: 12px; align-items: center; }
+  .label { text-align: right; font-size: 12px; color: var(--muted-foreground); }
+  .track { position: relative; height: 26px; }
+  .bar { position: absolute; inset-block: 0; left: calc(var(--from) / var(--max) * 100%); width: calc((var(--to) - var(--from)) / var(--max) * 100%); display: flex; align-items: center; padding: 0 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; }
+  .bar.info { --tone: var(--chart-2); }
+  .bar.bad { --tone: var(--destructive); }
+  .bar.good { --tone: var(--success); }
+  .bar.info, .bar.bad, .bar.good { background: color-mix(in oklab, var(--tone) 22%, transparent); border-color: color-mix(in oklab, var(--tone) 55%, transparent); }
+  .bar.over { border: 1px dashed var(--destructive-text); background: repeating-linear-gradient(-45deg, color-mix(in oklab, var(--destructive) 45%, transparent) 0 6px, transparent 6px 12px); color: var(--destructive-text); justify-content: center; }
+  .mark { position: absolute; inset-block: -3px; left: calc(var(--at) / var(--max) * 100%); width: 2px; border-radius: 2px; background: var(--success); }
+  .ticks { height: 16px; }
+  .ticks span { position: absolute; left: calc(var(--at) / var(--max) * 100%); transform: translateX(-50%); font-size: 11px; color: var(--subtle-foreground); white-space: nowrap; }
+  .ticks span:first-child { transform: none; }
+  .ticks span:last-child { transform: translateX(-100%); }
+
+  .flow { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+  .flow b { width: 52px; font-size: 13px; font-weight: 600; }
+  .chip { padding: 3px 10px; border: 1px solid var(--border); border-radius: 999px; background: var(--muted); font-size: 12px; }
+  .chip.bad { border-color: color-mix(in oklab, var(--destructive) 55%, transparent); background: var(--surface-destructive); color: var(--destructive-text); }
+  .chip.good { border-color: color-mix(in oklab, var(--success) 55%, transparent); background: color-mix(in oklab, var(--success) 14%, transparent); color: var(--success-foreground); }
+  .arrow { color: var(--subtle-foreground); font-size: 12px; }
+
+  .pipeline { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+  .stage { flex: 1 1 140px; display: grid; gap: 2px; padding: 8px 12px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface-raised); }
+  .stage span:last-child { font-size: 11px; color: var(--muted-foreground); }
+
+  .commits { margin: 0; padding: 0; list-style: none; display: grid; gap: 6px; }
+  .commits li { display: grid; grid-template-columns: 76px 1fr; gap: 10px; align-items: baseline; }
+  .commits code { justify-self: start; }
+
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; }
+  .card { display: grid; align-content: start; gap: 10px; padding: 16px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface-raised); }
+  .card.attention { border-color: color-mix(in oklab, var(--attention) 50%, transparent); background: var(--surface-attention); }
+  .card.attention p { color: var(--foreground); }
+  dl { margin: 0; display: grid; grid-template-columns: 30px 1fr; gap: 8px 10px; }
+  dt { font-family: var(--font-mono); font-size: 12px; color: var(--muted-foreground); }
+  dd { margin: 0; }
+
+  @media (max-width: 480px) {
+    .row { grid-template-columns: 1fr; gap: 2px; }
+    .label { text-align: left; }
+    .pipeline { flex-direction: column; align-items: stretch; }
+    .pipeline .arrow { align-self: center; transform: rotate(90deg); }
+  }
+</style>
+</head>
+<body>
+<div class="report">
+  <section>
+    <h2>What we fixed</h2>
+    <div class="tabs" role="tablist">
+      <button class="tab" role="tab" aria-selected="true" aria-controls="fix-1"><b>1</b>Window past the end</button>
+      <button class="tab" role="tab" aria-selected="false" aria-controls="fix-2"><b>2</b>Slow mirror</button>
+      <button class="tab" role="tab" aria-selected="false" aria-controls="fix-3"><b>3</b>HTTP 416</button>
+    </div>
+    <div class="panel" id="fix-1">
+      <p>The job adds 30 s of search pad, so the cutter asked for 174 s of a 143 s video. The old check called the good download too short, threw it away, and retried. The new check stops at the real end of the video.</p>
+      <div class="timeline">
+        <div class="row"><span class="label">Video file</span><div class="track"><span class="bar" style="--from: 0; --to: 143">143 s</span></div></div>
+        <div class="row"><span class="label">Cutter asks for</span><div class="track"><span class="bar info" style="--from: 0; --to: 143">0 – 174 s</span><span class="bar over" style="--from: 143; --to: 174">+31 s</span></div></div>
+        <div class="row"><span class="label">Old check: 174 s</span><div class="track"><span class="bar bad" style="--from: 0; --to: 143">download thrown away ✕</span></div></div>
+        <div class="row"><span class="label">New check: 141.5 s</span><div class="track"><span class="bar good" style="--from: 0; --to: 143">download kept ✓</span><span class="mark" style="--at: 141.5"></span></div></div>
+        <div class="row"><span></span><div class="track ticks"><span style="--at: 0">0 s</span><span style="--at: 30">30</span><span style="--at: 60">60</span><span style="--at: 90">90</span><span style="--at: 120">120</span><span style="--at: 150">150</span><span style="--at: 180">180 s</span></div></div>
+      </div>
+      <div class="flow"><b>Before</b><span class="chip">good download</span><span class="arrow">→</span><span class="chip bad">check fails</span><span class="arrow">→</span><span class="chip bad">retried 4× per route</span><span class="arrow">→</span><span class="chip bad">clip missing</span></div>
+      <div class="flow"><b>Now</b><span class="chip">good download</span><span class="arrow">→</span><span class="chip good">check passes</span><span class="arrow">→</span><span class="chip good">clip used</span></div>
+    </div>
+    <div class="panel" id="fix-2" hidden>
+      <p>One mirror sent 160 KB/s. The download cap now grows with the clip, so a slow but working mirror finishes instead of restarting.</p>
+    </div>
+    <div class="panel" id="fix-3" hidden>
+      <p>A resumed download asked for bytes past the end and got HTTP 416. Resume now starts from the bytes already on disk.</p>
+    </div>
+  </section>
+
+  <section>
+    <h2>What runs in production</h2>
+    <div class="pipeline">
+      <div class="stage"><span class="mono">branch upload-fix</span><span>from 0f0e1e74, not in main</span></div>
+      <span class="arrow">→</span>
+      <div class="stage"><span class="mono">image 7a9038f4</span><span>GitHub Actions build</span></div>
+      <span class="arrow">→</span>
+      <div class="stage"><span class="mono">endpoint clips-prod</span><span>4 workers max</span></div>
+    </div>
+    <ul class="commits">
+      <li><code>f39dd456</code><span>The cutter stops at the real end of the video.</span></li>
+      <li><code>2da27a8d</code><span>The download cap grows with the clip.</span></li>
+      <li><code>7a9038f4</code><span>Resume starts from the bytes on disk.</span></li>
+    </ul>
+    <p class="note">Rollback: set the image back to <code>0f0e1e74</code>.</p>
+  </section>
+
+  <div class="cards">
+    <div class="card">
+      <h3>Still open</h3>
+      <dl>
+        <dt>F7</dt><dd>The progress bar moves about 1.3% per clip, so long clips look stuck.</dd>
+        <dt>F8</dt><dd>The normal editor does not have the cutter fix yet.</dd>
+      </dl>
+    </div>
+    <div class="card attention">
+      <h3>Needs you</h3>
+      <p>Relaunch today's two projects: <code>b270bffa</code> and <code>12cc3282</code>. They were built on the old image.</p>
+    </div>
+  </div>
+</div>
+<script>
+  const tabs = document.querySelectorAll(".tab");
+  for (const tab of tabs) {
+    tab.addEventListener("click", () => {
+      for (const other of tabs) {
+        other.setAttribute("aria-selected", String(other === tab));
+        document.getElementById(other.getAttribute("aria-controls")).hidden = other !== tab;
+      }
+    });
+  }
+</script>
+</body>
+</html>

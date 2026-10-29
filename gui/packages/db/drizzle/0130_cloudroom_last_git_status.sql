@@ -1,0 +1,1 @@
+ALTER TABLE `cloudroom_threads` ADD `last_git_status` text;

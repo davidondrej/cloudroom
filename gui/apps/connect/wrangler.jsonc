@@ -1,0 +1,30 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "cloudroom-connect",
+  "main": "./src/worker.ts",
+  "account_id": "d23c61e641b3e7a374f6068540bbd4d6",
+  "compatibility_date": "2026-06-11",
+  "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
+  "observability": { "enabled": true },
+  "assets": { "directory": "../app/public", "binding": "ASSETS", "run_worker_first": true },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["TunnelDO"] }],
+  "durable_objects": {
+    "bindings": [{ "name": "TUNNEL_DO", "class_name": "TunnelDO" }]
+  },
+  "vars": {
+    "BASE_DOMAIN": "cloudroom.run",
+    "WEBSITE_URL": "https://www.cloudroom.dev"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "cloudroom-connect",
+      "database_id": "d9fabfff-1122-4721-a885-01cda43bd784",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "routes": [
+    { "pattern": "cloudroom.run", "custom_domain": true },
+    { "pattern": "*.cloudroom.run/*", "zone_name": "cloudroom.run" }
+  ]
+}

@@ -1,0 +1,125 @@
+import { isSettledWorkflowAgentState } from "@cloudroom/domain";
+import type { TimelineWorkflowWorkRow } from "@cloudroom/server-contract";
+import { AnimatedBody } from "@/components/promptbox/banner/AnimatedBody";
+import {
+  PROMPT_STACK_CARD_HEADER_BUTTON_CLASS,
+  PROMPT_STACK_CARD_ROW_HEIGHT,
+  PromptStackCard,
+  PromptStackCardChevron,
+} from "@/components/promptbox/banner/PromptStackCard";
+import { LiveDurationText } from "@/components/thread/timeline/LiveDurationText";
+import { WorkflowWorkRowBody } from "@/components/thread/timeline/WorkflowWorkRowBody";
+import {
+  activityIconClass,
+  activityMetaClass,
+  activityRowClass,
+  activityTextClass,
+} from "@cloudroom/shared-ui/activity-row-styles";
+import { Icon } from "@cloudroom/shared-ui/icon";
+import { WorkflowPhaseStrip } from "@cloudroom/shared-ui/workflow-progress";
+
+const BODY_ID = "thread-workflow-card-body";
+const TOGGLE_ID = "thread-workflow-card-toggle";
+const WORKFLOW_HEADER_BUTTON_CLASS = activityRowClass(
+  "running",
+  PROMPT_STACK_CARD_HEADER_BUTTON_CLASS,
+);
+
+function agentProgressLabel(workflow: TimelineWorkflowWorkRow): string | null {
+  const agents = workflow.workflow?.agents ?? [];
+  if (agents.length === 0) {
+    return null;
+  }
+  const settled = agents.filter((agent) =>
+    isSettledWorkflowAgentState(agent.state),
+  ).length;
+  return `${settled}/${agents.length} agents`;
+}
+
+interface ThreadWorkflowCardProps {
+  workflow: TimelineWorkflowWorkRow;
+  isExpanded: boolean;
+  onToggle: () => void;
+}
+
+export function ThreadWorkflowCard({
+  workflow,
+  isExpanded,
+  onToggle,
+}: ThreadWorkflowCardProps) {
+  if (workflow.status !== "pending") {
+    return null;
+  }
+  const name = workflow.workflowName ?? workflow.description;
+  const progress = agentProgressLabel(workflow);
+  return (
+    <PromptStackCard
+      ariaLabel="Workflow"
+      className="overflow-hidden"
+      style={{ minHeight: PROMPT_STACK_CARD_ROW_HEIGHT }}
+    >
+      <div className="flex items-center">
+        <button
+          type="button"
+          id={TOGGLE_ID}
+          aria-expanded={isExpanded}
+          aria-controls={BODY_ID}
+          aria-label={`Workflow: ${name}`}
+          onClick={onToggle}
+          className={WORKFLOW_HEADER_BUTTON_CLASS}
+        >
+          <Icon
+            name="Workflow"
+            className={activityIconClass("running", "size-3.5 shrink-0")}
+            aria-hidden="true"
+          />
+          <span className="flex min-w-0 flex-1 items-center gap-1.5 text-left">
+            <span
+              className={activityTextClass("running", "min-w-0 truncate")}
+              title={name}
+            >
+              {name}
+            </span>
+            {progress ? (
+              <span
+                className={activityMetaClass(
+                  "running",
+                  "shrink-0 text-2xs tabular-nums",
+                )}
+              >
+                {progress}
+              </span>
+            ) : null}
+            <span
+              className={activityMetaClass(
+                "running",
+                "shrink-0 text-2xs tabular-nums",
+              )}
+            >
+              <LiveDurationText startedAt={workflow.startedAt} />
+            </span>
+          </span>
+          <PromptStackCardChevron
+            isExpanded={isExpanded}
+            className={activityIconClass("running")}
+          />
+        </button>
+      </div>
+      {workflow.workflow ? (
+        <WorkflowPhaseStrip
+          progress={workflow.workflow}
+          settled={false}
+          className="px-3 pb-2"
+        />
+      ) : null}
+      <AnimatedBody
+        id={BODY_ID}
+        labelledBy={TOGGLE_ID}
+        isExpanded={isExpanded}
+        collapsedBorder="none"
+      >
+        <WorkflowWorkRowBody row={workflow} size="base" collapsiblePhases />
+      </AnimatedBody>
+    </PromptStackCard>
+  );
+}
