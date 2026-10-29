@@ -1,0 +1,35 @@
+{
+  "name": "@cloudroom/integration-tests",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --config vitest.config.ts",
+    "test:smoke": "vitest run --config vitest.config.ts fake/smoke",
+    "test:integration": "vitest run --config vitest.real-provider.config.ts",
+    "e2e:mobile-backend": "cross-env NODE_ENV=test node --conditions=source --import tsx mobile-e2e/backend.ts",
+    "e2e:mobile-connect-stub": "node --import tsx mobile-e2e/connect-stub.ts"
+  },
+  "dependencies": {
+    "@cloudroom/config": "workspace:*",
+    "@cloudroom/db": "workspace:*",
+    "@cloudroom/domain": "workspace:*",
+    "@cloudroom/host-daemon": "workspace:*",
+    "@cloudroom/host-daemon-contract": "workspace:*",
+    "@cloudroom/server": "workspace:*",
+    "@cloudroom/server-contract": "workspace:*",
+    "@cloudroom/test-helpers": "workspace:*",
+    "@hono/node-server": "^1.19.11",
+    "drizzle-orm": "^0.38.4",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@cloudroom/tsconfig": "workspace:*",
+    "@types/node": "^22.0.0",
+    "better-sqlite3": "12.10.0",
+    "typescript": "npm:@typescript/typescript6@^6.0.2",
+    "typescript-7": "npm:typescript@^7.0.2",
+    "vitest": "^4.1.1"
+  }
+}

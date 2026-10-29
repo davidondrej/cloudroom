@@ -1,0 +1,1 @@
+CREATE INDEX `cloudroom_commands_thread_created_idx` ON `cloudroom_commands` (`thread_id`,`created_at`);

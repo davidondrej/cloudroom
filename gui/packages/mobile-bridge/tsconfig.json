@@ -1,0 +1,10 @@
+{
+  "extends": [
+    "@cloudroom/tsconfig/base.json",
+    "@cloudroom/tsconfig/typecheck-overrides.json"
+  ],
+  "compilerOptions": {
+    "rootDir": "."
+  },
+  "include": ["src", "test"]
+}

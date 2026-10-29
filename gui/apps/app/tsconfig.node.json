@@ -1,0 +1,19 @@
+{
+  "extends": "@cloudroom/tsconfig/base.json",
+  "compilerOptions": {
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "rootDir": ".",
+    "noEmit": true,
+    "types": ["node"]
+  },
+  "include": [
+    "vite.config.ts",
+    "vite.dev.config.ts",
+    "vite-app-files.ts",
+    "vite-bundle-stats.ts",
+    "vite-font-preload.ts",
+    "vite-shared-ui-seam.ts",
+    "vite-react-compiler.ts"
+  ]
+}

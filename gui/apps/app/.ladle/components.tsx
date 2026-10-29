@@ -1,0 +1,82 @@
+import { useEffect, useMemo, type ReactNode } from "react";
+import { QueryClientProvider } from "@tanstack/react-query";
+import { WorkerPoolContextProvider } from "@pierre/diffs/react";
+import { Provider as JotaiProvider, createStore } from "jotai";
+import { MemoryRouter } from "react-router-dom";
+import { AppToaster } from "../src/components/AppToaster";
+import { RouteNavigationProvider } from "../src/components/ui/app-route-anchor";
+import { TooltipProvider } from "@cloudroom/shared-ui/tooltip";
+import { setPreferredTheme } from "../src/hooks/useTheme";
+import {
+  createDiffWorker,
+  getDiffWorkerPoolSize,
+} from "../src/lib/diff-worker-pool";
+import { createAppQueryClient } from "../src/lib/query-client";
+import "./ladle.css";
+
+if (typeof window !== "undefined") {
+  const params = new URLSearchParams(window.location.search);
+  if (!params.has("theme")) {
+    const stored = window.localStorage.getItem("bb.theme");
+    if (stored === "light" || stored === "dark") {
+      params.set("theme", stored);
+      const next = `${window.location.pathname}?${params.toString()}${window.location.hash}`;
+      window.history.replaceState(null, "", next);
+    }
+  }
+}
+
+export const Provider = ({
+  theme,
+  children,
+}: {
+  theme: "light" | "dark";
+  children: ReactNode;
+}) => {
+  const isDark = theme === "dark";
+  useEffect(() => {
+    setPreferredTheme(isDark ? "dark" : "light");
+  }, [isDark]);
+  const store = useMemo(() => createStore(), []);
+  const queryClient = useMemo(
+    () =>
+      createAppQueryClient({
+        showMutationErrorToasts: false,
+        defaultOptions: {
+          mutations: {
+            retry: false,
+          },
+          queries: {
+            gcTime: Infinity,
+            retry: false,
+          },
+        },
+      }),
+    [],
+  );
+
+  return (
+    <MemoryRouter initialEntries={["/"]}>
+      <RouteNavigationProvider>
+        <JotaiProvider store={store}>
+          <QueryClientProvider client={queryClient}>
+            <WorkerPoolContextProvider
+              poolOptions={{
+                workerFactory: createDiffWorker,
+                poolSize: getDiffWorkerPoolSize(),
+              }}
+              highlighterOptions={{}}
+            >
+              <TooltipProvider delayDuration={300} disableHoverableContent>
+                <div className="min-h-screen text-foreground">
+                  {children}
+                  <AppToaster />
+                </div>
+              </TooltipProvider>
+            </WorkerPoolContextProvider>
+          </QueryClientProvider>
+        </JotaiProvider>
+      </RouteNavigationProvider>
+    </MemoryRouter>
+  );
+};

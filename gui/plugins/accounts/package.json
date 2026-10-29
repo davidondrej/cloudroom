@@ -1,0 +1,37 @@
+{
+  "name": "bb-plugin-accounts",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Several Claude Code and Codex subscriptions for Local and Cloud threads. Pick the one in use.",
+  "engines": {
+    "bb": ">=0.0"
+  },
+  "bb": {
+    "name": "Accounts",
+    "description": "Several Claude Code and Codex subscriptions for Local and Cloud threads. Pick the one in use.",
+    "branding": {
+      "icon": "Layers"
+    },
+    "server": "./server.ts",
+    "app": "./app.tsx"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "prepare:bundled": "bb-plugin-build prepare-bundled"
+  },
+  "dependencies": {
+    "@cloudroom/domain": "workspace:*",
+    "@cloudroom/process-utils": "workspace:*",
+    "@cloudroom/shared-ui": "workspace:*",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@cloudroom/plugin-build": "workspace:*",
+    "@get-bb/plugin-sdk": "workspace:*",
+    "@types/node": "^22.0.0",
+    "@types/react": "^19.0.0",
+    "react": "^19.0.0",
+    "typescript": "npm:@typescript/typescript6@^6.0.2"
+  }
+}

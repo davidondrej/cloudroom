@@ -1,0 +1,1 @@
+ALTER TABLE `projects` ADD `hidden_at` integer;
