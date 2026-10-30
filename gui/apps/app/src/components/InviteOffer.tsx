@@ -85,6 +85,30 @@ export function InviteSettingsCard() {
   );
 }
 
+const NOTCH = "absolute top-1/2 size-[18px] -translate-y-1/2 rounded-full border-[1.5px] border-dashed border-primary/55 bg-background";
+
+export function InviteTicketCard() {
+  const list = useInvites();
+  const open = useSetAtom(manualAtom);
+  if (!list.data || nothingToShare(list.data)) return null;
+  const joined = list.data.codes.filter((item) => item.used).length;
+  return (
+    <div data-testid="account-invite-ticket" className="relative flex flex-col gap-2 rounded-2xl border-[1.5px] border-dashed border-primary/55 bg-primary/7 px-5 py-4">
+      <span aria-hidden className={cn(NOTCH, "-left-2.5 [clip-path:inset(0_0_0_50%)]")} />
+      <span aria-hidden className={cn(NOTCH, "-right-2.5 [clip-path:inset(0_50%_0_0)]")} />
+      <p className="flex items-center gap-2 text-2xs font-semibold tracking-[0.08em] text-primary-text uppercase"><TicketIcon className="text-primary-text" />Invite friends</p>
+      <p className="text-base leading-snug font-semibold text-foreground">Invite a friend and get up to $400 of Cloud credits</p>
+      <p className="text-xs text-subtle-foreground">They get 20% off their first month. You get credits worth what they pay.</p>
+      <div className="mt-auto flex items-center gap-3 pt-2">
+        <span className="min-w-0 flex-1 text-xs text-subtle-foreground tabular-nums">{joined ? `${joined} ${joined === 1 ? "friend" : "friends"} joined` : "Unlimited invites"}</span>
+        <button type="button" onClick={() => open(true)} className="h-8 shrink-0 rounded-md bg-primary px-3 text-xs font-semibold text-primary-foreground hover:brightness-95">
+          Invite a friend
+        </button>
+      </div>
+    </div>
+  );
+}
+
 const INK = "#0e0d0b", LIME = "#bfff00";
 const ROOT: CSSProperties = {
   background: `radial-gradient(900px 600px at 76% 52%, rgba(191,255,0,.12), transparent 60%), radial-gradient(700px 500px at 10% 0%, rgba(243,236,219,.06), transparent 60%), ${INK}`,

@@ -147,6 +147,12 @@ Each new session is created first with `openclaw gateway call sessions.create`: 
 
 Hosted sandboxes copy the Mac's OpenClaw sign-ins and API keys (its state databases and `.env`) and its default model and providers, never Claude plans or plan tokens (ADR 0265). Before sleep the sandbox stops the Gateway and wipes every copy: both databases, `models.json`, and the Codex runtime's login. Memory, persona, and chat apps stay on the Mac. Tested on Linux with OpenClaw 2026.10.3 and a fake model: start, a tool call in the cloud folder, steer, interrupt, restart and resume, a tool's `room-cli` call, recovery after the Gateway stopped, a changed Cloud environment, an imported API key, and the no-login failure.
 
+## Droid
+
+`src/runtime/droid.rs` runs Factory's `droid exec --output-format acp` over the shared ACP protocol. Core discovers `droid` in the agent account's `.local/bin` or `/usr/local/bin` once `~/.factory` exists. Sessions start in `auto-high` (full access, ADR 0045); the CLI's `--auto` flag does not apply to ACP sessions. Model and `reasoning_effort` are session options, and an effort the model does not offer is skipped. Droid keeps sessions in `~/.factory/sessions/<folder>/<id>.jsonl` and replays them on `session/load`; Core stores only the ACP stream.
+
+A browser login can't run in a sandbox: Droid signs in with `FACTORY_API_KEY` from the user's Cloud environment variables. Without one, a start fails with a message that says where to add it.
+
 ## Queue, completion and recovery
 
 There is one durable Cloudroom queue. Pi's memory-only steering/follow-up queue is not used for that backlog. RPC acknowledgement means acceptance, not completion. Pi requests settle only after its full run, including internal retries and compaction; an additional state check guards premature settled signals. Handled extension commands with no agent run are reconciled separately. Interrupt intent is correlated to the active request even when Pi aborts inside a tool without emitting a new assistant message. Interrupt clears Pi's internal continuations first, but preserves Cloudroom's durable future requests.

@@ -50,6 +50,10 @@ import {
 import { usePromptModePermissionDisplay } from "@/components/promptbox/usePromptModePermissionDisplay";
 import { PROMPT_PLACEHOLDER_HINT } from "@/components/promptbox/follow-up-placeholder";
 import { usePromptVoice } from "@/components/promptbox/usePromptVoice";
+import {
+  ProjectNudgeHint,
+  useProjectNudge,
+} from "@/components/promptbox/ProjectNudge";
 import { useOptionalPaneContext } from "@/views/thread-detail/PaneContext";
 import {
   EnvironmentPickerUI,
@@ -357,6 +361,17 @@ const DefaultNewThreadComposer = memo(function DefaultNewThreadComposer({
     : execution.model.isLoading
       ? "Loading models..."
       : "Submit (Enter)";
+  const nudge = useProjectNudge(value, project?.value);
+  const nudgeProject = nudge.projectId
+    ? project?.projects.find((option) => option.id === nudge.projectId)
+    : undefined;
+  const switchOnEnter =
+    nudgeProject && project
+      ? () => {
+          project.onChange(nudgeProject.id);
+          return true;
+        }
+      : undefined;
 
   return (
     <div
@@ -364,6 +379,13 @@ const DefaultNewThreadComposer = memo(function DefaultNewThreadComposer({
       data-app-composer-role="primary"
       data-promptbox-shell=""
       className="w-full"
+      onKeyDownCapture={
+        nudgeProject
+          ? (event) => {
+              if (event.key === "Escape") nudge.dismiss();
+            }
+          : undefined
+      }
     >
       <div
         className={`mb-2 grid gap-2 empty:hidden ${PROMPT_STACK_TRACK_CLASS}`}
@@ -379,6 +401,7 @@ const DefaultNewThreadComposer = memo(function DefaultNewThreadComposer({
         mentionRanges={mentionRanges}
         onChange={onChange}
         onSubmit={onSubmit}
+        onEnterKey={switchOnEnter}
         textEffects={textEffects}
         onComposerLayoutChange={onComposerLayoutChange}
         history={history}
@@ -465,6 +488,12 @@ const DefaultNewThreadComposer = memo(function DefaultNewThreadComposer({
           />
         </div>
       </div>
+      {nudgeProject && project ? (
+        <ProjectNudgeHint
+          name={nudgeProject.name}
+          onAccept={() => project.onChange(nudgeProject.id)}
+        />
+      ) : null}
       {modeConfig.footer}
     </div>
   );

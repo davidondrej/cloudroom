@@ -5,7 +5,7 @@ import { handoffSchema, messageSchema, orgRpcContract, settingsSchema, sharedThr
 // Organizations v1 (docs/scopes/organizations.md). Off by default; the website (web/lib/org.ts) holds everything, and
 // this plugin only asks it: a poll paced by the website, one sharing check per new Cloud thread, and clicks.
 const RETRY_MS = 5 * 60_000, MIN_POLL_MS = 30_000, SAVED = "state";
-const PROVIDERS = new Set(["claude-code", "codex", "pi", "opencode", "cursor", "hermes", "devin", "openclaw"]);
+const PROVIDERS = new Set(["claude-code", "codex", "pi", "opencode", "cursor", "hermes", "devin", "droid", "openclaw"]);
 const message = (error: unknown) => (error instanceof Error ? error.message : String(error));
 const repoKey = (url: string | null | undefined) => url?.trim().match(/github\.com[:/]([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+?)(?:\.git)?\/?$/i)?.[1]?.toLowerCase() ?? null;
 

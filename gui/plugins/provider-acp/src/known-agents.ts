@@ -287,6 +287,35 @@ export const KNOWN_ACP_AGENTS: readonly AcpAgentDefinition[] = [
       env: {},
     },
   },
+  {
+    id: "acp-droid",
+    displayName: "Droid",
+    icon: declaredIcon("droid"),
+    signInCommand: "droid",
+    installUrl: "https://docs.factory.com/droid-cli/quickstart",
+    installer: { scriptUrl: "https://app.factory.ai/cli" },
+    visibility: "installed",
+    primaryModels: [
+      "claude-opus-5-5",
+      "gpt-6.1-sol",
+      "claude-fable-5.1",
+      "kimi-k3",
+      "auto",
+    ],
+    fork: "tip",
+    launch: {
+      displayName: "Droid",
+      command: "droid",
+      args: ["exec", "--output-format", "acp"],
+      env: {},
+      nativeSkillRoots: {
+        user: recursiveRoots([".factory/skills", ".agents/skills"]),
+        project: ancestorRoots(
+          recursiveRoots([".factory/skills", ".agents/skills"]),
+        ),
+      },
+    },
+  },
 ];
 
 export const RESERVED_ACP_PROVIDER_IDS: ReadonlySet<string> = new Set(

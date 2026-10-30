@@ -11,6 +11,7 @@ import {
   DropdownMenuTrigger,
 } from "@cloudroom/shared-ui/dropdown-menu";
 import { Icon } from "@cloudroom/shared-ui/icon";
+import { Input } from "@cloudroom/shared-ui/input";
 import { cn } from "@cloudroom/shared-ui/lib/utils";
 import { Switch } from "@cloudroom/shared-ui/switch";
 import { Textarea } from "@cloudroom/shared-ui/textarea";
@@ -27,6 +28,11 @@ import {
   useSystemExecutionOptions,
 } from "@/hooks/queries/system-queries";
 import { threadPurposeShowInSidebarAtom } from "@/components/thread/ThreadPurposeHoverCard";
+import {
+  projectNudgeEnabledAtom,
+  projectNudgeConfidenceAtom,
+} from "@/components/promptbox/ProjectNudge";
+import { useCloudroomAccount } from "@/hooks/queries/cloudroom-queries";
 import { createSyncedPreferenceAtom } from "@/lib/ui-preferences/synced-preference-atom";
 import {
   SETTINGS_DROPDOWN_CONTENT_CLASS,
@@ -243,6 +249,62 @@ function ModelItem(props: ModelItemProps) {
         )}
       />
     </DropdownMenuItem>
+  );
+}
+
+export function ProjectNudgeSettingsSection() {
+  const [enabled, setEnabled] = useAtom(projectNudgeEnabledAtom);
+  const [confidence, setConfidence] = useAtom(projectNudgeConfidenceAtom);
+  const [draft, setDraft] = useState(String(confidence));
+  useEffect(() => setDraft(String(confidence)), [confidence]);
+  const saveConfidence = () => {
+    const next = Math.round(Number(draft));
+    if (next >= 1 && next <= 99) setConfidence(next);
+    else setDraft(String(confidence));
+  };
+  const plan = useCloudroomAccount().data?.plan ?? null;
+  const on = enabled ?? plan !== "free";
+
+  return (
+    <SettingsSection
+      title="Wrong-project hint"
+      description="While you type a new thread's prompt, suggests the right project when it looks like it belongs in another one. Press Enter to switch, or Esc to hide it."
+    >
+      <div className="space-y-4">
+        <SettingsWithControl
+          label="Wrong-project hint"
+          description="On by default for paid plans. Under 1 Cloud Credit per prompt: Pro's credits cover about 70,000 prompts."
+        >
+          <Switch
+            aria-label="Wrong-project hint"
+            checked={on}
+            onCheckedChange={setEnabled}
+          />
+        </SettingsWithControl>
+        {on ? (
+          <SettingsWithControl
+            label="Confidence"
+            description="Shows the hint only when Jev is at least this sure, in percent. Lower shows it more often, but it is wrong more often too. Default 70."
+          >
+            <Input
+              type="number"
+              inputMode="numeric"
+              min={1}
+              max={99}
+              step={1}
+              aria-label="Wrong-project hint confidence"
+              value={draft}
+              onChange={(event) => setDraft(event.target.value)}
+              onBlur={saveConfidence}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") saveConfidence();
+              }}
+              className="h-7 w-20 text-xs"
+            />
+          </SettingsWithControl>
+        ) : null}
+      </div>
+    </SettingsSection>
   );
 }
 

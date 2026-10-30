@@ -549,6 +549,12 @@ export class SandboxDirectory {
     return z.object({ rename: z.boolean() }).parse(value).rename;
   }
 
+  /** The project a new thread's prompt is for, when Jev is at least `confidence`% sure (1–99), or null (docs/scopes/jev-project-selection.md). */
+  async projectSuggestion(check: { prompt: string; confidence: number; projects: { id: string; name: string; summary: string }[] }): Promise<string | null> {
+    const value = await this.call(check, "project-suggest");
+    return z.object({ projectId: z.string().nullable() }).parse(value).projectId;
+  }
+
   /** Onboarding failures and the install ID link, saved with this account (ADR 0201). */
   setupEvent(event: string, context: Record<string, unknown>): Promise<unknown> {
     return this.call({ event, context }, "setup-events");

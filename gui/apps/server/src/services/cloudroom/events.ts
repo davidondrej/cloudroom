@@ -12,10 +12,10 @@ import { binding, command, queuedPrompts, saveBinding, saveCommandState, saveSta
 const object = z.record(z.string(), z.unknown());
 const nativeFrame = z.object({ method: z.string(), params: object.optional() });
 // GUI provider ID → cloud core harness ID.
-export const CLOUD_HARNESSES = { codex: "codex", pi: "pi", "claude-code": "claude-code", "acp-cursor": "cursor", "acp-fx": "fx", "acp-opencode": "opencode", "acp-hermes-agent": "hermes", "acp-devin": "devin", "acp-openclaw": "openclaw" } as const;
+export const CLOUD_HARNESSES = { codex: "codex", pi: "pi", "claude-code": "claude-code", "acp-cursor": "cursor", "acp-fx": "fx", "acp-opencode": "opencode", "acp-hermes-agent": "hermes", "acp-devin": "devin", "acp-droid": "droid", "acp-openclaw": "openclaw" } as const;
 export type CloudProvider = keyof typeof CLOUD_HARNESSES;
 export const isCloudProvider = (id: string | undefined): id is CloudProvider => id !== undefined && Object.hasOwn(CLOUD_HARNESSES, id);
-export const HARNESS_NAMES: Record<CloudProvider, string> = { codex: "Codex", pi: "Pi", "claude-code": "Claude Code", "acp-cursor": "Cursor", "acp-fx": "fx", "acp-opencode": "opencode", "acp-hermes-agent": "Hermes Agent", "acp-devin": "Devin", "acp-openclaw": "OpenClaw" };
+export const HARNESS_NAMES: Record<CloudProvider, string> = { codex: "Codex", pi: "Pi", "claude-code": "Claude Code", "acp-cursor": "Cursor", "acp-fx": "fx", "acp-opencode": "opencode", "acp-hermes-agent": "Hermes Agent", "acp-devin": "Devin", "acp-droid": "Droid", "acp-openclaw": "OpenClaw" };
 export const isAcpProvider = (id: string | undefined): id is Extract<CloudProvider, `acp-${string}`> => isCloudProvider(id) && id.startsWith("acp-");
 const FINISHED = ["completed", "failed", "interrupted", "unknown", "unknown_after_restart"];
 const turnStatus = (state: string): ThreadEventTurnStatus => state === "completed" ? "completed" : state === "interrupted" ? "interrupted" : "failed";

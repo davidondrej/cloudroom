@@ -124,7 +124,7 @@ export function lastNote(reply: string): string | null {
 
 // Loop run records (ADR 0298): every run reports what it did, why, and how sure it was. Same text as Cloud loops.
 const REPORT_ASK =
-  'Loop report: before your final message, run `room-cli loop report --outcome done|acted|needs-you|failed --confidence high|medium|low --reason "1-2 sentences on why"`, with one `--action "..."` per change you made (like `--action "merged #419"`). done: nothing needed doing; acted: you changed something; needs-you: you left it for the user.';
+  'Before replying, run `room-cli loop report --outcome done|acted|needs-you|failed --confidence high|medium|low --reason "why"`, plus one `--action "..."` per change.';
 
 export function memoryText(notes: string[]): string {
   const past = notes.length

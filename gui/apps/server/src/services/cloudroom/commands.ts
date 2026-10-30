@@ -1361,7 +1361,7 @@ class CloudroomService {
     const project = getProject(this.deps.db, request.projectId);
     if (!project) throw new ApiError(404, "project_not_found", "Project not found");
     if (!isCloudProvider(request.providerId) || (!fork && (request.originKind || request.sourceThreadId)) || request.sendAt || request.pluginSubmission || (request.environment.type !== "project-default" && !codeFrom))
-      throw new ApiError(400, "cloudroom_unsupported", "Cloud supports new Codex, Pi, Cursor, fx, opencode, Hermes Agent, Devin, OpenClaw and Claude Code threads in a cloud folder. Forks, scheduling and native machine targets are not supported.");
+      throw new ApiError(400, "cloudroom_unsupported", "Cloud supports new Codex, Pi, Cursor, fx, opencode, Hermes Agent, Devin, Droid, OpenClaw and Claude Code threads in a cloud folder. Forks, scheduling and native machine targets are not supported.");
     if (request.permissionMode && request.permissionMode !== "full") throw new ApiError(400, "cloudroom_unsupported", "Cloud uses the full permission mode; restricted modes are not supported.");
     if (request.startedOnBehalfOf || request.sourceSeqEnd !== undefined) throw new ApiError(400, "cloudroom_unsupported", "Cloud continuation and delegated starts are not enabled.");
     // A new sandbox starts on first delivery, so check against the last known capabilities.

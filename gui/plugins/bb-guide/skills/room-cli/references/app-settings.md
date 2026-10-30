@@ -31,7 +31,7 @@ every window and client sees the same value.
 ## Theme and starting machine
 
 - `appearance.theme` (`light`, `dark`, or `system`) and
-  `defaults.startingMachine` (`cloud` or `last`) are UI preferences too, so
+  `defaults.startingMachine` (`last`, the default, or `cloud`) are UI preferences too, so
   `room-cli settings ui set appearance.theme dark` changes every open window.
 
 ## Keyboard shortcuts

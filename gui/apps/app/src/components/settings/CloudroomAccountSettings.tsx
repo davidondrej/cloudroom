@@ -1,10 +1,9 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Button } from "@cloudroom/shared-ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuTrigger } from "@cloudroom/shared-ui/dropdown-menu";
 import { Icon } from "@cloudroom/shared-ui/icon";
-import { cn } from "@cloudroom/shared-ui/lib/utils";
-import { SETTINGS_CARD_CLASS, SETTINGS_CARD_ROW_CLASS, SettingsSection } from "@/components/ui/settings-section";
+import { SettingsSection } from "@/components/ui/settings-section";
 import { sdk } from "@/lib/sdk";
 import { openUrlInExternalBrowser } from "@/lib/url-open-routing";
 import { useCloudroomAccount } from "@/hooks/queries/cloudroom-queries";
@@ -12,6 +11,7 @@ import { MacAccessMenuItems, useMacAccessLevel, MAC_ACCESS_TITLE } from "@/compo
 import { FixPrompt } from "@/components/ui/fix-prompt";
 import { ConfirmDeleteDialog, ConfirmDeleteDialogContent } from "@/components/dialogs/ConfirmDeleteDialog";
 import { cloudUnavailableFixPrompt, syncFixPrompt } from "@/lib/fix-prompts";
+import { AccountOverview, StatusPill } from "./AccountOverview";
 import { SelfHostedCoreForm } from "./SelfHostedCoreForm";
 
 function useRefreshCloudroom() {
@@ -24,6 +24,7 @@ function useRefreshCloudroom() {
 export function CloudroomAccountSettings() {
   const queryClient = useQueryClient();
   const [signInUrl, setSignInUrl] = useState<string | null>(null);
+  const [signOutOpen, setSignOutOpen] = useState(false);
   const status = useCloudroomAccount();
   const refresh = useRefreshCloudroom();
   const action = useMutation({
@@ -60,18 +61,9 @@ export function CloudroomAccountSettings() {
   useEffect(() => { if (previews?.state === "connected") resetCheck(); }, [previews?.state, resetCheck]);
   const signedIn = account && !status.data?.signingIn;
   return <>
-    {signedIn ? <section className="flex flex-col items-center gap-3 text-center">
+    {signedIn ? <section className="space-y-4">
       <h2 className="sr-only">Cloudroom account</h2>
-      <span aria-hidden className="grid size-14 place-items-center rounded-full bg-primary text-xl font-semibold text-primary-foreground">{account.email.charAt(0).toUpperCase()}</span>
-      <div className="min-w-0 max-w-full">
-        <p className="truncate text-base font-semibold text-foreground">{account.email}</p>
-        <div className="mt-1.5 flex flex-wrap justify-center gap-x-4 gap-y-1">
-          <StatusPill ok={Boolean(ready)}>{ready ? "Cloud connected" : status.data?.error ?? "Cloud is unavailable. Your VM may still be working."}</StatusPill>
-          {previews && <StatusPill ok={previews.state === "connected"} title={previews.issue ?? previews.message ?? undefined}>{previews.state === "connected" ? "Previews ready" : "Previews reconnecting"}</StatusPill>}
-          {sync && <StatusPill ok={sync.state === "synced"} title="Skills and portable agent settings sync automatically.">{sync.state === "synced" ? "Synced" : `Sync: ${sync.state}`}</StatusPill>}
-        </div>
-      </div>
-      <div className="w-full space-y-3 text-left empty:hidden">
+      <div className="space-y-3 empty:hidden">
         {!ready && <FixPrompt prompt={cloudUnavailableFixPrompt(status.data?.error)} />}
         {sync && (sync.issue || sync.conflicts) ? <p role="status" className="text-sm">{sync.issue ?? `${sync.conflicts} conflicting files need review.`}</p> : null}
         {previews?.explained && previews.state !== "connected" && previews.message ? <div role="status" className="rounded-xl border border-warning/30 bg-warning/10 px-4 py-3 text-center text-sm">
@@ -84,6 +76,14 @@ export function CloudroomAccountSettings() {
         {sync && syncBroken && <FixPrompt prompt={syncFixPrompt(sync.state, sync.issue)} />}
         {error && <p role="alert" className="text-sm">{error}</p>}
       </div>
+      <AccountOverview email={account.email} onSignOut={() => setSignOutOpen(true)} />
+      <div className="flex flex-wrap items-center justify-center gap-x-4 gap-y-1 pt-1">
+        <StatusPill ok={Boolean(ready)}>{ready ? "Cloud connected" : status.data?.error ?? "Cloud is unavailable. Your VM may still be working."}</StatusPill>
+        {previews && <StatusPill ok={previews.state === "connected"} title={previews.issue ?? previews.message ?? undefined}>{previews.state === "connected" ? "Previews ready" : "Previews reconnecting"}</StatusPill>}
+        {sync && <StatusPill ok={sync.state === "synced"} title="Skills and portable agent settings sync automatically.">{sync.state === "synced" ? "Synced" : `Sync: ${sync.state}`}</StatusPill>}
+        <Button variant="link" className="h-auto gap-1 p-0 text-xs font-normal text-muted-foreground hover:text-foreground" onClick={() => openUrlInExternalBrowser("https://www.cloudroom.dev/settings")}>Delete account<Icon name="ExternalLink" className="size-3" aria-hidden /></Button>
+      </div>
+      <SignOutDialog open={signOutOpen} onOpenChange={setSignOutOpen} />
     </section> : <SettingsSection title="Cloudroom account" description="Sign in to connect your existing cloud VM. Local execution stays available.">
       <div className="space-y-3 text-sm">
         <p>{account ? account.email : "Not signed in to Cloudroom"}</p>
@@ -96,28 +96,7 @@ export function CloudroomAccountSettings() {
         {status.data && !account && !status.data.signingIn && <SelfHostedCoreForm connected={status.data.selfHosted === true} ready={status.data.ready} error={status.data.error} />}
       </div>
     </SettingsSection>}
-    {signedIn && <BillingRow />}
   </>;
-}
-
-function StatusPill({ ok, title, children }: { ok: boolean; title?: string; children: ReactNode }) {
-  return <span role="status" title={title} className="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
-    <span aria-hidden className={cn("size-1.5 shrink-0 rounded-full", ok ? "bg-success" : "bg-warning")} />
-    {children}
-  </span>;
-}
-
-// Plan, usage, and invoices live on the website (web/app/billing).
-function BillingRow() {
-  return <div className={SETTINGS_CARD_CLASS}>
-    <div className={SETTINGS_CARD_ROW_CLASS}>
-      <div className="min-w-0 flex-1">
-        <p className="text-foreground">Plan & billing</p>
-        <p className="text-xs text-subtle-foreground/75">Your plan, usage, and invoices.</p>
-      </div>
-      <Button variant="ghost" size="sm" className="text-muted-foreground" aria-label="Open plan and billing" onClick={() => openUrlInExternalBrowser("https://www.cloudroom.dev/billing")}>Open<Icon name="ExternalLink" aria-hidden /></Button>
-    </div>
-  </div>;
 }
 
 export function MacAccessControl() {
@@ -135,17 +114,7 @@ export function MacAccessControl() {
   </div>;
 }
 
-// Bottom of the Account page. The confirm step keeps sign-out from being a single stray click.
-export function CloudroomSignOut() {
-  const status = useCloudroomAccount();
-  const [open, setOpen] = useState(false);
-  if (!status.data?.account || status.data.signingIn) return null;
-  return <div className="flex flex-col items-center gap-2">
-    <Button variant="outline" size="sm" onClick={() => setOpen(true)}>Sign out</Button>
-    <SignOutDialog open={open} onOpenChange={setOpen} />
-  </div>;
-}
-
+// The confirm step keeps sign-out from being a single stray click.
 export function SignOutDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (open: boolean) => void }) {
   const refresh = useRefreshCloudroom();
   const logout = useMutation({ mutationFn: () => sdk.cloudroom.logout(), onSuccess: async () => { onOpenChange(false); await refresh(); } });

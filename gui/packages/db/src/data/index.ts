@@ -116,9 +116,12 @@ export {
   getAppKeybindingOverrides,
   getAppSettings,
   getPluginSafeMode,
+  getProjectSummaries,
   setAppKeybindingOverrides,
   setAppSettings,
   setPluginSafeMode,
+  setProjectSummaries,
+  type ProjectSummaries,
 } from "./app-settings.js";
 export { getStoredThreadTabs, replaceStoredThreadTabs } from "./thread-tabs.js";
 export {

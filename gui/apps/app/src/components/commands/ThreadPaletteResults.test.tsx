@@ -264,6 +264,51 @@ describe("ThreadPaletteResults", () => {
     },
   );
 
+  it("lists a server title hit inside a word under thread names", () => {
+    const title = "CloudRoom UI — design evolution · coordinator";
+    const start = title.indexOf("oord");
+    const contentMatch: ThreadSearchMatch = {
+      sourceKind: "assistant_message",
+      sourceSeq: 7,
+      text: "The coordinator merged it",
+      highlightRanges: [{ start: 5, end: 9 }],
+    };
+    const data = createSearchResponse(
+      createThreadListEntry({ id: "thr_inside", title }),
+      [
+        {
+          sourceKind: "title",
+          sourceSeq: null,
+          text: title,
+          highlightRanges: [{ start, end: start + 4 }],
+        },
+        contentMatch,
+      ],
+    );
+    data.active.results.push({
+      thread: createThreadListEntry({ id: "thr_chat", title: "Other work" }),
+      matches: [contentMatch],
+    });
+    data.active.total = 2;
+    mockThreadSearch({
+      data,
+      debouncedQuery: "oord",
+      hasSearchableQuery: true,
+      isDebouncing: false,
+      isError: false,
+      isFetching: false,
+      isLoading: false,
+    });
+
+    renderResults({ query: "oord" });
+
+    expect(
+      within(screen.getByRole("group", { name: "Thread names" }))
+        .getAllByRole("option")
+        .map((row) => row.id),
+    ).toEqual(["palette-option-title:thr_inside"]);
+  });
+
   it("orders project, name, and content hits with distinct navigation targets", async () => {
     const onNavigationItemsChange = vi.fn();
     const onSelect = vi.fn();

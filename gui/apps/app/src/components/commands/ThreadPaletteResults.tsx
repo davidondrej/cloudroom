@@ -256,7 +256,7 @@ export function ThreadPaletteResults({
         const fullNameMatch =
           queryWords.length > 0 &&
           queryWords.every((word) =>
-            nameWords.some((nameWord) => nameWord.startsWith(word)),
+            nameWords.some((nameWord) => nameWord.includes(word)),
           );
         const snippetMatch = getSnippetMatch(matches);
         if (

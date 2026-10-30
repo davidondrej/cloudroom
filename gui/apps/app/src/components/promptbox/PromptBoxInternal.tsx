@@ -542,6 +542,8 @@ interface PromptBoxInternalProps {
   onChange: (value: string, mentionRanges: PromptTextMention[]) => void;
   onSubmit: () => void;
   onEscape?: () => void;
+  /** Runs on the Enter key only, before it submits. Return true to skip the submit. */
+  onEnterKey?: () => boolean;
   blurOnPointerSubmit?: boolean;
   placeholder?: string;
   placeholderHint?: string;
@@ -1265,6 +1267,7 @@ export function PromptBoxInternal({
   onChange,
   onSubmit,
   onEscape,
+  onEnterKey,
   blurOnPointerSubmit = false,
   placeholder = "Ask anything. @ to mention files, folders, or sections",
   placeholderHint,
@@ -3281,10 +3284,12 @@ export function PromptBoxInternal({
 
       if (!isSubmitKey) return false;
       event.preventDefault();
+      if (onEnterKey?.()) return true;
       submitPrompt();
       return true;
     },
     [
+      onEnterKey,
       activeHistoryIndex,
       activeSuggestions,
       activeTriggerKind,

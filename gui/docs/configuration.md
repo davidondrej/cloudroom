@@ -485,8 +485,9 @@ Known ACP agents appear when their CLI is installed on the host. bb exposes
 `acp-omp` when `omp` (oh-my-pi) is on PATH, `acp-grok` when Grok Build's `grok`
 CLI is on PATH and can be launched as `grok agent stdio`, and
 `acp-hermes-agent` when Hermes' `hermes` CLI is on PATH, `acp-openclaw` when the
-`openclaw` CLI is on PATH (it runs through the host's OpenClaw Gateway), and `acp-devin` when
-Devin's `devin` CLI is on PATH. `acp-cursor` is always listed.
+`openclaw` CLI is on PATH (it runs through the host's OpenClaw Gateway), `acp-devin` when
+Devin's `devin` CLI is on PATH, and `acp-droid` when Factory's `droid` CLI is on PATH
+(launched as `droid exec --output-format acp`). `acp-cursor` is always listed.
 
 Add your own agent through the ACP providers plugin's `customAgents` setting,
 which holds a JSON array. In the app it is the multi-line editor on the
@@ -502,7 +503,7 @@ Each entry needs `id` (lowercase letters, digits and dashes), `displayName`,
 and `command`. bb derives the provider id `acp-<id>`; it never changes once a
 thread has used it. An id bb always lists (`cursor`) is reserved; an id bb
 lists only where the agent is installed (`opencode`, `omp`, `grok`,
-`hermes-agent`, `devin`) is not, so an entry with that id REPLACES the shipped agent.
+`hermes-agent`, `devin`, `droid`) is not, so an entry with that id REPLACES the shipped agent.
 A replacing entry keeps the shipped agent's `nativeSkillRoots` unless it sets
 its own, and bb still lists the roots that agent's host config names (its
 config directory, compat trees, configured paths, plugins) either way.
@@ -741,7 +742,7 @@ client wrote first, so a stale window cannot silently clobber a newer value.
 | `sidebar.navigationProvider`      | Plugin key, `__automatic__`, or `__builtin__`       |
 | `sidebar.threadListProvider`      | Plugin key, `__automatic__`, or `__builtin__`       |
 | `appearance.theme`                | `light`, `dark`, or `system` (default)              |
-| `defaults.startingMachine`        | `cloud` (default) or `last` for the last machine    |
+| `defaults.startingMachine`        | `last` (default) or `cloud`; Cloud on fresh install |
 
 By project (`project`) is the default for `sidebar.organizationMode` when no
 value is saved. Existing server and legacy browser choices are preserved.
@@ -796,6 +797,15 @@ Its Show in sidebar switch (`threadPurpose.showInSidebar`, on by default) hides 
 The default model is Haiku 5.5 on Claude Code, falling back to GPT-6 Luna on Codex. Codex-only users get GPT-6 Luna.
 With neither signed in on this Mac, no purposes are written.
 `room-cli thread show` prints it.
+
+### Wrong-project hint
+
+While you type a new thread's prompt, a line under the project picker suggests another project when Jev is sure the
+prompt belongs there. The first Enter switches the project; the second sends. Clicking Send always sends. Esc hides it for that prompt.
+It checks after a 500 ms typing pause once the prompt has 5 words, and never checks the same text twice.
+Each project gets a one-paragraph summary from the Thread purpose models, written 30 s after the app starts and when a project is added, and rewritten every 7 days; projects with no
+folder on this Mac are skipped. Settings → Wrong-project hint turns it on or off (`projectNudge.enabled`; null is on
+for paid plans and off for Free) and sets how sure Jev must be (`projectNudge.confidence`, 1–99 percent, default 70).
 
 ### Sidebar footer
 

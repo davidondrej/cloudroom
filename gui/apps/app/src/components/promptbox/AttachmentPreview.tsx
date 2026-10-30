@@ -164,19 +164,22 @@ export function AttachmentPreview({
       ) : (
         <div className="mx-3 mb-1 mt-1">
           {imageAttachments.length > 0 || uploadingImageCount > 0 ? (
-            <div className="mb-1.5 flex flex-wrap gap-2">
+            <div className="mb-1.5 flex flex-wrap gap-1.5">
               {imageAttachments.map((attachment, index) => (
-                <div key={`${attachment.path}-${index}`} className="relative">
+                <div
+                  key={`${attachment.path}-${index}`}
+                  className="group/attachment-image relative"
+                >
                   <button
                     type="button"
-                    className="cursor-zoom-in overflow-hidden rounded-md border border-border bg-surface-recessed"
+                    className="flex cursor-zoom-in overflow-hidden rounded-[10px] bg-surface-recessed"
                     onClick={() => onExpandedImageIndexChange(index)}
                     title={attachment.name}
                   >
                     <img
                       src={attachmentImageItems[index]?.src}
                       alt={attachment.name}
-                      className="h-16 w-24 object-cover"
+                      className="size-14 rounded-[10px] object-cover outline-1 -outline-offset-1 outline-foreground/10 transition-colors group-hover/attachment-image:outline-foreground/40"
                       loading="lazy"
                       decoding="async"
                       onLoad={(event) =>
@@ -195,7 +198,7 @@ export function AttachmentPreview({
                         releaseLocalAttachmentPreview(attachment.path);
                         onRemoveAttachment(attachment.path);
                       }}
-                      className="group/attachment-remove-image absolute right-1 top-1 z-10 inline-flex size-4 items-center justify-center rounded-full text-white focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring max-md:pointer-coarse:-right-1 max-md:pointer-coarse:-top-1 max-md:pointer-coarse:size-7"
+                      className="group/attachment-remove-image absolute right-1 top-1 z-10 inline-flex size-4 items-center justify-center rounded-full text-white opacity-0 transition-opacity group-hover/attachment-image:opacity-100 group-focus-within/attachment-image:opacity-100 pointer-coarse:opacity-100 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring max-md:pointer-coarse:-right-1 max-md:pointer-coarse:-top-1 max-md:pointer-coarse:size-7"
                       aria-label={`Remove ${attachment.name}`}
                     >
                       <span className="inline-flex size-4 items-center justify-center rounded-full bg-black/55 transition-colors group-hover/attachment-remove-image:bg-black/70">
@@ -210,7 +213,7 @@ export function AttachmentPreview({
                   key={`uploading-${index}`}
                   role="status"
                   aria-label="Uploading image"
-                  className="flex h-16 w-24 items-center justify-center rounded-md border border-border bg-surface-recessed text-muted-foreground motion-safe:animate-in motion-safe:fade-in motion-safe:duration-200"
+                  className="flex size-14 items-center justify-center rounded-[10px] bg-surface-recessed text-muted-foreground motion-safe:animate-in motion-safe:fade-in motion-safe:duration-200"
                 >
                   <Icon name="Spinner" className="size-4 animate-spin" />
                 </div>

@@ -23,6 +23,7 @@ pub(crate) mod cursor_auth;
 pub(crate) mod cursor_models;
 pub mod cursor_print;
 mod devin;
+mod droid;
 mod files;
 mod fx;
 mod hermes;
@@ -52,6 +53,7 @@ pub enum Kind {
     OpenCode,
     Hermes,
     Devin,
+    Droid,
     #[serde(rename = "openclaw")]
     OpenClaw,
 }
@@ -112,6 +114,7 @@ pub fn pi_reasoning_accepted(level: &str) -> bool {
     level == "max" || PI_REASONING_LEVELS.contains(&level)
 }
 pub use devin::REASONING_LEVELS as DEVIN_REASONING_LEVELS;
+pub use droid::REASONING_LEVELS as DROID_REASONING_LEVELS;
 pub use hermes::REASONING_LEVELS as HERMES_REASONING_LEVELS;
 pub use openclaw::REASONING_LEVELS as OPENCLAW_REASONING_LEVELS;
 pub use opencode::REASONING_LEVELS as OPENCODE_REASONING_LEVELS;
@@ -335,7 +338,7 @@ trait Adapter: Send {
 
 /// A Git 2.54+ config hook that drops AI agent Co-authored-by lines from every commit message.
 fn strip_ai_co_authors_env(command: &mut Command) {
-    const HOOK: &str = r#"cloudroom_strip_ai_co_authors() { grep -viE '^co-authored-by:.*(claude|anthropic|cursor|codex|openai|chatgpt|copilot|gemini|aider\.chat|devin-ai|windsurf|codeium)' "$1" > "$1.cloudroom"; [ $? -le 1 ] && mv "$1.cloudroom" "$1" || rm -f "$1.cloudroom"; }; cloudroom_strip_ai_co_authors"#;
+    const HOOK: &str = r#"cloudroom_strip_ai_co_authors() { grep -viE '^co-authored-by:.*(claude|anthropic|cursor|codex|openai|chatgpt|copilot|gemini|aider\.chat|devin-ai|factory-droid|windsurf|codeium)' "$1" > "$1.cloudroom"; [ $? -le 1 ] && mv "$1.cloudroom" "$1" || rm -f "$1.cloudroom"; }; cloudroom_strip_ai_co_authors"#;
     command.envs([
         ("GIT_CONFIG_COUNT", "3"),
         (
@@ -561,6 +564,17 @@ impl Handle {
                 None,
                 None,
             ),
+            Kind::Droid => (
+                droid::command(config, &profile)?,
+                Box::new(cursor::Protocol::new(
+                    config,
+                    &profile,
+                    resume.as_ref(),
+                    droid::DROID,
+                )),
+                None,
+                None,
+            ),
             Kind::OpenClaw => (
                 openclaw::command(config, &profile)?,
                 Box::new(cursor::Protocol::new(
@@ -670,7 +684,13 @@ impl Handle {
     pub fn capabilities(&self) -> Value {
         if matches!(
             self.kind,
-            Kind::Cursor | Kind::Fx | Kind::OpenCode | Kind::Hermes | Kind::Devin | Kind::OpenClaw
+            Kind::Cursor
+                | Kind::Fx
+                | Kind::OpenCode
+                | Kind::Hermes
+                | Kind::Devin
+                | Kind::Droid
+                | Kind::OpenClaw
         ) {
             return cursor::capabilities(self.kind);
         }
@@ -690,6 +710,7 @@ impl Handle {
             Kind::OpenCode => opencode::start(&startup).await,
             Kind::Hermes => hermes::start(&startup).await,
             Kind::Devin => devin::start(&startup).await,
+            Kind::Droid => droid::start(&startup).await,
             Kind::OpenClaw => openclaw::start(&startup).await,
         }
     }
@@ -729,11 +750,14 @@ impl Handle {
             Kind::Codex => codex::send(self, request, input).await.map(|()| Vec::new()),
             Kind::Pi => pi::send(self, request, input).await.map(|()| Vec::new()),
             Kind::Claude => claude::send(self, request, input).await,
-            Kind::Cursor | Kind::OpenCode | Kind::Hermes | Kind::Devin | Kind::OpenClaw => {
-                cursor::send(self, request, input)
-                    .await
-                    .map(|()| Vec::new())
-            }
+            Kind::Cursor
+            | Kind::OpenCode
+            | Kind::Hermes
+            | Kind::Devin
+            | Kind::Droid
+            | Kind::OpenClaw => cursor::send(self, request, input)
+                .await
+                .map(|()| Vec::new()),
             Kind::Fx => fx::send(self, request, input).await.map(|()| Vec::new()),
         }
     }
@@ -749,9 +773,12 @@ impl Handle {
             Kind::Codex => codex::steer(self, state, text).await,
             Kind::Pi => pi::steer(self, request, text).await,
             Kind::Claude => claude::steer(self, request, text).await,
-            Kind::Cursor | Kind::OpenCode | Kind::Hermes | Kind::Devin | Kind::OpenClaw => {
-                cursor::steer(self, request, text).await
-            }
+            Kind::Cursor
+            | Kind::OpenCode
+            | Kind::Hermes
+            | Kind::Devin
+            | Kind::Droid
+            | Kind::OpenClaw => cursor::steer(self, request, text).await,
             Kind::Fx => fx::steer(self, request, text).await,
         }
     }
@@ -765,6 +792,7 @@ impl Handle {
             | Kind::OpenCode
             | Kind::Hermes
             | Kind::Devin
+            | Kind::Droid
             | Kind::OpenClaw => Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "ACP compaction is not supported",
@@ -793,6 +821,7 @@ impl Handle {
             | Kind::OpenCode
             | Kind::Hermes
             | Kind::Devin
+            | Kind::Droid
             | Kind::OpenClaw => Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "ACP rewind is not supported",
@@ -880,6 +909,7 @@ impl Handle {
             | Kind::OpenCode
             | Kind::Hermes
             | Kind::Devin
+            | Kind::Droid
             | Kind::OpenClaw => Ok(None),
         }
     }
@@ -900,6 +930,7 @@ impl Handle {
             | Kind::OpenCode
             | Kind::Hermes
             | Kind::Devin
+            | Kind::Droid
             | Kind::OpenClaw => cursor::interrupt(self, state).await,
         }
     }
@@ -913,6 +944,7 @@ impl Handle {
             | Kind::OpenCode
             | Kind::Hermes
             | Kind::Devin
+            | Kind::Droid
             | Kind::OpenClaw => Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 "ACP context-only notices are unavailable",
@@ -957,6 +989,7 @@ pub fn check_resume_history(
         Kind::OpenCode => return opencode::validate(profile, saved, identity),
         Kind::Hermes => return hermes::validate(profile, saved, identity),
         Kind::Devin => return devin::validate(profile, saved, identity),
+        Kind::Droid => return droid::validate(profile, saved, identity),
         Kind::OpenClaw => return openclaw::validate(profile, saved, identity),
         _ => {}
     }
@@ -997,6 +1030,7 @@ pub fn recover_records(
             hermes::validate(profile, saved, policy.map(|p| (p.agent_uid, p.agent_gid)))
         }
         Kind::Devin => devin::validate(profile, saved, policy.map(|p| (p.agent_uid, p.agent_gid))),
+        Kind::Droid => droid::validate(profile, saved, policy.map(|p| (p.agent_uid, p.agent_gid))),
         Kind::OpenClaw => {
             openclaw::validate(profile, saved, policy.map(|p| (p.agent_uid, p.agent_gid)))
         }
@@ -1039,7 +1073,7 @@ pub fn checkpoint(
         Kind::Codex | Kind::Claude => files::checkpoint(previous, data, native),
         Kind::Pi => pi::checkpoint(data, native),
         Kind::Cursor => cursor::checkpoint(previous, data, native),
-        Kind::Fx | Kind::OpenCode | Kind::Hermes | Kind::Devin | Kind::OpenClaw => {
+        Kind::Fx | Kind::OpenCode | Kind::Hermes | Kind::Devin | Kind::Droid | Kind::OpenClaw => {
             Err(io::Error::other("ACP stream has no native records"))
         }
     }

@@ -79,6 +79,8 @@ export const UI_PREFERENCE_KEYS = [
   "threadPurpose.showInSidebar",
   "threadPurpose.model",
   "threadPurpose.reasoningEffort",
+  "projectNudge.enabled",
+  "projectNudge.confidence",
   "appearance.theme",
   "defaults.startingMachine",
 ] as const;
@@ -256,6 +258,16 @@ export const uiPreferenceDefinitions = {
     "medium",
     "Reasoning effort for the thread purpose model.",
   ),
+  "projectNudge.enabled": defineUiPreference(
+    z.boolean().nullable(),
+    null,
+    "While you type a new thread's prompt, suggest the right project when it looks like it belongs in another one. null is on for paid plans and off for Free.",
+  ),
+  "projectNudge.confidence": defineUiPreference(
+    z.number().int().min(1).max(99),
+    70,
+    "How sure Jev must be, in percent (1–99), before the hint suggests another project. Lower shows it more often.",
+  ),
   "appearance.theme": defineUiPreference(
     z.enum(["light", "dark", "system"]),
     "system",
@@ -263,8 +275,8 @@ export const uiPreferenceDefinitions = {
   ),
   "defaults.startingMachine": defineUiPreference(
     z.enum(["cloud", "last"]),
-    "cloud",
-    "Where new threads start: cloud, or last for the machine used last.",
+    "last",
+    "Where new threads start: last for the machine used last (Cloud on a fresh install), or cloud.",
   ),
 } as const satisfies Record<UiPreferenceKey, UiPreferenceDefinition>;
 

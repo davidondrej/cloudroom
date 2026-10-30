@@ -41,7 +41,9 @@ const INSTALLED_ONLY_PROVIDER_IDS = [
   "acp-grok",
   "acp-fx",
   "acp-hermes-agent",
+  "acp-openclaw",
   "acp-devin",
+  "acp-droid",
 ] as const;
 
 function registerInstalledOnlyProviderFixtures(harness: TestAppHarness): void {

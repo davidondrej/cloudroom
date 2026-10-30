@@ -6,7 +6,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import { sdk } from "@/lib/sdk";
 import { openUrlInExternalBrowser } from "@/lib/url-open-routing";
 import { SidebarProvider } from "@/components/ui/sidebar";
-import { CloudroomAccountSettings, CloudroomSignOut } from "./CloudroomAccountSettings";
+import { CloudroomAccountSettings } from "./CloudroomAccountSettings";
 import { SettingsAccountMenu } from "./SettingsAccountMenu";
 
 vi.mock("@/lib/sdk", () => ({ sdk: { cloudroom: { status: vi.fn(), signIn: vi.fn(), cancel: vi.fn(), logout: vi.fn() }, projects: { list: vi.fn() } } }));
@@ -17,7 +17,7 @@ const signedOut = { ready: false, account: null, projectId: null, repository: nu
 function mount() {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
   clients.push(client);
-  render(<QueryClientProvider client={client}><CloudroomAccountSettings /><CloudroomSignOut /></QueryClientProvider>);
+  render(<QueryClientProvider client={client}><MemoryRouter><CloudroomAccountSettings /></MemoryRouter></QueryClientProvider>);
 }
 it("opens system-browser sign-in without a project and exposes cancellation", async () => {
   vi.mocked(sdk.projects.list).mockResolvedValue([{ id: "project", name: "Prepared repository" }] as never);

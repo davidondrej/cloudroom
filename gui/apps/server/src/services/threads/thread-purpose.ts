@@ -57,7 +57,7 @@ function signedInHarnesses(): Promise<{ claude: boolean; codex: boolean }> {
   return logins.value;
 }
 
-async function purposeModels(
+export async function purposeModels(
   chosen: string | null,
 ): Promise<{ primary: string; fallback: string } | null> {
   if (chosen) return { primary: chosen, fallback: chosen };

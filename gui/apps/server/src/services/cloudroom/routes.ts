@@ -43,6 +43,7 @@ import { popupState, recordPopup } from "./popups.js";
 import { activation } from "./activation.js";
 import { disconnectGithub, githubAccount, githubAuth } from "./github-login.js";
 import { addGithubRepo, githubBranches, repoSuggestions } from "./repo-suggestions.js";
+import { projectSuggestion } from "./project-nudge.js";
 import { ACTIVATION_STEPS, CLOUD_CHOICE_ACTIONS, CLOUD_CHOICE_REASONS, POPUP_DETAILS, POPUPS, SETUP_ACTIONS, SETUP_AGENTS, SETUP_DETAILS, SETUP_STEPS, STARTER_PROMPTS, UPGRADE_PROMPTS } from "../system/telemetry.js";
 
 const SAFE_SETTINGS_SEARCH = /^(?=.{2,40}$)\p{L}+(?: \p{L}+){0,3}$/u;
@@ -502,6 +503,14 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: Plugin
   });
   app.post("/api/v1/cloudroom/account/previews/check", async context => { await checkPreviewsNow(deps); return context.json({ ok: true }); });
   app.get("/api/v1/cloudroom/account/repo-suggestions", async context => context.json(await repoSuggestions(deps)));
+  app.post("/api/v1/cloudroom/account/project-suggestion", async context => {
+    const input = z.object({ prompt: z.string().min(1).max(20_000), projectId: z.string().min(1) }).strict().parse(await context.req.json());
+    const projectId = await projectSuggestion(deps, input.prompt, input.projectId).catch((error: unknown) => {
+      deps.logger.debug({ error }, "Project suggestion failed");
+      return null;
+    });
+    return context.json({ projectId });
+  });
   app.get("/api/v1/cloudroom/account/github-branches", async context => {
     const projectId = z.string().min(1).parse(context.req.query("project"));
     return context.json(await githubBranches(projectId, deps));

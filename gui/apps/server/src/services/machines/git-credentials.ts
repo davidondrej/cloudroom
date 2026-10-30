@@ -16,7 +16,7 @@ const gitConfig = [
 ] as const;
 
 const aiCoAuthorPattern =
-  "^co-authored-by:.*(claude|anthropic|cursor|codex|openai|chatgpt|copilot|gemini|aider\\.chat|devin-ai|windsurf|codeium)";
+  "^co-authored-by:.*(claude|anthropic|cursor|codex|openai|chatgpt|copilot|gemini|aider\\.chat|devin-ai|factory-droid|windsurf|codeium)";
 const stripAiCoAuthorsHook = `cloudroom_strip_ai_co_authors() { grep -viE '${aiCoAuthorPattern}' "$1" > "$1.cloudroom"; [ $? -le 1 ] && mv "$1.cloudroom" "$1" || rm -f "$1.cloudroom"; }; cloudroom_strip_ai_co_authors`;
 const stripAiCoAuthorsConfig = [
   ["hook.cloudroom-strip-ai-co-authors.command", stripAiCoAuthorsHook],

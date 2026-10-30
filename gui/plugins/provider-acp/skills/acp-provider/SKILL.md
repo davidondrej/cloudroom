@@ -6,8 +6,8 @@ description: "Configure or troubleshoot ACP agent discovery, custom models, skil
 # ACP providers
 
 Known agents can be discovered automatically when their CLI is installed on the
-host: `opencode`, `omp`, `grok`, `hermes`, `openclaw`, and `devin` appear as `acp-opencode`,
-`acp-omp`, `acp-grok`, `acp-hermes-agent`, `acp-openclaw`, and `acp-devin`. Inspect the target host's catalog with
+host: `opencode`, `omp`, `grok`, `hermes`, `openclaw`, `devin`, and `droid` appear as `acp-opencode`,
+`acp-omp`, `acp-grok`, `acp-hermes-agent`, `acp-openclaw`, `acp-devin`, and `acp-droid`. Inspect the target host's catalog with
 `room-cli provider list` and `room-cli provider models <provider-id>` using its environment
 or machine selector.
 

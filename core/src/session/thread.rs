@@ -29,8 +29,8 @@ room-cli thread update --self --reasoning-level LEVEL
 room-cli thread archive --self
 room-cli thread move --self --project PROJECT
 room-cli thread stop --self
-room-cli thread spawn --provider codex|claude-code|pi|opencode|hermes|devin|fx|openclaw [--model MODEL] [--reasoning-level LEVEL] [--service-tier default|fast] [--title TITLE] [--shared-sandbox|--top-level] --prompt TEXT|--prompt-file PATH
-room-cli thread fork [--provider codex|claude-code|pi|opencode|hermes|devin|fx|openclaw] [--model MODEL] [--reasoning-level LEVEL] [--title TITLE] --prompt TEXT|--prompt-file PATH
+room-cli thread spawn --provider codex|claude-code|pi|opencode|hermes|devin|droid|fx|openclaw [--model MODEL] [--reasoning-level LEVEL] [--service-tier default|fast] [--title TITLE] [--shared-sandbox|--top-level] --prompt TEXT|--prompt-file PATH
+room-cli thread fork [--provider codex|claude-code|pi|opencode|hermes|devin|droid|fx|openclaw] [--model MODEL] [--reasoning-level LEVEL] [--title TITLE] --prompt TEXT|--prompt-file PATH
 room-cli thread list [--include-archived]
 room-cli thread output CHILD_ID [--all]
 room-cli thread tell CHILD_ID TEXT
@@ -491,7 +491,7 @@ fn check_start(
     provider
         .map(|p| {
             serde_json::from_value(json!(p)).map_err(|_| {
-                bad("Use --provider codex, claude-code, pi, opencode, hermes, devin, fx or openclaw")
+                bad("Use --provider codex, claude-code, pi, opencode, hermes, devin, droid, fx or openclaw")
             })
         })
         .transpose()

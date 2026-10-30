@@ -21,6 +21,9 @@ const AGENTS: [id: string, cli: string, signedIn: () => Promise<boolean>][] = [
   ["acp-openclaw", "openclaw", async () => (await macOpenclawLogin()) !== null],
   ["acp-grok", "grok", async () => Boolean(process.env.XAI_API_KEY) || hasSecret(parse(await read(join(dir("GROK_HOME", ".grok"), "auth.json"))))],
   ["acp-devin", "devin", async () => setsSecret(await read(join(dir("XDG_DATA_HOME", ".local/share"), "devin", "credentials.toml")))],
+  // Droid keeps its sign-in encrypted in ~/.factory (unlocked through the Keychain on macOS); an API key may live only in the login shell.
+  ["acp-droid", "droid", async () => Boolean(process.env.FACTORY_API_KEY || (await macVariables()).FACTORY_API_KEY)
+    || (await Promise.all(["auth.v2.loginkeychain", "auth.v2.file"].map((file) => read(join(homedir(), ".factory", file))))).some((text) => text.trim() !== "")],
   // fx keeps its key and sign-ins in ~/.fx; a Gateway key may live only in the login shell.
   ["acp-fx", "fx", async () => {
     const fx = join(homedir(), ".fx");

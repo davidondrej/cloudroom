@@ -2,6 +2,19 @@
 
 Also on [cloudroom.dev/changelog](https://www.cloudroom.dev/changelog).
 
+## 132
+
+A nudge toward the right project (2026-10-29)
+
+### Changes
+
+- While you type a new thread, Cloudroom suggests the right project if you are in the wrong one, and Enter switches to it.
+- You can turn the project hint off, or set how sure it must be, in Settings.
+- Droid now runs in Local and Cloud threads, and a signed-in Droid shows up during setup.
+- New threads now start where you ran your last one, and fresh installs still start in Cloud.
+- Cmd+K now finds threads by part of a word in their name.
+- Image attachments look cleaner, and HEIC photos preview again.
+
 ## 131
 
 Agents can ask for a GPU (2026-10-29)

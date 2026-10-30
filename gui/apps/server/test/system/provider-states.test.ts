@@ -33,7 +33,9 @@ const INSTALLED_ONLY_PROVIDER_IDS = new Set([
   "acp-grok",
   "acp-fx",
   "acp-hermes-agent",
+  "acp-openclaw",
   "acp-devin",
+  "acp-droid",
 ]);
 
 function healthForInstalledOnlyProvider(

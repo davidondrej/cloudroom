@@ -50,14 +50,14 @@ export const cloudroomStatusSchema = z.object({
   })).nullable().default([]),
 });
 
-const CORE_HARNESS_IDS: Record<string, string> = { "acp-cursor": "cursor", "acp-fx": "fx", "acp-opencode": "opencode", "acp-hermes-agent": "hermes", "acp-devin": "devin", "acp-openclaw": "openclaw" };
+const CORE_HARNESS_IDS: Record<string, string> = { "acp-cursor": "cursor", "acp-fx": "fx", "acp-opencode": "opencode", "acp-hermes-agent": "hermes", "acp-devin": "devin", "acp-droid": "droid", "acp-openclaw": "openclaw" };
 
 export function cloudHarness(status: z.infer<typeof cloudroomStatusSchema> | undefined, harness: string | undefined) {
   const id = harness === undefined ? undefined : (CORE_HARNESS_IDS[harness] ?? harness);
   return status?.harnesses?.find((item) => item.id === id);
 }
 
-const CLOUD_HARNESS_IDS = new Set(["claude-code", "codex", "pi", "cursor", "fx", "opencode", "hermes", "devin", "openclaw"]);
+const CLOUD_HARNESS_IDS = new Set(["claude-code", "codex", "pi", "cursor", "fx", "opencode", "hermes", "devin", "droid", "openclaw"]);
 export function cloudCanRunHarness(harness: string): boolean {
   return CLOUD_HARNESS_IDS.has(CORE_HARNESS_IDS[harness] ?? harness);
 }
@@ -67,7 +67,7 @@ export function cloudCatalogKnown(status: z.infer<typeof cloudroomStatusSchema> 
   return status?.ready === true && status.harnesses !== null;
 }
 
-const HARNESS_NAMES: Record<string, string> = { "claude-code": "Claude Code", codex: "Codex", pi: "Pi", cursor: "Cursor", fx: "fx", opencode: "opencode", hermes: "Hermes Agent", devin: "Devin", openclaw: "OpenClaw" };
+const HARNESS_NAMES: Record<string, string> = { "claude-code": "Claude Code", codex: "Codex", pi: "Pi", cursor: "Cursor", fx: "fx", opencode: "opencode", hermes: "Hermes Agent", devin: "Devin", droid: "Droid", openclaw: "OpenClaw" };
 export function cloudHarnessNames(status: z.infer<typeof cloudroomStatusSchema> | undefined): string {
   return (status?.harnesses ?? []).map((item) => HARNESS_NAMES[item.id] ?? item.id).join(", ") || "none";
 }

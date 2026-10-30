@@ -14,12 +14,12 @@ export function useStartingMachine() {
 }
 
 export function startingExecutionTarget(newThread: boolean): "local" | "cloud" {
+  const lastUsed = localStorage.getItem("cloudroom.executionTarget");
+  // A fresh install has no last-used machine yet, so its first thread starts in Cloud.
   const startInCloud =
-    newThread && getDefaultStore().get(startingMachineAtom) !== "last";
-  return startInCloud ||
-    localStorage.getItem("cloudroom.executionTarget") === "cloud"
-    ? "cloud"
-    : "local";
+    newThread &&
+    (getDefaultStore().get(startingMachineAtom) !== "last" || lastUsed === null);
+  return startInCloud || lastUsed === "cloud" ? "cloud" : "local";
 }
 
 export function agentExecutionTarget(

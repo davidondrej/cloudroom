@@ -382,8 +382,18 @@ describe("buildPluginProviderRegistration", () => {
         icon: undefined,
       },
       {
+        id: "acp-openclaw",
+        logoUrl: "/api/v1/system/providers/acp-openclaw/logo",
+        icon: undefined,
+      },
+      {
         id: "acp-devin",
         logoUrl: "/api/v1/system/providers/acp-devin/logo",
+        icon: undefined,
+      },
+      {
+        id: "acp-droid",
+        logoUrl: "/api/v1/system/providers/acp-droid/logo",
         icon: undefined,
       },
     ]);
@@ -413,7 +423,9 @@ describe("buildPluginProviderRegistration", () => {
       "acp-grok": "collapse",
       "acp-fx": "collapse",
       "acp-hermes-agent": "collapse",
+      "acp-openclaw": "collapse",
       "acp-devin": "collapse",
+      "acp-droid": "collapse",
     });
   });
 });

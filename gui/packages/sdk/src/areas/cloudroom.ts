@@ -261,6 +261,8 @@ export interface CloudroomArea {
   repoSuggestions(signal?: AbortSignal): Promise<{ githubConnected: boolean; repos: RepoSuggestion[] }>;
   /** Makes an `owner/name` GitHub repo a project right away. Machines and sandboxes clone it when first needed. */
   addGithubRepo(input: { repo: string }): Promise<{ projectId: string }>;
+  /** Another project a new thread's prompt looks like it belongs in, or null. */
+  projectSuggestion(input: { prompt: string; projectId: string }, signal?: AbortSignal): Promise<{ projectId: string | null }>;
   /** A project's branches on GitHub, for a project with no folder on this Mac. */
   githubBranches(projectId: string, signal?: AbortSignal): Promise<{ defaultBranch: string | null; branches: string[] }>;
   status(signal?: AbortSignal): Promise<CloudroomStatus>;
@@ -398,6 +400,7 @@ export function createCloudroomArea({ transport }: CreateSdkAreaArgs): Cloudroom
     githubAuth: (signal) => transport.readJson(request("/github", undefined, signal)) as Promise<CloudroomCodexAuth>,
     repoSuggestions: (signal) => transport.readJson(request("/repo-suggestions", undefined, signal)) as Promise<{ githubConnected: boolean; repos: RepoSuggestion[] }>,
     addGithubRepo: (input) => transport.readJson(request("/repo-suggestions/github", input)) as Promise<{ projectId: string }>,
+    projectSuggestion: (input, signal) => transport.readJson(request("/project-suggestion", input, signal)) as Promise<{ projectId: string | null }>,
     githubBranches: (projectId, signal) => transport.readJson(request(`/github-branches?project=${encodeURIComponent(projectId)}`, undefined, signal)) as Promise<{ defaultBranch: string | null; branches: string[] }>,
     githubLogin: (requestId) => transport.readJson(request("/github/login", { requestId })) as Promise<CloudroomCodexAuth>,
     cancelGithubLogin: (requestId) => transport.readJson(request("/github/cancel", { requestId })) as Promise<CloudroomCodexAuth>,

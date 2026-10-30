@@ -84,6 +84,7 @@ import { PluginSettingsSections } from "@/components/plugin/PluginSettingsSectio
 import { FileOpenersSettingsSection } from "@/components/settings/FileOpenersSettingsSection";
 import { VoiceInputSettingsSection } from "@/components/settings/VoiceInputSettingsSection";
 import {
+  ProjectNudgeSettingsSection,
   ThreadNamingSettingsSection,
   ThreadPurposeSettingsSection,
 } from "@/components/settings/ThreadNamingSettingsSection";
@@ -92,7 +93,7 @@ import { UpdatesSettingsSection } from "@/components/settings/UpdatesSettingsSec
 import { KeyboardSettingsSection } from "@/components/settings/KeyboardSettingsSection";
 import { BrowserSettingsSection } from "@/components/settings/BrowserSettingsSection";
 import { AdvancedMachineSettings, MachinesSettingsSection } from "@/components/settings/MachinesSettingsSection";
-import { CloudroomAccountSettings, CloudroomSignOut } from "@/components/settings/CloudroomAccountSettings";
+import { CloudroomAccountSettings } from "@/components/settings/CloudroomAccountSettings";
 import { InviteSettingsCard } from "@/components/InviteOffer";
 import { ProjectsSettingsSection } from "@/components/settings/ProjectsSettingsSection";
 import { ArchivedThreadsSettingsSection } from "@/components/settings/ArchivedThreadsSettingsSection";
@@ -1412,12 +1413,7 @@ export function SettingsView() {
   } else if (activeSection === "projects") {
     content = <ProjectsSettingsSection />;
   } else if (activeSection === "account") {
-    content = (
-      <div className="space-y-6">
-        <CloudroomAccountSettings />
-        <CloudroomSignOut />
-      </div>
-    );
+    content = <CloudroomAccountSettings />;
   } else if (activeSection === "machines") {
     content = <MachinesSettingsPage />;
   } else if (activeSection === "updates") {
@@ -1520,6 +1516,7 @@ export function SettingsView() {
         <CliSkillsSettingsSection />
         <ThreadNamingSettingsSection />
         <ThreadPurposeSettingsSection />
+        <ProjectNudgeSettingsSection />
         <VoiceInputSettingsSection />
         <PrivacySettingsSection
           telemetryEnabled={generalSettings.telemetryEnabled}

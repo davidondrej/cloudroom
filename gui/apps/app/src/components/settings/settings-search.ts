@@ -76,6 +76,10 @@ const SETTINGS_SEARCH_ENTRIES: readonly SettingsSearchEntry[] = [
     ["Show in sidebar", "thread purpose hover preview card left"],
     ["Reasoning effort", "thread purpose thinking"],
   ]),
+  ...entries("general", "Wrong-project hint", [
+    ["Wrong-project hint", "project nudge suggest switch jev"],
+    ["Confidence", "wrong project hint nudge sensitivity percent"],
+  ]),
   ...entries("general", "Voice Input", [
     ["Voice Input", "dictation speech talk"],
     ["Microphone", "mic audio dictation voice"],
@@ -159,7 +163,9 @@ const SETTINGS_SEARCH_ENTRIES: readonly SettingsSearchEntry[] = [
   ...entries("archived", undefined, [["Archived threads", "restore unarchive"]]),
   ...entries("account", undefined, [
     ["Cloudroom account", "sign in login email account sign out"],
-    ["Plan & billing", "billing plan subscription invoices upgrade pro ultra payment"],
+    ["Plan & billing", "billing plan subscription invoices upgrade pro ultra payment cloud credits buy packs"],
+    ["Connected", "github claude code codex logins connected"],
+    ["Invite friends", "invite friend referral share $400 credits"],
     ["Or connect your own Core", "self-hosted core url api token server"],
   ]),
   ...entries("machines", undefined, [

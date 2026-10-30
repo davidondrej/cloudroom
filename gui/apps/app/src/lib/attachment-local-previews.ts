@@ -10,7 +10,11 @@ function canCreateObjectUrls(): boolean {
 }
 
 export function registerLocalAttachmentPreview(path: string, file: Blob): void {
-  if (!canCreateObjectUrls() || !file.type.startsWith("image/")) {
+  if (
+    !canCreateObjectUrls() ||
+    !file.type.startsWith("image/") ||
+    /^image\/hei[cf]/i.test(file.type)
+  ) {
     return;
   }
   const previous = localPreviewUrlsByPath.get(path);

@@ -14,6 +14,7 @@ const appSettingsKeys = appSettingsKeySchema.options;
 
 const KEYBINDING_OVERRIDES_KEY = "keybindingOverrides";
 const PLUGIN_SAFE_MODE_KEY = "pluginSafeMode";
+const PROJECT_SUMMARIES_KEY = "projectSummaries";
 const LEGACY_DIAGNOSTIC_EVENTS_KEY = "showUnhandledProviderEvents";
 
 function parseStoredValue(text: string): unknown {
@@ -121,4 +122,23 @@ export function getPluginSafeMode(db: DbConnection): boolean {
 
 export function setPluginSafeMode(db: DbConnection, enabled: boolean): void {
   writeValue(db, PLUGIN_SAFE_MODE_KEY, enabled, Date.now());
+}
+
+export type ProjectSummaries = Record<string, { text: string; updatedAt: number }>;
+
+export function getProjectSummaries(db: DbConnection): ProjectSummaries {
+  const row = db
+    .select({ value: appSettingsValues.value })
+    .from(appSettingsValues)
+    .where(eq(appSettingsValues.key, PROJECT_SUMMARIES_KEY))
+    .get();
+  const value = row === undefined ? undefined : parseStoredValue(row.value);
+  return value && typeof value === "object" ? (value as ProjectSummaries) : {};
+}
+
+export function setProjectSummaries(
+  db: DbConnection,
+  summaries: ProjectSummaries,
+): void {
+  writeValue(db, PROJECT_SUMMARIES_KEY, summaries, Date.now());
 }

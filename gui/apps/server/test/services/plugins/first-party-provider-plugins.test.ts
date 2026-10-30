@@ -149,6 +149,19 @@ const FIRST_PARTY_PROVIDER_DECLARATIONS = [
     visibility: "installed",
     hasLogo: true,
   },
+  {
+    builtinName: "provider-acp",
+    pluginId: "provider-acp",
+    providerId: "acp-droid",
+    displayName: "Droid",
+    supportsThreadArchive: false,
+    supportsThreadRename: false,
+    fork: "tip",
+    supportsManualCompaction: false,
+    supportsUsage: false,
+    visibility: "installed",
+    hasLogo: true,
+  },
 ] as const;
 
 const PROVIDER_IDS = FIRST_PARTY_PROVIDER_DECLARATIONS.map(
@@ -416,6 +429,7 @@ describe("first-party provider plugins", () => {
           "acp-hermes-agent",
           "acp-openclaw",
           "acp-devin",
+          "acp-droid",
         ]);
         const infos = await listSystemProviderInfos(harness.deps, {});
         expect(infos.find((info) => info.id === "pi")).toBeUndefined();
