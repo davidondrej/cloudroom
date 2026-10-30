@@ -568,13 +568,14 @@ class ReplayTests(unittest.TestCase):
         records = self.service.records("a")
         self.assertEqual([r["data"]["delta"] for r in records if r["kind"] == "text_delta"], ["first", "last"])
 
-    def test_compact_storage_preserves_legacy_wire_fields(self):
+    def test_compact_storage_sends_the_codex_frame_once(self):
+        # Clients read the original frame from `native`; core no longer adds a copy of its params as `data.value`.
         params = {"threadId": "native", "itemId": "text", "delta": "hello"}
         raw = json.dumps({"method": "item/agentMessage/delta", "params": params}) + "\n"
         self.append("a", {"method": "item/agentMessage/delta", "delta": "hello"}, raw)
         self.start()
         record = self.service.records("a")[0]
-        self.assertEqual(record["data"].get("value"), params)
+        self.assertNotIn("value", record["data"])
         self.assertEqual(record["native"], raw)
 
     def test_slow_stream_cannot_hold_shutdown(self):

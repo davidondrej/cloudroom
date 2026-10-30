@@ -59,7 +59,7 @@ A failed resume exposes `startup_error` (`startup_timeout`, `empty_session`, `mi
 - Claude Code's tool-input deltas are not recorded. `item_started` carries the complete input.
 - Local and database event pages contain at most 256 records. Continue after the last returned sequence; sequences need not be contiguous within a session.
 - Saved-only metadata and the requested latest receipt share one scan over the API's 1,000-record pages, separate from replay pagination (256). A record over 1 MB comes back without its body, in its place.
-- New native-event records omit the duplicate `data.value` payload on disk and in saved history. The existing API field is reconstructed from the original frame on reads. Old records are unchanged, including during upload retries. No schema migration is needed.
+- New native-event records omit the duplicate `data.value` payload on disk and in saved history. Clients read the original frame in `native`, so reads don't rebuild it either. Old records are unchanged, including during upload retries. No schema migration is needed.
 - Saved-only sessions still do not restore running processes or populate the full receipt map.
 
 ## Verify

@@ -46,14 +46,6 @@ pub struct Record {
     pub native: Option<String>,
 }
 
-impl Record {
-    // Preserve the existing wire format without storing params twice alongside the native frame.
-    fn for_client(mut self) -> Result<Self> {
-        runtime::for_client(&mut self.data, self.native.as_deref())?;
-        Ok(self)
-    }
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Receipt {
     pub request_id: String,
@@ -587,10 +579,8 @@ impl Manager {
                     .iter()
                     .take(256)
                     .map(|sequence| {
-                        let record: Record =
-                            serde_json::from_slice(&local.journal.read(*sequence)?)
-                                .map_err(io::Error::other)?;
-                        record.for_client()
+                        Ok(serde_json::from_slice(&local.journal.read(*sequence)?)
+                            .map_err(io::Error::other)?)
                     })
                     .collect();
             }
@@ -598,10 +588,7 @@ impl Manager {
         self.history
             .read(session, after)
             .await
-            .map_err(|e| Error::Storage(format!("saved history: {e}")))?
-            .into_iter()
-            .map(Record::for_client)
-            .collect()
+            .map_err(|e| Error::Storage(format!("saved history: {e}")))
     }
 
     pub async fn session(&self, id: &str) -> Result<Session> {
