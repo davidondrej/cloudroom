@@ -397,7 +397,7 @@ def main():
             wait_done(service, sid, "task")
             assert (repo / "counter.txt").read_text() == "first\n"
             records = service.records(sid)
-            assert any(r["kind"] == "item_completed" and (r["data"].get("tool_name") == "bash" if args.harness == "pi" else r["data"]["value"].get("item", {}).get("type") == "commandExecution") for r in records)
+            assert any(r["kind"] == "item_completed" and (r["data"].get("tool_name") == "bash" if args.harness == "pi" else json.loads(r["native"])["params"].get("item", {}).get("type") == "commandExecution") for r in records)
             assert any(r["kind"] == "text_delta" for r in records)
             assert any(r["kind"] == "item_completed" and r["data"].get("request_id") == "task" for r in records), "native user message lost its request correlation"
             def complete_native_copy():

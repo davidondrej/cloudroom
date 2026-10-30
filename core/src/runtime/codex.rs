@@ -696,12 +696,6 @@ impl Adapter for Protocol {
     }
 }
 
-pub(super) fn for_client(data: &mut Value, native: Option<&str>) -> io::Result<()> {
-    let frame: Value = serde_json::from_str(native.unwrap_or("null"))?;
-    data["value"] = frame.get("params").cloned().unwrap_or(Value::Null);
-    Ok(())
-}
-
 #[derive(Default)]
 struct Tail {
     path: Option<PathBuf>,

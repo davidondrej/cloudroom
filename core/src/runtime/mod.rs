@@ -1055,14 +1055,6 @@ pub fn recover_records(
     }
 }
 
-// Legacy records remain byte-for-byte unchanged on disk. Only their read projection changes.
-pub fn for_client(data: &mut Value, native: Option<&str>) -> io::Result<()> {
-    if data.get("method").is_some() && data.get("value").is_none() && data.get("harness").is_none()
-    {
-        codex::for_client(data, native)?;
-    }
-    Ok(())
-}
 pub fn checkpoint(
     kind: Kind,
     previous: &Value,
