@@ -51,7 +51,7 @@ A failed resume exposes `startup_error` (`startup_timeout`, `empty_session`, `mi
 
 ## Storage and replay
 
-- All locally accepted records are fsynced before subscribers are notified. Native turn events own progress; RPC replies acknowledge delivery or rejection.
+- All locally accepted records are fsynced before subscribers are notified. Text and thinking deltas that queue while the disk is busy are saved together, up to 16, with one directory sync, and announced after all of them are saved. Native turn events own progress; RPC replies acknowledge delivery or rejection.
 - Native checkpoints are validated before journal persistence. Malformed native history fails that session without writing invalid checkpoints; source history is retained. Already-corrupt journals require explicit repair, never silent deletion.
 - A local journal write that fails before its rename (a full disk) changes nothing, so only that write fails, and history uploads retry with backoff. A failed rename or directory sync has an uncertain outcome: it makes readiness and dashboard runtime readiness false and blocks new mutations. Saved history remains readable. Correct the storage problem and restart for validated recovery; never reset the write guard blindly. Managed Cloud restarts such a Core once its disk has space. A remote database outage alone still permits local buffering.
 - Local replay uses a rebuilt, per-session sequence index. It does not scan other sessions.
