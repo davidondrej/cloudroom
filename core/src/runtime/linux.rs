@@ -378,6 +378,12 @@ pub(crate) fn nearest_value(pids: &[u32], name: &str) -> Option<Vec<u8>> {
         values(&environ, name).next().map(<[u8]>::to_vec)
     })
 }
+/// Whether Core may not read this process's environment: on protected machines Core runs as its own account, without
+/// the ptrace rights that needs (`/proc/PID/stat` stays readable).
+pub(crate) fn environment_hidden(pid: u32) -> bool {
+    fs::read(format!("/proc/{pid}/environ"))
+        .is_err_and(|e| e.kind() == io::ErrorKind::PermissionDenied)
+}
 /// Codex's code-mode host runs in its own group but holds session state, so it counts as harness.
 fn helper(pid: i32) -> bool {
     fs::read(format!("/proc/{pid}/cmdline")).is_ok_and(|cmdline| {

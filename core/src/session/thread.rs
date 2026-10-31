@@ -193,10 +193,24 @@ pub(crate) fn caller(m: &Manager, peer: Peer, command: &str) -> Result<String, F
 
 /// The session or loop script that sent this request, for the commands a loop's check script may run too.
 pub(crate) fn requester(m: &Manager, peer: Peer, command: &str) -> Result<Caller, Failure> {
-    identify(m, peer, command)?.ok_or(fail(
+    identify(m, peer, command)?.ok_or_else(|| unidentified(command, peer.1))
+}
+
+/// Neither a harness nor a loop marker sent this request. Where Core can't read the caller's environment at all, it
+/// can't see a marker either, so it says so.
+fn unidentified(command: &str, pid: Option<i32>) -> Failure {
+    if pid.is_some_and(|pid| crate::runtime::linux::environment_hidden(pid as u32)) {
+        return fail(
+            StatusCode::CONFLICT,
+            &format!(
+                "This machine's Core runs as its own account and can't read this command's environment, so it can't see a loop script's {LOOP_MARKER}. Run cloudroom {command} from a Cloudroom cloud thread here."
+            ),
+        );
+    }
+    fail(
         StatusCode::CONFLICT,
         &format!("Run cloudroom {command} from a Cloudroom cloud thread or a loop's check script"),
-    ))
+    )
 }
 
 /// A harness above the caller always wins, so a thread's own commands never act as a loop. Without one, the nearest
@@ -1194,4 +1208,33 @@ pub async fn cli(args: &[String]) -> io::Result<i32> {
     let answer = crate::mac::request(crate::mac::SOCKET, "POST", path, body).await?;
     println!("{answer}");
     Ok(0)
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_unreadable_caller_environment_gets_its_own_refusal() {
+        let error = |pid| unidentified("loop", Some(pid)).1.0["error"].clone();
+        // This test's own environment is readable, as where Core shares the agent's account: no marker, the usual refusal.
+        assert_eq!(
+            error(std::process::id() as i32),
+            "Run cloudroom loop from a Cloudroom cloud thread or a loop's check script"
+        );
+        // Root's init is another account's process, as every agent process is to a protected machine's Core. Where
+        // this test may read it anyway (as root with ptrace rights), there is nothing to check.
+        if std::fs::read("/proc/1/environ").is_ok() {
+            return;
+        }
+        let hidden = error(1);
+        assert!(
+            hidden
+                .as_str()
+                .unwrap()
+                .contains("can't read this command's environment"),
+            "{hidden}"
+        );
+        assert!(hidden.as_str().unwrap().contains(LOOP_MARKER), "{hidden}");
+    }
 }
