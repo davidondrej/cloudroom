@@ -72,7 +72,15 @@ pub async fn settle(cwd: &Path, limit: Duration) {
 /// copy with no status file, unless the app `promised` one it has not marked yet.
 pub async fn landed(cwd: &Path, promised: bool, limit: Duration, cancelled: impl Fn() -> bool) {
     let start = Instant::now();
-    while check(cwd, promised).is_none() && start.elapsed() < limit && !cancelled() {
+    // The app marks a copy once, as it starts, so a mark older than `limit` most likely outlived the app that ran the
+    // copy. Only a start the app promised a copy still waits for it.
+    let stale = || {
+        !promised
+            && status_file(cwd)
+                .and_then(|(_, file)| file.metadata().ok()?.modified().ok()?.elapsed().ok())
+                .is_some_and(|age| age >= limit)
+    };
+    while check(cwd, promised).is_none() && !stale() && start.elapsed() < limit && !cancelled() {
         tokio::time::sleep(LAUNCH_POLL).await;
     }
 }
@@ -168,7 +176,18 @@ mod tests {
         std::fs::write(&status, "copying").unwrap();
         assert!(waited(false, false).await >= Duration::from_millis(600));
         // A stop or close ends the wait.
+        std::fs::write(&status, "copying").unwrap();
         assert!(waited(false, true).await < LAUNCH_POLL);
+        // A mark older than the limit holds only a start the app promised a copy.
+        let old = std::time::SystemTime::now() - Duration::from_secs(3600);
+        std::fs::File::options()
+            .write(true)
+            .open(&status)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+        assert!(waited(false, false).await < LAUNCH_POLL);
+        assert!(waited(true, false).await >= Duration::from_millis(600));
         // A copy that landed or failed: at once.
         for state in ["ready", "failed: the clone failed"] {
             std::fs::write(&status, state).unwrap();

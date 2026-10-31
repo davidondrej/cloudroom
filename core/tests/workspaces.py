@@ -258,6 +258,16 @@ class WorkspaceTests(unittest.TestCase):
         self.assertEqual(self.started_with(sid),self.LANDED)
         self.assertEqual((waiting['state'],waiting['native_id']),('pending',None))
 
+    def test_a_mark_left_by_a_dead_copy_holds_no_start(self):
+        # Say the Mac app quit mid-copy on a VM, where only a project's first thread copies: nothing clears its mark.
+        self.start()
+        status = self.state.resolve()/'code'/'project.cloudroom-files'; status.write_text('copying')
+        old = time.time()-6*60; os.utime(status,(old,old))
+        started = time.monotonic()
+        sid = self.begin('later',workspace='later',workspace_name='project')
+        until(lambda:self.service.session(sid)['receipts']['hello']['state']=='completed','start beside a stale mark',4)
+        self.assertLess(time.monotonic()-started,4)
+
     def test_a_promised_copy_holds_the_harness_until_its_status_file_says_it_landed(self):
         # The app marks the folder only after Core accepts the start, so the start says a copy is coming. Here a
         # child in a Personal project, whose status file sits next to the sandbox root, as in the bug report.
