@@ -22,6 +22,8 @@ def codex():
     path = Path(os.environ["CODEX_HOME"]) / "sessions" / (native + ".jsonl")
     path.parent.mkdir(exist_ok=True)
     path.write_text('{"fixture":"start"}\n')
+    # What the harness found in its folder as it started: real ones read skills and AGENTS.md or CLAUDE.md only then.
+    (Path(os.environ["CODEX_HOME"]) / (native + ".started")).write_text(json.dumps(sorted(os.listdir())))
     children, turn, slow_exit, goal = {}, "", False, None
     login_cancelled = threading.Event()
 
