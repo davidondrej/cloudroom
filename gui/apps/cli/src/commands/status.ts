@@ -1,11 +1,12 @@
 import { Command } from "commander";
 import type { ThreadTimelinePendingTodos } from "@cloudroom/domain";
+import { BbRequestTimeoutError } from "@cloudroom/sdk";
 import { action } from "../action.js";
 import {
   resolveContextSnapshot,
   type ContextSnapshot,
 } from "../context-env.js";
-import { cliFetch, createCliBbSdk } from "../client.js";
+import { CLI_READ_TIMEOUT_MS, createCliBbSdk } from "../client.js";
 import { outputJson } from "./helpers.js";
 import {
   type ThreadEnvironmentInfo,
@@ -66,20 +67,17 @@ export function registerStatusCommand(
         };
 
         let serverAvailable = false;
+        const sdk = createCliBbSdk(getUrl(), CLI_READ_TIMEOUT_MS);
 
         try {
-          const response = await cliFetch(`${getUrl()}/api/v1/system/config`);
-          if (response.ok) {
-            const config = (await response.json()) as { dataDir?: unknown };
-            if (typeof config.dataDir === "string") {
-              payload.dataDir = config.dataDir;
-              serverAvailable = true;
-            }
-          }
-        } catch {}
+          payload.dataDir = (await sdk.system.config()).dataDir;
+          serverAvailable = true;
+        } catch (error) {
+          if (error instanceof BbRequestTimeoutError) throw error;
+        }
 
         if (serverAvailable) {
-          const { plugins } = await createCliBbSdk(getUrl()).plugins.list();
+          const { plugins } = await sdk.plugins.list();
           payload.pluginsNeedingAttention = plugins
             .filter(
               (p) =>
@@ -91,7 +89,6 @@ export function registerStatusCommand(
         }
 
         if (context.projectId || context.threadId) {
-          const sdk = createCliBbSdk(getUrl());
           const status = await sdk.status.get({
             projectId: context.projectId,
             threadId: context.threadId,

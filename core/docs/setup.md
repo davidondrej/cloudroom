@@ -216,7 +216,7 @@ The capability is `direct_workspaces: true`. Archive import, preparation, and ac
 
 ## Skills and login sync
 
-Run `python3 src/sync/client.py configure LOCAL_SYNC_DIR --connection PRIVATE_CONNECTION_JSON` on the Mac. The private JSON contains the existing core `url`, `token`, and optional `gateToken`; use mode 0600. This installs an independent LaunchAgent for skills, supported settings, and Codex login only. Python 3.11+ is needed for Codex TOML settings. `status` reports state; `stop` removes the job. Other systems can configure with `--no-start`, then supervise `run` themselves.
+Run `python3 src/sync/client.py configure LOCAL_SYNC_DIR --connection PRIVATE_CONNECTION_JSON` on the Mac or Linux. The private JSON contains the existing core `url`, `token`, and optional `gateToken`; use mode 0600. This installs an independent background job for skills, supported settings, and Codex login only: a LaunchAgent on macOS, a systemd user service on Linux. Python 3.11+ is needed for Codex TOML settings. `status` reports state; `stop` removes the job. Other systems, such as Windows, can configure with `--no-start`, then supervise `run` themselves. Do not start your own `run` for a folder that the app or `configure` already started; setup then fails with "Another sync helper is still running".
 
 Project files, unpublished Git changes, and project `.env` files no longer sync. Use Git or explicit message attachments. Conflicting skill/settings changes are preserved; offline changes catch up. `POST /v1/sync` handles device registration/status, file operations remain under `/v1/sync/{id}`, and `GET /v1/settings` is read-only.
 

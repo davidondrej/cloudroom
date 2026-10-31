@@ -13,6 +13,6 @@ Loops run agents and scripts on a schedule, once or on a repeat, or when a webho
 
 ## For agents
 
-Agents get the `automations` skill and the `room-cli loop` command (`room-cli automation` is the same): `create` (also `--template`), `list`, `show`, `update`, `pause`, `resume`, `run`, `hook`, `runs`, `review`, `report`, `templates`, `settings`, and `delete`. `--priority 1-4` sets a loop's priority. All commands accept `--json`. Threads that a loop starts cannot create loops.
+Agents get the `automations` skill and the `room-cli loop` command (`room-cli automation` is the same): `create` (also `--template`), `list`, `show`, `update`, `pause`, `resume`, `run`, `hook`, `runs`, `review`, `report`, `templates`, `settings`, and `delete`. `--priority 1-4` sets a loop's priority. `--secrets KEY,.env|none|all` picks the only API keys a Cloud loop's runs get. All commands accept `--json`. Threads that a loop starts cannot create loops.
 
 Scripts run on the machine that hosts the Cloudroom server. Agent runs use the providers you already have installed.

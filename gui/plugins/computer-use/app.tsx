@@ -49,7 +49,7 @@ function PermissionRows({
             <span className="text-xs text-muted-foreground">{row.granted ? "Granted" : row.need}</span>
           </span>
           {row.granted === false ? (
-            <Button size="sm" variant="outline" disabled={busy} onClick={() => void grant(row.kind)}>
+            <Button type="button" size="sm" variant="outline" disabled={busy} onClick={() => void grant(row.kind)}>
               Grant
             </Button>
           ) : null}
@@ -82,12 +82,8 @@ function ApprovalCard({ interaction, submit, cancel }: PluginPendingInteractionP
     }
   };
   return (
-    <form
+    <div
       className="space-y-4"
-      onSubmit={(event) => {
-        event.preventDefault();
-        void decide("always");
-      }}
       onKeyDown={(event) => {
         if (event.key === "Escape") void decide("deny");
       }}
@@ -114,11 +110,11 @@ function ApprovalCard({ interaction, submit, cancel }: PluginPendingInteractionP
         <Button type="button" variant="outline" size="sm" disabled={busy} onClick={() => void decide("thread")}>
           Only this thread
         </Button>
-        <Button type="submit" size="sm" disabled={busy} autoFocus>
+        <Button type="button" size="sm" disabled={busy} onClick={() => void decide("always")}>
           Always allow
         </Button>
       </div>
-    </form>
+    </div>
   );
 }
 

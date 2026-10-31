@@ -49,6 +49,7 @@
     "!dist/*.map",
     "host-daemon/dist/room-cli",
     "host-daemon/dist/room-cli.cmd",
+    "host-daemon/dist/room-cli.ps1",
     "host-daemon/dist/room-cli-chunks",
     "host-daemon/dist/bb-parcel-watcher-child.mjs",
     "host-daemon/dist/bb-plugin-host-worker.mjs",

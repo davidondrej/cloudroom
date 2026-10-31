@@ -14,6 +14,7 @@ The user describes the job in a sentence. Fill in everything else from the defau
 - **Where:** a Local loop in the project's main checkout (first line of `git worktree list`). No new worktrees. Use a Cloud loop when it must run with the Mac off, and always from a Cloud thread.
 - **One thread per run:** every run is its own top-level thread. Never point a loop at one manager thread that re-prompts and spawns sub-agents: the runs pile up nested under it. Local loops and Cloud `--cron` loops already start a fresh thread per run, so don't add `--same-thread`. A script that starts threads itself spawns them top-level: no `--parent-self` on the Mac, `--top-level` in a Cloud thread, never `--shared-sandbox`.
 - **Access:** read only. No edits, commits, or pushes until the user approves a fix.
+- **Secrets:** a Cloud loop gets only the API keys its job needs: `--secrets KEY,.env` or `--secrets none`.
 - **Safety:** include the safety sentence below verbatim in every Local or Cloud loop prompt, including prompts embedded in scripts.
 - **Finish:** all fine → 1-2 lines, then the thread archives itself. Something matters → a short verdict, thread left open for the user's Review tab.
 - **No repeats:** skip issues already reported in open threads with the same title.

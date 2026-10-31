@@ -123,6 +123,11 @@ export const automationRpcContract = defineRpcContract({
     input: cloudAutomationInputSchema,
     output: z.unknown(),
   },
+  // The API key names in Settings → Cloud environment, for a Cloud loop's Secrets picker (ADR 0342).
+  cloud_keys: {
+    input: z.null(),
+    output: z.object({ names: z.array(z.string()) }).strict(),
+  },
   // Loops their own failures paused, local and Cloud, for the app's paused-loop card (ADR 0338).
   paused_loops: {
     input: z.null(),
@@ -299,6 +304,11 @@ export function createRpcHandlers(
       return input.action === "list"
         ? withCloudAgents(sdk.threads, result)
         : result;
+    },
+    async cloud_keys() {
+      if (!sdk) throw new Error("Cloud loops are unavailable.");
+      const { variables } = await sdk.cloudroom.environment();
+      return { names: variables.map((variable) => variable.name) };
     },
     async paused_loops() {
       const now = Date.now();

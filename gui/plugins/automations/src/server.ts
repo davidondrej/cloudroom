@@ -58,11 +58,12 @@ export default async function plugin(bb: BbPluginApi) {
     });
     reviewChanged(thread.id);
   });
-  bb.events.on("thread.failed", ({ thread, error }) => {
+  bb.events.on("thread.failed", ({ thread, error, errorInfo }) => {
     closeAutomationRunForSettledThread(bb, db, {
       threadId: thread.id,
       status: "failed",
       error,
+      rateLimited: errorInfo?.category === "rate-limit",
     });
     reviewChanged(thread.id);
   });

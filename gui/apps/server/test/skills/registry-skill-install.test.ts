@@ -13,7 +13,21 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 const spawnMock = vi.hoisted(() => vi.fn());
-vi.mock("node:child_process", () => ({ spawn: spawnMock }));
+vi.mock("node:child_process", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("node:child_process")>()),
+  spawn: spawnMock,
+}));
+vi.mock("@cloudroom/process-utils", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@cloudroom/process-utils")>()),
+  execPortableFile: (command: string, args: string[], options: object) =>
+    new Promise((resolve, reject) => {
+      spawnMock(command, args, options).on("close", (code: number) =>
+        code === 0
+          ? resolve({ stdout: "", stderr: "" })
+          : reject(new Error(`exit ${code}`)),
+      );
+    }),
+}));
 
 import { installServerRegistrySkill } from "../../src/services/skills/registry-skill-install.js";
 import { readSkillTreeManifest } from "../../src/services/skills/injected-skills.js";

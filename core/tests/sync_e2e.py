@@ -2,6 +2,7 @@
 """Real HTTP sync checks for skills/settings/login, including safe repository-sync retirement."""
 import io
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -162,6 +163,24 @@ class SyncTests(unittest.TestCase):
         with self.assertRaises(OSError):
             self.remote.upload('skills-shared','escape/file',None,{'tag':'x','kind':'file','executable':False,'size':1},io.BytesIO(b'x'))
         self.assertFalse((outside / 'file').exists())
+
+    def test_deep_directories_scan_iteratively(self):
+        root = self.root / 'deep'; root.mkdir()
+        parent = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+        parents = []
+        try:
+            for _ in range(sys.getrecursionlimit() + 1):
+                parents.append(parent)
+                os.mkdir('d', dir_fd=parent)
+                parent = os.open('d', os.O_RDONLY | os.O_DIRECTORY, dir_fd=parent)
+            os.close(parent); parent = None
+            self.assertEqual(Tree(root).scan(), {'files': {}, 'skipped': []})
+        finally:
+            if parent is not None:
+                os.close(parent)
+            for parent in reversed(parents):
+                os.rmdir('d', dir_fd=parent)
+                os.close(parent)
 
     def test_settings_sync_without_copying_codex_logins_and_old_workers_are_denied(self):
         self.prepare()

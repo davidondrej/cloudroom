@@ -98,7 +98,10 @@ import {
   getLastThreadErrorMessage,
   getLastThreadOutput,
 } from "../threads/thread-data.js";
-import { buildTurnFailedEvent } from "../threads/turn-failed.js";
+import {
+  buildTurnFailedEvent,
+  describeFailedTurn,
+} from "../threads/turn-failed.js";
 import type {
   PluginBrandingAssetSet,
   PluginBrandingAssetSnapshot,
@@ -1259,10 +1262,16 @@ export function createPluginService(deps: PluginServiceDeps): PluginService {
         }));
       },
       emitThreadFailed(thread) {
-        emitThreadEvent("thread.failed", () => ({
-          thread: buildThreadDto(thread),
-          error: getLastThreadErrorMessage(deps.db, thread.id),
-        }));
+        emitThreadEvent("thread.failed", () => {
+          // The provider's own words first: a rate limit leaves no system/error.
+          const failure = describeFailedTurn(deps.db, thread.id);
+          return {
+            thread: buildThreadDto(thread),
+            error:
+              failure.message ?? getLastThreadErrorMessage(deps.db, thread.id),
+            errorInfo: failure.errorInfo,
+          };
+        });
       },
       emitThreadArchived(thread) {
         emitThreadEvent("thread.archived", () => ({

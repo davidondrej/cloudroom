@@ -23,7 +23,7 @@ EXCLUDED = {'.git', 'node_modules', '.cache', '__pycache__', '.venv', 'venv', '.
 PENDING = '.cloudroom-sync-pending'
 CHUNK = 64 * 1024
 MAX_FILE_BYTES = 4 * 1024**3
-DIRECTORY = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+DIRECTORY = os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0) | getattr(os, 'O_NOFOLLOW', 0)
 PORTABLE = {
     'pi': {'defaultProvider', 'defaultModel', 'defaultThinkingLevel', 'hideThinkingBlock', 'quietStartup'},
     'claude': {'model', 'effortLevel', 'language'},
@@ -475,39 +475,53 @@ class Tree:
         self.settle()
         files, folded, cache, skipped = {}, {}, cache or {}, []
         def visit(fd, prefix=''):
-            for name in sorted(os.listdir(fd)):
-                path = prefix + name
-                if excluded(path):
-                    continue
-                if self.filename and path != self.filename:
-                    continue
-                key = unicodedata.normalize('NFC', path).casefold()
-                if key in folded and folded[key] != path:
-                    raise Conflict('case-colliding filenames')
-                folded[key] = path
-                info = os.stat(name, dir_fd=fd, follow_symlinks=False)
-                if not self.filename and stat.S_ISLNK(info.st_mode):
-                    try:
-                        self.check_link(path, os.readlink(name, dir_fd=fd))
-                    except ValueError:
+            stack = [(fd, prefix, iter(sorted(os.listdir(fd))))]
+            try:
+                while stack:
+                    current, prefix, names = stack[-1]
+                    name = next(names, None)
+                    if name is None:
+                        finished, _, _ = stack.pop()
+                        if stack:
+                            os.close(finished)
+                        continue
+                    path = prefix + name
+                    if excluded(path):
+                        continue
+                    if self.filename and path != self.filename:
+                        continue
+                    key = unicodedata.normalize('NFC', path).casefold()
+                    if key in folded and folded[key] != path:
+                        raise Conflict('case-colliding filenames')
+                    folded[key] = path
+                    info = os.stat(name, dir_fd=current, follow_symlinks=False)
+                    if not self.filename and stat.S_ISLNK(info.st_mode):
+                        try:
+                            self.check_link(path, os.readlink(name, dir_fd=current))
+                        except ValueError:
+                            skipped.append(path)
+                            continue
+                    if not (stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode)):
                         skipped.append(path)
                         continue
-                if not (stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode)):
-                    skipped.append(path)
-                    continue
-                if stat.S_ISDIR(info.st_mode):
-                    child = os.open(name, DIRECTORY, dir_fd=fd)
-                    try:
-                        visit(child, path + '/')
-                    finally:
-                        os.close(child)
-                else:
-                    signature = self.signature(info)
-                    saved = cache.get(path)
-                    if saved and saved.get('signature') == signature:
-                        files[path] = saved
+                    if stat.S_ISDIR(info.st_mode):
+                        child = os.open(name, DIRECTORY, dir_fd=current)
+                        try:
+                            descendants = iter(sorted(os.listdir(child)))
+                        except BaseException:
+                            os.close(child)
+                            raise
+                        stack.append((child, path + '/', descendants))
                     else:
-                        files[path] = {**self.inspect(fd, name, path), 'signature': signature}
+                        signature = self.signature(info)
+                        saved = cache.get(path)
+                        if saved and saved.get('signature') == signature:
+                            files[path] = saved
+                        else:
+                            files[path] = {**self.inspect(current, name, path), 'signature': signature}
+            finally:
+                for child, _, _ in stack[1:]:
+                    os.close(child)
         with directory(self.root, self.create) as fd:
             visit(fd)
         if self.kind in PORTABLE:

@@ -4,6 +4,11 @@ import { delimiter, dirname, isAbsolute, join } from "node:path";
 import { promisify } from "node:util";
 import { access, mkdir, stat } from "node:fs/promises";
 import {
+  gitShell,
+  normalizeWindowsEnv,
+  terminateWindowsProcessTrees,
+} from "@cloudroom/process-utils";
+import {
   AUTOMATION_SCRIPT_TIMEOUT_MAX_MS,
   type AutomationScriptInterpreter,
 } from "./rpc-types.js";
@@ -72,7 +77,11 @@ async function resolveBbBinary(
   if (resolvedBbPath !== null) return resolvedBbPath;
   for (const candidate of bbBinaryCandidates(env)) {
     if (!(await isExecutableFile(candidate))) continue;
-    if (await commandWorks(candidate, ["--version"])) {
+    const works =
+      process.platform === "win32"
+        ? await commandWorks(process.execPath, [candidate, "--version"])
+        : await commandWorks(candidate, ["--version"]);
+    if (works) {
       resolvedBbPath = candidate;
       return candidate;
     }
@@ -174,7 +183,61 @@ export function mapScriptResultToRun(
   };
 }
 
+async function windowsProcessTree(pid: number): Promise<number[]> {
+  try {
+    const { stdout } = await execFileAsync(
+      join(
+        process.env.SystemRoot ?? "C:\\Windows",
+        "System32",
+        "WindowsPowerShell",
+        "v1.0",
+        "powershell.exe",
+      ),
+      [
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        'Get-CimInstance Win32_Process | ForEach-Object { "$($_.ProcessId) $($_.ParentProcessId)" }',
+      ],
+      { timeout: 10_000, windowsHide: true },
+    );
+    const links = stdout
+      .split(/\r?\n/u)
+      .map((line) => line.trim().split(" ").map(Number));
+    const tree = [pid];
+    for (let index = 0; index < tree.length; index += 1) {
+      for (const [childPid, parentPid] of links) {
+        if (
+          childPid !== undefined &&
+          parentPid === tree[index] &&
+          !tree.includes(childPid)
+        ) {
+          tree.push(childPid);
+        }
+      }
+    }
+    return tree;
+  } catch {
+    return [pid];
+  }
+}
+
 function signalProcessGroup(child: ChildProcess, signal: NodeJS.Signals): void {
+  if (process.platform === "win32" && child.pid !== undefined) {
+    const exited = child.exitCode !== null || child.signalCode !== null;
+    void (
+      exited
+        ? Promise.resolve(true)
+        : windowsProcessTree(child.pid).then((pids) =>
+            terminateWindowsProcessTrees(pids),
+          )
+    ).then((ended) => {
+      if (!ended) child.kill(signal);
+      child.stdout?.destroy();
+      child.stderr?.destroy();
+    });
+    return;
+  }
   try {
     if (process.platform !== "win32" && child.pid !== undefined) {
       process.kill(-child.pid, signal);
@@ -295,12 +358,18 @@ export async function executeStoredScript(args: {
   }
   const cwd = scriptsRoot(args.pluginDataDir);
   await mkdir(cwd, { recursive: true });
+  const windowsShell =
+    process.platform !== "win32"
+      ? null
+      : interpreter === "bash"
+        ? await gitShell(scriptEnv).catch(() => null)
+        : { command: interpreter, env: normalizeWindowsEnv(scriptEnv) };
   const result = await executeWithProcessGroup({
-    command: interpreter,
+    command: windowsShell?.command ?? interpreter,
     scriptPath,
     cwd,
     timeoutMs: Math.min(args.timeoutMs, AUTOMATION_SCRIPT_TIMEOUT_MAX_MS),
-    env: scriptEnv,
+    env: windowsShell?.env ?? scriptEnv,
   });
   return { ...result, output: `${warning}${result.output}` };
 }

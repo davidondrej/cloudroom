@@ -12,7 +12,7 @@ const serverClientState = vi.hoisted(() => ({
 }));
 
 vi.mock("../../client.js", async () => {
-  const { cliFetch } =
+  const { CLI_READ_TIMEOUT_MS, cliFetch } =
     await vi.importActual<typeof import("../../client.js")>("../../client.js");
   const { createBbSdk } =
     await vi.importActual<typeof import("@cloudroom/sdk/core")>("@cloudroom/sdk/core");
@@ -38,7 +38,7 @@ vi.mock("../../client.js", async () => {
       },
     });
   });
-  return { cliFetch, createCliBbSdk };
+  return { CLI_READ_TIMEOUT_MS, cliFetch, createCliBbSdk };
 });
 
 vi.mock("node:readline/promises", () => ({

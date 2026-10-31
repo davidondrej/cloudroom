@@ -2417,6 +2417,13 @@ async function runDesktopApp(): Promise<void> {
     if (url.startsWith("cloudroom://share/")) deliverOpenLink(url);
     desktopWindowFactory?.focusFirstWindow();
   });
+  if (
+    app.isPackaged &&
+    process.platform === "win32" &&
+    DESKTOP_RELEASE_INFO.channel === "latest"
+  ) {
+    app.setAsDefaultProtocolClient("cloudroom");
+  }
   deliverArgvShareLink(process.argv);
   app.on("before-quit", handleBeforeQuit);
   app.on("window-all-closed", () => {

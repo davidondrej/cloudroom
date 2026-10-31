@@ -39,6 +39,7 @@ const cloudLoop: LoopDialogLoop = {
   },
   agentEditable: true,
   runsOn: "Cloud · new thread each run",
+  secrets: { picked: ["SENTRY_AUTH_TOKEN", ".env"] },
 };
 
 const context: LoopDialogContext = {
@@ -104,6 +105,7 @@ export const Local = () => (
       nextRunAt: now + 2 * minute,
       runs: 412,
       runsOn: "Worktree · Full access",
+      secrets: { fixed: "Everything on this Mac" },
     }}
     ctx={{ ...context, repo: { label: "website", github: null } }}
   />

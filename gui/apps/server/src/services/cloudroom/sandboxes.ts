@@ -316,6 +316,7 @@ export async function sandboxGithubLogin(token: string): Promise<string> {
 const environmentSchema = z.object({
   variables: z.array(z.object({ name: z.string(), hint: z.string() })), setup: z.string(),
   repos: z.array(z.string()).default([]), mcp: z.array(z.string()).default([]), available: z.array(z.string()).optional(), pushed: z.record(z.string(), z.number()).optional(), ids: z.record(z.string(), z.number()).optional(), login: z.string().optional(),
+  loops: z.record(z.string(), z.number()).optional(),
 });
 export type CloudEnvironment = z.infer<typeof environmentSchema>;
 export const cloudEnvironmentRequestSchema = z.discriminatedUnion("action", [
@@ -467,6 +468,9 @@ export class SandboxDirectory {
   private readonly views = new Map<string, View>();
   /** A new thread's VPS-or-Cloud pick, sent with its first wake (ADR 0319). */
   private readonly targets = new Map<string, "vps" | "cloud">();
+  /** The sandbox whose API keys a new child or fork gets (ADR 0342), from its saved first message, so an app restart
+   *  never loses it. Sent with each wake; the website reads it only when it registers the thread. */
+  keySource: (thread: string) => string | undefined = () => undefined;
   /** Whether the account has a VPS connected, from its last status check: VPS accounts' prompts explain VPS threads. */
   vpsConnected = false;
   private readonly wakes = new Map<string, Promise<View>>();
@@ -474,7 +478,7 @@ export class SandboxDirectory {
   private readonly wakeHarnesses = new Map<string, Awaited<ReturnType<typeof macHarnessVersions>>>();
   // After a failed wake, wait before asking again. Network and server errors retry every 2 s three times first;
   // then 5 s, doubling to 5 minutes. Delivery retries every tick otherwise.
-  private readonly backoff = new Map<string, { until: number; delay: number; tries: number }>();
+  private readonly backoff = new Map<string, { until: number; delay: number; tries: number; refusal: CloudroomError | null }>();
   private readonly preloads = new Map<string, Promise<void>>();
   private readonly preloaded = new Map<string, number>();
   private readonly preloadQueue: { thread: string; project: SandboxProject }[] = [];
@@ -654,15 +658,18 @@ export class SandboxDirectory {
     if (view?.state === "awake" && view.origin && view.token) return { url: view.origin, token: view.token };
     if (!wake) return null;
     const waiting = this.backoff.get(thread);
-    if (waiting && Date.now() < waiting.until) throw new CloudroomConnectionError(`The cloud sandbox could not start. Retrying in ${Math.ceil((waiting.until - Date.now()) / 1000)} seconds.`);
+    if (waiting && Date.now() < waiting.until) {
+      const { refusal } = waiting, retry = `Retrying in ${Math.ceil((waiting.until - Date.now()) / 1000)} seconds.`;
+      throw !refusal ? new CloudroomConnectionError(`The cloud sandbox could not start. ${retry}`) : !refusal.code && refusal.retryable ? new CloudroomError(`${refusal.message} ${retry}`, refusal.status) : refusal;
+    }
     let pending = this.wakes.get(thread);
     if (!pending) {
       this.wakeStarts.set(thread, Date.now());
       // The Mac's harness versions: the sandbox upgrades to them before its agent starts (ADR 0133).
       pending = macHarnessVersions().then(harnesses => {
         this.wakeHarnesses.set(thread, harnesses);
-        const target = this.targets.get(thread);
-        return this.call({ action: "wake", ...place, ...(target ? { target } : {}), harnesses, ...(this.backoff.has(thread) ? { trigger: "retry" } : trigger ? { trigger } : {}) });
+        const target = this.targets.get(thread), from = this.keySource(thread);
+        return this.call({ action: "wake", ...place, ...(target ? { target } : {}), ...(from ? { from } : {}), harnesses, ...(this.backoff.has(thread) ? { trigger: "retry" } : trigger ? { trigger } : {}) });
       }).then(value => this.remember(viewSchema.parse(value))).then(view => {
         this.targets.delete(thread);
         this.woke(view.thread);
@@ -681,7 +688,7 @@ export class SandboxDirectory {
         // A thread moving to Cloud continues there in about a minute: keep checking.
         const moving = error instanceof CloudroomError && error.code === "sandbox_moving";
         const delay = quick ? 2_000 : moving ? 5_000 : Math.min(Math.max(previous?.delay ?? 0, 2_500) * 2, 300_000);
-        this.backoff.set(thread, { until: Date.now() + delay, delay, tries });
+        this.backoff.set(thread, { until: Date.now() + delay, delay, tries, refusal: error instanceof CloudroomError && error.status !== null ? error : null });
         throw error;
       }).finally(() => this.wakes.delete(thread));
       this.wakes.set(thread, pending);
@@ -706,8 +713,9 @@ export class SandboxDirectory {
       plan: z.string().nullable().default(null), preload: z.boolean().default(false),
     }).parse(await this.call({ action: "mode" }));
     this.plan = value.plan;
-    const code = this.refused?.code;
-    if ((code === USAGE_LIMIT && !value.limited) || (code === AGENT_LIMIT && value.plan && value.plan !== "free") || (code === CLOUD_QUEUE && !value.queue) || (code === CLOUD_REGION && !value.region_blocked)) this.refused = null;
+    const cleared = (code?: string | null) => (code === USAGE_LIMIT && !value.limited) || (code === AGENT_LIMIT && value.plan && value.plan !== "free") || (code === CLOUD_QUEUE && !value.queue) || (code === CLOUD_REGION && !value.region_blocked);
+    if (cleared(this.refused?.code)) this.refused = null;
+    for (const [thread, waiting] of this.backoff) if (cleared(waiting.refusal?.code)) this.backoff.delete(thread);
     this.preloadOn = value.preload;
     this.mode = { on: value.sandboxes, at: Date.now() };
     this.limit = { on: value.limited, at: Date.now() };
@@ -761,6 +769,10 @@ export class SandboxDirectory {
     if (this.refused) await this.forNewThreads();
     const refused = this.refused, day = (at: number) => new Date(at).toISOString().slice(0, 10);
     return refused && Date.now() - refused.at < 360_000 && day(refused.at) === day(Date.now()) ? refused.message : null;
+  }
+  /** The only API keys a thread's sandbox gets (a Cloud loop's pick, ADR 0342); null for every key. */
+  async loopSecrets(thread: string): Promise<string[] | null> {
+    return z.object({ secrets: z.array(z.string()).nullable() }).parse(await this.call({ action: "secrets", thread })).secrets;
   }
   /** Whether this run last saw the sandbox awake, without asking the website. */
   isAwake(thread: string): boolean { return this.views.get(thread)?.state === "awake" || this.awake.has(thread); }
@@ -961,7 +973,7 @@ export class SandboxDirectory {
     return this.call(body, "org");
   }
 
-  /** GPU sessions live on the website (docs/scopes/gpus.md): `room-cli gpu` steps, and the approvals GpuApprovals sends. */
+  /** GPU sessions live on the website (docs/scopes/gpus.md): `room-cli gpu` steps, and the cards and answers of GpuApprovals. */
   async gpu(body: Record<string, unknown>): Promise<unknown> {
     return this.call(body, "gpu");
   }

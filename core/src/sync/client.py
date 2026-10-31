@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Skills/settings sync, one-way MCP server copy, and one-way Codex and Pi setup import. Project files never sync."""
 import argparse
-import fcntl
 import functools
 import hashlib
 import json
@@ -22,6 +21,30 @@ import uuid
 
 from files import MCP, Conflict, Tree, atomic_json, excluded
 
+WINDOWS = sys.platform == 'win32'
+if WINDOWS:
+    import msvcrt
+else:
+    import fcntl
+NOFOLLOW = getattr(os, 'O_NOFOLLOW', 0)
+NONBLOCK = getattr(os, 'O_NONBLOCK', 0)
+
+
+def lock_file(file, wait=True):
+    """Locks `file` for this process. Without `wait`, raises BlockingIOError while another process holds it."""
+    if not WINDOWS:
+        return fcntl.flock(file, fcntl.LOCK_EX if wait else fcntl.LOCK_EX | fcntl.LOCK_NB)
+    file.seek(0)
+    try:
+        msvcrt.locking(file.fileno(), msvcrt.LK_LOCK if wait else msvcrt.LK_NBLCK, 1)
+    except OSError:
+        raise BlockingIOError('Locked by another process') from None
+
+
+def owned_private(info, mode=0o077):
+    """Windows files have no owner IDs or mode bits; the user's profile folder ACL keeps them private there."""
+    return WINDOWS or not (info.st_mode & mode or info.st_uid != os.getuid())
+
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, *args, **kwargs):
@@ -29,9 +52,9 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 def private_json(path):
-    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    fd = os.open(path, os.O_RDONLY | NOFOLLOW)
     with os.fdopen(fd) as source:
-        if os.fstat(source.fileno()).st_mode & 0o077:
+        if not WINDOWS and os.fstat(source.fileno()).st_mode & 0o077:
             raise ValueError('configuration must be private')
         return json.load(source)
 
@@ -95,7 +118,7 @@ def import_codex(config, connection, folder):
     folder.mkdir(mode=0o700, parents=True, exist_ok=True)
     with (folder / 'codex-import.lock').open('a') as lock:
         os.chmod(folder / 'codex-import.lock', 0o600)
-        fcntl.flock(lock, fcntl.LOCK_EX)
+        lock_file(lock)
         if not config.get('copyLogins'):
             return None  # The user said no in first-run setup (ADR 0130).
         remote = Remote(connection, config.get('device', ''))
@@ -108,10 +131,10 @@ def import_codex(config, connection, folder):
         home = config.get('codexHome') or os.environ.get('CODEX_HOME') or Path.home() / '.codex'
         path = Path(home).expanduser() / 'auth.json'
         try:
-            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            fd = os.open(path, os.O_RDONLY | NOFOLLOW | NONBLOCK)
             with os.fdopen(fd, 'rb') as source:
                 info = os.fstat(source.fileno())
-                if not stat.S_ISREG(info.st_mode) or info.st_mode & 0o077 or info.st_uid != os.getuid():
+                if not stat.S_ISREG(info.st_mode) or not owned_private(info):
                     return status
                 raw = source.read(64 * 1024 + 1)
             if len(raw) > 64 * 1024:
@@ -185,10 +208,10 @@ def portable_provider(provider):
 def pi_file(home, name):
     """A Pi file this user owns and nobody else can change. Login files must also be private."""
     try:
-        fd = os.open(Path(home).expanduser() / name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        fd = os.open(Path(home).expanduser() / name, os.O_RDONLY | NOFOLLOW | NONBLOCK)
         with os.fdopen(fd, 'rb') as source:
             info = os.fstat(source.fileno())
-            if not stat.S_ISREG(info.st_mode) or info.st_mode & (0o077 if name == 'auth.json' else 0o022) or info.st_uid != os.getuid():
+            if not stat.S_ISREG(info.st_mode) or not owned_private(info, 0o077 if name == 'auth.json' else 0o022):
                 return b''
             raw = source.read(256 * 1024 + 1)
         return raw if len(raw) <= 256 * 1024 else b''
@@ -331,7 +354,7 @@ def run(folder, once=False):
     folder = Path(folder).resolve(strict=True)
     with (folder / 'lock').open('a') as lock:
         os.chmod(folder / 'lock', 0o600)
-        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        lock_file(lock, wait=False)
         while True:
             started = time.monotonic()
             try:
@@ -370,10 +393,48 @@ def launch_identity(folder):
     return 'dev.cloudroom.sync.' + hashlib.sha256(str(folder).encode()).hexdigest()[:16]
 
 
+def wait_unlocked(folder, deadline):
+    """Waits until no sync helper holds this folder's run lock, such as one started by hand."""
+    with (folder / 'lock').open('a') as lock:
+        while True:
+            try:
+                return lock_file(lock, wait=False)
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise OSError(f'Another sync helper is still running for {folder}; stop it and try again')
+                time.sleep(.1)
+
+
+def systemd(folder, label, stop):
+    unit = label + '.service'
+    path = Path(os.environ.get('XDG_CONFIG_HOME') or Path.home() / '.config') / 'systemd/user' / unit
+    def systemctl(*args):
+        done = subprocess.run(['systemctl', '--user', *args], capture_output=True, text=True)
+        if done.returncode:
+            raise OSError(f'systemctl --user {args[0]} failed: {done.stderr.strip()}')
+    if stop:
+        if path.exists():
+            systemctl('disable', '--now', unit)
+            path.unlink()
+            systemctl('daemon-reload')
+        return
+    quote = lambda value: '"' + str(value).replace('\\', '\\\\').replace('"', '\\"').replace('%', '%%') + '"'
+    command = ' '.join(quote(part) for part in [sys.executable, '-B', '-E', '-s', folder / 'client.py', 'run', folder])
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f'[Service]\nExecStart={command}\nEnvironment={quote("PATH=" + os.environ.get("PATH", os.defpath))}\nRestart=always\nRestartSec=5\n\n[Install]\nWantedBy=default.target\n')
+    systemctl('daemon-reload')
+    systemctl('enable', '--now', unit)
+
+
 def launch(folder, stop=False):
-    if sys.platform != 'darwin':
-        raise ValueError('automatic installation supports macOS; use run on other systems')
     label = launch_identity(folder)
+    if sys.platform.startswith('linux'):
+        systemd(folder, label, stop)
+        if stop:
+            wait_unlocked(folder, time.monotonic() + 10)
+        return
+    if sys.platform != 'darwin':
+        raise ValueError('automatic installation supports macOS and Linux; use run on other systems')
     domain = f'gui/{os.getuid()}'
     path = Path.home() / 'Library/LaunchAgents' / (label + '.plist')
     if stop:
@@ -383,15 +444,7 @@ def launch(folder, stop=False):
             if time.monotonic() >= deadline:
                 raise OSError('Sync helper did not stop within 10 seconds')
             time.sleep(.1)
-        with (folder / 'lock').open('a') as lock:
-            while True:
-                try:
-                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                    break
-                except BlockingIOError:
-                    if time.monotonic() >= deadline:
-                        raise OSError('Previous sync helper is still shutting down')
-                    time.sleep(.1)
+        wait_unlocked(folder, deadline)
         path.unlink(missing_ok=True)
         return
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -405,7 +458,7 @@ def configure(folder, connection_file, activate=True, copy_logins=None):
     folder.mkdir(mode=0o700, parents=True, exist_ok=True)
     folder.chmod(0o700)
     with (folder / 'configure.lock').open('a') as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+        lock_file(lock)
         connection_file = Path(connection_file).expanduser().resolve(strict=True)
         connection = private_json(connection_file)
         binding = [connection['url'].rstrip('/'), (connection.get('account') or {}).get('id')]
@@ -467,6 +520,6 @@ if __name__ == '__main__':
     try:
         main()
     except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
-        message = f'Sync shutdown failed: {error}' if sys.argv[1:2] == ['stop'] else 'Sync setup failed. Check Python 3.11+, private connection settings, folder permissions, and macOS background-job access.'
+        message = f'Sync shutdown failed: {error}' if sys.argv[1:2] == ['stop'] else f'Sync setup failed: {error}'
         print(message, file=sys.stderr)
         sys.exit(1)

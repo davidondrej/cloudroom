@@ -144,8 +144,10 @@ the `WINDOWS_CERTIFICATE_PFX` and `WINDOWS_CERTIFICATE_PASSWORD` secrets.
 `afterPack` copies `@parcel/watcher-win32-x64` into the package, because
 electron-builder leaves it out, and loads it with the packaged Electron.
 
-Inside the installed app, `room-cli.cmd` runs on `Cloudroom.exe` with
-`ELECTRON_RUN_AS_NODE=1`, so the PC needs no Node.
+Inside the installed app, `room-cli.cmd` and `room-cli.ps1` run on
+`Cloudroom.exe` with `ELECTRON_RUN_AS_NODE=1`, so the PC needs no Node.
+PowerShell picks `room-cli.ps1`, which passes arguments as JSON in
+`ROOM_CLI_ARGV`, so cmd.exe never re-parses them.
 
 ### Linux (AppImage, x64)
 

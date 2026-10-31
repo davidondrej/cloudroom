@@ -1615,7 +1615,7 @@ describe("environment providers are asked inside provisioning", () => {
     });
   });
 
-  it("applies git-checkout availability eligibility to explicit selection", async () => {
+  it("accepts explicit selection when HEAD is unborn but a base branch exists", async () => {
     await withTestHarness(async (harness) => {
       installTarget({
         requiresGitCheckout: true,
@@ -1623,14 +1623,14 @@ describe("environment providers are asked inside provisioning", () => {
       });
       const { host, project, session } = seedTargetFixture(
         harness,
-        "host-target-unusable-git-checkout",
+        "host-target-unborn-git-checkout",
       );
       registerTestHostRpcCapture(harness, {
         hostId: host.id,
         sessionId: session.id,
         gitSourceInspectionResult: {
-          checkout: { kind: "unborn", branchName: "main" },
-          defaultBranch: null,
+          checkout: { kind: "unborn", branchName: "deleted" },
+          defaultBranch: "main",
           defaultBranchRelation: null,
           isWorktree: false,
           hasUncommittedChanges: false,
@@ -1638,19 +1638,11 @@ describe("environment providers are asked inside provisioning", () => {
           originDefaultBranch: null,
         },
       });
-      const failed = await createTargetThread(harness, {
+      const created = await createTargetThread(harness, {
         projectId: project.id,
         hostId: host.id,
-      }).then(
-        () => null,
-        (error: unknown) => error,
-      );
-      expect(failed).toBeInstanceOf(ApiError);
-      if (!(failed instanceof ApiError)) {
-        throw new Error("expected provider selection to be rejected");
-      }
-      expect(failed.body.code).toBe("environment_provider_rejected");
-      expect(failed.message).toContain("no usable git branch");
+      });
+      expect(getThread(harness.db, created.id)?.status).toBe("starting");
     });
   });
 
@@ -2351,7 +2343,7 @@ describe("environment provider listing", () => {
         );
         expect(later.providers[0]?.availability).toEqual({
           status: "unavailable",
-          message: "This project checkout has no usable git branch.",
+          message: `The project folder ${WORKSPACE_PATH} is missing or git can't read it (not a git repository). Change the folder in project settings, or run it as a Cloud thread.`,
         });
       });
       expect(inspect).toHaveBeenCalledTimes(1);

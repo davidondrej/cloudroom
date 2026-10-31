@@ -6,12 +6,13 @@ import { lstat, mkdtemp, open, readdir, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { promisify } from "node:util";
+import { z } from "zod";
 import { getProject, getThread, listProjectSourcesByProjectIds, setProjectGitRemoteUrlIfMissing } from "@cloudroom/db";
 import { tarCommand } from "@cloudroom/process-utils";
 import type { ProjectCopyProgress } from "@cloudroom/domain";
 import type { AppDeps } from "../../types.js";
 import { CloudroomError, UPLOAD_PART, type CloudroomClient } from "./client.js";
-import { saveProjectCopyProgress } from "./store.js";
+import { command, saveProjectCopyProgress } from "./store.js";
 import { copyMacGithub } from "./sync.js";
 
 type Deps = Pick<AppDeps, "db" | "hub" | "config">;
@@ -19,11 +20,13 @@ type Deps = Pick<AppDeps, "db" | "hub" | "config">;
 // New threads get a clone of the chosen branch (default branch if none) and `.env` files, or all files of a small project not on GitHub.
 // A GitHub project with no folder on the Mac (`localPath` null) is cloned only.
 // Teleport also brings the local branch and uncommitted work.
-export type ProjectCopyJob = { threadId: string; workspace: string; key: string; localPath: string | null; repository: string | null; clone: boolean; copyAll: boolean; teleport: boolean; branch?: string };
+/** `noEnv`: the thread's sandbox may not have the project's `.env` files (ADR 0342), so none are sent. */
+export type ProjectCopyJob = { threadId: string; workspace: string; key: string; localPath: string | null; repository: string | null; clone: boolean; copyAll: boolean; teleport: boolean; branch?: string; noEnv?: boolean };
 
 const exec = promisify(execFile);
 // A stalled piece counts as dropped, so the retry sends it again.
-const PIECE_TIMEOUT = 120_000;
+export const PIECE_TIMEOUT = 120_000;
+const PACK_TIMEOUT = 5 * 60_000;
 const MAX_FILE = 50 * 1024 * 1024;
 const MAX_TOTAL = 1024 * 1024 * 1024;
 // About 10-20 seconds on a home connection.
@@ -83,9 +86,11 @@ export async function planProjectCopyOrThrow(deps: Deps, client: CloudroomClient
   if (!empty && teleport) return null;
   const clone = empty && Boolean(repository);
   const copyAll = empty && !repository && !teleport && path !== null && await smallProject(path);
-  const job = { threadId, workspace, key, localPath: path, repository, clone, copyAll, teleport, ...(branch ? { branch } : {}) };
+  // A Cloud loop's run that didn't pick `.env` files passes none to its children and forks (keyFields in commands.ts).
+  const noEnv = z.object({ no_env: z.boolean().optional() }).safeParse(JSON.parse(command(deps.db, `first_${threadId}`)?.input ?? "{}")).data?.no_env === true;
+  const job = { threadId, workspace, key, localPath: path, repository, clone, copyAll, teleport, ...(branch ? { branch } : {}), ...(noEnv ? { noEnv } : {}) };
   // A Mac folder that can't be read has no `.env` files to send, so it reads as nothing left, never as a reason to wait.
-  return clone || copyAll || teleport || (path !== null && (await localFiles(path, "env").catch(() => [])).length) ? job : null;
+  return clone || copyAll || teleport || (path !== null && !noEnv && (await localFiles(path, "env").catch(() => [])).length) ? job : null;
 }
 
 /** Whether a copy for this thread runs in this app: an app restart ends every copy, but leaves its saved progress. */
@@ -162,7 +167,7 @@ async function run(deps: Deps, client: CloudroomClient, job: ProjectCopyJob, rep
     const folder = await mkdtemp(join(tmpdir(), "cloudroom-copy-"));
     const archive = join(folder, "project.tgz");
     try {
-      const packed = await packProject(job.localPath, scope, archive);
+      const packed = await packProject(job.localPath, scope, archive, job.noEnv);
       partial = packed.partial;
       if (packed.files) await send(client, archive, target, scope !== "changed", report);
     } finally {
@@ -202,12 +207,12 @@ async function vm(client: CloudroomClient, command: string, bytes?: Buffer<Array
 }
 
 /** Retries dropped connections and busy clouds for about 90 seconds, so a network blip doesn't end the copy. */
-async function retry<T>(attempt: () => Promise<T>): Promise<T> {
+export async function retry<T>(attempt: () => Promise<T>): Promise<T> {
   for (let tries = 1; ; tries++) {
     try {
       return await attempt();
     } catch (error) {
-      if (tries === 7 || !(error instanceof CloudroomError && error.retryable)) throw error;
+      if (tries === 7 || !(error instanceof CloudroomError && (error.retryable || error.status === 200))) throw error;
       await new Promise((resolve) => setTimeout(resolve, Math.min(2_000 * 2 ** (tries - 1), 30_000)));
     }
   }
@@ -302,13 +307,13 @@ async function* walk(root: string, folder: string): AsyncGenerator<string> {
 
 /** Lists and packs the files on the Mac. A full copy that fails here for any reason (too large, cloud-only Dropbox or
  *  iCloud files, unreadable files) packs only the `.env` files instead and says why. Clones and uncommitted edits never fall back. */
-async function packProject(root: string, scope: "all" | "changed" | "env", archive: string): Promise<{ files: number; partial?: string }> {
+async function packProject(root: string, scope: "all" | "changed" | "env", archive: string, noEnv = false): Promise<{ files: number; partial?: string }> {
   try {
-    const files = await localFiles(root, scope);
+    const files = (await localFiles(root, scope)).filter(path => !noEnv || !isEnv(path));
     if (files.length) await pack(root, files, archive);
     return { files: files.length };
   } catch (error) {
-    if (scope !== "all") throw error;
+    if (scope !== "all" || noEnv) throw error;
     const files = await localFiles(root, "env").catch(() => { throw error; });
     if (files.length) await pack(root, files, archive).catch(() => { throw error; });
     const reason = error instanceof Error ? error.message : String(error);
@@ -319,9 +324,9 @@ async function packProject(root: string, scope: "all" | "changed" | "env", archi
 async function pack(root: string, files: string[], archive: string): Promise<void> {
   await new Promise<void>((resolve, reject) => {
     let stderr = "";
-    const tar = spawn(tarCommand(), ["--no-xattrs", "-czf", archive, "--null", "-T", "-"], { cwd: root, env: { ...process.env, COPYFILE_DISABLE: "1" }, stdio: ["pipe", "ignore", "pipe"] });
+    const tar = spawn(tarCommand(), ["--no-xattrs", "-czf", archive, "--null", "-T", "-"], { cwd: root, env: { ...process.env, COPYFILE_DISABLE: "1" }, stdio: ["pipe", "ignore", "pipe"], timeout: PACK_TIMEOUT });
     tar.stderr.on("data", (chunk: Buffer) => { stderr = (stderr + chunk.toString()).slice(-300); });
-    tar.on("error", reject).on("close", (code) => code === 0 ? resolve() : reject(new Error(`Could not pack the project files. ${stderr.trim()}`.trim())));
+    tar.on("error", reject).on("close", (code) => code === 0 ? resolve() : reject(new Error(`Could not pack the project files${tar.killed ? ` within ${PACK_TIMEOUT / 60_000} minutes` : ""}. ${stderr.trim()}`.trim())));
     tar.stdin.end(files.map((path) => `${path}\0`).join(""));
   });
 }

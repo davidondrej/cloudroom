@@ -32,11 +32,7 @@ function ApprovalCard({ interaction, submit, cancel }: PluginPendingInteractionP
     }
   };
   return (
-    <form
-      onSubmit={(event) => {
-        event.preventDefault();
-        void decide(true);
-      }}
+    <div
       onKeyDown={(event) => {
         if (event.key === "Escape") void decide(false);
       }}
@@ -56,11 +52,11 @@ function ApprovalCard({ interaction, submit, cancel }: PluginPendingInteractionP
         <Button type="button" variant="ghost" disabled={busy} onClick={() => void decide(false)}>
           Deny
         </Button>
-        <Button type="submit" disabled={busy} autoFocus>
+        <Button type="button" disabled={busy} onClick={() => void decide(true)}>
           Approve
         </Button>
       </div>
-    </form>
+    </div>
   );
 }
 

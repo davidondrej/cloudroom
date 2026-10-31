@@ -910,6 +910,48 @@ describe("thread creation child-thread boundary validation", () => {
     });
   });
 
+  it("lets a personal parent teleported back from Cloud spawn a child", async () => {
+    await withTestHarness(async (harness) => {
+      const { host } = seedHostSession(harness.deps, {
+        id: "host-personal-spawn-teleported",
+      });
+      ensurePersonalProject(harness.db);
+      const parentEnvironment = seedEnvironment(harness.deps, {
+        hostId: host.id,
+        path: "/tmp/personal-spawn-teleported",
+        projectId: PERSONAL_PROJECT_ID,
+      });
+      const parent = seedThread(harness.deps, {
+        environmentId: parentEnvironment.id,
+        projectId: PERSONAL_PROJECT_ID,
+      });
+
+      for (const environment of [
+        { type: "project-default" as const },
+        {
+          type: "host" as const,
+          hostId: host.id,
+          workspace: { type: "personal" as const },
+        },
+        { type: "reuse" as const, environmentId: parentEnvironment.id },
+      ]) {
+        const child = await createThreadFromRequest(harness.deps, {
+          environment,
+          input: textInput("Child of a teleported parent"),
+          origin: "app",
+          parentThreadId: parent.id,
+          projectId: PERSONAL_PROJECT_ID,
+          providerId: "codex",
+          startedOnBehalfOf: null,
+        });
+        expect(getThread(harness.db, child.id)).toMatchObject({
+          environmentId: parentEnvironment.id,
+          parentThreadId: parent.id,
+        });
+      }
+    });
+  });
+
   it("rejects a personal fork that reuses a different unmanaged environment", async () => {
     await withTestHarness(async (harness) => {
       const { host } = seedHostSession(harness.deps, {

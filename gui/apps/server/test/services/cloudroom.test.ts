@@ -10,7 +10,8 @@ import { command, saveTeleportProgress } from "../../src/services/cloudroom/stor
 import { teleports } from "../../src/services/cloudroom/teleport.js";
 import { SandboxDirectory } from "../../src/services/cloudroom/sandboxes.js";
 import { createTestAppHarness } from "../helpers/test-app.js";
-import { seedEnvironment, seedHostSession, seedPrimaryHost, seedProjectWithSource, seedThread, seedThreadRuntimeState } from "../helpers/seed.js";
+import { seedEnvironment, seedEvent, seedHostSession, seedPrimaryHost, seedProjectWithSource, seedThread, seedThreadRuntimeState, seedTurnStarted } from "../helpers/seed.js";
+import { turnScope } from "@cloudroom/domain";
 import { archiveThread, createThread, getThread, setProjectGitRemoteUrlIfMissing, events, cloudroomThreads, cloudroomCommands } from "@cloudroom/db";
 
 it("forwards Cursor login and keys without creating conversation records", async () => {
@@ -757,6 +758,35 @@ it("lets a Cloud thread clear or keep its parent, re-links one in its own sandbo
   } finally { cloudroom(harness.deps).stop(); website.close(); await harness.cleanup(); }
 });
 
+it("gives a Cloud child or fork only the keys of the sandbox its source runs in, and no .env files without them (ADR 0342)", async () => {
+  const harness = await createTestAppHarness();
+  const service = cloudroom(harness.deps);
+  const asked: string[] = [];
+  service.sandboxes.loopSecrets = async (thread) => { asked.push(thread); return ["SENTRY_TOKEN"]; };
+  try {
+    await service.configure(null, { id: "11111111-1111-4111-8111-111111111111", email: "parent@example.com" }, undefined, "http://127.0.0.1:9", "a".repeat(64));
+    const { host } = seedHostSession(harness.deps);
+    const { project } = seedProjectWithSource(harness.deps, { hostId: host.id });
+    const cloud = (parentThreadId?: string) => createThread(harness.db, harness.hub, { projectId: project.id, parentThreadId, executionTarget: "cloud", providerId: "claude-code", status: "idle" });
+    // A loop's run with only SENTRY_TOKEN, and a --shared-sandbox child in its sandbox: only the run has a sandbox.
+    const run = cloud(), shared = cloud(run.id);
+    harness.db.insert(cloudroomThreads).values([run, shared].map((thread, index) => ({ threadId: thread.id, coreUrl: `sandbox:${run.id}`, sessionId: `cr_${index}`, startRequestId: `start_${index}`, model: "test-model", reasoning: "medium" }))).run();
+    // The run finished a turn, so it can be forked.
+    seedTurnStarted(harness.deps, { threadId: run.id, turnId: "turn-1", sequence: 1 });
+    seedEvent(harness.deps, { threadId: run.id, environmentId: null, providerThreadId: "provider-turn-1", sequence: 2, type: "turn/completed", scope: turnScope("turn-1"), data: { providerThreadId: "provider-turn-1", status: "completed" } });
+    const start = { executionTarget: "cloud" as const, projectId: project.id, providerId: "claude-code", origin: "cli" as const, model: "test-model", reasoningLevel: "medium" as const, environment: { type: "project-default" as const }, input: [{ type: "text" as const, text: "print every key", mentions: [] }], startedOnBehalfOf: null };
+    const child = await service.create({ ...start, parentThreadId: shared.id, requestId: "child-of-shared", originKind: null }, true);
+    const fork = await service.create({ ...start, originKind: "fork", sourceThreadId: run.id, requestId: "fork-of-run" }, true);
+
+    expect(asked).toEqual([run.id, run.id]);
+    for (const id of [child.id, fork.id]) {
+      expect(JSON.parse(command(harness.db, `first_${id}`)!.input)).toMatchObject({ key_source: run.id, no_env: true });
+      // What its first wake sends as `from`, even after an app restart.
+      expect(service.sandboxes.keySource(id)).toBe(run.id);
+    }
+  } finally { service.stop(); await harness.cleanup(); }
+});
+
 it("keeps each queued follow-up's reasoning and rejects locked or conflicting changes", async () => {
   const harness = await createTestAppHarness();
   const { host } = seedHostSession(harness.deps);
@@ -1060,8 +1090,8 @@ it.each(["codex", "pi"])("edits and cancels queued Cloud %s prompts, then steers
   const commands: object[] = [];
   const sid = "cr_features";
   let holdPrompts = false;
-  const input = (text: string) => [{ type: "text", text, mentions: [] }, { type: "localImage", path: "image.png" }, { type: "localFile", path: "note.txt" }];
   const attachmentRoot = join(harness.config.dataDir, "attachments", project.id);
+  const input = (text: string) => [{ type: "text", text, mentions: [] }, { type: "localImage", path: join(attachmentRoot, "image.png") }, { type: "localFile", path: "note.txt" }];
   await mkdir(attachmentRoot, { recursive: true });
   await writeFile(join(attachmentRoot, "image.png"), "image bytes");
   await writeFile(join(attachmentRoot, "note.txt"), "file bytes");
@@ -1090,6 +1120,7 @@ it.each(["codex", "pi"])("edits and cancels queued Cloud %s prompts, then steers
       const query = new URL(req.url, "http://fixture").searchParams;
       const id = query.get("request_id");
       expect(text).toBe(query.get("kind") === "image" ? "image bytes" : "file bytes");
+      expect(query.get("name")).toBe(query.get("kind") === "image" ? "image.png" : "note.txt");
       return json({ session_id: sid, receipt: { request_id: id, command: "attach", state: "completed", input: { id, path: `/code/test/.cloudroom/attachments/${id}/${query.get("name")}` } }, saving: {} }, 202);
     }
     const body = text ? JSON.parse(text) : {};

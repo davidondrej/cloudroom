@@ -33,6 +33,7 @@ enum Copy {
     Ready(PathBuf),
     Failed(PathBuf, String),
     NotRunning,
+    NoProject,
 }
 
 /// One look at the project copy. `None` while it runs, or may be about to start.
@@ -51,6 +52,8 @@ fn check(cwd: &Path, waited: Duration) -> Option<Copy> {
             Some(Copy::Failed(folder, reason.into()))
         }
         (Some(_), _) => None,
+        // Threads without a project start in the bare workspace root, where nothing is ever copied.
+        (None, _) if cwd == Path::new("/code") => Some(Copy::NoProject),
         (None, _) if waited >= GRACE || !looks_empty(cwd) => Some(Copy::NotRunning),
         (None, _) => None,
     }
@@ -83,6 +86,12 @@ async fn wait(cwd: &Path) -> io::Result<i32> {
                     ),
                 }
                 return Ok(1);
+            }
+            Some(Copy::NoProject) => {
+                println!(
+                    "This thread has no project, so Cloudroom copies nothing into it. Files sent with `room-cli vm push` stay where the sender put them, by default the agent home (~). Pull anything else from the user's Mac with `room-cli mac pull`."
+                );
+                return Ok(0);
             }
             Some(Copy::NotRunning) => {
                 println!(

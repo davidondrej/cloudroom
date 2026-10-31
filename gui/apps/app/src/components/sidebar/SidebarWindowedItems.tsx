@@ -1,6 +1,8 @@
 import {
+  createContext,
   startTransition,
   useCallback,
+  useContext,
   useEffect,
   useLayoutEffect,
   useMemo,
@@ -39,6 +41,8 @@ interface SidebarWindowedItemsProps {
 
 const EMPTY_KEY_SET: ReadonlySet<string> = new Set();
 
+const SidebarWindowedOrderContext = createContext<object | null>(null);
+
 export function SidebarWindowedItems({
   itemKeys,
   focusItemKey,
@@ -67,6 +71,11 @@ export function SidebarWindowedItems({
   const rowsByKeyRef = useRef(new Map<string, number>());
 
   const keySignature = useMemo(() => itemKeys.join("\u0000"), [itemKeys]);
+  const ancestorOrder = useContext(SidebarWindowedOrderContext);
+  const order = useMemo(
+    () => ({ ancestorOrder, keySignature }),
+    [ancestorOrder, keySignature],
+  );
 
   useLayoutEffect(() => {
     if (!focusItemKey) return;
@@ -185,7 +194,7 @@ export function SidebarWindowedItems({
       setRealizedKeys(next);
     }
     // oxlint-disable-next-line react/exhaustive-deps
-  }, [windowingEnabled, keySignature]);
+  }, [windowingEnabled, order]);
 
   useEffect(() => {
     if (!windowingEnabled || typeof IntersectionObserver === "undefined") {
@@ -240,7 +249,7 @@ export function SidebarWindowedItems({
   }, [windowingEnabled, resolveScrollElement, recordMeasuredHeight]);
 
   return (
-    <>
+    <SidebarWindowedOrderContext.Provider value={order}>
       {itemKeys.map((key, index) => {
         const isRealized =
           !windowingEnabled ||
@@ -277,6 +286,6 @@ export function SidebarWindowedItems({
           </div>
         );
       })}
-    </>
+    </SidebarWindowedOrderContext.Provider>
   );
 }

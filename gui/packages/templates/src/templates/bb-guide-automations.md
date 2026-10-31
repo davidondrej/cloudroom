@@ -25,6 +25,10 @@ run a prompt in a thread; script loops run stored code without model usage.
 Every loop has a priority, P1 (essential) to P4 (niche): `--priority 1-4` on
 create and update. Loops start at P3, or at their template's.
 
+A fresh-thread Cloud loop gets only the API keys picked with
+`--secrets KEY,.env|none|all` on create and update (`.env` is the project's .env
+files). Pick only what its prompt and script need. Without it, it gets all of them.
+
 Schedules:
 
   --cron <expression> --timezone <iana-timezone>

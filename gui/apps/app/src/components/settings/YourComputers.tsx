@@ -11,7 +11,7 @@ import { publishBannerHeight } from "@/components/layout/DesktopUpdateBanner";
 import { callPluginRpc } from "@/lib/plugin-sdk-hooks";
 import { getMutationErrorMessage } from "@/lib/mutation-errors";
 import { sdk } from "@/lib/sdk";
-import { isPhoneApp, isPhoneRelay, openMacOnPhone } from "@/cloud/cloud-mode";
+import { isPhoneApp, openMacOnPhone } from "@/cloud/cloud-mode";
 
 export interface YourMac {
   handle: string;
@@ -135,26 +135,6 @@ export function YourMacRow({ mac }: { mac: YourMac }) {
         onClick={() => run.mutate()}
       >
         {busy ? "Setting up…" : "Run threads here"}
-      </Button>
-    </div>
-  );
-}
-
-export function NewPhoneAppBanner() {
-  const { desktopApi } = useDesktopUpdateInfo();
-  if (desktopApi || !isPhoneRelay() || isPhoneApp()) return null;
-  return (
-    <div
-      ref={publishBannerHeight}
-      role="status"
-      className="flex shrink-0 items-center gap-3 border-b border-primary/30 bg-primary/10 px-4 py-2 text-sm"
-    >
-      <Icon name="Smartphone" className="size-4 shrink-0 text-primary" aria-hidden />
-      <span className="min-w-0 flex-1 truncate">
-        <strong>Cloudroom has a new phone app.</strong> It works with your {COMPUTER} off.
-      </span>
-      <Button size="sm" asChild>
-        <a href="https://www.cloudroom.dev/m">Get it</a>
       </Button>
     </div>
   );

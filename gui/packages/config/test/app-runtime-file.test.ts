@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -177,4 +178,27 @@ describe("stopVerifiedProcess", () => {
 
     expect(result).toMatchObject({ kind: "unverified", reason: "start-time" });
   });
+
+  it("verifies and stops a real process with this platform's tools", async () => {
+    const child = spawn(
+      process.execPath,
+      ["-e", "setInterval(() => {}, 1000)", "verified-stop-marker"],
+      { stdio: "ignore" },
+    );
+    const pid = child.pid ?? 0;
+    try {
+      const result = await stopVerifiedProcess({
+        killTimeoutMs: 5_000,
+        pid,
+        signal: "SIGTERM",
+        startedAt: new Date().toISOString(),
+        timeoutMs: 5_000,
+        verifyTokens: ["verified-stop-marker"],
+      });
+
+      expect(result).toEqual({ kind: "stopped", usedKill: false });
+    } finally {
+      child.kill("SIGKILL");
+    }
+  }, 60_000);
 });

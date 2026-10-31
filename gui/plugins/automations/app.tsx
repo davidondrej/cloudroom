@@ -707,6 +707,7 @@ function localLoop(automation: AutomationResponse): LoopDialogLoop {
             : automationEnvironmentLabel(execution)
         } · ${PERMISSION_LABELS[execution.permissionMode] ?? execution.permissionMode}`
       : "Local · script",
+    secrets: { fixed: `Everything on this ${COMPUTER}` },
     ...(agent ? { usageKey: { automationId: automation.id } } : {}),
   };
 }

@@ -2,7 +2,7 @@ import {
   PendingInteractionShell,
   type PendingInteractionSourceThread,
 } from "@/components/thread/pending-interactions/PendingInteractionShell";
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import { Button } from "@cloudroom/shared-ui/button";
 import { Dialog, DialogContent, DialogTitle } from "@cloudroom/shared-ui/dialog";
 import type { JsonValue, PendingInteraction } from "@cloudroom/domain";
@@ -39,6 +39,7 @@ export function PluginPendingInteractionComposer({
   const stopThread = useStopThread();
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const dialogRef = useRef<HTMLDivElement>(null);
   const slot = useMemo(
     () =>
       resolvePendingInteraction(
@@ -147,10 +148,15 @@ export function PluginPendingInteractionComposer({
     return (
       <Dialog open>
         <DialogContent
+          ref={dialogRef}
           hideCloseButton
           aria-describedby={undefined}
           overlayClassName="bg-black/35 backdrop-blur-sm"
-          className="max-w-[520px] gap-0 rounded-[14px] border-white/15 p-7 sm:rounded-[14px]"
+          className="max-w-[520px] gap-0 rounded-[14px] border-white/15 p-7 outline-none sm:rounded-[14px]"
+          onOpenAutoFocus={(event) => {
+            event.preventDefault();
+            dialogRef.current?.focus();
+          }}
           onEscapeKeyDown={(event) => event.preventDefault()}
           onInteractOutside={(event) => event.preventDefault()}
         >

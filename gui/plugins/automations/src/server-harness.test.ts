@@ -39,6 +39,7 @@ const rpcMethods = [
   "automations_review_mark",
   "automations_link_thread",
   "cloud_automations",
+  "cloud_keys",
   "cloud_template_add",
   "account_plan",
   "paused_loops",

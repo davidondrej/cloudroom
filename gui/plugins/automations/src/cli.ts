@@ -1012,12 +1012,14 @@ no output skips the run (exit 0 or 1; other exit codes fail it, 3 in a row pause
 A --webhook loop, Local or Cloud, runs when its secret URL gets a POST: create prints the URL once, and each run gets
 the requests that arrived as data. Cloud runs start within seconds; this Mac checks for Local ones about once a minute,
 and they wait while it is off. A Local webhook loop an agent creates starts paused: a person turns it on in Loops.
-room-cli loop create --cloud --thread <cloudThreadId> --name <name> --prompt <text> (--cron <expr> --timezone <tz> | --at <datetime> | --in <duration> | --webhook) [--new-thread | --same-thread] [--script <inline> | --script-file <path>] [--provider <id>] [--model <model>] [--reasoning <level>] [--priority 1-4]
+room-cli loop create --cloud --thread <cloudThreadId> --name <name> --prompt <text> (--cron <expr> --timezone <tz> | --at <datetime> | --in <duration> | --webhook) [--new-thread | --same-thread] [--script <inline> | --script-file <path>] [--provider <id>] [--model <model>] [--reasoning <level>] [--priority 1-4] [--secrets <KEY,.env|none|all>]
+--secrets picks the only API keys (Settings → Cloud environment) a fresh-thread Cloud loop's runs and script get, plus
+.env for the project's .env files: pick just what it needs, like --secrets SENTRY_TOKEN,.env, or none. Without it, all.
 A Cloud template loop runs from the project's newest Cloud thread, else a new one titled "<template> loop".
 room-cli loop list --cloud [--thread <cloudThreadId>]   All Cloud loops, in every project
 room-cli loop show|pause|resume|run|hook <cloudLoopId>
 room-cli loop runs <cloudLoopId> [--limit <count>]   What each run did, from its loop report
-room-cli loop update <cloudLoopId> [--name <name>] [--priority 1-4] [--prompt <text>] [schedule flags] [--script <inline> | --script-file <path> | --no-script] [--provider <id>] [--model <model>] [--reasoning <level>]
+room-cli loop update <cloudLoopId> [--name <name>] [--priority 1-4] [--prompt <text>] [schedule flags] [--script <inline> | --script-file <path> | --no-script] [--provider <id>] [--model <model>] [--reasoning <level>] [--secrets <KEY,.env|none|all>]
 room-cli loop delete <cloudLoopId> --yes
 `;
 }
@@ -1064,7 +1066,8 @@ function printCloudAutomation(a: CloudAutomation): string {
   const state = !a.enabled ? "paused" : webhook ? (a.next_run_at ? "running its webhooks" : "waiting for a webhook") : `next run ${a.next_run_at ?? "within a minute"}`;
   const mode = `${a.new_thread ? "new thread per run" : "re-prompts"}${a.script ? " · script" : ""}`;
   const agent = a.agent ? `\n  Agent: ${a.agent.provider} · ${a.agent.model ?? "default model"}${a.agent.reasoning ? ` · ${a.agent.reasoning}` : ""}` : "";
-  return `${a.id}  ${a.name}  P${a.priority ?? DEFAULT_LOOP_PRIORITY}\n  Cloud thread ${a.thread_id} · ${mode} · ${schedule} · ${state} · ${a.runs} runs${agent}${a.last_error ? `\n  Last error: ${a.last_error}` : ""}\n${a.url ? webhookNote(a.url) : ""}`;
+  const secrets = a.new_thread && a.secrets !== undefined ? `\n  Secrets: ${a.secrets === null ? "all API keys and .env files" : a.secrets.join(", ") || "none"}` : "";
+  return `${a.id}  ${a.name}  P${a.priority ?? DEFAULT_LOOP_PRIORITY}\n  Cloud thread ${a.thread_id} · ${mode} · ${schedule} · ${state} · ${a.runs} runs${agent}${secrets}${a.last_error ? `\n  Last error: ${a.last_error}` : ""}\n${a.url ? webhookNote(a.url) : ""}`;
 }
 
 async function projectCloudAutomations(bb: Pick<BbPluginApi, "sdk">, projectId: string): Promise<CloudAutomation[]> {
@@ -1081,6 +1084,13 @@ async function projectCloudAutomations(bb: Pick<BbPluginApi, "sdk">, projectId: 
 function cloudAgent(args: ParsedArgs): { harness?: string; model?: string; reasoning?: string } {
   const harness = flag(args, "provider"), model = flag(args, "model"), reasoning = flag(args, "reasoning");
   return { ...(harness ? { harness } : {}), ...(model ? { model } : {}), ...(reasoning ? { reasoning: parseReasoningLevel(reasoning) } : {}) };
+}
+
+/** The API keys and .env files a fresh-thread cloud loop's runs get (ADR 0342): names and .env, none, or all. */
+function cloudSecrets(args: ParsedArgs): { secrets?: string[] | null } {
+  const value = flag(args, "secrets");
+  if (value === undefined) return {};
+  return { secrets: value === "all" ? null : value === "none" ? [] : value.split(",").map((name) => name.trim()).filter(Boolean) };
 }
 
 /** A webhook loop's URL, printed only when it is created or replaced. */
@@ -1130,10 +1140,10 @@ async function runCloudCommand(bb: Pick<BbPluginApi, "sdk">, args: ParsedArgs, c
     const schedule = boolFlag(args, "webhook") && buildTrigger(args).triggerType === "webhook" ? { webhook: true as const } : cloudSchedule(args);
     if (!schedule) throw new Error("Provide exactly one trigger flag: --cron, --at, --in, or --webhook.");
     return one({ action: "create", thread, name: requireFlag(args, "name"), prompt: requireFlag(args, "prompt"), ...schedule, enabled: !boolFlag(args, "disabled"),
-      ...(boolFlag(args, "new-thread") ? { new_thread: true } : boolFlag(args, "same-thread") ? { new_thread: false } : {}), ...await cloudScript(bb, args, ctx), ...cloudAgent(args), ...parsePriority(args) }, "created");
+      ...(boolFlag(args, "new-thread") ? { new_thread: true } : boolFlag(args, "same-thread") ? { new_thread: false } : {}), ...await cloudScript(bb, args, ctx), ...cloudAgent(args), ...parsePriority(args), ...cloudSecrets(args) }, "created");
   }
   if (args.command === "update") {
-    const fields = { ...(flag(args, "name") ? { name: flag(args, "name") } : {}), ...(flag(args, "prompt") ? { prompt: flag(args, "prompt") } : {}), ...cloudSchedule(args), ...await cloudScript(bb, args, ctx), ...cloudAgent(args), ...parsePriority(args) };
+    const fields = { ...(flag(args, "name") ? { name: flag(args, "name") } : {}), ...(flag(args, "prompt") ? { prompt: flag(args, "prompt") } : {}), ...cloudSchedule(args), ...await cloudScript(bb, args, ctx), ...cloudAgent(args), ...parsePriority(args), ...cloudSecrets(args) };
     return one({ action: "update", id: requireId(), ...fields }, "updated");
   }
   if (args.command === "pause" || args.command === "resume") return one({ action: "update", id: requireId(), enabled: args.command === "resume" }, args.command === "pause" ? "paused" : "resumed");

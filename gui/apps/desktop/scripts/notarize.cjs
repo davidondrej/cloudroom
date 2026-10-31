@@ -86,3 +86,11 @@ async function afterSign(context) {
 module.exports = afterSign;
 module.exports.default = afterSign;
 module.exports.notarize = notarize;
+
+// `node scripts/notarize.cjs FILE` notarizes and staples one file, like the release DMG.
+if (require.main === module) {
+  notarize(process.argv[2]).catch((error) => {
+    console.error(error.message);
+    process.exit(1);
+  });
+}

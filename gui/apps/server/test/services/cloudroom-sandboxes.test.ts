@@ -405,7 +405,7 @@ it("sleeping cloud threads share one awake-list check per app, and a thread woke
   }
 }, 20_000);
 
-it("a sleeping thread costs no delivery work until it wakes, and opening it connects without waiting for the awake list", async () => {
+it("a sleeping thread costs no delivery work until it wakes, opening it connects without waiting for the awake list, and a refused wake keeps its reason", async () => {
   const harness = await createTestAppHarness();
   const { host } = seedHostSession(harness.deps);
   const { project } = seedProjectWithSource(harness.deps, { hostId: host.id });
@@ -427,11 +427,14 @@ it("a sleeping thread costs no delivery work until it wakes, and opening it conn
     }
     res.writeHead(404, { "Content-Type": "application/json" }); res.end("{}");
   });
+  const limit = "You used the Free plan's 25 hours. Upgrade at cloudroom.dev/billing, or wait.";
+  let refused = "";
   const websiteServer = createServer(async (req, res) => {
     const input = await body(req);
-    res.writeHead(200, { "Content-Type": "application/json" });
+    res.writeHead(input.action === "wake" && input.thread === refused ? 429 : 200, { "Content-Type": "application/json" });
     if (req.url === "/api/desktop/logins") return res.end(JSON.stringify({ claude: false, codex: false, pi: false, github: false }));
     if (input.action === "awake") return res.end(JSON.stringify({ sandboxes: [], recheck_ms: 60_000 }));
+    if (input.action === "wake" && input.thread === refused) return res.end(JSON.stringify({ error: limit, code: "cloud_usage_limit" }));
     if (input.action === "wake") return res.end(JSON.stringify({ thread: input.thread, state: "awake", generation: 1, issue: null, origin: coreUrl, token: "t".repeat(64) }));
     res.end(JSON.stringify({ thread: input.thread, state: "asleep", generation: 1, issue: null }));
   });
@@ -460,6 +463,12 @@ it("a sleeping thread costs no delivery work until it wakes, and opening it conn
     streams[0]!.destroy();
     await waitFor(() => streams.length === 2, "the dropped stream to reconnect");
     expect(cursors).toEqual([0, 1]);
+
+    refused = threads[2]!.id;
+    for (let i = 0; i < 2; i++) {
+      const run = await harness.app.request("/api/v1/cloudroom/vm/run", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ command: "true", threadId: refused }) });
+      expect([run.status, (await run.json()).message]).toEqual([429, limit]);
+    }
   } finally {
     service.stop();
     coreServer.closeAllConnections(); coreServer.close(); websiteServer.close();

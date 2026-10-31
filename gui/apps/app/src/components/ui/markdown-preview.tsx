@@ -777,7 +777,7 @@ function MarkdownCode({
     }
 
     return (
-      <div className="my-2 overflow-clip rounded-md border border-border bg-surface-recessed">
+      <div className="group/codeblock my-2 overflow-clip rounded-md border border-border bg-surface-recessed">
         <div className="sticky top-2 z-[2] mt-2 h-0">
           <MarkdownCodeCopyButton codeText={codeText} />
         </div>
@@ -851,11 +851,14 @@ function MarkdownCodeCopyButton({ codeText }: { codeText: string }) {
             onClick={() => {
               void copy();
             }}
-            className="absolute right-2 top-0 inline-flex size-7 cursor-pointer items-center justify-center rounded-md border border-border bg-surface-recessed-solid text-muted-foreground shadow-sm transition-colors hover:bg-muted hover:text-foreground"
+            className="absolute right-2 top-0 inline-flex size-5.5 cursor-pointer items-center justify-center rounded-md border border-transparent bg-surface-recessed-solid text-subtle-foreground transition-[width,height,color,background-color,border-color,box-shadow] duration-200 ease-out group-hover/codeblock:size-7 group-hover/codeblock:border-border group-hover/codeblock:text-muted-foreground group-hover/codeblock:shadow-sm hover:bg-muted hover:text-foreground pointer-coarse:size-7 pointer-coarse:border-border pointer-coarse:shadow-sm"
           >
             <Icon
               name={copied ? "Check" : "Copy"}
-              className={cn("size-4", copied && "text-success")}
+              className={cn(
+                "size-3.5 transition-[width,height] duration-200 ease-out group-hover/codeblock:size-4 pointer-coarse:size-4",
+                copied && "text-success",
+              )}
             />
           </button>
         </TooltipTrigger>

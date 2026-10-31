@@ -71,7 +71,7 @@ room-cli loop create --template <id> --project <id> [--local]
 room-cli loop settings [--stop-at-limit on|off]
 ```
 
-Priority is P1 (essential) to P4 (niche); `--priority` works on `create` and `update`, Local and Cloud, and loops start at P3. Templates need a paid plan. A template makes a Cloud loop unless `--local`, and fills in its name, prompt, schedule, agent (the project's default when its own isn't set up), and priority; any flag you pass wins. A Cloud one runs from the project's newest Cloud thread, else a new one. `runs <cloudLoopId>` lists what each Cloud run reported. `settings` reads or sets whether Cloud loops wait at their agent's plan limit (on by default).
+Priority is P1 (essential) to P4 (niche); `--priority` works on `create` and `update`, Local and Cloud, and loops start at P3. A fresh-thread Cloud loop gets only the API keys picked with `--secrets KEY,.env|none|all` (`.env` is the project's .env files): pick only what its prompt and script need. Templates need a paid plan. A template makes a Cloud loop unless `--local`, and fills in its name, prompt, schedule, agent (the project's default when its own isn't set up), and priority; any flag you pass wins. A Cloud one runs from the project's newest Cloud thread, else a new one. `runs <cloudLoopId>` lists what each Cloud run reported. `settings` reads or sets whether Cloud loops wait at their agent's plan limit (on by default).
 
 For partial updates, mode replacement, execution targets, or damaged records,
 read [references/updates.md](references/updates.md). Every command supports `--json`.

@@ -13,6 +13,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   ROOM_CLI_CMD,
   ROOM_CLI_HASHBANG,
+  ROOM_CLI_PS1,
   // @ts-expect-error -- plain ESM build script
 } from "../scripts/bundle-manifest.mjs";
 
@@ -98,4 +99,38 @@ describe("room-cli launchers", () => {
       lines.every((line: string) => !line.includes("%*") || !/[()]/.test(line)),
     ).toBe(true);
   });
+
+  it.runIf(process.platform === "win32")(
+    "passes PowerShell arguments to the CLI verbatim, without cmd.exe",
+    () => {
+      const dir = mkdtempSync(join(tmpdir(), "room-cli-ps1-"));
+      roots.push(dir);
+      writeFileSync(join(dir, "room-cli.ps1"), ROOM_CLI_PS1);
+      writeFileSync(
+        join(dir, "room-cli"),
+        'let s = ""; process.stdin.on("data", (c) => (s += c)).on("end", () => console.log(JSON.stringify([JSON.parse(process.env.ROOM_CLI_ARGV), s])))',
+      );
+      const args = [
+        'x "y & echo INJECTED"',
+        "",
+        "C:\\my dir\\",
+        '"quoted words"',
+        "50% <x> a|b",
+      ];
+      const out = execFileSync(
+        "powershell.exe",
+        [
+          "-NoProfile",
+          "-ExecutionPolicy",
+          "Bypass",
+          "-Command",
+          `'piped' | & '${join(dir, "room-cli.ps1")}' ${args.map((arg) => `'${arg.replaceAll("'", "''")}'`).join(" ")}`,
+        ],
+        { encoding: "utf8" },
+      );
+      const [argv, stdin] = JSON.parse(out);
+      expect(argv).toEqual(args);
+      expect(stdin.trimEnd()).toBe("piped");
+    },
+  );
 });

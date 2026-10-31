@@ -48,6 +48,7 @@ import {
   formatTimeUntil,
   isCloudWebhook,
 } from "./lib/format-schedule.js";
+import { SecretsPicker } from "./secrets-picker.js";
 import { LOOP_PRIORITY_STYLE } from "./templates-view.js";
 import type { ReviewItemStatus } from "./src/rpc-types.js";
 import type { automationRpcContract } from "./src/rpc.js";
@@ -181,6 +182,7 @@ export type LoopDialogChanges = {
   prompt?: string;
   cron?: string;
   agent?: ExperimentalProviderModelPickerValue;
+  secrets?: string[];
 };
 
 export type LoopDialogLoop = {
@@ -197,6 +199,8 @@ export type LoopDialogLoop = {
   agentEditable: boolean;
   agentRouting?: ExperimentalProviderModelPickerRouting;
   runsOn: string;
+  /** A fresh-thread Cloud loop's picked API keys and `.env` (null: all of them, ADR 0342), or what other loops get. */
+  secrets: { picked: string[] | null } | { fixed: string };
   usageKey?: { automationId: string } | { cloudId: string };
 };
 
@@ -232,6 +236,11 @@ function sameAgent(
     (!compareServiceTier ||
       (a.serviceTier ?? "default") === (b.serviceTier ?? "default"))
   );
+}
+
+function sameSecrets(a: string[] | null, b: string[] | null): boolean {
+  if (a === null || b === null) return a === b;
+  return a.length === b.length && a.every((name) => b.includes(name));
 }
 
 function useDraft<T>(saved: T, same: (a: T, b: T) => boolean) {
@@ -436,6 +445,10 @@ export function LoopDialog({
   const [prompt, setPrompt] = useDraft(loop.prompt ?? "", Object.is);
   const [cron, setCron] = useDraft(loop.cron, Object.is);
   const [agent, setAgent] = useDraft(loop.agent, sameAgentValue);
+  const [secrets, setSecrets] = useDraft(
+    "picked" in loop.secrets ? loop.secrets.picked : null,
+    sameSecrets,
+  );
   const [savingPrompt, setSavingPrompt] = useState(false);
   const [savedPrompt, setSavedPrompt] = useState<string | null>(null);
   const [seenPrompt, setSeenPrompt] = useState(loop.prompt);
@@ -719,6 +732,28 @@ export function LoopDialog({
                   <span className="truncate">{loop.runsOn}</span>
                 </ReadOnlyValue>
               </SettingRow>
+              <SettingRow label="Secrets">
+                {"fixed" in loop.secrets ? (
+                  <ReadOnlyValue>
+                    <Icon
+                      name={loop.cloud ? "Lock" : "Laptop"}
+                      className="size-3.5 shrink-0"
+                      aria-hidden
+                    />
+                    <span className="truncate">{loop.secrets.fixed}</span>
+                  </ReadOnlyValue>
+                ) : (
+                  <SecretsPicker
+                    picked={secrets}
+                    className={QUIET_CONTROL}
+                    onChange={(value) => {
+                      const previous = secrets;
+                      setSecrets(value);
+                      apply({ secrets: value }, () => setSecrets(previous));
+                    }}
+                  />
+                )}
+              </SettingRow>
               <SettingRow label="Priority">
                 <Select
                   value={String(priority)}
@@ -813,6 +848,9 @@ export function CloudLoopDialog({
       runsOn: automation.new_thread
         ? "Cloud · new thread each run"
         : "Cloud · same thread",
+      secrets: automation.new_thread
+        ? { picked: automation.secrets ?? null }
+        : { fixed: "Same as its thread" },
       usageKey: { cloudId: automation.id },
     }),
     [automation],
@@ -832,6 +870,8 @@ export function CloudLoopDialog({
         const cloudChanges: CloudAutomationChanges = {};
         if (changes.prompt !== undefined) cloudChanges.prompt = changes.prompt;
         if (changes.cron !== undefined) cloudChanges.cron = changes.cron;
+        if (changes.secrets !== undefined)
+          cloudChanges.secrets = changes.secrets;
         if (changes.agent !== undefined) {
           cloudChanges.harness = changes.agent.providerId;
           cloudChanges.model = changes.agent.model;

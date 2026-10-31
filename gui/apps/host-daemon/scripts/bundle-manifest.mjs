@@ -41,6 +41,21 @@ export const ROOM_CLI_CMD = [
   "",
 ].join("\r\n");
 
+export const ROOM_CLI_PS1 = [
+  "$app = @('Cloudroom.exe', 'Cloudroom Nightly.exe') | ForEach-Object { Join-Path $PSScriptRoot \"..\\..\\..\\..\\..\\..\\$_\" } | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1",
+  "$cli = Join-Path $PSScriptRoot 'room-cli'",
+  "$saved = $env:ELECTRON_RUN_AS_NODE, $env:ROOM_CLI_ARGV",
+  "try {",
+  '  $env:ROOM_CLI_ARGV = ConvertTo-Json -Compress -InputObject @($args | ForEach-Object { "$_" })',
+  "  if ($app) { $env:ELECTRON_RUN_AS_NODE = '1' } else { $app = 'node' }",
+  "  if ($MyInvocation.ExpectingInput) { $input | & $app $cli } else { & $app $cli }",
+  "} finally {",
+  "  $env:ELECTRON_RUN_AS_NODE, $env:ROOM_CLI_ARGV = $saved",
+  "}",
+  "exit $LASTEXITCODE",
+  "",
+].join("\r\n");
+
 export const bundleTargets = [
   {
     banner: NODE_ESM_REQUIRE_BANNER,

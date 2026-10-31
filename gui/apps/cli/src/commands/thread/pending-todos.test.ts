@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { ThreadTimelinePendingTodos } from "@cloudroom/domain";
 import type { ThreadTimelineResponse } from "@cloudroom/server-contract";
 import {
+  BbRequestTimeoutError,
   createNodeBbSdk,
   type BbSdk,
   type FetchImplementation,
@@ -174,6 +175,15 @@ describe("fetchThreadPendingTodos", () => {
       threadId: "thread-1",
     });
     expect(result).toBeNull();
+  });
+
+  it("rethrows a request timeout so the command stops instead of waiting again", async () => {
+    const { sdk } = makeSdkOverHttpBoundary(async () => {
+      throw new BbRequestTimeoutError(45_000);
+    });
+    await expect(
+      fetchThreadPendingTodos({ sdk, threadId: "thread-1" }),
+    ).rejects.toBeInstanceOf(BbRequestTimeoutError);
   });
 
   it("returns null when the server responds with an HTTP error (best-effort contract)", async () => {

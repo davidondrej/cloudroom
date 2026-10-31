@@ -14,14 +14,14 @@ import {
   type ThreadTimelinePendingTodos,
   type WorkspaceStatus,
 } from "@cloudroom/domain";
-import { BbHttpError, type BbSdk } from "@cloudroom/sdk";
+import { BbHttpError, BbRequestTimeoutError, type BbSdk } from "@cloudroom/sdk";
 import type {
   EnvironmentDiffQuery,
   ThreadTimelineResponse,
 } from "@cloudroom/server-contract";
 import { THREAD_EVENT_LIST_PAGE_SIZE } from "@cloudroom/server-contract";
 import { action } from "../../action.js";
-import { createCliBbSdk } from "../../client.js";
+import { CLI_READ_TIMEOUT_MS, createCliBbSdk } from "../../client.js";
 import {
   getErrorMessage,
   outputJson,
@@ -110,7 +110,8 @@ async function fetchExecution(sdk: BbSdk, thread: Thread): Promise<ThreadExecuti
     }
     const options = await sdk.threads.defaultExecutionOptions({ threadId: thread.id });
     return options && { model: options.model, reasoningLevel: options.reasoningLevel };
-  } catch {
+  } catch (error) {
+    if (error instanceof BbRequestTimeoutError) throw error;
     return null;
   }
 }
@@ -177,6 +178,7 @@ async function fetchPullRequest(args: {
       pullRequest: null,
     };
   } catch (err) {
+    if (err instanceof BbRequestTimeoutError) throw err;
     return {
       status: "unavailable",
       pullRequest: null,
@@ -226,7 +228,7 @@ export function registerShowCommand(
     .action(
       action(async (id: string | undefined, opts: ThreadShowCommandOptions) => {
         const threadId = requireThreadIdOrSelf(id, opts);
-        const sdk = createCliBbSdk(getUrl());
+        const sdk = createCliBbSdk(getUrl(), CLI_READ_TIMEOUT_MS);
         const thread = await sdk.threads.get({ threadId });
 
         const statusPayload: ThreadStatusPayload = { thread };
@@ -450,7 +452,7 @@ export function registerShowCommand(
     .action(
       action(async (id: string | undefined, opts: ThreadLogCommandOptions) => {
         const threadId = requireThreadIdOrSelf(id, opts);
-        const sdk = createCliBbSdk(getUrl());
+        const sdk = createCliBbSdk(getUrl(), CLI_READ_TIMEOUT_MS);
         const format = resolveThreadTimelineTextFormat(opts);
 
         if (opts.all && opts.limit !== undefined) {
@@ -540,7 +542,7 @@ export function registerShowCommand(
       action(
         async (id: string | undefined, opts: ThreadOutputCommandOptions) => {
           const threadId = requireThreadIdOrSelf(id, opts);
-          const sdk = createCliBbSdk(getUrl());
+          const sdk = createCliBbSdk(getUrl(), CLI_READ_TIMEOUT_MS);
           const result = await sdk.threads.output({ threadId });
           if (outputJson(opts, result)) return;
           if (result.output) {

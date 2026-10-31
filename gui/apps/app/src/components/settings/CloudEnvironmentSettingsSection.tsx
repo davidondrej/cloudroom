@@ -235,12 +235,17 @@ function VariablesCard({
     setValue(line.slice(at + 1).trim().replace(/^(["'])(.*)\1$/, "$2"));
   };
   return (
-    <Card icon="Lock" title="API keys" description="Agents get these as environment variables. Values are hidden after saving.">
+    <Card icon="Lock" title="API keys" description="Cloud threads get all of these as environment variables. Each Cloud loop gets only the ones picked for it. Values are hidden after saving.">
       {environment.variables.length > 0 && (
         <ul className="divide-y divide-border border-t border-border">
           {environment.variables.map((variable) => (
             <li key={variable.name} className="group flex items-center gap-3 px-4 py-2">
               <code className="min-w-0 flex-1 truncate font-mono text-xs text-foreground">{variable.name}</code>
+              {environment.loops?.[variable.name] ? (
+                <span title="Cloud loops that picked this key" className="rounded-full border border-border px-1.5 text-2xs text-subtle-foreground">
+                  {environment.loops[variable.name]} {environment.loops[variable.name] === 1 ? "loop" : "loops"}
+                </span>
+              ) : null}
               <span className="rounded-full border border-primary/30 px-1.5 text-2xs text-primary-text">in cloud</span>
               <span className="font-mono text-xs tracking-wider text-subtle-foreground" aria-label="Hidden value">
                 ••••••••{variable.hint}

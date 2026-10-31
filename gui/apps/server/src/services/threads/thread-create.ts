@@ -697,6 +697,8 @@ export async function createThreadFromRequest(
     requestInput.environment.environmentId === sourceThread.environmentId
       ? sourceThread.environmentId
       : undefined);
+  const allowUnmanagedPersonalProjectReuseEnvironmentId =
+    forkSourceEnvironmentId ?? parentThread?.environmentId ?? undefined;
   if (requestInput.startedOnBehalfOf !== null) {
     const senderThread = sourceThread ?? parentThread;
     if (senderThread === null) {
@@ -795,8 +797,7 @@ export async function createThreadFromRequest(
     requestedEnvironment.type === "provider"
       ? null
       : resolveStableThreadRequestEnvironment(deps, {
-          allowUnmanagedPersonalProjectReuseEnvironmentId:
-            forkSourceEnvironmentId,
+          allowUnmanagedPersonalProjectReuseEnvironmentId,
           environment: requestedEnvironment,
           projectId: request.projectId,
         });
@@ -854,11 +855,8 @@ export async function createThreadFromRequest(
 
   const { environmentId, environmentIntent } =
     await resolveThreadEnvironmentPlacement(deps, {
-      ...(forkSourceEnvironmentId !== undefined
-        ? {
-            allowUnmanagedPersonalProjectReuseEnvironmentId:
-              forkSourceEnvironmentId,
-          }
+      ...(allowUnmanagedPersonalProjectReuseEnvironmentId !== undefined
+        ? { allowUnmanagedPersonalProjectReuseEnvironmentId }
         : {}),
       projectId: request.projectId,
       requestedEnvironment: request.environment,

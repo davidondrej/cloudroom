@@ -33,6 +33,8 @@ export type CloudAutomation = {
   project_id?: string | null;
   /** P1-P4; missing until the website's 0094 update. */
   priority?: number;
+  /** API keys and `.env` its runs get (ADR 0342); null for all. Missing until the website's 0103 update. */
+  secrets?: string[] | null;
 };
 export type CloudAutomationChanges = {
   prompt?: string;
@@ -40,6 +42,7 @@ export type CloudAutomationChanges = {
   harness?: string;
   model?: string;
   reasoning?: string;
+  secrets?: string[];
 };
 export type CloudAutomationActions = {
   onOpen: (a: CloudAutomation) => void;

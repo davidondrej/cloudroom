@@ -392,19 +392,35 @@ export async function executeScriptRun(
 export function closeAutomationRunForSettledThread(
   bb: Pick<BbPluginApi, "realtime">,
   db: Db,
-  args: { threadId: string; status: "idle" | "failed"; error?: string | null },
+  args: {
+    threadId: string;
+    status: "idle" | "failed";
+    error?: string | null;
+    rateLimited?: boolean;
+  },
 ): void {
   const runs = listRunningAutomationRunsByThread(db, args.threadId);
   const now = Date.now();
   const changedProjects = new Set<string>();
+  const error = args.error ?? "Turn failed";
   for (const run of runs) {
-    const closed = closeAutomationRun(db, {
-      runId: run.id,
-      status: args.status === "idle" ? "succeeded" : "failed",
-      error: args.status === "idle" ? null : (args.error ?? "Turn failed"),
-      threadId: args.threadId,
-      now,
-    });
+    // A plan limit is the agent's account, not the loop: skip the run, so it never counts toward a pause.
+    const closed =
+      args.status === "failed" && args.rateLimited
+        ? closeAutomationRun(db, {
+            runId: run.id,
+            status: "skipped",
+            skipReason: `plan limit: ${error}`,
+            threadId: args.threadId,
+            now,
+          })
+        : closeAutomationRun(db, {
+            runId: run.id,
+            status: args.status === "idle" ? "succeeded" : "failed",
+            error: args.status === "idle" ? null : error,
+            threadId: args.threadId,
+            now,
+          });
     if (!closed) continue;
     const automation = getAutomation(db, closed.automationId);
     if (automation) changedProjects.add(automation.projectId);

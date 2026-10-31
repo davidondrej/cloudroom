@@ -214,7 +214,9 @@ target? })`. Inside the fixed-tab component,
   `rendererId`. `interaction` contains metadata plus the JSON `payload`;
   `submit(value)` returns the JSON value to the waiting backend invocation,
   while `cancel()` settles it without a value. Keep sensitive field values in
-  component state only.
+  component state only. The form can open while the user is typing, so never
+  autofocus an approval choice or make one the form's submit action: give each
+  choice its own `type="button"`.
 - `experimental_sidebarFooter.register` → managed host-rendered icon items in
   the app sidebar footer. Both variants take `{ id, label, icon }`. An action
   adds `{ kind: "action", onActivate }`; its callback receives

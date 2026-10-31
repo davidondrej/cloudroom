@@ -2,6 +2,20 @@
 
 Also on [cloudroom.dev/changelog](https://www.cloudroom.dev/changelog).
 
+## 133
+
+Choose the keys each loop gets (2026-10-30)
+
+### Changes
+
+- Each Cloud loop now gets only the API keys and .env files you pick for it, from a new Secrets row in the loop dialog.
+- A This Mac loop that hits your plan limit now skips that run instead of pausing, and failures show the real error.
+- Switching a Cloud thread to a model that can't start keeps your current agent running and shows why.
+- Skills and settings now sync on Linux.
+- On Windows, loop check scripts, room-cli in PowerShell, and file copies to and from Cloud now work.
+- A stray key press can no longer approve a GPU or computer use.
+- Security fixes.
+
 ## 132
 
 A nudge toward the right project (2026-10-29)

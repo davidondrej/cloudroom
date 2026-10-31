@@ -276,4 +276,32 @@ describe("PluginPendingInteractionComposer", () => {
     expect(screen.getByText(/form crashed/i)).toBeDefined();
     expect(screen.getByRole("button", { name: "Cancel" })).toBeDefined();
   });
+
+  it("opens a pop-up request with focus on the pop-up, not on a choice", () => {
+    function Approval() {
+      return (
+        <>
+          <button type="button">Deny</button>
+          <button type="button">Approve</button>
+        </>
+      );
+    }
+    setPluginSlotRegistrations(
+      "gpu",
+      registrations([{ id: "gpu-approval", component: Approval }]),
+    );
+    renderComposer(
+      <PluginPendingInteractionComposer
+        interaction={interaction}
+        request={{
+          pluginId: "gpu",
+          rendererId: "gpu-approval",
+          title: "Use a GPU?",
+          data: {},
+        }}
+        dismissal="cancel"
+      />,
+    );
+    expect(document.activeElement).toBe(screen.getByRole("dialog"));
+  });
 });

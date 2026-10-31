@@ -92,6 +92,8 @@ export interface CloudEnvironment {
   ids?: Record<string, number>;
   /** The GitHub account the repos belong to; only answered to `githubRepos`. */
   login?: string;
+  /** How many Cloud loops picked each API key (ADR 0342); keys no loop picked are missing. */
+  loops?: Record<string, number>;
 }
 
 /** A repo that is not a Cloudroom project yet: a Git folder on this Mac, or a GitHub repo. */
@@ -150,6 +152,9 @@ export interface CloudAutomation {
   agent?: { provider: string; model: string | null; reasoning: string | null } | null;
   /** P1-P4 (docs/scopes/loops.md). Missing until the website's 0094 update. */
   priority?: number;
+  /** The API keys a fresh-thread loop's runs get, and `.env` for the project's .env files (ADR 0342); null for all of
+   *  them. Missing until the website's 0103 update. */
+  secrets?: string[] | null;
 }
 /** One Cloud loop run's record (ADR 0298): what its agent reported, or null fields while it runs or never reported. */
 export interface CloudLoopRun {
@@ -162,7 +167,7 @@ export interface CloudLoopRun {
   actions: string[] | null;
 }
 /** `harness` is Core's harness name or the app's provider ID; only fresh-thread loops pick an agent. */
-export type CloudAutomationFields = { name?: string; prompt?: string; cron?: string | null; timezone?: string; run_at?: string | null; enabled?: boolean; script?: string | null; new_thread?: boolean; webhook?: true; harness?: string; model?: string; reasoning?: string; priority?: number };
+export type CloudAutomationFields = { name?: string; prompt?: string; cron?: string | null; timezone?: string; run_at?: string | null; enabled?: boolean; script?: string | null; new_thread?: boolean; webhook?: true; harness?: string; model?: string; reasoning?: string; priority?: number; secrets?: string[] | null };
 /** Webhook events the website holds for one Local webhook loop on this Mac (ADR 0262). Ack the batch once its run starts. */
 export interface CloudHookBatch {
   local: string;

@@ -3,7 +3,7 @@ import {
   type EnvironmentDisplayProviderLookup,
   formatEnvironmentDisplay,
 } from "@cloudroom/core-ui";
-import type { BbSdk } from "@cloudroom/sdk";
+import { BbRequestTimeoutError, type BbSdk } from "@cloudroom/sdk";
 
 export interface ThreadEnvironmentInfo {
   display: EnvironmentDisplayInfo;
@@ -56,7 +56,8 @@ export async function fetchEnvironmentInfo(args: {
       }),
       hostId: env.hostId,
     };
-  } catch {
+  } catch (error) {
+    if (error instanceof BbRequestTimeoutError) throw error;
     return null;
   }
 }

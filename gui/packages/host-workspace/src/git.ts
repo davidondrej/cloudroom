@@ -9,6 +9,7 @@ import {
 } from "bb-environment-provider-host/git-branches";
 import type { GitCheckoutRef, WorkspaceGitOperation } from "@cloudroom/domain";
 import {
+  gitShell,
   killProcessGroup,
   pathExists,
   sanitizeInheritedChildProcessEnv,
@@ -540,16 +541,21 @@ export async function runShellPipeline(
     throw createShellPipelineCancelledError(options.signal.reason);
   }
   try {
+    const env = resolveGitProcessEnv({
+      env: undefined,
+      shellPath: options.shellPath,
+    });
+    const shell =
+      process.platform === "win32"
+        ? await gitShell(env)
+        : { command: "/bin/sh", env };
     const result = await execFileAsync(
-      "/bin/sh",
+      shell.command,
       ["-c", script, "sh", ...positionalArgs],
       {
         cwd: options.cwd,
         encoding: "utf8",
-        env: resolveGitProcessEnv({
-          env: undefined,
-          shellPath: options.shellPath,
-        }),
+        env: shell.env,
         maxBuffer: DEFAULT_BUFFER_BYTES,
         signal: options.signal,
         timeout: options.timeoutMs,

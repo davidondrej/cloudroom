@@ -10,6 +10,14 @@ import {
 import { formatCloudroomVersion, resolveBbCliVersion } from "./version.js";
 import type { CliRuntimeContext } from "./context-env.js";
 
+if (process.platform === "win32" && process.env.ROOM_CLI_ARGV !== undefined) {
+  process.argv = [
+    ...process.argv.slice(0, 2),
+    ...(JSON.parse(process.env.ROOM_CLI_ARGV) as string[]),
+  ];
+  delete process.env.ROOM_CLI_ARGV;
+}
+
 maybeReexecViaRoomCli();
 
 process.argv = process.argv.map((arg) =>

@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { execPortableFile } from "@cloudroom/process-utils";
 import { ApiError } from "../../errors.js";
 import {
   hasSupportedFrontmatterDelimiter,
@@ -93,6 +94,19 @@ async function runRegistrySkillsCli(args: {
     packageRef: args.packageRef,
     skillId: args.skillId,
   });
+  if (process.platform === "win32") {
+    return execPortableFile(invocation.command, invocation.args, {
+      ...invocation.options,
+      timeoutMs: SKILLS_INSTALL_TIMEOUT_MS,
+    }).then(
+      ({ stdout, stderr }) => ({ ok: true, stdout, stderr }),
+      (error: { message?: string; stderr?: string; stdout?: string }) => ({
+        ok: false,
+        stdout: error.stdout ?? "",
+        stderr: error.stderr || (error.message ?? String(error)),
+      }),
+    );
+  }
   return new Promise((resolve) => {
     const child = spawn(
       invocation.command,

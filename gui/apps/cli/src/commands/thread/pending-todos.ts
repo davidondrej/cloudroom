@@ -3,7 +3,7 @@ import type {
   ThreadTimelinePendingTodoItem,
   ThreadTimelinePendingTodoItemStatus,
 } from "@cloudroom/domain";
-import type { BbSdk } from "@cloudroom/sdk";
+import { BbRequestTimeoutError, type BbSdk } from "@cloudroom/sdk";
 
 interface FetchThreadPendingTodosArgs {
   sdk: Pick<BbSdk, "threads">;
@@ -19,7 +19,8 @@ export async function fetchThreadPendingTodos(
       summaryOnly: "true",
     });
     return response.pendingTodos;
-  } catch {
+  } catch (error) {
+    if (error instanceof BbRequestTimeoutError) throw error;
     return null;
   }
 }

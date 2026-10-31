@@ -388,8 +388,8 @@ async function waitUntilStopped(client: CloudroomClient, sessionId: string) {
   throw new ApiError(409, "teleport_stop_timeout", "The cloud agent did not stop. The thread stays in Cloud; try again.");
 }
 
-export async function vm(client: CloudroomClient, command: string): Promise<Buffer> {
-  const result = await client.runOnVm({ command, stdin: "" });
+export async function vm(client: CloudroomClient, command: string, signal?: AbortSignal): Promise<Buffer> {
+  const result = await client.runOnVm({ command, stdin: "" }, signal);
   if (result.code !== 0 || result.truncated)
     throw new Error(Buffer.from(result.stderr, "hex").toString().trim() || `Cloud command failed (${result.code})`);
   return Buffer.from(result.stdout, "hex");
@@ -425,13 +425,13 @@ else: sys.exit("This forked Codex chat has too many parents.")`;
   return (await vm(client, `python3 -I -c ${quote(script)} ${quote(path)}`)).toString().split("\n").filter(Boolean);
 }
 
-export async function download(client: CloudroomClient, path: string, maxMb = Infinity): Promise<Buffer> {
-  const size = Number((await vm(client, `[ -f ${quote(path)} ] && wc -c < ${quote(path)} || echo -1`)).toString().trim());
+export async function download(client: CloudroomClient, path: string, maxMb = Infinity, run = (command: string) => vm(client, command)): Promise<Buffer> {
+  const size = Number((await run(`[ -f ${quote(path)} ] && wc -c < ${quote(path)} || echo -1`)).toString().trim());
   if (size < 0) throw new ApiError(404, "cloud_file_missing", `${path} is not a file in the cloud.`);
   if (size > maxMb * 1024 * 1024) throw new ApiError(413, "cloud_file_too_large", `${basename(path)} is over the ${maxMb} MB limit.`);
   const parts: Buffer[] = [];
   for (let offset = 0; offset < size; offset += CHUNK)
-    parts.push(await vm(client, `tail -c +${offset + 1} ${quote(path)} | head -c ${CHUNK}`));
+    parts.push(await run(`tail -c +${offset + 1} ${quote(path)} | head -c ${CHUNK}`));
   return Buffer.concat(parts);
 }
 

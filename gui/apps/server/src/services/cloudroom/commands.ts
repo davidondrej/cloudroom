@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { readFile, writeFile, mkdir, stat, rename, rm } from "node:fs/promises";
-import { join } from "node:path";
+import { join, win32 } from "node:path";
 import { and, desc, eq, inArray, isNull, max, notInArray } from "drizzle-orm";
 import { createThread, findLastCompletedRootStoredTurn, getAppSettings, getProject, getThread, getThreadExecutionOverride, setThreadExecutionOverride, updateThread, cloudroomThreads, cloudroomCommands, events, threads, type DbConnection, type DbQueryConnection, type DbTransaction } from "@cloudroom/db";
 import { PERSONAL_PROJECT_ID, encodeClientTurnRequestIdNumber, isStandaloneBuiltinCompactCommand, promptInputSchema, reasoningLevelSchema, threadQueuedMessageSchema, type Thread, type PromptInput, type ThreadEventType, type ThreadEventTurnStatus, type ThreadChangeKind, type ReasoningLevel, COMPUTER, COMPUTER_TITLE } from "@cloudroom/domain";
@@ -171,6 +171,8 @@ type PromptAttachment = { name: string; kind: "image" | "file"; localPath: strin
  *  `partial` says why only `.env` files arrived. It resolves once everything after the copy is done. */
 type Landed = (error?: string, client?: CloudroomClient, partial?: string) => Promise<void>;
 const CUT_SHORT = "The project copy was cut short, so some files may be missing.";
+const COPY_DEADLINE = 9 * 60_000;
+const STALLED = `The project copy did not finish in ${COPY_DEADLINE / 60_000} minutes, so some files may be missing.`;
 /** A project copy's target: one folder per thread sandbox, or one shared folder on a VM. */
 const copyKey = (sandbox: string | null, workspace: string) => sandbox ? `${sandbox}:${workspace}` : workspace;
 
@@ -219,7 +221,7 @@ export function promptPayload(input: PromptInput[], harness: string, attachments
     if (part.type !== "localImage" && part.type !== "localFile") throw new ApiError(400, "cloudroom_unsupported", "Cloud attachments must be uploaded files.");
     if (typeof attachmentsEnabled === "object" && !(part.type === "localImage" ? attachmentsEnabled.images : attachmentsEnabled.files)) throw new ApiError(400, "cloudroom_unsupported", "This attachment type is not enabled for the cloud harness.");
     attachments.push({
-      name: part.path.split("/").pop() || "attachment",
+      name: (process.platform === "win32" ? win32.basename(part.path) : part.path.split("/").pop()) || "attachment",
       kind: part.type === "localImage" ? "image" : "file",
       localPath: part.path,
     });
@@ -368,6 +370,9 @@ const CHILD_REPORTS = "cloudroom-child-reports.json";
 const childReportSchema = z.object({ child: z.string(), status: z.string(), turn: z.string() });
 const AGENT_FORK_WAIT = 90_000;
 
+/** The sandbox whose API keys a new Cloud child or fork gets, saved with its first message (keyFields). */
+const keySourceOf = (input: string | undefined) => input ? z.object({ key_source: z.string().optional() }).safeParse(JSON.parse(input)).data?.key_source : undefined;
+
 class CloudroomService {
   teleportRecovery?: () => void;
   archiveRequest?: (threadId: string) => void;
@@ -488,6 +493,7 @@ class CloudroomService {
       this.macReportDue = 0;
     });
     this.sandboxes.onRuns = runs => { for (const run of runs) this.adoptRun(run); };
+    this.sandboxes.keySource = thread => keySourceOf(command(deps.db, `first_${thread}`)?.input);
     this.sandboxes.skipLogins = async () => {
       const markers = await loginMarkers(deps);
       // Disconnect signed these CLIs out, so a login on this Mac now is a new sign-in (ADR 0327).
@@ -502,7 +508,7 @@ class CloudroomService {
       if (!await copyMacGithub(deps)) skip.add("github");
       return skip;
     };
-    this.gpuApprovals = new GpuApprovals(deps, (id, approve) => this.sandboxes.gpu({ decide: { id, approve } }));
+    this.gpuApprovals = new GpuApprovals(deps, body => this.sandboxes.gpu(body));
     this.codexAccounts = new CodexAccounts(body => this.sandboxes.codexAccounts(body), async () => (await this.sandboxes.account())?.userId ?? null,
       join(deps.config.dataDir, "cloudroom-codex-accounts.json"), () => this.restartAwake("codex"));
     // Renames, generated titles, agent renames, and new parents (a promoted subagent loses its parent's access) all
@@ -1049,7 +1055,7 @@ class CloudroomService {
       }
     } catch (error) {
       if (error instanceof ApiError && error.body.code === "cloudroom_sandbox_only") throw new ApiError(409, "cloudroom_vm_run", "Pass --thread <id> to pick which Cloud thread's sandbox runs this.");
-      throw new ApiError(error instanceof CloudroomError && error.status === 409 ? 409 : 503, "cloudroom_vm_run", publicError(error));
+      throw new ApiError(error instanceof CloudroomError && (error.status === 409 || error.status === 429) ? error.status : 503, "cloudroom_vm_run", publicError(error));
     }
   }
 
@@ -1358,6 +1364,7 @@ class CloudroomService {
     if (parentId) assertValidParentThread(this.deps, { parentThreadId: parentId, cloudChild: Boolean(codeFrom) });
     const sandbox = await this.newThreadsInSandboxes();
     const connection = sandbox ? null : await this.connection();
+    const keys = await this.keyFields(codeFrom);
     const project = getProject(this.deps.db, request.projectId);
     if (!project) throw new ApiError(404, "project_not_found", "Project not found");
     if (!isCloudProvider(request.providerId) || (!fork && (request.originKind || request.sourceThreadId)) || request.sendAt || request.pluginSubmission || (request.environment.type !== "project-default" && !codeFrom))
@@ -1426,7 +1433,7 @@ class CloudroomService {
           system_prompt: [cloudroomSystemPrompt(this.deps.db, { vps: this.sandboxes.vpsConnected }), cloudPluginInstructions({ threadId: thread.id, projectId: thread.projectId }), projectNote].filter(Boolean).join("\n\n") || undefined,
           ...(request.serviceTier && request.serviceTier !== "default" ? { service_tier: request.serviceTier } : {}),
           ...(request.baseBranch ? { base_branch: request.baseBranch } : {}),
-          ...(codeFrom ? { code_from: codeFrom } : {}),
+          ...(codeFrom ? { code_from: codeFrom } : {}), ...keys,
           ...(awaitingCore || this.heldStarts.has(request.requestId ?? "") ? { awaiting_core: true } : {}),
         })),
         createdAt: Date.now(),
@@ -1459,6 +1466,16 @@ class CloudroomService {
     return getThread(this.deps.db, thread.id)!;
   }
 
+  /** A new Cloud child or fork gets only the API keys of the sandbox its source runs in (ADR 0342), so a run with
+   *  some keys never hands out more: a --shared-sandbox source runs in its parent's. Without `.env` in that list, it
+   *  gets no `.env` files from this Mac either. Decided once, before it starts, and saved with its first message. */
+  private async keyFields(source: string | undefined): Promise<{ key_source?: string; no_env?: true }> {
+    const sandbox = source ? sandboxThread(binding(this.deps.db, source)?.coreUrl ?? "") : null;
+    if (!sandbox) return {};
+    const keys = await this.sandboxes.loopSecrets(sandbox);
+    return { key_source: sandbox, ...(keys && !keys.includes(".env") ? { no_env: true as const } : {}) };
+  }
+
   /** A Cloud fork (fork.ts): the source's harness and model in a new sandbox, with the history up to the fork point. */
   private async createFork(request: CreateThreadRequest, sourceId: string): Promise<Thread> {
     const source = getThread(this.deps.db, sourceId);
@@ -1476,6 +1493,7 @@ class CloudroomService {
     if (!(await this.newThreadsInSandboxes())) throw new ApiError(409, "cloudroom_unsupported", "Cloud forks need cloud sandboxes.");
     const capabilities = await this.savedCapabilities();
     if (capabilities && !capabilities.fork) throw new ApiError(409, "cloudroom_update", "Update the cloud core to fork Cloud threads.");
+    const keys = await this.keyFields(source.id);
     const fork = saved ? cloudForkPoint(this.deps.db, source, request.sourceSeqEnd) : localForkPoint(this.deps, source, request.sourceSeqEnd);
     const project = getProject(this.deps.db, source.projectId);
     if (!project) throw new ApiError(404, "project_not_found", "Project not found");
@@ -1493,7 +1511,7 @@ class CloudroomService {
       tx.insert(cloudroomCommands).values({
         id: `first_${thread.id}`, threadId: thread.id, command: "prompt",
         input: JSON.stringify(this.snapshotInstructions(thread, "prompt", {
-          ...payload, ...workspace, fork,
+          ...payload, ...workspace, fork, ...keys,
           command_guard_enabled: getAppSettings(this.deps.db).commandGuardEnabled,
           strip_ai_co_authors: getAppSettings(this.deps.db).stripAiCoAuthorsEnabled,
           system_prompt: [cloudroomSystemPrompt(this.deps.db, { vps: this.sandboxes.vpsConnected }), cloudPluginInstructions({ threadId: thread.id, projectId: thread.projectId }), projectNote].filter(Boolean).join("\n\n") || undefined,
@@ -1663,6 +1681,11 @@ class CloudroomService {
         ...(capabilities.system_prompt && startInput.system_prompt ? { system_prompt: startInput.system_prompt } : {}),
         ...(startInput.parent_thread ? { parent_thread: startInput.parent_thread } : {}),
       });
+      const failure = await this.startFailure(client, started.session_id);
+      if (failure) {
+        void client.close(started.session_id, randomUUID()).catch(() => {});
+        throw new ApiError(409, "cloudroom_switch", `${HARNESS_NAMES[target.providerId]} couldn't start in Cloud, so this thread wasn't changed. ${failure}`);
+      }
       const after = await client.session(oldSession).catch(() => null);
       if (after?.last_sequence !== before.last_sequence || !["idle", "error"].includes(getThread(this.deps.db, thread.id)?.status ?? "")) {
         void client.close(started.session_id, randomUUID()).catch(() => {});
@@ -1679,6 +1702,20 @@ class CloudroomService {
     }
     this.notify(thread.id);
     void this.deliver(thread.id).catch(() => {});
+  }
+
+  private async startFailure(client: CloudroomClient, sessionId: string): Promise<string | null> {
+    const signal = AbortSignal.timeout(30_000);
+    while (!signal.aborted) {
+      const session = await client.session(sessionId, signal).catch(() => null);
+      if (session?.state === "idle") return null;
+      if (session && ["failed", "process_lost", "closed"].includes(session.state)) {
+        const reasons = (await client.events(sessionId).catch(() => [])).map((record) => record.kind === "state" ? z.object({ reason: z.string() }).safeParse(record.data).data?.reason : undefined);
+        return reasons.filter(Boolean).at(-1) ?? `The new agent stopped (${session.state}).`;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+    return null;
   }
 
   /** Running child agents and Cloud automations stay tied to the old session, which a switch closes. */
@@ -1899,7 +1936,7 @@ class CloudroomService {
       }
       if (!attachment.localPath) continue;
       const root = join(this.deps.config.dataDir, "attachments", projectId);
-      const candidate = attachment.localPath.startsWith("/") ? attachment.localPath : join(root, attachment.localPath);
+      const candidate = attachment.localPath.startsWith("/") || (process.platform === "win32" && win32.isAbsolute(attachment.localPath)) ? attachment.localPath : join(root, attachment.localPath);
       const bytes = await readFile(candidate);
       const attachmentId = `${promptId}a${index}`;
       const id = attachmentId.length <= 64 ? attachmentId : createHash("sha256").update(attachmentId).digest("hex");
@@ -2845,9 +2882,11 @@ class CloudroomService {
   /** What a new thread's project copy does once it lands: the thread's own branch, a fork's or child's code, its start
    *  steps, and the status `room-cli files wait` reads (ADR 0209). A copy an app restart cut off lands the same way. */
   private landing(threadId: string, client: CloudroomClient, started: Parameters<typeof landForkCode>[1] | null, files: boolean, workspace: string | null, marked: Promise<void> | null): Landed {
+    const deadline = marked && workspace ? setTimeout(() => void marked.then(() => this.filesState(client, threadId, workspace, `failed: ${STALLED}`, true)), COPY_DEADLINE).unref() : undefined;
     const land = async (error?: string, current = client, partial?: string) => {
       if (files) this.progress(threadId, [{ key: "files", status: error ? "failed" : "completed" }]);
       const finish = async (failure?: string | null) => {
+        clearTimeout(deadline);
         if (marked && workspace) await marked.then(() => this.filesState(current, threadId, workspace, failure ? `failed: ${failure}` : "ready"));
       };
       const missing = error ?? partial;

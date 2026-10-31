@@ -21,7 +21,7 @@ use std::{
     },
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::net::{TcpStream, UnixListener};
 
@@ -827,13 +827,15 @@ pub async fn cli(args: &[String]) -> io::Result<()> {
     if !status && port.is_none() {
         return Err(io::Error::other("preview requires a port"));
     }
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let left = || deadline.saturating_duration_since(Instant::now());
     let request = |method: &str, path: &str, body: Option<Value>| -> io::Result<Value> {
         let mut command = std::process::Command::new("curl");
         command.args([
             "--silent",
             "--show-error",
             "--max-time",
-            "5",
+            &format!("{:.3}", left().as_secs_f64()),
             "--unix-socket",
             &socket,
             "-X",
@@ -845,6 +847,11 @@ pub async fn cli(args: &[String]) -> io::Result<()> {
             command.args(["--data-binary", &body.to_string()]);
         }
         let output = command.arg(format!("http://localhost{path}")).output()?;
+        if output.status.code() == Some(28) {
+            return Err(io::Error::other(
+                "Cloudroom is busy; retry room-cli preview in a moment",
+            ));
+        }
         if !output.status.success() {
             return Err(io::Error::other(
                 "Preview service unavailable; install preview setup or use the local thread's localhost server",
@@ -872,6 +879,9 @@ pub async fn cli(args: &[String]) -> io::Result<()> {
                 break;
             }
             tokio::time::sleep(Duration::from_secs(1)).await;
+            if left() < Duration::from_secs(1) {
+                break;
+            }
             result = request("GET", &path, None)?;
         }
     }

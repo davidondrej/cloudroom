@@ -25,6 +25,7 @@
   ],
   "scripts": {
     "typecheck": "tsc --noEmit",
+    "test": "vitest run --config vitest.config.ts",
     "prepare:bundled": "bb-plugin-build prepare-bundled"
   },
   "dependencies": {
@@ -34,9 +35,13 @@
   "devDependencies": {
     "@cloudroom/plugin-build": "workspace:*",
     "@get-bb/plugin-sdk": "workspace:*",
+    "@testing-library/react": "^16.3.2",
     "@types/node": "^22.0.0",
     "@types/react": "^19.0.0",
+    "jsdom": "^29.0.1",
     "react": "^19.0.0",
-    "typescript": "npm:@typescript/typescript6@^6.0.2"
+    "react-dom": "^19.0.0",
+    "typescript": "npm:@typescript/typescript6@^6.0.2",
+    "vitest": "^4.1.1"
   }
 }

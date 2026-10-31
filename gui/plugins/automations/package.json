@@ -36,6 +36,7 @@
     "prepare:bundled": "bb-plugin-build prepare-bundled"
   },
   "dependencies": {
+    "@cloudroom/process-utils": "workspace:*",
     "@cloudroom/shared-ui": "workspace:*",
     "@radix-ui/react-slot": "^1.3.0",
     "cron-parser": "^5.5.0",

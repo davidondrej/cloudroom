@@ -1,7 +1,7 @@
 import { Command } from "commander";
 import { PERSONAL_PROJECT_ID, type Thread } from "@cloudroom/domain";
 import { action } from "../../action.js";
-import { createCliBbSdk } from "../../client.js";
+import { CLI_READ_TIMEOUT_MS, createCliBbSdk } from "../../client.js";
 import { resolveExplicitIdFlag } from "../../context-env.js";
 import {
   columnWidths,
@@ -40,7 +40,7 @@ export function registerListCommand(
     .option("--json", "Print machine-readable JSON output")
     .action(
       action(async (opts: ThreadListCommandOptions) => {
-        const sdk = createCliBbSdk(getUrl());
+        const sdk = createCliBbSdk(getUrl(), CLI_READ_TIMEOUT_MS);
         const projectId = resolveExplicitIdFlag({
           flagName: "--project flag",
           value: opts.project,

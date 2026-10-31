@@ -308,9 +308,15 @@ export interface PluginThreadEventPayloads {
   /** Fired when a thread transitions into `idle`. `lastAssistantText` is
    * assembled the same way GET /threads/:id/output is. */
   "thread.idle": { thread: ThreadResponse; lastAssistantText: string | null };
-  /** Fired when a thread transitions into `error`. `error` is the latest
-   * system/error event message, when one exists. */
-  "thread.failed": { thread: ThreadResponse; error: string | null };
+  /** Fired when a thread transitions into `error`. `error` is the failed
+   * turn's provider error, else the latest system/error message. `errorInfo`
+   * classifies it the same way `turn.failed` does (a rate limit, an auth
+   * failure), or is null. */
+  "thread.failed": {
+    thread: ThreadResponse;
+    error: string | null;
+    errorInfo?: ProviderErrorInfo | null;
+  };
   /** Fired after a thread is archived (including cascade archives). */
   "thread.archived": { thread: ThreadResponse };
   /**

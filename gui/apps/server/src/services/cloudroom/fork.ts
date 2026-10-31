@@ -18,7 +18,7 @@ import { resolvePrimaryHostId } from "../hosts/primary-host.js";
 import { workspaceContextFromPath } from "../environments/workspace-command-target.js";
 import { CloudroomError, UPLOAD_PART, type CloudroomClient, type Harness, type TeleportManifest } from "./client.js";
 import { cloudroom } from "./commands.js";
-import { SKIPPED } from "./project-copy.js";
+import { PIECE_TIMEOUT, retry, SKIPPED } from "./project-copy.js";
 import { binding } from "./store.js";
 import { codexLineage, download, findNative, vm } from "./teleport-local.js";
 
@@ -292,9 +292,9 @@ async function idle(client: CloudroomClient, sessionId: string): Promise<void> {
  *  history (a project not on GitHub) goes as its files instead, without dependencies or build output. The source is untouched. */
 export async function sourceCode(from: CloudroomClient, workspace: string, id: string): Promise<Code | null> {
   return packCode({
-    run: async (script) => (await vm(from, script)).toString(),
-    read: (path) => download(from, path, 500),
-    remove: (path) => vm(from, `rm -f ${quote(path)}`),
+    run: async (script) => (await vm(from, script, AbortSignal.timeout(PIECE_TIMEOUT))).toString(),
+    read: (path) => download(from, path, 500, (command) => retry(() => vm(from, command, AbortSignal.timeout(PIECE_TIMEOUT)))),
+    remove: (path) => vm(from, `rm -f ${quote(path)}`, AbortSignal.timeout(PIECE_TIMEOUT)),
   }, workspace, id);
 }
 
@@ -365,7 +365,8 @@ function codeScript(workspace: string, id: string, thin: boolean): string {
 export async function uploadInParts(client: CloudroomClient, file: string, data: Buffer, signal?: AbortSignal): Promise<void> {
   for (let offset = 0; offset < data.length; offset += UPLOAD_PART) {
     const part = new Uint8Array(data.subarray(offset, offset + UPLOAD_PART));
-    const result = await client.runOnVm({ command: `mkdir -p ~/.cache/cloudroom && truncate -s ${offset} ~/${file} && cat >> ~/${file}` }, signal, part);
+    const send = (wait?: AbortSignal) => client.runOnVm({ command: `mkdir -p ~/.cache/cloudroom && truncate -s ${offset} ~/${file} && cat >> ~/${file}` }, wait, part);
+    const result = await (signal ? send(signal) : retry(() => send(AbortSignal.timeout(PIECE_TIMEOUT))));
     if (result.code !== 0) throw new Error(Buffer.from(result.stderr, "hex").toString().trim() || "The upload failed.");
   }
 }
@@ -393,7 +394,7 @@ async function applyForkCode(client: CloudroomClient, workspace: string, id: str
   await uploadInParts(client, file, code.data);
   if (files) {
     const skipped = [...SKIPPED, ".cloudroom"].map(quote).join(" ");
-    await vm(client, `mkdir -p ${quote(workspace)} && cd ${quote(workspace)} && python3 -I -c ${quote(PRUNE)} . ~/${file} ${skipped} && tar -xzf ~/${file}; code=$?; rm -f ~/${file}; exit $code`);
+    await vm(client, `mkdir -p ${quote(workspace)} && cd ${quote(workspace)} && python3 -I -c ${quote(PRUNE)} . ~/${file} ${skipped} && tar -xzf ~/${file}; code=$?; rm -f ~/${file}; exit $code`, AbortSignal.timeout(PIECE_TIMEOUT));
     return;
   }
   const land = () => client.runOnVm({
@@ -410,7 +411,7 @@ async function applyForkCode(client: CloudroomClient, workspace: string, id: str
       `code=$?; rm -f ~/${file}; exit $code`,
     ].join("\n"),
     stdin: "",
-  });
+  }, AbortSignal.timeout(PIECE_TIMEOUT));
   let result = await land();
   if (result.code === MISSING_HISTORY && code.full) {
     await uploadInParts(client, file, await code.full());

@@ -10,17 +10,17 @@ Preserve the user's meaning, not the conversation transcript. Record only the de
 ## Steps
 
 1. Extract the decision the user stated or approved in the conversation. Ask only if the decision is unclear; do not require him to dictate polished wording.
-2. Use the project's established ADR location, including a previously specified repository. Do not assume the current checkout owns the ADRs. Read that directory and take the next number.
+2. Use the project's established ADR location, including a previously specified repository. Do not assume the current checkout owns the ADRs. Name the file by that directory's rule (check its README or AGENTS.md); if it has none, take the next number.
 3. Write a short, clear ADR. Remove filler, emotional reactions, repetition, rhetorical questions, and instructions to the agent. Fix grammar and clarify references without changing the meaning, scope, conditions, or priorities.
 4. Check every statement against the user's decision. Remove invented requirements and unapproved agent suggestions.
 5. Show the saved path and full ADR in a code block.
 
 ## Format
 
-Follow existing numbering and filenames, such as `docs/adr/0042-short-slug.md`.
+Match the directory's filenames, such as `docs/adr/0042-short-slug.md` or `docs/adr/20261030-175900-short-slug.md`. Use the file's ID in the heading.
 
 ```markdown
-# 0042 — short title
+# <ID> — short title
 
 Status: accepted (<decision owner>, YYYY-MM-DD)
 

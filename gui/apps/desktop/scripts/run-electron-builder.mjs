@@ -375,7 +375,9 @@ async function main() {
   const buildStartedMs = Date.now();
   try {
     await runElectronBuilder(electronBuilderArgs, signingPlan);
-    if (process.exitCode === 0 && signingPlan.notarizationEnabled && !electronBuilderArgs.includes("--dir")) {
+    // The release workflow notarizes the DMG in its own step, after it saves the approved app.
+    const dmgLater = process.env.CLOUDROOM_NOTARIZE_DMG_LATER === "1";
+    if (process.exitCode === 0 && signingPlan.notarizationEnabled && !dmgLater && !electronBuilderArgs.includes("--dir")) {
       await notarizeDmgs(resolve(desktopPackageRoot, config.directories.output), buildStartedMs);
     }
     if (process.platform === "darwin") {

@@ -81,7 +81,11 @@ function diagnoseUnreachableServer(cause: unknown): UnreachableDiagnosis {
     if (code !== undefined && RETRYABLE_CODES.has(code)) {
       retryableCode = true;
     }
-    if (record.name === "TimeoutError" || record.name === "AbortError") {
+    if (
+      record.name === "TimeoutError" ||
+      record.name === "AbortError" ||
+      record.name === "BbRequestTimeoutError"
+    ) {
       timedOut = true;
     }
     if (typeof record.message === "string" && record.message.length > 0) {

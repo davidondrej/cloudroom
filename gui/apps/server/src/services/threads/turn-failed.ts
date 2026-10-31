@@ -25,6 +25,7 @@ import { parseStoredTurnRequestEvent } from "./thread-events.js";
 /** The message shapes the fallback query can return, by event type. */
 const providerErrorDataSchema = z.object({
   message: z.string(),
+  detail: z.string().optional(),
   errorInfo: providerErrorInfoSchema.optional(),
 });
 
@@ -177,29 +178,70 @@ export function buildTurnFailedEvent(
   }
   const failed = loadFailedTurn(db, threadId);
   if (failed === null) return null;
-  // The provider's own account of the failure, when the failure happened
-  // inside a provider turn at all: it carries both the turn id and the
-  // structured classification, so one row answers two fields.
-  const providerError = getLatestStoredThreadEventOfTypes(db, {
-    threadId,
-    types: ["provider/error"],
-    afterSequence: failed.requestSequence,
-  });
-  const providerErrorInfo: ProviderErrorInfo | null =
-    providerError === null
-      ? null
-      : (providerErrorDataSchema.safeParse(parseRowData(providerError)).data
-          ?.errorInfo ?? null);
+  const providerError = loadProviderError(db, { threadId, failed });
   return {
     threadId,
     requestId: failed.request.requestId,
     turnId: providerError?.turnId ?? null,
     errorInfo:
-      providerErrorInfo ?? doorRejectionErrorInfo(db, { threadId, failed }),
+      providerError?.errorInfo ??
+      doorRejectionErrorInfo(db, { threadId, failed }),
     inputAccepted: wasFailedTurnInputAccepted(db, { threadId, failed }),
     rateLimits: latestRateLimits(db, thread),
     attemptNumber: retryChain(failed.request).attemptNumber,
     interruptionReason: interruptionReason(db, { threadId, failed }),
+  };
+}
+
+/**
+ * The provider's own account of the failure, when the failure happened inside
+ * a provider turn at all: its turn id and its classification.
+ */
+function loadProviderError(
+  db: DbConnection,
+  args: { threadId: string; failed: FailedTurnRecord },
+): { turnId: string | null; errorInfo: ProviderErrorInfo | null } | null {
+  const row = getLatestStoredThreadEventOfTypes(db, {
+    threadId: args.threadId,
+    types: ["provider/error"],
+    afterSequence: args.failed.requestSequence,
+  });
+  if (row === null) return null;
+  return {
+    turnId: row.turnId,
+    errorInfo:
+      providerErrorDataSchema.safeParse(parseRowData(row)).data?.errorInfo ??
+      null,
+  };
+}
+
+/**
+ * Why the thread's last turn failed, for `thread.failed`: the provider's
+ * words ("You've hit your weekly limit") and the same classification
+ * `turn.failed` carries. Both null when the turn left neither.
+ */
+export function describeFailedTurn(
+  db: DbConnection,
+  threadId: string,
+): { message: string | null; errorInfo: ProviderErrorInfo | null } {
+  const failed = loadFailedTurn(db, threadId);
+  if (failed === null) return { message: null, errorInfo: null };
+  const providerError = loadProviderError(db, { threadId, failed });
+  // The turn's last error of either kind; both carry `message`.
+  const last = getLatestStoredThreadEventOfTypes(db, {
+    threadId,
+    types: ["provider/error", "system/error"],
+    afterSequence: failed.requestSequence,
+  });
+  const data =
+    last === null
+      ? undefined
+      : providerErrorDataSchema.safeParse(parseRowData(last)).data;
+  return {
+    message: data?.detail || data?.message || null,
+    errorInfo:
+      providerError?.errorInfo ??
+      doorRejectionErrorInfo(db, { threadId, failed }),
   };
 }
 
