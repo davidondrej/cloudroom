@@ -2,7 +2,14 @@ import { sleep, waitForChildExit } from "./child-process-helpers.mjs";
 import { appendOutput, formatProcessOutput } from "./smoke-output.mjs";
 import { execFile, spawn } from "node:child_process";
 import { createServer } from "node:net";
-import { mkdtemp, readFile, readdir, readlink, rm } from "node:fs/promises";
+import {
+  mkdtemp,
+  readFile,
+  readdir,
+  readlink,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -376,14 +383,48 @@ async function hostDaemonIsReady({ daemonPort, serverUrl }) {
   }
 }
 
+// The local API trusts a caller only after it writes a file into the
+// Cloudroom data folder, so prove this script the way the app and CLI do.
+async function proveCaller(serverUrl) {
+  const post = (path, body) =>
+    fetch(new URL(path, serverUrl), {
+      body: JSON.stringify(body),
+      headers: { "content-type": "application/json" },
+      method: "POST",
+      signal: AbortSignal.timeout(2_000),
+    });
+  const started = await post("/api/v1/caller-proofs", {});
+  if (!started.ok) return null;
+  const { claim, directory, id } = await started.json();
+  const proofFile = join(directory, id);
+  await writeFile(proofFile, id, { flag: "wx", mode: 0o600 });
+  try {
+    const finished = await post(`/api/v1/caller-proofs/${id}`, { claim });
+    if (!finished.ok) return null;
+    const { token } = await finished.json();
+    return typeof token === "string" ? token : null;
+  } finally {
+    await rm(proofFile, { force: true });
+  }
+}
+
+let callerToken = null;
+
 async function pluginStartupIsSettled(serverUrl) {
   try {
+    callerToken ??= await proveCaller(serverUrl);
+    if (callerToken === null) return false;
     const response = await fetch(
       new URL("/api/v1/system/providers", serverUrl),
-      { signal: AbortSignal.timeout(2_000) },
+      {
+        headers: { "x-cloudroom-caller": callerToken },
+        signal: AbortSignal.timeout(2_000),
+      },
     );
+    if (response.status === 401) callerToken = null;
     return response.ok;
   } catch {
+    callerToken = null;
     return false;
   }
 }
