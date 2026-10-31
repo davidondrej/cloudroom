@@ -615,6 +615,8 @@ struct Start {
     parent_session: Option<String>,
     /// The app's parent thread in another sandbox, which this session reports its turns to (relay.rs).
     parent_thread: Option<String>,
+    /// The app is about to copy the project into this session's folder, so the agent starts once it lands (ADR 0209).
+    project_copy: Option<bool>,
     prompt: Option<String>,
     title: Option<String>,
     /// Starts a side chat on a copy of this session's conversation, or a `fresh` one with none; it inherits the source's settings.
@@ -858,6 +860,7 @@ async fn start(
             || body.strip_ai_co_authors.is_some()
             || body.system_prompt.is_some()
             || body.parent_thread.is_some()
+            || body.project_copy.is_some()
         {
             return Err(session::Error::Conflict(
                 "a side chat takes only harness and fork",
@@ -878,6 +881,7 @@ async fn start(
             || body.strip_ai_co_authors.is_some()
             || body.system_prompt.is_some()
             || body.parent_thread.is_some()
+            || body.project_copy.is_some()
             || title.as_ref().is_some_and(|t| {
                 t.is_empty() || t.chars().count() > 200 || t.chars().any(char::is_control)
             })
@@ -920,6 +924,7 @@ async fn start(
                 body.strip_ai_co_authors,
                 body.system_prompt,
                 body.parent_thread,
+                body.project_copy,
             ),
         )
         .await?;

@@ -102,6 +102,7 @@ const capabilitiesSchema = z.object({
   usage: z.boolean().default(false),
   subagents: z.boolean().default(false),
   long_prompts: z.boolean().default(false),
+  project_copy: z.boolean().default(false),
   harnesses: z.array(z.object({
     id: z.string(),
     model: z.string(),
@@ -2258,8 +2259,17 @@ class CloudroomService {
         const parentThread = relayed ? { parent_thread: codeFrom } : {};
         const target = options.workspace && options.workspace !== ROOT_WORKSPACE ? options.workspace : null;
         if (fork && !capabilities.fork) throw new ApiError(503, "cloudroom_update", "Update the cloud core to fork Cloud threads. Your message is saved.");
+        const planned = target ? planProjectCopy(this.deps, client, threadId, target, { key: copyKey(sandbox, target), branch: baseBranch(initial?.input) }) : Promise.resolve(null);
+        // Agents read skills and AGENTS.md or CLAUDE.md only as they start, and the folder is marked as copying only once
+        // Core has the session, so the start says a copy is coming and Core starts the agent once it lands (ADR 0209).
+        // A child's code always comes. A thread sandbox's folder is new, so its copy is planned first; on a VM only a
+        // project's first thread copies, so the others don't wait for planning.
+        const projectCopy = !capabilities.project_copy ? Promise.resolve(false) : codeFrom ? Promise.resolve(true)
+          : sandbox ? planned.then(copy => Boolean(copy?.clone || copy?.copyAll)) : Promise.resolve(false);
+        const start = { model, reasoning: saved.reasoning, ...options, ...parentThread, ...(provider ? { provider } : {}) };
+        const startRequestId = saved.startRequestId;
         const [copy, started] = await Promise.all([
-          target ? planProjectCopy(this.deps, client, threadId, target, { key: copyKey(sandbox, target), branch: baseBranch(initial?.input) }) : null,
+          planned,
           sideChat
             ? this.startSideChat(client, threadId, saved.startRequestId, harness, sideChat)
             : fork
@@ -2273,7 +2283,7 @@ class CloudroomService {
               const latest = command(this.deps.db, `first_${threadId}`)!;
               this.deps.db.update(cloudroomCommands).set({ input: JSON.stringify({ ...JSON.parse(latest.input), fork: { ...fork, ...patch } }) }).where(eq(cloudroomCommands.id, latest.id)).run();
             })
-            : client.start(saved.startRequestId, CLOUD_HARNESSES[harness], { model, reasoning: saved.reasoning, ...options, ...parentThread, ...(provider ? { provider } : {}) }).then((accepted) => {
+            : projectCopy.then(coming => client.start(startRequestId, CLOUD_HARNESSES[harness], { ...start, ...(coming ? { project_copy: true } : {}) })).then((accepted) => {
               const transfer = `child_${threadId}`;
               return { sessionId: accepted.session_id, transfer, code: codeFrom ? threadCode(this.deps, codeFrom, transfer) : null };
             }),
@@ -2285,7 +2295,7 @@ class CloudroomService {
         const forkCode: StartStep[] = started.code ? [{ key: "fork", text: "Copying the source thread's code", status: "started" }] : [];
         this.progress(threadId, [{ key: "agent", status: "completed" }, ...files, ...forkCode], "completed");
         const firstSent = new Promise<void>(resolve => { releaseCopy = resolve; });
-        // `room-cli files wait` holds the agent until the files, and a fork's code, have landed (ADR 0209).
+        // Core starts the agent, and `room-cli files wait` returns, once the files and a fork's or child's code have landed (ADR 0209).
         // A child in a Personal project has no workspace of its own, so its status file sits next to the sandbox root.
         const workspace = target && (files.length || started.code) ? target
           : started.code ? await client.sessionWorkspace(started.sessionId).then(({ path }) => path, () => null) : null;

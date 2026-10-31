@@ -70,13 +70,15 @@ pub struct Receipt {
     pub error: Option<String>,
 }
 
-/// A start's provider, command guard, co-author stripping, system prompt and parent thread in another sandbox.
+/// A start's provider, command guard, co-author stripping, system prompt, parent thread in another sandbox, and
+/// whether the app is about to copy the project into its folder.
 type StartOptions = (
     Option<String>,
     Option<bool>,
     Option<bool>,
     Option<String>,
     Option<String>,
+    Option<bool>,
 );
 
 #[derive(Default, Clone, Serialize, Deserialize)]
@@ -314,6 +316,10 @@ pub(crate) const PLAN_ONLY_REFUSED: &str = "extra credits are off for loops";
 pub(crate) const PLAN_ONLY_STOPPED: &str =
     "Stopped: this loop run would spend extra credits, and Stop at plan limit is on.";
 const JOURNAL_UNWRITABLE: &str = "session journal is not writable";
+/// How long a new agent waits to start for its project copy (ADR 0209). Most copies take seconds; this also covers an
+/// upload piece that stalls for its 2 minutes and is sent again. Past it the agent starts anyway, and its first message
+/// tells it to run `room-cli files wait`, which allows 10 minutes.
+const PROJECT_COPY_WAIT: Duration = Duration::from_secs(300);
 type Result<T> = std::result::Result<T, Error>;
 
 struct Local {
@@ -667,11 +673,13 @@ impl Manager {
         command: &str,
         input: &Value,
     ) -> Result<Option<Receipt>> {
-        // `plan_only` is guard metadata Core may add itself (an inherited resume), not the request's content.
+        // `plan_only` is guard metadata Core may add itself (an inherited resume), not the request's content; nor is
+        // `project_copy`, which a retried start may plan differently.
         let content = |input: &Value| {
             let mut input = input.clone();
             if let Some(fields) = input.as_object_mut() {
                 fields.remove("plan_only");
+                fields.remove("project_copy");
             }
             input
         };
@@ -771,7 +779,14 @@ impl Manager {
         model: Option<String>,
         reasoning: Option<String>,
         (workspace, workspace_name): (Option<String>, Option<String>),
-        (provider, command_guard_enabled, strip_ai_co_authors, system_prompt, parent_thread): StartOptions,
+        (
+            provider,
+            command_guard_enabled,
+            strip_ai_co_authors,
+            system_prompt,
+            parent_thread,
+            project_copy,
+        ): StartOptions,
     ) -> Result<(String, Receipt)> {
         let id = format!("cr_{request}");
         let kind = harness
@@ -803,6 +818,9 @@ impl Manager {
                 return Err(Error::Conflict("invalid parent_thread"));
             }
             input["parent_thread"] = json!(parent);
+        }
+        if project_copy == Some(true) {
+            input["project_copy"] = json!(true);
         }
         if let Some(model) = &model {
             input["model"] = json!(model);
@@ -940,6 +958,26 @@ impl Manager {
     }
 
     async fn launch(self: Arc<Self>, id: String, request: String) {
+        // Harnesses read skills and AGENTS.md or CLAUDE.md only as they start, so a running project copy lands first.
+        // Without a startup slot, so a slow copy holds up only its own session.
+        let (folder, promised) = {
+            let local = self.local.lock().unwrap();
+            let session = &local.sessions[&id];
+            let promised = session
+                .receipts
+                .get(&request)
+                .is_some_and(|r| r.input["project_copy"] == true);
+            (session.workspace.as_ref().map(|w| w.path.clone()), promised)
+        };
+        if let Some(folder) = folder {
+            crate::workspace::files::landed(&folder, promised, PROJECT_COPY_WAIT, || {
+                self.is_stopping()
+                    || self.local.lock().unwrap().sessions[&id]
+                        .close_request
+                        .is_some()
+            })
+            .await;
+        }
         let started = Instant::now();
         let Ok(_startup) = self.startups.acquire().await else {
             return;

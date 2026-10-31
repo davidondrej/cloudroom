@@ -319,6 +319,60 @@ it("sends a new thread's first message before its project copy starts, so a slow
   }
 });
 
+it("tells Core a new thread's project copy is coming, so its agent starts in the copied folder (ADR 0209)", async () => {
+  const folder = await mkdtemp(join(tmpdir(), "cloudroom-copy-coming-"));
+  await writeFile(join(folder, "AGENTS.md"), "small project not on GitHub");
+  for (const supported of [true, false]) {
+    const harness = await createTestAppHarness();
+    const { host } = seedHostSession(harness.deps);
+    const copied = seedProjectWithSource(harness.deps, { hostId: host.id, path: folder, name: "Copied" }).project;
+    // No folder on the Mac and no GitHub remote: nothing to copy.
+    const empty = seedProjectWithSource(harness.deps, { hostId: host.id, path: join(folder, "missing"), name: "Empty" }).project;
+    const service = cloudroom(harness.deps);
+    const core: { path: string; input?: Record<string, unknown> }[] = [];
+    let coreUrl = "";
+    const coreServer = createServer(async (req, res) => {
+      const json = (value: unknown, status = 200) => { res.writeHead(status, { "Content-Type": "application/json" }); res.end(JSON.stringify(value)); };
+      if (req.url === "/v1/capabilities") return json({ version: 1, repository: "/code", stop: true, resume: true, launch_settings: true, workspaces: true, direct_workspaces: true, command_guard: true, project_copy: supported, harnesses: [{ id: "codex", model: "test-model" }] });
+      if (req.url?.includes("/stream?")) { res.writeHead(200, { "Content-Type": "text/event-stream" }); res.end(); return; }
+      const input = await body(req);
+      core.push({ path: req.url!, input });
+      if (req.url === "/v1/sessions") return json({ session_id: `cr_${input.request_id}`, receipt: { request_id: input.request_id, command: "start", input, state: "accepted" }, saving: {} }, 202);
+      if (req.url?.includes("/prompts")) return json({ session_id: "cr_x", receipt: { request_id: input.request_id, command: "prompt", input, state: "accepted" }, saving: {} }, 202);
+      return json({}, 404);
+    });
+    const websiteServer = createServer(async (req, res) => {
+      const json = (value: unknown) => { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify(value)); };
+      const input = await body(req);
+      if (req.url === "/api/desktop/logins") return json({ claude: false, codex: false, pi: false, github: false });
+      json({ thread: input.thread, state: "awake", generation: 1, issue: null, origin: coreUrl, token: "t".repeat(64) });
+    });
+    coreUrl = await listen(coreServer);
+    const websiteUrl = await listen(websiteServer);
+    try {
+      await service.configure(null, { id: "11111111-1111-4111-8111-111111111111", email: "sandbox@example.com" }, undefined, websiteUrl, "a".repeat(64));
+      const threads: Record<string, string> = {};
+      // A child of a Cloud thread gets its parent's code, even where its project has nothing to copy.
+      for (const [requestId, project, parent] of [["copy-coming", copied], ["nothing-to-copy", empty], ["child", empty, "nothing-to-copy"]] as const) {
+        const created = await harness.app.request("/api/v1/threads", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ executionTarget: "cloud", requestId, projectId: project.id, providerId: "codex", origin: "app", model: "test-model", reasoningLevel: "medium", environment: { type: "project-default" }, ...(parent ? { parentThreadId: threads[parent] } : {}), input: [{ type: "text", text: "test", mentions: [] }] }) });
+        expect(created.status).toBe(201);
+        threads[requestId] = (await created.json() as { id: string }).id;
+        await waitFor(() => core.some(call => call.path === "/v1/sessions" && call.input?.request_id === requestId), `start ${requestId}`);
+      }
+      const start = (requestId: string) => core.find(call => call.path === "/v1/sessions" && call.input?.request_id === requestId)!;
+      expect(start("copy-coming").input?.project_copy).toBe(supported ? true : undefined);
+      expect(start("nothing-to-copy").input?.project_copy).toBeUndefined();
+      expect(start("child").input?.project_copy).toBe(supported ? true : undefined);
+      // The copy is planned before the start says it is coming.
+      if (supported) expect(core.findIndex(call => call.path.startsWith("/v1/workspaces/"))).toBeLessThan(core.indexOf(start("copy-coming")));
+    } finally {
+      service.stop();
+      coreServer.close(); websiteServer.close();
+    }
+  }
+  await rm(folder, { recursive: true, force: true });
+});
+
 it("tells the user to remove forced API login when Codex refuses ChatGPT sign-in", async () => {
   const dir = await mkdtemp(join(tmpdir(), "codex-forced-api-"));
   const path = process.env.PATH, codexHome = process.env.CODEX_HOME;
