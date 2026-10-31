@@ -271,6 +271,8 @@ class WorkspaceTests(unittest.TestCase):
         until(lambda:self.service.session(sid)['receipts']['hello']['state']=='completed','first turn after the copy',10)
         self.assertEqual(self.started_with(sid),self.LANDED)
         self.assertEqual((unmarked['state'],unmarked['native_id']),('pending',None))
+        # A retried start may plan its copy differently; it is still the same start.
+        self.assertEqual(self.service.request('POST','/v1/sessions',{'request_id':'child','workspace':'root'},202)['session_id'],sid)
 
     def test_no_copy_or_a_failed_one_starts_the_harness_at_once(self):
         # Well under the 10 s an empty folder with no status file gets in `room-cli files wait`.

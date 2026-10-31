@@ -61,6 +61,7 @@ pub const FEATURES: &[&str] = &[
     "drain",
     "terminals",
     "files_wait",
+    "project_copy",
     "long_prompts",
     "agent_limits",
     "plan_only",
