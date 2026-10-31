@@ -9,6 +9,11 @@ import {
   createHostDaemonLocalClient,
   type WorkspaceOpenTarget,
 } from "@cloudroom/host-daemon-contract";
+import {
+  CALLER_TOKEN_HEADER,
+  DAEMON_CALLER_PROOF_PATH,
+  proveLocalCaller,
+} from "@cloudroom/config/caller-proof";
 import { startLocalApiServer, type LocalApiServer } from "./local-api.js";
 import { resolveHostPlatform } from "./host-platform.js";
 import type { HostDaemonLocalApiConfig } from "./local-api-config.js";
@@ -16,6 +21,22 @@ import { WorkspaceOpenTargetError } from "@cloudroom/local-open-targets";
 
 describe("local API server", () => {
   let server: LocalApiServer | null = null;
+  const dataDirs: string[] = [];
+
+  async function tempDataDir(): Promise<string> {
+    const dir = await mkdtemp(path.join(tmpdir(), "bb-local-api-"));
+    dataDirs.push(dir);
+    return dir;
+  }
+
+  async function callerHeaders(port: number): Promise<Record<string, string>> {
+    const token = await proveLocalCaller({
+      baseUrl: `http://localhost:${port}`,
+      proofPath: DAEMON_CALLER_PROOF_PATH,
+    });
+    if (token === null) throw new Error("caller proof failed");
+    return { [CALLER_TOKEN_HEADER]: token };
+  }
 
   function createLocalApiConfig(
     overrides: Partial<HostDaemonLocalApiConfig> = {},
@@ -32,11 +53,15 @@ describe("local API server", () => {
   afterEach(async () => {
     await server?.close();
     server = null;
+    for (const dir of dataDirs.splice(0)) {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 
   it("rejects a foreign browser origin instead of only withholding CORS", async () => {
     const openInTarget = vi.fn(async () => undefined);
     server = await startLocalApiServer({
+      dataDir: await tempDataDir(),
       hostId: "host-1",
       localApiConfig: createLocalApiConfig(),
       serverUrl: "http://server.test",
@@ -46,6 +71,7 @@ describe("local API server", () => {
       openInTarget,
     });
     const baseUrl = `http://localhost:${server.port}`;
+    const caller = await callerHeaders(server.port);
 
     async function postOpenInTarget(
       headers: Record<string, string>,
@@ -78,20 +104,27 @@ describe("local API server", () => {
     ).toBe(403);
     expect(openInTarget).not.toHaveBeenCalled();
 
+    expect(await postOpenInTarget({ "content-type": "application/json" })).toBe(
+      401,
+    );
+    expect(openInTarget).not.toHaveBeenCalled();
+
     expect(
       await postOpenInTarget({
         "content-type": "application/json",
         origin: "http://localhost:3334",
+        ...caller,
       }),
     ).toBe(200);
-    expect(await postOpenInTarget({ "content-type": "application/json" })).toBe(
-      200,
-    );
+    expect(
+      await postOpenInTarget({ "content-type": "application/json", ...caller }),
+    ).toBe(200);
     expect(openInTarget).toHaveBeenCalledTimes(2);
   });
 
   it("allows the exact remote server origin the daemon is enrolled with", async () => {
     server = await startLocalApiServer({
+      dataDir: await tempDataDir(),
       hostId: "host-remote",
       localApiConfig: createLocalApiConfig(),
       serverUrl: "https://remote-bb.example.test/projects/proj_1",
@@ -112,6 +145,7 @@ describe("local API server", () => {
   it("rejects a DNS-rebound origin that matches its own Host", async () => {
     const openInTarget = vi.fn(async () => undefined);
     server = await startLocalApiServer({
+      dataDir: await tempDataDir(),
       hostId: "host-1",
       localApiConfig: createLocalApiConfig(),
       serverUrl: "http://server.test",
@@ -163,6 +197,7 @@ describe("local API server", () => {
       await post({
         origin: `http://${bindHost}:${port}`,
         host: `${bindHost}:${port}`,
+        ...(await callerHeaders(port)),
       }),
     ).toBe(200);
     expect(openInTarget).toHaveBeenCalledTimes(1);
@@ -170,6 +205,7 @@ describe("local API server", () => {
 
   it("serves host identity and status over localhost", async () => {
     server = await startLocalApiServer({
+      dataDir: await tempDataDir(),
       hostId: "host-1",
       localApiConfig: createLocalApiConfig(),
       serverUrl: "http://server.test",
@@ -209,6 +245,7 @@ describe("local API server", () => {
     try {
       await expect(
         startLocalApiServer({
+          dataDir: await tempDataDir(),
           hostId: "host-1",
           localApiConfig: createLocalApiConfig({
             bindHost: "127.0.0.1",
@@ -254,6 +291,7 @@ describe("local API server", () => {
     const openInTarget = vi.fn(async () => undefined);
 
     server = await startLocalApiServer({
+      dataDir: await tempDataDir(),
       hostId: "host-1",
       localApiConfig: createLocalApiConfig(),
       serverUrl: "http://server.test",
@@ -265,6 +303,7 @@ describe("local API server", () => {
     });
     const client = createHostDaemonLocalClient(
       `http://localhost:${server.port}`,
+      await callerHeaders(server.port),
     );
 
     const targetsResponse = await client["workspace-open-targets"].$get({
@@ -325,6 +364,7 @@ describe("local API server", () => {
       });
       const client = createHostDaemonLocalClient(
         `http://localhost:${server.port}`,
+        await callerHeaders(server.port),
       );
 
       const corsResponse = await fetch(
@@ -392,6 +432,7 @@ describe("local API server", () => {
       });
       const client = createHostDaemonLocalClient(
         `http://localhost:${server.port}`,
+        await callerHeaders(server.port),
       );
 
       const response = await client["open-in-target"].$post({
@@ -425,6 +466,7 @@ describe("local API server", () => {
       });
     });
     server = await startLocalApiServer({
+      dataDir: await tempDataDir(),
       hostId: "host-1",
       localApiConfig: createLocalApiConfig(),
       serverUrl: "http://server.test",
@@ -435,6 +477,7 @@ describe("local API server", () => {
     });
     const client = createHostDaemonLocalClient(
       `http://localhost:${server.port}`,
+      await callerHeaders(server.port),
     );
 
     const response = await client["open-in-target"].$post({

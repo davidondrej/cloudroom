@@ -34,8 +34,9 @@ export const cloudForkSchema = z.object({
 });
 export type CloudFork = z.infer<typeof cloudForkSchema>;
 /** A thread's code: a Git bundle, or a .tgz of its files when its folder has no Git history, plus its `origin` URL.
- *  `full` packs a complete bundle, for a folder without the commits a thin bundle leaves out. */
-type Code = { data: Buffer; origin: string; full?: () => Promise<Buffer> };
+ *  `ref` names the bundle's ref (`refs/cloudroom/<ref>`). `full` packs a complete bundle, for a folder without the
+ *  commits a thin bundle leaves out. */
+type Code = { data: Buffer; origin: string; ref: string; full?: () => Promise<Buffer> };
 export const isFiles = (data: Buffer) => data[0] === 0x1f && data[1] === 0x8b;
 const skippedNames = () => [...SKIPPED, ".cloudroom"].map((name) => `-name ${quote(name)}`).join(" -o ");
 /** `applyForkCode`'s exit code when the folder lacks history the bundle needs. */
@@ -262,9 +263,38 @@ export function forkModel(deps: Pick<AppDeps, "db">, threadId: string): string |
 
 export const CHILD_HINT = "[Cloud child]\nYou run in your own sandbox. Cloudroom is copying your parent thread's code (its commits and uncommitted changes) into this folder. Run `room-cli files wait` before you read or change files; it returns once the code lands. Never recreate missing files.";
 
+/** How long a parent's pack waits for siblings started in the same fan-out, so they share it. */
+export const GATHER_MS = 5_000;
+/** Per parent: the pack that children asking while another runs will share, and the last queued pack. */
+const nextPack = new Map<string, Promise<Code | Error | null>>();
+const lastPack = new Map<string, Promise<unknown>>();
+
+/** Runs `task` once the parent's earlier packs, thin or full, are done. */
+function queuePack<T>(threadId: string, task: () => Promise<T>): Promise<T> {
+  const run = (lastPack.get(threadId) ?? Promise.resolve()).catch(() => {}).then(task);
+  lastPack.set(threadId, run);
+  const done = () => { if (lastPack.get(threadId) === run) lastPack.delete(threadId); };
+  void run.then(done, done);
+  return run;
+}
+
 /** A Cloud parent's code (its branch plus uncommitted changes) for a child in a sandbox of its own (ADR 0229),
- *  applied with `landForkCode` like a fork's. Null when the parent has no folder. */
-export async function threadCode(deps: Parameters<typeof cloudroom>[0], threadId: string, id: string): Promise<Code | Error | null> {
+ *  applied with `landForkCode` like a fork's. Null when the parent has no folder. A parent packs one copy at a time,
+ *  so a fan-out can't fill its disk: children that ask within `GATHER_MS`, or while a pack runs, share the next one,
+ *  which starts after they asked and so holds everything the parent wrote for them. */
+export function threadCode(deps: Parameters<typeof cloudroom>[0], threadId: string, id: string): Promise<Code | Error | null> {
+  const queued = nextPack.get(threadId);
+  if (queued) return queued;
+  const code = queuePack(threadId, async () => {
+    await new Promise((resolve) => setTimeout(resolve, GATHER_MS));
+    nextPack.delete(threadId);
+    return parentCode(deps, threadId, id);
+  }).then((packed) => packed instanceof Error || !packed?.full ? packed : { ...packed, full: () => queuePack(threadId, packed.full!) });
+  nextPack.set(threadId, code);
+  return code;
+}
+
+async function parentCode(deps: Parameters<typeof cloudroom>[0], threadId: string, id: string): Promise<Code | Error | null> {
   try {
     const source = binding(deps.db, threadId);
     if (!source?.sessionId) {
@@ -322,18 +352,19 @@ async function packCode(at: { run: (script: string) => Promise<string>; read: (p
   const pack = async (thin: boolean): Promise<Code | null> => {
     const [path, origin = ""] = (await at.run(codeScript(workspace, id, thin))).trim().split("\n");
     if (!path) return null;
-    try { return { data: await at.read(path), origin: origin.trim() }; }
+    try { return { data: await at.read(path), origin: origin.trim(), ref: id }; }
     finally { await at.remove(path).catch(() => {}); }
   };
   const code = await pack(true);
   if (!code || isFiles(code.data)) return code;
+  // Once, since children sharing this code would otherwise pack the same ref at the same time.
+  let complete: Promise<Buffer> | undefined;
   return {
     ...code,
-    full: async () => {
-      const complete = await pack(false);
-      if (!complete) throw new Error("The source thread's folder is gone.");
-      return complete.data;
-    },
+    full: () => complete ??= pack(false).then((full) => {
+      if (!full) throw new Error("The source thread's folder is gone.");
+      return full.data;
+    }),
   };
 }
 
@@ -344,7 +375,7 @@ function codeScript(workspace: string, id: string, thin: boolean): string {
     `if ! git rev-parse -q --verify HEAD >/dev/null 2>&1; then f=~/.cache/cloudroom/${id}.tgz && mkdir -p ~/.cache/cloudroom || exit 1`,
     // Listed first, so a folder find can't read fails the copy instead of leaving files out. A file that changes or
     // vanishes while packing (a log) is only a warning: tar exits 1 for it.
-    `  l="$f.list" && find . -mindepth 1 \\( ${skippedNames()} \\) -prune -o \\( -type f -o -type l \\) -print0 > "$l" && { tar -czf "$f" --ignore-failed-read --warning=no-file-changed --null -T "$l"; [ $? -le 1 ] && [ -s "$f" ]; } && echo "$f"; code=$?; rm -f "$l"; exit $code`,
+    `  l="$f.list" && find . -mindepth 1 \\( ${skippedNames()} \\) -prune -o \\( -type f -o -type l \\) -print0 > "$l" && { tar -czf "$f" --ignore-failed-read --warning=no-file-changed --null -T "$l"; [ $? -le 1 ] && [ -s "$f" ]; } && echo "$f"; code=$?; rm -f "$l"; [ $code -eq 0 ] || rm -f "$f"; exit $code`,
     "fi",
     // A temporary index, so the source's own staging area stays as it was. An empty file is not a valid index.
     `index=$(mktemp) && rm -f "$index" && trap 'rm -f "$index"; git update-ref -d ${ref} 2>/dev/null' EXIT`,
@@ -407,7 +438,7 @@ async function applyForkCode(client: CloudroomClient, workspace: string, id: str
       `if git rev-parse -q --verify HEAD >/dev/null && ! git diff --quiet HEAD; then echo 'The folder already had changes, so they were kept and the code was not copied in' >&2; rm -f ~/${file}; exit 1; fi`,
       // A thin bundle leaves out commits the source's remote has: fetch them, or ask for a complete bundle.
       `git bundle verify -q ~/${file} >/dev/null 2>&1 || GIT_TERMINAL_PROMPT=0 git fetch -q origin >/dev/null 2>&1; git bundle verify -q ~/${file} >/dev/null 2>&1 || { rm -f ~/${file}; exit ${MISSING_HISTORY}; }`,
-      `git fetch -q ~/${file} refs/cloudroom/${id} && git reset -q --hard FETCH_HEAD && git reset -q --soft HEAD~1 && git read-tree -m HEAD`,
+      `git fetch -q ~/${file} refs/cloudroom/${code.ref} && git reset -q --hard FETCH_HEAD && git reset -q --soft HEAD~1 && git read-tree -m HEAD`,
       `code=$?; rm -f ~/${file}; exit $code`,
     ].join("\n"),
     stdin: "",

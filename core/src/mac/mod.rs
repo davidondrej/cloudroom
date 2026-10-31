@@ -11,7 +11,7 @@ use axum::{
     },
     routing::{get, post},
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
@@ -70,6 +70,19 @@ pub struct Run {
     /// The command changes the Mac. Below Full access the helper refuses it or asks the user first (ADR 0186).
     #[serde(default)]
     write: bool,
+    /// A `push`: the helper builds its own unpack from this and ignores `command` (#222).
+    #[serde(default)]
+    copy: Option<Copy>,
+}
+/// What a `push` copies, for the Mac helper's own unpack: the item's `name`, its place as typed (`to`), and the Mac
+/// temp folder holding a copy over 16 MiB (`staged`). The helper places only that item, so a sandbox's archive can't
+/// add other files there. Older helpers run the job's `command` instead.
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Copy {
+    name: String,
+    to: String,
+    staged: Option<String>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -486,6 +499,9 @@ async fn local_run(
         );
     }
     let mut data = json!({"id":id,"command":run.command,"cwd":run.cwd,"write":run.write});
+    if let Some(copy) = run.copy {
+        data["copy"] = json!(copy);
+    }
     if fetch {
         data["stdin_bytes"] = json!(run.stdin.len() / 2);
     } else {
@@ -884,6 +900,16 @@ async fn print_result(value: Value) -> io::Result<i32> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_push_job_keeps_its_copy_for_the_mac() {
+        // Security fix (#222): without `copy`, the Mac helper falls back to the sandbox's own unpack command.
+        let copy =
+            serde_json::json!({"name":"notes.txt","to":"~/x/","staged":"/tmp/cloudroom.abc"});
+        let body = serde_json::json!({"command":"true","stdin":"","write":true,"copy":copy});
+        let run: super::Run = serde_json::from_value(body).unwrap();
+        assert_eq!(serde_json::json!(run.copy), copy);
+    }
+
     #[tokio::test]
     async fn subcommand_help_prints_usage_but_run_passes_it_after_the_command() {
         let cli = |words: &str| {

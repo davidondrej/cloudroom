@@ -257,11 +257,18 @@ function writeEnrollingBbApp(
 function writeCurlArtifactMock(
   fixture: ReturnType<typeof createFixture>,
   artifactStatus: number,
+  relayKey?: string,
 ): void {
+  const capture =
+    relayKey === undefined
+      ? ""
+      : `cat >"${join(fixture.dataDir, "curl-stdin")}"
+grep -rl -- '${relayKey}' "$TMPDIR" >"${join(fixture.dataDir, "curl-key-files")}" || true
+`;
   writeExecutable(
     join(fixture.binDir, "curl"),
     `#!/bin/sh
-output=
+${capture}output=
 while [ "$#" -gt 0 ]; do
   if [ "$1" = --output ]; then output=$2; shift 2; else shift; fi
 done
@@ -475,7 +482,17 @@ exec '${process.execPath}' "$@"
     "enrolls privately with portable service selection (%j)",
     ({ container }) => {
       const fixture = createFixture();
-      writeCurlArtifactMock(fixture, 200);
+      const tempDir = join(fixture.homeDir, "tmp");
+      mkdirSync(tempDir);
+      writeCurlArtifactMock(fixture, 200, "relay-key-test");
+      rmSync(join(fixture.binDir, "node"));
+      writeExecutable(
+        join(fixture.binDir, "node"),
+        `#!/bin/sh
+if env | grep -q relay-key-test; then printf '%s\\n' "$*" >>"${join(fixture.dataDir, "node-env-leaks")}"; fi
+exec "${process.execPath}" "$@"
+`,
+      );
       writeEnrollingBbApp(
         fixture,
         join(fixture.dataDir, "daemon-invocation"),
@@ -486,8 +503,9 @@ exec '${process.execPath}' "$@"
         `#!/usr/bin/env node
 const fs = require("node:fs");
 const path = require("node:path");
-const bundle = JSON.parse(process.env.ROOM_ENROLLMENT);
-fs.writeFileSync(path.join(process.env.ROOM_DATA_DIR, "enrollment-argv"), JSON.stringify(process.argv.slice(2)));
+const args = process.argv.slice(2);
+const bundle = JSON.parse(fs.readFileSync(args[args.indexOf("--bootstrap-file") + 1], "utf8"));
+fs.writeFileSync(path.join(process.env.ROOM_DATA_DIR, "enrollment-argv"), JSON.stringify(args));
 fs.writeFileSync(path.join(process.env.ROOM_DATA_DIR, "auth.json"), JSON.stringify({hostId: bundle.hostId, hostKey: "durable-test"}));
 fs.writeFileSync(path.join(process.env.ROOM_DATA_DIR, "config.json"), JSON.stringify({serverUrl: bundle.serverUrl}));
 `,
@@ -513,9 +531,11 @@ fs.writeFileSync(path.join(process.env.ROOM_DATA_DIR, "config.json"), JSON.strin
       }
       const result = runScript(["--bootstrap-env", "TEST_BUNDLE"], fixture, {
         BB_INSTALL_SKIP_SERVICE: container ? "0" : "1",
+        TMPDIR: tempDir,
         TEST_BUNDLE: JSON.stringify({
           hostId: "host-test",
           serverUrl: "https://machine.getbb.app",
+          headers: { "x-bb-connect-machine": "relay-key-test" },
           credential: "private-bootstrap-test",
           expiresAt: Date.now() + 60_000,
         }),
@@ -527,10 +547,18 @@ fs.writeFileSync(path.join(process.env.ROOM_DATA_DIR, "config.json"), JSON.strin
           JSON.parse(
             readFileSync(join(fixture.dataDir, "enrollment-argv"), "utf8"),
           ),
-        ).toEqual(["machine", "enroll", "--bootstrap-env", "ROOM_ENROLLMENT"]);
+        ).toEqual(["machine", "enroll", "--bootstrap-file", "/dev/stdin"]);
+        expect(existsSync(join(fixture.dataDir, "node-env-leaks"))).toBe(false);
         expect(result.stdout + result.stderr).not.toContain(
           "private-bootstrap-test",
         );
+        expect(readFileSync(join(fixture.dataDir, "curl-stdin"), "utf8")).toBe(
+          'header = "x-bb-connect-machine: relay-key-test"\n',
+        );
+        expect(
+          readFileSync(join(fixture.dataDir, "curl-key-files"), "utf8"),
+        ).toBe("");
+        expect(result.stdout + result.stderr).not.toContain("relay-key-test");
         expect(
           spawnSync("sh", ["-n", join(fixture.homeDir, ".local/bin/room-cli")])
             .status,

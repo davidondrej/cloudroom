@@ -117,6 +117,10 @@ function threadEventsOfType(type: string): Record<string, unknown>[] {
 }
 
 const bbThreadIdByProviderThreadId = new Map<string, string>();
+const permissionModeByProviderThreadId = new Map<
+  string,
+  "accept-edits" | "full"
+>();
 
 function bbThreadIdFor(providerThreadId: string): string {
   const recorded = bbThreadIdByProviderThreadId.get(providerThreadId);
@@ -202,6 +206,10 @@ interface AgentLaunchArgs {
     readonly?: string[];
     insertAfterArgs?: number;
   };
+  permissionEnv?: {
+    full?: Record<string, string>;
+    workspaceWrite?: Record<string, string>;
+  };
 }
 
 function acpLaunchSpec(args: AgentLaunchArgs): Record<string, unknown> {
@@ -226,6 +234,7 @@ function acpLaunchSpec(args: AgentLaunchArgs): Record<string, unknown> {
     ...(args.reasoningCli ? { reasoningCli: args.reasoningCli } : {}),
     ...(args.nativeReasoning ? { nativeReasoning: args.nativeReasoning } : {}),
     ...(args.permissionCli ? { permissionCli: args.permissionCli } : {}),
+    ...(args.permissionEnv ? { permissionEnv: args.permissionEnv } : {}),
   };
 }
 
@@ -291,6 +300,10 @@ async function startThread(args?: StartThreadArgs): Promise<{
   }
   startedProviderThreadIds.push(result.providerThreadId);
   bbThreadIdByProviderThreadId.set(result.providerThreadId, bbThreadId);
+  permissionModeByProviderThreadId.set(
+    result.providerThreadId,
+    args?.permissionMode ?? "full",
+  );
   return { bbThreadId, providerThreadId: result.providerThreadId };
 }
 
@@ -414,9 +427,46 @@ function sendTurnRequest(
     threadId: bbThreadIdFor(providerThreadId),
     providerThreadId,
     clientRequestId: CLIENT_REQUEST_ID,
-    options: executionOptions({}),
+    options: executionOptions({
+      permissionMode: permissionModeByProviderThreadId.get(providerThreadId),
+    }),
     ...params,
   });
+}
+
+function sendModeTurn(
+  providerThreadId: string,
+  text: string,
+  permissionMode: "accept-edits" | "full",
+): () => Promise<Record<string, unknown>> {
+  const completed = threadEventsOfType("turn/completed").length;
+  sendTurnRequest("turn/start", providerThreadId, {
+    input: [{ type: "text", text, mentions: [] }],
+    options: executionOptions({ permissionMode }),
+  });
+  return () =>
+    waitFor(
+      () => threadEventsOfType("turn/completed")[completed],
+      `turn completion after "${text}"`,
+    );
+}
+
+async function denyForwardedPermission(): Promise<void> {
+  const forwarded = await waitFor(
+    () =>
+      output.messages.find(
+        (message) =>
+          message.method === "interaction/request" && message.id !== undefined,
+      ),
+    "forwarded permission request",
+  );
+  handleLine(
+    JSON.stringify({
+      jsonrpc: "2.0",
+      id: forwarded.id,
+      result: { decision: "deny" },
+    }),
+  );
 }
 
 function compactCommandInput(): unknown[] {
@@ -1245,6 +1295,174 @@ describe("acp bridge", () => {
         (text) => text === "argv:agent --always-approve stdio",
       ),
     ).toBe(true);
+  });
+
+  it.each([
+    ["full", "full"],
+    ["accept-edits", "ask"],
+  ] as const)(
+    "launches %s threads with that mode's permission env over every other env",
+    async (permissionMode, expected) => {
+      vi.stubEnv("FAKE_ACP_GATE", "inherited");
+      const { providerThreadId } = await startThread({
+        permissionMode,
+        envVars: { FAKE_ACP_GATE: "configured" },
+        permissionEnv: {
+          full: { FAKE_ACP_GATE: "full" },
+          workspaceWrite: { FAKE_ACP_GATE: "ask" },
+        },
+      });
+      sendTurnRequest("turn/start", providerThreadId, {
+        input: [{ type: "text", text: "echo-env:FAKE_ACP_GATE", mentions: [] }],
+      });
+      await waitForTurnCompleted();
+
+      expect(agentMessageTexts()).toContain(`env:FAKE_ACP_GATE=${expected}`);
+    },
+  );
+
+  it("restarts an agent whose launch depends on the mode when a turn switches it", async () => {
+    chmodSync(FAKE_AGENT_PATH, 0o755);
+    const { providerThreadId } = await startThread({
+      agent: { command: FAKE_AGENT_PATH, args: ["agent", "stdio"] },
+      permissionMode: "full",
+      permissionCli: { full: ["--always-approve"], insertAfterArgs: 1 },
+      permissionEnv: {
+        full: { FAKE_ACP_GATE: "full" },
+        workspaceWrite: { FAKE_ACP_GATE: "ask" },
+      },
+    });
+
+    await sendModeTurn(providerThreadId, "echo-argv", "accept-edits")();
+    await sendModeTurn(
+      providerThreadId,
+      "echo-env:FAKE_ACP_GATE",
+      "accept-edits",
+    )();
+    const permissionTurn = sendModeTurn(
+      providerThreadId,
+      "request-permission",
+      "accept-edits",
+    );
+    await denyForwardedPermission();
+    await permissionTurn();
+
+    expect(agentMessageTexts()).toEqual(
+      expect.arrayContaining([
+        "argv:agent stdio",
+        "env:FAKE_ACP_GATE=ask",
+        "permission:no",
+      ]),
+    );
+    expect(notifications("session/replaced")).toHaveLength(1);
+  });
+
+  it("switches a plain agent's permission mode in place, both ways", async () => {
+    const { providerThreadId } = await startThread({ permissionMode: "full" });
+
+    const manualTurn = sendModeTurn(
+      providerThreadId,
+      "request-permission",
+      "accept-edits",
+    );
+    await denyForwardedPermission();
+    await manualTurn();
+    await sendModeTurn(providerThreadId, "request-permission", "full")();
+
+    expect(agentMessageTexts()).toEqual(
+      expect.arrayContaining(["permission:no", "permission:yes"]),
+    );
+    expect(
+      output.messages.filter(
+        (message) => message.method === "interaction/request",
+      ),
+    ).toHaveLength(1);
+    expect(notifications("session/replaced")).toHaveLength(0);
+  });
+
+  it.each([
+    ["joins the running prompt", true],
+    ["cancels and continues the prompt", false],
+  ] as const)(
+    "switches a plain agent's mode in place for a steer that %s",
+    async (_label, joins) => {
+      const requestLog = join(workspaceDir, "acp-requests.jsonl");
+      const { providerThreadId } = await startThread({
+        permissionMode: "full",
+        envVars: { FAKE_ACP_REQUEST_LOG: requestLog },
+        ...(joins
+          ? {
+              dialectId: "fx",
+              envVars: {
+                FAKE_ACP_REQUEST_LOG: requestLog,
+                FAKE_ACP_STEER_META: "fx",
+              },
+            }
+          : {}),
+      });
+      await waitForResponse(
+        sendTurnRequest("turn/start", providerThreadId, {
+          input: [{ type: "text", text: "hang", mentions: [] }],
+        }),
+      );
+
+      const steerId = sendTurnRequest("turn/steer", providerThreadId, {
+        expectedTurnId: "turn-1",
+        input: [{ type: "text", text: "request-permission", mentions: [] }],
+        options: executionOptions({ permissionMode: "accept-edits" }),
+      });
+      expect((await waitForResponse(steerId)).error).toBeUndefined();
+      await denyForwardedPermission();
+      await waitFor(
+        () =>
+          agentMessageTexts().find((text) => text.startsWith("permission:")),
+        "steered permission outcome",
+      );
+
+      expect(agentMessageTexts()).toContain("permission:no");
+      expect(notifications("session/replaced")).toHaveLength(0);
+      expect(
+        loggedAcpRequests(requestLog).some(
+          (request) =>
+            request.method === "session/prompt" &&
+            (request.params?._meta as Record<string, unknown> | undefined)?.[
+              "fx"
+            ] !== undefined,
+        ),
+      ).toBe(joins);
+    },
+  );
+
+  it("refuses a steer that changes the mode of an agent whose launch depends on it", async () => {
+    const { providerThreadId } = await startThread({
+      dialectId: "fx",
+      envVars: { FAKE_ACP_STEER_META: "fx" },
+      permissionMode: "full",
+      permissionEnv: {
+        full: { FAKE_ACP_GATE: "full" },
+        workspaceWrite: { FAKE_ACP_GATE: "ask" },
+      },
+    });
+    await waitForResponse(
+      sendTurnRequest("turn/start", providerThreadId, {
+        input: [{ type: "text", text: "hang", mentions: [] }],
+      }),
+    );
+
+    const response = await waitForResponse(
+      sendTurnRequest("turn/steer", providerThreadId, {
+        expectedTurnId: "turn-1",
+        input: [{ type: "text", text: "request-permission", mentions: [] }],
+        options: executionOptions({ permissionMode: "accept-edits" }),
+      }),
+    );
+
+    expect(response.error?.message).toMatch(
+      /can't change its permission mode in the middle of a turn/,
+    );
+    expect(
+      agentMessageTexts().some((text) => text.startsWith("permission:")),
+    ).toBe(false);
   });
 
   it("does not apply full-mode permission CLI args in workspace-write mode", async () => {
@@ -2182,6 +2400,36 @@ describe("acp bridge", () => {
     ).toHaveLength(0);
     expect(agentMessageTexts()).toContain("permission:yes");
   });
+
+  it.each(["full", "accept-edits"] as const)(
+    "follows %s permissions when a background job resumes after the turn",
+    async (permissionMode) => {
+      const triggerPath = join(workspaceDir, "background-permission");
+      const resultPath = `${triggerPath}.result`;
+      const { providerThreadId } = await startThread({
+        permissionMode,
+        envVars: { FAKE_ACP_BACKGROUND_PERMISSION: triggerPath },
+      });
+      const turnId = sendTurnRequest("turn/start", providerThreadId, {
+        input: [{ type: "text", text: "request-permission", mentions: [] }],
+      });
+      await waitForResponse(turnId);
+      await waitForTurnCompleted();
+      writeFileSync(triggerPath, "resume");
+
+      await waitForFileWithRealTimer(resultPath);
+      expect(readFileSync(resultPath, "utf8")).toBe(
+        permissionMode === "full"
+          ? "yes"
+          : "error:Permission denied: Cloudroom cannot request approval outside an active turn in accept-edits mode.",
+      );
+      expect(
+        output.messages.filter(
+          (message) => message.method === "interaction/request",
+        ),
+      ).toHaveLength(0);
+    },
+  );
 
   it("forwards permission requests to the runtime in ask mode", async () => {
     const { bbThreadId, providerThreadId } = await startThread({

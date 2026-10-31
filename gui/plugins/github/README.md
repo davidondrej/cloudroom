@@ -18,10 +18,16 @@ room-cli plugin install github
   Deep-linkable via the URL hash: `#/issues/<owner>/<repo>/<number>`.
 - **Send agent / Review with agent**: spawns a Cloudroom worker thread on the issue
   (or a review thread on the PR) in the repo's Cloudroom project. The issue/PR then
-  shows a ⚡ pill linking to the thread.
+  shows a ⚡ pill linking to the thread. The prompt holds the item number and
+  author, never GitHub text: the agent reads the item with `gh` and is told not
+  to follow instructions in it. Items by authors outside the repo (not an owner,
+  member, collaborator, or you) show "View" in the list and a warning on the
+  detail page. This lowers prompt-injection risk but does not limit the agent:
+  the thread still runs in the project's permission mode (full access by
+  default).
 - **Homepage section**: recent open issues with the same Send agent buttons.
 - **Mentions**: `@` or `#` in any composer completes GitHub issues and PRs; the
-  selected item's title/body/state is attached as agent context at send time.
+  agent gets the item number, author, and `gh` command at send time.
 - **`room-cli github` CLI**: `repos`, `issues [repo]`, `prs [repo]`, `sync` — also
   discoverable by agents through the plugin-commands skill.
 

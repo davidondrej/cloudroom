@@ -74,6 +74,10 @@ pub struct Model {
 /// Claude also runs exact models its catalog omits, such as `claude-opus-5-5[1m]`, so Cloud
 /// accepts what Local accepts (ADR 0133) and Claude itself reports an unknown model.
 pub fn reasoning_levels<'a>(kind: Kind, models: &'a [Model], model: &str) -> Option<Vec<&'a str>> {
+    let model = match kind {
+        Kind::Cursor => cursor_models::catalog_name(model),
+        _ => model,
+    };
     if let Some(entry) = models.iter().find(|entry| entry.model == model) {
         return Some(entry.reasoning_levels.iter().map(String::as_str).collect());
     }

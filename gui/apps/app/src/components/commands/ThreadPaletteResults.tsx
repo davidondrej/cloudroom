@@ -1,9 +1,8 @@
 import {
-  memo,
-  useCallback,
   useEffect,
   useMemo,
-  type MouseEventHandler,
+  useRef,
+  useState,
   type ReactNode,
 } from "react";
 import type { ThreadListEntry } from "@cloudroom/domain";
@@ -14,7 +13,6 @@ import {
   resolveThreadListIndicator,
   threadListIndicatorStateForThread,
 } from "@cloudroom/client-core";
-import { CHROME_SECTION_LABEL_CLASS } from "@cloudroom/shared-ui/chrome-style-tokens";
 import { Icon, type IconName } from "@cloudroom/shared-ui/icon";
 import { cn } from "@cloudroom/shared-ui/lib/utils";
 import {
@@ -32,6 +30,8 @@ import { useSidebarNavigation } from "@/hooks/queries/sidebar-navigation-query";
 import { usePromptDraftHasInput } from "@/hooks/usePromptDraftStorage";
 import { formatRelativeTime } from "@/lib/relative-time";
 import { getThreadDisplayTitle } from "@/lib/thread-title";
+import { sdk } from "@/lib/sdk";
+
 
 export interface ThreadPaletteNavigationItem {
   id: string;
@@ -41,40 +41,61 @@ export interface ThreadPaletteNavigationItem {
   messageSeq: number | null;
 }
 
+export interface SearchFilters {
+  threads: boolean;
+  projects: boolean;
+  archived: boolean;
+}
+
+export type JevRankState = "off" | "thinking" | "done";
+
+export interface ThreadPaletteSummary {
+  counts: { threads: number; projects: number; archived: number } | null;
+  jev: JevRankState;
+}
+
 interface ThreadPaletteResultsProps {
   activeIndex: number;
+  filters?: SearchFilters;
   onActiveIndexChange: (index: number) => void;
+  onIncludeArchived?: () => void;
   onNavigationItemsChange: (
     items: readonly ThreadPaletteNavigationItem[],
   ) => void;
   onSelect: (item: ThreadPaletteNavigationItem) => void;
+  onSummaryChange?: (summary: ThreadPaletteSummary) => void;
   optionIdPrefix: string;
   query: string;
 }
 
-interface ThreadSearchRenderableRow {
+interface ThreadRowData {
   kind: "thread";
   id: string;
   matches: readonly ThreadSearchMatch[];
   thread: ThreadListEntry;
 }
 
-interface ProjectSearchRenderableRow {
+interface ProjectRowData {
   kind: "project";
   id: string;
-  project: { id: string; name: string };
+  project: { id: string; name: string; threadCount: number };
 }
 
-interface ThreadSearchSection {
-  id: "recent" | "projects" | "titles" | "contents";
-  label: string;
-  rows: readonly (ThreadSearchRenderableRow | ProjectSearchRenderableRow)[];
-}
+type RowData = ThreadRowData | ProjectRowData;
 
+const ALL_FILTERS: SearchFilters = { threads: true, projects: true, archived: true };
 const RECENT_THREAD_LIMIT = 20;
+const JEV_MIN_P = 0.03;
+const JEV_TITLE_CHARS = 120;
+const JEV_TEXT_CHARS = 300;
+const JEV_BUDGET_CHARS = 190_000;
+const JEV_MAX_CARDS = 1_500;
+const JEV_CACHE_MS = 5 * 60_000;
+const JEV_PAUSE_MS = 200;
 const EMPTY_MATCHES: readonly ThreadSearchMatch[] = [];
 const RESULT_ROW_CLASS =
-  "flex min-h-10 w-full cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm outline-none";
+  "relative flex min-h-10 w-full cursor-pointer items-center gap-2.5 rounded-md px-2 py-1.5 text-left text-sm outline-none";
+const META_CLASS = "block truncate text-xs leading-4 text-subtle-foreground/70";
 
 function searchWords(text: string): string[] {
   return (
@@ -114,7 +135,7 @@ function getMessageMatchSeq(
 }
 
 function toNavigationItem(
-  row: ThreadSearchRenderableRow | ProjectSearchRenderableRow,
+  row: RowData,
   optionIdPrefix: string,
 ): ThreadPaletteNavigationItem {
   return {
@@ -122,7 +143,7 @@ function toNavigationItem(
     optionId: `${optionIdPrefix}-${row.id}`,
     projectId: row.kind === "project" ? row.project.id : row.thread.projectId,
     threadId: row.kind === "project" ? null : row.thread.id,
-    messageSeq: row.kind === "project" ? null : getMessageMatchSeq(row.matches),
+    messageSeq: row.kind === "project" || row.matches.some(isThreadTitleMatch) ? null : getMessageMatchSeq(row.matches),
   };
 }
 
@@ -164,11 +185,108 @@ function flattenRecentThreads(
   ];
 }
 
+function lastInteraction(thread: ThreadListEntry): number {
+  return Math.max(thread.lastReadAt ?? 0, thread.createdAt);
+}
+
+function jevItem(row: RowData, projectNames: ReadonlyMap<string, string>) {
+  if (row.kind === "project") {
+    return { id: row.id, title: row.project.name.slice(0, JEV_TITLE_CHARS), text: `A project with ${row.project.threadCount} open threads.` };
+  }
+  const project = projectNames.get(row.thread.projectId);
+  const purpose = row.thread.purpose?.text;
+  const snippet = getSnippetMatch(row.matches)?.text;
+  return {
+    id: row.id,
+    title: getThreadDisplayTitle(row.thread).slice(0, JEV_TITLE_CHARS),
+    text: [
+      `Thread${project ? ` in project ${project}` : ""}${row.thread.archivedAt !== null ? ", archived" : ""}.`,
+      purpose ? `Now: ${purpose}` : "",
+      snippet ? `Matching message: ${snippet}` : "",
+    ].filter(Boolean).join(" ").slice(0, JEV_TEXT_CHARS),
+  };
+}
+
+type JevAnswer = { probabilities: Record<string, number>; ranked: string[] } | null;
+const jevAnswers = new Map<string, { value: NonNullable<JevAnswer>; at: number }>();
+
+function cardsHash(text: string): string {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < text.length; index++) {
+    hash ^= text.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(36);
+}
+
+function useJevRank(
+  query: string,
+  candidates: readonly RowData[],
+  ready: boolean,
+  projectNames: ReadonlyMap<string, string>,
+): { answer: JevAnswer; state: JevRankState } {
+  const [answer, setAnswer] = useState<{ key: string; value: JevAnswer } | null>(null);
+  const items = useMemo(() => {
+    const cards: ReturnType<typeof jevItem>[] = [];
+    let chars = 0;
+    for (const row of candidates) {
+      if (cards.length >= JEV_MAX_CARDS) break;
+      const card = jevItem(row, projectNames);
+      chars += card.title.length + card.text.length;
+      if (chars > JEV_BUDGET_CHARS) break;
+      cards.push(card);
+    }
+    return cards;
+  }, [candidates, projectNames]);
+  const key = useMemo(
+    () => (ready && items.length > 0 ? `${query}\n${items.length}:${cardsHash(JSON.stringify(items))}` : ""),
+    [items, query, ready],
+  );
+  const itemsRef = useRef(items);
+  useEffect(() => {
+    itemsRef.current = items;
+  }, [items]);
+  useEffect(() => {
+    if (!key) return;
+    const cached = jevAnswers.get(key);
+    if (cached && Date.now() - cached.at < JEV_CACHE_MS) {
+      setAnswer({ key, value: cached.value });
+      return;
+    }
+    const controller = new AbortController();
+    const timer = setTimeout(() => {
+      sdk.cloudroom
+        .searchRank({ query, items: itemsRef.current }, controller.signal)
+        .then(({ probabilities, ranked }) => {
+          const value = probabilities ? { probabilities, ranked } : null;
+          if (value) {
+            if (jevAnswers.size > 100) jevAnswers.clear();
+            jevAnswers.set(key, { value, at: Date.now() });
+          }
+          setAnswer({ key, value });
+        })
+        .catch(() => {
+          if (!controller.signal.aborted) setAnswer({ key, value: null });
+        });
+    }, JEV_PAUSE_MS);
+    return () => {
+      clearTimeout(timer);
+      controller.abort();
+    };
+  }, [key, query]);
+  if (!key) return { answer: null, state: "off" };
+  if (answer?.key !== key) return { answer: null, state: "thinking" };
+  return { answer: answer.value, state: answer.value ? "done" : "off" };
+}
+
 export function ThreadPaletteResults({
   activeIndex,
+  filters = ALL_FILTERS,
   onActiveIndexChange,
+  onIncludeArchived,
   onNavigationItemsChange,
   onSelect,
+  onSummaryChange,
   optionIdPrefix,
   query,
 }: ThreadPaletteResultsProps) {
@@ -178,26 +296,16 @@ export function ThreadPaletteResults({
     [navigationQuery.data],
   );
   const { projectNamesById } = useThreadTitleMentionResources();
+  const [hoveredId, setHoveredId] = useState<string | null>(null);
   const trimmedQuery = query.trim();
   const hasQuery = trimmedQuery.length > 0;
   const liveQueryIsSearchable = hasThreadSearchableQuery(trimmedQuery);
   const threadSearch = useThreadSearch({ active: true, query });
   const searchResultsAreCurrent =
     liveQueryIsSearchable && threadSearch.debouncedQuery === trimmedQuery;
-  const sections = useMemo<ThreadSearchSection[]>(() => {
-    if (!hasQuery) {
-      const rows = [...recentThreads]
-        .sort((left, right) => right.updatedAt - left.updatedAt)
-        .slice(0, RECENT_THREAD_LIMIT)
-        .map((thread): ThreadSearchRenderableRow => ({
-          kind: "thread",
-          id: `recent:${thread.id}`,
-          matches: EMPTY_MATCHES,
-          thread,
-        }));
-      return [{ id: "recent", label: "Recent", rows }];
-    }
 
+  const found = useMemo(() => {
+    if (!hasQuery) return { projects: [], active: [], archived: [] as ThreadRowData[] };
     const projects = navigationQuery.data
       ? [...navigationQuery.data.projects, navigationQuery.data.personalProject]
       : [];
@@ -212,15 +320,15 @@ export function ThreadPaletteResults({
           )
         );
       })
-      .map((project): ProjectSearchRenderableRow => ({
+      .map((project): ProjectRowData => ({
         kind: "project",
         id: `project:${project.id}`,
-        project,
+        project: { id: project.id, name: project.name, threadCount: project.threads.length },
       }));
-    const titleRows: ThreadSearchRenderableRow[] = fuzzyMatchText({
+    const byThread = new Map<string, ThreadRowData>();
+    for (const { item: thread, positions } of fuzzyMatchText({
       items: recentThreads,
       query: trimmedQuery,
-      // NFC keeps match positions aligned with the shown title (the matcher folds accents per character).
       getText: (thread) => getThreadDisplayTitle(thread).normalize("NFC"),
       limit: recentThreads.length,
     })
@@ -229,10 +337,10 @@ export function ThreadPaletteResults({
           right.score - left.score ||
           right.item.updatedAt - left.item.updatedAt,
       )
-      .slice(0, THREAD_SEARCH_LIMIT_PER_GROUP)
-      .map(({ item: thread, positions }) => ({
+      .slice(0, THREAD_SEARCH_LIMIT_PER_GROUP)) {
+      byThread.set(thread.id, {
         kind: "thread",
-        id: `title:${thread.id}`,
+        id: `thread:${thread.id}`,
         thread,
         matches: [
           {
@@ -242,50 +350,24 @@ export function ThreadPaletteResults({
             sourceSeq: null,
           },
         ],
-      }));
-    const localTitleIds = new Set(titleRows.map((row) => row.thread.id));
-    const contentRows: ThreadSearchRenderableRow[] = [];
+      });
+    }
+    const archived: ThreadRowData[] = [];
     if (searchResultsAreCurrent && threadSearch.data) {
-      for (const { thread, matches } of [
-        ...threadSearch.data.active.results,
-        ...threadSearch.data.archived.results,
-      ]) {
-        const title = getThreadDisplayTitle(thread);
-        const titleMatch = getTitleMatch(title, matches);
-        const nameWords = searchWords(title);
-        const fullNameMatch =
-          queryWords.length > 0 &&
-          queryWords.every((word) =>
-            nameWords.some((nameWord) => nameWord.includes(word)),
-          );
-        const snippetMatch = getSnippetMatch(matches);
-        if (
-          fullNameMatch &&
-          (titleMatch || !snippetMatch) &&
-          !localTitleIds.has(thread.id)
-        ) {
-          titleRows.push({
-            kind: "thread",
-            id: `title:${thread.id}`,
-            thread,
-            matches: titleMatch ? [titleMatch] : EMPTY_MATCHES,
-          });
+      for (const { thread, matches } of threadSearch.data.active.results) {
+        const local = byThread.get(thread.id);
+        const snippet = getSnippetMatch(matches);
+        if (local) {
+          if (snippet) byThread.set(thread.id, { ...local, matches: [...local.matches, snippet] });
+          continue;
         }
-        if (snippetMatch) {
-          contentRows.push({
-            kind: "thread",
-            id: `content:${thread.id}`,
-            thread,
-            matches,
-          });
-        }
+        byThread.set(thread.id, { kind: "thread", id: `thread:${thread.id}`, thread, matches });
+      }
+      for (const { thread, matches } of threadSearch.data.archived.results) {
+        archived.push({ kind: "thread", id: `thread:${thread.id}`, thread, matches });
       }
     }
-    return [
-      { id: "projects", label: "Projects", rows: projectRows },
-      { id: "titles", label: "Thread names", rows: titleRows },
-      { id: "contents", label: "Conversation content", rows: contentRows },
-    ];
+    return { projects: projectRows, active: [...byThread.values()], archived };
   }, [
     hasQuery,
     navigationQuery.data,
@@ -294,10 +376,67 @@ export function ThreadPaletteResults({
     threadSearch.data,
     trimmedQuery,
   ]);
-  const rows = useMemo(
-    () => sections.flatMap((section) => section.rows),
-    [sections],
-  );
+
+  const localRows = useMemo<RowData[]>(() => {
+    if (!hasQuery) {
+      return [...recentThreads]
+        .sort((left, right) => lastInteraction(right) - lastInteraction(left))
+        .slice(0, RECENT_THREAD_LIMIT)
+        .map((thread) => ({
+          kind: "thread",
+          id: `recent:${thread.id}`,
+          matches: EMPTY_MATCHES,
+          thread,
+        }));
+    }
+    return [
+      ...(filters.projects ? found.projects : []),
+      ...(filters.threads ? found.active : []),
+      ...(filters.archived ? found.archived : []),
+    ];
+  }, [filters, found, hasQuery, recentThreads]);
+
+  const isLoading =
+    liveQueryIsSearchable &&
+    (!searchResultsAreCurrent ||
+      threadSearch.isDebouncing ||
+      (threadSearch.isLoading && threadSearch.data === undefined));
+  const candidates = useMemo<RowData[]>(() => {
+    if (!hasQuery) return [];
+    const seen = new Set(localRows.map((row) => row.id));
+    const rest: RowData[] = [];
+    if (filters.threads) {
+      for (const thread of [...recentThreads].sort((left, right) => lastInteraction(right) - lastInteraction(left))) {
+        const id = `thread:${thread.id}`;
+        if (seen.has(id)) continue;
+        seen.add(id);
+        rest.push({ kind: "thread", id, thread, matches: EMPTY_MATCHES });
+      }
+    }
+    if (filters.projects && navigationQuery.data) {
+      for (const project of [...navigationQuery.data.projects, navigationQuery.data.personalProject]) {
+        const id = `project:${project.id}`;
+        if (seen.has(id)) continue;
+        seen.add(id);
+        rest.push({ kind: "project", id, project: { id: project.id, name: project.name, threadCount: project.threads.length } });
+      }
+    }
+    return [...localRows, ...rest];
+  }, [filters.projects, filters.threads, hasQuery, localRows, navigationQuery.data, recentThreads]);
+  const jev = useJevRank(trimmedQuery, candidates, hasQuery && !isLoading, projectNamesById);
+  const probabilities = jev.answer?.probabilities ?? null;
+
+  const rows = useMemo(() => {
+    const answer = jev.answer;
+    if (!answer) return localRows;
+    const byId = new Map(candidates.map((row) => [row.id, row]));
+    const local = new Set(localRows.map((row) => row.id));
+    const top = answer.ranked
+      .filter((id) => id in answer.probabilities && (local.has(id) || (answer.probabilities[id] ?? 0) >= JEV_MIN_P))
+      .flatMap((id) => byId.get(id) ?? []);
+    const shown = new Set(top.map((row) => row.id));
+    return [...top, ...localRows.filter((row) => !shown.has(row.id))];
+  }, [candidates, jev.answer, localRows]);
   const navigationItems = useMemo(
     () => rows.map((row) => toNavigationItem(row, optionIdPrefix)),
     [optionIdPrefix, rows],
@@ -307,17 +446,23 @@ export function ThreadPaletteResults({
     onNavigationItemsChange(navigationItems);
   }, [navigationItems, onNavigationItemsChange]);
 
-  const isLoading =
-    liveQueryIsSearchable &&
-    (!searchResultsAreCurrent ||
-      threadSearch.isDebouncing ||
-      (threadSearch.isLoading && threadSearch.data === undefined));
+  const archivedTotal = threadSearch.data?.archived.total ?? found.archived.length;
+  const threadsTotal = hasQuery && !isLoading
+    ? Math.max(found.active.length, threadSearch.data?.active.total ?? 0)
+    : null;
+  const projectsTotal = found.projects.length;
+  useEffect(() => {
+    onSummaryChange?.({
+      counts: threadsTotal === null ? null : { threads: threadsTotal, projects: projectsTotal, archived: archivedTotal },
+      jev: jev.state,
+    });
+  }, [archivedTotal, jev.state, onSummaryChange, projectsTotal, threadsTotal]);
+
   const hasRows = rows.length > 0;
   const showRecentLoading = !hasQuery && navigationQuery.isLoading;
   const showError = liveQueryIsSearchable && threadSearch.isError && !isLoading;
   const showNoSearchResults = hasQuery && !isLoading && !showError && !hasRows;
-  const showTypeToSearch =
-    !hasQuery && !showRecentLoading && recentThreads.length === 0;
+  const hiddenArchived = !filters.archived ? archivedTotal : 0;
   const searchGroups = threadSearch.data
     ? [threadSearch.data.active, threadSearch.data.archived]
     : [];
@@ -329,112 +474,59 @@ export function ThreadPaletteResults({
     (count, group) => count + group.total,
     0,
   );
-  let startIndex = 0;
 
   return (
-    <div className="space-y-3 pb-2">
+    <div className="pb-1">
       {showRecentLoading ? (
-        <ThreadSearchMessage
-          iconName="Spinner"
-          isLoading
-          text="Loading threads..."
-        />
+        <ThreadSearchMessage iconName="Spinner" isLoading text="Loading threads..." />
       ) : null}
       {isLoading && !hasRows ? (
-        <ThreadSearchMessage
-          iconName="Spinner"
-          isLoading
-          text="Searching threads..."
-        />
+        <ThreadSearchMessage iconName="Spinner" isLoading text="Searching threads..." />
       ) : null}
       {showError ? (
         <ThreadSearchMessage iconName="AlertCircle" text="Search failed." />
       ) : null}
       {showNoSearchResults ? (
-        <ThreadSearchMessage
-          iconName="MessageQuestion"
-          text="No matching results"
-        />
-      ) : null}
-      {showTypeToSearch ? (
-        <ThreadSearchMessage
-          iconName="Search"
-          text="Search projects, thread names, and conversations."
-        />
-      ) : null}
-      {sections.map((section) => {
-        const sectionStartIndex = startIndex;
-        startIndex += section.rows.length;
-        if (section.rows.length === 0) return null;
-        return (
-          <section
-            key={section.id}
-            role="group"
-            aria-label={section.label}
-            className="space-y-1"
-          >
-            <div
-              className={cn(
-                CHROME_SECTION_LABEL_CLASS,
-                "sticky top-0 z-10 flex items-center gap-2 rounded-none bg-popover px-2",
-              )}
+        <div className="flex flex-col items-center gap-2 py-8 text-sm text-muted-foreground">
+          <span>No results</span>
+          {hiddenArchived > 0 && onIncludeArchived ? (
+            <button
+              type="button"
+              className="text-xs text-foreground underline underline-offset-2"
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={onIncludeArchived}
             >
-              <span className="min-w-0 truncate">{section.label}</span>
-            </div>
-            <div className="space-y-0.5">
-              {section.rows.map((row, rowIndex) => {
-                const index = sectionStartIndex + rowIndex;
-                const item = navigationItems[index];
-                if (!item) return null;
-                if (row.kind === "project") {
-                  return (
-                    <button
-                      key={row.id}
-                      id={item.optionId}
-                      type="button"
-                      role="option"
-                      aria-selected={activeIndex === index}
-                      className={cn(
-                        RESULT_ROW_CLASS,
-                        activeIndex === index &&
-                          "bg-state-hover text-foreground",
-                      )}
-                      onMouseEnter={() => onActiveIndexChange(index)}
-                      onFocus={() => onActiveIndexChange(index)}
-                      onClick={() => onSelect(item)}
-                    >
-                      <Icon
-                        name="Folder"
-                        className="size-4 shrink-0 text-muted-foreground"
-                        aria-hidden
-                      />
-                      <span className="min-w-0 truncate font-medium">
-                        {row.project.name}
-                      </span>
-                    </button>
-                  );
-                }
-                return (
-                  <ThreadPaletteResultRow
-                    key={row.id}
-                    id={item.optionId}
-                    isActive={activeIndex === index}
-                    matches={row.matches}
-                    projectName={projectNamesById.get(row.thread.projectId)}
-                    thread={row.thread}
-                    onActive={() => onActiveIndexChange(index)}
-                    onSelect={() => onSelect(item)}
-                  />
-                );
-              })}
-            </div>
-          </section>
-        );
-      })}
+              Include archived
+            </button>
+          ) : null}
+        </div>
+      ) : null}
+      <div className="space-y-0.5" onMouseLeave={() => setHoveredId(null)}>
+        {rows.map((row, index) => {
+          const item = navigationItems[index];
+          if (!item) return null;
+          const scored = probabilities?.[row.id];
+          const p = scored === undefined ? null : Math.round(scored * 100);
+          return (
+            <ResultRow
+              key={row.id}
+              id={item.optionId}
+              isActive={activeIndex === index}
+              isHovered={hoveredId === row.id}
+              p={p}
+              projectName={row.kind === "thread" ? projectNamesById.get(row.thread.projectId) : undefined}
+              row={row}
+              onFocus={() => onActiveIndexChange(index)}
+              onHover={() => setHoveredId(row.id)}
+              onSelect={() => onSelect(item)}
+            />
+          );
+        })}
+      </div>
       {liveQueryIsSearchable &&
       searchResultsAreCurrent &&
       shownThreadCount < totalThreadCount ? (
-        <p className="px-2 text-xs text-muted-foreground">
+        <p className="px-2 pt-1 text-xs text-subtle-foreground/70">
           Showing {shownThreadCount} of {totalThreadCount} threads. Refine your
           search.
         </p>
@@ -455,11 +547,9 @@ function clampRange(
 function HighlightedText({
   ranges,
   text,
-  isTitle = false,
 }: {
   ranges: ThreadSearchMatch["highlightRanges"];
   text: string;
-  isTitle?: boolean;
 }) {
   if (ranges.length === 0 || text.length === 0) return text;
   const nodes: ReactNode[] = [];
@@ -475,12 +565,7 @@ function HighlightedText({
     nodes.push(
       <mark
         key={`${range.start}:${range.end}`}
-        className={cn(
-          "rounded-sm px-0",
-          isTitle
-            ? "bg-destructive text-destructive-foreground"
-            : "bg-state-selected text-foreground",
-        )}
+        className="bg-transparent font-semibold text-foreground"
       >
         {text.slice(range.start, range.end)}
       </mark>,
@@ -508,66 +593,99 @@ function getSnippetMatch(
   return matches.find((match) => !isThreadTitleMatch(match));
 }
 
-function isNonEmptyMetadataPart(value: string | null): value is string {
-  return value !== null && value.length > 0;
+function SignalBars({ p }: { p: number }) {
+  const on = p >= 50 ? 4 : p >= 15 ? 2 : p >= 5 ? 1 : 0;
+  return (
+    <span className="flex shrink-0 items-end gap-[1.5px]" aria-hidden>
+      {[0, 1, 2, 3].map((bar) => (
+        <span
+          key={bar}
+          className={cn("w-[3px] rounded-[1px]", bar < on ? "bg-primary" : "bg-state-hover")}
+          style={{ height: 4 + bar * 2 }}
+        />
+      ))}
+    </span>
+  );
 }
 
-function ThreadPaletteResultRowComponent({
-  id,
-  isActive,
-  matches,
-  onActive,
-  onSelect,
-  projectName,
-  thread,
-}: {
-  id: string;
-  isActive: boolean;
-  matches: readonly ThreadSearchMatch[];
-  onActive: () => void;
-  onSelect: () => void;
-  projectName: string | undefined;
-  thread: ThreadListEntry;
-}) {
-  const title = getThreadDisplayTitle(thread);
-  const titleMatch = getTitleMatch(title, matches);
-  const snippetMatch = getSnippetMatch(matches);
-  const primaryMatch = snippetMatch ?? titleMatch;
-  const primaryText = primaryMatch?.text ?? title;
-  const primaryHighlightRanges = primaryMatch?.highlightRanges ?? [];
+function LocationIcon({ thread }: { thread: ThreadListEntry }) {
+  const cloud = thread.executionTarget === "cloud";
+  return (
+    <Icon
+      name={cloud ? "Cloud" : "Laptop"}
+      aria-label={cloud ? "Cloud thread" : "Local thread"}
+      className={cn("size-4 shrink-0", cloud ? "text-primary [&_path]:stroke-[1.9]" : "text-muted-foreground opacity-50")}
+    />
+  );
+}
+
+function ThreadStatus({ thread }: { thread: ThreadListEntry }) {
   const hasUnsubmittedDraft = usePromptDraftHasInput({
     kind: "thread",
     projectId: thread.projectId,
     threadId: thread.id,
   });
-  const indicatorState = threadListIndicatorStateForThread(
-    thread,
-    hasUnsubmittedDraft,
+  const indicatorState = threadListIndicatorStateForThread(thread, hasUnsubmittedDraft);
+  if (resolveThreadListIndicator(indicatorState) === "none") return null;
+  return (
+    <span className="inline-flex size-4 shrink-0 items-center justify-center">
+      <ThreadStatusGlyph {...indicatorState} />
+    </span>
   );
-  const indicatorKind = resolveThreadListIndicator(indicatorState);
-  const projectMetadata =
-    thread.projectId !== PERSONAL_PROJECT_ID && projectName
-      ? projectName
-      : null;
-  const relativeTime = formatRelativeTime({
-    timestamp: thread.updatedAt,
-    now: Date.now(),
-  });
-  const metadataSuffix = [
-    projectMetadata,
-    thread.archivedAt !== null ? "Archived" : null,
-    relativeTime,
-  ]
-    .filter(isNonEmptyMetadataPart)
-    .join(" · ");
-  const metadataText = [snippetMatch ? title : null, metadataSuffix]
-    .filter(isNonEmptyMetadataPart)
-    .join(" · ");
-  const handleMouseEnter = useCallback<MouseEventHandler<HTMLButtonElement>>(
-    () => onActive(),
-    [onActive],
-  );
+}
 
+function ResultRow({
+  id,
+  isActive,
+  isHovered,
+  onFocus,
+  onHover,
+  onSelect,
+  p,
+  projectName,
+  row,
+}: {
+  id: string;
+  isActive: boolean;
+  isHovered: boolean;
+  onFocus: () => void;
+  onHover: () => void;
+  onSelect: () => void;
+  p: number | null;
+  projectName: string | undefined;
+  row: RowData;
+}) {
+  let icon: ReactNode;
+  let title: ReactNode;
+  let meta: ReactNode;
+  if (row.kind === "project") {
+    icon = <Icon name="Folder" className="size-4 shrink-0 text-muted-foreground" aria-hidden />;
+    title = row.project.name;
+    meta = `Project · ${row.project.threadCount} threads`;
+  } else {
+    const { thread, matches } = row;
+    const text = getThreadDisplayTitle(thread);
+    const titleMatch = getTitleMatch(text, matches);
+    const snippetMatch = getSnippetMatch(matches);
+    icon = <LocationIcon thread={thread} />;
+    title = <HighlightedText text={text} ranges={titleMatch?.highlightRanges ?? []} />;
+    const parts = [
+      thread.projectId !== PERSONAL_PROJECT_ID ? projectName : undefined,
+      thread.archivedAt !== null ? "Archived" : undefined,
+      formatRelativeTime({ timestamp: thread.updatedAt, now: Date.now() }),
+    ].filter((part): part is string => Boolean(part));
+    meta = (
+      <>
+        {parts.join(" · ")}
+        {snippetMatch ? (
+          <>
+            {" · "}
+            <HighlightedText text={snippetMatch.text} ranges={snippetMatch.highlightRanges} />
+          </>
+        ) : null}
+      </>
+    );
+  }
   return (
     <button
       id={id}
@@ -577,54 +695,26 @@ function ThreadPaletteResultRowComponent({
       className={cn(
         RESULT_ROW_CLASS,
         isActive && "bg-state-hover text-foreground",
+        isHovered && !isActive && "bg-state-hover/35",
       )}
-      onMouseEnter={handleMouseEnter}
-      onFocus={onActive}
+      onMouseEnter={onHover}
+      onFocus={onFocus}
+      onMouseDown={(event) => event.preventDefault()}
       onClick={onSelect}
     >
-      <span className="min-w-0 flex-1 space-y-0.5">
-        <span className="block min-w-0 truncate">
-          <HighlightedText
-            text={primaryText}
-            ranges={primaryHighlightRanges}
-            isTitle={!snippetMatch}
-          />
-        </span>
-        <span
-          className="flex min-w-0 items-center gap-1.5 text-xs leading-4 text-muted-foreground"
-          title={metadataText}
-        >
-          {snippetMatch ? (
-            <Icon
-              name="MessageSquare"
-              className="size-3 shrink-0 text-subtle-foreground"
-              aria-hidden="true"
-            />
-          ) : projectMetadata ? (
-            <Icon name="Folder" className="size-3.5 shrink-0" aria-hidden />
-          ) : null}
-          <span className="min-w-0 truncate">
-            {snippetMatch ? (
-              <>
-                <HighlightedText
-                  text={titleMatch?.text ?? title}
-                  ranges={titleMatch?.highlightRanges ?? []}
-                  isTitle
-                />
-                {metadataSuffix ? " · " : null}
-              </>
-            ) : null}
-            {metadataSuffix}
-          </span>
-        </span>
+      {icon}
+      <span className="min-w-0 flex-1">
+        <span className="block truncate">{title}</span>
+        <span className={META_CLASS}>{meta}</span>
       </span>
-      {indicatorKind !== "none" ? (
-        <span className="inline-flex size-4 shrink-0 items-center justify-center">
-          <ThreadStatusGlyph {...indicatorState} />
+      {row.kind === "thread" ? <ThreadStatus thread={row.thread} /> : null}
+      {p === null ? null : (
+        <span className="flex shrink-0 items-center gap-2">
+          {isHovered ? <span className="text-xs tabular-nums text-muted-foreground">{p}%</span> : null}
+          <SignalBars p={p} />
         </span>
-      ) : null}
+      )}
     </button>
   );
 }
 
-const ThreadPaletteResultRow = memo(ThreadPaletteResultRowComponent);

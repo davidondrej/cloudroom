@@ -43,6 +43,11 @@ fn split(id: &str) -> (String, &'static str, bool, bool) {
     (rest, "medium", fast, thinking)
 }
 
+/// The catalog name of a requested model: Cursor's own `auto` is the catalog's `default`.
+pub(crate) fn catalog_name(model: &str) -> &str {
+    if model == "auto" { "default" } else { model }
+}
+
 /// The GUI names `auto` "default" and drops Cursor's `cursor-` prefix.
 fn family_name(family: &str) -> String {
     if family == "auto" {
@@ -158,4 +163,14 @@ pub(crate) async fn list(config: &Config, storage: &Guard) -> io::Result<Vec<Mod
         return Err(io::Error::other("Cursor model list unavailable"));
     }
     Ok(models)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn auto_passes_the_start_check_as_default() {
+        let catalog = super::models(super::parse("auto - Auto\ncomposer-2.5 - Composer 2.5"));
+        let levels = super::super::reasoning_levels(super::Kind::Cursor, &catalog, "auto");
+        assert_eq!(levels, Some(vec!["medium"]));
+    }
 }

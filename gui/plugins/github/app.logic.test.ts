@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   buildSuggestions,
+  isOutsideAuthor,
   matchesQuery,
   parseQuery,
   parseSubPath,
@@ -16,6 +17,7 @@ const issue: Item = {
   title: "Fix cache invalidation",
   state: "OPEN",
   author: "alice",
+  authorAssociation: "MEMBER",
   labels: ["bug", "good first issue"],
   assignees: ["octocat"],
   url: "https://github.com/acme/widgets/issues/7",
@@ -122,5 +124,29 @@ describe("github panel query engine", () => {
     expect(
       buildSuggestions("author:ali", vocab, "issue", "octocat")[0]?.icon,
     ).toEqual({ kind: "avatar", login: "alice" });
+  });
+});
+
+describe("outside authors", () => {
+  it("trusts repo members and the signed-in user, and nobody else", () => {
+    const by = (author: string, authorAssociation: string) => ({
+      author,
+      authorAssociation,
+    });
+    for (const role of ["OWNER", "MEMBER", "COLLABORATOR"]) {
+      expect(isOutsideAuthor(by("alice", role), null)).toBe(false);
+    }
+    expect(isOutsideAuthor(by("octocat", "NONE"), "octocat")).toBe(false);
+    for (const role of ["NONE", "CONTRIBUTOR", "FIRST_TIME_CONTRIBUTOR", ""]) {
+      expect(isOutsideAuthor(by("mallory", role), "octocat")).toBe(true);
+    }
+    expect(isOutsideAuthor(by("mallory", "NONE"), null)).toBe(true);
+    expect(isOutsideAuthor(by("app/helper-bot", "NONE"), "octocat")).toBe(
+      true,
+    );
+    expect(isOutsideAuthor(by("app/helper-bot", "MEMBER"), "octocat")).toBe(
+      true,
+    );
+    expect(isOutsideAuthor(by("", ""), null)).toBe(true);
   });
 });

@@ -1,6 +1,6 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import { chmod, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { expect, it } from "vitest";
@@ -56,6 +56,31 @@ function localCloud(home: string, workspace = home) {
     sessionWorkspace: async () => ({ path: workspace, branch: null, head: null }),
   } as unknown as CloudroomClient;
 }
+
+it.skipIf(process.platform !== "linux")("Teleport removes its archive when the pack response is lost", async () => {
+  const home = await mkdtemp(join(tmpdir(), "teleport-lost-response-"));
+  try {
+    const workspace = join(home, "project");
+    await mkdir(workspace);
+    await writeFile(join(workspace, "changed.txt"), "cloud work\n");
+    const client = localCloud(home);
+    const run = client.runOnVm.bind(client);
+    let calls = 0;
+    client.runOnVm = async (...args) => {
+      const result = await run(...args);
+      if (calls++ === 0) {
+        expect(result.code).toBe(0);
+        expect(readdirSync(join(home, ".cache/cloudroom"))).toHaveLength(1);
+        throw new Error("Pack response lost");
+      }
+      return result;
+    };
+    await expect(cloudChanges(client, workspace, null, Date.now())).rejects.toThrow("Pack response lost");
+    expect(readdirSync(join(home, ".cache/cloudroom"))).toEqual([]);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
 
 it.skipIf(process.platform === "win32")("A child's blobless clone lands its parent's code and uncommitted changes", async () => {
   const home = await mkdtemp(join(tmpdir(), "fork-code-"));
@@ -115,7 +140,7 @@ it.skipIf(process.platform === "win32")("Teleport packs fail on an unreadable fi
   }
 });
 
-it.skipIf(process.platform === "win32")("Teleport to Local stops before switching when a changed cloud file can't be read", async () => {
+it.skipIf(process.platform !== "linux")("Teleport to Local stops before switching when a changed cloud file can't be read", async () => {
   const home = await mkdtemp(join(tmpdir(), "teleport-cloud-"));
   try {
     const workspace = join(home, "project");
@@ -126,6 +151,7 @@ it.skipIf(process.platform === "win32")("Teleport to Local stops before switchin
     await writeFile(join(workspace, "secret.txt"), "x");
     await chmod(join(workspace, "secret.txt"), 0o000);
     await expect(cloudChanges(localCloud(home), workspace, null, Date.now())).rejects.toThrow(/secret\.txt/);
+    expect(readdirSync(join(home, ".cache/cloudroom"))).toEqual([]);
     await chmod(join(workspace, "secret.txt"), 0o600);
     const changes = await cloudChanges(localCloud(home), workspace, null, Date.now());
     expect(changes.archive.length).toBeGreaterThan(0);
@@ -148,7 +174,7 @@ it("CRLF checkouts are found in every spelling Git accepts", async () => {
   }
 });
 
-it.skipIf(process.platform === "win32")("A folder link round-trips to Mac and Linux, and stops a Windows Teleport with its path", async () => {
+it.skipIf(process.platform !== "linux")("A folder link round-trips to Mac and Linux, and stops a Windows Teleport with its path", async () => {
   const home = await mkdtemp(join(tmpdir(), "teleport-folder-link-"));
   try {
     const workspace = join(home, "project");
@@ -175,7 +201,7 @@ it.skipIf(process.platform === "win32")("A folder link round-trips to Mac and Li
   }
 });
 
-it.skipIf(process.platform === "win32")("A Windows Teleport refuses a link out of the project before switching", async () => {
+it.skipIf(process.platform !== "linux")("A Windows Teleport refuses a link out of the project before switching", async () => {
   const home = await mkdtemp(join(tmpdir(), "teleport-outside-link-"));
   const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
   try {

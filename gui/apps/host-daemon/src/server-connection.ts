@@ -1,3 +1,7 @@
+import {
+  CALLER_TOKEN_HEADER,
+  callerTokenFor,
+} from "@cloudroom/config/caller-proof";
 import { Buffer } from "node:buffer";
 import {
   HOST_DAEMON_PROTOCOL_VERSION,
@@ -403,6 +407,7 @@ export class ServerConnection {
     initialSessionId: string | null,
   ): Promise<HostDaemonSessionOpenResponse> {
     let nextSessionId: string | null = initialSessionId;
+    let callerToken: string | null = null;
     const websocket = this.createWebSocket(
       async () => {
         if (!nextSessionId) {
@@ -410,6 +415,7 @@ export class ServerConnection {
         }
         const sessionId = nextSessionId;
         nextSessionId = null;
+        callerToken = await callerTokenFor(this.options.serverUrl);
         return this.buildWebSocketUrl(sessionId);
       },
       {
@@ -417,12 +423,15 @@ export class ServerConnection {
         maxReconnectionDelay: DEFAULT_MAX_RECONNECTION_DELAY,
         reconnectionDelayGrowFactor: DEFAULT_RECONNECTION_DELAY_GROW_FACTOR,
         connectionTimeout: DEFAULT_CONNECTION_TIMEOUT_MS,
-        headers: {
+        headers: () => ({
           authorization: buildHostDaemonWebSocketAuthorizationHeader(
             this.options.hostKey,
           ),
           ...this.options.serverHeaders,
-        },
+          ...(callerToken === null
+            ? {}
+            : { [CALLER_TOKEN_HEADER]: callerToken }),
+        }),
         maxRetries: Number.POSITIVE_INFINITY,
         protocols: buildHostDaemonWebSocketProtocols(),
       },

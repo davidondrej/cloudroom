@@ -50,7 +50,7 @@ import {
   appSettingsUpdateSchema,
   appKeybindingOverridesSchema,
   appThemeSelectionSchema,
-  experimentsSchema,
+  experimentChangesSchema,
 } from "@cloudroom/domain";
 import type { ProviderUsageResponse } from "@cloudroom/host-daemon-contract";
 import {
@@ -1670,7 +1670,7 @@ export const publicApiRoutes = {
     experiments: defineRoute({
       path: "/settings/experiments",
       method: "put",
-      request: jsonRequest<EmptyInput, Experiments>(experimentsSchema),
+      request: jsonRequest<EmptyInput, Partial<Experiments>>(experimentChangesSchema),
       response: jsonResponse<Experiments>(),
     }),
     appearance: defineRoute({

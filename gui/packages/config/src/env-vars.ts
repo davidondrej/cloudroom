@@ -1,4 +1,3 @@
-import { z } from "zod";
 import { delimiter } from "node:path";
 import { defaultFeatureFlags } from "@cloudroom/domain";
 import { DEFAULTS } from "./defaults.js";
@@ -297,29 +296,6 @@ export const BB_BRIDGE_DIR_ENV = defineEnvVar<string | undefined>({
   description:
     "Directory containing provider bridge bundles for the host daemon runtime",
   name: "BB_BRIDGE_DIR",
-  parse: parseOptionalTrimmedStringEnvValue,
-});
-
-export const BB_SERVER_HEADERS_ENV = defineEnvVar<Record<string, string>>({
-  description: "Private JSON headers attached to machine server requests",
-  name: "BB_SERVER_HEADERS",
-  parse: ({ value }) => {
-    try {
-      return z.record(z.string(), z.string()).parse(JSON.parse(value));
-    } catch {
-      throw new Error(
-        "BB_SERVER_HEADERS must be a JSON object with string values",
-      );
-    }
-  },
-});
-
-export const BB_CONNECT_MACHINE_CREDENTIAL_ENV = defineEnvVar<
-  string | undefined
->({
-  description:
-    "Daemon-managed bb connect credential for traversing the public machine gate",
-  name: "BB_CONNECT_MACHINE_CREDENTIAL",
   parse: parseOptionalTrimmedStringEnvValue,
 });
 

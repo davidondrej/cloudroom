@@ -3470,6 +3470,22 @@ export function getLastStoredProviderThreadId(
   return latestProviderRow.providerThreadId;
 }
 
+export function threadHasProviderSession(
+  db: DbQueryConnection,
+  threadId: string,
+): boolean {
+  return (
+    db
+      .select({ id: events.id })
+      .from(events)
+      .where(
+        and(eq(events.threadId, threadId), isNotNull(events.providerThreadId)),
+      )
+      .limit(1)
+      .get() !== undefined
+  );
+}
+
 export function listThreadTurnInterruptionEventStates(
   db: DbQueryConnection,
   args: ListThreadTurnInterruptionEventStatesArgs,

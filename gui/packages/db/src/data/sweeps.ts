@@ -13,7 +13,7 @@ import {
   RETAINED_EVENT_OUTPUT_TARGETS,
   type RetainedEventOutputTarget,
 } from "../retained-event-output.js";
-import { environments, events, maintenanceScanCursors } from "../schema.js";
+import { environments, events, maintenanceScanCursors, threads } from "../schema.js";
 import { bumpThreadEventRewriteGeneration } from "./event-rewrite-generation.js";
 import {
   insertPreparedRetainedEventOutput,
@@ -744,6 +744,7 @@ export function pruneDestroyedEnvironments(
         eq(environments.status, "destroyed"),
         sql`(${environments.environmentProviderId} is null or ${environments.teardownStatus} = 'removed')`,
         lt(environments.updatedAt, args.updatedBefore),
+        sql`not exists (select 1 from ${threads} where ${threads.environmentId} = ${environments.id} and ${threads.deletedAt} is null)`,
       ),
     )
     .orderBy(asc(environments.updatedAt), asc(environments.id))

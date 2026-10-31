@@ -1,3 +1,9 @@
+import {
+  CALLER_TOKEN_HEADER,
+  callerTokenFor,
+  renewCallerToken,
+} from "@cloudroom/config/caller-proof";
+import { createLocalCallerAuth } from "./local-caller-auth.js";
 import { randomUUID } from "node:crypto";
 import { accessSync, constants as fsConstants, readFileSync } from "node:fs";
 import { rm } from "node:fs/promises";
@@ -36,6 +42,7 @@ import {
   bbDesktopBrowserImportCookiesRequestSchema,
   bbDesktopThemeSchema,
   type BbDesktopInfo,
+  type BbDesktopVitals,
   type BbDesktopWindowState,
 } from "@cloudroom/desktop-contract";
 import { installSocketTypeOfServiceGuard } from "@cloudroom/process-utils/socket-type-of-service";
@@ -75,6 +82,7 @@ import {
 } from "./desktop-app-window-policy.js";
 import { createLocalViewUrl, STARTUP_RETRY_CHANNEL } from "./local-view.js";
 import { installApplicationMenu } from "./menu.js";
+import { startMacVitals } from "./mac-vitals.js";
 import {
   DEFAULT_APPLICATION_MENU_ACCELERATORS,
   resolveApplicationMenuAccelerators,
@@ -108,7 +116,6 @@ import {
   createRelaySessionKeeper,
   OPEN_RETRY_MS,
   openComputer,
-  RELAY_URL_PATTERN,
   relayCookieOrigins,
   RELAY_CREDENTIAL_FILE_NAME,
   type ComputerList,
@@ -364,6 +371,7 @@ let currentApplicationMenuAccelerators = DEFAULT_APPLICATION_MENU_ACCELERATORS;
 let desktopUpdateService: DesktopUpdateService | null = null;
 let desktopAutoUpdateService: DesktopAutoUpdateService | null = null;
 let idleInstall: ReturnType<typeof startIdleInstall> | null = null;
+let macVitals: BbDesktopVitals | undefined;
 let currentRuntime: DesktopRuntime | null = null;
 let currentWindowUrl: string | null = null;
 let logViewerLineBuffer: LogLineBuffer | null = null;
@@ -374,6 +382,11 @@ let systemConfigSync: SystemConfigSync | null = null;
 let systemConfigRefreshToken = 0;
 let refreshRemoteSystemConfig: (() => void) | null = null;
 const applicationWindowWebContentsIds = new Set<number>();
+const localCallerAuth = createLocalCallerAuth({
+  isAppWebContents: (id) => applicationWindowWebContentsIds.has(id),
+  localServerUrl: () => currentRuntime?.serverUrl ?? builtinServerUrl,
+  reloadAppWindows: () => reloadApplicationWindows(),
+});
 let bbAppLoaded = false;
 let startupRetryUrl: string | null = null;
 let startupRetryPending = false;
@@ -500,6 +513,7 @@ function getCurrentDesktopInfo(): BbDesktopInfo | null {
     ...info,
     computers: describeComputers(),
     serverDaemonLogsAvailable: shouldEnableServerDaemonLogsMenu(),
+    ...(macVitals ? { vitals: macVitals } : {}),
   };
 }
 
@@ -972,7 +986,7 @@ function createSystemConfigSync(serverUrl: string): SystemConfigSync {
     }
     reconnectTimer = setTimeout(() => {
       reconnectTimer = null;
-      connect();
+      void connect();
     }, 1_000);
   }
 
@@ -998,23 +1012,38 @@ function createSystemConfigSync(serverUrl: string): SystemConfigSync {
     }
   }
 
-  function connect(): void {
+  async function connect(): Promise<void> {
     if (stopped) {
       return;
     }
-    socket = new WebSocket(realtimeUrl);
+    const token = await callerTokenFor(serverUrl);
+    if (stopped) {
+      return;
+    }
+    let opened = false;
+    const HeaderWebSocket = WebSocket as unknown as new (
+      url: string,
+      init: { headers: Record<string, string> },
+    ) => WebSocket;
+    socket = new HeaderWebSocket(realtimeUrl, {
+      headers: token === null ? {} : { [CALLER_TOKEN_HEADER]: token },
+    });
     socket.addEventListener("open", () => {
+      opened = true;
       socket?.send(JSON.stringify(subscribeMessage));
       void refreshSystemConfig({ fetchImpl: fetch, serverUrl });
     });
     socket.addEventListener("message", handleMessage);
-    socket.addEventListener("close", scheduleReconnect);
+    socket.addEventListener("close", () => {
+      if (!opened) void renewCallerToken(serverUrl, token);
+      scheduleReconnect();
+    });
     socket.addEventListener("error", () => {
       socket?.close();
     });
   }
 
-  connect();
+  void connect();
 
   return {
     stop(): void {
@@ -1033,6 +1062,7 @@ async function refreshSystemConfig(
   systemConfigRefreshToken = token;
   try {
     const config = await fetchSystemConfig(args);
+    void localCallerAuth.refreshDaemons();
     if (token !== systemConfigRefreshToken) {
       return;
     }
@@ -1390,6 +1420,7 @@ async function loadRemoteServerTarget(
   isCurrent: () => boolean,
   otherMac = false,
 ): Promise<boolean> {
+  localCallerAuth.clear();
   const loaded = await loadRemoteServerPage({
     isCurrent,
     loadStartupError: otherMac ? async () => {} : loadStartupError,
@@ -1751,6 +1782,10 @@ async function loadStartupError(args: LoadStartupErrorArgs): Promise<void> {
 
 async function loadBbApp(serverUrl: string): Promise<void> {
   bbAppLoaded = true;
+  await localCallerAuth.prepare(
+    currentRuntime?.serverUrl ?? builtinServerUrl,
+    serverUrl,
+  );
   await loadWindowUrl({ url: serverUrl });
   if (shouldOpenDevTools()) {
     desktopWindowFactory?.openDevTools();
@@ -2636,11 +2671,15 @@ async function runDesktopApp(): Promise<void> {
       void applyServerTarget();
     },
   });
+  session.defaultSession.webRequest.onBeforeSendHeaders((details, callback) =>
+    localCallerAuth.beforeSendHeaders(details, callback),
+  );
   // "Sign in required" from the Mac on screen: its sign-in expired or "Sign out all phones" ended it.
-  session.defaultSession.webRequest.onCompleted({ urls: [RELAY_URL_PATTERN] }, (details) => {
-    if (details.statusCode === 401) {
+  session.defaultSession.webRequest.onCompleted((details) => {
+    if (details.statusCode === 401 && isRelayUrl(details.url)) {
       void relaySessionKeeper?.onSignInRequired(details.url, details.resourceType === "mainFrame");
     }
+    localCallerAuth.completed(details);
   });
   computersSync = createComputersSync({
     async fetchList() {
@@ -2747,6 +2786,12 @@ async function runDesktopApp(): Promise<void> {
     });
   }
   registerDesktopUpdateIpc();
+  if (process.platform === "darwin") {
+    startMacVitals((vitals) => {
+      macVitals = vitals;
+      sendDesktopInfoChanged();
+    });
+  }
   desktopBrowserViewManager = createDesktopBrowserViewManager({
     dispatchAppCommand({ command, hostWebContentsId }) {
       const browserWindow = BrowserWindow.getAllWindows().find(

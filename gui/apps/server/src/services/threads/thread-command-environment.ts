@@ -4,7 +4,7 @@ import {
 } from "../environments/path-admission.js";
 import type { EnvironmentRow } from "@cloudroom/db";
 import type { Thread } from "@cloudroom/domain";
-import type { DbConnection } from "@cloudroom/db";
+import { threadHasProviderSession, type DbConnection } from "@cloudroom/db";
 import type { WorkSessionDeps } from "../../types.js";
 import { requireEnvironment } from "../lib/entity-lookup.js";
 import {
@@ -76,6 +76,11 @@ export async function requireThreadCommandEnvironment(
   }
 
   throwThreadEnvironmentUnavailable(
-    threadEnvironmentUnavailableDetails("never_attached", null),
+    threadEnvironmentUnavailableDetails(
+      threadHasProviderSession(deps.db, args.thread.id)
+        ? "destroyed"
+        : "never_attached",
+      null,
+    ),
   );
 }

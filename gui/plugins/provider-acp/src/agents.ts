@@ -53,6 +53,7 @@ export const customAcpAgentSchema = z
     nativeReasoning: launchSpecFields.nativeReasoning,
     nativeSkillRoots: launchSpecFields.nativeSkillRoots,
     permissionCli: launchSpecFields.permissionCli,
+    permissionEnv: launchSpecFields.permissionEnv,
     supportsManualCompaction: z.boolean().default(false),
   })
   .strict();
@@ -87,6 +88,9 @@ export function customAcpAgentDefinition(
       ...(agent.permissionCli === undefined
         ? {}
         : { permissionCli: agent.permissionCli }),
+      ...(agent.permissionEnv === undefined
+        ? {}
+        : { permissionEnv: agent.permissionEnv }),
     },
     ...(agent.dialect === undefined ? {} : { dialect: agent.dialect }),
     ...(shipped?.nativeRootsResolver === undefined

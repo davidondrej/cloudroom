@@ -11,6 +11,8 @@ import { apiErrorSchema } from "@cloudroom/server-contract";
 import { eq } from "drizzle-orm";
 import { describe, expect, it } from "vitest";
 import { readJson } from "../helpers/json.js";
+import { textInput } from "../helpers/prompt-input.js";
+import { readThreadProvisionContext } from "../../src/services/threads/thread-startup-store.js";
 import {
   seedEnvironment,
   seedHostSession,
@@ -21,9 +23,7 @@ import { withTestHarness, type TestAppHarness } from "../helpers/test-app.js";
 
 const EIGHT_DAYS_MS = 8 * 24 * 60 * 60_000;
 
-function seedThreadWithPrunedEnvironment(
-  deps: Parameters<typeof seedThread>[0],
-) {
+function seedThreadWithEnvironment(deps: Parameters<typeof seedThread>[0]) {
   const { host } = seedHostSession(deps);
   const { project } = seedProjectWithSource(deps, { hostId: host.id });
   const environment = seedEnvironment(deps, {
@@ -37,6 +37,13 @@ function seedThreadWithPrunedEnvironment(
     projectId: project.id,
     status: "idle",
   });
+  return { environment, thread };
+}
+
+function retireEnvironmentPastPruneTtl(
+  deps: Parameters<typeof seedThread>[0],
+  environmentId: string,
+) {
   deps.db
     .update(environments)
     .set({
@@ -44,15 +51,20 @@ function seedThreadWithPrunedEnvironment(
       teardownStatus: "removed",
       updatedAt: Date.now() - EIGHT_DAYS_MS,
     })
-    .where(eq(environments.id, environment.id))
+    .where(eq(environments.id, environmentId))
     .run();
-  expect(
-    pruneDestroyedEnvironments(deps.db, deps.hub, {
-      updatedBefore: Date.now() - DESTROYED_ENVIRONMENT_TTL_MS,
-      eventBatchSize: DEFAULT_DESTROYED_ENVIRONMENT_EVENT_DETACH_BATCH_SIZE,
-      limit: DEFAULT_DESTROYED_ENVIRONMENT_PRUNE_BATCH_SIZE,
-    }).deleted,
-  ).toBe(1);
+  return pruneDestroyedEnvironments(deps.db, deps.hub, {
+    updatedBefore: Date.now() - DESTROYED_ENVIRONMENT_TTL_MS,
+    eventBatchSize: DEFAULT_DESTROYED_ENVIRONMENT_EVENT_DETACH_BATCH_SIZE,
+    limit: DEFAULT_DESTROYED_ENVIRONMENT_PRUNE_BATCH_SIZE,
+  }).deleted;
+}
+
+function seedThreadWithPrunedEnvironment(
+  deps: Parameters<typeof seedThread>[0],
+) {
+  const { environment, thread } = seedThreadWithEnvironment(deps);
+  deps.db.delete(environments).where(eq(environments.id, environment.id)).run();
 
   const threadAfterPrune = getThread(deps.db, thread.id);
   expect(threadAfterPrune?.environmentId).toBeNull();
@@ -111,4 +123,40 @@ describe("archive after environment prune", () => {
       });
     },
   );
+});
+
+describe("unarchive after environment retirement", () => {
+  it("keeps the environment through prune so unarchive and send restore it", async () => {
+    await withTestHarness(async (harness) => {
+      const { environment, thread } = seedThreadWithEnvironment(harness.deps);
+      const post = (path: string, body?: unknown) =>
+        harness.app.request(`/api/v1/threads/${thread.id}/${path}`, {
+          method: "POST",
+          ...(body === undefined
+            ? {}
+            : {
+                headers: { "content-type": "application/json" },
+                body: JSON.stringify(body),
+              }),
+        });
+      expect((await post("archive-all")).status).toBe(200);
+      expect(
+        retireEnvironmentPastPruneTtl(harness.deps, environment.id),
+      ).toBe(0);
+      expect((await post("unarchive")).status).toBe(200);
+
+      const response = await post("send", {
+        input: textInput("Continue after unarchive"),
+        mode: "auto",
+        model: "gpt-5",
+      });
+      expect(response.status, await response.text()).toBe(200);
+      expect(getThread(harness.deps.db, thread.id)).toMatchObject({
+        archivedAt: null,
+        environmentId: environment.id,
+        status: "starting",
+      });
+      expect(readThreadProvisionContext(harness.deps.db, thread.id)).not.toBeNull();
+    });
+  });
 });

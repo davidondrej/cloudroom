@@ -1,4 +1,4 @@
-export const PLUGIN_SDK_VERSION = "0.6.49";
+export const PLUGIN_SDK_VERSION = "0.6.50";
 
 export const PLUGIN_SDK_NPM_VERSION = "0.6.49";
 

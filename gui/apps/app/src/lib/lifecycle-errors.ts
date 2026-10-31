@@ -216,8 +216,14 @@ function describeThreadEnvironmentUnavailable({
     case "destroyed":
       return warning({
         operation,
-        title: "Workspace unavailable",
-        body: "Workspace no longer exists.",
+        title:
+          details.environmentStatus === null
+            ? "Workspace deleted"
+            : "Workspace unavailable",
+        body:
+          details.environmentStatus === null
+            ? "This thread's workspace was deleted. Start a new thread to continue."
+            : "Workspace no longer exists.",
       });
     case "provisioning":
       return info({

@@ -85,6 +85,7 @@ import { FileOpenersSettingsSection } from "@/components/settings/FileOpenersSet
 import { VoiceInputSettingsSection } from "@/components/settings/VoiceInputSettingsSection";
 import {
   ProjectNudgeSettingsSection,
+  SmartSearchSettingsSection,
   ThreadNamingSettingsSection,
   ThreadPurposeSettingsSection,
 } from "@/components/settings/ThreadNamingSettingsSection";
@@ -1182,6 +1183,11 @@ const EXPERIMENT_DEFINITIONS: Record<
     description:
       "Show the latest release notes as a compact preview on the Updates page.",
   },
+  hideLaptopHints: {
+    label: "Hide Cloud suggestions",
+    description:
+      "Stop suggesting Cloud when your Mac is low on battery, memory, or disk, or the internet is patchy.",
+  },
   multiMachinePicker: {
     label: "Multi-machine picker",
     description:
@@ -1517,6 +1523,7 @@ export function SettingsView() {
         <ThreadNamingSettingsSection />
         <ThreadPurposeSettingsSection />
         <ProjectNudgeSettingsSection />
+        <SmartSearchSettingsSection />
         <VoiceInputSettingsSection />
         <PrivacySettingsSection
           telemetryEnabled={generalSettings.telemetryEnabled}

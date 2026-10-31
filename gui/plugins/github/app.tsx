@@ -13,6 +13,7 @@ import {
 } from "@get-bb/plugin-sdk/app";
 import {
   buildSuggestions,
+  isOutsideAuthor,
   matchesQuery,
   parseQuery,
   parseSubPath,
@@ -564,9 +565,8 @@ function StatusCell({ item }: { item: Item }) {
   );
 }
 
-function RowMenu({ item }: { item: Item }) {
+function RowMenu({ item, viewer }: { item: Item; viewer: string | null }) {
   const navigate = useBbNavigate();
-  const viewer = useViewer();
   const { setIssueState, setAssignees } = useIssueMutations();
   const assignedToMe = viewer !== null && item.assignees.includes(viewer);
 
@@ -650,6 +650,8 @@ function ItemRow({
   onOpen: () => void;
 }) {
   const { spawn, spawningKey } = useSpawn();
+  const viewer = useViewer();
+  const outside = isOutsideAuthor(item, viewer);
   const busy = spawningKey === `${item.repo}#${item.number}`;
   return (
     <div
@@ -690,9 +692,13 @@ function ItemRow({
             size="sm"
             variant="outline"
             className="h-7"
-            disabled={spawningKey !== null}
+            disabled={!outside && spawningKey !== null}
             onClick={(event) => {
               event.stopPropagation();
+              if (outside) {
+                onOpen();
+                return;
+              }
               spawn(
                 item.kind === "issue" ? "startWork" : "startReview",
                 item.repo,
@@ -700,9 +706,15 @@ function ItemRow({
               );
             }}
           >
-            {busy ? "…" : item.kind === "issue" ? "Start" : "Review"}
+            {outside
+              ? "View"
+              : busy
+                ? "…"
+                : item.kind === "issue"
+                  ? "Start"
+                  : "Review"}
           </Button>
-          <RowMenu item={item} />
+          <RowMenu item={item} viewer={viewer} />
         </span>
       </span>
     </div>
@@ -962,6 +974,26 @@ function LabelPicker({
   );
 }
 
+function OutsideAuthorNote({
+  kind,
+  author,
+  repo,
+}: {
+  kind: "issue" | "pr";
+  author: string;
+  repo: string;
+}) {
+  const noun = kind === "pr" ? "pull request" : "issue";
+  return (
+    <p className="rounded-md border border-warning/20 bg-warning/10 px-3 py-2 text-xs text-warning-text">
+      {author.length > 0 ? `@${author}` : "The author"} is not a member of{" "}
+      {repo}. Text in this {noun} can try to give the agent orders. By
+      default, agents have full access and can run any command on your
+      computer. Read the {noun} and its comments before you send an agent.
+    </p>
+  );
+}
+
 function IssueDetailView({
   repo,
   number,
@@ -973,6 +1005,7 @@ function IssueDetailView({
 }) {
   const rpc = useRpc<typeof githubRpcContract>();
   const links = useLinks();
+  const viewer = useViewer();
   const { spawn, spawningKey } = useSpawn();
   const { setIssueState, setAssignees, setLabels } = useIssueMutations();
   const [detail, setDetail] = useState<IssueDetail | null>(null);
@@ -1094,6 +1127,9 @@ function IssueDetailView({
           {spawningKey !== null ? "Starting…" : "Send agent"}
         </Button>
       </div>
+      {isOutsideAuthor(detail, viewer) ? (
+        <OutsideAuthorNote kind="issue" author={detail.author} repo={repo} />
+      ) : null}
 
       <div className="flex flex-col gap-6 lg:flex-row">
         <div className="flex min-w-0 flex-1 flex-col gap-4">
@@ -1613,6 +1649,7 @@ function PullDetailView({
 }) {
   const rpc = useRpc<typeof githubRpcContract>();
   const links = useLinks();
+  const viewer = useViewer();
   const { spawn, spawningKey } = useSpawn();
   const [pull, setPull] = useState<PullDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -1728,6 +1765,9 @@ function PullDetailView({
           {spawningKey !== null ? "Starting…" : "Review with agent"}
         </Button>
       </div>
+      {isOutsideAuthor(pull, viewer) ? (
+        <OutsideAuthorNote kind="pr" author={pull.author} repo={repo} />
+      ) : null}
 
       <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
         <PullStateBadge state={pull.state} />

@@ -68,7 +68,7 @@
  */
 
 import { createInterface } from "node:readline";
-import { appendFileSync, renameSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, renameSync, writeFileSync } from "node:fs";
 
 const failLoad = process.env.FAKE_ACP_FAIL_LOAD === "1";
 const loadSession = process.env.FAKE_ACP_LOAD_SESSION === "1" || failLoad;
@@ -96,6 +96,7 @@ const authMethods = (process.env.FAKE_ACP_AUTH_METHODS ?? "")
 const authOptional = process.env.FAKE_ACP_AUTH_OPTIONAL === "1";
 const sessionNewError = process.env.FAKE_ACP_SESSION_NEW_ERROR;
 const exitOnSessionNew = process.env.FAKE_ACP_EXIT_ON_SESSION_NEW;
+const steerMeta = process.env.FAKE_ACP_STEER_META;
 const sessionNewDelayMs = Number(
   process.env.FAKE_ACP_SESSION_NEW_DELAY_MS ?? "0",
 );
@@ -413,7 +414,10 @@ function captureMcpServers(message) {
 }
 
 async function handlePrompt(message) {
-  activePromptId = message.id;
+  const joinedSteer =
+    steerMeta !== undefined &&
+    message.params?._meta?.[steerMeta]?.steer === true;
+  if (!joinedSteer) activePromptId = message.id;
   const text = promptText(message.params?.prompt);
   if (process.env.FAKE_ACP_PROMPT_LOG) {
     appendFileSync(
@@ -481,6 +485,16 @@ async function handlePrompt(message) {
     }
     notifyUpdate(messageChunk(`permission:${outcome}`));
   } else if (text.includes("request-permission")) {
+    const backgroundPermission = process.env.FAKE_ACP_BACKGROUND_PERMISSION;
+    if (backgroundPermission) {
+      activePromptId = null;
+      send({
+        jsonrpc: "2.0",
+        id: message.id,
+        result: { stopReason: "end_turn" },
+      });
+      while (!existsSync(backgroundPermission)) await sleep(10);
+    }
     notifyUpdate({
       sessionUpdate: "tool_call",
       toolCallId: "perm-tool-1",
@@ -509,8 +523,12 @@ async function handlePrompt(message) {
         result?.outcome?.outcome === "selected"
           ? result.outcome.optionId
           : "cancelled";
-    } catch {
-      outcome = "error";
+    } catch (error) {
+      outcome = backgroundPermission ? `error:${error.message}` : "error";
+    }
+    if (backgroundPermission) {
+      writeFileSync(`${backgroundPermission}.result`, outcome);
+      return;
     }
     notifyUpdate(messageChunk(`permission:${outcome}`));
   } else if (text.includes("write-file")) {
@@ -559,11 +577,20 @@ async function handlePrompt(message) {
     notifyUpdate(
       messageChunk(`mcp-server-config:${JSON.stringify(currentMcpServers)}`),
     );
+  } else if (/echo-env:[A-Za-z_]\w*/.test(text)) {
+    const name = /echo-env:([A-Za-z_]\w*)/.exec(text)[1];
+    notifyUpdate(messageChunk(`env:${name}=${process.env[name] ?? "missing"}`));
   } else {
     notifyUpdate(messageChunk(`echo:${text}`));
   }
 
-  if (activePromptId === message.id) {
+  if (joinedSteer) {
+    send({
+      jsonrpc: "2.0",
+      id: message.id,
+      result: { stopReason: "end_turn" },
+    });
+  } else if (activePromptId === message.id) {
     activePromptId = null;
     const stopReason =
       text === "/compact"
@@ -603,6 +630,9 @@ async function handleMessage(message) {
             loadSession,
             promptCapabilities: { image: false },
             ...(forkSession ? { sessionCapabilities: { fork: {} } } : {}),
+            ...(steerMeta
+              ? { _meta: { [steerMeta]: { steering: true } } }
+              : {}),
           },
           ...(authMethods.length > 0
             ? { authMethods: authMethods.map((id) => ({ id })) }

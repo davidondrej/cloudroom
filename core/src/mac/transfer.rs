@@ -3,7 +3,7 @@
 //! Every piece of a copy runs the same command, with its number in stdin, so the Mac helper's Jev check
 //! (ADR 0224) reviews one command per copy, not one per piece.
 use super::{LIMIT, finished, hex, literal, quote, request};
-use serde_json::json;
+use serde_json::{Value, json};
 use std::{
     fs,
     hash::{BuildHasher, RandomState},
@@ -56,7 +56,7 @@ pub(super) async fn pull(socket: &str, source: &str, target: &str) -> io::Result
         MAX + 1
     );
     let archive = Temp::file("pull")?;
-    let name = match run(socket, pack, &[], false).await? {
+    let name = match run(socket, pack, &[], false, Value::Null).await? {
         (Some(0), stdout, stderr) => {
             fs::write(&archive.0, stdout)?;
             stderr
@@ -211,15 +211,17 @@ pub(super) async fn push(socket: &str, source: &str, target: &str) -> io::Result
     };
     let place = "s=$?; [ \"$x\" = \"$d\" ] || { [ $s = 0 ] && ! used && mv -- \"$x/$n\" \"$d\" || s=1; rm -rf \"$x\"; }; \
                  [ $s != 0 ] || printf '%s\\n' \"$to\"; ";
+    // The Mac helper builds the unpack itself from `copy` and places only this item, so an archive can't add other
+    // files there (#222). Older helpers run the command above instead.
+    let copy =
+        |staged: Option<&str>| json!({"name":name.to_string_lossy(),"to":target,"staged":staged});
     let out = if size <= LIMIT as u64 {
         let input = fs::read(&archive.0)?;
-        job(
-            socket,
-            format!("{}tar -xzf - -C \"$x\"; {place}exit $s", unpack("")),
-            &input,
-            true,
-        )
-        .await?
+        let unpack = format!("{}tar -xzf - -C \"$x\"; {place}exit $s", unpack(""));
+        match run(socket, unpack, &input, true, copy(None)).await? {
+            (Some(0), stdout, _) => stdout,
+            (_, _, stderr) => return Err(failed(&stderr)),
+        }
     } else {
         let dir = temp_dir(&String::from_utf8_lossy(
             &job(socket, MKTEMP.into(), &[], false).await?,
@@ -235,7 +237,7 @@ pub(super) async fn push(socket: &str, source: &str, target: &str) -> io::Result
             "{}cat {dir}/* | tar -xzf - -C \"$x\"; {place}rm -rf {dir}; exit $s",
             unpack(&format!(" {dir}"))
         );
-        match run(socket, unpack, &[], true).await? {
+        match run(socket, unpack, &[], true, copy(Some(&dir))).await? {
             (Some(0), stdout, _) => stdout,
             (_, _, stderr) => {
                 let _ = clean().await; // Refused, denied, or stopped before the unpack removed the staging.
@@ -267,14 +269,18 @@ async fn stage(socket: &str, dir: &str, path: &Path, size: u64) -> io::Result<()
     verify(path, &String::from_utf8_lossy(&sha)).await
 }
 
-/// Runs one Mac command: its exit code, stdout, and stderr.
+/// Runs one Mac command: its exit code, stdout, and stderr. `copy` marks a push's unpack (`Copy` in mod.rs).
 async fn run(
     socket: &str,
     command: String,
     stdin: &[u8],
     write: bool,
+    copy: Value,
 ) -> io::Result<(Option<i32>, Vec<u8>, Vec<u8>)> {
-    let body = json!({"command":command,"stdin":hex(stdin),"write":write});
+    let mut body = json!({"command":command,"stdin":hex(stdin),"write":write});
+    if !copy.is_null() {
+        body["copy"] = copy;
+    }
     let value = request(socket, "POST", "/jobs", Some(body)).await?;
     if let Some(id) = value["job"].as_str().filter(|_| value["state"] == "done") {
         let _ = request(socket, "DELETE", &format!("/jobs/{id}"), None).await;
@@ -284,7 +290,7 @@ async fn run(
 
 /// Runs one Mac command and returns its stdout, or an error with its stderr.
 async fn job(socket: &str, command: String, stdin: &[u8], write: bool) -> io::Result<Vec<u8>> {
-    match run(socket, command, stdin, write).await? {
+    match run(socket, command, stdin, write, Value::Null).await? {
         (Some(0), stdout, _) => Ok(stdout),
         (_, _, stderr) => Err(failed(&stderr)),
     }

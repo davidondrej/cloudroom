@@ -15,7 +15,7 @@ import { codexOutage } from "./openai-status.js";
 import { buildThreadStatusChangeMetadata } from "../threads/thread-runtime-display.js";
 import { cloudPluginInstructions, cloudroomSystemPrompt, prepareCloudInstructionInput, resolveCustomInstructions } from "../threads/custom-instructions.js";
 import { baseBranch, binding, bindings, command, commands, coreInUse, localTeleports, openBindings, queuedPrompts, saveBinding, saveCommandState, saveStatus, effectivePrompt, projectCopyProgress, stampBindings, teleportBlocked, unstartedTurn, type Binding, type Command, type OpenBinding } from "./store.js";
-import { copyProject, copyRunning, githubRepository, localProjectNote, planProjectCopy, planProjectCopyOrThrow, reportProjectCopy, writeFilesState, type ProjectCopyJob } from "./project-copy.js";
+import { copyProject, copyRunning, githubRepository, localProjectNote, localProjectPath, planNewProjectCopy, planProjectCopy, planProjectCopyOrThrow, reportProjectCopy, writeFilesState, type ProjectCopyJob } from "./project-copy.js";
 import { CHILD_HINT, cloudForkOf, cloudForkPoint, codeFromOf, FORK_HARNESSES, FORK_HINT, landForkCode, localForkPoint, startCloudFork, threadCode, uploadInParts } from "./fork.js";
 import { copyForkSourceHistory } from "../threads/thread-fork-history.js";
 import { CloudGitError, savedWorkspacePath } from "./git.js";
@@ -992,7 +992,9 @@ class CloudroomService {
   }
 
   async status() {
-    const lastCloudAt = this.deps.db.select({ at: max(threads.updatedAt) }).from(threads).where(eq(threads.executionTarget, "cloud")).get()?.at ?? null;
+    const cloud = this.deps.db.select({ updated: max(threads.updatedAt), created: max(threads.createdAt) }).from(threads).where(eq(threads.executionTarget, "cloud")).get();
+    const lastCloudAt = cloud?.updated ?? null;
+    const lastNewCloudAt = cloud?.created ?? null;
     let account: CloudroomAccount | null = null;
     let projectId: string | null = null;
     let storage: Storage | null = null;
@@ -1018,7 +1020,7 @@ class CloudroomService {
           model: capabilities?.harnesses.find((h) => h.id === "codex")?.model ?? null,
           steer: capabilities?.steer ?? false, rewind: capabilities?.rewind ?? false, attachments: capabilities?.attachments ?? false,
           compact: capabilities?.compact ?? false, queue_edit: capabilities?.queue_edit ?? false, queue_cancel: capabilities?.queue_cancel ?? false,
-          queue_reorder: capabilities?.queue_reorder ?? false, error: null, cloudQueue: this.sandboxes.cloudQueue(), usedCloud: lastCloudAt !== null, lastCloudAt,
+          queue_reorder: capabilities?.queue_reorder ?? false, error: null, cloudQueue: this.sandboxes.cloudQueue(), usedCloud: lastCloudAt !== null, lastCloudAt, lastNewCloudAt,
           plan: this.sandboxes.currentPlan(), planUsage: this.sandboxes.planUsage(),
         };
       }
@@ -1037,7 +1039,7 @@ class CloudroomService {
         model: capabilities.harnesses.find((h) => h.id === "codex")?.model ?? null,
         steer: capabilities.steer, rewind: capabilities.rewind, attachments: capabilities.attachments,
         compact: capabilities.compact, queue_edit: capabilities.queue_edit, queue_cancel: capabilities.queue_cancel,
-        queue_reorder: capabilities.queue_reorder, error: null, usedCloud: lastCloudAt !== null, lastCloudAt,
+        queue_reorder: capabilities.queue_reorder, error: null, usedCloud: lastCloudAt !== null, lastCloudAt, lastNewCloudAt,
       };
     } catch (error) { return { ready: false, account, selfHosted, projectId, storage, workspaces: false, repository: null, model: null, error: publicError(error) }; }
   }
@@ -1481,6 +1483,14 @@ class CloudroomService {
     if (!sandbox) return {};
     const keys = await this.sandboxes.loopSecrets(sandbox);
     return { key_source: sandbox, ...(keys && !keys.includes(".env") ? { no_env: true as const } : {}) };
+  }
+
+  /** The only API keys the sandbox a thread runs in gets (ADR 0342): null for every key and for threads without a
+   *  sandbox, like a VM's, and undefined when the website has no row for it. A sandbox with a list gets nothing from
+   *  this Mac at its agent's request. */
+  async keyList(threadId: string): Promise<string[] | null | undefined> {
+    const sandbox = sandboxThread(binding(this.deps.db, threadId)?.coreUrl ?? "");
+    return sandbox ? this.sandboxes.loopSecrets(sandbox) : null;
   }
 
   /** A Cloud fork (fork.ts): the source's harness and model in a new sandbox, with the history up to the fork point. */
@@ -2304,8 +2314,11 @@ class CloudroomService {
         const parentThread = relayed ? { parent_thread: codeFrom } : {};
         const target = options.workspace && options.workspace !== ROOT_WORKSPACE ? options.workspace : null;
         if (fork && !capabilities.fork) throw new ApiError(503, "cloudroom_update", "Update the cloud core to fork Cloud threads. Your message is saved.");
-        const [copy, started] = await Promise.all([
-          target ? planProjectCopy(this.deps, client, threadId, target, { key: copyKey(sandbox, target), branch: baseBranch(initial?.input) }) : null,
+        const plan = { key: copyKey(sandbox, target ?? ""), branch: baseBranch(initial?.input) };
+        const failure = (error: unknown) => error instanceof Error ? error : new Error(String(error));
+        // A copy that can't be planned fails where the user and `room-cli files wait` see it, never as nothing to copy (#337).
+        const [planned, started] = await Promise.all([
+          target ? planNewProjectCopy(this.deps, client, threadId, target, plan).catch(failure) : null,
           sideChat
             ? this.startSideChat(client, threadId, saved.startRequestId, harness, sideChat)
             : fork
@@ -2326,6 +2339,16 @@ class CloudroomService {
         ]);
         saveBinding(this.deps.db, threadId, { sessionId: started.sessionId, error: null });
         saved = binding(this.deps.db, threadId)!;
+        const copy = planned instanceof Error ? null : planned;
+        // Like any failed copy, the card shows only for a project with no folder on the Mac; otherwise only the agent
+        // is told, and pulls what it needs (docs/scopes/sandboxes.md, David, 2026-10-13).
+        const macPath = planned instanceof Error ? localProjectPath(this.deps, getThread(this.deps.db, threadId)?.projectId ?? "") : undefined;
+        const unplanned = planned instanceof Error ? `The copy could not start: ${planned.message}`.slice(0, 500)
+          + (macPath ? ` The full project is on the user's ${COMPUTER} at \`${macPath}\`. Pull only what the task needs with \`room-cli mac pull\`.` : "") : undefined;
+        if (unplanned) {
+          this.warn("Cloud project copy could not be planned", planned, { threadId });
+          if (!macPath) reportProjectCopy(this.deps, threadId, { phase: "error", completed: 0, total: 0, error: unplanned });
+        }
         const copying = copy?.clone && copy.repository ? `Cloning ${copy.repository.replace("https://github.com/", "")}` : copy?.copyAll ? `Copying project from your ${COMPUTER}` : null;
         const files: StartStep[] = copying ? [{ key: "files", text: copying, status: "started" }] : [];
         const forkCode: StartStep[] = started.code ? [{ key: "fork", text: "Copying the source thread's code", status: "started" }] : [];
@@ -2333,14 +2356,14 @@ class CloudroomService {
         const firstSent = new Promise<void>(resolve => { releaseCopy = resolve; });
         // `room-cli files wait` holds the agent until the files, and a fork's code, have landed (ADR 0209).
         // A child in a Personal project has no workspace of its own, so its status file sits next to the sandbox root.
-        const workspace = target && (files.length || started.code) ? target
+        const workspace = target && (files.length || started.code || unplanned) ? target
           : started.code ? await client.sessionWorkspace(started.sessionId).then(({ path }) => path, () => null) : null;
         // Code from another thread replaces the folder's files, so the agent must wait for it from its first command.
         const marked = workspace ? started.code ? this.filesState(client, threadId, workspace, "copying") : firstSent.then(() => this.filesState(client, threadId, workspace, "copying")) : null;
         if (started.code) await marked;
         const landed = this.landing(threadId, client, started, files.length > 0, workspace, marked);
         if (copy) this.copy(client, copy, landed, firstSent);
-        else if (started.code) void landed();
+        else if (started.code || unplanned) void landed(unplanned);
         else if (sandbox) void this.ensureBranch(threadId, true);
       }
       if (epoch !== this.epoch) return;
@@ -2900,8 +2923,10 @@ class CloudroomService {
         if (marked && workspace) await marked.then(() => this.filesState(current, threadId, workspace, failure ? `failed: ${failure}` : "ready"));
       };
       const missing = error ?? partial;
+      // `ready` comes after the branch, so the agent never starts work on the default branch.
       if (!started?.code) {
-        await Promise.all([this.ensureBranch(threadId, true), finish(missing)]);
+        await this.ensureBranch(threadId, true);
+        await finish(missing);
         return;
       }
       // A fork's branch then moves to its source's code, so the agent sees what the source saw.
@@ -2946,7 +2971,9 @@ class CloudroomService {
     const client = await this.client(saved);
     const job = await planProjectCopy(this.deps, client, threadId, workspace, { key: copyKey(sandboxThread(saved.coreUrl), workspace), branch: baseBranch(input) });
     if (!job) throw new ApiError(409, "cloudroom_no_project_copy", "Nothing is left to copy, or a copy is already running.");
-    this.copyInto(client, job);
+    // A full copy lands like a new thread's, on the thread's own branch, which a copy that never ran never made.
+    if (job.clone || job.copyAll) this.copy(client, job, this.landing(threadId, client, null, true, workspace, this.filesState(client, threadId, workspace, "copying")));
+    else this.copyInto(client, job);
   }
 
   /** Plans a copy the last app run cut off again, once the thread's stream connects (#106). An empty folder gets the copy

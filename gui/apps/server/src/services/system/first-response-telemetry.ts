@@ -126,7 +126,7 @@ function latestTurnExecution(db: DbConnection, threadId: string): { model: strin
       reasoning: sql<string | null>`json_extract(${events.data}, '$.execution.reasoningLevel')`,
     })
     .from(events)
-    .where(and(eq(events.threadId, threadId), eq(events.type, "client/turn/requested")))
+    .where(and(eq(events.threadId, threadId), eq(events.type, "client/turn/requested"), sql`json_extract(${events.data}, '$.initiator') = 'user'`))
     .orderBy(desc(events.sequence))
     .limit(1)
     .get();

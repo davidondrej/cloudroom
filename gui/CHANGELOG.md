@@ -2,6 +2,20 @@
 
 Also on [cloudroom.dev/changelog](https://www.cloudroom.dev/changelog).
 
+## 135
+
+Cmd+K finds what you mean (2026-10-31)
+
+### Changes
+
+- Cmd+K now ranks your threads and projects by what you mean, not just matching words, with filters for threads, projects, and archived.
+- When your Mac is struggling, Cloudroom can suggest moving work to Cloud, and you can hide these hints in Settings → Experiments.
+- Ultra effort levels are now hidden from the effort menu, and Settings → Defaults brings them back.
+- Cloud previews stay awake while you browse them, and show a clearer error when your app's server isn't running.
+- A slash command at the start of a Cloud message now runs even when you attach images.
+- Moving a thread between your Mac and Cloud now says clearly when it takes too long.
+- Security fixes.
+
 ## 134
 
 Your phone no longer needs your Mac (2026-10-30)

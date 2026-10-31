@@ -1,3 +1,7 @@
+import {
+  CALLER_TOKEN_HEADER,
+  createCallerProofFetch,
+} from "@cloudroom/config/caller-proof";
 import { loadCliConfig, type CliConfig } from "@cloudroom/config/cli";
 import {
   createHostDaemonLocalClient,
@@ -20,6 +24,7 @@ import type {
 
 export interface CreateNodeTransportArgs {
   baseUrl?: string;
+  callerToken?: string;
   cliConfig?: CliConfig;
   fetch?: FetchImplementation;
   realtimeUrl?: string;
@@ -45,19 +50,36 @@ function resolveHostDaemonUrl(cliConfig?: CliConfig): string {
   return `http://${DEFAULT_HOST_DAEMON_LOCAL_BIND_HOST}:${config.ROOM_HOST_DAEMON_PORT}`;
 }
 
+function withCallerToken(
+  fetchImpl: FetchImplementation,
+  callerToken: string,
+): FetchImplementation {
+  return (input, init) => {
+    const headers = new Headers(init?.headers);
+    headers.set(CALLER_TOKEN_HEADER, callerToken);
+    return fetchImpl(input, { ...init, headers });
+  };
+}
+
 export function createNodeTransport(
   args: CreateNodeTransportArgs = {},
 ): BbSdkTransport {
+  const fetchImpl =
+    args.fetch ??
+    createRequestTimeoutFetch({
+      timeoutMs: args.timeoutMs ?? DEFAULT_BB_REQUEST_TIMEOUT_MS,
+    });
   return createHttpTransport({
     baseUrl: args.baseUrl ?? resolveCliConfig(args.cliConfig).ROOM_SERVER_URL,
     fetch:
-      args.fetch ??
-      createRequestTimeoutFetch({
-        timeoutMs: args.timeoutMs ?? DEFAULT_BB_REQUEST_TIMEOUT_MS,
-      }),
+      args.callerToken === undefined
+        ? createCallerProofFetch(fetchImpl)
+        : withCallerToken(fetchImpl, args.callerToken),
     realtimeUrl: args.realtimeUrl,
     runtime: "node",
-    websocket: args.websocket ?? createNodeWebsocketFactory(),
+    websocket:
+      args.websocket ??
+      createNodeWebsocketFactory({ callerToken: args.callerToken }),
   });
 }
 

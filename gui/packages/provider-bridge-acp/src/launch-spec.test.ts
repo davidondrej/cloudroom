@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { acpLaunchSpecSchema, normalizeAcpLaunchSpec } from "./launch-spec.js";
 
 describe("normalizeAcpLaunchSpec", () => {
-  it("drops a model CLI that lists nothing, a mode-less permission CLI and every absent field", () => {
+  it("drops a model CLI that lists nothing, mode-less permission CLI and env, and every absent field", () => {
     expect(
       normalizeAcpLaunchSpec({
         displayName: "Custom ACP",
@@ -21,6 +21,7 @@ describe("normalizeAcpLaunchSpec", () => {
           defaultLevel: "high",
         },
         permissionCli: {},
+        permissionEnv: {},
       }),
     ).toEqual({
       displayName: "Custom ACP",
@@ -49,10 +50,34 @@ describe("normalizeAcpLaunchSpec", () => {
         primaryModels: ["composer"],
       },
       permissionCli: { full: ["--force"] },
+      permissionEnv: {
+        full: { AGENT_MODE: "full-access" },
+        workspaceWrite: { AGENT_MODE: "ask" },
+      },
       nativeSkillRoots: { user: [".cursor/skills"], project: [] },
     });
     const normalized = normalizeAcpLaunchSpec(spec);
     expect(normalized).toEqual(spec);
     expect(normalizeAcpLaunchSpec(normalized)).toEqual(normalized);
+  });
+});
+
+describe("acpLaunchSpecSchema permissionEnv", () => {
+  const base = {
+    displayName: "Custom ACP",
+    command: "custom-agent",
+    args: [],
+    env: {},
+  };
+
+  it.each([
+    ["no mode", {}],
+    ["a mode that sets nothing", { workspaceWrite: {} }],
+    ["an invalid variable name", { full: { "BAD-NAME": "1" } }],
+    ["an unknown mode", { auto: { AGENT_MODE: "auto" } }],
+  ])("rejects %s", (_label, permissionEnv) => {
+    expect(
+      acpLaunchSpecSchema.safeParse({ ...base, permissionEnv }).success,
+    ).toBe(false);
   });
 });

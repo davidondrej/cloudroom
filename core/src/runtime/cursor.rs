@@ -121,10 +121,7 @@ pub(super) async fn attach(
 }
 
 async fn select_model(handle: &Handle, id: &str, session: &Value) -> io::Result<()> {
-    let requested = match handle.profile.model.as_str() {
-        "auto" => "default",
-        value => value,
-    };
+    let requested = super::cursor_models::catalog_name(&handle.profile.model);
     let catalog = session["models"]["availableModels"]
         .as_array()
         .ok_or_else(|| io::Error::other("Cursor model catalog unavailable"))?;

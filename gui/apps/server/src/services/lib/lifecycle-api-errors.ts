@@ -79,7 +79,9 @@ export function throwThreadEnvironmentUnavailable(
   throw new ApiError(
     409,
     "thread_environment_unavailable",
-    "Thread environment is unavailable",
+    details.reason === "destroyed" && details.environmentStatus === null
+      ? "This thread's workspace was deleted. Start a new thread to continue."
+      : "Thread environment is unavailable",
     { details },
   );
 }

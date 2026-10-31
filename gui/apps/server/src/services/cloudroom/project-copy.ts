@@ -27,6 +27,7 @@ const exec = promisify(execFile);
 // A stalled piece counts as dropped, so the retry sends it again.
 export const PIECE_TIMEOUT = 120_000;
 const PACK_TIMEOUT = 5 * 60_000;
+const CLONE_TIMEOUT = 15 * 60_000;
 const MAX_FILE = 50 * 1024 * 1024;
 const MAX_TOTAL = 1024 * 1024 * 1024;
 // About 10-20 seconds on a home connection.
@@ -42,7 +43,7 @@ export function githubRepository(remote: string | null): string | null {
   return repository ? `https://github.com/${repository}` : null;
 }
 
-function localProjectPath(deps: Deps, projectId: string): string | undefined {
+export function localProjectPath(deps: Deps, projectId: string): string | undefined {
   const sources = listProjectSourcesByProjectIds(deps.db, [projectId]).filter((source) => existsSync(source.path));
   return (sources.find((source) => source.isDefault) ?? sources[0])?.path;
 }
@@ -72,17 +73,34 @@ export function planProjectCopy(...args: Parameters<typeof planProjectCopyOrThro
   return planProjectCopyOrThrow(...args).catch(() => null);
 }
 
+/** A new thread's copy (#337): a request its just-claimed sandbox drops is tried once more a second later, and an error
+ *  that remains throws, so the thread is told instead of starting with an empty folder. Its sandbox gets 10 seconds in
+ *  all, so the first message never waits long (ADR 0160); Try again covers the rest. A folder another copy fills needs nothing more. */
+export function planNewProjectCopy(deps: Deps, client: CloudroomClient, threadId: string, workspace: string, options: { key: string; branch?: string }): Promise<ProjectCopyJob | null> {
+  const signal = AbortSignal.timeout(10_000);
+  const plan = () => planProjectCopyOrThrow(deps, client, threadId, workspace, { ...options, signal });
+  return plan()
+    .catch(() => new Promise(resolve => setTimeout(resolve, 1_000)).then(plan))
+    .catch((error: unknown) => {
+      if (copying.has(options.key)) return null;
+      throw error;
+    });
+}
+
 /** Like planProjectCopy, but a sandbox that can't be reached, or a folder another copy is filling, throws instead of
  *  reading as nothing left to copy. */
-export async function planProjectCopyOrThrow(deps: Deps, client: CloudroomClient, threadId: string, workspace: string, { localPath, key = workspace, teleport = false, branch }: { localPath?: string; key?: string; teleport?: boolean; branch?: string } = {}): Promise<ProjectCopyJob | null> {
+export async function planProjectCopyOrThrow(deps: Deps, client: CloudroomClient, threadId: string, workspace: string, { localPath, key = workspace, teleport = false, branch, signal }: { localPath?: string; key?: string; teleport?: boolean; branch?: string; signal?: AbortSignal } = {}): Promise<ProjectCopyJob | null> {
   const project = getProject(deps.db, getThread(deps.db, threadId)?.projectId ?? "");
   if (!project) return null;
   if (copying.has(key)) throw new Error("Another copy is filling this project folder.");
   const path = localPath ?? localProjectPath(deps, project.id) ?? null;
   const repository = githubRepository(await projectRemote(deps, project, path));
   if (!path && !repository) return null;
-  const existing = await client.workspace(workspace);
-  const empty = !existing || (await client.runOnVm({ command: `[ -z "$(ls -A -- ${quote(existing.path)} 2>/dev/null | grep -Fvx .cloudroom)" ]`, stdin: "" })).code === 0;
+  const existing = await client.workspace(workspace, signal);
+  // Exit 1 means files are there; any other end of the check (a signal, a missing shell) says nothing about the folder.
+  const check = existing && (await client.runOnVm({ command: `[ -z "$(ls -A -- ${quote(existing.path)} 2>/dev/null | grep -Fvx .cloudroom)" ]`, stdin: "" }, signal)).code;
+  if (existing && check !== 0 && check !== 1) throw new CloudroomError(`Could not check the cloud project folder (exit code ${check}).`);
+  const empty = !existing || check === 0;
   if (!empty && teleport) return null;
   const clone = empty && Boolean(repository);
   const copyAll = empty && !repository && !teleport && path !== null && await smallProject(path);
@@ -193,11 +211,13 @@ async function writeFailureNote(client: CloudroomClient, job: ProjectCopyJob, me
  *  project folder (a workspace ID, or a path), so Git never sees it. With `onlyIfCopying`, it changes only a copy still
  *  marked `copying`. Next to the sandbox root (`/code`), only root can write, so it falls back to sudo. */
 export async function writeFilesState(client: CloudroomClient, workspace: string, state: string, onlyIfCopying = false): Promise<void> {
-  const target = workspace.startsWith("/") ? workspace : (await client.workspace(workspace))?.path;
-  if (!target) return;
-  const file = `${target}.cloudroom-files`;
-  const write = `state=$(cat) && { printf %s "$state" 2>/dev/null > ${quote(`${file}.tmp`)} && mv -f -- ${quote(`${file}.tmp`)} ${quote(file)} || printf %s "$state" | sudo -n tee ${quote(file)} >/dev/null; }`;
-  await vm(client, onlyIfCopying ? `if [ "$(cat -- ${quote(file)} 2>/dev/null)" = copying ]; then ${write}; fi` : write, Buffer.from(state));
+  await retry(async () => {
+    const target = workspace.startsWith("/") ? workspace : (await client.workspace(workspace))?.path;
+    if (!target) return;
+    const file = `${target}.cloudroom-files`;
+    const write = `state=$(cat) && { printf %s "$state" 2>/dev/null > ${quote(`${file}.tmp`)} && mv -f -- ${quote(`${file}.tmp`)} ${quote(file)} || printf %s "$state" | sudo -n tee ${quote(file)} >/dev/null; }`;
+    await vm(client, onlyIfCopying ? `if [ "$(cat -- ${quote(file)} 2>/dev/null)" = copying ]; then ${write}; fi` : write, Buffer.from(state));
+  });
 }
 
 async function vm(client: CloudroomClient, command: string, bytes?: Buffer<ArrayBuffer>, raw = false): Promise<void> {
@@ -212,7 +232,7 @@ export async function retry<T>(attempt: () => Promise<T>): Promise<T> {
     try {
       return await attempt();
     } catch (error) {
-      if (tries === 7 || !(error instanceof CloudroomError && (error.retryable || error.status === 200))) throw error;
+      if (tries === 7 || !(error instanceof CloudroomError && error.retryable)) throw error;
       await new Promise((resolve) => setTimeout(resolve, Math.min(2_000 * 2 ** (tries - 1), 30_000)));
     }
   }
@@ -246,7 +266,7 @@ async function clone(deps: Deps, client: CloudroomClient, target: string, reposi
       `test -e ${quote(`${target}/.git`)} || { echo 'The clone did not reach the project folder.' >&2; exit 1; }`,
     ].join("\n"),
     stdin: Buffer.from(token).toString("hex"),
-  });
+  }, AbortSignal.timeout(CLONE_TIMEOUT));
   if (result.code === 0) return null;
   const error = Buffer.from(result.stderr, "hex").toString().trim().slice(-300) || `git clone exited with code ${result.code}`;
   const stdout = Buffer.from(result.stdout, "hex");

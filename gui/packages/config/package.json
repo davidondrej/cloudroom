@@ -132,6 +132,11 @@
       "source": "./src/child-process-exit.ts",
       "types": "./src/child-process-exit.ts",
       "default": "./src/child-process-exit.ts"
+    },
+    "./caller-proof": {
+      "source": "./src/caller-proof.ts",
+      "types": "./src/caller-proof.ts",
+      "default": "./src/caller-proof.ts"
     }
   },
   "scripts": {

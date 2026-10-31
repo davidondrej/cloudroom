@@ -1,3 +1,4 @@
+import { CALLER_TOKEN_HEADER } from "@cloudroom/config/caller-proof";
 import { setTimeout as sleep } from "node:timers/promises";
 import { createHash } from "node:crypto";
 import { isUtf8 } from "node:buffer";
@@ -304,6 +305,7 @@ export function internalAuthHeaders(
       hostId: args.hostId ?? inferredHost?.hostId ?? "host-1",
     })}`,
     "content-type": "application/json",
+    [CALLER_TOKEN_HEADER]: harness.callerToken,
   };
 }
 

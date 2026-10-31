@@ -369,6 +369,7 @@ export function createPluginRuntime(context: PluginRuntimeContext) {
   >();
   let boundSdk: BbSdk | undefined;
   let boundLoopbackBaseUrl: string | undefined;
+  let boundCallerToken: string | undefined;
 
   function publishStatus(
     id: string,
@@ -1490,6 +1491,7 @@ export function createPluginRuntime(context: PluginRuntimeContext) {
       },
       getAppUrl: deps.getAppUrl ?? (() => null),
       getLoopbackBaseUrl: () => boundLoopbackBaseUrl,
+      getCallerToken: () => boundCallerToken,
       ...(row.id === "accounts" && { claudeSetupToken: deps.claudeSetupToken }),
       rpcCaller: rpcCallers.issue(row.id),
       publishSignal: (channel, payload) => {
@@ -1904,9 +1906,13 @@ export function createPluginRuntime(context: PluginRuntimeContext) {
     return { outcome: "found", value };
   }
 
-  function bindSdk(args: { baseUrl: string }): void {
-    boundSdk = createNodeBbSdk({ baseUrl: args.baseUrl });
+  function bindSdk(args: { baseUrl: string; callerToken?: string }): void {
+    boundSdk = createNodeBbSdk({
+      baseUrl: args.baseUrl,
+      callerToken: args.callerToken,
+    });
     boundLoopbackBaseUrl = args.baseUrl;
+    boundCallerToken = args.callerToken;
   }
 
   return {

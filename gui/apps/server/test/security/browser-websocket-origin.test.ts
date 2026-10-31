@@ -1,3 +1,4 @@
+import { CALLER_TOKEN_HEADER } from "@cloudroom/config/caller-proof";
 import { createNodeBbSdk } from "@cloudroom/sdk/node";
 import { createNodeWebsocketFactory } from "@cloudroom/sdk/node-websocket";
 import { afterEach, describe, expect, it } from "vitest";
@@ -16,21 +17,30 @@ function websocketUrl(baseUrl: string, path: string): string {
   return url.href;
 }
 
-function openWebSocket(url: string, origin?: string): Promise<WebSocket> {
+function openWebSocket(
+  url: string,
+  origin?: string,
+  callerToken?: string,
+): Promise<WebSocket> {
   return new Promise((resolve, reject) => {
+    const headers =
+      callerToken === undefined ? {} : { [CALLER_TOKEN_HEADER]: callerToken };
     const socket =
       origin === undefined
-        ? new WebSocket(url)
-        : new WebSocket(url, { origin });
+        ? new WebSocket(url, { headers })
+        : new WebSocket(url, { headers, origin });
     sockets.add(socket);
     socket.once("open", () => resolve(socket));
     socket.once("error", reject);
   });
 }
 
-function rejectedWebSocketStatus(url: string, origin: string): Promise<number> {
+function rejectedWebSocketStatus(
+  url: string,
+  origin?: string,
+): Promise<number> {
   return new Promise((resolve, reject) => {
-    const socket = new WebSocket(url, { origin });
+    const socket = new WebSocket(url, origin === undefined ? {} : { origin });
     sockets.add(socket);
     socket.once("open", () =>
       reject(new Error(`WebSocket unexpectedly opened for ${origin}`)),
@@ -99,22 +109,35 @@ describe("browser WebSocket origin boundary", () => {
       "/ws/terminals/missing-terminal",
     );
 
-    const sameOrigin = await openWebSocket(realtimeUrl, server.baseUrl);
+    const token = server.callerToken;
+    const sameOrigin = await openWebSocket(realtimeUrl, server.baseUrl, token);
     await closeSocket(sameOrigin);
 
     const configuredApp = await openWebSocket(
       realtimeUrl,
       "https://bb.example.test",
+      token,
     );
     await closeSocket(configuredApp);
 
     const devOrigin = new URL(server.baseUrl);
     devOrigin.port = "5173";
-    const dev = await openWebSocket(realtimeUrl, devOrigin.origin);
+    const dev = await openWebSocket(realtimeUrl, devOrigin.origin, token);
     await closeSocket(dev);
 
-    const terminal = await openWebSocket(terminalUrl, server.baseUrl);
+    const terminal = await openWebSocket(terminalUrl, server.baseUrl, token);
     await closeSocket(terminal);
+  });
+
+  it("refuses realtime and terminal sockets from callers without a caller token", async () => {
+    server = await startTestServer();
+    for (const path of ["/ws", "/ws/terminals/known-to-attacker"]) {
+      const url = websocketUrl(server.baseUrl, path);
+      await expect(rejectedWebSocketStatus(url)).resolves.toBe(401);
+      await expect(rejectedWebSocketStatus(url, server.baseUrl)).resolves.toBe(
+        401,
+      );
+    }
   });
 
   it("keeps absent-Origin Node SDK realtime and CLI terminal sockets working", async () => {

@@ -39,11 +39,12 @@ import { connectAccount, registerConnect } from "./connect-relay.js";
 import { getGateAuthKind } from "../../request-context.js";
 import { noteActiveMinute, timeInApp } from "./time-in-app.js";
 import { starPrompt, starRepo } from "./star-prompt.js";
-import { popupState, recordPopup } from "./popups.js";
+import { popupState, recordChecklistHide, recordPopup } from "./popups.js";
 import { activation } from "./activation.js";
 import { disconnectGithub, githubAccount, githubAuth } from "./github-login.js";
 import { addGithubRepo, githubBranches, repoSuggestions } from "./repo-suggestions.js";
 import { projectSuggestion } from "./project-nudge.js";
+import { readUiPreferences } from "../system/ui-preferences.js";
 import { ACTIVATION_STEPS, CLOUD_CHOICE_ACTIONS, CLOUD_CHOICE_REASONS, POPUP_DETAILS, POPUPS, SETUP_ACTIONS, SETUP_AGENTS, SETUP_DETAILS, SETUP_STEPS, STARTER_PROMPTS, UPGRADE_PROMPTS } from "../system/telemetry.js";
 
 const SAFE_SETTINGS_SEARCH = /^(?=.{2,40}$)\p{L}+(?: \p{L}+){0,3}$/u;
@@ -154,7 +155,8 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: Plugin
     const parsed = z.object({ step: z.enum(ACTIVATION_STEPS), action: z.enum(["clicked", "hidden"]).default("clicked") }).strict().safeParse(body);
     if (!parsed.success) throw new ApiError(400, "invalid_activation_step", "Invalid checklist step.");
     deps.telemetry.capture({ name: "activation_step", properties: parsed.data });
-    return context.json({ ok: true });
+    const hides = parsed.data.action === "hidden" ? await recordChecklistHide(deps).catch(() => null) : null;
+    return context.json({ ok: true, hides });
   });
   app.get("/api/v1/cloudroom/time-in-app", async (context) => {
     return context.json(await timeInApp(deps));
@@ -510,6 +512,19 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: Plugin
       return null;
     });
     return context.json({ projectId });
+  });
+  app.post("/api/v1/cloudroom/account/search-rank", async context => {
+    const item = z.object({ id: z.string().min(1).max(200), title: z.string().max(500), text: z.string().max(2_000) }).strict();
+    const input = z.object({ query: z.string().min(1).max(500), items: z.array(item).min(1).max(1_500) }).strict().parse(await context.req.json());
+    const off = { probabilities: null, ranked: [] };
+    // Smart search (docs/scopes/search.md): nothing leaves the Mac unless the plan is confirmed paid and the switch isn't off.
+    const plan = cloudroom(deps).sandboxes.currentPlan();
+    if (plan === null || plan === "free" || readUiPreferences(deps)["search.smart"].value === false) return context.json(off);
+    const rank = await cloudroom(deps).sandboxes.searchRank(input, context.req.raw.signal).catch((error: unknown) => {
+      deps.logger.debug({ error }, "Search rank failed");
+      return off;
+    });
+    return context.json(rank);
   });
   app.get("/api/v1/cloudroom/account/github-branches", async context => {
     const projectId = z.string().min(1).parse(context.req.query("project"));

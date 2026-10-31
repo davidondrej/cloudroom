@@ -86,7 +86,8 @@ async function readSkill(file: string): Promise<string> {
   }
 }
 
-function instructionBody(content: string, name: string): string {
+/** The skill's instructions, or null when only Claude Code can run it (tool, model, hook or shell settings). */
+function instructionBody(content: string, name: string): string | null {
   const normalized = content.replace(/^\uFEFF/u, "").replaceAll("\r\n", "\n");
   let body = normalized;
   if (normalized.startsWith("---\n")) {
@@ -94,20 +95,13 @@ function instructionBody(content: string, name: string): string {
     const end = lines.indexOf("---", 1);
     if (end < 0) throw new Error(`Skill /${name} has invalid frontmatter`);
     const header = lines.slice(1, end).join("\n");
-    if (NATIVE_FIELDS.test(header) || /^[\s]*[\[{]/u.test(header)) {
-      throw new Error(
-        `Skill /${name} uses native Claude settings. Run it through Claude's native skill invocation instead of a Cloudroom skill tag.`,
-      );
-    }
+    if (NATIVE_FIELDS.test(header) || /^[\s]*[\[{]/u.test(header)) return null;
     body = lines
       .slice(end + 1)
       .join("\n")
       .trimStart();
   }
-  if (NATIVE_BODY.test(body))
-    throw new Error(
-      `Skill /${name} requires native Claude expansion; use its native invocation instead of a Cloudroom skill tag.`,
-    );
+  if (NATIVE_BODY.test(body)) return null;
   if (!body.trim()) throw new Error(`Skill /${name} is empty`);
   return body;
 }
@@ -126,7 +120,7 @@ function withArguments(body: string, args: string): string {
 async function loadSkill(
   skill: Skill,
   roots: readonly Root[],
-): Promise<{ file: string; body: string }> {
+): Promise<{ file: string; body: string | null; native: boolean }> {
   if (!/^[a-zA-Z0-9_-]+(?::[a-zA-Z0-9_-]+)*$/u.test(skill.name))
     throw new Error(`Unsupported skill name: ${skill.name}`);
   const injected = new Set<string>();
@@ -152,7 +146,11 @@ async function loadSkill(
       `Skill /${skill.name} is ${candidates.size ? "ambiguous" : "missing on this machine"}. Check its installation and select it again.`,
     );
   const file = [...candidates][0]!;
-  return { file, body: instructionBody(await readSkill(file), skill.name) };
+  return {
+    file,
+    body: instructionBody(await readSkill(file), skill.name),
+    native: !injected.size,
+  };
 }
 
 export async function expandClaudeSkillInput(
@@ -172,6 +170,25 @@ export async function expandClaudeSkillInput(
   const roots = await skillRoots(options);
   const loaded = new Map<string, string>();
   const resolved = new Map<string, Awaited<ReturnType<typeof loadSkill>>>();
+  // A leading skill with Claude Code settings goes to Claude Code as typed, so it runs with them.
+  const [first] = input;
+  const lead =
+    first?.type === "text"
+      ? first.mentions.find(({ start }) => start === 0)?.resource
+      : undefined;
+  if (
+    lead?.kind === "command" &&
+    lead.source === "skill" &&
+    first?.type === "text" &&
+    first.text.startsWith(`/${lead.name}`)
+  ) {
+    const skill = await loadSkill(lead, roots);
+    if (skill.body === null && skill.native)
+      return input.map((part) =>
+        part.type === "text" ? { ...part, mentions: [] } : part,
+      );
+    resolved.set(`${lead.origin}:${lead.name}`, skill);
+  }
   let remaining = MAX_INPUT_BYTES - Buffer.byteLength(JSON.stringify(input));
   const output: PromptInput[] = [];
   for (const part of input) {
@@ -202,6 +219,10 @@ export async function expandClaudeSkillInput(
       const key = `${skill.origin}:${skill.name}`;
       if (!resolved.has(key)) resolved.set(key, await loadSkill(skill, roots));
       const { file, body } = resolved.get(key)!;
+      if (body === null)
+        throw new Error(
+          `/${skill.name} uses Claude Code settings, so it only runs when /${skill.name} starts your message.`,
+        );
       if (!loaded.has(file)) {
         const args = part.text
           .slice(mention.end, mentions[index + 1]?.start)

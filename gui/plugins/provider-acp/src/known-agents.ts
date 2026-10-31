@@ -126,7 +126,7 @@ export const KNOWN_ACP_AGENTS: readonly AcpAgentDefinition[] = [
       displayName: "omp",
       command: "omp",
       args: ["acp"],
-      env: {},
+      env: { OMP_MCP_TIMEOUT_MS: "900000" },
       nativeSkillRoots: {
         user: plainRoots([
           ".agent/skills",
@@ -212,7 +212,11 @@ export const KNOWN_ACP_AGENTS: readonly AcpAgentDefinition[] = [
       displayName: "fx",
       command: "fx",
       args: ["acp"],
-      env: { FX_PERMISSION_MODE: "full-access" },
+      env: {},
+      permissionEnv: {
+        full: { FX_PERMISSION_MODE: "full-access" },
+        workspaceWrite: { FX_PERMISSION_MODE: "ask" },
+      },
     },
   },
   {

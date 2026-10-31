@@ -15,14 +15,13 @@ import {
   DESKTOP_SESSION_TTL_MS,
   PHONE_CODE_TTL_MS,
   SESSION_TTL_MS,
-  SHARE_CODE_TTL_MS,
   accountHandles,
   accountServers,
   codeHandle,
-  consumeCode,
   createCode,
   createMachine,
   createSession,
+  createShareCode,
   deleteMachine,
   formatCode,
   hasPhone,
@@ -31,6 +30,7 @@ import {
   normalizeCode,
   phoneUser,
   pickServer,
+  redeemCode,
   registerServer,
   registerVps,
   retireServer,
@@ -391,7 +391,7 @@ async function apex(request: Request, url: URL, env: Env): Promise<Response> {
       });
     }
     if (url.pathname === "/api/phone-sessions/revoke") {
-      const revoked = await revokeSessions(env.DB, server);
+      const revoked = await revokeSessions(env.DB, server.userId);
       const closed = await Promise.all(
         (await accountHandles(env.DB, server.userId)).map((handle) =>
           env.TUNNEL_DO.get(env.TUNNEL_DO.idFromName(handle))
@@ -506,13 +506,12 @@ async function visitor(
 
   if (url.pathname === "/__pair") {
     const code = normalizeCode(url.searchParams.get("code") ?? "");
-    const used = code === null ? null : await consumeCode(env.DB, code, server.id, target);
-    if (used === null) {
+    const token = code === null ? null : await redeemCode(env.DB, code, server.id, target);
+    if (token === null) {
       return target === null
         ? codePage("/__pair", WRONG_CODE)
         : messagePage("Link expired", "Open the link again.", 400);
     }
-    const token = await createSession(env.DB, server.id, target, SESSION_TTL_MS, used.userId);
     return redirect(returnUrl(serverOrigin(server, target, env), url.searchParams.get("return")), sessionCookie(token));
   }
 
@@ -539,13 +538,13 @@ async function visitor(
 
   if (url.pathname === "/__share") {
     if (target !== null) return text("Not found\n", 404);
-    if (!signedIn) {
+    if (!signedIn || !token) {
       const next = new URL(`https://${APP_HANDLE}.${env.BASE_DOMAIN}/__share${url.search}`);
       next.searchParams.set("mac", server.handle);
       next.searchParams.set("signin", "1");
       return redirect(next.toString());
     }
-    return shareRedirect(env, server, url);
+    return shareRedirect(env, server, url, token);
   }
   if (url.pathname.startsWith("/__")) return text("Not found\n", 404);
 
@@ -559,7 +558,7 @@ async function visitor(
   return forward(request, env, ctx, server, target);
 }
 
-async function shareRedirect(env: Env, mac: Server, url: URL): Promise<Response> {
+async function shareRedirect(env: Env, mac: Server, url: URL, token: string): Promise<Response> {
   const port = url.searchParams.get("port") ?? "";
   if (!PORT.test(port)) return text("Not found\n", 404);
   const machineHandle = url.searchParams.get("machine");
@@ -570,7 +569,8 @@ async function shareRedirect(env: Env, mac: Server, url: URL): Promise<Response>
         ? await serverByHandle(env.DB, machineHandle, true)
         : null;
   if (!host || (host.id !== mac.id && host.ownerServerId !== mac.id)) return text("Not found\n", 404);
-  const { code } = await createCode(env.DB, host.id, port, SHARE_CODE_TTL_MS, mac.userId);
+  const code = await createShareCode(env.DB, host.id, port, mac.userId, token);
+  if (code === null) return text("Sign in required\n", 401);
   const next = new URL(`${serverOrigin(host, port, env)}/__pair`);
   next.searchParams.set("code", code);
   next.searchParams.set("return", url.searchParams.get("return") ?? "/");
@@ -713,7 +713,7 @@ async function phoneApp(request: Request, url: URL, env: Env, ctx: ExecutionCont
     const handle = url.searchParams.get("mac") ?? "";
     const mac = HANDLE.test(handle) ? await serverByHandle(env.DB, handle, true) : null;
     if (!mac || mac.userId !== session.userId || mac.ownerServerId !== null) return text("Not found\n", 404);
-    return shareRedirect(env, mac, url);
+    return shareRedirect(env, mac, url, token);
   }
   const cloudPath = CLOUD_PATH.exec(url.pathname)?.[1];
   if (cloudPath !== undefined) return cloud(request, cloudPath, url, env, token);

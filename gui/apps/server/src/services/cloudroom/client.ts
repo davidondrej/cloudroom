@@ -270,6 +270,7 @@ const MAX_RESPONSE_BYTES = 16 * 1024 * 1024;
 const STREAM_SILENCE_MS = 45_000;
 /** The most one upload request may carry: some sandbox proxies drop requests over about 8 MB. */
 export const UPLOAD_PART = 4 * 1024 * 1024;
+const VM_RUN_TIMEOUT = 5 * 60_000;
 
 export class CloudroomClient {
   #base: string;
@@ -337,9 +338,9 @@ export class CloudroomClient {
     }) as unknown as TeleportStatus;
   }
 
-  /** Runs a shell command on the VM as its agent account (ADR 0113). No timeout: the caller decides.
-   *  Raw `bytes` replace hex stdin, halving the upload; older cores answer 404. */
-  async runOnVm(input: VmRun, signal?: AbortSignal, bytes?: Uint8Array<ArrayBuffer>): Promise<VmRunResult> {
+  /** Runs a shell command on the VM as its agent account (ADR 0113). Without a `signal`, it gives up after
+   *  `VM_RUN_TIMEOUT`. Raw `bytes` replace hex stdin, halving the upload; older cores answer 404. */
+  async runOnVm(input: VmRun, signal: AbortSignal = AbortSignal.timeout(VM_RUN_TIMEOUT), bytes?: Uint8Array<ArrayBuffer>): Promise<VmRunResult> {
     const raw = bytes ? `/raw?${new URLSearchParams({ command: input.command, ...(input.cwd ? { cwd: input.cwd } : {}) })}` : "";
     let response: Response;
     try {
@@ -360,7 +361,10 @@ export class CloudroomClient {
     } catch (error) {
       throw new CloudroomConnectionError(`Cloudroom is unreachable: ${describe(error)}`, error);
     }
-    const value = await response.json().catch(() => null) as Record<string, unknown> | null;
+    const value = await response.json().catch((error: unknown) => {
+      if (response.ok) throw new CloudroomConnectionError(`The cloud's answer was cut off: ${describe(error)}`, error);
+      return null;
+    }) as Record<string, unknown> | null;
     if (!response.ok || !value) {
       throw new CloudroomError(typeof value?.error === "string" ? value.error : `Cloudroom rejected the request (HTTP ${response.status})`, response.status);
     }

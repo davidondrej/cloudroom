@@ -291,25 +291,27 @@ if [ -n "$lifecycle_action" ]; then
   [ -z "$bootstrap_env$join_code$requested_host_daemon_port" ] || usage
 elif [ -n "$bootstrap_env" ]; then
   if [ -n "$join_code$host_id$server_url" ]; then usage; fi
-  host_id=$(node -e '
-    const name = process.argv[1];
-    if (!/^[A-Za-z_][A-Za-z0-9_]*$/u.test(name)) process.exit(2);
+  # The bundle holds a relay key, and macOS lets any process of this user read
+  # another program's environment. So it leaves the environment before any
+  # program starts, and programs get it through pipes.
+  case "$bootstrap_env" in [!A-Za-z_]*|*[!A-Za-z0-9_]*) usage ;; esac
+  eval "bootstrap_payload=\${$bootstrap_env-}"
+  unset "$bootstrap_env"
+  host_id=$(printf '%s' "$bootstrap_payload" | node -e '
     try {
-      const bundle = JSON.parse(process.env[name]);
+      const bundle = JSON.parse(require("node:fs").readFileSync(0, "utf8"));
       if (typeof bundle.hostId !== "string" || !bundle.hostId) process.exit(2);
       process.stdout.write(bundle.hostId);
     } catch { process.exit(2); }
-  ' "$bootstrap_env") || usage
-  server_url=$(node -e '
+  ') || usage
+  server_url=$(printf '%s' "$bootstrap_payload" | node -e '
     try {
-      const bundle = JSON.parse(process.env[process.argv[1]]);
+      const bundle = JSON.parse(require("node:fs").readFileSync(0, "utf8"));
       const url = new URL(bundle.serverUrl);
       if (!["http:", "https:"].includes(url.protocol) || url.username || url.password || url.search || url.hash) process.exit(2);
       process.stdout.write(url.href.replace(/\/$/u, ""));
     } catch { process.exit(2); }
-  ' "$bootstrap_env") || usage
-  bootstrap_payload=$(node -e 'process.stdout.write(process.env[process.argv[1]])' "$bootstrap_env")
-  unset "$bootstrap_env"
+  ') || usage
 else
   [ -n "$join_code" ] || usage
 fi
@@ -544,12 +546,11 @@ complete_step "Using local host-daemon port $host_daemon_port"
 package_url="${server_url%/}/install/bb-app.tgz"
 package_dir=$(mktemp -d "${TMPDIR:-/tmp}/bb-app.XXXXXX")
 package_file="$package_dir/bb-app.tgz"
-access_config="$package_dir/access.curl"
-: > "$access_config"
-chmod 600 "$access_config"
-if [ -n "$bootstrap_env" ]; then
-  BB_ENROLLMENT="$bootstrap_payload" node -e 'for (const [name,value] of Object.entries(JSON.parse(process.env.BB_ENROLLMENT).headers ?? {})) console.log("header = " + JSON.stringify(name + ": " + value))' > "$access_config"
-fi
+# The server's access headers (a relay key) reach curl through a pipe, never a
+# file: Read-only Mac commands can read temp folders.
+access_headers() {
+  [ -z "$bootstrap_env" ] || printf '%s' "$bootstrap_payload" | node -e 'for (const [name,value] of Object.entries(JSON.parse(require("node:fs").readFileSync(0, "utf8")).headers ?? {})) console.log("header = " + JSON.stringify(name + ": " + value))'
+}
 package_headers="$package_dir/headers"
 host_artifact_digest_file="$data_dir/host-artifact.sha256"
 installed_artifact_digest=
@@ -572,7 +573,7 @@ if [ ! -t 2 ]; then
 fi
 active_step "Downloading the server's bb-app package (timeout: 5 minutes)"
 if [ -n "$installed_artifact_digest" ]; then
-  package_status=$(curl --config "$access_config" "$curl_output_mode" --show-error --location \
+  package_status=$(access_headers | curl --config - "$curl_output_mode" --show-error --location \
     --connect-timeout "$CURL_CONNECT_TIMEOUT_SECONDS" \
     --max-time "$PACKAGE_DOWNLOAD_TIMEOUT_SECONDS" \
     --retry "$PACKAGE_DOWNLOAD_RETRIES" \
@@ -582,7 +583,7 @@ if [ -n "$installed_artifact_digest" ]; then
     --write-out '%{http_code}' \
     "$package_url") || package_status=000
 else
-  package_status=$(curl --config "$access_config" "$curl_output_mode" --show-error --location \
+  package_status=$(access_headers | curl --config - "$curl_output_mode" --show-error --location \
     --connect-timeout "$CURL_CONNECT_TIMEOUT_SECONDS" \
     --max-time "$PACKAGE_DOWNLOAD_TIMEOUT_SECONDS" \
     --retry "$PACKAGE_DOWNLOAD_RETRIES" \
@@ -672,7 +673,7 @@ if [ -n "$bootstrap_env" ]; then
     fail_step "The installed build does not provide the machine enrollment CLI."
     exit 1
   fi
-  ROOM_ENROLLMENT="$bootstrap_payload" ROOM_DATA_DIR="$data_dir" "$bb_cli" machine enroll --bootstrap-env ROOM_ENROLLMENT
+  printf '%s' "$bootstrap_payload" | ROOM_DATA_DIR="$data_dir" "$bb_cli" machine enroll --bootstrap-file /dev/stdin
   bootstrap_payload=
 fi
 

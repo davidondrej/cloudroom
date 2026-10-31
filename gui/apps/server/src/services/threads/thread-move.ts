@@ -49,6 +49,10 @@ export type MoveRequester = "local" | "cloud-agent";
 
 const AGENT_MOVE_REFUSED =
   "The agent asked to move this thread to another project. Cloudroom didn't move it because Mac access isn't Full. Move it from the thread menu.";
+const AGENT_MOVE_LIMITED =
+  "The agent asked to move this thread to another project. Cloudroom didn't move it because this sandbox has only the API keys picked for its Cloud loop. Move it from the thread menu.";
+const AGENT_MOVE_UNCHECKED =
+  "The agent asked to move this thread to another project. Cloudroom couldn't confirm this sandbox's API keys, so it didn't move it. Move it from the thread menu.";
 
 const pendingMoves = new Map<
   string,
@@ -61,7 +65,8 @@ export async function moveThreadToProject(
   projectRef: string,
   requestedBy: MoveRequester,
 ): Promise<ThreadMoveResult> {
-  const allowed = requestedBy === "local" || (await macAccess(deps)) === "full";
+  const refusal =
+    requestedBy === "local" ? null : await agentMoveRefusal(deps, threadId);
   const thread = getThread(deps.db, threadId);
   if (!thread || thread.deletedAt !== null) {
     throw new ApiError(404, "thread_not_found", "Thread not found");
@@ -73,7 +78,7 @@ export async function moveThreadToProject(
       "Unarchive the thread, then move it.",
     );
   }
-  if (!allowed) refuseAgentMove(deps, thread);
+  if (refusal) refuseAgentMove(deps, thread, refusal);
   const project = resolveProject(deps, projectRef);
   if (project.id === thread.projectId) {
     pendingMoves.delete(thread.id);
@@ -130,7 +135,23 @@ export function installThreadMoves(deps: AppDeps): void {
     );
 }
 
-function refuseAgentMove(deps: AppDeps, thread: Thread): never {
+async function agentMoveRefusal(
+  deps: AppDeps,
+  threadId: string,
+): Promise<string | null> {
+  if ((await macAccess(deps)) !== "full") return AGENT_MOVE_REFUSED;
+  const keys = await cloudroom(deps)
+    .keyList(threadId)
+    .catch(() => undefined);
+  if (keys === undefined) return AGENT_MOVE_UNCHECKED;
+  return keys ? AGENT_MOVE_LIMITED : null;
+}
+
+function refuseAgentMove(
+  deps: AppDeps,
+  thread: Thread,
+  message: string,
+): never {
   appendThreadEvent(deps, {
     threadId: thread.id,
     environmentId: thread.environmentId,
@@ -140,10 +161,10 @@ function refuseAgentMove(deps: AppDeps, thread: Thread): never {
       operation: "thread_move",
       operationId: createEventId(),
       status: "failed",
-      message: AGENT_MOVE_REFUSED,
+      message,
     },
   });
-  throw new ApiError(403, "mac_access", AGENT_MOVE_REFUSED);
+  throw new ApiError(403, "mac_access", message);
 }
 
 async function applyPendingThreadMove(

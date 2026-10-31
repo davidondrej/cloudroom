@@ -1,3 +1,4 @@
+import { CALLER_TOKEN_HEADER } from "@cloudroom/config/caller-proof";
 import { PERSONAL_PROJECT_ID } from "@cloudroom/domain";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
@@ -17,7 +18,10 @@ describe("Personal automations", () => {
         "/api/v1/plugins/automations/rpc/automations_create",
         {
           method: "POST",
-          headers: { "content-type": "application/json" },
+          headers: {
+            "content-type": "application/json",
+            [CALLER_TOKEN_HEADER]: server.callerToken,
+          },
           body: JSON.stringify({
             projectId: PERSONAL_PROJECT_ID,
             name: "Say hi every hour",
@@ -54,7 +58,10 @@ describe("Personal automations", () => {
         "/api/v1/plugins/automations/rpc/automations_update",
         {
           method: "POST",
-          headers: { "content-type": "application/json" },
+          headers: {
+            "content-type": "application/json",
+            [CALLER_TOKEN_HEADER]: server.callerToken,
+          },
           body: JSON.stringify({
             projectId: PERSONAL_PROJECT_ID,
             automationId: result.id,

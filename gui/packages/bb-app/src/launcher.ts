@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { createCallerProofFetch } from "@cloudroom/config/caller-proof";
 import type { ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
@@ -84,6 +85,10 @@ import {
   beginStep,
   endStep,
 } from "./launcher-output.js";
+
+const serverFetch = createCallerProofFetch((input, init) =>
+  fetch(input, init),
+);
 
 const HOST_AUTH_FILE_NAME = "auth.json";
 const HOST_ID_FILE_NAME = "host-id";
@@ -853,16 +858,6 @@ function applyManagedConfigEnv(
 ): NodeJS.ProcessEnv {
   return {
     ...args.env,
-    ...(args.config.serverHeaders !== undefined ||
-    args.config.machineCredential !== undefined
-      ? {
-          BB_SERVER_HEADERS: JSON.stringify(
-            args.config.serverHeaders ?? {
-              "x-bb-connect-machine": args.config.machineCredential,
-            },
-          ),
-        }
-      : {}),
     ...args.config.config,
     ...args.envFile.env,
   };
@@ -1549,7 +1544,7 @@ async function resolveClientSshTargetHostId(
   }
   const serverOrigin = normalizeClientServerOrigin(args.serverOrigin);
   const hostsUrl = new URL("/api/v1/hosts", serverOrigin);
-  const response = await fetch(hostsUrl);
+  const response = await serverFetch(hostsUrl);
   if (!response.ok) {
     throw new Error(
       `Failed to list hosts from ${serverOrigin}: HTTP ${response.status}`,
@@ -1651,7 +1646,7 @@ async function refreshRunningServerConfig(
   const reloadUrl = new URL("/api/v1/system/config/reload", args.serverUrl);
   let response: Response;
   try {
-    response = await fetch(reloadUrl, { method: "POST" });
+    response = await serverFetch(reloadUrl, { method: "POST" });
   } catch {
     if (args.required) {
       throw new Error(`Could not reach bb server at ${args.serverUrl}`);
@@ -2061,7 +2056,7 @@ async function requireExpectedHostDaemonId(args: {
 async function requestMatchingHostEnrollKey(
   args: RequestHostEnrollKeyArgs,
 ): Promise<HostEnrollKeyResponse> {
-  const response = await fetch(`${args.serverUrl}/internal/hosts/enroll-key`, {
+  const response = await serverFetch(`${args.serverUrl}/internal/hosts/enroll-key`, {
     body: JSON.stringify(
       createHostEnrollKeyRequestBody({
         requestedHostId: args.requestedHostId,
@@ -2363,7 +2358,7 @@ export function createServerEnv(args: CreateServerEnvArgs): NodeJS.ProcessEnv {
 }
 
 export function createDaemonEnv(args: CreateDaemonEnvArgs): NodeJS.ProcessEnv {
-  return {
+  const env: NodeJS.ProcessEnv = {
     ...stripThreadContextEnv(args.env),
     BB_APP_VERSION: args.context.appVersion,
     BB_BRIDGE_DIR: args.context.daemonBundleDir,
@@ -2373,6 +2368,9 @@ export function createDaemonEnv(args: CreateDaemonEnvArgs): NodeJS.ProcessEnv {
     BB_SERVER_URL: args.serverUrl,
     NODE_ENV: "production",
   };
+  delete env.BB_SERVER_HEADERS;
+  delete env.BB_CONNECT_MACHINE_CREDENTIAL;
+  return env;
 }
 
 function createCliEnv(args: CreateCliEnvArgs): NodeJS.ProcessEnv {

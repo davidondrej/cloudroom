@@ -1,5 +1,9 @@
+import { once } from "node:events";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import { eq } from "drizzle-orm";
 import {
+  cloudroomThreads,
   createThread,
   getEnvironment,
   getThread,
@@ -227,6 +231,85 @@ describe("thread move", () => {
       await vi.waitFor(() => expect(moveProject).toHaveBeenCalledTimes(1));
       expect(moveProject.mock.calls[0]![1]).toBe(to.id);
     });
+  });
+
+  it("never runs a Cloud agent's own move from a sandbox with a key list, even with Full Mac access", async () => {
+    const answers: [number, object][] = [
+      [200, { secrets: [".env"], found: true }],
+      [503, { error: "Sandbox records are unavailable." }],
+      [200, { secrets: null, found: false }],
+      [200, { secrets: null, found: true }],
+    ];
+    const asked: unknown[] = [];
+    const website = createServer(async (req, res) => {
+      let text = "";
+      for await (const chunk of req) text += chunk;
+      const input = JSON.parse(text || "{}") as { action?: string };
+      const [status, body] =
+        input.action === "secrets" ? answers.shift()! : [404, {}];
+      if (input.action === "secrets") asked.push(input);
+      res.writeHead(status, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(body));
+    });
+    website.listen(0, "127.0.0.1");
+    await once(website, "listening");
+    const { port } = website.address() as AddressInfo;
+    try {
+      await withTestHarness(async (harness) => {
+        const { thread, from, to, moveProject } = seedCloudThread(
+          harness,
+          "idle",
+        );
+        harness.db
+          .insert(cloudroomThreads)
+          .values({
+            threadId: thread.id,
+            coreUrl: "sandbox:thr_lead",
+            sessionId: "cr_run",
+            startRequestId: "start_run",
+            model: "gpt-5",
+            reasoning: "medium",
+          })
+          .run();
+        await setMacAccess(harness.deps, "full");
+        const service = cloudroom(harness.deps);
+        (service.sandboxes as { account: () => Promise<unknown> }).account =
+          async () => ({
+            website: `http://127.0.0.1:${port}`,
+            userId: "11111111-1111-4111-8111-111111111111",
+            token: "a".repeat(64),
+          });
+
+        for (const refused of [1, 2, 3]) {
+          service.moveRequest!(thread.id, to.id);
+          await vi.waitFor(() =>
+            expect(refusedMoves(harness, thread.id)).toHaveLength(refused),
+          );
+        }
+        expect(
+          refusedMoves(harness, thread.id).map(
+            (event) => (JSON.parse(event.data) as { message: string }).message,
+          ),
+        ).toEqual([
+          expect.stringContaining(
+            "only the API keys picked for its Cloud loop",
+          ),
+          expect.stringContaining("couldn't confirm this sandbox's API keys"),
+          expect.stringContaining("couldn't confirm this sandbox's API keys"),
+        ]);
+        expect(moveProject).not.toHaveBeenCalled();
+        expect(getThread(harness.db, thread.id)?.projectId).toBe(from.id);
+
+        service.moveRequest!(thread.id, to.id);
+        await vi.waitFor(() => expect(moveProject).toHaveBeenCalledTimes(1));
+        expect(asked).toEqual(
+          Array(4).fill({ action: "secrets", thread: "thr_lead" }),
+        );
+      });
+    } finally {
+      website.closeAllConnections();
+      website.close();
+    }
   });
 
   it("checks a queued Cloud agent move again when its turn ends", async () => {

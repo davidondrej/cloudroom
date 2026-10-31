@@ -10,6 +10,7 @@ import {
   ACP_DEFAULT_MODEL_ID,
   type AcpBridgeNativeReasoning,
   type AcpBridgePermissionCli,
+  type AcpBridgePermissionEnv,
   type AcpBridgeReasoningCli,
 } from "./bridge-protocol.js";
 import { cursorParameterizedSelection } from "./cursor-model-selection.js";
@@ -73,6 +74,7 @@ export interface AcpSessionParams {
   nativeReasoning?: AcpBridgeNativeReasoning;
   parameterizedModelPicker: boolean;
   permissionCli?: AcpBridgePermissionCli;
+  permissionEnv?: AcpBridgePermissionEnv;
   permissionMode: "accept-edits" | "full";
   workspaceWriteRoots: string[];
   envVars?: Record<string, string>;
@@ -230,10 +232,24 @@ function buildAcpModelParams(
   };
 }
 
+function acpPermissionMode(
+  permissionMode: PermissionMode,
+  providerLabel: string,
+): AcpSessionParams["permissionMode"] {
+  if (permissionMode === "auto") {
+    throw new Error(
+      `Provider "${providerLabel}" does not support permission mode "auto".`,
+    );
+  }
+  return permissionMode;
+}
+
 export function applyAcpTurnSettings(
   construction: AcpSessionParams,
   launchSpec: AcpLaunchSpec | null,
-  options: AcpModelOptions & Pick<AcpSessionExecutionOptions, "envVars">,
+  options: AcpModelOptions &
+    Pick<AcpSessionExecutionOptions, "envVars"> &
+    Partial<Pick<AcpSessionExecutionOptions, "permissionMode">>,
 ): AcpSessionParams {
   let next = construction;
   if (launchSpec !== null && options.model !== undefined) {
@@ -254,6 +270,18 @@ export function applyAcpTurnSettings(
   }
   if (Object.keys(options.envVars ?? {}).length > 0) {
     next = { ...next, envVars: { ...launchSpec?.env, ...options.envVars } };
+  }
+  if (
+    options.permissionMode !== undefined &&
+    options.permissionMode !== construction.permissionMode
+  ) {
+    next = {
+      ...next,
+      permissionMode: acpPermissionMode(
+        options.permissionMode,
+        launchSpec?.displayName ?? construction.agent.command,
+      ),
+    };
   }
   return next;
 }
@@ -329,11 +357,10 @@ export function buildAcpSessionParams(
     ...launchSpec.env,
     ...(options.envVars ?? {}),
   };
-  if (options.permissionMode === "auto") {
-    throw new Error(
-      `Provider "${args.providerLabel}" does not support permission mode "auto".`,
-    );
-  }
+  const permissionMode = acpPermissionMode(
+    options.permissionMode,
+    args.providerLabel,
+  );
   return {
     threadId: args.threadId,
     cwd,
@@ -358,7 +385,10 @@ export function buildAcpSessionParams(
     ...(launchSpec.permissionCli !== undefined
       ? { permissionCli: launchSpec.permissionCli }
       : {}),
-    permissionMode: options.permissionMode,
+    ...(launchSpec.permissionEnv !== undefined
+      ? { permissionEnv: launchSpec.permissionEnv }
+      : {}),
+    permissionMode,
     workspaceWriteRoots: [cwd, ...args.additionalWorkspaceWriteRoots],
     ...(Object.keys(envVars).length > 0 ? { envVars } : {}),
     ...(instructions ? { instructions } : {}),

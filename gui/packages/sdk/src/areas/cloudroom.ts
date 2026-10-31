@@ -268,6 +268,7 @@ export interface CloudroomArea {
   addGithubRepo(input: { repo: string }): Promise<{ projectId: string }>;
   /** Another project a new thread's prompt looks like it belongs in, or null. */
   projectSuggestion(input: { prompt: string; projectId: string }, signal?: AbortSignal): Promise<{ projectId: string | null }>;
+  searchRank(input: { query: string; items: { id: string; title: string; text: string }[] }, signal?: AbortSignal): Promise<{ probabilities: Record<string, number> | null; ranked: string[] }>;
   /** A project's branches on GitHub, for a project with no folder on this Mac. */
   githubBranches(projectId: string, signal?: AbortSignal): Promise<{ defaultBranch: string | null; branches: string[] }>;
   status(signal?: AbortSignal): Promise<CloudroomStatus>;
@@ -406,6 +407,7 @@ export function createCloudroomArea({ transport }: CreateSdkAreaArgs): Cloudroom
     repoSuggestions: (signal) => transport.readJson(request("/repo-suggestions", undefined, signal)) as Promise<{ githubConnected: boolean; repos: RepoSuggestion[] }>,
     addGithubRepo: (input) => transport.readJson(request("/repo-suggestions/github", input)) as Promise<{ projectId: string }>,
     projectSuggestion: (input, signal) => transport.readJson(request("/project-suggestion", input, signal)) as Promise<{ projectId: string | null }>,
+    searchRank: (input, signal) => transport.readJson(request("/search-rank", input, signal)) as Promise<{ probabilities: Record<string, number> | null; ranked: string[] }>,
     githubBranches: (projectId, signal) => transport.readJson(request(`/github-branches?project=${encodeURIComponent(projectId)}`, undefined, signal)) as Promise<{ defaultBranch: string | null; branches: string[] }>,
     githubLogin: (requestId) => transport.readJson(request("/github/login", { requestId })) as Promise<CloudroomCodexAuth>,
     cancelGithubLogin: (requestId) => transport.readJson(request("/github/cancel", { requestId })) as Promise<CloudroomCodexAuth>,

@@ -52,10 +52,38 @@ import { useSettingsNavSections } from "@/components/settings/settings-nav";
 import { appQueryClient } from "@/lib/app-query-client";
 import {
   ThreadPaletteResults,
+  type SearchFilters,
   type ThreadPaletteNavigationItem,
+  type ThreadPaletteSummary,
 } from "./ThreadPaletteResults";
 
 type PaletteMode = "commands" | "threads";
+
+const FILTERS_KEY = "cloudroom.search.filters";
+const FILTER_CHIPS = [
+  { key: "threads", label: "Threads", icon: "MessageSquare" },
+  { key: "projects", label: "Projects", icon: "Folder" },
+  { key: "archived", label: "Archived", icon: "Archive" },
+] as const;
+
+function readFilters(): SearchFilters {
+  const all = { threads: true, projects: true, archived: true };
+  try {
+    const saved = JSON.parse(window.localStorage.getItem(FILTERS_KEY) ?? "null") as Partial<SearchFilters> | null;
+    return saved ? { ...all, ...saved } : all;
+  } catch {
+    return all;
+  }
+}
+
+function ShortcutHint({ keys, label }: { keys: string; label: string }) {
+  return (
+    <span className="flex items-center gap-1.5">
+      <AppCommandShortcutPill shortcut={{ ariaKeyshortcuts: "", label: keys }} />
+      {label}
+    </span>
+  );
+}
 
 function invocationTarget(invocation: {
   target: EventTarget | null;
@@ -85,9 +113,33 @@ export function CommandPalette({ threadId, projectId }: CommandPaletteProps) {
     readonly ThreadPaletteNavigationItem[]
   >([]);
   const [highlightedIndex, setHighlightedIndex] = useState(0);
+  const pickedThreadIdRef = useRef<string | null>(null);
+  const handleThreadItems = useCallback(
+    (items: readonly ThreadPaletteNavigationItem[]) => {
+      setThreadItems(items);
+      const picked = pickedThreadIdRef.current;
+      const index = picked === null ? -1 : items.findIndex((item) => item.id === picked);
+      if (index >= 0) setHighlightedIndex(index);
+    },
+    [],
+  );
   const [recents, setRecents] = useState<readonly string[]>(() =>
     readPaletteRecents(),
   );
+  const [filters, setFilters] = useState<SearchFilters>(readFilters);
+  const [summary, setSummary] = useState<ThreadPaletteSummary>({ counts: null, jev: "off" });
+  const toggleFilter = useCallback((key: keyof SearchFilters) => {
+    setFilters((current) => {
+      const next = { ...current, [key]: !current[key] };
+      window.localStorage.setItem(FILTERS_KEY, JSON.stringify(next));
+      return next;
+    });
+    setHighlightedIndex(0);
+    pickedThreadIdRef.current = null;
+  }, []);
+  const includeArchived = useCallback(() => {
+    if (!filters.archived) toggleFilter("archived");
+  }, [filters.archived, toggleFilter]);
   const [installedPlugins, setInstalledPlugins] = useState<
     readonly PluginSettingsCandidate[]
   >([]);
@@ -189,6 +241,7 @@ export function CommandPalette({ threadId, projectId }: CommandPaletteProps) {
       setThreadItems([]);
       setQuery(mode === "commands" ? ">" : "");
       setHighlightedIndex(0);
+      pickedThreadIdRef.current = null;
       setOpen(true);
       loadInstalledPlugins();
     },
@@ -286,32 +339,26 @@ export function CommandPalette({ threadId, projectId }: CommandPaletteProps) {
     (event: ReactKeyboardEvent<HTMLInputElement>) => {
       if (event.nativeEvent.isComposing) return;
       if (resultCount === 0) return;
-      if (event.key === "ArrowDown") {
+      const moveTo = (index: number) => {
         event.preventDefault();
         scrollOnNextHighlightRef.current = true;
-        setHighlightedIndex((current) =>
-          current + 1 >= resultCount ? 0 : current + 1,
-        );
+        setHighlightedIndex(index);
+        pickedThreadIdRef.current = mode === "threads" ? threadItems[index]?.id ?? null : null;
+      };
+      if (event.key === "ArrowDown") {
+        moveTo(activeIndex + 1 >= resultCount ? 0 : activeIndex + 1);
         return;
       }
       if (event.key === "ArrowUp") {
-        event.preventDefault();
-        scrollOnNextHighlightRef.current = true;
-        setHighlightedIndex((current) =>
-          current <= 0 ? resultCount - 1 : current - 1,
-        );
+        moveTo(activeIndex <= 0 ? resultCount - 1 : activeIndex - 1);
         return;
       }
       if (event.key === "Home") {
-        event.preventDefault();
-        scrollOnNextHighlightRef.current = true;
-        setHighlightedIndex(0);
+        moveTo(0);
         return;
       }
       if (event.key === "End") {
-        event.preventDefault();
-        scrollOnNextHighlightRef.current = true;
-        setHighlightedIndex(resultCount - 1);
+        moveTo(resultCount - 1);
         return;
       }
       if (event.key === "Enter") {
@@ -344,13 +391,14 @@ export function CommandPalette({ threadId, projectId }: CommandPaletteProps) {
         : threadItems[activeIndex]?.optionId;
   const inputLabel =
     mode === "commands" ? "Search commands" : "Search projects and threads";
+  const placeholder = mode === "commands" ? "Search commands" : "Search...";
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogContent
         hideCloseButton
         aria-describedby={undefined}
-        className="top-[12%] max-w-xl translate-y-0 gap-0 p-0"
+        className="top-[12%] max-w-xl translate-y-0 gap-0 overflow-hidden p-0"
         onAfterCloseAutoFocus={handleAfterCloseAutoFocus}
         data-testid="command-palette"
       >
@@ -359,32 +407,74 @@ export function CommandPalette({ threadId, projectId }: CommandPaletteProps) {
             ? "Quick palette"
             : "Search projects and threads"}
         </DialogTitle>
-        <div className="flex items-center gap-2 border-b px-3">
-          <Icon
-            name="Search"
-            className="size-4 shrink-0 text-muted-foreground"
-          />
-          <input
-            autoFocus
-            role="combobox"
-            aria-expanded
-            aria-controls={listId}
-            aria-activedescendant={activeDescendant}
-            aria-label={inputLabel}
-            autoComplete="off"
-            spellCheck={false}
-            className="h-11 w-full bg-transparent text-sm outline-none placeholder:text-muted-foreground"
-            placeholder={inputLabel}
-            value={query}
-            onChange={(event) => {
-              const nextQuery = event.target.value;
-              setQuery(nextQuery);
-              if (!nextQuery.startsWith(">")) setThreadItems([]);
-              setHighlightedIndex(0);
-              if (listRef.current !== null) listRef.current.scrollTop = 0;
-            }}
-            onKeyDown={handleKeyDown}
-          />
+        <div className="border-b bg-foreground/[0.05]">
+          <div className="flex h-12 items-center gap-2.5 px-3">
+            <Icon
+              name="Search"
+              className="size-4 shrink-0 text-muted-foreground"
+            />
+            <input
+              autoFocus
+              role="combobox"
+              aria-expanded
+              aria-controls={listId}
+              aria-activedescendant={activeDescendant}
+              aria-label={inputLabel}
+              autoComplete="off"
+              spellCheck={false}
+              className="h-12 w-full bg-transparent text-[15px] outline-none placeholder:text-subtle-foreground/50"
+              placeholder={placeholder}
+              value={query}
+              onChange={(event) => {
+                const nextQuery = event.target.value;
+                setQuery(nextQuery);
+                if (!nextQuery.startsWith(">")) setThreadItems([]);
+                pickedThreadIdRef.current = null;
+                setHighlightedIndex(0);
+                if (listRef.current !== null) listRef.current.scrollTop = 0;
+              }}
+              onKeyDown={handleKeyDown}
+            />
+            {mode === "threads" && summary.jev !== "off" ? (
+              <span className="flex shrink-0 items-center gap-1.5 text-xs text-muted-foreground">
+                {summary.jev === "thinking" ? (
+                  <Icon name="Spinner" className="size-3 animate-spin" />
+                ) : (
+                  <span className="size-1.5 rounded-full bg-primary" />
+                )}
+                Jev
+              </span>
+            ) : null}
+          </div>
+          {mode === "threads" ? (
+            <div className="flex items-center gap-1.5 px-3 pb-2.5">
+              {FILTER_CHIPS.map(({ key, label, icon }) => {
+                const on = filters[key];
+                const count = summary.counts?.[key];
+                return (
+                  <button
+                    key={key}
+                    type="button"
+                    aria-pressed={on}
+                    className={cn(
+                      "inline-flex h-6 items-center gap-1.5 rounded-md px-2 text-xs transition-colors",
+                      on
+                        ? "bg-state-hover text-muted-foreground hover:text-foreground"
+                        : "border border-border/60 text-muted-foreground/60 hover:text-muted-foreground",
+                    )}
+                    onMouseDown={(event) => event.preventDefault()}
+                    onClick={() => toggleFilter(key)}
+                  >
+                    <Icon name={on ? "Check" : icon} className="size-3" aria-hidden />
+                    {label}
+                    {count === undefined ? null : (
+                      <span className="tabular-nums opacity-60">{count}</span>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+          ) : null}
         </div>
         <div
           ref={listRef}
@@ -411,14 +501,23 @@ export function CommandPalette({ threadId, projectId }: CommandPaletteProps) {
           ) : (
             <ThreadPaletteResults
               activeIndex={activeIndex}
+              filters={filters}
               onActiveIndexChange={setHighlightedIndex}
-              onNavigationItemsChange={setThreadItems}
+              onIncludeArchived={includeArchived}
+              onNavigationItemsChange={handleThreadItems}
               onSelect={chooseThread}
+              onSummaryChange={setSummary}
               optionIdPrefix={optionIdPrefix}
               query={modeQuery}
             />
           )}
         </div>
+        {resultCount > 0 ? (
+          <div className="flex items-center justify-end gap-3 px-3 pb-2.5 pt-1 text-xs text-muted-foreground">
+            <ShortcutHint keys="↑↓" label="move" />
+            <ShortcutHint keys="↵" label="open" />
+          </div>
+        ) : null}
       </DialogContent>
     </Dialog>
   );

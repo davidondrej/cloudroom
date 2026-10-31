@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { readBbAppServerHeaders } from "@cloudroom/config/bb-app-managed-config";
 import { loadHostDaemonStartConfig } from "@cloudroom/config/host-daemon";
 import { loadHostDaemonEntrypointConfig } from "@cloudroom/config/host-daemon-entrypoint";
 import {
@@ -60,7 +61,7 @@ async function runHostDaemonEntrypoint(): Promise<void> {
     bridgeBundleDir:
       hostDaemonEntrypointConfig.BB_BRIDGE_DIR ??
       resolveEntrypointBridgeBundleDir(),
-    serverHeaders: hostDaemonEntrypointConfig.BB_SERVER_HEADERS,
+    serverHeaders: await readBbAppServerHeaders(hostDaemonStartConfig.dataDir),
     autoUpdate: hostDaemonEntrypointConfig.BB_HOST_DAEMON_AUTO_UPDATE,
     enrollKey: hostDaemonEntrypointConfig.BB_HOST_ENROLL_KEY,
     hostId: hostDaemonEntrypointConfig.BB_HOST_ID,

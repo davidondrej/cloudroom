@@ -1,6 +1,7 @@
 import {
   acpNativeReasoningSchema as acpBridgeNativeReasoningSchema,
   acpPermissionCliSchema as acpBridgePermissionCliSchema,
+  acpPermissionEnvSchema as acpBridgePermissionEnvSchema,
   acpReasoningCliSchema as acpBridgeReasoningCliSchema,
 } from "@cloudroom/domain";
 import {
@@ -31,6 +32,10 @@ export type AcpBridgeNativeReasoning = z.infer<
 
 export type AcpBridgePermissionCli = z.infer<
   typeof acpBridgePermissionCliSchema
+>;
+
+export type AcpBridgePermissionEnv = z.infer<
+  typeof acpBridgePermissionEnvSchema
 >;
 
 const acpModelListParamsSchema = canonicalModelListParamsSchema.extend({

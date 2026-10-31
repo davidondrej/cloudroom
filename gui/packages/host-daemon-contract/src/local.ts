@@ -283,7 +283,10 @@ export type HostDaemonLocalSchema = {
 
 type HostDaemonLocalRoutes = Hono<{}, HostDaemonLocalSchema, "/">;
 
-export function createHostDaemonLocalClient(baseUrl: string) {
+export function createHostDaemonLocalClient(
+  baseUrl: string,
+  headers: Record<string, string> = {},
+) {
   const normalizedBaseUrl = baseUrl.replace(/\/$/, "");
-  return hc<HostDaemonLocalRoutes>(normalizedBaseUrl);
+  return hc<HostDaemonLocalRoutes>(normalizedBaseUrl, { headers });
 }

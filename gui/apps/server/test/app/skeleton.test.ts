@@ -18,7 +18,11 @@ import {
   seedProjectWithSource,
   seedThread,
 } from "../helpers/seed.js";
-import { createTestAppHarness, withTestHarness } from "../helpers/test-app.js";
+import {
+  createTestAppHarness,
+  sendCallerToken,
+  withTestHarness,
+} from "../helpers/test-app.js";
 
 type InsertMigrationParameters = [string, number];
 
@@ -198,6 +202,7 @@ describe("server skeleton", () => {
         slowApiRequestLogThresholdMs: 0,
       },
     );
+    sendCallerToken(serverApp.app, harness.callerToken);
     try {
       const response = await serverApp.app.request("/api/v1/hosts");
       expect(response.status).toBe(200);

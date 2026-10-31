@@ -29,21 +29,23 @@ async function harness() {
       { status: 201 },
     ),
   );
-  const env: NodeJS.ProcessEnv = {
-    ROOM_DATA_DIR: dir,
-    BB_ENROLLMENT: JSON.stringify(bundle()),
-    PATH: "/nonexistent",
-  };
-  return {
+  const env: NodeJS.ProcessEnv = { ROOM_DATA_DIR: dir, PATH: "/nonexistent" };
+  const bootstrapFile = join(dir, "bootstrap.json");
+  const h = {
     dir,
     fetchFn,
     env,
-    run: () =>
-      enrollMachine(
-        { bootstrapEnv: "BB_ENROLLMENT" },
-        { env, fetchFn, homeDir: dir },
-      ),
+    bootstrapFile,
+    bundle: JSON.stringify(bundle()),
+    run: async () => {
+      await writeFile(bootstrapFile, h.bundle);
+      return enrollMachine(
+        { bootstrapFile },
+        { env, fetchFn, homeDir: dir, platform: "linux" },
+      );
+    },
   };
+  return h;
 }
 
 describe("machine enroll", () => {
@@ -54,7 +56,7 @@ describe("machine enroll", () => {
     await expect(readFile(join(h.dir, "auth.json"))).rejects.toMatchObject({
       code: "ENOENT",
     });
-    h.env.BB_ENROLLMENT = JSON.stringify({
+    h.bundle = JSON.stringify({
       ...bundle(),
       credential: "replacement-bootstrap",
     });
@@ -69,7 +71,6 @@ describe("machine enroll", () => {
   it("exchanges through authorization, persists private credentials, and no-ops on same identity with expired material", async () => {
     const h = await harness();
     expect(await h.run()).toEqual({ hostId: "host_test" });
-    expect(h.env.BB_ENROLLMENT).toBeUndefined();
     expect(h.fetchFn.mock.calls[0]?.[1]?.headers).toMatchObject({
       authorization: "Bearer private-bootstrap",
     });
@@ -79,9 +80,32 @@ describe("machine enroll", () => {
     );
     expect(port).toBeGreaterThan(0);
     expect(port).toBeLessThanOrEqual(65535);
-    h.env.BB_ENROLLMENT = JSON.stringify({ ...bundle(), expiresAt: 1 });
+    h.bundle = JSON.stringify({ ...bundle(), expiresAt: 1 });
     expect(await h.run()).toEqual({ hostId: "host_test" });
     expect(h.fetchFn).toHaveBeenCalledOnce();
+  });
+
+  it("on macOS, keeps machine keys in ~/.bb-machines, which Read-only Mac access hides", async () => {
+    const h = await harness();
+    await writeFile(h.bootstrapFile, h.bundle);
+    const run = (dataDir: string) =>
+      enrollMachine(
+        { bootstrapFile: h.bootstrapFile },
+        {
+          env: { ...h.env, ROOM_DATA_DIR: dataDir },
+          fetchFn: h.fetchFn,
+          homeDir: h.dir,
+          platform: "darwin",
+        },
+      );
+    await expect(run(join(h.dir, "elsewhere"))).rejects.toThrow(
+      "inside ~/.bb-machines",
+    );
+    expect(h.fetchFn).not.toHaveBeenCalled();
+    const machine = join(h.dir, ".bb-machines", "server.example");
+    await mkdir(join(machine, "npm", "bin"), { recursive: true });
+    await writeFile(join(machine, "npm", "bin", "bb-app"), "");
+    await expect(run(machine)).resolves.toEqual({ hostId: "host_test" });
   });
 
   it("refuses a different host or server before exchanging credentials", async () => {
@@ -99,15 +123,15 @@ describe("machine enroll", () => {
 
   it("rejects invalid and expired bundles without exposing their input", async () => {
     const h = await harness();
-    h.env.BB_ENROLLMENT = '{"credential":"do-not-echo"';
+    h.bundle = '{"credential":"do-not-echo"';
     await expect(h.run()).rejects.toThrow(
       /^Invalid machine enrollment bootstrap$/,
     );
-    h.env.BB_ENROLLMENT = JSON.stringify({ ...bundle(), version: 2 });
+    h.bundle = JSON.stringify({ ...bundle(), version: 2 });
     await expect(h.run()).rejects.toThrow(
       /^Invalid machine enrollment bootstrap$/,
     );
-    h.env.BB_ENROLLMENT = JSON.stringify({ ...bundle(), expiresAt: 1 });
+    h.bundle = JSON.stringify({ ...bundle(), expiresAt: 1 });
     await expect(h.run()).rejects.toThrow("expired");
     expect(h.fetchFn).not.toHaveBeenCalled();
   });
@@ -118,14 +142,14 @@ describe("machine enroll", () => {
     await expect(h.run()).rejects.toThrow(
       /^Could not exchange machine enrollment credential$/,
     );
-    h.env.BB_ENROLLMENT = JSON.stringify(bundle());
+    h.bundle = JSON.stringify(bundle());
     await expect(h.run()).resolves.toEqual({ hostId: "host_test" });
   });
 
   it("persists provider headers and sends them directly on enrollment without redemption", async () => {
     const h = await harness();
     const headers = { "x-access-token": "private-provider-header" };
-    h.env.BB_ENROLLMENT = JSON.stringify({ ...bundle(), headers });
+    h.bundle = JSON.stringify({ ...bundle(), headers });
     await h.run();
     expect(h.fetchFn).toHaveBeenCalledOnce();
     expect(String(h.fetchFn.mock.calls[0]?.[0])).toBe(
@@ -138,9 +162,9 @@ describe("machine enroll", () => {
   });
 });
 
-it("accepts delivered direct and Connect bundles from file and environment", async () => {
+it("accepts delivered direct and Connect bundles from a file", async () => {
   for (const kind of ["direct", "connect"] as const) {
-    for (const source of ["file", "env"]) {
+    {
       const h = await harness();
       const headers =
         kind === "connect"
@@ -153,7 +177,6 @@ it("accepts delivered direct and Connect bundles from file and environment", asy
       };
       const path = join(h.dir, "bootstrap.json");
       await writeFile(path, JSON.stringify(value));
-      h.env.BB_ENROLLMENT = JSON.stringify(value);
       h.fetchFn.mockImplementation(async () =>
         Response.json(
           { hostId: "host_test", hostKey: "private-durable" },
@@ -162,10 +185,8 @@ it("accepts delivered direct and Connect bundles from file and environment", asy
       );
       await expect(
         enrollMachine(
-          source === "file"
-            ? { bootstrapFile: path }
-            : { bootstrapEnv: "BB_ENROLLMENT" },
-          { env: h.env, homeDir: h.dir, fetchFn: h.fetchFn },
+          { bootstrapFile: path },
+          { env: h.env, homeDir: h.dir, fetchFn: h.fetchFn, platform: "linux" },
         ),
       ).resolves.toEqual({ hostId: "host_test" });
       const enroll = h.fetchFn.mock.calls.find(([url]) =>

@@ -13,6 +13,7 @@ import {
   canonicalizeHostPath,
   isAbsoluteHostPath,
   isHostPathRoot,
+  isHostPathWithin,
   turnScope,
   type HostPathFlavor,
 } from "@cloudroom/domain";
@@ -23,6 +24,7 @@ import { appendThreadEventInTransaction } from "./thread-events.js";
 import { buildEnvironmentProvisionCommand } from "./thread-create-helpers.js";
 import { findHostDataDir } from "../lib/entity-lookup.js";
 import { foreignProviderOwnedPathRefusal } from "./workspace-path-claims.js";
+import { resolveExistingThreadPermissionMode } from "./thread-execution-plan.js";
 import {
   getHostPathFlavorForHost,
   invalidHostPathMessage,
@@ -129,6 +131,29 @@ function threadWritableFailure(thread: Thread): string | null {
   }
   if (thread.archivedAt !== null) {
     return "Cannot update the environment directory for an archived thread.";
+  }
+  return null;
+}
+
+function workspaceScopeFailure(
+  deps: AppDeps,
+  args: { hostId: string; path: string; threadId: string },
+): string | null {
+  let permissionMode: string;
+  try {
+    permissionMode = resolveExistingThreadPermissionMode(deps, args.threadId);
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error);
+  }
+  if (permissionMode !== "full") {
+    return "This thread runs in the workspace sandbox, so it can't move itself to another directory. Ask the user to move it, or to switch it to Full access.";
+  }
+  const dataDir = findHostDataDir(deps, args.hostId);
+  if (
+    dataDir !== null &&
+    isHostPathWithin({ rootPath: args.path, candidatePath: dataDir })
+  ) {
+    return "This directory contains Cloudroom's data folder. Use a different directory.";
   }
   return null;
 }
@@ -295,6 +320,15 @@ export async function handleUpdateEnvironmentDirectoryToolCall(
   const writableFailure = threadWritableFailure(args.thread);
   if (writableFailure) {
     return toolCallFailure(writableFailure);
+  }
+
+  const scopeFailure = workspaceScopeFailure(deps, {
+    hostId: args.currentEnvironment.hostId,
+    path: normalizedPath,
+    threadId: args.thread.id,
+  });
+  if (scopeFailure) {
+    return toolCallFailure(scopeFailure);
   }
 
   try {

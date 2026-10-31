@@ -161,6 +161,8 @@ describe("cloud git", () => {
 
   it("never runs hooks or textconv", async () => {
     writeFileSync(join(repo, ".git", "hooks", "post-index-change"), `#!/bin/sh\ntouch "${join(repo, "hook-ran")}"\n`, { mode: 0o755 });
+    git("config", "hook.cloudroom-test.command", `touch "${join(repo, "config-hook-ran")}"`);
+    git("config", "hook.cloudroom-test.event", "post-index-change");
     git("config", "diff.sample.textconv", "sed s/^/X/");
     git("config", "diff.sample.cachetextconv", "true");
     write(".gitattributes", "*.txt diff=sample\n");
@@ -170,6 +172,7 @@ describe("cloud git", () => {
     const [patch] = await cloudGitDiffPatch(run, { type: "uncommitted" }, ["keep.txt"]);
     expect(patch?.patch).toContain("\n+three");
     expect(existsSync(join(repo, "hook-ran"))).toBe(false);
+    expect(existsSync(join(repo, "config-hook-ran"))).toBe(false);
     expect(git("for-each-ref", "refs/notes")).toBe("");
     expect(git("count-objects", "-v")).toBe(objects);
   });

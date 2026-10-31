@@ -74,10 +74,10 @@ value and only shows whether a key is set.
 The Add machine installer may also store a `machineCredential` and its
 `connectMachineId` beside `serverUrl` in `config.json`. The credential is a
 secret managed by bb connect: do not copy, edit, or commit it. Both fields are
-intentionally omitted from `bb-app config list`. At runtime bb-app passes
-`machineCredential` to the standalone host daemon through `BB_SERVER_HEADERS`,
-and the daemon and its bundled `bb` CLI send it to the server as the
-`x-bb-connect-machine` header; `connectMachineId` is only stored. These are
+intentionally omitted from `bb-app config list`. At runtime the standalone host daemon reads
+`machineCredential` from this file and sends it to the server as the
+`x-bb-connect-machine` header, and agents reach the server through the daemon's
+local proxy, which adds it; `connectMachineId` is only stored. These are
 installer-managed transport details, not user configuration knobs; re-add the
 machine instead of setting them by hand.
 
@@ -516,7 +516,9 @@ selection), `reasoningCli` (launch-time reasoning flags), `nativeReasoning`
 in the composer, as `{"user": [...], "project": [...]}` relative paths; an
 entry is a path or `{"path": ..., "recursive": true, "ancestors": true}` for
 an agent that nests skills or reads them from every ancestor directory),
-`permissionCli` (permission-mode launch flags), `supportsManualCompaction`
+`permissionCli` (permission-mode launch flags), `permissionEnv`
+(permission-mode environment variables, as `{"full": {...}, "workspaceWrite":
+{...}}`; they override every other variable), `supportsManualCompaction`
 (only if the agent accepts an explicit compaction request — bb hides
 `/compact` otherwise), and `dialect` (the vendor side channels bb reads for
 the agent: `cursor`, `opencode`, `omp`, or `grok`).
@@ -746,6 +748,7 @@ client wrote first, so a stale window cannot silently clobber a newer value.
 | `sidebar.threadListProvider`      | Plugin key, `__automatic__`, or `__builtin__`       |
 | `appearance.theme`                | `light`, `dark`, or `system` (default)              |
 | `defaults.startingMachine`        | `last` (default: where the project's last new thread started) or `cloud` |
+| `defaults.showUltraEfforts`       | `true` adds Claude Ultracode and Codex Ultra to the effort menu (default `false`) |
 
 By project (`project`) is the default for `sidebar.organizationMode` when no
 value is saved. Existing server and legacy browser choices are preserved.
@@ -809,6 +812,8 @@ It checks after a 500 ms typing pause once the prompt has 5 words, and never che
 Each project gets a one-paragraph summary from the Thread purpose models, written 30 s after the app starts and when a project is added, and rewritten every 7 days; projects with no
 folder on this Mac are skipped. Settings → Wrong-project hint turns it on or off (`projectNudge.enabled`; null is on
 for paid plans and off for Free) and sets how sure Jev must be (`projectNudge.confidence`, 1–99 percent, default 70).
+Settings → Smart search turns Jev ranking in Cmd+K on or off (`search.smart`; null is on for paid plans and off for Free).
+Off keeps search on this Mac.
 
 ### Sidebar footer
 
@@ -1344,8 +1349,9 @@ machineServerUrl <url-or-null>` and `bb settings general defaultMachineAccess
 selection. Access grants serve ongoing runtime requests as well as enrolment.
 
 Bootstrap v2 carries optional provider headers. The machine persists them as
-`serverHeaders` in its private `config.json`; the launcher supplies them to the
-daemon through `BB_SERVER_HEADERS` as a JSON string map. These headers are private
+`serverHeaders` in its private `config.json`; the daemon reads them from that
+file. They never pass through a process environment, which other programs of the
+same user can read on macOS. These headers are private
 credentials and cover enrollment, HTTP, WebSocket, and runtime proxy requests.
 Direct grants omit headers. Legacy `machineCredential` configuration is translated
 into the corresponding request header when loading an existing machine.

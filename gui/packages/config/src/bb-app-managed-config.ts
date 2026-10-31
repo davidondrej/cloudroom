@@ -1,3 +1,4 @@
+import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
   acpNativeReasoningSchema,
@@ -270,6 +271,27 @@ export function parseBbAppManagedConfig(
 
 export function formatBbAppConfigPath(dataDir: string): string {
   return join(dataDir, BB_APP_CONFIG_FILE_NAME);
+}
+
+export async function readBbAppServerHeaders(
+  dataDir: string,
+): Promise<Record<string, string> | undefined> {
+  let raw: string;
+  try {
+    raw = await readFile(formatBbAppConfigPath(dataDir), "utf8");
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") {
+      return undefined;
+    }
+    throw error;
+  }
+  const config = parseBbAppManagedConfig(JSON.parse(raw));
+  return (
+    config.serverHeaders ??
+    (config.machineCredential === undefined
+      ? undefined
+      : { "x-bb-connect-machine": config.machineCredential })
+  );
 }
 
 export function formatBbAppEnvPath(dataDir: string): string {

@@ -30,6 +30,15 @@ const bbDesktopComputersSchema = z.object({
     .nullable(),
 });
 
+export const bbDesktopVitalsSchema = z.object({
+  battery: z.number().nullable(),
+  cpuBusySince: z.number().nullable(),
+  memoryRedSince: z.number().nullable(),
+  hotSince: z.number().nullable(),
+  diskFreeGb: z.number().nullable(),
+});
+export type BbDesktopVitals = z.infer<typeof bbDesktopVitalsSchema>;
+
 export const bbDesktopInfoSchema = z.object({
   autoUpdateEnabled: z.boolean().optional(),
   computers: bbDesktopComputersSchema.optional(),
@@ -43,6 +52,7 @@ export const bbDesktopInfoSchema = z.object({
   updateAvailable: z.boolean(),
   updateDownloaded: z.boolean(),
   version: z.string().min(1),
+  vitals: bbDesktopVitalsSchema.optional(),
 });
 export type BbDesktopInfo = z.infer<typeof bbDesktopInfoSchema>;
 

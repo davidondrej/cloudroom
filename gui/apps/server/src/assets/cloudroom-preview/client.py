@@ -430,7 +430,10 @@ class Proxy(http.server.BaseHTTPRequestHandler):
         except (OSError, ValueError, http.client.HTTPException):
             if not sent_headers and not self.wfile.closed:
                 with contextlib.suppress(OSError):
-                    self.send_error(502, 'Cloud preview unavailable; reconnecting')
+                    if getattr(self.server.tunnel.process, 'down', False):
+                        self.send_error(502, "Your app's server in the sandbox isn't running. A sleep stops every server: ask the agent to start it again")
+                    else:
+                        self.send_error(502, 'Cloud preview unavailable; reconnecting')
         finally:
             if response is not None:
                 response.close()
@@ -475,6 +478,7 @@ class Relay:
     joins it to the agent's port. It mimics the SSH process interface the tunnel code expects."""
     def __init__(self, core, port, device, path):
         self.core, self.port, self.device, self.stopped = core, port, device, False
+        self.down = False  # Core found nothing listening on the port, as after a sleep.
         self.stderr = io.BytesIO()
         self.path, self.listener = path, None
         if WINDOWS:
@@ -498,6 +502,7 @@ class Relay:
         return local
 
     def open(self):
+        self.down = False  # Only this attempt's answer counts, never an older one's.
         # Some sandbox proxies relay bytes only after a WebSocket handshake; cores before 0.1.35 know only cloudroom-tunnel.
         try:
             return self.connect('websocket')
@@ -522,6 +527,7 @@ class Relay:
         if len(status) >= 2 and status[1] == b'400':
             remote.close()
             raise PermissionError('Preview tunnel protocol refused')
+        self.down = status[1:2] == [b'409']
         if len(status) < 2 or status[1] != b'101':
             raise OSError('Preview tunnel refused')
         remote.settimeout(None)
@@ -667,7 +673,7 @@ MAC_LEVELS = ('off', 'read-only', 'ask', 'full')
 # apps or URLs through Launch Services, send Apple Events, create background jobs, or write preferences through cfprefsd.
 # macOS also refuses setuid tools like ps and top here; pgrep and lsof still work.
 # They also cannot reach this Mac's own servers and sockets (the app's local API, ssh-agent, Docker; DNS still works) or
-# read Cloudroom's folder beyond its tools, so they cannot act through the app or its tokens (ADR 0260). The internet works.
+# read Cloudroom's folders beyond its tools, so they cannot act through the app or its tokens (ADR 0260). The internet works.
 READ_ONLY = ('(version 1)(allow default)(deny file-write*)'
              '(allow file-write* (subpath "/private/tmp") (subpath "/private/var/folders") (literal "/dev/null") (literal "/dev/zero")'
              ' (literal "/dev/dtracehelper") (regex #"^/dev/tty") (regex #"^/dev/fd/"))'
@@ -682,16 +688,52 @@ READ_ONLY = ('(version 1)(allow default)(deny file-write*)'
              # Seatbelt's localhost misses IPv4-mapped IPv6 like ::ffff:127.0.0.1, so IPv6 is blocked outright and clients fall
              # back to IPv4. It must be ip4 here: next to an ip6 rule, (remote ip "localhost:*") stops matching 127.0.0.1.
              '(deny network-outbound (remote ip4 "localhost:*") (remote ip6 "*:*") (remote unix-socket))'
-             '(allow network-outbound (literal "/private/var/run/mDNSResponder"))'
-             '(deny file-read* (subpath (param "DATA")))'
-             '(allow file-read* (literal (param "DATA")) (subpath (param "DATA_BIN")) (subpath (param "DATA_HARNESS")))')
+             '(allow network-outbound (literal "/private/var/run/mDNSResponder"))')
+# Cloudroom's own tools stay readable in its hidden data folder.
+READ_ONLY_TOOLS = '(allow file-read* (literal (param "DATA")) (subpath (param "DATA_BIN")) (subpath (param "DATA_HARNESS")))'
+# Older machine installers kept the relay key in a temp file, and an interrupted install left it behind.
+READ_ONLY_OLD_KEYS = '(regex #"/bb-app\\.[^/]+/access\\.curl$")'
+
+
+def real_paths(paths):
+    """Seatbelt matches real paths. A path that can't be resolved stays as given."""
+    real = []
+    for path in paths:
+        with contextlib.suppress(OSError, RuntimeError):
+            path = path.resolve()
+        real.append(path)
+    return list(dict.fromkeys(real))
+
+
+def hidden_folders(data):
+    """Cloudroom's folders with keys: its data folders (this app's and any other copy's, like a dev build's), and each
+    machine install here for another Mac (~/.bb-machines), which holds that Mac's relay key. An install can be a link.
+    Older installs could use another folder; their LaunchAgent names it (install-machine.sh)."""
+    home = Path.home()
+    machines = [home / '.bb-machines']
+    with contextlib.suppress(OSError):
+        machines += list(machines[0].iterdir())
+    with contextlib.suppress(OSError):
+        for agent in (home / 'Library' / 'LaunchAgents').glob('app.getbb.host-daemon.*.plist'):
+            with contextlib.suppress(Exception):  # A broken plist must not stop Read-only commands.
+                folder = Path(plistlib.loads(agent.read_bytes())['EnvironmentVariables']['BB_DATA_DIR'])
+                if folder.is_absolute():
+                    machines.append(folder)
+    return real_paths([data, home / '.gui-cloudroom', home / '.gui-cloudroom-dev']), real_paths(machines)
 
 
 def read_only(data):
     """sandbox-exec arguments for a read-only command; `data` is Cloudroom's folder, which holds its tokens."""
     data = data.resolve()  # Seatbelt matches real paths.
-    params = {'DATA': data, 'DATA_BIN': data / 'bin', 'DATA_HARNESS': data / 'browser-harness'}
-    return ['/usr/bin/sandbox-exec', *(arg for key, path in params.items() for arg in ('-D', f'{key}={path}')), '-p', READ_ONLY]
+    folders, machines = hidden_folders(data)
+    params = {'DATA': data, 'DATA_BIN': data / 'bin', 'DATA_HARNESS': data / 'browser-harness',
+              **{f'FOLDER_{n}': path for n, path in enumerate(folders)},
+              **{f'MACHINE_{n}': path for n, path in enumerate(machines)}}
+    subpaths = lambda name, paths: ''.join(f' (subpath (param "{name}_{n}"))' for n in range(len(paths)))
+    # Machine installs come last, after the tools and temp-folder exceptions, so neither can reopen them.
+    profile = (f'{READ_ONLY}(deny file-read*{subpaths("FOLDER", folders)}){READ_ONLY_TOOLS}'
+               f'(deny file-read* file-write*{subpaths("MACHINE", machines)} {READ_ONLY_OLD_KEYS})')
+    return ['/usr/bin/sandbox-exec', *(arg for key, path in params.items() for arg in ('-D', f'{key}={path}')), '-p', profile]
 ASK = '''on run argv
 activate
 display dialog (item 1 of argv) with title "Cloudroom" buttons {"Allow", "Allow for this sandbox", "Deny"} default button "Deny" cancel button "Deny" with icon caution giving up after 300
@@ -811,6 +853,69 @@ def deliver(post, result):
     post(result)
 
 
+# A push's own tar. macOS's bsdtar refuses `..` and writing through symlinks, even when the user's PATH puts GNU tar first.
+COPY_TAR = '/usr/bin/tar' if sys.platform == 'darwin' else 'tar'
+# Where read-only commands may write (READ_ONLY), so agents can swap paths there without asking.
+TEMP_FOLDERS = ('/private/tmp', '/private/var/folders')
+
+
+def copy_command(copy):
+    """The command for a `room-cli mac push` (#222), built here from the job's names, never from the sandbox's command.
+    Returns it with where the item lands, whether that is inside a folder, and whether it is in a temp folder.
+
+    The place is resolved here, from the home folder like any push and through any links, so the popup names the real
+    place and the command writes nowhere else. Outside temp folders, agents can't change that path without asking. In a
+    temp folder they can, so there the command runs read-only (as_copy). It unpacks in a new, empty folder at the place
+    and keeps only the named item, so an archive can't add other files or reach existing ones through a hard link. Like
+    cp, the item gets a new name, which must not exist yet, or goes into a folder: it moves in if new, else is re-packed
+    there so that folders merge and files replace as before. Raises ValueError for a name or place it can't use."""
+    name, to, staged = copy['name'], copy['to'], copy.get('staged')
+    if not (isinstance(name, str) and isinstance(to, str) and 0 < len(to) <= 4096 and name not in ('', '.', '..')
+            and '/' not in name and '\0' not in name + to and len(name.encode()) <= 255):
+        raise ValueError('Invalid copy')
+    if staged is not None and not (isinstance(staged, str) and staged.startswith('/tmp/cloudroom.') and staged[15:].isascii() and staged[15:].isalnum()):
+        raise ValueError('Invalid copy')
+    home = str(Path.home())  # ~ and ~/ mean the home folder, as in Core's quote(); other paths start there too.
+    path = os.path.join(home, home + to[1:] if to == '~' or to.startswith('~/') else to)
+    inside = to.endswith('/') or os.path.isdir(path)
+    folder, final = (path, name) if inside else os.path.split(path)
+    folder = os.path.realpath(folder)
+    if final in ('', '.', '..'):
+        raise ValueError('Invalid copy')
+    place, temp = os.path.join(folder, final), any(folder == root or folder.startswith(root + '/') for root in TEMP_FOLDERS)
+    taken = '{ [ ! -e "$to" ] && [ ! -L "$to" ] || taken; }'
+    return (f"b={shlex.quote(folder)}; n={shlex.quote(name)}; to={shlex.quote(place)}; s={staged or ''}; "
+            "taken() { printf '%s already exists; nothing was copied\\n' \"$to\" >&2; return 1; }; "
+            + ('' if inside else f'{taken} || exit 1; ') +
+            'mkdir -p -- "$b" && x=$(mktemp -d "$b/.cloudroom.XXXXXX") && mkdir -- "$x/i" || exit 1; '
+            'clean() { find "$x" -type d -exec chmod u+rwx {} + 2>/dev/null; rm -rf "$x" $s; }; '
+            "trap 'clean; exit 1' HUP INT TERM; "
+            + (f'cat {staged}/* | ' if staged else '') + f'{COPY_TAR} -xzf - -C "$x/i"; c=$?; '
+            # Exactly one item, named $n. Entries are counted by NUL, since a name may hold a line break.
+            'if [ $c = 0 ] && ! { { [ -e "$x/i/$n" ] || [ -L "$x/i/$n" ]; } && '
+            '[ $(( $(find "$x/i" -mindepth 1 -maxdepth 1 -print0 | tr -dc \'\\000\' | wc -c) )) = 1 ]; }; '
+            'then echo "The copy held other files, so nothing was copied" >&2; c=1; fi; '
+            'if [ $c = 0 ]; then '
+            # Into a folder: a new item moves in. Otherwise it is packed whole first, so a failure changes nothing there.
+            + (f'{{ [ ! -e "$to" ] && [ ! -L "$to" ] && mv -- "$x/i/$n" "$to" 2>/dev/null; }} || {{ (cd -- "$x/i" && '
+               f'COPYFILE_DISABLE=1 {COPY_TAR} --no-xattrs -cf ../p.tar -- "$n") && {COPY_TAR} -xf "$x/p.tar" -C "$b"; }}; ' if inside else
+               f'{taken} && mv -- "$x/i/$n" "$to"; ')
+            + """c=$?; fi; clean; [ $c != 0 ] || printf '%s\\n' "$to"; exit $c"""), place, inside, temp
+
+
+def as_copy(job):
+    """A push runs only the command built here (copy_command), from the home folder, and always counts as a change. One
+    into a temp folder also runs read-only. Why it can't run, or None."""
+    if job.get('copy') is None:
+        return None
+    try:
+        command, place, inside, temp = copy_command(job['copy'])
+    except (KeyError, TypeError, ValueError, AttributeError):
+        return 'This copy has a name or place the Mac cannot use, so nothing was copied.'
+    job.update(command=command, cwd=None, write=True, sandbox=temp, place=(place, inside))
+    return None
+
+
 class MacJobs:
     """Mac access (ADR 0113, levels in ADR 0186): run commands from the user's cloud agents as this user, only while enabled."""
     def __init__(self, folder):
@@ -820,6 +925,9 @@ class MacJobs:
         # Ask first: one dialog at a time. "Allow for this sandbox" trusts every agent on that sandbox's core (jobs carry no
         # thread), until the helper restarts or the access level changes.
         self.asking, self.trusted, self.level = threading.Lock(), set(), None
+        # Whether each sandbox core has a key list, asked once per wake (limited), one question at a time. The helper
+        # restarts with every app launch, so this stays small.
+        self.lists, self.checking = {}, threading.Lock()
 
     def enabled(self):
         config = private_json(self.folder / 'config.json')
@@ -831,9 +939,19 @@ class MacJobs:
                 return True
             # Show what will run, including a script sent as input. Hidden parts still run: warn above them, where
             # padding cannot push the warning out of view. The command comes first, and the folder after it on one
-            # line, so a folder name cannot pose as the command. Return always denies.
+            # line, so a folder name cannot pose as the command. A push shows only where its one item lands, because
+            # the command built here places nothing else (#222). Return always denies.
+            if job.get('copy'):
+                (place, inside), home = job['place'], os.path.realpath(Path.home())
+                lands, cut = visible('~' + place[len(home):] if place.startswith(home + '/') else place, 300, 1)
+                note = ('It replaces a file with the same name there, and merges into a folder with the same name.' if inside else
+                        'It gets this new name.')
+                text = f"A cloud agent wants to copy a file or folder to your Mac.\n\nCopy to: {lands}{'…' if cut else ''}\n\nOnly this one item is copied. {note}"
+                return self.ask(core, job, text)
             command, hidden = visible(job['command'].rstrip(), 600, 10)
             warnings = f"Warning: {hidden:,} more characters of this command are not shown, and will also run.\n\n" if hidden else ''
+            if any(word in job['command'] for word in ('/tmp', '/var/folders', 'TMPDIR')):
+                warnings += 'Warning: the command uses files in a temp folder. Cloud agents can change those without asking, and they are not shown.\n\n'
             folder, cut = visible(job.get('cwd') or '~', 200, 1)
             text = f"Command:\n{block(command)}\n\nFolder: {folder}{'…' if cut else ''}"
             if job.get('stdin'):
@@ -846,24 +964,56 @@ class MacJobs:
                     text += f"\n\nInput ({count:,} line{'s' if count != 1 else ''}{', all shown' if not hidden else ''}):\n{block(script)}"
                     if hidden:
                         warnings += f"Warning: {hidden:,} more characters of its input are not shown, and will also run.\n\n"
-                except ValueError:  # Not text, such as the archive a push unpacks.
-                    warnings += f"Warning: the command also reads {len(job['stdin']) // 2:,} bytes of input that cannot be shown.\n\n"
-            text = f"A cloud agent wants to change your Mac.\n\n{warnings}{text}"
-            process = subprocess.Popen(['/usr/bin/osascript', '-e', ASK, text], stdout=subprocess.PIPE,
-                                       stderr=subprocess.DEVNULL, text=True, start_new_session=True)
-            with self.lock:
-                self.running[job['id']] = process
-            answer = process.communicate()[0].strip()
-            with self.lock:
-                self.running.pop(job['id'], None)
-            if answer == 'Allow for this sandbox':
-                self.trusted.add(core.key)
-            return answer in ('Allow', 'Allow for this sandbox')
+                except ValueError:  # Not text, such as an archive.
+                    warnings += (f"Warning: the command also reads {len(job['stdin']) // 2:,} bytes of input that cannot be shown, such as an archive. "
+                                 'What it changes can depend on that input.\n\n')
+            return self.ask(core, job, f"A cloud agent wants to change your Mac.\n\n{warnings}{text}")
+
+    def ask(self, core, job, text):
+        """Shows the Ask first popup; call it holding `asking`. Allow and "Allow for this sandbox" approve."""
+        process = subprocess.Popen(['/usr/bin/osascript', '-e', ASK, text], stdout=subprocess.PIPE,
+                                   stderr=subprocess.DEVNULL, text=True, start_new_session=True)
+        with self.lock:
+            self.running[job['id']] = process
+        answer = process.communicate()[0].strip()
+        with self.lock:
+            self.running.pop(job['id'], None)
+        if answer == 'Allow for this sandbox':
+            self.trusted.add(core.key)
+        return answer in ('Allow', 'Allow for this sandbox')
 
     def track(self, level):
         """Any access level change, even Off and back, ends "Allow for this sandbox"."""
         if level != self.level:
             self.trusted, self.level = set(), level
+
+    def limited(self, core):
+        """Why this sandbox may not use the Mac at all, or None. A sandbox with a key list (a Cloud loop's run, its
+        children and forks, ADR 0342) gets only the keys picked for it, and the Mac holds every file. The website's row
+        decides, never the sandbox, whose agent has root: only a row it found without a list allows. Each wake brings a
+        new token, so the answer is kept per core. A failed check refuses and asks again at the next job."""
+        if not core.sandbox:
+            return None
+        with self.checking:
+            limited = self.lists.get(core.key)
+            if limited is None:
+                try:
+                    account, token = (core.connection.get('account') or {}).get('id'), core.connection.get('sandboxToken')
+                    uuid.UUID(account)
+                    if not token or not core.thread:
+                        raise ValueError('No thread or sign-in to check')
+                    credential = base64.b64encode((account + ':' + token).encode()).decode()
+                    answer = control(website(core.config, core.connection) + '/api/desktop/sandboxes', {'action': 'secrets', 'thread': core.thread},
+                                     'POST', {'Authorization': 'Basic ' + credential})
+                    if answer.get('found') is not True or answer['secrets'] is not None and not isinstance(answer['secrets'], list):
+                        raise ValueError('Unconfirmed key list')
+                except (OSError, ValueError, KeyError, TypeError, AttributeError):
+                    return "The Mac could not confirm this sandbox's API keys with Cloudroom, so the command did not run. Try again."
+                limited = self.lists[core.key] = answer['secrets'] is not None
+        if limited:
+            return ("This sandbox has only the API keys picked for its Cloud loop, so it can't use the Mac. Do not retry. "
+                    'If the loop needs the Mac, the user can give it all secrets in its Secrets row. That applies from its next run.')
+        return None
 
     def refusal(self, core, job):
         """Why this job may not run as asked, or None. Everything else that is not full access runs read-only."""
@@ -871,6 +1021,13 @@ class MacJobs:
         self.track(level)
         if level == 'off':
             return 'Mac access is off.'
+        limited = self.limited(core)
+        if limited:
+            return limited
+        # After Off and the key list, so a sandbox without Mac access can't learn which Mac folders exist from a push.
+        unusable = as_copy(job)
+        if unusable:
+            return unusable
         if level == 'full' or not job.get('write') and sys.platform == 'darwin' and level in ('read-only', 'ask'):
             return None
         if sys.platform != 'darwin':
@@ -950,7 +1107,8 @@ class MacJobs:
         # Refused commands are checked too, but a script file is read only for a command that will run.
         with contextlib.suppress(OSError, ValueError, KeyError, TypeError):
             review(core, job, mac_level(self.enabled() or {}), not refused)
-        sandboxed = not refused and not job.get('write') and mac_level(self.enabled() or {}) != 'full'
+        # A push into a temp folder (as_copy) runs read-only even once approved, since agents can swap paths there.
+        sandboxed = not refused and (not job.get('write') or job.get('sandbox')) and mac_level(self.enabled() or {}) != 'full'
         login = pwd.getpwuid(os.getuid()).pw_shell or '/bin/zsh'
         # As in Local threads, Cloudroom's own tools (browser-harness) come first, then the PATH the app read from an
         # interactive login shell, so tools set up in ~/.zshrc are found, all after the user's profile sets PATH. On macOS

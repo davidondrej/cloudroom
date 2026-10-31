@@ -961,7 +961,11 @@ export function hasHostDaemonWebSocketProtocol(
   );
 }
 
-export function createHostDaemonClient(baseUrl: string, hostKey: string) {
+export function createHostDaemonClient(
+  baseUrl: string,
+  hostKey: string,
+  extraHeaders: Record<string, string> = {},
+) {
   const normalizedBaseUrl = baseUrl.replace(/\/$/, "");
   const internalBaseUrl = normalizedBaseUrl.endsWith("/internal")
     ? normalizedBaseUrl
@@ -969,6 +973,7 @@ export function createHostDaemonClient(baseUrl: string, hostKey: string) {
   return hc<HostDaemonInternalRoutes>(internalBaseUrl, {
     headers: {
       authorization: `Bearer ${hostKey}`,
+      ...extraHeaders,
     },
   });
 }

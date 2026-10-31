@@ -559,6 +559,13 @@ export class SandboxDirectory {
     return z.object({ projectId: z.string().nullable() }).parse(value).projectId;
   }
 
+  /** Jev's ranking of Cmd+K search results: finalists' probabilities, and every id best first. Null probabilities on Free (docs/scopes/search.md). */
+  async searchRank(check: { query: string; items: { id: string; title: string; text: string }[] }, signal: AbortSignal): Promise<{ probabilities: Record<string, number> | null; ranked: string[] }> {
+    const account = await this.account();
+    const value = await this.call(check, "search-rank", account ? { account, signal } : undefined);
+    return z.object({ probabilities: z.record(z.string(), z.number()).nullable(), ranked: z.array(z.string()).default([]) }).parse(value);
+  }
+
   /** Onboarding failures and the install ID link, saved with this account (ADR 0201). */
   setupEvent(event: string, context: Record<string, unknown>): Promise<unknown> {
     return this.call({ event, context }, "setup-events");
@@ -770,9 +777,11 @@ export class SandboxDirectory {
     const refused = this.refused, day = (at: number) => new Date(at).toISOString().slice(0, 10);
     return refused && Date.now() - refused.at < 360_000 && day(refused.at) === day(Date.now()) ? refused.message : null;
   }
-  /** The only API keys a thread's sandbox gets (a Cloud loop's pick, ADR 0342); null for every key. */
-  async loopSecrets(thread: string): Promise<string[] | null> {
-    return z.object({ secrets: z.array(z.string()).nullable() }).parse(await this.call({ action: "secrets", thread })).secrets;
+  /** The only API keys a thread's sandbox gets (a Cloud loop's pick, ADR 0342); null for every key, and undefined when
+   *  the website has no sandbox row for the thread. */
+  async loopSecrets(thread: string): Promise<string[] | null | undefined> {
+    const { secrets, found } = z.object({ secrets: z.array(z.string()).nullable(), found: z.boolean().optional() }).parse(await this.call({ action: "secrets", thread }));
+    return found === false ? undefined : secrets;
   }
   /** Whether this run last saw the sandbox awake, without asking the website. */
   isAwake(thread: string): boolean { return this.views.get(thread)?.state === "awake" || this.awake.has(thread); }

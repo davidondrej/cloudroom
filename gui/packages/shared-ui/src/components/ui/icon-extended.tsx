@@ -21,6 +21,7 @@ import {
   ArrowUpDownIcon,
   ArrowUpRight01Icon,
   AttachmentIcon,
+  BatteryLowIcon,
   BellDotIcon,
   Book02Icon,
   BrainIcon,
@@ -65,6 +66,7 @@ import {
   GitPullRequestIcon,
   GridViewIcon,
   Image01Icon,
+  HardDriveIcon,
   InternetIcon,
   Layers01Icon,
   LayoutTwoColumnIcon,
@@ -76,6 +78,7 @@ import {
   LockIcon,
   Logout03Icon,
   Mail02Icon,
+  RamMemoryIcon,
   MailOpen01Icon,
   Menu02Icon,
   MessageAdd02Icon,
@@ -105,6 +108,7 @@ import {
   ViewIcon,
   ViewOffIcon,
   ZoomInAreaIcon,
+  WifiDisconnected02Icon,
   ZoomOutAreaIcon,
 } from "@hugeicons/core-free-icons";
 import { type ExtendedIconMap, registerExtendedIcons } from "./icon-registry";
@@ -240,6 +244,7 @@ export const EXTENDED_ICON_MAP: ExtendedIconMap = {
   ArrowTurnDown: ArrowTurnDownIcon,
   ArrowTurnForward: ArrowTurnForwardIcon,
   ArrowUpRight: ArrowUpRight01Icon,
+  Battery: BatteryLowIcon,
   Beaker: TestTube01Icon,
   BellDot: BellDotIcon,
   Browser: BrowserIcon,
@@ -297,6 +302,7 @@ export const EXTENDED_ICON_MAP: ExtendedIconMap = {
   GitPullRequestClosed: GitPullRequestClosedIcon,
   GitPullRequestDraft: GitPullRequestDraftIcon,
   Globe: InternetIcon,
+  HardDrive: HardDriveIcon,
   GridView: GridViewIcon,
   Image: Image01Icon,
   Laptop: SoftLaptopIcon,
@@ -308,6 +314,7 @@ export const EXTENDED_ICON_MAP: ExtendedIconMap = {
   Lock: LockIcon,
   LogOut: Logout03Icon,
   Mail: Mail02Icon,
+  Memory: RamMemoryIcon,
   MailOpen: MailOpen01Icon,
   Maximize2: ExpandIcon,
   Mic: Mic02Icon,
@@ -341,6 +348,7 @@ export const EXTENDED_ICON_MAP: ExtendedIconMap = {
   TimeSchedule: TimeScheduleIcon,
   UserRound: SoftAccountIcon,
   ZoomIn: ZoomInAreaIcon,
+  WifiOff: WifiDisconnected02Icon,
   ZoomOut: ZoomOutAreaIcon,
 };
 

@@ -243,3 +243,13 @@ export function buildSuggestions(
   }
   return [];
 }
+
+const MEMBER_ROLES = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
+
+export function isOutsideAuthor(
+  item: { author: string; authorAssociation: string },
+  viewer: string | null,
+): boolean {
+  if (item.author.startsWith("app/")) return true;
+  return !MEMBER_ROLES.has(item.authorAssociation) && item.author !== viewer;
+}

@@ -623,6 +623,49 @@ it.each([true, false, null])("starts without copying local files or waiting for 
   }
 });
 
+it("clones a new Cloud thread's project when the copy plan's first request drops (#337)", async () => {
+  const harness = await createTestAppHarness();
+  const service = cloudroom(harness.deps);
+  const { host } = seedHostSession(harness.deps);
+  seedPrimaryHost(harness.deps, host.id);
+  const root = join(harness.config.dataDir, "project");
+  await mkdir(root, { recursive: true });
+  const { project } = seedProjectWithSource(harness.deps, { hostId: host.id, path: root });
+  setProjectGitRemoteUrlIfMissing(harness.db, harness.deps.hub, project.id, "https://github.com/example/project");
+  await sync.setCopyMacGithub(harness.deps, false);
+  let started = false;
+  let lookups = 0;
+  const commands: string[] = [];
+  const core = createServer(async (req, res) => {
+    const json = (body: unknown, status = 200) => { res.writeHead(status, { "Content-Type": "application/json" }); res.end(JSON.stringify(body)); };
+    if (req.url === "/v1/capabilities") return json({ version: 1, repository: "/code/test", stop: true, resume: true, launch_settings: true, workspaces: true, direct_workspaces: true, command_guard: true, sync: true, harnesses: [{ id: "codex", model: "test-model" }] });
+    if (req.url === "/v1/ready") return json({ ready: true });
+    if (req.url?.includes("/stream?")) { res.writeHead(200, { "Content-Type": "text/event-stream" }); res.write(": connected\n\n"); return; }
+    // The just-claimed sandbox drops the copy plan's first request.
+    if (req.url?.startsWith("/v1/workspaces/")) return ++lookups === 1 ? req.socket.destroy() : started ? json({ id: decodeURIComponent(req.url.split("/")[3]!), path: "/code/project" }) : json({}, 404);
+    let body = "";
+    for await (const chunk of req) body += chunk;
+    const input = JSON.parse(body || "{}");
+    if (req.url === "/v1/vm/run") { commands.push(input.command); return json({ code: 0, stdout: "", stderr: "" }); }
+    if (req.url === "/v1/sessions") { started = true; return json({ session_id: "cr_copy", receipt: { request_id: input.request_id, command: "start", input, state: "accepted" }, saving: {} }, 202); }
+    if (req.url === "/v1/sessions/cr_copy/prompts") return json({ session_id: "cr_copy", receipt: { request_id: input.request_id, command: "prompt", input, state: "accepted" }, saving: {} }, 202);
+    return json({}, 404);
+  });
+  core.listen(0, "127.0.0.1");
+  await once(core, "listening");
+  const address = core.address();
+  if (!address || typeof address === "string") throw new Error("fixture did not listen");
+  try {
+    await service.configure({ url: `http://127.0.0.1:${address.port}`, token: "fixture-" + "x".repeat(40), projectId: project.id });
+    const created = await harness.app.request("/api/v1/threads", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ executionTarget: "cloud", requestId: "dropped-plan", title: "Dropped plan", projectId: project.id, providerId: "codex", origin: "app", model: "test-model", reasoningLevel: "high", environment: { type: "project-default" }, input: [{ type: "text", text: "Read the code", mentions: [] }] }) });
+    expect(created.status, await created.clone().text()).toBe(201);
+    await expect.poll(() => commands.some(command => command.includes("git clone") && command.includes("https://github.com/example/project")), { timeout: 15000 }).toBe(true);
+    expect(lookups).toBeGreaterThan(1);
+  } finally {
+    service.stop(); core.closeAllConnections(); await new Promise<void>((resolve) => core.close(() => resolve())); await harness.cleanup();
+  }
+}, 20000);
+
 it.each(["starting", "stopping"] as const)("archives and restores a %s Cloud child without a native environment or connection", async (status) => {
   const harness = await createTestAppHarness();
   try {

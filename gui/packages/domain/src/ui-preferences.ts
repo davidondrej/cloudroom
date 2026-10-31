@@ -81,8 +81,10 @@ export const UI_PREFERENCE_KEYS = [
   "threadPurpose.reasoningEffort",
   "projectNudge.enabled",
   "projectNudge.confidence",
+  "search.smart",
   "appearance.theme",
   "defaults.startingMachine",
+  "defaults.showUltraEfforts",
 ] as const;
 export type UiPreferenceKey = (typeof UI_PREFERENCE_KEYS)[number];
 const uiPreferenceKeySchema = z.enum(UI_PREFERENCE_KEYS);
@@ -268,6 +270,11 @@ export const uiPreferenceDefinitions = {
     70,
     "How sure Jev must be, in percent (1–99), before the hint suggests another project. Lower shows it more often.",
   ),
+  "search.smart": defineUiPreference(
+    z.boolean().nullable(),
+    null,
+    "Cmd+K search asks Jev to rank results, sending a short card for each open thread to the website. null is on for paid plans and off for Free.",
+  ),
   "appearance.theme": defineUiPreference(
     z.enum(["light", "dark", "system"]),
     "system",
@@ -277,6 +284,11 @@ export const uiPreferenceDefinitions = {
     z.enum(["cloud", "last"]),
     "last",
     "Where new threads start: last for where the last new thread started (Cloud before any), or cloud.",
+  ),
+  "defaults.showUltraEfforts": defineUiPreference(
+    z.boolean(),
+    false,
+    "Show Claude Ultracode and Codex Ultra in the effort menu. A thread already on one keeps it visible.",
   ),
 } as const satisfies Record<UiPreferenceKey, UiPreferenceDefinition>;
 

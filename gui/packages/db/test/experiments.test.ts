@@ -37,6 +37,7 @@ describe("experiments", () => {
       ).toEqual([
         "changelogPreview",
         "futureExperiment",
+        "hideLaptopHints",
         "mobileApp",
         "multiMachinePicker",
         "sidebarProgressiveDisclosure",

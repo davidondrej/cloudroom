@@ -10,6 +10,7 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@cloud
 import { SettingsWithControl } from "@/components/ui/settings-section";
 import { useCloudroomAccount } from "@/hooks/queries/cloudroom-queries";
 import { createBooleanPreferenceAtom } from "@/lib/browser-storage";
+import { useChecklistHides } from "@/lib/popups";
 import { useIsNativeBrowserViewShown } from "@/hooks/useBrowserDimmingModal";
 import { fetchWithAppSurface } from "@/lib/app-surface";
 import { getPluginConfigurationRoutePath, getRootComposeRoutePath, LEGACY_PROJECT_COMPOSE_ROUTE_PATH } from "@/lib/route-paths";
@@ -130,20 +131,24 @@ export function ActivationChecklist() {
   const composing = pathname === getRootComposeRoutePath() || matchPath(LEGACY_PROJECT_COMPOSE_ROUTE_PATH, pathname) !== null;
   const data = useActivation();
   const startersShown = useStartersShown(data);
-  if (!data || hiddenUntil > Date.now() || nativeBrowserShown) return null;
+  const plan = useCloudroomAccount().data?.plan;
+  const paid = Boolean(plan && plan !== "free");
+  const [hides, saveHides] = useChecklistHides();
+  if (!data || hiddenUntil > Date.now() || nativeBrowserShown || (paid && (hides === null || hides >= 2))) return null;
   const done = STEPS.filter((step) => data.steps[step.id]).length;
   const next = STEPS.find((step) => !data.steps[step.id]);
   if (!next) return null;
   const report = (step: Step, action: "clicked" | "hidden") =>
-    void fetchWithAppSurface("/api/v1/cloudroom/activation", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ step, action }) }).catch(() => {});
+    fetchWithAppSurface("/api/v1/cloudroom/activation", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ step, action }) })
+      .then((response) => response.json() as Promise<{ hides?: number | null }>).catch(() => ({ hides: null }));
   const hide = () => {
     const until = Date.now() + HIDE_MS;
     localStorage.setItem(HIDDEN_KEY, String(until));
     setHiddenUntil(until);
-    report(next.id, "hidden");
+    void report(next.id, "hidden").then(({ hides: saved }) => { if (typeof saved === "number") saveHides(saved); });
   };
   const start = (step: (typeof STEPS)[number]) => {
-    report(step.id, "clicked");
+    void report(step.id, "clicked");
     if (!step.prompt) return navigate(getPluginConfigurationRoutePath({ pluginId: "connect" }));
     selectCloudForNewThreads();
     void navigate(getRootComposeRoutePath(), {
@@ -188,7 +193,10 @@ export function ActivationChecklist() {
             <TooltipTrigger asChild>
               <button type="button" onClick={hide} className="rounded px-1 text-[11px] text-muted-foreground/50 hover:text-muted-foreground">Hide</button>
             </TooltipTrigger>
-            <TooltipContent side="bottom">Hides this for 8 hours. It goes away for good once you finish all 5 steps.</TooltipContent>
+            <TooltipContent side="bottom">
+              {!paid ? "Hides this for 8 hours. It goes away for good once you finish all 5 steps."
+                : hides ? "Hide it now and it's gone for good." : "Hides this for 8 hours. Hide it twice and it's gone for good."}
+            </TooltipContent>
           </Tooltip>
         </TooltipProvider>
       </div>

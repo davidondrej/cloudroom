@@ -29,12 +29,13 @@ const SNAPSHOTS = 5;
 
 // One round trip per read, and no Git writes. Working-tree diffs compare against the files on disk, with untracked files
 // marked intent-to-add in a throwaway index, so nothing is hashed or stored. Untracked files over 1 MiB are listed but
-// never read. Hooks and textconv never run, and lazy fetches in partial clones are refused, so reads use only objects
-// already in the sandbox. Git failures exit non-zero; only committed line counts and squash detection are best effort.
+// never read. Hooks (also Git 2.54+ config hooks) and textconv never run, and lazy fetches in partial clones are
+// refused, so reads use only objects already in the sandbox. Git failures exit non-zero; only committed line counts and
+// squash detection are best effort.
 // Every reply is framed as "<bytes>\n<bytes of data>" so any file name survives.
 const PRELUDE = `export GIT_OPTIONAL_LOCKS=0 GIT_LITERAL_PATHSPECS=1 GIT_TERMINAL_PROMPT=0 GIT_ALLOW_PROTOCOL=none LC_ALL=C
 ulimit -t 60 2>/dev/null
-g() { git -c core.hooksPath=/dev/null -c color.ui=never -c diff.noprefix=false -c diff.mnemonicPrefix=false -c diff.relative=false -c core.splitIndex=false -c core.untrackedCache=false -c core.fsmonitor=false "$@"; }
+g() { git -c core.hooksPath=/dev/null -c hook.post-index-change.enabled=false -c color.ui=never -c diff.noprefix=false -c diff.mnemonicPrefix=false -c diff.relative=false -c core.splitIndex=false -c core.untrackedCache=false -c core.fsmonitor=false "$@"; }
 top=$(git rev-parse --show-toplevel 2>/dev/null) && cd "$top" || { echo "This folder is not a Git repository." >&2; exit 3; }
 index=$(git rev-parse --git-path index); objects=$(cd "$(git rev-parse --git-path objects)" && pwd -P)
 tmp=$(mktemp -d) || exit 1; trap 'rm -rf "$tmp"' EXIT

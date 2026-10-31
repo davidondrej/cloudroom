@@ -351,9 +351,6 @@ pub(super) async fn send(handle: &Handle, request: &str, input: &Value) -> io::R
         .call("apply_flag_settings", json!({"settings":settings}))
         .await?;
     let mut content = Vec::new();
-    if !text.is_empty() {
-        content.push(json!({"type":"text","text":text}));
-    }
     // Attachments are staged by Workspace, using the same safe reader as Pi.
     let reader = handle.clone();
     let payload = input.clone();
@@ -378,12 +375,21 @@ pub(super) async fn send(handle: &Handle, request: &str, input: &Value) -> io::R
         }
         content.push(json!({"type":"image","source":{"type":"base64","media_type":image["mimeType"],"data":image["data"]}}));
     }
+    // Claude Code reads a slash command only from the last block, so images go first and file notes join the text.
     if let Some(attachments) = input["attachments"].as_array() {
         for attachment in attachments.iter().filter(|a| a["kind"] != "image") {
             if let Some(path) = attachment["path"].as_str() {
-                content.push(json!({"type":"text","text":format!("[Attached file: {path}] Use the Read tool to inspect it.")}));
+                if !text.is_empty() {
+                    text.push('\n');
+                }
+                text.push_str(&format!(
+                    "[Attached file: {path}] Use the Read tool to inspect it."
+                ));
             }
         }
+    }
+    if !text.is_empty() {
+        content.push(json!({"type":"text","text":text}));
     }
     if content.is_empty() {
         return Err(io::Error::new(

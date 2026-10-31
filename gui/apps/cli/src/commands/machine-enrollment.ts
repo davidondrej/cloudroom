@@ -8,7 +8,7 @@ import {
   access,
 } from "node:fs/promises";
 import { homedir, hostname } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { createServer } from "node:net";
 import { mutateManagedJsonFile } from "@cloudroom/config/managed-json-file";
 import { z } from "zod";
@@ -89,7 +89,6 @@ async function reservePort(dataDir: string): Promise<void> {
 
 export interface MachineEnrollmentOptions {
   bootstrapFile?: string;
-  bootstrapEnv?: string;
 }
 
 export async function enrollMachine(
@@ -98,26 +97,16 @@ export async function enrollMachine(
     env?: NodeJS.ProcessEnv;
     homeDir?: string;
     fetchFn?: typeof fetch;
+    platform?: NodeJS.Platform;
   } = {},
 ): Promise<{ hostId: string }> {
   const env = runtime.env ?? process.env;
-  if (Boolean(options.bootstrapFile) === Boolean(options.bootstrapEnv))
+  if (!options.bootstrapFile)
     throw new Error(
-      "Specify exactly one of --bootstrap-file or --bootstrap-env",
+      "Specify --bootstrap-file (a private file, or /dev/stdin with the bundle piped in)",
     );
-  let input: string;
-  if (options.bootstrapEnv) {
-    if (!/^[A-Za-z_][A-Za-z0-9_]*$/u.test(options.bootstrapEnv))
-      throw new Error("Invalid bootstrap environment variable name");
-    const value = env[options.bootstrapEnv];
-    if (!value) throw new Error("Bootstrap environment variable is empty");
-    input = value;
-    delete env[options.bootstrapEnv];
-  } else {
-    const value = await readOptional(options.bootstrapFile!);
-    if (value === null) throw new Error("Bootstrap file was not found");
-    input = value;
-  }
+  const input = await readOptional(options.bootstrapFile);
+  if (input === null) throw new Error("Bootstrap file was not found");
   let bootstrap: z.infer<typeof bootstrapSchema>;
   try {
     bootstrap = bootstrapSchema.parse(JSON.parse(input));
@@ -137,6 +126,13 @@ export async function enrollMachine(
   if (dataDir === resolve(home, ".bb"))
     throw new Error(
       "Machine enrollment cannot use the default BB data directory",
+    );
+  if (
+    (runtime.platform ?? process.platform) === "darwin" &&
+    dirname(dataDir) !== resolve(home, ".bb-machines")
+  )
+    throw new Error(
+      "On macOS, machine enrollment needs a data directory inside ~/.bb-machines, where Read-only Mac access hides its keys",
     );
   const existingAuth = await readOptional(join(dataDir, "auth.json"));
   if (existingAuth !== null) {

@@ -114,8 +114,8 @@ treat it as an ownership assertion and refuse the default BB installation; see
 thread-creation.md and docs/configuration.md for the directory constraints.
 
 Machine enrollment v2 stores private `serverHeaders` in machine `config.json`.
-The launcher transports these through `BB_SERVER_HEADERS` (JSON string map) for
-all server requests. Do not print these headers; they can contain access tokens.
+The host daemon reads them from that file for all server requests; they never
+pass through a process environment. Do not print these headers; they can contain access tokens.
 
 ## Machine environment
 

@@ -53,6 +53,7 @@ export function createPluginRpcCallerRegistry(): PluginRpcCallerRegistry {
 
 export function createPluginRpcCallerSdk(args: {
   baseUrl: string;
+  callerToken?: string;
   token: string;
 }): BbSdk {
   const timeoutFetch = createRequestTimeoutFetch({
@@ -60,6 +61,7 @@ export function createPluginRpcCallerSdk(args: {
   });
   return createNodeBbSdk({
     baseUrl: args.baseUrl,
+    callerToken: args.callerToken,
     fetch: (input, init) => {
       const headers = new Headers(init?.headers);
       headers.set(PLUGIN_RPC_CALLER_HEADER, args.token);

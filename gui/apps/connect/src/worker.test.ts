@@ -8,7 +8,7 @@ import { decodeFrame, encodeFrame, type Frame } from "@cloudroom/tunnel-contract
 import { OFFLINE_HEADER } from "./pages";
 import { GATE_AUTH_HEADER, GATE_MACHINE_ID_HEADER, MACHINE_CREDENTIAL_HEADER, PHONE_SESSION_HEADER, SESSION_COOKIE, TUNNEL_SESSION_HEADER, TUNNEL_TARGET_HEADER } from "./protocol-headers";
 import { parseVisitorHost, requestForTunnelDo, returnUrl } from "./worker";
-import { sha256Hex } from "./store";
+import { createShareCode, sha256Hex } from "./store";
 
 type ClientWebSocket = NonNullable<
   Awaited<ReturnType<Miniflare["dispatchFetch"]>>["webSocket"]
@@ -330,12 +330,49 @@ describe("Cloudroom Connect relay", () => {
     const otherTunnel = otherTunnelResponse.webSocket!;
     serveMac(otherTunnel);
     const otherCookie = await signInPhone(otherMac);
+    const unusedCode = await phoneCode(otherMac.credential);
+    const opened = await fetchRelay(`https://${BASE}/api/computers/open`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${credential}`, "content-type": "application/json" },
+      body: JSON.stringify({ handle: otherMac.handle }),
+    });
+    expect(opened.status).toBe(200);
+    const { cookie: desktop } = (await opened.json()) as { cookie: { name: string; value: string } };
+    const desktopCookie = `${desktop.name}=${desktop.value}`;
+    expect((await fetchRelay(`${otherMac.serverUrl}/x`, { headers: { cookie: desktopCookie } })).status).toBe(200);
+    website = () => MiniflareResponse.json({ userId: "user-2" });
+    const strangerMac = await register("66666666666666666666666666666666");
+    website = () => MiniflareResponse.json({ userId: "user-1" });
+    const strangerTunnel = (await fetchRelay(`${strangerMac.serverUrl}/__tunnel?v=1`, {
+      headers: { upgrade: "websocket", authorization: `Bearer ${strangerMac.credential}` },
+    })).webSocket!;
+    serveMac(strangerTunnel);
+    const strangerCookie = await signInPhone(strangerMac);
     const cookie = await signInPhone();
     const secondCookie = await signInPhone();
     const share = await fetchRelay(`https://${handle}.${BASE}/__share?port=3000`, {
       headers: { cookie },
     });
     const shareCookie = cookieFrom(await fetchRelay(share.headers.get("location")!));
+    const unusedTicket = (await fetchRelay(`https://${handle}.${BASE}/__share?port=3000`, {
+      headers: { cookie },
+    })).headers.get("location")!;
+    const asMac = { authorization: `Bearer ${credential}`, "content-type": "application/json" };
+    const machine = (await (await fetchRelay(`https://${BASE}/api/machines`, { method: "POST", headers: asMac, body: "{}" }))
+      .json()) as { machineId: string; credential: string };
+    const { label } = (await (await fetchRelay(`https://${BASE}/api/connect/machine-label`, {
+      method: "POST",
+      headers: { [MACHINE_CREDENTIAL_HEADER]: machine.credential, "content-type": "application/json" },
+      body: "{}",
+    })).json()) as { label: string };
+    const db = await mf.getD1Database("DB");
+    const untaggedShare = "d".repeat(64);
+    await db.prepare("INSERT INTO session (token_hash, server_id, target, expires_at, created_at) VALUES (?, ?, '5173', ?, ?)")
+      .bind(await sha256Hex(untaggedShare), machine.machineId, Date.now() + 60_000, Date.now()).run();
+    const hostShare = () => fetchRelay(`https://${label}--5173.${BASE}/x`, {
+      headers: { cookie: `${SESSION_COOKIE}=${untaggedShare}` },
+    });
+    expect((await hostShare()).status).toBe(503);
     const addresses = [
       { url: `https://${handle}.${BASE}/ws`, cookie },
       { url: `https://${handle}.${BASE}/ws/terminals/test`, cookie: secondCookie },
@@ -389,16 +426,22 @@ describe("Cloudroom Connect relay", () => {
     }
     const after = await fetchRelay(`https://${handle}.${BASE}/x`, { headers: { cookie } });
     expect(after.status).toBe(401);
-    const otherStillSignedIn = await fetchRelay(`${otherMac.serverUrl}/x`, {
-      headers: { cookie: otherCookie },
-    });
-    expect(otherStillSignedIn.status).toBe(200);
+    for (const signedOut of [otherCookie, desktopCookie]) {
+      expect((await fetchRelay(`${otherMac.serverUrl}/x`, { headers: { cookie: signedOut } })).status).toBe(401);
+    }
+    expect((await fetchRelay(`https://${BASE}/pair?code=${unusedCode}`)).status).toBe(400);
+    expect((await fetchRelay(unusedTicket)).status).toBe(400);
+    expect((await hostShare()).status).toBe(401);
+    const mac = (await db.prepare("SELECT id FROM server WHERE handle = ?").bind(handle).first<{ id: string }>())!;
+    expect(await createShareCode(db, mac.id, "3000", "user-1", cookie.slice(`${SESSION_COOKIE}=`.length))).toBeNull();
+    const stranger = await fetchRelay(`${strangerMac.serverUrl}/x`, { headers: { cookie: strangerCookie } });
+    expect(await stranger.text()).toBe("mac:app:/x");
     otherTunnel.close();
+    strangerTunnel.close();
 
     const newCookie = await signInPhone();
     const working = await fetchRelay(`https://${handle}.${BASE}/x`, { headers: { cookie: newCookie } });
     expect(await working.text()).toBe("mac:app:/x");
-    const db = await mf.getD1Database("DB");
     await db.prepare("DELETE FROM session WHERE token_hash = ?")
       .bind(await sha256Hex(newCookie.split("=")[1]!)).run();
     const expired = await fetchRelay(`https://${handle}.${BASE}/x`, { headers: { cookie: newCookie } });

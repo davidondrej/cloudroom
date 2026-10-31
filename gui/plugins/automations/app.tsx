@@ -512,7 +512,7 @@ function useTemplates(onAdded: () => void): LoopTemplatesState {
             projectId,
           });
           const agent = ownAgent || defaults === null ? template : defaults;
-          if (target === "cloud") {
+          if (target === "cloud" && !template.localOnly) {
             await rpc.call("cloud_template_add", {
               projectId,
               name: template.name,

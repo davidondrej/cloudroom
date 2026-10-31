@@ -46,7 +46,8 @@ fn roots(handle: &Handle, origin: &str) -> io::Result<Vec<PathBuf>> {
     }
 }
 
-fn body(content: &str, name: &str) -> io::Result<String> {
+/// The skill's instructions, or `None` when only Claude Code can run it (tool, model, hook, shell or argument settings).
+fn body(content: &str, name: &str) -> io::Result<Option<String>> {
     let content = content.trim_start_matches('\u{feff}').replace("\r\n", "\n");
     let mut body = content.as_str();
     if content.starts_with("---\n") {
@@ -57,6 +58,24 @@ fn body(content: &str, name: &str) -> io::Result<String> {
             .ok_or_else(|| invalid(format!("Skill /{name} has invalid frontmatter")))?;
         let rest = &content[end + 4..];
         let header = &content[4..end.max(4)];
+        // Core stops native subagents unless a Skill call runs them, so a forked slash command can't run here.
+        // Flow-style headers aren't parsed, so they count as forked.
+        let unquote = |text: &str| text.trim().trim_matches(['\'', '"']).to_owned();
+        if header.trim_start().starts_with(['{', '['])
+            || header.lines().any(|line| {
+                let line = line.split('#').next().unwrap_or_default();
+                line.split_once(':').is_some_and(|(key, value)| {
+                    unquote(key) == "context" && unquote(value) == "fork"
+                })
+            })
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!(
+                    "/{name} runs as a forked Claude Code subagent, which Cloud threads don't support yet. Run it in a Local thread."
+                ),
+            ));
+        }
         let native = [
             "allowed-tools",
             "disallowed-tools",
@@ -76,24 +95,20 @@ fn body(content: &str, name: &str) -> io::Result<String> {
                     .is_some_and(|(key, _)| native.contains(&key.trim().trim_matches(['\'', '"'])))
             })
         {
-            return Err(invalid(format!(
-                "Skill /{name} uses native Claude settings. Use its native invocation instead of a Cloudroom skill tag."
-            )));
+            return Ok(None);
         }
         body = rest.trim_start();
     }
     if body.contains("!`") || body.contains("$ARGUMENTS") || body.contains("${CLAUDE_") {
-        return Err(invalid(format!(
-            "Skill /{name} requires native Claude expansion; use its native invocation instead of a Cloudroom skill tag."
-        )));
+        return Ok(None);
     }
     if body.trim().is_empty() {
         return Err(invalid(format!("Skill /{name} is empty")));
     }
-    Ok(body.into())
+    Ok(Some(body.into()))
 }
 
-fn load(handle: &Handle, name: &str, origin: &str) -> io::Result<(PathBuf, String)> {
+fn load(handle: &Handle, name: &str, origin: &str) -> io::Result<(PathBuf, Option<String>)> {
     if name.is_empty()
         || !name
             .bytes()
@@ -144,6 +159,13 @@ fn load(handle: &Handle, name: &str, origin: &str) -> io::Result<(PathBuf, Strin
 /// Returns the prompt text and a warning for each selected skill that could not load.
 /// A missing skill never fails the turn: the agent gets a short note instead.
 pub(super) fn expand(handle: &Handle, input: &Value) -> io::Result<(String, Vec<Value>)> {
+    expand_with(input, |name, origin| load(handle, name, origin))
+}
+
+fn expand_with(
+    input: &Value,
+    mut load: impl FnMut(&str, &str) -> io::Result<(PathBuf, Option<String>)>,
+) -> io::Result<(String, Vec<Value>)> {
     let original = input["text"].as_str().unwrap_or_default();
     let Some(parts) = input["content"].as_array() else {
         return Ok((original.into(), Vec::new()));
@@ -156,7 +178,11 @@ pub(super) fn expand(handle: &Handle, input: &Value) -> io::Result<(String, Vec<
     let mut loaded = HashSet::new();
     let mut selections = HashSet::new();
     let mut remaining = MAX_LINE.saturating_sub(original.len());
-    for part in parts.iter().filter(|part| part["type"] == "text") {
+    for (index, part) in parts
+        .iter()
+        .filter(|part| part["type"] == "text")
+        .enumerate()
+    {
         let text = part["text"]
             .as_str()
             .ok_or_else(|| invalid("Invalid prompt text"))?;
@@ -197,8 +223,17 @@ pub(super) fn expand(handle: &Handle, input: &Value) -> io::Result<(String, Vec<
                 ));
             }
             if selections.insert((name, origin)) {
-                match load(handle, name, origin) {
-                    Ok((directory, body)) if loaded.insert(directory.clone()) => {
+                match load(name, origin) {
+                    // A leading skill with Claude Code settings goes to Claude Code as typed, so it runs with them.
+                    Ok((_, None)) if index == 0 && start == 0 => {
+                        return Ok((original.into(), Vec::new()));
+                    }
+                    Ok((_, None)) => {
+                        return Err(invalid(format!(
+                            "/{name} uses Claude Code settings, so it only runs when /{name} starts your message."
+                        )));
+                    }
+                    Ok((directory, Some(body))) if loaded.insert(directory.clone()) => {
                         let block = format!(
                             "Skill: /{name}\nBase directory: {}\n\n{body}",
                             directory.display()
@@ -211,6 +246,9 @@ pub(super) fn expand(handle: &Handle, input: &Value) -> io::Result<(String, Vec<
                         instructions.push(block);
                     }
                     Ok(_) => {}
+                    Err(error) if error.kind() == io::ErrorKind::Unsupported => {
+                        return Err(invalid(error.to_string()));
+                    }
                     Err(error) => {
                         missing.push(format!("/{name}"));
                         warnings.push(json!({"message":format!("Skill /{name} was not loaded. The agent will look for it."),"detail":error.to_string()}));
@@ -256,4 +294,64 @@ pub(super) fn expand(handle: &Handle, input: &Value) -> io::Result<(String, Vec<
         ));
     }
     Ok((expanded, warnings))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn prompt(text: &str, name: &str) -> Value {
+        let start = text.find(&format!("/{name}")).unwrap();
+        let resource = json!({"kind":"command","source":"skill","name":name,"origin":"user"});
+        let mention = json!({"start":start,"end":start + name.len() + 1,"resource":resource});
+        json!({"text":text,"content":[{"type":"text","text":text,"mentions":[mention]}]})
+    }
+
+    #[test]
+    fn a_leading_skill_with_claude_code_settings_runs_as_typed() {
+        let native = "---\nname: native\nmodel: sonnet\nallowed-tools: Bash\n---\nDo it.\n";
+        assert_eq!(body(native, "native").unwrap(), None);
+        assert_eq!(body("Plan $ARGUMENTS", "gsd").unwrap(), None);
+        assert_eq!(
+            body("---\nname: plain\n---\nDo it.\n", "plain")
+                .unwrap()
+                .as_deref(),
+            Some("Do it.\n")
+        );
+        let load = |name: &str, _: &str| Ok((PathBuf::from("/skills/native"), body(native, name)?));
+        for fork in [
+            "context: fork",
+            "\"context\": 'fork' # isolated",
+            "{context: fork}",
+        ] {
+            let skill = format!("---\n{fork}\n---\nDo it.\n");
+            assert_eq!(
+                body(&skill, "fork").unwrap_err().kind(),
+                io::ErrorKind::Unsupported
+            );
+        }
+        let fork = |name: &str, _: &str| {
+            Ok((
+                PathBuf::new(),
+                body("---\ncontext: fork\n---\nDo it.\n", name)?,
+            ))
+        };
+        assert!(
+            expand_with(&prompt("/fork it", "fork"), fork)
+                .unwrap_err()
+                .to_string()
+                .contains("forked")
+        );
+        let text = "/native fix it";
+        assert_eq!(
+            expand_with(&prompt(text, "native"), load).unwrap(),
+            (text.into(), Vec::new())
+        );
+        assert_eq!(
+            expand_with(&prompt("please /native", "native"), load)
+                .unwrap_err()
+                .to_string(),
+            "/native uses Claude Code settings, so it only runs when /native starts your message."
+        );
+    }
 }

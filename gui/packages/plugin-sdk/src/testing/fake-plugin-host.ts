@@ -1108,6 +1108,10 @@ function createFakePluginHostInternal(
       assertLive();
       return loopbackBaseUrl;
     },
+    get experimental_loopbackHeaders(): Readonly<Record<string, string>> {
+      assertLive();
+      return {};
+    },
     get experimental_dataDir(): string {
       assertLive();
       return dataDir;

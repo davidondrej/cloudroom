@@ -104,11 +104,21 @@ import {
   browserRequestProblem,
 } from "./browser-request-guard.js";
 import {
+  arrivedOverLoopback,
+  assertTrustedCaller,
+  type CallerTrustReader,
+  callerProofRequiredResponse,
+  captureCallerTrust,
+  isOpenWithoutCallerProof,
+  isTrustedCaller,
+  PLUGIN_WIRE_HTTP_PATH,
+  registerCallerProofRoutes,
+} from "./caller-access.js";
+import {
   callPluginHostRpc,
   disposePluginHostWorkers,
 } from "./services/plugins/plugin-host-rpc.js";
 
-const PLUGIN_WIRE_HTTP_PATH = /^\/api\/v1\/plugins\/[^/]+\/http(?:\/|$)/u;
 import { rankAcceptedAssetEncodings } from "./asset-content-encoding.js";
 import { apiJsonCompression } from "./api-response-compression.js";
 
@@ -438,6 +448,7 @@ export function createApp(
 
   app.use("*", async (context, next) => {
     captureTrustedRemoteAddress(context);
+    captureCallerTrust(context, deps.callerProofs);
     if (getGateAuthKind(context) === "session") void notePhoneUse(deps).catch(() => {});
     return runWithTelemetryAppSurface(resolveRequestAppSurface(context), next);
   });
@@ -556,6 +567,22 @@ export function createApp(
       );
     }
   });
+  app.use("/api/v1/*", async (context, next) => {
+    if (PLUGIN_WIRE_HTTP_PATH.test(context.req.path)) {
+      return next();
+    }
+    const problem = browserRequestProblem(context, deps);
+    if (problem !== null) {
+      throw new ApiError(problem.status, "forbidden_origin", problem.error);
+    }
+    if (
+      isTrustedCaller(context) ||
+      isOpenWithoutCallerProof(context.req.method, context.req.path)
+    ) {
+      return next();
+    }
+    return callerProofRequiredResponse(context);
+  });
   app.use("/api/v1/development-only/*", async (_context, next) => {
     if (!deps.config.isDevelopment) {
       throw new ApiError(404, "not_found", "Not found");
@@ -563,6 +590,9 @@ export function createApp(
     return next();
   });
   app.use("/internal/*", async (context, next) => {
+    if (!isTrustedCaller(context) && arrivedOverLoopback(context)) {
+      return callerProofRequiredResponse(context);
+    }
     const normalizedPath = normalizeInternalAuthPath(context.req.path);
     if (normalizedPath === "/internal/hosts/enroll-key") {
       return next();
@@ -684,6 +714,7 @@ export function createApp(
     notifyCatalogChanged: () => deps.hub.notifySystem(["plugins-changed"]),
     warn: (message) => deps.logger.warn(message),
   });
+  registerCallerProofRoutes(publicApi, deps.callerProofs);
   registerProjectRoutes(publicApi, deps);
   registerThreadSectionRoutes(publicApi, deps);
   registerFileRoutes(publicApi, deps);
@@ -716,7 +747,7 @@ export function createApp(
   app.route("/internal", internalApi);
 
   const assertBrowserWebSocketAllowed = (
-    context: Parameters<typeof browserRequestProblem>[0],
+    context: Parameters<typeof browserRequestProblem>[0] & CallerTrustReader,
   ): void => {
     const problem = browserRequestProblem(context, deps);
     if (problem !== null) {
@@ -727,6 +758,7 @@ export function createApp(
         false,
       );
     }
+    assertTrustedCaller(context);
   };
 
   app.get(

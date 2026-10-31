@@ -18,6 +18,7 @@ export const EXTENDED_ICON_NAMES = [
   "ArrowTurnDown",
   "ArrowTurnForward",
   "ArrowUpRight",
+  "Battery",
   "Beaker",
   "BellDot",
   "Browser",
@@ -75,6 +76,7 @@ export const EXTENDED_ICON_NAMES = [
   "GitPullRequestClosed",
   "GitPullRequestDraft",
   "Globe",
+  "HardDrive",
   "GridView",
   "Image",
   "Laptop",
@@ -86,6 +88,7 @@ export const EXTENDED_ICON_NAMES = [
   "Lock",
   "LogOut",
   "Mail",
+  "Memory",
   "MailOpen",
   "Maximize2",
   "Mic",
@@ -119,6 +122,7 @@ export const EXTENDED_ICON_NAMES = [
   "TimeSchedule",
   "UserRound",
   "ZoomIn",
+  "WifiOff",
   "ZoomOut",
 ] as const;
 

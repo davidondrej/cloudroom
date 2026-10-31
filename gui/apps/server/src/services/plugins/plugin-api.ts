@@ -1,3 +1,4 @@
+import { CALLER_TOKEN_HEADER } from "@cloudroom/config/caller-proof";
 import {
   environmentCompositionSchema,
   validateServerAccessProviderDeclaration,
@@ -493,6 +494,7 @@ export function createPluginApi(options: {
   getMachineEnrollments: () => MachineEnrollments;
   getAppUrl: () => string | null;
   getLoopbackBaseUrl: () => string | undefined;
+  getCallerToken: () => string | undefined;
   claudeSetupToken?: () => PluginClaudeSetupTokenRun;
   rpcCaller: PluginRpcCallerCredential;
   publishSignal: (channel: string, payload: unknown) => void;
@@ -569,6 +571,7 @@ export function createPluginApi(options: {
     getSdk,
     getAppUrl,
     getLoopbackBaseUrl,
+    getCallerToken,
     claudeSetupToken,
     rpcCaller,
     publishSignal,
@@ -1021,6 +1024,11 @@ export function createPluginApi(options: {
       }
       return baseUrl;
     },
+    get experimental_loopbackHeaders(): Readonly<Record<string, string>> {
+      assertLive();
+      const token = getCallerToken();
+      return token === undefined ? {} : { [CALLER_TOKEN_HEADER]: token };
+    },
     get experimental_dataDir(): string {
       assertLive();
       return dataDir;
@@ -1387,6 +1395,7 @@ export function createPluginApi(options: {
         pluginId,
         createPluginRpcCallerSdk({
           baseUrl: loopbackBaseUrl,
+          callerToken: getCallerToken(),
           token: rpcCaller.token,
         }),
       );

@@ -308,6 +308,33 @@ export function ProjectNudgeSettingsSection() {
   );
 }
 
+const smartSearchAtom = createSyncedPreferenceAtom("search.smart");
+
+export function SmartSearchSettingsSection() {
+  const [enabled, setEnabled] = useAtom(smartSearchAtom);
+  const plan = useCloudroomAccount().data?.plan ?? null;
+  const paid = plan !== null && plan !== "free";
+
+  return (
+    <SettingsSection
+      title="Smart search"
+      description="Cmd+K asks Jev which thread you're looking for. It sends what you type and a short card for each open thread (title, project, one-line summary) to Cloudroom. Off keeps search on this Mac."
+    >
+      <SettingsWithControl
+        label="Smart search"
+        description={paid ? "On by default for paid plans. About 2 Cloud Credits per search." : "Paid plans only."}
+      >
+        <Switch
+          aria-label="Smart search"
+          checked={paid && enabled !== false}
+          disabled={!paid}
+          onCheckedChange={setEnabled}
+        />
+      </SettingsWithControl>
+    </SettingsSection>
+  );
+}
+
 export function ThreadPurposeSettingsSection() {
   const [enabled, setEnabled] = useAtom(threadPurposeEnabledAtom);
   const [model, setModel] = useAtom(threadPurposeModelAtom);

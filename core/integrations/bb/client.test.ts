@@ -601,6 +601,17 @@ test("times out a stalled command without resubmitting", async (t) => {
   assert.equal(service.requests.length, 1);
 });
 
+test("a VM command answer cut off after HTTP 200 is a retryable dropped connection, not a rejection", async (t) => {
+  const service = await fixture((_req, res) => {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.write('{"code":0,"stdout":"');
+    setTimeout(() => res.socket?.destroy(), 20);
+  });
+  t.after(() => service.close());
+  await assert.rejects(service.client.runOnVm({ command: "true", stdin: "" }), (error: unknown) =>
+    error instanceof CloudroomConnectionError && error.retryable && /answer was cut off/.test(error.message));
+});
+
 test("reads core status without exposing private fields as client configuration", async (t) => {
   const service = await fixture((_req, res) =>
     sendJson(res, {

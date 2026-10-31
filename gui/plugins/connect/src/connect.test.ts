@@ -719,6 +719,7 @@ describe("ConnectTunnel share activation", () => {
       shares,
       onCredentialRejected: () => {},
       getLoopbackBaseUrl: () => "http://127.0.0.1:38886",
+      getLoopbackHeaders: () => ({}),
       log: pluginBb.log,
     });
 
@@ -779,6 +780,7 @@ describe("ConnectTunnel share activation", () => {
       shares,
       onCredentialRejected: () => {},
       getLoopbackBaseUrl: () => "http://127.0.0.1:38886",
+      getLoopbackHeaders: () => ({}),
       log: pluginBb.log,
     });
 

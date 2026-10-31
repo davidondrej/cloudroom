@@ -76,6 +76,7 @@ export default async function plugin(bb: BbPluginApi) {
     store: createKvCredentialStore(bb.storage.kv, RELAY_CREDENTIAL_KV_KEY),
     shares,
     getLoopbackBaseUrl,
+    getLoopbackHeaders: () => bb.server.experimental_loopbackHeaders,
     log: bb.log,
     onStatusChange: (relayStatus) => {
       publish();

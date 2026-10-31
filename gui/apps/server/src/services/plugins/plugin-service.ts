@@ -232,7 +232,7 @@ export interface PluginService {
    * Bind the in-process BB SDK to the running server. Call once the HTTP
    * listener is up, before start(): bb.sdk throws until this runs.
    */
-  bindSdk(args: { baseUrl: string }): void;
+  bindSdk(args: { baseUrl: string; callerToken?: string }): void;
   start(): Promise<void>;
   stop(): Promise<void>;
   handleUncaughtException(error: unknown): boolean;

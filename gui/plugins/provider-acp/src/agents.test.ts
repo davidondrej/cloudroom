@@ -90,6 +90,7 @@ describe("parseCustomAcpAgents", () => {
           },
           nativeSkillRoots: { user: [".amp/skills"], project: [".amp"] },
           permissionCli: { full: ["--dangerous"] },
+          permissionEnv: { full: { AMP_MODE: "yolo" } },
         },
       ],
       reservedProviderIds: reserved,
@@ -106,6 +107,7 @@ describe("parseCustomAcpAgents", () => {
       user: [".amp/skills"],
       project: [".amp"],
     });
+    expect(launch.permissionEnv).toEqual({ full: { AMP_MODE: "yolo" } });
   });
 
   it.each([
@@ -125,6 +127,7 @@ describe("parseCustomAcpAgents", () => {
       },
     ],
     ["an unknown skill-root shape", { nativeSkillRoots: { argFlag: "-s" } }],
+    ["a permission env without a mode", { permissionEnv: {} }],
   ])("rejects %s", (_label, extra) => {
     const parsed = parseCustomAcpAgents({
       entries: [{ id: "amp", displayName: "Amp", command: "amp", ...extra }],
@@ -198,6 +201,15 @@ describe("acpProviderDeclaration", () => {
         acpProviderDeclaration(agent).experimental_nativeSkillRoots,
       ).toBeUndefined();
     }
+  });
+
+  it("starts fx in ask mode for Manual and in full access only for Full", () => {
+    const fx = KNOWN_ACP_AGENTS.find((agent) => agent.id === "acp-fx");
+    expect(fx?.launch.env).not.toHaveProperty("FX_PERMISSION_MODE");
+    expect(fx?.launch.permissionEnv).toEqual({
+      full: { FX_PERMISSION_MODE: "full-access" },
+      workspaceWrite: { FX_PERMISSION_MODE: "ask" },
+    });
   });
 
   it("groups every agent under the acp family instead of an id prefix", () => {

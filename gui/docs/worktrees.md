@@ -129,6 +129,8 @@ worktree it made and removes the ones nothing is using:
   worktree is kept; let it elapse and the worktree goes.
 - Teleporting the last thread to Cloud shortens the wait to 2 days, or to the
   retention setting if that is shorter. "Never" still keeps it.
+- Unarchive a thread after its worktree is gone and its next message sets
+  one up again.
 
 Removal runs `.bb-env-teardown.sh` inside the worktree first, then stops
 every process whose working directory is inside the worktree — the agent's

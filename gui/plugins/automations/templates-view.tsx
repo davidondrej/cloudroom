@@ -119,7 +119,9 @@ function TemplateRepoPicker({
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState<ReadonlySet<string>>(new Set());
-  const [target, setTarget] = useState<LoopTarget>("cloud");
+  const [target, setTarget] = useState<LoopTarget>(
+    template.localOnly ? "local" : "cloud",
+  );
   const [pending, setPending] = useState(false);
   const on = activeIds.size > 0;
   const choosable = (projects ?? []).filter((p) => !activeIds.has(p.id));
@@ -249,15 +251,17 @@ function TemplateRepoPicker({
                 key={option}
                 type="button"
                 aria-pressed={target === option}
-                disabled={pending}
+                disabled={pending || (option === "cloud" && template.localOnly)}
                 title={
                   option === "cloud"
-                    ? `Runs on Cloudroom's servers, even while this ${COMPUTER} is off`
+                    ? template.localOnly
+                      ? `Runs only on this ${COMPUTER}: Cloud threads can't see the project's threads`
+                      : `Runs on Cloudroom's servers, even while this ${COMPUTER} is off`
                     : `Runs on this ${COMPUTER}, only while it is awake`
                 }
                 onClick={() => setTarget(option)}
                 className={cn(
-                  "flex h-6 cursor-pointer items-center gap-1 rounded-[5px] px-2 text-xs text-muted-foreground transition-colors hover:text-foreground",
+                  "flex h-6 cursor-pointer items-center gap-1 rounded-[5px] px-2 text-xs text-muted-foreground transition-colors hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40",
                   target === option && "bg-state-hover text-foreground",
                 )}
               >

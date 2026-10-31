@@ -1019,6 +1019,19 @@ should get named, read-only accessors for the bb-managed files it may read —
 a path invites writes into bb's directory, which `bb.storage` exists to
 prevent.
 
+## `bb.server.experimental_loopbackHeaders`
+
+**What it does.** Headers that prove a request to `bb.server.loopbackBaseUrl`
+comes from the server's own process. The local API refuses most requests
+from callers that cannot pass the local caller proof, so a plugin that relays
+traffic back to the server (the Connect tunnel) adds them to each relayed
+request. Empty when the server runs without a bound SDK.
+
+**Audit before stabilizing.** Decide whether relay plugins should get a
+narrower credential than full local trust. Today every relayed request is
+trusted, so a plugin must never add these headers to traffic for any other
+origin.
+
 ## `bb.server.experimental_appUrl`
 
 **What it does.** This value gives plugins the operator-configured public app

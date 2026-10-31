@@ -11,6 +11,7 @@ import {
   isThreadQueueAutoSendPaused,
   releaseQueuedMessageClaim,
   releaseStaleQueuedMessageClaims,
+  threadHasProviderSession,
   type ClaimedQueuedThreadMessageRow,
   type DbQueryConnection,
   type QueuedThreadMessageClaimPolicy,
@@ -188,9 +189,9 @@ function admitQueuedMessage(
   ensureThreadQueueIsWritable(thread);
   const providerThreadId = getLastProviderThreadId({ db }, thread.id);
   if (thread.environmentId === null) {
-    if (providerThreadId !== null) {
+    if (threadHasProviderSession(db, thread.id)) {
       throwThreadEnvironmentUnavailable(
-        threadEnvironmentUnavailableDetails("never_attached", null),
+        threadEnvironmentUnavailableDetails("destroyed", null),
       );
     }
     return { providerThreadId };

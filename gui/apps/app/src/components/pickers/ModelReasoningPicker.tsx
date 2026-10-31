@@ -14,11 +14,13 @@ import type {
 } from "@cloudroom/server-contract";
 import type { ReasoningLevel } from "@cloudroom/domain";
 import { useQueryClient } from "@tanstack/react-query";
+import { useAtomValue } from "jotai";
 import {
   stripModelBrandPrefix,
   type ProviderPickerOption,
 } from "./model-brand-prefix";
 import { fastServiceTierLabel } from "@/lib/reasoning-labels";
+import { showUltraEffortsAtom, withoutHiddenUltraEfforts } from "@/lib/ultra-efforts";
 import { Button } from "@cloudroom/shared-ui/button";
 import { Icon } from "@cloudroom/shared-ui/icon";
 import { Input } from "@cloudroom/shared-ui/input";
@@ -244,7 +246,7 @@ export function ModelReasoningPicker({
   onModelChange,
   formatModelLabel,
   reasoningValue,
-  reasoningOptions,
+  reasoningOptions: allReasoningOptions,
   onReasoningChange,
   fastModeEnabled,
   onFastModeChange,
@@ -260,6 +262,11 @@ export function ModelReasoningPicker({
   lockModelSelection = false,
   onSelectModel,
 }: ModelReasoningPickerProps) {
+  const showUltraEfforts = useAtomValue(showUltraEffortsAtom);
+  const reasoningOptions = useMemo(
+    () => withoutHiddenUltraEfforts(allReasoningOptions, reasoningValue, showUltraEfforts),
+    [allReasoningOptions, reasoningValue, showUltraEfforts],
+  );
   const isCompactViewport = useIsCompactViewport();
   const [open, setOpen] = useState(false);
   const [effortOpen, setEffortOpen] = useState(false);

@@ -1,3 +1,15 @@
+import { spawnSync } from "node:child_process";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import type { MachineExecutor } from "@get-bb/plugin-sdk";
 import type { MachineEnrollments, EnrollmentBootstrap } from "./enrollments.js";
@@ -10,14 +22,14 @@ const bootstrap: EnrollmentBootstrap = {
   expiresAt: Date.now() + 60_000,
 };
 
-function harness() {
+function harness(prepared: EnrollmentBootstrap = bootstrap) {
   const enrollments: MachineEnrollments = {
     clearPending: vi.fn(),
     prepare: vi.fn<MachineEnrollments["prepare"]>(async () => ({
       id: "enrollment",
       hostId: "host_1",
       state: "pending",
-      bootstrap,
+      bootstrap: prepared,
     })),
     waitForConnection: vi.fn(async () => ({ hostId: "host_1" })),
   };
@@ -54,6 +66,52 @@ describe("machine bootstrap", () => {
     expect(h.enrollments.waitForConnection).toHaveBeenCalledOnce();
     expect(result).toEqual({ hostId: "host_1" });
     expect(request[0].command.join(" ")).not.toContain(bootstrap.credential);
+  });
+
+  it("pipes the bundle to node and curl, and only sh gets it in its environment", async () => {
+    const h = harness({
+      ...bootstrap,
+      headers: { "x-bb-connect-machine": "private-relay-key" },
+    });
+    await h.api.bootstrap({
+      key: "key",
+      executor: { exec: h.exec },
+      report: h.report,
+      signal: new AbortController().signal,
+    });
+    const { command, stdin } = vi.mocked(h.exec).mock.calls[0]![0];
+    const dir = mkdtempSync(join(tmpdir(), "bb-machine-bootstrap-"));
+    try {
+      const bin = join(dir, "bin");
+      mkdirSync(bin);
+      const write = (name: string, body: string) => {
+        writeFileSync(join(bin, name), body);
+        chmodSync(join(bin, name), 0o755);
+      };
+      write(
+        "node",
+        `#!/bin/sh\nif env | grep -q private-relay-key; then echo "$*" >>"${dir}/node-env-leaks"; fi\nexec "${process.execPath}" "$@"\n`,
+      );
+      write(
+        "curl",
+        `#!/bin/sh\ncat >"${dir}/curl-config"\ncat <<'EOF'\nprintf '%s %s' "$BB_ENROLLMENT" "$*" >"${dir}/installer-input"\nEOF\n`,
+      );
+      const result = spawnSync(command[0]!, command.slice(1), {
+        input: stdin,
+        env: { PATH: `${bin}:/usr/bin:/bin` },
+        encoding: "utf8",
+      });
+      expect(result.status, result.stderr).toBe(0);
+      expect(readFileSync(join(dir, "curl-config"), "utf8")).toBe(
+        'header = "x-bb-connect-machine: private-relay-key"\n',
+      );
+      expect(readFileSync(join(dir, "installer-input"), "utf8")).toBe(
+        `${stdin} --bootstrap-env BB_ENROLLMENT`,
+      );
+      expect(existsSync(join(dir, "node-env-leaks"))).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it("includes the last 20 streamed lines when the command exits non-zero", async () => {

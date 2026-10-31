@@ -9,6 +9,7 @@ import {
 import { Icon } from "@cloudroom/shared-ui/icon";
 import { cn } from "@cloudroom/shared-ui/lib/utils";
 import { Switch } from "@cloudroom/shared-ui/switch";
+import { useAtom } from "jotai";
 import {
   SettingsSection,
   SettingsWithControl,
@@ -19,6 +20,7 @@ import {
   useStartingMachine,
   type StartingMachine,
 } from "@/hooks/useStartingMachine";
+import { showUltraEffortsAtom } from "@/lib/ultra-efforts";
 import {
   SETTINGS_DROPDOWN_CONTENT_CLASS,
   SETTINGS_DROPDOWN_TRIGGER_CLASS,
@@ -36,6 +38,7 @@ export function DefaultsSettingsSection() {
   const [startingMachine, setStartingMachine] = useStartingMachine();
   const settings = useSystemConfig().data?.generalSettings;
   const updateSettings = useUpdateGeneralSettings();
+  const [showUltraEfforts, setShowUltraEfforts] = useAtom(showUltraEffortsAtom);
   return (
     <SettingsSection title="Defaults" bodyClassName="space-y-5">
       <SettingsWithControl
@@ -95,6 +98,16 @@ export function DefaultsSettingsSection() {
               });
           }}
           aria-label="Remove AI co-authors"
+        />
+      </SettingsWithControl>
+      <SettingsWithControl
+        label="Show Ultra effort levels"
+        description="Adds Claude Ultracode and Codex Ultra to the effort menu. They launch many parallel agents and use a lot of usage."
+      >
+        <Switch
+          checked={showUltraEfforts}
+          onCheckedChange={setShowUltraEfforts}
+          aria-label="Show Ultra effort levels"
         />
       </SettingsWithControl>
     </SettingsSection>

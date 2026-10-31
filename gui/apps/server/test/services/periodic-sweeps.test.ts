@@ -544,10 +544,7 @@ describe("runPeriodicSweeps", () => {
         path: "/tmp/destroyed-with-large-history",
         status: "destroyed",
       });
-      const thread = seedThread(harness.deps, {
-        environmentId: environment.id,
-        projectId: project.id,
-      });
+      const thread = seedThread(harness.deps, { projectId: project.id });
       const eventCount = 150;
       for (let sequence = 1; sequence <= eventCount; sequence += 1) {
         seedEvent(harness.deps, {

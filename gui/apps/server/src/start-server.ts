@@ -5,6 +5,7 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ServerConfig } from "@cloudroom/config/server";
+import { createCallerProofIssuer } from "@cloudroom/config/caller-proof";
 import { isLoopbackHostname } from "@cloudroom/config/loopback";
 import { moveLegacyUserSkills, resolveUserSkillsRootPath } from "@cloudroom/config/skill-storage-paths";
 import { toOptionalString } from "@cloudroom/config/strings";
@@ -190,6 +191,9 @@ export async function runServer(serverConfig: ServerConfig): Promise<void> {
   });
   pendingInteractions.start();
 
+  const callerProofs = await createCallerProofIssuer({
+    dataDir: serverConfig.BB_DATA_DIR,
+  });
   const appVersion = createAppVersionService({
     config: runtimeConfig,
     desktopVersion: process.env.BB_DESKTOP_VERSION,
@@ -204,6 +208,7 @@ export async function runServer(serverConfig: ServerConfig): Promise<void> {
     {
       appVersion,
       bbAppManagedConfig,
+      callerProofs,
       config: runtimeConfig,
       db,
       hub,
@@ -293,6 +298,7 @@ export async function runServer(serverConfig: ServerConfig): Promise<void> {
 
   pluginService.bindSdk({
     baseUrl: `http://127.0.0.1:${serverConfig.BB_SERVER_PORT}`,
+    callerToken: callerProofs.issueInternal(),
   });
   void pluginService
     .start()

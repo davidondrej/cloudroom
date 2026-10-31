@@ -1,9 +1,25 @@
 import { describe, expect, it } from "vitest";
 import { getExperiments } from "@cloudroom/db";
-import { experimentsSchema } from "@cloudroom/domain";
+import { defaultExperiments, experimentsSchema } from "@cloudroom/domain";
 import { systemConfigResponseSchema } from "@cloudroom/server-contract";
 import { readJson } from "../helpers/json.js";
-import { withTestHarness } from "../helpers/test-app.js";
+import { withTestHarness, type TestAppHarness } from "../helpers/test-app.js";
+
+const allOn = {
+  changelogPreview: true,
+  mobileApp: true,
+  multiMachinePicker: true,
+  sidebarProgressiveDisclosure: true,
+  timelineWindowing: true,
+};
+
+function putExperiments(harness: TestAppHarness, body: unknown) {
+  return harness.app.request("/api/v1/settings/experiments", {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
 
 describe("experiments settings", () => {
   it("serves the shipped experiment defaults in /system/config", async () => {
@@ -11,13 +27,7 @@ describe("experiments settings", () => {
       const response = await harness.app.request("/api/v1/system/config");
       expect(response.status).toBe(200);
       const body = systemConfigResponseSchema.parse(await readJson(response));
-      expect(body.experiments).toEqual({
-        changelogPreview: false,
-        mobileApp: false,
-        multiMachinePicker: false,
-        sidebarProgressiveDisclosure: false,
-        timelineWindowing: false,
-      });
+      expect(body.experiments).toEqual(defaultExperiments);
     });
   });
 
@@ -26,40 +36,16 @@ describe("experiments settings", () => {
       const put = await harness.app.request("/api/v1/settings/experiments", {
         method: "PUT",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          changelogPreview: true,
-          mobileApp: true,
-          multiMachinePicker: true,
-          sidebarProgressiveDisclosure: true,
-          timelineWindowing: true,
-        }),
+        body: JSON.stringify(allOn),
       });
       expect(put.status).toBe(200);
-      expect(experimentsSchema.parse(await readJson(put))).toEqual({
-        changelogPreview: true,
-        mobileApp: true,
-        multiMachinePicker: true,
-        sidebarProgressiveDisclosure: true,
-        timelineWindowing: true,
-      });
-      expect(getExperiments(harness.db)).toEqual({
-        changelogPreview: true,
-        mobileApp: true,
-        multiMachinePicker: true,
-        sidebarProgressiveDisclosure: true,
-        timelineWindowing: true,
-      });
+      expect(experimentsSchema.parse(await readJson(put))).toEqual({ ...defaultExperiments, ...allOn });
+      expect(getExperiments(harness.db)).toEqual({ ...defaultExperiments, ...allOn });
 
       const config = await harness.app.request("/api/v1/system/config");
       expect(
         systemConfigResponseSchema.parse(await readJson(config)).experiments,
-      ).toEqual({
-        changelogPreview: true,
-        mobileApp: true,
-        multiMachinePicker: true,
-        sidebarProgressiveDisclosure: true,
-        timelineWindowing: true,
-      });
+      ).toEqual({ ...defaultExperiments, ...allOn });
     });
   });
 
@@ -86,17 +72,12 @@ describe("experiments settings", () => {
     });
   });
 
-  it("rejects payloads that are not the full experiments object", async () => {
+  it("keeps settings a payload leaves out and ignores unknown ones", async () => {
     await withTestHarness(async (harness) => {
-      const response = await harness.app.request(
-        "/api/v1/settings/experiments",
-        {
-          method: "PUT",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({}),
-        },
-      );
-      expect(response.status).toBe(400);
+      expect((await putExperiments(harness, { hideLaptopHints: true })).status).toBe(200);
+      expect((await putExperiments(harness, { changelogPreview: true, futureExperiment: true })).status).toBe(200);
+      expect(getExperiments(harness.db)).toEqual({ ...defaultExperiments, hideLaptopHints: true, changelogPreview: true });
+      expect((await putExperiments(harness, { changelogPreview: "yes" })).status).toBe(400);
     });
   });
 });

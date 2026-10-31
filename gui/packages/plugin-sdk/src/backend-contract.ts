@@ -1935,6 +1935,15 @@ export interface PluginServerApi {
   readonly loopbackBaseUrl: string;
 
   /**
+   * Headers that prove a request to `loopbackBaseUrl` comes from this
+   * server's own process. The local API refuses most requests from
+   * callers that cannot prove they run outside an agent sandbox, so a plugin
+   * that relays traffic back to the server (e.g. a tunnel) adds these to each
+   * relayed request. Never send them to any other origin.
+   */
+  readonly experimental_loopbackHeaders: Readonly<Record<string, string>>;
+
+  /**
    * This server's data directory — the one holding `config.json`, `bb.db` and
    * `plugins/<id>/`. A plugin cannot compute it: a dev server derives it from
    * its repo root and instance id, so a plugin that guesses `~/.bb` reads the

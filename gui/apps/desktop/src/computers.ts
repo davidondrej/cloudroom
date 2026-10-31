@@ -1,4 +1,5 @@
 // Your Macs on cloudroom.run: list them and open one in this window (ADR 0184 relay).
+import { localServerFetch } from "./local-caller-auth.js";
 import { execFile } from "node:child_process";
 import { hostname } from "node:os";
 import { promisify } from "node:util";
@@ -91,7 +92,7 @@ export async function computerName(): Promise<string> {
 export async function fetchRelayCredential(
   localServerUrl: string,
 ): Promise<ConnectCredential | null | undefined> {
-  const response = await fetch(
+  const response = await localServerFetch(
     new URL("/api/v1/plugins/connect/rpc/relayCredential", localServerUrl),
     {
       method: "POST",
@@ -205,9 +206,6 @@ export async function openComputer(
   }
   return { ok: true, value: { url, expiresAt: cookie.expiresAt } };
 }
-
-/** Every request to a Mac on the relay, for watching its answers. */
-export const RELAY_URL_PATTERN = `*://*.${RELAY_HOST}/*`;
 
 const RENEW_CHECK_MS = 60 * 60_000;
 // The relay's sign-in lasts 30 days. Renew with a week to spare, so a sleeping Mac never wakes up signed out.

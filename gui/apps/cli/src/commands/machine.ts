@@ -204,10 +204,9 @@ export function registerMachineCommands(
   machine
     .command("enroll")
     .description("Enroll this machine using a private bootstrap bundle")
-    .option("--bootstrap-file <path>", "Read the bootstrap bundle from a file")
     .option(
-      "--bootstrap-env <name>",
-      "Consume the bootstrap bundle from an environment variable",
+      "--bootstrap-file <path>",
+      "Read the bootstrap bundle from a file, or /dev/stdin",
     )
     .option("--json", "Print machine-readable JSON output")
     .action(

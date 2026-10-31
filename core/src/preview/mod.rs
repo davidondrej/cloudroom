@@ -20,10 +20,16 @@ use std::{
         net::UnixStream as StdUnixStream,
     },
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
-use tokio::net::{TcpStream, UnixListener};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::{TcpStream, UnixListener},
+};
 
 const SOCKET: &str = "/run/cloudroom/preview.sock";
 const FRESH_SECONDS: u64 = 15;
@@ -98,6 +104,8 @@ pub struct Previews {
     reports: Mutex<BTreeMap<(String, u16), (u64, Report)>>,
     tunnels: Mutex<Vec<Live>>,
     core_port: u16,
+    /// When a browser last loaded a preview page or called its API, in ms; 0 for never. The website counts it as activity.
+    active: AtomicU64,
 }
 #[derive(Debug)]
 pub struct Failure(StatusCode, String);
@@ -199,6 +207,7 @@ impl Previews {
             reports: Mutex::new(BTreeMap::new()),
             tunnels: Mutex::new(Vec::new()),
             core_port: config.listen.port(),
+            active: AtomicU64::new(0),
         }))
     }
     /// Mac access shares the preview pairing and agent identity.
@@ -211,6 +220,9 @@ impl Previews {
     }
     pub(crate) fn paired(&self, device: &str) -> bool {
         self.saved.lock().unwrap().devices.contains_key(device)
+    }
+    pub fn last_activity(&self) -> Option<u64> {
+        Some(self.active.load(Ordering::Relaxed)).filter(|at| *at > 0)
     }
     pub fn enabled(&self) -> bool {
         self.setup.lock().unwrap().is_some()
@@ -576,10 +588,23 @@ async fn tunnel(
     };
     let mut upstream = m.previews.connect(port, &input.device).await?;
     let upgrade = hyper::upgrade::on(&mut request);
+    let previews = m.previews.clone();
     let task = tokio::spawn(async move {
         if let Ok(upgraded) = upgrade.await {
             let mut mac = hyper_util::rt::TokioIo::new(upgraded);
-            let _ = tokio::io::copy_bidirectional(&mut mac, &mut upstream).await;
+            // The Mac opens one tunnel per request, so its first bytes are the browser's request.
+            let mut head = vec![0; 8192];
+            let Ok(read) = mac.read(&mut head).await else {
+                return;
+            };
+            if page_request(&head[..read]) {
+                previews
+                    .active
+                    .store(crate::observability::now_ms(), Ordering::Relaxed);
+            }
+            if upstream.write_all(&head[..read]).await.is_ok() {
+                let _ = tokio::io::copy_bidirectional(&mut mac, &mut upstream).await;
+            }
         }
     });
     let mut tunnels = m.previews.tunnels.lock().unwrap();
@@ -595,6 +620,16 @@ async fn tunnel(
         .header(header::UPGRADE, protocol)
         .body(Body::empty())
         .unwrap())
+}
+/// A browser's page load or its own API call. Assets, WebSockets and the Mac helper's health checks
+/// (they send no Sec-Fetch headers) don't count.
+fn page_request(head: &[u8]) -> bool {
+    let head = String::from_utf8_lossy(head).to_ascii_lowercase();
+    let headers = head.split("\r\n\r\n").next().unwrap_or("");
+    headers.lines().any(|line| {
+        line.strip_prefix("sec-fetch-dest:")
+            .is_some_and(|dest| matches!(dest.trim(), "document" | "iframe" | "empty"))
+    })
 }
 async fn list(State(m): State<Arc<crate::session::Manager>>) -> Result<Json<Value>> {
     Ok(Json(m.previews.list()?))

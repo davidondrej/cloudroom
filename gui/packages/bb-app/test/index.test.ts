@@ -965,6 +965,38 @@ describe("bb-app launcher", () => {
     expect(runtime.env.BB_SERVER_URL).toBe("https://stored.example.test");
   });
 
+  it("keeps the machine's server access headers out of every process environment", async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "bb-app-headers-config-"));
+    writeFileSync(
+      join(dataDir, "config.json"),
+      JSON.stringify({
+        serverUrl: "https://bb.example.test",
+        serverHeaders: { "x-bb-connect-machine": "private-relay-key" },
+        machineCredential: "private-legacy-key",
+      }),
+      "utf8",
+    );
+
+    const runtime = await resolveBbAppRuntimeState({
+      entrypointUrl: pathToFileURL("/repo/packages/bb-app/dist/bb-app.js").href,
+      env: { BB_DATA_DIR: dataDir },
+      homeDir: "/home/tester",
+      options: { help: false },
+      serverUrlMode: "managed",
+    });
+    const daemonEnv = createDaemonEnv({
+      context: runtime.context,
+      env: {
+        ...runtime.env,
+        BB_SERVER_HEADERS: '{"x-bb-connect-machine":"private-inherited"}',
+        BB_CONNECT_MACHINE_CREDENTIAL: "private-legacy-join",
+      },
+      serverUrl: runtime.context.serverUrl,
+    });
+
+    expect(JSON.stringify([runtime.env, daemonEnv])).not.toContain("private-");
+  });
+
   it("keeps full-stack startup local even when managed config has a server URL", async () => {
     const dataDir = mkdtempSync(join(tmpdir(), "bb-app-local-config-"));
     writeFileSync(

@@ -1,3 +1,4 @@
+import type { CallerProofIssuer } from "@cloudroom/config/caller-proof";
 import type { CustomProviderModel } from "@cloudroom/config/bb-app-managed-config";
 import type { DbConnection } from "@cloudroom/db";
 import type { FeatureFlags, ProviderNativeSkillRoots } from "@cloudroom/domain";
@@ -67,6 +68,7 @@ export interface AppDeps {
 export interface ServerAppDeps extends AppDeps {
   appVersion: AppVersionService;
   bbAppManagedConfig: BbAppManagedConfigReloader;
+  callerProofs: CallerProofIssuer;
 }
 
 export type WorkSessionDeps = Pick<

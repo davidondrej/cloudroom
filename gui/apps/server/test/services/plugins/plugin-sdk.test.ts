@@ -1,3 +1,4 @@
+import { CALLER_TOKEN_HEADER } from "@cloudroom/config/caller-proof";
 import { createHash } from "node:crypto";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -1111,7 +1112,10 @@ describe("plugin bb.sdk against a running server", () => {
         `${server.baseUrl}/api/v1/plugins/callee/rpc/whoami`,
         {
           method: "POST",
-          headers: { "content-type": "application/json" },
+          headers: {
+            "content-type": "application/json",
+            [CALLER_TOKEN_HEADER]: server.callerToken,
+          },
           body: "null",
         },
       );
@@ -1128,6 +1132,7 @@ describe("plugin bb.sdk against a running server", () => {
           headers: {
             "content-type": "application/json",
             "x-bb-plugin-caller": "not-a-real-token",
+            [CALLER_TOKEN_HEADER]: server.callerToken,
           },
           body: "null",
         },

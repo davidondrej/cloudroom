@@ -6,7 +6,6 @@ import {
   render,
   screen,
   waitFor,
-  within,
 } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ThreadListEntry } from "@cloudroom/domain";
@@ -39,6 +38,10 @@ vi.mock("@/hooks/queries/thread-queries", () => ({
     value.replace(/\s/g, "").length >= 2,
   THREAD_SEARCH_LIMIT_PER_GROUP: 20,
   useThreadSearch: vi.fn(),
+}));
+
+vi.mock("@/lib/sdk", () => ({
+  sdk: { cloudroom: { searchRank: () => new Promise(() => {}) } },
 }));
 
 vi.mock("@/hooks/queries/sidebar-navigation-query", () => ({
@@ -152,7 +155,7 @@ describe("ThreadPaletteResults", () => {
     renderResults({ query: "needle" });
 
     expect(screen.getByRole("option").id).toBe(
-      "palette-option-title:thr_current",
+      "palette-option-thread:thr_current",
     );
   });
 
@@ -198,7 +201,7 @@ describe("ThreadPaletteResults", () => {
     { sourceKind: "title", withSnippet: false, archived: false },
     { sourceKind: "title_fallback", withSnippet: false, archived: true },
   ] as const)(
-    "highlights $sourceKind in red (snippet: $withSnippet, archived: $archived)",
+    "highlights $sourceKind in bold (snippet: $withSnippet, archived: $archived)",
     ({ sourceKind, withSnippet, archived }) => {
       const title = "Claude Code support";
       const thread = createThreadListEntry({ id: "thr_title", title });
@@ -239,32 +242,18 @@ describe("ThreadPaletteResults", () => {
 
       renderResults({ query: "claude code" });
 
-      const titleRow = within(
-        screen.getByRole("group", { name: "Thread names" }),
-      ).getByRole("option");
-      expect(titleRow.firstElementChild?.firstElementChild?.textContent).toBe(
-        title,
-      );
-      expect(titleRow.querySelectorAll("mark.bg-destructive")).toHaveLength(2);
-      if (archived) expect(titleRow.textContent).toContain("Archived");
-      const row = withSnippet
-        ? within(
-            screen.getByRole("group", { name: "Conversation content" }),
-          ).getByRole("option")
-        : titleRow;
-      const titleMarks = row.querySelectorAll("mark.bg-destructive");
-      expect([...titleMarks].map((mark) => mark.textContent)).toEqual([
-        "Claude",
-        "Code",
-      ]);
-      expect(titleMarks[0]?.parentElement?.textContent).toContain(title);
-      expect(row.querySelectorAll("mark.bg-state-selected")).toHaveLength(
-        withSnippet ? 2 : 0,
+      const row = screen.getByRole("option");
+      expect(row.textContent).toContain(title);
+      if (archived) expect(row.textContent).toContain("Archived");
+      const marks = [...row.querySelectorAll("mark")];
+      expect(marks.every((mark) => mark.classList.contains("font-semibold"))).toBe(true);
+      expect(marks.map((mark) => mark.textContent)).toEqual(
+        withSnippet ? ["Claude", "Code", "Claude", "Code"] : ["Claude", "Code"],
       );
     },
   );
 
-  it("lists a server title hit inside a word under thread names", () => {
+  it("lists a server title hit inside a word", () => {
     const title = "CloudRoom UI — design evolution · coordinator";
     const start = title.indexOf("oord");
     const contentMatch: ThreadSearchMatch = {
@@ -302,14 +291,13 @@ describe("ThreadPaletteResults", () => {
 
     renderResults({ query: "oord" });
 
-    expect(
-      within(screen.getByRole("group", { name: "Thread names" }))
-        .getAllByRole("option")
-        .map((row) => row.id),
-    ).toEqual(["palette-option-title:thr_inside"]);
+    expect(screen.getAllByRole("option").map((row) => row.id)).toEqual([
+      "palette-option-thread:thr_inside",
+      "palette-option-thread:thr_chat",
+    ]);
   });
 
-  it("orders project, name, and content hits with distinct navigation targets", async () => {
+  it("lists projects before threads, each with its navigation target", async () => {
     const onNavigationItemsChange = vi.fn();
     const onSelect = vi.fn();
     const thread = createThreadListEntry({
@@ -361,14 +349,10 @@ describe("ThreadPaletteResults", () => {
 
     renderResults({ query: "needle", onNavigationItemsChange, onSelect });
 
-    expect(
-      screen
-        .getAllByRole("group")
-        .map((group) => group.getAttribute("aria-label")),
-    ).toEqual(["Projects", "Thread names", "Conversation content"]);
     const rows = screen.getAllByRole("option");
-    expect(rows[0]?.textContent).toBe("Needle project");
-    expect(rows[1]?.textContent).toContain("Needle thread");
+    expect(rows[0]?.textContent).toContain("Needle project");
+    expect(rows[1]?.textContent).toContain("Other conversation");
+    expect(rows[2]?.textContent).toContain("Needle thread");
     await waitFor(() =>
       expect(onNavigationItemsChange).toHaveBeenLastCalledWith([
         expect.objectContaining({
@@ -376,9 +360,8 @@ describe("ThreadPaletteResults", () => {
           threadId: null,
           messageSeq: null,
         }),
-        expect.objectContaining({ threadId: "thr_needle", messageSeq: null }),
         expect.objectContaining({ threadId: "thr_content", messageSeq: 7 }),
-        expect.objectContaining({ threadId: "thr_needle", messageSeq: 7 }),
+        expect.objectContaining({ threadId: "thr_needle", messageSeq: null }),
       ]),
     );
     fireEvent.click(rows[0]!);
@@ -387,11 +370,11 @@ describe("ThreadPaletteResults", () => {
     );
     fireEvent.click(rows[1]!);
     expect(onSelect).toHaveBeenLastCalledWith(
-      expect.objectContaining({ threadId: "thr_needle", messageSeq: null }),
+      expect.objectContaining({ threadId: "thr_content", messageSeq: 7 }),
     );
     fireEvent.click(rows[2]!);
     expect(onSelect).toHaveBeenLastCalledWith(
-      expect.objectContaining({ threadId: "thr_content", messageSeq: 7 }),
+      expect.objectContaining({ threadId: "thr_needle", messageSeq: null }),
     );
   });
 
@@ -414,8 +397,8 @@ describe("ThreadPaletteResults", () => {
         isLoading: false,
       });
       renderResults({ query: "needle" });
-      expect(screen.getByRole("option").textContent).toBe("Needle project");
-      expect(screen.queryByText("No matching results")).toBeNull();
+      expect(screen.getByRole("option").textContent).toContain("Needle project");
+      expect(screen.queryByText("No results")).toBeNull();
       if (state === "failed")
         expect(screen.getByText("Search failed.")).not.toBeNull();
     },

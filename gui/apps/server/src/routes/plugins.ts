@@ -1,3 +1,8 @@
+import {
+  CALLER_PROOF_REQUIRED_MESSAGE,
+  CALLER_PROOF_STATUS_HEADER,
+} from "@cloudroom/config/caller-proof";
+import { callerProofStatus, isTrustedCaller } from "../caller-access.js";
 import { timingSafeEqual } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { promisify } from "node:util";
@@ -138,9 +143,14 @@ function localAuthProblem(
   context: Context,
   deps: PluginRoutesDeps,
 ): WireAuthProblem | null {
-  return browserRequestProblem(context, deps, {
-    requireJsonForMutation: true,
-  });
+  return (
+    browserRequestProblem(context, deps, {
+      requireJsonForMutation: true,
+    }) ??
+    (isTrustedCaller(context)
+      ? null
+      : { status: 401, error: CALLER_PROOF_REQUIRED_MESSAGE })
+  );
 }
 
 function isStringArray(value: unknown): value is string[] {
@@ -805,7 +815,13 @@ export function registerPluginRoutes(
           ? await tokenAuthProblem(context, plugins, id)
           : null;
     if (problem) {
-      return context.json({ ok: false, error: problem.error }, problem.status);
+      return context.json(
+        { ok: false, error: problem.error },
+        problem.status,
+        problem.status === 401 && auth === "local"
+          ? { [CALLER_PROOF_STATUS_HEADER]: callerProofStatus(context) }
+          : undefined,
+      );
     }
     const fresh = plugins.getHttpRoute(id, context.req.method, subPath);
     if (fresh.outcome !== "found" || fresh.value.auth !== auth) {

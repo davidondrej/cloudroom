@@ -1,3 +1,4 @@
+import { createCallerProofFetch } from "@cloudroom/config/caller-proof";
 import { randomUUID } from "node:crypto";
 import { dirname } from "node:path";
 import { loadHostDaemonStartConfig } from "@cloudroom/config/host-daemon";
@@ -81,6 +82,7 @@ export async function startHostDaemon(
       providedHostName: options.hostName,
     });
     const instanceId = randomUUID();
+    const serverFetch = createCallerProofFetch(fetch);
     const serverUrl = resolveServerUrl({
       providedServerUrl: hostDaemonConfig.BB_SERVER_URL,
     });
@@ -98,6 +100,7 @@ export async function startHostDaemon(
       persistedAuth?.hostKey ??
       (
         await enrollDaemonHost({
+          fetchFn: serverFetch,
           hostId: identity.hostId,
           hostName: identity.hostName,
           serverUrl,
@@ -189,6 +192,7 @@ export async function startHostDaemon(
     const runtimeShellEnvResolvedAtMs = Date.now();
     app = await createHostDaemonApp({
       dataDir,
+      fetchFn: serverFetch,
       serverUrl,
       hostKey,
       serverHeaders: options.serverHeaders,

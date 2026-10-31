@@ -1,3 +1,4 @@
+import { createCallerProofFetch } from "@cloudroom/config/caller-proof";
 import {
   BbRequestTimeoutError,
   createNodeBbSdk,
@@ -10,11 +11,15 @@ type CliRequestInit = RequestInit & { dispatcher?: Dispatcher };
 
 export const CLI_READ_TIMEOUT_MS = 45_000;
 
+const callerProofFetch = createCallerProofFetch((input, init) =>
+  fetch(input, init),
+);
+
 export function cliFetch(
   input: RequestInfo | URL,
   init?: CliRequestInit,
 ): Promise<Response> {
-  return fetch(input, init);
+  return callerProofFetch(input, init);
 }
 
 export function createCliBbSdk(baseUrl: string, timeoutMs?: number): BbSdk {

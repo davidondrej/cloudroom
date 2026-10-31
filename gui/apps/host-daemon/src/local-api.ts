@@ -1,4 +1,11 @@
 import fs from "node:fs/promises";
+import {
+  CALLER_PROOF_REQUIRED_MESSAGE,
+  CALLER_PROOF_STATUS_HEADER,
+  CALLER_TOKEN_HEADER,
+  createCallerProofIssuer,
+  DAEMON_CALLER_PROOF_PATH,
+} from "@cloudroom/config/caller-proof";
 import { serve } from "@hono/node-server";
 import {
   buildLocalAppOrigins,
@@ -45,7 +52,7 @@ type WorkspaceOpenTargetListHandler = (
 type OpenInTargetHandler = (request: OpenPathInTargetArgs) => Promise<void>;
 
 interface StartLocalApiServerOptions {
-  dataDir?: string;
+  dataDir: string;
   hostId: string;
   localApiConfig: HostDaemonLocalApiConfig;
   serverUrl: string;
@@ -251,6 +258,35 @@ export async function startLocalApiServer(
         { error: `origin "${origin}" is not a local Cloudroom app origin` },
         403,
       );
+    }
+    await next();
+  });
+
+  const callerProofs = await createCallerProofIssuer({
+    dataDir: options.dataDir,
+  });
+  app.post(DAEMON_CALLER_PROOF_PATH, (c) => c.json(callerProofs.start()));
+  app.post(`${DAEMON_CALLER_PROOF_PATH}/:id`, async (c) => {
+    const body: unknown = await c.req.json().catch(() => null);
+    const claim =
+      typeof body === "object" && body !== null
+        ? (body as { claim?: unknown }).claim
+        : undefined;
+    const token =
+      typeof claim === "string"
+        ? await callerProofs.finish(c.req.param("id"), claim)
+        : null;
+    return token === null
+      ? c.json({ error: "Caller proof failed" }, 403)
+      : c.json({ token });
+  });
+  app.use("/open-in-target", async (c, next) => {
+    const token = c.req.header(CALLER_TOKEN_HEADER);
+    if (!callerProofs.verify(token)) {
+      return c.json({ message: CALLER_PROOF_REQUIRED_MESSAGE }, 401, {
+        [CALLER_PROOF_STATUS_HEADER]:
+          token === undefined ? "required" : "invalid",
+      });
     }
     await next();
   });

@@ -111,7 +111,11 @@ function createWebSocketFixture(args: CreateWebSocketFixtureArgs = {}) {
     urlProvider,
     options,
   ) => {
-    headers.push(options.headers);
+    headers.push(
+      typeof options.headers === "function"
+        ? options.headers()
+        : options.headers,
+    );
     let readyState = 0;
     const socket: ReconnectingWebSocketLike = {
       get bufferedAmount() {

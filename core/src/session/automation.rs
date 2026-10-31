@@ -6,7 +6,7 @@ use super::{
     Manager,
     thread::{Failure, caller, fail},
 };
-use crate::preview::Peer;
+use crate::{preview::Peer, runtime};
 use axum::{
     Json, Router,
     extract::{ConnectInfo, State},
@@ -89,6 +89,7 @@ async fn automation(
             "Run room-cli loop from a Cloudroom cloud thread",
         ));
     };
+    check_agent(&m, &session, &input).await?;
     // The website finds the thread from this Core's own sign-in; the session is the agent asking.
     let mut body =
         serde_json::to_value(&input).map_err(|e| fail(StatusCode::BAD_REQUEST, &e.to_string()))?;
@@ -106,6 +107,92 @@ async fn automation(
                 &format!("Could not save the automation: {error}"),
             ),
         })
+}
+
+/// A harness as Core or the app names it: `cursor` or `acp-cursor`, `hermes` or `acp-hermes-agent`.
+fn harness(name: &str) -> Option<runtime::Kind> {
+    let name = name.strip_prefix("acp-").unwrap_or(name);
+    serde_json::from_value(json!(name.strip_suffix("-agent").unwrap_or(name))).ok()
+}
+
+/// A loop's agent must pass the check a session start runs (#300), so a bad model or effort fails now, while the
+/// agent is here, not on every run. Its base is this session on create and the loop's saved agent on update; another
+/// harness starts at medium (Pi at its own level), as the website's `withAgent` saves it. What can't be checked here
+/// (a harness not set up, no model list) is left to the run.
+async fn check_agent(m: &Arc<Manager>, session: &str, input: &Body) -> Result<(), Failure> {
+    let picked = input.harness.is_some() || input.model.is_some() || input.reasoning.is_some();
+    if !picked || !matches!(input.action.as_str(), "create" | "update") {
+        return Ok(());
+    }
+    let base = if input.action == "create" {
+        let local = m.local.lock().unwrap();
+        // As the website's snapshot reads it: the model from the session's start.
+        local.sessions.get(session).map(|s| {
+            let start = s.receipts.values().find(|r| r.command == "start");
+            let model = start.and_then(|r| r.input["model"].as_str().map(str::to_owned));
+            (Some(s.harness), model, s.reasoning.clone())
+        })
+    } else {
+        let Some(api) = &m.history.api else {
+            return Ok(());
+        };
+        let list = api.post("automation", &json!({"action":"list"})).await;
+        let loops = list
+            .ok()
+            .and_then(|list| list["automations"].as_array().cloned());
+        loops
+            .unwrap_or_default()
+            .into_iter()
+            .find(|l| l["id"].as_str() == input.id.as_deref())
+            .filter(|l| l["agent"].is_object())
+            .map(|l| {
+                let text = |key: &str| l["agent"][key].as_str().map(str::to_owned);
+                (
+                    text("provider").and_then(|p| harness(&p)),
+                    text("model"),
+                    text("reasoning"),
+                )
+            })
+    };
+    let Some((base, model, reasoning)) = base else {
+        return Ok(());
+    };
+    let Some(kind) = input.harness.as_deref().map(harness).unwrap_or(base) else {
+        return Ok(());
+    };
+    let same = Some(kind) == base;
+    let model = input.model.clone().or(model.filter(|_| same));
+    // As `withAgent`: the same harness keeps its effort, even none (then a start checks nothing either).
+    let reasoning = match input.reasoning.clone() {
+        Some(reasoning) => Some(reasoning),
+        None if same => reasoning,
+        None => (kind != runtime::Kind::Pi).then(|| "medium".into()),
+    };
+    let Some(reasoning) = reasoning else {
+        return Ok(());
+    };
+    if !m.config.harnesses.contains_key(&kind) {
+        return Ok(());
+    }
+    let Err(super::Error::Conflict(error @ ("invalid model" | "invalid reasoning effort"))) = m
+        .execution_supported(kind, model.as_ref(), &reasoning)
+        .await
+    else {
+        return Ok(());
+    };
+    // Codex, Claude and Cursor name what they offer.
+    let selected = model.unwrap_or_else(|| m.config.harnesses[&kind].model.clone());
+    let detail = match m.model_catalog(kind).await {
+        Ok(models) => runtime::supports(kind, &models, &selected, &reasoning).err(),
+        Err(_) => None,
+    };
+    let detail = detail.unwrap_or_else(|| format!("{error} {reasoning}"));
+    Err(fail(
+        StatusCode::BAD_REQUEST,
+        &format!(
+            "Cloud can't run this loop's agent: {detail}. Pick another with --model or --reasoning."
+        ),
+    ))
 }
 
 /// Clear errors before the website, which checks the cron itself.

@@ -229,8 +229,12 @@ async function applyTemplate(bb: Pick<BbPluginApi, "sdk">, args: ParsedArgs): Pr
   if (args.flags.has("cloud") && args.flags.has("local")) {
     throw new Error("Use --cloud or --local, not both.");
   }
-  const local = args.flags.has("local");
-  if (!local) args.flags.set("cloud", true);
+  if (template.localOnly && args.flags.has("cloud")) {
+    throw new Error(`${template.name} runs only on the Mac: Cloud threads can't see the project's threads. Use --local.`);
+  }
+  const local = args.flags.has("local") || template.localOnly === true;
+  if (local) args.flags.set("local", true);
+  else args.flags.set("cloud", true);
   const projectId = requireFlag(args, "project");
   const [providers, defaults] = await Promise.all([
     bb.sdk.providers.list().catch(() => []),

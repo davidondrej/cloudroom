@@ -1,3 +1,4 @@
+import { localServerFetch } from "./local-caller-auth.js";
 import { readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "zod";
@@ -33,7 +34,7 @@ async function requestJson(
   method: "GET" | "POST" = "GET",
   body?: unknown,
 ): Promise<unknown> {
-  const response = await fetch(
+  const response = await localServerFetch(
     `${serverUrl.replace(/\/$/u, "")}/api/v1${path}`,
     {
       method,

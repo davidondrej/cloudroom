@@ -8,7 +8,7 @@ use std::{
 };
 
 const USAGE: &str = "room-cli files wait
-Waits until Cloudroom finishes copying this project into the sandbox, up to 10 minutes. Returns at once if no copy is running.";
+Waits until Cloudroom finishes copying this project into the sandbox, up to 10 minutes. Returns at once if no copy is running, and fails if the folder is empty.";
 const FAILURE_NOTE: &str = ".cloudroom/project-copy-failed.txt";
 const POLL: Duration = Duration::from_secs(2);
 /// The app writes the status file right after the session starts, so an agent can ask a moment before it exists.
@@ -33,6 +33,7 @@ enum Copy {
     Ready(PathBuf),
     Failed(PathBuf, String),
     NotRunning,
+    Missing,
     NoProject,
 }
 
@@ -54,7 +55,9 @@ fn check(cwd: &Path, waited: Duration) -> Option<Copy> {
         (Some(_), _) => None,
         // Threads without a project start in the bare workspace root, where nothing is ever copied.
         (None, _) if cwd == Path::new("/code") => Some(Copy::NoProject),
-        (None, _) if waited >= GRACE || !looks_empty(cwd) => Some(Copy::NotRunning),
+        (None, _) if !looks_empty(cwd) => Some(Copy::NotRunning),
+        // No status and no files: the copy never started, or its status never arrived (#337).
+        (None, _) if waited >= GRACE => Some(Copy::Missing),
         (None, _) => None,
     }
 }
@@ -92,6 +95,12 @@ async fn wait(cwd: &Path) -> io::Result<i32> {
                     "This thread has no project, so Cloudroom copies nothing into it. Files sent with `room-cli vm push` stay where the sender put them, by default the agent home (~). Pull anything else from the user's Mac with `room-cli mac pull`."
                 );
                 return Ok(0);
+            }
+            Some(Copy::Missing) => {
+                println!(
+                    "No project copy is running, and this folder is empty, so the project files are missing. Do not wait for them: if the project is on GitHub, clone it into this folder; otherwise pull what you need from the user's Mac with `room-cli mac pull`."
+                );
+                return Ok(1);
             }
             Some(Copy::NotRunning) => {
                 println!(

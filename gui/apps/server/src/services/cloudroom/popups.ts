@@ -5,10 +5,10 @@ import type { AppDeps } from "../../types.js";
 import { POPUPS, type Popup, type PopupDetail } from "../system/telemetry.js";
 import { cloudroom } from "./commands.js";
 
-export type PopupState = { closed: Popup[]; shownAt: number | null; credits: boolean };
+export type PopupState = { closed: Popup[]; shownAt: number | null; credits: boolean; checklistHides: number };
 const DAY = 86_400_000;
 const RECHECK_MS = 10 * 60_000;
-const stateSchema = z.object({ closed: z.array(z.string()), shown_at: z.string().nullable(), credits: z.boolean() });
+const stateSchema = z.object({ closed: z.array(z.string()), shown_at: z.string().nullable(), credits: z.boolean(), checklist_hides: z.number().int().catch(0) });
 const savedSchema = z.object({ closed: z.record(z.string(), z.string()).catch({}), shown_at: z.string().nullable().catch(null) }).catch({ closed: {}, shown_at: null });
 const localFile = (deps: AppDeps) => join(deps.config.dataDir, "cloudroom-popups.json");
 let cache: { key: string; at: number; value: PopupState } | null = null;
@@ -17,6 +17,7 @@ const toState = (value: z.infer<typeof stateSchema>): PopupState => ({
   closed: POPUPS.filter((popup) => value.closed.includes(popup)),
   shownAt: value.shown_at ? Date.parse(value.shown_at) : null,
   credits: value.credits,
+  checklistHides: value.checklist_hides,
 });
 const readLocal = async (deps: AppDeps) => savedSchema.parse(await readFile(localFile(deps), "utf8").then(JSON.parse, () => ({})));
 
@@ -26,7 +27,7 @@ async function load(deps: AppDeps, signedIn: boolean): Promise<PopupState | null
     return parsed.success ? toState(parsed.data) : null;
   }
   const saved = await readLocal(deps);
-  return toState({ closed: Object.keys(saved.closed), shown_at: saved.shown_at, credits: false });
+  return toState({ closed: Object.keys(saved.closed), shown_at: saved.shown_at, credits: false, checklist_hides: 0 });
 }
 
 export async function popupState(deps: AppDeps): Promise<PopupState | null> {
@@ -34,7 +35,7 @@ export async function popupState(deps: AppDeps): Promise<PopupState | null> {
   const key = account?.userId ?? "local";
   if (cache?.key !== key || Date.now() - cache.at > RECHECK_MS) {
     const value = await load(deps, account !== null);
-    if (!value) return null;
+    if (!value) return cache?.key === key ? cache.value : null;
     cache = { key, at: Date.now(), value };
   }
   return cache.value;
@@ -58,4 +59,12 @@ export async function recordPopup(deps: AppDeps, popup: Popup, event: "shown" | 
   }
   if (ok) deps.telemetry.capture({ name: "popup", properties: { popup, action: detail ?? (event === "shown" ? "viewed" : "closed") } });
   return ok;
+}
+
+export async function recordChecklistHide(deps: AppDeps): Promise<number | null> {
+  const account = await cloudroom(deps).sandboxes.account();
+  if (!account) return null;
+  const { hides } = z.object({ hides: z.number().int() }).parse(await cloudroom(deps).sandboxes.popups({ checklist: "hidden" }));
+  if (cache?.key === account.userId) cache.value = { ...cache.value, checklistHides: hides };
+  return hides;
 }

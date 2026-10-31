@@ -10,6 +10,11 @@ import {
   resolveBuiltinSkillsRootPath,
 } from "../../src/services/skills/builtin-skills-copy.js";
 import { serve } from "@hono/node-server";
+import type { Hono } from "hono";
+import {
+  CALLER_TOKEN_HEADER,
+  createCallerProofIssuer,
+} from "@cloudroom/config/caller-proof";
 import type { AddressInfo } from "node:net";
 import { createConnection, getAppSettings, type DbConnection } from "@cloudroom/db";
 import { defaultFeatureFlags } from "@cloudroom/domain";
@@ -42,10 +47,26 @@ import { HostSharedPortCoordinator } from "../../src/ws/host-shared-ports.js";
 import { WorkspaceReadCaches } from "../../src/services/environments/workspace-read-cache.js";
 
 const TEST_MACHINE_KEY_PREFIX = "test-daemon-key";
+
+export const ANONYMOUS_CALLER = { [CALLER_TOKEN_HEADER]: "anonymous" };
+
+function withCallerToken(request: Request, token: string): Request {
+  if (request.headers.has(CALLER_TOKEN_HEADER)) return request;
+  const withToken = new Request(request);
+  withToken.headers.set(CALLER_TOKEN_HEADER, token);
+  return withToken;
+}
+
+export function sendCallerToken(app: Hono, token: string): void {
+  const fetch = app.fetch;
+  app.fetch = ((request, ...rest) =>
+    fetch(withCallerToken(request, token), ...rest)) as Hono["fetch"];
+}
 const TEST_SERVER_HOST = "127.0.0.1";
 
 export interface TestAppHarness {
   app: ReturnType<typeof createApp>["app"];
+  callerToken: string;
   config: ServerRuntimeConfig;
   db: DbConnection;
   deps: ServerAppDeps;
@@ -267,9 +288,12 @@ export async function createTestAppHarness(
   });
   pendingInteractions.start();
   const appVersion = appVersionService ?? createAppVersionService({ config });
+  const callerProofs = await createCallerProofIssuer({ dataDir });
+  const callerToken = callerProofs.issueInternal();
   const deps: ServerAppDeps = {
     appVersion,
     bbAppManagedConfig,
+    callerProofs,
     config,
     db,
     hub,
@@ -289,10 +313,12 @@ export async function createTestAppHarness(
     workspaceReadCaches,
   };
   const { app, pluginCatalogService, pluginService } = createApp(deps);
+  sendCallerToken(app, callerToken);
   installDefaultEnvironmentProviders();
 
   return {
     app,
+    callerToken,
     config,
     db,
     deps,

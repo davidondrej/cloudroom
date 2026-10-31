@@ -33,6 +33,8 @@ export interface LoopTemplate {
   model: string;
   reasoningLevel: ReasoningLevel;
   prompt: string;
+  /** Mac only: Cloud threads only see their own subagents, not the project's threads (#549). */
+  localOnly?: true;
 }
 
 const REPORT = `
@@ -285,6 +287,7 @@ Find this project's production URL and health endpoints in the README, config, o
     providerId: "claude-code",
     model: "claude-sonnet-5-5",
     reasoningLevel: "medium",
+    localOnly: true,
     prompt: `Thread cleanup for this project. List its open threads with \`room-cli thread list --project "$ROOM_PROJECT_ID" --json\`.
 Archive a thread only when it is clearly finished: the work shipped or was abandoned, its last message is a final report, and nothing waits on the user. Never archive pinned threads, threads that are running, or threads with a question for the user. When unsure, keep it.
 Then write a short list of what you archived and why, and archive this thread with \`room-cli thread archive --self\`.`,

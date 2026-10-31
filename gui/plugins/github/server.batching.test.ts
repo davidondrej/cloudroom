@@ -34,6 +34,7 @@ function node(number: number, state = "OPEN") {
     state,
     title: `Title ${number}`,
     author: { login: "robot[bot]" },
+    authorAssociation: "NONE",
     labels: { nodes: [{ name: "bug" }] },
     assignees: { nodes: [{ login: "alice" }] },
     body: "Body\ntext",
@@ -104,6 +105,7 @@ it("maps all four lists into SQLite and preserves closed/merged filtering", asyn
         state: "OPEN",
         title: "Title 1",
         author: "app/robot[bot]",
+        authorAssociation: "NONE",
         labels: ["bug"],
         assignees: ["alice"],
         body: "Body\ntext",
@@ -219,3 +221,25 @@ it.each([
     ).toEqual({ n: 10 });
   },
 );
+
+it("tells open lists to refresh when only an author's role changes", async () => {
+  fake.responses.set("one", response());
+  const { harness } = await start();
+  const refreshes = () =>
+    harness.realtimeSignals.filter((signal) => signal.channel === "data-changed")
+      .length;
+  await harness.behavior.callRpc("refresh");
+  const synced = refreshes();
+  await harness.behavior.callRpc("refresh");
+  expect(refreshes()).toBe(synced);
+
+  fake.responses.set(
+    "one",
+    response({
+      ...repository(),
+      openIssues: { nodes: [{ ...node(1), authorAssociation: "MEMBER" }] },
+    }),
+  );
+  await harness.behavior.callRpc("refresh");
+  expect(refreshes()).toBe(synced + 1);
+});

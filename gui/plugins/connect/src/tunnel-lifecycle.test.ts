@@ -79,6 +79,7 @@ function createTunnelFixture() {
     shares,
     onCredentialRejected: () => {},
     getLoopbackBaseUrl: () => "http://127.0.0.1:38886",
+    getLoopbackHeaders: () => ({}),
     log: pluginBb.log,
     onStatusChange,
   });

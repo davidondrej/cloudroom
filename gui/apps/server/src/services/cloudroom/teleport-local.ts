@@ -50,7 +50,7 @@ const VM_SESSIONS: Record<Harness, string> = {
   "acp-cursor": "$HOME/.cursor/chats",
   "acp-opencode": "$HOME/.local/share/opencode",
 };
-const CHUNK = 8 * 1024 * 1024;
+const CHUNK = 3 * 1024 * 1024;
 const PREVIEW_MB = 20;
 const DOWNLOAD_MB = 200;
 const exec = promisify(execFile);
@@ -439,24 +439,26 @@ export async function cloudChanges(client: CloudroomClient, workspace: string, l
   const head = localHead?.trim();
   const archive = `.cache/cloudroom/teleport-local-${randomUUID()}.tgz`;
   const skipped = [...SKIPPED, ".cloudroom"].map((name) => `-name ${quote(name)}`).join(" -o ");
-  const created = (await vm(client, [
+  const command = [
     `cd ${quote(workspace)} || exit 1`,
     "mkdir -p ~/.cache/cloudroom",
     "if git rev-parse --git-dir >/dev/null 2>&1; then",
     "  proven=0; base=$(git reflog --format=%H HEAD 2>/dev/null | tail -n 1); [ -n \"$base\" ] || base=HEAD",
     head && /^[0-9a-f]{40,64}$/.test(head) ? `  git cat-file -e '${head}^{commit}' 2>/dev/null && shared=$(git merge-base HEAD ${head} 2>/dev/null) && { base=$shared; proven=1; }` : "",
-    `  { git diff -z --name-only --no-renames --diff-filter=d "$base"; git ls-files -z --others --exclude-standard; } | ${packChangesCommand(`~/${archive}`)} || exit 1`,
+    `  { git diff -z --name-only --no-renames --diff-filter=d "$base"; git ls-files -z --others --exclude-standard; } | ${packChangesCommand(`~/${archive}`)} || { rm -f ~/${archive}; exit 1; }`,
     "else",
-    `  proven=0; find . \\( ${skipped} \\) -prune -o \\( -type f -o -type l \\) -newermt @${Math.floor(since / 1000) - 600} -print0 | ${packChangesCommand(`~/${archive}`)} || exit 1`,
+    `  proven=0; find . \\( ${skipped} \\) -prune -o \\( -type f -o -type l \\) -newermt @${Math.floor(since / 1000) - 600} -print0 | ${packChangesCommand(`~/${archive}`)} || { rm -f ~/${archive}; exit 1; }`,
     "fi",
     `echo "$proven" "$base" ~/${archive}`,
-  ].join("\n"))).toString().trim();
-  const [proven, base, path] = (created.split("\n").pop() ?? "").split(" ");
-  if (!path) throw new Error("The cloud file changes could not be packed. The thread stays in Cloud.");
+  ].join("\n");
   try {
+    const slow = "The cloud file changes took over 4 minutes to pack. The thread stays in Cloud.";
+    const created = (await vm(client, `timeout -k 5s 240s bash -c ${quote(command)} || { code=$?; [ $code = 124 ] && echo ${quote(slow)} >&2; exit $code; }`)).toString().trim();
+    const [proven, base, path] = (created.split("\n").pop() ?? "").split(" ");
+    if (!path) throw new Error("The cloud file changes could not be packed. The thread stays in Cloud.");
     return { archive: await download(client, path), base: proven === "1" && base && /^[0-9a-f]{40,64}$/.test(base) ? base : null };
   } finally {
-    await vm(client, `rm -f ${quote(path)}`).catch(() => {});
+    await vm(client, `rm -f ~/${archive}`).catch(() => {});
   }
 }
 

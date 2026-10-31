@@ -58,6 +58,7 @@ import {
   type AcpBridgeCommand,
   type AcpBridgeNativeReasoning,
   type AcpBridgePermissionCli,
+  type AcpBridgePermissionEnv,
   type AcpBridgeReasoningCli,
   acpBridgeCommandMethodValues,
 } from "../bridge-protocol.js";
@@ -678,6 +679,41 @@ function permissionCliArgsForMode(
     case "accept-edits":
       return permissionCli.workspaceWrite ?? [];
   }
+}
+
+function permissionEnvForMode(
+  permissionEnv: AcpBridgePermissionEnv | undefined,
+  permissionMode: AcpSessionPolicy["permissionMode"],
+): Record<string, string> {
+  switch (permissionMode) {
+    case "full":
+      return permissionEnv?.full ?? {};
+    case "accept-edits":
+      return permissionEnv?.workspaceWrite ?? {};
+  }
+}
+
+function switchesPermissionModeInPlace(
+  session: AcpThreadSession,
+  next: AcpSessionParams,
+): boolean {
+  const current = session.construction;
+  return (
+    next.permissionMode !== current.permissionMode &&
+    session.dialect.openSession === undefined &&
+    isDeepStrictEqual(
+      { ...current, permissionMode: next.permissionMode },
+      next,
+    ) &&
+    isDeepStrictEqual(
+      permissionCliArgsForMode(current.permissionCli, current.permissionMode),
+      permissionCliArgsForMode(next.permissionCli, next.permissionMode),
+    ) &&
+    isDeepStrictEqual(
+      permissionEnvForMode(current.permissionEnv, current.permissionMode),
+      permissionEnvForMode(next.permissionEnv, next.permissionMode),
+    )
+  );
 }
 
 function applyPermissionCliArgs(
@@ -1402,12 +1438,23 @@ function handlePermissionRequest(
     return;
   }
 
-  if (
-    session.stopping ||
-    session.cancelRequested ||
-    session.activePromptKind !== "turn"
-  ) {
+  if (session.stopping || session.cancelRequested) {
     responder.result({ outcome: { outcome: "cancelled" } });
+    return;
+  }
+
+  if (session.activePromptKind !== "turn") {
+    if (session.policy.permissionMode === "full") {
+      respondPermission(
+        { responder, options: parsed.data.options },
+        "allow_once",
+      );
+    } else {
+      responder.error(
+        -32000,
+        "Permission denied: Cloudroom cannot request approval outside an active turn in accept-edits mode.",
+      );
+    }
     return;
   }
 
@@ -1704,6 +1751,7 @@ async function startAgentSession(
   const childEnv = {
     ...withoutBridgeRuntimeEnv(process.env),
     ...params.envVars,
+    ...permissionEnvForMode(params.permissionEnv, params.permissionMode),
   };
   await dialect.prepareLaunch?.(params.agent.command, childEnv);
   const connection = createAcpAgentConnection({
@@ -2825,7 +2873,10 @@ async function handleRequest(
         decodeLaunchSpec(params.options.providerOptions),
         params.options,
       );
-      if (!isDeepStrictEqual(construction, session.construction)) {
+      if (switchesPermissionModeInPlace(session, construction)) {
+        session.construction = construction;
+        session.policy.permissionMode = construction.permissionMode;
+      } else if (!isDeepStrictEqual(construction, session.construction)) {
         const previousProviderThreadId = session.providerThreadId;
         session = await startAgentSession({
           kind: "resume",
@@ -2866,6 +2917,24 @@ async function handleRequest(
           recovery: { kind: "staleTurn", message, retryable: false },
         });
         return;
+      }
+      const construction = applyAcpTurnSettings(session.construction, null, {
+        permissionMode: params.options.permissionMode,
+      });
+      if (construction !== session.construction) {
+        if (!switchesPermissionModeInPlace(session, construction)) {
+          const agent =
+            decodeLaunchSpec(params.options.providerOptions)?.displayName ??
+            "This agent";
+          sendError(
+            request.id,
+            -32000,
+            `${agent} can't change its permission mode in the middle of a turn. Wait for the turn to finish or stop it, then send your message again.`,
+          );
+          return;
+        }
+        session.construction = construction;
+        session.policy.permissionMode = construction.permissionMode;
       }
       const pending: AcpPendingTurnInput = {
         clientRequestId: params.clientRequestId,

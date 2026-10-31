@@ -37,6 +37,7 @@ export const cloudroomStatusSchema = z.object({
   cloudQueue: z.object({ position: z.number(), total: z.number(), regionBlocked: z.boolean() }).nullable().default(null),
   usedCloud: z.boolean().default(true),
   lastCloudAt: z.number().nullable().optional(),
+  lastNewCloudAt: z.number().nullable().optional(),
   harnesses: z.array(z.object({
     id: z.string(),
     provider: z.string().nullable().optional(),

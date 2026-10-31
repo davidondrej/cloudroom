@@ -116,3 +116,29 @@ export const acpPermissionCliSchema = z
       });
     }
   });
+
+const acpPermissionEnvValuesSchema = z
+  .record(z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/u), z.string())
+  .refine((env) => Object.keys(env).length > 0, {
+    message: "a permission mode's env must set at least one variable",
+  });
+
+export const acpPermissionEnvSchema = z
+  .object({
+    full: acpPermissionEnvValuesSchema.optional(),
+    workspaceWrite: acpPermissionEnvValuesSchema.optional(),
+    readonly: acpPermissionEnvValuesSchema.optional(),
+  })
+  .strict()
+  .superRefine((permissionEnv, context) => {
+    if (
+      permissionEnv.full === undefined &&
+      permissionEnv.workspaceWrite === undefined &&
+      permissionEnv.readonly === undefined
+    ) {
+      context.addIssue({
+        code: "custom",
+        message: "permissionEnv must configure at least one permission mode",
+      });
+    }
+  });

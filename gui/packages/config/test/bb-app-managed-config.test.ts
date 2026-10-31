@@ -1,7 +1,11 @@
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   formatCustomAcpAgentProviderId,
   parseBbAppManagedConfig,
+  readBbAppServerHeaders,
 } from "../src/bb-app-managed-config.js";
 
 function parseWithWarnings(rawConfig: unknown) {
@@ -387,5 +391,29 @@ describe("parseBbAppManagedConfig", () => {
     ]);
     expect(warnings).toHaveLength(3);
     expect(warnings.map((warning) => warning.index)).toEqual([1, 2, 3]);
+  });
+});
+
+describe("readBbAppServerHeaders", () => {
+  it("reads the machine's server access headers from its own config", async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "bb-app-server-headers-"));
+    try {
+      await expect(readBbAppServerHeaders(dataDir)).resolves.toBeUndefined();
+      const write = (config: unknown) =>
+        writeFileSync(join(dataDir, "config.json"), JSON.stringify(config));
+      write({ machineCredential: "legacy-key" });
+      await expect(readBbAppServerHeaders(dataDir)).resolves.toEqual({
+        "x-bb-connect-machine": "legacy-key",
+      });
+      write({
+        serverHeaders: { "x-bb-connect-machine": "relay-key" },
+        machineCredential: "legacy-key",
+      });
+      await expect(readBbAppServerHeaders(dataDir)).resolves.toEqual({
+        "x-bb-connect-machine": "relay-key",
+      });
+    } finally {
+      rmSync(dataDir, { recursive: true, force: true });
+    }
   });
 });

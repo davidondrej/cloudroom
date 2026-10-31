@@ -7,7 +7,7 @@ import { getLocalStorage } from "@/lib/browser-storage";
 const ORDER = ["credits", "star", "install"] as const;
 export type Popup = (typeof ORDER)[number];
 type Detail = "starred" | "opened" | "already" | "migrated";
-type State = { closed: Popup[]; shownAt: number | null; credits: boolean };
+type State = { closed: Popup[]; shownAt: number | null; credits: boolean; checklistHides: number };
 type Unsaved = { popup: Popup; detail?: Detail };
 const PATH = "/api/v1/cloudroom/popups";
 const KEY = ["cloudroom-popups"];
@@ -65,6 +65,13 @@ export const useCreditsCohort = () => {
   const { data } = usePopupState();
   return data === undefined ? undefined : data?.credits === true;
 };
+
+export function useChecklistHides() {
+  const hides = usePopupState().data?.checklistHides ?? null;
+  const client = useQueryClient();
+  const save = (saved: number) => client.setQueryData<State | null>(KEY, (current) => current && { ...current, checklistHides: saved });
+  return [hides, save] as const;
+}
 
 export function usePopup(id: Popup, eligible: boolean | null) {
   const state = usePopupState().data;

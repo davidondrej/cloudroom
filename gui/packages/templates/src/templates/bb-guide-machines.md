@@ -75,8 +75,7 @@ room-cli machine create --provider <id> Create a standalone machine
 --inputs <JSON> Non-secret provider inputs
 --project <id-or-name> Optional project context
 --json Print the created machine as JSON
-room-cli machine enroll --bootstrap-file <path>
---bootstrap-env <NAME> Alternative private bundle source
+room-cli machine enroll --bootstrap-file <path> (or /dev/stdin)
 room-cli machine show <id-or-name> Show machine details
 room-cli machine join-code Create a machine pairing code
 room-cli machine rename <id-or-name> <name> Rename a machine
@@ -216,17 +215,17 @@ is paused. `room-cli machine resume` likewise waits for provider restore and boo
 
 ## Enroll a preinstalled machine
 
-`room-cli machine enroll --bootstrap-file <path>` or `room-cli machine enroll --bootstrap-env <NAME>` consumes a versioned private enrollment bundle prepared by core. Supply exactly one source. The environment source is removed from the CLI process environment after reading it; files remain under the caller's ownership. Neither command prints the bundle or credentials.
+`room-cli machine enroll --bootstrap-file <path>` consumes a versioned private enrollment bundle prepared by core, from a private file or `/dev/stdin` with the bundle piped in. It never takes the bundle from an environment variable: on macOS other programs of the same user can read a program's environment. Files remain under the caller's ownership. The command never prints the bundle or credentials.
 
-The CLI refuses another host or server identity in the selected machine directory. Repeating enrollment with the same persisted identity succeeds without exchanging the credential again, including when the original bundle expired. Machine data defaults to `~/.bb-machines/<server-host>`; `ROOM_DATA_DIR` can select another isolated machine directory, but enrollment refuses the default `~/.bb` directory.
+The CLI refuses another host or server identity in the selected machine directory. Repeating enrollment with the same persisted identity succeeds without exchanging the credential again, including when the original bundle expired. Machine data defaults to `~/.bb-machines/<server-host>`; `ROOM_DATA_DIR` can select another isolated machine directory, but enrollment refuses the default `~/.bb` directory. On macOS the directory must be inside `~/.bb-machines`, which Read-only Mac access hides.
 
 The manual copy command fetches `/install.sh` using a short-lived `X-BB-Enrollment` header. The server supplies the bootstrap only for a pending, unexpired, uncancelled manual enrollment whose credential has not been consumed; downloaded responses are not cached. The command contains no bootstrap JSON or access-provider credentials.
 
-The installer accepts `--bootstrap-env <NAME>` and uses the same enrollment command. It installs a private CLI and supplies `~/.local/bin/room-cli` without replacing an existing path. Non-login transports can use `command -v cloudroom` with `~/.local/bin/cloudroom` as a fallback. Linux machines without a systemd user session run a detached daemon; systemd and launchd machines receive a persistent service.
+The installer accepts `--bootstrap-env <NAME>`, takes the bundle out of its environment before starting any other program, and pipes it to the same enrollment command. It installs a private CLI and supplies `~/.local/bin/room-cli` without replacing an existing path. Non-login transports can use `command -v cloudroom` with `~/.local/bin/cloudroom` as a fallback. Linux machines without a systemd user session run a detached daemon; systemd and launchd machines receive a persistent service.
 
 Machine bootstrap v2 supplies optional server request headers. `room-cli machine enroll`
-persists them privately as `serverHeaders`; the launcher passes `BB_SERVER_HEADERS`
-to the daemon for enrollment, connection and runtime requests. Server-access
+persists them privately as `serverHeaders`; the daemon reads them from that config
+for enrollment, connection and runtime requests. They never enter a process environment. Server-access
 plugins redeem provider codes on the server. Pending encrypted v1 bundles are
 upgraded by the server when prepared again.
 

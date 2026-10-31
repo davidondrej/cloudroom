@@ -1912,7 +1912,7 @@ export function NewThreadComposer({
                   : {}),
               },
               ...(executionTarget === "local" && !cloudLocked && !locks.environment && cloudCanRunHarness(selectedProviderId)
-                ? { hint: <TryCloudHint draftLength={promptDraft.text.trim().length} onUseCloud={selectCloudTarget} /> }
+                ? { hint: <TryCloudHint draftLength={promptDraft.text.trim().length} github={cloudBranchPickerShown} onUseCloud={selectCloudTarget} /> }
                 : {}),
               value: effectiveEnvironmentValue,
               sources: projectSources,

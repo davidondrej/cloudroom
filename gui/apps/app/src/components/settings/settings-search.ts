@@ -142,6 +142,7 @@ const SETTINGS_SEARCH_ENTRIES: readonly SettingsSearchEntry[] = [
   ...entries("defaults", "Defaults", [
     ["Starting machine", "cloud local last used new thread"],
     ["Remove AI co-authors", "git commit co-authored-by attribution claude cursor"],
+    ["Show Ultra effort levels", "ultracode ultra reasoning effort thinking parallel agents codex claude"],
   ]),
   ...entries("cloud-environment", "Cloud environment", [
     ["GitHub", "account token gh push pr"],
@@ -194,6 +195,7 @@ const SETTINGS_SEARCH_ENTRIES: readonly SettingsSearchEntry[] = [
     ["Multi-machine picker", "beta"],
     ["Sidebar progressive disclosure", "beta"],
     ["Timeline windowing", "beta performance"],
+    ["Hide Cloud suggestions", "laptop hints battery memory disk internet nudge"],
   ]),
   ...entries("community", "Community", [
     ["Website", "blog"],

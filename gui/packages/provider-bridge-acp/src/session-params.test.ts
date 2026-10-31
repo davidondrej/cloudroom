@@ -7,6 +7,7 @@ import {
 import { SAMPLE_LIST } from "./bridge/model-catalog.fixture.js";
 import { acpLaunchSpecSchema, type AcpLaunchSpec } from "./launch-spec.js";
 import {
+  applyAcpTurnSettings,
   buildAcpModelListParams,
   buildAcpSessionParams,
   type AcpSessionExecutionOptions,
@@ -394,6 +395,46 @@ gemini-3.5-flash claude-sonnet-4 gpt-5-mini gemini-2.5-flash kimi-k3 kimi-k2.7-c
     expect(() => cursorSessionParams({ permissionMode: "auto" })).toThrow(
       'does not support permission mode "auto"',
     );
+  });
+});
+
+describe("applyAcpTurnSettings permission mode", () => {
+  const launchSpec = launchSpecFor({
+    displayName: "Custom ACP",
+    command: "custom-agent",
+    args: ["acp"],
+    env: {},
+    permissionEnv: {
+      full: { AGENT_MODE: "full-access" },
+      workspaceWrite: { AGENT_MODE: "ask" },
+    },
+  });
+  const construction = buildAcpSessionParams({
+    additionalWorkspaceWriteRoots: [],
+    cwd: "/workspace",
+    options: BASE_OPTIONS,
+    parameterizedModelPicker: false,
+    launchSpec,
+    providerLabel: "acp-custom",
+    threadId: "thread-1",
+  });
+
+  it("carries the permission env and switches to a turn's new mode", () => {
+    expect(construction.permissionEnv).toEqual(launchSpec.permissionEnv);
+    expect(
+      applyAcpTurnSettings(construction, null, {
+        permissionMode: "accept-edits",
+      }),
+    ).toEqual({ ...construction, permissionMode: "accept-edits" });
+    expect(
+      applyAcpTurnSettings(construction, null, { permissionMode: "full" }),
+    ).toBe(construction);
+  });
+
+  it("rejects a turn in permission mode auto", () => {
+    expect(() =>
+      applyAcpTurnSettings(construction, null, { permissionMode: "auto" }),
+    ).toThrow('does not support permission mode "auto"');
   });
 });
 

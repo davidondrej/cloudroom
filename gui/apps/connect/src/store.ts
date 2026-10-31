@@ -322,6 +322,26 @@ export async function createCode(
   return { code, expiresAt };
 }
 
+export async function createShareCode(
+  db: D1Database,
+  hostId: string,
+  port: string,
+  userId: string,
+  sessionToken: string,
+): Promise<string | null> {
+  const now = Date.now();
+  const code = randomString(CODE_ALPHABET, 8);
+  const [, created] = await db.batch([
+    db.prepare("DELETE FROM code WHERE expires_at < ?").bind(now),
+    db
+      .prepare(
+        "INSERT INTO code (code_hash, server_id, target, expires_at, user_id) SELECT ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM session WHERE token_hash = ? AND expires_at > ?)",
+      )
+      .bind(await sha256Hex(code), hostId, port, now + SHARE_CODE_TTL_MS, userId, await sha256Hex(sessionToken), now),
+  ]);
+  return created?.meta.changes === 1 ? code : null;
+}
+
 export async function codeHandle(
   db: D1Database,
   code: string,
@@ -335,19 +355,24 @@ export async function codeHandle(
   return row?.handle ?? null;
 }
 
-export async function consumeCode(
+export async function redeemCode(
   db: D1Database,
   code: string,
   serverId: string,
   target: string | null,
-): Promise<{ userId: string | null } | null> {
-  const row = await db
-    .prepare(
-      "DELETE FROM code WHERE code_hash = ? AND server_id = ? AND target IS ? AND expires_at > ? RETURNING user_id",
-    )
-    .bind(await sha256Hex(code), serverId, target, Date.now())
-    .first<{ user_id: string | null }>();
-  return row ? { userId: row.user_id } : null;
+): Promise<string | null> {
+  const now = Date.now();
+  const token = randomToken();
+  const codeHash = await sha256Hex(code);
+  const [created] = await db.batch([
+    db
+      .prepare(
+        "INSERT INTO session (token_hash, server_id, target, expires_at, created_at, user_id) SELECT ?, server_id, target, ?, ?, user_id FROM code WHERE code_hash = ? AND server_id = ? AND target IS ? AND expires_at > ?",
+      )
+      .bind(await sha256Hex(token), now + SESSION_TTL_MS, now, codeHash, serverId, target, now),
+    db.prepare("DELETE FROM code WHERE code_hash = ? AND server_id = ? AND target IS ?").bind(codeHash, serverId, target),
+  ]);
+  return created?.meta.changes === 1 ? token : null;
 }
 
 export async function createSession(
@@ -420,10 +445,14 @@ export async function accountHandles(db: D1Database, userId: string): Promise<st
   return results.map((row) => row.handle);
 }
 
-export async function revokeSessions(db: D1Database, server: Server): Promise<number> {
-  const result = await db
-    .prepare("DELETE FROM session WHERE server_id = ? OR user_id = ?")
-    .bind(server.id, server.userId)
-    .run();
-  return result.meta.changes;
+export async function revokeSessions(db: D1Database, userId: string): Promise<number> {
+  const [, sessions] = await db.batch([
+    db
+      .prepare("DELETE FROM code WHERE user_id = ? OR server_id IN (SELECT id FROM server WHERE user_id = ?)")
+      .bind(userId, userId),
+    db
+      .prepare("DELETE FROM session WHERE user_id = ? OR server_id IN (SELECT id FROM server WHERE user_id = ?)")
+      .bind(userId, userId),
+  ]);
+  return sessions?.meta.changes ?? 0;
 }

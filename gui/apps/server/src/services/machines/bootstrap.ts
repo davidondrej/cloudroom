@@ -7,13 +7,12 @@ import { INSTALL_MACHINE_SCRIPT_PATH } from "../../install-machine-asset.js";
 const installerScript = `
 set -eu
 umask 077
-BB_ENROLLMENT=$(cat)
-export BB_ENROLLMENT
+bundle=$(cat)
 installer_url=$1
 installer_file=$(mktemp)
 trap 'rm -f "$installer_file"' EXIT HUP INT TERM
-node -e 'for (const [name,value] of Object.entries(JSON.parse(process.env.BB_ENROLLMENT).headers ?? {})) console.log("header = " + JSON.stringify(name + ": " + value))' | curl --config - --fail --silent --show-error --location --connect-timeout 10 --max-time 60 "$installer_url" > "$installer_file"
-sh "$installer_file" --bootstrap-env BB_ENROLLMENT
+printf '%s' "$bundle" | node -e 'for (const [name,value] of Object.entries(JSON.parse(require("node:fs").readFileSync(0, "utf8")).headers ?? {})) console.log("header = " + JSON.stringify(name + ": " + value))' | curl --config - --fail --silent --show-error --location --connect-timeout 10 --max-time 60 "$installer_url" > "$installer_file"
+BB_ENROLLMENT=$bundle sh "$installer_file" --bootstrap-env BB_ENROLLMENT
 `;
 
 function installerCommand(bootstrap: EnrollmentBootstrap) {
