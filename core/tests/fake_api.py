@@ -1,6 +1,7 @@
 """A stand-in for Cloudroom's website API (rewrite/storage-move-design.md), for tests only.
 
-Core saves through five calls under CLOUDROOM_API_URL: upload links, records, diagnostics, feedback and automations.
+Core saves through six calls under CLOUDROOM_API_URL: upload links, records, diagnostics, feedback, automations and
+top-level launches.
 Uploads go to a fake file store on the same server, like R2's signed links. `down` makes every call fail, as in an
 outage. Keys follow the website's, without the thread folder.
 """
@@ -15,6 +16,7 @@ class FakeApi:
     def __init__(self, token, store):
         self.token, self.store, self.down = token, store, False
         self.files, self.diagnostics, self.reports, self.automations, self.calls = {}, [], [], [], []
+        self.launches = []
         api = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -68,6 +70,9 @@ class FakeApi:
                 if op == 'automation':
                     api.automations.append(payload)
                     return self.answer(200, {'id': '00000000-0000-4000-8000-000000000000', 'ok': True})
+                if op == 'launch':
+                    api.launches.append(payload)
+                    return self.answer(200, {'id': 'thr_fixture'})
                 return self.answer(404, {'error': 'Not found.'})
 
             def do_GET(self):

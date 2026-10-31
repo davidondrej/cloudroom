@@ -6,6 +6,7 @@
 //! `thread fork` asks the app the same way to fork this thread into a new Cloud thread; without an answer there is no
 //! fork. Only the user forks to their Mac, from the app.
 //! `spawn --top-level` asks the website to start a top-level thread instead, with no link back (ADR 0267).
+//! A Cloud loop's check script has no thread: it may start top-level threads for its loop, and nothing else here.
 use super::{Manager, relay};
 use crate::preview::Peer;
 use axum::{
@@ -41,6 +42,9 @@ const OWN_NOTE: &str = "Started in its own sandbox with a copy of your code (com
 const FALLBACK_NOTE: &str = " The user's Cloudroom app didn't start it in its own sandbox (it's probably closed), so it runs here.";
 const FORK_NOTE: &str = "Forked this thread at its last finished turn: a new thread with this conversation and your code (commits and uncommitted changes), on its own branch where the project uses Git. It runs on its own and doesn't report back to you; it doesn't see your later edits.";
 const TOP_NOTE: &str = "Started as a top-level thread in its own sandbox, from the project's GitHub repo (push your work first) and .env files. It is not your child: it doesn't report back, and you can't tell, stop or read it. It shows in the user's sidebar within a minute.";
+const SCRIPT_CHILD: &str = "A loop's check script has no thread to start a child under. Add --top-level to start a top-level thread instead, from the project's GitHub repo.";
+/// The website sets this to the automation ID where it runs a loop's check script, after any sudo.
+const LOOP_MARKER: &str = "CLOUDROOM_LOOP";
 /// How long `spawn --top-level` keeps retrying a start the website could not finish (say, a slow wake).
 const LAUNCH_RETRY: Duration = Duration::from_secs(240);
 /// How long a spawn waits for the app to start the child in its own sandbox, and how long after a miss spawns
@@ -66,6 +70,24 @@ enum Outcome {
     Here(Instant),
 }
 pub(crate) type Failure = (StatusCode, Json<Value>);
+
+/// Who sent an agent-socket request.
+pub(crate) enum Caller {
+    /// A harness session, or a command one of its tools ran.
+    Session(String),
+    /// A Cloud loop's check script, by automation ID: no harness above it, only `LOOP_MARKER`.
+    Loop(String),
+}
+impl Caller {
+    /// The field the website finds the asker by. It checks a loop belongs to this sandbox and acts for its owner
+    /// and project.
+    pub(crate) fn scope(&self) -> (&'static str, &str) {
+        match self {
+            Self::Session(session) => ("session", session),
+            Self::Loop(id) => ("automation", id),
+        }
+    }
+}
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -154,18 +176,66 @@ pub(crate) fn agent_routes() -> Router<Arc<Manager>> {
 
 /// The session whose harness process sent this `cloudroom <command>` request.
 pub(crate) fn caller(m: &Manager, peer: Peer, command: &str) -> Result<String, Failure> {
+    match identify(m, peer, command)? {
+        Some(Caller::Session(session)) => Ok(session),
+        Some(Caller::Loop(_)) => Err(fail(
+            StatusCode::CONFLICT,
+            &format!(
+                "A loop's check script has no thread, so it can't run cloudroom {command}. It can run room-cli loop (except report) and room-cli thread spawn --top-level."
+            ),
+        )),
+        None => Err(fail(
+            StatusCode::CONFLICT,
+            &format!("Run cloudroom {command} from a Cloudroom cloud thread"),
+        )),
+    }
+}
+
+/// The session or loop script that sent this request, for the commands a loop's check script may run too.
+pub(crate) fn requester(m: &Manager, peer: Peer, command: &str) -> Result<Caller, Failure> {
+    identify(m, peer, command)?.ok_or_else(|| unidentified(command, peer.1))
+}
+
+/// Neither a harness nor a loop marker sent this request. Where Core can't read the caller's environment at all, it
+/// can't see a marker either, so it says so.
+fn unidentified(command: &str, pid: Option<i32>) -> Failure {
+    if pid.is_some_and(|pid| crate::runtime::linux::environment_hidden(pid as u32)) {
+        return fail(
+            StatusCode::CONFLICT,
+            &format!(
+                "This machine's Core runs as its own account and can't read this command's environment, so it can't see a loop script's {LOOP_MARKER}. Run cloudroom {command} from a Cloudroom cloud thread here."
+            ),
+        );
+    }
+    fail(
+        StatusCode::CONFLICT,
+        &format!("Run cloudroom {command} from a Cloudroom cloud thread or a loop's check script"),
+    )
+}
+
+/// A harness above the caller always wins, so a thread's own commands never act as a loop. Without one, the nearest
+/// `LOOP_MARKER` names the loop; the website checks it belongs to this sandbox.
+fn identify(m: &Manager, peer: Peer, command: &str) -> Result<Option<Caller>, Failure> {
     if peer.0.is_none() || m.previews.agent().map(|(_, uid)| uid) != peer.0 {
         return Err(fail(
             StatusCode::FORBIDDEN,
             &format!("Only the VM agent account may run cloudroom {command}"),
         ));
     }
-    peer.1
-        .and_then(|pid| m.harness_session(&crate::secrets::ancestors(pid)))
-        .ok_or(fail(
+    let pids = peer.1.map(crate::secrets::ancestors).unwrap_or_default();
+    if let Some(session) = m.harness_session(&pids) {
+        return Ok(Some(Caller::Session(session)));
+    }
+    let Some(marker) = crate::runtime::linux::nearest_value(&pids, LOOP_MARKER) else {
+        return Ok(None);
+    };
+    match String::from_utf8(marker) {
+        Ok(id) if super::automation::valid_id(&id) => Ok(Some(Caller::Loop(id))),
+        _ => Err(fail(
             StatusCode::CONFLICT,
-            &format!("Run cloudroom {command} from a Cloudroom cloud thread"),
-        ))
+            &format!("{LOOP_MARKER} must be the ID of the loop whose check script runs here"),
+        )),
+    }
 }
 
 pub(crate) fn fail(status: StatusCode, error: &str) -> Failure {
@@ -297,7 +367,7 @@ async fn spawn(
     ConnectInfo(peer): ConnectInfo<Peer>,
     Json(input): Json<SpawnBody>,
 ) -> Result<Json<Value>, Failure> {
-    let parent = caller(&m, peer, "thread spawn")?;
+    let caller = requester(&m, peer, "thread spawn")?;
     let bad = |message: &str| fail(StatusCode::CONFLICT, message);
     let harness = check_start(
         &input.prompt,
@@ -313,7 +383,11 @@ async fn spawn(
     {
         return Err(bad("Use --service-tier default or fast"));
     }
-    pi_model(&m, &parent, harness, input.model.as_deref())?;
+    let parent = match &caller {
+        Caller::Session(session) => Some(session.as_str()),
+        Caller::Loop(_) => None,
+    };
+    pi_model(&m, parent, harness, input.model.as_deref())?;
     let key = request_key(input.request_id.clone())?;
     if input.top_level {
         if input.shared {
@@ -321,14 +395,17 @@ async fn spawn(
                 "A top-level thread gets a sandbox of its own. Omit --shared-sandbox.",
             ));
         }
-        return launch(&m, &parent, key, input).await;
+        return launch(&m, &caller, key, input).await;
     }
+    let Some(parent) = parent else {
+        return Err(bad(SCRIPT_CHILD));
+    };
     let mut note = SPAWN_NOTE.to_owned();
     if !input.shared {
-        match own_sandbox_child(&m, &parent, &key, &input).await? {
+        match own_sandbox_child(&m, parent, &key, &input).await? {
             Some(thread) => {
                 let _ = m.note(
-                    &parent,
+                    parent,
                     "child_state",
                     json!({"child":thread,"state":"running"}),
                 );
@@ -346,7 +423,7 @@ async fn spawn(
         service_tier: input.service_tier,
     };
     let (id, receipt) = m
-        .spawn_child(&parent, &key, spawn)
+        .spawn_child(parent, &key, spawn)
         .await
         .map_err(session_failure)?;
     Ok(Json(
@@ -359,7 +436,7 @@ async fn spawn(
 /// continues the same start instead of making a second thread.
 async fn launch(
     m: &Arc<Manager>,
-    session: &str,
+    caller: &Caller,
     key: String,
     input: SpawnBody,
 ) -> Result<Json<Value>, Failure> {
@@ -369,7 +446,9 @@ async fn launch(
             "Run room-cli thread spawn --top-level from a Cloudroom cloud thread",
         ));
     };
-    let body = json!({"request_id":key,"session":session,"prompt":input.prompt,"title":input.title,"harness":input.provider,"model":input.model,"reasoning":input.reasoning,"service_tier":input.service_tier});
+    let mut body = json!({"request_id":key,"prompt":input.prompt,"title":input.title,"harness":input.provider,"model":input.model,"reasoning":input.reasoning,"service_tier":input.service_tier});
+    let (field, asker) = caller.scope();
+    body[field] = json!(asker);
     let started = Instant::now();
     let task = tokio::spawn(async move {
         let mut wait = Duration::from_secs(10);
@@ -439,18 +518,19 @@ async fn own_sandbox_child(
 /// Only a Pi parent passes its own model on; Cloud's default Pi model may not work with the user's logins.
 fn pi_model(
     m: &Manager,
-    parent: &str,
+    parent: Option<&str>,
     harness: Option<crate::runtime::Kind>,
     model: Option<&str>,
 ) -> Result<(), Failure> {
-    let pi_parent = m
-        .local
-        .lock()
-        .unwrap()
-        .sessions
-        .get(parent)
-        .map(|p| p.harness)
-        == Some(crate::runtime::Kind::Pi);
+    let pi_parent = parent.is_some_and(|parent| {
+        m.local
+            .lock()
+            .unwrap()
+            .sessions
+            .get(parent)
+            .map(|p| p.harness)
+            == Some(crate::runtime::Kind::Pi)
+    });
     if harness == Some(crate::runtime::Kind::Pi)
         && !pi_parent
         && !model
@@ -615,7 +695,7 @@ async fn fork(
         input.reasoning.as_deref(),
         input.provider.as_deref(),
     )?;
-    pi_model(&m, &parent, harness, input.model.as_deref())?;
+    pi_model(&m, Some(&parent), harness, input.model.as_deref())?;
     let key = request_key(input.request_id)?;
     let mut data = json!({"id":format!("fork_{key}"),"prompt":input.prompt});
     for (name, value) in [
@@ -1128,4 +1208,33 @@ pub async fn cli(args: &[String]) -> io::Result<i32> {
     let answer = crate::mac::request(crate::mac::SOCKET, "POST", path, body).await?;
     println!("{answer}");
     Ok(0)
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_unreadable_caller_environment_gets_its_own_refusal() {
+        let error = |pid| unidentified("loop", Some(pid)).1.0["error"].clone();
+        // This test's own environment is readable, as where Core shares the agent's account: no marker, the usual refusal.
+        assert_eq!(
+            error(std::process::id() as i32),
+            "Run cloudroom loop from a Cloudroom cloud thread or a loop's check script"
+        );
+        // Root's init is another account's process, as every agent process is to a protected machine's Core. Where
+        // this test may read it anyway (as root with ptrace rights), there is nothing to check.
+        if std::fs::read("/proc/1/environ").is_ok() {
+            return;
+        }
+        let hidden = error(1);
+        assert!(
+            hidden
+                .as_str()
+                .unwrap()
+                .contains("can't read this command's environment"),
+            "{hidden}"
+        );
+        assert!(hidden.as_str().unwrap().contains(LOOP_MARKER), "{hidden}");
+    }
 }

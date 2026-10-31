@@ -87,7 +87,7 @@ fn cpu_quota() -> Option<u64> {
 }
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
-const MARKER: &[u8] = b"CLOUDROOM_WORKLOAD=";
+const MARKER: &str = "CLOUDROOM_WORKLOAD";
 /// Set on the virtual screen and everything computer use starts on it (see `desktop`).
 pub(crate) const DESKTOP_MARKER: &str = "CLOUDROOM_DESKTOP";
 const SIGKILL: i32 = 9;
@@ -346,10 +346,8 @@ fn members(id: Option<&str>) -> io::Result<Vec<Member>> {
         let Ok(environ) = fs::read(entry.path().join("environ")) else {
             continue;
         };
-        let marked = environ.split(|b| *b == 0).any(|var| {
-            var.strip_prefix(MARKER)
-                .is_some_and(|value| id.is_none_or(|id| value == id.as_bytes()))
-        });
+        let marked =
+            values(&environ, MARKER).any(|value| id.is_none_or(|id| value == id.as_bytes()));
         // Exited processes (zombies) have no environment left and hold nothing.
         let state = fs::read_to_string(entry.path().join("stat"))
             .ok()
@@ -366,6 +364,26 @@ fn members(id: Option<&str>) -> io::Result<Vec<Member>> {
     }
     Ok(found)
 }
+/// Each value of `name` in an environment block from `/proc/PID/environ`.
+fn values<'a>(environ: &'a [u8], name: &'a str) -> impl Iterator<Item = &'a [u8]> {
+    environ
+        .split(|b| *b == 0)
+        .filter_map(move |var| var.strip_prefix(name.as_bytes())?.strip_prefix(b"="))
+}
+/// `name`'s value in the first of these processes that sets it: with ancestors, the nearest. Other accounts'
+/// processes are unreadable and skipped.
+pub(crate) fn nearest_value(pids: &[u32], name: &str) -> Option<Vec<u8>> {
+    pids.iter().find_map(|pid| {
+        let environ = fs::read(format!("/proc/{pid}/environ")).ok()?;
+        values(&environ, name).next().map(<[u8]>::to_vec)
+    })
+}
+/// Whether Core may not read this process's environment: on protected machines Core runs as its own account, without
+/// the ptrace rights that needs (`/proc/PID/stat` stays readable).
+pub(crate) fn environment_hidden(pid: u32) -> bool {
+    fs::read(format!("/proc/{pid}/environ"))
+        .is_err_and(|e| e.kind() == io::ErrorKind::PermissionDenied)
+}
 /// Codex's code-mode host runs in its own group but holds session state, so it counts as harness.
 fn helper(pid: i32) -> bool {
     fs::read(format!("/proc/{pid}/cmdline")).is_ok_and(|cmdline| {
@@ -377,11 +395,8 @@ fn helper(pid: i32) -> bool {
 /// `CLOUDROOM_DESKTOP=1`; browser-harness runs its daemon as `python -m browser_harness.daemon`. For idle sleep
 /// only: the disk guard still sees them. An unreadable environment counts as a background job, as before.
 fn desktop(pid: i32) -> bool {
-    let marked = fs::read(format!("/proc/{pid}/environ")).is_ok_and(|environ| {
-        environ
-            .split(|b| *b == 0)
-            .any(|var| var.strip_prefix(DESKTOP_MARKER.as_bytes()) == Some(b"=1".as_slice()))
-    });
+    let marked = fs::read(format!("/proc/{pid}/environ"))
+        .is_ok_and(|environ| values(&environ, DESKTOP_MARKER).any(|value| value == b"1"));
     marked
         || fs::read(format!("/proc/{pid}/cmdline")).is_ok_and(|cmdline| {
             let args: Vec<&[u8]> = cmdline.split(|b| *b == 0).skip(1).take(2).collect();

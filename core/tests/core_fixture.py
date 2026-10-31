@@ -133,6 +133,11 @@ def codex():
                     continue
                 if text != "reply-first":
                     send(reply)
+                if text == "agent-socket":
+                    # A tool command of this harness that carries a loop's marker anyway: it still belongs to the session.
+                    asked = subprocess.run([sys.executable, __file__, "agent-request", Path("agent-socket").read_text(), "POST", "/automation", '{"action":"list"}'],
+                                           env={**os.environ, "CLOUDROOM_LOOP": str(uuid.uuid4())}, capture_output=True, text=True, timeout=20)
+                    Path("agent-socket.out").write_text(asked.stdout)
                 if text == "hold":
                     job = f"from pathlib import Path; import time\nfor n in range(300):\n Path('{native}.ticks').write_text(str(n)); time.sleep(.1)\n"
                     child = subprocess.Popen([sys.executable, "-c", job], start_new_session=True,
@@ -215,6 +220,18 @@ def codex():
             child.kill(); child.wait()
         with path.open("a") as file:
             file.write('{"fixture":"shutdown"}\n')
+
+
+def agent_request(path, method, route, body=""):
+    """Sends one request on Core's agent socket, as `room-cli` does, and prints its status and answer."""
+    with socket.socket(socket.AF_UNIX) as sock:
+        sock.connect(path)
+        data = body.encode()
+        sock.sendall(f"{method} {route} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\n"
+                     f"Content-Length: {len(data)}\r\nConnection: close\r\n\r\n".encode() + data)
+        response = b"".join(iter(lambda: sock.recv(65536), b""))
+    head, _, answer = response.partition(b"\r\n\r\n")
+    print(json.dumps({"status": int(head.split()[1]), "answer": json.loads(answer or b"null")}))
 
 
 class ReplayTests(unittest.TestCase):
@@ -1043,6 +1060,94 @@ class RecoveryTests(unittest.TestCase):
             sleeper.wait()
 
 
+class LoopScriptTests(unittest.TestCase):
+    """A Cloud loop's check script runs `room-cli` with no harness above it. The website marks the shell it starts
+    with `CLOUDROOM_LOOP=<automation id>`; Core forwards that loop, never a session, and only for what a script may do."""
+    setUp, tearDown, start, seed, prompt, status, wait, ready = (
+        RecoveryTests.setUp, RecoveryTests.tearDown, RecoveryTests.start, RecoveryTests.seed, RecoveryTests.prompt,
+        RecoveryTests.status, RecoveryTests.wait, RecoveryTests.ready)
+
+    def serve(self):
+        """Core with the fake website and its agent socket (as in Cloud sandboxes), next to a running thread."""
+        from fake_api import FakeApi
+        self.api = FakeApi(self.env["CLOUDROOM_TOKEN"], self.env["CLOUDROOM_STORE"])
+        self.addCleanup(self.api.close)
+        self.env.pop("CLOUDROOM_LOCAL_HISTORY", None); self.env.update(self.api.env())
+        sockets = self.root / "run"; sockets.mkdir()
+        previews = self.state / "previews"; previews.mkdir(mode=0o700)
+        setup = previews / "setup.json"
+        setup.write_text(json.dumps({"socket": str(sockets / "preview.sock"), "host": None, "agent_uid": os.getuid(), "tunnel": True}))
+        setup.chmod(0o600)
+        self.socket = str(sockets / "mac.sock")
+        self.seed(); self.start(); self.ready()
+
+    def script(self, method, route, body=None, marker=None):
+        """One `room-cli` request from a script's command. The marker sits on the shell above it, as the website sets
+        it after sudo; the command itself clears its environment, so only the ancestry carries it."""
+        command = [sys.executable, __file__, "agent-request", self.socket, method, route, json.dumps(body) if body else ""]
+        shell = ["sh", "-c", 'env -i "$@"; :', "sh", *command]
+        marked = ["env", "CLOUDROOM_LOOP=" + marker] if marker is not None else []
+        answer = json.loads(subprocess.run(marked + shell, capture_output=True, text=True, timeout=30, check=True).stdout)
+        return answer["status"], answer["answer"]
+
+    def test_a_loop_script_runs_loop_commands_and_top_level_spawns_as_its_loop(self):
+        self.serve()
+        loop = str(uuid.uuid4())
+        status, answer = self.script("POST", "/automation", {"action": "list"}, loop)
+        self.assertEqual(status, 200, answer)
+        self.assertEqual(self.api.automations, [{"action": "list", "automation": loop}])
+        status, answer = self.script("POST", "/children", {"prompt": "check the deploy", "top_level": True, "request_id": "loop-launch"}, loop)
+        self.assertEqual((status, answer["id"]), (200, "thr_fixture"), answer)
+        [launch] = self.api.launches
+        self.assertEqual((launch["automation"], launch["prompt"], launch["request_id"]), (loop, "check the deploy", "loop-launch"))
+        self.assertNotIn("session", launch)
+
+    def test_a_process_without_a_loop_marker_is_still_refused(self):
+        self.serve()
+        status, answer = self.script("POST", "/automation", {"action": "list"})
+        self.assertEqual(status, 409, answer)
+        status, answer = self.script("POST", "/children", {"prompt": "x", "top_level": True, "request_id": "unmarked"})
+        self.assertEqual(status, 409, answer)
+        self.assertEqual((self.api.automations, self.api.launches), ([], []))
+
+    def test_a_malformed_loop_marker_is_refused(self):
+        self.serve()
+        for marker in ["", "not-a-loop", "x" * 36, "../" + str(uuid.uuid4())[3:], str(uuid.uuid4()) + "0"]:
+            status, answer = self.script("POST", "/automation", {"action": "list"}, marker)
+            self.assertEqual(status, 409, (marker, answer))
+            self.assertIn("CLOUDROOM_LOOP", answer["error"], marker)
+        self.assertEqual(self.api.automations, [])
+
+    def test_session_only_commands_refuse_a_loop_script_clearly(self):
+        self.serve()
+        loop = str(uuid.uuid4())
+        for method, route, body, says in [
+            ("GET", "/children", None, "loop's check script"),
+            ("POST", "/title", {"title": "renamed"}, "loop's check script"),
+            ("POST", "/archive", None, "loop's check script"),
+            ("POST", "/fork", {"prompt": "x"}, "loop's check script"),
+            ("POST", "/children/thr_abc/messages", {"text": "x"}, "loop's check script"),
+            ("POST", "/report", {"message": "x"}, "loop's check script"),
+            ("POST", "/children", {"prompt": "x"}, "--top-level"),
+            ("POST", "/children", {"prompt": "x", "shared": True}, "--top-level"),
+            ("POST", "/automation", {"action": "report", "outcome": "done", "confidence": "high", "reason": "x"}, "report"),
+        ]:
+            status, answer = self.script(method, route, body, loop)
+            self.assertEqual(status, 409, (route, body, answer))
+            self.assertIn(says, answer["error"], (route, body))
+            self.assertIn("check script", answer["error"], (route, body))
+        self.assertEqual((self.api.automations, self.api.launches), ([], []))
+
+    def test_a_harness_session_wins_over_a_loop_marker(self):
+        self.serve()
+        (self.repo / "agent-socket").write_text(self.socket)
+        self.prompt("socket", "agent-socket")
+        self.wait(lambda: self.status()["receipts"]["socket"]["state"] == "completed", "harness tool asked Core")
+        answer = json.loads((self.repo / "agent-socket.out").read_text())
+        self.assertEqual(answer["status"], 200, answer)
+        self.assertEqual(self.api.automations, [{"action": "list", "session": "cr_seed"}])
+
+
 def progress_checks(service, root):
     sid = service.request("POST", "/v1/sessions", {"request_id": "ordering"}, 202)["session_id"]
     until(lambda: service.session(sid)["state"] == "idle", "ordering session")
@@ -1211,5 +1316,7 @@ def queue_and_recovery_checks(service, root):
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "app-server":
         codex()
+    elif len(sys.argv) > 1 and sys.argv[1] == "agent-request":
+        agent_request(*sys.argv[2:])
     else:
         unittest.main()
