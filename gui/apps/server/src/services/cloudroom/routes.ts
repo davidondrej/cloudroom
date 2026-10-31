@@ -143,7 +143,7 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: Plugin
     await cloudroom(deps).noteActivity();
     return context.json({ ok: true });
   });
-  app.get("/api/v1/cloudroom/activation", async (context) => context.json(await activation(deps)));
+  app.get("/api/v1/cloudroom/activation", async (context) => context.json(await activation(deps, plugins)));
   app.post("/api/v1/cloudroom/activation", async (context) => {
     const body = await context.req.json().catch(() => null);
     const starter = z.object({ starter: z.enum(STARTER_PROMPTS) }).strict().safeParse(body);

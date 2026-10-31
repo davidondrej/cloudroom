@@ -106,6 +106,7 @@ import {
 } from "@/components/commands/AppCommandProvider";
 import { useIsCompactViewport } from "@cloudroom/shared-ui/hooks/use-compact-viewport";
 import {
+  isFirefoxAndroid,
   shouldRestoreIOSViewportOnKeyboardDismissal,
   useMobileVisualViewportHeight,
 } from "./useMobileVisualViewportHeight";
@@ -410,9 +411,10 @@ export function AppLayout({ children }: AppLayoutProps) {
     () => shouldRestoreIOSViewportOnKeyboardDismissal(navigator),
     [],
   );
+  const firefoxAndroid = useMemo(() => isFirefoxAndroid(navigator), []);
   useMobileVisualViewportHeight(
     contentShellRef,
-    isCompactViewport,
+    isCompactViewport || firefoxAndroid,
     restoreIOSViewportOnKeyboardDismissal,
   );
   const location = useLocation();

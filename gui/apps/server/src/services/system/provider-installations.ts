@@ -72,13 +72,15 @@ export async function aggregateProviderInstallations(
 
 export async function getProviderInstallations(
   deps: WorkSessionDeps,
-  args: { hostId: string },
+  args: { hostId: string; providerIds?: readonly string[] },
 ): Promise<ProviderCliStatusResponse> {
   const deadline = Date.now() + PROVIDER_INSTALLATION_STATUS_TIMEOUT_MS;
-  const providers = await listSystemProviderInfos(deps, {
-    hostId: args.hostId,
-    capability: "installation",
-  });
+  const providers = (
+    await listSystemProviderInfos(deps, {
+      hostId: args.hostId,
+      capability: "installation",
+    })
+  ).filter((provider) => args.providerIds?.includes(provider.id) ?? true);
   return aggregateProviderInstallations(providers, {
     deadlineMs: deadline,
     now: Date.now,

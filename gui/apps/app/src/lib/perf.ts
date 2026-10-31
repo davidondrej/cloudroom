@@ -1,12 +1,19 @@
 import { useEffect, useLayoutEffect, useRef } from "react";
 import { fetchWithAppSurface } from "./app-surface";
+import { getBbDesktopInfo } from "./bb-desktop";
 
-type PerfMetric = "app_ready" | "thread_open" | "ui_freeze";
+type PerfMetric =
+  | "app_ready"
+  | "thread_open"
+  | "ui_freeze"
+  | "panel_toggle_noop"
+  | "top_right_window_drag";
 
 interface PerfEntry {
   metric: PerfMetric;
   ms: number;
   threadId?: string;
+  detail?: string;
 }
 
 interface PendingThreadOpen {
@@ -21,6 +28,7 @@ const FLUSH_INTERVAL_MS = 10_000;
 const MAX_QUEUED_ENTRIES = 100;
 const UI_FREEZE_THRESHOLD_MS = 200;
 const INPUT_TO_OPEN_WINDOW_MS = 2_000;
+const PANEL_OPEN_CHECK_MS = 500;
 
 const queue: PerfEntry[] = [];
 let lastInputAt: number | null = null;
@@ -85,8 +93,27 @@ export function installPerfMonitor(): void {
       }
     }).observe({ buffered: true, type: "longtask" });
   }
+  getBbDesktopInfo()?.onTopRightWindowDrag?.((position) => {
+    recordPerf({ metric: "top_right_window_drag", ms: 0, detail: position });
+  });
   window.setInterval(flushPerf, FLUSH_INTERVAL_MS);
   window.addEventListener("pagehide", flushPerf);
+}
+
+export function watchPanelOpen(
+  threadId: string,
+  stillClosed: () => string | null,
+): void {
+  window.setTimeout(() => {
+    const detail = stillClosed();
+    if (detail === null) return;
+    recordPerf({
+      metric: "panel_toggle_noop",
+      ms: PANEL_OPEN_CHECK_MS,
+      threadId,
+      detail: detail.slice(0, 300),
+    });
+  }, PANEL_OPEN_CHECK_MS);
 }
 
 export function useThreadOpenTiming(threadId: string, ready: boolean): void {

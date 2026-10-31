@@ -15,6 +15,7 @@ import {
   net,
   powerMonitor,
   safeStorage,
+  screen,
   session,
   shell,
   type Event,
@@ -197,6 +198,7 @@ import {
   BB_DESKTOP_OPEN_NEW_TAB_CHANNEL,
   BB_DESKTOP_OPEN_COMPUTER_CHANNEL,
   BB_DESKTOP_OPEN_SERVER_DAEMON_LOGS_CHANNEL,
+  BB_DESKTOP_TOP_RIGHT_DRAG_CHANNEL,
   BB_DESKTOP_WINDOW_STATE_CHANGED_CHANNEL,
   CLOSE_WINDOW_REQUEST_TIMEOUT_MS,
 } from "./desktop-window-command-ipc.js";
@@ -1131,6 +1133,19 @@ function registerApplicationWindow(browserWindow: DesktopBrowserWindow): void {
   });
   (browserWindow as BrowserWindow).on("blur", () => {
     sendDesktopWindowStateChanged(browserWindow);
+  });
+  (browserWindow as BrowserWindow).on("will-move", () => {
+    const bounds = browserWindow.getBounds();
+    const cursor = screen.getCursorScreenPoint();
+    const x = cursor.x - bounds.x;
+    const y = cursor.y - bounds.y;
+    if (y < 60 && bounds.width - x < 140) {
+      sendToApplicationRenderer(
+        browserWindow as BrowserWindow,
+        BB_DESKTOP_TOP_RIGHT_DRAG_CHANNEL,
+        `${x},${y}`,
+      );
+    }
   });
   browserWindow.on("closed", () => {
     desktopBrowserBroker?.releaseWindow(webContentsId);

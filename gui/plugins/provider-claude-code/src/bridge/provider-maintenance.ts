@@ -35,6 +35,8 @@ const CLAUDE_KEYCHAIN_SERVICE = "Claude Code-credentials";
 const CLAUDE_NPM_PACKAGE = "@anthropic-ai/claude-code";
 const CLAUDE_INSTALL_SCRIPT_URL = "https://claude.ai/install.sh";
 const CLAUDE_POWERSHELL_INSTALL_SCRIPT_URL = "https://claude.ai/install.ps1";
+const CLAUDE_NATIVE_RELEASES_URL =
+  "https://downloads.claude.ai/claude-code-releases";
 const CLAUDE_MINIMUM_SUPPORTED_VERSION = "2.1.280";
 
 const claudeCredentialsSchema = z.object({
@@ -108,6 +110,31 @@ function claudeDistTags(value: string | null): {
   }
 }
 
+async function nativeChannelVersion(channel: "latest" | "stable") {
+  try {
+    const response = await fetchWithProxyFallback((init) =>
+      fetch(`${CLAUDE_NATIVE_RELEASES_URL}/${channel}`, {
+        ...init,
+        signal: AbortSignal.timeout(USAGE_FETCH_TIMEOUT_MS),
+      }),
+    );
+    return response.ok ? versionFrom(await response.text()) : null;
+  } catch {
+    return null;
+  }
+}
+
+async function claudeNativeTags(): Promise<{
+  latest: string;
+  stable: string | null;
+} | null> {
+  const [latest, stable] = await Promise.all([
+    nativeChannelVersion("latest"),
+    nativeChannelVersion("stable"),
+  ]);
+  return latest === null ? null : { latest, stable };
+}
+
 function claudeDoctor(value: string | null): {
   installMethod: "native" | "npm-global" | "package-manager" | "unknown" | null;
   updateChannel: "latest" | "stable" | null;
@@ -162,6 +189,7 @@ async function claudeInstallation(): Promise<{
     tagsOutput,
     npmGlobal,
     doctorOutput,
+    nativeTags,
   ] = await Promise.all([
     resolveExecutablePath(command),
     commandOutput(command, ["--version"]),
@@ -173,6 +201,7 @@ async function claudeInstallation(): Promise<{
     ]),
     probeNpmGlobalPackage(CLAUDE_NPM_PACKAGE),
     commandOutput(command, ["doctor"]),
+    claudeNativeTags(),
   ]);
   const installed = resolvedExecutable !== null || versionOutput !== null;
   const currentVersion = versionFrom(versionOutput);
@@ -185,7 +214,10 @@ async function claudeInstallation(): Promise<{
       : homebrew.args.at(-1)?.endsWith("@latest")
         ? "latest"
         : "stable";
-  const tags = claudeDistTags(tagsOutput);
+  const tags =
+    homebrew === null && doctor.installMethod === "native"
+      ? nativeTags
+      : claudeDistTags(tagsOutput);
   const latestVersion =
     updateChannel === null || tags === null ? null : tags[updateChannel];
   const definitelyNeedsUnknownChannelUpdate =

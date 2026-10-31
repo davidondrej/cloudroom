@@ -143,6 +143,8 @@ impl Process {
             let mut output_closed = false;
             let mut close_pending = false;
             let mut cause = None;
+            // History capture is a backup: a failure is logged once and retried later, never fatal.
+            let mut capture_error = None;
             let reason = loop {
                 let mut bounded = (&mut output).take((MAX_LINE + 1 - line.len()) as u64);
                 tokio::select! {
@@ -203,7 +205,15 @@ impl Process {
                         if let Some((id, result)) = adapter.response(&value) && let Some(reply) = pending.remove(&id) { let _ = reply.send(result); }
                     }
                     _ = tick.tick() => {
-                        let records = match adapter.capture() { Ok(r) => r, Err(e) => { cause = Some(e.to_string()); break "native history capture failed" } };
+                        let records = match adapter.capture() {
+                            Ok(r) => { capture_error = None; r }
+                            Err(e) => {
+                                let error = e.to_string();
+                                if capture_error.as_ref() != Some(&error) { eprintln!("Native history capture failed: {error}"); }
+                                capture_error = Some(error);
+                                continue;
+                            }
+                        };
                         let mut disconnected = false;
                         for record in records { if events.send(record).await.is_err() { disconnected = true; break; } }
                         if disconnected { break "recording owner disconnected"; }
@@ -245,8 +255,7 @@ impl Process {
                         }
                     }
                     Err(error) => {
-                        reason = "native history capture failed at exit";
-                        cause = Some(error.to_string());
+                        eprintln!("Native history capture failed at exit: {error}");
                         break;
                     }
                 }

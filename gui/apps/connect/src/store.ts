@@ -401,6 +401,17 @@ export async function phoneUser(db: D1Database, token: string): Promise<string |
   return row?.user_id ?? null;
 }
 
+/** Whether a phone is signed in to the account, on any of its Macs. Phone sessions last a year, Mac-to-Mac ones 30 days. */
+export async function hasPhone(db: D1Database, userId: string): Promise<boolean> {
+  const row = await db
+    .prepare(
+      "SELECT 1 FROM session JOIN server ON server.id = session.server_id WHERE server.user_id = ? AND session.target IS NULL AND session.expires_at > ? AND session.expires_at - session.created_at > ? LIMIT 1",
+    )
+    .bind(userId, Date.now(), DESKTOP_SESSION_TTL_MS)
+    .first();
+  return row !== null;
+}
+
 export async function accountHandles(db: D1Database, userId: string): Promise<string[]> {
   const { results } = await db
     .prepare("SELECT handle FROM server WHERE user_id = ?")

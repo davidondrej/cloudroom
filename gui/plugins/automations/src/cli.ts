@@ -998,7 +998,7 @@ room-cli loop review [--all]                List what loops did in the last 7 da
 room-cli loop review mark <itemId...> [--undo]
 room-cli loop report --outcome done|acted|needs-you|failed --confidence high|medium|low --reason TEXT [--action TEXT]...   Inside a loop run: record what it did and why
 room-cli loop scan-progress --data JSON   Inside a Workflow scan: save its progress for the progress card
-room-cli loop settings [--stop-at-limit on|off]   Cloud loops wait while their agent is at its plan limit (on by default)
+room-cli loop settings [--stop-at-limit on|off] [--fallback on|off]   Cloud loops wait while their agent is at its plan limit; loops at a Claude or Codex limit switch to the other (both on by default)
 
 Priority is P1 (essential) to P4 (niche); loops start at P3, or at their template's.
 Cloud loops run on Cloudroom's servers, even while this Mac is off: every minute with a script, else at most every
@@ -1165,14 +1165,20 @@ async function runCloudCommand(bb: Pick<BbPluginApi, "sdk">, args: ParsedArgs, c
   throw new Error(`Unknown loop command: ${args.command}`);
 }
 
-/** Stop at plan limit (ADR 0292): an account setting for Cloud loops. */
+/** Stop at plan limit (ADR 0292) and Switch provider at a limit (ADR 0345): account settings for loops. */
 async function runSettingsCommand(bb: Pick<BbPluginApi, "sdk">, args: ParsedArgs): Promise<PluginCliResult> {
   const value = optionalFlag(args, "stop-at-limit");
   if (value !== undefined && value !== "on" && value !== "off") throw new Error("Use --stop-at-limit on or off.");
-  const { stop_at_limit: stop } = await bb.sdk.cloudroom.automations({ action: "settings", ...(value ? { stop_at_limit: value === "on" } : {}) });
+  const fallbackValue = optionalFlag(args, "fallback");
+  if (fallbackValue !== undefined && fallbackValue !== "on" && fallbackValue !== "off") throw new Error("Use --fallback on or off.");
+  const { stop_at_limit: stop, fallback } = await bb.sdk.cloudroom.automations({
+    action: "settings",
+    ...(value ? { stop_at_limit: value === "on" } : {}),
+    ...(fallbackValue ? { fallback: fallbackValue === "on" } : {}),
+  });
   return {
     exitCode: 0,
-    stdout: optionalJson(args, { stop_at_limit: stop }) ?? `Stop at plan limit: ${stop === false ? "off" : "on"}\n  On: Cloud loops wait while their agent is at its plan limit or would spend extra credits.\n`,
+    stdout: optionalJson(args, { stop_at_limit: stop, fallback }) ?? `Stop at plan limit: ${stop === false ? "off" : "on"}\n  On: Cloud loops wait while their agent is at its plan limit or would spend extra credits.\nSwitch provider at a limit: ${fallback === false ? "off" : "on"}\n  On: a loop that hits a Claude or Codex limit runs on the other one, with the model of the same level.\n`,
   };
 }
 
@@ -1357,8 +1363,8 @@ export function registerAutomationCli(args: {
       },
       {
         name: "settings",
-        summary: "Read or set whether Cloud loops stop at plan limits",
-        usage: "room-cli loop settings [--stop-at-limit on|off] [--json]",
+        summary: "Read or set whether loops stop or switch provider at plan limits",
+        usage: "room-cli loop settings [--stop-at-limit on|off] [--fallback on|off] [--json]",
       },
     ],
     async run(argv: string[], ctx: PluginCliContext): Promise<PluginCliResult> {

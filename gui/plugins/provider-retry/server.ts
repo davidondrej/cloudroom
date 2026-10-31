@@ -1,8 +1,16 @@
-import type { BbPluginApi } from "@get-bb/plugin-sdk";
+import { defineRpcContract, type BbPluginApi } from "@get-bb/plugin-sdk";
+import { z } from "zod";
 import { registerProviderRetryCli } from "./src/cli.js";
 import { DEFAULT_MAXIMUM_WAIT_MS, decideRetry } from "./src/retry-policy.js";
 
 const MAXIMUM_WAIT_OPTIONS = ["6 hours", "24 hours", "No limit"] as const;
+
+export const loopFallbackRpcContract = defineRpcContract({
+  loopFallback: {
+    input: z.object({ fallback: z.boolean().optional() }).strict(),
+    output: z.object({ fallback: z.boolean() }).strict(),
+  },
+});
 
 function maximumWaitMs(value: string): number | null {
   switch (value) {
@@ -66,6 +74,16 @@ export default async function plugin(bb: BbPluginApi) {
         `Retry not scheduled for ${event.threadId}: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
+  });
+
+  bb.rpc.register(loopFallbackRpcContract, {
+    async loopFallback({ fallback }) {
+      const settings = await bb.sdk.cloudroom.automations({
+        action: "settings",
+        ...(fallback === undefined ? {} : { fallback }),
+      });
+      return { fallback: settings.fallback !== false };
+    },
   });
 
   registerProviderRetryCli(bb);

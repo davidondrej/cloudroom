@@ -137,6 +137,7 @@ it.each(["pi", "codex"])("sends selected skills in Cloud %s starts and follow-up
   const { project } = seedProjectWithSource(app.deps, { hostId: host.id });
   const service = cloudroom(app.deps);
   const prompts: string[] = [];
+  const starts: { reasoning?: string }[] = [];
   const sid = "cr_skill-test";
   const core = createServer(async (req, res) => {
     const json = (body: unknown, status = 200) => { res.writeHead(status, { "Content-Type": "application/json" }); res.end(JSON.stringify(body)); };
@@ -148,6 +149,7 @@ it.each(["pi", "codex"])("sends selected skills in Cloud %s starts and follow-up
     const body = JSON.parse(text);
     const command = req.url === "/v1/sessions" ? "start" : "prompt";
     if (command === "prompt") prompts.push(body.text);
+    else starts.push(body);
     json({ session_id: sid, receipt: { request_id: body.request_id, command, state: "accepted", input: {} }, saving: {} }, 202);
   });
   core.listen(0, "127.0.0.1"); await once(core, "listening");
@@ -157,13 +159,14 @@ it.each(["pi", "codex"])("sends selected skills in Cloud %s starts and follow-up
   const request = (path: string, body: unknown) => app.app.request(`/api/v1${path}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
   try {
     await service.configure({ url: `http://127.0.0.1:${address.port}`, token: "x".repeat(40), projectId: project.id });
-    const body = { executionTarget: "cloud", requestId: "skill-test", projectId: project.id, providerId, origin: "app", model: providerId === "pi" ? "fixture/test-model" : "test-model", reasoningLevel: "medium", environment: { type: "project-default" }, input: [tagged] };
+    const body = { executionTarget: "cloud", requestId: "skill-test", projectId: project.id, providerId, origin: "app", model: providerId === "pi" ? "fixture/test-model" : "test-model", environment: { type: "project-default" }, input: [tagged] };
     const created = await request("/threads", body);
     expect(created.status, await created.clone().text()).toBe(201);
     const thread = await created.json();
     await expect.poll(() => prompts).toEqual([providerId === "pi" ? "/skill:file-tree show  please" : tagged.text]);
     expect((await request("/threads", body)).status).toBe(201);
     expect(prompts).toHaveLength(1);
+    expect(starts.map(start => start.reasoning)).toEqual([providerId === "pi" ? undefined : "medium"]);
     const follow = await request(`/threads/${thread.id}/send`, { requestId: "skill-follow", mode: "auto", input: [{ type: "text", text: "again", mentions: [] }, { type: "text", text: "/file-tree", mentions: [{ start: 0, end: 10, resource }] }] });
     expect(follow.status, await follow.clone().text()).toBe(200);
     await expect.poll(() => prompts.at(-1)).toBe(providerId === "pi" ? "/skill:file-tree again\n" : "again\n/file-tree");

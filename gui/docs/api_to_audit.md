@@ -2499,8 +2499,7 @@ reimplementing it, and `indicatorLabel` carries the matching accessible string.
    contract. Confirm new kinds can ship without breaking plugins, and that the
    documented "treat unknown as none" rule is enough.
 3. **Unread semantics.** `isUnread` is plain read state, so it is true for
-   child threads and running threads that `isUnreadDoneThread` excludes by
-   design. Confirm that is the more useful primitive for a replaced list.
+   running threads that `isUnreadDoneThread` excludes by design. Confirm that is the more useful primitive for a replaced list.
 4. **Scale.** Confirm one array of every thread is right at ten thousand
    threads, versus a paged or windowed read. Today the host memoizes each
    thread DTO per unchanged `ThreadListEntry` (React Query structurally shares

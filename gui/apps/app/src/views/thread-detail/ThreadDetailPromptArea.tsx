@@ -372,7 +372,7 @@ async function runWhileFollowUpShortcutSending(
 
 import { showCloudSignIn, useCloudLocked } from "@/hooks/useCloudLocked";
 import { useCloudroomThread, useSetCloudReasoning, useCloudroomThreadWorkspace, useCloudroomConnection, useRetryCloudStart, useTeleportThread, useTeleportLocal, useTeleportDirection, cloudroomRequestId, clearCloudroomRequestId, cloudReasoningLevels, cloudServiceTierSupported, cloudFeatureSupported, cloudCanRunHarness, cloudHarness } from "@/hooks/queries/cloudroom-queries";
-import { reasoningLevelSchema } from "@cloudroom/domain";
+import { reasoningLevelSchema, reconcileReasoningLevel } from "@cloudroom/domain";
 import { reasoningLevelLabel } from "@/lib/reasoning-labels";
 import { useCopyCommand } from "@/hooks/useCopyCommand";
 
@@ -825,7 +825,10 @@ export function ThreadDetailPromptArea({
         }
         if (selection.model === cloudState.data?.model) return;
       }
-      const next = { ...selection, reasoningLevel: selection.reasoningLevel ?? followUpReasoningLevel };
+      const level = selection.reasoningLevel ?? followUpReasoningLevel;
+      const cloudLevels = isCloud ? cloudReasoningLevels(cloudConnection.data, selection.providerId, selection.model) : [];
+      const supported = reasoningLevelSchema.options.filter((option) => cloudLevels.includes(option));
+      const next = { ...selection, reasoningLevel: supported.length > 0 ? reconcileReasoningLevel(followUpReasoningLevel, supported) : level };
       updateExecution(
         { id: thread.id, ...next },
         {
@@ -837,7 +840,7 @@ export function ThreadDetailPromptArea({
         },
       );
     },
-    [cloudState.data?.model, fallbackIdentity, followUpReasoningLevel, handleModelChange, isCloud, queryClient, setProviderModelReasoning, thread.id, thread.providerId, updateExecution],
+    [cloudConnection.data, cloudState.data?.model, fallbackIdentity, followUpReasoningLevel, handleModelChange, isCloud, queryClient, setProviderModelReasoning, thread.id, thread.providerId, updateExecution],
   );
   const { typeaheadConfig, promptActions } = useComposerTypeahead({
     projectId: thread.projectId,

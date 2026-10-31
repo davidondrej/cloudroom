@@ -2,6 +2,20 @@
 
 Also on [cloudroom.dev/changelog](https://www.cloudroom.dev/changelog).
 
+## 134
+
+Your phone no longer needs your Mac (2026-10-30)
+
+### Changes
+
+- You can now start new Cloud threads from your phone while your Mac is off.
+- A loop at its Claude or Codex limit now keeps going on the other agent with a same-level model, and you can turn this off in Settings.
+- Finished subagents now show their own unread dot in the sidebar.
+- Each project now remembers whether its new threads start in Cloud or on this Mac.
+- The chat no longer jumps when you open or close the sidebar.
+- Switching branches in a Local thread no longer fails when the repo has untracked files.
+- Claude Code no longer shows an Update button for a version that can't install yet.
+
 ## 133
 
 Choose the keys each loop gets (2026-10-30)

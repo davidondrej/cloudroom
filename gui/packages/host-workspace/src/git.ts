@@ -916,7 +916,7 @@ export async function readWorkspaceGitState(
         "--no-optional-locks",
         "status",
         "--porcelain=v1",
-        "--untracked-files=all",
+        "--untracked-files=no",
       ],
       { cwd, ...options },
     ),

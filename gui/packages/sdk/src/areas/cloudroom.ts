@@ -188,10 +188,10 @@ export type CloudAutomationRequest =
   | { action: "events"; local: string[] }
   | { action: "ack"; batches: string[] }
   // Stop loops at plan limits (ADR 0292): read the account's switch, or set it with `stop_at_limit`.
-  | { action: "settings"; stop_at_limit?: boolean }
+  | { action: "settings"; stop_at_limit?: boolean; fallback?: boolean }
   // Loop run records (ADR 0298): a Local loop run's `room-cli loop report`, saved with Cloud runs.
   | { action: "report"; local: string; run: string; thread: string; name: string; started_at: string; outcome: string; confidence: string; reason: string; actions: string[] };
-export type CloudAutomationResponse = { automations?: CloudAutomation[]; automation?: CloudAutomation; ok?: boolean; url?: string; batches?: CloudHookBatch[]; recheck_ms?: number; stop_at_limit?: boolean; runs?: string[]; history?: CloudLoopRun[]; reported?: boolean };
+export type CloudAutomationResponse = { automations?: CloudAutomation[]; automation?: CloudAutomation; ok?: boolean; url?: string; batches?: CloudHookBatch[]; recheck_ms?: number; stop_at_limit?: boolean; fallback?: boolean; runs?: string[]; history?: CloudLoopRun[]; reported?: boolean };
 /** Weighted tokens the listed threads used since `threadsSince`, and all of the provider's threads since `totalSince`. */
 export type TokenUsageRequest = { providerId: string; threadIds: string[]; threadsSince: number; totalSince: number };
 export type TokenUsageResponse = { total: number; threads: Record<string, number> };

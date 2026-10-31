@@ -1053,6 +1053,14 @@ pub async fn cli(args: &[String]) -> io::Result<i32> {
         ["spawn", rest @ ..] => return spawn_cli(rest).await,
         ["fork", rest @ ..] => return fork_cli(rest).await,
         ["list", rest @ ..] => {
+            // It lists only this thread's children, so a filter like --project is refused: an ignored one made an
+            // empty list read as "the project has no open threads".
+            if let Some(word) = unknown_word(rest, &[], &["--include-archived"]) {
+                eprintln!(
+                    "Unknown option {word}. Cloud `thread list` shows only this thread's subagents, not the project's threads, and takes only --include-archived. In a loop, past runs are in the Loop notes in your prompt."
+                );
+                return Ok(2);
+            }
             let path = if rest.contains(&"--include-archived") {
                 "/children?include_archived=true"
             } else {

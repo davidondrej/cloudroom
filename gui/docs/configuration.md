@@ -307,6 +307,9 @@ provider new threads use when neither the caller nor the project chose one
 Each provider row also shows its login on this Mac and in the Cloud (Log in or
 Connect when missing), its CLI version, the Auto-update switch
 (`providerAutoUpdate`), and its update status (Update, Retry, or a check).
+With Auto-update on, Cloudroom checks every 10 minutes and updates at once,
+even while threads run; a failed update retries after an hour. Native Claude
+Code installs compare against Claude's own release channel, not npm.
 Agents that can be installed but are not appear under "Not installed" with an
 Install button. Settings → Updates covers Cloudroom itself and other machines'
 CLIs; it links here for this Mac's agents.
@@ -742,7 +745,7 @@ client wrote first, so a stale window cannot silently clobber a newer value.
 | `sidebar.navigationProvider`      | Plugin key, `__automatic__`, or `__builtin__`       |
 | `sidebar.threadListProvider`      | Plugin key, `__automatic__`, or `__builtin__`       |
 | `appearance.theme`                | `light`, `dark`, or `system` (default)              |
-| `defaults.startingMachine`        | `last` (default) or `cloud`; Cloud on fresh install |
+| `defaults.startingMachine`        | `last` (default: where the project's last new thread started) or `cloud` |
 
 By project (`project`) is the default for `sidebar.organizationMode` when no
 value is saved. Existing server and legacy browser choices are preserved.

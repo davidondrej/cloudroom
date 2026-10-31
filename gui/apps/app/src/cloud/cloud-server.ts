@@ -1,7 +1,13 @@
 import { COMPUTER, PERSONAL_PROJECT_ID } from "@cloudroom/domain";
 import { appToast } from "@/components/ui/app-toast";
 import { wsManager } from "@/lib/ws";
-import { cloudApi, SignedOutError, type CloudThreadSummary } from "./cloud-api";
+import {
+  cloudApi,
+  CloudError,
+  SignedOutError,
+  type CloudCreate,
+  type CloudThreadSummary,
+} from "./cloud-api";
 import { macOnline, markMacOff, SAVED_API, startupMac } from "./cloud-mode";
 import {
   CloudThreadEvents,
@@ -36,6 +42,9 @@ const OUTBOX_MS = 10 * 60_000;
 const MAC_CHECK_MS = 60_000;
 const MATCH_CHARS = 3000;
 const MAC_CHECK_MAX_MS = 5 * 60_000;
+const WARM_EVERY_MS = 60_000;
+const RETRY_SOON_MS = 10_000;
+const RETRY_SOON_FOR_MS = 2 * 60_000;
 const BUSY_RECHECK_MS = 10_000;
 const RETRY_HISTORY_MS = 10_000;
 const AUTO_RETRIES = 3;
@@ -113,6 +122,23 @@ const object = (value: unknown): Json =>
   value !== null && typeof value === "object" && !Array.isArray(value)
     ? (value as Json)
     : {};
+const textOf = (body: Json): string | Response => {
+  const parts = (Array.isArray(body.input) ? body.input : []).map(object);
+  if (parts.some((part) => part.type !== "text"))
+    return needsMac(`Photos and files need your ${COMPUTER} for now.`);
+  const text = parts
+    .filter((part) => part.type === "text" && typeof part.text === "string")
+    .map((part) => part.text as string)
+    .join("\n")
+    .trim();
+  return (
+    text ||
+    json(
+      { message: `Only text messages work while your ${COMPUTER} is off.` },
+      400,
+    )
+  );
+};
 
 async function withTimeout<T>(work: Promise<T>, ms: number): Promise<T | null> {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -122,6 +148,23 @@ async function withTimeout<T>(work: Promise<T>, ms: number): Promise<T | null> {
       timer = setTimeout(() => resolve(null), ms);
     }),
   ]).finally(() => clearTimeout(timer));
+}
+
+async function createSoon(body: CloudCreate): Promise<CloudThreadSummary> {
+  const until = Date.now() + RETRY_SOON_FOR_MS;
+  for (;;) {
+    try {
+      return await cloudApi.create(body);
+    } catch (failure) {
+      if (
+        !(failure instanceof CloudError) ||
+        failure.code !== "retry_soon" ||
+        Date.now() + RETRY_SOON_MS > until
+      )
+        throw failure;
+      await new Promise((resolve) => setTimeout(resolve, RETRY_SOON_MS));
+    }
+  }
 }
 
 class CloudThread {
@@ -374,6 +417,7 @@ class CloudServer {
   private readonly readAt = new Map<string, number>();
   private readonly tabs = new Map<string, Json>();
   private busy = 0;
+  private warmedAt = 0;
   private readonly preferences: Json = {};
   private readonly savedCopies = new Map<
     string,
@@ -465,19 +509,8 @@ class CloudServer {
     if (onMac) return onMac;
     if (thread && thread[2] === "/send") {
       const body = object(await request.json().catch(() => null));
-      const parts = (Array.isArray(body.input) ? body.input : []).map(object);
-      if (parts.some((part) => part.type !== "text"))
-        return needsMac(`Photos and files need your ${COMPUTER} for now.`);
-      const text = parts
-        .filter((part) => part.type === "text" && typeof part.text === "string")
-        .map((part) => part.text as string)
-        .join("\n")
-        .trim();
-      if (!text)
-        return json(
-          { message: `Only text messages work while your ${COMPUTER} is off.` },
-          400,
-        );
+      const text = textOf(body);
+      if (text instanceof Response) return text;
       const requestId =
         typeof body.requestId === "string" && REQUEST_ID.test(body.requestId)
           ? body.requestId
@@ -538,11 +571,70 @@ class CloudServer {
       return json({ key, ...entry });
     }
     if (path === "/api/v1/threads" && request.method === "POST")
-      return needsMac(`Starting a new thread needs your ${COMPUTER} for now.`);
+      return this.create(object(await request.json().catch(() => null)));
     if (/^\/api\/v1\/projects\/[^/]+\/attachments/.test(path))
       return needsMac(`Photos and files need your ${COMPUTER} for now.`);
-    if (path === "/api/v1/cloudroom/account/activity") return empty();
+    if (path === "/api/v1/cloudroom/account/activity") {
+      if (Date.now() - this.warmedAt >= WARM_EVERY_MS) {
+        this.warmedAt = Date.now();
+        void cloudApi.warm().catch(() => undefined);
+      }
+      return empty();
+    }
     return needsMac();
+  }
+
+  private async create(body: Json): Promise<Response> {
+    if (body.executionTarget !== "cloud")
+      return needsMac(
+        `Local threads need your ${COMPUTER}. Pick Cloud to start one now.`,
+      );
+    const prompt = textOf(body);
+    if (prompt instanceof Response) return prompt;
+    const optional = (value: unknown) =>
+      typeof value === "string" ? value : undefined;
+    const onMac = [
+      "sourceThreadId",
+      "parentThreadId",
+      "sendAt",
+      "baseBranch",
+      "pluginSubmission",
+    ];
+    const startNeedsMac = `Starting a new thread needs your ${COMPUTER} for now.`;
+    if (
+      typeof body.projectId !== "string" ||
+      onMac.some((key) => body[key] != null)
+    )
+      return needsMac(startNeedsMac);
+    const thread = await createSoon({
+      project: body.projectId,
+      request_id: optional(body.requestId) ?? crypto.randomUUID(),
+      text: prompt,
+      title: optional(body.title),
+      harness: optional(body.providerId),
+      model: optional(body.model),
+      reasoning: optional(body.reasoningLevel),
+      service_tier: optional(body.serviceTier),
+      target: optional(body.cloudTarget),
+    }).catch((failure: unknown) => {
+      if (!(failure instanceof CloudError)) throw failure;
+      return failure.code === "no_cloud_thread"
+        ? needsMac(startNeedsMac)
+        : json({ message: failure.message }, failure.status);
+    });
+    if (thread instanceof Response) return thread;
+    this.list = null;
+    return json(
+      this.live({
+        activeBackgroundAgentCount: 0,
+        canSpawnChild: false,
+        projectCopy: null,
+        ...cloudEntry(thread, body.projectId),
+        providerId: optional(body.providerId) ?? "claude-code",
+        queuedMessageCount: 0,
+      }),
+      201,
+    );
   }
 
   private async account(): Promise<Json> {

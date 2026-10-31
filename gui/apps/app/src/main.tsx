@@ -14,6 +14,7 @@ import {
 import { installCloudServer } from "./cloud/cloud-server";
 import { AppErrorBoundary } from "./components/AppErrorBoundary";
 import { AppToaster } from "./components/AppToaster";
+import { isFirefoxAndroid } from "./components/layout/useMobileVisualViewportHeight";
 import { appToast } from "./components/ui/app-toast";
 import { registerProviderCliInstallQueryClient } from "./components/provider-cli/provider-cli-install-store";
 import { initializeCorners } from "./hooks/useCorners";
@@ -46,6 +47,11 @@ window.addEventListener("vite:preloadError", () => {
   sessionStorage.setItem("cloudroom:preload-reload", String(Date.now()));
   window.location.reload();
 });
+
+document.documentElement.toggleAttribute(
+  "data-firefox-android",
+  isFirefoxAndroid(navigator),
+);
 
 const desktopApi = getBbDesktopInfo();
 const updateWindowFocus = (isFocused: boolean | undefined) => {

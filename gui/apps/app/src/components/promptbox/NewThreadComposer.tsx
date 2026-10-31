@@ -100,7 +100,7 @@ import {
 } from "@/hooks/usePromptDraftStorage";
 import { usePromptMentions } from "@/hooks/usePromptMentions";
 import { usePromptBoxMachinePreference } from "@/hooks/thread-creation-options/persisted-selection-fields";
-import { agentExecutionTarget, startingExecutionTarget } from "@/hooks/useStartingMachine";
+import { agentExecutionTarget, saveNewThreadMachine, saveStartedMachine, startingExecutionTarget } from "@/hooks/useStartingMachine";
 import { useCloudVps, vpsSummary } from "@/components/settings/VpsSettings";
 
 const CLOUD_TARGET_KEY = "cloudroom.cloudTarget";
@@ -430,7 +430,7 @@ function resolvePanelThreadId(
 
 const SELECT_CLOUD_EVENT = "cloudroom:select-cloud";
 export function selectCloudForNewThreads() {
-  localStorage.setItem("cloudroom.executionTarget", "cloud");
+  saveStartedMachine("cloud");
   window.dispatchEvent(new Event(SELECT_CLOUD_EVENT));
 }
 
@@ -456,7 +456,7 @@ export function NewThreadComposer({
       seed?.executionTarget ??
       (seed?.environment !== undefined
         ? "local"
-        : startingExecutionTarget(selectionScope === "new-thread")),
+        : startingExecutionTarget(selectionScope === "new-thread", requestedProjectId ?? PERSONAL_PROJECT_ID)),
   );
   const [cloudPicked, setCloudPicked] = useState(
     seed?.executionTarget === "cloud",
@@ -510,6 +510,14 @@ export function NewThreadComposer({
     if (!projects || !replayKnowsCandidate) return requestedCandidate;
     return candidateKnown ? requestedCandidate : PERSONAL_PROJECT_ID;
   }, [candidateKnown, projects, replayKnowsCandidate, requestedCandidate]);
+  const [machineProjectId, setMachineProjectId] = useState(projectId);
+  if (machineProjectId !== projectId) {
+    setMachineProjectId(projectId);
+    if (selectionScope === "new-thread" && seed?.executionTarget === undefined && seed?.environment === undefined) {
+      setExecutionTarget(startingExecutionTarget(true, projectId));
+      setCloudPicked(false);
+    }
+  }
   const isProjectless = isProjectlessProjectId(projectId);
   const currentProject = useMemo(() => {
     if (isProjectless) {
@@ -1036,13 +1044,11 @@ export function NewThreadComposer({
     snapshotDraftBeforeOptionChange();
     setExecutionTarget("cloud");
     setCloudPicked(true);
-    localStorage.setItem("cloudroom.executionTarget", "cloud");
   }, [cloudLocked, snapshotDraftBeforeOptionChange]);
   const handleSelectProvider = useCallback(
     (provider: SystemEnvironmentProvider, hostId: string | null) => {
       if (selectionScope === "new-thread" && executionTarget === "cloud") reportCloudChoice("picked_local", cloudChoiceReason);
       setExecutionTarget("local");
-      localStorage.setItem("cloudroom.executionTarget", "local");
       changeEnvironment(
         encodeProviderValue(provider.id),
         hostId === null ? null : { type: "existing", hostId },
@@ -1636,6 +1642,8 @@ export function NewThreadComposer({
       : localSubmitDisabledReason;
   const starterRef = useRef<string | null>(null);
   const starterHigh = availableReasoningOptions.some((option) => option.value === "high");
+  const seededMachine =
+    seed?.executionTarget !== undefined || seed?.environment !== undefined;
   const submitDraft = useCallback(
     async (
       blockedReason: string | null,
@@ -1703,7 +1711,8 @@ export function NewThreadComposer({
           clearCloudroomRequestId(promptDraft.storageKey);
         clearReuseEnvironment();
         if (selectionScope === "new-thread") {
-          setExecutionTarget(startingExecutionTarget(true));
+          saveNewThreadMachine(projectId, seededMachine, storedExecutionTarget, executionTarget);
+          setExecutionTarget(startingExecutionTarget(true, projectId));
           setCloudPicked(false);
         }
       } catch (submitError) {
@@ -1742,6 +1751,8 @@ export function NewThreadComposer({
       vpsConnected,
       wantedCloudTarget,
       starterHigh,
+      seededMachine,
+      storedExecutionTarget,
     ],
   );
 
@@ -1955,7 +1966,6 @@ export function NewThreadComposer({
                 onUseLocal={() => {
                   setExecutionTarget("local");
                   setCloudPicked(false);
-                  localStorage.setItem("cloudroom.executionTarget", "local");
                 }}
               />
             ) : <>{executionTarget === "cloud" && wantedCloudTarget === "vps" && !landsOnVps && vps.data ? (

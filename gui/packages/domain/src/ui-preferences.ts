@@ -276,7 +276,7 @@ export const uiPreferenceDefinitions = {
   "defaults.startingMachine": defineUiPreference(
     z.enum(["cloud", "last"]),
     "last",
-    "Where new threads start: last for the machine used last (Cloud on a fresh install), or cloud.",
+    "Where new threads start: last for where the last new thread started (Cloud before any), or cloud.",
   ),
 } as const satisfies Record<UiPreferenceKey, UiPreferenceDefinition>;
 

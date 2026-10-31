@@ -47,6 +47,10 @@
     }
   }
 
+  html[data-firefox-android] {
+    --bb-shell-height: 100svh;
+  }
+
   html.bb-app-shell-root,
   body.bb-app-shell {
     overflow: hidden;

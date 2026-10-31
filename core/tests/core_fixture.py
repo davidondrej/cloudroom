@@ -669,10 +669,11 @@ class RecoveryTests(unittest.TestCase):
         path = Path(self.status()['native_path'])
         with path.open('ab') as output:
             output.write(b'{"before":true}\n\xff\n{"after":true}\n'); output.flush(); os.fsync(output.fileno())
-        self.wait(lambda:self.status()['state']=='process_lost','malformed history isolated')
+        time.sleep(2)  # Several capture ticks: a failed backup is logged, never fatal to the agent.
+        self.assertEqual(self.status()['state'],'idle')
         self.assertEqual(self.service.request('GET','/v1/health')['status'],'ready')
         self.service.stop(); self.start()
-        self.assertEqual(self.status()['state'],'process_lost')
+        self.wait(lambda:self.status()['state']=='process_lost','malformed history isolated after restart')
         self.assertIn(b'\xff',path.read_bytes(), 'corrupt source must remain intact')
         records = self.service.records('cr_seed')
         self.assertTrue(any(r['kind']=='native_history_unavailable' for r in records))

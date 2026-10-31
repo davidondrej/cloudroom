@@ -1,4 +1,4 @@
-import { getAppSettings, listActiveHostThreads } from "@cloudroom/db";
+import { getAppSettings } from "@cloudroom/db";
 import type { WorkSessionDeps } from "../../types.js";
 import { listPublicHostsWithStatus } from "../lib/entity-lookup.js";
 import {
@@ -7,28 +7,32 @@ import {
 } from "./provider-installations.js";
 
 export const PROVIDER_AUTO_UPDATE_FIRST_RUN_MS = 60_000;
-export const PROVIDER_AUTO_UPDATE_INTERVAL_MS = 60 * 60_000;
+export const PROVIDER_AUTO_UPDATE_INTERVAL_MS = 10 * 60_000;
+const PROVIDER_AUTO_UPDATE_RETRY_MS = 60 * 60_000;
 
-const attemptedUpdates = new Set<string>();
+const lastAttemptAt = new Map<string, number>();
 let running = false;
-
-function hostIsBusy(deps: WorkSessionDeps, hostId: string): boolean {
-  return listActiveHostThreads(deps.db, { hostId }).length > 0;
-}
 
 async function updateHostProviders(
   deps: WorkSessionDeps,
   hostId: string,
   providers: readonly string[],
 ): Promise<void> {
-  if (hostIsBusy(deps, hostId)) return;
-  const statuses = await getProviderInstallations(deps, { hostId });
+  const statuses = await getProviderInstallations(deps, {
+    hostId,
+    providerIds: providers,
+  });
   for (const provider of providers) {
     const status = statuses[provider];
     if (status?.installAction?.kind !== "update") continue;
     const attemptKey = `${hostId}:${provider}:${status.latestVersion ?? status.currentVersion}`;
-    if (attemptedUpdates.has(attemptKey) || hostIsBusy(deps, hostId)) continue;
-    attemptedUpdates.add(attemptKey);
+    const lastAttempt = lastAttemptAt.get(attemptKey);
+    if (
+      lastAttempt !== undefined &&
+      Date.now() - lastAttempt < PROVIDER_AUTO_UPDATE_RETRY_MS
+    )
+      continue;
+    lastAttemptAt.set(attemptKey, Date.now());
     const events = await runProviderCliInstall(deps, {
       hostId,
       provider,
@@ -40,6 +44,9 @@ async function updateHostProviders(
         providerId: provider,
         success: events.some(
           (event) => event.type === "completed" && event.success,
+        ),
+        errors: events.flatMap((event) =>
+          event.type === "error" ? [event.message] : [],
         ),
       },
       "Provider auto-update finished",

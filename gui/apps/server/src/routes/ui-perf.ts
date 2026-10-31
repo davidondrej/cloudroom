@@ -9,9 +9,16 @@ const uiPerfBatchSchema = z
       .array(
         z
           .object({
-            metric: z.enum(["app_ready", "thread_open", "ui_freeze"]),
+            metric: z.enum([
+              "app_ready",
+              "thread_open",
+              "ui_freeze",
+              "panel_toggle_noop",
+              "top_right_window_drag",
+            ]),
             ms: z.number().int().nonnegative().max(3_600_000),
             threadId: z.string().max(64).optional(),
+            detail: z.string().max(300).optional(),
           })
           .strict(),
       )

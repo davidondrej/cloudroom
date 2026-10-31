@@ -25,6 +25,7 @@ import {
   createSession,
   deleteMachine,
   formatCode,
+  hasPhone,
   machineByCredential,
   newHandle,
   normalizeCode,
@@ -373,6 +374,7 @@ async function apex(request: Request, url: URL, env: Env): Promise<Response> {
     if (!server || server.ownerServerId !== null || server.vps) return json({ error: "Unknown Mac." }, 401);
     if (url.pathname === "/api/computers") return computers(request, env, server);
     if (url.pathname === "/api/computers/open") return openComputer(request, env, server);
+    if (url.pathname === "/api/phones") return json({ phone: await hasPhone(env.DB, server.userId) });
     if (url.pathname === "/api/machines") return addMachine(request, env, server);
     if (url.pathname === "/api/machines/revoke") return removeMachine(request, env, server);
     if (url.pathname === "/api/unregister") {

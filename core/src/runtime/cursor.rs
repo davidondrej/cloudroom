@@ -837,14 +837,16 @@ impl Capture {
                         let _ = child.kill();
                     }
                     let status = child.wait()?;
-                    result?;
-                    if !status.success() {
+                    if result.is_err() || !status.success() {
+                        // A script stopped mid-line leaves torn JSON; its stderr says why (e.g. the 30-second budget).
                         let mut error = String::new();
                         if let Some(stderr) = child.stderr.take() {
                             let _ = stderr.take(4096).read_to_string(&mut error);
                         }
+                        let read = result.err().map(|e| format!("{e}; ")).unwrap_or_default();
                         return Err(io::Error::other(format!(
-                            "Cursor native snapshot failed: {error}"
+                            "Cursor native snapshot failed: {read}{}",
+                            error.trim()
                         )));
                     }
                     Ok(())

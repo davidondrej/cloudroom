@@ -683,19 +683,30 @@ describe("ModelReasoningPicker", () => {
 
   it("reports a pick on another provider tab with that provider (ADR 0211)", async () => {
     const onSelectModel = vi.fn();
+    const noMedium = availableModel({ value: "claude-haiku", label: "Haiku" });
+    noMedium.supportedReasoningEfforts = (["low", "high", "max"] as const).map(
+      (reasoningEffort) => ({ reasoningEffort, description: reasoningEffort }),
+    );
     const { onModelChange } = renderPicker({
       onSelectedProviderChange: null,
       onSelectModel,
+      alternateProviderModels: [
+        availableModel({
+          value: "claude-opus-4-7",
+          label: "Claude Opus 4.7",
+          isDefault: true,
+        }),
+        noMedium,
+      ],
     });
     fireEvent.click(screen.getByRole("button", { name: "Provider and model" }));
     fireEvent.click(screen.getByTitle("Claude Code"));
-    fireEvent.click(await screen.findByText("Opus 4.7"));
-    expect(onSelectModel).toHaveBeenCalledExactlyOnceWith(
-      expect.objectContaining({
-        providerId: "claude-code",
-        model: "claude-opus-4-7",
-      }),
-    );
+    fireEvent.click(await screen.findByText("Haiku"));
+    expect(onSelectModel).toHaveBeenCalledExactlyOnceWith({
+      providerId: "claude-code",
+      model: "claude-haiku",
+      reasoningLevel: "high",
+    });
     expect(onModelChange).not.toHaveBeenCalled();
     expect(screen.queryByRole("dialog")).toBeNull();
   });

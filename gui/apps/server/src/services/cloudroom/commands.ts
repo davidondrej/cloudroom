@@ -3,7 +3,7 @@ import { readFile, writeFile, mkdir, stat, rename, rm } from "node:fs/promises";
 import { join, win32 } from "node:path";
 import { and, desc, eq, inArray, isNull, max, notInArray } from "drizzle-orm";
 import { createThread, findLastCompletedRootStoredTurn, getAppSettings, getProject, getThread, getThreadExecutionOverride, setThreadExecutionOverride, updateThread, cloudroomThreads, cloudroomCommands, events, threads, type DbConnection, type DbQueryConnection, type DbTransaction } from "@cloudroom/db";
-import { PERSONAL_PROJECT_ID, encodeClientTurnRequestIdNumber, isStandaloneBuiltinCompactCommand, promptInputSchema, reasoningLevelSchema, threadQueuedMessageSchema, type Thread, type PromptInput, type ThreadEventType, type ThreadEventTurnStatus, type ThreadChangeKind, type ReasoningLevel, COMPUTER, COMPUTER_TITLE } from "@cloudroom/domain";
+import { PERSONAL_PROJECT_ID, encodeClientTurnRequestIdNumber, isStandaloneBuiltinCompactCommand, promptInputSchema, reasoningLevelSchema, reconcileReasoningLevel, threadQueuedMessageSchema, type Thread, type PromptInput, type ThreadEventType, type ThreadEventTurnStatus, type ThreadChangeKind, type ReasoningLevel, COMPUTER, COMPUTER_TITLE } from "@cloudroom/domain";
 import type { CreateThreadRequest, ForkThreadRequest, SendMessageRequest, SendMessageResponse } from "@cloudroom/server-contract";
 import { z } from "zod";
 import { findCliExecutable } from "@cloudroom/process-utils";
@@ -252,12 +252,17 @@ function coreModel(harness: CloudProvider, model: string, capabilities: z.infer<
   return { model: model.slice(separator + 1), ...(profile.provider_selection ? { provider } : {}) };
 }
 
+function reasoningLevels(harness: string, model: string, capabilities: Capabilities): string[] | undefined {
+  const profile = harnessProfile(capabilities, harness);
+  // Claude runs exact models its catalog omits, such as claude-opus-5-5[1m]; core allows any VM level (ADR 0133).
+  const anyLevel = harness === "claude-code" ? [...new Set(profile?.models?.flatMap((item) => item.reasoning_levels))] : undefined;
+  return profile?.models ? (profile.models.find((item) => item.model === model)?.reasoning_levels ?? anyLevel) : profile?.reasoning_levels;
+}
+
 function validateReasoning(harness: string, model: string, reasoning: string, capabilities: z.infer<typeof capabilitiesSchema>): void {
   const profile = harnessProfile(capabilities, harness);
   if (profile?.models === null) throw new ApiError(503, "model_catalog_unavailable", "Cloud model discovery is unavailable. Try again when the cloud harness is ready.");
-  // Claude runs exact models its catalog omits, such as claude-opus-5-5[1m]; core allows any VM level (ADR 0133).
-  const anyLevel = harness === "claude-code" ? [...new Set(profile?.models?.flatMap((item) => item.reasoning_levels))] : undefined;
-  const levels = profile?.models ? (profile.models.find((item) => item.model === model)?.reasoning_levels ?? anyLevel) : profile?.reasoning_levels;
+  const levels = reasoningLevels(harness, model, capabilities);
   if (profile?.models && !levels) {
     const name = HARNESS_NAMES[harness as CloudProvider] ?? harness;
     const offers = profile.models.slice(0, 4).map((item) => item.model).join(", ");
@@ -1385,6 +1390,7 @@ class CloudroomService {
     if (capabilities && request.serviceTier === "fast" && !profile?.service_tier) throw new ApiError(400, "cloudroom_unsupported", "Cloud fast service tier is not enabled");
     const payload = promptPayload(request.input, request.providerId, capabilities?.attachments === false ? false : profile?.attachments ?? true, cloudPromptLimit(capabilities));
     const model = request.model;
+    const piDefault = request.providerId === "pi" && !request.reasoningLevel;
     const reasoning = request.reasoningLevel ?? "medium";
     if (!model) throw new ApiError(400, "model_required", "Select a Codex model");
     const startRequestId = request.requestId ?? randomUUID();
@@ -1393,7 +1399,7 @@ class CloudroomService {
       if (!previous) return null;
       const initial = command(db, `first_${previous.threadId}`);
       const thread = getThread(db, previous.threadId);
-      if (thread?.projectId !== request.projectId || thread?.providerId !== request.providerId || previous.model !== model || previous.reasoning !== reasoning || (initial ? JSON.parse(initial.input).text : null) !== payload.text) throw new ApiError(409, "request_conflict", "Request ID was already used with different content");
+      if (thread?.projectId !== request.projectId || thread?.providerId !== request.providerId || previous.model !== model || (initial && JSON.parse(initial.input).default_reasoning ? !piDefault : previous.reasoning !== reasoning) || (initial ? JSON.parse(initial.input).text : null) !== payload.text) throw new ApiError(409, "request_conflict", "Request ID was already used with different content");
       return thread;
     };
     const previous = existingThread(this.deps.db);
@@ -1405,7 +1411,7 @@ class CloudroomService {
     }
     const remoteModel = capabilities ? coreModel(request.providerId, model, capabilities) : null;
     // A sleeping sandbox's saved catalog may predate a login (say, Cursor's key); its Core checks the model at start.
-    if (capabilities && remoteModel && !(sandbox && profile?.models === null)) validateReasoning(request.providerId, remoteModel.model, reasoning, capabilities);
+    if (capabilities && remoteModel && !piDefault && !(sandbox && profile?.models === null)) validateReasoning(request.providerId, remoteModel.model, reasoning, capabilities);
     const workspace = project.id === PERSONAL_PROJECT_ID ? { workspace: ROOT_WORKSPACE } : { workspace: workspaceId(project.id), workspace_name: workspaceName(project.name) };
     const providerId = request.providerId;
     const projectNote = project.id === PERSONAL_PROJECT_ID ? undefined : await localProjectNote(this.deps, project.id);
@@ -1434,6 +1440,7 @@ class CloudroomService {
           ...(request.serviceTier && request.serviceTier !== "default" ? { service_tier: request.serviceTier } : {}),
           ...(request.baseBranch ? { base_branch: request.baseBranch } : {}),
           ...(codeFrom ? { code_from: codeFrom } : {}), ...keys,
+          ...(piDefault ? { default_reasoning: true } : {}),
           ...(awaitingCore || this.heldStarts.has(request.requestId ?? "") ? { awaiting_core: true } : {}),
         })),
         createdAt: Date.now(),
@@ -1620,7 +1627,7 @@ class CloudroomService {
     await this.restartSession(thread, { ...target, refusal: "Agents started by another agent keep their agent." }, prepare, (tx, started) => {
       updateThread(tx, this.deps.hub, thread.id, { providerId: target.providerId });
       saveBinding(tx, thread.id, { ...started, model: target.model, cursor: 0, nativeId: null, turnId: null, error: null });
-      setThreadExecutionOverride(tx, { threadId: thread.id, modelOverride: null, reasoningLevelOverride: target.reasoningLevel });
+      setThreadExecutionOverride(tx, { threadId: thread.id, modelOverride: null, reasoningLevelOverride: reasoningLevelSchema.safeParse(started.reasoning).data ?? null });
     });
   }
 
@@ -1661,8 +1668,10 @@ class CloudroomService {
       const client = await this.client(saved);
       const capabilities = await this.capabilities(client);
       if (!harnessProfile(capabilities, target.providerId)) throw new ApiError(400, "cloudroom_unsupported", `${HARNESS_NAMES[target.providerId]} isn't set up in Cloud yet.`);
-      const reasoning = target.reasoningLevel ?? saved.reasoning;
       const { model, provider } = coreModel(target.providerId, target.model, capabilities);
+      const current = this.currentReasoning(thread.id, saved);
+      const levels = reasoningLevels(target.providerId, model, capabilities) as ReasoningLevel[] | undefined;
+      const reasoning = target.reasoningLevel ?? (levels?.length ? reconcileReasoningLevel(current as ReasoningLevel, levels) : current);
       validateReasoning(target.providerId, model, reasoning, capabilities);
       const before = await this.quietSession(client, saved);
       const start = Object.values(before.receipts).find((receipt) => receipt.command === "start");
@@ -2310,7 +2319,7 @@ class CloudroomService {
               const latest = command(this.deps.db, `first_${threadId}`)!;
               this.deps.db.update(cloudroomCommands).set({ input: JSON.stringify({ ...JSON.parse(latest.input), fork: { ...fork, ...patch } }) }).where(eq(cloudroomCommands.id, latest.id)).run();
             })
-            : client.start(saved.startRequestId, CLOUD_HARNESSES[harness], { model, reasoning: saved.reasoning, ...options, ...parentThread, ...(provider ? { provider } : {}) }).then((accepted) => {
+            : client.start(saved.startRequestId, CLOUD_HARNESSES[harness], { model, reasoning: initial && JSON.parse(initial.input).default_reasoning ? undefined : saved.reasoning, ...options, ...parentThread, ...(provider ? { provider } : {}) }).then((accepted) => {
               const transfer = `child_${threadId}`;
               return { sessionId: accepted.session_id, transfer, code: codeFrom ? threadCode(this.deps, codeFrom, transfer) : null };
             }),
@@ -2646,7 +2655,8 @@ class CloudroomService {
         const same = providerId === parentThread.providerId;
         const profile = input.model || same ? null : harnessProfile(await this.savedCapabilities() ?? await this.capabilities(client), providerId);
         const model = input.model ?? (same ? parent.model : profile && (providerId === "pi" && profile.provider ? `${profile.provider}/${profile.model}` : profile.model));
-        const reasoning = reasoningLevelSchema.safeParse(input.reasoning ?? (same ? parent.reasoning : undefined));
+        const piDefault = providerId === "pi" && (model !== parent.model || (JSON.parse(command(this.deps.db, `first_${parent.threadId}`)?.input ?? "{}").default_reasoning && !getThreadExecutionOverride(this.deps.db, parent.threadId)?.reasoningLevelOverride));
+        const reasoning = reasoningLevelSchema.safeParse(input.reasoning ?? (same && !piDefault ? binding(this.deps.db, parent.threadId)?.reasoning : undefined));
         if (input.reasoning && !reasoning.success) throw new ApiError(400, "cloudroom_reasoning", `Unknown effort level ${input.reasoning}.`);
         child = (await this.create({
           projectId: parentThread.projectId, providerId, ...(model ? { model } : {}), ...(reasoning.success ? { reasoningLevel: reasoning.data } : {}), ...(input.title ? { title: input.title } : {}), ...(input.service_tier ? { serviceTier: input.service_tier } : {}),
@@ -2818,10 +2828,10 @@ class CloudroomService {
           projecting = true;
           // The stream replays from the saved cursor, so renames made while the app was offline apply on reconnect.
           if (record.kind === "title") updateThread(this.deps.db, this.deps.hub, saved.threadId, { title: z.object({ title: z.string().min(1) }).parse(record.data).title });
-          const effort = record.kind === "reasoning" && z.object({ reasoning: reasoningLevelSchema }).safeParse(record.data);
+          const effort = (record.kind === "reasoning" || record.kind === "launch_reasoning") && z.object({ reasoning: reasoningLevelSchema }).safeParse(record.data);
           if (effort && effort.success) {
             saveBinding(this.deps.db, saved.threadId, { reasoning: effort.data.reasoning });
-            setThreadExecutionOverride(this.deps.db, { threadId: saved.threadId, reasoningLevelOverride: effort.data.reasoning });
+            if (record.kind === "reasoning") setThreadExecutionOverride(this.deps.db, { threadId: saved.threadId, reasoningLevelOverride: effort.data.reasoning });
           }
           const fresh = record.sequence > (binding(this.deps.db, saved.threadId)?.cursor ?? 0);
           const move = fresh && record.kind === "move" && z.object({ project: z.string().min(1) }).safeParse(record.data);

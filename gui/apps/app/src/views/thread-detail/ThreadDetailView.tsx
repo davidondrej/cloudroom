@@ -53,7 +53,7 @@ import type {
 import type { WorkspaceOpenTarget } from "@cloudroom/host-daemon-contract";
 import { appToast } from "@/components/ui/app-toast";
 import { copyToClipboardWithToast } from "@/lib/clipboard";
-import { useThreadOpenTiming } from "@/lib/perf";
+import { useThreadOpenTiming, watchPanelOpen } from "@/lib/perf";
 import type { ThreadSecondaryPanel as ThreadSecondaryPanelTab } from "@/lib/thread-secondary-panel";
 import {
   PluginDetailPanelContext,
@@ -1345,10 +1345,32 @@ function ThreadDetailViewInternal(props: ThreadRoutePathArgs) {
     dismissPluginDetails();
     closeWorkspacePanel();
   }, [dismissPluginDetails, closeWorkspacePanel]);
+  const panelSnapshot = useRef({
+    open: isSecondaryPanelOpen,
+    state: fixedPanelTabsState.secondary,
+  });
+  useEffect(() => {
+    panelSnapshot.current = {
+      open: isSecondaryPanelOpen,
+      state: fixedPanelTabsState.secondary,
+    };
+  });
   const toggleSecondaryPanel = useCallback(() => {
+    if (!panelSnapshot.current.open) {
+      watchPanelOpen(threadId, () => {
+        const { open, state } = panelSnapshot.current;
+        if (open) return null;
+        return JSON.stringify({ ...state, tabs: state.tabs.map((t) => t.kind) });
+      });
+    }
     if (pluginDetails.activePluginId !== null) closeSecondaryPanel();
     else toggleWorkspacePanel();
-  }, [pluginDetails.activePluginId, closeSecondaryPanel, toggleWorkspacePanel]);
+  }, [
+    pluginDetails.activePluginId,
+    closeSecondaryPanel,
+    threadId,
+    toggleWorkspacePanel,
+  ]);
   const fixedTabDestinations = useMemo(
     () => [
       createThreadInfoFixedTabDestination(() =>

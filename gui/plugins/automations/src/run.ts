@@ -16,6 +16,7 @@ import {
   type AutomationRunRow,
   type Db,
 } from "./data.js";
+import { loopAgent, type FallbackSdk } from "./fallback.js";
 import { publishAutomationChange } from "./realtime.js";
 import { executeStoredScript, mapScriptResultToRun } from "./script-runner.js";
 import type { AutomationExecution } from "./rpc-types.js";
@@ -36,7 +37,7 @@ type AgentThreadsSdk = {
   ): Promise<{ output?: string | null }>;
 };
 export type AgentRunApi = Pick<BbPluginApi, "realtime" | "log"> & {
-  sdk: { threads: AgentThreadsSdk };
+  sdk: FallbackSdk & { threads: AgentThreadsSdk };
 };
 
 const sdkThreadSchema = z
@@ -193,12 +194,7 @@ export async function executeAgentRun(
           args.events,
         ),
         title: args.automation.name,
-        providerId: args.execution.providerId,
-        model: args.execution.model,
-        reasoningLevel: args.execution.reasoningLevel,
-        ...(args.execution.serviceTier === undefined
-          ? {}
-          : { serviceTier: args.execution.serviceTier }),
+        ...(await loopAgent(bb.sdk, args.automation, args.execution)),
         permissionMode: args.execution.permissionMode,
       }),
     );

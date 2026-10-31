@@ -37,7 +37,7 @@ export function DefaultsSettingsSection() {
   const settings = useSystemConfig().data?.generalSettings;
   const updateSettings = useUpdateGeneralSettings();
   return (
-    <SettingsSection title="Defaults">
+    <SettingsSection title="Defaults" bodyClassName="space-y-5">
       <SettingsWithControl
         label="Starting machine"
         description="Where new threads run when you open the composer."

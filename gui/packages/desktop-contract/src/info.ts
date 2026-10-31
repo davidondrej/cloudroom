@@ -80,6 +80,9 @@ export interface BbDesktopApi extends BbDesktopInfo {
   ): BbDesktopInfoUnsubscribe;
   onOpenNewTab?(listener: BbDesktopOpenNewTabHandler): BbDesktopInfoUnsubscribe;
   onOpenLink?(listener: BbDesktopOpenLinkHandler): BbDesktopInfoUnsubscribe;
+  onTopRightWindowDrag?(
+    listener: (position: string) => void,
+  ): BbDesktopInfoUnsubscribe;
   onAppCommand?(listener: BbDesktopAppCommandHandler): BbDesktopInfoUnsubscribe;
   onAddImageToChat?(
     listener: (imageUrl: string) => void,

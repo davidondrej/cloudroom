@@ -86,6 +86,7 @@ import {
   BB_DESKTOP_CLOSE_WINDOW_RESPONSE_CHANNEL,
   BB_DESKTOP_GET_WINDOW_STATE_CHANNEL,
   BB_DESKTOP_OPEN_LINK_CHANNEL,
+  BB_DESKTOP_TOP_RIGHT_DRAG_CHANNEL,
   BB_DESKTOP_OPEN_NEW_TAB_CHANNEL,
   BB_DESKTOP_OPEN_COMPUTER_CHANNEL,
   BB_DESKTOP_OPEN_SERVER_DAEMON_LOGS_CHANNEL,
@@ -418,6 +419,15 @@ const bbDesktopApi: BbDesktopApi = {
     const unsubscribe = addListener(openLinkListeners, listener);
     for (const url of pendingOpenLinks.splice(0)) listener(url);
     return unsubscribe;
+  },
+  onTopRightWindowDrag(listener): BbDesktopInfoUnsubscribe {
+    const handler = (_event: unknown, position: unknown) => {
+      if (typeof position === "string") listener(position);
+    };
+    ipcRenderer.on(BB_DESKTOP_TOP_RIGHT_DRAG_CHANNEL, handler);
+    return () => {
+      ipcRenderer.removeListener(BB_DESKTOP_TOP_RIGHT_DRAG_CHANNEL, handler);
+    };
   },
   onAppCommand(listener): BbDesktopInfoUnsubscribe {
     return addListener(appCommandListeners, listener);

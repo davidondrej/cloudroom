@@ -7,6 +7,7 @@ import { CompactSecondaryPanelShelf } from "@/components/secondary-panel/Compact
 import {
   KEYBOARD_OPEN_MIN_SHRINK_PX,
   SHELL_SAFE_AREA_BOTTOM_PROPERTY,
+  isFirefoxAndroid,
   shouldRestoreIOSViewportOnKeyboardDismissal,
   useMobileVisualViewportHeight,
 } from "./useMobileVisualViewportHeight";
@@ -591,5 +592,54 @@ describe("shouldRestoreIOSViewportOnKeyboardDismissal", () => {
         maxTouchPoints: 0,
       }),
     ).toBe(false);
+  });
+});
+
+describe("isFirefoxAndroid", () => {
+  const firefoxAndroid = (userAgent: string, maxTouchPoints = 5) =>
+    isFirefoxAndroid({ userAgent, maxTouchPoints });
+
+  it("matches Firefox on Android tablets, including Desktop site mode", () => {
+    expect(
+      firefoxAndroid(
+        "Mozilla/5.0 (Android 11; Tablet; rv:144.0) Gecko/144.0 Firefox/144.0",
+      ),
+    ).toBe(true);
+    expect(
+      firefoxAndroid(
+        "Mozilla/5.0 (X11; Linux x86_64; rv:144.0) Gecko/20100101 Firefox/144.0",
+      ),
+    ).toBe(true);
+  });
+
+  it("leaves every other platform alone", () => {
+    for (const [userAgent, maxTouchPoints] of [
+      [
+        "Mozilla/5.0 (X11; Linux x86_64; rv:144.0) Gecko/20100101 Firefox/144.0",
+        0,
+      ],
+      [
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:144.0) Gecko/20100101 Firefox/144.0",
+        10,
+      ],
+      [
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:144.0) Gecko/20100101 Firefox/144.0",
+        0,
+      ],
+      [
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15) AppleWebKit/605.1.15 Version/18.0 Safari/605.1.15",
+        5,
+      ],
+      [
+        "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 FxiOS/144.0 Mobile/15E148 Safari/605.1.15",
+        5,
+      ],
+      [
+        "Mozilla/5.0 (Linux; Android 11; KFTRWI) AppleWebKit/537.36 Chrome/140.0.0.0 Safari/537.36",
+        5,
+      ],
+    ] as const) {
+      expect(firefoxAndroid(userAgent, maxTouchPoints)).toBe(false);
+    }
   });
 });

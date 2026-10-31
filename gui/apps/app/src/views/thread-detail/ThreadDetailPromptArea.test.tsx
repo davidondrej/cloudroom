@@ -2039,4 +2039,35 @@ describe("ThreadDetailPromptArea", () => {
     );
     expect(mocks.createThreadMutateAsync).not.toHaveBeenCalled();
   });
+
+  it.each([
+    { current: "low", supported: ["low", "medium", "high"], expected: "low" },
+    { current: "xhigh", supported: ["low", "medium", "high"], expected: "high" },
+    { current: "medium", supported: ["low", "high", "max"], expected: "high" },
+    { current: "low", supported: [], expected: "medium" },
+  ])("switches Cloud from $current to $expected using Cloud's levels", ({ current, supported, expected }) => {
+    const threadKey = ["cloudroom-thread", "thr_1"];
+    const connectionKey = ["cloudroom-connection"];
+    testQueryClient.setQueryDefaults(threadKey, { staleTime: Infinity });
+    testQueryClient.setQueryDefaults(connectionKey, { staleTime: Infinity });
+    testQueryClient.setQueryData(threadKey, {
+      sessionId: "cloud-session", paused: false, model: "gpt-6-astra",
+      reasoning: current, error: null, pendingDelivery: 0,
+    });
+    testQueryClient.setQueryData(connectionKey, {
+      ready: true, projectId: null, repository: "/code/test", model: "gpt-6-astra", error: null,
+      harnesses: [{ id: "claude-code", reasoning_levels: supported,
+        models: [{ model: "claude-opus-5", reasoning_levels: supported }] }],
+    });
+    renderPromptArea({ thread: makeThread({ executionTarget: "cloud" }) });
+
+    fireEvent.click(screen.getByRole("button", { name: "Switch harness" }));
+
+    expect(mocks.updateThreadMutate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        providerId: "claude-code", model: "claude-opus-5", reasoningLevel: expected,
+      }),
+      expect.anything(),
+    );
+  });
 });

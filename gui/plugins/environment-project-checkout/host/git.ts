@@ -99,7 +99,7 @@ async function readPorcelainStatus(cwd: string): Promise<string> {
       "--no-optional-locks",
       "status",
       "--porcelain=v1",
-      "--untracked-files=all",
+      "--untracked-files=no",
     ],
     { cwd },
   );

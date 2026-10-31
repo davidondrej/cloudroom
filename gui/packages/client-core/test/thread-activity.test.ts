@@ -294,7 +294,7 @@ describe("thread-activity", () => {
         lastReadAt: 10,
         parentThreadId: "manager-1",
       }),
-    ).toBe(false);
+    ).toBe(true);
     expect(
       isUnreadDoneThread({
         status: "error",
@@ -718,14 +718,14 @@ describe("thread-activity", () => {
       });
     });
 
-    it("never flags 'unread' for parented children", () => {
-      const unreadButParented = makeChild({
+    it("flags 'unread' for a finished child the user has not opened", () => {
+      const unreadChild = makeChild({
         latestAttentionAt: 20,
         lastReadAt: 10,
         parentThreadId: "manager-1",
       });
-      expect(getCollapsedChildActivity([unreadButParented])).toMatchObject({
-        unread: false,
+      expect(getCollapsedChildActivity([unreadChild])).toMatchObject({
+        unread: true,
         unreadError: false,
       });
     });

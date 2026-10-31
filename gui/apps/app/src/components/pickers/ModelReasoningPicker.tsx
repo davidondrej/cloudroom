@@ -54,7 +54,10 @@ import {
   prefetchSystemExecutionOptions,
   useSystemExecutionOptions,
 } from "@/hooks/queries/system-queries";
-import { resolveModelCatalogSelection } from "@/hooks/thread-creation-options/model-catalog-selection";
+import {
+  resolveModelCatalogSelection,
+  resolveModelReasoningLevel,
+} from "@/hooks/thread-creation-options/model-catalog-selection";
 import { useIsCompactViewport } from "@cloudroom/shared-ui/hooks/use-compact-viewport";
 import { FLOATING_DRAWER_CLASS_NAME } from "@cloudroom/shared-ui/responsive-overlay";
 import {
@@ -576,9 +579,16 @@ export function ModelReasoningPicker({
         onSelectModel({
           providerId: activeProviderId,
           model,
-          reasoningLevel:
-            (isPreviewing ? previewSelection?.reasoningLevel : undefined) ??
-            reasoningValue,
+          reasoningLevel: isPreviewing
+            ? resolveModelReasoningLevel(
+                [
+                  ...(previewQuery.data?.models ?? []),
+                  ...(previewQuery.data?.selectedOnlyModels ?? []),
+                ].find((candidate) => candidate.model === model) ??
+                  previewSelection?.activeModel,
+                reasoningValue,
+              )
+            : reasoningValue,
         });
       } else {
         onModelChange(model);
@@ -591,6 +601,7 @@ export function ModelReasoningPicker({
       isPreviewing,
       onModelChange,
       onSelectModel,
+      previewQuery.data,
       previewSelection,
       lockModelSelection,
       previewSelectionBlocked,
@@ -928,10 +939,10 @@ export function ModelReasoningPicker({
       aria-keyshortcuts={reasoningShortcut?.ariaKeyshortcuts}
       disabled={disabled}
       onKeyDown={handleReasoningArrowKeyDown}
-      className={cn(halfClassName, "shrink-0")}
+      className={cn(halfClassName, "min-w-0 shrink-[0.001]")}
     >
       <span
-        className="whitespace-nowrap text-subtle-foreground"
+        className="min-w-0 truncate text-subtle-foreground"
         title={`Reasoning effort: ${reasoningLabel}`}
       >
         {reasoningLabel}
