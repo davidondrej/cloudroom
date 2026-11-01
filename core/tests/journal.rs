@@ -81,6 +81,26 @@ fn gaps_and_uncertain_writes_fail_closed() {
 }
 
 #[test]
+fn queued_records_save_together_and_a_full_disk_changes_nothing() {
+    let dir = Directory::new();
+    let mut journal = Journal::open(&dir.0).unwrap();
+    journal.append(b"first").unwrap();
+    // Every record is synced before the first rename, so a full disk on any of them leaves the journal as it was.
+    fs::create_dir(dir.0.join("pending.2.tmp")).unwrap();
+    assert!(journal.append_all(&[b"a", b"b", b"c"]).is_err());
+    assert_eq!(journal.last(), 1);
+    assert!(!dir.0.join("00000000000000000002.record").exists());
+    fs::remove_dir(dir.0.join("pending.2.tmp")).unwrap();
+    assert_eq!(journal.append_all(&[b"a", b"b", b"c"]).unwrap(), 4);
+    drop(journal);
+    let journal = Journal::open(&dir.0).unwrap();
+    assert_eq!(journal.last(), 4);
+    for (id, record) in [(2, b"a"), (3, b"b"), (4, b"c")] {
+        assert_eq!(journal.read(id).unwrap(), record);
+    }
+}
+
+#[test]
 fn journal_survives_killed_writer() {
     const CHILD_DIRECTORY: &str = "CLOUDROOM_JOURNAL_TEST_CHILD";
     if let Some(directory) = std::env::var_os(CHILD_DIRECTORY) {
