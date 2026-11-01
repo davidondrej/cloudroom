@@ -13,7 +13,7 @@ import { z } from "zod";
 import { hasSupportedFrontmatterDelimiter, parseFrontmatter } from "../skills/injected-skills.js";
 import { macClaudeSignedIn } from "./claude-token.js";
 import { CloudroomConnectionError, CloudroomError } from "./client.js";
-import { macHarnessVersions } from "./harness-versions.js";
+import { lastMacHarnessVersions, macHarnessVersions, versionOf } from "./harness-versions.js";
 import { cancelMcpSignIns, isRemoteMcp, mcpSignInKey, needsMcpSignIn, type McpSignIn, type RemoteMcpServer } from "./mcp-login.js";
 
 export const SANDBOX_PREFIX = "sandbox:";
@@ -94,12 +94,16 @@ export function codexLoginFailure(output: string): string {
   return `Codex on this ${COMPUTER} only allows API-key login, but Cloudroom needs ChatGPT sign-in. Remove \`forced_login_method = "api"\` from ${config}, then click Connect again. If the file is locked, run \`chflags nouchg ${config}\` first.`;
 }
 
-type MacCodexLogin = { child: ChildProcess; url: string | null; error: string | null; done: boolean };
+type MacCodexLogin = { child: ChildProcess | null; url: string | null; error: string | null; done: boolean };
 let macCodexLoginRun: MacCodexLogin | null = null;
-/** Runs `codex login` on this Mac. Codex opens the default browser and saves the login itself; one run at a time, 10 minutes at most. */
+const codexMissing = () => `Codex is not installed on this ${COMPUTER}. Install it with \`npm i -g @openai/codex\`, then click Connect again.`;
+/** Runs `codex login` on this Mac. Codex opens the default browser and saves the login itself; one run at a time, 10 minutes at most.
+ *  No Codex found means not installed: a bare `codex` could reach one inside Codex.app through PATH (#96). */
 export function startMacCodexLogin(): MacCodexLogin {
   if (macCodexLoginRun && !macCodexLoginRun.done) return macCodexLoginRun;
-  const child = spawnPortableProcess({ command: findCliExecutable("codex") ?? "codex", args: ["login"], stdio: ["ignore", "pipe", "pipe"], timeout: 10 * 60_000 });
+  const codex = findCliExecutable("codex");
+  if (!codex) return macCodexLoginRun = { child: null, url: null, error: codexMissing(), done: true };
+  const child = spawnPortableProcess({ command: codex, args: ["login"], stdio: ["ignore", "pipe", "pipe"], timeout: 10 * 60_000 });
   const run: MacCodexLogin = { child, url: null, error: null, done: false };
   let output = "";
   const read = (chunk: Buffer) => { output += chunk.toString(); run.url ??= output.match(/https:\/\/auth\.openai\.com\/\S+/)?.[0] ?? null; };
@@ -107,7 +111,7 @@ export function startMacCodexLogin(): MacCodexLogin {
   child.stderr?.on("data", read);
   child.on("error", (error: NodeJS.ErrnoException) => {
     run.done = true;
-    run.error = error.code === "ENOENT" ? `Codex is not installed on this ${COMPUTER}. Install it with \`npm i -g @openai/codex\`, then click Connect again.` : `Codex sign-in could not start: ${error.message}`;
+    run.error = error.code === "ENOENT" ? codexMissing() : `Codex sign-in could not start: ${error.message}`;
   });
   // A cancel or the 10-minute timeout kills Codex (code null); only a real exit has an error worth showing.
   child.on("exit", code => { run.done = true; if (code !== 0) run.error ??= codexLoginFailure(code === null ? "" : output); });
@@ -121,7 +125,7 @@ export function macCodexLogin(): MacCodexLogin | null {
   return run;
 }
 export function cancelMacCodexLogin(): void {
-  if (macCodexLoginRun) killPortableProcess(macCodexLoginRun.child, "SIGTERM");
+  if (macCodexLoginRun?.child) killPortableProcess(macCodexLoginRun.child, "SIGTERM");
   macCodexLoginRun = null;
 }
 
@@ -138,8 +142,11 @@ function codexTokenExpiry(text: string): number | null {
 export async function macCodexLoginExpired(): Promise<boolean> {
   const expiry = codexTokenExpiry(await readFile(codexAuthPath(), "utf8").catch(() => ""));
   if (expiry === null || Date.now() < expiry) return false;
+  // No Codex found counts as signed in, like a failed start: never a bare `codex` PATH lookup (#96).
+  const codex = findCliExecutable("codex");
+  if (!codex) return false;
   return new Promise(resolve => {
-    const child = spawnPortableProcess({ command: findCliExecutable("codex") ?? "codex", args: ["app-server"], stdio: ["pipe", "pipe", "ignore"], timeout: 20_000 });
+    const child = spawnPortableProcess({ command: codex, args: ["app-server"], stdio: ["pipe", "pipe", "ignore"], timeout: 20_000 });
     const end = (expired: boolean) => { resolve(expired); killPortableProcess(child, "SIGTERM"); };
     const send = (message: object) => child.stdin?.write(`${JSON.stringify(message)}\n`);
     child.stdin?.on("error", () => end(false));
@@ -177,7 +184,8 @@ function contentDigest(tar: Buffer): string {
  *  kept byte for byte so a sandbox's unchanged export matches it (ADR 0172). */
 export async function macOpencodeLogin(): Promise<string | null> {
   const binary = findCliExecutable("opencode");
-  const version = (await macHarnessVersions()).opencode;
+  // Login copies and checks run on launch, so only OpenCode's own version, never every agent CLI (#96).
+  const version = await versionOf(binary);
   const value = binary && version && !version.startsWith("1.")
     ? (await execPortableFile(binary, ["auth", "export", "--standalone"], { timeoutMs: 20_000, maxBuffer: 1024 * 1024 }).catch(() => null))?.stdout ?? null
     : await readFile(join(process.env.XDG_DATA_HOME || join(homedir(), ".local/share"), "opencode/auth.json"), "utf8").catch(() => null);
@@ -672,8 +680,9 @@ export class SandboxDirectory {
     let pending = this.wakes.get(thread);
     if (!pending) {
       this.wakeStarts.set(thread, Date.now());
-      // The Mac's harness versions: the sandbox upgrades to them before its agent starts (ADR 0133).
-      pending = macHarnessVersions().then(harnesses => {
+      // The Mac's harness versions: the sandbox upgrades to them before its agent starts (ADR 0133). A view wake also
+      // fires on launch and focus, so it sends the last versions read instead of running the CLIs (#96).
+      pending = (trigger === "thread_view" ? lastMacHarnessVersions() : macHarnessVersions()).then(harnesses => {
         this.wakeHarnesses.set(thread, harnesses);
         const target = this.targets.get(thread), from = this.keySource(thread);
         return this.call({ action: "wake", ...place, ...(target ? { target } : {}), ...(from ? { from } : {}), harnesses, ...(this.backoff.has(thread) ? { trigger: "retry" } : trigger ? { trigger } : {}) });
@@ -760,7 +769,8 @@ export class SandboxDirectory {
 
   private preloadOne(thread: string, project: SandboxProject): Promise<void> {
     this.wakeStarts.set(thread, Date.now());
-    const run = macHarnessVersions().then(harnesses => {
+    // Preloads are automatic: the last versions read, never the CLIs (#96).
+    const run = lastMacHarnessVersions().then(harnesses => {
       this.wakeHarnesses.set(thread, harnesses);
       return this.call({ action: "wake", ...placeOf(thread, project), harnesses, trigger: "sidebar_preload" });
     }).then(value => this.woke(this.remember(viewSchema.parse(value)).thread)).catch(() => {}).finally(() => this.preloads.delete(thread));
@@ -834,7 +844,8 @@ export class SandboxDirectory {
   async warm(project: SandboxProject, trigger: SandboxTrigger = "composer"): Promise<void> {
     if (this.warmed?.project === project.id && Date.now() - this.warmed.at < RECHECK_MS) return;
     this.warmed = { project: project.id, at: Date.now() };
-    await this.call({ action: "warm", project: project.id, trigger, ...(project.repository ? { repository: project.repository, folder: project.folder } : {}), harnesses: await macHarnessVersions() });
+    // Spares warm on launch and activity: the last versions read, never the CLIs (#96).
+    await this.call({ action: "warm", project: project.id, trigger, ...(project.repository ? { repository: project.repository, folder: project.folder } : {}), harnesses: await lastMacHarnessVersions() });
   }
 
   /** Forgets what was learned under the last account: sandbox tokens, uploaded logins and config, and its settings. */
