@@ -133,10 +133,11 @@ export function useMacAgents(enabled = true) {
 
 const desktopUpdateSchema = z.object({ version: z.string(), installAt: z.number().nullable(), installing: z.boolean() }).nullable();
 
-export function useDesktopUpdate() {
+export function useDesktopUpdate(enabled = true, refetchInterval = 15_000) {
   return useQuery({
     queryKey: ["cloudroom-desktop-update"],
-    refetchInterval: 15_000,
+    enabled,
+    refetchInterval: enabled ? refetchInterval : false,
     queryFn: async ({ signal }) => {
       const update = desktopUpdateSchema.parse(await (await fetchWithAppSurface("/api/v1/cloudroom/desktop-update", { signal })).json());
       return update && { ...update, minutes: update.installAt === null ? null : Math.max(1, Math.ceil((update.installAt - Date.now()) / 60_000)) };
@@ -155,6 +156,19 @@ export function useInstallDesktopUpdate() {
     onError: (error) => appToast.error(error.message),
   });
 }
+
+export function useHostDesktopUpdate(enabled: boolean) {
+  const update = useDesktopUpdate(enabled, 60_000).data;
+  const install = useInstallDesktopUpdate();
+  if (!enabled || !update) return null;
+  return {
+    version: update.version,
+    restart: () => install.mutate(),
+    restarting: update.installing || install.isPending,
+  };
+}
+
+export type HostDesktopUpdate = NonNullable<ReturnType<typeof useHostDesktopUpdate>>;
 
 export function useCloudroomThread(threadId: string, enabled: boolean) {
   return useQuery({ queryKey: ["cloudroom-thread", threadId], enabled, queryFn: async ({ signal }) => threadStatusSchema.parse(await (await fetchWithAppSurface(`/api/v1/cloudroom/threads/${encodeURIComponent(threadId)}`, { signal })).json()), refetchInterval: 1500 });

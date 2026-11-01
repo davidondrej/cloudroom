@@ -293,6 +293,12 @@ impl Observability {
                     || counts.last_activity.is_some_and(|at| at >= cpu_since_ms);
                 if Instant::now() >= cpu_at {
                     resources.cpu_minute = sampler.minute(busy);
+                    let directory = config.state_dir.clone();
+                    resources.journal_bytes =
+                        tokio::task::spawn_blocking(move || system::journal_bytes(&directory))
+                            .await
+                            .ok()
+                            .flatten();
                     (cpu_at, cpu_since_ms, busy) = (Instant::now() + CPU_INTERVAL, now_ms(), false);
                 }
                 resources.agents = Some(counts);

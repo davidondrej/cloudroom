@@ -1,7 +1,7 @@
 /// <reference path="./cross-spawn.d.ts" />
-import { accessSync, constants, statSync } from "node:fs";
+import { accessSync, constants, existsSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { delimiter, extname, posix, resolve, win32 } from "node:path";
+import { delimiter, dirname, extname, join, posix, resolve, win32 } from "node:path";
 import parseCrossSpawnCommand from "cross-spawn/lib/parse.js";
 
 // Windows process helpers, hand-ported from get-bb/bb#4610, #5429 and #5997
@@ -89,7 +89,10 @@ export function resolvePortableCommand(
     command.includes("/") || (windows && command.includes("\\"));
   const directories = hasDirectory
     ? [""]
-    : (env.PATH ?? "").split(delimiter).filter(Boolean);
+    : (env.PATH ?? "")
+        .split(delimiter)
+        .map((directory) => directory.replace(/^"(.*)"$/u, "$1"))
+        .filter(Boolean);
   for (const directory of directories) {
     for (const extension of extensions) {
       const candidate = resolve(
@@ -101,6 +104,58 @@ export function resolvePortableCommand(
     }
   }
   return undefined;
+}
+
+const NPM_SHIM_HEAD =
+  "@ECHO off\r\nGOTO start\r\n:find_dp0\r\nSET dp0=%~dp0\r\nEXIT /b\r\n:start\r\nSETLOCAL\r\nCALL :find_dp0\r\n";
+const NPM_NODE_SHIM_PROG =
+  '\r\nIF EXIST "%dp0%\\node.exe" (\r\n  SET "_prog=%dp0%\\node.exe"\r\n) ELSE (\r\n  SET "_prog=node"\r\n  SET PATHEXT=%PATHEXT:;.JS;=;%\r\n)\r\n\r\nendLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  ';
+
+export function resolveWindowsShim(request: {
+  command: string;
+  args: string[];
+  cwd?: string;
+  env: NodeJS.ProcessEnv;
+}): { command: string; args: string[] } {
+  const unchanged = { command: request.command, args: request.args };
+  if (process.platform !== "win32") return unchanged;
+  const env = Object.fromEntries(
+    Object.entries(request.env).filter(
+      ([key]) => key.toUpperCase() !== "PATHEXT",
+    ),
+  );
+  env.PATHEXT = process.env.PATHEXT || ".EXE;.CMD;.BAT;.COM";
+  const lookup = { cwd: request.cwd, env };
+  const inCwd =
+    !/[\\/]/u.test(request.command) &&
+    resolvePortableCommand(request.command, {
+      ...lookup,
+      env: { ...env, PATH: "." },
+    }) !== undefined;
+  const shim = resolvePortableCommand(request.command, lookup);
+  if (inCwd || shim === undefined || !/\.cmd$/iu.test(shim)) return unchanged;
+  let source = "";
+  try {
+    source = readFileSync(shim, "utf8");
+  } catch {}
+  const target = /"%dp0%\\([^"\r\n]+\.(?:exe|[cm]?js))"(?: {3}| )%\*\r\n$/u.exec(
+    source,
+  )?.[1];
+  if (target === undefined) return unchanged;
+  const file = join(dirname(shim), ...target.split("\\"));
+  if (/\.exe$/iu.test(target)) {
+    return source === `${NPM_SHIM_HEAD}"%dp0%\\${target}"   %*\r\n`
+      ? { command: file, args: request.args }
+      : unchanged;
+  }
+  if (source !== `${NPM_SHIM_HEAD}${NPM_NODE_SHIM_PROG}"%dp0%\\${target}" %*\r\n`) {
+    return unchanged;
+  }
+  const localNode = join(dirname(shim), "node.exe");
+  return {
+    command: existsSync(localNode) ? localNode : "node",
+    args: [file, ...request.args],
+  };
 }
 
 /**

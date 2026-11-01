@@ -155,6 +155,56 @@ pub(super) const FINISHED: [&str; 5] = [
 ];
 /// How much of a child's reply its parent's notice quotes, as for Local threads.
 pub(super) const NOTICE_REPLY_CHARS: usize = 4000;
+/// How much of a child's reply the journal keeps. The whole latest one sits in a file beside it (#280).
+const SAVED_REPLY_CHARS: usize = 32768;
+
+/// The journal's copy of a child's reply, marked when cut so it is never silently short.
+pub(super) fn capped_reply(text: &str) -> String {
+    let total = text.chars().count();
+    let mut kept: String = text.chars().take(SAVED_REPLY_CHARS).collect();
+    if total > SAVED_REPLY_CHARS {
+        kept.push_str(&format!(
+            "\n\n[reply truncated: {total} chars, showing first {SAVED_REPLY_CHARS}]"
+        ));
+    }
+    kept
+}
+
+/// A child's whole latest reply, kept outside the history journal so history stays small.
+fn reply_file(state_dir: &std::path::Path, child: &str) -> std::path::PathBuf {
+    state_dir.join("replies").join(format!("{child}.json"))
+}
+
+/// Saves a child's whole reply for `thread output`. Best effort: the journal keeps a capped copy.
+pub(super) fn save_reply(state_dir: &std::path::Path, child: &str, request: &str, text: &str) {
+    let file = reply_file(state_dir, child);
+    let temporary = file.with_extension("tmp");
+    let saved = std::fs::create_dir_all(state_dir.join("replies"))
+        .and_then(|_| {
+            std::fs::write(
+                &temporary,
+                json!({"request_id":request,"text":text}).to_string(),
+            )
+        })
+        .and_then(|_| std::fs::rename(&temporary, &file));
+    if saved.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+}
+
+/// The whole saved reply to `request`, or else the journal's copy of it.
+fn saved_reply(
+    state_dir: &std::path::Path,
+    child: &str,
+    (request, kept): &(String, String),
+) -> String {
+    std::fs::read(reply_file(state_dir, child))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+        .filter(|saved| saved["request_id"] == request.as_str())
+        .and_then(|saved| saved["text"].as_str().map(str::to_owned))
+        .unwrap_or_else(|| kept.clone())
+}
 
 /// A child thread the parent does not wait for: `room-cli thread spawn`, or the app's API.
 pub struct Spawn {
@@ -770,18 +820,48 @@ impl Manager {
             let handle = child
                 .filter(|c| c.current_request.is_none())
                 .and_then(|c| c.handle.clone());
-            let kept = child
-                .and_then(|c| c.replies.last())
-                .map(|(_, text)| text.clone());
+            let kept = child.and_then(|c| Some((c.session_id.clone(), c.replies.last()?.clone())));
             (items, handle, kept)
         };
+        // Read outside the lock: the whole reply may be large.
+        let kept = kept.map(|(id, reply)| saved_reply(&self.config.state_dir, &id, &reply));
         let reply = match handle {
-            Some(handle) => handle.last_text().await.ok(),
+            // A harness shutting down refuses the read, and a resumed one has seen no text yet: use the saved reply.
+            Some(handle) => handle
+                .last_text()
+                .await
+                .ok()
+                .filter(|t| !t.is_empty())
+                .or(kept),
             None => kept,
         };
         if let (Some(item), Some(reply)) = (items.first_mut(), reply) {
             item["reply"] = json!(reply);
         }
         json!({"children":items})
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn thread_output_serves_the_whole_saved_reply_of_a_sleeping_child() {
+        let dir = std::env::temp_dir().join(format!("cloudroom-replies-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let long = format!("{} END", "x".repeat(40000));
+        let kept = ("p1".to_owned(), capped_reply(&long));
+        assert!(
+            kept.1
+                .ends_with("[reply truncated: 40004 chars, showing first 32768]")
+        );
+        assert_eq!(saved_reply(&dir, "cr_child_a", &kept), kept.1);
+        save_reply(&dir, "cr_child_a", "p1", &long);
+        assert_eq!(saved_reply(&dir, "cr_child_a", &kept), long);
+        // A file left from an older turn never stands in for a newer reply.
+        let newer = ("p2".to_owned(), "newer".to_owned());
+        assert_eq!(saved_reply(&dir, "cr_child_a", &newer), "newer");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

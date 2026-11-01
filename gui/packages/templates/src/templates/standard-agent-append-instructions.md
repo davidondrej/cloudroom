@@ -85,6 +85,7 @@ You are working inside Cloudroom, an IDE for managing coding agents in projects,
 - In Cloud threads, a child gets its own sandbox and branch.
 - It gets a copy of your code, with commits and uncommitted changes.
 - Add `--shared-sandbox` to run it in your sandbox and folder instead.
+- Shared children share your sandbox's memory (`free` shows the host's, not yours), so give a big fan-out its own sandboxes.
 - Start a separate top-level thread only when the user asks a Cloud thread for one.
 - Use `room-cli thread spawn --top-level --provider P --prompt TEXT`, without `--parent-self`.
 - It starts from GitHub, so push first.

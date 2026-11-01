@@ -54,6 +54,7 @@ const SETTINGS_SEARCH_ENTRIES: readonly SettingsSearchEntry[] = [
   ...entries("general", "Threads & editing", [
     ["Navigate to threads on creation", "open jump new thread"],
     ["Markdown formatting in prompt box", "rich text composer editor"],
+    ["Prompt suggestions", "predict next prompt ghost text tab autocomplete"],
     ["Default thread followup behavior", "queue steer enter follow up message"],
   ]),
   ...entries("general", "Links", [

@@ -112,6 +112,7 @@ export type TelemetryEvent =
   | { name: "activation_step"; properties: { step: ActivationStep; action: "clicked" | "done" | "hidden" } }
   | { name: "starter_prompt"; properties: { starter: StarterPrompt } }
   | { name: "popup"; properties: { popup: Popup; action: "viewed" | "closed" | PopupDetail } }
+  | { name: "prompt_suggestion"; properties: { action: "shown" | "accepted"; provider: string } }
   | { name: "cloud_choice"; properties: { action: (typeof CLOUD_CHOICE_ACTIONS)[number]; reason: (typeof CLOUD_CHOICE_REASONS)[number] | null } };
 
 export const CLOUD_CHOICE_ACTIONS = ["picked_local", "cloud_blocked", "forced_local"] as const;

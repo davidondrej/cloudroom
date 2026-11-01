@@ -272,10 +272,21 @@ export {
 
 /**
  * Spawns a provider CLI by name the way the daemon does: on Windows it resolves
- * PATH and PATHEXT, runs npm `.cmd` shims, and opens no console window. Use it
- * in place of `node:child_process` `spawn` for a provider executable.
+ * PATH and PATHEXT and opens no console window. An npm or pnpm `.cmd` shim runs
+ * its target directly (`node <script>`, or the bin's `.exe`), because Node
+ * refuses to start a `.cmd` without a shell (EINVAL) and cmd.exe drops stdio
+ * beyond fd 2; any other `.cmd` runs through cmd.exe. Use it in place of
+ * `node:child_process` `spawn` for a provider executable.
  */
 export { spawnPortableProcess as experimental_spawnPortableProcess } from "@cloudroom/process-utils";
+
+/**
+ * Runs a provider CLI to completion and returns its output, like a promisified
+ * `execFile`. On Windows it starts the command the way
+ * `experimental_spawnPortableProcess` does, so npm `.cmd` shims work. Use it in
+ * place of `execFile` for a provider executable.
+ */
+export { execPortableFile as experimental_execPortableFile } from "@cloudroom/process-utils";
 
 /**
  * Ends a child started with `experimental_spawnPortableProcess`. On Windows it

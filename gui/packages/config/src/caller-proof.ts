@@ -225,9 +225,9 @@ export function isLocalCallerProofTarget(baseUrl: string): boolean {
   }
 }
 
-export async function proveLocalCaller(
-  args: ProveLocalCallerArgs,
-): Promise<string | null> {
+type ProofAttempt = { token: string } | { retry: string } | null;
+
+async function attemptProof(args: ProveLocalCallerArgs): Promise<ProofAttempt> {
   if (!isLocalCallerProofTarget(args.baseUrl)) return null;
   const fetchImpl = args.fetch ?? fetch;
   const post = (path: string, body: unknown) =>
@@ -255,26 +255,64 @@ export async function proveLocalCaller(
       const finishResponse = await post(`${args.proofPath}/${started.id}`, {
         claim: started.claim,
       });
-      if (!finishResponse.ok) return null;
+      if (!finishResponse.ok) {
+        return { retry: `was refused (${finishResponse.status})` };
+      }
       const body: unknown = await finishResponse.json();
       const token =
         typeof body === "object" && body !== null
           ? (body as { token?: unknown }).token
           : undefined;
-      return typeof token === "string" ? token : null;
+      return typeof token === "string" ? { token } : null;
     } finally {
       await unlink(filePath).catch(() => {});
     }
-  } catch {
-    return null;
+  } catch (error) {
+    const timedOut =
+      args.signal?.aborted === true ||
+      (error instanceof Error && error.name.endsWith("TimeoutError"));
+    return timedOut ? { retry: "timed out" } : null;
   }
 }
 
+export async function proveLocalCaller(
+  args: ProveLocalCallerArgs,
+): Promise<string | null> {
+  const attempt = await attemptProof(args);
+  return attempt !== null && "token" in attempt ? attempt.token : null;
+}
+
+export const CALLER_PROOF_WAIT_MS = 50_000;
+const FIRST_PROOF_RETRY_DELAY_MS = 1_000;
 const FAILED_PROOF_RETRY_MS = 2_000;
-const PROOF_REQUEST_TIMEOUT_MS = 5_000;
+
+async function proveWithRetries(
+  baseUrl: string,
+  fetchImpl: typeof fetch,
+  proofPath: string,
+): Promise<string | null> {
+  const deadline = Date.now() + CALLER_PROOF_WAIT_MS;
+  for (let delay = FIRST_PROOF_RETRY_DELAY_MS; ; delay *= 2) {
+    const timeout = Math.min(PROOF_MAX_AGE_MS, deadline - Date.now());
+    const attempt = await attemptProof({
+      baseUrl,
+      fetch: fetchImpl,
+      proofPath,
+      signal: AbortSignal.timeout(Math.max(timeout, 1)),
+    });
+    if (attempt === null) return null;
+    if ("token" in attempt) return attempt.token;
+    const retrying = Date.now() + delay < deadline;
+    console.warn(
+      `Cloudroom caller proof ${attempt.retry}; ${retrying ? `retrying in ${delay / 1_000} s` : "giving up"}`,
+    );
+    if (!retrying) return null;
+    await new Promise((resolve) => setTimeout(resolve, delay));
+  }
+}
 
 interface CachedCallerToken {
-  startedAt: number;
+  settledAt?: number;
   token: Promise<string | null>;
   value?: string | null;
 }
@@ -295,7 +333,7 @@ function keepsCachedToken(
   if (cached.value === null) {
     return (
       options.force !== true &&
-      Date.now() - cached.startedAt < FAILED_PROOF_RETRY_MS
+      Date.now() - (cached.settledAt ?? 0) < FAILED_PROOF_RETRY_MS
     );
   }
   if (options.force === true) return false;
@@ -312,16 +350,15 @@ function provenToken(
     return cached.token;
   }
   const entry: CachedCallerToken = {
-    startedAt: Date.now(),
-    token: proveLocalCaller({
-      baseUrl: origin,
-      fetch: fetchImpl,
-      proofPath: options.proofPath ?? SERVER_CALLER_PROOF_PATH,
-      signal: AbortSignal.timeout(PROOF_REQUEST_TIMEOUT_MS),
-    }),
+    token: proveWithRetries(
+      origin,
+      fetchImpl,
+      options.proofPath ?? SERVER_CALLER_PROOF_PATH,
+    ),
   };
   void entry.token.then((value) => {
     entry.value = value;
+    entry.settledAt = Date.now();
   });
   callerTokens.set(origin, entry);
   return entry.token;

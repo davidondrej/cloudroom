@@ -1,14 +1,12 @@
 import type { ReasoningLevel } from "@cloudroom/domain";
-import { execFile } from "node:child_process";
+import { execPortableFile } from "@cloudroom/provider-bridge-protocol/bridge-kit";
 import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { connect } from "node:net";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { promisify } from "node:util";
 import type { AcpDialect, AcpSessionOpening } from "./dialect.js";
 
-const run = promisify(execFile);
 const DEFAULT_PORT = 18789;
 
 function record(value: unknown): Record<string, unknown> {
@@ -63,9 +61,10 @@ async function ensureGateway(
 ): Promise<void> {
   const { port, remote } = await gatewayTarget(env);
   if (remote || (await reachable(port))) return;
-  await run(command, ["gateway", "start"], { env, timeout: 60_000 }).catch(
-    () => undefined,
-  );
+  await execPortableFile(command, ["gateway", "start"], {
+    env,
+    timeoutMs: 60_000,
+  }).catch(() => undefined);
   const deadline = Date.now() + 60_000;
   while (Date.now() < deadline) {
     if (await reachable(port)) return;
@@ -81,10 +80,10 @@ async function call(
   method: string,
   params: Record<string, unknown>,
 ): Promise<Record<string, unknown>> {
-  const output = await run(
+  const output = await execPortableFile(
     opening.command,
     ["gateway", "call", method, "--json", "--params", JSON.stringify(params)],
-    { env: opening.env, timeout: 60_000, maxBuffer: 4 * 1024 * 1024 },
+    { env: opening.env, timeoutMs: 60_000, maxBuffer: 4 * 1024 * 1024 },
   ).catch((error: { stdout?: string; stderr?: string; message: string }) => ({
     stdout: error.stdout ?? "",
     stderr: error.stderr || error.message,

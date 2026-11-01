@@ -52,6 +52,8 @@ struct Derived {
     resume_plan_only: bool,
     #[serde(default)]
     guarded_turn: bool,
+    #[serde(default)]
+    replies: Vec<(String, String)>,
 }
 
 impl Derived {
@@ -76,6 +78,7 @@ impl Derived {
             guarded_turn: s.guarded_turn,
             limit_resumes: s.limit_resumes,
             resume_refused: s.resume_refused,
+            replies: s.replies.clone(),
         }
     }
 
@@ -99,6 +102,7 @@ impl Derived {
         s.resume_refused = self.resume_refused;
         s.resume_plan_only = self.resume_plan_only;
         s.guarded_turn = self.guarded_turn;
+        s.replies = self.replies;
     }
 }
 
@@ -608,6 +612,16 @@ impl Local {
                         .insert(child.to_owned(), state.to_owned());
                 }
             }
+            "child_reply" => {
+                if let (Some(request), Some(text)) = (
+                    record.data["request_id"].as_str(),
+                    record.data["text"].as_str(),
+                ) {
+                    session.replies.push((request.to_owned(), text.to_owned()));
+                    let old = session.replies.len().saturating_sub(8);
+                    session.replies.drain(..old);
+                }
+            }
             "parent_report" => {
                 if let Some(request) = record.data["request_id"].as_str() {
                     session.reported.insert(request.to_owned());
@@ -735,6 +749,7 @@ mod tests {
                 "state",
                 json!({"state":"starting_turn","request_id":"p1"}),
             ),
+            ("a", "child_reply", json!({"request_id":"p0","text":"done"})),
             (
                 "b",
                 "receipt",
@@ -759,15 +774,19 @@ mod tests {
         ];
         for (i, (id, kind, data)) in records.into_iter().enumerate() {
             local.append(id, kind, data, None).unwrap();
-            if i == 5 {
+            if i == 6 {
                 local.save_snapshot();
             }
         }
         let expected = state(&local);
+        let reply = vec![("p0".to_owned(), "done".to_owned())];
+        assert_eq!(local.sessions["a"].replies, reply);
         drop(local);
         let restored = Local::open(&dir).unwrap();
-        assert_eq!(restored.snapshot_at, 6);
+        assert_eq!(restored.snapshot_at, 7);
         assert_eq!(state(&restored), expected);
+        // A sleeping child's reply outlives a restart (#339).
+        assert_eq!(restored.sessions["a"].replies, reply);
         drop(restored);
         fs::remove_file(dir.join("snapshot.json")).unwrap();
         assert_eq!(state(&Local::open(&dir).unwrap()), expected);

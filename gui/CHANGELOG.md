@@ -2,6 +2,20 @@
 
 Also on [cloudroom.dev/changelog](https://www.cloudroom.dev/changelog).
 
+## 137
+
+Suggested prompts, one Tab away (2026-11-01)
+
+### Changes
+
+- After an agent replies, Cloudroom suggests your next prompt in grey, and Tab fills it in. You can turn it off in Settings.
+- Fixed a crash where the app closed seconds after opening on busy computers, mostly on Windows.
+- Paused loops now show a small "paused" count next to Loops instead of popups, with Resume on hover.
+- Script loops no longer pause during GitHub outages, and a failed Resume can be retried.
+- When you use Cloudroom remotely, it now shows pending updates and can restart the host app to install them.
+- Pi and OpenCode now start correctly on Windows.
+- Finished subagents show their unread dot even if you opened them while they ran.
+
 ## 136
 
 Hit a limit, keep the thread (2026-11-01)

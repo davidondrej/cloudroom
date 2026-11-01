@@ -28,6 +28,16 @@ describe("buildDevWebSocketUrl", () => {
     );
   });
 
+  it("uses 127.0.0.1 for a localhost page, the server origin the desktop trusts", () => {
+    vi.stubGlobal("__BB_DEV_WS_BROWSER_HOST_PORT__", 23_802);
+    vi.stubGlobal("__BB_DEV_APP_BROWSER_HOST_PORT__", 15_802);
+    installWindowLocation("http://localhost:15802/threads/thr_1");
+
+    expect(buildDevWebSocketUrl({ path: "/ws" })).toBe(
+      "ws://127.0.0.1:23802/ws",
+    );
+  });
+
   it("uses the proxied app origin for HTTPS bb connect shares", () => {
     vi.stubGlobal("__BB_DEV_WS_BROWSER_HOST_PORT__", 23_802);
     vi.stubGlobal("__BB_DEV_APP_BROWSER_HOST_PORT__", 15_802);

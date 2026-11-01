@@ -45,6 +45,7 @@ import { activation } from "./activation.js";
 import { disconnectGithub, githubAccount, githubAuth } from "./github-login.js";
 import { addGithubRepo, githubBranches, repoSuggestions } from "./repo-suggestions.js";
 import { projectSuggestion } from "./project-nudge.js";
+import { promptSuggestion, promptSuggestionEvent } from "../threads/prompt-suggestion.js";
 import { readUiPreferences } from "../system/ui-preferences.js";
 import { ACTIVATION_STEPS, CLOUD_CHOICE_ACTIONS, CLOUD_CHOICE_REASONS, POPUP_DETAILS, POPUPS, SETUP_ACTIONS, SETUP_AGENTS, SETUP_DETAILS, SETUP_STEPS, STARTER_PROMPTS, UPGRADE_PROMPTS } from "../system/telemetry.js";
 
@@ -520,6 +521,15 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: Plugin
       return null;
     });
     return context.json({ projectId });
+  });
+  app.post("/api/v1/cloudroom/account/prompt-suggestion", async context => {
+    const { threadId } = z.object({ threadId: z.string().min(1).max(200) }).strict().parse(await context.req.json());
+    return context.json({ suggestion: await promptSuggestion(deps, threadId) });
+  });
+  app.post("/api/v1/cloudroom/account/prompt-suggestion/event", async context => {
+    const input = z.object({ threadId: z.string().min(1).max(200), action: z.enum(["shown", "accepted"]) }).strict().parse(await context.req.json());
+    await promptSuggestionEvent(deps, input.threadId, input.action);
+    return context.json({ ok: true });
   });
   app.post("/api/v1/cloudroom/account/search-rank", async context => {
     const item = z.object({ id: z.string().min(1).max(200), title: z.string().max(500), text: z.string().max(2_000) }).strict();

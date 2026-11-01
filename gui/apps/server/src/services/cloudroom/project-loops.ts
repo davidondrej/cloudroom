@@ -12,10 +12,12 @@ type Deps = Pick<AppDeps, "db" | "hub" | "config">;
 // The web's limit for a loop's packed .env files (web/lib/cloud-start.ts ENV_LIMIT).
 const ENV_LIMIT = 256_000;
 
-/** A project's .env files on this Mac, packed like a Cloud thread's copy: base64 of a .tgz. Empty without any. */
-async function packedEnv(root: string | undefined): Promise<string> {
-  if (!root) return "";
-  const files = await localFiles(root, "env");
+/** A project's .env files on this Mac, packed like a Cloud thread's copy: base64 of a .tgz. Empty when the folder has
+ *  none; null when there is no folder or it can't be read, so nothing replaces the loops' saved copy. */
+async function packedEnv(root: string | undefined): Promise<string | null> {
+  if (!root) return null;
+  const files = await localFiles(root, "env").catch(() => null);
+  if (files === null) return null;
   if (!files.length) return "";
   const dir = await mkdtemp(join(tmpdir(), "cloudroom-loop-env-"));
   try {
@@ -34,9 +36,10 @@ export async function projectLoopSettings(deps: Deps, projectId: string, vps: bo
   const repository = githubRepository(project.gitRemoteUrl);
   if (!repository) throw new ApiError(400, "cloud_automation", "This project is not on GitHub. Create its Cloud loop from a Cloud thread in it instead.");
   const settings = getAppSettings(deps.db), systemPrompt = cloudroomSystemPrompt(deps.db, { vps });
+  const env = await packedEnv(localProjectPath(deps, project.id));
   return {
     repository, workspace: workspaceId(project.id), folder: workspaceName(project.name), project_name: project.name,
-    env: await packedEnv(localProjectPath(deps, project.id)),
+    ...(env === null ? {} : { env }),
     start: { command_guard_enabled: settings.commandGuardEnabled, strip_ai_co_authors: settings.stripAiCoAuthorsEnabled, ...(systemPrompt ? { system_prompt: systemPrompt } : {}) },
   };
 }
@@ -48,9 +51,10 @@ export function syncLoopEnv(deps: Deps, sandboxes: { automations(body: Record<st
   if (!projectId) return;
   void (async () => {
     const env = await packedEnv(localProjectPath(deps, projectId));
+    if (env === null) return;
     const hash = createHash("sha256").update(env).digest("hex");
     if (sentEnv.get(projectId) === hash) return;
     await sandboxes.automations({ action: "env", project: projectId, env });
     sentEnv.set(projectId, hash);
-  })().catch(() => {});
+  })().catch((error: unknown) => console.warn(`The project's loops did not get its .env files: ${error instanceof Error ? error.message : String(error)}`));
 }

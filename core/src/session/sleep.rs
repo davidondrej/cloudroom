@@ -3,6 +3,9 @@ use super::*;
 
 /// ADR 0031: stop the harness after 30 minutes without active work.
 const IDLE_SLEEP_MS: u64 = 30 * 60 * 1000;
+/// A child in its parent's sandbox shares its memory, so a finished one frees its agent soon (#339).
+/// Its reply is already saved for the parent; its next message resumes it.
+const SHARED_IDLE_SLEEP_MS: u64 = 30 * 1000;
 const CHECK_EVERY: Duration = Duration::from_secs(5);
 
 /// The running harness and its workload size when it became ready.
@@ -58,6 +61,14 @@ impl Session {
                 .is_some_and(|(now, baseline)| now > baseline)
     }
 
+    fn idle_limit(&self) -> u64 {
+        if self.parent_session.is_some() {
+            SHARED_IDLE_SLEEP_MS
+        } else {
+            IDLE_SLEEP_MS
+        }
+    }
+
     fn idle_ms(&self, now: u64) -> u64 {
         let since = self.last_activity.unwrap_or(0);
         now.saturating_sub(since.max(self.awake.map_or(0, |a| a.since_ms)))
@@ -69,7 +80,7 @@ impl Session {
             || (self.state != "sleeping"
                 && self
                     .last_activity
-                    .is_none_or(|at| now.saturating_sub(at) < IDLE_SLEEP_MS))
+                    .is_none_or(|at| now.saturating_sub(at) < self.idle_limit()))
     }
 }
 
@@ -161,7 +172,8 @@ impl Manager {
                         session.awaken();
                         continue;
                     }
-                    let due = session.sleep_pending() || session.idle_ms(now) >= IDLE_SLEEP_MS;
+                    let due =
+                        session.sleep_pending() || session.idle_ms(now) >= session.idle_limit();
                     if due && local.can_sleep(&id) {
                         manager.release(&mut local, &id);
                     }

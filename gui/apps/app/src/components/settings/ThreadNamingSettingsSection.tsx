@@ -335,6 +335,26 @@ export function SmartSearchSettingsSection() {
   );
 }
 
+const promptSuggestionsEnabledAtom = createSyncedPreferenceAtom(
+  "promptSuggestions.enabled",
+);
+
+export function PromptSuggestionsSetting() {
+  const [enabled, setEnabled] = useAtom(promptSuggestionsEnabledAtom);
+  return (
+    <SettingsWithControl
+      label="Prompt suggestions"
+      description="After each reply, shows your likely next prompt in faint grey. Tab puts it in the box. Uses the smallest model (Haiku 5.5 or GPT-6 Luna) at low effort, only for the thread you have open. Rough estimate: about 0.1% of a $200 plan's weekly limit, 0.4% of a $100 plan, and 2% of a $20 plan."
+    >
+      <Switch
+        aria-label="Prompt suggestions"
+        checked={enabled}
+        onCheckedChange={setEnabled}
+      />
+    </SettingsWithControl>
+  );
+}
+
 export function ThreadPurposeSettingsSection() {
   const [enabled, setEnabled] = useAtom(threadPurposeEnabledAtom);
   const [model, setModel] = useAtom(threadPurposeModelAtom);

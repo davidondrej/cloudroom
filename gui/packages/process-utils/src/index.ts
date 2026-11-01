@@ -25,7 +25,7 @@ import {
 import type { Readable, Writable } from "node:stream";
 import { promisify } from "node:util";
 import crossSpawn from "cross-spawn";
-import { normalizeWindowsEnv } from "./windows.js";
+import { normalizeWindowsEnv, resolveWindowsShim } from "./windows.js";
 
 interface PortableSpawnRequest {
   command: string;
@@ -155,7 +155,13 @@ export function spawnPortableProcess(
   // shim is cmd.exe; on Windows the whole tree ends first instead.
   const treeTimeout =
     process.platform === "win32" ? request.timeout : undefined;
-  const child = crossSpawn(request.command, request.args, {
+  const launch = resolveWindowsShim({
+    command: request.command,
+    args: request.args,
+    cwd: request.cwd,
+    env: request.env ?? process.env,
+  });
+  const child = crossSpawn(launch.command, launch.args, {
     cwd: request.cwd,
     detached: request.detached,
     env: request.env && normalizeWindowsEnv(request.env),

@@ -3,6 +3,7 @@ import { createInterface } from "node:readline";
 import {
   experimental_recordProviderChildIo,
   isClosedPipeError,
+  spawnPortableProcess,
 } from "@cloudroom/provider-bridge-protocol/bridge-kit";
 import type { z } from "zod";
 import { ACP_PROTOCOL_VERSION, acpInitializeResultSchema } from "../wire.js";
@@ -133,11 +134,21 @@ function parseAgentLine(line: string): ParsedAgentMessage | null {
 export function createAcpAgentConnection(
   options: CreateAcpAgentConnectionOptions,
 ): AcpAgentConnection {
-  const child: ChildProcess = spawn(options.command, options.args, {
-    cwd: options.cwd,
-    env: options.env,
-    stdio: ["pipe", "pipe", "pipe"],
-  });
+  const child: ChildProcess =
+    process.platform === "win32"
+      ? spawnPortableProcess({
+          command: options.command,
+          args: options.args,
+          cwd: options.cwd,
+          env: options.env,
+          stdio: ["pipe", "pipe", "pipe"],
+          windowsHide: true,
+        })
+      : spawn(options.command, options.args, {
+          cwd: options.cwd,
+          env: options.env,
+          stdio: ["pipe", "pipe", "pipe"],
+        });
   experimental_recordProviderChildIo(child, {
     threadId: options.recordThreadId,
   });

@@ -61,6 +61,7 @@ export const INFERENCE_POLICY = {
   // Naming tries its model, the fallback, then its model again.
   threadMetadata: { maxAttempts: 3, retryDelayMs: 250, timeoutMs: 30_000 },
   threadPurpose: { maxAttempts: 2, retryDelayMs: 250, timeoutMs: 90_000 },
+  promptSuggestion: { maxAttempts: 1, retryDelayMs: 0, timeoutMs: 60_000 },
   voiceTranscription: { maxAttempts: 2, retryDelayMs: 250, timeoutMs: 10_000 },
 } as const;
 

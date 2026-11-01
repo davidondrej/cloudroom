@@ -32,6 +32,11 @@ import {
   getCompactFollowUpPromptPlaceholder,
   getFollowUpPromptPlaceholderHint,
 } from "@/components/promptbox/follow-up-placeholder";
+import {
+  reportPromptSuggestion,
+  usePromptSuggestion,
+  type PromptSuggestionAction,
+} from "@/components/promptbox/usePromptSuggestion";
 import { PERSONAL_PROJECT_ID } from "@cloudroom/domain";
 import type {
   ReasoningLevel,
@@ -1347,6 +1352,17 @@ export function ThreadDetailPromptArea({
     [setBottomComposerText, wakeCloudThread],
   );
 
+  const promptSuggestion = usePromptSuggestion(
+    thread.id,
+    runtimeDisplayStatus === "idle" &&
+      !isStopRequested &&
+      currentPromptDraft.text.trim() === "",
+    thread.updatedAt,
+  );
+  const handlePromptSuggestionEvent = useCallback(
+    (action: PromptSuggestionAction) => reportPromptSuggestion(thread.id, action),
+    [thread.id],
+  );
   const bottomComposerConfig = useMemo<FollowUpComposerProps>(
     () => ({
       history: {
@@ -1367,6 +1383,8 @@ export function ThreadDetailPromptArea({
       compactPromptPlaceholder,
       promptPlaceholder,
       promptPlaceholderHint,
+      ghostText: promptSuggestion,
+      onGhostText: handlePromptSuggestionEvent,
       canModifierSubmit: (!isCloud || cloudSteerSupported) && canSubmitModifierShortcut,
       steerActiveThreadOnEnter: isCloud ? cloudSteerSupported && steerActiveThreadOnEnter : steerActiveThreadOnEnter,
       submitMode: movingToLocal ? { kind: "ready" } : submitMode,
@@ -1386,6 +1404,8 @@ export function ThreadDetailPromptArea({
       promptHistoryDrafts,
       promptPlaceholder,
       promptPlaceholderHint,
+      promptSuggestion,
+      handlePromptSuggestionEvent,
       promptDraft.setDraft,
       runtimeDisplayStatus,
       steerActiveThreadOnEnter,

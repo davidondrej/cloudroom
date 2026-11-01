@@ -1955,6 +1955,14 @@ async function installDownloadedUpdate(): Promise<void> {
     quitting = true;
     stoppingForQuit = true;
     await finishQuit();
+    if (process.platform === "linux") {
+      autoUpdater.once("error", (error: Error) => {
+        desktopLogger.error(`The update didn't install; reopening Cloudroom: ${String(error?.message ?? error)}`);
+        autoUpdater.autoInstallOnAppQuit = false;
+        app.relaunch({ execPath: appImagePath });
+        app.exit(0);
+      });
+    }
     if (process.platform === "win32") {
       // electron-updater quits as soon as it asks Windows to start the NSIS installer,
       // so a failed start would leave Cloudroom closed (BB #5528). Reopen this version.
@@ -2765,8 +2773,8 @@ async function runDesktopApp(): Promise<void> {
   desktopAutoUpdateService.subscribe(() => {
     sendDesktopInfoChanged();
   });
-  // A password prompt must never pop up unattended, so skip idle and remote-window installs.
-  if (process.platform === "darwin" && !updateNeedsPassword) {
+  // A password prompt or Windows installer must never pop up unattended, so skip idle and remote-window installs.
+  if (process.platform !== "win32" && !updateNeedsPassword) {
     idleInstall = startIdleInstall({
       isUpdateDownloaded: () =>
         desktopAutoUpdateService?.getInfo().updateDownloaded === true,

@@ -298,6 +298,14 @@ impl Error {
         match self {
             Self::NotFound => "session not found".into(),
             Self::Conflict(message) => (*message).into(),
+            // A locked journal or a write that found no space: the only way in is `vm run` (#211).
+            Self::Storage(detail)
+                if detail == JOURNAL_UNWRITABLE || detail.contains("os error 28") =>
+            {
+                format!(
+                    "storage unavailable ({detail}). Disk full? Free a few GB with `room-cli vm run --thread <thread id> '<command>'`"
+                )
+            }
             Self::Storage(detail) => format!("storage unavailable ({detail})"),
         }
     }
@@ -581,7 +589,8 @@ impl Manager {
 
     pub async fn records(&self, session: &str, after: u64) -> Result<Vec<Record>> {
         {
-            let local = self.local.lock().unwrap();
+            let mut guard = self.local.lock().unwrap();
+            let local = &mut *guard;
             if let Some(sequences) = local.sequences.get(session) {
                 return sequences[sequences.partition_point(|id| *id <= after)..]
                     .iter()
@@ -2306,18 +2315,23 @@ impl Manager {
                     }
                     self.clone().snapshot_usage(id.to_owned(), handle.clone());
                     if let Some(request) = local.sessions[id].current_request.clone() {
-                        local.finish_receipt_with(id, &request, &status, error)?;
-                        let session = local.sessions.get_mut(id).ok_or(Error::NotFound)?;
+                        let session = local.sessions.get(id).ok_or(Error::NotFound)?;
                         if status == "completed"
                             && (session.parent_session.is_some()
                                 || session.parent_thread().is_some())
                         {
-                            let text = handle.seen_text().chars().take(32768).collect();
-                            session.replies.push((request, text));
-                            session
-                                .replies
-                                .drain(..session.replies.len().saturating_sub(8));
+                            // Saved before the turn completes, so `thread output` and the parent's notice still have
+                            // it once the child sleeps or Core restarts (#339).
+                            let text = handle.seen_text();
+                            children::save_reply(&self.config.state_dir, id, &request, &text);
+                            local.append(
+                                id,
+                                "child_reply",
+                                json!({"request_id":request,"text":children::capped_reply(&text)}),
+                                None,
+                            )?;
                         }
+                        local.finish_receipt_with(id, &request, &status, error)?;
                     }
                     self.advance(&mut local, id, true);
                 }

@@ -2,10 +2,10 @@ import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import type { Db } from "./data.js";
 
-// Loops their own failures paused, for the app's paused-loop card (ADR 0338). Pauses older than a week stay quiet.
+// Loops their own failures paused, for the sidebar's paused label (ADR 20261101-191413). Pauses older than a week stay quiet.
 export const pausedLoopSchema = z
   .object({
-    /** Changes with each new pause, so a dismissed card comes back only for a later one. */
+    /** Changes with each new pause, so each pause has its own key. */
     key: z.string(),
     kind: z.enum(["local", "cloud"]),
     id: z.string(),
@@ -19,7 +19,7 @@ export const pausedLoopSchema = z
 export type PausedLoop = z.infer<typeof pausedLoopSchema>;
 
 const WEEK_MS = 7 * 86_400_000;
-// The website is read at most every 15 minutes: a loop pauses after 3 failed runs, so a later card loses little.
+// The website is read at most every 15 minutes: a loop pauses after 3 failed runs, so a later label loses little.
 const CLOUD_EVERY_MS = 15 * 60_000;
 
 /** The sweep pauses a local loop by turning it off and adding "(loop paused after N consecutive failures)". */

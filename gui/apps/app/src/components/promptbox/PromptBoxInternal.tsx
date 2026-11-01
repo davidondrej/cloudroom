@@ -547,6 +547,8 @@ interface PromptBoxInternalProps {
   blurOnPointerSubmit?: boolean;
   placeholder?: string;
   placeholderHint?: string;
+  ghostText?: string | null;
+  onGhostText?: (action: "shown" | "accepted") => void;
   autoFocus?: boolean;
   allowSoftKeyboardAutoFocus?: boolean;
   textEffects?: readonly ComposerTextEffectSource[];
@@ -1271,6 +1273,8 @@ export function PromptBoxInternal({
   blurOnPointerSubmit = false,
   placeholder = "Ask anything. @ to mention files, folders, or sections",
   placeholderHint,
+  ghostText,
+  onGhostText,
   autoFocus = true,
   allowSoftKeyboardAutoFocus = false,
   textEffects,
@@ -1550,9 +1554,13 @@ export function PromptBoxInternal({
   }, []);
   const showCompactLayout =
     compact?.isCompact === true && !showVoiceActionGroup;
+  const activeGhostText = showCompactLayout ? null : (ghostText ?? null);
   const effectivePlaceholder = showCompactLayout
     ? (compact.placeholder ?? placeholder)
-    : placeholder;
+    : (activeGhostText ?? placeholder);
+  useEffect(() => {
+    if (activeGhostText) onGhostText?.("shown");
+  }, [activeGhostText, onGhostText]);
   const pluginComposerHost = usePluginComposerHost();
   const composerInputLocked = useComposerInputLock(
     pluginComposerHost?.textEffectKey ?? null,
@@ -3174,6 +3182,18 @@ export function PromptBoxInternal({
         }
       }
 
+      if (
+        activeGhostText &&
+        (event.key === "Tab" || event.key === "ArrowRight") &&
+        !hasArrowNavigationModifier &&
+        currentEditor?.isEmpty
+      ) {
+        event.preventDefault();
+        currentEditor.chain().focus().insertContent(activeGhostText).run();
+        onGhostText?.("accepted");
+        return true;
+      }
+
       if (event.key === "Escape") {
         if (onEscape) {
           onEscape();
@@ -3290,6 +3310,8 @@ export function PromptBoxInternal({
     },
     [
       onEnterKey,
+      activeGhostText,
+      onGhostText,
       activeHistoryIndex,
       activeSuggestions,
       activeTriggerKind,
@@ -3487,7 +3509,13 @@ export function PromptBoxInternal({
               inputLocked={composerInputLocked}
               isCompactLayout={showCompactLayout}
               placeholder={effectivePlaceholder}
-              placeholderHint={showCompactLayout ? undefined : placeholderHint}
+              placeholderHint={
+                showCompactLayout
+                  ? undefined
+                  : activeGhostText
+                    ? "Tab to accept"
+                    : placeholderHint
+              }
               minHeight={minHeight}
               layout={editorLayout}
               resolveMentionLink={mentionResolveLink}

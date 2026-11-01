@@ -637,12 +637,11 @@ export interface ThreadEnvironmentAssignmentRow {
 interface StatusTransition {
   currentStatus: ThreadStatus;
   newStatus: ThreadStatus;
-  parentThreadId: string | null;
 }
 
 function statusTransitionNeedsAttention(args: StatusTransition): boolean {
   if (args.currentStatus === "active" && args.newStatus === "idle") {
-    return args.parentThreadId === null;
+    return true;
   }
 
   if (args.newStatus !== "error") {
@@ -2073,7 +2072,6 @@ export function applyThreadLifecycleEventInTransaction(
     statusTransitionNeedsAttention({
       currentStatus: thread.status,
       newStatus: evaluation.to,
-      parentThreadId: thread.parentThreadId,
     })
   ) {
     set.latestAttentionAt = now;

@@ -15,7 +15,11 @@ function resolveBrowserHostDevWebSocketBaseUrl(
     return `${protocol}//${window.location.host}/ws`;
   }
 
-  return `${protocol}//${window.location.hostname}:${serverPort}/ws`;
+  const hostname =
+    window.location.hostname === "localhost"
+      ? "127.0.0.1"
+      : window.location.hostname;
+  return `${protocol}//${hostname}:${serverPort}/ws`;
 }
 
 function resolveDevWebSocketBaseUrl(): string | undefined {

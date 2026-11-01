@@ -7,6 +7,7 @@ import {
   DESKTOP_DOWNLOAD_URL,
   useDesktopUpdateInfo,
 } from "@/hooks/useDesktopUpdateInfo";
+import { useHostDesktopUpdate } from "@/hooks/queries/cloudroom-queries";
 import { useSidebarNavigationThreadSelection } from "@/hooks/queries/sidebar-navigation-query";
 import { rawStringLocalStorage } from "@/lib/browser-storage";
 import { localHostStatusAtom } from "@/lib/system-config-atoms";
@@ -105,15 +106,20 @@ export function GitForWindowsBanner({ pinned = true }: { pinned?: boolean }) {
 // App-wide notice: Restart once the in-app update is ready; the website link only when the app can't update itself.
 export function DesktopUpdateBanner() {
   const { desktopApi, desktopInfo } = useDesktopUpdateInfo();
-  const [restarting, setRestarting] = useState(false);
-  const version = desktopInfo?.pendingVersion ?? desktopInfo?.latestVersion;
+  const host = useHostDesktopUpdate(desktopApi === null);
+  const [clicked, setRestarting] = useState(false);
+  const restarting = clicked || host?.restarting === true;
+  const version =
+    host?.version ?? desktopInfo?.pendingVersion ?? desktopInfo?.latestVersion;
   const dismissal = useDismissal(version);
-  const ready = desktopInfo?.updateDownloaded === true && desktopApi !== null;
+  const ready =
+    host !== null ||
+    (desktopInfo?.updateDownloaded === true && desktopApi !== null);
   const cannotSelfUpdate =
     desktopInfo?.autoUpdateEnabled !== true ||
     desktopInfo.downloadState === "failed";
   if (
-    !desktopInfo?.updateAvailable ||
+    (host === null && !desktopInfo?.updateAvailable) ||
     !version ||
     dismissal.hidden ||
     (!ready && !cannotSelfUpdate)
@@ -124,13 +130,17 @@ export function DesktopUpdateBanner() {
   const dismiss = () => dismissal.dismiss(version);
   // A failed download (e.g. Wi-Fi still off after sleep) retries in-app; the website is only for apps that can't self-update.
   const download = () => {
-    if (desktopInfo.autoUpdateEnabled === true && desktopApi !== null) {
+    if (desktopInfo?.autoUpdateEnabled === true && desktopApi !== null) {
       void desktopApi.checkForUpdates().catch(() => undefined);
       return;
     }
     openUrlInExternalBrowser(DESKTOP_DOWNLOAD_URL);
   };
   const restart = () => {
+    if (host !== null) {
+      host.restart();
+      return;
+    }
     setRestarting(true);
     void desktopApi
       ?.installUpdate()
@@ -151,14 +161,14 @@ export function DesktopUpdateBanner() {
           <>
             <strong>A new version of Cloudroom is ready.</strong> Restart to
             update.{" "}
-            {desktopInfo.installNeedsPassword
+            {desktopInfo?.installNeedsPassword
               ? "Enter your Mac password once, and future updates install by themselves."
               : "Running agents resume automatically."}
           </>
         ) : (
           <>
             <strong>Cloudroom {version} is available.</strong> You have{" "}
-            {desktopInfo.version}. Download it to get the latest fixes.
+            {desktopInfo?.version}. Download it to get the latest fixes.
           </>
         )}
       </span>

@@ -1117,7 +1117,9 @@ async function runCloudCommand(bb: Pick<BbPluginApi, "sdk">, args: ParsedArgs, c
   const one = async (request: Parameters<Cloud["automations"]>[0], verb: string) => {
     const { automation } = await cloud.automations(request);
     if (!automation) throw new Error("The website returned no loop.");
-    return { exitCode: 0, stdout: optionalJson(args, automation) ?? `Cloud loop ${verb}\n${printCloudAutomation(automation)}` };
+    // The website returns an identical existing loop instead of a copy (#703).
+    const said = "existing" in automation ? "already exists with this name, prompt and schedule; unchanged" : verb;
+    return { exitCode: 0, stdout: optionalJson(args, automation) ?? `Cloud loop ${said}\n${printCloudAutomation(automation)}` };
   };
   const requireId = () => {
     if (!id || !CLOUD_ID.test(id)) throw new Error("Missing cloud loop ID.");

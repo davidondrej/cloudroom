@@ -134,6 +134,8 @@ export interface FollowUpComposerProps {
   compactPromptPlaceholder: string;
   promptPlaceholder: string;
   promptPlaceholderHint?: string;
+  ghostText?: string | null;
+  onGhostText?: (action: "shown" | "accepted") => void;
   canModifierSubmit: boolean;
   steerActiveThreadOnEnter: boolean;
   submitMode: FollowUpSubmitMode;
@@ -696,6 +698,8 @@ function FollowUpPromptBoxWithComposer({
         placeholderHint={
           isCompactViewport ? undefined : composer.promptPlaceholderHint
         }
+        ghostText={composer.ghostText}
+        onGhostText={composer.onGhostText}
         containerCompactPlaceholder={composer.compactPromptPlaceholder}
         heightAnimationKey={isInteractionExpanded ? "expanded" : "compact"}
         mentionMenuPlacement="top"

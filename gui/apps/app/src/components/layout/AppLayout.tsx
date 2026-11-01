@@ -242,6 +242,11 @@ function SidebarTriggerOverlay({
               className="gap-0.5"
             />
           </div>
+          {import.meta.env.DEV ? (
+            <span className="ml-1.5 mr-2 select-none text-lg font-black tracking-wide text-blue-500">
+              DEV
+            </span>
+          ) : null}
           <AppCommandShortcutHint
             shortcut={shortcut}
             className="absolute left-full ml-1"

@@ -740,6 +740,16 @@ export interface PluginNavPanelRegistration {
    */
   experimental_sidebarAccessory?: ComponentType;
   /**
+   * Optional component right after this panel's title in its sidebar row, for
+   * a short status worth noticing, like "4 paused". Unlike the accessory it may
+   * be interactive, for example a hover card. It receives no props and renders
+   * nothing when there is nothing to say. Clicks in portalled content still
+   * bubble to the row through React, so stop them there.
+   *
+   * Experimental: see docs/api_to_audit.md.
+   */
+  experimental_sidebarLabel?: ComponentType;
+  /**
    * Optional component rendered on the right side of the shared title bar
    * (e.g. a sync button or a count). Contained separately from the body: a
    * throwing headerContent is hidden without breaking the title bar.

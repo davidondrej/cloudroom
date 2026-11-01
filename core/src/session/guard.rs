@@ -10,6 +10,9 @@ const RESCUE_MIN_BYTES: u64 = 32_000_000;
 const UPLOAD_AFTER: Duration = Duration::from_secs(30);
 /// ...unless this many records wait already.
 const UPLOAD_RECORDS: u64 = 1024;
+/// Folds saved history into gzip segments (#280). Off for one release: Core before it can't open a compacted journal,
+/// so a rollback must find none. Follow-up: turn it on once every Core reads segments.
+const COMPACT_HISTORY: bool = false;
 
 impl Manager {
     pub async fn check_storage(&self) -> Snapshot {
@@ -253,11 +256,19 @@ impl Manager {
             let (mut since, mut failures, mut retry_at, mut faulted, mut settled) =
                 (None::<Instant>, 0u32, Instant::now(), false, false);
             let mut commands = 0;
+            let (mut compacted, mut compact_at) = (None, Instant::now());
             loop {
                 let asked = tokio::select! {
                     _ = manager.uploads.notified() => true,
                     _ = tokio::time::sleep(Duration::from_secs(1)) => false,
                 };
+                // Apart from uploads: a fully saved journal compacts at startup, and a failed pass retries.
+                if COMPACT_HISTORY
+                    && Instant::now() >= compact_at
+                    && !manager.compact_history(&mut compacted).await
+                {
+                    compact_at = Instant::now() + Duration::from_secs(60);
+                }
                 let (pending, idle, seen) = {
                     let local = manager.local.lock().unwrap();
                     let idle = local.sessions.values().all(|s| !s.busy());
@@ -358,6 +369,31 @@ impl Manager {
             self.local.lock().unwrap().journal.begin_upload(end)?;
         }
         Ok(batch)
+    }
+
+    /// One bounded compaction pass when a whole block is saved past `next` (`Journal::compact`). False if it failed.
+    async fn compact_history(&self, next: &mut Option<u64>) -> bool {
+        let (directory, saved) = {
+            let local = self.local.lock().unwrap();
+            (local.journal.directory().to_owned(), local.journal.saved())
+        };
+        if next.is_some_and(|block| (block + 1) * outbox::SEGMENT > saved) {
+            return true;
+        }
+        let mut block = *next;
+        let pass = tokio::task::spawn_blocking(move || {
+            let result = outbox::Journal::compact(&directory, &mut block, saved);
+            (block, result)
+        })
+        .await;
+        let result = pass.map(|(block, result)| {
+            *next = block;
+            result
+        });
+        if let Ok(Err(error)) = &result {
+            eprintln!("Cloudroom could not compact saved history: {error}");
+        }
+        matches!(result, Ok(Ok(())))
     }
 
     /// Uploads now and waits up to `wait` for every record to be saved. Returns how many are still pending.

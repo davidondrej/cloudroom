@@ -79,6 +79,7 @@ export const UI_PREFERENCE_KEYS = [
   "threadPurpose.showInSidebar",
   "threadPurpose.model",
   "threadPurpose.reasoningEffort",
+  "promptSuggestions.enabled",
   "projectNudge.enabled",
   "projectNudge.confidence",
   "search.smart",
@@ -244,6 +245,11 @@ export const uiPreferenceDefinitions = {
     z.boolean(),
     true,
     "Keep a short purpose and percent done on each thread, refreshed after every reply. Shown when hovering the thread title, or a sidebar thread for 1.5s (see threadPurpose.showInSidebar).",
+  ),
+  "promptSuggestions.enabled": defineUiPreference(
+    z.boolean(),
+    true,
+    "After each reply, show the user's likely next prompt as faint text in the open thread's empty composer; Tab inserts it. Uses Haiku 5.5 on Claude Code, else GPT-6 Luna on Codex, at low effort.",
   ),
   "threadPurpose.showInSidebar": defineUiPreference(
     z.boolean(),

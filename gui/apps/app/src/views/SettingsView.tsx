@@ -86,6 +86,7 @@ import { VoiceInputSettingsSection } from "@/components/settings/VoiceInputSetti
 import {
   ProjectNudgeSettingsSection,
   SmartSearchSettingsSection,
+  PromptSuggestionsSetting,
   ThreadNamingSettingsSection,
   ThreadPurposeSettingsSection,
 } from "@/components/settings/ThreadNamingSettingsSection";
@@ -968,6 +969,8 @@ export function GeneralSettingsSection({
               aria-label={RICH_TEXT_EDITING_SETTING_LABEL}
             />
           </SettingsWithControl>
+
+          <PromptSuggestionsSetting />
 
           <SettingsWithControl
             label={FOLLOW_UP_BEHAVIOR_SETTING_LABEL}

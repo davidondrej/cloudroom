@@ -533,7 +533,7 @@ impl IntoResponse for session::Error {
                 return (
                     StatusCode::SERVICE_UNAVAILABLE,
                     Json(json!({
-                        "error": format!("storage unavailable ({detail}); retry with the same request_id"),
+                        "error": format!("{}; retry with the same request_id", Self::Storage(detail).message()),
                         "code": "storage_unavailable",
                     })),
                 )

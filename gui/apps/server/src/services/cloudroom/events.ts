@@ -70,9 +70,10 @@ function childNotice(db: DbQueryConnection, saved: Binding, request: Command, te
 function promptRequestedEvent(db: DbQueryConnection, saved: Binding, request: Command, steeredTurnId?: string): ThreadEvent {
   const stored = effectivePrompt(db, saved.threadId, request.id);
   const initial = request.id === `first_${saved.threadId}`;
+  const sender = typeof stored.sender_thread_id === "string" ? stored.sender_thread_id : null;
   return threadEventSchema.parse({
     type: "client/turn/requested", scope: threadScope(), threadId: saved.threadId,
-    direction: "outbound", requestId: bbRequestId(request.id), source: initial ? "spawn" : "tell", ...childNotice(db, saved, request, stored.text), senderThreadId: null,
+    direction: "outbound", requestId: bbRequestId(request.id), source: initial ? "spawn" : "tell", ...(sender ? { initiator: "agent" } : childNotice(db, saved, request, stored.text)), senderThreadId: sender,
     input: Array.isArray(stored.content) ? stored.content : [{ type: "text", text: stored.text ?? "", mentions: [] }],
     target: steeredTurnId ? { kind: "steer", expectedTurnId: steeredTurnId } : { kind: initial ? "thread-start" : "new-turn" },
     request: { method: initial ? "thread/start" : "turn/start", params: {} },

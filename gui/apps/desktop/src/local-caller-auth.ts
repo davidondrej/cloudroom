@@ -1,5 +1,6 @@
 import {
   CALLER_PROOF_STATUS_HEADER,
+  CALLER_PROOF_WAIT_MS,
   CALLER_TOKEN_HEADER,
   callerTokenFor,
   createCallerProofFetch,
@@ -9,7 +10,7 @@ import {
 import { isLoopbackHostname } from "@cloudroom/config/loopback";
 import { DEFAULT_HOST_DAEMON_LOCAL_BIND_HOST } from "@cloudroom/host-daemon-contract";
 
-const PROOF_TIMEOUT_MS = 5_000;
+const CONFIG_TIMEOUT_MS = 5_000;
 const RELOAD_COOLDOWN_MS = 10_000;
 const DAEMON_REFRESH_COOLDOWN_MS = 5_000;
 
@@ -77,7 +78,7 @@ function withTimeout<T>(promise: Promise<T>, fallback: T): Promise<T> {
   return Promise.race([
     promise,
     new Promise<T>((resolve) => {
-      setTimeout(() => resolve(fallback), PROOF_TIMEOUT_MS).unref?.();
+      setTimeout(() => resolve(fallback), CALLER_PROOF_WAIT_MS).unref?.();
     }),
   ]);
 }
@@ -94,7 +95,7 @@ function headerValue(
 
 async function readLocalHelperPorts(serverUrl: string): Promise<number[]> {
   const response = await fetch(new URL("/api/v1/system/config", serverUrl), {
-    signal: AbortSignal.timeout(PROOF_TIMEOUT_MS),
+    signal: AbortSignal.timeout(CONFIG_TIMEOUT_MS),
   });
   if (!response.ok) return [];
   const body: unknown = await response.json();

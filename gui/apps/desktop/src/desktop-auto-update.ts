@@ -89,16 +89,16 @@ interface ApplyUpdateNotAvailableArgs {
 
 export interface DesktopAutoUpdateService extends DesktopUpdateService {
   /**
-   * Windows: holds off new checks and downloads until the install hands off or
+   * Windows and Linux: holds off new checks and downloads until the install hands off or
    * ends, since a new download deletes the staged installer. False while a
    * download is running. Always true elsewhere.
    */
   beginInstall(): boolean;
-  /** Windows: lets checks and downloads run again after an install that didn't hand off. */
+  /** Windows and Linux: lets checks and downloads run again after an install that didn't hand off. */
   endInstall(): void;
   /** False when the install is declined (nothing downloaded). */
   installUpdate(): boolean;
-  /** Windows: whether the downloaded installer is still on disk. If not, offers the download again. */
+  /** Windows and Linux: whether the downloaded installer is still on disk. If not, offers the download again. */
   installerReady(): boolean;
   /** The last Restart to update didn't change the version: offer the download again. */
   markInstallFailed(version: string): void;
@@ -265,11 +265,11 @@ export function createDesktopAutoUpdateService(
     if (downloadInFlight !== null || installing) {
       return;
     }
-    // NSIS keeps one installer: a new download deletes the staged one, so it's no longer ready.
+    // NSIS and AppImage keep one installer: a new download deletes the staged one, so it's no longer ready.
     scheduler.updateInfo({
       ...scheduler.getInfo(),
       downloadState: "downloading",
-      ...(args.platform === "windows" ? { pendingVersion: null, updateDownloaded: false } : {}),
+      ...(args.platform !== "macos" ? { pendingVersion: null, updateDownloaded: false } : {}),
     });
     try {
       downloadInFlight = args.updater.downloadUpdate();
@@ -422,7 +422,7 @@ export function createDesktopAutoUpdateService(
   return {
     ...scheduler,
     beginInstall(): boolean {
-      if (args.platform !== "windows") {
+      if (args.platform === "macos") {
         return true;
       }
       if (installing) {
@@ -439,7 +439,7 @@ export function createDesktopAutoUpdateService(
       installing = false;
     },
     installerReady(): boolean {
-      if (args.platform !== "windows" || !scheduler.getInfo().updateDownloaded) {
+      if (args.platform === "macos" || !scheduler.getInfo().updateDownloaded) {
         return true;
       }
       const installer = args.updater.stagedInstallerPath();

@@ -1,6 +1,7 @@
+use flate2::{Compression, read::GzDecoder, write::GzEncoder};
 use std::{
     fs::{self, File, OpenOptions},
-    io::{self, Write},
+    io::{self, Read, Write},
     os::unix::fs::{DirBuilderExt, OpenOptionsExt},
     path::{Path, PathBuf},
 };
@@ -14,13 +15,75 @@ pub struct Journal {
     /// The last record of the batch being uploaded. Saved before sending, so a restart resends the exact same batch.
     uploading: Option<u64>,
     writable: bool,
+    /// The last segment read, so a replay or page of old records decompresses each segment once.
+    segment: Option<Segment>,
     _lock: File,
 }
 
 const SNAPSHOT: &str = "snapshot.json";
+/// Saved records are folded into gzip segments (`compact`). One file per record took ~4.6 KiB of disk each: 3.5 GiB
+/// on a busy sandbox (#280). A segment is ~16x smaller and still a full local copy. Each covers an aligned run of at
+/// most SEGMENT records and SEGMENT_BYTES of them: all a read ever decompresses. A bigger record stays a file.
+pub(super) const SEGMENT: u64 = 1024;
+const SEGMENT_BYTES: u64 = 8 << 20;
+
+/// A decompressed segment: line `i` is record `first + i` and ends at `ends[i]`.
+struct Segment {
+    first: u64,
+    text: Vec<u8>,
+    ends: Vec<usize>,
+}
 
 fn record_name(id: u64) -> String {
     format!("{id:020}.record")
+}
+
+fn segment_name(first: u64, last: u64) -> String {
+    format!("{first:020}-{last:020}.jsonl.gz")
+}
+
+/// The segment holding record `id`. Runs are aligned powers of two, so this tries at most 11 names, never a listing.
+fn segment_of(directory: &Path, id: u64) -> Option<(u64, u64)> {
+    let mut size = SEGMENT;
+    loop {
+        let first = (id - 1) / size * size + 1;
+        if directory
+            .join(segment_name(first, first + size - 1))
+            .is_file()
+        {
+            return Some((first, first + size - 1));
+        }
+        if size == 1 {
+            return None;
+        }
+        size /= 2;
+    }
+}
+
+/// Decompresses a segment, never more than SEGMENT_BYTES, and checks it holds exactly its records.
+fn read_segment(directory: &Path, first: u64, last: u64) -> io::Result<Segment> {
+    let mut text = Vec::new();
+    GzDecoder::new(File::open(directory.join(segment_name(first, last)))?)
+        .take(SEGMENT_BYTES + 1)
+        .read_to_end(&mut text)?;
+    let count = (last - first + 1) as usize;
+    let ends: Vec<usize> = (text.iter().enumerate())
+        .filter_map(|(i, b)| (*b == b'\n').then_some(i))
+        .take(count + 1)
+        .collect();
+    if text.len() as u64 > SEGMENT_BYTES || ends.len() != count || text.last() != Some(&b'\n') {
+        return Err(io::Error::other("damaged or oversized journal segment"));
+    }
+    Ok(Segment { first, text, ends })
+}
+
+/// Makes renames in the directory durable.
+fn sync_directory(directory: &Path) -> io::Result<()> {
+    #[cfg(test)]
+    if tests::FAILED_SYNCS.replace(tests::FAILED_SYNCS.get().saturating_sub(1)) > 0 {
+        return Err(io::Error::other("injected directory sync failure"));
+    }
+    File::open(directory)?.sync_all()
 }
 
 impl Journal {
@@ -44,14 +107,16 @@ impl Journal {
             .open(directory.join("lock"))?;
         lock.try_lock()
             .map_err(|_| io::Error::other("state directory already in use"))?;
-        let last = if known > 0 && directory.join(record_name(known)).is_file() {
+        // A record file at or before the segments' end is one an interrupted `compact` left behind.
+        let compacted = Self::compacted(directory);
+        let last = if known > compacted && directory.join(record_name(known)).is_file() {
             let mut last = known;
             while directory.join(record_name(last + 1)).is_file() {
                 last += 1;
             }
             last
         } else {
-            Self::count(directory)?
+            Self::count(directory, compacted)?
         };
         let saved = match fs::read_to_string(directory.join("saved")) {
             Ok(value) => value
@@ -73,12 +138,13 @@ impl Journal {
             saved,
             uploading,
             writable: true,
+            segment: None,
             _lock: lock,
         })
     }
 
-    /// Lists every record and checks they run from 1 without gaps.
-    fn count(directory: &Path) -> io::Result<u64> {
+    /// Lists every record and checks they run on from the segments without gaps.
+    fn count(directory: &Path, compacted: u64) -> io::Result<u64> {
         let mut ids = Vec::new();
         for entry in fs::read_dir(directory)? {
             let path = entry?.path();
@@ -91,14 +157,112 @@ impl Journal {
                 if path.file_name().and_then(|s| s.to_str()) != Some(&record_name(id)) {
                     return Err(io::Error::other("noncanonical journal filename"));
                 }
-                ids.push(id);
+                // Files an interrupted `compact` left behind duplicate its segment.
+                if id > compacted {
+                    ids.push(id);
+                }
             }
         }
         ids.sort_unstable();
-        if ids.iter().copied().ne(1..=ids.len() as u64) {
+        if ids
+            .iter()
+            .copied()
+            .ne(compacted + 1..=compacted + ids.len() as u64)
+        {
             return Err(io::Error::other("journal has missing or duplicate records"));
         }
-        Ok(ids.len() as u64)
+        Ok(compacted + ids.len() as u64)
+    }
+
+    /// The last record of the segments that run from record 1, with the records too big for one between them.
+    pub fn compacted(directory: &Path) -> u64 {
+        let mut last = 0;
+        loop {
+            if let Some((_, end)) = segment_of(directory, last + 1) {
+                last = end;
+            } else if fs::metadata(directory.join(record_name(last + 1)))
+                .is_ok_and(|m| m.len() >= SEGMENT_BYTES)
+            {
+                last += 1;
+            } else {
+                return last;
+            }
+        }
+    }
+
+    /// Folds whole blocks of SEGMENT saved records into segments, from block `next` on. Only saved ones: uploads read
+    /// records as files (`read_written`). `None` starts at the segments' last block, which deletes files an interrupted
+    /// run left there. Without other writers, so it never holds the journal. At most 64 blocks a call (~3 s), so a
+    /// large backlog doesn't hold up uploads for long. A failure leaves `next` at the block to retry.
+    pub fn compact(directory: &Path, next: &mut Option<u64>, saved: u64) -> io::Result<()> {
+        let block =
+            next.get_or_insert_with(|| Self::compacted(directory).saturating_sub(1) / SEGMENT);
+        for _ in 0..64 {
+            if (*block + 1) * SEGMENT > saved {
+                break;
+            }
+            Self::fold(directory, *block * SEGMENT + 1, (*block + 1) * SEGMENT)?;
+            *block += 1;
+        }
+        Ok(())
+    }
+
+    /// Writes records `first..=last` as one segment, or as two halves while they are over SEGMENT_BYTES, then deletes
+    /// their files. Missing files mean a half was written before a crash: the halves finish the job. A record over
+    /// SEGMENT_BYTES on its own stays a file.
+    fn fold(directory: &Path, first: u64, last: u64) -> io::Result<()> {
+        let name = directory.join(segment_name(first, last));
+        if name.is_file() {
+            // A retry after a failed directory sync: the segment must read back whole before its files go.
+            read_segment(directory, first, last)?;
+        } else {
+            let mut bytes = 0;
+            for id in first..=last {
+                match fs::metadata(directory.join(record_name(id))) {
+                    Ok(metadata) => bytes += metadata.len() + 1,
+                    Err(e) if e.kind() == io::ErrorKind::NotFound && first < last => {
+                        bytes = u64::MAX;
+                        break;
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+            if bytes > SEGMENT_BYTES {
+                if first == last {
+                    return Ok(());
+                }
+                let middle = first + (last - first) / 2;
+                Self::fold(directory, first, middle)?;
+                return Self::fold(directory, middle + 1, last);
+            }
+            let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+            for id in first..=last {
+                let record = fs::read(directory.join(record_name(id)))?;
+                if record.contains(&b'\n') {
+                    return Err(io::Error::other("record spans lines"));
+                }
+                encoder.write_all(&record)?;
+                encoder.write_all(b"\n")?;
+            }
+            let temporary = directory.join("segment.tmp");
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(&temporary)?;
+            file.write_all(&encoder.finish()?)?;
+            file.sync_all()?;
+            fs::rename(temporary, name)?;
+        }
+        sync_directory(directory)?;
+        for id in first..=last {
+            match fs::remove_file(directory.join(record_name(id))) {
+                Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
+                _ => {}
+            }
+        }
+        Ok(())
     }
 
     pub fn append(&mut self, record: &[u8]) -> io::Result<u64> {
@@ -128,14 +292,28 @@ impl Journal {
         fs::rename(temporary, self.directory.join(SNAPSHOT))
     }
 
-    pub fn read(&self, id: u64) -> io::Result<Vec<u8>> {
+    pub fn read(&mut self, id: u64) -> io::Result<Vec<u8>> {
         if id == 0 || id >= self.next {
             return Err(io::Error::other("record outside journal"));
         }
-        fs::read(self.directory.join(record_name(id)))
+        match fs::read(self.directory.join(record_name(id))) {
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            read => return read,
+        }
+        let cached = |s: &Segment| (s.first..s.first + s.ends.len() as u64).contains(&id);
+        if !self.segment.as_ref().is_some_and(cached) {
+            self.segment = None;
+            let (first, last) = segment_of(&self.directory, id)
+                .ok_or_else(|| io::Error::other("record missing from journal"))?;
+            self.segment = Some(read_segment(&self.directory, first, last)?);
+        }
+        let segment = self.segment.as_ref().unwrap();
+        let line = (id - segment.first) as usize;
+        let start = line.checked_sub(1).map_or(0, |i| segment.ends[i] + 1);
+        Ok(segment.text[start..segment.ends[line]].to_vec())
     }
 
-    /// Reads a record already written, without holding whoever owns the journal: records never change.
+    /// Reads an unsaved record already written, without holding whoever owns the journal: records never change.
     pub fn read_written(directory: &Path, id: u64) -> io::Result<Vec<u8>> {
         fs::read(directory.join(record_name(id)))
     }
@@ -194,12 +372,68 @@ impl Journal {
             .open(&temporary)?;
         file.write_all(bytes)?;
         file.sync_all()?;
-        // A rename followed by a failed directory fsync has an uncertain outcome.
-        // Refuse further writes until reopening, rather than overwrite that record.
-        self.writable = false;
-        fs::rename(temporary, self.directory.join(name))?;
+        // A rename refused for space changed nothing (a full disk can refuse a new directory block), so only that
+        // write fails (#211). Any other failed rename, or a failed directory fsync after one, has an uncertain outcome:
+        // refuse further writes until reopening, rather than overwrite that record.
+        let renamed = fs::rename(temporary, self.directory.join(name));
+        self.writable = renamed.as_ref().is_err_and(no_space);
+        renamed?;
         File::open(&self.directory)?.sync_all()?;
         self.writable = true;
         Ok(())
+    }
+}
+
+/// Errors that guarantee the filesystem refused the change before making it.
+fn no_space(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::StorageFull | io::ErrorKind::QuotaExceeded
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+
+    thread_local! {
+        /// How many directory syncs fail before they work again.
+        pub(super) static FAILED_SYNCS: Cell<u32> = const { Cell::new(0) };
+    }
+
+    #[test]
+    fn record_files_are_deleted_only_after_a_directory_sync() {
+        let dir = std::env::temp_dir().join(format!("cloudroom-sync-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir(&dir).unwrap();
+        for id in 1..=SEGMENT {
+            fs::write(dir.join(record_name(id)), id.to_string()).unwrap();
+        }
+        // The segment is renamed in but its sync fails, and so does the retry's: no record file goes either time.
+        FAILED_SYNCS.set(2);
+        for _ in 0..2 {
+            assert!(Journal::compact(&dir, &mut None, SEGMENT).is_err());
+            assert!(dir.join(segment_name(1, SEGMENT)).is_file());
+            assert!(dir.join(record_name(1)).is_file());
+        }
+        Journal::compact(&dir, &mut None, SEGMENT).unwrap();
+        assert!(!dir.join(record_name(1)).exists());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn only_a_rename_refused_for_space_keeps_the_journal_writable() {
+        // ENOSPC and EDQUOT keep it writable; EIO, EISDIR and ENOTEMPTY may follow a completed rename, so they lock it.
+        use io::ErrorKind::*;
+        for (kind, writable) in [
+            (StorageFull, true),
+            (QuotaExceeded, true),
+            (Other, false),
+            (IsADirectory, false),
+            (DirectoryNotEmpty, false),
+        ] {
+            assert_eq!(super::no_space(&kind.into()), writable, "{kind:?}");
+        }
     }
 }

@@ -389,10 +389,12 @@ impl Manager {
             Err(Error::NotFound) => {}
             Err(error) => return Err(error),
         }
-        if self.is_stopping() || !self.recording_available() {
-            return Err(Error::Storage(
-                "service is stopping or the session journal is not writable".into(),
-            ));
+        // The common journal error, so its 503 carries the recovery hint (Error::message, #211).
+        if !self.recording_available() {
+            return Err(Error::Storage(super::JOURNAL_UNWRITABLE.into()));
+        }
+        if self.is_stopping() {
+            return Err(Error::Storage("service is stopping".into()));
         }
         if self.local.lock().unwrap().draining {
             return Err(Error::Conflict("service is draining"));
@@ -506,10 +508,11 @@ impl Manager {
         if transfer.cancelled {
             return Err(Error::Conflict("transfer cancelled"));
         }
-        if self.storage.blocks() || !self.recording_available() {
-            return Err(Error::Storage(
-                "disk protection is blocking writes or the session journal is not writable".into(),
-            ));
+        if !self.recording_available() {
+            return Err(Error::Storage(super::JOURNAL_UNWRITABLE.into()));
+        }
+        if self.storage.blocks() {
+            return Err(Error::Storage("disk protection is blocking writes".into()));
         }
         let mut entry = transfer
             .manifest

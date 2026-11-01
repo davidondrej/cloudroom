@@ -1409,6 +1409,19 @@ the `experimental_fixedTabOpenCalls` inspection list.
 10. Keep core and plugin destinations on the same resolver and verify the
     controller never learns Changes, file, task, or document target shapes.
 
+## `PluginNavPanelRegistration.experimental_sidebarLabel`
+
+**Experimental (2026-11-01).** One consumer: the Loops plugin's "● N paused" with its hover list (ADR 20261101-191413).
+
+**What it does.** Lets a nav panel mount a no-props component right after its
+title in the sidebar row, on every viewport. Unlike the accessory it may be
+interactive, such as a hover card. It renders nothing when it has nothing to
+say. A crash hides only the label.
+
+**Audit before stabilizing.** Clicks in portalled content bubble to the row
+through React, so each consumer must stop them; decide whether the host should
+do that. Decide whether one label per row should be capped in width.
+
 ## `PluginNavPanelRegistration.experimental_sidebarAccessory`
 
 **Kept experimental (2026-08-22).** one consumer (the tasks plugin); item 1 below (a narrower value/badge contract) would change the API shape.

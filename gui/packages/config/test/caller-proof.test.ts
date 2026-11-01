@@ -272,4 +272,55 @@ describe("caller proof", () => {
     expect(post.status).toBe(200);
     expect(calls).toEqual(["POST /api/v1/terminals"]);
   });
+
+  it.each([
+    [
+      "refuses a proof",
+      7,
+      () => Promise.resolve(new Response("{}", { status: 403 })),
+      "was refused (403)",
+    ],
+    [
+      "is slower than the caller's own request timeout",
+      8,
+      () =>
+        Promise.reject(
+          Object.assign(new Error("Cloudroom request timed out after 6s."), {
+            name: "BbRequestTimeoutError",
+          }),
+        ),
+      "timed out",
+    ],
+  ])(
+    "proves again when a busy server %s, so the request still goes through",
+    async (_, port, fail, reason) => {
+      const issuer = await createCallerProofIssuer({
+        dataDir: await tempDataDir(),
+      });
+      const origin = `http://127.0.0.1:${port}`;
+      const base = issuerFetch(issuer, origin);
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      let refused = false;
+      const authed = createCallerProofFetch(((input, init) => {
+        const finishing = new URL(String(input)).pathname.startsWith(
+          `${SERVER_CALLER_PROOF_PATH}/`,
+        );
+        if (finishing && !refused) {
+          refused = true;
+          return fail();
+        }
+        return base(input, init);
+      }) as typeof fetch);
+
+      const response = await authed(`${origin}/internal/hosts/enroll`, {
+        body: "{}",
+        method: "POST",
+      });
+      expect(response.status).toBe(200);
+      expect(warn).toHaveBeenCalledWith(
+        `Cloudroom caller proof ${reason}; retrying in 1 s`,
+      );
+      expect(await readdir(issuer.directory)).toEqual([]);
+    },
+  );
 });

@@ -159,7 +159,7 @@ function lastTurnSequence(db: DbConnection, threadId: string): number {
   );
 }
 
-function clip(text: string, max: number): string {
+export function clip(text: string, max: number): string {
   const clean = text
     .replace(/<cloudroom_[a-z_]+>[\s\S]*?<\/cloudroom_[a-z_]+>/gu, "")
     .replace(/\s+/gu, " ")
@@ -183,7 +183,7 @@ function requestText(data: string): string {
   }
 }
 
-function userMessages(
+export function userMessages(
   db: DbConnection,
   threadId: string,
   order: "first" | "last",

@@ -128,7 +128,7 @@ export const automationRpcContract = defineRpcContract({
     input: z.null(),
     output: z.object({ names: z.array(z.string()) }).strict(),
   },
-  // Loops their own failures paused, local and Cloud, for the app's paused-loop card (ADR 0338).
+  // Loops their own failures paused, local and Cloud, for the sidebar's paused label (ADR 20261101-191413).
   paused_loops: {
     input: z.null(),
     output: z.object({ loops: z.array(pausedLoopSchema) }).strict(),
@@ -187,11 +187,13 @@ async function cloudThreadAgent(
 
 async function withCloudAgents(threads: Sdk["threads"], result: unknown) {
   const { automations = [] } = result as {
-    automations?: Pick<CloudAutomation, "thread_id" | "agent">[];
+    automations?: (Pick<CloudAutomation, "thread_id" | "agent"> & {
+      project_id?: string | null;
+    })[];
   };
   return {
     ...(result as object),
-    // A fresh-thread loop's own saved agent; otherwise its thread's, which it uses. Its project is its thread's.
+    // A fresh-thread loop's own saved agent; otherwise its thread's, which it uses. Its project is its thread's, or the website's once that thread is deleted.
     automations: await Promise.all(
       automations.map(async (automation) => {
         // A project loop's home is its project (no thread hosts it).
@@ -201,7 +203,11 @@ async function withCloudAgents(threads: Sdk["threads"], result: unknown) {
           : await threads.get({ threadId: automation.thread_id }).catch(() => null);
         return {
           ...automation,
-          project_id: home ?? (thread && "projectId" in thread ? thread.projectId : null),
+          project_id:
+            home ??
+            (thread && "projectId" in thread
+              ? thread.projectId
+              : (automation.project_id ?? null)),
           agent: automation.agent
             ? {
                 providerId: automation.agent.provider,

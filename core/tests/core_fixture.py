@@ -17,6 +17,9 @@ import uuid
 from core_e2e import BINARY, Service, run, until, next_event
 
 
+# A child reply longer than the journal keeps (32768 chars), with an end that a cut copy loses.
+LONG_REPLY = "x" * 40000 + " END"
+
 def codex():
     native = str(uuid.uuid4())
     path = Path(os.environ["CODEX_HOME"]) / "sessions" / (native + ".jsonl")
@@ -142,6 +145,9 @@ def codex():
                     event("item/started", turnId=turn, item={"id": "tool", "type": "commandExecution", "processId": str(child.pid)})
                 elif text == "hang":
                     time.sleep(30)
+                elif text == "long":
+                    event("item/completed", turnId=turn, item={"id": "text", "type": "agentMessage", "text": LONG_REPLY})
+                    event("turn/completed", turn={"id": turn, "status": "completed"})
                 else:
                     event("item/agentMessage/delta", turnId=turn, itemId="text", delta="hello")
                     event("turn/completed", turn={"id": turn, "status": "completed"})
@@ -786,12 +792,16 @@ class RecoveryTests(unittest.TestCase):
         # A write that failed before its rename (a full disk) changed nothing, so the next one goes ahead.
         self.prompt('again','hello')
         self.wait(lambda:self.status()['receipts']['again']['state']=='completed','write after a full disk')
-        # A failed rename is uncertain: nothing is written until a restart reopens the journal.
+        # A rename that failed for anything but space (here EISDIR) is uncertain: nothing is written until a restart
+        # reopens the journal. One refused for space (ENOSPC, EDQUOT) changed nothing and keeps it writable (#211).
         target = self.state/f"{self.service.request('GET','/v1/health')['saving']['locally_recorded_through'] + 1:020}.record"
         target.mkdir()
         self.service.request('POST','/v1/sessions/cr_seed/prompts',{'request_id':'uncertain','text':'hello'},503)
         target.rmdir()
         self.service.request('POST','/v1/sessions/cr_seed/prompts',{'request_id':'blocked','text':'hello'},503)
+        teleport = {'request_id':'locked','harness':'codex','native_id':'n','model':'fixture','workspace':'root','workspace_name':'repo',
+                    'files':[{'path':'n.jsonl','size':1,'sha256':'0'*64,'kind':'native','origin':None}],'handoff':'continue'}
+        self.assertIn('room-cli vm run --thread', self.service.request('POST','/v1/teleports',teleport,503)['error'])
         self.assertFalse(self.service.request('GET','/v1/ready',expected=503)['ready'])
         self.assertFalse(self.service.request('GET','/v1/dashboard')['runtime']['ready'])
         self.service.request('POST','/v1/sessions/cr_seed/attachments?request_id=blocked&name=note.txt&kind=file',{},503)
@@ -873,6 +883,25 @@ class RecoveryTests(unittest.TestCase):
         self.service.request("POST", "/v1/sessions/cr_child_kid/prompts", {"request_id": "again", "text": "hello"}, 202)
         self.wait(lambda: receipts().get("notice_cr_child_kid_again", {}).get("state") == "completed", "queued notice")
         self.assertNotIn("notice_cr_child_kid_again_steer", receipts())
+
+    def test_a_finished_shared_child_frees_its_agent_soon_and_keeps_its_whole_reply(self):
+        # #339: idle children in the parent's sandbox kept their agent loaded for 30 minutes and ran it out of memory.
+        self.seed(); self.start(); self.ready()
+        self.service.request("POST", "/v1/sessions", {"request_id": "kid", "parent_session": "cr_seed", "prompt": "long"}, 202)
+        child = lambda: self.service.session("cr_child_kid")
+        self.wait(lambda: "notice_cr_child_kid_task_kid" in self.status()["receipts"], "parent notice")
+        until(lambda: child()["state"] == "sleeping", "finished child asleep", 45)
+        self.assertEqual(self.status()["state"], "idle")
+        # The whole reply outlives the sleep and a restart, outside the history journal; the journal's copy says it is cut.
+        self.service.stop(); self.start(); self.ready()
+        self.assertEqual(child()["state"], "sleeping")
+        saved = json.loads((self.state / "replies" / "cr_child_kid.json").read_text())
+        self.assertEqual(saved, {"request_id": "task_kid", "text": LONG_REPLY})
+        copies = [r["data"]["text"] for r in self.service.records("cr_child_kid") if r["kind"] == "child_reply"]
+        self.assertEqual(copies, [LONG_REPLY[:32768] + "\n\n[reply truncated: 40004 chars, showing first 32768]"])
+        self.service.request("POST", "/v1/sessions/cr_child_kid/prompts", {"request_id": "again", "text": "hello"}, 202)
+        until(lambda: child()["receipts"]["again"]["state"] == "completed", "woken child turn", 10)
+        self.wait(lambda: "notice_cr_child_kid_again" in self.status()["receipts"], "second notice")
 
     def test_parent_hears_nothing_of_a_turn_cut_by_restart_or_a_detached_child(self):
         self.seed(); self.start(); self.ready()

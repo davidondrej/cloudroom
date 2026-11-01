@@ -1496,7 +1496,11 @@ export function AutomationOverviewView({
     const project = templates?.projects?.find((item) => item.id === projectId);
     const github = project?.github ?? null;
     return {
-      label: github?.split("/")[1] ?? project?.name ?? fallback ?? "Other",
+      label:
+        github?.split("/")[1] ??
+        project?.name ??
+        fallback ??
+        (projectId === PERSONAL_PROJECT_ID ? "Personal" : "Other"),
       github,
     };
   };

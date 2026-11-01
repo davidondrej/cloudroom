@@ -1053,6 +1053,19 @@ function PluginNavSidebarItem({
         <SidebarAccessory />
       </PluginSlotMount>
     ) : null;
+  const SidebarLabel = panel?.experimental_sidebarLabel;
+  const sidebarLabel =
+    panel !== null && SidebarLabel !== undefined ? (
+      <PluginSlotMount
+        key={`${panel.pluginId}/${panel.id}/${panel.generation}`}
+        pluginId={panel.pluginId}
+        slotKind="navPanelSidebarLabel"
+        slotId={panel.id}
+        crashFallback={<></>}
+      >
+        <SidebarLabel />
+      </PluginSlotMount>
+    ) : null;
 
   return (
     <SidebarNavRowChrome
@@ -1064,6 +1077,7 @@ function PluginNavSidebarItem({
       isActive={pathname === path || pathname.startsWith(`${path}/`)}
       splitMiniMap={splitIndicator.miniMap}
       accessory={sidebarAccessory}
+      label={sidebarLabel}
       onPointerDown={onPointerDown}
       onOpenInSplit={
         splitEnabled && !isCompactViewport ? openInSplit : undefined
@@ -1107,6 +1121,7 @@ interface SidebarNavRowChromeProps {
   disablePending: boolean;
   splitMiniMap?: MiniMapSlot[] | null;
   accessory?: ReactNode;
+  label?: ReactNode;
   dragBindings?: SidebarSortableDragBindings;
   rowRef?: (element: HTMLElement | null) => void;
   rowStyle?: CSSProperties;
@@ -1127,6 +1142,7 @@ function SidebarNavRowChrome({
   disablePending,
   splitMiniMap = null,
   accessory,
+  label,
   dragBindings,
   rowRef,
   rowStyle,
@@ -1182,6 +1198,7 @@ function SidebarNavRowChrome({
             {icon}
             <span className="flex min-w-0 flex-1 items-center gap-1.5 text-left">
               <span className="min-w-0 truncate">{title}</span>
+              {label}
               {splitMiniMap ? (
                 <SplitPaneMiniMap
                   slots={splitMiniMap}

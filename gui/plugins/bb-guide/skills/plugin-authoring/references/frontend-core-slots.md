@@ -93,7 +93,7 @@ Slot props contracts (versioned, additive-only):
   back/forward then walks panel-internal history (prefer this over hash
   routing).
   Registration:
-  `{ id, title, icon, path, component, fixedTabs?, experimental_sidebarAccessory?, headerContent? }`.
+  `{ id, title, icon, path, component, fixedTabs?, experimental_sidebarAccessory?, experimental_sidebarLabel?, headerContent? }`.
   Cloudroom automatically wraps every plugin page in the same host-owned App panel
   used by New thread and thread pages. The page component supplies only its
   main body; it must not mount a second panel layout or register Browser and
@@ -146,6 +146,10 @@ target? })`. Inside the fixed-tab component,
   refresh. Invalid, unavailable, untargeted, or other-plugin references return
   false without changing valid panel state.
 
+  `experimental_sidebarLabel` is a no-props component right after the row's
+  title, on every viewport. It may be interactive (a hover card); stop clicks
+  in portalled content, since React bubbles them to the row. Render nothing
+  when there is nothing to say. Experimental: see `docs/api_to_audit.md`.
   `experimental_sidebarAccessory` is a no-props, presentational component at
   the trailing edge of the sidebar row. It can own SDK hooks for a live count
   or short status without lifting state into the host sidebar. The host does

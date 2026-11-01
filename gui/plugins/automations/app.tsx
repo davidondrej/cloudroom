@@ -44,7 +44,7 @@ import {
   type LoopReviewState,
 } from "./overview-view";
 import { PERSONAL_PROJECT_ID } from "./lib/format-schedule";
-import { mountPausedLoops } from "./paused-notice";
+import { PausedLoopsLabel } from "./paused-notice";
 import type { LoopTemplate } from "./templates";
 import type {
   LoopTarget,
@@ -978,7 +978,6 @@ export default definePluginApp((app) => {
     icon: "Repeat",
     path: PANEL_PATH,
     component: AutomationsPanel,
+    experimental_sidebarLabel: PausedLoopsLabel,
   });
-  // A card on every screen when a loop's own failures paused it (ADR 0338).
-  app.contentScripts.register({ id: "paused-loops", mount: mountPausedLoops });
 });

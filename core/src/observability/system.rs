@@ -5,6 +5,8 @@ use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, HashMap},
     fs,
+    os::unix::fs::MetadataExt,
+    path::Path,
     time::Instant,
 };
 
@@ -28,6 +30,9 @@ pub(crate) struct Resources {
     /// Once a minute; absent from the other samples.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) cpu_minute: Option<CpuMinute>,
+    /// Disk the history journal takes, with the CPU minute (#280).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) journal_bytes: Option<u64>,
 }
 
 /// Where this machine's (or container's) CPU went in the last minute. Program names only, never arguments or paths.
@@ -125,6 +130,7 @@ impl Sampler {
             state_disk: disk(&config.state_dir).ok(),
             agents: None,
             cpu_minute: None,
+            journal_bytes: None,
         }
     }
 
@@ -284,6 +290,20 @@ fn npm_name(part: &str) -> bool {
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"-._".contains(&b))
 }
 
+/// Allocated blocks, not lengths: a small record file still takes a whole block.
+pub(super) fn journal_bytes(directory: &Path) -> Option<u64> {
+    let mut bytes = 0;
+    for entry in fs::read_dir(directory).ok()? {
+        let entry = entry.ok()?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.ends_with(".record") || name.ends_with(".jsonl.gz") || name == "snapshot.json" {
+            bytes += entry.metadata().ok()?.blocks() * 512;
+        }
+    }
+    Some(bytes)
+}
+
 /// The container's CPU counter in microseconds, when its cgroup is visible.
 fn container_usage() -> Option<u64> {
     cgroup("cpu.stat").and_then(|s| field(&s, "usage_usec"))
@@ -333,6 +353,7 @@ fn disk_percentage_excludes_reserved_blocks() {
         state_disk: None,
         agents: None,
         cpu_minute: None,
+        journal_bytes: None,
     };
     assert_eq!(resources.dashboard()["disk"], 100.0);
     resources.workspace_disk = Some(Disk {

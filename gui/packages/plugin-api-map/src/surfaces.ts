@@ -75,6 +75,7 @@ export const SURFACE_GROUPS: SurfaceGroup[] = [
           "Render any React you write across that whole area",
           "Get its own URL, so the page can be linked to and Cloudroom's back and forward buttons work",
           "Register tabs in the panel to the right of its page, beside Cloudroom's own Browser and Terminal tabs",
+          "Show a short status right after its sidebar title, with an optional hover card, through experimental_sidebarLabel",
         ],
         apiSymbols: ["PluginNavPanelRegistration"],
         firstParty: ["Loops", "Docs", "GitHub", "Tasks"],

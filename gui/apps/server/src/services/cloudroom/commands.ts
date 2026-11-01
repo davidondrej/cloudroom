@@ -1822,6 +1822,7 @@ class CloudroomService {
       ...parsed,
       ...(reasoning !== saved.reasoning ? { reasoning } : {}),
       ...(payload.serviceTier && payload.serviceTier !== "default" ? { service_tier: payload.serviceTier } : {}),
+      ...(payload.senderThreadId ? { sender_thread_id: payload.senderThreadId } : {}),
     };
     if (previous) {
       if (!sameStoredPrompt(previous, thread.id, stored, reasoning, saved.reasoning)) throw new ApiError(409, "request_conflict", "Request ID was already used with different content");

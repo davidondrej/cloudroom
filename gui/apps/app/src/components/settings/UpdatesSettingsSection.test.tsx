@@ -80,6 +80,11 @@ vi.mock("@/hooks/useDesktopUpdateInfo", async (importOriginal) => ({
   useDesktopUpdateInfo: vi.fn(),
 }));
 
+vi.mock("@/hooks/queries/cloudroom-queries", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/hooks/queries/cloudroom-queries")>()),
+  useHostDesktopUpdate: () => null,
+}));
+
 const hostDaemon = vi.hoisted(() => ({
   localDaemonHostId: null as string | null,
 }));

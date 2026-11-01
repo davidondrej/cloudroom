@@ -70,6 +70,10 @@ import { invalidateHostProviderCliStatus } from "@/hooks/cache-owners/provider-c
 import { hydrateSystemVersionCache } from "@/hooks/cache-owners/system-version-cache-owner";
 import { useRetryHostUpdate } from "@/hooks/mutations/host-mutations";
 import {
+  type HostDesktopUpdate,
+  useHostDesktopUpdate,
+} from "@/hooks/queries/cloudroom-queries";
+import {
   useUpdateInventory,
   type UpdateInventoryMachine,
 } from "@/hooks/useUpdateInventory";
@@ -746,6 +750,7 @@ export function ChangelogPreviewCard() {
 interface BbAppUpdateRowsProps {
   systemVersion: SystemVersionResponse | undefined;
   desktopInfo: BbDesktopInfo | null;
+  hostUpdate?: HostDesktopUpdate | null;
   isDesktop: boolean;
   onRelaunchDesktop: (() => void) | null;
   onRetryDesktop: (() => void) | null;
@@ -756,6 +761,7 @@ interface BbAppUpdateRowsProps {
 export function BbAppUpdateRows({
   systemVersion,
   desktopInfo,
+  hostUpdate = null,
   isDesktop,
   onRelaunchDesktop,
   onRetryDesktop,
@@ -849,6 +855,22 @@ export function BbAppUpdateRows({
     return row(name, settledStatus);
   }
 
+  const current =
+    systemVersion?.desktopVersion ?? systemVersion?.currentVersion ?? null;
+  if (hostUpdate !== null) {
+    return row(
+      <RowName name="Cloudroom app" current={current} latest={hostUpdate.version} />,
+      <RowStateControl
+        state="restart-required"
+        buttonLeading={<BbLogo className="size-3" />}
+        buttonLabel="Relaunch"
+        actionLabel="Relaunch Cloudroom to finish updating"
+        loading={hostUpdate.restarting}
+        onClick={hostUpdate.restart}
+      />,
+    );
+  }
+
   if (systemVersion === undefined) {
     return row(
       <RowName name="Cloudroom app" current={null} latest={null} />,
@@ -866,7 +888,7 @@ export function BbAppUpdateRows({
           </span>
         ) : undefined
       }
-      current={systemVersion.currentVersion}
+      current={current}
       latest={
         systemVersion.updateAvailable ? systemVersion.latestVersion : null
       }
@@ -1338,6 +1360,7 @@ export function UpdatesSettingsSection({
   const inventory = useUpdateInventory();
   const { localDaemonHostId } = useHostDaemon();
   const { desktopApi, desktopInfo, isDesktop } = useDesktopUpdateInfo();
+  const hostUpdate = useHostDesktopUpdate(!isDesktop);
   const retryHostUpdate = useRetryHostUpdate();
   const isChecking = useSyncExternalStore(
     subscribeAppUpdateCheck,
@@ -1529,6 +1552,7 @@ export function UpdatesSettingsSection({
                   <BbAppUpdateRows
                     systemVersion={inventory.systemVersion}
                     desktopInfo={desktopInfo}
+                    hostUpdate={hostUpdate}
                     isDesktop={isDesktop}
                     isChecking={isChecking}
                     isRelaunching={isRelaunching}

@@ -178,6 +178,23 @@ Never use `tailscale funnel` for Core: it opens the API to the whole internet.
 
 In the [Cloudroom app](https://www.cloudroom.dev/download) (v83 or newer), open **Settings → Cloudroom account → Connect your own Core**. Enter the HTTPS URL and the token from `sudo grep ^CLOUDROOM_TOKEN= /etc/cloudroom/core.env`. No Cloudroom account is needed. Cloud threads then run on this machine and share its files.
 
+## Your own server vs Cloudroom Cloud
+
+**Works on your own server:**
+
+- Codex and Pi, set up in `core.env`. Claude Code, Cursor, OpenCode, Hermes, Devin, Droid, fx, and OpenClaw turn on once they are installed and signed in under the agent account.
+- Cloud threads from the desktop app, with Mac access, web previews, secret requests, and synced skills and logins.
+- Saved history, kept on this machine.
+
+**Cloudroom Cloud only:**
+
+- GPUs, Cloud loops, and computer use. Local loops still work.
+- Settings → Cloud environment (API keys, repos, setup script). Install your tools on the server yourself.
+- Phone access while your Mac is off.
+- One isolated sandbox per thread. Here, every thread shares one machine, so use it for one trusted user.
+
+**History:** to back it up, run `sudo systemctl stop cloudroom`, copy `CLOUDROOM_STATE_DIR` (default `/var/lib/cloudroom/history`), then start it again. Moving history from Cloudroom Cloud to your server isn't supported yet.
+
 ## Upgrade
 
 Pick a `core-v` version from the [releases](https://github.com/davidondrej/cloudroom/releases), then:

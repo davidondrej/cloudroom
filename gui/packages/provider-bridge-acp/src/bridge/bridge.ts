@@ -25,6 +25,7 @@ import {
   createBridgeLineHandler,
   decodeBridgeJsonRpcResponse,
   decodeToolCallResponsePayload,
+  execPortableFile,
   experimental_defineProviderBridge,
   findCliExecutable,
   mimeTypeFromExtension,
@@ -36,7 +37,6 @@ import type {
   BridgeToolCallContent,
   BridgeToolCallImage,
 } from "@cloudroom/provider-bridge-protocol/bridge-kit";
-import { execFile } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { promises as fs, readFileSync } from "node:fs";
 import { createServer, type Server, type Socket } from "node:net";
@@ -800,35 +800,25 @@ async function authenticateAcpAgent(args: {
 async function loadAgentModelCatalog(
   listCommand: AcpAgentCommandParam,
 ): Promise<AgentModelCatalog | null> {
-  const stdout = await new Promise<string | null>((resolveExec, rejectExec) => {
-    execFile(
-      listCommand.command,
-      listCommand.args,
-      {
-        ...(listCommand.cwd !== undefined ? { cwd: listCommand.cwd } : {}),
-        env: {
-          ...withoutBridgeRuntimeEnv(process.env),
-          ...(listCommand.envVars ?? {}),
-        },
-        timeout: MODEL_LIST_TIMEOUT_MS,
-      },
-      (error, out, stderr) => {
-        if (!error) {
-          resolveExec(out);
-          return;
-        }
-        if (isMissingExecutableError(error)) {
-          rejectExec(error);
-          return;
-        }
-        if (isAuthRequiredModelListError(error, out, stderr)) {
-          rejectExec(new AcpModelListAuthRequiredError());
-          return;
-        }
-        resolveExec(null);
-      },
-    );
-  });
+  const stdout = await execPortableFile(listCommand.command, listCommand.args, {
+    ...(listCommand.cwd !== undefined ? { cwd: listCommand.cwd } : {}),
+    env: {
+      ...withoutBridgeRuntimeEnv(process.env),
+      ...(listCommand.envVars ?? {}),
+    },
+    timeoutMs: MODEL_LIST_TIMEOUT_MS,
+  }).then(
+    ({ stdout: out }) => out,
+    (error: { stdout?: string; stderr?: string }) => {
+      if (isMissingExecutableError(error)) throw error;
+      if (
+        isAuthRequiredModelListError(error, error.stdout ?? "", error.stderr ?? "")
+      ) {
+        throw new AcpModelListAuthRequiredError();
+      }
+      return null;
+    },
+  );
   const key = JSON.stringify(listCommand);
   if (stdout === null) {
     process.stderr.write(
