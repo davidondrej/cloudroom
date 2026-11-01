@@ -1,16 +1,19 @@
-import type { ComponentType } from "react";
+import { useEffect, useState, type ComponentType } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import type {
   SystemExecutionOptionsModelLoadError,
   SystemProvidersQuery,
 } from "@cloudroom/server-contract";
+import { Button } from "@cloudroom/shared-ui/button";
 import { Icon } from "@cloudroom/shared-ui/icon";
+import { useAppCommandRunner } from "@/components/commands/AppCommandProvider";
 import { systemExecutionOptionsQueryKey } from "@/hooks/queries/query-keys";
 import {
   modelCatalogCacheKey,
   writeCachedModelCatalog,
 } from "@/lib/model-catalog-cache";
 import { sdk } from "@/lib/sdk";
+import { runInNewTerminal } from "@/lib/terminal-start-request";
 import { useUrlAnchorClickHandler } from "@/lib/url-open-routing";
 import { formatModelLoadErrorText } from "./model-load-error-message";
 
@@ -21,6 +24,8 @@ function shortReason(error: SystemExecutionOptionsModelLoadError | null) {
   return "Not available";
 }
 
+const signInsInProgress = new Set<string>();
+
 export function ModelUnavailable({
   providerId,
   providerLabel,
@@ -29,6 +34,8 @@ export function ModelUnavailable({
   error,
   failed,
   installUrl,
+  signInCommand,
+  signInHint,
 }: {
   providerId: string;
   providerLabel: string;
@@ -37,19 +44,27 @@ export function ModelUnavailable({
   error: SystemExecutionOptionsModelLoadError | null;
   failed: boolean;
   installUrl?: string;
+  signInCommand?: string;
+  signInHint?: string;
 }) {
   const queryClient = useQueryClient();
+  const commandRunner = useAppCommandRunner();
+  const [terminalFailed, setTerminalFailed] = useState(false);
   const identity = {
     providerId,
     environmentId: routing?.environmentId ?? null,
     hostId: routing?.hostId ?? null,
   };
+  const signInKey = `${providerId}:${identity.environmentId ?? identity.hostId ?? ""}`;
+  const needsSignIn =
+    signInCommand !== undefined &&
+    (error ? error.code === "auth_required" : !failed);
   const helpUrl = error?.code === "missing_executable" ? installUrl : undefined;
   const handleHelpLinkClick = useUrlAnchorClickHandler(helpUrl);
   const retry = useMutation({
-    mutationFn: async () => {
+    mutationFn: async (restart: boolean) => {
       const queryKey = systemExecutionOptionsQueryKey(identity);
-      if (error?.canRestart !== true) {
+      if (!restart) {
         await queryClient.refetchQueries({ queryKey, exact: true });
         return;
       }
@@ -78,17 +93,37 @@ export function ModelUnavailable({
         models: result.models,
         selectedOnlyModels: result.selectedOnlyModels,
       });
+      signInsInProgress.delete(signInKey);
     },
   });
+  const { mutate: retryLoad } = retry;
+  useEffect(() => {
+    if (needsSignIn && signInsInProgress.has(signInKey)) retryLoad(true);
+  }, [needsSignIn, retryLoad, signInKey]);
+
+  const startSignIn = () => {
+    if (signInCommand === undefined) return;
+    const opened = runInNewTerminal(
+      {
+        start: { mode: "command", command: signInCommand },
+        title: `Sign in to ${providerLabel}`,
+      },
+      () => commandRunner.dispatch("terminal.open", null),
+    );
+    if (opened) signInsInProgress.add(signInKey);
+    setTerminalFailed(!opened);
+  };
 
   const label = failed || error ? shortReason(error) : "No models";
   const detail = retry.isError
     ? retry.error.message
-    : error
-      ? formatModelLoadErrorText({ error, providerLabel })
-      : failed
-        ? `Could not load ${providerLabel} models.`
-        : `${providerLabel} has no models.`;
+    : needsSignIn
+      ? `Sign in to a provider for ${providerLabel}.`
+      : error
+        ? formatModelLoadErrorText({ error, providerLabel })
+        : failed
+          ? `Could not load ${providerLabel} models.`
+          : `${providerLabel} has no models.`;
 
   return (
     <div
@@ -98,7 +133,37 @@ export function ModelUnavailable({
       {ProviderIcon ? (
         <ProviderIcon className="size-7 text-subtle-foreground opacity-50" />
       ) : null}
-      {helpUrl ? (
+      {needsSignIn ? (
+        <>
+          <span
+            className="text-center text-foreground"
+            role={retry.isError ? "alert" : undefined}
+          >
+            {detail}
+          </span>
+          <Button size="sm" onClick={startSignIn}>
+            Sign in to {providerLabel}
+          </Button>
+          {terminalFailed || signInHint ? (
+            <span className="text-center">
+              {(terminalFailed
+                ? `Could not open a terminal here. Run \`${signInCommand}\` in your own terminal.`
+                : (signInHint ?? "")
+              )
+                .split("`")
+                .map((part, index) =>
+                  index % 2 === 1 ? (
+                    <code key={index} className="font-mono text-foreground">
+                      {part}
+                    </code>
+                  ) : (
+                    part
+                  ),
+                )}
+            </span>
+          ) : null}
+        </>
+      ) : helpUrl ? (
         <a
           href={helpUrl}
           target="_blank"
@@ -111,15 +176,17 @@ export function ModelUnavailable({
       ) : (
         <span>{label}</span>
       )}
-      <span className="sr-only" role={retry.isError ? "alert" : undefined}>
-        {detail}
-      </span>
+      {needsSignIn ? null : (
+        <span className="sr-only" role={retry.isError ? "alert" : undefined}>
+          {detail}
+        </span>
+      )}
       <button
         type="button"
         aria-label={`Retry loading ${providerLabel} models`}
         title="Retry"
         disabled={retry.isPending}
-        onClick={() => retry.mutate()}
+        onClick={() => retry.mutate(error?.canRestart === true || needsSignIn)}
         className="flex size-7 items-center justify-center rounded-md border border-border text-muted-foreground hover:bg-state-hover hover:text-foreground disabled:opacity-60"
       >
         <Icon

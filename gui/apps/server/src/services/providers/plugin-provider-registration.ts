@@ -197,6 +197,9 @@ export function buildPluginProviderRegistration(args: {
             signInHint: strings.signInHint,
             expiredHint: strings.expiredHint,
             installUrl: strings.installUrl,
+            ...(strings.signInCommand === undefined
+              ? {}
+              : { signInCommand: strings.signInCommand }),
             ...(strings.brandPrefix === undefined
               ? {}
               : { brandPrefix: strings.brandPrefix }),

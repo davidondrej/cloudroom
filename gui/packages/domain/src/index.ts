@@ -1,6 +1,7 @@
 export * from "./context-snapshot.js";
 export * from "./active-thinking.js";
 export * from "./acp-cli.js";
+export * from "./model-levels.js";
 export * from "./native-roots.js";
 export * from "./app-settings.js";
 export * from "./ui-preferences.js";

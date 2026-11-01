@@ -27,6 +27,7 @@ import { exportableChats, exportChats } from "./chat-export.js";
 import { copyToMac, openOnMac, teleportingToLocal, teleportToLocal } from "./teleport-local.js";
 import { cloudEnvironmentRequestSchema, macCodexLogin, macMcpServers, macSkills, macVariables, sandboxThread, startMacCodexLogin, type CloudEnvironmentRequest } from "./sandboxes.js";
 import { CloudroomError } from "./client.js";
+import { projectLoopSettings } from "./project-loops.js";
 import { tokenUsageSince } from "./loop-usage.js";
 import { macClis } from "./clis.js";
 import { finishMcpSignIn, isRemoteMcp, startMcpSignIn } from "./mcp-login.js";
@@ -280,9 +281,16 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: Plugin
   // Cloud automations (ADR 0212): the website stores and runs them, so they keep running while this Mac is off.
   // A child Cloud thread shares its parent's sandbox, so the website gets the parent and the child's own session.
   app.post("/api/v1/cloudroom/account/automations", async (context) => {
-    const input = z.object({ action: z.enum(["list", "create", "update", "run", "runs", "history", "delete", "hook", "unhook", "events", "ack", "settings", "report"]), thread: z.string().min(1).max(64).optional() }).passthrough().parse(await context.req.json());
+    const input = z.object({ action: z.enum(["list", "create", "update", "run", "runs", "history", "delete", "hook", "unhook", "events", "ack", "settings", "report"]), thread: z.string().min(1).max(64).optional(), project: z.string().min(1).max(64).optional() }).passthrough().parse(await context.req.json());
     let body: Record<string, unknown> = input;
-    if (input.action === "create") {
+    // A fresh-thread loop made from a project needs no thread: this Mac sends the project's settings (ADR 20261101-004659).
+    // From a Local thread, with no Cloud thread to re-prompt, it is made from that thread's project.
+    const local = input.action === "create" && input.thread && !input.project ? getThread(deps.db, input.thread) : null;
+    const project = input.project ?? (local && !isCloudThread(local) && !local.archivedAt && !local.deletedAt && input.new_thread !== false ? local.projectId : undefined);
+    if (input.action === "create" && project && (!input.thread || !input.project && local && !isCloudThread(local))) {
+      const { thread: _thread, ...rest } = input;
+      body = { ...rest, project, settings: await projectLoopSettings(deps, project, cloudroom(deps).sandboxes.vpsConnected) };
+    } else if (input.action === "create") {
       const thread = input.thread ? getThread(deps.db, input.thread) : null;
       if (!thread || !isCloudThread(thread) || thread.archivedAt || thread.deletedAt) throw new ApiError(400, "cloud_automation", "Cloud automations need an open Cloud thread.");
       let root = thread;
@@ -607,7 +615,7 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: Plugin
     if (context.req.method === "PATCH" && path === "") {
       const body = await context.req.json<unknown>();
       // A model or harness change switches the thread in place (ADR 0211); a new parent is saved to the website first.
-      if (body && typeof body === "object" && !Array.isArray(body) && Object.keys(body).every((key) => ["title", "reasoningLevel", "model", "providerId", "parentThreadId", "sectionId"].includes(key))) {
+      if (body && typeof body === "object" && !Array.isArray(body) && Object.keys(body).every((key) => ["title", "reasoningLevel", "model", "providerId", "parentThreadId", "sectionId", "resend"].includes(key))) {
         const parentId = (body as { parentThreadId?: unknown }).parentThreadId;
         if (parentId === undefined || parentId === thread.parentThreadId || thread.deletedAt || (parentId !== null && typeof parentId !== "string") || !updateThreadRequestSchema.safeParse(body).success) return next();
         if (["model", "providerId", "reasoningLevel"].some((key) => key in body)) return context.json({ message: "Change a Cloud thread's parent on its own, then change its model.", code: "cloudroom_parent_alone" }, 400);

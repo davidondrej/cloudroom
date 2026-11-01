@@ -53,19 +53,27 @@ document.documentElement.toggleAttribute(
   isFirefoxAndroid(navigator),
 );
 
+// Pause looping animations only when Electron and the page both say the
+// window is unfocused. Either signal alone can be wrong: the page loses focus
+// to the in-app browser view, and Electron's state can disagree with the page.
 const desktopApi = getBbDesktopInfo();
-const updateWindowFocus = (isFocused: boolean | undefined) => {
+let nativeFocused: boolean | undefined;
+const updateWindowBlurred = () => {
   document.documentElement.toggleAttribute(
     "data-window-blurred",
-    isFocused === false,
+    nativeFocused === false && !document.hasFocus(),
   );
 };
-desktopApi?.onWindowStateChange?.(({ isFocused }) => {
-  updateWindowFocus(isFocused);
-});
-void desktopApi?.getWindowState?.().then(({ isFocused }) => {
-  updateWindowFocus(isFocused);
-});
+const setNativeFocused = ({ isFocused }: { isFocused?: boolean }) => {
+  nativeFocused = isFocused;
+  updateWindowBlurred();
+};
+desktopApi?.onWindowStateChange?.(setNativeFocused);
+void desktopApi?.getWindowState?.().then(setNativeFocused);
+for (const type of ["focus", "blur", "pageshow"]) {
+  window.addEventListener(type, updateWindowBlurred);
+}
+document.addEventListener("visibilitychange", updateWindowBlurred);
 
 installAppQueryClientBrowserEvents(appQueryClient);
 registerProviderCliInstallQueryClient(appQueryClient);

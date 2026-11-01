@@ -64,6 +64,7 @@ const UI_PREFERENCES_QUERY_KEY = "uiPreferences";
 const SYSTEM_THEME_QUERY_KEY = "systemTheme";
 export const SYSTEM_EXECUTION_OPTIONS_QUERY_KEY = "systemExecutionOptions";
 const SYSTEM_CLI_SKILLS_QUERY_KEY = "systemCliSkills";
+const SYSTEM_WORKTREE_STORAGE_QUERY_KEY = "systemWorktreeStorage";
 const SYSTEM_VERSION_QUERY_KEY = "systemVersion";
 const HOST_PROVIDER_CLI_STATUS_QUERY_KEY = "hostProviderCliStatus";
 const SYSTEM_USAGE_LIMITS_QUERY_KEY = "systemUsageLimits";
@@ -475,6 +476,9 @@ type UiPreferencesQueryKey = readonly [typeof UI_PREFERENCES_QUERY_KEY];
 type SystemThemeQueryKey = readonly [typeof SYSTEM_THEME_QUERY_KEY, string];
 type AllSystemThemesQueryKeyPrefix = readonly [typeof SYSTEM_THEME_QUERY_KEY];
 type SystemCliSkillsQueryKey = readonly [typeof SYSTEM_CLI_SKILLS_QUERY_KEY];
+type SystemWorktreeStorageQueryKey = readonly [
+  typeof SYSTEM_WORKTREE_STORAGE_QUERY_KEY,
+];
 type SystemVersionQueryKey = readonly [typeof SYSTEM_VERSION_QUERY_KEY];
 type HostProviderCliStatusQueryKey = readonly [
   typeof HOST_PROVIDER_CLI_STATUS_QUERY_KEY,
@@ -1131,6 +1135,10 @@ export function machineEnvironmentQueryKey(): MachineEnvironmentQueryKey {
 
 export function systemCliSkillsQueryKey(): SystemCliSkillsQueryKey {
   return [SYSTEM_CLI_SKILLS_QUERY_KEY];
+}
+
+export function systemWorktreeStorageQueryKey(): SystemWorktreeStorageQueryKey {
+  return [SYSTEM_WORKTREE_STORAGE_QUERY_KEY];
 }
 
 export function systemConfigQueryKey(): SystemConfigQueryKey {

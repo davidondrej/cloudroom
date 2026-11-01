@@ -649,11 +649,17 @@ export const updateThreadRequestSchema = z
     model: z.string().min(1).nullable(),
     reasoningLevel: reasoningLevelSchema.nullable(),
     visibility: threadVisibilitySchema,
+    /** After a harness switch, the new agent continues the conversation right away. */
+    resend: z.boolean(),
   })
   .partial()
   .refine(
     (value) => value.providerId === undefined || typeof value.model === "string",
     "providerId needs a model",
+  )
+  .refine(
+    (value) => value.resend !== true || value.providerId !== undefined,
+    "resend needs a providerId",
   )
   .refine(
     (value) =>

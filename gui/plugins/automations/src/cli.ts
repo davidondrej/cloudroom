@@ -7,7 +7,6 @@ import type {
 import { z } from "zod";
 import type { AutomationService } from "./service.js";
 import { LOOP_TEMPLATES } from "../templates.js";
-import { cloudTemplateHost } from "./rpc.js";
 import type {
   AgentEnvironment,
   AgentExecutionUpdate,
@@ -1009,17 +1008,17 @@ Cloud loops run on Cloudroom's servers, even while this Mac is off: every minute
 15 minutes. A --cron run starts a fresh Cloud thread in its own sandbox from that thread's project and agent;
 --same-thread re-prompts the thread instead.
 A one-time --at/--in run re-prompts the thread; --new-thread gives it a fresh one.
-A fresh-thread loop saves the thread's settings, so it keeps running after that thread is archived. Its runs use
-the thread's agent unless --provider, --model, or --reasoning picks another; update changes it.
+A fresh-thread Cloud loop runs the agent --provider, --model, and --reasoning pick; update changes it.
 A --script/--script-file runs first (60 s), in the loop's own sandbox with fresh threads, else in the thread's:
 no output skips the run (exit 0 or 1; other exit codes fail it, 3 in a row pause it), output is added to the prompt.
 A --webhook loop, Local or Cloud, runs when its secret URL gets a POST: create prints the URL once, and each run gets
 the requests that arrived as data. Cloud runs start within seconds; this Mac checks for Local ones about once a minute,
 and they wait while it is off. A Local webhook loop an agent creates starts paused: a person turns it on in Loops.
-room-cli loop create --cloud --thread <cloudThreadId> --name <name> --prompt <text> (--cron <expr> --timezone <tz> | --at <datetime> | --in <duration> | --webhook) [--new-thread | --same-thread] [--script <inline> | --script-file <path>] [--provider <id>] [--model <model>] [--reasoning <level>] [--priority 1-4] [--secrets <KEY,.env|none|all>]
+room-cli loop create --cloud --project <id> --name <name> --prompt <text> (--cron <expr> --timezone <tz> | --at <datetime> | --in <duration> | --webhook) [--new-thread | --same-thread] [--script <inline> | --script-file <path>] [--provider <id>] [--model <model>] [--reasoning <level>] [--priority 1-4] [--secrets <KEY,.env|none|all>]
 --secrets picks the only API keys (Settings → Cloud environment) a fresh-thread Cloud loop's runs and script get, plus
 .env for the project's .env files: pick just what it needs, like --secrets SENTRY_TOKEN,.env, or none. Without it, all.
-A Cloud template loop runs from the project's newest Cloud thread, else a new one titled "<template> loop".
+A Cloud loop belongs to its project: it saves the project's GitHub repo, .env files and agent, and needs no thread.
+Use --thread <cloudThreadId> --same-thread instead for a loop that re-prompts one Cloud thread.
 room-cli loop list --cloud [--thread <cloudThreadId>]   All Cloud loops, in every project
 room-cli loop show|pause|resume|run|hook <cloudLoopId>
 room-cli loop runs <cloudLoopId> [--limit <count>]   What each run did, from its loop report
@@ -1071,7 +1070,7 @@ function printCloudAutomation(a: CloudAutomation): string {
   const mode = `${a.new_thread ? "new thread per run" : "re-prompts"}${a.script ? " · script" : ""}`;
   const agent = a.agent ? `\n  Agent: ${a.agent.provider} · ${a.agent.model ?? "default model"}${a.agent.reasoning ? ` · ${a.agent.reasoning}` : ""}` : "";
   const secrets = a.new_thread && a.secrets !== undefined ? `\n  Secrets: ${a.secrets === null ? "all API keys and .env files" : a.secrets.join(", ") || "none"}` : "";
-  return `${a.id}  ${a.name}  P${a.priority ?? DEFAULT_LOOP_PRIORITY}\n  Cloud thread ${a.thread_id} · ${mode} · ${schedule} · ${state} · ${a.runs} runs${agent}${secrets}${a.last_error ? `\n  Last error: ${a.last_error}` : ""}\n${a.url ? webhookNote(a.url) : ""}`;
+  return `${a.id}  ${a.name}  P${a.priority ?? DEFAULT_LOOP_PRIORITY}\n  ${a.thread_id.startsWith("proj_") ? "Project" : "Cloud thread"} ${a.thread_id} · ${mode} · ${schedule} · ${state} · ${a.runs} runs${agent}${secrets}${a.last_error ? `\n  Last error: ${a.last_error}` : ""}\n${a.url ? webhookNote(a.url) : ""}`;
 }
 
 async function projectCloudAutomations(bb: Pick<BbPluginApi, "sdk">, projectId: string): Promise<CloudAutomation[]> {
@@ -1081,7 +1080,7 @@ async function projectCloudAutomations(bb: Pick<BbPluginApi, "sdk">, projectId: 
     const thread = await bb.sdk.threads.get({ threadId }).catch(() => null);
     return [threadId, thread && "projectId" in thread ? thread.projectId : null] as const;
   })));
-  return automations.filter((a) => projects.get(a.thread_id) === projectId);
+  return automations.filter((a) => a.thread_id === projectId || projects.get(a.thread_id) === projectId);
 }
 
 /** The agent a fresh-thread cloud loop runs, when --provider, --model, or --reasoning picks one. */
@@ -1136,14 +1135,13 @@ async function runCloudCommand(bb: Pick<BbPluginApi, "sdk">, args: ParsedArgs, c
   }
   if (args.command === "create") {
     if (args.flags.has("environment")) throw new Error("Cloud loops run in their Cloud thread's project. Drop --environment.");
+    // A fresh-thread loop belongs to its project (ADR 20261101-004659); --thread is for a loop that re-prompts that thread.
     const project = flag(args, "project");
-    const thread = flag(args, "thread") ?? (args.flags.has("template") && project
-      ? await cloudTemplateHost(bb.sdk, { projectId: project, name: requireFlag(args, "name"), providerId: requireFlag(args, "provider"), model: requireFlag(args, "model") })
-      : ctx.threadId);
-    if (!thread) throw new Error("Missing required option --thread <cloudThreadId>.");
+    const thread = flag(args, "thread") ?? (project ? undefined : ctx.threadId);
+    if (!thread && !project) throw new Error("Missing required option --project <id>.");
     const schedule = boolFlag(args, "webhook") && buildTrigger(args).triggerType === "webhook" ? { webhook: true as const } : cloudSchedule(args);
     if (!schedule) throw new Error("Provide exactly one trigger flag: --cron, --at, --in, or --webhook.");
-    return one({ action: "create", thread, name: requireFlag(args, "name"), prompt: requireFlag(args, "prompt"), ...schedule, enabled: !boolFlag(args, "disabled"),
+    return one({ action: "create", ...(thread ? { thread } : { project }), name: requireFlag(args, "name"), prompt: requireFlag(args, "prompt"), ...schedule, enabled: !boolFlag(args, "disabled"),
       ...(boolFlag(args, "new-thread") ? { new_thread: true } : boolFlag(args, "same-thread") ? { new_thread: false } : {}), ...await cloudScript(bb, args, ctx), ...cloudAgent(args), ...parsePriority(args), ...cloudSecrets(args) }, "created");
   }
   if (args.command === "update") {

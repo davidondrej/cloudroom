@@ -19,6 +19,7 @@ bb.providers.register({
     expiredHint:
       "Your Echo session expired. Run `echo-agent login`, then reload.",
     installUrl: "https://example.com/echo-agent",
+    signInCommand: "echo-agent login", // optional; Sign in button when no models load
     brandPrefix: "Echo ", // optional; stripped from model display names
     planModeCopy: "Echo will plan without executing.", // optional
     iconTint: { light: "#334155", dark: "#CBD5E1" }, // optional

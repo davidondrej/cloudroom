@@ -85,6 +85,7 @@ export const providerStringsSchema = z.object({
   signInHint: z.string().min(1),
   expiredHint: z.string().min(1),
   installUrl: z.string().min(1),
+  signInCommand: z.string().min(1).optional(),
   brandPrefix: z.string().min(1).optional(),
   planModeCopy: z.string().min(1).optional(),
   iconTint: z

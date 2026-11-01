@@ -1,4 +1,5 @@
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
+import { MODEL_LEVELS } from "@cloudroom/domain";
 import type { AutomationRow } from "./data.js";
 import type {
   AutomationExecution,
@@ -7,13 +8,6 @@ import type {
 } from "./rpc-types.js";
 
 type AgentExecution = Extract<AutomationExecution, { mode: "agent" }>;
-type Level = {
-  claude: string;
-  claudeModel: string;
-  claudeEfforts: ReasoningLevel[];
-  codex: string;
-  codexModel: string;
-};
 export type FallbackSdk = {
   system?: Pick<BbPluginApi["sdk"]["system"], "usageLimits">;
   cloudroom?: Pick<BbPluginApi["sdk"]["cloudroom"], "automations">;
@@ -33,36 +27,6 @@ const OTHER_PROVIDER: Record<string, string> = {
   "claude-code": "codex",
   codex: "claude-code",
 };
-const LEVELS: Level[] = [
-  {
-    claude: "fable",
-    claudeModel: "claude-fable-5-1",
-    claudeEfforts: ["low", "medium", "high", "xhigh", "max"],
-    codex: "astra",
-    codexModel: "gpt-6-astra",
-  },
-  {
-    claude: "opus",
-    claudeModel: "claude-opus-5-5",
-    claudeEfforts: ["low", "medium", "high", "xhigh", "max"],
-    codex: "sol",
-    codexModel: "gpt-6.1-sol",
-  },
-  {
-    claude: "sonnet",
-    claudeModel: "claude-sonnet-5-5",
-    claudeEfforts: ["low", "medium", "high", "max"],
-    codex: "terra",
-    codexModel: "gpt-6.1-terra",
-  },
-  {
-    claude: "haiku",
-    claudeModel: "claude-haiku-5-5",
-    claudeEfforts: [],
-    codex: "luna",
-    codexModel: "gpt-6-luna",
-  },
-];
 const CODEX_EFFORTS: ReasoningLevel[] = ["low", "medium", "high", "xhigh"];
 const USAGE_CACHE_MS = 60_000;
 const LIMIT_SUSPECT_MS = 10 * 60_000;
@@ -86,10 +50,12 @@ export function sameLevelAgent(execution: AgentExecution): LoopAgent {
   const toCodex = execution.providerId === "claude-code";
   const model = execution.model.toLowerCase();
   const level =
-    LEVELS.find((entry) =>
+    MODEL_LEVELS.find((entry) =>
       model.includes(toCodex ? entry.claude : entry.codex),
-    ) ?? LEVELS[1]!;
-  const efforts = toCodex ? CODEX_EFFORTS : level.claudeEfforts;
+    ) ?? MODEL_LEVELS[1]!;
+  const efforts: readonly ReasoningLevel[] = toCodex
+    ? CODEX_EFFORTS
+    : level.claudeEfforts;
   return {
     providerId: toCodex ? "codex" : "claude-code",
     model: toCodex ? level.codexModel : level.claudeModel,

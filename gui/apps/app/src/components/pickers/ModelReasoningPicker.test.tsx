@@ -30,6 +30,7 @@ import {
 import type { PickerOption } from "./OptionPicker";
 import type { ProviderPickerOption } from "./model-brand-prefix";
 import type { ModelPickerOption } from "./model-picker-option";
+import { takeTerminalStartRequest } from "@/lib/terminal-start-request";
 
 type CapturedCommandHandler = (invocation: {
   target: EventTarget | null;
@@ -40,11 +41,19 @@ const commandHandlers = vi.hoisted(
 );
 
 vi.mock("@/lib/sdk", () => ({
-  sdk: { system: { executionOptions: vi.fn() } },
+  sdk: {
+    system: { executionOptions: vi.fn() },
+    providers: { restartModelDiscovery: vi.fn() },
+  },
 }));
 
 vi.mock("@/components/commands/AppCommandProvider", () => ({
   useAppCommandContext: () => undefined,
+  useAppCommandRunner: () => ({
+    dispatch: (command: string) =>
+      commandHandlers.get(command)?.({ target: null }) ?? false,
+    isCommandAvailable: () => false,
+  }),
   useAppCommandHandler: (command: string, handler: CapturedCommandHandler) => {
     commandHandlers.set(command, handler);
   },
@@ -407,6 +416,87 @@ describe("ModelReasoningPicker", () => {
         "Codex is unavailable because its provider plugin failed to load.",
       ),
     ).not.toBeNull();
+  });
+
+  describe("sign-in for a provider with no models", () => {
+    const piOptions: readonly ProviderPickerOption[] = [
+      {
+        value: "pi",
+        label: "Pi",
+        signInCommand: "pi",
+        signInHint: "Run `pi`, type /login, and pick a provider.",
+      },
+    ];
+    const openEmptyPiPicker = () => {
+      renderPicker({
+        pickerProviderOptions: piOptions,
+        selectedProviderId: "pi",
+        modelOptions: [],
+        modelValue: "",
+        pickerReasoningOptions: [],
+      });
+      fireEvent.click(
+        screen.getByRole("button", { name: "Provider and model" }),
+      );
+    };
+
+    it("runs the provider's sign-in command in a new terminal", () => {
+      const started: unknown[] = [];
+      openEmptyPiPicker();
+      commandHandlers.set("terminal.open", () => {
+        started.push(takeTerminalStartRequest());
+        return true;
+      });
+
+      expect(screen.getByText("Sign in to a provider for Pi.")).not.toBeNull();
+      expect(
+        screen.getByText("pi", { selector: "code" }).parentElement?.textContent,
+      ).toBe("Run pi, type /login, and pick a provider.");
+      fireEvent.click(screen.getByRole("button", { name: "Sign in to Pi" }));
+
+      expect(started).toEqual([
+        { start: { mode: "command", command: "pi" }, title: "Sign in to Pi" },
+      ]);
+      expect(takeTerminalStartRequest()).toEqual({});
+    });
+
+    it("tells the user to run the command when no terminal can open", () => {
+      openEmptyPiPicker();
+      fireEvent.click(screen.getByRole("button", { name: "Sign in to Pi" }));
+
+      expect(
+        screen.getByText("pi", { selector: "code" }).parentElement?.textContent,
+      ).toBe("Could not open a terminal here. Run pi in your own terminal.");
+      expect(sdk.providers.restartModelDiscovery).not.toHaveBeenCalled();
+    });
+
+    it("reloads models when the picker reopens after sign-in", async () => {
+      vi.mocked(sdk.providers.restartModelDiscovery).mockResolvedValue(
+        executionOptions({
+          models: [
+            availableModel({ value: "anthropic/claude", label: "Claude" }),
+          ],
+        }),
+      );
+      openEmptyPiPicker();
+      commandHandlers.set("terminal.open", () => true);
+      fireEvent.click(screen.getByRole("button", { name: "Sign in to Pi" }));
+      expect(sdk.providers.restartModelDiscovery).not.toHaveBeenCalled();
+      const trigger = screen.getByRole("button", {
+        name: "Provider and model",
+        hidden: true,
+      });
+      fireEvent.click(trigger);
+      expect(
+        screen.queryByRole("button", { name: "Sign in to Pi" }),
+      ).toBeNull();
+
+      await act(async () => fireEvent.click(trigger));
+
+      expect(sdk.providers.restartModelDiscovery).toHaveBeenCalledWith({
+        providerId: "pi",
+      });
+    });
   });
 
   it("holds the trigger and model-list layout with skeletons while loading", () => {

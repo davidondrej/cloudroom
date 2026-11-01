@@ -70,7 +70,10 @@ import {
 import { extractThreadTimelineGoal } from "./goal-snapshot-extraction.js";
 import { extractThreadTimelineModelFallback } from "./model-fallback-extraction.js";
 import { extractThreadTimelinePendingTodos } from "./todo-snapshot-extraction.js";
-import { buildTimelineErrorDisplay } from "./error-display.js";
+import {
+  buildTimelineErrorDisplay,
+  isPlanLimitError,
+} from "./error-display.js";
 
 interface ThreadTimelineFromEventsBaseOptions {
   completedTurnDisplay: CompletedTurnDisplay;
@@ -847,6 +850,9 @@ function convertMessage(
           title: errorDisplay.title,
           detail: errorDisplay.detail,
           status: isReconnect ? null : "error",
+          ...(!isReconnect && isPlanLimitError(message)
+            ? { planLimit: true }
+            : {}),
         },
       ];
     }

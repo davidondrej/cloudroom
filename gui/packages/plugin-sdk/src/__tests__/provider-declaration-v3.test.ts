@@ -34,6 +34,7 @@ describe("provider declaration target-state fields", () => {
           signInHint: "Run `my-agent login`.",
           expiredHint: "Session expired; run `my-agent login` again.",
           installUrl: "https://example.com/install",
+          signInCommand: "my-agent login",
           brandPrefix: "My ",
           iconTint: { light: "#123456", dark: "#abcdef" },
         },
@@ -55,6 +56,7 @@ describe("provider declaration target-state fields", () => {
       signInHint: "Run `my-agent login`.",
       expiredHint: "Session expired; run `my-agent login` again.",
       installUrl: "https://example.com/install",
+      signInCommand: "my-agent login",
       brandPrefix: "My ",
       iconTint: { light: "#123456", dark: "#abcdef" },
     });

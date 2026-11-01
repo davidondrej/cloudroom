@@ -2,6 +2,7 @@ import { type MachineEnvironmentList } from "./api/machine-environment.js";
 import {
   machineEnvironmentReplaceSchema,
   type MachineEnvironmentReplace,
+  type SystemWorktreeStorageResponse,
 } from "./api/system.js";
 import {
   desktopBrowserHostRequestSchema,
@@ -1747,6 +1748,12 @@ export const publicApiRoutes = {
         systemInstallCliSkillsRequestSchema,
       ),
       response: jsonResponse<SystemInstallCliSkillsResponse>(),
+    }),
+    worktreeStorage: defineRoute({
+      path: "/system/worktree-storage",
+      method: "get",
+      request: noRequest(),
+      response: jsonResponse<SystemWorktreeStorageResponse>(),
     }),
     executionOptions: defineRoute({
       path: "/system/execution-options",

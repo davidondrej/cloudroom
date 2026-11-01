@@ -32,6 +32,18 @@ const providerErrorCategoryTitles = {
 
 const MAX_ERROR_TITLE_LENGTH = 80;
 
+/** Core puts this in every Cloud plan-limit error (PLAN_LIMIT in core/src/runtime/mod.rs). */
+const CORE_PLAN_LIMIT = "plan limit (not Cloudroom's).";
+
+export function isPlanLimitError(
+  message: EventProjectionErrorMessage,
+): boolean {
+  return (
+    message.providerErrorInfo?.category === "rate-limit" ||
+    `${message.message}\n${message.detail ?? ""}`.includes(CORE_PLAN_LIMIT)
+  );
+}
+
 const reconnectProgressPattern = /^Reconnecting\.\.\.\s+\d+\/\d+$/u;
 
 interface ReconnectDisplay {

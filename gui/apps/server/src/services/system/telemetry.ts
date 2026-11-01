@@ -35,7 +35,12 @@ export type TelemetryEvent =
   /** A thread moved to another harness or model in place (ADR 0211). */
   | {
       name: "harness_switched";
-      properties: { execution: TelemetryExecution; from: string; to: string };
+      properties: {
+        execution: TelemetryExecution;
+        from: string;
+        to: string;
+        resend: boolean;
+      };
     }
   | {
       name: "user_message_sent";

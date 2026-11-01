@@ -46,6 +46,7 @@ const REGISTRATION_FIELDS = {
   signInHint: "strings.signInHint",
   expiredHint: "strings.expiredHint",
   installUrl: "strings.installUrl",
+  signInCommand: "strings.signInCommand",
   brandPrefix: "strings.brandPrefix",
   planModeCopy: "strings.planModeCopy",
   iconTint: "strings.iconTint",

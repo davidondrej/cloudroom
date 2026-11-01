@@ -38,6 +38,10 @@ const copying = new Map<string, string>();
 export const FAILURE_NOTE = ".cloudroom/project-copy-failed.txt";
 const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
 
+/** The Core workspace and folder a project's Cloud threads use. */
+export const workspaceId = (projectId: string) => `bb_${projectId}`;
+export const workspaceName = (name: string) => name.replace(/[^a-zA-Z0-9_.-]/g, "-").replace(/^\.+/, "").slice(0, 80) || "project";
+
 export function githubRepository(remote: string | null): string | null {
   const repository = remote?.match(/^(?:https:\/\/github\.com\/|git@github\.com:)([a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+)\/?$/)?.[1];
   return repository ? `https://github.com/${repository}` : null;
@@ -341,7 +345,7 @@ async function packProject(root: string, scope: "all" | "changed" | "env", archi
   }
 }
 
-async function pack(root: string, files: string[], archive: string): Promise<void> {
+export async function pack(root: string, files: string[], archive: string): Promise<void> {
   await new Promise<void>((resolve, reject) => {
     let stderr = "";
     const tar = spawn(tarCommand(), ["--no-xattrs", "-czf", archive, "--null", "-T", "-"], { cwd: root, env: { ...process.env, COPYFILE_DISABLE: "1" }, stdio: ["pipe", "ignore", "pipe"], timeout: PACK_TIMEOUT });

@@ -1,6 +1,19 @@
 #[tokio::main(worker_threads = 2)]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    // `std::env::args()` panics on an argument that isn't UTF-8 (#705).
+    let mut args = Vec::new();
+    for (index, arg) in std::env::args_os().enumerate().skip(1) {
+        match arg.into_string() {
+            Ok(arg) => args.push(arg),
+            Err(arg) => {
+                eprintln!(
+                    "Argument {index} isn't valid UTF-8: {}. Pass text; send bytes on stdin instead (room-cli mac run --stdin).",
+                    arg.to_string_lossy()
+                );
+                std::process::exit(2);
+            }
+        }
+    }
     if args.first().map(String::as_str) == Some("--version") {
         println!("cloudroom {} ({})", cloudroom::VERSION, cloudroom::COMMIT);
         return Ok(());

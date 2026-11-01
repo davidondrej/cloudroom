@@ -569,6 +569,18 @@ export function registerThreadActionRoutes(app: Hono, deps: AppDeps): void {
 
   post(routes.unarchive, (context, query) => {
     const thread = requirePublicThread(deps.db, context.req.param("id"));
+    // A worktree mid-removal would be deleted under the restored thread.
+    if (
+      !isCloudThread(thread) &&
+      thread.environmentId !== null &&
+      getEnvironment(deps.db, thread.environmentId)?.teardownStatus ===
+        "running"
+    )
+      throw new ApiError(
+        409,
+        "environment_removing",
+        "This thread's worktree is being removed. Try again in a few seconds.",
+      );
     const providerThreadId = getLastProviderThreadId(deps, thread.id);
     const unarchivedThread = unarchiveThreadKeepingOpenParent(
       deps,

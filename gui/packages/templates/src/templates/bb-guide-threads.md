@@ -100,6 +100,8 @@ Switching agents:
   with the conversation so far as hidden context; the prompt cache starts over.
   In Cloud, any model change works this way. CLI callers use
   room-cli thread update THREAD --provider PROVIDER --model MODEL.
+  When a plan limit stops a turn, the error offers "Continue with <agent>":
+  it switches the same way and the new agent picks up at once (--resend).
 
 Forking:
 
@@ -329,6 +331,7 @@ Ownership:
     --model <model>                        Set the sticky model for the next and later turns
     --reasoning-level <level>              Set the sticky reasoning level (provider-dependent)
     --visibility <visibility>              Set visible or hidden
+    --resend                               With --provider: the new agent continues right away
 
   Clearing a parent inherits the former parent's section unless --section or
   --clear-section is also supplied. Children released by environment archiving

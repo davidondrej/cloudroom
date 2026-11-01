@@ -176,7 +176,8 @@ export interface CloudHookBatch {
 }
 export type CloudAutomationRequest =
   | { action: "list"; thread?: string }
-  | ({ action: "create"; thread: string } & CloudAutomationFields)
+  // A fresh-thread loop is made from its project; a loop that re-prompts a thread, from that thread.
+  | ({ action: "create"; thread?: string; project?: string } & CloudAutomationFields)
   | ({ action: "update"; id: string } & CloudAutomationFields)
   | { action: "run" | "delete" | "hook"; id: string }
   // A cloud loop's run threads from the last 7 days, for its usage estimate (docs/scopes/loops.md).

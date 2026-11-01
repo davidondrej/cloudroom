@@ -4,6 +4,8 @@ export interface ProviderPickerOption extends PickerOption<string> {
   brandPrefix?: string;
   planModeCopy?: string;
   installUrl?: string;
+  signInCommand?: string;
+  signInHint?: string;
 }
 
 export function stripModelBrandPrefix(

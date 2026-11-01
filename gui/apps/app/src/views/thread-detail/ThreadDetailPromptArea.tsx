@@ -288,6 +288,7 @@ function buildInlineDraftComposer(options: InlineDraftComposerOptions) {
       executionReadOnly={options.executionReadOnly ?? true}
       permission={options.permission}
       permissionReadOnly
+      permissionInToolbar
       typeahead={options.typeahead}
       promptActions={options.promptActions}
       collapseResetKey={options.collapseResetKey}

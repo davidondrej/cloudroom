@@ -137,6 +137,30 @@ describe("room-cli provider command output", () => {
     ]);
   });
 
+  it("room-cli provider models says how to sign in when a provider has no models", async () => {
+    stubServerApi({
+      "v1.system.execution-options.$get": vi.fn(async () => ({
+        providers: [
+          {
+            id: "pi",
+            strings: {
+              signInHint: "Run `pi`, type /login, and pick a provider.",
+            },
+          },
+        ],
+        models: [],
+        selectedOnlyModels: [],
+        modelLoadError: null,
+      })),
+    });
+
+    await runCommand(["provider", "models", "pi"], register);
+
+    expect(collectLogPayloads(vi.mocked(console.log))).toEqual([
+      "No models available. Run `pi`, type /login, and pick a provider.",
+    ]);
+  });
+
   it("room-cli provider models routes through an environment", async () => {
     const get = vi.fn(async () => ({
       providers: [],

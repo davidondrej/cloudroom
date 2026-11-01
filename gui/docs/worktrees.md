@@ -26,7 +26,8 @@ branch. Under the hood it's `git worktree add` plus some bookkeeping:
   — for example, `~/.bb/plugins/environment-git-worktree/host-data/worktrees/thr_abc.../myrepo`.
 - Once every thread using it is archived or deleted, Cloudroom removes the
   worktree (`git worktree remove --force`) after the worktree retention setting
-  (default 21 days). Unarchiving a thread before then keeps it.
+  (default 3 days). Unarchiving a thread keeps it. See Cleanup for worktrees
+  with unsaved work and worktrees on other machines.
 
 Worktrees are created by bb's built-in **Worktree** plugin, which is enabled by
 default. Disabling it in Settings → Plugins leaves existing worktrees alone
@@ -124,9 +125,20 @@ Contract:
 You don't need to clean up worktrees by hand. The Worktree plugin watches every
 worktree it made and removes the ones nothing is using:
 
-- Archiving or deleting the last thread on a worktree starts the retention
-  wait (Settings, default 21 days). Unarchive a thread within it and the
-  worktree is kept; let it elapse and the worktree goes.
+- Archiving the last thread on a worktree starts the retention wait
+  (Settings, default 3 days). Unarchive a thread within it and the worktree is
+  kept; let it elapse and the worktree goes.
+- On this computer, deleting the last thread ends the wait, and a worktree
+  with uncommitted changes (submodules included) or commits missing from every
+  remote is kept when the wait ends and checked again every hour. Once
+  untouched for 30 days, its changes are committed to its branch (or a new
+  `cloudroom/saved-*` branch) and the folder is removed. With no
+  remote, commits must be on a branch. A thread can't be restored while its
+  worktree is being removed. A worktree folder that is already gone is
+  finalized.
+- Worktrees on other machines ("Run threads here") are removed when the wait
+  ends, without the git check, as before.
+- Settings shows how much disk worktrees use. Below 10 GB free, the app warns.
 - Teleporting the last thread to Cloud shortens the wait to 2 days, or to the
   retention setting if that is shorter. "Never" still keeps it.
 - Unarchive a thread after its worktree is gone and its next message sets

@@ -406,11 +406,16 @@ export function registerThreadBaseRoutes(app: Hono, deps: AppDeps): void {
         (isCloudThread(thread) &&
           payload.model !== binding(deps.db, thread.id)?.model))
     ) {
-      await switchThreadHarness(deps, thread.id, {
-        providerId: switchTo,
-        model: payload.model,
-        reasoningLevel: payload.reasoningLevel ?? null,
-      });
+      await switchThreadHarness(
+        deps,
+        thread.id,
+        {
+          providerId: switchTo,
+          model: payload.model,
+          reasoningLevel: payload.reasoningLevel ?? null,
+        },
+        { resend: payload.resend === true },
+      );
     } else if ("model" in payload || "reasoningLevel" in payload) {
       if (isCloudThread(thread)) {
         if ("reasoningLevel" in payload) {

@@ -284,7 +284,7 @@ export function ProjectNudgeSettingsSection() {
         {on ? (
           <SettingsWithControl
             label="Confidence"
-            description="Shows the hint only when Jev is at least this sure, in percent. Lower shows it more often, but it is wrong more often too. Default 70."
+            description="Shows the hint only when Jev is at least this sure, in percent. Lower shows it more often, but it is wrong more often too. Default 60."
           >
             <Input
               type="number"

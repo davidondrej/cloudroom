@@ -108,6 +108,7 @@ import {
   useUpdateExperiments,
 } from "@/hooks/mutations/settings-mutations";
 import { useSystemConfig } from "@/hooks/queries/system-queries";
+import { WorktreeDiskUse } from "@/components/layout/LowDiskBanner";
 import { useWorkspaceOpenTargets } from "@/hooks/useWorkspaceOpenTargets";
 import { isDesktopBrowserAvailable } from "@/lib/bb-desktop";
 import {
@@ -209,6 +210,7 @@ interface GeneralSettingsSectionProps {
   richTextEditing: boolean;
   steerActiveThreadOnEnter: boolean;
   worktreeRetention: WorktreeRetention;
+  worktreeDiskUse?: ReactNode;
 }
 
 interface PrivacySettingsSectionProps {
@@ -665,6 +667,7 @@ const WORKTREE_RETENTION_LABELS: Record<WorktreeRetention, string> = {
   "5m": "5 minutes",
   "1h": "1 hour",
   "1d": "1 day",
+  "3d": "3 days",
   "7d": "7 days",
   "21d": "21 days",
   "30d": "30 days",
@@ -941,6 +944,7 @@ export function GeneralSettingsSection({
   richTextEditing,
   steerActiveThreadOnEnter,
   worktreeRetention,
+  worktreeDiskUse,
 }: GeneralSettingsSectionProps) {
   return (
     <>
@@ -1055,7 +1059,17 @@ export function GeneralSettingsSection({
           />
           <SettingsWithControl
             label={WORKTREE_RETENTION_SETTING_LABEL}
-            description="Removes the worktree folder once its last thread is archived or deleted. The branch stays, but uncommitted changes are lost."
+            description={
+              <>
+                Removes the worktree folder this long after its last thread is
+                archived. On this computer, deleting the last thread removes
+                it sooner, and worktrees with uncommitted or unpushed work are
+                kept until untouched for 30 days, then their changes are
+                committed to the branch. Worktrees on other machines are removed when the time
+                ends, without that check. The branch stays.{" "}
+                {worktreeDiskUse}
+              </>
+            }
           >
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
@@ -1512,6 +1526,7 @@ export function SettingsView() {
             })
           }
           worktreeRetention={generalSettings.worktreeRetention}
+          worktreeDiskUse={<WorktreeDiskUse />}
           onWorktreeRetentionChange={(retention) =>
             updateGeneralSettingsMutation.mutate({
               ...generalSettings,

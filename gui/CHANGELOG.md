@@ -2,6 +2,20 @@
 
 Also on [cloudroom.dev/changelog](https://www.cloudroom.dev/changelog).
 
+## 136
+
+Hit a limit, keep the thread (2026-11-01)
+
+### Changes
+
+- When an agent hits its plan limit, one click continues the same thread on another agent.
+- Old worktrees are now cleaned up after 3 days, and Settings shows how much disk they use.
+- Worktrees untouched for 30 days save any unsaved work to their branch before the folder is removed.
+- A subagent's "finished" notice no longer gets stuck in its parent's queue overnight.
+- Editing a queued message now fits the editor to your text, with Full Access moved into the toolbar.
+- Pi now explains an empty model list and offers a one-click Sign in button.
+- Security fixes.
+
 ## 135
 
 Cmd+K finds what you mean (2026-10-31)

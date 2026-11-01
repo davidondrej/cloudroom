@@ -134,7 +134,14 @@ export function registerProviderCommands(
           });
           if (outputJson(opts, models)) return;
           if (models.length === 0) {
-            console.log("No models available");
+            const signInHint = executionOptions.providers.find(
+              (entry) => entry.id === providerId,
+            )?.strings?.signInHint;
+            console.log(
+              signInHint
+                ? `No models available. ${signInHint}`
+                : "No models available",
+            );
             return;
           }
           printModelTable(models, providerId);

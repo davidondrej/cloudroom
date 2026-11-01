@@ -52,6 +52,7 @@ bb.providers.register({
     signInHint: "Run `claude` on the machine to sign in.",
     expiredHint: "Your Claude session expired. Run `claude`, then reload.",
     installUrl: "https://docs.anthropic.com/claude-code",
+    signInCommand: undefined,    // optional; terminal command behind the picker's Sign in button ("pi")
     brandPrefix: "Claude ",      // optional; stripped from model display names
     planModeCopy: undefined,     // optional; plan-mode banner copy
     iconTint: undefined,         // optional { light, dark }

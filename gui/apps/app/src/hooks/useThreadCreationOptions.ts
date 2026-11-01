@@ -477,6 +477,12 @@ export function useThreadCreationOptions(
         ...(p.strings?.installUrl === undefined
           ? {}
           : { installUrl: p.strings.installUrl }),
+        ...(p.strings?.signInCommand === undefined
+          ? {}
+          : { signInCommand: p.strings.signInCommand }),
+        ...(p.strings?.signInHint === undefined
+          ? {}
+          : { signInHint: p.strings.signInHint }),
       })),
     [providers],
   );

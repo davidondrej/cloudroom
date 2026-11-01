@@ -8,3 +8,18 @@ packages:
   # dependencies are installed into each plugin's own node_modules — plugins
   # bring their own dependencies.
   - "examples/plugins/*"
+
+# Supply-chain rule (ADR 20261101-000509): resolve only versions at least 48 hours old.
+minimumReleaseAge: 2880
+# pnpm 10 runs no dependency install scripts by default. These are the ones pnpm 9 ran; a new one needs review.
+onlyBuiltDependencies:
+  - "@google/genai"
+  - "@parcel/watcher"
+  - better-sqlite3
+  - cbor-extract
+  - esbuild
+  - msw
+  - node-pty
+  - protobufjs
+  - sharp
+  - workerd

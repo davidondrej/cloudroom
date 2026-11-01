@@ -1,5 +1,7 @@
 import {
+  archiveThread,
   claimQueuedThreadMessage,
+  createQueuedThreadMessage,
   getQueuedThreadMessage,
   listEvents,
   setQueuedThreadMessageFailureReason,
@@ -119,6 +121,61 @@ describe("host-connected queue dispatch", () => {
         kind: "host-offline",
         hostName: "M2",
       });
+    });
+  });
+
+  it("keeps a child notice queued for the idle sweep when its parent changed mid-delivery", async () => {
+    await withTestHarness(async (harness) => {
+      const { host } = seedHostSession(harness.deps, { name: "M4" });
+      const { project } = seedProjectWithSource(harness.deps, {
+        hostId: host.id,
+        path: WORKSPACE_PATH,
+      });
+      const environment = seedEnvironment(harness.deps, {
+        hostId: host.id,
+        projectId: project.id,
+        path: WORKSPACE_PATH,
+      });
+      const parent = seedThread(harness.deps, {
+        environmentId: environment.id,
+        projectId: project.id,
+        status: "active",
+      });
+      seedThreadRuntimeState(harness.deps, {
+        environmentId: environment.id,
+        providerThreadId: "provider-parent",
+        threadId: parent.id,
+      });
+      seedTurnStarted(harness.deps, {
+        environmentId: environment.id,
+        providerThreadId: "provider-parent",
+        threadId: parent.id,
+        turnId: "turn-parent",
+      });
+      const notice = createQueuedThreadMessage(harness.db, harness.deps.hub, {
+        threadId: parent.id,
+        content: textInput("Child completed"),
+        model: "gpt-5",
+        reasoningLevel: "medium",
+        permissionMode: "auto",
+        serviceTier: "default",
+        senderThreadId: null,
+        waitingOn: { kind: "turn-starting" },
+        sendAt: null,
+        payload: { kind: "inline" },
+        systemNotice: { kind: "unlabeled", subject: null },
+      });
+      archiveThread(harness.db, harness.hub, parent.id);
+
+      await runQueuedMessageDispatch(harness.deps, {
+        kind: "turn-started",
+        threadId: parent.id,
+      });
+
+      const row = getQueuedThreadMessage(harness.db, notice.id);
+      expect(row?.failureReason).toBeNull();
+      expect(row?.claimToken).toBeNull();
+      expect(row?.waitingOn).toBeNull();
     });
   });
 });

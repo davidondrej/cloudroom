@@ -1,6 +1,6 @@
 # Build Cloudroom from source
 
-You need macOS on Apple Silicon, Git, Node.js 22.19+, pnpm 9.15.9, Python 3.11+, and Xcode Command Line Tools. Building needs no Cloudroom account.
+You need macOS on Apple Silicon, Git, Node.js 22.19+, pnpm 10.34.9, Python 3.11+, and Xcode Command Line Tools. Building needs no Cloudroom account.
 
 Run these from this folder:
 
@@ -9,7 +9,7 @@ pnpm install --frozen-lockfile
 pnpm exec turbo run build typecheck --filter=@cloudroom/app --filter=@cloudroom/server --filter=@cloudroom/desktop --concurrency=2
 ```
 
-Keep dependency install scripts on. SQLite, file watching, and terminals use native modules. If your pnpm version differs, use `npx --yes pnpm@9.15.9`.
+SQLite, file watching, and terminals use native modules, so their install scripts must run: `pnpm-workspace.yaml` lists the allowed ones. If your pnpm version differs, use `npx --yes pnpm@10.34.9`.
 
 ## Run in dev mode
 

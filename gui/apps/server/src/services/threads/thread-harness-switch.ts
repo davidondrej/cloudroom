@@ -23,10 +23,13 @@ import {
 } from "../cloudroom/commands.js";
 import { teleportBlocked } from "../cloudroom/store.js";
 import { storeAttachment } from "../projects/attachments.js";
+import { resolveDeferredFirstTurnContext } from "./deferred-first-turn-context.js";
 import { withThreadContextClearGuard } from "./thread-context-mutation-guard.js";
 import { appendThreadEventInTransaction } from "./thread-events.js";
 import { resolveHarnessSwitchOverride } from "./thread-execution-override.js";
 import { stopThreadForCurrentState } from "./thread-lifecycle.js";
+import { acceptThreadSendRequest } from "./thread-send-request.js";
+import { cancelRetriesForExplicitStop } from "./turn-retry.js";
 import {
   threadMessages,
   transcriptMarkdown,
@@ -39,6 +42,8 @@ export interface HarnessSwitch {
   reasoningLevel: ReasoningLevel | null;
 }
 
+const CONTINUE_TEXT =
+  "[Cloudroom] Continue the conversation: answer the user's last message if it has no reply yet, or finish the task that was in progress.";
 const HISTORY_FILE = "conversation-history.md";
 // The file stays far below the 100 MB attachment limit; the inline tail stays well inside Cloud's 256 KB message limit.
 const FILE_CHARS = 4_000_000;
@@ -47,11 +52,13 @@ const TAIL_CHARS = 6_000;
 /**
  * Moves a thread to another harness or model in place (ADR 0211). Nothing changes if the new harness can't start.
  * The next turn starts a fresh native session that gets the earlier conversation as hidden context.
+ * With `resend`, that turn starts right away.
  */
 export async function switchThreadHarness(
   deps: LoggedPendingInteractionWorkSessionDeps,
   threadId: string,
   target: HarnessSwitch,
+  options: { resend?: boolean } = {},
 ): Promise<void> {
   const from = await withThreadContextClearGuard(threadId, async () => {
     const thread = requireSwitchableThread(deps, threadId);
@@ -100,6 +107,8 @@ export async function switchThreadHarness(
     });
     return thread;
   });
+  // A queued retry replays the old harness's model, so it can only fail now.
+  cancelRetriesForExplicitStop(deps, threadId);
   deps.hub.notifyThread(threadId, ["execution-options-changed"], {
     projectId: from.projectId,
   });
@@ -109,7 +118,32 @@ export async function switchThreadHarness(
       execution: isCloudThread(from) ? cloudExecution(deps, threadId) : "local",
       from: from.providerId,
       to: target.providerId,
+      resend: options.resend === true,
     },
+  });
+  if (options.resend) await resendAfterSwitch(deps, threadId);
+}
+
+/** A hidden nudge, sent like any message so it carries the earlier conversation. */
+async function resendAfterSwitch(
+  deps: LoggedPendingInteractionWorkSessionDeps,
+  threadId: string,
+): Promise<void> {
+  const thread = getThread(deps.db, threadId);
+  if (!thread) return;
+  const nudge: PromptInput = {
+    type: "text",
+    text: CONTINUE_TEXT,
+    mentions: [],
+    visibility: "agent-only",
+  };
+  // Cloud adds the earlier conversation only to messages that don't start hidden.
+  const seed = isCloudThread(thread)
+    ? (resolveDeferredFirstTurnContext(deps.db, threadId)?.input ?? [])
+    : [];
+  await acceptThreadSendRequest(deps, {
+    thread,
+    payload: { input: [...seed, nudge], mode: "queue-if-active" },
   });
 }
 

@@ -15,7 +15,8 @@ import { codexOutage } from "./openai-status.js";
 import { buildThreadStatusChangeMetadata } from "../threads/thread-runtime-display.js";
 import { cloudPluginInstructions, cloudroomSystemPrompt, prepareCloudInstructionInput, resolveCustomInstructions } from "../threads/custom-instructions.js";
 import { baseBranch, binding, bindings, command, commands, coreInUse, localTeleports, openBindings, queuedPrompts, saveBinding, saveCommandState, saveStatus, effectivePrompt, projectCopyProgress, stampBindings, teleportBlocked, unstartedTurn, type Binding, type Command, type OpenBinding } from "./store.js";
-import { copyProject, copyRunning, githubRepository, localProjectNote, localProjectPath, planNewProjectCopy, planProjectCopy, planProjectCopyOrThrow, reportProjectCopy, writeFilesState, type ProjectCopyJob } from "./project-copy.js";
+import { syncLoopEnv } from "./project-loops.js";
+import { copyProject, copyRunning, githubRepository, localProjectNote, localProjectPath, planNewProjectCopy, workspaceId, workspaceName, planProjectCopy, planProjectCopyOrThrow, reportProjectCopy, writeFilesState, type ProjectCopyJob } from "./project-copy.js";
 import { CHILD_HINT, cloudForkOf, cloudForkPoint, codeFromOf, FORK_HARNESSES, FORK_HINT, landForkCode, localForkPoint, startCloudFork, threadCode, uploadInParts } from "./fork.js";
 import { copyForkSourceHistory } from "../threads/thread-fork-history.js";
 import { CloudGitError, savedWorkspacePath } from "./git.js";
@@ -140,9 +141,7 @@ function storageMessage(storage: Storage | null): string | null {
 }
 type Deps = Pick<AppDeps, "db" | "hub" | "config" | "providerRegistry"> & Partial<LoggedWorkSessionDeps> & Partial<Pick<AppDeps, "pendingInteractions">>;
 const services = new WeakMap<DbConnection, CloudroomService>();
-const workspaceId = (projectId: string) => `bb_${projectId}`;
 const ROOT_WORKSPACE = "root";
-const workspaceName = (name: string) => name.replace(/[^a-zA-Z0-9_.-]/g, "-").replace(/^\.+/, "").slice(0, 80) || "project";
 const cloudStep = (sandbox: boolean, status: StartStep["status"] = "started"): StartStep => ({ key: "cloud", text: sandbox ? "Starting cloud sandbox" : "Connecting to cloud VM", status });
 
 export function cloudroom(deps: Deps): CloudroomService {
@@ -1674,7 +1673,7 @@ class CloudroomService {
       if (teleportBlocked(this.deps.db, thread.id)) throw new ApiError(409, "teleport_in_progress", "Wait for Teleport to finish, then switch.");
       if (!isCloudProvider(target.providerId)) throw new ApiError(400, "cloudroom_unsupported", "This agent can't run in Cloud.");
       const oldSession = saved.sessionId;
-      await this.requireNoSessionDependents(thread.id, saved);
+      const resumeLoops = await this.requireNoSessionDependents(thread.id, saved);
       const client = await this.client(saved);
       const capabilities = await this.capabilities(client);
       if (!harnessProfile(capabilities, target.providerId)) throw new ApiError(400, "cloudroom_unsupported", `${HARNESS_NAMES[target.providerId]} isn't set up in Cloud yet.`);
@@ -1716,6 +1715,7 @@ class CloudroomService {
         record(tx);
       });
       void client.close(oldSession, randomUUID()).catch((error: unknown) => this.warn("The previous Cloud session could not be closed", error, { threadId: thread.id }));
+      for (const id of resumeLoops) void this.sandboxes.automations({ action: "delete", id }).catch((error: unknown) => this.warn("The old session's resume loop could not be deleted", error, { threadId: thread.id }));
     } finally {
       this.switching.delete(thread.id);
     }
@@ -1737,15 +1737,21 @@ class CloudroomService {
     return null;
   }
 
-  /** Running child agents and Cloud automations stay tied to the old session, which a switch closes. */
-  private async requireNoSessionDependents(threadId: string, saved: Binding): Promise<void> {
+  /**
+   * Running child agents and Cloud automations stay tied to the old session, which a switch closes.
+   * Core's own "Resume after … plan limit" loops don't block; their ids come back to delete after the switch.
+   */
+  private async requireNoSessionDependents(threadId: string, saved: Binding): Promise<string[]> {
     const runningChild = this.deps.db.select({ id: threads.id }).from(threads).where(and(eq(threads.parentThreadId, threadId), isNull(threads.archivedAt), isNull(threads.deletedAt), notInArray(threads.status, ["idle", "error"]))).get();
     if (runningChild) throw new ApiError(409, "thread_busy", "Wait until this thread's child agents finish, then switch.");
     const sandbox = sandboxThread(saved.coreUrl);
-    if (!sandbox) return;
-    const listed = z.object({ automations: z.array(z.object({ session_id: z.string().nullable(), enabled: z.boolean() }).passthrough()) }).safeParse(await this.sandboxes.automations({ action: "list", thread: sandbox }).catch(() => null));
+    if (!sandbox) return [];
+    const listed = z.object({ automations: z.array(z.object({ id: z.string().catch(""), name: z.string().catch(""), session_id: z.string().nullable(), enabled: z.boolean() }).passthrough()) }).safeParse(await this.sandboxes.automations({ action: "list", thread: sandbox }).catch(() => null));
     if (!listed.success) throw new ApiError(503, "cloudroom_switch", "Couldn't check this thread's loops. Try again in a moment.");
-    if (listed.data.automations.some((automation) => automation.enabled && automation.session_id === saved.sessionId)) throw new ApiError(409, "cloudroom_switch", "This thread has a Cloud loop. Pause or delete it, then switch.");
+    const own = listed.data.automations.filter((automation) => automation.enabled && automation.session_id === saved.sessionId);
+    const resume = own.filter((automation) => automation.id && /^Resume after (Claude |Codex )?plan limit · /.test(automation.name));
+    if (own.length > resume.length) throw new ApiError(409, "cloudroom_switch", "This thread has a Cloud loop. Pause or delete it, then switch.");
+    return resume.map((automation) => automation.id);
   }
 
   /** The old session must be idle, with nothing queued, and fully shown here, so the new agent's history is complete. */
@@ -2315,6 +2321,8 @@ class CloudroomService {
         const target = options.workspace && options.workspace !== ROOT_WORKSPACE ? options.workspace : null;
         if (fork && !capabilities.fork) throw new ApiError(503, "cloudroom_update", "Update the cloud core to fork Cloud threads. Your message is saved.");
         const plan = { key: copyKey(sandbox, target ?? ""), branch: baseBranch(initial?.input) };
+        // The project's loops get its current .env files (ADR 20261101-004659).
+        if (target) syncLoopEnv(this.deps, this.sandboxes, getThread(this.deps.db, threadId)?.projectId);
         const failure = (error: unknown) => error instanceof Error ? error : new Error(String(error));
         // A copy that can't be planned fails where the user and `room-cli files wait` see it, never as nothing to copy (#337).
         const [planned, started] = await Promise.all([

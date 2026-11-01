@@ -51,6 +51,7 @@ import type { ServerAppDeps, ServerRuntimeConfig } from "../types.js";
 import type { PluginService } from "../services/plugins/plugin-service.js";
 import { ApiError } from "../errors.js";
 import { rescheduleWorktreeRetirement } from "../services/environments/environment-engine.js";
+import { worktreeDiskStatus } from "../services/environments/worktree-storage.js";
 import {
   resolveVoiceTranscriptionEnabled,
   transcribeVoiceInput,
@@ -371,6 +372,9 @@ export function registerSystemRoutes(
     return context.json({ ok: true });
   });
 
+  get(routes.worktreeStorage, (context) =>
+    context.json(worktreeDiskStatus(deps)),
+  );
   get(routes.cliSkillsStatus, async (context, query) =>
     context.json(
       await readGlobalCliSkillStatus(deps, {

@@ -288,11 +288,14 @@ after you change it; it does not rename an existing branch or worktree. Set it
 with `bb settings general managedBranchPrefix <prefix>`.
 
 Settings → General → Git → Delete archived worktrees after sets how long a
-worktree folder stays after its last thread is archived or deleted: 5 minutes,
-1 hour, 1 day, 7 days, 21 days (default), 30 days, or never. The branch stays;
-uncommitted changes are lost. Changing it restarts the timer for worktrees
-already waiting. Set it with
-`room-cli settings general worktreeRetention <5m|1h|1d|7d|21d|30d|never>`.
+worktree folder stays after its last thread is archived: 5 minutes, 1 hour,
+1 day, 3 days (default), 7 days, 21 days, 30 days, or never. On this computer,
+deleting the last thread ends the wait, and worktrees with uncommitted or
+unpushed work are kept and checked again hourly; after 30 days untouched,
+their changes are committed to the branch and the folder is removed. Worktrees on other machines
+are removed when the wait ends, without that check. The branch stays. Changing it restarts the timer for
+worktrees already waiting. Set it with
+`room-cli settings general worktreeRetention <5m|1h|1d|3d|7d|21d|30d|never>`.
 
 Settings → Providers lists every registered agent provider in picker order.
 Move a provider up or down to change the order and choose the default for new

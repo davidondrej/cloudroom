@@ -29,12 +29,28 @@ type QueueWaitDeps = { db: DbQueryConnection; hub: DbNotifier };
 export const QUEUED_MESSAGE_CLAIM_LOST_CODE = "queued_message_claim_lost";
 export const QUEUED_MESSAGE_AUTO_SEND_PAUSED_CODE =
   "queued_message_auto_send_paused";
+export const QUEUED_MESSAGE_NOT_DELIVERED_CODE = "queued_message_not_delivered";
 
 export function createQueuedMessageClaimLostError(): ApiError {
   return new ApiError(
     409,
     QUEUED_MESSAGE_CLAIM_LOST_CODE,
     "Queued message claim expired before it could be sent",
+  );
+}
+
+export function createQueuedMessageNotDeliveredError(): ApiError {
+  return new ApiError(
+    409,
+    QUEUED_MESSAGE_NOT_DELIVERED_CODE,
+    "The thread changed before the message could be sent; it stays queued",
+  );
+}
+
+export function isQueuedMessageNotDeliveredError(error: unknown): boolean {
+  return (
+    error instanceof ApiError &&
+    error.body.code === QUEUED_MESSAGE_NOT_DELIVERED_CODE
   );
 }
 

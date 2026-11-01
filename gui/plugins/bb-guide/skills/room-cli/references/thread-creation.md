@@ -46,7 +46,8 @@ worktree` only; a provider takes its branch through `--environment-inputs`.
 - Spawn creates a root thread unless you pass `--parent-thread`.
 - To move a thread to another agent or model in place, use `room-cli thread update
   THREAD --provider PROVIDER --model MODEL` (ADR 0211). The next turn carries the
-  conversation so far.
+  conversation so far. Add `--resend` to have the new agent continue right away,
+  for example after a plan limit.
 - Use `room-cli thread fork <source-thread-id>` to clone a provider session. The
   fork inherits the source conversation in its timeline. It creates an idle
   fork in the source environment by default; add `--prompt`, select an existing

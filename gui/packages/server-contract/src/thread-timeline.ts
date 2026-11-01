@@ -189,6 +189,8 @@ const timelineSystemRowBaseSchema = timelineRowBaseSchema.extend({
 export const timelineNonOperationSystemRowSchema =
   timelineSystemRowBaseSchema.extend({
     systemKind: z.enum(["debug", "error", "reconnect"]),
+    /** The provider's plan or usage limit stopped the turn. */
+    planLimit: z.boolean().optional(),
   });
 export type TimelineNonOperationSystemRow = z.infer<
   typeof timelineNonOperationSystemRowSchema

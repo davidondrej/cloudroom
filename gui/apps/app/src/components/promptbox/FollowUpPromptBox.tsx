@@ -157,6 +157,7 @@ export interface FollowUpPromptBoxProps {
   permission: ExecutionPermissionConfig;
   executionReadOnly?: boolean;
   permissionReadOnly?: boolean;
+  permissionInToolbar?: boolean;
   typeahead: TypeaheadConfig;
   promptActions?: readonly PromptBoxAction[];
   suppressPluginComposerCustomizations?: boolean;
@@ -229,6 +230,7 @@ function FollowUpPromptBoxWithComposer({
   permission,
   executionReadOnly,
   permissionReadOnly,
+  permissionInToolbar = false,
   typeahead,
   promptActions,
   suppressPluginComposerCustomizations,
@@ -609,12 +611,6 @@ function FollowUpPromptBoxWithComposer({
     onModifierSubmit ? `, ${modifierSubmitShortcutLabel()} to ${action}` : "";
   const executionControlsDisabled =
     (executionReadOnly ?? false) || hasPendingInteraction;
-  const footerStart = useMemo(
-    () => (
-      <ExecutionControls {...execution} disabled={execution.disabled || executionControlsDisabled} />
-    ),
-    [execution, executionControlsDisabled],
-  );
   const { permissionDisplayOverride, permissionPickerDisabledByPlanMode } =
     usePromptModePermissionDisplay({
       execution,
@@ -648,6 +644,19 @@ function FollowUpPromptBoxWithComposer({
       permissionPickerDisabledByPlanMode,
       permissionPickerDisabled,
     ],
+  );
+  const footerStart = useMemo(
+    () => (
+      <>
+        <ExecutionControls {...execution} disabled={execution.disabled || executionControlsDisabled} />
+        {permissionInToolbar ? (
+          <div className="ml-auto flex shrink-0 items-center">
+            {permissionControl}
+          </div>
+        ) : null}
+      </>
+    ),
+    [execution, executionControlsDisabled, permissionControl, permissionInToolbar],
   );
   const composerElement = (
     <div
@@ -751,7 +760,7 @@ function FollowUpPromptBoxWithComposer({
         onCollapse={isCompactViewport ? undefined : collapseWidePromptBox}
         footerStart={footerStart}
       />
-      {!isPromptBoxCompact ? (
+      {!isPromptBoxCompact && !permissionInToolbar ? (
         <div
           data-follow-up-composer-footer=""
           className="mt-1 flex min-h-6 max-h-6 select-none items-center justify-between gap-2 overflow-hidden pl-[15px] pr-3.5 opacity-100 transition-[max-height,min-height,margin-top,opacity] duration-[180ms] ease-[cubic-bezier(0.16,1,0.3,1)] motion-reduce:transition-none"

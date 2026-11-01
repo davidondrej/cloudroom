@@ -82,6 +82,11 @@ import {
   MissingProviderCliRow,
   missingProviderCli,
 } from "./MissingProviderCliRow.js";
+import { PlanLimitRow } from "./PlanLimitRow.js";
+import {
+  LatestPlanLimitRowIdContext,
+  findLatestPlanLimitRowId,
+} from "./plan-limit-agents.js";
 import {
   TimelineLeadingIcon,
   TimelineStaticRowHeader,
@@ -1556,6 +1561,16 @@ function TimelineRowView({
     row.kind === "work" ? row : null,
   );
   const staticLeadingIconUrl = useLeadingIconUrlForRow(row);
+  const latestPlanLimitRowId = useContext(LatestPlanLimitRowIdContext);
+
+  if (row.id === latestPlanLimitRowId) {
+    return (
+      <PlanLimitRow
+        threadId={row.threadId}
+        className={timelineRowHorizontalPaddingClassName(horizontalPadding)}
+      />
+    );
+  }
 
   if (row.kind === "conversation") {
     return (
@@ -2189,6 +2204,10 @@ function ThreadTimelineRowsForTimelineView(props: ThreadTimelineRowsProps) {
     () => (scopeActive ? findStreamingAssistantMessageId(rows) : null),
     [rows, scopeActive],
   );
+  const latestPlanLimitRowId = useMemo(
+    () => (scopeActive ? null : findLatestPlanLimitRowId(rows)),
+    [rows, scopeActive],
+  );
   const computedAutoExpansionRowIds = useMemo(
     () => collectTimelineAutoExpansionRowIds({ rows, scopeActive }),
     [rows, scopeActive],
@@ -2450,27 +2469,31 @@ function ThreadTimelineRowsForTimelineView(props: ThreadTimelineRowsProps) {
                       value={props.timelineWindowingEnabled ?? false}
                     >
                       <AutoHeightContainer snapRevision={heightSnapRevision}>
-                        <TimelineRowsList
-                          hasOlderTimelineRows={props.hasOlderTimelineRows}
-                          isLoadingOlderTimelineRows={
-                            props.isLoadingOlderTimelineRows
-                          }
-                          navigationTargetRowId={
-                            props.timelineNavigationTargetRowId
-                          }
-                          onLoadOlderRows={props.onLoadOlderRows}
-                          rows={rows}
-                          scopeActive={scopeActive}
-                          showAssistantMessageActions={true}
-                          compactActivityIntents={false}
-                          spacing="top-level"
-                          unreadDividerAutoScroll={
-                            props.unreadDividerAutoScroll ?? true
-                          }
-                          unreadDividerPlacement={
-                            props.unreadDividerPlacement ?? null
-                          }
-                        />
+                        <LatestPlanLimitRowIdContext.Provider
+                          value={latestPlanLimitRowId}
+                        >
+                          <TimelineRowsList
+                            hasOlderTimelineRows={props.hasOlderTimelineRows}
+                            isLoadingOlderTimelineRows={
+                              props.isLoadingOlderTimelineRows
+                            }
+                            navigationTargetRowId={
+                              props.timelineNavigationTargetRowId
+                            }
+                            onLoadOlderRows={props.onLoadOlderRows}
+                            rows={rows}
+                            scopeActive={scopeActive}
+                            showAssistantMessageActions={true}
+                            compactActivityIntents={false}
+                            spacing="top-level"
+                            unreadDividerAutoScroll={
+                              props.unreadDividerAutoScroll ?? true
+                            }
+                            unreadDividerPlacement={
+                              props.unreadDividerPlacement ?? null
+                            }
+                          />
+                        </LatestPlanLimitRowIdContext.Provider>
                       </AutoHeightContainer>
                     </TimelineWindowingEnabledContext.Provider>
                   </TimelineWindowingMeasurementsContext.Provider>

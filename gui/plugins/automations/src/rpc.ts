@@ -194,12 +194,14 @@ async function withCloudAgents(threads: Sdk["threads"], result: unknown) {
     // A fresh-thread loop's own saved agent; otherwise its thread's, which it uses. Its project is its thread's.
     automations: await Promise.all(
       automations.map(async (automation) => {
-        const thread = await threads
-          .get({ threadId: automation.thread_id })
-          .catch(() => null);
+        // A project loop's home is its project (no thread hosts it).
+        const home = automation.thread_id.startsWith("proj_") ? automation.thread_id : null;
+        const thread = home
+          ? null
+          : await threads.get({ threadId: automation.thread_id }).catch(() => null);
         return {
           ...automation,
-          project_id: thread && "projectId" in thread ? thread.projectId : null,
+          project_id: home ?? (thread && "projectId" in thread ? thread.projectId : null),
           agent: automation.agent
             ? {
                 providerId: automation.agent.provider,
@@ -213,68 +215,6 @@ async function withCloudAgents(threads: Sdk["threads"], result: unknown) {
       }),
     ),
   };
-}
-
-const HOST_START_TIMEOUT_MS = 5 * 60_000;
-
-async function hasCloudSession(sdk: Sdk, threadId: string): Promise<boolean> {
-  const status = (await sdk.cloudroom
-    .threadStatus(threadId)
-    .catch(() => null)) as { sessionId?: string | null } | null;
-  return Boolean(status?.sessionId);
-}
-
-// A Cloud loop needs an open, started Cloud thread in its project: the newest one, else a new one started for it.
-export async function cloudTemplateHost(
-  sdk: Sdk,
-  input: Pick<
-    z.output<typeof cloudTemplateInputSchema>,
-    "projectId" | "name" | "providerId" | "model"
-  >,
-): Promise<string> {
-  const threads = await sdk.threads.list({
-    projectId: input.projectId,
-    archived: false,
-  });
-  const open = threads
-    .filter(
-      (thread) =>
-        thread.executionTarget === "cloud" &&
-        thread.archivedAt === null &&
-        thread.deletedAt === null,
-    )
-    .sort((a, b) => b.updatedAt - a.updatedAt);
-  for (const thread of open) {
-    // "starting" may still be copying the project into its sandbox.
-    if (thread.status !== "idle" && thread.status !== "active") continue;
-    if (await hasCloudSession(sdk, thread.id)) return thread.id;
-  }
-  const thread = await sdk.threads.spawn({
-    projectId: input.projectId,
-    executionTarget: "cloud",
-    environment: { type: "project-default" },
-    title: `${input.name} loop`,
-    providerId: input.providerId,
-    model: input.model,
-    reasoningLevel: "low",
-    prompt: `This Cloud thread hosts the "${input.name}" loop, added from Loops → Templates. Each run starts its own fresh thread. First run \`room-cli files wait\`. If it says the project copy failed, reply with one word: Failed. Otherwise reply with one word: Ready.`,
-  });
-  // The session exists before the project finishes copying, so wait for the reply its prompt gives after `files wait`.
-  const deadline = Date.now() + HOST_START_TIMEOUT_MS;
-  for (;;) {
-    const status = (await sdk.threads.get({ threadId: thread.id }))?.status;
-    if (status === "error")
-      throw new Error("its new Cloud thread failed to start");
-    if (status === "idle") {
-      const { output } = await sdk.threads.output({ threadId: thread.id });
-      if (/\bready\b/i.test(output ?? "")) return thread.id;
-      if (output)
-        throw new Error("its project did not finish copying to the cloud");
-    }
-    if (Date.now() > deadline)
-      throw new Error("its new Cloud thread did not start within 5 minutes");
-    await new Promise((resolve) => setTimeout(resolve, 3_000));
-  }
 }
 
 const connected = (auth: { state: string } | null) =>
@@ -324,7 +264,8 @@ export function createRpcHandlers(
       if (!sdk) throw new Error("Cloud loops are unavailable.");
       return sdk.cloudroom.automations({
         action: "create",
-        thread: await cloudTemplateHost(sdk, input),
+        // A Cloud loop belongs to its project; no thread hosts it (ADR 20261101-004659).
+        project: input.projectId,
         name: input.name,
         prompt: input.prompt,
         cron: input.cron,

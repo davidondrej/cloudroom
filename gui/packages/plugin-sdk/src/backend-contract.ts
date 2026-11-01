@@ -1357,6 +1357,8 @@ export interface PluginProviderStrings {
   expiredHint: string;
   /** Where to install the agent. */
   installUrl: string;
+  /** Terminal command that starts sign-in on the host ("pi"). Adds a Sign in button when the provider lists no models. */
+  signInCommand?: string;
   /** Brand prefix stripped from model display names ("Claude "). */
   brandPrefix?: string;
   /** Plan-mode banner copy for providers that declare the `plan` action. */

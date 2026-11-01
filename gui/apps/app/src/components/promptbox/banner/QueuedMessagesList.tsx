@@ -1241,10 +1241,7 @@ export function QueuedMessagesList({
       lastElement.getBoundingClientRect().bottom -
       firstElement.getBoundingClientRect().top;
     const chromeHeight = Math.max(0, surfaceRect.height - scrollRect.height);
-    const desiredHeight = Math.max(
-      WORKSPACE_MIN_HEIGHT,
-      Math.ceil(contentHeight + chromeHeight),
-    );
+    const desiredHeight = Math.ceil(contentHeight + chromeHeight);
     setInlineEditorDesiredHeight((currentHeight) =>
       currentHeight === desiredHeight ? currentHeight : desiredHeight,
     );

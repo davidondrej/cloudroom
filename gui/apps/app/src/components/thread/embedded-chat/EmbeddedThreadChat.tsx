@@ -1064,6 +1064,7 @@ function EmbeddedThreadChatWithComposer({
           executionReadOnly
           permission={inlinePermissionConfig}
           permissionReadOnly
+          permissionInToolbar
           typeahead={typeaheadConfig}
           promptActions={promptActions}
           collapseResetKey={`${surfaceKey}:queued-message:${inlineEditingQueuedMessage.queuedMessageId}`}

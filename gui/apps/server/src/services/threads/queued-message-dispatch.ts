@@ -23,7 +23,10 @@ import {
 } from "../lib/error-log-fields.js";
 import { isDispatchRequeuedRecently } from "./dispatch-hooks.js";
 import { recordQueuedMessageDrainFailure } from "./queue-drain-failure.js";
-import { clearQueuedMessageWait } from "./queue-waits.js";
+import {
+  clearQueuedMessageWait,
+  isQueuedMessageNotDeliveredError,
+} from "./queue-waits.js";
 import {
   createAutomaticQueuedMessageEligibility,
   releaseStaleQueuedMessageDispatchClaims,
@@ -388,6 +391,13 @@ async function attemptAutomaticQueuedMessage(
       threadId: row.threadId,
     });
   } catch (error) {
+    if (isQueuedMessageNotDeliveredError(error)) {
+      clearQueuedMessageWait(deps, {
+        queuedMessageId: row.id,
+        threadId: row.threadId,
+      });
+      return;
+    }
     if (isCommandTimeoutError(error)) {
       deps.logger.debug(
         {

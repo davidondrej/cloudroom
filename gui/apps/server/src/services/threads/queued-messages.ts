@@ -68,6 +68,8 @@ import { deliverParentSystemMessage } from "./parent-system-messages.js";
 import {
   createQueuedMessageAutoSendPausedError,
   createQueuedMessageClaimLostError,
+  createQueuedMessageNotDeliveredError,
+  isQueuedMessageNotDeliveredError,
   QUEUED_MESSAGE_AUTO_SEND_PAUSED_CODE,
   QUEUED_MESSAGE_CLAIM_LOST_CODE,
   settleQueueRowDispatched,
@@ -623,7 +625,7 @@ async function sendClaimedSystemNotice(
   if (!delivered) {
     // The thread changed under the drain. Leave the row claimed-and-released
     // by the caller's error path rather than consuming a notice nobody got.
-    throw createQueuedMessageClaimLostError();
+    throw createQueuedMessageNotDeliveredError();
   }
   const consumed = deps.db.transaction(
     (tx) => deleteClaimedQueuedThreadMessageInTransaction(tx, claimed),
@@ -853,6 +855,7 @@ export async function sendNextQueuedMessageIfPresent(
     releaseClaim(deps, nextQueuedMessage);
     if (
       isQueuedMessageClaimLostError(error) ||
+      isQueuedMessageNotDeliveredError(error) ||
       isQueuedMessageAutoSendPausedError(error) ||
       error instanceof ThreadContextClearInProgressError
     ) {

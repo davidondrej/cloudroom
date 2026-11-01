@@ -26,6 +26,7 @@ import type {
   SystemVersionQuery,
   SystemVersionResponse,
   SystemVoiceTranscriptionResponse,
+  SystemWorktreeStorageResponse,
   UiPreferenceResponse,
   UiPreferencesResponse,
 } from "@cloudroom/server-contract";
@@ -60,6 +61,10 @@ export interface SystemVersionArgs {
 export interface SystemVoiceTranscriptionArgs {
   file: Blob;
   prompt?: string;
+  signal?: AbortSignal;
+}
+
+export interface SystemWorktreeStorageArgs {
   signal?: AbortSignal;
 }
 
@@ -129,6 +134,9 @@ export interface SystemArea {
     args: SystemInstallCliSkillsArgs,
   ): Promise<SystemInstallCliSkillsResult>;
   reloadConfig(): Promise<SystemReloadConfigResult>;
+  worktreeStorage(
+    args?: SystemWorktreeStorageArgs,
+  ): Promise<SystemWorktreeStorageResponse>;
   transcribeVoice(
     args: SystemVoiceTranscriptionArgs,
   ): Promise<SystemVoiceTranscriptionResult>;
@@ -236,6 +244,14 @@ export function createSystemArea(args: CreateSdkAreaArgs): SystemArea {
     },
     async reloadConfig() {
       return transport.readJson(transport.api.v1.system.config.reload.$post());
+    },
+    async worktreeStorage(input = {}) {
+      return transport.readJson(
+        transport.api.v1.system["worktree-storage"].$get(
+          {},
+          ...signalRequestArgs(input.signal),
+        ),
+      );
     },
     async transcribeVoice(input) {
       if (input.file.size === 0) {

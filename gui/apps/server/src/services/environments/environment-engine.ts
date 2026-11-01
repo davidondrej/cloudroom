@@ -1,7 +1,9 @@
 import { withHostCleanup } from "../hosts/cleanup-context.js";
+import { readPrimaryHostIdFromDataDir } from "../hosts/primary-host.js";
 import { findHostDataDir } from "../lib/entity-lookup.js";
 import { updateThread } from "@cloudroom/db";
 import { assertEnvironmentPathAvailable } from "./path-admission.js";
+import { worktreeCanBeRemoved } from "./worktree-work.js";
 import { saveThreadProvisionContext } from "../threads/thread-startup-store.js";
 import {
   refreshAttachedEnvironmentBranch,
@@ -608,13 +610,18 @@ export async function cancelProviderEnvironmentCreation(
     );
 }
 
+const WORK_RECHECK_MS = 60 * 60_000;
+const explicitRemovals = new Set<string>();
+
 export function requestEnvironmentRemoval(
   deps: Deps,
   environmentId: string,
+  explicit = true,
 ): boolean {
   const row = getEnvironment(deps.db, environmentId);
   if (row === null || environmentHasLiveThreads(deps.db, environmentId))
     return false;
+  if (explicit) explicitRemovals.add(environmentId);
   if (row.ownerThreadId !== null && row.teardownStatus === null) {
     const owner = getThread(deps.db, row.ownerThreadId);
     if (
@@ -673,6 +680,20 @@ async function runRemove(
     throw new Error(
       `Environment provider "${row.environmentProviderId}" is unavailable or belongs to another plugin`,
     );
+  // Automatic local removals check git after the teardown hook, right before
+  // the folder is deleted, and keep the worktree if it has work. Restore is
+  // refused while teardown runs; the live-thread check is a last guard.
+  const automatic =
+    !explicitRemovals.has(environmentId) && isLocalWorktree(deps, row);
+  const keep = (retireAt: number | null) =>
+    writeEnvironment(deps, environmentId, {
+      status: "ready",
+      teardownStatus: null,
+      teardownMessage: null,
+      retireAt,
+    });
+  const inUse = () =>
+    automatic && environmentHasLiveThreads(deps.db, environmentId);
   await withHostCleanup(deps, row.hostId, async () => {
     try {
       if (row.providerOwnsPath && row.hostId !== null && row.path !== null) {
@@ -692,6 +713,14 @@ async function runRemove(
           },
           signal,
         });
+      }
+      if (automatic && !(await worktreeCanBeRemoved(row.path!))) {
+        keep(Date.now() + WORK_RECHECK_MS);
+        return;
+      }
+      if (inUse()) {
+        keep(null);
+        return;
       }
       const invocation = await invokeEnvironmentProvider(
         record,
@@ -721,6 +750,7 @@ async function runRemove(
         });
         return;
       }
+      explicitRemovals.delete(environmentId);
       writeEnvironment(deps, environmentId, {
         teardownStatus: "removed",
         teardownMessage: null,
@@ -769,6 +799,17 @@ async function removeEnvironment(
     },
   });
   await operation.done;
+}
+
+function isLocalWorktree(deps: Deps, row: EnvironmentRow): boolean {
+  return (
+    row.ownerThreadId === null &&
+    row.status !== "destroyed" &&
+    row.path !== null &&
+    row.environmentProviderId === DEFAULT_ENVIRONMENT_PROVIDER_ID.gitWorktree &&
+    row.hostId ===
+      readPrimaryHostIdFromDataDir({ dataDir: deps.config.dataDir })
+  );
 }
 
 async function sweepProviderEnvironmentInSlot(
@@ -821,8 +862,36 @@ async function sweepProviderEnvironmentInSlot(
     writeEnvironment(deps, environmentId, { retireAt });
     row = { ...row, retireAt };
   }
-  if (row.retireAt !== null && row.retireAt > now) return;
-  if (!requestEnvironmentRemoval(deps, environmentId)) return;
+  const local = row.teardownStatus === null && isLocalWorktree(deps, row);
+  const deleted =
+    local &&
+    deps.db
+      .select({ id: threads.id })
+      .from(threads)
+      .where(eq(threads.environmentId, environmentId))
+      .get() === undefined;
+  if (
+    row.retireAt !== null &&
+    row.retireAt > now &&
+    !(deleted && row.retireAt > now + WORK_RECHECK_MS)
+  )
+    return;
+  if (local) {
+    const noWork = await worktreeCanBeRemoved(row.path!);
+    const fresh = getEnvironment(deps.db, environmentId);
+    if (
+      fresh?.retireAt == null ||
+      environmentHasLiveThreads(deps.db, environmentId)
+    )
+      return;
+    if (!noWork) {
+      writeEnvironment(deps, environmentId, {
+        retireAt: Date.now() + WORK_RECHECK_MS,
+      });
+      return;
+    }
+  }
+  if (!requestEnvironmentRemoval(deps, environmentId, false)) return;
   if (cancelled && row.providerOwnsPath && row.path !== null) {
     await cancelPendingEnvironmentHook(deps, {
       id: `environment:${row.id}:${row.environmentProviderInstanceKey}:setup`,

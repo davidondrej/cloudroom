@@ -122,6 +122,9 @@ const appCommandListeners = new Set<BbDesktopAppCommandHandler>();
 const windowStateListeners = new Set<BbDesktopWindowStateChangeHandler>();
 let currentInfo = createInitialDesktopInfo();
 let currentWindowState = createInitialDesktopWindowState();
+// Bumped by every snapshot request and state event, so a snapshot reply that
+// arrives after a newer event can't overwrite it with an older focus state.
+let windowStateRevision = 0;
 
 function notifyListeners(): void {
   for (const listener of listeners) {
@@ -167,10 +170,12 @@ async function invokeDesktopInfo(channel: string): Promise<BbDesktopInfo> {
 }
 
 async function invokeDesktopWindowState(): Promise<BbDesktopWindowState> {
+  const revision = ++windowStateRevision;
   try {
     const payload: unknown = await ipcRenderer.invoke(
       BB_DESKTOP_GET_WINDOW_STATE_CHANNEL,
     );
+    if (revision !== windowStateRevision) return currentWindowState;
     return applyDesktopWindowStatePayload(payload) ?? currentWindowState;
   } catch {
     return currentWindowState;
@@ -465,6 +470,7 @@ ipcRenderer.on(BB_DESKTOP_INFO_CHANGED_CHANNEL, (_event, payload: unknown) => {
 ipcRenderer.on(
   BB_DESKTOP_WINDOW_STATE_CHANGED_CHANNEL,
   (_event, payload: unknown) => {
+    windowStateRevision += 1;
     applyDesktopWindowStatePayload(payload);
   },
 );

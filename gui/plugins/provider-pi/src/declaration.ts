@@ -7,9 +7,10 @@ export function piProviderDeclaration(): PluginProviderDeclaration {
     displayName: "Pi",
     icon: "./icons/pi.svg",
     strings: {
-      signInHint: "Run `pi` on the machine to sign in.",
+      signInHint: "Run `pi`, type /login, and pick a provider.",
       expiredHint: "Your Pi session expired. Run `pi`, then reload.",
       installUrl: "https://pi.dev",
+      signInCommand: "pi",
       iconTint: { light: "#6D5DFB", dark: "#6D5DFB" },
     },
     experimental_modelDiscoveryRestart: true,

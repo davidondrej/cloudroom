@@ -357,6 +357,7 @@ type ExpectedSystemKey =
   | "executionOptions"
   | "installCliSkills"
   | "reloadConfig"
+  | "worktreeStorage"
   | "transcribeVoice"
   | "uiPreferences"
   | "updateExperiments"

@@ -46,6 +46,7 @@ interface ThreadUpdateCommandOptions {
   model?: string;
   reasoningLevel?: string;
   visibility?: string;
+  resend?: boolean;
 }
 
 interface ThreadMoveCommandOptions {
@@ -143,6 +144,7 @@ interface ThreadUpdateBody {
   model?: string;
   reasoningLevel?: ReasoningLevel;
   visibility?: ThreadVisibility;
+  resend?: boolean;
 }
 
 export function registerActionsCommands(
@@ -172,6 +174,10 @@ export function registerActionsCommands(
       "Set the sticky reasoning level applied on the thread's next turn: low, medium, high, xhigh, max (provider-dependent)",
     )
     .option("--visibility <visibility>", "Thread visibility: visible or hidden")
+    .option(
+      "--resend",
+      "With --provider: the new agent continues the conversation right away, e.g. after a plan limit",
+    )
     .action(
       action(
         async (id: string | undefined, opts: ThreadUpdateCommandOptions) => {
@@ -190,6 +196,9 @@ export function registerActionsCommands(
               : threadVisibilitySchema.parse(opts.visibility);
           if (opts.provider && !opts.model) {
             throw new Error("--provider needs --model.");
+          }
+          if (opts.resend && !opts.provider) {
+            throw new Error("--resend needs --provider.");
           }
           if (
             !opts.parentThread &&
@@ -239,6 +248,9 @@ export function registerActionsCommands(
           }
           if (visibility) {
             body.visibility = visibility;
+          }
+          if (opts.resend) {
+            body.resend = true;
           }
 
           const sdk = createCliBbSdk(getUrl());

@@ -14,6 +14,7 @@ import { SYSTEM_EXECUTION_OPTIONS_QUERY_KEY } from "@/hooks/queries/query-keys";
 import { permissionModeValues } from "@cloudroom/domain";
 import type {
   SystemCliSkillsStatusResponse,
+  SystemWorktreeStorageResponse,
   SystemExecutionOptionsResponse,
   SystemProvidersQuery,
   SystemProviderStatesResponse,
@@ -45,6 +46,7 @@ import {
   allSystemProvidersQueryKeyPrefix,
   hostProviderCliStatusQueryKey,
   systemCliSkillsQueryKey,
+  systemWorktreeStorageQueryKey,
   systemConfigQueryKey,
   systemExecutionOptionsQueryKey,
   systemInstallableProvidersQueryKey,
@@ -283,7 +285,7 @@ export function useSystemProviderInfo({
   );
 }
 
-function systemExecutionOptionsQueryOptions({
+export function systemExecutionOptionsQueryOptions({
   environmentId,
   hostId,
   providerId,
@@ -428,6 +430,15 @@ export function useCliSkillsStatus(options?: QueryOptions) {
     queryFn: ({ signal }) => sdk.system.cliSkillsStatus({ signal }),
     enabled: options?.enabled ?? true,
     staleTime: 30_000,
+  });
+}
+
+export function useWorktreeStorage() {
+  return useQuery<SystemWorktreeStorageResponse>({
+    queryKey: systemWorktreeStorageQueryKey(),
+    queryFn: ({ signal }) => sdk.system.worktreeStorage({ signal }),
+    refetchInterval: 10 * 60_000,
+    staleTime: 60_000,
   });
 }
 

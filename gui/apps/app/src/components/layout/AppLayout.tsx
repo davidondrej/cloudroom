@@ -30,6 +30,7 @@ import {
 } from "@/components/tools/tools-navigation";
 import { AppBreadcrumbs } from "./AppBreadcrumbs";
 import { DesktopUpdateBanner, GitForWindowsBanner } from "./DesktopUpdateBanner";
+import { LowDiskBanner } from "./LowDiskBanner";
 import { ComputerFallbackBanner } from "@/components/settings/YourComputers";
 import { resourceRouteLabelAtom } from "./resourceRouteLabelAtom";
 import { AppPageHeader, HEADER_ICON_BUTTON_CLASS } from "./AppPageHeader";
@@ -837,6 +838,7 @@ export function AppLayout({ children }: AppLayoutProps) {
                   <ComputerFallbackBanner />
                   <GitForWindowsBanner />
                   <DesktopUpdateBanner />
+                  <LowDiskBanner />
                   <main className="flex min-h-0 flex-1 flex-col p-4 md:p-5">
                     {children}
                   </main>

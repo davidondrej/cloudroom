@@ -372,7 +372,9 @@ export function ModelReasoningPicker({
         : modelOptions.length === 0
           ? canSwitchProviders
             ? "Select model"
-            : "No models available"
+            : selectedProvider?.signInCommand
+              ? `Sign in to ${selectedProviderLabel}`
+              : "No models available"
           : "Select model";
   const triggerModelValueIsDestructive =
     triggerModelLabel === FAILED_TO_LOAD_MODELS_LABEL;
@@ -1216,6 +1218,12 @@ export function ModelReasoningPicker({
                         {...(activeProvider?.installUrl === undefined
                           ? {}
                           : { installUrl: activeProvider.installUrl })}
+                        {...(activeProvider?.signInCommand === undefined
+                          ? {}
+                          : { signInCommand: activeProvider.signInCommand })}
+                        {...(activeProvider?.signInHint === undefined
+                          ? {}
+                          : { signInHint: activeProvider.signInHint })}
                       />
                     )}
                   </div>

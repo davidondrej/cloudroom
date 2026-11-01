@@ -318,6 +318,13 @@ export const systemInstallCliSkillsResponseSchema = z.object({
 export type SystemInstallCliSkillsResponse = z.infer<
   typeof systemInstallCliSkillsResponseSchema
 >;
+
+export interface SystemWorktreeStorageResponse {
+  freeBytes: number | null;
+  usedBytes: number | null;
+  low: boolean;
+}
+
 export type SystemConfigReloadResponse = z.infer<
   typeof systemConfigReloadResponseSchema
 >;
