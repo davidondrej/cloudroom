@@ -362,7 +362,7 @@ function missingCodexCliGuidance(): string {
     brokenLink === null
       ? ""
       : ` \`${brokenLink}\` points to a file that no longer exists.`;
-  return `Cloudroom could not find the Codex CLI on this machine.${cause} Install Codex (https://developers.openai.com/codex/cli) or put \`codex\` on PATH, then retry.`;
+  return `Cloudroom could not find the Codex CLI on this machine.${cause} Install Codex (https://developers.openai.com/codex/cli) or put \`codex\` on PATH, then retry. Cloudroom never runs the copy inside Codex.app or ChatGPT.app.`;
 }
 
 export function resolveAppServerLaunch(

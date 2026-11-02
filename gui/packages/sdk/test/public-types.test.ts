@@ -397,6 +397,7 @@ type ExpectedThreadsKey =
   | "listRunning"
   | "markRead"
   | "markUnread"
+  | "move"
   | "open"
   | "output"
   | "paneAction"

@@ -1,4 +1,3 @@
-import { isSemanticComment } from "./lib/semantic-comment.mjs";
 const blockingChildProcessCalls = new Set([
   "execFileSync",
   "execSync",
@@ -69,57 +68,8 @@ const noNativeTitleOnButton = {
   },
 };
 
-const noComments = {
-  meta: {
-    fixable: "whitespace",
-  },
-  create(context) {
-    const sourceCode = context.sourceCode;
-
-    return {
-      Program() {
-        const fileText = sourceCode.getText();
-
-        for (const comment of sourceCode.getAllComments()) {
-          const commentText = sourceCode.getText(comment);
-
-          if (isSemanticComment(commentText)) {
-            continue;
-          }
-
-          context.report({
-            node: comment,
-            message: "Code comments are forbidden.",
-            fix(fixer) {
-              if (/\r|\n/.test(commentText)) {
-                return fixer.replaceText(
-                  comment,
-                  commentText.replace(/[^\r\n]/g, ""),
-                );
-              }
-
-              const [start, end] = comment.range;
-              const before = fileText[start - 1];
-              const after = fileText[end];
-              const needsSeparator =
-                commentText.startsWith("/*") &&
-                before !== undefined &&
-                after !== undefined &&
-                !/\s/.test(before) &&
-                !/\s/.test(after);
-
-              return fixer.replaceText(comment, needsSeparator ? " " : "");
-            },
-          });
-        }
-      },
-    };
-  },
-};
-
 export const rules = {
   "no-blocking-child-process-call": noBlockingChildProcessCall,
-  "no-comments": noComments,
   "no-native-title-on-button": noNativeTitleOnButton,
   "no-native-title-with-aria-label": noNativeTitleWithAriaLabel,
 };

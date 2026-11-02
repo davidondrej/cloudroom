@@ -901,6 +901,8 @@ export async function createThreadFromRequest(
     ...createArgs,
     sendAt: request.sendAt,
   });
+  // Imported chats are old work, not new agents: they would inflate the site's agent counter.
+  if (createArgs.deferFork) return thread;
   deps.telemetry.capture({
     name: "thread_created",
     properties: {

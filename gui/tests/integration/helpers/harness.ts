@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { serve } from "@hono/node-server";
 import type { DbConnection } from "@cloudroom/db";
 import { defaultFeatureFlags } from "@cloudroom/domain";
+import { createCallerProofIssuer } from "@cloudroom/config/caller-proof";
 import {
   acquireDaemonLock,
   createHostDaemonApp,
@@ -249,6 +250,7 @@ async function startIntegrationServer(
   const serverDeps = {
     appVersion,
     bbAppManagedConfig,
+    callerProofs: await createCallerProofIssuer({ dataDir: serverDataDir }),
     providerRegistry,
     providerNativeRoots: createProviderNativeRootsCache(),
     pluginHostArtifacts,

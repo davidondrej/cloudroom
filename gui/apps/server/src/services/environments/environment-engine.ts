@@ -86,6 +86,7 @@ import {
 } from "./lifecycle-outcome.js";
 import { buildEnvironmentProvisionCommand } from "../threads/thread-create-helpers.js";
 import { recordProvisionedEnvironmentWorkspace } from "@cloudroom/db/internal-environment-lifecycle";
+import { ApiError } from "../../errors.js";
 import { type AppDeps } from "../../types.js";
 import {
   appendThreadProvisioningEvent,
@@ -676,8 +677,8 @@ async function runRemove(
   // thread can still come back, the environment is parked instead of
   // destroyed: the row stays and the folder is rebuilt on demand. Restore is
   // refused while teardown runs; the live-thread check is a last guard.
-  const automatic =
-    !explicitRemovals.has(environmentId) && isLocalWorktree(deps, row);
+  const local = isLocalWorktree(deps, row);
+  const automatic = !explicitRemovals.has(environmentId) && local;
   const park =
     automatic && environmentHasRestorableThreads(deps.db, environmentId);
   const keep = (retireAt: number | null) =>
@@ -709,16 +710,18 @@ async function runRemove(
           signal,
         });
       }
-      let branchName = row.branchName;
       if (automatic && existsSync(row.path!)) {
-        branchName = await saveWorktreeWork(
+        const branchName = await saveWorktreeWork(
           row.path!,
           worktreeNotesDir(deps, environmentId),
+          `cloudroom/saved-${environmentId}`,
         );
         if (branchName === null) {
           keep(Date.now() + WORK_RECHECK_MS);
           return;
         }
+        // Recorded before the folder goes: a retry can't save it again.
+        writeEnvironment(deps, environmentId, { branchName });
       }
       if (inUse()) {
         keep(null);
@@ -759,7 +762,6 @@ async function runRemove(
           teardownStatus: null,
           teardownMessage: null,
           retireAt: null,
-          branchName,
           parkedAt: Date.now(),
         });
         return;
@@ -770,16 +772,17 @@ async function runRemove(
         claimPath: null,
         resource: null,
         retireAt: null,
+        parkedAt: null,
       });
       applyLoggedEnvironmentLifecycleEvent(deps, {
         environmentId,
         event: { type: "destroy.recorded" },
       });
-      if (automatic)
+      if (local)
         await rm(worktreeNotesDir(deps, environmentId), {
           recursive: true,
           force: true,
-        });
+        }).catch(() => undefined);
     } catch (error) {
       writeEnvironment(deps, environmentId, {
         teardownStatus: "failed",
@@ -867,6 +870,7 @@ async function sweepProviderEnvironmentInSlot(
   }
   if (
     row.parkedAt !== null &&
+    row.teardownStatus === null &&
     environmentHasRestorableThreads(deps.db, environmentId)
   )
     return;
@@ -1029,23 +1033,27 @@ export function shortenWorktreeRetirement(
 
 const restores = new Map<string, Promise<void>>();
 
-/** Rebuilds a thread's parked worktree at its old path, on the branch that holds its saved work. */
+/** Rebuilds a parked worktree for this thread at its old path, on the branch that holds its saved work. Does nothing if it isn't parked. */
 export function restoreParkedWorktree(
   deps: Pick<Deps, "config" | "db" | "hub">,
   threadId: string,
+  environmentId: string,
 ): Promise<void> {
+  const row = getEnvironment(deps.db, environmentId);
+  if (row === null || row.parkedAt === null) return Promise.resolve();
   const thread = getThread(deps.db, threadId);
-  const row =
-    thread?.environmentId == null
-      ? null
-      : getEnvironment(deps.db, thread.environmentId);
-  if (thread === null || row === null || row.parkedAt === null)
-    return Promise.resolve();
+  if (thread === null) return Promise.resolve();
   const running = restores.get(row.id);
   if (running !== undefined) return running;
-  const restore = rebuildParkedWorktree(deps, thread, row).finally(() =>
-    restores.delete(row.id),
-  );
+  const restore = rebuildParkedWorktree(deps, thread, row)
+    .catch((error: unknown) => {
+      throw new ApiError(
+        409,
+        "worktree_restore_failed",
+        `Cloudroom couldn't bring back this thread's worktree: ${errorMessage(error)}`,
+      );
+    })
+    .finally(() => restores.delete(row.id));
   restores.set(row.id, restore);
   return restore;
 }
@@ -1061,6 +1069,8 @@ async function rebuildParkedWorktree(
       : getEnvironmentProvider(row.environmentProviderId);
   if (record === undefined || row.path === null)
     throw new Error("The worktree provider is unavailable.");
+  if (row.teardownStatus !== null)
+    throw new Error("It is being removed. Try again in a moment.");
   const context = await resolveRestoreOperationContext(
     deps,
     thread,

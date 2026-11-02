@@ -2,10 +2,13 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { experimental_findCliExecutable as findCliExecutable } from "@get-bb/plugin-sdk/provider-bridge";
 import { resetChatGptCloudflareCookiesForTests } from "../ai/chatgpt-fetch.js";
 import {
   __testing,
+  codexExecutable,
   getCodexProviderHealth,
+  getCodexProviderInstallationStatus,
   getCodexProviderUsage,
 } from "./provider-maintenance.js";
 
@@ -266,6 +269,59 @@ describe("Codex credential health and usage", () => {
       usage: { status: "error", message: expect.any(String) },
     });
   });
+
+  // #96: running a binary inside a flagged Codex.app gets the whole app moved to the Bin.
+  it.skipIf(process.platform === "win32")(
+    "never runs the Codex inside Codex.app, even through a PATH symlink, and offers Install",
+    async () => {
+      const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
+      Object.defineProperty(process, "platform", {
+        ...platform,
+        value: "darwin",
+      });
+      try {
+        const binDir = path.join(homeDir, "bin");
+        await fs.rm(path.join(binDir, "codex"));
+        // Only the fake bin, so no npm runs either.
+        vi.stubEnv("PATH", binDir);
+        // A codex this machine keeps in /usr/local/bin or Homebrew; null on a clean Mac.
+        const elsewhere = findCliExecutable("codex");
+        const bundled = path.join(
+          homeDir,
+          "Applications/Codex.app/Contents/Resources/codex",
+        );
+        const ran = path.join(homeDir, "bundled-codex-ran");
+        await fs.mkdir(path.dirname(bundled), { recursive: true });
+        const script = `#!/bin/sh\n: > '${ran}'\necho "codex-cli 0.150.0"\n`;
+        await fs.writeFile(bundled, script, { mode: 0o755 });
+        await fs.symlink(bundled, path.join(binDir, "codex"));
+
+        const status = await getCodexProviderInstallationStatus();
+        await getCodexProviderHealth();
+        await getCodexProviderUsage();
+        const bundledRan = await fs.access(ran).then(
+          () => true,
+          () => false,
+        );
+        expect(bundledRan).toBe(false);
+        expect(codexExecutable()).toBe(
+          elsewhere ??
+            path.join(homeDir, ".codex/packages/standalone/current/codex"),
+        );
+        expect(status).toMatchObject(
+          elsewhere === null
+            ? {
+                installed: false,
+                executablePath: null,
+                installAction: { kind: "install" },
+              }
+            : { executablePath: elsewhere },
+        );
+      } finally {
+        Object.defineProperty(process, "platform", platform);
+      }
+    },
+  );
 
   it("fetches usage with the ChatGPT token and retries once through a Cloudflare challenge", async () => {
     const accessToken = createAccessToken({

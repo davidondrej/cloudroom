@@ -796,7 +796,6 @@ const QueuedMessageRow = memo(function QueuedMessageRow({
                 data-queued-message-hard-queue=""
                 className="inline-flex shrink-0 text-subtle-foreground"
                 role="img"
-                aria-label="Hard Queue"
                 title="Hard Queue: sends after all child threads finish"
               >
                 <Icon name="Lock" className="size-3" aria-hidden />

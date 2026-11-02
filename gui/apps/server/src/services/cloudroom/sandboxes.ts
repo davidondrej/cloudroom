@@ -94,12 +94,16 @@ export function codexLoginFailure(output: string): string {
   return `Codex on this ${COMPUTER} only allows API-key login, but Cloudroom needs ChatGPT sign-in. Remove \`forced_login_method = "api"\` from ${config}, then click Connect again. If the file is locked, run \`chflags nouchg ${config}\` first.`;
 }
 
-type MacCodexLogin = { child: ChildProcess; url: string | null; error: string | null; done: boolean };
+type MacCodexLogin = { child: ChildProcess | null; url: string | null; error: string | null; done: boolean };
 let macCodexLoginRun: MacCodexLogin | null = null;
-/** Runs `codex login` on this Mac. Codex opens the default browser and saves the login itself; one run at a time, 10 minutes at most. */
+const codexMissing = () => `Codex is not installed on this ${COMPUTER}.${process.platform === "darwin" ? " Cloudroom never runs the copy inside Codex.app or ChatGPT.app." : ""} Install it with \`npm i -g @openai/codex\`, then click Connect again.`;
+/** Runs `codex login` on this Mac. Codex opens the default browser and saves the login itself; one run at a time, 10 minutes at most.
+ *  No Codex found means not installed: a bare `codex` could reach the one inside Codex.app through PATH (#96). */
 export function startMacCodexLogin(): MacCodexLogin {
   if (macCodexLoginRun && !macCodexLoginRun.done) return macCodexLoginRun;
-  const child = spawnPortableProcess({ command: findCliExecutable("codex") ?? "codex", args: ["login"], stdio: ["ignore", "pipe", "pipe"], timeout: 10 * 60_000 });
+  const codex = findCliExecutable("codex");
+  if (!codex) return macCodexLoginRun = { child: null, url: null, error: codexMissing(), done: true };
+  const child = spawnPortableProcess({ command: codex, args: ["login"], stdio: ["ignore", "pipe", "pipe"], timeout: 10 * 60_000 });
   const run: MacCodexLogin = { child, url: null, error: null, done: false };
   let output = "";
   const read = (chunk: Buffer) => { output += chunk.toString(); run.url ??= output.match(/https:\/\/auth\.openai\.com\/\S+/)?.[0] ?? null; };
@@ -107,7 +111,7 @@ export function startMacCodexLogin(): MacCodexLogin {
   child.stderr?.on("data", read);
   child.on("error", (error: NodeJS.ErrnoException) => {
     run.done = true;
-    run.error = error.code === "ENOENT" ? `Codex is not installed on this ${COMPUTER}. Install it with \`npm i -g @openai/codex\`, then click Connect again.` : `Codex sign-in could not start: ${error.message}`;
+    run.error = error.code === "ENOENT" ? codexMissing() : `Codex sign-in could not start: ${error.message}`;
   });
   // A cancel or the 10-minute timeout kills Codex (code null); only a real exit has an error worth showing.
   child.on("exit", code => { run.done = true; if (code !== 0) run.error ??= codexLoginFailure(code === null ? "" : output); });
@@ -121,7 +125,7 @@ export function macCodexLogin(): MacCodexLogin | null {
   return run;
 }
 export function cancelMacCodexLogin(): void {
-  if (macCodexLoginRun) killPortableProcess(macCodexLoginRun.child, "SIGTERM");
+  if (macCodexLoginRun?.child) killPortableProcess(macCodexLoginRun.child, "SIGTERM");
   macCodexLoginRun = null;
 }
 
@@ -138,8 +142,11 @@ function codexTokenExpiry(text: string): number | null {
 export async function macCodexLoginExpired(): Promise<boolean> {
   const expiry = codexTokenExpiry(await readFile(codexAuthPath(), "utf8").catch(() => ""));
   if (expiry === null || Date.now() < expiry) return false;
+  // No Codex found counts as signed in, like a failed start: never a bare `codex` PATH lookup (#96).
+  const codex = findCliExecutable("codex");
+  if (!codex) return false;
   return new Promise(resolve => {
-    const child = spawnPortableProcess({ command: findCliExecutable("codex") ?? "codex", args: ["app-server"], stdio: ["pipe", "pipe", "ignore"], timeout: 20_000 });
+    const child = spawnPortableProcess({ command: codex, args: ["app-server"], stdio: ["pipe", "pipe", "ignore"], timeout: 20_000 });
     const end = (expired: boolean) => { resolve(expired); killPortableProcess(child, "SIGTERM"); };
     const send = (message: object) => child.stdin?.write(`${JSON.stringify(message)}\n`);
     child.stdin?.on("error", () => end(false));
@@ -1197,7 +1204,7 @@ export class SandboxDirectory {
     const instructions = (await Promise.all(INSTRUCTION_FILES.map(path => stat(join(home, path)).then(() => path, () => null)))).filter((path): path is string => path !== null);
     const present = [...(await macSkills()).filter(skill => inCloud(skill.name)).flatMap(skill => skill.paths), ...instructions];
     const files = await configFiles(home, present);
-    const run = files.length ? promisify(execFile)(tarCommand(), ["-c", "-h", "--no-recursion", "--format", "ustar", "-C", home, "--null", "-T", "-"],
+    const run = files.length ? promisify(execFile)(tarCommand(), ["-c", "-h", ...(process.platform === "linux" ? ["--hard-dereference"] : []), "--no-recursion", "--format", "ustar", "-C", home, "--null", "-T", "-"],
       { encoding: "buffer", maxBuffer: 4 * CONFIG_LIMIT, timeout: 30_000, env: { ...process.env, COPYFILE_DISABLE: "1" } }) : null;
     run?.child.stdin?.on("error", () => {}).end(files.join("\0") + "\0");
     const tar = run ? (await run).stdout : Buffer.alloc(1024);

@@ -2,6 +2,20 @@
 
 Also on [cloudroom.dev/changelog](https://www.cloudroom.dev/changelog).
 
+## 139
+
+Archive cleans up after your agents (2026-11-02)
+
+### Changes
+
+- Archiving a Local thread now stops any servers it left running, 10 seconds later, once Undo has passed.
+- Archiving a Local thread also frees its idle agent session right away, instead of 30 minutes later.
+- Archiving a Cloud subagent that shares its parent's sandbox now stops its agent too.
+- When an agent hits its limit, a new Switch account button lets you carry on with another signed-in account.
+- Archiving many threads in a row no longer reloads the whole sidebar each time.
+- Cloudroom no longer runs the Codex copy inside Codex.app or ChatGPT.app, which could send those apps to the Bin.
+- Skills with long paths no longer fail to upload to the cloud on Linux.
+
 ## 138
 
 Preview Excel, Word, and PowerPoint (2026-11-01)

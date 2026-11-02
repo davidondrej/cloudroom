@@ -464,6 +464,41 @@ export function dispatchThreadRenameCommand(
   });
 }
 
+const ARCHIVED_THREAD_PROCESS_STOP_DELAY_MS = 10_000;
+
+export function scheduleArchivedThreadProcessStop(
+  deps: CommandResultSideEffectsDeps,
+  args: {
+    threadId: string;
+    archivedAt: number;
+    environment: { id: string; hostId: string };
+  },
+): void {
+  const warn = (error: unknown) =>
+    deps.logger.warn(
+      { err: error, threadId: args.threadId },
+      "Stopping an archived thread's processes failed",
+    );
+  setTimeout(() => {
+    try {
+      const thread = getThread(deps.db, args.threadId);
+      if (thread && thread.archivedAt !== args.archivedAt) return;
+      startLiveHostCommand(deps, {
+        command: {
+          type: "thread.processes.stop",
+          environmentId: args.environment.id,
+          threadId: args.threadId,
+        },
+        hostId: args.environment.hostId,
+        timeoutMs: 60_000,
+        onError: ({ error }) => warn(error),
+      });
+    } catch (error) {
+      warn(error);
+    }
+  }, ARCHIVED_THREAD_PROCESS_STOP_DELAY_MS).unref();
+}
+
 /** Pushes a generated title to a local thread's live provider session, when it has one. */
 export function syncGeneratedTitleToProvider(
   deps: CommandResultSideEffectsDeps,

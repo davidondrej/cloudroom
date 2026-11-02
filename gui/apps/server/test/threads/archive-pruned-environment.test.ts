@@ -125,6 +125,31 @@ describe("archive after environment prune", () => {
   );
 });
 
+describe("archive events", () => {
+  it("say which way the thread moved", async () => {
+    await withTestHarness(async (harness) => {
+      const { thread } = seedThreadWithEnvironment(harness.deps);
+      const archivedFlags: unknown[] = [];
+      harness.deps.hub.onChangedMessage((message) => {
+        if (
+          message.entity === "thread" &&
+          message.changes.includes("archived-changed")
+        ) {
+          archivedFlags.push(message.metadata?.archived);
+        }
+      });
+      for (const action of ["archive-all", "unarchive"]) {
+        const response = await harness.app.request(
+          `/api/v1/threads/${thread.id}/${action}`,
+          { method: "POST" },
+        );
+        expect(response.status).toBe(200);
+      }
+      expect(archivedFlags).toEqual([true, false]);
+    });
+  });
+});
+
 describe("unarchive after environment retirement", () => {
   it("keeps the environment through prune so unarchive and send restore it", async () => {
     await withTestHarness(async (harness) => {

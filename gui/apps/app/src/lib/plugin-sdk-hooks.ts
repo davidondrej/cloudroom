@@ -876,6 +876,7 @@ export function useComposer(): PluginComposerApi {
       experimental_openPopup: () => false,
       experimental_closePopup: () => false,
     }),
+    // oxlint-disable-next-line react-hooks/exhaustive-deps -- composerText makes plugins see each draft change
     [
       addQuote,
       clear,

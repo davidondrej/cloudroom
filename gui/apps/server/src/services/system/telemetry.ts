@@ -30,6 +30,8 @@ export type TelemetryEvent =
         execution: TelemetryExecution;
         is_child_thread: boolean;
         provider: string;
+        /** An imported chat's first message: its agent starts now, not at import. */
+        imported?: true;
       };
     }
   /** A thread moved to another harness or model in place (ADR 0211). */
@@ -122,7 +124,7 @@ export const ACTIVATION_STEPS = ["cloud", "subagents", "second", "phone", "loop"
 export type ActivationStep = (typeof ACTIVATION_STEPS)[number];
 export const STARTER_PROMPTS = ["security", "keys", "packages", "mac"] as const;
 export type StarterPrompt = (typeof STARTER_PROMPTS)[number];
-export const POPUPS = ["credits", "star", "install"] as const;
+export const POPUPS = ["credits", "star", "install", "star_card"] as const;
 export type Popup = (typeof POPUPS)[number];
 export const POPUP_DETAILS = ["starred", "opened", "already", "migrated"] as const;
 export type PopupDetail = (typeof POPUP_DETAILS)[number];

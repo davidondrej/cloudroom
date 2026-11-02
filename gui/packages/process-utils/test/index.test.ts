@@ -4,6 +4,8 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { join, resolve } from "node:path";
@@ -374,4 +376,55 @@ describe("process utils", () => {
     writeFileSync(official, "", { mode: 0o755 });
     expect(findCliExecutable("codex", env)).toBe(official);
   });
+
+  // #96: running a binary inside a flagged Codex.app gets the whole app moved to the Bin.
+  it.skipIf(process.platform === "win32")(
+    "never resolves the Codex inside Codex.app or ChatGPT.app, even through PATH",
+    () => {
+      const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
+      Object.defineProperty(process, "platform", {
+        ...platform,
+        value: "darwin",
+      });
+      try {
+        const home = mkdtempSync(join(tmpdir(), "codex-app-"));
+        const bin = join(home, "bin");
+        mkdirSync(bin);
+        const env = { HOME: home, PATH: bin };
+        // A codex this machine keeps in /usr/local/bin or Homebrew; null on a clean Mac.
+        const elsewhere = findCliExecutable("codex", env);
+        const bundled = ["ChatGPT.app", "Codex.app"].flatMap((app) => {
+          const resources = join(
+            home,
+            "Applications",
+            app,
+            "Contents",
+            "Resources",
+          );
+          return [
+            join(resources, "codex-cli", "bin", "codex"),
+            join(resources, "codex"),
+          ];
+        });
+        for (const file of bundled) {
+          mkdirSync(join(file, ".."), { recursive: true });
+          writeFileSync(file, "", { mode: 0o755 });
+        }
+        expect(findCliExecutable("codex", env)).toBe(elsewhere);
+        symlinkSync(bundled[0]!, join(bin, "codex"));
+        expect(findCliExecutable("codex", env)).toBe(elsewhere);
+
+        // A real PATH install, then OpenAI's official one, still win as before.
+        rmSync(join(bin, "codex"));
+        writeFileSync(join(bin, "codex"), "", { mode: 0o755 });
+        expect(findCliExecutable("codex", env)).toBe(join(bin, "codex"));
+        const official = officialCodexPath(env);
+        mkdirSync(join(official, ".."), { recursive: true });
+        writeFileSync(official, "", { mode: 0o755 });
+        expect(findCliExecutable("codex", env)).toBe(official);
+      } finally {
+        Object.defineProperty(process, "platform", platform);
+      }
+    },
+  );
 });

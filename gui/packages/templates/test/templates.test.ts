@@ -54,6 +54,7 @@ describe("@cloudroom/templates", () => {
     const rendered = renderTemplate("standardAgentAppendInstructions", {
       bugReports: "",
       mac: "on",
+      vps: "",
       windows: "",
     });
 
@@ -71,6 +72,7 @@ describe("@cloudroom/templates", () => {
       renderTemplate("standardAgentAppendInstructions", {
         bugReports: "",
         mac: windows ? "" : "on",
+        vps: "",
         windows: windows ? "on" : "",
       });
 

@@ -1,4 +1,11 @@
-import { accessSync, constants, existsSync, lstatSync, statSync } from "node:fs";
+import {
+  accessSync,
+  constants,
+  existsSync,
+  lstatSync,
+  realpathSync,
+  statSync,
+} from "node:fs";
 import { homedir } from "node:os";
 import { delimiter, isAbsolute, join } from "node:path";
 import { windowsExecutableExtensions } from "./windows.js";
@@ -55,17 +62,15 @@ function windowsFallbackCandidates(
   ];
 }
 
-function codexAppBundlePaths(home: string): string[] {
-  if (process.platform !== "darwin") return [];
-  return ["/Applications", join(home, "Applications")].flatMap((apps) =>
-    ["ChatGPT.app", "Codex.app"].flatMap((app) => {
-      const resources = join(apps, app, "Contents", "Resources");
-      return [
-        join(resources, "codex-cli", "bin", "codex"),
-        join(resources, "codex"),
-      ];
-    }),
-  );
+// Codex.app and ChatGPT.app ship a codex. Running a binary inside a bundle macOS
+// flags makes it move the whole app to the Bin (#96), so Cloudroom never runs one,
+// even through a PATH symlink. Those users install the standalone CLI instead.
+function insideAppBundle(candidate: string): boolean {
+  try {
+    return realpathSync(candidate).includes(".app/");
+  } catch {
+    return false;
+  }
 }
 
 function homeDir(env: NodeJS.ProcessEnv): string {
@@ -99,17 +104,15 @@ function fallbackCandidates(cli: string, env: NodeJS.ProcessEnv): string[] {
     join(home, ".volta", "bin"),
   ];
   const providerPaths =
-    cli === "codex"
-      ? codexAppBundlePaths(home)
-      : cli === "opencode"
-        ? [join(home, ".opencode", "bin", "opencode")]
-        : cli === "claude"
-          ? [join(home, ".claude", "local", "claude")]
-          : cli === "grok"
-            ? [join(home, ".grok", "bin", "grok")]
-            : cli === "kilo"
-              ? [join(home, ".kilo", "bin", "kilo")]
-              : [];
+    cli === "opencode"
+      ? [join(home, ".opencode", "bin", "opencode")]
+      : cli === "claude"
+        ? [join(home, ".claude", "local", "claude")]
+        : cli === "grok"
+          ? [join(home, ".grok", "bin", "grok")]
+          : cli === "kilo"
+            ? [join(home, ".kilo", "bin", "kilo")]
+            : [];
   return [...binDirs.map((dir) => join(dir, cli)), ...providerPaths];
 }
 
@@ -129,7 +132,11 @@ export function findCliExecutable(
         ...fallbackCandidates(cli, env),
       ],
       env,
-    ).find(isExecutableFile) ?? null
+    ).find(
+      (candidate) =>
+        isExecutableFile(candidate) &&
+        !(cli === "codex" && insideAppBundle(candidate)),
+    ) ?? null
   );
 }
 

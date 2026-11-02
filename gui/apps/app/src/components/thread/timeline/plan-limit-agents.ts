@@ -1,4 +1,4 @@
-import { createContext, type ComponentType } from "react";
+import { createContext, type ComponentType, type CSSProperties } from "react";
 import { useQueries } from "@tanstack/react-query";
 import {
   reasoningLevelSchema,
@@ -20,7 +20,10 @@ import {
 } from "@/hooks/queries/system-queries";
 import { useThreadDefaultExecutionOptions } from "@/hooks/queries/thread-default-execution-options-query";
 import { useThread } from "@/hooks/queries/thread-queries";
-import { getProviderIconInfo } from "@/lib/provider-icon";
+import {
+  getProviderIconInfo,
+  getProviderIconTintStyle,
+} from "@/lib/provider-icon";
 import { reasoningLevelLabel } from "@/lib/reasoning-labels";
 
 type ProviderIconComponent = ComponentType<{ className?: string }>;
@@ -29,6 +32,7 @@ export interface PlanLimitAgent {
   providerId: string;
   name: string;
   icon: ProviderIconComponent;
+  tint: CSSProperties | undefined;
   model: string;
   modelLabel: string;
   reasoningLevel: ReasoningLevel;
@@ -146,6 +150,7 @@ export function usePlanLimitAgents(threadId: string) {
           providerId: provider.id,
           name: provider.displayName,
           icon: providerIcon(provider),
+          tint: getProviderIconTintStyle(provider),
           model: pick.selectedModel,
           modelLabel: stripModelBrandPrefix(
             label,
@@ -162,7 +167,13 @@ export function usePlanLimitAgents(threadId: string) {
     );
   return {
     thread,
-    self: self ? { name: self.displayName, icon: providerIcon(self) } : null,
+    self: self
+      ? {
+          name: self.displayName,
+          icon: providerIcon(self),
+          tint: getProviderIconTintStyle(self),
+        }
+      : null,
     selfResetsAt: resetOf(providerId, currentModel),
     agents,
     primary: agents.find((agent) => agent.resetsAt === null) ?? null,

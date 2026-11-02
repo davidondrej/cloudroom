@@ -2486,9 +2486,15 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
       return threadIdentityRegistry.getProviderSession(threadId);
     },
 
-    async reapIdleProviderSessions({ idleForMs, nowMs, runThreadExclusive }) {
+    async reapIdleProviderSessions({
+      idleForMs,
+      nowMs,
+      runThreadExclusive,
+      threadId: only,
+    }) {
       const reapedSessions: ReapedIdleProviderSession[] = [];
-      for (const threadId of [...threadRuntimeConfigs.keys()]) {
+      const threadIds = only ? [only] : [...threadRuntimeConfigs.keys()];
+      for (const threadId of threadIds) {
         const release = async (): Promise<ReapedIdleProviderSession | null> => {
           const candidate = findReapableIdleProviderSession({
             idleForMs,

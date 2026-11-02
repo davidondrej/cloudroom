@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, it, vi } from "vitest";
 import { cloudroom } from "../../src/services/cloudroom/commands.js";
-import { saveStatus } from "../../src/services/cloudroom/store.js";
+import { binding, saveStatus } from "../../src/services/cloudroom/store.js";
 import { createTestAppHarness } from "../helpers/test-app.js";
 import { seedHostSession, seedProjectWithSource } from "../helpers/seed.js";
 import { cloudroomThreads, createThread, getThread } from "@cloudroom/db";
@@ -202,6 +202,54 @@ it("an unarchived Cloud child becomes top-level, keeps its parent's sandbox, and
     expect((await post(`/threads/${child.id}/archive-all`)).status).toBe(200);
     await waitFor(() => calls("archive").length === 2, "second sandbox archive");
     expect(calls("archive")).toEqual([parent.id, parent.id]);
+  } finally {
+    service.stop();
+    coreServer.close(); websiteServer.close();
+  }
+});
+
+it("archiving a working child whose parent keeps the sandbox open stops the child's agent, and only it", async () => {
+  const harness = await createTestAppHarness();
+  const { host } = seedHostSession(harness.deps);
+  const { project } = seedProjectWithSource(harness.deps, { hostId: host.id });
+  const service = cloudroom(harness.deps);
+  const website: string[] = [];
+  const core: string[] = [];
+  let coreUrl = "", sandbox = "";
+  const coreServer = createServer(async (req, res) => {
+    const json = (value: unknown, status = 200) => { res.writeHead(status, { "Content-Type": "application/json" }); res.end(JSON.stringify(value)); };
+    core.push(req.url!);
+    const input = await body(req);
+    const command = req.url?.match(/^\/v1\/sessions\/cr_child\/(stop|sleep)$/)?.[1];
+    if (command) return json({ session_id: "cr_child", receipt: { request_id: input.request_id, command, input: {}, state: "accepted" }, saving: {} }, 202);
+    return json({}, 404);
+  });
+  const websiteServer = createServer(async (req, res) => {
+    const json = (value: unknown) => { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify(value)); };
+    const input = await body(req);
+    website.push(input.action ?? input.name);
+    if (req.url === "/api/desktop/logins") return json({ claude: false, codex: false, pi: false, github: false });
+    if (input.action === "awake") return json({ sandboxes: [{ thread: sandbox, origin: coreUrl, token: "t".repeat(64) }] });
+    return json({ thread: input.thread, state: "awake", generation: 1, issue: null, origin: coreUrl, token: "t".repeat(64) });
+  });
+  coreUrl = await listen(coreServer);
+  const websiteUrl = await listen(websiteServer);
+  try {
+    await service.configure(null, { id: "11111111-1111-4111-8111-111111111111", email: "sandbox@example.com" }, undefined, websiteUrl, "a".repeat(64));
+    const parent = createThread(harness.deps.db, harness.deps.hub, { executionTarget: "cloud", projectId: project.id, providerId: "codex", status: "active" });
+    const child = createThread(harness.deps.db, harness.deps.hub, { executionTarget: "cloud", projectId: project.id, providerId: "codex", parentThreadId: parent.id, status: "active" });
+    sandbox = parent.id;
+    harness.deps.db.insert(cloudroomThreads).values([
+      { threadId: parent.id, coreUrl: `sandbox:${parent.id}`, sessionId: "cr_parent", startRequestId: "parent", model: "test-model", reasoning: "medium" },
+      { threadId: child.id, coreUrl: `sandbox:${parent.id}`, sessionId: "cr_child", startRequestId: "child", model: "test-model", reasoning: "medium" },
+    ]).run();
+
+    expect((await harness.app.request(`/api/v1/threads/${child.id}/archive-all`, { method: "POST" })).status).toBe(200);
+    await waitFor(() => core.includes("/v1/sessions/cr_child/sleep"), "child stop and sleep");
+    expect(core.filter(path => /\/(stop|sleep)$/.test(path))).toEqual(["/v1/sessions/cr_child/stop", "/v1/sessions/cr_child/sleep"]);
+    expect(website).not.toContain("archive");
+    expect(getThread(harness.deps.db, child.id)?.status).toBe("idle");
+    expect(binding(harness.deps.db, child.id)?.queuePaused).toBe(true);
   } finally {
     service.stop();
     coreServer.close(); websiteServer.close();

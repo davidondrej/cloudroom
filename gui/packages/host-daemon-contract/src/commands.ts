@@ -422,6 +422,10 @@ const threadArchiveCommandSchema = hostDaemonThreadWorkspaceTargetSchema
   })
   .strict();
 
+const threadProcessesStopCommandSchema = hostDaemonThreadTargetSchema.extend({
+  type: z.literal("thread.processes.stop"),
+});
+
 const threadUnarchiveCommandSchema = hostDaemonThreadTargetSchema
   .extend({
     type: z.literal("thread.unarchive"),
@@ -1557,6 +1561,17 @@ export const hostDaemonCommandRegistry = {
     retryable: false,
     flushEventsBeforeResult: false,
     envLane: "write",
+  }),
+  "thread.processes.stop": defineHostDaemonCommandDescriptor({
+    type: "thread.processes.stop",
+    schema: threadProcessesStopCommandSchema,
+    resultSchema: z
+      .object({ stopped: z.number().int().nonnegative() })
+      .strict(),
+    transport: "settled",
+    retryable: false,
+    flushEventsBeforeResult: false,
+    envLane: null,
   }),
   "thread.unarchive": defineHostDaemonCommandDescriptor({
     type: "thread.unarchive",

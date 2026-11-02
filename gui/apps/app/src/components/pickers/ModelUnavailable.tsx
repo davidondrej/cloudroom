@@ -184,7 +184,6 @@ export function ModelUnavailable({
       <button
         type="button"
         aria-label={`Retry loading ${providerLabel} models`}
-        title="Retry"
         disabled={retry.isPending}
         onClick={() => retry.mutate(error?.canRestart === true || needsSignIn)}
         className="flex size-7 items-center justify-center rounded-md border border-border text-muted-foreground hover:bg-state-hover hover:text-foreground disabled:opacity-60"

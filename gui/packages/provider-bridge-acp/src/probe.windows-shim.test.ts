@@ -8,8 +8,14 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, expect, it } from "vitest";
-import { probeAcpAgent } from "./probe.js";
+import { afterAll, afterEach, beforeEach, expect, it, vi } from "vitest";
+
+const originalPlatform = process.platform;
+Object.defineProperty(process, "platform", {
+  configurable: true,
+  value: "win32",
+});
+const { probeAcpAgent } = await import("./probe.js");
 
 const OPENCODE_CMD =
   '@ECHO off\r\nGOTO start\r\n:find_dp0\r\nSET dp0=%~dp0\r\nEXIT /b\r\n:start\r\nSETLOCAL\r\nCALL :find_dp0\r\n"%dp0%\\node_modules\\opencode-ai\\bin\\opencode.exe"   %*\r\n';
@@ -17,23 +23,23 @@ const AGENT = `process.stdin.once("data", () => {
   process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: 1, result: { protocolVersion: 1, agentCapabilities: {} } }) + "\\n");
 });`;
 
-const originalPlatform = process.platform;
 let root: string;
 
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), "acp-win-shim-"));
-  Object.defineProperty(process, "platform", {
-    configurable: true,
-    value: "win32",
-  });
+  vi.stubEnv("PATHEXT", ".com;.exe;.bat;.cmd");
 });
 
 afterEach(() => {
+  vi.unstubAllEnvs();
+  rmSync(root, { recursive: true, force: true });
+});
+
+afterAll(() => {
   Object.defineProperty(process, "platform", {
     configurable: true,
     value: originalPlatform,
   });
-  rmSync(root, { recursive: true, force: true });
 });
 
 it("starts an npm-installed agent whose .cmd shim targets an exe (opencode) on Windows, natively too", async () => {

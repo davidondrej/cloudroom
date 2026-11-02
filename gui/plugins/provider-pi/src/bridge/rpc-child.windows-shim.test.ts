@@ -8,9 +8,15 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { probePiVersion } from "./provider-maintenance.js";
-import { PiRpcChild } from "./rpc-child.js";
+import { afterAll, afterEach, beforeEach, expect, it, vi } from "vitest";
+
+const originalPlatform = process.platform;
+Object.defineProperty(process, "platform", {
+  configurable: true,
+  value: "win32",
+});
+const { probePiVersion } = await import("./provider-maintenance.js");
+const { PiRpcChild } = await import("./rpc-child.js");
 
 const NPM_PI_CMD = [
   "@ECHO off",
@@ -41,7 +47,6 @@ const CLI_PARTS = [
   "cli.js",
 ];
 
-const originalPlatform = process.platform;
 let root: string;
 
 function npmPrefix(script: string, withNode = true): string {
@@ -61,21 +66,21 @@ function npmPrefix(script: string, withNode = true): string {
 
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), "bb-pi-win-shim-"));
-  Object.defineProperty(process, "platform", {
-    configurable: true,
-    value: "win32",
-  });
   vi.stubEnv("BB_PI_BRIDGE_COMMAND", "");
   vi.stubEnv("BB_PI_BRIDGE_ARGS", "");
+  vi.stubEnv("PATHEXT", ".com;.exe;.bat;.cmd");
 });
 
 afterEach(() => {
+  vi.unstubAllEnvs();
+  rmSync(root, { recursive: true, force: true });
+});
+
+afterAll(() => {
   Object.defineProperty(process, "platform", {
     configurable: true,
     value: originalPlatform,
   });
-  vi.unstubAllEnvs();
-  rmSync(root, { recursive: true, force: true });
 });
 
 it("probes the version of an npm-installed pi on Windows", async () => {

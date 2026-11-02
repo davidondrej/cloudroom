@@ -1,15 +1,21 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { delimiter, join } from "node:path";
-import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { resolveWindowsShim } from "../src/index.js";
+import { join } from "node:path";
+import { afterAll, afterEach, beforeEach, expect, it, vi } from "vitest";
+
+const originalPlatform = process.platform;
+Object.defineProperty(process, "platform", {
+  configurable: true,
+  value: "win32",
+});
+const { resolvePortableCommand, resolveWindowsShim } =
+  await import("../src/index.js");
 
 const NPM_SHIM_HEAD =
   "@ECHO off\r\nGOTO start\r\n:find_dp0\r\nSET dp0=%~dp0\r\nEXIT /b\r\n:start\r\nSETLOCAL\r\nCALL :find_dp0\r\n";
 const PI_CMD = `${NPM_SHIM_HEAD}\r\nIF EXIST "%dp0%\\node.exe" (\r\n  SET "_prog=%dp0%\\node.exe"\r\n) ELSE (\r\n  SET "_prog=node"\r\n  SET PATHEXT=%PATHEXT:;.JS;=;%\r\n)\r\n\r\nendLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\\node_modules\\@earendil-works\\pi-coding-agent\\dist\\bundle\\cli.js" %*\r\n`;
 const OPENCODE_CMD = `${NPM_SHIM_HEAD}"%dp0%\\node_modules\\opencode-ai\\bin\\opencode.exe"   %*\r\n`;
 
-const originalPlatform = process.platform;
 let root: string;
 
 function dir(files: Record<string, string>): string {
@@ -23,19 +29,19 @@ function dir(files: Record<string, string>): string {
 
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), "cr-win-shim-"));
-  Object.defineProperty(process, "platform", {
-    configurable: true,
-    value: "win32",
-  });
+  vi.stubEnv("PATHEXT", ".com;.exe;.bat;.cmd");
 });
 
 afterEach(() => {
+  vi.unstubAllEnvs();
+  rmSync(root, { recursive: true, force: true });
+});
+
+afterAll(() => {
   Object.defineProperty(process, "platform", {
     configurable: true,
     value: originalPlatform,
   });
-  vi.unstubAllEnvs();
-  rmSync(root, { recursive: true, force: true });
 });
 
 it("runs a JS-target shim as node plus its script, preferring the node.exe beside it", () => {
@@ -82,21 +88,21 @@ it("runs an exe-target shim's exe directly", () => {
   });
 });
 
-it("leaves an earlier exe, a cwd command, and an unreadable shim alone", () => {
+it("leaves an earlier exe, a cwd command, and an unreadable shim alone, as cross-spawn picks them", () => {
   const unchanged = { command: "pi", args: [] };
   const npm = dir({ "pi.cmd": PI_CMD });
   const bun = dir({ "pi.exe": "" });
   expect(
     resolveWindowsShim({
       ...unchanged,
-      env: { PATH: [bun, npm].join(delimiter) },
+      env: { PATH: `${bun};${npm}` },
     }),
   ).toEqual(unchanged);
   const project = dir({ "pi.exe": "" });
   expect(
     resolveWindowsShim({ ...unchanged, cwd: project, env: { PATH: npm } }),
   ).toEqual(unchanged);
-  vi.stubEnv("PATHEXT", ".EXE;.CMD");
+  vi.stubEnv("PATHEXT", ".exe;.cmd");
   expect(
     resolveWindowsShim({
       ...unchanged,
@@ -115,6 +121,10 @@ it("leaves an earlier exe, a cwd command, and an unreadable shim alone", () => {
   expect(resolveWindowsShim({ ...unchanged, env: { PATH: npm } })).toEqual(
     unchanged,
   );
+  Object.defineProperty(process, "platform", {
+    configurable: true,
+    value: "win32",
+  });
 });
 
 it("leaves any shim but npm's exact templates alone", () => {
@@ -145,4 +155,25 @@ it("leaves any shim but npm's exact templates alone", () => {
       }),
     ).toEqual(unchanged);
   }
+});
+
+it("leaves cwd's extensionless command alone when PATHEXT has an empty entry, as cross-spawn does", () => {
+  vi.stubEnv("PATHEXT", ".exe;.cmd;");
+  const project = dir({ pi: "#!/usr/bin/env node\nconsole.log(1)\n" });
+  const npm = dir({ "pi.cmd": PI_CMD });
+  expect(
+    resolveWindowsShim({
+      command: "pi",
+      args: [],
+      cwd: project,
+      env: { PATH: npm },
+    }),
+  ).toEqual({ command: "pi", args: [] });
+});
+
+it("finds a command in a quoted PATH entry", () => {
+  const nodejs = dir({ "npm.cmd": "" });
+  expect(
+    resolvePortableCommand("npm.cmd", { env: { PATH: `"${nodejs}"` } }),
+  ).toBe(join(nodejs, "npm.cmd"));
 });

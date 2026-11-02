@@ -2074,7 +2074,9 @@ export function NewThreadComposer({
     },
     [
       executionTarget,
-      snapshotDraftBeforeOptionChange,
+      pickStarter,
+      selectCloudTarget,
+      cloudLocked,
       activeModel,
       composerError,
       commandSuggestions,

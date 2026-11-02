@@ -48,6 +48,7 @@ const providers = [
       signInHint: "",
       expiredHint: "",
       installUrl: "https://claude.com/claude-code",
+      iconTint: { light: "#D97757", dark: "#D97757" },
     },
   }),
   makeProviderInfo({ id: "codex", displayName: "Codex", logoUrl: codexLogo }),
@@ -131,13 +132,32 @@ function usage(usedPercent: number, resetInMinutes: number) {
   };
 }
 
-function seededClient(othersUsedPercent: number): QueryClient {
+const accounts = [
+  { id: "a1", email: "alex@acme.co", inUse: false, windows: [] },
+  {
+    id: "a2",
+    email: "alex.backup@gmail.com",
+    inUse: false,
+    limitedUntil: Date.now() + 3_600_000,
+    windows: [],
+  },
+  { id: "a3", email: "alex@gmail.com", inUse: true, windows: [] },
+];
+
+function seededClient(
+  othersUsedPercent: number,
+  withAccounts: boolean,
+): QueryClient {
   const client = new QueryClient({
     defaultOptions: {
       queries: { gcTime: Infinity, retry: false, staleTime: Infinity },
     },
   });
   client.setQueryData(hostsQueryKey(), []);
+  client.setQueryData(
+    ["plan-limit-accounts", "claude-code"],
+    withAccounts ? accounts : [],
+  );
   client.setQueryData(systemConfigQueryKey(), makeSystemConfig());
   client.setQueryData(
     threadQueryKey(THREAD_ID),
@@ -188,8 +208,16 @@ function seededClient(othersUsedPercent: number): QueryClient {
   return client;
 }
 
-function Preview({ othersUsedPercent }: { othersUsedPercent: number }) {
-  const [client] = useState(() => seededClient(othersUsedPercent));
+function Preview({
+  othersUsedPercent,
+  withAccounts = false,
+}: {
+  othersUsedPercent: number;
+  withAccounts?: boolean;
+}) {
+  const [client] = useState(() =>
+    seededClient(othersUsedPercent, withAccounts),
+  );
   return (
     <QueryClientProvider client={client}>
       <div className="w-full max-w-[760px]">
@@ -207,13 +235,25 @@ export function States() {
   return (
     <StoryCard>
       <StoryRow
-        label="another agent has room"
-        hint="Continue picks Codex on the same-level model (Opus 5.5 → GPT-6.1 Sol, Max → Extra High); the arrow lists every agent"
+        label="another account and another agent"
+        hint="Switch account picks the next account with room; each arrow lists accounts or agents"
+      >
+        <Preview othersUsedPercent={36} withAccounts />
+      </StoryRow>
+      <StoryRow
+        label="only another agent"
+        hint="one Claude account; Continue picks Codex on the same-level model"
       >
         <Preview othersUsedPercent={36} />
       </StoryRow>
       <StoryRow
-        label="every agent is at its limit"
+        label="only another account"
+        hint="every other agent is at its limit; accounts at their limit still show"
+      >
+        <Preview othersUsedPercent={100} withAccounts />
+      </StoryRow>
+      <StoryRow
+        label="nothing to switch to"
         hint="no button; the row only says when the limit resets"
       >
         <Preview othersUsedPercent={100} />

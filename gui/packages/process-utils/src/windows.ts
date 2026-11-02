@@ -115,25 +115,15 @@ export function resolveWindowsShim(request: {
   command: string;
   args: string[];
   cwd?: string;
-  env: NodeJS.ProcessEnv;
+  env?: NodeJS.ProcessEnv;
 }): { command: string; args: string[] } {
   const unchanged = { command: request.command, args: request.args };
   if (process.platform !== "win32") return unchanged;
-  const env = Object.fromEntries(
-    Object.entries(request.env).filter(
-      ([key]) => key.toUpperCase() !== "PATHEXT",
-    ),
-  );
-  env.PATHEXT = process.env.PATHEXT || ".EXE;.CMD;.BAT;.COM";
-  const lookup = { cwd: request.cwd, env };
-  const inCwd =
-    !/[\\/]/u.test(request.command) &&
-    resolvePortableCommand(request.command, {
-      ...lookup,
-      env: { ...env, PATH: "." },
-    }) !== undefined;
-  const shim = resolvePortableCommand(request.command, lookup);
-  if (inCwd || shim === undefined || !/\.cmd$/iu.test(shim)) return unchanged;
+  const shim = parseCrossSpawnCommand(request.command, request.args, {
+    cwd: request.cwd,
+    env: request.env,
+  }).file;
+  if (shim === undefined || !/\.cmd$/iu.test(shim)) return unchanged;
   let source = "";
   try {
     source = readFileSync(shim, "utf8");

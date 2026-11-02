@@ -362,6 +362,15 @@ export function pendingImportFork(
   db: DbQueryConnection,
   threadId: string,
 ): ThreadForkDescriptor | null {
+  const fork = threadForkDescriptorSchema.safeParse(pendingImport(db, threadId)?.metadata);
+  return fork.success ? fork.data : null;
+}
+
+/** An imported chat whose agent has not run yet; its next turn is its first. */
+export function pendingImport(
+  db: DbQueryConnection,
+  threadId: string,
+): { metadata?: unknown } | null {
   const row = db
     .select({ type: events.type, data: events.data })
     .from(events)
@@ -389,7 +398,5 @@ export function pendingImportFork(
     operation?: unknown;
     metadata?: unknown;
   };
-  if (data.operation !== THREAD_IMPORT_OPERATION) return null;
-  const fork = threadForkDescriptorSchema.safeParse(data.metadata);
-  return fork.success ? fork.data : null;
+  return data.operation === THREAD_IMPORT_OPERATION ? data : null;
 }

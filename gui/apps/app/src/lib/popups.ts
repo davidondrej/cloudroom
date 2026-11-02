@@ -8,7 +8,7 @@ const ORDER = ["credits", "star", "install"] as const;
 export type Popup = (typeof ORDER)[number];
 type Detail = "starred" | "opened" | "already" | "migrated";
 type State = { closed: Popup[]; shownAt: number | null; credits: boolean; checklistHides: number };
-type Unsaved = { popup: Popup; detail?: Detail };
+type Unsaved = { popup: Popup | "star_card"; detail?: Detail };
 const PATH = "/api/v1/cloudroom/popups";
 const KEY = ["cloudroom-popups"];
 const DAY = 86_400_000;
@@ -17,7 +17,7 @@ const LEGACY_KEYS: Partial<Record<Popup, string>> = { credits: "cloudroom.credit
 const statusAtom = atom<Partial<Record<Popup, boolean | null>>>({});
 const openAtom = atom<Popup | "claiming" | null>(null);
 
-const send = async (body: { popup: Popup; event: "shown" | "closed"; detail?: Detail }) => {
+const send = async (body: { popup: Popup | "star_card"; event: "shown" | "closed"; detail?: Detail }) => {
   const response = await fetchWithAppSurface(PATH, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
   if (!response.ok) throw new Error("The pop-up could not be saved.");
   return (await response.json() as { ok?: boolean }).ok === true;
@@ -26,7 +26,7 @@ const send = async (body: { popup: Popup; event: "shown" | "closed"; detail?: De
 const readUnsaved = (): Unsaved[] => {
   try {
     const list = JSON.parse(getLocalStorage()?.getItem(UNSAVED_KEY) ?? "[]") as Unsaved[];
-    return Array.isArray(list) ? list.filter((item) => ORDER.includes(item?.popup)) : [];
+    return Array.isArray(list) ? list.filter((item) => item?.popup === "star_card" || ORDER.includes(item?.popup)) : [];
   } catch { return []; }
 };
 const writeUnsaved = (list: Unsaved[]) => {
@@ -46,6 +46,9 @@ async function saveClosed(item: Unsaved) {
   if (saved) writeUnsaved(readUnsaved().filter((other) => other.popup !== item.popup));
 }
 
+export const claimStarCard = () => send({ popup: "star_card", event: "shown" }).catch(() => false);
+export const closeStarCard = (detail?: "starred" | "opened") => void saveClosed({ popup: "star_card", ...(detail ? { detail } : {}) });
+
 function usePopupState() {
   return useQuery<State | null>({
     queryKey: KEY, retry: false,
@@ -54,9 +57,9 @@ function usePopupState() {
       const state = response.ok ? await response.json() as State | null : null;
       if (!state) return null;
       const legacy = ORDER.filter(closedBefore).map((popup): Unsaved => ({ popup, detail: "migrated" }));
-      const unsaved = [...readUnsaved(), ...legacy].filter((item) => !state.closed.includes(item.popup));
+      const unsaved = [...readUnsaved(), ...legacy].filter((item) => item.popup === "star_card" || !state.closed.includes(item.popup));
       for (const item of unsaved) void saveClosed(item);
-      return { ...state, closed: [...new Set([...state.closed, ...unsaved.map((item) => item.popup)])] };
+      return { ...state, closed: [...new Set([...state.closed, ...unsaved.flatMap((item) => item.popup === "star_card" ? [] : [item.popup])])] };
     },
   });
 }

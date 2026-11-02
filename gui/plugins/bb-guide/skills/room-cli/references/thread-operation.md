@@ -197,3 +197,5 @@ For review or fix pipelines, get the environment ID from
   same scope, size, and title. It does not replay the original launch command.
 
 `room-cli thread update <id> --parent-thread <parent-id>` makes an existing thread a child; the parent then gets its turn updates. Clearing a thread's parent with `room-cli thread update --clear-parent-thread` inherits the former parent's section unless the update explicitly supplies a section. Unarchiving a child under an archived parent also releases it to top-level, unless `room-cli thread unarchive --keep-parent` keeps the link; under an open parent it stays a child. Children released by environment archiving also inherit their former parent's section.
+
+Archiving a Local thread, 10 seconds later once Undo has passed, frees its idle agent session and stops what it left running outside the app: processes carrying its `ROOM_THREAD_ID`, such as a `nohup` dev server. Apps it opened are left alone. Cloud archive stops the whole sandbox.

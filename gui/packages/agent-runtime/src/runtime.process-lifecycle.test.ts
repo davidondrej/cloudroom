@@ -953,6 +953,51 @@ describe("createAgentRuntime process lifecycle", () => {
     }
   });
 
+  it("frees only the targeted thread's idle session", async () => {
+    const events: ThreadEvent[] = [];
+    const { runtime } = createCodexRuntime({ events });
+    try {
+      for (const [threadId, clientRequestId] of [
+        ["t1", "creq_2222222263"],
+        ["t2", "creq_2222222264"],
+      ] as const) {
+        await runtime.startThread({
+          environmentId: "env-1",
+          threadId,
+          projectId: "p1",
+          providerId: "codex",
+          options: fullRuntimeOptions,
+        });
+        await runtime.runTurn({
+          clientRequestId,
+          threadId,
+          input: [promptTextInput({ text: `idle ${threadId}` })],
+          options: fullRuntimeOptions,
+        });
+        await waitForThreadAgentMessageText({
+          events,
+          providerId: "codex",
+          runtime,
+          text: `idle ${threadId}`,
+          threadId,
+        });
+      }
+
+      const result = await runtime.reapIdleProviderSessions({
+        idleForMs: 0,
+        nowMs: Date.now(),
+        threadId: "t1",
+      });
+      expect(result.reapedSessions.map((session) => session.threadId)).toEqual([
+        "t1",
+      ]);
+      expect(runtime.hasThread("t1")).toBe(false);
+      expect(runtime.hasThread("t2")).toBe(true);
+    } finally {
+      await runtime.shutdown();
+    }
+  });
+
   it("reaps an idle codex session and resumes it on a new process", async () => {
     const events: ThreadEvent[] = [];
     const { processLog, runtime } = createCodexRuntime({ events });

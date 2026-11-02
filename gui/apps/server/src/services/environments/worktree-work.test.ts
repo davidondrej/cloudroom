@@ -40,7 +40,7 @@ describe("saveWorktreeWork and restoreWorktreeWork", () => {
       writeFileSync(path.join(tree, "private", "plan.md"), "plan");
       mkdirSync(path.join(tree, "node_modules"));
 
-      expect(await saveWorktreeWork(tree, notes)).toBe("room/task");
+      expect(await saveWorktreeWork(tree, notes, "cloudroom/saved-env")).toBe("room/task");
       git(repo, "worktree", "remove", "--force", tree);
       git(repo, "worktree", "add", "-q", tree, "room/task");
       await restoreWorktreeWork(tree, notes);
@@ -53,15 +53,39 @@ describe("saveWorktreeWork and restoreWorktreeWork", () => {
       expect(existsSync(notes)).toBe(false);
     }));
 
-  it("keeps a detached HEAD's work on a new branch", () =>
+  it("lets saved notes win over older notes in the rebuilt folder", () =>
+    withRepo(async (base, repo) => {
+      const tree = path.join(base, "tree");
+      const notes = path.join(base, "notes");
+      git(repo, "worktree", "add", "-q", "-b", "room/task", tree);
+      mkdirSync(path.join(tree, "private"));
+      writeFileSync(path.join(tree, "private", "plan.md"), "newer");
+
+      await saveWorktreeWork(tree, notes, "cloudroom/saved-env");
+      git(repo, "worktree", "remove", "--force", tree);
+      git(repo, "worktree", "add", "-q", tree, "room/task");
+      mkdirSync(path.join(tree, "private"));
+      writeFileSync(path.join(tree, "private", "plan.md"), "older");
+      await restoreWorktreeWork(tree, notes);
+
+      expect(readFileSync(path.join(tree, "private", "plan.md"), "utf8")).toBe("newer");
+      expect(existsSync(notes)).toBe(false);
+    }));
+
+  it("keeps a detached HEAD's work on the given branch and stays on it", () =>
     withRepo(async (base, repo) => {
       const tree = path.join(base, "tree");
       git(repo, "worktree", "add", "-q", "--detach", tree);
       writeFileSync(path.join(tree, "draft.txt"), "draft");
 
-      const branch = await saveWorktreeWork(tree, path.join(base, "notes"));
+      const branch = await saveWorktreeWork(
+        tree,
+        path.join(base, "notes"),
+        "cloudroom/saved-env",
+      );
 
-      expect(branch).toMatch(/^cloudroom\/saved-/);
+      expect(branch).toBe("cloudroom/saved-env");
       expect(git(repo, "show", `${branch}:draft.txt`)).toBe("draft");
+      expect(git(tree, "branch", "--show-current").trim()).toBe(branch);
     }));
 });

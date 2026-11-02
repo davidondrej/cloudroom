@@ -198,6 +198,7 @@ export interface RuntimeManagerOptions {
 export interface RuntimeManagerReapIdleProviderSessionsArgs {
   idleForMs: number;
   nowMs: number;
+  threadId?: string;
 }
 
 interface RuntimeManagerReapedIdleProviderSession extends ReapedIdleProviderSession {

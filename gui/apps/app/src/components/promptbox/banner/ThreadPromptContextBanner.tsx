@@ -535,7 +535,6 @@ function MinimalGitBanner({
           aria-expanded={isExpanded}
           aria-controls={SECTION_IDS.git.body}
           aria-label={`Changed files: ${prefix}, ${formatChangeSummary(tally)}`}
-          title={`${prefix} · ${formatChangeSummary(tally)}`}
           onClick={onToggle}
           className={cn(
             "ml-auto flex min-h-6 shrink-0 cursor-pointer items-center gap-1 rounded px-1.5 text-2xs transition-[color,opacity]",

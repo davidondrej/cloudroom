@@ -102,7 +102,6 @@ export function CollapsibleActiveStackCard({
           <button
             type="button"
             aria-label={action.ariaLabel}
-            title={action.ariaLabel}
             onClick={action.onClick}
             disabled={action.isPending}
             className={DISMISS_BUTTON_CLASS}

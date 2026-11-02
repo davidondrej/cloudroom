@@ -155,16 +155,17 @@ export function spawnPortableProcess(
   // shim is cmd.exe; on Windows the whole tree ends first instead.
   const treeTimeout =
     process.platform === "win32" ? request.timeout : undefined;
+  const env = request.env && normalizeWindowsEnv(request.env);
   const launch = resolveWindowsShim({
     command: request.command,
     args: request.args,
     cwd: request.cwd,
-    env: request.env ?? process.env,
+    env,
   });
   const child = crossSpawn(launch.command, launch.args, {
     cwd: request.cwd,
     detached: request.detached,
-    env: request.env && normalizeWindowsEnv(request.env),
+    env,
     stdio: request.stdio,
     timeout: treeTimeout === undefined ? request.timeout : undefined,
     windowsHide: request.windowsHide,

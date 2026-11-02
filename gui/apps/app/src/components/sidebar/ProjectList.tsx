@@ -1575,6 +1575,7 @@ function ProjectListComponent({
   const getSectionSort = useSidebarSectionSort();
   const comparatorCache = useMemo(
     () => new Map<string, ThreadComparator>(),
+    // oxlint-disable-next-line react-hooks/exhaustive-deps -- a new title source must empty the cache
     [titleMentionResources],
   );
   const compareThreadsForSection = useCallback<SidebarSectionComparator>(

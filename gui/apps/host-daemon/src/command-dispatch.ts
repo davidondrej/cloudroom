@@ -143,6 +143,7 @@ export {
   getErrorCode,
   type CommandDispatchOptions,
 } from "./command-dispatch-support.js";
+import { stopThreadProcesses } from "./thread-processes.js";
 
 type CommandHandlerMap = {
   [TType in HostDaemonSettledCommandType]: (
@@ -544,6 +545,31 @@ const commandHandlers: CommandHandlerMap = {
       bridgeLaunch,
     });
     return {};
+  },
+  "thread.processes.stop": async (command, options) => {
+    await options.runtimeManager
+      .reapIdleProviderSessions({
+        idleForMs: 0,
+        nowMs: Date.now(),
+        threadId: command.threadId,
+      })
+      .catch((error: unknown) =>
+        options.logger.warn(
+          { err: error, threadId: command.threadId },
+          "Freeing an archived thread's agent session failed",
+        ),
+      );
+    const stopped = await stopThreadProcesses(
+      command.threadId,
+      options.runtimeManager.getShellEnv().ROOM_SERVER_URL,
+    );
+    if (stopped > 0) {
+      options.logger.debug(
+        { threadId: command.threadId, stopped },
+        "Stopped processes an archived thread left running",
+      );
+    }
+    return { stopped };
   },
   "thread.unarchive": async (command, options) => {
     const bridgeLaunch = await resolveRuntimeBridgeLaunch(

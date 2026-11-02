@@ -30,6 +30,7 @@ import {
 } from "./thread-lifecycle.js";
 import { archiveThreadAndReleaseChildren } from "./thread-ownership.js";
 import { requireThreadHostCommandEnvironment } from "./thread-command-environment.js";
+import { scheduleArchivedThreadProcessStop } from "./thread-commands.js";
 import { getThreadProvisionContext } from "./thread-startup-store.js";
 import { isPreStartThreadStatus } from "./thread-status.js";
 import { cloudroom, isCloudThread } from "../cloudroom/commands.js";
@@ -118,6 +119,13 @@ function archiveThreadWithLifecycleEffects(
     }
     dispatchSettledArchivedThreadProviderArchiveCommand(deps, {
       threadId: archivedThread.id,
+    });
+  }
+  if (args.environment !== null && archivedThread.archivedAt !== null) {
+    scheduleArchivedThreadProcessStop(deps, {
+      threadId: archivedThread.id,
+      archivedAt: archivedThread.archivedAt,
+      environment: args.environment,
     });
   }
   resetActiveThreadEventPruningState(archivedThread.id);

@@ -212,6 +212,7 @@ export type ThreadStatusChangeMetadata = z.infer<
 
 export const threadChangeMetadataSchema = z
   .object({
+    archived: z.boolean().optional(),
     backgroundActivityChanged: z.boolean().optional(),
     eventTypes: z.array(threadEventTypeSchema).readonly().optional(),
     hasPendingInteraction: z.boolean().optional(),
@@ -296,6 +297,7 @@ const knownThreadEventTypes: ReadonlySet<string> = new Set(
 );
 
 const threadChangeMetadataLenientSchema = z.object({
+  archived: z.boolean().optional(),
   backgroundActivityChanged: z.boolean().optional(),
   eventTypes: z
     .array(z.string())

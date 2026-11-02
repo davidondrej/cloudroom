@@ -34,6 +34,7 @@ function lenientOptionsByEntity(): Map<string, LenientChangedOption> {
 }
 
 const maximalThreadMetadata: ThreadChangeMetadata = {
+  archived: true,
   backgroundActivityChanged: true,
   eventTypes: [...threadEventTypeValues],
   hasPendingInteraction: true,

@@ -46,7 +46,11 @@ export const accountsRpcContract = defineRpcContract({
     input: z.object({ provider: providerSchema }),
     output: z.array(accountViewSchema),
   },
-  "accounts.use": { input: target, output: ok },
+  "accounts.use": {
+    // `cloud` waits until Cloud is on the account too, and fails if it isn't.
+    input: target.extend({ cloud: z.boolean().optional() }),
+    output: ok,
+  },
   "accounts.move": {
     input: target.extend({ direction: z.enum(["up", "down"]) }),
     output: ok,

@@ -1945,6 +1945,7 @@ export function archiveThread(
     .get();
   if (updated) {
     notifier.notifyThread(id, ["archived-changed"], {
+      archived: true,
       projectId: updated.projectId,
     });
   }
@@ -1965,6 +1966,7 @@ export function unarchiveThread(
     .get();
   if (updated) {
     notifier.notifyThread(id, ["archived-changed"], {
+      archived: false,
       projectId: updated.projectId,
     });
     showProjectOfVisibleThread(db, notifier, updated);

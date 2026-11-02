@@ -26,6 +26,7 @@ import {
   updateCachedThreadListStatusState,
 } from "./query-cache";
 import { bumpDiffPatchFreshnessGeneration } from "./environment-diff-patch-cache-owner";
+import { removeLiveThreadsFromCachedLists } from "./thread-archive-cache";
 import { invalidateSystemExecutionOptions } from "./system-cache-effects";
 import {
   getCachedThreadLists,
@@ -145,12 +146,18 @@ const THROTTLED_LIST_QUERY_ROOTS = new Set<unknown>([
   threadSearchQueryKeyPrefix()[0],
 ]);
 
-const statusPatchesByFetchingQuery = new WeakMap<
+const ARCHIVED_THREAD_LIST_PATCH = "archived";
+
+type InFlightThreadListPatch =
+  | ThreadStatusChangeMetadata
+  | typeof ARCHIVED_THREAD_LIST_PATCH;
+
+const listPatchesByFetchingQuery = new WeakMap<
   QueryClient,
-  Map<string, Map<string, ThreadStatusChangeMetadata>>
+  Map<string, Map<string, InFlightThreadListPatch>>
 >();
 
-const statusPatchUnsubscribers = new WeakMap<QueryClient, () => void>();
+const listPatchUnsubscribers = new WeakMap<QueryClient, () => void>();
 
 const TRAILING_REFETCH_MIN_INTERVAL_MS = 50;
 const TRAILING_REFETCH_MAX_INTERVAL_MS = 1_000;
@@ -256,56 +263,100 @@ function invalidateListQueryKey(
   });
 }
 
-function keepStatusPatchOverInFlightLists(
+function removeLiveThreadFromCachedLists(
   queryClient: QueryClient,
   threadId: string,
-  statusChange: ThreadStatusChangeMetadata,
+): void {
+  removeLiveThreadsFromCachedLists({
+    matchesThread: (thread) => thread.id === threadId,
+    queryClient,
+  });
+}
+
+function keepPatchOverInFlightLists(
+  queryClient: QueryClient,
+  threadId: string,
+  patch: InFlightThreadListPatch,
 ): void {
   const queries = getFetchingThreadListQueries(queryClient);
   if (queries.length === 0) {
     return;
   }
-  let patchesByQuery = statusPatchesByFetchingQuery.get(queryClient);
+  let patchesByQuery = listPatchesByFetchingQuery.get(queryClient);
   if (!patchesByQuery) {
     patchesByQuery = new Map();
-    statusPatchesByFetchingQuery.set(queryClient, patchesByQuery);
+    listPatchesByFetchingQuery.set(queryClient, patchesByQuery);
   }
   for (const query of queries) {
     const patches = patchesByQuery.get(query.queryHash) ?? new Map();
-    patches.set(threadId, statusChange);
+    if (patches.get(threadId) !== ARCHIVED_THREAD_LIST_PATCH) {
+      patches.set(threadId, patch);
+    }
     patchesByQuery.set(query.queryHash, patches);
   }
-  if (statusPatchUnsubscribers.has(queryClient)) {
+  if (listPatchUnsubscribers.has(queryClient)) {
     return;
   }
   const pending = patchesByQuery;
+  const forgetQuery = (queryHash: string): void => {
+    pending.delete(queryHash);
+    if (pending.size === 0) {
+      unsubscribe();
+      listPatchUnsubscribers.delete(queryClient);
+    }
+  };
   const unsubscribe = queryClient.getQueryCache().subscribe((event) => {
+    if (event.type === "removed") {
+      forgetQuery(event.query.queryHash);
+      return;
+    }
     if (event.type !== "updated") {
       return;
     }
     const { action, query } = event;
-    if (action.type === "success" ? action.manual : action.type !== "error") {
+    const fetchEnded =
+      action.type === "success"
+        ? !action.manual
+        : action.type === "error" ||
+          (action.type === "setState" && query.state.fetchStatus === "idle");
+    if (!fetchEnded) {
       return;
     }
     const patches = pending.get(query.queryHash);
     if (!patches) {
       return;
     }
-    pending.delete(query.queryHash);
-    if (pending.size === 0) {
-      unsubscribe();
-      statusPatchUnsubscribers.delete(queryClient);
-    }
+    forgetQuery(query.queryHash);
     if (action.type !== "success") {
       return;
     }
-    for (const [patchedThreadId, patch] of patches) {
-      updateCachedThreadListStatusState(queryClient, patchedThreadId, patch, {
-        keepNewer: true,
-      });
+    for (const [patchedThreadId, listPatch] of patches) {
+      if (listPatch === ARCHIVED_THREAD_LIST_PATCH) {
+        removeLiveThreadFromCachedLists(queryClient, patchedThreadId);
+        continue;
+      }
+      updateCachedThreadListStatusState(
+        queryClient,
+        patchedThreadId,
+        listPatch,
+        { keepNewer: true },
+      );
     }
   });
-  statusPatchUnsubscribers.set(queryClient, unsubscribe);
+  listPatchUnsubscribers.set(queryClient, unsubscribe);
+}
+
+function forgetInFlightArchiveRemoval(
+  queryClient: QueryClient,
+  threadId: string,
+): void {
+  for (const patches of listPatchesByFetchingQuery
+    .get(queryClient)
+    ?.values() ?? []) {
+    if (patches.get(threadId) === ARCHIVED_THREAD_LIST_PATCH) {
+      patches.delete(threadId);
+    }
+  }
 }
 
 function scheduleTrailingActiveRefetch({
@@ -404,9 +455,9 @@ export function disposeTrailingActiveRefetches(queryClient: QueryClient): void {
     }
     throttledActiveRefetchEntries.delete(queryClient);
   }
-  statusPatchUnsubscribers.get(queryClient)?.();
-  statusPatchUnsubscribers.delete(queryClient);
-  statusPatchesByFetchingQuery.delete(queryClient);
+  listPatchUnsubscribers.get(queryClient)?.();
+  listPatchUnsubscribers.delete(queryClient);
+  listPatchesByFetchingQuery.delete(queryClient);
   const unsubscribers = trailingActiveRefetchUnsubscribers.get(queryClient);
   if (!unsubscribers) {
     return;
@@ -494,7 +545,7 @@ export const REALTIME_THREAD_CHANGE_REGISTRY = {
   "archived-changed": {
     flush: "debounced",
     dirty: [
-      dirtyThreadListQueries,
+      patchThreadListArchivedState,
       dirtyThreadDetailQueries,
       dirtyProjectPromptHistoryQueries,
     ],
@@ -681,6 +732,7 @@ interface RealtimeDirtyContext {
 }
 
 interface ThreadRealtimeDirtyContext extends RealtimeDirtyContext {
+  archived: boolean | undefined;
   backgroundActivityChanged: boolean | undefined;
   eventTypes: readonly ThreadEventType[] | undefined;
   flushOnce: (key: string) => boolean;
@@ -835,11 +887,11 @@ function dirtyThreadListQueries({
   return getThreadListInvalidationQueryKeys({ projectId, queryClient });
 }
 
-function dirtyActiveThreadListQueries({
+function getCachedThreadListQueryKeysForProject({
   projectId,
   queryClient,
 }: ThreadRealtimeDirtyContext): QueryKey[] {
-  const listQueryKeys = projectId
+  return projectId
     ? [
         ...getCachedProjectThreadListInvalidationQueryKeys({
           projectId,
@@ -848,7 +900,13 @@ function dirtyActiveThreadListQueries({
         ...getCachedGlobalThreadListInvalidationQueryKeys({ queryClient }),
       ]
     : getCachedThreadListQueryKeys(queryClient);
-  for (const queryKey of listQueryKeys) {
+}
+
+function dirtyActiveThreadListQueries(
+  context: ThreadRealtimeDirtyContext,
+): QueryKey[] {
+  const { queryClient } = context;
+  for (const queryKey of getCachedThreadListQueryKeysForProject(context)) {
     if (isArchivedThreadListQueryKey(queryKey)) {
       queryClient.invalidateQueries({
         exact: true,
@@ -1127,7 +1185,31 @@ function patchThreadListStatusState(
     return dirtyActiveThreadListQueries(context);
   }
   updateCachedThreadListStatusState(queryClient, threadId, statusChange);
-  keepStatusPatchOverInFlightLists(queryClient, threadId, statusChange);
+  keepPatchOverInFlightLists(queryClient, threadId, statusChange);
+  return [threadSearchQueryKeyPrefix()];
+}
+
+function patchThreadListArchivedState(
+  context: ThreadRealtimeDirtyContext,
+): QueryKey[] {
+  const { archived, queryClient, threadId } = context;
+  if (!threadId || archived !== true) {
+    if (threadId) {
+      forgetInFlightArchiveRemoval(queryClient, threadId);
+    }
+    return dirtyThreadListQueries(context);
+  }
+  removeLiveThreadFromCachedLists(queryClient, threadId);
+  keepPatchOverInFlightLists(
+    queryClient,
+    threadId,
+    ARCHIVED_THREAD_LIST_PATCH,
+  );
+  for (const queryKey of getCachedThreadListQueryKeysForProject(context)) {
+    if (isArchivedThreadListQueryKey(queryKey)) {
+      invalidateListQueryKey(queryClient, queryKey, true);
+    }
+  }
   return [threadSearchQueryKeyPrefix()];
 }
 

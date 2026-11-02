@@ -591,7 +591,7 @@ export function registerThreadActionRoutes(app: Hono, deps: AppDeps): void {
       if (isCloudThread(unarchivedThread)) void cloudroom(deps).restore(unarchivedThread.id).catch((error: unknown) => deps.logger.warn({ threadId: unarchivedThread.id, error: error instanceof Error ? error.message : String(error) }, "The thread's sandbox could not be restored"));
       if (!isCloudThread(unarchivedThread) && unarchivedThread.environmentId !== null) {
         refreshProviderRetirement(deps, unarchivedThread.environmentId);
-        void restoreParkedWorktree(deps, unarchivedThread.id).catch((error: unknown) => deps.logger.warn({ threadId: unarchivedThread.id, error: error instanceof Error ? error.message : String(error) }, "The thread's worktree could not be restored"));
+        void restoreParkedWorktree(deps, unarchivedThread.id, unarchivedThread.environmentId).catch((error: unknown) => deps.logger.warn({ threadId: unarchivedThread.id, error: error instanceof Error ? error.message : String(error) }, "The thread's worktree could not be restored"));
       }
       emitPluginThreadUnarchived(unarchivedThread);
     }

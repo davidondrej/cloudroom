@@ -15,6 +15,7 @@ import type {
 } from "@cloudroom/domain";
 import type { HostDaemonCommand } from "@cloudroom/host-daemon-contract";
 import type { LoggedPendingInteractionWorkSessionDeps } from "../../types.js";
+import { restoreParkedWorktree } from "../environments/environment-engine.js";
 import { requireThreadEnvironment } from "../lib/entity-lookup.js";
 import { createQueuedThreadMessage } from "@cloudroom/db";
 import {
@@ -507,6 +508,7 @@ async function deliverParentSystemMessageWithContextGuard(
 ): Promise<boolean> {
   const { parentThread } = args;
   const { environment } = requireThreadEnvironment(deps.db, parentThread.id);
+  await restoreParkedWorktree(deps, parentThread.id, environment.id);
   const execution = await buildExecutionOptions(
     deps,
     {},

@@ -155,7 +155,7 @@ export default async function plugin(bb: BbPluginApi) {
       kv.set("limits:v1", limits),
     ]);
     bb.realtime.publish(ACCOUNTS_CHANGED, {});
-    void followInCloud(connect);
+    return { cloud: followInCloud(connect) };
   };
   const ids = (): string[] => {
     const saved = accounts.map((account) => account.id);
@@ -190,10 +190,11 @@ export default async function plugin(bb: BbPluginApi) {
       JSON.parse(await fs.readFile(secretPath(account.id), "utf8")),
     );
   // Cloud keeps one Claude login per user, so it follows the account in use (ADR 0197).
-  const followInCloud = async (connect: boolean) => {
+  // Resolves to why Cloud is not on the account, or null.
+  const followInCloud = async (connect: boolean): Promise<string | null> => {
     const id = current("claude-code");
     const account = accounts.find((entry) => entry.id === id);
-    if (!account || id === inCloud) return;
+    if (!account || id === inCloud) return null;
     try {
       const secret = await readSecret(account);
       const status = await bb.sdk.cloudroom.claudeAuth({
@@ -204,13 +205,15 @@ export default async function plugin(bb: BbPluginApi) {
         follow: !connect,
       });
       // A disconnected Claude skips background saves, so Cloud is still not on this account.
-      if (status.state !== "connected") return;
+      if (status.state !== "connected")
+        return "Claude isn't connected in Cloud.";
       inCloud = id;
       await kv.set("cloud:v1", id);
+      return null;
     } catch (error) {
-      bb.log.warn(
-        `Cloud could not switch Claude accounts: ${error instanceof Error ? error.message : String(error)}`,
-      );
+      const message = error instanceof Error ? error.message : String(error);
+      bb.log.warn(`Cloud could not switch Claude accounts: ${message}`);
+      return message;
     }
   };
 
@@ -445,7 +448,7 @@ export default async function plugin(bb: BbPluginApi) {
     {
       "accounts.list": ({ provider }) =>
         provider === "codex" ? codexView() : claudeView(),
-      "accounts.use": async ({ provider, id }) => {
+      "accounts.use": async ({ provider, id, cloud }) => {
         delete limits[`${provider}:${id}`];
         if (provider === "codex") {
           await codex({ action: "use", id: id === LOCAL ? null : id });
@@ -453,9 +456,11 @@ export default async function plugin(bb: BbPluginApi) {
           return null;
         }
         move(id, 0);
-        await changed(true);
+        const following = (await changed(true)).cloud;
         const account = accounts.find((entry) => entry.id === id);
         if (account) void refreshUsage(account, true);
+        const failed = cloud ? await following : null;
+        if (failed) throw new Error(`Cloud didn't switch accounts: ${failed}`);
         return null;
       },
       "accounts.move": async ({ provider, id, direction }) => {

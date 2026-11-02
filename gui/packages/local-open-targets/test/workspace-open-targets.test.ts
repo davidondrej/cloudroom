@@ -10,7 +10,7 @@ import {
   openPathInTargetWithRuntime,
   type WorkspaceOpenTargetRuntime,
 } from "../src/index.js";
-import type { OpenPathInTargetArgs } from "../src/types.js";
+import type { OpenPathInTargetArgs } from "../src/index.js";
 
 // Terminal and iTerm2 are launched through osascript; the tests assert POSIX
 // commands, so they can't pass on Windows. macOS and Linux run them.

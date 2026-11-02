@@ -67,6 +67,7 @@ import { validatePromptAttachmentReferences } from "../projects/attachments.js";
 import { resolvePluginMentionContextInputs } from "../plugins/plugin-mentions.js";
 import { clearThreadContext } from "./thread-context-clear.js";
 import { withThreadSendGuard } from "./thread-context-mutation-guard.js";
+import { pendingImport } from "./thread-fork-history.js";
 import {
   prependDeferredFirstTurnContext,
   requireDeferredFirstTurnContextCurrent,
@@ -385,7 +386,10 @@ export function captureUserMessageSentTelemetry(
     threadId: string;
   },
 ): void {
-  if (!args.isChildThread) cloudroom(deps).noteActiveDay();
+  if (!args.isChildThread) {
+    cloudroom(deps).noteActiveDay();
+    noteUserPrompt(deps);
+  }
   noteMessageSent(args.threadId, {
     execution: args.execution ?? "local",
     isChildThread: args.isChildThread,
@@ -467,6 +471,7 @@ function appendAndQueueSendThreadMessageInTransaction({
 }
 
 import { cloudroom } from "../cloudroom/commands.js";
+import { noteUserPrompt } from "../cloudroom/star-prompt.js";
 import { teleportBlocked } from "../cloudroom/store.js";
 
 export async function sendThreadMessage(
@@ -491,6 +496,9 @@ export async function sendThreadMessage(
     sendThreadMessageWithoutContextClear(deps, args),
   );
 }
+
+/** Imported chats already counted as started in this app run, so a quick second send can't count one twice. */
+const countedImports = new Set<string>();
 
 async function sendThreadMessageWithoutContextClear(
   deps: LoggedPendingInteractionWorkSessionDeps,
@@ -566,6 +574,24 @@ async function sendThreadMessageWithoutContextClear(
     args.retryOf !== undefined ? "system" : senderThreadId ? "agent" : "user";
   const shouldCaptureUserMessageSent =
     args.trigger === "user" && initiator === "user" && input.length > 0;
+  // Imports send no `thread_created`: an imported chat counts as an agent once, when the first message
+  // sent to it, directly or from the queue, starts its agent.
+  const startsImport =
+    input.length > 0 && !countedImports.has(thread.id) && pendingImport(deps.db, thread.id) !== null;
+  const captureSent = () => {
+    const isChildThread = thread.parentThreadId !== null;
+    if (startsImport && !countedImports.has(thread.id)) {
+      countedImports.add(thread.id);
+      deps.telemetry.capture({ name: "thread_created", properties: { execution: "local", is_child_thread: isChildThread, provider: thread.providerId, imported: true } });
+    }
+    if (!shouldCaptureUserMessageSent) return;
+    captureUserMessageSentTelemetry(deps, {
+      isChildThread,
+      messageSource: "thread_send",
+      providerId: thread.providerId,
+      threadId: thread.id,
+    });
+  };
   const expectedSteerTurnId =
     mode === "auto" || mode === "steer"
       ? getActiveTurnId(deps, thread.id)
@@ -613,14 +639,7 @@ async function sendThreadMessageWithoutContextClear(
       thread,
     })
   ) {
-    if (shouldCaptureUserMessageSent) {
-      captureUserMessageSentTelemetry(deps, {
-        isChildThread: thread.parentThreadId !== null,
-        messageSource: "thread_send",
-        providerId: thread.providerId,
-        threadId: thread.id,
-      });
-    }
+    captureSent();
     return;
   }
   const readyEnvironment = requireReadyThreadEnvironment(
@@ -741,14 +760,7 @@ async function sendThreadMessageWithoutContextClear(
         buildThreadStatusChangeMetadata(deps, queuedRequest.activeThread),
       );
     }
-    if (shouldCaptureUserMessageSent) {
-      captureUserMessageSentTelemetry(deps, {
-        isChildThread: thread.parentThreadId !== null,
-        messageSource: "thread_send",
-        providerId: thread.providerId,
-        threadId: thread.id,
-      });
-    }
+    captureSent();
     return;
   }
 
@@ -810,12 +822,5 @@ async function sendThreadMessageWithoutContextClear(
       );
     },
   });
-  if (shouldCaptureUserMessageSent) {
-    captureUserMessageSentTelemetry(deps, {
-      isChildThread: thread.parentThreadId !== null,
-      messageSource: "thread_send",
-      providerId: thread.providerId,
-      threadId: thread.id,
-    });
-  }
+  captureSent();
 }

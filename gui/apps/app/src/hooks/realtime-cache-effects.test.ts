@@ -1054,6 +1054,193 @@ describe("createRealtimeCacheEffects", () => {
     effects.dispose();
   });
 
+  describe("archived-changed list updates", () => {
+    const row = (id: string, archivedAt: number | null = null) => ({
+      archivedAt,
+      id,
+    });
+    const liveRows = [row("thr_child"), row("thr_1"), row("thr_2")];
+    const sidebar = (threads: ReturnType<typeof row>[]) => ({
+      personalProject: { threads: [] },
+      projects: [{ threads }],
+    });
+    const archiveEvent = (metadata: { archived?: boolean }) =>
+      ({
+        type: "changed",
+        entity: "thread",
+        id: "thr_1",
+        metadata: { projectId: "project-1", ...metadata },
+        changes: ["archived-changed"],
+      }) as const;
+
+    function setup(visibility?: RealtimeCacheEffectsVisibility) {
+      vi.useFakeTimers();
+      const { effects, queryClient } =
+        createRealtimeEffectsTestContext(visibility);
+      const sidebarKey = sidebarNavigationQueryKey();
+      const openListKey = threadListQueryKey({
+        archived: false,
+        projectId: "project-1",
+      });
+      const archivedListKey = archivedThreadsListQueryKey({
+        projectId: "project-1",
+      });
+      const sidebarQueryFn = vi.fn(async () => sidebar(liveRows));
+      const openListQueryFn = vi.fn(async () => liveRows);
+      const archivedListQueryFn = vi.fn(async () => [row("thr_old", 1)]);
+      queryClient.setQueryData(sidebarKey, sidebar(liveRows));
+      queryClient.setQueryData(openListKey, liveRows);
+      queryClient.setQueryData(archivedListKey, [row("thr_old", 1)]);
+      const unsubscribers = [
+        [sidebarKey, sidebarQueryFn],
+        [openListKey, openListQueryFn],
+        [archivedListKey, archivedListQueryFn],
+      ].map(([queryKey, queryFn]) =>
+        new QueryObserver(queryClient, {
+          queryFn: queryFn as () => Promise<unknown>,
+          queryKey: queryKey as readonly unknown[],
+          staleTime: Infinity,
+        }).subscribe(() => {}),
+      );
+      const sidebarIds = () =>
+        queryClient
+          .getQueryData<ReturnType<typeof sidebar>>(sidebarKey)
+          ?.projects[0]?.threads.map((thread) => thread.id);
+      return {
+        archivedListKey,
+        archivedListQueryFn,
+        cleanup: () => {
+          for (const unsubscribe of unsubscribers) unsubscribe();
+          effects.dispose();
+        },
+        effects,
+        openListKey,
+        openListQueryFn,
+        queryClient,
+        sidebarIds,
+        sidebarKey,
+        sidebarQueryFn,
+      };
+    }
+
+    function holdNextSidebarFetch(
+      sidebarQueryFn: ReturnType<typeof vi.fn>,
+    ): (threads: ReturnType<typeof row>[]) => void {
+      let release: (threads: ReturnType<typeof row>[]) => void = () => {};
+      sidebarQueryFn.mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            release = (threads) => resolve(sidebar(threads));
+          }),
+      );
+      return (threads) => release(threads);
+    }
+
+    it("removes only that thread, without reloading open lists or the sidebar", async () => {
+      const context = setup();
+      context.effects.handleChanged(archiveEvent({ archived: true }));
+      await vi.advanceTimersByTimeAsync(2_000);
+
+      expect(context.sidebarIds()).toEqual(["thr_child", "thr_2"]);
+      expect(context.queryClient.getQueryData(context.openListKey)).toEqual([
+        row("thr_child"),
+        row("thr_2"),
+      ]);
+      expect(context.sidebarQueryFn).not.toHaveBeenCalled();
+      expect(context.openListQueryFn).not.toHaveBeenCalled();
+      expect(context.archivedListQueryFn).toHaveBeenCalledTimes(1);
+      expect(context.queryClient.getQueryData(context.archivedListKey)).toEqual(
+        [row("thr_old", 1)],
+      );
+      context.cleanup();
+    });
+
+    it("keeps the thread removed when a stale fetch lands, for that fetch only", async () => {
+      const context = setup();
+      const finishStaleFetch = holdNextSidebarFetch(context.sidebarQueryFn);
+      void context.queryClient.refetchQueries({ queryKey: context.sidebarKey });
+      await vi.advanceTimersByTimeAsync(0);
+
+      context.effects.handleChanged(archiveEvent({ archived: true }));
+      await vi.advanceTimersByTimeAsync(50);
+      expect(context.sidebarIds()).toEqual(["thr_child", "thr_2"]);
+
+      finishStaleFetch(liveRows);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(context.sidebarIds()).toEqual(["thr_child", "thr_2"]);
+
+      await context.queryClient.refetchQueries({ queryKey: context.sidebarKey });
+      expect(context.sidebarIds()).toEqual(["thr_child", "thr_1", "thr_2"]);
+      context.cleanup();
+    });
+
+    it("forgets the removal when a cancelled fetch ends", async () => {
+      const context = setup();
+      holdNextSidebarFetch(context.sidebarQueryFn);
+      void context.queryClient
+        .refetchQueries({ queryKey: context.sidebarKey })
+        .catch(() => {});
+      await vi.advanceTimersByTimeAsync(0);
+      context.effects.handleChanged(archiveEvent({ archived: true }));
+      await vi.advanceTimersByTimeAsync(50);
+
+      await context.queryClient.cancelQueries({ queryKey: context.sidebarKey });
+      expect(context.sidebarIds()).toEqual(["thr_child", "thr_2"]);
+
+      await context.queryClient.refetchQueries({ queryKey: context.sidebarKey });
+      expect(context.sidebarIds()).toEqual(["thr_child", "thr_1", "thr_2"]);
+      context.cleanup();
+    });
+
+    it("lets an unarchive win over a removal waiting on a stale fetch", async () => {
+      const context = setup();
+      const finishStaleFetch = holdNextSidebarFetch(context.sidebarQueryFn);
+      void context.queryClient.refetchQueries({ queryKey: context.sidebarKey });
+      await vi.advanceTimersByTimeAsync(0);
+      context.effects.handleChanged(archiveEvent({ archived: true }));
+      await vi.advanceTimersByTimeAsync(50);
+
+      context.effects.handleChanged(archiveEvent({ archived: false }));
+      await vi.advanceTimersByTimeAsync(50);
+      const finishRefetch = holdNextSidebarFetch(context.sidebarQueryFn);
+      finishStaleFetch(liveRows);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(context.sidebarIds()).toEqual(["thr_child", "thr_1", "thr_2"]);
+
+      finishRefetch(liveRows);
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(context.sidebarIds()).toEqual(["thr_child", "thr_1", "thr_2"]);
+      expect(context.sidebarQueryFn).toHaveBeenCalledTimes(2);
+      context.cleanup();
+    });
+
+    it("uses the newest archive event when a hidden window catches up", async () => {
+      const visibility = createFakeVisibility();
+      const context = setup(visibility);
+      visibility.setVisible(false);
+      context.effects.handleChanged(archiveEvent({ archived: true }));
+      context.effects.handleChanged(archiveEvent({ archived: false }));
+      visibility.setVisible(true);
+      await vi.advanceTimersByTimeAsync(2_000);
+
+      expect(context.sidebarIds()).toEqual(["thr_child", "thr_1", "thr_2"]);
+      expect(context.sidebarQueryFn).toHaveBeenCalledTimes(1);
+      context.cleanup();
+    });
+
+    it("reloads the lists when the event does not say which way it went", async () => {
+      const context = setup();
+      context.effects.handleChanged(archiveEvent({ archived: true }));
+      context.effects.handleChanged(archiveEvent({}));
+      await vi.advanceTimersByTimeAsync(2_000);
+
+      expect(context.sidebarIds()).toEqual(["thr_child", "thr_1", "thr_2"]);
+      expect(context.sidebarQueryFn).toHaveBeenCalledTimes(1);
+      expect(context.openListQueryFn).toHaveBeenCalledTimes(1);
+      context.cleanup();
+    });
+  });
+
   it.each(["thread detail", "sidebar navigation"] as const)(
     "refetches the active environment pull request from %s when a turn completes",
     async (cacheSource) => {

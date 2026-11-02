@@ -1872,6 +1872,13 @@ class CloudroomService {
       this.detach(threadId);
       if (["active", "stopping"].includes(getThread(this.deps.db, threadId)?.status ?? "")) saveStatus(this.deps.db, threadId, "idle");
       if (!coreInUse(this.deps.db, saved.coreUrl)) void this.sandboxes.archive(sandbox).catch(error => this.warn("The thread's sandbox could not be archived; it sleeps on its own", error, { threadId }));
+      // Its other threads keep the sandbox open, so stop this thread's own agent: a stop, then a sleep, as on a VM.
+      else if (saved.sessionId) {
+        const stop = randomUUID(), sleep = randomUUID();
+        this.enqueue(threadId, stop, "stop", {});
+        this.enqueue(threadId, sleep, "sleep", {});
+        void this.stopArchived(threadId, saved.sessionId, stop, sleep).catch(error => this.warn("The archived thread's agent could not be stopped", error, { threadId }));
+      }
       // Cloud automations (ADR 0212) stop prompting it. A child shares its parent's sandbox, which stays open.
       if (saved.sessionId) void this.sandboxes.automations({ action: "archived", thread: sandbox, session: saved.sessionId }).catch(error => this.warn("The thread's cloud automations could not be paused", error, { threadId }));
       return;
@@ -1879,6 +1886,33 @@ class CloudroomService {
     this.enqueue(threadId, randomUUID(), "stop", {});
     this.enqueue(threadId, randomUUID(), "sleep", {});
     void this.deliver(threadId).catch(() => {});
+  }
+
+  /** Sends an archived thread's saved stop and sleep straight to its Core, without following its stream. An asleep
+   *  sandbox runs nothing, so it is never woken for this. Unsent ones are dropped, so an unarchived thread never gets them. */
+  private async stopArchived(threadId: string, sessionId: string, stop: string, sleep: string): Promise<void> {
+    try {
+      for (let tries = 1; ; tries++) {
+        const saved = binding(this.deps.db, threadId);
+        if (!saved || !getThread(this.deps.db, threadId)?.archivedAt) return;
+        try {
+          const client = await this.client(saved, false);
+          for (const [id, action] of [[stop, "stop"], [sleep, "sleep"]] as const) {
+            if (command(this.deps.db, id)?.state !== "sending") continue;
+            saveCommandState(this.deps.db, threadId, id, (await client[action](sessionId, id)).receipt.state);
+            // So a message sent after an unarchive resumes the queue first, as after the user's own Stop.
+            if (action === "stop") saveBinding(this.deps.db, threadId, { queuePaused: true });
+          }
+          return;
+        } catch (error) {
+          if (error instanceof SandboxAsleep) return;
+          if (!(error instanceof CloudroomConnectionError) || tries >= 3) throw error;
+        }
+        await new Promise(resolve => setTimeout(resolve, 2_000));
+      }
+    } finally {
+      for (const id of [stop, sleep]) if (command(this.deps.db, id)?.state === "sending") saveCommandState(this.deps.db, threadId, id, "failed");
+    }
   }
 
   /** Delete: the website erases the thread's own sandbox, snapshots, saved copy, and chat history. Children share it. */
