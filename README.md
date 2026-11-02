@@ -30,7 +30,7 @@ Cloudroom is a desktop app for AI coding agents. Start them on your Mac, or give
 - **Teleport.** Move a running thread to the cloud and back. Same chat, model, and effort.
 - **Your own cloud.** Run the core on your own Linux machine. No Cloudroom account needed.
 
-For Apple Silicon Macs (macOS 13+), Linux x64 (alpha), and Windows 11 (beta).
+For Apple Silicon Macs (macOS 13+), Linux x64, and Windows 11.
 
 <p align="center">
   <img src=".github/teleport.png" alt="Teleport moves a running agent between your Mac and the cloud, with the same chat, model, and effort." width="100%">
