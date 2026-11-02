@@ -1,20 +1,13 @@
 import {
   clientNotificationSchema,
+  type ClientChannel,
   type ClientNotification,
 } from "./contract.js";
 
-export type ClientChannel = "web" | "desktop";
+const SEEN_LIMIT = 100;
 
-export function clientChannel(): ClientChannel | null {
-  if ("bbDesktop" in window) return "desktop";
-  if (
-    "bb" in window &&
-    typeof window.bb === "object" &&
-    window.bb !== null &&
-    "native" in window.bb
-  )
-    return null;
-  return "web";
+export function clientChannel(): ClientChannel {
+  return "bbDesktop" in window ? "desktop" : "web";
 }
 
 export function notificationPermission():
@@ -25,23 +18,50 @@ export function notificationPermission():
     : Notification.permission;
 }
 
+function isMacDesktop(): boolean {
+  const desktop: unknown = (window as { bbDesktop?: unknown }).bbDesktop;
+  return (
+    typeof desktop === "object" &&
+    desktop !== null &&
+    "platform" in desktop &&
+    desktop.platform === "macos"
+  );
+}
+
+function readSeenIds(key: string): string[] {
+  try {
+    const stored: unknown = JSON.parse(localStorage.getItem(key) ?? "[]");
+    return Array.isArray(stored)
+      ? stored.filter((id): id is string => typeof id === "string")
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+function markSeen(key: string, ids: readonly string[], id: string): void {
+  try {
+    localStorage.setItem(
+      key,
+      JSON.stringify([...ids.slice(-(SEEN_LIMIT - 1)), id]),
+    );
+  } catch {
+    return;
+  }
+}
+
 export function createClientDelivery(navigate: (threadId: string) => void) {
   const active = new Set<Notification>();
   let disposed = false;
 
   function display(message: ClientNotification): void {
-    if (disposed || notificationPermission() !== "granted") return;
-    const isMacDesktop =
-      "bbDesktop" in window &&
-      typeof window.bbDesktop === "object" &&
-      window.bbDesktop !== null &&
-      "platform" in window.bbDesktop &&
-      window.bbDesktop.platform === "macos";
     const notification = new Notification(message.title, {
       body: message.body,
-      ...(isMacDesktop
+      ...(isMacDesktop()
         ? {}
-        : { icon: new URL("/icon-192.png?v=room", window.location.origin).href }),
+        : {
+            icon: new URL("/icon-192.png?v=room", window.location.origin).href,
+          }),
       tag: `bb-${message.threadId ?? message.id}`,
     });
     active.add(notification);
@@ -61,39 +81,26 @@ export function createClientDelivery(navigate: (threadId: string) => void) {
     if (
       !enabled ||
       disposed ||
-      channel === null ||
       !parsed.success ||
       !parsed.data.channels.includes(channel) ||
       notificationPermission() !== "granted"
-    )
+    ) {
       return;
+    }
     const message = parsed.data;
-    const claim = () => {
-      if (disposed) return;
+    const showOnce = () => {
+      if (disposed || notificationPermission() !== "granted") return;
       const key = `bb.push-notifications.seen.${channel}`;
-      let ids: string[] = [];
-      try {
-        const stored: unknown = JSON.parse(localStorage.getItem(key) ?? "[]");
-        ids = Array.isArray(stored)
-          ? stored.filter((id): id is string => typeof id === "string")
-          : [];
-        if (ids.includes(message.id)) return;
-      } catch {
-        ids = [];
-      }
+      const seen = readSeenIds(key);
+      if (seen.includes(message.id)) return;
       display(message);
-      try {
-        localStorage.setItem(
-          key,
-          JSON.stringify([...ids.slice(-99), message.id]),
-        );
-      } catch {
-        return;
-      }
+      markSeen(key, seen, message.id);
     };
-    if (navigator.locks)
-      await navigator.locks.request(`bb-notifications-${channel}`, claim);
-    else claim();
+    if (navigator.locks) {
+      await navigator.locks.request(`bb-notifications-${channel}`, showOnce);
+    } else {
+      showOnce();
+    }
   }
 
   return {

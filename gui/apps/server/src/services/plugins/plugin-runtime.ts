@@ -136,6 +136,8 @@ const pluginSdkAlias: Record<string, string> | undefined = existsSync(
 )
   ? pluginSdkAliasFor(pluginSdkRuntimePath)
   : undefined;
+const pluginSdkRuntimeUrl =
+  pluginSdkAlias === undefined ? null : pathToFileURL(pluginSdkRuntimePath).href;
 
 interface MutableRoot {
   id: number;
@@ -148,21 +150,33 @@ let nextMutableRootId = 1;
 let nextMutableRootEpoch = 1;
 let mutableRootHooks: { deregister: () => void } | null = null;
 
+function mutableRootFor(url: string): MutableRoot | undefined {
+  let match: MutableRoot | undefined;
+  let matchedLength = 0;
+  for (const [rootUrl, root] of mutableRoots) {
+    if (rootUrl.length <= matchedLength || !url.startsWith(rootUrl)) continue;
+    match = root;
+    matchedLength = rootUrl.length;
+  }
+  return match;
+}
+
 function registerMutableRootHooks(): void {
   if (mutableRootHooks !== null) return;
   mutableRootHooks = registerHooks({
     resolve(specifier, context, nextResolve) {
+      if (
+        pluginSdkRuntimeUrl !== null &&
+        (specifier === PLUGIN_SDK_SPECIFIER ||
+          specifier === LEGACY_PLUGIN_SDK_SPECIFIER) &&
+        mutableRootFor(context.parentURL ?? "") !== undefined
+      ) {
+        return { url: pluginSdkRuntimeUrl, shortCircuit: true };
+      }
       const resolved = nextResolve(specifier, context);
       if (mutableRoots.size === 0) return resolved;
       if (!resolved.url.startsWith("file:")) return resolved;
-      let match: MutableRoot | undefined;
-      let matchedLength = 0;
-      for (const [rootUrl, root] of mutableRoots) {
-        if (rootUrl.length <= matchedLength) continue;
-        if (!resolved.url.startsWith(rootUrl)) continue;
-        match = root;
-        matchedLength = rootUrl.length;
-      }
+      const match = mutableRootFor(resolved.url);
       if (match === undefined) return resolved;
       const parent = MUTABLE_ROOT_MARKER.exec(context.parentURL ?? "");
       const epoch =
@@ -1671,13 +1685,21 @@ export function createPluginRuntime(context: PluginRuntimeContext) {
       ownedRootUrls.add(mutableRootUrl(mutableRootDir(row.rootDir)));
     }
     try {
-      const jiti = createJiti(import.meta.url, {
-        moduleCache: false,
-        ...(pluginSdkAlias === undefined ? {} : { alias: pluginSdkAlias }),
-      });
-      const mod = (await jiti.import(
-        await resolveServerEntry(row, manifest),
-      )) as {
+      const entry = await resolveServerEntry(row, manifest);
+      const loadsNatively =
+        rollbackGeneration !== undefined &&
+        isPackagedBuiltinEntry({
+          kind: sourceKind(row.source),
+          manifest,
+          rootDir: row.rootDir,
+          artifact: "server",
+        });
+      const mod = (await (loadsNatively
+        ? import(pathToFileURL(entry).href)
+        : createJiti(import.meta.url, {
+            moduleCache: false,
+            ...(pluginSdkAlias === undefined ? {} : { alias: pluginSdkAlias }),
+          }).import(entry))) as {
         default?: unknown;
       };
       const factory = mod.default;

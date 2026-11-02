@@ -1,4 +1,5 @@
 import { sweepProviderLifecycles } from "../environments/environment-engine.js";
+import { runLowDiskWorktreeCleanup } from "../environments/low-disk-cleanup.js";
 import { and, eq, isNull, isNotNull, inArray } from "drizzle-orm";
 import { sweepMachineLifecycles } from "../machines/provider-orchestration.js";
 import {
@@ -488,6 +489,12 @@ const PERIODIC_SWEEP_JOBS: PeriodicSweepJob[] = [
     category: "durable-intent-retry",
     name: "thread-title-retry",
     run: sweepThreadTitleRetries,
+  },
+  {
+    cadenceMs: 60_000,
+    category: "retention",
+    name: "low-disk-worktree-cleanup",
+    run: runLowDiskWorktreeCleanup,
   },
   {
     cadenceMs: 0,

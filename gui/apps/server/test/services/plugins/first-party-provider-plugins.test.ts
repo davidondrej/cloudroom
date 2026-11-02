@@ -162,6 +162,32 @@ const FIRST_PARTY_PROVIDER_DECLARATIONS = [
     visibility: "installed",
     hasLogo: true,
   },
+  {
+    builtinName: "provider-acp",
+    pluginId: "provider-acp",
+    providerId: "acp-kilo",
+    displayName: "Kilo Code",
+    supportsThreadArchive: false,
+    supportsThreadRename: false,
+    fork: "tip",
+    supportsManualCompaction: false,
+    supportsUsage: false,
+    visibility: "installed",
+    hasLogo: true,
+  },
+  {
+    builtinName: "provider-acp",
+    pluginId: "provider-acp",
+    providerId: "acp-cline",
+    displayName: "Cline",
+    supportsThreadArchive: false,
+    supportsThreadRename: false,
+    fork: "none",
+    supportsManualCompaction: false,
+    supportsUsage: false,
+    visibility: "installed",
+    hasLogo: true,
+  },
 ] as const;
 
 const PROVIDER_IDS = FIRST_PARTY_PROVIDER_DECLARATIONS.map(
@@ -430,6 +456,8 @@ describe("first-party provider plugins", () => {
           "acp-openclaw",
           "acp-devin",
           "acp-droid",
+          "acp-kilo",
+          "acp-cline",
         ]);
         const infos = await listSystemProviderInfos(harness.deps, {});
         expect(infos.find((info) => info.id === "pi")).toBeUndefined();

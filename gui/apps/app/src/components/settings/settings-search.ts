@@ -63,7 +63,6 @@ const SETTINGS_SEARCH_ENTRIES: readonly SettingsSearchEntry[] = [
   ]),
   ...entries("general", "Git", [
     ["New branch prefix", "branch name worktree"],
-    ["Delete archived worktrees after", "worktree cleanup auto delete retention days never disk space storage"],
   ]),
   ...entries("general", "Skills", [["Cloudroom CLI skills", "install agents"]]),
   ...entries("general", "Thread naming", [

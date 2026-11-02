@@ -2,6 +2,19 @@
 
 Also on [cloudroom.dev/changelog](https://www.cloudroom.dev/changelog).
 
+## 138
+
+Preview Excel, Word, and PowerPoint (2026-11-01)
+
+### Changes
+
+- The right panel now previews Excel, Word, and PowerPoint files, plus archives and audio.
+- "Restart to update" is about 9 seconds faster.
+- Archiving a Local thread frees its worktree's disk space right away, and unarchiving brings it back with your work.
+- When your disk runs low, Cloudroom clears archived worktrees first.
+- Kilo Code and Cline can now be installed as Local agents.
+- Unarchive now shows on every archived thread, including forked and child threads.
+
 ## 137
 
 Suggested prompts, one Tab away (2026-11-01)

@@ -6,6 +6,8 @@ import type { EnvironmentRow } from "@cloudroom/db";
 import type { Thread } from "@cloudroom/domain";
 import { threadHasProviderSession, type DbConnection } from "@cloudroom/db";
 import type { WorkSessionDeps } from "../../types.js";
+import { ApiError } from "../../errors.js";
+import { restoreParkedWorktree } from "../environments/environment-engine.js";
 import { requireEnvironment } from "../lib/entity-lookup.js";
 import {
   goneThreadEnvironmentDetails,
@@ -61,7 +63,19 @@ export async function requireThreadCommandEnvironment(
   args: RequireThreadCommandEnvironmentArgs,
 ): Promise<EnvironmentRow> {
   if (args.thread.environmentId !== null) {
-    const environment = requireEnvironment(deps.db, args.thread.environmentId);
+    let environment = requireEnvironment(deps.db, args.thread.environmentId);
+    if (environment.parkedAt !== null) {
+      try {
+        await restoreParkedWorktree(deps, args.thread.id);
+      } catch (error) {
+        throw new ApiError(
+          409,
+          "worktree_restore_failed",
+          `Cloudroom couldn't bring back this thread's worktree: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+      environment = requireEnvironment(deps.db, environment.id);
+    }
     const goneDetails = goneThreadEnvironmentDetails(environment);
     if (goneDetails && environment.environmentProviderId === null) {
       throwThreadEnvironmentUnavailable(goneDetails);

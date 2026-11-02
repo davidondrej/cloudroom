@@ -396,6 +396,16 @@ describe("buildPluginProviderRegistration", () => {
         logoUrl: "/api/v1/system/providers/acp-droid/logo",
         icon: undefined,
       },
+      {
+        id: "acp-kilo",
+        logoUrl: "/api/v1/system/providers/acp-kilo/logo",
+        icon: undefined,
+      },
+      {
+        id: "acp-cline",
+        logoUrl: "/api/v1/system/providers/acp-cline/logo",
+        icon: undefined,
+      },
     ]);
   });
 
@@ -426,6 +436,8 @@ describe("buildPluginProviderRegistration", () => {
       "acp-openclaw": "collapse",
       "acp-devin": "collapse",
       "acp-droid": "collapse",
+      "acp-kilo": "collapse",
+      "acp-cline": "collapse",
     });
   });
 });

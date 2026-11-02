@@ -108,6 +108,8 @@ describe("resolveCreateThreadExecutionDefaults", () => {
         "acp-openclaw",
         "acp-devin",
         "acp-droid",
+        "acp-kilo",
+        "acp-cline",
       ],
     });
   });
@@ -135,6 +137,8 @@ describe("resolveCreateThreadExecutionDefaults", () => {
       "acp-openclaw",
       "acp-devin",
       "acp-droid",
+      "acp-kilo",
+      "acp-cline",
     ]);
     expect(
       resolveCreateThreadExecutionDefaults(userRegistry, {
@@ -182,6 +186,8 @@ describe("resolveCreateThreadExecutionDefaults", () => {
       "acp-openclaw",
       "acp-devin",
       "acp-droid",
+      "acp-kilo",
+      "acp-cline",
     ]);
   });
 
@@ -259,6 +265,8 @@ describe("resolveCreateThreadExecutionDefaults", () => {
         "acp-openclaw",
         "acp-devin",
         "acp-droid",
+        "acp-kilo",
+        "acp-cline",
       ],
     });
   });

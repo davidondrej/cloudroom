@@ -33,6 +33,7 @@ function makeRow(overrides: Partial<EnvironmentRow> = {}): EnvironmentRow {
     statusMessage: null,
     pendingLog: "",
     claimPath: null,
+    parkedAt: null,
     status: "ready",
     createdAt: 1,
     updatedAt: 2,

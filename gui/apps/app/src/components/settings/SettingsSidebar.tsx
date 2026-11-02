@@ -12,12 +12,10 @@ import { Input } from "@cloudroom/shared-ui/input";
 import {
   SectionSidebar,
   SectionSidebarIcon,
-  SectionSidebarActionRow,
   SectionSidebarRow,
 } from "@/components/sidebar/SectionSidebar";
 import { InviteSidebarRow } from "@/components/InviteOffer";
 import { useCloseMobileSidebar } from "@/components/ui/sidebar.js";
-import { canOpenNativeScreen, shellOpenNative } from "@/lib/native-shell";
 import { SettingsAccountMenu } from "./SettingsAccountMenu";
 import { useSettingsNavState } from "./settings-nav";
 import type { SettingsNavState } from "./settings-nav";
@@ -96,8 +94,7 @@ export function SettingsSidebarContent({
         return;
       if (
         target instanceof HTMLElement &&
-        (target.isContentEditable ||
-          target.matches("input, textarea, select"))
+        (target.isContentEditable || target.matches("input, textarea, select"))
       )
         return;
       event.preventDefault();
@@ -111,20 +108,7 @@ export function SettingsSidebarContent({
     return links.length > 0 ? [{ group, to: links[0]!.to }] : [];
   });
 
-  const footer = (
-    <div className="space-y-2">
-      {canOpenNativeScreen() ? (
-        <SectionSidebarActionRow
-          label="This device"
-          testId="settings-nav-native-device"
-          onClick={() => shellOpenNative("device-settings")}
-        >
-          <SectionSidebarIcon name="Smartphone" />
-        </SectionSidebarActionRow>
-      ) : null}
-      {account}
-    </div>
-  );
+  const footer = <div className="space-y-2">{account}</div>;
 
   return (
     <SectionSidebar

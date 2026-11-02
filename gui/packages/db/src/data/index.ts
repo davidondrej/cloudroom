@@ -229,6 +229,7 @@ export {
   updatePreparingEnvironment,
   listProviderLifecycleEnvironments,
   environmentHasLiveThreads,
+  environmentHasRestorableThreads,
   releaseFinishedEnvironmentPreparationOwners,
   claimEnvironmentPath,
   findEnvironmentPathClaim,

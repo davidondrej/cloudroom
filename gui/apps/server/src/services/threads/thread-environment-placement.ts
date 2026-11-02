@@ -737,8 +737,37 @@ export async function resolveProviderOperationContext(
   });
 }
 
+/** Context to rebuild a thread's parked worktree where it was, with the inputs it was created with. */
+export async function resolveRestoreOperationContext(
+  deps: Pick<ThreadProvisioningDeps, "db" | "hub">,
+  thread: Thread,
+  environment: EnvironmentRow,
+  record: PluginEnvironmentProviderRecord,
+): Promise<ProviderOperationContext> {
+  const host = getNonDestroyedHostWithStatus(deps, environment.hostId);
+  if (host === null)
+    throw new Error("The machine that held this worktree no longer exists.");
+  const project = requirePublicProject(deps.db, thread.projectId);
+  return buildProviderOperationContext(deps, {
+    host,
+    inputs: await parseProviderInputs(
+      record,
+      environment.environmentProviderSelection?.inputs ?? null,
+    ),
+    machine: { type: "existing", hostId: host.id },
+    project,
+    projectCheckout: toProviderProjectCheckout(deps.db, {
+      checkout: getProjectSourceByHost(deps.db, project.id, host.id),
+      hostId: host.id,
+      projectId: project.id,
+    }),
+    record,
+    thread,
+  });
+}
+
 function buildProviderOperationContext(
-  deps: ThreadProvisioningDeps,
+  deps: Pick<ThreadProvisioningDeps, "db" | "hub">,
   args: Pick<
     ProviderOperationContext,
     "host" | "inputs" | "machine" | "project" | "projectCheckout"

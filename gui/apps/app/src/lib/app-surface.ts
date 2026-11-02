@@ -4,16 +4,10 @@ import {
   APP_SURFACE_WEB,
   type RequestAppSurface,
 } from "@cloudroom/config/app-surface";
-import { isInsideNativeShell } from "@/lib/native-shell";
-
-const APP_SURFACE_MOBILE: RequestAppSurface = "mobile";
 
 export function getAppSurface(): RequestAppSurface {
   if (typeof window !== "undefined" && window.bbDesktop !== undefined) {
     return APP_SURFACE_DESKTOP;
-  }
-  if (isInsideNativeShell()) {
-    return APP_SURFACE_MOBILE;
   }
   return APP_SURFACE_WEB;
 }

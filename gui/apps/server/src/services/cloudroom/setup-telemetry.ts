@@ -21,6 +21,9 @@ type Deps = Pick<AppDeps, "telemetry" | "config" | "logger" | "db"> & { sandboxe
 let deps: Deps | null = null;
 let firstLaunchAt = Date.now();
 let failureSnapshotSent = false;
+type UpdateAttempt = { from: string; to: string; at: number; location?: string; needs_password?: boolean; quit_timeout?: boolean; updater_error?: string };
+let updateAttempt: Promise<UpdateAttempt | null> = Promise.resolve(null);
+let appReadySeen = false;
 
 /** Seconds since this install's data folder was created, so every setup event lines up on one timeline. */
 export const secondsSinceFirstLaunch = () => Math.max(0, Math.round((Date.now() - firstLaunchAt) / 1000));
@@ -29,6 +32,7 @@ export function startSetupTelemetry(appDeps: Deps): void {
   deps = appDeps;
   try { firstLaunchAt = statSync(appDeps.config.dataDir).birthtimeMs || firstLaunchAt; } catch { /* keep now */ }
   const marker = join(appDeps.config.dataDir, "cloudroom-setup-snapshot.json");
+  updateAttempt = readFile(join(appDeps.config.dataDir, "update-attempt.json"), "utf8").then(text => JSON.parse(text) as UpdateAttempt).catch(() => null);
   setTimeout(() => {
     linkInstall();
     void reportUpdateAttempt(appDeps.config.dataDir).catch(error => appDeps.logger.debug({ err: error }, "Update report failed"));
@@ -89,11 +93,9 @@ export function cliPlace(path: string | null | undefined): string | null {
  * means the install failed, so report why from macOS's installer log. Failures reach our database.
  */
 async function reportUpdateAttempt(dataDir: string): Promise<void> {
-  const file = join(dataDir, "update-attempt.json");
-  const text = await readFile(file, "utf8").catch(() => null);
-  if (text === null) return;
-  await rm(file, { force: true });
-  const attempt = JSON.parse(text) as { from: string; to: string; at: number; location?: string; needs_password?: boolean; quit_timeout?: boolean; updater_error?: string };
+  const attempt = await updateAttempt;
+  if (attempt === null) return;
+  await rm(join(dataDir, "update-attempt.json"), { force: true });
   const version = process.env.BB_DESKTOP_VERSION ?? null;
   const failed = version === attempt.from;
   const lines = failed ? await shipItLines(attempt.at) : [];
@@ -104,6 +106,15 @@ async function reportUpdateAttempt(dataDir: string): Promise<void> {
     quit_timeout: attempt.quit_timeout ?? false, updater_error: scrub(attempt.updater_error),
     ...(failed ? { code: updateFailureCode(lines), message: scrub(lines.filter(line => /error|abort|cancel|fail/i.test(line)).at(-1)) } : {}),
   }));
+}
+
+export function reportAppReady(): void {
+  if (appReadySeen) return;
+  appReadySeen = true;
+  void updateAttempt.then(attempt => {
+    if (attempt === null || attempt.from === (process.env.BB_DESKTOP_VERSION ?? null)) return;
+    capture("update_ready", () => ({ from: attempt.from, to: attempt.to, ms: Date.now() - attempt.at }));
+  });
 }
 
 /** Windows: crashes the desktop app noted in last-crash.json (desktop-crash-report.ts) during the last run. */
@@ -150,7 +161,7 @@ export function reportMacHelperProblem(detail: string): void {
 }
 
 /** Telemetry must never break setup, so building or sending an event can't throw. */
-function capture(name: "setup_snapshot" | "agent_connect" | "cli_install" | "account_sign_in_failed" | "update_install" | "app_crash", properties: () => Record<string, TelemetryValue>): void {
+function capture(name: "setup_snapshot" | "agent_connect" | "cli_install" | "account_sign_in_failed" | "update_install" | "update_ready" | "app_crash", properties: () => Record<string, TelemetryValue>): void {
   try {
     const event: Record<string, TelemetryValue> = { ...properties(), seconds_since_first_launch: secondsSinceFirstLaunch() };
     deps?.telemetry.capture({ name, properties: event });

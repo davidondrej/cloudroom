@@ -6,7 +6,6 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { MemoryRouter, useLocation } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { SidebarProvider } from "@/components/ui/sidebar";
-import * as nativeShell from "@/lib/native-shell";
 import {
   SETTINGS_NAV_GROUPS,
   SETTINGS_NAV_SECTIONS,
@@ -175,15 +174,5 @@ describe("SettingsSidebarContent navigation", () => {
     fireEvent.keyDown(search, { key: "ArrowUp" });
     fireEvent.keyDown(search, { key: "ArrowUp" });
     expect(search.getAttribute("aria-activedescendant")).toBe(second!.id);
-  });
-
-  it("keeps native device settings reachable", () => {
-    vi.spyOn(nativeShell, "canOpenNativeScreen").mockReturnValue(true);
-    const openNative = vi
-      .spyOn(nativeShell, "shellOpenNative")
-      .mockReturnValue(true);
-    renderSidebar();
-    fireEvent.click(screen.getByRole("button", { name: "This device" }));
-    expect(openNative).toHaveBeenCalledWith("device-settings");
   });
 });

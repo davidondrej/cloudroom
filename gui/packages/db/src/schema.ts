@@ -524,6 +524,7 @@ export const environments = sqliteTable(
     statusMessage: text("status_message"),
     pendingLog: text("pending_log").notNull().default(""),
     claimPath: text("claim_path"),
+    parkedAt: integer("parked_at"),
     status: text("status")
       .$type<EnvironmentStatus>()
       .notNull()

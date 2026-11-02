@@ -25,7 +25,6 @@
     "@cloudroom/domain": "workspace:*",
     "@cloudroom/fuzzy-match": "workspace:*",
     "@cloudroom/host-daemon-contract": "workspace:*",
-    "@cloudroom/mobile-bridge": "workspace:*",
     "@cloudroom/sdk": "workspace:*",
     "@cloudroom/server-contract": "workspace:*",
     "@cloudroom/shared-ui": "workspace:*",

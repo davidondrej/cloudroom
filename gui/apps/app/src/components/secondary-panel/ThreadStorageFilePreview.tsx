@@ -7,6 +7,7 @@ import {
 import { hashSourceContents } from "@/components/code/source-code-budget";
 import type { MarkdownLinkRouting } from "@/components/ui/markdown-link-routing.js";
 import { HttpError } from "@/lib/api";
+import { useDocumentFilePreview } from "./useDocumentFilePreview";
 import type {
   FilePreview,
   FilePreviewLineRange,
@@ -149,6 +150,18 @@ function resolveSecondaryPanelFilePreviewState({
     return { kind: "video", url: filePreview.url };
   }
 
+  if (filePreview.kind === "audio") {
+    return {
+      kind: "audio",
+      url: filePreview.url,
+      sizeBytes: filePreview.sizeBytes ?? null,
+    };
+  }
+
+  if (filePreview.kind === "document") {
+    return { kind: "loading" };
+  }
+
   return {
     kind: "error",
     message: `Preview not available for ${filePreview.mimeType}.`,
@@ -172,16 +185,27 @@ export function SecondaryPanelFilePreview({
   onRefresh,
   statusLabel = null,
 }: SecondaryPanelFilePreviewProps) {
-  const state = resolveSecondaryPanelFilePreviewState({
-    activePath,
-    error,
-    filePreview,
-    htmlPreviewUrl,
-    isLoading,
-    lineRange,
-  });
+  const documentPreview = useDocumentFilePreview(
+    !error &&
+      !isLoading &&
+      filePreview?.kind === "document" &&
+      filePreview.path === activePath
+      ? filePreview
+      : null,
+  );
+  const state =
+    documentPreview?.state ??
+    resolveSecondaryPanelFilePreviewState({
+      activePath,
+      error,
+      filePreview,
+      htmlPreviewUrl,
+      isLoading,
+      lineRange,
+    });
   return (
     <FilePreviewSurface
+      notice={documentPreview?.notice}
       path={activePath}
       copyPath={copyPath}
       onSelectionAddToChat={onSelectionAddToChat}

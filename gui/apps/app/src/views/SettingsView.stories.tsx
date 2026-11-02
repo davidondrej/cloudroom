@@ -211,8 +211,6 @@ function GeneralSettingsStory({
         rewriteLocalhostLinks={state.rewriteLocalhostLinks}
         richTextEditing={state.richTextEditing}
         steerActiveThreadOnEnter={state.steerActiveThreadOnEnter}
-        worktreeRetention="30d"
-        onWorktreeRetentionChange={() => {}}
       />
       <CliSkillsSettingsSectionContent
         hasConnectedMachine={false}

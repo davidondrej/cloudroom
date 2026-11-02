@@ -1,10 +1,8 @@
 import { useState } from "react";
-import { useNavigate } from "react-router-dom";
 import { Button } from "@cloudroom/shared-ui/button";
 import { Icon } from "@cloudroom/shared-ui/icon";
 import { publishBannerHeight } from "./DesktopUpdateBanner";
 import { useWorktreeStorage } from "@/hooks/queries/system-queries";
-import { SETTINGS_ROUTE_PATH } from "@/lib/route-paths";
 
 const gb = (bytes: number) =>
   bytes < 1e9
@@ -26,7 +24,6 @@ export function WorktreeDiskUse() {
 
 export function LowDiskBanner() {
   const storage = useWorktreeStorage().data;
-  const navigate = useNavigate();
   const [dismissed, setDismissed] = useState(false);
   if (!storage?.low || storage.freeBytes === null || dismissed) return null;
   return (
@@ -41,15 +38,8 @@ export function LowDiskBanner() {
         {storage.usedBytes === null
           ? ""
           : `Worktrees use ${gb(storage.usedBytes)}. `}
-        Delete finished threads or shorten worktree retention to free space.
+        Archive finished threads to free space.
       </span>
-      <Button
-        size="sm"
-        variant="ghost"
-        onClick={() => void navigate(`${SETTINGS_ROUTE_PATH}/general`)}
-      >
-        Worktree settings
-      </Button>
       <Button
         size="icon"
         variant="ghost"

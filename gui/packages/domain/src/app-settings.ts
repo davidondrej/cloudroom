@@ -13,25 +13,6 @@ export const managedBranchPrefixSchema = z
     message: "Prefix must start a valid git branch name",
   });
 
-const MINUTE_MS = 60_000;
-const DAY_MS = 24 * 60 * MINUTE_MS;
-
-export const WORKTREE_RETENTION_MS = {
-  "5m": 5 * MINUTE_MS,
-  "1h": 60 * MINUTE_MS,
-  "1d": DAY_MS,
-  "3d": 3 * DAY_MS,
-  "7d": 7 * DAY_MS,
-  "21d": 21 * DAY_MS,
-  "30d": 30 * DAY_MS,
-  never: null,
-} as const satisfies Record<string, number | null>;
-export type WorktreeRetention = keyof typeof WORKTREE_RETENTION_MS;
-export const DEFAULT_WORKTREE_RETENTION: WorktreeRetention = "3d";
-const worktreeRetentionSchema = z.enum(
-  Object.keys(WORKTREE_RETENTION_MS) as [WorktreeRetention, ...WorktreeRetention[]],
-);
-
 export const appSettingsSchema = z
   .object({
     showKeyboardHints: z.boolean(),
@@ -53,9 +34,6 @@ export const appSettingsSchema = z
     providerAutoUpdate: z.array(z.string().min(1)).default([]),
     hiddenProviderIds: z.array(z.string().min(1)).default([]),
     managedBranchPrefix: managedBranchPrefixSchema,
-    worktreeRetention: worktreeRetentionSchema.default(
-      DEFAULT_WORKTREE_RETENTION,
-    ),
     machineServerUrl: z
       .string()
       .url()
@@ -91,7 +69,6 @@ export const defaultAppSettings: AppSettings = {
   providerAutoUpdate: [],
   hiddenProviderIds: [],
   managedBranchPrefix: DEFAULT_MANAGED_BRANCH_PREFIX,
-  worktreeRetention: DEFAULT_WORKTREE_RETENTION,
   machineServerUrl: null,
   defaultMachineAccess: null,
   machineGitCredentialsEnabled: true,
@@ -107,7 +84,6 @@ export const appSettingsUpdateSchema = z.union([
     providerAutoUpdate: z.array(z.string().min(1)).optional(),
     hiddenProviderIds: z.array(z.string().min(1)).optional(),
     telemetryEnabled: z.boolean().optional(),
-    worktreeRetention: worktreeRetentionSchema.optional(),
     showUnhandledProviderEvents: z.boolean().optional(),
   }),
   appSettingsSchema.omit({ showDiagnosticEvents: true }).extend({
@@ -119,7 +95,6 @@ export const appSettingsUpdateSchema = z.union([
     providerAutoUpdate: z.array(z.string().min(1)).optional(),
     hiddenProviderIds: z.array(z.string().min(1)).optional(),
     telemetryEnabled: z.boolean().optional(),
-    worktreeRetention: worktreeRetentionSchema.optional(),
     showUnhandledProviderEvents: z.boolean(),
   }),
 ]);

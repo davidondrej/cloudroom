@@ -21,4 +21,5 @@ description: 'Inspect and control the user’s Cloudroom threads, projects, and 
 - On the Mac, start with `room-cli --help` or `room-cli guide`. Prefer `--json`.
 - Tools, API keys, and repos for every cloud sandbox live in the Mac's `room-cli cloud env list --json`. To install a tool in every sandbox, read https://www.cloudroom.dev/docs/cloud-environment.md first (tools must land on the agents' PATH). Then save the whole new script with `room-cli mac run --write --stdin '~/.local/bin/room-cli cloud setup set' < FILE`. It replaces the old script, so keep its lines.
 - `Mac unavailable` means the Mac is offline or Mac access is off, and says which when Cloudroom knows, including why an online Mac can't connect. `room-cli mac status` gives the same `reason`. Tell the user.
+- Phone: the user opens cloudroom.dev/m, signs in with their Cloudroom account, and adds the app to the Home Screen. With the Mac off, the phone still shows and runs Cloud threads, but starting a new thread needs the Mac.
 - Never inspect, message, or launch other threads unless the user asks.

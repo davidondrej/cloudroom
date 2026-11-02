@@ -23,6 +23,32 @@ const MARKDOWN_MIME_TYPES = new Set(["text/markdown", "text/x-markdown"]);
 const CSV_FILE_EXTENSIONS = [".csv"];
 const CSV_MIME_TYPES = new Set(["application/csv", "text/csv"]);
 const HTML_FILE_EXTENSION = ".html";
+const AUDIO_FILE_EXTENSIONS = [
+  ".aac",
+  ".flac",
+  ".m4a",
+  ".mp3",
+  ".oga",
+  ".ogg",
+  ".opus",
+  ".wav",
+  ".weba",
+];
+const DOCUMENT_FILE_EXTENSIONS: readonly (readonly [
+  string,
+  DocumentFileFormat,
+])[] = [
+  [".xlsx", "xlsx"],
+  [".xlsm", "xlsx"],
+  [".docx", "docx"],
+  [".docm", "docx"],
+  [".pptx", "pptx"],
+  [".pptm", "pptx"],
+  [".zip", "zip"],
+  [".tar", "tar"],
+  [".tar.gz", "tgz"],
+  [".tgz", "tgz"],
+];
 const NULL_CHARACTER = "\u0000";
 
 export interface FilePreviewTarget {
@@ -31,8 +57,16 @@ export interface FilePreviewTarget {
   url: string;
 }
 
+export type DocumentFileFormat =
+  | "docx"
+  | "pptx"
+  | "tar"
+  | "tgz"
+  | "xlsx"
+  | "zip";
+
 interface FilePreviewBase extends FilePreviewTarget {
-  kind: "image" | "text" | "unsupported" | "video";
+  kind: "audio" | "document" | "image" | "text" | "unsupported" | "video";
   mimeType: string;
 }
 
@@ -42,6 +76,17 @@ interface ImageFilePreview extends FilePreviewBase {
 
 interface VideoFilePreview extends FilePreviewBase {
   kind: "video";
+}
+
+interface AudioFilePreview extends FilePreviewBase {
+  kind: "audio";
+  sizeBytes?: number;
+}
+
+export interface DocumentFilePreview extends FilePreviewBase {
+  kind: "document";
+  format: DocumentFileFormat;
+  contentBytes: Uint8Array;
 }
 
 export interface TextFilePreview extends FilePreviewBase {
@@ -54,6 +99,8 @@ interface UnsupportedFilePreview extends FilePreviewBase {
 }
 
 export type FilePreview =
+  | AudioFilePreview
+  | DocumentFilePreview
   | ImageFilePreview
   | VideoFilePreview
   | TextFilePreview
@@ -204,6 +251,22 @@ function hasCsvExtension(path: string): boolean {
   );
 }
 
+export function isAudioFilePreviewPath(path: string): boolean {
+  const normalizedPath = path.toLowerCase();
+  return AUDIO_FILE_EXTENSIONS.some((extension) =>
+    normalizedPath.endsWith(extension),
+  );
+}
+
+export function getDocumentFileFormat(path: string): DocumentFileFormat | null {
+  const normalizedPath = path.toLowerCase();
+  return (
+    DOCUMENT_FILE_EXTENSIONS.find(([extension]) =>
+      normalizedPath.endsWith(extension),
+    )?.[1] ?? null
+  );
+}
+
 export function isHtmlFilePreviewPath(path: string): boolean {
   return path.toLowerCase().endsWith(HTML_FILE_EXTENSION);
 }
@@ -245,6 +308,25 @@ export function buildFilePreview(args: BuildFilePreviewArgs): FilePreview {
     return {
       kind: "image",
       ...base,
+    };
+  }
+
+  const fileName = args.name ?? args.path;
+  if (isAudioFilePreviewPath(fileName)) {
+    return {
+      kind: "audio",
+      ...base,
+      sizeBytes: args.contentBytes.byteLength,
+    };
+  }
+
+  const documentFormat = getDocumentFileFormat(fileName);
+  if (documentFormat !== null) {
+    return {
+      kind: "document",
+      ...base,
+      contentBytes: args.contentBytes,
+      format: documentFormat,
     };
   }
 

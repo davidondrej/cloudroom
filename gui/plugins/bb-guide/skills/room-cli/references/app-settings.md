@@ -119,15 +119,10 @@ This blocks common catastrophic shell commands; it is not a sandbox.
 
 ## Worktree cleanup
 
-- `worktreeRetention` defaults to `3d`. Options: `5m`, `1h`, `1d`, `3d`,
-  `7d`, `21d`, `30d`, `never`. Set it with
-  `room-cli settings general worktreeRetention <option>`.
-- cloudroom deletes a worktree folder that long after its last thread is
-  archived. On this computer, deleting the last thread removes it sooner, and
-  worktrees with uncommitted or unpushed work are kept. Worktrees on other
-  machines are removed when the time ends, without that check. The branch
-  stays.
-- Changing it restarts the timer for worktrees already waiting.
+- There is no setting. Archiving a thread commits its worktree's unfinished
+  work to the branch and removes the folder.
+- Unarchiving the thread or sending it a message rebuilds the folder at the
+  same path. Saved changes come back uncommitted; reinstall dependencies.
 
 ## Provider order and default
 

@@ -624,8 +624,6 @@ function ReadOnlyContextBanner({
 }: ReadOnlyContextBannerProps) {
   const isParentThreadExpanded =
     expandedSection === "parentThread" && parentThreadSection !== null;
-  const hasMultipleSegments = parentThreadSection !== null;
-  const showStatusAction = statusAction !== null && !hasMultipleSegments;
   return (
     <PromptStackCard
       ariaLabel="Thread context before sending"
@@ -656,7 +654,7 @@ function ReadOnlyContextBanner({
             {statusLabel}
           </span>
         </div>
-        {showStatusAction ? (
+        {statusAction ? (
           <BannerActionSlot>{statusAction}</BannerActionSlot>
         ) : null}
       </div>

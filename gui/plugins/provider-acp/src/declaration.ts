@@ -81,10 +81,13 @@ export function acpProviderDeclaration(
       ...(agent.installer === undefined
         ? {}
         : {
-            acpInstaller: {
-              scriptUrl: agent.installer.scriptUrl,
-              args: [...(agent.installer.args ?? [])],
-            },
+            acpInstaller:
+              "npmPackage" in agent.installer
+                ? { npmPackage: agent.installer.npmPackage }
+                : {
+                    scriptUrl: agent.installer.scriptUrl,
+                    args: [...(agent.installer.args ?? [])],
+                  },
           }),
       acpLaunchSpec: { ...agent.launch },
     },

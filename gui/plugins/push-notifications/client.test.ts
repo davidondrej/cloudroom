@@ -92,12 +92,8 @@ describe("client system notifications", () => {
     delivery.dispose();
   });
 
-  it("does not deliver in the mobile WebView and survives unavailable storage", async () => {
+  it("still delivers when browser storage is unavailable", async () => {
     const delivery = createClientDelivery(vi.fn());
-    vi.stubGlobal("bb", { native: {} });
-    await delivery.deliver(message, true);
-    expect(TestNotification.instances).toHaveLength(0);
-    vi.stubGlobal("bb", undefined);
     vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
       throw new Error("Unavailable");
     });

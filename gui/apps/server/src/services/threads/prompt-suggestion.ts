@@ -26,8 +26,8 @@ const MACHINE_PREFIXES = [
   "Automatic Cloudroom note",
 ];
 const MAX_SAMPLE_LENGTH = 200;
-const STYLE_THREADS = 10;
-const STYLE_CANDIDATES = 30;
+const STYLE_THREADS = 15;
+const STYLE_CANDIDATES = 45;
 const MAX_SUGGESTION_LENGTH = 120;
 const MAX_CACHED_THREADS = 200;
 

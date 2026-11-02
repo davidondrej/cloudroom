@@ -427,7 +427,11 @@ export function buildEnvironmentFilePreview({
     path,
     url: contentUrl,
   });
-  if (preview.kind !== "image" && preview.kind !== "video") {
+  if (
+    preview.kind !== "image" &&
+    preview.kind !== "video" &&
+    preview.kind !== "audio"
+  ) {
     return preview;
   }
   const base64Content =

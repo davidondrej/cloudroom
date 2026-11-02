@@ -7,7 +7,6 @@ import {
   type ReactNode,
 } from "react";
 import { getBbDesktopInfo, isDesktopBrowserAvailable } from "@/lib/bb-desktop";
-import { shellOpenExternal } from "@/lib/native-shell";
 import {
   openUrlByPreference,
   useOpenLinksInAppBrowserPreference,
@@ -35,7 +34,6 @@ export function openUrlInExternalBrowser(url: string): void {
     desktopInfo.openExternalUrl(url);
     return;
   }
-  if (shellOpenExternal(url)) return;
   if (typeof window !== "undefined") {
     window.open(url, "_blank", "noopener,noreferrer");
   }

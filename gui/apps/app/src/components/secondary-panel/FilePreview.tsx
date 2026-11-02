@@ -30,6 +30,7 @@ import {
 import { TruncateStart } from "@/components/ui/truncate-start.js";
 import { copyToClipboardWithToast } from "@/lib/clipboard";
 import { openUrlInExternalBrowser } from "@/lib/url-open-routing";
+import { formatFileSize } from "@/lib/format-file-size";
 import type {
   FilePreviewLineRange,
   WorkspaceFilePreviewStatusLabel,
@@ -64,6 +65,7 @@ export type FilePreviewState =
   | { kind: "error"; message?: string }
   | { kind: "image"; url: string }
   | { kind: "video"; url: string }
+  | { kind: "audio"; url: string; sizeBytes: number | null }
   | ({ kind: "iframe" } & IframeFilePreviewTarget)
   | {
       kind: "html";
@@ -80,6 +82,7 @@ export type FilePreviewState =
 
 interface FilePreviewProps {
   state: FilePreviewState;
+  notice?: ReactNode;
   path: string;
   copyPath?: string | null;
   headerMode?: FilePreviewHeaderMode;
@@ -161,6 +164,12 @@ interface FilePreviewVideoProps {
   title: string;
 }
 
+interface FilePreviewAudioProps {
+  url: string;
+  path: string;
+  sizeBytes: number | null;
+}
+
 interface FilePreviewMessageProps {
   message: string;
   role?: "alert";
@@ -197,6 +206,8 @@ const CSV_PREVIEW_MAX_COLUMNS = 100;
 const CSV_PREVIEW_MAX_ROWS = 500;
 const CSV_PREVIEW_ROW_HEIGHT_PX = 29;
 const CSV_PREVIEW_OVERSCAN_ROWS = 8;
+const CSV_COLUMN_MIN_CHARS = 6;
+const CSV_COLUMN_MAX_CHARS = 36;
 
 const HTML_FILE_PREVIEW_IFRAME_STYLE = {
   width: "100%",
@@ -424,6 +435,7 @@ export function getCsvTruncationNote(
 
 export function FilePreview({
   state,
+  notice,
   path,
   copyPath = null,
   headerMode = "file",
@@ -487,6 +499,7 @@ export function FilePreview({
             : "@container/page min-h-full"
       }
     >
+      {notice}
       {headerMode === "file" ? (
         <FilePreviewHeader
           path={path}
@@ -564,6 +577,15 @@ function FilePreviewBody({
   }
   if (state.kind === "video") {
     return <FilePreviewVideo url={state.url} title={path} />;
+  }
+  if (state.kind === "audio") {
+    return (
+      <FilePreviewAudio
+        url={state.url}
+        path={path}
+        sizeBytes={state.sizeBytes}
+      />
+    );
   }
   if (state.kind === "iframe") {
     return (
@@ -980,7 +1002,23 @@ function CsvFilePreview({ file, onSelectionAddToChat }: CsvFilePreviewProps) {
     index,
     label: headerRow[index] ?? "",
   }));
-  const tableWidth = `max(100%, ${3 + columns.length * 18}rem)`;
+  const columnChars = useMemo(
+    () =>
+      Array.from({ length: preview.columnCount }, (_, index) =>
+        Math.min(
+          CSV_COLUMN_MAX_CHARS,
+          Math.max(
+            CSV_COLUMN_MIN_CHARS,
+            (preview.rows[0]?.[index] || `Column ${index + 1}`).length,
+            ...preview.rows
+              .slice(1, 101)
+              .map((row) => (row[index] ?? "").length),
+          ) + 2,
+        ),
+      ),
+    [preview],
+  );
+  const tableWidth = `max(100%, calc(3rem + ${columnChars.reduce((total, chars) => total + chars, 0)}ch + ${columns.length}rem))`;
   const truncationNote = getCsvTruncationNote(preview, bodyRows.length);
 
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -1015,7 +1053,12 @@ function CsvFilePreview({ file, onSelectionAddToChat }: CsvFilePreviewProps) {
             <colgroup>
               <col className="w-12" />
               {columns.map((column) => (
-                <col key={column.index} className="w-72" />
+                <col
+                  key={column.index}
+                  style={{
+                    width: `calc(${columnChars[column.index] ?? CSV_COLUMN_MIN_CHARS}ch + 1rem)`,
+                  }}
+                />
               ))}
             </colgroup>
             <thead>
@@ -1030,7 +1073,7 @@ function CsvFilePreview({ file, onSelectionAddToChat }: CsvFilePreviewProps) {
                   <th
                     key={column.index}
                     scope="col"
-                    className="sticky top-0 z-20 w-72 max-w-72 border-b border-r border-border bg-surface-recessed-solid px-2 py-1 text-left font-medium text-foreground"
+                    className="sticky top-0 z-20 border-b border-r border-border bg-surface-recessed-solid px-2 py-1 text-left font-medium text-foreground"
                     title={column.label}
                   >
                     <span className="block max-w-full truncate">
@@ -1066,7 +1109,7 @@ function CsvFilePreview({ file, onSelectionAddToChat }: CsvFilePreviewProps) {
                       return (
                         <td
                           key={column.index}
-                          className="w-72 max-w-72 overflow-hidden border-b border-r border-border px-2 py-1 align-top text-foreground"
+                          className="overflow-hidden border-b border-r border-border px-2 py-1 align-top text-foreground"
                           title={cell}
                         >
                           <span className="block max-w-full truncate">
@@ -1130,6 +1173,47 @@ function FilePreviewImage({ url, alt }: FilePreviewImageProps) {
           onClose={() => setIsLightboxOpen(false)}
         />
       ) : null}
+    </div>
+  );
+}
+
+function formatDuration(seconds: number): string {
+  const total = Math.round(seconds);
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const rest = String(total % 60).padStart(2, "0");
+  return hours > 0
+    ? `${hours}:${String(minutes).padStart(2, "0")}:${rest}`
+    : `${minutes}:${rest}`;
+}
+
+function FilePreviewAudio({ url, path, sizeBytes }: FilePreviewAudioProps) {
+  const [duration, setDuration] = useState<number | null>(null);
+  const format = path.split(".").at(-1)?.toUpperCase() ?? null;
+  const details: [string, string][] = [];
+  if (duration !== null && Number.isFinite(duration)) {
+    details.push(["Length", formatDuration(duration)]);
+  }
+  if (format) details.push(["Format", format]);
+  if (sizeBytes !== null) details.push(["Size", formatFileSize(sizeBytes)]);
+  return (
+    <div className="px-4 pt-5">
+      <audio
+        src={url}
+        aria-label={path}
+        className="block w-full"
+        controls
+        preload="metadata"
+        onLoadedMetadata={(event) => setDuration(event.currentTarget.duration)}
+      />
+      <dl className="mt-5 grid grid-cols-[6rem_1fr] gap-y-2 text-sm">
+        {details.map(([label, value]) => (
+          <div key={label} className="contents">
+            <dt className="text-muted-foreground">{label}</dt>
+            <dd className="text-foreground">{value}</dd>
+          </div>
+        ))}
+      </dl>
     </div>
   );
 }

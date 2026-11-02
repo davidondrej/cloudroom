@@ -107,7 +107,9 @@ function fallbackCandidates(cli: string, env: NodeJS.ProcessEnv): string[] {
           ? [join(home, ".claude", "local", "claude")]
           : cli === "grok"
             ? [join(home, ".grok", "bin", "grok")]
-            : [];
+            : cli === "kilo"
+              ? [join(home, ".kilo", "bin", "kilo")]
+              : [];
   return [...binDirs.map((dir) => join(dir, cli)), ...providerPaths];
 }
 

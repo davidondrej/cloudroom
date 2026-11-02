@@ -18,6 +18,7 @@ import {
   clampPercent,
   downloadedInstallerCommand,
   formatCommand,
+  npmGlobalInstallCommand,
   readCliVersion,
   resolveExecutablePath,
 } from "@cloudroom/provider-bridge-protocol/bridge-kit";
@@ -137,7 +138,7 @@ export interface AcpMaintenanceDialect {
   readUsage(): Promise<ProviderUsageResult>;
 }
 
-export const acpScriptInstallerSchema = z.object({
+const acpScriptInstallerSchema = z.object({
   scriptUrl: z
     .string()
     .regex(/^https:\/\/[A-Za-z0-9.-]+(?:\/[A-Za-z0-9._~/-]*)?$/u),
@@ -146,11 +147,25 @@ export const acpScriptInstallerSchema = z.object({
     .max(8)
     .default([]),
 });
-export type AcpScriptInstaller = z.infer<typeof acpScriptInstallerSchema>;
 
-export function acpScriptInstallerCommand(
-  installer: AcpScriptInstaller,
+const acpNpmInstallerSchema = z.object({
+  npmPackage: z
+    .string()
+    .regex(/^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/u),
+});
+
+export const acpInstallerSchema = z.union([
+  acpScriptInstallerSchema,
+  acpNpmInstallerSchema,
+]);
+type AcpInstaller = z.infer<typeof acpInstallerSchema>;
+
+export function acpInstallerCommand(
+  installer: AcpInstaller,
 ): ProviderInstallationCommand {
+  if ("npmPackage" in installer) {
+    return npmGlobalInstallCommand(installer.npmPackage);
+  }
   const script = [
     'tmp=$(mktemp "${TMPDIR:-/tmp}/provider-installation.XXXXXX")',
     "trap 'rm -f \"$tmp\"' EXIT",

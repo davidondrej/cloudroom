@@ -19,7 +19,6 @@ import {
   experimentKeys,
   managedBranchPrefixSchema,
   type AppTheme,
-  type WorktreeRetention,
   type ExperimentKey,
   type Experiments,
   type FaviconColorPreference,
@@ -205,12 +204,10 @@ interface GeneralSettingsSectionProps {
   onRewriteLocalhostLinksChange: (enabled: boolean) => void;
   onRichTextEditingChange: (enabled: boolean) => void;
   onSteerActiveThreadOnEnterChange: (enabled: boolean) => void;
-  onWorktreeRetentionChange: (retention: WorktreeRetention) => void;
   openLinksInAppBrowser: boolean;
   rewriteLocalhostLinks: boolean;
   richTextEditing: boolean;
   steerActiveThreadOnEnter: boolean;
-  worktreeRetention: WorktreeRetention;
   worktreeDiskUse?: ReactNode;
 }
 
@@ -663,17 +660,6 @@ const FOLLOW_UP_BEHAVIOR_OPTIONS = [
 const STREAMER_MODE_SETTING_LABEL = "Streamer mode";
 const MANAGED_BRANCH_PREFIX_SETTING_LABEL = "New branch prefix";
 const MANAGED_BRANCH_PREFIX_EXAMPLE_SLUG = "fix-login-flow-thr_ab12cd34ef";
-const WORKTREE_RETENTION_SETTING_LABEL = "Delete archived worktrees after";
-const WORKTREE_RETENTION_LABELS: Record<WorktreeRetention, string> = {
-  "5m": "5 minutes",
-  "1h": "1 hour",
-  "1d": "1 day",
-  "3d": "3 days",
-  "7d": "7 days",
-  "21d": "21 days",
-  "30d": "30 days",
-  never: "Never",
-};
 
 interface ManagedBranchPrefixSettingProps {
   disabled: boolean;
@@ -939,12 +925,10 @@ export function GeneralSettingsSection({
   onRewriteLocalhostLinksChange,
   onRichTextEditingChange,
   onSteerActiveThreadOnEnterChange,
-  onWorktreeRetentionChange,
   openLinksInAppBrowser,
   rewriteLocalhostLinks,
   richTextEditing,
   steerActiveThreadOnEnter,
-  worktreeRetention,
   worktreeDiskUse,
 }: GeneralSettingsSectionProps) {
   return (
@@ -1060,65 +1044,11 @@ export function GeneralSettingsSection({
             disabled={generalSettingsDisabled}
             onChange={onManagedBranchPrefixChange}
           />
-          <SettingsWithControl
-            label={WORKTREE_RETENTION_SETTING_LABEL}
-            description={
-              <>
-                Removes the worktree folder this long after its last thread is
-                archived. On this computer, deleting the last thread removes
-                it sooner, and worktrees with uncommitted or unpushed work are
-                kept until untouched for 30 days, then their changes are
-                committed to the branch. Worktrees on other machines are removed when the time
-                ends, without that check. The branch stays.{" "}
-                {worktreeDiskUse}
-              </>
-            }
-          >
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  className={SETTINGS_DROPDOWN_TRIGGER_CLASS}
-                  disabled={generalSettingsDisabled}
-                  aria-label={WORKTREE_RETENTION_SETTING_LABEL}
-                >
-                  {WORKTREE_RETENTION_LABELS[worktreeRetention]}
-                  <Icon
-                    name="ChevronDown"
-                    className="size-3.5 text-muted-foreground"
-                  />
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent
-                align="end"
-                className={SETTINGS_DROPDOWN_CONTENT_CLASS}
-              >
-                {Object.entries(WORKTREE_RETENTION_LABELS).map(
-                  ([retention, label]) => (
-                    <DropdownMenuItem
-                      key={retention}
-                      onSelect={() =>
-                        onWorktreeRetentionChange(
-                          retention as WorktreeRetention,
-                        )
-                      }
-                    >
-                      {label}
-                      <Icon
-                        name="Check"
-                        className={cn(
-                          "ml-auto",
-                          retention !== worktreeRetention && "opacity-0",
-                          COARSE_POINTER_ICON_SIZE_CLASS,
-                        )}
-                      />
-                    </DropdownMenuItem>
-                  ),
-                )}
-              </DropdownMenuContent>
-            </DropdownMenu>
-          </SettingsWithControl>
+          <p className="text-xs leading-snug text-subtle-foreground/75">
+            Archiving a thread saves its work to its branch and removes its
+            worktree folder. Unarchiving the thread or sending it a message
+            brings the folder back. {worktreeDiskUse}
+          </p>
         </div>
       </SettingsSection>
     </>
@@ -1528,14 +1458,7 @@ export function SettingsView() {
               steerActiveThreadOnEnter: enabled,
             })
           }
-          worktreeRetention={generalSettings.worktreeRetention}
           worktreeDiskUse={<WorktreeDiskUse />}
-          onWorktreeRetentionChange={(retention) =>
-            updateGeneralSettingsMutation.mutate({
-              ...generalSettings,
-              worktreeRetention: retention,
-            })
-          }
         />
         <CliSkillsSettingsSection />
         <ThreadNamingSettingsSection />

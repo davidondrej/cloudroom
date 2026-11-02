@@ -12,7 +12,7 @@ import { hostFilePreviewQueryKey } from "./query-keys";
 import { HEAVY_PAYLOAD_QUERY_POLICY } from "./query-policies";
 
 interface HostMediaPreviewType {
-  kind: "image" | "video";
+  kind: "audio" | "image" | "video";
   mimeType: string;
 }
 
@@ -42,6 +42,15 @@ const HOST_MEDIA_PREVIEW_TYPES = new Map<string, HostMediaPreviewType>([
   [".ogv", { kind: "video", mimeType: "video/ogg" }],
   [".webm", { kind: "video", mimeType: "video/webm" }],
   [".wmv", { kind: "video", mimeType: "video/x-ms-wmv" }],
+  [".aac", { kind: "audio", mimeType: "audio/aac" }],
+  [".flac", { kind: "audio", mimeType: "audio/flac" }],
+  [".m4a", { kind: "audio", mimeType: "audio/mp4" }],
+  [".mp3", { kind: "audio", mimeType: "audio/mpeg" }],
+  [".oga", { kind: "audio", mimeType: "audio/ogg" }],
+  [".ogg", { kind: "audio", mimeType: "audio/ogg" }],
+  [".opus", { kind: "audio", mimeType: "audio/opus" }],
+  [".wav", { kind: "audio", mimeType: "audio/wav" }],
+  [".weba", { kind: "audio", mimeType: "audio/webm" }],
 ]);
 
 function splitAbsoluteHostFilePath(path: string): {
@@ -120,6 +129,7 @@ export function useHostFilePreview(
         previewUrl !== null ||
         (preview.kind !== "image" &&
           preview.kind !== "video" &&
+          preview.kind !== "audio" &&
           !isHtmlFilePreviewPath(activePath))
       ) {
         return preview;

@@ -16,9 +16,27 @@ import {
   notificationPermission,
 } from "./client.js";
 
+const BUTTON_CLASS =
+  "rounded-md border border-border px-3 py-2 disabled:opacity-50";
+
+const PERMISSION_STATUS = {
+  unsupported:
+    "System notifications are unavailable here. Use a supported browser over HTTPS or localhost.",
+  denied:
+    "Notifications are blocked. Allow them in your browser or system notification settings, then return here.",
+  granted:
+    "Notifications allowed. Your system notification settings also apply.",
+  default: "Allow notifications on this device to receive thread updates.",
+} as const;
+
+function useChannelEnabled(): boolean {
+  const { values } = useSettings();
+  return values?.[`${clientChannel()}Enabled`] === true;
+}
+
 function NotificationDelivery() {
   const navigate = useBbNavigate();
-  const { values } = useSettings();
+  const enabled = useChannelEnabled();
   const delivery = useRef<ReturnType<typeof createClientDelivery> | null>(null);
   useEffect(() => {
     const next = createClientDelivery((id) => navigate.toThread(id));
@@ -29,8 +47,6 @@ function NotificationDelivery() {
     };
   }, [navigate]);
   useRealtime(CLIENT_NOTIFICATION_CHANNEL, (payload) => {
-    const channel = clientChannel();
-    const enabled = channel !== null && values?.[`${channel}Enabled`] === true;
     void delivery.current?.deliver(payload, enabled).catch(() => undefined);
   });
   return null;
@@ -38,7 +54,7 @@ function NotificationDelivery() {
 
 function NotificationSettings() {
   const rpc = useRpc<typeof pushNotificationsRpcContract>();
-  const { values } = useSettings();
+  const enabled = useChannelEnabled();
   const channel = clientChannel();
   const [permission, setPermission] = useState(notificationPermission);
   const [busy, setBusy] = useState(false);
@@ -52,44 +68,29 @@ function NotificationSettings() {
       document.removeEventListener("visibilitychange", refresh);
     };
   }, []);
-  if (channel === null) return null;
-  const enabled = values?.[`${channel}Enabled`] === true;
-  const status =
-    permission === "unsupported"
-      ? "System notifications are unavailable here. Use a supported browser over HTTPS or localhost."
-      : permission === "denied"
-        ? "Notifications are blocked. Allow them in your browser or system notification settings, then return here."
-        : permission === "granted"
-          ? "Notifications allowed. Your system notification settings also apply."
-          : "Allow notifications on this device to receive thread updates.";
 
-  async function requestPermission() {
+  async function run(action: () => Promise<string | null>) {
     setBusy(true);
     setMessage(null);
     try {
+      setMessage(await action());
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const allow = () =>
+    run(async () => {
       setPermission(await Notification.requestPermission());
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : String(error));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function testNotification() {
-    if (channel === null) return;
-    setBusy(true);
-    setMessage(null);
-    try {
+      return null;
+    });
+  const sendTest = () =>
+    run(async () => {
       await rpc.call("notifications.test", { channel });
-      setMessage(
-        `Test sent to connected ${channel} clients with notification permission.`,
-      );
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : String(error));
-    } finally {
-      setBusy(false);
-    }
-  }
+      return `Test sent to connected ${channel} clients with notification permission.`;
+    });
 
   return (
     <div className="space-y-3 text-sm">
@@ -97,14 +98,14 @@ function NotificationSettings() {
         {channel === "desktop" ? "This desktop app" : "This browser"}
       </h3>
       <p className="text-muted-foreground" role="status">
-        {status}
+        {PERMISSION_STATUS[permission]}
       </p>
       {permission === "default" ? (
         <button
           type="button"
-          className="rounded-md border border-border px-3 py-2 disabled:opacity-50"
+          className={BUTTON_CLASS}
           disabled={busy || !enabled}
-          onClick={() => void requestPermission()}
+          onClick={() => void allow()}
         >
           Allow notifications
         </button>
@@ -112,9 +113,9 @@ function NotificationSettings() {
       {permission === "granted" ? (
         <button
           type="button"
-          className="rounded-md border border-border px-3 py-2 disabled:opacity-50"
+          className={BUTTON_CLASS}
           disabled={busy || !enabled}
-          onClick={() => void testNotification()}
+          onClick={() => void sendTest()}
         >
           Send test notification
         </button>
@@ -130,8 +131,8 @@ function NotificationSettings() {
         </p>
       ) : null}
       <p className="text-xs text-muted-foreground">
-        Channel settings apply to this Cloudroom server. Each browser needs permission.
-        Click a notification to open its thread.
+        Channel settings apply to this Cloudroom server. Each browser needs
+        permission. Click a notification to open its thread.
       </p>
     </div>
   );

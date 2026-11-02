@@ -17,6 +17,7 @@ import {
   releaseLocalAttachmentPreview,
   rememberLocalAttachmentAspectRatio,
 } from "@/lib/attachment-local-previews";
+import { formatFileSize } from "@/lib/format-file-size";
 
 export function resolveAttachmentPreviewSrc(
   path: string,
@@ -52,12 +53,6 @@ export function AttachmentFileIcon({ name }: { name: string }) {
       className={`size-4 shrink-0 ${match?.[2] ?? "text-muted-foreground"}`}
     />
   );
-}
-
-function formatFileSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 function isImageAttachment(attachment: PromptDraftAttachment): boolean {

@@ -50,7 +50,6 @@ import {
 import type { ServerAppDeps, ServerRuntimeConfig } from "../types.js";
 import type { PluginService } from "../services/plugins/plugin-service.js";
 import { ApiError } from "../errors.js";
-import { rescheduleWorktreeRetirement } from "../services/environments/environment-engine.js";
 import { worktreeDiskStatus } from "../services/environments/worktree-storage.js";
 import {
   resolveVoiceTranscriptionEnabled,
@@ -280,7 +279,6 @@ export function registerSystemRoutes(
       stripAiCoAuthorsEnabled: settings.stripAiCoAuthorsEnabled ?? current.stripAiCoAuthorsEnabled,
       providerAutoUpdate: settings.providerAutoUpdate ?? current.providerAutoUpdate,
       hiddenProviderIds: settings.hiddenProviderIds ?? current.hiddenProviderIds,
-      worktreeRetention: settings.worktreeRetention ?? current.worktreeRetention,
       showDiagnosticEvents:
         diagnosticValue === undefined ||
         (showUnhandledProviderEvents !== undefined &&
@@ -291,8 +289,6 @@ export function registerSystemRoutes(
     setAppSettings(deps.db, updatedSettings);
     deps.telemetry.setEnabled(updatedSettings.telemetryEnabled);
     deps.hub.notifySystem(["config-changed"]);
-    if (updatedSettings.worktreeRetention !== current.worktreeRetention)
-      rescheduleWorktreeRetirement(deps);
     if (
       updatedSettings.providerAutoUpdate.some(
         (provider) => !current.providerAutoUpdate.includes(provider),

@@ -24,10 +24,9 @@ branch. Under the hood it's `git worktree add` plus some bookkeeping:
 - It lives at
   `<BB_DATA_DIR>/plugins/environment-git-worktree/host-data/worktrees/<thread-id>/<repo-name>`
   — for example, `~/.bb/plugins/environment-git-worktree/host-data/worktrees/thr_abc.../myrepo`.
-- Once every thread using it is archived or deleted, Cloudroom removes the
-  worktree (`git worktree remove --force`) after the worktree retention setting
-  (default 3 days). Unarchiving a thread keeps it. See Cleanup for worktrees
-  with unsaved work and worktrees on other machines.
+- Once every thread using it is archived, Cloudroom saves its work to its
+  branch and removes the folder. Unarchiving a thread or sending it a message
+  brings the folder back at the same path. See Cleanup.
 
 Worktrees are created by bb's built-in **Worktree** plugin, which is enabled by
 default. Disabling it in Settings → Plugins leaves existing worktrees alone
@@ -125,24 +124,21 @@ Contract:
 You don't need to clean up worktrees by hand. The Worktree plugin watches every
 worktree it made and removes the ones nothing is using:
 
-- Archiving the last thread on a worktree starts the retention wait
-  (Settings, default 3 days). Unarchive a thread within it and the worktree is
-  kept; let it elapse and the worktree goes.
-- On this computer, deleting the last thread ends the wait, and a worktree
-  with uncommitted changes (submodules included) or commits missing from every
-  remote is kept when the wait ends and checked again every hour. Once
-  untouched for 30 days, its changes are committed to its branch (or a new
-  `cloudroom/saved-*` branch) and the folder is removed. With no
-  remote, commits must be on a branch. A thread can't be restored while its
-  worktree is being removed. A worktree folder that is already gone is
-  finalized.
-- Worktrees on other machines ("Run threads here") are removed when the wait
-  ends, without the git check, as before.
+- On this computer, archiving the last thread on a worktree removes its
+  folder right away. First, uncommitted changes are committed to its branch
+  (a new `cloudroom/saved-*` branch if HEAD is detached), and the ignored
+  `private/` folder is set aside. If that save fails, the folder stays and is
+  checked again every hour.
+- Unarchiving the thread or sending it a message rebuilds the worktree at the
+  same path from that branch. Saved changes come back uncommitted, `private/`
+  comes back, and `.worktreeinclude` files are copied again. Dependencies and
+  build output are not kept, so reinstall them.
+- Deleting the last thread removes the worktree for good. The branch stays.
+  A thread can't be restored while its worktree is being removed.
+- Worktrees on other machines ("Run threads here") are removed 3 days after
+  their last thread is archived, without saving first.
 - Settings shows how much disk worktrees use. Below 10 GB free, the app warns.
-- Teleporting the last thread to Cloud shortens the wait to 2 days, or to the
-  retention setting if that is shorter. "Never" still keeps it.
-- Unarchive a thread after its worktree is gone and its next message sets
-  one up again.
+- Teleporting the last thread to Cloud removes the local worktree after 2 days.
 
 Removal runs `.bb-env-teardown.sh` inside the worktree first, then stops
 every process whose working directory is inside the worktree — the agent's

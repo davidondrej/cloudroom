@@ -59,8 +59,8 @@ describe("@cloudroom/templates", () => {
 
     expect(rendered).toContain("You are working inside Cloudroom");
     expect(rendered).toContain("IDE for managing coding agents");
-    expect(rendered).toContain("Mention any thread or agent as @thread:thr_abc123");
-    expect(rendered).toContain("Do not construct thread URLs manually");
+    expect(rendered).toContain("Mention threads as @thread:thr_abc123");
+    expect(rendered).toContain("Never build thread URLs");
     expect(rendered).not.toContain(
       "Ask the user a blocking question only when",
     );
@@ -75,10 +75,10 @@ describe("@cloudroom/templates", () => {
       });
 
     expect(render(false)).toContain("room-cli mac pull");
-    expect(render(false)).toContain("in Local threads Cloudroom asks the user");
+    expect(render(false)).toContain("read the `computer-use` or `cloud-computer-use` skill");
     expect(render(true)).not.toMatch(/room-cli mac (pull|push)|run it on their Mac/u);
-    expect(render(true)).not.toContain("in Local threads Cloudroom asks the user");
-    expect(render(true)).toContain("save lasting skills in the repo.");
+    expect(render(true)).not.toContain("read the `computer-use` or");
+    expect(render(true)).toContain("Save lasting skills in the repo.");
   });
 
   it("renders child thread needs-attention messages with blocker summaries", () => {

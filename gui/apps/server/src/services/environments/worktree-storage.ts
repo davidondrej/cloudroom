@@ -31,15 +31,36 @@ function refreshUsage(root: string): void {
     });
 }
 
+type LocalDiskDeps = Pick<AppDeps, "config" | "db" | "hub">;
+
+function localHostDataDir(deps: LocalDiskDeps): string | null {
+  const hostId = readPrimaryHostIdFromDataDir({ dataDir: deps.config.dataDir });
+  const dataDir = hostId === null ? null : findHostDataDir(deps, hostId);
+  return dataDir && path.isAbsolute(dataDir) ? dataDir : null;
+}
+
+function freeBytesAt(dir: string): number | null {
+  try {
+    const disk = statfsSync(dir);
+    return disk.bavail * disk.bsize;
+  } catch {
+    return null;
+  }
+}
+
+export function localFreeBytes(deps: LocalDiskDeps): number | null {
+  const dataDir = localHostDataDir(deps);
+  return dataDir === null ? null : freeBytesAt(dataDir);
+}
+
 export function worktreeDiskStatus(
-  deps: Pick<AppDeps, "config" | "db" | "hub">,
+  deps: LocalDiskDeps,
 ): SystemWorktreeStorageResponse {
   const record = getEnvironmentProvider(
     DEFAULT_ENVIRONMENT_PROVIDER_ID.gitWorktree,
   );
-  const hostId = readPrimaryHostIdFromDataDir({ dataDir: deps.config.dataDir });
-  const dataDir = hostId === null ? null : findHostDataDir(deps, hostId);
-  if (record === undefined || !dataDir || !path.isAbsolute(dataDir))
+  const dataDir = localHostDataDir(deps);
+  if (record === undefined || dataDir === null)
     return { freeBytes: null, usedBytes: null, low: false };
   refreshUsage(
     path.join(
@@ -50,11 +71,7 @@ export function worktreeDiskStatus(
       "worktrees",
     ),
   );
-  let free: number | null = null;
-  try {
-    const disk = statfsSync(dataDir);
-    free = disk.bavail * disk.bsize;
-  } catch {}
+  const free = freeBytesAt(dataDir);
   return {
     freeBytes: free,
     usedBytes: usage.bytes,

@@ -1,13 +1,17 @@
+import { existsSync } from "node:fs";
+import { rm } from "node:fs/promises";
+import path from "node:path";
 import { withHostCleanup } from "../hosts/cleanup-context.js";
 import { readPrimaryHostIdFromDataDir } from "../hosts/primary-host.js";
 import { findHostDataDir } from "../lib/entity-lookup.js";
 import { updateThread } from "@cloudroom/db";
 import { assertEnvironmentPathAvailable } from "./path-admission.js";
-import { worktreeCanBeRemoved } from "./worktree-work.js";
+import { restoreWorktreeWork, saveWorktreeWork } from "./worktree-work.js";
 import { saveThreadProvisionContext } from "../threads/thread-startup-store.js";
 import {
   refreshAttachedEnvironmentBranch,
   resolveProviderOperationContext,
+  resolveRestoreOperationContext,
 } from "../threads/thread-environment-placement.js";
 import { withEnvironmentCleanupSlot } from "./cleanup-concurrency.js";
 import { ensureHostSessionReadyForWork } from "../hosts/host-lifecycle.js";
@@ -21,12 +25,12 @@ import {
   runEnvironmentHook,
   ENVIRONMENT_HOOK_TIMEOUT_MS,
 } from "./environment-hooks.js";
-import { eq, and, isNotNull, isNull, or, sql } from "drizzle-orm";
+import { eq, and, isNull, or, sql } from "drizzle-orm";
 import { z } from "zod";
 import {
-  getAppSettings,
   releaseFinishedEnvironmentPreparationOwners,
   environmentHasLiveThreads,
+  environmentHasRestorableThreads,
   environments,
   getEnvironment,
   getThread,
@@ -57,7 +61,6 @@ import {
   type SystemThreadProvisioningStatus,
   type ThreadStatus,
   threadScope,
-  WORKTREE_RETENTION_MS,
 } from "@cloudroom/domain";
 import { type ThreadResponse } from "@cloudroom/server-contract";
 import {
@@ -304,36 +307,24 @@ function runTrackedOperation(args: {
 
 const REMOVE_RETRY_MS = 60_000;
 
+const REMOTE_WORKTREE_GRACE_MS = 3 * 24 * 60 * 60_000;
+
+/** Local worktrees are saved and parked at once. Other machines' worktrees can't be saved first, so they wait. */
 function retireGraceMs(
-  db: DbQueryConnection,
+  deps: Pick<Deps, "config">,
   provider: PluginEnvironmentProviderRecord["provider"],
+  row: EnvironmentRow,
 ): number | null {
-  return provider.id === DEFAULT_ENVIRONMENT_PROVIDER_ID.gitWorktree
-    ? WORKTREE_RETENTION_MS[getAppSettings(db).worktreeRetention]
-    : provider.policy.retireGraceMs;
+  if (provider.id !== DEFAULT_ENVIRONMENT_PROVIDER_ID.gitWorktree)
+    return provider.policy.retireGraceMs;
+  return isLocalWorktree(deps, row) ? 0 : REMOTE_WORKTREE_GRACE_MS;
 }
 
-export function rescheduleWorktreeRetirement(deps: {
-  db: DbConnection;
-  hub: Pick<Deps["hub"], "notifyEnvironment">;
-}): void {
-  const rescheduled = deps.db
-    .update(environments)
-    .set({ retireAt: null })
-    .where(
-      and(
-        eq(
-          environments.environmentProviderId,
-          DEFAULT_ENVIRONMENT_PROVIDER_ID.gitWorktree,
-        ),
-        isNull(environments.teardownStatus),
-        isNotNull(environments.retireAt),
-      ),
-    )
-    .returning({ id: environments.id })
-    .all();
-  for (const { id } of rescheduled)
-    deps.hub.notifyEnvironment(id, ["metadata-changed"]);
+function worktreeNotesDir(
+  deps: Pick<Deps, "config">,
+  environmentId: string,
+): string {
+  return path.join(deps.config.dataDir, "worktree-notes", environmentId);
 }
 
 async function invokeCreate(
@@ -680,11 +671,15 @@ async function runRemove(
     throw new Error(
       `Environment provider "${row.environmentProviderId}" is unavailable or belongs to another plugin`,
     );
-  // Automatic local removals check git after the teardown hook, right before
-  // the folder is deleted, and keep the worktree if it has work. Restore is
+  // Automatic local removals save the worktree's work to its branch after the
+  // teardown hook, right before the folder is deleted. While an archived Local
+  // thread can still come back, the environment is parked instead of
+  // destroyed: the row stays and the folder is rebuilt on demand. Restore is
   // refused while teardown runs; the live-thread check is a last guard.
   const automatic =
     !explicitRemovals.has(environmentId) && isLocalWorktree(deps, row);
+  const park =
+    automatic && environmentHasRestorableThreads(deps.db, environmentId);
   const keep = (retireAt: number | null) =>
     writeEnvironment(deps, environmentId, {
       status: "ready",
@@ -714,9 +709,16 @@ async function runRemove(
           signal,
         });
       }
-      if (automatic && !(await worktreeCanBeRemoved(row.path!))) {
-        keep(Date.now() + WORK_RECHECK_MS);
-        return;
+      let branchName = row.branchName;
+      if (automatic && existsSync(row.path!)) {
+        branchName = await saveWorktreeWork(
+          row.path!,
+          worktreeNotesDir(deps, environmentId),
+        );
+        if (branchName === null) {
+          keep(Date.now() + WORK_RECHECK_MS);
+          return;
+        }
       }
       if (inUse()) {
         keep(null);
@@ -751,6 +753,17 @@ async function runRemove(
         return;
       }
       explicitRemovals.delete(environmentId);
+      if (park) {
+        writeEnvironment(deps, environmentId, {
+          status: "ready",
+          teardownStatus: null,
+          teardownMessage: null,
+          retireAt: null,
+          branchName,
+          parkedAt: Date.now(),
+        });
+        return;
+      }
       writeEnvironment(deps, environmentId, {
         teardownStatus: "removed",
         teardownMessage: null,
@@ -762,6 +775,11 @@ async function runRemove(
         environmentId,
         event: { type: "destroy.recorded" },
       });
+      if (automatic)
+        await rm(worktreeNotesDir(deps, environmentId), {
+          recursive: true,
+          force: true,
+        });
     } catch (error) {
       writeEnvironment(deps, environmentId, {
         teardownStatus: "failed",
@@ -801,7 +819,10 @@ async function removeEnvironment(
   await operation.done;
 }
 
-function isLocalWorktree(deps: Deps, row: EnvironmentRow): boolean {
+function isLocalWorktree(
+  deps: Pick<Deps, "config">,
+  row: EnvironmentRow,
+): boolean {
   return (
     row.ownerThreadId === null &&
     row.status !== "destroyed" &&
@@ -844,6 +865,11 @@ async function sweepProviderEnvironmentInSlot(
       writeEnvironment(deps, environmentId, { retireAt: null });
     return;
   }
+  if (
+    row.parkedAt !== null &&
+    environmentHasRestorableThreads(deps.db, environmentId)
+  )
+    return;
   if (record.pluginId !== row.environmentProviderPluginId) {
     const teardownMessage =
       "The environment provider belongs to a different plugin or has no recorded owner. Automatic removal is blocked.";
@@ -855,7 +881,7 @@ async function sweepProviderEnvironmentInSlot(
     return;
   }
   if (row.retireAt === null) {
-    const grace = retireGraceMs(deps.db, record.provider);
+    const grace = retireGraceMs(deps, record.provider, row);
     if (!cancelled && grace === null && row.status !== "destroyed") return;
     const retireAt =
       row.status === "destroyed" || cancelled ? now : now + (grace ?? 0);
@@ -876,21 +902,6 @@ async function sweepProviderEnvironmentInSlot(
     !(deleted && row.retireAt > now + WORK_RECHECK_MS)
   )
     return;
-  if (local) {
-    const noWork = await worktreeCanBeRemoved(row.path!);
-    const fresh = getEnvironment(deps.db, environmentId);
-    if (
-      fresh?.retireAt == null ||
-      environmentHasLiveThreads(deps.db, environmentId)
-    )
-      return;
-    if (!noWork) {
-      writeEnvironment(deps, environmentId, {
-        retireAt: Date.now() + WORK_RECHECK_MS,
-      });
-      return;
-    }
-  }
   if (!requestEnvironmentRemoval(deps, environmentId, false)) return;
   if (cancelled && row.providerOwnsPath && row.path !== null) {
     await cancelPendingEnvironmentHook(deps, {
@@ -971,11 +982,15 @@ export function refreshProviderRetirement(
     return;
   const provider = getEnvironmentProvider(row.environmentProviderId);
   if (provider === undefined) return;
-  const grace = retireGraceMs(deps.db, provider.provider);
-  const retireAt =
-    grace === null || environmentHasLiveThreads(deps.db, environmentId)
-      ? null
-      : (row.retireAt ?? Date.now() + grace);
+  const grace = provider.provider.policy.retireGraceMs;
+  // The sweep times worktree removal: only it knows if the worktree is local.
+  const retireAt = environmentHasLiveThreads(deps.db, environmentId)
+    ? null
+    : provider.provider.id === DEFAULT_ENVIRONMENT_PROVIDER_ID.gitWorktree
+      ? row.retireAt
+      : grace === null
+        ? null
+        : (row.retireAt ?? Date.now() + grace);
   if (row.retireAt === retireAt) return;
   deps.db
     .update(environments)
@@ -995,18 +1010,14 @@ export function shortenWorktreeRetirement(
   environmentId: string,
 ): void {
   const row = getEnvironment(deps.db, environmentId);
-  const retention =
-    WORKTREE_RETENTION_MS[getAppSettings(deps.db).worktreeRetention];
   if (
     row === null ||
     row.environmentProviderId !== DEFAULT_ENVIRONMENT_PROVIDER_ID.gitWorktree ||
     row.teardownStatus !== null ||
-    retention === null ||
     environmentHasLiveThreads(deps.db, environmentId)
   )
     return;
-  const retireAt =
-    Date.now() + Math.min(retention, TELEPORTED_WORKTREE_RETENTION_MS);
+  const retireAt = Date.now() + TELEPORTED_WORKTREE_RETENTION_MS;
   if (row.retireAt !== null && row.retireAt <= retireAt) return;
   deps.db
     .update(environments)
@@ -1014,6 +1025,72 @@ export function shortenWorktreeRetirement(
     .where(eq(environments.id, environmentId))
     .run();
   deps.hub.notifyEnvironment(environmentId, ["metadata-changed"]);
+}
+
+const restores = new Map<string, Promise<void>>();
+
+/** Rebuilds a thread's parked worktree at its old path, on the branch that holds its saved work. */
+export function restoreParkedWorktree(
+  deps: Pick<Deps, "config" | "db" | "hub">,
+  threadId: string,
+): Promise<void> {
+  const thread = getThread(deps.db, threadId);
+  const row =
+    thread?.environmentId == null
+      ? null
+      : getEnvironment(deps.db, thread.environmentId);
+  if (thread === null || row === null || row.parkedAt === null)
+    return Promise.resolve();
+  const running = restores.get(row.id);
+  if (running !== undefined) return running;
+  const restore = rebuildParkedWorktree(deps, thread, row).finally(() =>
+    restores.delete(row.id),
+  );
+  restores.set(row.id, restore);
+  return restore;
+}
+
+async function rebuildParkedWorktree(
+  deps: Pick<Deps, "config" | "db" | "hub">,
+  thread: NonNullable<ReturnType<typeof getThread>>,
+  row: EnvironmentRow,
+): Promise<void> {
+  const record =
+    row.environmentProviderId === null
+      ? undefined
+      : getEnvironmentProvider(row.environmentProviderId);
+  if (record === undefined || row.path === null)
+    throw new Error("The worktree provider is unavailable.");
+  const context = await resolveRestoreOperationContext(
+    deps,
+    thread,
+    row,
+    record,
+  );
+  const result = await invokeCreate(record, {
+    thread: context.thread,
+    project: context.project,
+    host: context.host,
+    projectCheckout: context.projectCheckout,
+    gitRemote: context.gitRemote,
+    inputs: context.inputs,
+    suggestedBranchName: context.suggestedBranchName,
+    pathKey: row.environmentProviderInstanceKey ?? row.id,
+    attempt: row.attempt,
+    rebuild: true,
+    experimental_claimPath: async () => true,
+    previous: { environment: toEnvironmentResponse(row), resource: row.resource },
+    report: emptyReporter(),
+    signal: new AbortController().signal,
+  });
+  if (result.status === "failed") throw new Error(result.message);
+  const flavor = getHostPathFlavorForHost(deps, row.hostId);
+  if (canonicalizeHostPath(result.path, flavor) !== row.path)
+    throw new Error(
+      `The worktree came back at ${result.path} instead of ${row.path}.`,
+    );
+  await restoreWorktreeWork(row.path, worktreeNotesDir(deps, row.id));
+  writeEnvironment(deps, row.id, { parkedAt: null });
 }
 
 type EnvironmentProvisionCommand =

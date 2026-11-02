@@ -1,22 +1,7 @@
 import { APP_SURFACE_HEADER_NAME } from "@cloudroom/config/app-surface";
-import {
-  buildBridgeInjectionScript,
-  type NativeShellHandshake,
-} from "@cloudroom/mobile-bridge";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createBbDesktopApi } from "@/test/bb-desktop-test-utils";
-import { resetNativeShellForTests } from "@/lib/native-shell";
 import { appSurfaceRequestInit, getAppSurface } from "./app-surface";
-
-const mobileHandshake: NativeShellHandshake = {
-  bridgeVersion: 1,
-  appVersion: "0.39.0",
-  platform: "ios",
-  profileMode: "connect",
-  secureContext: true,
-  safeArea: { top: 59, right: 0, bottom: 34, left: 0 },
-  capabilities: ["haptic", "badge", "share", "open-external", "safe-area"],
-};
 
 const desktopInfo = {
   lastCheckedAt: null,
@@ -31,7 +16,6 @@ const desktopInfo = {
 describe("app surface request metadata", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
-    resetNativeShellForTests();
   });
 
   it("defaults browser requests to the web app surface", () => {
@@ -55,25 +39,6 @@ describe("app surface request metadata", () => {
     expect(getAppSurface()).toBe("desktop");
     expect(new Headers(init.headers).get(APP_SURFACE_HEADER_NAME)).toBe(
       "desktop",
-    );
-  });
-
-  it("marks requests from the bb mobile shell as mobile", () => {
-    const fakeWindow: Record<string, unknown> = {
-      ReactNativeWebView: { postMessage: () => {} },
-    };
-    // eslint-disable-next-line no-new-func
-    new Function("window", buildBridgeInjectionScript(mobileHandshake))(
-      fakeWindow,
-    );
-    vi.stubGlobal("window", fakeWindow);
-    resetNativeShellForTests();
-
-    const init = appSurfaceRequestInit();
-
-    expect(getAppSurface()).toBe("mobile");
-    expect(new Headers(init.headers).get(APP_SURFACE_HEADER_NAME)).toBe(
-      "mobile",
     );
   });
 });

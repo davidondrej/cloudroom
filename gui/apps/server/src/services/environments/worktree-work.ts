@@ -1,10 +1,13 @@
 import { execFile } from "node:child_process";
-import { existsSync, statSync } from "node:fs";
+import { existsSync } from "node:fs";
+import { cp, rm } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 
-export const STALE_WORK_MS = 30 * 24 * 60 * 60_000;
 const execGit = promisify(execFile);
+const SAVE_MESSAGE =
+  "Cloudroom: save unfinished work before removing the worktree";
+const NOTES = "private";
 const STATUS = [
   "status",
   "--porcelain",
@@ -12,111 +15,64 @@ const STATUS = [
   "--ignore-submodules=none",
 ];
 
-async function git(
-  folder: string,
-  args: string[],
-  env?: Record<string, string>,
-): Promise<string> {
-  const options = {
-    timeout: 60_000,
-    ...(env === undefined ? {} : { env: { ...process.env, ...env } }),
-  };
-  return (await execGit("git", ["-C", folder, ...args], options)).stdout;
-}
-
-async function headReachableFrom(folder: string, refs: string) {
-  const count = await git(folder, ["rev-list", "--count", "HEAD", "--not", refs]);
-  return count.trim() === "0";
+async function git(folder: string, args: string[]): Promise<string> {
+  return (
+    await execGit("git", ["-C", folder, ...args], { timeout: 60_000 })
+  ).stdout;
 }
 
 /**
- * Removing the folder loses nothing: no uncommitted changes, and HEAD's
- * commits are on a remote (with no remote, on a local branch, which stays).
+ * Commits unfinished work to the worktree's branch (a new `cloudroom/saved-*`
+ * branch if HEAD is detached) and copies its ignored `private/` notes to
+ * `notesDir`. Returns that branch, or null when the folder must stay.
  */
-export async function worktreeHasNoWork(folder: string): Promise<boolean> {
-  if (!existsSync(folder)) return true;
-  try {
-    const [changes, remotes] = await Promise.all([
-      git(folder, STATUS),
-      git(folder, ["remote"]),
-    ]);
-    if (changes !== "") return false;
-    return headReachableFrom(
-      folder,
-      remotes.trim() === "" ? "--branches" : "--remotes",
-    );
-  } catch {
-    return false;
-  }
-}
-
-/** Newest of HEAD's commit time and the changed files' modification times. */
-async function lastTouchedAt(folder: string): Promise<number> {
-  let latest =
-    Number((await git(folder, ["log", "-1", "--format=%ct", "HEAD"])).trim()) *
-    1000;
-  const entries = (await git(folder, [...STATUS, "-z"])).split("\0");
-  for (let index = 0; index < entries.length; index++) {
-    const entry = entries[index]!;
-    if (entry.length < 4) continue;
-    if (/[RC]/.test(entry.slice(0, 2))) index++; // skip the rename source
-    try {
-      latest = Math.max(
-        latest,
-        statSync(path.join(folder, entry.slice(3))).mtimeMs,
-      );
-    } catch {}
-  }
-  return latest;
-}
-
-/**
- * No work to lose, or work untouched for 30 days: then it is committed to the
- * worktree's branch (a new `cloudroom/saved-*` branch if HEAD is detached),
- * dated when it was last touched so later checks still see it as stale.
- */
-export async function worktreeCanBeRemoved(
+export async function saveWorktreeWork(
   folder: string,
-  now = Date.now(),
-): Promise<boolean> {
-  if (await worktreeHasNoWork(folder)) return true;
+  notesDir: string,
+): Promise<string | null> {
   try {
-    const touchedAt = await lastTouchedAt(folder);
-    if (now - touchedAt < STALE_WORK_MS) return false;
     if ((await git(folder, STATUS)) !== "") {
-      const date = `@${Math.floor(touchedAt / 1000)} +0000`;
       await git(folder, ["add", "-A"]);
-      await git(
-        folder,
-        [
-          "-c",
-          "commit.gpgsign=false",
-          "-c",
-          "user.name=Cloudroom",
-          "-c",
-          "user.email=cloudroom@localhost",
-          "commit",
-          "--no-verify",
-          "-q",
-          "-m",
-          "Cloudroom: save work from a worktree unused for 30 days before removing it",
-        ],
-        { GIT_AUTHOR_DATE: date, GIT_COMMITTER_DATE: date },
-      );
+      await git(folder, [
+        "-c",
+        "commit.gpgsign=false",
+        "-c",
+        "user.name=Cloudroom",
+        "-c",
+        "user.email=cloudroom@localhost",
+        "commit",
+        "--no-verify",
+        "-q",
+        "-m",
+        SAVE_MESSAGE,
+      ]);
     }
-    const detached = await git(folder, ["symbolic-ref", "-q", "HEAD"]).then(
-      () => false,
-      () => true,
-    );
-    if (detached) {
+    if ((await git(folder, STATUS)) !== "") return null;
+    let branch = (await git(folder, ["branch", "--show-current"])).trim();
+    if (branch === "") {
       const sha = (await git(folder, ["rev-parse", "--short", "HEAD"])).trim();
-      await git(folder, ["branch", "-f", `cloudroom/saved-${sha}`, "HEAD"]);
+      branch = `cloudroom/saved-${sha}`;
+      await git(folder, ["branch", "-f", branch, "HEAD"]);
     }
-    return (
-      (await git(folder, STATUS)) === "" &&
-      (await headReachableFrom(folder, "--branches"))
-    );
+    if (existsSync(path.join(folder, NOTES)))
+      await cp(path.join(folder, NOTES), notesDir, { recursive: true });
+    return branch;
   } catch {
-    return false;
+    return null;
   }
+}
+
+/** Undoes `saveWorktreeWork` in the rebuilt folder: the work is uncommitted again and the notes are back. */
+export async function restoreWorktreeWork(
+  folder: string,
+  notesDir: string,
+): Promise<void> {
+  if ((await git(folder, ["log", "-1", "--format=%s"])).trim() === SAVE_MESSAGE)
+    await git(folder, ["reset", "-q", "HEAD~1"]);
+  if (!existsSync(notesDir)) return;
+  await cp(notesDir, path.join(folder, NOTES), {
+    recursive: true,
+    force: false,
+  });
+  await rm(notesDir, { recursive: true, force: true });
 }

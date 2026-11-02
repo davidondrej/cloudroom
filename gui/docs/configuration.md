@@ -198,17 +198,14 @@ selected browser `MediaDevices` device id in localStorage as
 `bb.voiceInput.audioInputDeviceId`; it does not change `bb-app config` or the
 server-side transcription model.
 
-The built-in Push notifications plugin uses `expoPushUrl` for its relay URL.
-The default is `https://exp.host/--/api/v2/push/send`. Change it with
-`bb plugin config push-notifications set expoPushUrl <url>`. The plugin reads
-the value when it sends a message. Independent `mobileEnabled`, `webEnabled`,
-and `desktopEnabled` booleans default to true. Change each with
-`bb plugin config push-notifications set webEnabled false` (or the other
-channel key). Web and desktop clients receive system notifications while a bb
-tab or window remains open; browsers require HTTPS or localhost and per-device
-notification permission. Settings → Push notifications offers permission and
-test controls. `bb push-notifications test <web|desktop>` broadcasts a test to
-connected, permitted clients; it does not confirm OS display.
+The built-in Push notifications plugin has two booleans, `webEnabled` and
+`desktopEnabled`, both true by default. Change each with
+`bb plugin config push-notifications set webEnabled false` (or `desktopEnabled`).
+Web and desktop clients receive system notifications while a bb tab or window
+remains open; browsers require HTTPS or localhost and per-device notification
+permission. Settings → Notifications offers permission and test controls.
+`bb push-notifications test <web|desktop>` broadcasts a test to connected,
+permitted clients; it does not confirm OS display.
 
 The builtin Keep Awake plugin has one autosaving configuration page with an
 enable switch and an all-or-selected host picker. On selected macOS hosts it
@@ -287,15 +284,9 @@ the prefix is at most 64 characters. The prefix applies to branches bb creates
 after you change it; it does not rename an existing branch or worktree. Set it
 with `bb settings general managedBranchPrefix <prefix>`.
 
-Settings → General → Git → Delete archived worktrees after sets how long a
-worktree folder stays after its last thread is archived: 5 minutes, 1 hour,
-1 day, 3 days (default), 7 days, 21 days, 30 days, or never. On this computer,
-deleting the last thread ends the wait, and worktrees with uncommitted or
-unpushed work are kept and checked again hourly; after 30 days untouched,
-their changes are committed to the branch and the folder is removed. Worktrees on other machines
-are removed when the wait ends, without that check. The branch stays. Changing it restarts the timer for
-worktrees already waiting. Set it with
-`room-cli settings general worktreeRetention <5m|1h|1d|3d|7d|21d|30d|never>`.
+Archiving a thread saves its worktree's work to its branch and removes the
+folder; unarchiving the thread or sending it a message brings it back. There
+is no setting. See [Worktrees](worktrees.md#cleanup).
 
 Settings → Providers lists every registered agent provider in picker order.
 Move a provider up or down to change the order and choose the default for new
@@ -492,8 +483,10 @@ Known ACP agents appear when their CLI is installed on the host. bb exposes
 CLI is on PATH and can be launched as `grok agent stdio`, and
 `acp-hermes-agent` when Hermes' `hermes` CLI is on PATH, `acp-openclaw` when the
 `openclaw` CLI is on PATH (it runs through the host's OpenClaw Gateway), `acp-devin` when
-Devin's `devin` CLI is on PATH, and `acp-droid` when Factory's `droid` CLI is on PATH
-(launched as `droid exec --output-format acp`). `acp-cursor` is always listed.
+Devin's `devin` CLI is on PATH, `acp-droid` when Factory's `droid` CLI is on PATH
+(launched as `droid exec --output-format acp`), `acp-kilo` when Kilo Code's `kilo` CLI is on PATH
+(launched as `kilo acp`), and `acp-cline` when the `cline` CLI is on PATH (launched as
+`cline --acp`). `acp-cursor` is always listed.
 
 Add your own agent through the ACP providers plugin's `customAgents` setting,
 which holds a JSON array. In the app it is the multi-line editor on the
@@ -509,7 +502,7 @@ Each entry needs `id` (lowercase letters, digits and dashes), `displayName`,
 and `command`. bb derives the provider id `acp-<id>`; it never changes once a
 thread has used it. An id bb always lists (`cursor`) is reserved; an id bb
 lists only where the agent is installed (`opencode`, `omp`, `grok`,
-`hermes-agent`, `devin`, `droid`) is not, so an entry with that id REPLACES the shipped agent.
+`hermes-agent`, `devin`, `droid`, `kilo`, `cline`) is not, so an entry with that id REPLACES the shipped agent.
 A replacing entry keeps the shipped agent's `nativeSkillRoots` unless it sets
 its own, and bb still lists the roots that agent's host config names (its
 config directory, compat trees, configured paths, plugins) either way.

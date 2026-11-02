@@ -320,6 +320,44 @@ export const KNOWN_ACP_AGENTS: readonly AcpAgentDefinition[] = [
       },
     },
   },
+  {
+    id: "acp-kilo",
+    displayName: "Kilo Code",
+    icon: declaredIcon("kilo"),
+    signInCommand: "kilo auth login",
+    installUrl: "https://kilo.ai/docs/cli",
+    installer: { scriptUrl: "https://kilo.ai/cli/install" },
+    visibility: "installed",
+    dialect: "opencode",
+    primaryModels: [
+      "kilo/kilo-auto/free",
+      "kilo/kilo-auto/frontier",
+      "kilo/kilo-auto/balanced",
+      "kilo/kilo-auto/efficient",
+    ],
+    fork: "tip",
+    launch: {
+      displayName: "Kilo Code",
+      command: "kilo",
+      args: ["acp"],
+      env: {},
+    },
+  },
+  {
+    id: "acp-cline",
+    displayName: "Cline",
+    icon: declaredIcon("cline"),
+    signInCommand: "cline auth",
+    installUrl: "https://docs.cline.bot/cline-cli/installation",
+    installer: { npmPackage: "cline" },
+    visibility: "installed",
+    launch: {
+      displayName: "Cline",
+      command: "cline",
+      args: ["--acp"],
+      env: {},
+    },
+  },
 ];
 
 export const RESERVED_ACP_PROVIDER_IDS: ReadonlySet<string> = new Set(

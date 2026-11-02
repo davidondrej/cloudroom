@@ -1,8 +1,8 @@
 ---
 kind: instruction
 title: Cloudroom Guide — Customization
-summary: Command reference for customizing the cloudroom app color palette, typography, keyboard shortcuts, and mobile push notifications.
-intent: Explain the CLI theme surface, server-backed app customization, and push-notification device registration.
+summary: Command reference for customizing the cloudroom app color palette, typography, keyboard shortcuts, and web and desktop notifications.
+intent: Explain the CLI theme surface, server-backed app customization, and notification switches.
 editingNotes: Keep flags accurate against the CLI implementation. Theme details live in the room-cli skill's references/theming.md.
 ---
 Customization commands
@@ -216,27 +216,19 @@ bindings in the same update; plugin defaults yield to explicit bindings.
 
 Push notifications
 
-The built-in Push notifications plugin sends mobile updates through Expo and
-system notifications to connected web and desktop clients. Web tabs or desktop
-windows must stay open; browser permission is requested in the plugin settings.
+The built-in Push notifications plugin shows system notifications in connected
+web and desktop clients when a thread asks a question, fails, or finishes. Web
+tabs or desktop windows must stay open; browser permission is requested in the
+plugin settings.
 
-  room-cli push-notifications list
-  room-cli push-notifications add --token <expo-push-token>
-      --platform <ios|android> --label <device-name>
-  room-cli push-notifications remove <id>
-  room-cli push-notifications status
+  room-cli push-notifications status [--json]
   room-cli push-notifications test <web|desktop>
-  room-cli plugin config push-notifications set <mobileEnabled|webEnabled|desktopEnabled> <true|false>
+  room-cli plugin config push-notifications set <webEnabled|desktopEnabled> <true|false>
 
-`add` is an upsert by token: a known token refreshes its label and last-seen
-time and keeps its id. Expo tokens that are no longer registered are removed
-automatically after a failed delivery. Use `room-cli plugin disable
-push-notifications` to stop delivery. Change the relay URL with `room-cli plugin
-config push-notifications set expoPushUrl <url>`. Add `--json` to `list` or
-`status` for machine-readable output. The list returns token suffixes only.
-The three channel switches default to true and apply immediately across this
-server. `test` broadcasts to all connected clients of the selected type with
-permission; OS notification settings still control whether a banner appears.
+Use `room-cli plugin disable push-notifications` to stop delivery. Both channel
+switches default to true and apply immediately across this server. `test`
+broadcasts to all connected clients of the selected type with permission; OS
+notification settings still control whether a banner appears.
 
 Host files and voice transcription
 

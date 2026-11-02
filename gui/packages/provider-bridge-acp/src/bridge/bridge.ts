@@ -96,8 +96,8 @@ import {
 } from "../session-params.js";
 import { buildCursorParameterizedModelCatalog } from "../cursor-model-selection.js";
 import {
-  acpScriptInstallerCommand,
-  acpScriptInstallerSchema,
+  acpInstallerCommand,
+  acpInstallerSchema,
   getAcpProviderHealth,
   getAcpProviderInstallationRun,
   getAcpProviderInstallationStatus,
@@ -2692,15 +2692,15 @@ function maintenanceTarget(
 ): AcpMaintenanceTarget {
   const launchSpec = decodeLaunchSpec(providerOptions);
   const maintenance = maintenanceForRequest(providerOptions, launchSpec);
-  const scriptInstaller = acpScriptInstallerSchema.safeParse(
+  const installer = acpInstallerSchema.safeParse(
     providerOptions?.["acpInstaller"],
   );
   return {
     maintenance,
     installer:
       maintenance?.installer ??
-      (scriptInstaller.success
-        ? () => acpScriptInstallerCommand(scriptInstaller.data)
+      (installer.success
+        ? () => acpInstallerCommand(installer.data)
         : undefined),
     command: launchSpec?.command ?? null,
   };

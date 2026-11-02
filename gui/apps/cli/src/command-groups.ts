@@ -113,6 +113,11 @@ export const CORE_COMMAND_GROUPS: readonly CommandGroup[] = [
     (m) => (program, deps) => m.registerFileCommands(program, deps.getUrl),
   ),
   group(
+    "files",
+    () => import("./commands/file.js"),
+    (m) => (program) => m.registerFilesCommand(program),
+  ),
+  group(
     "theme",
     () => import("./commands/theme.js"),
     (m) => (program, deps) => m.registerThemeCommands(program, deps.getUrl),

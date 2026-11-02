@@ -103,6 +103,8 @@ const ACP_PLAN_STEP_STATUS_BY_ENTRY_STATUS = {
 } as const;
 
 const PLAN_STEPS_CHANNEL = "planSteps";
+const RATE_LIMIT_PATTERN =
+  /\b429\b|rate[ _-]?limit|too many requests|usage limit|free limit reached|clinepass limit|FreeUsageLimitError|PROMOTION_MODEL_LIMIT_REACHED|free-models-per-day/iu;
 
 function isTerminalAcpStatus(
   status: AcpToolCallUpdateEvent["status"],
@@ -851,11 +853,21 @@ export function createAcpDeltaTranslator(
     const errorEnvelope = errorEnvelopeSchema.safeParse(event);
     if (errorEnvelope.success) {
       clearThreadCalls(context);
+      const detail = errorEnvelope.data.params?.message ?? "unknown error";
       return [
         {
           kind: "provider.error",
           message: "Provider error",
-          detail: errorEnvelope.data.params?.message ?? "unknown error",
+          detail,
+          ...(RATE_LIMIT_PATTERN.test(detail)
+            ? {
+                errorInfo: {
+                  category: "rate-limit",
+                  providerCode: null,
+                  httpStatusCode: null,
+                },
+              }
+            : {}),
           settlesTurn: true,
         },
       ];

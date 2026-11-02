@@ -139,6 +139,7 @@ export function useThreadOpenTiming(threadId: string, ready: boolean): void {
         ms: performance.now() - open.startedAt,
         threadId,
       });
+      if (open.metric === "app_ready") flushPerf();
     });
   }, [ready, threadId]);
 }
