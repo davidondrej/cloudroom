@@ -944,6 +944,10 @@ impl Adapter for Protocol {
         }
         let request = self.active.as_ref().map(|(_, id)| id.clone());
         let mut data = json!({"harness":"claude-code","type":kind,"request_id":request});
+        if kind == "system" && value["subtype"] == "compact_boundary" {
+            // Clients count Claude's own compactions from this; a `/compact` is counted from its receipt.
+            data["compaction"] = value["compact_metadata"]["trigger"].clone();
+        }
         let mut keep = true;
         let event_kind = if kind == "stream_event" {
             let event = &value["event"];
@@ -1475,5 +1479,29 @@ mod tests {
         assert!(feed(child("other")).is_err());
         feed(json!({"type":"user","session_id":"s","parent_tool_use_id":null,"message":{"content":[{"type":"tool_result","tool_use_id":"skill","content":"done"}]}})).unwrap();
         assert!(feed(child("skill")).is_err());
+    }
+
+    #[test]
+    fn a_compaction_record_says_what_triggered_it() {
+        let profile = HarnessConfig {
+            binary: "claude".into(),
+            home: "/nonexistent".into(),
+            model: "haiku".into(),
+            provider: None,
+        };
+        let mut claude = Protocol::new(&profile, "s".into(), None, None).unwrap();
+        let mut state = Progress::default();
+        claude.encode(1, "prompt", json!({"content":"hi"}), Some("one"));
+        for trigger in ["auto", "manual"] {
+            let frame = json!({"type":"system","subtype":"compact_boundary","session_id":"s","compact_metadata":{"trigger":trigger,"pre_tokens":200_000,"post_tokens":9_000}});
+            let events = claude
+                .receive(&frame, frame.to_string(), &mut state)
+                .unwrap();
+            let Some(Event::Record { data, .. }) = events.first() else {
+                panic!("compact_boundary made no record");
+            };
+            assert_eq!(data["request_id"], "one");
+            assert_eq!(data["compaction"], trigger);
+        }
     }
 }

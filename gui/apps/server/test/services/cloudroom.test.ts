@@ -7,12 +7,13 @@ import * as sync from "../../src/services/cloudroom/sync.js";
 import { listQueuedCommands } from "../helpers/commands.js";
 import { cloudroom } from "../../src/services/cloudroom/commands.js";
 import { command, saveTeleportProgress } from "../../src/services/cloudroom/store.js";
+import { projectRecord } from "../../src/services/cloudroom/events.js";
 import { teleports } from "../../src/services/cloudroom/teleport.js";
 import { SandboxDirectory } from "../../src/services/cloudroom/sandboxes.js";
 import { createTestAppHarness } from "../helpers/test-app.js";
 import { seedEnvironment, seedEvent, seedHostSession, seedPrimaryHost, seedProjectWithSource, seedThread, seedThreadRuntimeState, seedTurnStarted } from "../helpers/seed.js";
 import { turnScope } from "@cloudroom/domain";
-import { archiveThread, createThread, getThread, setProjectGitRemoteUrlIfMissing, events, cloudroomThreads, cloudroomCommands } from "@cloudroom/db";
+import { archiveThread, countContextCompactions, createThread, getThread, setProjectGitRemoteUrlIfMissing, events, cloudroomThreads, cloudroomCommands } from "@cloudroom/db";
 
 it("forwards Cursor login and keys without creating conversation records", async () => {
   const harness = await createTestAppHarness();
@@ -1049,6 +1050,23 @@ it("credits Claude usage that arrives after a follow-up was sent to the turn tha
     service.stop();
     core.closeAllConnections();
     await new Promise<void>((resolve) => core.close(() => resolve()));
+    await harness.cleanup();
+  }
+});
+
+it("counts a Cloud Claude auto-compaction once, and leaves /compact to its receipt (#100)", async () => {
+  const harness = await createTestAppHarness();
+  try {
+    const { host } = seedHostSession(harness.deps);
+    const { project } = seedProjectWithSource(harness.deps, { hostId: host.id });
+    const thread = seedThread(harness.deps, { projectId: project.id, providerId: "claude-code" });
+    harness.db.insert(cloudroomThreads).values({ threadId: thread.id, coreUrl: "http://core", startRequestId: "start", sessionId: "cr_claude", nativeId: "native", model: "test", reasoning: "medium" }).run();
+    seedTurnStarted(harness.deps, { threadId: thread.id, turnId: "one", providerThreadId: "native" });
+    const boundary = (sequence: number, compaction: string) => projectRecord(harness.db, thread.id, { sequence, session_id: "cr_claude", kind: "native_event", data: { harness: "claude-code", type: "system", request_id: "one", compaction } });
+    expect(boundary(1, "auto")).toEqual(["thread/compacted"]);
+    expect(boundary(2, "manual")).toEqual([]);
+    expect(countContextCompactions(harness.db, { threadId: thread.id, sequenceStart: 0 })).toBe(1);
+  } finally {
     await harness.cleanup();
   }
 });

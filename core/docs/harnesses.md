@@ -43,6 +43,8 @@ Create sessions with `"harness":"claude-code"`. Missing login returns `claude_au
 
 Steering writes the message into the running turn, as Local's Claude does; a steer that misses its turn runs as Claude's own turn. The adapter disables Fast mode, structured questions and hidden native subagents. The one exception is a forked skill (such as `/code-review`): its subagent runs inside the Skill call, and only the call's result reaches the conversation. Delegation uses Cloudroom child sessions through an in-process MCP transport. Hooks/plugins load normally. Startup and context notices use native non-query messages, not inference. Rewind forks conversation history without restoring files; native paths and checkpoints remain adapter-owned.
 
+A compaction's `native_event` record carries `data.compaction`, Claude's trigger (`auto` or `manual`), so clients can count the compactions Claude starts itself. A `/compact` is reported by its `compact` receipt.
+
 ### Selected skills
 
 Structured prompt `content` can carry skill mentions with UTF-16 `start`/`end` offsets and a `resource` containing `kind: "command"`, `source: "skill"`, `name`, and `origin: "user" | "project"`. Its text blocks, joined with newlines, must match `text`. The Claude harness advertises `skill_mentions: true`; GUI clients must not drop these mentions when using an older core.

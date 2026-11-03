@@ -335,6 +335,9 @@ export function projectRecord(db: DbConnection, threadId: string, record: Sessio
           type: "toolCall", id, tool: typeof data.tool_name === "string" ? data.tool_name : "Claude tool", status: record.kind === "item_started" ? "pending" : data.is_error === true ? "failed" : "completed",
           ...(data.input && typeof data.input === "object" ? { arguments: data.input } : {}), ...(data.result !== undefined ? { result: data.result } : {}),
         } });
+      } else if (data.compaction === "auto") {
+        // Claude compacted on its own. A /compact is projected from its receipt instead.
+        emit({ ...base, type: "thread/compacted" });
       }
     }
     const recordTurn = typeof data.request_id === "string" ? data.request_id : saved.turnId;
