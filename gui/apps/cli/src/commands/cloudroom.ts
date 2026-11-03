@@ -359,6 +359,7 @@ export function registerCloudCommands(program: Command, getUrl: () => string): v
   }
   group.command("teleport <thread-id>").description("Move a local Codex, Pi, Claude Code, or opencode thread to Cloud without changing its conversation. Checks first that Cloud can run the same model and effort. Use --to-local to bring a Cloud Codex, Pi, Claude Code, opencode, or Cursor thread back to this Mac")
     .option("--to-local", "Move a Cloud thread back to this Mac with its conversation and code changes")
+    .option("--without-cloud", "With --to-local: move a thread whose sandbox can't start (say, out of credits) without its cloud changes")
     .option("--cancel", "Cancel before cloud execution starts")
     .option("--status", "Read transfer progress without changing it")
     .option("--check", "Check whether Teleport would work, without moving anything")
@@ -367,10 +368,10 @@ export function registerCloudCommands(program: Command, getUrl: () => string): v
     .option("--wait", "Wait until the transfer completes, is cancelled, or fails")
     .option("--timeout <seconds>", "Stop waiting after this many seconds (with --wait)", "600")
     .option("--json", "Print JSON")
-    .action(action(async (threadId: string, options: JsonOutputOptions & { cancel?: boolean; status?: boolean; model?: string; reasoning?: string; toLocal?: boolean; wait?: boolean; timeout: string; check?: boolean }) => {
+    .action(action(async (threadId: string, options: JsonOutputOptions & { cancel?: boolean; status?: boolean; model?: string; reasoning?: string; toLocal?: boolean; withoutCloud?: boolean; wait?: boolean; timeout: string; check?: boolean }) => {
       const sdk = createCliBbSdk(getUrl());
       if (options.toLocal) {
-        const moved = await sdk.cloudroom.teleportLocal(threadId);
+        const moved = await sdk.cloudroom.teleportLocal(threadId, { withoutCloud: options.withoutCloud === true });
         if (!outputJson(options, moved)) console.log(`Moved to this Mac.${moved.conflicts ? ` ${moved.conflicts} changed files were kept in both versions; cloud copies are in .cloudroom/teleport/.` : ""}`);
         return;
       }

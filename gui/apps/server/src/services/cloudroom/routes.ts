@@ -80,10 +80,10 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: Plugin
   app.post("/api/v1/cloudroom/threads/:id/teleport", async context => {
     const problem = browserRequestProblem(context, deps, { requireJsonForMutation: true });
     if (problem) return context.json({ message: "Use the local Cloudroom app or CLI." }, problem.status);
-    const body = z.object({ action: z.enum(["start", "cancel", "local", "copy", "move", "check"]).default("start"), model: z.string().min(1).optional(), reasoning: z.string().min(1).optional() }).strict().parse(await context.req.json());
+    const body = z.object({ action: z.enum(["start", "cancel", "local", "copy", "move", "check"]).default("start"), model: z.string().min(1).optional(), reasoning: z.string().min(1).optional(), withoutCloud: z.boolean().optional() }).strict().parse(await context.req.json());
     const id = context.req.param("id");
     if (body.action === "cancel") { await teleports(deps).cancel(id); return context.json(teleportProgress(deps.db, id), 202); }
-    if (body.action === "local") return context.json(await teleportToLocal(deps, id));
+    if (body.action === "local") return context.json(await teleportToLocal(deps, id, { withoutCloud: body.withoutCloud }));
     if (body.action === "copy") return context.json(await copyToMac(deps, id));
     const choice = body.model && body.reasoning ? { model: body.model, reasoning: body.reasoning } : undefined;
     if (body.action === "move") return context.json(await moveToSandbox(deps, id, choice), 202);

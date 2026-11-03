@@ -345,7 +345,7 @@ function commandReasoning(input: string): string | undefined {
 
 const connectionOrReplayFailed = "Cloudroom connection or replay failed";
 
-function publicError(error: unknown): string {
+export function publicError(error: unknown): string {
   if (error instanceof CloudroomError || error instanceof ApiError) return error.message;
   return error instanceof Error ? `${connectionOrReplayFailed}: ${error.message}` : connectionOrReplayFailed;
 }
@@ -2102,10 +2102,11 @@ class CloudroomService {
     return this.queuedMessage(binding(this.deps.db, thread.id)!, command(this.deps.db, id)!);
   }
 
-  queue(threadId: string) {
+  /** `unsent` adds messages that never reached Core, such as ones sent while the sandbox could not start. */
+  queue(threadId: string, unsent = false) {
     const saved = binding(this.deps.db, threadId);
     if (!saved) return [];
-    return queuedPrompts(this.deps.db, threadId).map((c) => this.queuedMessage(saved, c));
+    return queuedPrompts(this.deps.db, threadId, unsent).map((c) => this.queuedMessage(saved, c));
   }
 
   private queuedMessage(saved: Binding, c: Command) {

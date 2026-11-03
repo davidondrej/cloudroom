@@ -132,13 +132,13 @@ export function commands(db: DbQueryConnection, threadId: string): Command[] {
   return db.select().from(cloudroomCommands).where(eq(cloudroomCommands.threadId, threadId)).orderBy(cloudroomCommands.createdAt, cloudroomCommands.id).all();
 }
 
-export function queuedPrompts(db: DbQueryConnection, threadId: string): Command[] {
+export function queuedPrompts(db: DbQueryConnection, threadId: string, unsent = false): Command[] {
   const all = commands(db, threadId);
   const status = db.select({ status: threads.status }).from(threads).where(eq(threads.id, threadId)).get()?.status;
   const active = status === "active" || status === "pending" || status === "starting";
   const turnId = binding(db, threadId)?.turnId;
   const cancelling = new Set(all.filter(item => item.command === "cancel" && ["sending", "accepted", "completed"].includes(item.state)).map(item => JSON.parse(item.input).target_request_id));
-  const queued = all.filter(item => item.command === "prompt" && item.id !== `first_${threadId}` && item.id !== turnId && (item.state === "accepted" || (active && item.state === "sending")) && !cancelling.has(item.id) && !JSON.parse(item.input).teleport_handoff);
+  const queued = all.filter(item => item.command === "prompt" && item.id !== `first_${threadId}` && item.id !== turnId && (item.state === "accepted" || ((active || unsent) && item.state === "sending")) && !cancelling.has(item.id) && !JSON.parse(item.input).teleport_handoff);
   // Mirror the core: the latest reorder puts its listed prompts first; newer prompts follow in send order.
   const reorder = [...all].reverse().find(item => item.command === "reorder" && ["sending", "accepted", "completed"].includes(item.state));
   if (!reorder) return queued;

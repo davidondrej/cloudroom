@@ -9,7 +9,9 @@ import { and, desc, eq, inArray, isNull } from "drizzle-orm";
 import {
   cloudroomCommands,
   cloudroomThreads,
+  createEventId,
   createQueuedThreadMessageInTransaction,
+  type DbTransaction,
   findProjectEnvironmentByHostPath,
   getEnvironment,
   getProject,
@@ -19,7 +21,7 @@ import {
   threadPluginMetadata,
   threads,
 } from "@cloudroom/db";
-import { getHostPathComparisonKey, PERSONAL_PROJECT_ID, type PromptInput, type TeleportLocalStep, type Thread, COMPUTER } from "@cloudroom/domain";
+import { getHostPathComparisonKey, PERSONAL_PROJECT_ID, THREAD_HARNESS_SWITCH_OPERATION, threadScope, type PromptInput, type TeleportLocalStep, type Thread, COMPUTER } from "@cloudroom/domain";
 import { folderOpenerCommand, tarCommand } from "@cloudroom/process-utils";
 import type { CreateThreadEnvironmentArgs } from "@cloudroom/server-contract";
 import type { AppDeps } from "../../types.js";
@@ -28,7 +30,8 @@ import { resolvePrimaryHostId } from "../hosts/primary-host.js";
 import { runLiveHostCommand } from "../hosts/live-command.js";
 import { workspaceContextFromPath } from "../environments/workspace-command-target.js";
 import { provisionUnmanagedEnvironmentForPath } from "../threads/thread-environment-directory.js";
-import { getLastProviderThreadId } from "../threads/thread-events.js";
+import { appendThreadEventInTransaction, getLastProviderThreadId } from "../threads/thread-events.js";
+import { historySeed } from "../threads/thread-harness-switch.js";
 import type { ThreadForkPoint } from "../threads/thread-fork-history.js";
 import { worktreeProviderInputs } from "../threads/thread-environment-placement.js";
 import { ensureProjectCheckoutForThread } from "../projects/project-source-setup.js";
@@ -36,8 +39,9 @@ import { resolveStableThreadRequestEnvironment } from "../threads/thread-request
 import { DEFAULT_ENVIRONMENT_PROVIDER_ID } from "../environments/environment-provider-ids.js";
 import { requestQueuedMessageDispatch } from "../threads/queued-message-dispatch.js";
 import { requireThreadStoragePath } from "../threads/thread-storage.js";
-import { cloudroom } from "./commands.js";
-import type { CloudroomClient } from "./client.js";
+import { cloudroom, publicError } from "./commands.js";
+import { CloudroomError, type CloudroomClient } from "./client.js";
+import { BUDGET_LIMIT, startRefused } from "./sandboxes.js";
 import { SKIPPED } from "./project-copy.js";
 import { cloudForkPoint, FORK_HARNESSES, isFiles, localCheckpoint, sourceCode } from "./fork.js";
 import { binding, localTeleports, teleportProgress } from "./store.js";
@@ -73,7 +77,9 @@ export function packChangesCommand(archive: string, windows = process.platform =
 
 export const teleportingToLocal = (threadId: string) => localTeleports.has(threadId);
 
-export async function teleportToLocal(deps: AppDeps, threadId: string): Promise<{ conflicts: number }> {
+/** With `withoutCloud`, a thread whose sandbox the website won't start (say, out of credits) moves without its cloud
+ *  session and files. A sandbox that starts still hands everything over. */
+export async function teleportToLocal(deps: AppDeps, threadId: string, options: { withoutCloud?: boolean } = {}): Promise<{ conflicts: number }> {
   if (localTeleports.has(threadId)) throw new ApiError(409, "teleport_in_progress", "Teleport to Local is already running.");
   const step = (value?: TeleportLocalStep) => {
     if (value) localTeleports.set(threadId, value);
@@ -82,13 +88,13 @@ export async function teleportToLocal(deps: AppDeps, threadId: string): Promise<
   };
   step("stopping");
   try {
-    return await run(deps, threadId, step);
+    return await run(deps, threadId, step, options.withoutCloud === true);
   } finally {
     step();
   }
 }
 
-async function run(deps: AppDeps, threadId: string, step: (value: TeleportLocalStep) => void): Promise<{ conflicts: number }> {
+async function run(deps: AppDeps, threadId: string, step: (value: TeleportLocalStep) => void, withoutCloud: boolean): Promise<{ conflicts: number }> {
   const thread = getThread(deps.db, threadId);
   const saved = binding(deps.db, threadId);
   const harness = thread?.providerId as Harness | undefined;
@@ -100,7 +106,16 @@ async function run(deps: AppDeps, threadId: string, step: (value: TeleportLocalS
   if (!nativeId || !/^[A-Za-z0-9_-]+$/.test(nativeId))
     throw new ApiError(409, "teleport_unavailable", "This cloud thread has no saved conversation yet.");
   const environment = await localEnvironment(deps, thread);
-  const client = await cloudroom(deps).teleportClient(threadId, "teleport_local");
+  const client = await cloudroom(deps).teleportClient(threadId, "teleport_local").catch((error: unknown) => {
+    deps.logger.warn({ threadId, error }, "Teleport to Local could not wake the cloud sandbox");
+    // The website refused before starting the sandbox, so no agent runs there and the thread can move without it.
+    if (startRefused(error) || (error instanceof CloudroomError && error.code === BUDGET_LIMIT)) {
+      if (withoutCloud) return null;
+      throw new ApiError(409, "teleport_cloud_unavailable", `${error.message} You can move the thread to this ${computer} without its cloud changes, or try again once the sandbox can start.`);
+    }
+    throw error instanceof ApiError ? error : new ApiError(503, error instanceof CloudroomError && error.code ? error.code : "cloudroom_unavailable", `${publicError(error)} The thread stays in Cloud.`);
+  });
+  if (!client) return moveWithoutCloud(deps, thread, environment, step);
 
   await cloudroom(deps).control(threadId, "stop");
   await waitUntilStopped(client, saved.sessionId);
@@ -127,7 +142,31 @@ async function run(deps: AppDeps, threadId: string, step: (value: TeleportLocalS
   const conflicts = await applyChanges(environment.path, changes.archive, randomUUID(), changes.base);
   step("switching");
 
-  const queued = cloudroom(deps).queue(threadId);
+  switchToLocal(deps, thread, environment.id, cloudroom(deps).queue(threadId));
+  await client.close(saved.sessionId, randomUUID()).catch((error: unknown) =>
+    deps.logger.warn({ threadId, error }, "Cloud session did not close after Teleport to Local"));
+  return { conflicts };
+}
+
+/** Moves a thread whose sandbox can't start, so its session file and changed files can't come along. The local agent
+ *  starts a fresh session that gets the conversation so far, like after a harness switch, and messages that never
+ *  reached the cloud go with the thread. The sleeping sandbox keeps the cloud session and its files. */
+async function moveWithoutCloud(deps: AppDeps, thread: Thread, environment: { id: string; path: string }, step: (value: TeleportLocalStep) => void): Promise<{ conflicts: number }> {
+  step("switching");
+  const seed = await historySeed(deps, thread, `[Cloudroom] This conversation ran in a Cloud sandbox that could not start, so it moved to the user's ${computer} without its cloud session. You now work in ${environment.path}. Changes the cloud agent did not push stayed in Cloud.`);
+  switchToLocal(deps, thread, environment.id, cloudroom(deps).queue(thread.id, true), (tx) => appendThreadEventInTransaction(tx, {
+    threadId: thread.id, environmentId: environment.id, type: "system/operation", scope: threadScope(),
+    data: {
+      operation: THREAD_HARNESS_SWITCH_OPERATION, operationId: createEventId(), status: "completed",
+      message: `Moved to this ${computer} without the cloud session.`,
+      metadata: { from: thread.providerId, to: thread.providerId, seed },
+    },
+  }));
+  return { conflicts: 0 };
+}
+
+function switchToLocal(deps: AppDeps, thread: Thread, environmentId: string, queued: ReturnType<ReturnType<typeof cloudroom>["queue"]>, record?: (tx: DbTransaction) => void): void {
+  const threadId = thread.id;
   deps.db.transaction((tx) => {
     for (const message of queued)
       createQueuedThreadMessageInTransaction(tx, {
@@ -138,15 +177,13 @@ async function run(deps: AppDeps, threadId: string, step: (value: TeleportLocalS
     tx.delete(cloudroomCommands).where(eq(cloudroomCommands.threadId, threadId)).run();
     tx.delete(cloudroomThreads).where(eq(cloudroomThreads.threadId, threadId)).run();
     tx.delete(threadPluginMetadata).where(and(eq(threadPluginMetadata.threadId, threadId), inArray(threadPluginMetadata.pluginId, ["cloudroom.teleport", "cloudroom.project-copy"]))).run();
-    tx.update(threads).set({ executionTarget: "local", environmentId: environment.id, status: "idle", updatedAt: Date.now() }).where(eq(threads.id, threadId)).run();
+    tx.update(threads).set({ executionTarget: "local", environmentId, status: "idle", updatedAt: Date.now() }).where(eq(threads.id, threadId)).run();
+    record?.(tx);
   });
   cloudroom(deps).detach(threadId);
   deps.hub.notifyThread(threadId, ["status-changed", "queue-changed"]);
   deps.hub.notifyProject(thread.projectId, ["threads-changed"]);
   requestQueuedMessageDispatch(deps, { kind: "thread-ready", threadId });
-  await client.close(saved.sessionId, randomUUID()).catch((error: unknown) =>
-    deps.logger.warn({ threadId, error }, "Cloud session did not close after Teleport to Local"));
-  return { conflicts };
 }
 
 function requireThisMac(deps: AppDeps, requested: CreateThreadEnvironmentArgs): void {
