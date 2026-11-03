@@ -8,7 +8,7 @@ use super::{
     history::ApiError,
     thread::{
         Failure, archive_under, deliver, fail, random_key, record, retire, session_failure,
-        website_failure,
+        starting, website_failure,
     },
 };
 use axum::{
@@ -28,6 +28,9 @@ use std::{
 static FAILING_SINCE: Mutex<Option<Instant>> = Mutex::new(None);
 const GIVE_UP_AWAKE: Duration = Duration::from_secs(30 * 60);
 const APP_NOTE: &str = "Passed to the user's Cloudroom app, which applies it while it is open.";
+/// Core can't tell whether the app counts this thread as the caller's child: the user may have moved it there.
+const MAYBE_NOTE: &str = "Not linked to this thread, so it went to the user's Cloudroom app. The app applies it only to a thread this one started (such as one the user moved here), while it is open; otherwise nothing happens.";
+const STARTING: &str = "This child is still starting in its own sandbox. Retry in a few seconds.";
 
 /// The website delivers here, with this Core's token.
 pub fn routes() -> Router<Arc<Manager>> {
@@ -58,36 +61,72 @@ pub(super) async fn command(
     action: &str,
     text: Option<&str>,
 ) -> Result<Json<Value>, Failure> {
-    // A caller sharing another thread's sandbox has no link on the website, so the app passes these on, as before.
-    let shared = m
-        .local
-        .lock()
-        .unwrap()
-        .sessions
-        .get(caller)
-        .is_some_and(|s| s.parent_session.is_some());
-    let Some(api) = m.history.api.as_ref().filter(|_| !shared) else {
-        let mut data = json!({"id":id,"action":action});
-        if let Some(text) = text {
-            data["text"] = json!(text);
-        }
-        let _ = record(m, caller, "child_command", data)?;
-        return Ok(Json(json!({"id":id,"state":"requested","note":APP_NOTE})));
+    // A caller sharing another thread's sandbox has no link on the website, so the app passes on commands for its own
+    // children, as before, and drops any other. Its `tell` to another thread goes through the website as this
+    // sandbox's thread, which reaches the same tree. `label` has the website name that thread as the sender, since
+    // this caller's session ID means nothing in another sandbox (#177). What the website doesn't link still goes to
+    // the app, which knows a child the user moved under this caller.
+    let (shared, mine) = {
+        let local = m.local.lock().unwrap();
+        let session = local.sessions.get(caller);
+        let mine = session.is_some_and(|s| s.child_states.contains_key(id));
+        (session.is_some_and(|s| s.parent_session.is_some()), mine)
+    };
+    let other = shared && !mine;
+    let Some(api) = m
+        .history
+        .api
+        .as_ref()
+        .filter(|_| !shared || (other && action == "tell"))
+    else {
+        return via_app(
+            m,
+            caller,
+            id,
+            action,
+            text,
+            if other { MAYBE_NOTE } else { APP_NOTE },
+        );
     };
     let key = random_key().map_err(|e| fail(StatusCode::SERVICE_UNAVAILABLE, &e.to_string()))?;
-    let body = json!({"action":action,"thread":id,"text":text,"request_id":format!("relay_{key}")});
-    let mut answer = api
-        .post_waking("relay", &body)
-        .await
-        .map_err(|error| website_failure(error, "reach the child"))?;
+    let body = json!({"action":action,"thread":id,"text":text,"request_id":format!("relay_{key}"),"label":other});
+    let mut answer = match api.post_waking("relay", &body).await {
+        // The website may not know a child that just started yet (#317).
+        Err(ApiError::Status(404, _)) if starting(caller).iter().any(|c| c == id) => {
+            return Err(fail(StatusCode::SERVICE_UNAVAILABLE, STARTING));
+        }
+        Err(ApiError::Status(404, _)) if other => {
+            return via_app(m, caller, id, action, text, MAYBE_NOTE);
+        }
+        answer => answer.map_err(|error| website_failure(error, "reach the child"))?,
+    };
     let state = match action {
         "tell" => "running",
         "stop" => "stopped",
         _ => "archived",
     };
-    note_child(m, caller, id, state);
+    if !other {
+        note_child(m, caller, id, state);
+    }
     answer["id"] = json!(id);
     Ok(Json(answer))
+}
+
+/// The app applies it to a child the caller started, whenever it next reads the caller's thread.
+fn via_app(
+    m: &Manager,
+    caller: &str,
+    id: &str,
+    action: &str,
+    text: Option<&str>,
+    note: &str,
+) -> Result<Json<Value>, Failure> {
+    let mut data = json!({"id":id,"action":action});
+    if let Some(text) = text {
+        data["text"] = json!(text);
+    }
+    let _ = record(m, caller, "child_command", data)?;
+    Ok(Json(json!({"id":id,"state":"requested","note":note})))
 }
 
 #[derive(Deserialize)]
@@ -168,7 +207,7 @@ async fn receive(
         }
         _ => return Err(bad("unknown action")),
     };
-    let answer = deliver(&m, &id, &request, &text).await?;
+    let answer = deliver(&m, &id, &request, &text, true).await?;
     // A steer not yet confirmed may still fail; the sender retries, and a failed steer is then queued instead.
     let steering = m.receipt(&id, &format!("{request}_steer"));
     if m.receipt(&id, &request).is_none() && steering.is_some_and(|s| s.state == "accepted") {
@@ -205,7 +244,8 @@ fn next_report(local: &Local) -> Option<(String, String, Value)> {
 }
 
 /// `thread list` also shows children in sandboxes of their own, at any depth, from the website's links (ADR 0256):
-/// what this thread last heard of each, or else its sandbox's state.
+/// what this thread last heard of each, or else its sandbox's state. Ones started in the last few minutes show as
+/// `starting` until their sandbox wakes, linked or not.
 pub(super) async fn own_children(m: &Manager, caller: &str, archived: bool, answer: &mut Value) {
     let (shared, known) = {
         let local = m.local.lock().unwrap();
@@ -220,26 +260,41 @@ pub(super) async fn own_children(m: &Manager, caller: &str, archived: bool, answ
         return;
     };
     let flag = if archived { "1" } else { "0" };
+    // Without the website's list, the children started in the last few minutes still show.
     let found = match api.get("children", &[("archived", flag)]).await {
         Ok(found) => found,
         Err(error) => {
             answer["note"] = json!(format!(
                 "Children in sandboxes of their own are missing: {error}. Retry."
             ));
-            return;
+            Value::Null
         }
     };
     let Some(list) = answer["children"].as_array_mut() else {
         return;
     };
+    let recent = starting(caller);
     for child in found["children"].as_array().into_iter().flatten() {
         let id = child["id"].as_str().unwrap_or_default();
         let sandbox = child["state"].as_str().unwrap_or("unknown");
         let state = match sandbox {
             "archived" | "deleted" => "archived",
+            "new" if recent.iter().any(|c| c == id) => "starting",
             _ => known.get(id).map_or(sandbox, String::as_str),
         };
-        list.push(json!({"id":id,"title":child["title"],"state":state,"parent":child["parent"],"sandbox":"own"}));
+        let mut item = json!({"id":id,"title":child["title"],"state":state,"parent":child["parent"],"sandbox":"own"});
+        // Its sandbox didn't start yet, say after a failed wake.
+        if let Some(issue) = child["issue"].as_str() {
+            item["issue"] = json!(issue);
+        }
+        list.push(item);
+    }
+    // Children the app just started that the website doesn't link to this thread yet (#317).
+    for id in recent {
+        let archived = known.get(&id).is_some_and(|s| s == "archived");
+        if !archived && !list.iter().any(|c| c["id"] == id.as_str()) {
+            list.push(json!({"id":id,"title":null,"state":"starting","sandbox":"own"}));
+        }
     }
 }
 

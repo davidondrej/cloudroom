@@ -780,13 +780,27 @@ async fn stop(
     Ok(accepted(&manager, &id, receipt))
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Resume {
+    request_id: String,
+    /// Restart a lost agent but keep a Stop's pause, so the client can queue and reorder before releasing it.
+    #[serde(default)]
+    keep_paused: bool,
+}
+
 async fn resume(
     State(manager): State<Arc<Manager>>,
     Path(id): Path<String>,
-    Json(body): Json<RequestId>,
+    Json(body): Json<Resume>,
 ) -> Result<impl IntoResponse> {
     key(&body.request_id)?;
-    let receipt = manager.command(&id, body.request_id, "resume", json!({}))?;
+    let input = if body.keep_paused {
+        json!({"keep_paused":true})
+    } else {
+        json!({})
+    };
+    let receipt = manager.command(&id, body.request_id, "resume", input)?;
     Ok(accepted(&manager, &id, receipt))
 }
 

@@ -123,7 +123,7 @@ impl Session {
             && !self.queue_paused
             && !self.archived
             && self.close_request.is_none()
-            && self.state != "closed";
+            && self.state != SessionState::Closed;
         match &self.resume_loop {
             Some(id) => (!stopped).then(|| Change::Delete(id.clone())),
             None if stopped && !self.resume_refused => {
@@ -313,9 +313,9 @@ impl Manager {
                     && !s.archived
                     && harnesses.contains(&s.harness)
                     // Awake and idle, going to sleep (the app's switch asks for it), or asleep.
-                    && ((s.ready && s.handle.is_some() && s.state == "idle")
+                    && ((s.ready && s.handle.is_some() && s.state == SessionState::Idle)
                         || s.releasing
-                        || (s.handle.is_none() && s.state == "sleeping"))
+                        || (s.handle.is_none() && s.state == SessionState::Sleeping))
                     && s.current_request.is_none()
                     && s.queue.is_empty()
                     && !s.queue_paused
@@ -686,7 +686,10 @@ impl Manager {
             s.harness == runtime::Kind::Codex
                 && (s.current_request.is_some()
                     || (!s.queue_paused && !s.queue.is_empty())
-                    || matches!(s.state.as_str(), "starting" | "resuming" | "pending"))
+                    || matches!(
+                        s.state,
+                        SessionState::Starting | SessionState::Resuming | SessionState::Pending
+                    ))
         }) {
             return Err(Error::Conflict(
                 "finish active Codex work before signing in",
@@ -744,7 +747,10 @@ impl Manager {
                 && (session.handle.is_some()
                     || session.current_request.is_some()
                     || (!session.queue_paused && !session.queue.is_empty())
-                    || matches!(session.state.as_str(), "starting" | "resuming" | "pending"))
+                    || matches!(
+                        session.state,
+                        SessionState::Starting | SessionState::Resuming | SessionState::Pending
+                    ))
         }) {
             return Err(Error::Conflict(
                 "close Cursor sessions before changing the cloud login",

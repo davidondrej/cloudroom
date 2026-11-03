@@ -48,6 +48,7 @@ import {
   type ProviderRuntimeEvent,
   experimental_defineProviderBridge,
   experimental_findBrokenCliLink as findBrokenCliLink,
+  experimental_findCliExecutable as findCliExecutable,
   type ProviderRecoveryHint,
 } from "@get-bb/plugin-sdk/provider-bridge";
 import { z } from "zod";
@@ -87,7 +88,6 @@ import {
   type CodexAppServerRequestResponder,
 } from "./app-server-connection.js";
 import {
-  codexExecutable,
   getCodexProviderHealth,
   getCodexProviderInstallationRun,
   getCodexProviderInstallationStatus,
@@ -367,19 +367,25 @@ function missingCodexCliGuidance(): string {
 
 export function resolveAppServerLaunch(
   env: NodeJS.ProcessEnv = process.env,
-  codexCommand = "codex",
 ): {
   command: string;
   args: string[];
 } {
-  const command = env[CODEX_APP_SERVER_COMMAND_ENV];
+  const override = env[CODEX_APP_SERVER_COMMAND_ENV];
   const rawArgs = env[CODEX_APP_SERVER_ARGS_ENV];
-  const args = command
+  const command = override || findCliExecutable("codex", env);
+  if (!command) {
+    // describeCodexLaunchError shows the install guidance, as for a failed spawn.
+    throw new CodexAppServerExitedError("codex is not installed", {
+      spawnFailed: true,
+    });
+  }
+  const args = override
     ? rawArgs
       ? z.array(z.string()).parse(JSON.parse(rawArgs))
       : []
     : ["app-server"];
-  return { command: command ?? codexCommand, args };
+  return { command, args };
 }
 
 function buildAppServerEnv(): NodeJS.ProcessEnv {
@@ -835,7 +841,7 @@ function spawnChildConnection(callbacks: {
   ) => void;
   onExit: (info: CodexAppServerExitInfo) => void;
 }): CodexAppServerConnection {
-  const launch = resolveAppServerLaunch(process.env, codexExecutable(process.env));
+  const launch = resolveAppServerLaunch();
   return createCodexAppServerConnection({
     command: launch.command,
     args: launch.args,
@@ -976,17 +982,19 @@ async function constructThreadSession(
   }
   sendThreadDeltas(session, [{ kind: "session.reset" }]);
 
-  const connection = spawnChildConnection({
-    recordThreadId: args.threadId,
-    onNotification: (method, params) =>
-      handleChildNotification(args.threadId, serial, method, params),
-    onRequest: (method, params, responder) =>
-      handleChildRequest(args.threadId, serial, method, params, responder),
-    onExit: (info) => handleChildExit(args.threadId, serial, info),
-  });
-  session.connection = connection;
-
+  let spawned: CodexAppServerConnection | null = null;
   try {
+    const connection = spawnChildConnection({
+      recordThreadId: args.threadId,
+      onNotification: (method, params) =>
+        handleChildNotification(args.threadId, serial, method, params),
+      onRequest: (method, params, responder) =>
+        handleChildRequest(args.threadId, serial, method, params, responder),
+      onExit: (info) => handleChildExit(args.threadId, serial, info),
+    });
+    spawned = connection;
+    session.connection = connection;
+
     await initializeChild(connection, translator.buildPostInitializeRequests());
     await signInCloudroomAccount(connection, decoded.sessionOptions.envVars);
     if (args.options.providerOptions?.commandGuardEnabled !== false) {
@@ -1090,7 +1098,7 @@ async function constructThreadSession(
       sessionsByBbThreadId.delete(args.threadId);
     }
     session.closing = true;
-    await connection.kill();
+    await spawned?.kill();
     throw released ? new CodexSessionReleasedError(error) : error;
   }
 }

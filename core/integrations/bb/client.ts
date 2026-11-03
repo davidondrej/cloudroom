@@ -753,8 +753,8 @@ export class CloudroomClient {
     return this.#command(`${sessionPath(sessionId)}/stop`, "stop", { request_id: id }, sessionId);
   }
 
-  resume(sessionId: string, id: string) {
-    return this.#command(`${sessionPath(sessionId)}/resume`, "resume", { request_id: id }, sessionId);
+  resume(sessionId: string, id: string, keepPaused = false) {
+    return this.#command(`${sessionPath(sessionId)}/resume`, "resume", { request_id: id, ...(keepPaused ? { keep_paused: true } : {}) }, sessionId);
   }
 
   sleep(sessionId: string, id: string) {

@@ -1,7 +1,7 @@
 //! Saved history, diagnostics, and feedback leave the machine over HTTPS (ADR 0232), never through a database login.
 //! History goes up as gzip JSONL files, one per session per batch, straight to file storage through short-lived links
 //! the API hands out (ADR 0231, 0237). Without `CLOUDROOM_API_URL`, history stays only in the local journal.
-use super::{Receipt, Record, Session};
+use super::{Receipt, Record, Session, SessionState};
 use crate::config::Config;
 use flate2::{Compression, write::GzEncoder};
 use reqwest::{Method, RequestBuilder, Response, StatusCode};
@@ -280,7 +280,7 @@ impl History {
         let mut receipt = None; // Decode only the latest matching receipt, not superseded versions.
         let mut session = Session {
             session_id: id.into(),
-            state: "saved_history_only".into(),
+            state: SessionState::SavedHistoryOnly,
             ..Session::default()
         };
         let decode = |e: serde_json::Error| ApiError::Network(format!("saved history: {e}"));

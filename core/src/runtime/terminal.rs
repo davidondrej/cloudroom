@@ -455,6 +455,16 @@ impl Terminals {
         }
     }
 
+    /// Whether any open terminal runs a command beyond its shell, which may use the shared browser (#610).
+    pub fn running(&self) -> bool {
+        self.open.lock().unwrap().values().any(|t| {
+            t.output.lock().unwrap().exit.is_none()
+                && (t.group.lock().unwrap().as_ref())
+                    .and_then(|group| group.process_count())
+                    .is_some_and(|count| count > 1)
+        })
+    }
+
     pub fn summary(&self) -> Value {
         let open = self.open.lock().unwrap();
         let running = open

@@ -2,11 +2,11 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { experimental_findCliExecutable as findCliExecutable } from "@get-bb/plugin-sdk/provider-bridge";
 import { resetChatGptCloudflareCookiesForTests } from "../ai/chatgpt-fetch.js";
+import { CodexAppServerExitedError } from "./app-server-connection.js";
+import { resolveAppServerLaunch } from "./bridge.js";
 import {
   __testing,
-  codexExecutable,
   getCodexProviderHealth,
   getCodexProviderInstallationStatus,
   getCodexProviderUsage,
@@ -206,7 +206,7 @@ describe("Codex credential health and usage", () => {
         minimumSupportedVersion: "0.136.0",
         canInstall: true,
         canUpdate: true,
-        loginCommand: "codex login",
+        loginCommand: `${path.join(homeDir, "bin", "codex")} login`,
       },
     });
     await expect(getCodexProviderUsage()).resolves.toEqual({
@@ -272,20 +272,20 @@ describe("Codex credential health and usage", () => {
 
   // #96: running a binary inside a flagged Codex.app gets the whole app moved to the Bin.
   it.skipIf(process.platform === "win32")(
-    "never runs the Codex inside Codex.app, even through a PATH symlink, and offers Install",
+    "never runs the Codex inside Codex.app, through PATH or the official path, and offers Install",
     async () => {
       const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
       Object.defineProperty(process, "platform", {
         ...platform,
         value: "darwin",
       });
+      // Root skips Homebrew and /usr/local, so a Codex on this machine can't answer.
+      const getuid = vi.spyOn(process, "getuid").mockReturnValue(0);
       try {
         const binDir = path.join(homeDir, "bin");
         await fs.rm(path.join(binDir, "codex"));
         // Only the fake bin, so no npm runs either.
         vi.stubEnv("PATH", binDir);
-        // A codex this machine keeps in /usr/local/bin or Homebrew; null on a clean Mac.
-        const elsewhere = findCliExecutable("codex");
         const bundled = path.join(
           homeDir,
           "Applications/Codex.app/Contents/Resources/codex",
@@ -295,29 +295,48 @@ describe("Codex credential health and usage", () => {
         const script = `#!/bin/sh\n: > '${ran}'\necho "codex-cli 0.150.0"\n`;
         await fs.writeFile(bundled, script, { mode: 0o755 });
         await fs.symlink(bundled, path.join(binDir, "codex"));
+        const official = path.join(
+          homeDir,
+          ".codex/packages/standalone/current/codex",
+        );
+        await fs.mkdir(path.dirname(official), { recursive: true });
+        await fs.symlink(bundled, official);
+        const bundledRan = () =>
+          fs.access(ran).then(
+            () => true,
+            () => false,
+          );
 
         const status = await getCodexProviderInstallationStatus();
-        await getCodexProviderHealth();
-        await getCodexProviderUsage();
-        const bundledRan = await fs.access(ran).then(
-          () => true,
-          () => false,
+        const health = await getCodexProviderHealth();
+        const usage = await getCodexProviderUsage();
+        expect(await bundledRan()).toBe(false);
+        expect(status).toMatchObject({
+          installed: false,
+          executablePath: null,
+          installAction: { kind: "install" },
+        });
+        expect(health).toMatchObject({
+          health: { status: "not_installed", loginCommand: null },
+        });
+        expect(usage).toMatchObject({ usage: { status: "not_installed" } });
+        expect(() => resolveAppServerLaunch()).toThrow(
+          CodexAppServerExitedError,
         );
-        expect(bundledRan).toBe(false);
-        expect(codexExecutable()).toBe(
-          elsewhere ??
-            path.join(homeDir, ".codex/packages/standalone/current/codex"),
-        );
-        expect(status).toMatchObject(
-          elsewhere === null
-            ? {
-                installed: false,
-                executablePath: null,
-                installAction: { kind: "install" },
-              }
-            : { executablePath: elsewhere },
-        );
+
+        // Log in runs the safe Codex we found, quoted, whatever else PATH holds.
+        const safe = path.join(homeDir, "My Tools", "codex");
+        await fs.mkdir(path.dirname(safe));
+        await fs.writeFile(safe, '#!/bin/sh\necho "codex-cli 0.150.0"\n', {
+          mode: 0o755,
+        });
+        vi.stubEnv("PATH", `${path.dirname(safe)}${path.delimiter}${binDir}`);
+        await expect(getCodexProviderHealth()).resolves.toMatchObject({
+          health: { status: "unauthenticated", loginCommand: `'${safe}' login` },
+        });
+        expect(await bundledRan()).toBe(false);
       } finally {
+        getuid.mockRestore();
         Object.defineProperty(process, "platform", platform);
       }
     },

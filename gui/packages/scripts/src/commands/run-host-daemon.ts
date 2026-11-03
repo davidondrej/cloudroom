@@ -9,6 +9,7 @@ import {
   type BbRuntimeMode,
 } from "@cloudroom/config/runtime";
 import { loadServerUrlValue } from "@cloudroom/config/server-url";
+import { createCallerProofFetch } from "@cloudroom/config/caller-proof";
 import {
   HOST_AUTH_FILE_NAME,
   HOST_ID_FILE_NAME,
@@ -169,7 +170,8 @@ export async function maybeAddAutoJoinEnv(
   const requestedHostId =
     env.BB_HOST_ID?.trim() || (await readPersistedHostId(env.BB_DATA_DIR));
 
-  const response = await fetch(
+  // The server only enrolls a caller that proves it runs outside a sandbox.
+  const response = await createCallerProofFetch(fetch)(
     `${env.BB_SERVER_URL}/internal/hosts/enroll-key`,
     {
       body: JSON.stringify(createAutoJoinRequest({ requestedHostId })),

@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
+import { randomUUID } from "node:crypto";
 import { DEFAULTS } from "@cloudroom/config/defaults";
 import { readOrCreateSecretFile } from "@cloudroom/secret-storage";
 import type { AppSurface, RequestAppSurface } from "@cloudroom/config/app-surface";
@@ -6,6 +7,8 @@ import type { ServerLogger } from "../../types.js";
 
 const POSTHOG_INGESTION_URL = "https://us.i.posthog.com/capture/";
 export const TELEMETRY_ID_FILE_NAME = "telemetry-id";
+/** Events wait in memory and reach our own server through the website in batches (ADR 20261102-201050). */
+const BATCH_SIZE = 100, MAX_QUEUED = 1_000, FIRST_FLUSH_MS = 10_000, FLUSH_MS = 60_000;
 
 const telemetryAppSurfaceStorage = new AsyncLocalStorage<RequestAppSurface>();
 
@@ -132,11 +135,16 @@ const PLANS = ["free", "pro", "super", "ultra"];
 
 export type PluginTelemetryProperties = Record<string, TelemetryValue>;
 
+/** Where batches go. Signed-in apps add their login, so the website can save the verified account with the events. */
+export type TelemetryTarget = { website: string; authorization?: string };
+
 export interface TelemetryService {
   capture(event: TelemetryEvent): void;
   capturePlugin(pluginId: string, name: string, properties: PluginTelemetryProperties): void;
+  flush(): Promise<void>;
   setEnabled(enabled: boolean): void;
   setPlanSource(source: () => string | null): void;
+  setTargetSource(source: () => Promise<TelemetryTarget>): void;
 }
 
 interface CreateTelemetryServiceArgs {
@@ -154,8 +162,10 @@ interface CreateTelemetryServiceArgs {
 const noopTelemetryService: TelemetryService = {
   capture: () => {},
   capturePlugin: () => {},
+  flush: () => Promise.resolve(),
   setEnabled: () => {},
   setPlanSource: () => {},
+  setTargetSource: () => {},
 };
 
 export function createNoopTelemetryService(): TelemetryService {
@@ -187,6 +197,36 @@ export async function createTelemetryService(
   });
   let telemetryEnabled = args.telemetryEnabled;
   let planSource: () => string | null = () => null;
+  let targetSource: (() => Promise<TelemetryTarget>) | null = null;
+  const queue: { id: string; name: string; at: string; properties: object }[] = [];
+  let flushing: Promise<void> | null = null;
+  let optOuts = 0;
+  const sendBatches = async (): Promise<void> => {
+    while (targetSource && queue.length > 0) {
+      const startedAt = optOuts;
+      const batch = queue.slice(0, BATCH_SIZE);
+      const { website, authorization } = await targetSource();
+      if (optOuts !== startedAt) return; // Turned off during that wait: this copy of the batch must not leave.
+      const response = await fetch(`${website}/api/desktop/events`, {
+        body: JSON.stringify({ install_id: distinctId, events: batch }),
+        headers: { "content-type": "application/json", ...(authorization ? { authorization } : {}) },
+        method: "POST",
+        redirect: "error",
+        signal: AbortSignal.timeout(15_000),
+      });
+      // A 400 will never succeed. Anything else stays queued for the next flush, and the event IDs drop any duplicates.
+      if (optOuts !== startedAt || (!response.ok && response.status !== 400)) return;
+      queue.splice(0, batch.length);
+    }
+  };
+  const flush = (): Promise<void> => {
+    flushing ??= sendBatches()
+      .catch((error: unknown) => { args.logger.debug({ err: error }, "Telemetry batch send failed"); })
+      .finally(() => { flushing = null; });
+    return flushing;
+  };
+  setTimeout(() => void flush(), FIRST_FLUSH_MS).unref();
+  setInterval(() => void flush(), FLUSH_MS).unref();
   const commonProperties = {
     app_version: args.appVersion,
     arch: process.arch,
@@ -197,17 +237,25 @@ export async function createTelemetryService(
     if (!telemetryEnabled) return;
     const appSurface = telemetryAppSurfaceStorage.getStore() ?? args.appSurface;
     const plan = planSource();
+    const properties = {
+      ...commonProperties,
+      ...eventProperties,
+      app_surface: appSurface,
+      plan: plan && PLANS.includes(plan) ? plan : null,
+    };
+    const timestamp = new Date().toISOString();
+    if (queue.length >= MAX_QUEUED) queue.shift();
+    const id = randomUUID();
+    queue.push({ id, name, at: timestamp, properties });
+    if (queue.length >= BATCH_SIZE) void flush();
     const body = JSON.stringify({
       api_key: args.apiKey,
       distinct_id: distinctId,
       event: name,
-      properties: {
-        ...commonProperties,
-        ...eventProperties,
-        app_surface: appSurface,
-        plan: plan && PLANS.includes(plan) ? plan : null,
-      },
-      timestamp: new Date().toISOString(),
+      properties: { ...properties, dual_written: true },
+      timestamp,
+      // The same ID on both sides, so the import from PostHog can find exactly what never reached our server.
+      uuid: id,
     });
     fetch(POSTHOG_INGESTION_URL, {
       body,
@@ -221,11 +269,19 @@ export async function createTelemetryService(
     });
   };
   return {
+    flush,
     setEnabled(enabled: boolean): void {
       telemetryEnabled = enabled;
+      if (!enabled) {
+        optOuts += 1;
+        queue.length = 0;
+      }
     },
     setPlanSource(source): void {
       planSource = source;
+    },
+    setTargetSource(source): void {
+      targetSource = source;
     },
     capturePlugin(pluginId, name, properties): void {
       send(name, { ...properties, plugin_id: pluginId });

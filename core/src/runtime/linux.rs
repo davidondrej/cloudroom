@@ -208,7 +208,7 @@ impl Workload {
     }
     /// Idle sleep treats processes beyond the launch count as background jobs. Codex starts its code-mode
     /// host on the first command and keeps it for the session, so it is harness, not a background job. The
-    /// virtual screen and its browser are neither: an open page alone never keeps the sandbox awake.
+    /// virtual screen and its browser are neither: an open page alone never keeps the sandbox awake (ADR 0272).
     pub fn process_count(&self) -> Option<usize> {
         Some(
             self.pids()
@@ -368,25 +368,82 @@ fn members(id: Option<&str>) -> io::Result<Vec<Member>> {
 }
 /// Codex's code-mode host runs in its own group but holds session state, so it counts as harness.
 fn helper(pid: i32) -> bool {
+    program(pid, b"codex-code-mode-host")
+}
+fn program(pid: i32, name: &[u8]) -> bool {
     fs::read(format!("/proc/{pid}/cmdline")).is_ok_and(|cmdline| {
         let program = cmdline.split(|b| *b == 0).next().unwrap_or_default();
-        program.rsplit(|b| *b == b'/').next() == Some(b"codex-code-mode-host".as_slice())
+        program.rsplit(|b| *b == b'/').next() == Some(name)
     })
 }
-/// Computer use marks the virtual screen, its helpers and the apps it launches (Chromium included) with
-/// `CLOUDROOM_DESKTOP=1`; browser-harness runs its daemon as `python -m browser_harness.daemon`. For idle sleep
-/// only: the disk guard still sees them. An unreadable environment counts as a background job, as before.
+/// Computer use marks the virtual screen, its helpers and the apps it launches with `CLOUDROOM_DESKTOP=1`; the
+/// shared browser is matched by `browser`, and Chromium's crash reporter is never real work. For idle sleep only:
+/// the disk guard still sees them. An unreadable environment counts as a background job, as before.
 fn desktop(pid: i32) -> bool {
     let marked = fs::read(format!("/proc/{pid}/environ")).is_ok_and(|environ| {
         environ
             .split(|b| *b == 0)
             .any(|var| var.strip_prefix(DESKTOP_MARKER.as_bytes()) == Some(b"=1".as_slice()))
     });
-    marked
-        || fs::read(format!("/proc/{pid}/cmdline")).is_ok_and(|cmdline| {
-            let args: Vec<&[u8]> = cmdline.split(|b| *b == 0).skip(1).take(2).collect();
-            args == [b"-m".as_slice(), b"browser_harness.daemon".as_slice()]
-        })
+    marked || browser(pid) || program(pid, b"chrome_crashpad_handler")
+}
+/// The shared browser: browser-harness's daemons (`python -m browser_harness.daemon`) and every process of the
+/// Chromium its wrapper starts with `--user-data-dir=$HOME/.config/chromium-agent` (web/browser.sh). Chromium wipes
+/// its environment and rewrites its command line as one space-joined title, so only a substring can tell (#610).
+/// Only those programs match: another process carrying the same words is never paused.
+fn browser(pid: i32) -> bool {
+    fs::read(format!("/proc/{pid}/cmdline")).is_ok_and(|cmdline| {
+        let mut words = cmdline.split(|b| *b == 0 || *b == b' ');
+        let program = words.next().unwrap_or_default();
+        match program.rsplit(|b| *b == b'/').next().unwrap_or_default() {
+            b"chromium" => words.any(|word| {
+                word.starts_with(b"--user-data-dir=") && word.ends_with(b"/.config/chromium-agent")
+            }),
+            name => {
+                name.starts_with(b"python")
+                    && words
+                        .take(2)
+                        .eq([b"-m".as_slice(), b"browser_harness.daemon".as_slice()])
+            }
+        }
+    })
+}
+/// Pauses (SIGSTOP) or resumes (SIGCONT) the shared browser, so an open page burns no Cloud Credits while nothing
+/// uses it (#610). Tabs, logins and page state stay; its daemons pause too, so their connection to Chromium survives.
+/// Resuming is harmless when nothing is paused. Only the idle sleeper pauses (session `Browser`).
+/// Only the agent account's browser: `owner` is its uid, or Core's own when agents share it. Another account's
+/// browser on the same server is never touched, even though Core may signal it (`CAP_KILL`).
+pub(crate) fn pause_browser(paused: bool, owner: Option<u32>) {
+    let owner = owner.unwrap_or_else(|| {
+        unsafe extern "C" {
+            fn geteuid() -> u32;
+        }
+        unsafe { geteuid() }
+    });
+    let Ok(entries) = fs::read_dir("/proc") else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if let Some(pid) = entry.file_name().to_str().and_then(|s| s.parse().ok())
+            && pid != std::process::id() as i32
+            && uid(pid) == Some(owner)
+            && browser(pid)
+        {
+            signal(pid, if paused { SIGSTOP } else { SIGCONT });
+        }
+    }
+}
+/// A process's real uid, from `/proc/PID/status`. Readable even when the process isn't dumpable, unlike the
+/// owner of `/proc/PID`, which is then root.
+fn uid(pid: i32) -> Option<u32> {
+    let status = fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+    status.lines().find_map(|line| {
+        line.strip_prefix("Uid:")?
+            .split_whitespace()
+            .next()?
+            .parse()
+            .ok()
+    })
 }
 /// A process's group and start time, from `/proc/PID/stat`.
 fn stat(pid: i32) -> Option<(i32, u64)> {

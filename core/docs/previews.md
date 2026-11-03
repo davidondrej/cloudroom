@@ -17,13 +17,15 @@ The open command waits briefly for the helper, then returns pending rather than 
 
 ## Machines without inbound SSH
 
+Hosted sandboxes and self-hosted servers use tunnel mode. Self-hosted installs and upgrades set it up with `previews.py --tunnel`: no preview account and no SSH changes. A self-hosted server already on SSH previews keeps them untouched: its upgrades run `previews.py --tools-only`, which only refreshes the agent tools.
+
 Write `previews/setup.json` with `"tunnel": true` and no SSH fields. Pairing then returns `{"tunnel":true}`. The helper opens each preview connection as `GET /v1/previews/PORT/tunnel?device=ID` with `Upgrade: websocket` and the core bearer token; cores before 0.1.35 answer that with `400`, so the helper retries with `Upgrade: cloudroom-tunnel`. Either name opens the same raw tunnel, with no WebSocket frames: the `websocket` name only gets it through proxies that relay nothing else. Core rechecks the device, the registration, and the agent's listener, answers `101`, and joins the connection to `127.0.0.1:PORT`. Closing a preview or revoking the device ends its tunnels. Mac access uses the same pairing.
 
 ## Ownership
 
 - `src/preview/mod.rs`: registry, agent-only Unix socket, authenticated HTTP API, public SSH-key authorization, and CLI. Runs inside the existing core service. Registry writes stay in the protected state directory; no SQL.
 - `src/preview/client.py`: independent Mac helper. Reuses authenticated HTTPS, prepares managed SSH metadata automatically, owns forwarding/local listeners, and reports actual URLs. Closing the GUI does not stop it. Sign-out stops it and revokes access on every reachable core; an unreachable VM or sandbox never blocks sign-out. Desktop updates pause it without losing pairing.
-- `install/previews.py`: operator-only setup of the dedicated forwarding account and SSH policy. Existing VM upgrades require an explicit operator setup; ordinary `configure.py` retries do not change SSH.
+- `install/previews.py`: operator-only setup. By default, the dedicated forwarding account and SSH policy, which hosted VMs get on install and upgrade. Self-hosted servers (`CLOUDROOM_STORE=self-hosted`) get `--tunnel` or `--tools-only`: no account and no SSH changes. Ordinary `configure.py` retries do not change SSH.
 - `src/preview/cloud-preview/SKILL.md`: instructions for agents. The installer copies it into supported harness skill directories without overwriting existing files.
 
 ## Installation
@@ -40,7 +42,7 @@ The script installs only the preview account's SSH policy and a root-owned `/etc
 
 The helper retries missing/stale metadata without requiring another sign-in. Preparation failures do not block sign-in or cloud sessions. If it cannot list or reach any awake sandbox for over a minute (for example, a VPN, proxy, or antivirus inspecting HTTPS), `status` reports `offline` instead of `connected`, with a short `message` for Settings and a technical `detail` the app saves with the account (ADR 0201) but never shows. While failing, it rereads the Mac's proxy setting every 30 s, or at once when the app touches `woke` (Settings → Check now, or `room-cli cloud check`). Its certificates come from Python's own file, not the Keychain. A sandbox counts as unreachable only on a network failure; an HTTP answer, such as one paired with another Mac, does not. If it can't reach Cloudroom at all (certificate refused, no DNS answer, connection or proxy tunnel refused), those requests never reach our servers, so it retries every 10–20 s (random) and shows the reason after the second failure in a row; it heals within 20 s of a fix.
 
-Self-hosters set the reachable IP through authenticated `POST /v1/previews/host` with `{"host":"VM_IP"}`. SSH defaults to port 22. A different port belongs in the protected `previews/setup.json`.
+Self-hosters on SSH previews set the reachable IP through authenticated `POST /v1/previews/host` with `{"host":"VM_IP"}`. SSH defaults to port 22. A different port belongs in the protected `previews/setup.json`.
 
 The desktop bundles and configures the helper automatically when `capabilities.previews` is true. Without the GUI:
 

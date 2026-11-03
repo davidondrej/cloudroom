@@ -1,4 +1,4 @@
-import { cloudroom } from "./services/cloudroom/commands.js";
+import { cloudroom, configuredWebsite } from "./services/cloudroom/commands.js";
 import { serve } from "@hono/node-server";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
@@ -236,6 +236,12 @@ export async function runServer(serverConfig: ServerConfig): Promise<void> {
   });
   cloud.start();
   telemetry.setPlanSource(() => cloud.sandboxes.currentPlan());
+  telemetry.setTargetSource(async () => {
+    const account = await cloud.sandboxes.account();
+    return account
+      ? { website: account.website, authorization: `Basic ${Buffer.from(`${account.userId}:${account.token}`).toString("base64")}` }
+      : { website: configuredWebsite() };
+  });
   const stopFirstResponseTelemetry = installFirstResponseTelemetry({ db, hub, telemetry }, (threadId, at) => cloud.sandboxes.wokeSince(threadId, at), (threadId, at) => cloud.sandboxes.startupSince(threadId, at));
   const stopAuthFailureTelemetry = installAuthFailureTelemetry({ db, logger, telemetry });
 
@@ -331,6 +337,8 @@ export async function runServer(serverConfig: ServerConfig): Promise<void> {
       return shutdownPromise;
     }
     shutdownPromise = (async () => {
+      // The last events get as long as shutdown takes, and at most 1.5 s.
+      const lastEvents = Promise.race([telemetry.flush(), new Promise((resolve) => setTimeout(resolve, 1_500))]);
       providerModelCatalogPrewarm.stop();
       eventLoopStallMonitor.stop();
       cloud.stop();
@@ -358,6 +366,7 @@ export async function runServer(serverConfig: ServerConfig): Promise<void> {
       });
       await closeWebSockets();
       await closeServer;
+      await lastEvents;
     })();
     return shutdownPromise;
   };

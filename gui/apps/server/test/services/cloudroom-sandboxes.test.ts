@@ -6,9 +6,10 @@ import { join } from "node:path";
 import { expect, it, vi } from "vitest";
 import { cloudroom } from "../../src/services/cloudroom/commands.js";
 import { binding, saveStatus } from "../../src/services/cloudroom/store.js";
+import { setCopyLogins } from "../../src/services/cloudroom/sync.js";
 import { createTestAppHarness } from "../helpers/test-app.js";
 import { seedHostSession, seedProjectWithSource } from "../helpers/seed.js";
-import { cloudroomThreads, createThread, getThread } from "@cloudroom/db";
+import { cloudroomCommands, cloudroomThreads, createThread, getThread } from "@cloudroom/db";
 
 // The Cursor key check runs this computer's Cursor CLI, which rejects the tests' fake keys.
 vi.mock("../../src/services/cloudroom/sandboxes.js", async (original) => ({ ...await original<object>(), cursorKeyRejected: async () => false }));
@@ -19,8 +20,8 @@ const listen = async (server: ReturnType<typeof createServer>) => {
   return `http://127.0.0.1:${address.port}`;
 };
 const body = async (req: import("node:http").IncomingMessage) => { let text = ""; for await (const chunk of req) text += chunk; return text ? JSON.parse(text) : {}; };
-const waitFor = async (check: () => boolean, label: string) => {
-  for (let i = 0; i < 200 && !check(); i++) await new Promise(resolve => setTimeout(resolve, 25));
+const waitFor = async (check: () => boolean, label: string, ms = 5_000) => {
+  for (let i = 0; i < ms / 25 && !check(); i++) await new Promise(resolve => setTimeout(resolve, 25));
   if (!check()) throw new Error(`timed out: ${label}`);
 };
 
@@ -32,7 +33,9 @@ it("gives each cloud thread its own sandbox, wakes it only for work, and archive
   const capture = vi.spyOn(harness.deps.telemetry, "capture");
   const website: { action: string; thread?: string; project?: string; auth?: string; title?: string; project_name?: string; session?: string; harness?: string; model?: string; parent?: string | null }[] = [];
   const core: { path: string; auth?: string }[] = [];
+  const prompts: string[] = [];
   let state: "new" | "awake" | "asleep" | "archived" = "new";
+  let refusal: string | null = null;
   let sandboxThread = "";
   let coreUrl = "";
   const coreServer = createServer(async (req, res) => {
@@ -44,7 +47,10 @@ it("gives each cloud thread its own sandbox, wakes it only for work, and archive
     if (req.url?.includes("/stream?")) { res.writeHead(200, { "Content-Type": "text/event-stream" }); res.end(`id: 1\nevent: record\ndata: ${JSON.stringify({ sequence: 1, session_id: "cr_one", kind: "state", data: { state: "running" } })}\n\n`); return; }
     const input = await body(req);
     if (req.url === "/v1/sessions") return json({ session_id: "cr_one", receipt: { request_id: input.request_id, command: "start", input, state: "accepted" }, saving: {} }, 202);
+    if (req.url?.startsWith("/v1/sessions/cr_one/prompts")) prompts.push(input.request_id);
     if (req.url?.startsWith("/v1/sessions/cr_one/prompts")) return json({ session_id: "cr_one", receipt: { request_id: input.request_id, command: "prompt", input, state: "accepted" }, saving: {} }, 202);
+    const control = req.url?.match(/^\/v1\/sessions\/cr_one\/(stop|resume|reorder)$/)?.[1];
+    if (control) return json({ session_id: "cr_one", receipt: { request_id: input.request_id, command: control, input, state: "accepted" }, saving: {} }, 202);
     return json({}, 404);
   });
   const websiteServer = createServer(async (req, res) => {
@@ -53,6 +59,7 @@ it("gives each cloud thread its own sandbox, wakes it only for work, and archive
     website.push({ action: input.action ?? input.name, thread: input.thread, project: input.project, auth: req.headers.authorization, title: input.title, project_name: input.project_name, session: input.session, harness: input.harness, model: input.model, parent: input.parent });
     if (req.url === "/api/desktop/logins") return json({ claude: false, codex: false, pi: false, github: false });
     if (input.action === "awake") return json({ sandboxes: state === "awake" ? [{ thread: sandboxThread, origin: coreUrl, token: "t".repeat(64) }] : [] });
+    if (input.action === "wake" && refusal) return json({ error: "Refused.", code: refusal }, 429);
     if (input.action === "wake") { state = "awake"; sandboxThread = input.thread; }
     if (input.action === "archive") state = "archived";
     else if (state === "archived") return json({ error: "This thread is archived. Restore it to continue.", code: "sandbox_archived" }, 409);
@@ -109,11 +116,76 @@ it("gives each cloud thread its own sandbox, wakes it only for work, and archive
     expect(capture).toHaveBeenCalledWith({ name: "user_message_sent", properties: { execution: "cloud_sandbox", is_child_thread: false, message_source: "thread_create", provider: "codex" } });
     expect(capture).toHaveBeenCalledWith({ name: "user_message_sent", properties: { execution: "cloud_sandbox", is_child_thread: false, message_source: "thread_send", provider: "codex" } });
 
-    // Archive goes to the website, which stops the sandbox even mid-task, so the thread stops showing as running.
+    // Out of credits, the website refuses every wake. Stop still works without one (#553).
     await waitFor(() => getThread(harness.deps.db, thread.id)?.status === "active", "running follow-up");
+    state = "asleep";
+    refusal = "sandbox_repairing";
     service.sandboxes.forget(thread.id);
+    await waitFor(() => getThread(harness.deps.db, thread.id)?.status === "idle", "asleep");
+    const commandState = (id: string) => harness.deps.db.select().from(cloudroomCommands).all().find(item => item.id === id)?.state;
+    const skipBackoff = () => (service.sandboxes as unknown as { backoff: Map<string, unknown> }).backoff.clear();
+    let refusedAt = wakes();
+    expect((await request(`/threads/${thread.id}/send`, { requestId: "over-limit", mode: "auto", input: [{ type: "text", text: "Not now", mentions: [] }] })).status).toBe(200);
+    await waitFor(() => wakes() > refusedAt, "refused wake");
+    // A 429 that isn't a plan limit, like a repair, may come after the sandbox started: Stop still fails, cancelling nothing.
+    expect((await request(`/threads/${thread.id}/stop`, {})).status).toBe(503);
+    expect(commandState("over-limit")).toBe("sending");
+    // Free's spent daily budget: Stop works without a wake, and the message never goes out.
+    refusal = "cloud_budget_limit";
+    refusedAt = wakes();
+    skipBackoff();
+    await waitFor(() => wakes() > refusedAt, "refused for the budget");
+    harness.deps.db.insert(cloudroomCommands).values({ id: "edit-queued", threadId: thread.id, command: "edit", input: JSON.stringify({ target_request_id: "over-limit", expected_revision: 1, text: "Not now, edited" }), createdAt: Date.now() + 1 }).run();
+    // A delivery is preparing to wake the sandbox for the message, copying logins first, when Stop lands. Every login is
+    // skipped, so no real one is read.
+    const allLogins = new Set(["codex", "pi", "opencode", "hermes", "devin", "openclaw", "cursor", "github"]);
+    let releaseLogins: (() => void) | null = null;
+    service.sandboxes.skipLogins = () => releaseLogins ? Promise.resolve(allLogins) : new Promise(resolve => { releaseLogins = () => resolve(allLogins); });
+    await setCopyLogins(harness.deps, true);
+    skipBackoff();
+    await waitFor(() => releaseLogins !== null, "delivery preparing a wake");
+    const stopped = await request(`/threads/${thread.id}/stop`, {});
+    expect(stopped.status, await stopped.clone().text()).toBe(200);
+    expect(getThread(harness.deps.db, thread.id)?.status).toBe("idle");
+    // The message's queue edit goes with it. Other commands that don't run the agent, like a reorder, wait for the next
+    // wake with the stop instead of waking the sandbox now.
+    expect([commandState("over-limit"), commandState("edit-queued")]).toEqual(["cancelled", "cancelled"]);
+    harness.deps.db.insert(cloudroomCommands).values({ id: "reorder-stopped", threadId: thread.id, command: "reorder", input: JSON.stringify({ order: ["follow-up"] }), createdAt: Date.now() + 2 }).run();
+    const stoppedAt = wakes();
+    skipBackoff();
+    (releaseLogins as (() => void) | null)?.();
+    await new Promise(resolve => setTimeout(resolve, 3200));
+    expect(wakes()).toBe(stoppedAt);
+    // Out of credits, the same. A message edit and a goal waiting to go out run the agent too.
+    refusal = "cloud_usage_limit";
+    refusedAt = wakes();
+    skipBackoff();
+    harness.deps.db.insert(cloudroomCommands).values([
+      { id: "edit-over-limit", threadId: thread.id, command: "rewind", input: JSON.stringify({ before: "checkpoint", replacement: { request_id: "edited", text: "Edited" } }), createdAt: Date.now() + 1 },
+      { id: "goal-over-limit", threadId: thread.id, command: "goal", input: JSON.stringify({ status: "active" }), createdAt: Date.now() + 2 },
+    ]).run();
+    await waitFor(() => wakes() > refusedAt, "refused for the limit");
     expect((await request(`/threads/${thread.id}/stop`, {})).status).toBe(200);
-    expect(core.some(call => call.path.startsWith("/v1/sessions/cr_one/stop"))).toBe(true);
+    expect(["edit-over-limit", "goal-over-limit"].map(commandState)).toEqual(["cancelled", "cancelled"]);
+    // Once the limit lifts, the next wake sends the stop to Core before the new work. The stopped work never goes out.
+    refusal = null;
+    skipBackoff();
+    const resumed = await request(`/threads/${thread.id}/send`, { requestId: "after-limit", mode: "auto", input: [{ type: "text", text: "Go on", mentions: [] }] });
+    expect(resumed.status, await resumed.clone().text()).toBeLessThan(300);
+    await waitFor(() => prompts.includes("after-limit"), "prompt after the limit");
+    const paths = core.map(call => call.path);
+    expect(paths.indexOf("/v1/sessions/cr_one/stop")).toBeGreaterThan(-1);
+    expect(paths.indexOf("/v1/sessions/cr_one/stop")).toBeLessThan(paths.lastIndexOf("/v1/sessions/cr_one/prompts"));
+    expect(prompts).not.toContain("over-limit");
+    expect(paths.filter(path => /\/(rewind|goal)$/.test(path))).toEqual([]);
+
+    // Archive goes to the website, which stops the sandbox even mid-task, so the thread stops showing as running.
+    saveStatus(harness.deps.db, thread.id, "active");
+    service.sandboxes.forget(thread.id);
+    const stops = () => core.filter(call => call.path === "/v1/sessions/cr_one/stop").length;
+    const stopsBefore = stops();
+    expect((await request(`/threads/${thread.id}/stop`, {})).status).toBe(200);
+    expect(stops()).toBeGreaterThan(stopsBefore);
     expect((await harness.app.request(`/api/v1/threads/${thread.id}/archive-all`, { method: "POST" })).status).toBeLessThan(300);
     await waitFor(() => website.some(call => call.action === "archive" && call.thread === thread.id), "archive");
     expect(getThread(harness.deps.db, thread.id)?.status).toBe("idle");
@@ -123,7 +195,7 @@ it("gives each cloud thread its own sandbox, wakes it only for work, and archive
     service.stop();
     coreServer.close(); websiteServer.close();
   }
-});
+}, 20_000);
 
 it("an unarchived Cloud child becomes top-level, keeps its parent's sandbox, and archives it as the last thread", async () => {
   const harness = await createTestAppHarness();
@@ -522,6 +594,133 @@ it("a sleeping thread costs no delivery work until it wakes, opening it connects
     coreServer.closeAllConnections(); coreServer.close(); websiteServer.close();
   }
 }, 25_000);
+
+it("a message to a stopped thread is saved first, then resumes it once its restoring sandbox wakes (#534)", async () => {
+  const harness = await createTestAppHarness();
+  const { host } = seedHostSession(harness.deps);
+  const { project } = seedProjectWithSource(harness.deps, { hostId: host.id });
+  const service = cloudroom(harness.deps);
+  const core: string[] = [];
+  let restoring = true;
+  let wakes = 0;
+  let release!: () => void;
+  const held = new Promise<void>(resolve => { release = resolve; });
+  let coreUrl = "";
+  const coreServer = createServer(async (req, res) => {
+    const json = (value: unknown, status = 200) => { res.writeHead(status, { "Content-Type": "application/json" }); res.end(JSON.stringify(value)); };
+    core.push(req.url!);
+    if (req.url?.includes("/stream?")) { res.writeHead(200, { "Content-Type": "text/event-stream" }); res.end(); return; }
+    // Live Core is newer than the app's saved capabilities: it has a fast tier and queue reordering.
+    if (req.url === "/v1/capabilities") return json({ version: 1, repository: "/code", stop: true, resume: true, launch_settings: true, workspaces: true, direct_workspaces: true, queue_reorder: true, harnesses: [{ id: "codex", model: "test-model", service_tier: true }] });
+    const input = await body(req);
+    const command = req.url?.match(/^\/v1\/sessions\/cr_0\/(prompts|resume|reorder)/)?.[1];
+    if (command) return json({ session_id: "cr_0", receipt: { request_id: input.request_id, command: command === "prompts" ? "prompt" : command, input, state: "accepted" }, saving: {} }, 202);
+    return json({}, 404);
+  });
+  const websiteServer = createServer(async (req, res) => {
+    const input = await body(req);
+    const json = (value: unknown, status = 200) => { res.writeHead(status, { "Content-Type": "application/json" }); res.end(JSON.stringify(value)); };
+    if (req.url === "/api/desktop/logins") return json({ claude: false, codex: false, pi: false, github: false });
+    if (input.action === "awake") return json({ sandboxes: [], recheck_ms: 60_000 });
+    // Wakes find the big saved copy still restoring until the test says it's done. The first answer waits for the test.
+    if (input.action === "wake" && wakes++ === 0) await held;
+    if (input.action === "wake" && restoring) return json({ error: "This thread is still coming back from its saved copy. It continues on its own.", code: "sandbox_restoring" }, 429);
+    if (input.action === "wake") return json({ thread: input.thread, state: "awake", generation: 1, issue: null, origin: coreUrl, token: "t".repeat(64) });
+    json({ thread: input.thread, state: "asleep", generation: 1, issue: null });
+  });
+  coreUrl = await listen(coreServer);
+  const websiteUrl = await listen(websiteServer);
+  try {
+    await service.configure(null, { id: "11111111-1111-4111-8111-111111111111", email: "sandbox@example.com" }, undefined, websiteUrl, "a".repeat(64));
+    const thread = createThread(harness.deps.db, harness.deps.hub, { executionTarget: "cloud", projectId: project.id, providerId: "codex", status: "idle" });
+    harness.deps.db.insert(cloudroomThreads).values({ threadId: thread.id, coreUrl: `sandbox:${thread.id}`, sessionId: "cr_0", startRequestId: "start_0", model: "test-model", reasoning: "medium", queuePaused: true }).run();
+    const send = (requestId: string, serviceTier?: "fast") => harness.app.request(`/api/v1/threads/${thread.id}/send`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ requestId, mode: "auto", serviceTier, input: [{ type: "text", text: "Continue", mentions: [] }] }) });
+    const sentTo = () => core.filter(path => /\/(prompts|resume|reorder)/.test(path)).map(path => path.split("/").at(-1)!.split("?")[0]);
+
+    // Without saved capabilities the app must ask the sandbox first. Two attempts wait on its slow wake: a first try and a
+    // new message.
+    const asked = vi.spyOn(service as unknown as { liveCapabilities: () => Promise<unknown> }, "liveCapabilities");
+    const slow = send("after-stop"), other = send("no-capabilities");
+    await waitFor(() => asked.mock.calls.length === 2 && wakes === 1, "both attempts asking the sandbox");
+    // Meanwhile a retry of the first, with saved capabilities, saves the message at once.
+    await writeFile(join(harness.deps.config.dataDir, "cloudroom-capability-cache.json"), JSON.stringify({ version: 1, repository: "/code", stop: true, resume: true, launch_settings: true, workspaces: true, direct_workspaces: true, harnesses: [{ id: "codex", model: "test-model" }] }));
+    const sent = await send("after-stop");
+    expect(sent.status, await sent.clone().text()).toBeLessThan(300);
+    // The wake is refused: the slow first try says its message is saved, and only the new message says it was not sent.
+    release();
+    const [first, second] = await Promise.all([slow, other]);
+    expect([first.status, (await first.json()).message]).toEqual([503, "This thread is still coming back from its saved copy. It continues on its own. This message is already saved (sending). Retry with the same request ID; don't send it as a new message."]);
+    expect([second.status, (await second.json()).message]).toEqual([503, "This thread is still coming back from its saved copy. It continues on its own. Your message was not sent. Send it again in a moment."]);
+    expect(core).toEqual([]);
+    restoring = false;
+    for (let i = 0; i < 60 && !core.some(path => path.startsWith("/v1/sessions/cr_0/resume")); i++) await new Promise(resolve => setTimeout(resolve, 250));
+    expect(sentTo()).toEqual(["prompts", "resume"]);
+
+    // The stale saved capabilities reject the fast tier, so the app asks live Core, and uses its answer for the queue too:
+    // the new message jumps the prompt still waiting in the paused queue.
+    expect((await send("fast", "fast")).status).toBeLessThan(300);
+    await waitFor(() => sentTo().length === 5, "fast prompt, reorder and resume");
+    expect(sentTo().slice(2)).toEqual(["prompts", "reorder", "resume"]);
+
+    // A retry of that saved message, while the sandbox restores again, must not tell the user to send it as new.
+    restoring = true;
+    service.sandboxes.forget(thread.id);
+    const retried = await send("fast", "fast");
+    expect([retried.status, (await retried.json()).message]).toEqual([503, "This thread is still coming back from its saved copy. It continues on its own. This message is already saved (accepted). Retry with the same request ID; don't send it as a new message."]);
+  } finally {
+    service.stop();
+    coreServer.close(); websiteServer.close();
+  }
+}, 20_000);
+
+it("a saved message that meets a sandbox already gone (404) wakes it again instead of failing (#534)", async () => {
+  const harness = await createTestAppHarness();
+  const { host } = seedHostSession(harness.deps);
+  const { project } = seedProjectWithSource(harness.deps, { hostId: host.id });
+  const service = cloudroom(harness.deps);
+  const core: string[] = [];
+  let gone = true;
+  let wakes = 0;
+  let coreUrl = "";
+  const coreServer = createServer(async (req, res) => {
+    const json = (value: unknown, status = 200) => { res.writeHead(status, { "Content-Type": "application/json" }); res.end(JSON.stringify(value)); };
+    if (req.url?.includes("/stream?")) { res.writeHead(200, { "Content-Type": "text/event-stream" }); res.end(); return; }
+    const input = await body(req);
+    // An unarchive right after an archive: the first wake gets the old box's address, which is gone by the time the prompt lands.
+    if (gone) return json({ error: "preview not found" }, 404);
+    core.push(req.url!);
+    const command = req.url?.match(/^\/v1\/sessions\/cr_0\/(prompts|resume)/)?.[1];
+    if (command) return json({ session_id: "cr_0", receipt: { request_id: input.request_id, command: command === "prompts" ? "prompt" : command, input, state: "accepted" }, saving: {} }, 202);
+    return json({}, 404);
+  });
+  const websiteServer = createServer(async (req, res) => {
+    const input = await body(req);
+    const json = (value: unknown, status = 200) => { res.writeHead(status, { "Content-Type": "application/json" }); res.end(JSON.stringify(value)); };
+    if (req.url === "/api/desktop/logins") return json({ claude: false, codex: false, pi: false, github: false });
+    if (input.action === "awake") return json({ sandboxes: [], recheck_ms: 60_000 });
+    if (input.action === "wake") {
+      if (++wakes > 1) gone = false;
+      return json({ thread: input.thread, state: "awake", generation: wakes, issue: null, origin: coreUrl, token: "t".repeat(64) });
+    }
+    json({ thread: input.thread, state: "asleep", generation: 1, issue: null });
+  });
+  coreUrl = await listen(coreServer);
+  const websiteUrl = await listen(websiteServer);
+  try {
+    await service.configure(null, { id: "11111111-1111-4111-8111-111111111111", email: "sandbox@example.com" }, undefined, websiteUrl, "a".repeat(64));
+    await writeFile(join(harness.deps.config.dataDir, "cloudroom-capability-cache.json"), JSON.stringify({ version: 1, repository: "/code", stop: true, resume: true, launch_settings: true, workspaces: true, direct_workspaces: true, harnesses: [{ id: "codex", model: "test-model" }] }));
+    const thread = createThread(harness.deps.db, harness.deps.hub, { executionTarget: "cloud", projectId: project.id, providerId: "codex", status: "idle" });
+    harness.deps.db.insert(cloudroomThreads).values({ threadId: thread.id, coreUrl: `sandbox:${thread.id}`, sessionId: "cr_0", startRequestId: "start_0", model: "test-model", reasoning: "medium", queuePaused: true }).run();
+    const sent = await harness.app.request(`/api/v1/threads/${thread.id}/send`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ requestId: "after-unarchive", mode: "auto", input: [{ type: "text", text: "Continue", mentions: [] }] }) });
+    expect(sent.status, await sent.clone().text()).toBeLessThan(300);
+    await waitFor(() => core.some(path => path.startsWith("/v1/sessions/cr_0/resume")), "prompt and resume on the woken sandbox");
+    expect(core.map(path => path.split("/").at(-1)!.split("?")[0])).toEqual(["prompts", "resume"]);
+    expect(harness.deps.db.select().from(cloudroomCommands).all().find(row => row.id === "after-unarchive")?.state).toBe("accepted");
+  } finally {
+    service.stop();
+    coreServer.close(); websiteServer.close();
+  }
+}, 20_000);
 
 it("Windows MCP paths and %VARIABLES% stay on this PC", async () => {
   const { WINDOWS_LOCAL_PATH } = await import("../../src/services/cloudroom/sandboxes.js");

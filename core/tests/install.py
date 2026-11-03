@@ -264,5 +264,27 @@ class AgentHomeTests(unittest.TestCase):
         self.setup.check(self.shell, self.agent)
 
 
+class UpgradePreviewTests(unittest.TestCase):
+    def test_only_self_hosted_servers_change_their_preview_command(self):
+        spec = importlib.util.spec_from_file_location('updater', Path(__file__).resolve().parents[1] / 'install/update.py')
+        update = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(update)
+        with tempfile.TemporaryDirectory() as state:
+            setup = Path(state) / 'previews/setup.json'
+            setup.parent.mkdir()
+            def command(store, saved):
+                setup.unlink(missing_ok=True)
+                if saved:
+                    setup.write_text(json.dumps(saved))
+                with patch.object(update, 'run') as run:
+                    update.previews({'CLOUDROOM_STORE': store, 'CLOUDROOM_STATE_DIR': state})
+                return run.call_args.args[2:]
+            self.assertEqual(command('self-hosted', None), ('--tunnel', state))
+            self.assertEqual(command('self-hosted', {'tunnel': True}), ('--tunnel', state))
+            self.assertEqual(command('self-hosted', {'port': 22}), ('--tools-only', state))
+            self.assertEqual(command('account-id', None), (state,))
+            self.assertEqual(command('account-id', {'tunnel': True}), (state,))
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -7,7 +7,7 @@ use crate::observability::Signal;
 use crate::preview::Peer;
 use crate::session::{
     Manager,
-    thread::{Failure, caller, fail},
+    thread::{Failure, agent, caller, fail},
 };
 use axum::{
     Json, Router,
@@ -208,7 +208,20 @@ struct Event {
 
 /// Served on the agent-only socket that `room-cli mac` also uses.
 pub(crate) fn agent_routes() -> Router<Arc<Manager>> {
-    Router::new().route("/computer-use/event", post(event))
+    Router::new()
+        .route("/computer-use/event", post(event))
+        .route("/computer-use/resume", post(resume))
+}
+
+/// Resumes the shared browser Core paused while idle, so the idle sleeper knows (#610).
+async fn resume(
+    State(m): State<Arc<Manager>>,
+    ConnectInfo(peer): ConnectInfo<Peer>,
+) -> Result<Json<Value>, Failure> {
+    agent(&m, peer, "computer-use")?;
+    let session = caller(&m, peer, "computer-use").ok();
+    m.resume_browser(session.as_deref());
+    Ok(Json(json!({"resumed":true})))
 }
 
 async fn event(
@@ -314,7 +327,21 @@ async fn call(tool: &str, json: Option<&String>) -> Result<i32, Error> {
     Ok(code)
 }
 
+/// Core pauses the shared browser while nothing uses it (#610). Every command, and browser-harness before each run,
+/// resumes it through Core, which holds it outside a turn; directly when Core doesn't answer within 2 s (an older or
+/// stuck Core), so no command ever waits on it.
+async fn resume_browser(socket: &str) {
+    let resume = crate::mac::request(socket, "POST", "/computer-use/resume", None);
+    if !matches!(
+        tokio::time::timeout(Duration::from_secs(2), resume).await,
+        Ok(Ok(_))
+    ) {
+        crate::runtime::linux::pause_browser(false, None);
+    }
+}
+
 pub async fn cli(args: &[String]) -> Result<i32, Error> {
+    resume_browser(crate::mac::SOCKET).await;
     match args.first().map(String::as_str) {
         Some("status") => {
             let installed = Path::new(DRIVER).exists();

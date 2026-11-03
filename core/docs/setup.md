@@ -104,9 +104,13 @@ The service unit already sets `CLOUDROOM_STORAGE_POLICY=/etc/cloudroom/storage.j
 sudo chown cloudroom:cloudroom /etc/cloudroom/core.env
 sudo chmod 600 /etc/cloudroom/core.env
 sudo python3 install/configure.py --storage-only /etc/cloudroom
+sudo install -m 755 install/previews.py /usr/local/lib/cloudroom/previews.py
+sudo python3 /usr/local/lib/cloudroom/previews.py --tunnel /var/lib/cloudroom/history
 sudo systemctl daemon-reload
 sudo systemctl enable --now cloudroom.service
 ```
+
+`previews.py --tunnel` sets up Mac access, secret requests, and previews. It adds no account beyond the two above and doesn't change SSH.
 
 Do not bypass failed protection setup with `CLOUDROOM_UNPROTECTED_TEST_MODE`. See [disk setup and existing-VM upgrades](storage.md#provisioning).
 
@@ -208,6 +212,8 @@ sudo cat /var/lib/cloudroom-update/state.json
 ```
 
 The script waits until agents are idle, backs up the old core, swaps it, checks every session, and rolls back on failure. Your settings, logins, and history stay. `"result": "updated"` means done; `waiting` means agents were busy, so run it again later. It never downgrades.
+
+Upgrades don't add accounts or change SSH when `CLOUDROOM_STORE=self-hosted`. Mac access, secret requests, and previews run over Core's own port. A server already on SSH previews keeps them untouched.
 
 ## If something fails
 

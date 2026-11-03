@@ -44,6 +44,7 @@ pub const FEATURES: &[&str] = &[
     "queue_edit",
     "queue_cancel",
     "queue_reorder",
+    "resume_keep_paused",
     "steer",
     "rewind",
     "fork",
@@ -65,6 +66,7 @@ pub const FEATURES: &[&str] = &[
     "agent_limits",
     "plan_only",
     "loop_report",
+    "credits_usage",
 ];
 
 pub async fn serve(mut config: config::Config) -> Result<(), Box<dyn std::error::Error>> {

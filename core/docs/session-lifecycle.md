@@ -47,7 +47,7 @@ Authenticated `GET /v1/sessions/{id}/recovery` is read-only. It returns `status`
 
 Check this before deployment for every session expected to resume. Do not silently replace or discard `empty`/`missing` sessions to pass verification.
 
-A failed resume exposes `startup_error` (`startup_timeout`, `empty_session`, `missing_history`, or `resume_failed`). After correcting the cause, `POST /v1/sessions/{id}/resume` with a new `request_id` explicitly retries a failed startup only after old-process cleanup and a successful history preflight. Its receipt completes after the native handshake. It unpauses the queue, but never replays completed, failed, or uncertain prompts. Retrying the same request ID does not launch another process. Closed sessions stay closed.
+A failed resume exposes `startup_error` (`startup_timeout`, `empty_session`, `missing_history`, or `resume_failed`). After correcting the cause, `POST /v1/sessions/{id}/resume` with a new `request_id` explicitly restarts a `process_lost` session (a failed startup, or a crash after its one automatic recovery) only after old-process cleanup and a successful history preflight. Its receipt completes after the native handshake. It unpauses the queue unless sent with `keep_paused: true` (capability `resume_keep_paused`), which keeps a Stop's pause so a client can queue and reorder before a plain `resume` releases it; older journal receipts have no flag and still unpause on replay. It never replays completed, failed, or uncertain prompts. Retrying the same request ID does not launch another process. Closed sessions stay closed.
 
 ## Storage and replay
 

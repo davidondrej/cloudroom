@@ -34,7 +34,7 @@ import { macAccess, macAccessSupported, noteWake, setupPreviews, stopPreviews, p
 import { GpuApprovals } from "./gpu.js";
 import { CloudSecrets } from "./secrets.js";
 import { CodexAccounts } from "./codex-accounts.js";
-import { cancelMacCodexLogin, hasMacCodexLogin, macCodexLogin, macCodexLoginExpired, cursorKeyRejected, macCursorLogin, revokeDesktopToken, startMacCodexLogin, CLOUD_REGION, SANDBOX_PREFIX, SandboxAsleep, SandboxDirectory, sandboxThread, startRefused, type AutomationRun, type SandboxProject, type SandboxTrigger, type SandboxWakeTrigger } from "./sandboxes.js";
+import { BUDGET_LIMIT, cancelMacCodexLogin, hasMacCodexLogin, macCodexLogin, macCodexLoginExpired, cursorKeyRejected, macCursorLogin, revokeDesktopToken, startMacCodexLogin, CLOUD_REGION, SANDBOX_PREFIX, SandboxAsleep, SandboxDirectory, sandboxThread, startRefused, type AutomationRun, type SandboxProject, type SandboxTrigger, type SandboxWakeTrigger } from "./sandboxes.js";
 import type { AppDeps, LoggedWorkSessionDeps } from "../../types.js";
 import { markMinutesSent, unsentMinutes } from "./time-in-app.js";
 import { emitPluginThreadCreated } from "../plugins/plugin-thread-events.js";
@@ -91,6 +91,7 @@ const capabilitiesSchema = z.object({
   relay: z.boolean().default(false),
   queue_cancel: z.boolean().default(false),
   queue_reorder: z.boolean().default(false),
+  resume_keep_paused: z.boolean().default(false),
   steer: z.boolean().default(false),
   rewind: z.boolean().default(false),
   fork: z.boolean().default(false),
@@ -101,6 +102,7 @@ const capabilitiesSchema = z.object({
   compact: z.boolean().default(false),
   goal: z.boolean().default(false),
   usage: z.boolean().default(false),
+  credits_usage: z.boolean().default(false),
   subagents: z.boolean().default(false),
   long_prompts: z.boolean().default(false),
   harnesses: z.array(z.object({
@@ -377,6 +379,17 @@ const AGENT_FORK_WAIT = 90_000;
 /** The sandbox whose API keys a new Cloud child or fork gets, saved with its first message (keyFields). */
 const keySourceOf = (input: string | undefined) => input ? z.object({ key_source: z.string().optional() }).safeParse(JSON.parse(input)).data?.key_source : undefined;
 
+/** Commands that make the agent run. A goal's pause or clear doesn't. */
+const startsWork = (item: Command) => ["prompt", "steer", "resume", "compact", "rewind"].includes(item.command)
+  || (item.command === "goal" && JSON.parse(item.input).status !== "paused" && !JSON.parse(item.input).clear);
+/** Unsent commands that need Core now. A stop left for a sleeping sandbox (#553) waits for its next wake, and until then
+ *  only work that runs the agent wakes it: queue edits, reorders and the like wait with the stop. */
+const unsentWork = (db: DbQueryConnection, threadId: string) => {
+  const unsent = commands(db, threadId).filter(c => c.state === "sending");
+  const stopped = unsent.some(c => c.command === "stop");
+  return unsent.some(c => c.command !== "stop" && (!stopped || startsWork(c)));
+};
+
 class CloudroomService {
   teleportRecovery?: () => void;
   archiveRequest?: (threadId: string) => void;
@@ -481,6 +494,8 @@ class CloudroomService {
   private readonly catchUps = new Map<string, number>();
   /** Threads whose sandbox address just answered 404 and is being woken again (feedback #596). */
   private readonly rewoken = new Set<string>();
+  /** The Cloud Credits level (80 or 95 %) each Cloud thread's agent was last told, so each note comes once (#610). */
+  private readonly creditsTold = new Map<string, number>();
   /** What sandboxes run, kept apart from a VM's: an account with both starts new threads in sandboxes. */
   private sandboxCapabilities: Capabilities | null = null;
   private readonly secrets: CloudSecrets;
@@ -715,22 +730,26 @@ class CloudroomService {
     } finally { await rm(temporary, { force: true }); }
   }
 
-  /** A thread's Core. Sandbox threads wake only when `wake` is true, for work that must be sent. */
-  private async client(saved?: Binding, wake = true, trigger?: SandboxWakeTrigger, fresh = false): Promise<CloudroomClient> {
+  /** A thread's Core. Sandbox threads wake only when `wake` is true, for work that must be sent; a function is asked
+   *  again right before the wake, since an offline Stop (#553) can cancel the work while logins sync. */
+  private async client(saved?: Binding, wake: boolean | (() => boolean) = true, trigger?: SandboxWakeTrigger, fresh = false): Promise<CloudroomClient> {
     return new CloudroomClient(await this.coreConnection(saved, wake, trigger, fresh));
   }
 
-  private async coreConnection(saved?: Binding, wake = true, trigger?: SandboxWakeTrigger, fresh = false): Promise<{ url: string; token: string; gateToken?: string }> {
+  private async coreConnection(saved?: Binding, wakeFor: boolean | (() => boolean) = true, trigger?: SandboxWakeTrigger, fresh = false): Promise<{ url: string; token: string; gateToken?: string }> {
     if (saved) await this.requireOwnThread(saved);
     const sandbox = saved ? sandboxThread(saved.coreUrl) : null;
     if (sandbox) {
-      if (wake) await this.beforeWake();
-      const project = this.sandboxProject(getThread(this.deps.db, sandbox)?.projectId);
+      const wakes = () => typeof wakeFor === "function" ? wakeFor() : wakeFor;
+      if (wakes()) await this.beforeWake();
+      const wake = wakes();
+      const thread = getThread(this.deps.db, sandbox);
+      const project = this.sandboxProject(thread?.projectId), parent = thread?.parentThreadId ?? undefined;
       // A sandbox archived while one of its threads is active (a missed or racing restore) comes back for it.
-      const found = await this.sandboxes.connection(sandbox, project, wake, trigger, fresh).catch(async (error: unknown) => {
+      const found = await this.sandboxes.connection(sandbox, project, wake, trigger, fresh, parent).catch(async (error: unknown) => {
         if (!(error instanceof CloudroomError && error.code === "sandbox_archived") || !coreInUse(this.deps.db, SANDBOX_PREFIX + sandbox)) throw error;
         await this.sandboxes.restore(sandbox);
-        return this.sandboxes.connection(sandbox, project, wake, trigger, fresh);
+        return this.sandboxes.connection(sandbox, project, wake, trigger, fresh, parent);
       });
       if (!found) throw new SandboxAsleep();
       return found;
@@ -1802,16 +1821,26 @@ class CloudroomService {
     const reasoning = payload.reasoningLevel ?? (previous
       ? commandReasoning(previous.input) ?? saved.reasoning
       : this.currentReasoning(thread.id, saved));
-    const live = () => this.liveCapabilities(saved);
+    // live() runs before this send saves anything: say whether the message is saved (maybe by an overlapping attempt
+    // with the same request ID while this one waited), so it isn't sent twice.
+    const live = () => this.liveCapabilities(saved).catch((error: unknown) => {
+      if (!(error instanceof ApiError) || error.status !== 503) throw error;
+      const stored = command(this.deps.db, id);
+      throw stored?.threadId === thread.id
+        ? new ApiError(503, error.body.code, `${error.body.message} This message is already saved (${stored.state}). Retry with the same request ID; don't send it as a new message.`, { details: { requestId: id, state: stored.state } })
+        : new ApiError(503, error.body.code, `${error.body.message} Your message was not sent. Send it again in a moment.`);
+    });
     const starting = !saved.sessionId && ["pending", "starting"].includes(thread.status);
-    const fast = starting || (saved.sessionId && !saved.queuePaused && ["idle", "error", "active"].includes(thread.status));
+    // A stopped thread uses the saved capabilities too, so its message is saved before any wake (#534).
+    const fast = starting || (saved.sessionId && ["idle", "error", "active"].includes(thread.status));
     const known = fast ? sandboxThread(saved.coreUrl) ? await this.savedCapabilities() : this.lastCapabilities : null;
     const validated = steer || previous ? null : reasoning;
+    let capabilities = known ?? await live();
     let parsed: ReturnType<typeof promptPayload>;
-    try { parsed = followUpPayload(thread.providerId, saved, payload, validated, known ?? await live()); }
+    try { parsed = followUpPayload(thread.providerId, saved, payload, validated, capabilities); }
     catch (error) {
       if (!known || !(error instanceof ApiError)) throw error;
-      parsed = followUpPayload(thread.providerId, saved, payload, validated, await live());
+      parsed = followUpPayload(thread.providerId, saved, payload, validated, capabilities = await live());
     }
     if (steer) {
       this.enqueue(thread.id, id, "steer", { target_request_id: saved.turnId, text: parsed.text, content: parsed.content });
@@ -1827,7 +1856,8 @@ class CloudroomService {
     if (previous) {
       if (!sameStoredPrompt(previous, thread.id, stored, reasoning, saved.reasoning)) throw new ApiError(409, "request_conflict", "Request ID was already used with different content");
     } else {
-      const jumpQueue = saved.queuePaused && this.queue(thread.id).length > 0 && feature(await live(), "queue_reorder");
+      const jumpQueue = saved.queuePaused && this.queue(thread.id).length > 0 && feature(capabilities, "queue_reorder");
+      if (thread.status === "error" && saved.sessionId) this.enqueue(thread.id, randomUUID(), "resume", saved.queuePaused ? { keep_paused: true } : {});
       this.enqueue(thread.id, id, "prompt", stored);
       if (jumpQueue) this.enqueue(thread.id, randomUUID(), "reorder", { order: [id] });
       if (saved.queuePaused) this.enqueue(thread.id, randomUUID(), "resume", {});
@@ -1848,14 +1878,31 @@ class CloudroomService {
     return queued ? { ok: true, delivery: "queued", queuedMessage: queued } : { ok: true, delivery: "sent" };
   }
 
-  async control(threadId: string, action: "stop" | "resume"): Promise<void> {
+  /** `offline`: a stop the website refuses to wake the sandbox for still stops, without it (#553). */
+  async control(threadId: string, action: "stop" | "resume", offline = true): Promise<void> {
     const saved = binding(this.deps.db, threadId);
     if (!saved) throw new ApiError(409, "cloudroom_missing_binding", "Cloud session is unavailable");
     if (action === "stop" && getThread(this.deps.db, threadId)?.archivedAt) return;
-    const wake = action === "resume" || commands(this.deps.db, threadId).some(c => c.state === "sending") || (!saved.queuePaused && queuedPrompts(this.deps.db, threadId).length > 0);
+    const wake = action === "resume" || unsentWork(this.deps.db, threadId) || (!saved.queuePaused && queuedPrompts(this.deps.db, threadId).length > 0);
     try { await this.client(saved, wake, undefined, true); }
     catch (error) {
       if (error instanceof SandboxAsleep) return this.asleep(threadId);
+      // The website refused the wake before starting the sandbox (out of credits, a plan limit, Free's daily budget), so
+      // nothing runs there. Work that never reached Core is cancelled, and the stop waits for the next wake, ahead of later work.
+      if (action === "stop" && offline && saved.sessionId && (startRefused(error) || (error instanceof CloudroomError && error.code === BUDGET_LIMIT))) {
+        this.deps.db.transaction(tx => {
+          const cancelled = new Set<string>();
+          for (const item of commands(tx, threadId)) if (item.state === "sending" && (startsWork(item) || cancelled.has(JSON.parse(item.input).target_request_id))) {
+            saveCommandState(tx, threadId, item.id, "cancelled");
+            cancelled.add(item.id);
+          }
+          saveBinding(tx, threadId, { queuePaused: true });
+          saveStatus(tx, threadId, "idle");
+        });
+        this.enqueue(threadId, randomUUID(), "stop", {});
+        this.notify(threadId);
+        return this.asleep(threadId);
+      }
       if (error instanceof ApiError) throw error;
       throw new ApiError(503, error instanceof CloudroomError ? error.code ?? "cloudroom_unavailable" : "cloudroom_unavailable", publicError(error));
     }
@@ -2114,7 +2161,8 @@ class CloudroomService {
       }
     }
     if (queue[0]!.id !== queuedMessageId) throw new ApiError(409, "invalid_request", "This Cloud agent sends queued messages in order. Send or delete the earlier messages first.");
-    if (active) await this.control(thread.id, "stop");
+    // Over a plan limit this fails as a whole, never cancelling the message to send.
+    if (active) await this.control(thread.id, "stop", false);
     await this.control(thread.id, "resume");
     return { ok: true, delivery: "queued", queuedMessage: queued };
   }
@@ -2299,6 +2347,37 @@ class CloudroomService {
     return work;
   }
 
+  /** A note for a sandbox agent's next prompt once the account has used 80 %, then 95 %, of its Cloud Credits, plan
+   *  and packs together (#610). Reads only the usage the app already caches, never asking the website. It sits in the
+   *  agent-only custom instructions envelope, which every app and the phone already hide from the user. */
+  private creditsNote(threadId: string, coreUrl: string, capabilities: Capabilities): { note: string; level: number } | null {
+    const sandbox = sandboxThread(coreUrl), usage = sandbox ? this.sandboxes.planUsage(false) : null;
+    if (!sandbox || !usage || usage.credits === null) return null;
+    const total = usage.creditsLimit + usage.extraCreditsTotal;
+    const left = Math.max(0, usage.creditsLimit - usage.credits) + usage.extraCredits;
+    const used = total > 0 ? 1 - left / total : 1, level = used >= 0.95 ? 95 : used >= 0.8 ? 80 : 0;
+    const told = this.creditsTold.get(threadId) ?? 0;
+    // Usage that falls back (old usage ages out, a pack) lowers the level, so a later climb tells again.
+    if (level < told) this.creditsTold.set(threadId, level);
+    // A VPS thread uses no credits; placement the app hasn't heard from the website gets no note, and no lookup.
+    if (level <= told || !this.sandboxes.knownInCloud(sandbox)) return null;
+    const check = feature(capabilities, "credits_usage") ? " Run `room-cli usage` before a big fan-out." : "";
+    return { level, note: `<cloudroom_custom_instructions>\n[Cloud Credits] This account has used ${Math.floor(used * 100)}% of its Cloud Credits (${Math.floor(left).toLocaleString("en-US")} left). When none are left, its Cloud sandboxes stop, even mid-turn. Don't start sandboxes it doesn't need.${check}\n</cloudroom_custom_instructions>` };
+  }
+
+  /** The agent-only text after a prompt: its workspace hint if it fits, then the Cloud Credits note if that fits too.
+   *  A level counts as told only once its note goes out. A built-in command typed alone (`/clear`) gets no note: the
+   *  four that skip custom instructions. Cloud refuses them as picked commands, so only their text can tell. */
+  private promptContext(threadId: string, coreUrl: string, capabilities: Capabilities, typed: string, text: string, hint: string | null): string | null {
+    const fits = (context: string) => Buffer.byteLength(`${text}\n\n${context}`, "utf8") <= cloudPromptLimit(capabilities);
+    const context = hint && fits(hint) ? hint : null;
+    const credits = /^\/(?:compact|clear|teleport|context)$/.test(typed.trim()) ? null : this.creditsNote(threadId, coreUrl, capabilities);
+    const noted = credits && [context, credits.note].filter(Boolean).join("\n\n");
+    if (!credits || !noted || !fits(noted)) return context;
+    this.creditsTold.set(threadId, credits.level);
+    return noted;
+  }
+
   private async deliverPending(threadId: string): Promise<void> {
     this.slept.delete(threadId);
     this.holdRejectedStart(threadId);
@@ -2313,7 +2392,9 @@ class CloudroomService {
     // A new thread's project copy waits until its first message is sent or fails (ADR 0160).
     let releaseCopy: (() => void) | undefined;
     try {
-      const work = !saved.sessionId || commands(this.deps.db, threadId).some(c => c.state === "sending") || this.catchUpForParent(saved);
+      const bound = saved;
+      let catchUp = false;
+      const work = () => !bound.sessionId || unsentWork(this.deps.db, threadId) || (catchUp ||= this.catchUpForParent(bound));
       const client = await this.client(saved, work);
       if (epoch !== this.epoch) return;
       if (saved.sessionId) {
@@ -2468,7 +2549,7 @@ class CloudroomService {
             if (context === undefined) {
               const copying = pending.id === `first_${threadId}` && ["cloning", "uploading", "waiting"].includes(projectCopyProgress(this.deps.db, threadId)?.phase ?? "");
               const hint = fork || (child && getThread(this.deps.db, threadId)?.originKind === "fork") ? FORK_HINT : child ? CHILD_HINT : copying ? `[Cloud workspace context]\nThis project is new on the VM. Cloudroom is copying its files into this folder right now: a GitHub clone or an upload from the user's ${COMPUTER}, plus uncommitted edits and .env files. Run \`room-cli files wait\` before you rely on them; it returns once they land, or says why they won't. Never recreate missing files or instructions such as AGENTS.md.` : null;
-              context = hint && Buffer.byteLength(`${enriched.text}\n\n${hint}`, "utf8") <= cloudPromptLimit(capabilities) ? hint : null;
+              context = this.promptContext(threadId, saved.coreUrl, capabilities, parsed.text, enriched.text, hint);
               this.deps.db.update(cloudroomCommands).set({ input: JSON.stringify({ ...JSON.parse(pending.input), workspaceContext: context }) }).where(eq(cloudroomCommands.id, pending.id)).run();
             }
             const text = context ? `${enriched.text}\n\n${context}` : enriched.text;
@@ -2514,7 +2595,12 @@ class CloudroomService {
             const enriched = prepareCloudInstructionInput({ text: parsed.replacement.text, content: cloudTextContent(parsed.replacement.content) }, parsed.customInstructions, cloudPromptLimit(capabilities));
             const attachments = await this.uploadAttachments(client, sessionId, parsed.replacement.request_id, parsed.replacement.attachments ?? [], getThread(this.deps.db, threadId)!.projectId, capabilities.upload_parts);
             accepted = await client.rewind(sessionId, pending.id, parsed.before, parsed.last_turn_id, { ...parsed.replacement, ...enriched, content: enriched.content as never, attachments: attachments as never });
-          } else if (pending.command === "stop" || pending.command === "resume" || pending.command === "sleep") {
+          } else if (pending.command === "resume") {
+            const keepPaused = JSON.parse(pending.input).keep_paused === true;
+            // Cached capabilities can describe another sandbox or an older Core; never fall back to releasing Stop.
+            if (keepPaused && !feature(await this.capabilities(client), "resume_keep_paused")) throw new ApiError(503, "cloudroom_update", "Update the cloud core to restart this stopped agent safely. Your message is saved.");
+            accepted = await client.resume(sessionId, pending.id, keepPaused);
+          } else if (pending.command === "stop" || pending.command === "sleep") {
             accepted = await client[pending.command](sessionId, pending.id);
           } else {
             throw new CloudroomError(`Unsupported cloud command ${pending.command}`, 400);
@@ -2522,7 +2608,9 @@ class CloudroomService {
           if (command(this.deps.db, pending.id)?.state === "sending") saveCommandState(this.deps.db, threadId, pending.id, accepted.receipt.state);
           if (pending.command === "prompt") void this.rememberCloudMessage(sessionId, pending.id, epoch).catch(() => {});
         } catch (error) {
-          if (refused(error, ["steer", "edit", "cancel", "reorder"].includes(pending.command))) {
+          // A sandbox put to sleep answers 404 at its stale address: the catch below wakes it once, so keep the command unsent.
+          const stale = sandboxThread(saved.coreUrl) && error instanceof CloudroomError && error.status === 404 && !error.code && !this.rewoken.has(threadId);
+          if (!stale && refused(error, ["steer", "edit", "cancel", "reorder"].includes(pending.command))) {
             if (pending.command === "steer") {
               // Usually its turn just ended. It queues ahead of anything sent after it; the same ID makes a repeat harmless.
               const { text, content } = z.object({ text: z.string(), content: z.unknown().optional() }).parse(JSON.parse(pending.input));

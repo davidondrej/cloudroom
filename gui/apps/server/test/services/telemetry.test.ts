@@ -254,6 +254,40 @@ describe("telemetry service", () => {
     });
   });
 
+  it("batches events to the website with the PostHog event's ID, and sends nothing once turned off", async () => {
+    const telemetry = await createTelemetryService({
+      apiKey: "phc_test",
+      appSurface: "desktop",
+      appVersion: "1.2.3",
+      dataDir,
+      telemetryEnabled: true,
+      enabled: true,
+      logger: createTestLogger(),
+    });
+    const batches = () => fetchMock.mock.calls.filter(([url]) => String(url).endsWith("/api/desktop/events"));
+    let release = () => {};
+    telemetry.setTargetSource(() => new Promise((resolve) => { release = () => resolve({ website: "https://example.test" }); }));
+    telemetry.capture({ name: "bug_report_clicked" });
+    const pending = telemetry.flush(); // Now waiting for the account lookup.
+    telemetry.setEnabled(false);
+    release();
+    await pending;
+    expect(batches()).toHaveLength(0);
+
+    telemetry.setEnabled(true);
+    telemetry.setTargetSource(async () => ({ website: "https://example.test", authorization: "Basic abc" }));
+    telemetry.capture({ name: "bug_report_clicked" });
+    await telemetry.flush();
+    expect(batches()).toHaveLength(1);
+    const [, init] = batches()[0] as [string, { body: string; headers: Record<string, string> }];
+    const sent = JSON.parse(init.body) as { install_id: string; events: { id: string; name: string }[] };
+    expect(sent.install_id).toMatch(/^[0-9a-f]{32}$/);
+    expect(sent.events.map((event) => event.name)).toEqual(["bug_report_clicked"]);
+    expect(init.headers.authorization).toBe("Basic abc");
+    const posthog = fetchMock.mock.calls.filter(([url]) => String(url).includes("posthog")).at(-1) as [string, { body: string }];
+    expect(JSON.parse(posthog[1].body).uuid).toBe(sent.events[0]!.id);
+  });
+
   it("logs and swallows send failures", async () => {
     const logger = createTestLogger();
     fetchMock.mockRejectedValue(new Error("offline"));

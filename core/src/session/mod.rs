@@ -13,6 +13,7 @@ pub(crate) mod relay;
 pub mod report;
 mod sleep;
 mod state;
+pub use state::SessionState;
 pub mod thread;
 
 use crate::{
@@ -91,7 +92,7 @@ pub struct Session {
     pub native_id: Option<String>,
     pub native_path: Option<std::path::PathBuf>,
     pub native_offset: u64,
-    pub state: String,
+    pub state: SessionState,
     pub current_request: Option<String>,
     pub current_turn: Option<String>,
     pub startup_error: Option<String>,
@@ -195,18 +196,26 @@ impl Session {
         if self.storage_paused {
             return "waiting";
         }
-        match self.state.as_str() {
-            "starting" | "resuming" => "queued",
-            "starting_turn" | "running" | "interrupting" | "closing" => "working",
-            "idle" => match self.last_prompt_state.as_deref() {
+        match self.state {
+            SessionState::Starting | SessionState::Resuming => "queued",
+            SessionState::StartingTurn
+            | SessionState::Running
+            | SessionState::Interrupting
+            | SessionState::Closing => "working",
+            SessionState::Idle => match self.last_prompt_state.as_deref() {
                 Some("failed") => "failed",
                 Some("unknown" | "unknown_after_restart") => "unknown",
                 _ => "waiting",
             },
-            "closed" => "stopped",
-            "sleeping" => "sleeping",
-            "failed" | "process_lost" => "failed",
-            _ => "unknown",
+            SessionState::Closed => "stopped",
+            SessionState::Sleeping => "sleeping",
+            SessionState::Failed | SessionState::ProcessLost => "failed",
+            SessionState::Pending
+            | SessionState::WaitingForFiles
+            | SessionState::Suspended
+            | SessionState::Rewinding
+            | SessionState::SavedHistoryOnly
+            | SessionState::Other(_) => "unknown",
         }
     }
 
@@ -258,14 +267,20 @@ impl Session {
             && self.native_path.is_some()
             && self.close_request.is_none()
             && !matches!(
-                self.state.as_str(),
-                "closed" | "process_lost" | "failed" | "resuming" | "rewinding"
+                self.state,
+                SessionState::Closed
+                    | SessionState::ProcessLost
+                    | SessionState::Failed
+                    | SessionState::Resuming
+                    | SessionState::Rewinding
             )
     }
 
     fn waiting_start(&self) -> Option<String> {
-        if !matches!(self.state.as_str(), "pending" | "waiting_for_files")
-            || self.close_request.is_some()
+        if !matches!(
+            self.state,
+            SessionState::Pending | SessionState::WaitingForFiles
+        ) || self.close_request.is_some()
             || self.native_id.is_some()
             || self.harness_pid.is_some()
         {
@@ -335,6 +350,10 @@ struct Local {
     draining: bool,
     // The journal position of the latest replay snapshot (or failed attempt).
     snapshot_at: u64,
+    // The shared browser, paused by the idle sleeper while nothing may use it (#610).
+    browser: sleep::Browser,
+    // The agent account that owns that browser; None when agents run as Core's own account.
+    browser_owner: Option<u32>,
 }
 
 pub struct Manager {
@@ -375,6 +394,7 @@ pub struct Manager {
 impl Manager {
     pub fn open(config: Config) -> io::Result<Arc<Self>> {
         let mut local = Local::open(&config.state_dir)?;
+        local.browser_owner = config.storage.as_ref().map(|p| p.agent_uid);
         // Resume conversations, not uncertain actions. An interrupted resume attempt
         // is left failed instead of creating a service-restart recovery loop.
         for session in local.sessions.values().cloned().collect::<Vec<_>>() {
@@ -391,7 +411,7 @@ impl Manager {
             }
             let eligible = session.can_resume()
                 || session.startup_error.as_deref() == Some("startup_timeout")
-                || (session.state == "resuming"
+                || (session.state == SessionState::Resuming
                     && !session.has_dispatched
                     && session.native_path.is_some());
             for mut receipt in session.receipts.values().cloned() {
@@ -420,13 +440,16 @@ impl Manager {
                 }
             }
             if !matches!(
-                session.state.as_str(),
-                "closed" | "process_lost" | "failed" | "sleeping"
+                session.state,
+                SessionState::Closed
+                    | SessionState::ProcessLost
+                    | SessionState::Failed
+                    | SessionState::Sleeping
             ) {
                 local.append(
                     &session.session_id,
                     "state",
-                    json!({"state":if eligible { "suspended" } else { "process_lost" }}),
+                    json!({"state":if eligible { SessionState::Suspended } else { SessionState::ProcessLost }}),
                     None,
                 )?;
             }
@@ -459,7 +482,7 @@ impl Manager {
                     local.append(
                         &session.session_id,
                         "state",
-                        json!({"state":"process_lost"}),
+                        json!({"state":SessionState::ProcessLost}),
                         None,
                     )?;
                     local
@@ -627,8 +650,8 @@ impl Manager {
 
     pub fn recovery_check(&self, session: &Session) -> Value {
         let (status, message) = if session.close_request.is_some()
-            || session.state == "closed"
-            || session.state == "saved_history_only"
+            || session.state == SessionState::Closed
+            || session.state == SessionState::SavedHistoryOnly
         {
             (
                 "unavailable",
@@ -704,7 +727,8 @@ impl Manager {
         }
         let busy = self.local.lock().unwrap().sessions.values().any(|s| {
             s.harness == runtime::Kind::Claude
-                && (s.handle.is_some() || matches!(s.state.as_str(), "starting" | "resuming"))
+                && (s.handle.is_some()
+                    || matches!(s.state, SessionState::Starting | SessionState::Resuming))
         });
         Ok(runtime::claude_version::ensure(self.config.clone(), version, busy).await)
     }
@@ -1002,7 +1026,7 @@ impl Manager {
                 fork = children::fork_history(&local, &id, &request)?;
                 failure_reason = "Harness initialization failed; inspect native history and protected local harness diagnostics for this session";
                 // Claim before spawning: a crash after this point must not repeat uncertain execution.
-                local.append(&id, "state", json!({"state":"starting"}), None)?;
+                local.append(&id, "state", json!({"state":SessionState::Starting}), None)?;
                 let (handle, events) = match &fork {
                     Some(fork) => runtime::Handle::spawn_fork(&config, kind, fork, command_guard_enabled, strip_ai_co_authors, system_prompt)?,
                     None => runtime::Handle::spawn_guarded(&config, kind, None, command_guard_enabled, strip_ai_co_authors, system_prompt)?,
@@ -1026,7 +1050,7 @@ impl Manager {
             }
             local.sessions.get_mut(&id).unwrap().ready = true;
             local.sessions.get_mut(&id).unwrap().awaken();
-            local.append(&id, "state", json!({"state":"idle"}), None)?;
+            local.append(&id, "state", json!({"state":SessionState::Idle}), None)?;
             local
                 .finish_receipt(&id, &request, "completed")
                 .map_err(|_| io::Error::other("cannot record startup"))?;
@@ -1058,7 +1082,7 @@ impl Manager {
             let _ = local.append(
                 &id,
                 "state",
-                json!({"state":"failed","reason":reason}),
+                json!({"state":SessionState::Failed,"reason":reason}),
                 None,
             );
             // The receipts keep the cause too, so a parent's report says why (ADR 0123); the state goes
@@ -1144,9 +1168,12 @@ impl Manager {
             }
             // The app retries this answer until the harness is back.
             if matches!(command, "compact" | "rewind" | "goal")
-                && matches!(session.state.as_str(), "sleeping" | "resuming")
+                && matches!(
+                    session.state,
+                    SessionState::Sleeping | SessionState::Resuming
+                )
             {
-                if session.state == "sleeping" {
+                if session.state == SessionState::Sleeping {
                     self.schedule_resume(&mut local, id, false)?;
                 }
                 return Err(Error::Conflict(
@@ -1162,7 +1189,7 @@ impl Manager {
             {
                 return Err(Error::Conflict("wait for the pending close or interrupt"));
             }
-            if command == "close" && session.state == "starting" {
+            if command == "close" && session.state == SessionState::Starting {
                 return Err(Error::Conflict("session is still starting"));
             }
             if !matches!(
@@ -1184,19 +1211,22 @@ impl Manager {
                 return Err(Error::Conflict("unsupported command"));
             }
             let handle = session.handle.clone();
-            let retry_startup = command == "resume"
-                && session.state == "process_lost"
-                && session.startup_error.is_some()
+            // An explicit resume restarts a lost agent from its intact saved chat: a failed startup, or a crash
+            // after its one automatic recovery (#154).
+            let retry_lost = command == "resume"
+                && session.state == SessionState::ProcessLost
                 && session.current_request.is_none()
                 && handle.is_none()
                 && session.harness_pid.is_none();
-            if retry_startup && self.recovery_check(session)["status"] != "ready" {
+            if retry_lost && self.recovery_check(session)["status"] != "ready" {
                 return Err(Error::Conflict(
                     "saved conversation is unavailable; inspect session recovery before retrying",
                 ));
             }
-            if matches!(session.state.as_str(), "closed" | "process_lost" | "failed")
-                && !retry_startup
+            if matches!(
+                session.state,
+                SessionState::Closed | SessionState::ProcessLost | SessionState::Failed
+            ) && !retry_lost
             {
                 return Err(Error::Conflict(
                     "process unavailable; history does not restore execution",
@@ -1265,7 +1295,7 @@ impl Manager {
                     return Err(Error::Conflict("compaction is already running"));
                 }
                 if session.current_request.is_some()
-                    || !matches!(session.state.as_str(), "idle" | "failed")
+                    || !matches!(session.state, SessionState::Idle | SessionState::Failed)
                 {
                     return Err(Error::Conflict(
                         "context can only be compacted while the thread is idle",
@@ -1286,8 +1316,11 @@ impl Manager {
                         && (child.current_request.is_some()
                             || !child.queue.is_empty()
                             || matches!(
-                                child.state.as_str(),
-                                "pending" | "starting" | "resuming" | "waiting_for_files"
+                                child.state,
+                                SessionState::Pending
+                                    | SessionState::Starting
+                                    | SessionState::Resuming
+                                    | SessionState::WaitingForFiles
                             ))
                 }) {
                     return Err(Error::Conflict(
@@ -1324,7 +1357,7 @@ impl Manager {
                     ));
                 }
                 if session.current_request.is_some()
-                    || !matches!(session.state.as_str(), "idle" | "failed")
+                    || !matches!(session.state, SessionState::Idle | SessionState::Failed)
                 {
                     return Err(Error::Conflict(
                         "wait for the active turn to finish before editing a sent message",
@@ -1336,7 +1369,7 @@ impl Manager {
             }
             let deliver_now = command == "prompt"
                 && session.ready
-                && session.state == "idle"
+                && session.state == SessionState::Idle
                 && !session.queue_paused
                 && !session.compacting
                 && session.queue.is_empty();
@@ -1380,7 +1413,7 @@ impl Manager {
                     local.finish_receipt(id, &request, "completed")?;
                     Next::None
                 }
-                "resume" if retry_startup => {
+                "resume" if retry_lost => {
                     self.schedule_resume(&mut local, id, false)?;
                     Next::None
                 }
@@ -1401,7 +1434,7 @@ impl Manager {
                     request.clone(),
                 ),
                 "compact" => {
-                    local.append(id, "state", json!({"state":"running"}), None)?;
+                    local.append(id, "state", json!({"state":SessionState::Running}), None)?;
                     Next::Compact(handle.expect("validated compact harness"), request.clone())
                 }
                 "goal" => Next::Goal(
@@ -1416,11 +1449,11 @@ impl Manager {
                 ),
                 "close" => {
                     let session = &local.sessions[id];
-                    let data = json!({"state":"closing","request_id":session.current_request,"turn_id":session.current_turn});
+                    let data = json!({"state":SessionState::Closing,"request_id":session.current_request,"turn_id":session.current_turn});
                     local.append(id, "state", data, None)?;
                     local.fail_pending(id)?;
                     if handle.is_none() {
-                        local.append(id, "state", json!({"state":"closed"}), None)?;
+                        local.append(id, "state", json!({"state":SessionState::Closed}), None)?;
                         local.finish_receipt(id, &request, "completed")?;
                     }
                     Next::Close(handle)
@@ -1517,12 +1550,13 @@ impl Manager {
         Ok(())
     }
 
-    /// Record the start of a queued or immediate turn; dequeues the request.
+    /// Record the start of a queued or immediate turn; dequeues the request. A paused browser resumes first (#610).
     fn begin_turn(&self, local: &mut Local, id: &str, request: &str) -> io::Result<()> {
+        local.browser_turn();
         local.append(
             id,
             "state",
-            json!({"state":"starting_turn","request_id":request}),
+            json!({"state":SessionState::StartingTurn,"request_id":request}),
             None,
         )?;
         Ok(())
@@ -1778,7 +1812,7 @@ impl Manager {
     /// out a pending interrupt, or return to idle. `turn_ended` bypasses the active
     /// turn guard when the just-finished turn is the reason for advancing.
     fn advance(self: &Arc<Self>, local: &mut Local, id: &str, turn_ended: bool) {
-        if local.sessions[id].state == "sleeping" {
+        if local.sessions[id].state == SessionState::Sleeping {
             let _ = self.wake(local, id);
             return;
         }
@@ -1794,7 +1828,12 @@ impl Manager {
             return; // a turn is still active; wait for its completion
         }
         if session.interrupt_pending() {
-            let _ = local.append(id, "state", json!({"state":"interrupting"}), None);
+            let _ = local.append(
+                id,
+                "state",
+                json!({"state":SessionState::Interrupting}),
+                None,
+            );
             return;
         }
         if self.storage.blocks()
@@ -1803,9 +1842,9 @@ impl Manager {
             || session.compacting
         {
             let state = if session.compacting {
-                "running"
+                SessionState::Running
             } else {
-                "idle"
+                SessionState::Idle
             };
             let _ = local.append(id, "state", json!({"state":state}), None);
             return;
@@ -1835,7 +1874,7 @@ impl Manager {
             self.clone().deliver(id.to_owned(), next, handle);
             return;
         }
-        let _ = local.append(id, "state", json!({"state":"idle"}), None);
+        let _ = local.append(id, "state", json!({"state":SessionState::Idle}), None);
     }
 
     fn snapshot_usage(self: Arc<Self>, id: String, handle: runtime::Handle) {
@@ -1910,8 +1949,8 @@ impl Manager {
             if local.sessions[&id].restores_awake(now) {
                 self.schedule_resume(&mut local, &id, false)
                     .map_err(|_| io::Error::other("cannot save recovery state"))?;
-            } else if local.sessions[&id].state != "sleeping" {
-                local.append(&id, "state", json!({"state":"sleeping"}), None)?;
+            } else if local.sessions[&id].state != SessionState::Sleeping {
+                local.append(&id, "state", json!({"state":SessionState::Sleeping}), None)?;
             }
         }
         for session in local.sessions.values() {
@@ -1939,7 +1978,7 @@ impl Manager {
         local.append(
             id,
             "state",
-            json!({"state":"resuming","recovery":recovery}),
+            json!({"state":SessionState::Resuming,"recovery":recovery}),
             None,
         )?;
         let (manager, id) = (self.clone(), id.to_owned());
@@ -1961,7 +2000,12 @@ impl Manager {
                         return Ok(());
                     }
                     if self.is_stopping() {
-                        local.append(&id, "state", json!({"state":"suspended"}), None)?;
+                        local.append(
+                            &id,
+                            "state",
+                            json!({"state":SessionState::Suspended}),
+                            None,
+                        )?;
                         return Ok(());
                     }
                 }
@@ -2048,7 +2092,7 @@ impl Manager {
                 handle.native_identity(&native)?,
                 None,
             )?;
-            local.append(&id, "state", json!({"state":"idle"}), None)?;
+            local.append(&id, "state", json!({"state":SessionState::Idle}), None)?;
             let retries: Vec<_> = local.sessions[&id]
                 .receipts
                 .values()
@@ -2104,7 +2148,7 @@ impl Manager {
                 let _ = local.append(
                     &id,
                     "state",
-                    json!({"state":"process_lost","reason":lost,"startup_error":code}),
+                    json!({"state":SessionState::ProcessLost,"reason":lost,"startup_error":code}),
                     None,
                 );
                 if code != "startup_timeout" {
@@ -2281,9 +2325,9 @@ impl Manager {
                     return Ok(());
                 }
                 let state = if session.close_request.is_some() {
-                    "closing"
+                    SessionState::Closing
                 } else {
-                    "running"
+                    SessionState::Running
                 };
                 let data = json!({"state":state,"request_id":request,"turn_id":native_turn});
                 local.append(id, "state", data, None)?;
@@ -2377,7 +2421,7 @@ impl Manager {
                 }
                 let session = local.sessions.get_mut(id).ok_or(Error::NotFound)?;
                 session.releasing = false;
-                let restoring = session.state == "resuming"
+                let restoring = session.state == SessionState::Resuming
                     && session.native_id.is_some()
                     && session.native_path.is_some();
                 let resumable = cleaned_up
@@ -2392,7 +2436,7 @@ impl Manager {
                 let failed = session
                     .failure
                     .clone()
-                    .filter(|_| session.state == "failed");
+                    .filter(|_| session.state == SessionState::Failed);
                 session.handle = None;
                 session.ready = false;
                 let request = session.current_request.clone();
@@ -2438,15 +2482,16 @@ impl Manager {
                     local.append(id, "harness", json!({"pid":null}), None)?;
                 }
                 let state = if expected && close.is_some() {
-                    "closed"
+                    SessionState::Closed
                 } else if resumable && (self.is_stopping() || recover) {
-                    "suspended"
+                    SessionState::Suspended
                 } else if failed.is_some() {
-                    "failed"
+                    SessionState::Failed
                 } else {
-                    "process_lost"
+                    SessionState::ProcessLost
                 };
-                let lost_or_failed = matches!(state, "process_lost" | "failed");
+                let lost_or_failed =
+                    matches!(state, SessionState::ProcessLost | SessionState::Failed);
                 local.append(
                     id,
                     "state",
@@ -2460,7 +2505,7 @@ impl Manager {
                         if expected { "completed" } else { "unknown" },
                     )?;
                 }
-                if state != "suspended" && !preserve_queue {
+                if state != SessionState::Suspended && !preserve_queue {
                     local.fail_pending_because(id, Some(&lost))?;
                 }
                 local.sessions.get_mut(id).unwrap().credits_stop = None;
@@ -2484,11 +2529,11 @@ impl Manager {
             let waiting: Vec<_> = local
                 .sessions
                 .values()
-                .filter(|s| s.state == "resuming" && s.handle.is_none())
+                .filter(|s| s.state == SessionState::Resuming && s.handle.is_none())
                 .map(|s| s.session_id.clone())
                 .collect();
             for id in waiting {
-                let _ = local.append(&id, "state", json!({"state":"suspended"}), None);
+                let _ = local.append(&id, "state", json!({"state":SessionState::Suspended}), None);
             }
             // Before the harness cleanup, which may outlast the deadline. Its few records replay next start.
             local.save_snapshot();

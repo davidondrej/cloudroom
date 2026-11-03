@@ -2,6 +2,20 @@
 
 Also on [cloudroom.dev/changelog](https://www.cloudroom.dev/changelog).
 
+## 140
+
+Crashed Cloud agents come back (2026-11-02)
+
+### Changes
+
+- A Cloud agent that crashed now restarts as soon as you message it.
+- Messages you send to a stopped Cloud thread are saved first, so none get lost while its sandbox wakes.
+- Cloud subagents show as starting the moment you spawn them, and can message their parent and siblings.
+- An idle cloud browser now pauses until an agent needs it again.
+- Setting up a worktree again never wipes your uncommitted work.
+- Codex sign-in and status checks never use the copy inside Codex.app.
+- Security fixes.
+
 ## 139
 
 Archive cleans up after your agents (2026-11-02)

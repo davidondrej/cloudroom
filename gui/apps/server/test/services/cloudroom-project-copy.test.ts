@@ -20,11 +20,36 @@ it("Teleport to Cloud copies staged, unstaged, and untracked work plus ignored .
     ["staged.txt", "unstaged.txt", "clean.txt"].forEach(write("old"));
     git("add", ".");
     git("commit", "-qm", "init");
-    ["staged.txt", "added.txt", "unstaged.txt", "untracked.txt", ".env", "node_modules/pkg/index.js"].forEach(write("new"));
+    ["staged.txt", "added.txt", "unstaged.txt", "untracked.txt", ".env", "apps/web/.env", "node_modules/pkg/index.js"].forEach(write("new"));
     git("add", "staged.txt", "added.txt");
 
-    expect((await localFiles(root, "changed")).sort()).toEqual([".env", "added.txt", "staged.txt", "unstaged.txt", "untracked.txt"]);
-    expect(await localFiles(root, "env")).toEqual([".env"]);
+    expect((await localFiles(root, "changed")).sort()).toEqual([".env", "added.txt", "apps/web/.env", "staged.txt", "unstaged.txt", "untracked.txt"]);
+    // Decision (#140): a project at a repo root keeps its ignored `.env` files at any depth, since monorepo apps need theirs.
+    expect((await localFiles(root, "env")).sort()).toEqual([".env", "apps/web/.env"]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+it("copies a non-repo-root project's .env files only from its root and the roots of nested repos (#140)", async () => {
+  const root = mkdtempSync(join(tmpdir(), "cloudroom-project-copy-"));
+  try {
+    for (const path of [".env", "app.js", "secrets/.env.prod", "tools/config/.env.local", "api/.git/HEAD", "api/.env.production", "api/src/.env", "web/.git", "web/.env"]) {
+      mkdirSync(dirname(join(root, path)), { recursive: true });
+      writeFileSync(join(root, path), "x");
+    }
+    expect((await localFiles(root, "env")).sort()).toEqual([".env", "api/.env.production", "web/.env"]);
+    expect((await localFiles(root, "all")).sort()).toEqual([".env", "api/.env.production", "app.js", "web/.env"]);
+
+    // A project folder inside another Git checkout is listed by Git, but gets the same rule.
+    const inner = join(root, "checkout/workspace");
+    for (const path of [".env", "secrets/.env.production", "config/.env.local"]) {
+      mkdirSync(dirname(join(inner, path)), { recursive: true });
+      writeFileSync(join(inner, path), "x");
+    }
+    execFileSync("git", ["init", "-q", join(root, "checkout")]);
+    writeFileSync(join(root, "checkout/.gitignore"), ".env*\n");
+    expect((await localFiles(inner, "env")).sort()).toEqual([".env"]);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

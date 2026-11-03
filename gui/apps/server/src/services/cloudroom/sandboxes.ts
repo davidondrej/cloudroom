@@ -59,6 +59,8 @@ export type CloudQueue = { position: number; total: number; regionBlocked: boole
 export type PlanUsage = { plan: string; credits: number | null; creditsLimit: number; extraCredits: number; extraCreditsTotal: number; og: { name: string | null; endsAt: string } | null };
 const USAGE_LIMIT = "cloud_usage_limit";
 const AGENT_LIMIT = "cloud_agent_limit";
+/** Free's shared daily budget is spent: like the limits above, the website refused before starting the sandbox. */
+export const BUDGET_LIMIT = "cloud_budget_limit";
 const CLOUD_QUEUE = "cloud_queue";
 export const CLOUD_REGION = "cloud_region";
 export const startRefused = (error: unknown): error is CloudroomError & { code: string } => error instanceof CloudroomError && [USAGE_LIMIT, AGENT_LIMIT, CLOUD_QUEUE, CLOUD_REGION].includes(error.code ?? "");
@@ -655,8 +657,10 @@ export class SandboxDirectory {
     await this.awakeList();
   }
 
-  /** The thread's Core, or null while it sleeps. `wake` starts it; only callers with work to send pass true. */
-  async connection(thread: string, project: SandboxProject, wake: boolean, trigger?: SandboxWakeTrigger, fresh = false): Promise<SandboxConnection | null> {
+  /** The thread's Core, or null while it sleeps. `wake` starts it; only callers with work to send pass true. `parent`,
+   *  the thread that started it, goes with the wake: the website saves it when it registers the thread, so the parent
+   *  lists and reaches its child before the child's Core runs, not only once its label is saved (#317). */
+  async connection(thread: string, project: SandboxProject, wake: boolean, trigger?: SandboxWakeTrigger, fresh = false, parent?: string): Promise<SandboxConnection | null> {
     const preloading = wake ? this.preloads.get(thread) : undefined;
     if (preloading) {
       this.wakeStarts.set(thread, Date.now());
@@ -683,7 +687,7 @@ export class SandboxDirectory {
       pending = macHarnessVersions().then(harnesses => {
         this.wakeHarnesses.set(thread, harnesses);
         const target = this.targets.get(thread), from = this.keySource(thread);
-        return this.call({ action: "wake", ...place, ...(target ? { target } : {}), ...(from ? { from } : {}), harnesses, ...(this.backoff.has(thread) ? { trigger: "retry" } : trigger ? { trigger } : {}) });
+        return this.call({ action: "wake", ...place, ...(target ? { target } : {}), ...(from ? { from } : {}), ...(parent ? { parent } : {}), harnesses, ...(this.backoff.has(thread) ? { trigger: "retry" } : trigger ? { trigger } : {}) });
       }).then(value => this.remember(viewSchema.parse(value))).then(view => {
         this.targets.delete(thread);
         this.woke(view.thread);
@@ -798,10 +802,10 @@ export class SandboxDirectory {
   private usage: { value: PlanUsage | null; next: number } | null = null;
   private checkingUsage = false;
   /** The account's usage; null while billing is off, in the cloud queue, or before the website answers. Its plan is
-   *  refreshed with forNewThreads(); the usage itself as often as the website says. */
-  planUsage(): PlanUsage | null {
+   *  refreshed with forNewThreads(); the usage itself as often as the website says, unless `refresh` is false. */
+  planUsage(refresh = true): PlanUsage | null {
     if (!this.plan || this.queue) return null;
-    if (!this.checkingUsage && Date.now() >= (this.usage?.next ?? 0)) {
+    if (refresh && !this.checkingUsage && Date.now() >= (this.usage?.next ?? 0)) {
       this.checkingUsage = true;
       void this.call({ action: "usage" }).then((value) => {
         // A website without credits (say, rolled back) shows no card rather than old units.
@@ -881,14 +885,17 @@ export class SandboxDirectory {
 
   /** Whether each thread runs on the user's own VPS (ADR 0319), from the website's last answer about it. */
   private placed = new Map<string, boolean>();
+  private readonly lookedUp = new Set<string>();
   onVps(thread: string): boolean {
     const known = this.placed.get(thread);
-    if (known !== undefined || !thread || !this.vpsConnected) return known === true;
+    if (known !== undefined || !thread || !this.vpsConnected || this.lookedUp.has(thread)) return known === true;
     // Found only through the awake list (say, after the app restarted), which doesn't say: a lookup, once.
-    this.placed.set(thread, false);
+    this.lookedUp.add(thread);
     void this.call({ action: "lookup", thread }).then(value => this.remember(viewSchema.parse(value)), () => {});
     return false;
   }
+  /** Whether the website's last answer put this thread in Cloud, not on the VPS. Never asks: unknown is false. */
+  knownInCloud(thread: string): boolean { return this.placed.get(thread) === false; }
   /** A VPS thread's move to Cloud: under way, or failed (the copy didn't finish, so it stayed on the VPS). */
   private moves = new Map<string, "moving" | "failed">();
   moveState(thread: string): "moving" | "failed" | null { return this.moves.get(thread) ?? null; }

@@ -43,11 +43,26 @@ const skippedNames = () => [...SKIPPED, ".cloudroom"].map((name) => `-name ${quo
 const MISSING_HISTORY = 3;
 /** Before unpacking a source's files: removes symlinks on the way to an archive file, so tar never writes through them.
  *  A folder with no Git repository also loses the files the archive lacks, and folders it holds as files. Exact names,
- *  so any file name works. Skipped names (dependencies, build output, `.cloudroom`) stay. An empty archive removes nothing. */
+ *  so any file name works. Skipped names (dependencies, build output, `.cloudroom`) stay. An empty archive removes nothing.
+ *  A subfolder with its own `.git` stays whole: no copy ever brings one, so the agent made it here, like a clone (#588).
+ *  An archive file inside one, or in place of a folder holding one at any depth, fails the copy before anything changes. */
 const PRUNE = `import os,shutil,sys,tarfile
 root,skip=sys.argv[1],set(sys.argv[3:])
+repo=lambda p:os.path.lexists(os.path.join(p,".git"))
 with tarfile.open(sys.argv[2]) as t: names={os.path.normpath(m.name) for m in t if not m.isdir()}
 if not names: sys.exit()
+repos=[]
+for d,dirs,_ in os.walk(root):
+    dirs[:]=[x for x in dirs if x not in skip and not os.path.islink(os.path.join(d,x))]
+    for x in [x for x in dirs if repo(os.path.join(d,x))]: repos.append(os.path.relpath(os.path.join(d,x),root)); dirs.remove(x)
+def refuse(n,r): sys.exit(f"{r} is a Git repository made in this sandbox, and the source's file {n} would overwrite it, so nothing was changed")
+for n in names:
+    for r in repos:
+        if n.startswith(r+os.sep): refuse(n,r)
+    p=os.path.join(root,n)
+    if os.path.isdir(p) and not os.path.islink(p):
+        for d,ds,fs in os.walk(p):
+            if ".git" in ds+fs: refuse(n,os.path.relpath(d,root))
 for n in names:
     parts=n.split(os.sep)
     for i in range(1,len(parts)):
@@ -56,7 +71,7 @@ for n in names:
 if os.path.lexists(os.path.join(root,".git")): sys.exit()
 for d,dirs,files in os.walk(root):
     links=[x for x in dirs if os.path.islink(os.path.join(d,x))]
-    dirs[:]=[x for x in dirs if x not in skip and x not in links]
+    dirs[:]=[x for x in dirs if x not in skip and x not in links and not repo(os.path.join(d,x))]
     for f in files+links:
         p=os.path.join(d,f)
         if f not in skip and os.path.relpath(p,root) not in names: os.remove(p)

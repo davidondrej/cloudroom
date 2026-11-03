@@ -65,6 +65,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
+    if args.first().map(String::as_str) == Some("usage") {
+        match cloudroom::session::report::usage_cli(&args[1..]).await {
+            Ok(code) => std::process::exit(code),
+            Err(error) => {
+                eprintln!("{error}");
+                std::process::exit(1);
+            }
+        }
+    }
     if matches!(
         args.first().map(String::as_str),
         Some("automation" | "loop")
@@ -153,7 +162,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     // The service starts without arguments; anything else is a mistyped agent command.
     if let Some(command) = args.first() {
-        let commands = "Commands: room-cli thread, automation (loop), mac, secret, files, preview, computer-use, gpu, feedback. Add --help to any of them. Other threads, projects, and settings live on the user's Mac: see the room-cli skill.";
+        let commands = "Commands: room-cli thread, automation (loop), mac, secret, files, preview, computer-use, gpu, usage, feedback. Add --help to any of them. Other threads, projects, and settings live on the user's Mac: see the room-cli skill.";
         if matches!(command.as_str(), "--help" | "-h" | "help") {
             println!("{commands}");
             return Ok(());

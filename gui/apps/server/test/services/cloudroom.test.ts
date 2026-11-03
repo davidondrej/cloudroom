@@ -1432,3 +1432,85 @@ it("concurrent Disconnects keep every marker", async () => {
     await harness.cleanup();
   }
 });
+
+it("a message to a lost Cloud agent restarts it from its saved chat, and a refused one fails instead of saying sent (#154, #155)", async () => {
+  const harness = await createTestAppHarness();
+  const { host } = seedHostSession(harness.deps);
+  const { project } = seedProjectWithSource(harness.deps, { hostId: host.id });
+  const service = cloudroom(harness.deps);
+  const sid = "cr_lost", calls: string[] = [], records: object[] = [], streams = new Set<ServerResponse>();
+  let state = "idle", history = true, keepPausedCapability = true;
+  const record = (kind: string, data: object) => {
+    const value = { sequence: records.length + 1, timestamp_ms: Date.now(), session_id: sid, kind, data };
+    records.push(value);
+    for (const stream of streams) stream.write(`id: ${value.sequence}\nevent: record\ndata: ${JSON.stringify(value)}\n\n`);
+  };
+  const core = createServer(async (req, res) => {
+    const json = (body: unknown, status = 200) => { res.writeHead(status, { "Content-Type": "application/json" }); res.end(JSON.stringify(body)); };
+    if (req.url === "/v1/health") return json({});
+    if (req.url === "/v1/capabilities") return json({ version: 1, repository: "/code/test", stop: true, resume: true, launch_settings: true, direct_workspaces: true, command_guard: true, queue_reorder: true, resume_keep_paused: keepPausedCapability, harnesses: [{ id: "codex", model: "test-model", models: [{ model: "test-model", reasoning_levels: ["high"] }] }] });
+    if (req.url === "/v1/ready") return json({ ready: true });
+    if (req.url?.includes("/stream?")) {
+      res.writeHead(200, { "Content-Type": "text/event-stream" });
+      const after = Number(new URL(req.url, "http://fixture").searchParams.get("after"));
+      for (const value of records.slice(after)) res.write(`id: ${(value as { sequence: number }).sequence}\nevent: record\ndata: ${JSON.stringify(value)}\n\n`);
+      res.flushHeaders(); streams.add(res); res.on("close", () => streams.delete(res)); return;
+    }
+    if (req.method !== "POST") return json({}, 404);
+    let text = ""; for await (const chunk of req) text += chunk;
+    const body = JSON.parse(text);
+    const command = req.url === "/v1/sessions" ? "start" : req.url!.split("/").pop()!.replace(/s$/, "");
+    calls.push(`${command}${body.keep_paused ? "+keep" : ""}:${state}`);
+    // Real Core: only `resume` may restart a lost session, and only with its saved chat intact.
+    if (state === "process_lost" && command === "resume" && !history) return json({ code: "request_rejected", error: "saved conversation is unavailable; inspect session recovery before retrying" }, 409);
+    if (state === "process_lost" && command !== "resume") return json({ code: "request_rejected", error: "process unavailable; history does not restore execution" }, 409);
+    const receipt = { request_id: body.request_id, command, state: command === "resume" ? "completed" : "accepted", input: command === "prompt" ? { text: body.text } : body.keep_paused ? { keep_paused: true } : {} };
+    if (command === "resume") { state = "idle"; record("state", { state: "resuming" }); record("state", { state: "idle" }); }
+    record("receipt", receipt);
+    json({ session_id: sid, receipt, saving: {} }, 202);
+  });
+  core.listen(0, "127.0.0.1"); await once(core, "listening");
+  const address = core.address(); if (!address || typeof address === "string") throw new Error("fixture did not listen");
+  const request = (path: string, body?: unknown) => harness.app.request(`/api/v1${path}`, { method: body === undefined ? "GET" : "POST", headers: { "Content-Type": "application/json" }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
+  // How `room-cli thread tell` sends to a Cloud thread.
+  const tell = (threadId: string, text: string, requestId?: string) => request(`/threads/${threadId}/send`, { requestId, mode: "queue-if-active", input: [{ type: "text", text, mentions: [] }] });
+  const lose = () => { state = "process_lost"; record("state", { state: "process_lost", reason: "Agent process exited unexpectedly (out of memory)", out_of_memory: true }); };
+  try {
+    await service.configure({ url: `http://127.0.0.1:${address.port}`, token: "x".repeat(40), projectId: project.id });
+    const created = await request("/threads", { executionTarget: "cloud", requestId: "lost-start", projectId: project.id, providerId: "codex", origin: "app", model: "test-model", reasoningLevel: "high", environment: { type: "project-default" }, input: [{ type: "text", text: "Build it", mentions: [] }] });
+    expect(created.status).toBe(201);
+    const threadId = (await created.json()).id as string;
+    await expect.poll(() => calls).toContain("prompt:idle");
+    lose();
+    await expect.poll(() => getThread(harness.db, threadId)?.status).toBe("error");
+    calls.length = 0;
+    const revived = await tell(threadId, "Memory is free now; carry on");
+    expect({ status: revived.status, body: await revived.json() }).toMatchObject({ status: 200, body: { ok: true } });
+    expect(calls).toEqual(["resume:process_lost", "prompt:idle"]);
+    // #844 review: Stop paused an older message. Two quick sends restart once, keeping the pause until a message is first.
+    keepPausedCapability = false;
+    await service.status();
+    record("receipt", { request_id: "stop", command: "stop", state: "accepted", input: {} });
+    record("receipt", { request_id: "older", command: "prompt", state: "accepted", input: { text: "Older" } });
+    lose();
+    await expect.poll(() => getThread(harness.db, threadId)?.status).toBe("error");
+    expect(service.threadStatus(threadId)?.paused).toBe(true);
+    calls.length = 0;
+    const unsupported = await tell(threadId, "Correction A", "correction-a");
+    expect(unsupported.ok).toBe(false);
+    expect(await unsupported.json()).toMatchObject({ message: expect.stringContaining("Update the cloud core") });
+    expect(calls).toEqual([]);
+    // The saved send succeeds once Core supports it, even while the app's cached capabilities still say otherwise.
+    keepPausedCapability = true;
+    expect((await Promise.all([tell(threadId, "Correction A", "correction-a"), tell(threadId, "Correction B")])).map(response => response.status)).toEqual([200, 200]);
+    expect(calls.slice(0, 4)).toEqual(["resume+keep:process_lost", "prompt:idle", "reorder:idle", "resume:idle"]);
+    expect(calls.filter(call => call.startsWith("prompt"))).toHaveLength(2);
+    lose(); history = false;
+    await expect.poll(() => getThread(harness.db, threadId)?.status).toBe("error");
+    const refused = await tell(threadId, "Are you there?");
+    expect(refused.ok).toBe(false);
+    expect(await refused.json()).toMatchObject({ message: expect.stringContaining("saved conversation is unavailable") });
+  } finally {
+    service.stop(); core.closeAllConnections(); await new Promise<void>(resolve => core.close(() => resolve())); await harness.cleanup();
+  }
+}, 15000);

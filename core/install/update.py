@@ -239,8 +239,19 @@ def preview_state(values):
     return Path(values.get('CLOUDROOM_STATE_DIR', '/srv/cloudroom/core/history')) / 'previews'
 
 
+def preview_mode(values):
+    """Hosted VMs: no flag, the same command as ever. Self-hosted servers: no new account and no SSH changes, and SSH setups they already have stay as they are."""
+    if values.get('CLOUDROOM_STORE') != 'self-hosted':
+        return []
+    try:
+        tunnel = json.loads((preview_state(values) / 'setup.json').read_text()).get('tunnel') is True
+    except FileNotFoundError:
+        tunnel = True
+    return ['--tunnel'] if tunnel else ['--tools-only']
+
+
 def previews(values):
-    run('python3', str(ROOT / 'previews.py'), str(preview_state(values).parent))
+    run('python3', str(ROOT / 'previews.py'), *preview_mode(values), str(preview_state(values).parent))
 
 
 def restarts():

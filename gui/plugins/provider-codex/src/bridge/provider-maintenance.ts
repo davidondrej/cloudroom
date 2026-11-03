@@ -1,6 +1,5 @@
 import { realpath } from "node:fs/promises";
-import { homedir } from "node:os";
-import { join, sep } from "node:path";
+import { sep } from "node:path";
 import {
   type ProviderHealthResult,
   type ProviderInstallationRunResult,
@@ -20,7 +19,6 @@ import {
   experimental_npmLatestVersion as npmLatestVersion,
   experimental_probeNpmGlobalPackage as probeNpmGlobalPackage,
   experimental_readCliVersion as readCliVersion,
-  experimental_resolveExecutablePath as resolveExecutablePath,
   experimental_versionFrom as versionFrom,
 } from "@get-bb/plugin-sdk/provider-bridge";
 import { z } from "zod";
@@ -82,23 +80,8 @@ function minimumSupportedVersionForRequirement(
     : CODEX_MINIMUM_SUPPORTED_VERSION;
 }
 
-// With no Codex Cloudroom may run, name where OpenAI's installer would put it, so a run fails as
-// "not installed". A bare `codex` would let PATH reach a symlink into Codex.app (#96).
-export function codexExecutable(env: NodeJS.ProcessEnv = process.env): string {
-  return (
-    findCliExecutable("codex", env) ??
-    join(
-      env.CODEX_HOME?.trim() || join(env.HOME?.trim() || homedir(), ".codex"),
-      "packages",
-      "standalone",
-      "current",
-      "codex",
-    )
-  );
-}
-
 function codexUpdateCommand(
-  command = "codex",
+  command: string,
   npmPrefix: string | null = null,
 ): {
   command: string;
@@ -129,15 +112,15 @@ export async function getCodexProviderInstallationStatus(
 ): Promise<ProviderInstallationStatus> {
   const minimumSupportedVersion =
     minimumSupportedVersionForRequirement(requirement);
-  const command = codexExecutable();
-  const [resolvedExecutable, versionOutput, latestVersion, npmGlobal] =
-    await Promise.all([
-      resolveExecutablePath(command),
-      commandOutput(command, ["--version"]),
-      npmLatestVersion(CODEX_NPM_PACKAGE),
-      probeNpmGlobalPackage(CODEX_NPM_PACKAGE),
-    ]);
-  const installed = resolvedExecutable !== null || versionOutput !== null;
+  // Only ever run what findCliExecutable returns. A bare `codex` or an unchecked path can reach
+  // the copy inside Codex.app, and macOS may move the whole app to the Bin (#96).
+  const executable = findCliExecutable("codex");
+  const [versionOutput, latestVersion, npmGlobal] = await Promise.all([
+    executable === null ? null : commandOutput(executable, ["--version"]),
+    npmLatestVersion(CODEX_NPM_PACKAGE),
+    probeNpmGlobalPackage(CODEX_NPM_PACKAGE),
+  ]);
+  const installed = executable !== null;
   const currentVersion = versionFrom(versionOutput);
   const needsUpdate =
     installed &&
@@ -157,11 +140,11 @@ export async function getCodexProviderInstallationStatus(
 
   return {
     executableName: "codex",
-    executablePath: resolvedExecutable,
+    executablePath: executable,
     installed,
     installSource: npmGlobalInstallSource({
       installed,
-      executablePath: resolvedExecutable,
+      executablePath: executable,
       npmBin: npmGlobal.npmBin,
     }),
     currentVersion,
@@ -178,7 +161,7 @@ export async function getCodexProviderInstallationStatus(
             command:
               actionKind === "install"
                 ? npmGlobalInstallCommand(CODEX_NPM_PACKAGE).displayCommand
-                : codexUpdateCommand().displayCommand,
+                : codexUpdateCommand("codex").displayCommand,
           },
     needsUpdate,
     versionUnsupported,
@@ -221,9 +204,9 @@ function buildCodexProviderInstallationRun(
   return {
     available: true,
     command:
-      action === "install"
-        ? npmGlobalInstallCommand(CODEX_NPM_PACKAGE)
-        : codexUpdateCommand(status.executablePath ?? "codex", npmPrefix),
+      action === "update" && status.executablePath !== null
+        ? codexUpdateCommand(status.executablePath, npmPrefix)
+        : npmGlobalInstallCommand(CODEX_NPM_PACKAGE),
     verification: installationVerification(status, action),
     ...(process.platform === "win32"
       ? {}
@@ -235,6 +218,16 @@ function buildCodexProviderInstallationRun(
           },
         }),
   };
+}
+
+// The terminal's shell would otherwise pick its own `codex` from PATH (#96). Windows shells don't
+// read these POSIX quotes, and only macOS has the app copy problem.
+function codexLoginCommand(): string | null {
+  const executable = findCliExecutable("codex");
+  if (executable === null) return null;
+  return process.platform === "win32"
+    ? "codex login"
+    : formatCommand(executable, ["login"]);
 }
 
 function healthResult(
@@ -262,14 +255,14 @@ function healthResult(
       minimumSupportedVersion: CODEX_MINIMUM_SUPPORTED_VERSION,
       canInstall: true,
       canUpdate: status !== "not_installed",
-      loginCommand: "codex login",
+      loginCommand: codexLoginCommand(),
     },
   };
 }
 
 export async function getCodexProviderHealth(): Promise<ProviderHealthResult> {
-  const command = codexExecutable();
-  if ((await resolveExecutablePath(command)) === null) {
+  const command = findCliExecutable("codex");
+  if (command === null) {
     return healthResult("not_installed");
   }
   const version = await readCliVersion(command);
@@ -420,7 +413,7 @@ function normalizeUsage(raw: unknown, email: string | null): ProviderUsage {
 }
 
 export async function getCodexProviderUsage(): Promise<ProviderUsageResult> {
-  if ((await resolveExecutablePath(codexExecutable())) === null) {
+  if (findCliExecutable("codex") === null) {
     return { supported: true, usage: { status: "not_installed" } };
   }
   let credentials: CodexAuthCredentials | null;

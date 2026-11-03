@@ -120,13 +120,57 @@ async function ensureExistingWorkspaceMatches(
     return false;
   }
 
+  let currentBranch: string | undefined;
   try {
-    const currentBranch = await getCurrentBranch(targetPath);
+    currentBranch = await getCurrentBranch(targetPath);
     throwIfProvisionAborted(signal);
-    return currentBranch === branchName;
+    if (currentBranch === branchName) return true;
   } catch (error) {
     if (signal?.aborted) throw error;
     return false;
+  }
+  // The caller replaces a mismatched folder. Never replace one holding
+  // uncommitted work (an agent's own branch, a rebase, a renamed thread).
+  if (await hasUncommittedWork(targetPath, signal)) {
+    throw new WorkspaceError(
+      "abandoned_worktree_dirty",
+      `The worktree at ${targetPath} is on ${currentBranch === undefined ? "a detached HEAD" : `branch ${currentBranch}`}, not ${branchName}, and has uncommitted changes, so it was left alone instead of being replaced. Commit or stash them, or remove the folder, to retry.`,
+    );
+  }
+  return false;
+}
+
+/**
+ * True when this folder is a Git checkout (has its own `.git`) with changes.
+ * Once `.git` exists, any Git failure counts as changes, so nothing is
+ * deleted on a guess.
+ */
+export async function hasUncommittedWork(
+  targetPath: string,
+  signal: AbortSignal | undefined,
+): Promise<boolean> {
+  try {
+    await fs.access(path.join(targetPath, ".git"));
+  } catch {
+    return false;
+  }
+  try {
+    // Explicit flags, so user config can't hide changes; no optional locks, so
+    // the agent's own Git commands aren't blocked.
+    const status = await runGit(
+      [
+        "--no-optional-locks",
+        "status",
+        "--porcelain",
+        "--untracked-files=normal",
+        "--ignore-submodules=none",
+      ],
+      { cwd: targetPath, ...signalOptions(signal), allowFailure: true },
+    );
+    return status.exitCode !== 0 || status.stdout.trim() !== "";
+  } catch (error) {
+    if (signal?.aborted) throw error;
+    return true;
   }
 }
 
@@ -160,11 +204,7 @@ async function removeAbandonedAttemptWorktree(args: {
     return;
   }
   throwIfProvisionAborted(args.signal);
-  const status = await runGit(["status", "--porcelain"], {
-    cwd: holder,
-    ...(args.signal !== undefined ? { signal: args.signal } : {}),
-  });
-  if (status.stdout.trim() !== "") {
+  if (await hasUncommittedWork(holder, args.signal)) {
     throw new WorkspaceError(
       "abandoned_worktree_dirty",
       `Branch ${args.branchName} is still checked out at ${holder} by an earlier attempt, and that worktree has uncommitted changes, so it was left alone. Remove it to retry.`,
@@ -486,7 +526,8 @@ export async function createWorktree(
       await finishWorktreeSetup(args);
       return { path: args.targetPath };
     } catch (error) {
-      await removeCreateTarget(args);
+      if (!(await hasUncommittedWork(args.targetPath, args.signal)))
+        await removeCreateTarget(args);
       throw error;
     }
   }

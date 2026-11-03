@@ -91,8 +91,8 @@ impl Manager {
                             )))
                         }
                         _ if matches!(
-                            child.state.as_str(),
-                            "failed" | "closed" | "process_lost"
+                            child.state,
+                            SessionState::Failed | SessionState::Closed | SessionState::ProcessLost
                         ) =>
                         {
                             Some(Err("Child runtime is unavailable".into()))
@@ -268,6 +268,19 @@ fn may_use(local: &Local, caller: &str, child: &Session) -> bool {
             .is_some_and(|source| under(local, source, child))
 }
 
+/// `thread tell` also reaches the caller's parent and every thread under that parent, like Local threads (#177).
+/// Some(true) for a thread the caller may use, Some(false) for the others, which see who sent it.
+fn may_tell(local: &Local, caller: &str, target: &str) -> Option<bool> {
+    let t = local.sessions.get(target)?;
+    let parent = local.sessions.get(caller)?.parent_session.as_deref();
+    if may_use(local, caller, t) {
+        Some(true)
+    } else {
+        (target != caller && parent.is_some_and(|p| p == target || under(local, p, t)))
+            .then_some(false)
+    }
+}
+
 /// The latest saved history of a side chat's source, read as the side chat launches.
 pub(super) fn fork_history(
     local: &Local,
@@ -390,7 +403,7 @@ impl Manager {
         let (kind, input, model, provider, workspace) = {
             let local = self.local.lock().unwrap();
             let p = local.sessions.get(parent).ok_or(Error::NotFound)?;
-            if p.close_request.is_some() || p.state == "closed" {
+            if p.close_request.is_some() || p.state == SessionState::Closed {
                 return Err(Error::Conflict("the parent thread is closed"));
             }
             let kind = spawn.harness.unwrap_or(p.harness);
@@ -707,7 +720,7 @@ impl Manager {
                     else {
                         return;
                     };
-                    if p.close_request.is_some() || p.state == "closed" {
+                    if p.close_request.is_some() || p.state == SessionState::Closed {
                         return;
                     }
                     let finished = c.receipts.values().find_map(|r| {
@@ -748,7 +761,9 @@ impl Manager {
                             title(c),
                             p.current_request.clone().filter(|_| steer),
                         )),
-                        None if c.close_request.is_some() || c.state == "closed" => return,
+                        None if c.close_request.is_some() || c.state == SessionState::Closed => {
+                            return;
+                        }
                         None => None,
                     }
                 };
@@ -788,6 +803,13 @@ impl Manager {
             Some(c) if may_use(&local, parent, c) => Ok(()),
             _ => Err(Error::Conflict("not a child thread of this thread")),
         }
+    }
+
+    /// `thread tell`'s target: true for a thread under the caller, false for any other it may tell.
+    pub(crate) fn tell_target(&self, caller: &str, target: &str) -> Result<bool> {
+        may_tell(&self.local.lock().unwrap(), caller, target).ok_or(Error::Conflict(
+            "not in this thread's tree: tell reaches its subagents, its parent (`room-cli thread tell --parent TEXT`) and the threads under its parent",
+        ))
     }
 
     /// Every thread under this one, at any depth, with whether it is already archived.

@@ -9,7 +9,11 @@ import {
   resolveWorktreeAttemptRoot,
   resolveWorktreeTargetPath,
 } from "./host/paths.js";
-import { createWorktree, removeWorktree } from "./host/worktree.js";
+import {
+  createWorktree,
+  hasUncommittedWork,
+  removeWorktree,
+} from "./host/worktree.js";
 
 function completionPathForWorktree(worktreePath: string): string {
   return `${worktreePath}.completed`;
@@ -92,6 +96,14 @@ export function createWorktreeHostEntry() {
                 })
               : [input.path];
           for (const path of paths) {
+            // A remove without a path is for an attempt that never got its
+            // folder. A folder under its key with changes may be a live
+            // thread's work, so keep it (#576).
+            if (
+              input.path === null &&
+              (await hasUncommittedWork(path, context.signal))
+            )
+              continue;
             await rm(completionPathForWorktree(path), { force: true });
             await removeWorktree({
               path,

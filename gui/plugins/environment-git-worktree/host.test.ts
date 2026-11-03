@@ -328,7 +328,7 @@ describe("worktree host entry", () => {
     await harness.experimental_dispose();
   });
 
-  it("replaces an invalid target before recreating the expected branch", async () => {
+  it("replaces a clean target on the wrong branch before recreating the expected branch", async () => {
     const { sourcePath, dataDir } = await createSourceRepository();
     const harness = createHarness(dataDir);
     const input = createInput({
@@ -350,6 +350,47 @@ describe("worktree host entry", () => {
     ).toBe("bb/expected");
     await harness.experimental_dispose();
   });
+
+  it.each([
+    ["its own branch", ["checkout", "-b", "agent-branch"], "bb/expected"],
+    ["a detached HEAD", ["checkout", "--detach"], "bb/expected"],
+    ["a renamed expected branch", null, "bb/renamed"],
+  ])(
+    "keeps a dirty target on %s instead of replacing it",
+    async (_label, checkout, retryBranch) => {
+      const { sourcePath, dataDir } = await createSourceRepository();
+      const harness = createHarness(dataDir);
+      const input = createInput({
+        operationId: "first",
+        sourcePath,
+        pathKey: "dirty",
+        branchName: "bb/expected",
+      });
+      const first = await harness.experimental_call("create", input);
+      if (first.status !== "created") throw new Error(first.message);
+      await writeFile(join(first.path, "agent.txt"), "work\n");
+      await git(sourcePath, "config", "status.showUntrackedFiles", "no");
+      if (checkout !== null) await git(first.path, ...checkout);
+      const retry = await harness.experimental_call("create", {
+        ...input,
+        operationId: "retry",
+        branchName: retryBranch,
+      });
+      expect(retry).toMatchObject({
+        status: "failed",
+        message: expect.stringContaining("uncommitted changes"),
+      });
+      expect(
+        await harness.experimental_call("remove", {
+          operationId: "cleanup",
+          pathKey: "dirty",
+          path: null,
+        }),
+      ).toEqual({ status: "removed" });
+      expect(existsSync(join(first.path, "agent.txt"))).toBe(true);
+      await harness.experimental_dispose();
+    },
+  );
 
   it("leaves setup execution to core", async () => {
     const { sourcePath, dataDir } = await createSourceRepository();
@@ -396,6 +437,7 @@ describe("worktree host entry", () => {
     );
     if (first.status !== "created") throw new Error(first.message);
     await writeFile(join(first.path, "notes.txt"), "work in progress\n");
+    await git(sourcePath, "config", "status.showUntrackedFiles", "no");
     const retry = await harness.experimental_call(
       "create",
       createInput({

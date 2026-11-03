@@ -1,5 +1,5 @@
 //! A transfer is staged before one durable activation makes it executable.
-use super::{Error, Manager, Receipt, Result};
+use super::{Error, Manager, Receipt, Result, SessionState};
 use crate::{runtime, workspace};
 use axum::body::{Body, Bytes};
 use serde::{Deserialize, Serialize};
@@ -210,7 +210,7 @@ fn validate(manifest: &Manifest) -> Result<()> {
 fn native_in_use(local: &super::Local, native_id: &str) -> bool {
     local.sessions.values().any(|s| {
         s.native_id.as_deref() == Some(native_id)
-            && s.state != "closed"
+            && s.state != SessionState::Closed
             && s.close_request.is_none()
     })
 }
@@ -273,7 +273,10 @@ impl Manager {
                     None
                 } else if s.queue_paused {
                     Some("paused_before_output")
-                } else if matches!(s.state.as_str(), "closed" | "process_lost" | "failed") {
+                } else if matches!(
+                    s.state,
+                    SessionState::Closed | SessionState::ProcessLost | SessionState::Failed
+                ) {
                     Some("cloud_process_unavailable")
                 } else if s.ready && s.current_request.is_none() && s.queue.is_empty() {
                     Some("no_cloud_output")
@@ -662,7 +665,7 @@ impl Manager {
             if session.receipts.contains_key(&request) {
                 return Ok(());
             }
-            if session.close_request.is_some() || session.state == "closed" {
+            if session.close_request.is_some() || session.state == SessionState::Closed {
                 return Err(Error::Conflict("cloud session is closed"));
             }
             let receipt = Receipt {

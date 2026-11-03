@@ -1,5 +1,9 @@
 //! Two-way Mac ↔ VM access (ADR 0113). VM agents reach the paired Mac through its helper; the Mac runs commands on the VM.
-use crate::{preview::Peer, session::Manager};
+use crate::{
+    observability::{Signal, elapsed_ms},
+    preview::Peer,
+    session::Manager,
+};
 use axum::{
     Json, Router,
     body::Bytes,
@@ -148,6 +152,8 @@ pub struct Mac {
     /// When the helper last disconnected; None if it hasn't connected since Core started.
     left: Mutex<Option<Instant>>,
     report: Mutex<Option<(AppReport, Instant)>>,
+    /// The last `mac run` refusal put in diagnostics. Agents retry fast, so at most one a minute per reason.
+    refused: Mutex<Option<(&'static str, Instant)>>,
 }
 impl Default for Mac {
     fn default() -> Self {
@@ -159,6 +165,7 @@ impl Default for Mac {
             since: Mutex::new(Instant::now()),
             left: Mutex::default(),
             report: Mutex::default(),
+            refused: Mutex::default(),
         }
     }
 }
@@ -195,9 +202,13 @@ impl Mac {
     }
     /// Why agents can't reach the Mac: the newest thing Core or the Mac app knows (#109).
     fn unavailable(&self) -> String {
+        self.why_unavailable().1
+    }
+    /// The same answer, with a fixed reason for diagnostics.
+    fn why_unavailable(&self) -> (&'static str, String) {
         match self.helper.lock().unwrap().as_ref().map(|h| h.stale) {
-            Some(true) => return STALE.into(),
-            Some(false) => return RECONNECTED.into(),
+            Some(true) => return ("stale", STALE.into()),
+            Some(false) => return ("reconnected", RECONNECTED.into()),
             None => {}
         }
         let left = *self.left.lock().unwrap();
@@ -208,10 +219,10 @@ impl Mac {
         let after = |at: &Instant| left.is_none_or(|left| *at > left);
         let reported = self.report.lock().unwrap();
         match reported.as_ref().filter(|(_, at)| at.elapsed() < REPORTED) {
-            Some((report, _)) if report.access == "off" => "Mac unavailable: the user turned Mac access off. If you need their Mac, ask them to turn it on in Cloudroom; otherwise continue cloud work.".into(),
-            Some((AppReport { problem: Some(problem), .. }, at)) if after(at) => format!("Mac unavailable: the user's Mac is online, but Mac access can't connect to Cloudroom{since}. Cloudroom shows them why in Settings → Machines, with a Check now link: {problem} Continue cloud work; mention it only if you need their Mac."),
-            Some((_, at)) if after(at) => format!("Mac unavailable: the user's Mac is online with Mac access on, but it isn't connected to this sandbox{since}. If it doesn't connect within a few minutes, the user can restart Cloudroom on their Mac. Continue cloud work meanwhile."),
-            _ => left.map_or(UNAVAILABLE.into(), |at| format!("Mac unavailable: the paired Mac disconnected {} ago. It may be asleep, offline, or have Mac access turned off. Continue cloud work and try again later.", ago(at))),
+            Some((report, _)) if report.access == "off" => ("access_off", "Mac unavailable: the user turned Mac access off. If you need their Mac, ask them to turn it on in Cloudroom; otherwise continue cloud work.".into()),
+            Some((AppReport { problem: Some(problem), .. }, at)) if after(at) => ("mac_problem", format!("Mac unavailable: the user's Mac is online, but Mac access can't connect to Cloudroom{since}. Cloudroom shows them why in Settings → Machines, with a Check now link: {problem} Continue cloud work; mention it only if you need their Mac.")),
+            Some((_, at)) if after(at) => ("not_connected", format!("Mac unavailable: the user's Mac is online with Mac access on, but it isn't connected to this sandbox{since}. If it doesn't connect within a few minutes, the user can restart Cloudroom on their Mac. Continue cloud work meanwhile.")),
+            _ => left.map_or(("never_connected", UNAVAILABLE.into()), |at| ("disconnected", format!("Mac unavailable: the paired Mac disconnected {} ago. It may be asleep, offline, or have Mac access turned off. Continue cloud work and try again later.", ago(at)))),
         }
     }
 }
@@ -448,6 +459,29 @@ fn local_auth(m: &Manager, peer: Peer) -> Result<()> {
     }
 }
 
+/// Records why a `mac run` got no Mac, so a lost link can be traced after the sandbox is gone.
+fn record_refusal(m: &Manager, reason: &'static str, started: Instant) {
+    {
+        let mut last = m.mac.refused.lock().unwrap();
+        if last
+            .as_ref()
+            .is_some_and(|(r, at)| *r == reason && at.elapsed() < Duration::from_secs(60))
+        {
+            return;
+        }
+        *last = Some((reason, Instant::now()));
+    }
+    m.observability.record(Signal::MacUnavailable {
+        reason,
+        waited_ms: elapsed_ms(started),
+        holder: m.previews.holder(),
+    });
+}
+fn refused(m: &Manager, started: Instant) -> Failure {
+    let (reason, message) = m.mac.why_unavailable();
+    record_refusal(m, reason, started);
+    Failure(StatusCode::CONFLICT, message)
+}
 async fn local_run(
     State(m): State<Arc<Manager>>,
     ConnectInfo(peer): ConnectInfo<Peer>,
@@ -455,6 +489,7 @@ async fn local_run(
 ) -> Result<Json<Value>> {
     local_auth(&m, peer)?;
     let stdin = validate(&run)?;
+    let started = Instant::now();
     let mac = &m.mac;
     let mut changed = mac.changed.subscribe();
     let fresh = mac.since.lock().unwrap().elapsed() < FRESH;
@@ -470,7 +505,7 @@ async fn local_run(
             );
         }
         if Instant::now() >= wait {
-            return Err(Failure(StatusCode::CONFLICT, mac.unavailable()));
+            return Err(refused(&m, started));
         }
         tokio::select! {
             _ = changed.changed() => {},
@@ -514,7 +549,7 @@ async fn local_run(
         .is_err()
     {
         mac.jobs.lock().unwrap().remove(&id);
-        return Err(Failure(StatusCode::CONFLICT, mac.unavailable()));
+        return Err(refused(&m, started));
     }
     let mut cancel = Cancel {
         id: id.clone(),
@@ -531,9 +566,7 @@ async fn local_run(
         let connected = mac.connected(generation);
         {
             let mut jobs = mac.jobs.lock().unwrap();
-            let job = jobs
-                .get(&id)
-                .ok_or_else(|| Failure(StatusCode::CONFLICT, mac.unavailable()))?;
+            let job = jobs.get(&id).ok_or_else(|| refused(&m, started))?;
             if let Some(result) = &job.result {
                 cancel.armed = false;
                 let mut result = result.clone();
@@ -552,9 +585,10 @@ async fn local_run(
                     h.stale = true;
                 }
                 return Err(if connected {
+                    record_refusal(&m, "not_responding", started);
                     conflict(NOT_RESPONDING)
                 } else {
-                    Failure(StatusCode::CONFLICT, mac.unavailable())
+                    refused(&m, started)
                 });
             }
             // In-flight work keeps running on the Mac; its helper reports the result after reconnecting.

@@ -1,5 +1,5 @@
 //! Preview registration, not web-server or harness lifecycle ownership.
-use crate::config::Config;
+use crate::{config::Config, observability::Signal};
 use axum::{
     Json, Router,
     body::Body,
@@ -33,6 +33,7 @@ use tokio::{
 
 const SOCKET: &str = "/run/cloudroom/preview.sock";
 const FRESH_SECONDS: u64 = 15;
+const MAX_PAIRING_SEEN: usize = 16;
 pub const SKILL: &str = include_str!("cloud-preview/SKILL.md");
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -106,6 +107,8 @@ pub struct Previews {
     core_port: u16,
     /// When a browser last loaded a preview page or called its API, in ms; 0 for never. The website counts it as activity.
     active: AtomicU64,
+    /// Each device's last recorded pairing outcome and holder. Helpers retry every few seconds; only changes are recorded.
+    pairing_seen: Mutex<BTreeMap<String, (&'static str, Option<String>)>>,
 }
 #[derive(Debug)]
 pub struct Failure(StatusCode, String);
@@ -131,6 +134,9 @@ fn now() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+fn short_device(device: &str) -> String {
+    device.chars().take(8).collect()
 }
 fn valid_device(device: &str) -> bool {
     device.len() == 32 && device.bytes().all(|b| b.is_ascii_hexdigit())
@@ -208,6 +214,7 @@ impl Previews {
             tunnels: Mutex::new(Vec::new()),
             core_port: config.listen.port(),
             active: AtomicU64::new(0),
+            pairing_seen: Mutex::default(),
         }))
     }
     /// Mac access shares the preview pairing and agent identity.
@@ -220,6 +227,44 @@ impl Previews {
     }
     pub(crate) fn paired(&self, device: &str) -> bool {
         self.saved.lock().unwrap().devices.contains_key(device)
+    }
+    /// The device that holds this sandbox's pairing, shortened for diagnostics.
+    pub(crate) fn holder(&self) -> Option<String> {
+        let saved = self.saved.lock().unwrap();
+        saved
+            .devices
+            .keys()
+            .next()
+            .map(|device| short_device(device))
+    }
+    /// What to record for this pairing try: nothing unless its outcome or holder changed.
+    fn pairing_signal(&self, device: &str, paired: bool) -> Option<Signal> {
+        if !valid_device(device) {
+            return None;
+        }
+        let holder = self.holder();
+        let outcome = if paired {
+            "paired"
+        } else if holder.as_deref() == Some(short_device(device).as_str()) {
+            "failed"
+        } else {
+            "refused"
+        };
+        let mut seen = self.pairing_seen.lock().unwrap();
+        let unseen = !seen.contains_key(device);
+        if (unseen && seen.len() >= MAX_PAIRING_SEEN)
+            || seen
+                .get(device)
+                .is_some_and(|(o, h)| *o == outcome && *h == holder)
+        {
+            return None;
+        }
+        seen.insert(device.to_owned(), (outcome, holder.clone()));
+        Some(Signal::MacPairing {
+            device: short_device(device),
+            outcome,
+            holder,
+        })
     }
     pub fn last_activity(&self) -> Option<u64> {
         Some(self.active.load(Ordering::Relaxed)).filter(|at| *at > 0)
@@ -662,13 +707,27 @@ async fn pair(
     State(m): State<Arc<crate::session::Manager>>,
     Json(input): Json<Device>,
 ) -> Result<Json<Value>> {
-    Ok(Json(m.previews.pair(input)?))
+    let device = input.device.clone();
+    let result = m.previews.pair(input);
+    if let Some(signal) = m.previews.pairing_signal(&device, result.is_ok()) {
+        m.observability.record(signal);
+    }
+    Ok(Json(result?))
 }
 async fn revoke(
     State(m): State<Arc<crate::session::Manager>>,
     RoutePath(id): RoutePath<String>,
 ) -> Result<Json<Value>> {
-    Ok(Json(m.previews.revoke(&id)?))
+    let held = m.previews.paired(&id);
+    let revoked = m.previews.revoke(&id)?;
+    if held {
+        m.observability.record(Signal::MacPairing {
+            device: short_device(&id),
+            outcome: "revoked",
+            holder: None,
+        });
+    }
+    Ok(Json(revoked))
 }
 async fn report(
     State(m): State<Arc<crate::session::Manager>>,

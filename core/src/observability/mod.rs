@@ -81,6 +81,18 @@ pub(crate) enum Signal {
         reason: &'static str,
     },
     Resources(system::Resources),
+    /// A Mac helper's try at this sandbox's one-Mac pairing. Devices are shortened IDs; only changes are recorded.
+    MacPairing {
+        device: String,
+        outcome: &'static str,
+        holder: Option<String>,
+    },
+    /// An agent's `mac run` got no Mac: why, how long it waited, and which device holds the pairing.
+    MacUnavailable {
+        reason: &'static str,
+        waited_ms: u64,
+        holder: Option<String>,
+    },
     ComputerUse {
         session_id: String,
         tool: String,

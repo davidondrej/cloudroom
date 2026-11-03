@@ -117,7 +117,10 @@ async fn wait(cwd: &Path) -> io::Result<i32> {
             return Ok(1);
         }
         if !announced {
-            println!("Waiting for Cloudroom to finish copying the project...");
+            // Some harnesses hand a long command back to the agent while it runs (#588).
+            println!(
+                "Waiting for Cloudroom to finish copying the project... Keep waiting until this command returns: files you write in this folder before then can be replaced."
+            );
             announced = true;
         }
         tokio::time::sleep(POLL).await;

@@ -42,13 +42,19 @@ describe("pickThreadProcesses", () => {
         "/Applications/Ollama.app/Contents/MacOS/Ollama",
       ),
       row(54, 1, tags("thr_abc", "http://127.0.0.1:2")),
+      row(
+        56,
+        1,
+        tags("thr_abc"),
+        "/opt/homebrew/Cellar/python@3.15/3.15.0_1/Frameworks/Python.framework/Versions/3.15/Resources/Python.app/Contents/MacOS/Python",
+      ),
       row(55, 1, ["FOO=x ROOM_THREAD_ID=thr_abc", `ROOM_SERVER_URL=${URL}`]),
     ];
     const pick = (threadId: string, serverUrl: string | undefined) =>
       pickThreadProcesses(rows, { threadId, serverUrl, selfPid: 20 }).map(
         (picked) => picked.pid,
       );
-    expect(pick("thr_abc", URL)).toEqual([50]);
+    expect(pick("thr_abc", URL)).toEqual([50, 56]);
     expect(pick("not a thread", URL)).toEqual([]);
     expect(pick("thr_abc", undefined)).toEqual([]);
     expect(pick("thr_abc", "")).toEqual([]);

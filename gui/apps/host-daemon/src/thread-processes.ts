@@ -16,7 +16,7 @@ export interface ProcessTable {
 }
 
 const THREAD_ID = /^thr_[a-z0-9]+$/u;
-const APP_BUNDLE = /\.app\/Contents\//u;
+const INSTALLED_APP = /^(?:\/System|\/Users\/[^/]+)?\/Applications\/[^/]+\.app\//u;
 const STOP_GRACE_MS = 3_000;
 
 export function pickThreadProcesses(
@@ -51,7 +51,7 @@ export function pickThreadProcesses(
       tags.every((tag) => row.env.includes(tag)) &&
       !tree.has(row.pid) &&
       !ancestors.has(row.pid) &&
-      !APP_BUNDLE.test(row.exe ?? ""),
+      !INSTALLED_APP.test(row.exe ?? ""),
   );
 }
 

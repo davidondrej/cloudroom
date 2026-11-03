@@ -1,5 +1,5 @@
-//! Cloud agents send Cloudroom feedback straight to David by themselves (ADR 0158). Core sends each report to the
-//! website itself (ADR 0234), so reports arrive even while the user's Mac is offline.
+//! Cloud agents send Cloudroom feedback straight to David by themselves (ADR 0158), and read their account's Cloud
+//! Credits (#610). Core asks the website itself (ADR 0234), so both work even while the user's Mac is offline.
 use super::{
     Manager,
     thread::{Failure, caller, fail},
@@ -17,6 +17,9 @@ use std::{io, sync::Arc};
 
 const USAGE: &str = "room-cli feedback MESSAGE
 Sends David, Cloudroom's founder, a bug, friction, or idea: what you did, what happened, and the exact error. Never include secrets, personal data, or the user's code.";
+const CREDITS: &str = "room-cli usage [--json]
+The account's Cloud Credits: how many of the plan's credits the last 30 days used, and extra credits left. Cloud
+sandboxes stop when none are left. Check before a big Cloud fan-out.";
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -26,7 +29,29 @@ pub struct Report {
 
 /// Served on the agent-only socket that `room-cli mac` also uses.
 pub(crate) fn agent_routes() -> Router<Arc<Manager>> {
-    Router::new().route("/report", post(report))
+    Router::new()
+        .route("/report", post(report))
+        .route("/usage", post(usage))
+}
+
+/// One website read per call, never polled.
+async fn usage(
+    State(m): State<Arc<Manager>>,
+    ConnectInfo(peer): ConnectInfo<Peer>,
+) -> Result<Json<Value>, Failure> {
+    caller(&m, peer, "usage")?;
+    let Some(api) = &m.history.api else {
+        return Err(fail(
+            StatusCode::CONFLICT,
+            "Cloud Credits apply only to Cloudroom cloud threads",
+        ));
+    };
+    api.get("usage", &[]).await.map(Json).map_err(|error| {
+        fail(
+            StatusCode::SERVICE_UNAVAILABLE,
+            &format!("Could not read Cloud Credits: {error}"),
+        )
+    })
 }
 
 async fn report(
@@ -85,4 +110,45 @@ pub async fn cli(args: &[String]) -> io::Result<i32> {
     .await?;
     println!("{answer}");
     Ok(0)
+}
+
+/// `room-cli usage` in Cloud threads.
+pub async fn usage_cli(args: &[String]) -> io::Result<i32> {
+    let json = match args {
+        [] => false,
+        [flag] if flag == "--json" => true,
+        _ => {
+            println!("{CREDITS}");
+            return Ok(if args[0] == "--help" { 0 } else { 2 });
+        }
+    };
+    let usage = crate::mac::request(crate::mac::SOCKET, "POST", "/usage", None).await?;
+    if json {
+        println!("{usage}");
+        return Ok(0);
+    }
+    println!("{}", credits(&usage));
+    Ok(0)
+}
+
+/// The website's answer in one line.
+fn credits(usage: &Value) -> String {
+    let (Some(plan), Some(limit)) = (usage["plan"].as_str(), usage["credits_limit"].as_f64())
+    else {
+        return "This account's Cloud Credits aren't metered.".into();
+    };
+    let Some(used) = usage["credits"].as_f64() else {
+        return format!(
+            "Cloud Credits ({plan} plan) are being counted. Try again in a few minutes."
+        );
+    };
+    let extra = usage["extra_credits"].as_f64().unwrap_or(0.0);
+    let percent = if limit > 0.0 {
+        used / limit * 100.0
+    } else {
+        100.0
+    };
+    format!(
+        "Cloud Credits ({plan} plan): {used:.0} of {limit:.0} used in the last 30 days ({percent:.0}%), {extra:.0} extra credits left. Cloud sandboxes stop when none are left."
+    )
 }

@@ -214,7 +214,7 @@ export function projectRecord(db: DbConnection, threadId: string, record: Sessio
         emit({ ...base, type: "thread/compacted" });
         emit({ ...base, type: "turn/completed", status: "completed" });
       }
-      if (receipt.state === "accepted" && ["stop", "resume"].includes(receipt.command)) {
+      if (receipt.state === "accepted" && (receipt.command === "stop" || (receipt.command === "resume" && !(data.input && object.parse(data.input).keep_paused)))) {
         saveBinding(tx, threadId, { queuePaused: receipt.command === "stop" });
         if (receipt.command === "stop" && unstartedTurn(tx, threadId)) saveStatus(tx, threadId, "idle");
       }

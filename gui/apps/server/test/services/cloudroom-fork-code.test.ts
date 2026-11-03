@@ -40,8 +40,8 @@ function folder(name: string, files: Record<string, string>): string {
 
 const git = (cwd: string, ...args: string[]) => execFileSync("git", ["-C", cwd, "-c", "user.name=t", "-c", "user.email=t@t", ...args]).toString();
 
-function clone(files: Record<string, string>): string {
-  const path = folder("child", files);
+function clone(files: Record<string, string>, name = "child"): string {
+  const path = folder(name, files);
   git(path, "init", "-q");
   git(path, "add", "-A");
   git(path, "commit", "-qm", "init");
@@ -75,6 +75,26 @@ linux("mirrors the parent's files into a child with no Git repository, and an em
   expect(existsSync(join(child, "stale.ts"))).toBe(false);
   expect(readFileSync(join(child, ".env"), "utf8")).toBe("KEY=2");
   expect(existsSync(join(child, "a.ts")) && existsSync(join(child, "node_modules/x.js"))).toBe(true);
+});
+
+linux("keeps a repo the agent cloned into a child with no Git before the parent's files landed (#588)", async () => {
+  const child = folder("child", { "stale.ts": "s" });
+  const repo = clone({ "README.md": "r", "src/a.ts": "a" }, "child/repo");
+  writeFileSync(join(repo, "check.sh"), "new");
+  expect(await copy(folder("parent", { "a.ts": "a" }), child, "t6")).toBeNull();
+  expect(git(repo, "status", "--porcelain")).toBe("?? check.sh\n");
+  expect(existsSync(join(child, "stale.ts"))).toBe(false);
+});
+
+linux("changes nothing when the parent's files overlap a repo the agent cloned (#588)", async () => {
+  const cases = [["t7", "vendor/repo", "vendor"], ["t8", "vendor/repo", "vendor/repo/README.md"], ["t9", "vendor/.cache/repo", "vendor"], ["t10", "vendor/build/repo", "vendor"]] as const;
+  for (const [id, at, path] of cases) {
+    const child = folder(`child-${id}`, { "stale.ts": "s" });
+    const repo = clone({ "README.md": "r" }, `child-${id}/${at}`);
+    expect(await copy(folder(`parent-${id}`, { [path]: "p", "a.ts": "a" }), child, id)).toContain(`${at} is a Git repository`);
+    expect(git(repo, "status", "--porcelain")).toBe("");
+    expect(existsSync(join(child, "stale.ts")) && !existsSync(join(child, "a.ts"))).toBe(true);
+  }
 });
 
 linux("never writes through a clone's symlink into .git", async () => {

@@ -33,11 +33,23 @@ room-cli thread spawn --provider codex|claude-code|pi|opencode|hermes|devin|droi
 room-cli thread fork [--provider codex|claude-code|pi|opencode|hermes|devin|droid|fx|openclaw] [--model MODEL] [--reasoning-level LEVEL] [--title TITLE] --prompt TEXT|--prompt-file PATH
 room-cli thread list [--include-archived]
 room-cli thread output CHILD_ID [--all]
-room-cli thread tell CHILD_ID TEXT
+room-cli thread tell THREAD_ID|--parent TEXT
 room-cli thread stop CHILD_ID
 room-cli thread archive CHILD_ID";
 const SPAWN_NOTE: &str = "Started in this sandbox and folder. Keep working: Cloudroom sends you a message each time it finishes a turn.";
 const OWN_NOTE: &str = "Started in its own sandbox with a copy of your code (commits and uncommitted changes), on its own branch. It doesn't see your later edits; share work through Git. Use this ID with tell, stop and archive. Keep working: Cloudroom sends you a message each time it finishes a turn.";
+/// What `thread tell` answers once its message is steered, unconfirmed or queued: for a subagent, which reports back,
+/// or for another thread, which doesn't (#177). The website words its own relayed tells the same.
+const CHILD_NOTES: [&str; 3] = [
+    "Sent into the child's running turn. Cloudroom tells you when that turn finishes.",
+    "Could not confirm the child's running turn got it. Check thread output before sending it again.",
+    "Queued. Cloudroom tells you when the child finishes it.",
+];
+const OTHER_NOTES: [&str; 3] = [
+    "Sent into its running turn. It isn't your subagent, so Cloudroom won't tell you when it finishes.",
+    "Could not confirm its running turn got it. Sending it again may deliver it twice.",
+    "Queued. It isn't your subagent, so Cloudroom won't tell you when it finishes.",
+];
 const FALLBACK_NOTE: &str = " The user's Cloudroom app didn't start it in its own sandbox (it's probably closed), so it runs here.";
 const FORK_NOTE: &str = "Forked this thread at its last finished turn: a new thread with this conversation and your code (commits and uncommitted changes), on its own branch where the project uses Git. It runs on its own and doesn't report back to you; it doesn't see your later edits.";
 const TOP_NOTE: &str = "Started as a top-level thread in its own sandbox, from the project's GitHub repo (push your work first) and .env files. It is not your child: it doesn't report back, and you can't tell, stop or read it. It shows in the user's sidebar within a minute.";
@@ -56,6 +68,28 @@ const OUTCOME_KEPT: Duration = Duration::from_secs(3600);
 /// child never runs both in its own sandbox and here.
 static CHILDREN: LazyLock<Mutex<HashMap<String, Outcome>>> = LazyLock::new(Mutex::default);
 static APP_MISSED: Mutex<Option<Instant>> = Mutex::new(None);
+/// How long a child the app just started in a sandbox of its own counts as starting, while the website may not link
+/// it to this thread yet. Older apps link it only once its Core runs (#317).
+const STARTING_FOR: Duration = Duration::from_secs(300);
+
+/// The calling session's children started in sandboxes of their own in the last few minutes, oldest first.
+pub(super) fn starting(parent: &str) -> Vec<String> {
+    let prefix = format!("{parent}/own_");
+    let children = CHILDREN.lock().unwrap();
+    let mut started: Vec<_> = children
+        .iter()
+        .filter_map(|(slot, outcome)| match outcome {
+            Outcome::Started(thread, at)
+                if slot.starts_with(&prefix) && at.elapsed() < STARTING_FOR =>
+            {
+                Some((*at, thread.clone()))
+            }
+            _ => None,
+        })
+        .collect();
+    started.sort();
+    started.into_iter().map(|(_, thread)| thread).collect()
+}
 
 enum Outcome {
     /// Waiting for the app: its thread ID, or why it could not start the child.
@@ -154,18 +188,24 @@ pub(crate) fn agent_routes() -> Router<Arc<Manager>> {
 
 /// The session whose harness process sent this `cloudroom <command>` request.
 pub(crate) fn caller(m: &Manager, peer: Peer, command: &str) -> Result<String, Failure> {
-    if peer.0.is_none() || m.previews.agent().map(|(_, uid)| uid) != peer.0 {
-        return Err(fail(
-            StatusCode::FORBIDDEN,
-            &format!("Only the VM agent account may run cloudroom {command}"),
-        ));
-    }
+    agent(m, peer, command)?;
     peer.1
         .and_then(|pid| m.harness_session(&crate::secrets::ancestors(pid)))
         .ok_or(fail(
             StatusCode::CONFLICT,
             &format!("Run cloudroom {command} from a Cloudroom cloud thread"),
         ))
+}
+
+/// Only the VM agent account, from a thread or not (say, its terminal).
+pub(crate) fn agent(m: &Manager, peer: Peer, command: &str) -> Result<(), Failure> {
+    if peer.0.is_none() || m.previews.agent().map(|(_, uid)| uid) != peer.0 {
+        return Err(fail(
+            StatusCode::FORBIDDEN,
+            &format!("Only the VM agent account may run cloudroom {command}"),
+        ));
+    }
+    Ok(())
 }
 
 pub(crate) fn fail(status: StatusCode, error: &str) -> Failure {
@@ -720,11 +760,17 @@ async fn output(
             ));
         };
         let all = if query.all { "1" } else { "0" };
-        return api
-            .get("chat", &[("thread", &id), ("all", all)])
-            .await
-            .map(Json)
-            .map_err(|error| website_failure(error, "read the child's chat"));
+        return match api.get("chat", &[("thread", &id), ("all", all)]).await {
+            // The website may not know a child that just started yet, or has no chat of it yet (#317).
+            Err(super::history::ApiError::Status(404, _)) if starting(&parent).contains(&id) => {
+                Ok(Json(
+                    json!({"id":id,"state":"starting","note":"Its sandbox is still starting. Its replies arrive as messages when its turns end."}),
+                ))
+            }
+            answer => answer
+                .map(Json)
+                .map_err(|error| website_failure(error, "read the child's chat")),
+        };
     }
     m.own_child(&parent, &id).map_err(session_failure)?;
     Ok(Json(
@@ -738,20 +784,44 @@ async fn tell(
     Path(id): Path<String>,
     Json(input): Json<Tell>,
 ) -> Result<Json<Value>, Failure> {
-    let parent = caller(&m, peer, "thread tell")?;
+    let sender = caller(&m, peer, "thread tell")?;
     if input.text.trim().is_empty() || input.text.len() > super::MAX_PROMPT {
         return Err(fail(
             StatusCode::CONFLICT,
             "Use a message of 1-262144 bytes",
         ));
     }
+    let id = if id == "parent" {
+        // `thread tell --parent`: the thread that started this one, in this sandbox or another.
+        let local = m.local.lock().unwrap();
+        let session = local.sessions.get(&sender);
+        let up = session.and_then(|s| {
+            s.parent_session
+                .clone()
+                .or_else(|| s.parent_thread().map(str::to_owned))
+        });
+        up.ok_or_else(|| fail(StatusCode::CONFLICT, "This thread has no parent that `thread tell --parent` can reach. If another thread started it, Cloudroom passes it your reply when this turn ends."))?
+    } else {
+        id
+    };
     if relay::thread_id(&id) {
-        return relay::command(&m, &parent, &id, "tell", Some(&input.text)).await;
+        return relay::command(&m, &sender, &id, "tell", Some(&input.text)).await;
     }
-    m.own_child(&parent, &id).map_err(session_failure)?;
+    let under = m.tell_target(&sender, &id).map_err(session_failure)?;
+    let text = if under {
+        input.text
+    } else {
+        from_thread(&sender, &input.text)
+    };
     let request =
         random_key().map_err(|e| fail(StatusCode::SERVICE_UNAVAILABLE, &e.to_string()))?;
-    deliver(&m, &id, &request, &input.text).await
+    deliver(&m, &id, &request, &text, under).await
+}
+
+/// A message to a thread that isn't the sender's subagent says who sent it, as in Local threads, where the app shows
+/// it as an agent's message.
+fn from_thread(sender: &str, text: &str) -> String {
+    format!("[bb message from thread:{sender}]\n\n{text}")
 }
 
 /// Sends a message into the session's running turn, or else queues it. A request already delivered stays as it is,
@@ -761,7 +831,9 @@ pub(super) async fn deliver(
     id: &str,
     request: &str,
     text: &str,
+    child: bool,
 ) -> Result<Json<Value>, Failure> {
+    let notes = if child { CHILD_NOTES } else { OTHER_NOTES };
     let steer_id = format!("{request}_steer");
     if let Some(done) = m.receipt(id, request) {
         return Ok(Json(json!({"id":id,"state":done.state})));
@@ -774,23 +846,17 @@ pub(super) async fn deliver(
     };
     match steered.as_deref() {
         Some("completed") => {
-            return Ok(Json(
-                json!({"id":id,"state":"steered","note":"Sent into the child's running turn. Cloudroom tells you when that turn finishes."}),
-            ));
+            return Ok(Json(json!({"id":id,"state":"steered","note":notes[0]})));
         }
         Some(state) => {
-            return Ok(Json(
-                json!({"id":id,"state":state,"note":"Could not confirm the child's running turn got it. Check thread output before sending it again."}),
-            ));
+            return Ok(Json(json!({"id":id,"state":state,"note":notes[1]})));
         }
         None => {}
     }
     let receipt = m
         .command(id, request.to_owned(), "prompt", json!({"text":text}))
         .map_err(session_failure)?;
-    Ok(Json(
-        json!({"id":id,"state":receipt.state,"note":"Queued. Cloudroom tells you when the child finishes it."}),
-    ))
+    Ok(Json(json!({"id":id,"state":receipt.state,"note":notes[2]})))
 }
 
 /// A website call failed: its own refusal as is, or why it could not be reached.
@@ -1087,6 +1153,8 @@ pub async fn cli(args: &[String]) -> io::Result<i32> {
             return Ok(0);
         }
         ["tell", id, text] | ["tell", id, "--prompt", text] => {
+            // `--parent` names the thread that started this one.
+            let id = if *id == "--parent" { "parent" } else { id };
             let answer = crate::mac::request(
                 crate::mac::SOCKET,
                 "POST",

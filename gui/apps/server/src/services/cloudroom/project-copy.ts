@@ -4,7 +4,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { lstat, mkdtemp, open, readdir, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { promisify } from "node:util";
 import { z } from "zod";
 import { getProject, getThread, listProjectSourcesByProjectIds, setProjectGitRemoteUrlIfMissing } from "@cloudroom/db";
@@ -303,12 +303,19 @@ export async function localFiles(root: string, scope: "all" | "changed" | "env",
   // `--modified` skips staged edits and staged new files, so add what the index changed since the last commit.
   const staged = listed === null || scope === "all" ? "" : await git(root, ["diff", "-z", "--name-only", "--cached"]) ?? "";
   const ignored = listed === null ? "" : await git(root, ["ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--directory"]) ?? "";
-  const env = ignored.split("\0").filter((path) => path && !path.endsWith("/") && isEnv(path));
+  // A repo root keeps ignored `.env` files at any depth, since monorepo apps need theirs. Any other folder (a workspace, or a
+  // folder inside a checkout) keeps them only at its root and nested repo roots, so it doesn't send every secret under it (#140).
+  const repoRoot = listed !== null && (await git(root, ["rev-parse", "--show-prefix"]))?.trim() === "";
+  const envAt = (path: string) => repoRoot || dirname(path) === "." || existsSync(join(root, dirname(path), ".git"));
+  const env = ignored.split("\0").filter((path) => path && !path.endsWith("/") && isEnv(path) && envAt(path));
+  // Unignored `.env` files follow the same rule, unless Git tracks them (a committed `.env.example` is project code).
+  const tracked = repoRoot || listed === null ? null : new Set((await git(root, ["ls-files", "-z", "--cached"]) ?? "").split("\0"));
   const found = listed === null ? walk(root, "") : [...new Set([...listed.split("\0"), ...staged.split("\0"), ...env].filter(Boolean))];
   const files: string[] = [];
   let total = 0;
   for await (const path of found) {
     if (scope === "env" && !isEnv(path)) continue;
+    if (isEnv(path) && !envAt(path) && !tracked?.has(path)) continue;
     const info = await lstat(join(root, path)).catch(() => null);
     if (!info || !(info.isFile() || info.isSymbolicLink()) || info.size > MAX_FILE) continue;
     total += info.size;

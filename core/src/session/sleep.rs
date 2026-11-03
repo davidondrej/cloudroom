@@ -39,13 +39,13 @@ impl Session {
         self.current_request.is_some()
             || self.has_work()
             || matches!(
-                self.state.as_str(),
-                "pending"
-                    | "waiting_for_files"
-                    | "starting"
-                    | "resuming"
-                    | "starting_turn"
-                    | "running"
+                self.state,
+                SessionState::Pending
+                    | SessionState::WaitingForFiles
+                    | SessionState::Starting
+                    | SessionState::Resuming
+                    | SessionState::StartingTurn
+                    | SessionState::Running
             )
     }
 
@@ -77,14 +77,69 @@ impl Session {
     /// A restart relaunches only sessions with work or recent activity.
     pub(super) fn restores_awake(&self, now: u64) -> bool {
         self.has_work()
-            || (self.state != "sleeping"
+            || (self.state != SessionState::Sleeping
                 && self
                     .last_activity
                     .is_none_or(|at| now.saturating_sub(at) < self.idle_limit()))
     }
 }
 
+/// The shared browser pauses while nothing may use it, so an open page never burns credits while the sandbox waits to
+/// sleep (#610). Unknown at start counts as paused: a Core that stopped while it was paused leaves it so.
+#[derive(Clone, Copy, PartialEq)]
+pub(super) enum Browser {
+    Running,
+    /// Resumed by a command outside a turn: it runs until the next turn ends, never paused mid-command.
+    Held,
+    Paused,
+}
+
 impl Local {
+    fn set_browser(&mut self, next: Browser) {
+        // At startup Paused is only an assumption; enforce it on every idle check.
+        if next == Browser::Paused || self.browser == Browser::Paused {
+            crate::runtime::linux::pause_browser(next == Browser::Paused, self.browser_owner);
+        }
+        self.browser = next;
+    }
+
+    fn working(&self) -> bool {
+        (self.sessions.values()).any(|s| s.state != SessionState::Closed && s.busy())
+    }
+
+    /// A turn starts: the browser runs, and pauses again once it ends.
+    pub(super) fn browser_turn(&mut self) {
+        self.set_browser(Browser::Running);
+    }
+
+    /// `room-cli computer-use` (browser-harness runs it first) resumes the browser through here, so the sleeper
+    /// knows. Outside a turn it is held until the next turn ends.
+    pub(super) fn resume_browser(&mut self, in_turn: bool) {
+        let next = if in_turn && self.browser != Browser::Held {
+            Browser::Running
+        } else {
+            Browser::Held
+        };
+        self.set_browser(next);
+    }
+
+    /// Each idle-sleeper check: a turn, a background job, or a cloud-terminal command may use the browser, so it
+    /// runs; otherwise it pauses. A held browser waits for the next turn.
+    pub(super) fn check_browser(&mut self, terminal: impl FnOnce() -> bool) {
+        if self.browser == Browser::Held {
+            return;
+        }
+        if self.working() {
+            return self.set_browser(Browser::Running);
+        }
+        let used = self.agent_counts().background > 0 || terminal();
+        self.set_browser(if used {
+            Browser::Running
+        } else {
+            Browser::Paused
+        });
+    }
+
     /// Only an idle harness with no queued work, children, or background jobs may stop.
     fn can_sleep(&self, id: &str) -> bool {
         let s = &self.sessions[id];
@@ -95,7 +150,7 @@ impl Local {
         let background = s.has_background_jobs();
         s.ready
             && !s.releasing
-            && s.state == "idle"
+            && s.state == SessionState::Idle
             && !s.busy()
             && !s.compacting
             && s.rewind_request.is_none()
@@ -112,6 +167,15 @@ impl Local {
 }
 
 impl Manager {
+    /// Called by `room-cli computer-use` through the agent socket (#610).
+    pub(crate) fn resume_browser(&self, session: Option<&str>) {
+        let mut local = self.local.lock().unwrap();
+        let in_turn = session
+            .and_then(|id| local.sessions.get(id))
+            .is_some_and(Session::busy);
+        local.resume_browser(in_turn);
+    }
+
     /// Before a sandbox stops, refuse new work, but only when nothing is running.
     /// `hold: false` releases the drain, for example when the stop is cancelled.
     pub fn drain(&self, hold: bool) -> Value {
@@ -125,7 +189,7 @@ impl Manager {
         let busy = local
             .sessions
             .values()
-            .filter(|s| s.state != "closed" && !s.storage_paused)
+            .filter(|s| s.state != SessionState::Closed && !s.storage_paused)
             .find(|s| {
                 s.busy()
                     || s.compacting
@@ -178,6 +242,7 @@ impl Manager {
                         manager.release(&mut local, &id);
                     }
                 }
+                local.check_browser(|| manager.terminals.running());
             }
         });
     }
@@ -236,8 +301,8 @@ impl Manager {
                 self.release(local, id);
             }
         } else if !session.busy() {
-            if session.can_resume() && session.state != "sleeping" {
-                local.append(id, "state", json!({"state":"sleeping"}), None)?;
+            if session.can_resume() && session.state != SessionState::Sleeping {
+                local.append(id, "state", json!({"state":SessionState::Sleeping}), None)?;
             }
             local.finish_receipt(id, &request, "completed")?;
         }
@@ -252,7 +317,7 @@ impl Manager {
         session.releasing = false;
         session.awake = None;
         local.append(id, "harness", json!({"pid":null}), None)?;
-        local.append(id, "state", json!({"state":"sleeping"}), None)?;
+        local.append(id, "state", json!({"state":SessionState::Sleeping}), None)?;
         let pending: Vec<_> = local.sessions[id]
             .receipts
             .values()
@@ -268,7 +333,8 @@ impl Manager {
     /// Work arrived for a sleeping session: resume its native conversation.
     pub(super) fn wake(self: &Arc<Self>, local: &mut Local, id: &str) -> Result<()> {
         let s = &local.sessions[id];
-        if s.state == "sleeping" && s.handle.is_none() && s.has_work() && s.can_resume() {
+        if s.state == SessionState::Sleeping && s.handle.is_none() && s.has_work() && s.can_resume()
+        {
             self.schedule_resume(local, id, false)?;
         }
         Ok(())

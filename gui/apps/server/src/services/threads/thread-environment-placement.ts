@@ -24,7 +24,9 @@ import {
   type ProviderOperationContext,
 } from "../environments/environment-engine.js";
 import {
+  environmentHasLiveThreads,
   getPreparingEnvironment,
+  listEnvironments,
   reserveEnvironment,
   updatePreparingEnvironment,
 } from "@cloudroom/db";
@@ -1228,6 +1230,40 @@ export function prepareProviderEnvironment(
       policy.pathKeys === "per-attempt" || context.environment !== null
         ? `${context.thread.id}-${attempt}`
         : context.thread.id;
+    // A per-attempt create (a worktree) may replace the folder at its path
+    // key, so never aim one at a folder a thread is using (#576).
+    const live =
+      policy.pathKeys === "per-attempt"
+        ? listEnvironments(deps.db, {
+            environmentProviderId: record.provider.id,
+            hostId: context.host.id,
+            instanceKey: pathKey,
+          }).find(
+            (other) =>
+              other.id !== row?.id &&
+              other.status !== "destroyed" &&
+              other.teardownStatus !== "removed" &&
+              environmentHasLiveThreads(deps.db, other.id),
+          )
+        : undefined;
+    if (live !== undefined) {
+      deps.logger.warn(
+        {
+          threadId: context.thread.id,
+          threadStatus: context.thread.status,
+          threadEnvironmentId: context.thread.environmentId,
+          liveEnvironmentId: live.id,
+          pathKey,
+          stack: new Error().stack,
+        },
+        "Refused a duplicate environment create over a live environment",
+      );
+      return {
+        action: "reject",
+        message:
+          "This thread's workspace is already in use, so it was not re-created.",
+      };
+    }
     row = reserveEnvironment(deps.db, {
       projectId: context.project.id,
       ownerThreadId: context.thread.id,

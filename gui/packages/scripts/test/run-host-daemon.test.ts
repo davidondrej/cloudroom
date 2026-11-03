@@ -4,6 +4,11 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  CALLER_TOKEN_HEADER,
+  createCallerProofIssuer,
+  SERVER_CALLER_PROOF_PATH,
+} from "@cloudroom/config/caller-proof";
+import {
   HOST_AUTH_FILE_NAME,
   HOST_ID_FILE_NAME,
 } from "@cloudroom/host-daemon-contract";
@@ -54,6 +59,48 @@ async function makeTempDir(prefix: string): Promise<string> {
   return dir;
 }
 
+async function mockEnrollmentFetch(
+  dataDir: string,
+  hostId: string,
+  enrollKey: string,
+): Promise<RecordedFetchRequest[]> {
+  const issuer = await createCallerProofIssuer({ dataDir });
+  const requests: RecordedFetchRequest[] = [];
+  vi.stubGlobal(
+    "fetch",
+    async (input: TestFetchInput, init?: RequestInit): Promise<Response> => {
+      const url = new URL(input instanceof Request ? input.url : String(input));
+      if (url.pathname === "/health") return new Response("");
+      if (url.pathname === SERVER_CALLER_PROOF_PATH) {
+        return Response.json(issuer.start());
+      }
+      if (url.pathname.startsWith(`${SERVER_CALLER_PROOF_PATH}/`)) {
+        const { claim } = JSON.parse(String(init?.body)) as { claim: string };
+        const token = await issuer.finish(
+          url.pathname.slice(SERVER_CALLER_PROOF_PATH.length + 1),
+          claim,
+        );
+        return Response.json({ token }, { status: token === null ? 403 : 200 });
+      }
+      expect(url.pathname).toBe("/internal/hosts/enroll-key");
+      expect(
+        issuer.verify(
+          new Headers(init?.headers).get(CALLER_TOKEN_HEADER) ?? undefined,
+        ),
+      ).toBe(true);
+      requests.push({
+        body: typeof init?.body === "string" ? init.body : null,
+        url: url.href,
+      });
+      return Response.json(
+        { enrollKey, expiresAt: Date.now() + 60_000, hostId },
+        { status: 201 },
+      );
+    },
+  );
+  return requests;
+}
+
 beforeEach(async () => {
   vi.resetModules();
   vi.stubEnv("BB_DATA_DIR", "/tmp/bb-run-host-daemon-test");
@@ -64,6 +111,7 @@ beforeEach(async () => {
 
 afterEach(async () => {
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
   vi.unstubAllEnvs();
   await Promise.all(
     tempDirs
@@ -196,39 +244,10 @@ describe("run-host-daemon auto join", () => {
       `${persistedHostId}\n`,
     );
 
-    const requests: RecordedFetchRequest[] = [];
-    vi.stubGlobal(
-      "fetch",
-      async (input: TestFetchInput, init?: RequestInit): Promise<Response> => {
-        const url =
-          input instanceof Request
-            ? input.url
-            : input instanceof URL
-              ? input.toString()
-              : input;
-        requests.push({
-          body: typeof init?.body === "string" ? init.body : null,
-          url,
-        });
-
-        if (url.endsWith("/health")) {
-          return new Response("", { status: 200 });
-        }
-
-        return new Response(
-          JSON.stringify({
-            enrollKey: "bbde_test_enroll_key",
-            expiresAt: Date.now() + 60_000,
-            hostId: persistedHostId,
-          }),
-          {
-            headers: {
-              "content-type": "application/json",
-            },
-            status: 201,
-          },
-        );
-      },
+    const requests = await mockEnrollmentFetch(
+      dataDir,
+      persistedHostId,
+      "bbde_test_enroll_key",
     );
 
     const env = await runHostDaemon.maybeAddAutoJoinEnv(
@@ -238,11 +257,11 @@ describe("run-host-daemon auto join", () => {
 
     expect(env.BB_HOST_ID).toBe(persistedHostId);
     expect(env.BB_HOST_ENROLL_KEY).toBe("bbde_test_enroll_key");
-    expect(requests).toHaveLength(2);
-    expect(requests[1]?.url).toBe(
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.url).toBe(
       "http://127.0.0.1:3334/internal/hosts/enroll-key",
     );
-    expect(requests[1]?.body).toBe(
+    expect(requests[0]?.body).toBe(
       JSON.stringify({
         hostId: persistedHostId,
       }),
@@ -252,39 +271,10 @@ describe("run-host-daemon auto join", () => {
   it("requests a fresh enroll key when no host ID is persisted", async () => {
     const dataDir = await makeTempDir("bb-run-host-daemon-");
 
-    const requests: RecordedFetchRequest[] = [];
-    vi.stubGlobal(
-      "fetch",
-      async (input: TestFetchInput, init?: RequestInit): Promise<Response> => {
-        const url =
-          input instanceof Request
-            ? input.url
-            : input instanceof URL
-              ? input.toString()
-              : input;
-        requests.push({
-          body: typeof init?.body === "string" ? init.body : null,
-          url,
-        });
-
-        if (url.endsWith("/health")) {
-          return new Response("", { status: 200 });
-        }
-
-        return new Response(
-          JSON.stringify({
-            enrollKey: "bbde_generated_enroll_key",
-            expiresAt: Date.now() + 60_000,
-            hostId: "host_generated",
-          }),
-          {
-            headers: {
-              "content-type": "application/json",
-            },
-            status: 201,
-          },
-        );
-      },
+    const requests = await mockEnrollmentFetch(
+      dataDir,
+      "host_generated",
+      "bbde_generated_enroll_key",
     );
 
     const env = await runHostDaemon.maybeAddAutoJoinEnv(
@@ -294,7 +284,8 @@ describe("run-host-daemon auto join", () => {
 
     expect(env.BB_HOST_ID).toBe("host_generated");
     expect(env.BB_HOST_ENROLL_KEY).toBe("bbde_generated_enroll_key");
-    expect(requests[1]?.body).toBe(JSON.stringify({}));
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.body).toBe(JSON.stringify({}));
   });
 
   it("surfaces enroll-key request failures", async () => {

@@ -1003,6 +1003,26 @@ class RecoveryTests(unittest.TestCase):
         time.sleep(.3)
         self.assertEqual((self.repo / (self.native + ".requests")).read_text().splitlines(), ["first", "second"])
         self.assertEqual(len([r for r in self.service.records("cr_seed") if r["kind"] == "harness" and r["data"]["pid"] is not None]), 2)
+        # A crash after the spent recovery is not a startup error, but an explicit resume still restarts it (#154).
+        self.assertIsNone(self.status().get("startup_error"))
+        self.service.request("POST", "/v1/sessions/cr_seed/resume", {"request_id": "user-resume"}, 202)
+        self.wait(lambda: self.status()["receipts"]["user-resume"]["state"] == "completed", "explicit resume after crash")
+        self.assertEqual(self.status()["native_id"], self.native)
+        self.prompt("after-resume", "hello")
+        self.wait(lambda: self.status()["receipts"]["after-resume"]["state"] == "completed", "work after resume")
+        self.assertEqual((self.repo / (self.native + ".requests")).read_text().splitlines(), ["first", "second", "after-resume"])
+
+    def test_replayed_resume_lifts_stop_unless_it_kept_the_pause(self):
+        receipt = lambda request, command, state, data=None: ("receipt", {"request_id": request, "command": command, "input": data or {}, "state": state})
+        # An older journal's resume has no `keep_paused` and still lifts Stop's pause on replay.
+        self.seed([receipt("stop", "stop", "accepted"), receipt("stop", "stop", "completed"),
+                   receipt("legacy", "resume", "accepted"), receipt("legacy", "resume", "completed")])
+        self.start(); self.ready()
+        self.assertFalse(self.status()["queue_paused"])
+        self.service.request("POST", "/v1/sessions/cr_seed/stop", {"request_id": "stop-2"}, 202)
+        self.service.request("POST", "/v1/sessions/cr_seed/resume", {"request_id": "kept", "keep_paused": True}, 202)
+        self.service.stop(); (self.state / "snapshot.json").unlink(missing_ok=True); self.start(); self.ready()
+        self.assertTrue(self.status()["queue_paused"])
 
     def test_close_during_resume_never_dispatches_queued_input(self):
         self.seed(); (self.repo / "hold-resume").touch(); self.start()
