@@ -407,6 +407,11 @@ mod tests {
             for_database(&codex).unwrap(),
             serde_json::to_string(&codex).unwrap()
         );
+        // Clients get the same Claude record whether it comes from the journal or saved history.
+        let live = serde_json::to_string(&claude.clone().for_client().unwrap()).unwrap();
+        assert_eq!(live, for_database(&claude).unwrap());
+        assert!(file.clone().for_client().unwrap().native.is_some());
+        assert!(codex.clone().for_client().unwrap().native.is_some());
     }
 
     #[test]
