@@ -14,7 +14,7 @@ import { mentionsOpenAISide401 } from "./codex-errors.js";
 import { codexOutage } from "./openai-status.js";
 import { buildThreadStatusChangeMetadata } from "../threads/thread-runtime-display.js";
 import { cloudPluginInstructions, cloudroomSystemPrompt, prepareCloudInstructionInput, resolveCustomInstructions } from "../threads/custom-instructions.js";
-import { baseBranch, binding, bindings, command, commands, coreInUse, localTeleports, openBindings, queuedPrompts, saveBinding, saveCommandState, saveStatus, effectivePrompt, projectCopyProgress, stampBindings, teleportBlocked, unstartedTurn, type Binding, type Command, type OpenBinding, isDead, statusOf } from "./store.js";
+import { abandonedSessions, baseBranch, binding, bindings, forgetAbandonedSession, command, commands, coreInUse, localTeleports, openBindings, queuedPrompts, saveBinding, saveCommandState, saveStatus, effectivePrompt, projectCopyProgress, stampBindings, teleportBlocked, unstartedTurn, type Binding, type Command, type OpenBinding, isDead, statusOf } from "./store.js";
 import { syncLoopEnv } from "./project-loops.js";
 import { copyProject, copyRunning, githubRepository, localProjectNote, localProjectPath, planNewProjectCopy, workspaceId, workspaceName, planProjectCopy, planProjectCopyOrThrow, reportProjectCopy, writeFilesState, type ProjectCopyJob } from "./project-copy.js";
 import { CHILD_HINT, cloudForkOf, cloudForkPoint, codeFromOf, FORK_HARNESSES, FORK_HINT, landForkCode, localForkPoint, startCloudFork, threadCode, uploadInParts } from "./fork.js";
@@ -345,7 +345,7 @@ function commandReasoning(input: string): string | undefined {
 
 const connectionOrReplayFailed = "Cloudroom connection or replay failed";
 
-function publicError(error: unknown): string {
+export function publicError(error: unknown): string {
   if (error instanceof CloudroomError || error instanceof ApiError) return error.message;
   return error instanceof Error ? `${connectionOrReplayFailed}: ${error.message}` : connectionOrReplayFailed;
 }
@@ -755,11 +755,28 @@ class CloudroomService {
         return this.sandboxes.connection(sandbox, project, wake, trigger, fresh, parent);
       });
       if (!found) throw new SandboxAsleep();
+      await this.closeAbandoned(SANDBOX_PREFIX + sandbox, found);
       return found;
     }
     const connection = await this.connection();
     if (saved && connection.url !== saved.coreUrl) throw new ApiError(409, "cloudroom_connection_changed", "This thread belongs to a different core connection. Restore its connection before continuing.");
     return connection;
+  }
+
+  /** Before any other work reaches a sandbox, closes the sessions threads left there when they moved to Local without
+   *  it, so Core never runs their old work (#107). One that can't be closed now is tried again next time. */
+  private async closeAbandoned(coreUrl: string, connection: { url: string; token: string; gateToken?: string }): Promise<void> {
+    const left = abandonedSessions(this.deps.db, coreUrl);
+    if (!left.length) return;
+    const client = new CloudroomClient(connection);
+    for (const { threadId, sessionId } of left) {
+      try { await client.close(sessionId, randomUUID()); }
+      catch (error) {
+        // A 4xx means Core has no such open session, so nothing of it can run.
+        if (!(error instanceof CloudroomError && error.status !== null && error.status < 500)) { this.warn("A session left behind by Teleport to Local could not be closed yet", error, { threadId }); continue; }
+      }
+      forgetAbandonedSession(this.deps.db, threadId, sessionId);
+    }
   }
 
   /** Where a cloud thread's terminal runs: its Core, woken first, and the session whose folder the shell opens in. */
@@ -2102,10 +2119,11 @@ class CloudroomService {
     return this.queuedMessage(binding(this.deps.db, thread.id)!, command(this.deps.db, id)!);
   }
 
-  queue(threadId: string) {
+  /** `unsent` adds messages that never reached Core, such as ones sent while the sandbox could not start. */
+  queue(threadId: string, unsent = false) {
     const saved = binding(this.deps.db, threadId);
     if (!saved) return [];
-    return queuedPrompts(this.deps.db, threadId).map((c) => this.queuedMessage(saved, c));
+    return queuedPrompts(this.deps.db, threadId, unsent).map((c) => this.queuedMessage(saved, c));
   }
 
   private queuedMessage(saved: Binding, c: Command) {
@@ -2416,7 +2434,7 @@ class CloudroomService {
     this.slept.delete(threadId);
     this.holdRejectedStart(threadId);
     let saved = binding(this.deps.db, threadId);
-    if (!saved || this.stopped || await this.otherAccountThread(saved)) return;
+    if (!saved || this.stopped || this.leavingCloud(threadId) || await this.otherAccountThread(saved)) return;
     if (!saved.sessionId && commands(this.deps.db, threadId).some(item => item.command === "teleport")) return;
     if (!saved.sessionId && command(this.deps.db, `first_${threadId}`)?.state === "failed") return;
     if (!saved.sessionId && this.mustNotStart(threadId)) return;
@@ -2428,7 +2446,7 @@ class CloudroomService {
     try {
       const bound = saved;
       let catchUp = false;
-      const work = () => !bound.sessionId || unsentWork(this.deps.db, threadId) || (catchUp ||= this.catchUpForParent(bound));
+      const work = () => !this.leavingCloud(threadId) && (!bound.sessionId || unsentWork(this.deps.db, threadId) || (catchUp ||= this.catchUpForParent(bound)));
       const client = await this.client(saved, work);
       if (epoch !== this.epoch) return;
       if (saved.sessionId) {
@@ -3195,6 +3213,11 @@ class CloudroomService {
       if (job) this.copyInto(client, job);
       else void this.filesState(client, threadId, workspace, `failed: ${CUT_SHORT}`, true);
     } finally { this.retrying.delete(threadId); }
+  }
+
+  /** Teleport to Local is moving the thread off its sandbox, so delivery must not wake it or send it work. */
+  private leavingCloud(threadId: string): boolean {
+    return localTeleports.get(threadId) === "switching";
   }
 
   /** A copy runs, or a move or Teleport brings its own, so no other may start. */

@@ -61,6 +61,32 @@ export function saveProjectCopyProgress(db: DbQueryConnection, threadId: string,
   db.insert(threadPluginMetadata).values({ threadId, pluginId: projectCopyNamespace, metadataJson: JSON.stringify(value) })
     .onConflictDoUpdate({ target: [threadPluginMetadata.threadId, threadPluginMetadata.pluginId], set: { metadataJson: JSON.stringify(value) } }).run();
 }
+/** Cloud sessions a thread left in its sandbox when it moved to Local without it (#107). Core resumes a session that
+ *  still has work as soon as its sandbox wakes, so each is closed the next time the app reaches that sandbox. */
+const abandonedNamespace = "cloudroom.abandoned";
+export type AbandonedSession = { threadId: string; coreUrl: string; sessionId: string };
+export function abandonedSessions(db: DbQueryConnection, coreUrl: string): AbandonedSession[] {
+  return db.select({ threadId: threadPluginMetadata.threadId, value: threadPluginMetadata.metadataJson }).from(threadPluginMetadata)
+    .where(eq(threadPluginMetadata.pluginId, abandonedNamespace)).all()
+    .flatMap(row => (JSON.parse(row.value) as Omit<AbandonedSession, "threadId">[]).map(session => ({ threadId: row.threadId, ...session })))
+    .filter(session => session.coreUrl === coreUrl);
+}
+export function saveAbandonedSessions(db: DbQueryConnection, threadId: string, sessions: Omit<AbandonedSession, "threadId">[]): void {
+  if (!sessions.length) db.delete(threadPluginMetadata).where(and(eq(threadPluginMetadata.threadId, threadId), eq(threadPluginMetadata.pluginId, abandonedNamespace))).run();
+  else db.insert(threadPluginMetadata).values({ threadId, pluginId: abandonedNamespace, metadataJson: JSON.stringify(sessions) })
+    .onConflictDoUpdate({ target: [threadPluginMetadata.threadId, threadPluginMetadata.pluginId], set: { metadataJson: JSON.stringify(sessions) } }).run();
+}
+export function abandonSession(db: DbQueryConnection, threadId: string, coreUrl: string, sessionId: string): void {
+  const row = db.select({ value: threadPluginMetadata.metadataJson }).from(threadPluginMetadata)
+    .where(and(eq(threadPluginMetadata.threadId, threadId), eq(threadPluginMetadata.pluginId, abandonedNamespace))).get();
+  const kept = row ? (JSON.parse(row.value) as Omit<AbandonedSession, "threadId">[]).filter(session => session.sessionId !== sessionId) : [];
+  saveAbandonedSessions(db, threadId, [...kept, { coreUrl, sessionId }]);
+}
+export function forgetAbandonedSession(db: DbQueryConnection, threadId: string, sessionId: string): void {
+  const row = db.select({ value: threadPluginMetadata.metadataJson }).from(threadPluginMetadata)
+    .where(and(eq(threadPluginMetadata.threadId, threadId), eq(threadPluginMetadata.pluginId, abandonedNamespace))).get();
+  if (row) saveAbandonedSessions(db, threadId, (JSON.parse(row.value) as Omit<AbandonedSession, "threadId">[]).filter(session => session.sessionId !== sessionId));
+}
 
 const TRANSFER_PROGRESS_BATCH_SIZE = 900;
 
@@ -132,13 +158,13 @@ export function commands(db: DbQueryConnection, threadId: string): Command[] {
   return db.select().from(cloudroomCommands).where(eq(cloudroomCommands.threadId, threadId)).orderBy(cloudroomCommands.createdAt, cloudroomCommands.id).all();
 }
 
-export function queuedPrompts(db: DbQueryConnection, threadId: string): Command[] {
+export function queuedPrompts(db: DbQueryConnection, threadId: string, unsent = false): Command[] {
   const all = commands(db, threadId);
   const status = db.select({ status: threads.status }).from(threads).where(eq(threads.id, threadId)).get()?.status;
   const active = status === "active" || status === "pending" || status === "starting";
   const turnId = binding(db, threadId)?.turnId;
   const cancelling = new Set(all.filter(item => item.command === "cancel" && ["sending", "accepted", "completed"].includes(item.state)).map(item => JSON.parse(item.input).target_request_id));
-  const queued = all.filter(item => item.command === "prompt" && item.id !== `first_${threadId}` && item.id !== turnId && (item.state === "accepted" || (active && item.state === "sending")) && !cancelling.has(item.id) && !JSON.parse(item.input).teleport_handoff);
+  const queued = all.filter(item => item.command === "prompt" && item.id !== `first_${threadId}` && (item.id !== turnId || (unsent && item.state === "sending")) && (item.state === "accepted" || ((active || unsent) && item.state === "sending")) && !cancelling.has(item.id) && !JSON.parse(item.input).teleport_handoff);
   // Mirror the core: the latest reorder puts its listed prompts first; newer prompts follow in send order.
   const reorder = [...all].reverse().find(item => item.command === "reorder" && ["sending", "accepted", "completed"].includes(item.state));
   if (!reorder) return queued;

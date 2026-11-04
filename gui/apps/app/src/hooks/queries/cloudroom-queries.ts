@@ -6,7 +6,7 @@ import type { ProjectSelectorSuggestions } from "@/components/pickers/ProjectSel
 import { usePathPickerHost } from "@/hooks/useLocalPathPicker";
 import { useSetRootComposeProjectId } from "@/lib/root-compose-selection";
 import { fetchWithAppSurface } from "@/lib/app-surface";
-import { sdk } from "@/lib/sdk";
+import { BbHttpError, sdk } from "@/lib/sdk";
 import { threadReasoningSaveKey } from "@/hooks/queries/query-keys";
 import { openUrlInExternalBrowser } from "@/lib/url-open-routing";
 import { appToast } from "@/components/ui/app-toast";
@@ -217,13 +217,22 @@ export function useTeleportThread(threadId: string) {
 
 export function useTeleportLocal(threadId: string) {
   const client = useQueryClient();
-  return useMutation({
+  const mutation = useMutation({
     mutationKey: ["cloudroom", "teleport-local", threadId],
-    mutationFn: () => sdk.cloudroom.teleportLocal(threadId),
+    mutationFn: (options: { withoutCloud?: boolean } | void) => sdk.cloudroom.teleportLocal(threadId, options ?? undefined),
     onSuccess: ({ conflicts }) => appToast.success(conflicts ? `Moved to this computer. ${conflicts} files could not be merged safely; the cloud versions are in .cloudroom/teleport/.` : "Moved to this computer."),
-    onError: (error) => showMutationErrorToast({ error, fallbackMessage: "Could not teleport to Local" }),
+    onError: (error) => {
+      // The sandbox can't start (say, out of credits): offer to move without its cloud changes.
+      if (!(error instanceof BbHttpError) || error.code !== "teleport_cloud_unavailable") return showMutationErrorToast({ error, fallbackMessage: "Could not teleport to Local" });
+      appToast.error("Could not teleport to Local", {
+        description: getMutationErrorMessage({ error, fallbackMessage: "The cloud sandbox could not start." }),
+        action: { label: "Move without cloud changes", onClick: () => mutation.mutate({ withoutCloud: true }) },
+        duration: Infinity,
+      });
+    },
     onSettled: () => client.invalidateQueries(),
   });
+  return mutation;
 }
 
 export function useTeleportDirection(thread: Pick<Thread, "id" | "teleport" | "teleportLocalStep">): "cloud" | "local" | null {
