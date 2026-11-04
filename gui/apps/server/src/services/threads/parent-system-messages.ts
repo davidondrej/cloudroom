@@ -1,6 +1,7 @@
 import {
   getEnvironment,
   getThread,
+  isThreadQueueAutoSendPaused,
   requireThreadLifecycleEventApplied,
   type DbTransaction,
 } from "@cloudroom/db";
@@ -52,6 +53,10 @@ import {
   withThreadSendGuard,
 } from "./thread-context-mutation-guard.js";
 import { requestQueuedMessageDispatch } from "./queued-message-dispatch.js";
+import {
+  createQueuedMessageAutoSendPausedError,
+  isQueuedMessageAutoSendPausedError,
+} from "./queue-waits.js";
 
 const PARENT_SYSTEM_MESSAGE_SOURCE = "tell";
 
@@ -435,6 +440,7 @@ export async function queueParentSystemMessage(
   }
   const hasPendingInteraction =
     deps.pendingInteractions.hasPendingThreadInteraction(parentThread.id);
+  let heldByStop = false;
   if (!hasPendingInteraction) {
     try {
       return await deliverParentSystemMessage(deps, {
@@ -444,7 +450,9 @@ export async function queueParentSystemMessage(
         systemMessageSubject: args.systemMessageSubject,
       });
     } catch (error) {
-      if (!(error instanceof ThreadContextClearInProgressError)) throw error;
+      heldByStop = isQueuedMessageAutoSendPausedError(error);
+      if (!(error instanceof ThreadContextClearInProgressError) && !heldByStop)
+        throw error;
     }
   }
 
@@ -471,7 +479,7 @@ export async function queueParentSystemMessage(
       subject: args.systemMessageSubject,
     },
   });
-  if (!hasPendingInteraction) {
+  if (!hasPendingInteraction && !heldByStop) {
     requestQueuedMessageDispatch(deps, {
       kind: "thread-ready",
       threadId: parentThread.id,
@@ -483,6 +491,8 @@ export async function queueParentSystemMessage(
 interface DeliverParentSystemMessageArgs extends ParentSystemMessageTaxonomy {
   input: PromptInput[];
   parentThread: Thread;
+  /** An explicit `queue send`, which releases the manual-stop hold. */
+  sendNow?: boolean;
 }
 
 /**
@@ -492,6 +502,9 @@ interface DeliverParentSystemMessageArgs extends ParentSystemMessageTaxonomy {
  * interaction without re-entering the check that queued it — which, on a
  * thread whose interaction settled a moment ago, would otherwise be a race
  * that could queue a second copy of the same notice.
+ *
+ * Every notice path ends here, so this is where a manual Stop holds them: the
+ * parent stays stopped until the user sends a message or `queue send` (#821).
  */
 export async function deliverParentSystemMessage(
   deps: LoggedPendingInteractionWorkSessionDeps,
@@ -507,6 +520,9 @@ async function deliverParentSystemMessageWithContextGuard(
   args: DeliverParentSystemMessageArgs,
 ): Promise<boolean> {
   const { parentThread } = args;
+  if (!args.sendNow && isThreadQueueAutoSendPaused(deps.db, parentThread.id)) {
+    throw createQueuedMessageAutoSendPausedError();
+  }
   const { environment } = requireThreadEnvironment(deps.db, parentThread.id);
   await restoreParkedWorktree(deps, parentThread.id, environment.id);
   const execution = await buildExecutionOptions(

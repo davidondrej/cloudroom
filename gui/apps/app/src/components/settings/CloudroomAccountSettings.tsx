@@ -3,14 +3,15 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Button } from "@cloudroom/shared-ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuTrigger } from "@cloudroom/shared-ui/dropdown-menu";
 import { Icon } from "@cloudroom/shared-ui/icon";
-import { SettingsSection } from "@/components/ui/settings-section";
+import { COMPUTER } from "@cloudroom/domain";
+import { SettingsRow, SettingsRowList, SettingsSection } from "@/components/ui/settings-section";
 import { sdk } from "@/lib/sdk";
 import { openUrlInExternalBrowser } from "@/lib/url-open-routing";
 import { useCloudroomAccount } from "@/hooks/queries/cloudroom-queries";
 import { MacAccessMenuItems, useMacAccessLevel, MAC_ACCESS_TITLE } from "@/components/sidebar/MacAccessChip";
 import { FixPrompt } from "@/components/ui/fix-prompt";
 import { ConfirmDeleteDialog, ConfirmDeleteDialogContent } from "@/components/dialogs/ConfirmDeleteDialog";
-import { cloudUnavailableFixPrompt, syncFixPrompt } from "@/lib/fix-prompts";
+import { cloudUnavailableFixPrompt, plainError, syncFixPrompt } from "@/lib/fix-prompts";
 import { AccountOverview, StatusPill } from "./AccountOverview";
 import { SelfHostedCoreForm } from "./SelfHostedCoreForm";
 
@@ -57,6 +58,8 @@ export function CloudroomAccountSettings() {
   const sync = status.data?.sync;
   const syncBroken = ready && sync && (sync.issue || sync.state === "offline" || sync.state === "conflict");
   const previews = status.data?.previews;
+  // A helper that couldn't start says why first (#109), then why a running one can't connect.
+  const previewProblem = previews && previews.state !== "connected" ? previews.issue ?? (previews.explained ? previews.message : null) : null;
   const resetCheck = check.reset;
   useEffect(() => { if (previews?.state === "connected") resetCheck(); }, [previews?.state, resetCheck]);
   const signedIn = account && !status.data?.signingIn;
@@ -64,23 +67,22 @@ export function CloudroomAccountSettings() {
     {signedIn ? <section className="space-y-4">
       <h2 className="sr-only">Cloudroom account</h2>
       <div className="space-y-3 empty:hidden">
-        {!ready && <FixPrompt prompt={cloudUnavailableFixPrompt(status.data?.error)} />}
         {sync && (sync.issue || sync.conflicts) ? <p role="status" className="text-sm">{sync.issue ?? `${sync.conflicts} conflicting files need review.`}</p> : null}
-        {previews?.explained && previews.state !== "connected" && previews.message ? <div role="status" className="rounded-xl border border-warning/30 bg-warning/10 px-4 py-3 text-center text-sm">
+        {previewProblem ? <div role="status" className="rounded-xl border border-warning/30 bg-warning/10 px-4 py-3 text-center text-sm">
           <p className="flex items-center justify-center gap-1.5 font-medium text-foreground"><Icon name="AlertTriangle" className="size-4 shrink-0 text-warning-text" aria-hidden />{MAC_ACCESS_TITLE} and previews can't connect</p>
           <p className="mt-1 text-xs text-muted-foreground">
-            {previews.message}{" "}
+            {previewProblem}{" "}
             {check.isPending ? "Checking…" : <>{check.isSuccess && "Still can't connect. "}<Button variant="link" className="h-auto p-0 align-baseline text-xs font-normal text-muted-foreground underline underline-offset-2 hover:text-foreground" onClick={() => check.mutate()}>Check now</Button></>}
           </p>
         </div> : null}
-        {sync && syncBroken && <FixPrompt prompt={syncFixPrompt(sync.state, sync.issue)} />}
         {error && <p role="alert" className="text-sm">{error}</p>}
       </div>
       <AccountOverview email={account.email} onSignOut={() => setSignOutOpen(true)} />
       <div className="flex flex-wrap items-center justify-center gap-x-4 gap-y-1 pt-1">
-        <StatusPill ok={Boolean(ready)}>{ready ? "Cloud connected" : status.data?.error ?? "Cloud is unavailable. Your VM may still be working."}</StatusPill>
+        <StatusPill ok={Boolean(ready)} title={ready ? undefined : status.data?.error ?? undefined}>{ready ? "Cloud connected" : status.data?.error ? plainError(status.data.error) : "Cloud is unavailable. Your VM may still be working."}</StatusPill>
         {previews && <StatusPill ok={previews.state === "connected"} title={previews.issue ?? previews.message ?? undefined}>{previews.state === "connected" ? "Previews ready" : "Previews reconnecting"}</StatusPill>}
         {sync && <StatusPill ok={sync.state === "synced"} title="Skills and portable agent settings sync automatically.">{sync.state === "synced" ? "Synced" : `Sync: ${sync.state}`}</StatusPill>}
+        {!ready ? <FixPrompt prompt={cloudUnavailableFixPrompt(status.data?.error)} /> : sync && syncBroken && <FixPrompt prompt={syncFixPrompt(sync.state, sync.issue)} />}
         <Button variant="link" className="h-auto gap-1 p-0 text-xs font-normal text-muted-foreground hover:text-foreground" onClick={() => openUrlInExternalBrowser("https://www.cloudroom.dev/settings")}>Delete account<Icon name="ExternalLink" className="size-3" aria-hidden /></Button>
       </div>
       <SignOutDialog open={signOutOpen} onOpenChange={setSignOutOpen} />
@@ -99,12 +101,12 @@ export function CloudroomAccountSettings() {
   </>;
 }
 
-export function MacAccessControl() {
+export function MacAccessControl({ label = true }: { label?: boolean }) {
   const status = useCloudroomAccount();
   const { current, select, saving } = useMacAccessLevel();
   if (!status.data?.account || status.data.signingIn || status.data.macAccessSupported === false) return null;
   return <div className="flex shrink-0 items-center gap-2">
-    <span className="text-xs text-subtle-foreground/75 max-sm:hidden">{MAC_ACCESS_TITLE}</span>
+    {label && <span className="text-xs text-subtle-foreground/75 max-sm:hidden">{MAC_ACCESS_TITLE}</span>}
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
         <Button variant="outline" size="sm" aria-label={`${MAC_ACCESS_TITLE}: ${current.label}`} disabled={saving}>{current.label}<Icon name="ChevronDown" className="text-muted-foreground" aria-hidden /></Button>
@@ -112,6 +114,23 @@ export function MacAccessControl() {
       <DropdownMenuContent align="end" mobileTitle={MAC_ACCESS_TITLE} className="w-72 p-1.5"><MacAccessMenuItems current={current} select={select} /></DropdownMenuContent>
     </DropdownMenu>
   </div>;
+}
+
+/** This computer's machine page: the same control as its row in Machines, and why the helper can't start (#109). */
+export function MacAccessSection() {
+  const status = useCloudroomAccount();
+  const { current } = useMacAccessLevel();
+  if (!status.data?.account || status.data.signingIn || status.data.macAccessSupported === false) return null;
+  const issue = status.data.previews?.state !== "connected" ? status.data.previews?.issue : null;
+  return <SettingsSection title={MAC_ACCESS_TITLE} description={`What Cloud agents may do on this ${COMPUTER}.`}>
+    <SettingsRowList>
+      <SettingsRow>
+        <span className="min-w-0 flex-1 text-sm text-muted-foreground">{current.description}</span>
+        <MacAccessControl label={false} />
+      </SettingsRow>
+    </SettingsRowList>
+    {issue ? <p role="status" className="mt-2 text-xs text-warning-text">{issue}</p> : null}
+  </SettingsSection>;
 }
 
 // The confirm step keeps sign-out from being a single stray click.

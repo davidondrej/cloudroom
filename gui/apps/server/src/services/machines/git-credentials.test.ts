@@ -79,7 +79,7 @@ describe("machine Git environment", () => {
       await exec("git", ["init", "-q", repo], { env });
       await writeFile(join(repo, "file.txt"), "content\n");
       await exec("git", ["add", "file.txt"], { cwd: repo, env });
-      await exec(
+      const commit = await exec(
         "git",
         [
           "commit",
@@ -103,6 +103,15 @@ describe("machine Git environment", () => {
       expect(stdout.trim()).toBe(
         "Add file\n\nCo-authored-by: Ada Lovelace <ada@example.com>",
       );
+      expect(commit.stderr).toBe(
+        "Cloudroom removed AI Co-authored-by lines (turn off: room-cli settings general stripAiCoAuthorsEnabled false)\n",
+      );
+      const human = await exec(
+        "git",
+        ["commit", "-q", "--allow-empty", "-m", "Human only"],
+        { cwd: repo, env },
+      );
+      expect(human.stderr).toBe("");
     },
   );
 

@@ -37,3 +37,11 @@ export function reconcileReasoningLevel(
 function reasoningRank(level: ReasoningLevel): number {
   return reasoningLevelValues.indexOf(level);
 }
+
+/** A new thread's level when nobody picked or remembered one: the model's own
+ *  default (Claude Code reports the user's `effortLevel` here), else medium. */
+export function defaultReasoningLevel(
+  model: { defaultReasoningEffort: ReasoningLevel } | undefined,
+): ReasoningLevel {
+  return model?.defaultReasoningEffort ?? "medium";
+}

@@ -10,6 +10,7 @@ import {
   DropdownMenuTrigger,
 } from "@cloudroom/shared-ui/dropdown-menu";
 import { Icon } from "@cloudroom/shared-ui/icon";
+import { loopsChanged } from "./paused-notice";
 import type { automationRpcContract } from "./src/rpc.js";
 import type { AutomationAgentSummary } from "./src/rpc-types.js";
 
@@ -135,6 +136,7 @@ export function useCloudAutomations(): {
     async (request: Request, done: string) => {
       try {
         await call(request);
+        if (request.action !== "run") loopsChanged();
         toast.success(done);
       } catch (error: unknown) {
         toast.error(error instanceof Error ? error.message : String(error));
@@ -162,7 +164,7 @@ export function useCloudAutomations(): {
       onEnabledChange: (a, enabled) =>
         void act(
           { action: "update", id: a.id, enabled },
-          enabled ? "Resumed" : "Paused",
+          enabled ? "Resumed" : "Turned off",
         ),
       onPriorityChange: async (a, priority) => {
         try {

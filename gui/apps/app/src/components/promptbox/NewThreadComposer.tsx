@@ -402,18 +402,20 @@ export function restorePromptDraftAfterOptionChange({
   return changed ? restoredDraft : null;
 }
 
-function useDraftPreservingOptionChange<T>(
+export function useDraftPreservingOptionChange<T>(
   current: T,
   setValue: (value: T) => void,
   snapshot: () => void,
+  recordUnchanged = false,
 ): (value: T) => void {
   return useCallback(
     (value: T) => {
-      if (Object.is(current, value)) return;
-      snapshot();
+      const changed = !Object.is(current, value);
+      if (!changed && !recordUnchanged) return;
+      if (changed) snapshot();
       setValue(value);
     },
-    [current, setValue, snapshot],
+    [current, recordUnchanged, setValue, snapshot],
   );
 }
 
@@ -1795,10 +1797,12 @@ export function NewThreadComposer({
     setSelectedModel,
     snapshotDraftBeforeOptionChange,
   );
+  // Clicking the displayed default still records it as the user's pick (#656).
   const handleReasoningChange = useDraftPreservingOptionChange(
     reasoningLevel,
     setReasoningLevel,
     snapshotDraftBeforeOptionChange,
+    true,
   );
   const handleSelectModel = useCallback(
     (selection: { providerId: string; model: string }) => {

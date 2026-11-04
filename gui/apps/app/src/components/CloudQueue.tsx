@@ -57,6 +57,18 @@ export function CloudQueueCard({ queue, onUseLocal }: { queue: CloudQueue; onUse
 
 const share = (used: number, limit: number) => limit > 0 ? Math.min(used / limit, 1) : 1;
 
+/** Cloud Credits left as one bar, like /billing: extra credits first, in blue, then the plan's. A bar empties from the
+ *  right, so extra reads as used last, as it is (ADR 0317). Without extra credits it is the plan's bar alone. */
+export function CreditsBar({ plan, limit, extra, extraTotal, className, planClassName, edgeClassName }: { plan: number; limit: number; extra: number; extraTotal: number; className: string; planClassName: string; edgeClassName: string }) {
+  const room = limit + (extra > 0 ? Math.max(extra, extraTotal) : 0), width = (part: number) => `${room > 0 ? Math.min(100, (part / room) * 100) : 0}%`;
+  return (
+    <div className={cn("flex overflow-hidden rounded-full", className)}>
+      {extra > 0 && <div className={cn("h-full bg-sky-400", plan > 0 && "border-r-2", edgeClassName)} style={{ width: width(extra) }} />}
+      <div className={cn("h-full", extra > 0 ? null : "rounded-full", planClassName)} style={{ width: width(plan) }} />
+    </div>
+  );
+}
+
 /** Free accounts always see their Cloud Credits left (ADR 0307). Paid plans see a quiet meter once 75% are used, and
  *  while running on pack credits. */
 export function PlanCard() {
@@ -82,23 +94,25 @@ export function PlanCard() {
   );
 }
 
-/** "Pro · 9,000 credits left" over a thin bar: amber from 75%, red at 0. While packs carry the account (ADR 0317) it
- *  shows their credits left in gray. The white "+ buy more" chip opens /billing: a pack or the next plan. */
+/** "Pro · 9,000 credits left" over a thin bar: amber from 75%, red at 0. With extra credits (ADR 0317) the number is
+ *  plan + extra and the bar is CreditsBar. The white "+ buy more" chip opens /billing: a pack or the next plan. */
 function PlanMeter({ plan, used, limit, extra, extraTotal }: { plan: string; used: number; limit: number; extra: number; extraTotal: number }) {
   const name = plan.charAt(0).toUpperCase() + plan.slice(1);
-  const onExtra = used >= limit && extra > 0, out = used >= limit && !onExtra;
-  const left = onExtra ? extra : Math.max(0, limit - used);
+  const planLeft = Math.max(0, limit - used), onExtra = planLeft === 0 && extra > 0, out = used >= limit && extra <= 0;
+  const left = planLeft + Math.max(0, extra);
   return (
     <div className="w-full px-2 pb-1">
       <p className="flex items-center justify-between gap-2 text-xs">
         <span className="min-w-0 truncate text-muted-foreground">
-          {name} · <span className={cn("font-semibold tabular-nums", onExtra ? "text-foreground" : out ? "text-destructive" : "text-warning-text")}>{Math.floor(left).toLocaleString("en-US")}</span> {onExtra ? "extra credits left" : "credits left"}
+          {name} · <span className={cn("font-semibold tabular-nums", extra > 0 ? "text-foreground" : out ? "text-destructive" : "text-warning-text")}>{Math.floor(left).toLocaleString("en-US")}</span> {onExtra ? "extra credits left" : "credits left"}
         </span>
         <button type="button" className="shrink-0 border border-foreground/30 px-1.5 leading-5 text-foreground hover:bg-foreground/5" onClick={() => openUpgrade("plan_card")}>+ buy more</button>
       </p>
-      <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-foreground/10">
-        <div className={cn("h-full rounded-full", onExtra ? "bg-foreground/70" : out ? "bg-destructive" : "bg-warning")} style={{ width: `${(onExtra ? share(extra, extraTotal) : share(used, limit)) * 100}%` }} />
-      </div>
+      {extra > 0
+        ? <CreditsBar className="mt-1.5 h-1 bg-foreground/10" plan={planLeft} limit={limit} extra={extra} extraTotal={extraTotal} planClassName="bg-warning" edgeClassName="border-sidebar" />
+        : <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-foreground/10">
+          <div className={cn("h-full rounded-full", out ? "bg-destructive" : "bg-warning")} style={{ width: `${share(used, limit) * 100}%` }} />
+        </div>}
     </div>
   );
 }

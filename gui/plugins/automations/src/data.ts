@@ -39,7 +39,13 @@ const AUTOMATION_RUN_COLUMNS = `id, automation_id AS automationId, run_mode AS r
 export type Db = Database.Database;
 
 const AUTOMATION_MAX_CONSECUTIVE_FAILURES = 3;
-export const AUTOMATION_RETRY_BASE_MS = 30_000;
+/** Before a pause, a scheduled loop tries again 1 minute, then 15 minutes, after a failure. */
+export const AUTOMATION_RETRY_DELAYS_MS = [60_000, 15 * 60_000] as const;
+// A paused loop tries again on its own (ADR 20261103-235500), like Cloud loops: 1 hour, 6 hours, then daily, until 10
+// failures in a row. Each try that fails adds one, so the count says how far along it is.
+const PAUSE_RETRY_MS = [60 * 60_000, 6 * 60 * 60_000, 24 * 60 * 60_000];
+const STOP_RETRYING = 10;
+const PAUSE_MARK = "%(loop paused after % consecutive failures)";
 
 export interface AutomationRow {
   id: string;
@@ -241,8 +247,33 @@ export const migrations = [
 export const REVIEW_RETENTION_MS = 30 * 24 * 60 * 60_000;
 
 function automationRetryDelayMs(consecutiveFailures: number): number {
-  const exponent = Math.max(0, consecutiveFailures - 1);
-  return AUTOMATION_RETRY_BASE_MS * 2 ** exponent;
+  const delays = AUTOMATION_RETRY_DELAYS_MS;
+  return delays[Math.min(Math.max(consecutiveFailures, 1), delays.length) - 1]!;
+}
+
+function pausedRetryAt(consecutiveFailures: number, now: number): number | null {
+  if (consecutiveFailures >= STOP_RETRYING) return null;
+  const step = consecutiveFailures - AUTOMATION_MAX_CONSECUTIVE_FAILURES;
+  return now + PAUSE_RETRY_MS[Math.min(Math.max(step, 0), PAUSE_RETRY_MS.length - 1)]!;
+}
+
+/** Paused loops whose time to try again came run again, keeping their failure count, so one more failure pauses them
+ *  again and one success clears it. Pauses from before retries (no time saved) from the last 30 days try once too.
+ *  Returns the projects whose loops changed. */
+export function retryPausedAutomations(db: Db, now: number): string[] {
+  const rows = db
+    .prepare(
+      `UPDATE automations SET
+         enabled = 1,
+         next_run_at = CASE WHEN trigger_type = 'webhook' THEN NULL ELSE @now END,
+         last_error = NULL,
+         updated_at = @now
+       WHERE enabled = 0 AND last_error LIKE @mark AND consecutive_failures < @stop
+         AND (next_run_at <= @now OR (next_run_at IS NULL AND updated_at >= @since))
+       RETURNING project_id AS projectId`,
+    )
+    .all({ now, mark: PAUSE_MARK, stop: STOP_RETRYING, since: now - 30 * 86_400_000 }) as { projectId: string }[];
+  return [...new Set(rows.map((row) => row.projectId))];
 }
 
 export interface CreateAutomationInput {
@@ -796,7 +827,10 @@ function recordAutomationFailure(
     return { consecutiveFailures: 0, paused: false, retryAt: null };
   }
   const consecutiveFailures = automation.consecutiveFailures + 1;
-  const paused = consecutiveFailures >= AUTOMATION_MAX_CONSECUTIVE_FAILURES;
+  // Turned off by hand while this run went on, it stays off: no pause mark, so it never tries again on its own.
+  const paused =
+    automation.enabled &&
+    consecutiveFailures >= AUTOMATION_MAX_CONSECUTIVE_FAILURES;
   const retryAt =
     args.retrySchedule && automation.enabled && !paused
       ? args.now + automationRetryDelayMs(consecutiveFailures)
@@ -808,7 +842,7 @@ function recordAutomationFailure(
     `UPDATE automations SET
        enabled = CASE WHEN @paused = 1 THEN 0 ELSE enabled END,
        next_run_at = CASE
-         WHEN @paused = 1 THEN NULL
+         WHEN @paused = 1 THEN @pausedRetryAt
          WHEN @retryAt IS NOT NULL THEN @retryAt
          ELSE next_run_at
        END,
@@ -820,6 +854,7 @@ function recordAutomationFailure(
   ).run({
     automationId: args.automationId,
     paused: boolToInt(paused),
+    pausedRetryAt: paused ? pausedRetryAt(consecutiveFailures, args.now) : null,
     retryAt,
     consecutiveFailures,
     lastError,

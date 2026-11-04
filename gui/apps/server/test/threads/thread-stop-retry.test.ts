@@ -10,6 +10,7 @@ import {
   requestThreadStopForCurrentState,
 } from "../../src/services/threads/thread-lifecycle.js";
 import {
+  internalAuthHeaders,
   listQueuedThreadCommands,
   reportQueuedCommandError,
   reportQueuedCommandSuccess,
@@ -26,11 +27,13 @@ import { withTestHarness, type TestAppHarness } from "../helpers/test-app.js";
 
 interface ActiveThreadStopFixture {
   environment: EnvironmentRow;
+  sessionId: string;
   thread: Thread;
 }
 
 interface SeedActiveThreadStopFixtureArgs {
   harness: TestAppHarness;
+  status?: Thread["status"];
   value: number;
 }
 
@@ -41,7 +44,7 @@ interface WaitForStopRpcIdleArgs {
 function seedActiveThreadStopFixture(
   args: SeedActiveThreadStopFixtureArgs,
 ): ActiveThreadStopFixture {
-  const { host } = seedHostSession(args.harness.deps, {
+  const { host, session } = seedHostSession(args.harness.deps, {
     id: `host-thread-stop-retry-${args.value}`,
   });
   const { project } = seedProjectWithSource(args.harness.deps, {
@@ -57,10 +60,10 @@ function seedActiveThreadStopFixture(
   const thread = seedThread(args.harness.deps, {
     projectId: project.id,
     environmentId: environment.id,
-    status: "active",
+    status: args.status ?? "active",
   });
 
-  return { environment, thread };
+  return { environment, sessionId: session.id, thread };
 }
 
 async function waitForStopRpcIdle(args: WaitForStopRpcIdleArgs): Promise<void> {
@@ -208,6 +211,82 @@ describe("thread stop dispatch", () => {
       expect(
         threadEvents.filter((event) => event.type === "turn/completed"),
       ).toHaveLength(0);
+    });
+  });
+
+  it("stops a thread the memory guard reports as a stop, never a retryable failure", async () => {
+    await withTestHarness(async (harness) => {
+      const { sessionId, thread } = seedActiveThreadStopFixture({
+        harness,
+        value: 7,
+      });
+
+      const response = await harness.app.request(
+        "/internal/session/thread-memory-limit",
+        {
+          method: "POST",
+          headers: internalAuthHeaders(harness),
+          body: JSON.stringify({
+            sessionId,
+            threadId: thread.id,
+            usedBytes: 70 * 2 ** 30,
+            totalBytes: 128 * 2 ** 30,
+          }),
+        },
+      );
+      expect(response.status).toBe(200);
+      const stopCommand = await waitForQueuedCommand(
+        harness,
+        ({ command }) =>
+          command.type === "thread.stop" && command.threadId === thread.id,
+      );
+      await reportQueuedCommandError(harness, stopCommand, {
+        errorCode: "unknown_environment",
+        errorMessage: "No runtime exists for environment env_missing_runtime",
+      });
+      await waitForStopRpcIdle({ threadId: thread.id });
+
+      // Idle, not error: a stop settles without `turn.failed`, so no retry.
+      expect(getThread(harness.db, thread.id)).toMatchObject({
+        status: "idle",
+      });
+      const interrupted = listEvents(harness.db, {
+        threadId: thread.id,
+      }).filter((event) => event.type === "system/thread/interrupted");
+      expect(interrupted.map((event) => JSON.parse(event.data).reason)).toEqual(
+        ["memory-limit"],
+      );
+    });
+  });
+
+  it("records a late memory report on a thread that already failed, once", async () => {
+    await withTestHarness(async (harness) => {
+      const { sessionId, thread } = seedActiveThreadStopFixture({
+        harness,
+        status: "error",
+        value: 8,
+      });
+      const report = () =>
+        harness.app.request("/internal/session/thread-memory-limit", {
+          method: "POST",
+          headers: internalAuthHeaders(harness),
+          body: JSON.stringify({
+            sessionId,
+            threadId: thread.id,
+            usedBytes: 70 * 2 ** 30,
+            totalBytes: 128 * 2 ** 30,
+          }),
+        });
+
+      expect((await report()).status).toBe(200);
+      expect((await report()).status).toBe(200);
+
+      const interrupted = listEvents(harness.db, {
+        threadId: thread.id,
+      }).filter((event) => event.type === "system/thread/interrupted");
+      expect(interrupted.map((event) => JSON.parse(event.data).reason)).toEqual(
+        ["memory-limit"],
+      );
     });
   });
 

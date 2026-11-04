@@ -23,6 +23,7 @@ interface ResolveProjectExecutionDefaultsForCreateArgs {
   model?: ThreadCreateServiceRequestInput["model"];
   projectId: string;
   providerId?: ThreadCreateServiceRequestInput["providerId"];
+  reasoningLevel?: ThreadCreateServiceRequestInput["reasoningLevel"];
 }
 
 interface ResolvedProjectExecutionDefaultsForCreate {
@@ -30,6 +31,7 @@ interface ResolvedProjectExecutionDefaultsForCreate {
   providerId: string;
   providerFallbackCandidates: readonly string[];
   requestedModel: string | null;
+  requestedReasoningLevel: boolean;
 }
 
 type CreateExecutionInputSources =
@@ -107,6 +109,12 @@ export function resolveProjectExecutionDefaultsForCreate(
     providerId,
     providerFallbackCandidates,
     requestedModel: requestedModel ?? null,
+    requestedReasoningLevel:
+      resolveRequestedCreateExecutionValue({
+        field: "reasoningLevel",
+        sources: args.executionInputSources,
+        value: args.reasoningLevel,
+      }) !== undefined,
   };
 }
 

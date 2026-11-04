@@ -14,6 +14,7 @@ import {
 } from "./interactive-request-registry.js";
 import { startEventLoopStallMonitor } from "./event-loop-stall-monitor.js";
 import { startHostDaemonHealthMonitor } from "./host-daemon-health-monitor.js";
+import { startMemoryGuard } from "./memory-guard.js";
 import { startLocalApiServer, type LocalApiServer } from "./local-api.js";
 import type { HostDaemonLocalApiConfig } from "./local-api-config.js";
 import type { HostDaemonLogger } from "./logger.js";
@@ -901,6 +902,11 @@ export async function createHostDaemonApp(
   const eventLoopStallMonitor = startEventLoopStallMonitor({
     logger: options.logger,
   });
+  const memoryGuard = startMemoryGuard({
+    logger: options.logger,
+    serverUrl: () => runtimeManager.getShellEnv().ROOM_SERVER_URL,
+    reportThread: (args) => serverClient.reportThreadMemoryLimit(args),
+  });
   const hostDaemonHealthMonitor = startHostDaemonHealthMonitor({
     logger: options.logger,
     getWatchCounts: () => ({
@@ -926,6 +932,7 @@ export async function createHostDaemonApp(
       idleProviderSessionReaper.stop();
       eventLoopStallMonitor.stop();
       hostDaemonHealthMonitor.stop();
+      memoryGuard.stop();
       await pluginHostManager.shutdown();
       await options.closeMachineAuthProxy?.();
       await localApi?.close();

@@ -59,10 +59,13 @@
   equivalents are `threads.queue.list` (cross-thread) and
   `threads.queuedMessages.list/send/update/delete` (one thread).
 - Stop pauses a Local thread's queue too, including a message that was waiting
-  on a pending interaction the Stop cancelled. `queue list` shows these rows as
-  `paused by Stop` (`pausedByStop: true` in JSON). Send one with `queue send` or
-  discard it with `queue delete`; do not re-send it with `tell`, because the
-  next turn resumes the queue and the paused copy would send too.
+  on a pending interaction the Stop cancelled. A stopped parent also holds its
+  children's notices and `tell`s until the user messages it; a child whose
+  `tell` is held must not resend it or `queue send` it.
+  `queue list` shows these rows as `paused by Stop` (`pausedByStop: true` in
+  JSON). Send one with `queue send` or discard it with `queue delete`; do not
+  re-send it with `tell`, because the next turn resumes the queue and the
+  paused copy would send too.
 - `room-cli thread queue send <thread-id> <message-id> --mode steer` re-attempts the
   row as a steer with the same send-now behavior: it bypasses the row's schedule
   and plugin waits, while core waits still apply. During provisioning it reports

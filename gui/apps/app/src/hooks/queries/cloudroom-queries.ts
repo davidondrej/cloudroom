@@ -1,6 +1,6 @@
 import { useIsMutating, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { z } from "zod";
-import { deriveProjectNameFromPath, reasoningLevelSchema, serviceTierSchema, type ReasoningLevel, type Thread } from "@cloudroom/domain";
+import { COMPUTER_TITLE, deriveProjectNameFromPath, reasoningLevelSchema, serviceTierSchema, type ReasoningLevel, type Thread } from "@cloudroom/domain";
 import type { MacAccessLevel, NativeSession, RepoSuggestion, SessionImportResult } from "@cloudroom/sdk/browser";
 import type { ProjectSelectorSuggestions } from "@/components/pickers/ProjectSelector";
 import { usePathPickerHost } from "@/hooks/useLocalPathPicker";
@@ -251,11 +251,27 @@ export function useOpenCloudFile(threadId: string) {
   });
 }
 
-/** How much cloud agents may do on this computer (ADR 0113, 0186). `true` means Full access. */
-export function useSetMacAccess() {
+type MacAccessChoice = boolean | MacAccessLevel;
+export const MAC_ACCESS_MUTATION_KEY = ["cloudroom-mac-access"];
+/** How much cloud agents may do on this computer (ADR 0113, 0186). `true` means Full access. The account cache is the one
+ *  source every menu reads: it changes at once and rolls back on failure (#109). `onSaved` and the app's error toast run
+ *  with the mutation itself, so each shows once, even after the menu that made the change has closed. */
+export function useSetMacAccess(onSaved?: (access: MacAccessChoice) => void) {
   const client = useQueryClient();
+  type Account = Awaited<ReturnType<typeof sdk.cloudroom.status>>;
   return useMutation({
-    mutationFn: (access: boolean | MacAccessLevel) => sdk.cloudroom.setMacAccess(access),
+    mutationKey: MAC_ACCESS_MUTATION_KEY,
+    meta: { errorMessage: `Couldn't change ${COMPUTER_TITLE} access.` },
+    mutationFn: (access: MacAccessChoice) => sdk.cloudroom.setMacAccess(access),
+    onMutate: async (access) => {
+      await client.cancelQueries({ queryKey: ["cloudroom-account"] });
+      const previous = client.getQueryData<Account>(["cloudroom-account"]);
+      const level = access === true ? "full" : access === false ? "off" : access;
+      if (previous) client.setQueryData<Account>(["cloudroom-account"], { ...previous, macAccessLevel: level, macAccess: level !== "off" });
+      return { previous };
+    },
+    onSuccess: (_result, access) => onSaved?.(access),
+    onError: (_error, _access, context) => { if (context?.previous) client.setQueryData(["cloudroom-account"], context.previous); },
     onSettled: () => client.invalidateQueries({ queryKey: ["cloudroom-account"] }),
   });
 }
@@ -281,12 +297,14 @@ export function useNativeSessions() {
   return useQuery({ queryKey: ["cloudroom-native-sessions"], queryFn: ({ signal }) => sdk.cloudroom.nativeSessions(signal), retry: false, staleTime: 30_000 });
 }
 
-/** Repos on this Mac and GitHub that are not projects yet, newest first. Adding one makes it a project and picks it for the next thread. */
+/** Repos on this Mac and GitHub that are not projects yet, newest first. Adding one makes it a project and picks it for the next thread.
+ *  Mac repos come from a fast scan with no network calls, so they show while GitHub answers. */
 export function useProjectSuggestions(): ProjectSelectorSuggestions | undefined {
   const client = useQueryClient();
   const { hostId } = usePathPickerHost();
   const setProjectId = useSetRootComposeProjectId();
-  const query = useQuery({ queryKey: ["cloudroom-repo-suggestions"], queryFn: ({ signal }) => sdk.cloudroom.repoSuggestions(signal), retry: false, staleTime: 60_000 });
+  const mac = useQuery({ queryKey: ["cloudroom-repo-suggestions", "mac"], queryFn: ({ signal }) => sdk.cloudroom.macRepoSuggestions(signal), retry: false, staleTime: 60_000 });
+  const query = useQuery({ queryKey: ["cloudroom-repo-suggestions", "all"], queryFn: ({ signal }) => sdk.cloudroom.repoSuggestions(signal), retry: false, staleTime: 60_000 });
   const add = useMutation({
     mutationFn: async ({ hostId, repo }: { hostId: string; repo: RepoSuggestion }) => repo.source === "mac"
       ? (await sdk.projects.create({ name: deriveProjectNameFromPath(repo.path), source: { type: "local_path", hostId, path: repo.path } })).id
@@ -298,9 +316,10 @@ export function useProjectSuggestions(): ProjectSelectorSuggestions | undefined 
   if (!hostId) return undefined;
   const adding = add.isPending ? add.variables.repo : null;
   return {
-    repos: [...(query.data?.repos ?? [])].sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0)),
+    repos: [...(query.data ?? mac.data)?.repos ?? []].sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0)),
     githubConnected: query.data?.githubConnected ?? true,
-    isLoading: query.isPending,
+    isLoading: query.isPending && mac.isPending,
+    githubLoading: query.isPending,
     addingKey: adding ? (adding.source === "mac" ? adding.path : adding.repo) : null,
     onAdd: (repo) => add.mutateAsync({ hostId, repo }),
   };

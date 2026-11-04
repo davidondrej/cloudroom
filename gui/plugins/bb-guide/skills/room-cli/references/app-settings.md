@@ -58,7 +58,11 @@ Settings → Defaults → Remove AI co-authors is on by default. Set
 `stripAiCoAuthorsEnabled` with
 `room-cli settings general stripAiCoAuthorsEnabled <true|false|on|off>`.
 New Local and Cloud sessions drop agent `Co-authored-by` lines from commits and
-keep human ones. It needs Git 2.54 or newer.
+keep human ones, and print one stderr line when they remove something. Cloud
+touches only real repositories (the session's own, `/repos/<name>`, and
+`/code/<name>` in Personal threads), never test fixtures; Local touches every
+repository. Cloud OpenClaw always strips, even with the setting off.
+It needs Git 2.54 or newer.
 
 ## Command Guard
 

@@ -3,7 +3,7 @@ import { readFile, writeFile, mkdir, stat, rename, rm } from "node:fs/promises";
 import { join, win32 } from "node:path";
 import { and, desc, eq, inArray, isNull, max, notInArray } from "drizzle-orm";
 import { createThread, findLastCompletedRootStoredTurn, getAppSettings, getProject, getThread, getThreadExecutionOverride, setThreadExecutionOverride, updateThread, cloudroomThreads, cloudroomCommands, events, threads, type DbConnection, type DbQueryConnection, type DbTransaction } from "@cloudroom/db";
-import { PERSONAL_PROJECT_ID, encodeClientTurnRequestIdNumber, isStandaloneBuiltinCompactCommand, promptInputSchema, reasoningLevelSchema, reconcileReasoningLevel, threadQueuedMessageSchema, type Thread, type PromptInput, type ThreadEventType, type ThreadEventTurnStatus, type ThreadChangeKind, type ReasoningLevel, COMPUTER, COMPUTER_TITLE } from "@cloudroom/domain";
+import { PERSONAL_PROJECT_ID, encodeClientTurnRequestIdNumber, isStandaloneBuiltinCompactCommand, promptInputSchema, reasoningLevelSchema, reconcileReasoningLevel, defaultReasoningLevel, threadQueuedMessageSchema, type Thread, type PromptInput, type ThreadEventType, type ThreadEventTurnStatus, type ThreadChangeKind, type ReasoningLevel, COMPUTER, COMPUTER_TITLE } from "@cloudroom/domain";
 import type { CreateThreadRequest, ForkThreadRequest, SendMessageRequest, SendMessageResponse } from "@cloudroom/server-contract";
 import { z } from "zod";
 import { findCliExecutable } from "@cloudroom/process-utils";
@@ -14,7 +14,7 @@ import { mentionsOpenAISide401 } from "./codex-errors.js";
 import { codexOutage } from "./openai-status.js";
 import { buildThreadStatusChangeMetadata } from "../threads/thread-runtime-display.js";
 import { cloudPluginInstructions, cloudroomSystemPrompt, prepareCloudInstructionInput, resolveCustomInstructions } from "../threads/custom-instructions.js";
-import { baseBranch, binding, bindings, command, commands, coreInUse, localTeleports, openBindings, queuedPrompts, saveBinding, saveCommandState, saveStatus, effectivePrompt, projectCopyProgress, stampBindings, teleportBlocked, unstartedTurn, type Binding, type Command, type OpenBinding } from "./store.js";
+import { baseBranch, binding, bindings, command, commands, coreInUse, localTeleports, openBindings, queuedPrompts, saveBinding, saveCommandState, saveStatus, effectivePrompt, projectCopyProgress, stampBindings, teleportBlocked, unstartedTurn, type Binding, type Command, type OpenBinding, isDead, statusOf } from "./store.js";
 import { syncLoopEnv } from "./project-loops.js";
 import { copyProject, copyRunning, githubRepository, localProjectNote, localProjectPath, planNewProjectCopy, workspaceId, workspaceName, planProjectCopy, planProjectCopyOrThrow, reportProjectCopy, writeFilesState, type ProjectCopyJob } from "./project-copy.js";
 import { CHILD_HINT, cloudForkOf, cloudForkPoint, codeFromOf, FORK_HARNESSES, FORK_HINT, landForkCode, localForkPoint, startCloudFork, threadCode, uploadInParts } from "./fork.js";
@@ -27,10 +27,10 @@ import { buildSuggestedBranchName } from "../threads/thread-create-helpers.js";
 import { assertValidParentThread, isParentNotifiableChildThread } from "../threads/thread-parent.js";
 import { inferThreadMetadata, queueThreadTitle } from "../threads/thread-metadata-inference.js";
 import { getLastThreadOutput } from "../threads/thread-data.js";
-import { cliPlace, reportAgentConnect, reportMacHelperProblem } from "./setup-telemetry.js";
+import { cliPlace, reportAgentConnect, reportMacHelperDown, reportMacHelperProblem } from "./setup-telemetry.js";
 import { cloudSkills, copyLogins, copyMacGithub, importCodexLogin, importPiLogin, loginMarkers, macPiSetup, markLogin, setupSync, skillInCloud, stopSync, syncStatus } from "./sync.js";
 import { macClaudeSignedIn } from "./claude-token.js";
-import { macAccess, macAccessSupported, noteWake, setupPreviews, stopPreviews, previewStatus } from "./previews.js";
+import { helperRunning, macAccess, macAccessSupported, noteWake, previewsSetUp, setupPreviews, stopPreviews, previewStatus } from "./previews.js";
 import { GpuApprovals } from "./gpu.js";
 import { CloudSecrets } from "./secrets.js";
 import { CodexAccounts } from "./codex-accounts.js";
@@ -400,14 +400,14 @@ class CloudroomService {
   private readonly teleportUrls = new Map<string, string>();
   /** The core a thread's teleport picked, saved as its binding. */
   teleportUrl(threadId: string): string { return this.teleportUrls.get(threadId) ?? ""; }
-  async teleportClient(threadId?: string): Promise<CloudroomClient> {
+  async teleportClient(threadId?: string, trigger?: SandboxWakeTrigger): Promise<CloudroomClient> {
     const existing = threadId ? binding(this.deps.db, threadId) : null;
     const sandbox = existing ? sandboxThread(existing.coreUrl) : threadId && await this.newThreadsInSandboxes() ? threadId : null;
     if (sandbox) {
       // Teleported threads get their own sandbox too; this wakes it for the transfer.
       const coreUrl = SANDBOX_PREFIX + sandbox;
       if (threadId) this.teleportUrls.set(threadId, coreUrl);
-      return this.client({ coreUrl } as Binding);
+      return this.client({ coreUrl } as Binding, true, trigger);
     }
     const connection = await this.connection();
     const saved = threadId ? binding(this.deps.db, threadId) : null;
@@ -415,10 +415,10 @@ class CloudroomService {
     if (threadId) this.teleportUrls.set(threadId, connection.url);
     return new CloudroomClient(connection);
   }
-  async threadClient(threadId: string, wake = true): Promise<CloudroomClient> {
+  async threadClient(threadId: string, wake = true, trigger?: SandboxWakeTrigger): Promise<CloudroomClient> {
     const saved = binding(this.deps.db, threadId);
     if (!saved) throw new ApiError(409, "cloudroom_thread_unstarted", "This cloud thread has not started yet.");
-    return this.client(saved, wake);
+    return this.client(saved, wake, trigger);
   }
   followTeleport(threadId: string): void { void this.deliver(threadId).catch(() => {}); }
   private readonly leftParent = new Map<string, number | string>();
@@ -483,6 +483,7 @@ class CloudroomService {
   private previewIssue: string | null = null;
   private previewSetupEpoch = -1;
   private previewRetryAt = 0;
+  private previewFailures = 0;
   private onboardingDue = 0;
   private reportingOnboarding = false;
   private lastCapabilities: Capabilities | null = null;
@@ -491,6 +492,8 @@ class CloudroomService {
   private readonly pausedCopies = new Map<string, { job: ProjectCopyJob; landed: Landed; tries: number }>();
   // Threads whose cut copy resumeCutCopy is planning, so a reconnect meanwhile can't plan a second.
   private readonly retrying = new Set<string>();
+  /** Failed tries to mark a new thread's files status, so a lasting failure fails its start (#816). */
+  private readonly prepTries = new Map<string, number>();
   private readonly catchUps = new Map<string, number>();
   /** Threads whose sandbox address just answered 404 and is being woken again (feedback #596). */
   private readonly rewoken = new Set<string>();
@@ -827,6 +830,8 @@ class CloudroomService {
       signal?.throwIfAborted();
       this.stop();
       if (previousAccount) {
+        // Its sign-out revoked this Mac's helper; if it never signed out, revoke now, while its login is still saved (#109).
+        await stopPreviews(this.deps).catch(() => {});
         stampBindings(this.deps.db, previousAccount);
         this.sandboxes.reset();
       }
@@ -994,6 +999,20 @@ class CloudroomService {
     }
   }
 
+  /** Check now: a helper that couldn't start tries again at the next status check, not after its wait. */
+  retryPreviews(): void { this.previewRetryAt = 0; }
+
+  /** A new Mac access level reaches the helper in the background, queued like every other setup so two never overlap.
+   *  Saving it never waits on the helper or fails because of it; Settings shows why the helper can't start (#109). */
+  applyMacAccess(): void {
+    const epoch = this.epoch;
+    void this.changeConnection(async () => {
+      if (this.stopped || epoch !== this.epoch || !await previewsSetUp(this.deps)) return;
+      await setupPreviews(this.deps);
+      if (epoch === this.epoch) { this.previewIssue = null; this.previewFailures = 0; }
+    }).catch((error: unknown) => { if (epoch === this.epoch) this.previewIssue = publicError(error); });
+  }
+
   private ensurePreviews(capabilities: Capabilities): Promise<void> | undefined {
     if (!capabilities.previews || this.stopped || this.previewSetupEpoch === this.epoch || Date.now() < this.previewRetryAt) return;
     const epoch = this.epoch;
@@ -1002,10 +1021,15 @@ class CloudroomService {
     return this.changeConnection(async () => {
       if (this.stopped || epoch !== this.epoch) return;
       await setupPreviews(this.deps);
-      if (epoch === this.epoch) this.previewIssue = null;
-    }).catch(() => {
+      if (epoch === this.epoch) { this.previewIssue = null; this.previewFailures = 0; }
+    }).catch(async (error: unknown) => {
       if (epoch !== this.epoch) return;
-      this.previewIssue = "Cloud previews could not start. Cloud sessions are unaffected.";
+      // Retry after 1, 2, 4, then every 5 minutes: a helper that can't start never restarts in a tight loop (#109).
+      this.previewRetryAt = Date.now() + Math.min(30_000 * 2 ** ++this.previewFailures, 300_000);
+      this.previewIssue = publicError(error);
+      // Twice in a row, so a slow start at login never counts.
+      const level = macAccessSupported ? await macAccess(this.deps).catch(() => null) : null;
+      if (this.previewFailures >= 2 && level && level !== "off" && !await helperRunning(this.deps)) reportMacHelperDown(this.previewIssue);
     }).finally(() => { if (this.previewSetupEpoch === epoch) this.previewSetupEpoch = -1; });
   }
 
@@ -1411,7 +1435,7 @@ class CloudroomService {
     const payload = promptPayload(request.input, request.providerId, capabilities?.attachments === false ? false : profile?.attachments ?? true, cloudPromptLimit(capabilities));
     const model = request.model;
     const piDefault = request.providerId === "pi" && !request.reasoningLevel;
-    const reasoning = request.reasoningLevel ?? "medium";
+    const reasoning = request.reasoningLevel ?? defaultReasoningLevel(undefined);
     if (!model) throw new ApiError(400, "model_required", "Select a Codex model");
     const startRequestId = request.requestId ?? randomUUID();
     const existingThread = (db: DbQueryConnection) => {
@@ -1747,7 +1771,7 @@ class CloudroomService {
     while (!signal.aborted) {
       const session = await client.session(sessionId, signal).catch(() => null);
       if (session?.state === "idle") return null;
-      if (session && ["failed", "process_lost", "closed"].includes(session.state)) {
+      if (session && isDead(session.state)) {
         const reasons = (await client.events(sessionId).catch(() => [])).map((record) => record.kind === "state" ? z.object({ reason: z.string() }).safeParse(record.data).data?.reason : undefined);
         return reasons.filter(Boolean).at(-1) ?? `The new agent stopped (${session.state}).`;
       }
@@ -1778,8 +1802,8 @@ class CloudroomService {
     this.follow(saved, client);
     for (let attempt = 0; ; attempt++) {
       const session = await client.session(saved.sessionId!);
-      const caughtUp = (binding(this.deps.db, saved.threadId)?.cursor ?? 0) >= session.last_sequence && !["pending", "waiting_for_files", "starting", "resuming"].includes(session.state);
-      const busy = ["starting_turn", "running", "interrupting"].includes(session.state) || session.current_request !== null || session.queue.length > 0 || commands(this.deps.db, saved.threadId).some((c) => c.state === "sending");
+      const caughtUp = (binding(this.deps.db, saved.threadId)?.cursor ?? 0) >= session.last_sequence && !["pending", "starting"].includes(statusOf(session.state) ?? "");
+      const busy = ["active", "stopping"].includes(statusOf(session.state) ?? "") || session.current_request !== null || session.queue.length > 0 || commands(this.deps.db, saved.threadId).some((c) => c.state === "sending");
       if (busy) throw new ApiError(409, "thread_busy", "Wait until the agent and its queued messages finish, then switch.");
       if (caughtUp) return session;
       if (attempt >= 20) throw new ApiError(503, "cloudroom_switch", "This thread is still syncing with the cloud. Try again in a moment.");
@@ -1972,17 +1996,18 @@ class CloudroomService {
   }
 
   /** Each sandbox works on its own branch, named after the thread: room/<name>-<id> (docs/scopes/sandboxes.md).
-   *  `create` switches a fresh checkout to it; later calls only rename it to match a new title, before its first push. */
-  private async ensureBranch(threadId: string, create: boolean): Promise<void> {
+   *  `create` switches a fresh checkout to it, and says why if it could not; later calls only rename it to match a new
+   *  title, before its first push. */
+  private async ensureBranch(threadId: string, create: boolean): Promise<string | null> {
     const saved = binding(this.deps.db, threadId);
     const thread = getThread(this.deps.db, threadId);
-    if (!saved?.sessionId || !thread || sandboxThread(saved.coreUrl) !== threadId) return;
+    if (!saved?.sessionId || !thread || sandboxThread(saved.coreUrl) !== threadId) return null;
     const name = buildSuggestedBranchName({ branchPrefix: "room/", title: thread.title ?? thread.titleFallback ?? null, threadId });
     try {
       const client = await this.client(saved, false);
       const workspace = await client.sessionWorkspace(saved.sessionId);
       if (create) this.progress(threadId, [{ key: "workspace", text: `Using workspace: ${workspace.path}`, status: "completed" }]);
-      if (!workspace.head) return;
+      if (!workspace.head) return null;
       const quoted = `'${name}'`;
       // A warm project snapshot skips the clone, so switch to the chosen base branch here.
       const base = baseBranch(command(this.deps.db, `first_${threadId}`)?.input);
@@ -1993,7 +2018,14 @@ class CloudroomService {
       const result = await client.runOnVm({ command: `${script}\ngit symbolic-ref --quiet --short HEAD`, cwd: workspace.path });
       const branch = Buffer.from(result.stdout, "hex").toString().trim().split("\n").at(-1);
       if (branch) this.progress(threadId, [{ key: "branch", text: `Using branch: ${branch}`, status: "completed" }]);
-    } catch { /* A missing branch never blocks the agent; the next title change retries. */ }
+      // A detached checkout exits 0 with no branch to switch. A failed or killed command, or any other branch, means the
+      // switch failed (#816).
+      if (!create || result.code === 0 && (!branch || /^(room|cloudroom)\//.test(branch))) return null;
+      return `Cloudroom could not switch the folder to the thread's branch ${name}${branch ? `, so it is still on ${branch}` : ""}. Git said: ${Buffer.from(result.stderr, "hex").toString().trim().slice(-300) || `exit code ${result.code}`}`;
+    } catch (error) {
+      // A rename that fails never blocks the agent; the next title change retries.
+      return create ? `Cloudroom could not set up the thread's branch ${name}: ${error instanceof Error ? error.message : String(error)}` : null;
+    }
   }
 
   /** Restores the sandbox the thread runs in, which may be another thread's: an unarchived child keeps its parent's. */
@@ -2320,6 +2352,8 @@ class CloudroomService {
   stop(): void {
     this.epoch++;
     this.previewRetryAt = 0;
+    this.previewFailures = 0;
+    this.previewIssue = null;
     this.claudeConnected = null;
     this.stopped = true;
     if (this.timer) clearInterval(this.timer);
@@ -2461,8 +2495,6 @@ class CloudroomService {
               return { sessionId: accepted.session_id, transfer, code: codeFrom ? threadCode(this.deps, codeFrom, transfer) : null };
             }),
         ]);
-        saveBinding(this.deps.db, threadId, { sessionId: started.sessionId, error: null });
-        saved = binding(this.deps.db, threadId)!;
         const copy = planned instanceof Error ? null : planned;
         // Like any failed copy, the card shows only for a project with no folder on the Mac; otherwise only the agent
         // is told, and pulls what it needs (docs/scopes/sandboxes.md, David, 2026-10-13).
@@ -2478,16 +2510,37 @@ class CloudroomService {
         const forkCode: StartStep[] = started.code ? [{ key: "fork", text: "Copying the source thread's code", status: "started" }] : [];
         this.progress(threadId, [{ key: "agent", status: "completed" }, ...files, ...forkCode], "completed");
         const firstSent = new Promise<void>(resolve => { releaseCopy = resolve; });
-        // `room-cli files wait` holds the agent until the files, and a fork's code, have landed (ADR 0209).
+        // `room-cli files wait` holds the agent until the files, a fork's code, and its own sandbox's branch are ready
+        // (ADR 0209). The mark lands before the first message: an unmarked folder with files reads as done, so an agent
+        // could start mid-checkout (#816). A Git checkout already there (a project template) still gets its branch.
         // A child in a Personal project has no workspace of its own, so its status file sits next to the sandbox root.
-        const workspace = target && (files.length || started.code || unplanned) ? target
-          : started.code ? await client.sessionWorkspace(started.sessionId).then(({ path }) => path, () => null) : null;
-        // Code from another thread replaces the folder's files, so the agent must wait for it from its first command.
-        const marked = workspace ? started.code ? this.filesState(client, threadId, workspace, "copying") : firstSent.then(() => this.filesState(client, threadId, workspace, "copying")) : null;
-        if (started.code) await marked;
+        // The session is saved only after the status, so a failed check or write starts it again on the next try (Core
+        // keeps the same session) instead of sending the first message with setup unmarked.
+        // After 3 failed tries the start fails where the user sees it; a permanent error fails it at once.
+        const workspace = await (async () => {
+          // Core's 404 means no workspace, like `client.workspace`; any other error tries again.
+          const lookup = () => client.sessionWorkspace(started.sessionId).catch((error: unknown) => {
+            if (error instanceof CloudroomError && error.status === 404) return null;
+            throw error;
+          });
+          const folder = target && (files.length || started.code || unplanned || sandbox === threadId && (await lookup())?.head) ? target
+            : started.code ? (await lookup())?.path ?? null : null;
+          if (folder) await writeFilesState(client, folder, "copying");
+          this.prepTries.delete(threadId);
+          return folder;
+        })().catch((error: unknown) => {
+          const tries = (this.prepTries.get(threadId) ?? 0) + 1;
+          this.prepTries.set(threadId, tries);
+          if (tries < 3) throw error;
+          this.prepTries.delete(threadId);
+          throw new ApiError(400, "cloudroom_files", `Cloudroom could not prepare the project folder: ${error instanceof Error ? error.message : String(error)}`);
+        });
+        saveBinding(this.deps.db, threadId, { sessionId: started.sessionId, error: null });
+        saved = binding(this.deps.db, threadId)!;
+        const marked = workspace ? Promise.resolve() : null;
         const landed = this.landing(threadId, client, started, files.length > 0, workspace, marked);
         if (copy) this.copy(client, copy, landed, firstSent);
-        else if (started.code || unplanned) void landed(unplanned);
+        else if (workspace || started.code) void landed(unplanned);
         else if (sandbox) void this.ensureBranch(threadId, true);
       }
       if (epoch !== this.epoch) return;
@@ -3046,28 +3099,32 @@ class CloudroomService {
   /** What a new thread's project copy does once it lands: the thread's own branch, a fork's or child's code, its start
    *  steps, and the status `room-cli files wait` reads (ADR 0209). A copy an app restart cut off lands the same way. */
   private landing(threadId: string, client: CloudroomClient, started: Parameters<typeof landForkCode>[1] | null, files: boolean, workspace: string | null, marked: Promise<void> | null): Landed {
-    const deadline = marked && workspace ? setTimeout(() => void marked.then(() => this.filesState(client, threadId, workspace, `failed: ${STALLED}`, true)), COPY_DEADLINE).unref() : undefined;
+    // A status that could not be written is written again here, so the agent never waits on a stale `copying`.
+    let final: string | undefined, last = client;
+    const deadline = marked && workspace ? setTimeout(() => void marked.then(() => this.filesState(last, threadId, workspace, final ?? `failed: ${STALLED}`, true)), COPY_DEADLINE).unref() : undefined;
     const land = async (error?: string, current = client, partial?: string) => {
       if (files) this.progress(threadId, [{ key: "files", status: error ? "failed" : "completed" }]);
       const finish = async (failure?: string | null) => {
-        clearTimeout(deadline);
-        if (marked && workspace) await marked.then(() => this.filesState(current, threadId, workspace, failure ? `failed: ${failure}` : "ready"));
+        final = failure ? `failed: ${failure}` : "ready"; last = current;
+        if (!marked || !workspace) return clearTimeout(deadline);
+        await marked.then(() => writeFilesState(current, workspace, final!)).then(() => clearTimeout(deadline),
+          (error: unknown) => this.warn("Could not save the project copy state for `room-cli files wait`", error, { threadId }));
       };
       const missing = error ?? partial;
       // `ready` comes after the branch, so the agent never starts work on the default branch.
       if (!started?.code) {
-        await this.ensureBranch(threadId, true);
-        await finish(missing);
+        const branch = await this.ensureBranch(threadId, true);
+        await finish(missing ?? branch);
         return;
       }
       // A fork's branch then moves to its source's code, so the agent sees what the source saw.
-      await this.ensureBranch(threadId, true);
+      const branch = await this.ensureBranch(threadId, true);
       const failure = await landForkCode(current, started);
       // A child folder with no Git gets its repository only now, on a cloudroom/ branch: rename it to its room/ one
       // before the agent goes on.
       if (!failure) await this.ensureBranch(threadId, false);
       this.progress(threadId, [{ key: "fork", status: failure ? "failed" : "completed" }]);
-      await finish(failure ?? missing);
+      await finish(failure ?? missing ?? branch);
     };
     return (error, current, partial) => land(error, current, partial).catch(failure => this.warn("Cloud project copy did not land", failure, { threadId }));
   }

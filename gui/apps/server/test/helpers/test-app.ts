@@ -171,7 +171,7 @@ export async function createTestAppHarness(
     ...configOverrides
   } = overrides;
   const logger = createTestLogger();
-  const dataDir = await mkdtemp(join(tmpdir(), "bb-server-test-"));
+  const dataDir = await mkdtemp(join(tmpdir(), "cloudroom-server-test-"));
   await copySharedBuiltinSkills(
     resolveSharedBuiltinSkillsRootPath(resolveBuiltinSkillsRootPath()),
     join(dataDir, "shared-skills"),

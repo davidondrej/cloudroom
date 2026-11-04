@@ -43,7 +43,7 @@ import { starPrompt, starRepo } from "./star-prompt.js";
 import { popupState, recordChecklistHide, recordPopup } from "./popups.js";
 import { activation } from "./activation.js";
 import { disconnectGithub, githubAccount, githubAuth } from "./github-login.js";
-import { addGithubRepo, githubBranches, repoSuggestions } from "./repo-suggestions.js";
+import { addGithubRepo, githubBranches, macRepoSuggestions, repoSuggestions } from "./repo-suggestions.js";
 import { projectSuggestion } from "./project-nudge.js";
 import { promptSuggestion, promptSuggestionEvent } from "../threads/prompt-suggestion.js";
 import { readUiPreferences } from "../system/ui-preferences.js";
@@ -253,6 +253,7 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: Plugin
   app.post("/api/v1/cloudroom/account/mac-access", async (context) => {
     const input = z.union([z.object({ level: z.enum(macAccessLevels) }).strict(), z.object({ enabled: z.boolean() }).strict()]).parse(await context.req.json());
     await setMacAccess(deps, "level" in input ? input.level : input.enabled ? "full" : "off");
+    cloudroom(deps).applyMacAccess();
     return context.json({ ok: true });
   });
   // The website's own message (say, an invalid key) reaches the user instead of "Internal server error".
@@ -512,8 +513,9 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: Plugin
     await restoreAgent(deps, agentId(context));
     return context.json({ ok: true });
   });
-  app.post("/api/v1/cloudroom/account/previews/check", async context => { await checkPreviewsNow(deps); return context.json({ ok: true }); });
+  app.post("/api/v1/cloudroom/account/previews/check", async context => { cloudroom(deps).retryPreviews(); await checkPreviewsNow(deps); return context.json({ ok: true }); });
   app.get("/api/v1/cloudroom/account/repo-suggestions", async context => context.json(await repoSuggestions(deps)));
+  app.get("/api/v1/cloudroom/account/repo-suggestions/mac", async context => context.json(await macRepoSuggestions(deps)));
   app.post("/api/v1/cloudroom/account/project-suggestion", async context => {
     const input = z.object({ prompt: z.string().min(1).max(20_000), projectId: z.string().min(1) }).strict().parse(await context.req.json());
     const projectId = await projectSuggestion(deps, input.prompt, input.projectId).catch((error: unknown) => {

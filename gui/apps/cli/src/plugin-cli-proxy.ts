@@ -414,13 +414,19 @@ export async function runPluginCliCommand(
     stdout?: unknown;
     stderr?: unknown;
     error?: unknown;
+    code?: unknown;
+    message?: unknown;
   } | null;
   if (result === null || typeof result.exitCode !== "number") {
+    // Plugin route errors use `error`; the API gate (e.g. caller proof) sends `{ code, message }`.
+    const code = typeof result?.code === "string" ? ` ${result.code}` : "";
     await writePluginCliOutput(
       streams.stderr,
       typeof result?.error === "string"
         ? result.error
-        : `Unexpected response from the plugin CLI endpoint (HTTP ${response.status})`,
+        : typeof result?.message === "string"
+          ? `${result.message} (HTTP ${response.status}${code})`
+          : `Unexpected response from the plugin CLI endpoint (HTTP ${response.status})`,
     );
     return 1;
   }

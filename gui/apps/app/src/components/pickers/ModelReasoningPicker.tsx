@@ -116,7 +116,7 @@ interface ResolvedProviderPreview {
 export interface ModelReasoningPickerSelection {
   providerId: string;
   model: string;
-  reasoningLevel: ReasoningLevel;
+  reasoningLevel?: ReasoningLevel;
 }
 
 const FAILED_TO_LOAD_MODELS_LABEL = "Failed to load models";
@@ -585,19 +585,22 @@ export function ModelReasoningPicker({
       if (previewSelectionBlocked || lockModelSelection) return;
       if (close) setOpen(false);
       if (onSelectModel) {
+        // Same provider: send no level, so an unpicked one stays unset (#656).
         onSelectModel({
           providerId: activeProviderId,
           model,
-          reasoningLevel: isPreviewing
-            ? resolveModelReasoningLevel(
-                [
-                  ...(previewQuery.data?.models ?? []),
-                  ...(previewQuery.data?.selectedOnlyModels ?? []),
-                ].find((candidate) => candidate.model === model) ??
-                  previewSelection?.activeModel,
-                reasoningValue,
-              )
-            : reasoningValue,
+          ...(isPreviewing
+            ? {
+                reasoningLevel: resolveModelReasoningLevel(
+                  [
+                    ...(previewQuery.data?.models ?? []),
+                    ...(previewQuery.data?.selectedOnlyModels ?? []),
+                  ].find((candidate) => candidate.model === model) ??
+                    previewSelection?.activeModel,
+                  reasoningValue,
+                ),
+              }
+            : {}),
         });
       } else {
         onModelChange(model);

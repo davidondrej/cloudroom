@@ -562,19 +562,29 @@ describe("resolveCreateThreadEnvironment", () => {
           }),
         });
 
-        await expect(
-          resolveCreateThreadEnvironment(harness.deps, {
-            parentThread: makeParentThread({
+        // No --machine, and --machine naming the parent's own host (#822).
+        for (const requestedEnvironment of [
+          { type: "project-default" as const },
+          {
+            type: "host" as const,
+            hostId: host.id,
+            workspace: { type: "unmanaged" as const, path: null },
+          },
+        ]) {
+          await expect(
+            resolveCreateThreadEnvironment(harness.deps, {
+              parentThread: makeParentThread({
+                projectId: project.id,
+                environmentId: parentEnvironment.id,
+              }),
               projectId: project.id,
-              environmentId: parentEnvironment.id,
+              requestedEnvironment,
             }),
-            projectId: project.id,
-            requestedEnvironment: { type: "project-default" },
-          }),
-        ).resolves.toEqual({
-          type: "reuse",
-          environmentId: parentEnvironment.id,
-        });
+          ).resolves.toEqual({
+            type: "reuse",
+            environmentId: parentEnvironment.id,
+          });
+        }
       });
     },
   );

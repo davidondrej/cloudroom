@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
-import { atom, useAtom, useSetAtom } from "jotai";
+import { atom, useAtom, useAtomValue, useSetAtom } from "jotai";
 import { atomWithStorage } from "jotai/utils";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
@@ -34,12 +34,14 @@ import { openUrlInExternalBrowser } from "@/lib/url-open-routing";
 
 const dismissedAtom = atomWithStorage("cloudroom.setup.dismissed", false, booleanLocalStorage, { getOnInit: true });
 const openAtom = atom(false);
+// A new install's sign-in page opens by itself (David, 2026-11-03, docs/scopes/onboarding.md). 20% keep the button, to measure it.
+const signInGroupAtom = atomWithStorage<"auto" | "manual" | "auto_done" | null>("cloudroom.setup.signInGroup", null, undefined, { getOnInit: true });
 export const useOpenSetup = () => useSetAtom(openAtom);
 
 const STEPS = ["Sign in", "Connect an agent", "Connect GitHub", "Import your work"];
 const STEP_IDS = ["account", "agent", "github", "project"] as const;
 type SetupStepId = (typeof STEP_IDS)[number];
-type SetupDetail = "claude" | "codex" | "both" | "none" | "existing" | "found" | "folder" | "recent_folder" | "bb_import" | "chat_import" | "pi" | "opencode" | "cursor" | "hermes" | "grok" | "devin" | "droid" | "fx" | "openclaw";
+type SetupDetail = "claude" | "codex" | "both" | "none" | "existing" | "found" | "folder" | "recent_folder" | "bb_import" | "chat_import" | "pi" | "opencode" | "cursor" | "hermes" | "grok" | "devin" | "droid" | "fx" | "openclaw" | "auto" | "manual";
 const agentDetail = (id: string) => id.replace(/^acp-/, "").replace(/-agent$/, "") as SetupDetail;
 function track(step: SetupStepId, action: "viewed" | "started" | "done" | "skipped" | "closed" | "detected", detail: SetupDetail | null = null, agents?: SetupDetail[]) {
   void fetchWithAppSurface("/api/v1/cloudroom/setup-step", {
@@ -94,10 +96,10 @@ export function Onboarding() {
   useEffect(() => { if (firstRun) setOpen(true); }, [firstRun, setOpen]);
   const visible = locked || open || firstRun;
   if (!visible) return null;
-  return <Setup locked={locked} close={() => { setDismissed(true); setOpen(false); }} />;
+  return <Setup locked={locked} fresh={projects?.length === 0} close={() => { setDismissed(true); setOpen(false); }} />;
 }
 
-function Setup({ locked, close }: { locked: boolean; close: () => void }) {
+function Setup({ locked, fresh, close }: { locked: boolean; fresh: boolean; close: () => void }) {
   const progress = useSetupProgress();
   const { done, account } = progress;
   const [choices, setChoices] = useState({ macAccess: true, copyLogins: true });
@@ -148,11 +150,13 @@ function Setup({ locked, close }: { locked: boolean; close: () => void }) {
     return () => clearTimeout(timer);
   }, [countdown]);
   const viewed = useRef(new Set<number>());
+  const signInGroup = useAtomValue(signInGroupAtom);
   useEffect(() => {
     if (progress.checking || viewed.current.has(step)) return;
-    const timer = setTimeout(() => { viewed.current.add(step); track(STEP_IDS[step] ?? "project", "viewed"); }, 1500);
+    const group = step === 0 && signInGroup ? (signInGroup === "manual" ? "manual" : "auto") : null;
+    const timer = setTimeout(() => { viewed.current.add(step); track(STEP_IDS[step] ?? "project", "viewed", group); }, 1500);
     return () => clearTimeout(timer);
-  }, [progress.checking, step]);
+  }, [progress.checking, step, signInGroup]);
   const knownSignedIn = useRef<boolean | null>(null);
   useEffect(() => {
     if (progress.checking) return;
@@ -222,7 +226,7 @@ function Setup({ locked, close }: { locked: boolean; close: () => void }) {
           <div key={step} className={cn("my-auto w-full duration-300 animate-in fade-in-0 slide-in-from-bottom-1", step === 3 ? "max-w-[860px]" : "max-w-[600px]")}>
             {step === 1 && stamped ? <TickStamp key={`${claude}-${codex}`} /> : <BbLogo className="mb-6 size-[72px] -rotate-[5deg]" />}
             <p className="font-serif text-base text-(--ob-muted) italic">Step {step + 1} of 4</p>
-            {step === 0 && <AccountStep email={account.data?.account?.email ?? null} signingIn={account.data?.signingIn === true} next={next} />}
+            {step === 0 && <AccountStep email={account.data?.account?.email ?? null} signingIn={account.data?.signingIn === true} next={next} fresh={fresh} />}
             {step === 1 && <AgentStep progress={progress} next={next} stamped={stamped} left={countdown?.left ?? null} choices={choices} setChoices={setChoices} />}
             {step === 2 && <GithubStep progress={progress} next={next} />}
             {step === 3 && <ProjectStep close={leave} added={added} setAdded={setAdded} imported={imported} setImported={setImported} />}
@@ -352,10 +356,23 @@ const TickStamp = () => (
   </span>
 );
 
-function AccountStep({ email, signingIn, next }: { email: string | null; signingIn: boolean; next: () => void }) {
+const SIGN_IN_COUNTDOWN = 3;
+function AccountStep({ email, signingIn, next, fresh }: { email: string | null; signingIn: boolean; next: () => void; fresh: boolean }) {
   const signIn = useCloudroomSignIn();
   const busy = signingIn || signIn.isPending;
-  const start = () => { track("account", "started"); signIn.mutate("signIn"); };
+  const [group, setGroup] = useAtom(signInGroupAtom);
+  const start = (detail: SetupDetail | null = null) => { track("account", "started", detail); signIn.mutate("signIn"); };
+  const begin = () => { setGroup("auto_done"); if (!busy && !email) start("auto"); };
+  const [left, setLeft] = useCountdown(true, begin);
+  const openNow = () => { setLeft(null); begin(); };
+  const cancel = () => { setLeft(null); setGroup("auto_done"); };
+  // Only the desktop app on a new install, and only once: Cancel or a finished countdown never auto-opens again.
+  const offered = fresh && !email && getBbDesktopInfo() !== null;
+  useEffect(() => {
+    if (!offered || busy) return;
+    if (group === null) setGroup(Math.random() < 0.2 ? "manual" : "auto");
+    else if (group === "auto" && left === null) setLeft(SIGN_IN_COUNTDOWN);
+  }, [offered, busy, group, left, setGroup, setLeft]);
   return (
     <>
       <Heading lead="Sign in to" mark="Cloudroom" />
@@ -369,11 +386,23 @@ function AccountStep({ email, signingIn, next }: { email: string | null; signing
           <Cta disabled className="w-full"><Icon name="Loading" className="animate-spin" aria-hidden />Waiting for your browser…</Cta>
           <Note>Finish logging in in your browser. <button type="button" className={LINK} onClick={() => signIn.mutate("cancel")}>Cancel</button></Note>
         </div>
+      ) : left !== null ? (
+        <>
+          <p className="mt-3 text-base text-(--ob-muted)">Use the account you made on cloudroom.dev.</p>
+          <div className="mt-8 flex items-center gap-5">
+            <Cta onClick={openNow}>Opening your browser in {left}…</Cta>
+            <Note>
+              <button type="button" className={LINK} onClick={openNow}>Open now</button> · <button type="button" className={LINK} onClick={cancel}>Cancel</button>
+            </Note>
+          </div>
+          <CountdownBar seconds={SIGN_IN_COUNTDOWN} />
+          <p className="mt-6 text-sm text-(--ob-muted)">Already signed in on cloudroom.dev? You come right back.</p>
+        </>
       ) : (
         <>
           <p className="mt-3 text-base text-(--ob-muted)">Use the account you made on cloudroom.dev.</p>
           <div className="mt-8 flex flex-col items-start gap-4">
-            <Cta onClick={start}>Sign in with browser <Icon name="ArrowRight" aria-hidden /></Cta>
+            <Cta onClick={() => start()}>Sign in with browser <Icon name="ArrowRight" aria-hidden /></Cta>
             <Note>Already signed in there? You come right back.</Note>
           </div>
         </>
@@ -550,6 +579,28 @@ function Choice({ checked, onChange, label, detail }: { checked: boolean; onChan
   );
 }
 
+/** Counts down a second at a time while `ready`, then runs `done`. Returns the seconds left (null when stopped) and its setter. */
+function useCountdown(ready: boolean, done: () => void) {
+  const [left, setLeft] = useState<number | null>(null);
+  const finish = useRef(done);
+  useEffect(() => { finish.current = done; });
+  useEffect(() => {
+    if (left === null || !ready) return;
+    const timer = setTimeout(() => {
+      if (left > 1) return setLeft(left - 1);
+      setLeft(null);
+      finish.current();
+    }, 1000);
+    return () => clearTimeout(timer);
+  }, [left, ready]);
+  return [left, setLeft] as const;
+}
+const CountdownBar = ({ seconds }: { seconds: number }) => (
+  <div className="mt-3.5 h-1.5 w-[360px] bg-(--ob-line)">
+    <span className="bb-hero-progress-fill block h-full bg-(--ob-ink)" style={{ "--bb-hero-slide-duration": `${seconds}s` } as CSSProperties} />
+  </div>
+);
+
 const GITHUB_COUNTDOWN = 4;
 const openGithub = (url: string) => { if (new URL(url).origin === "https://github.com") openUrlInExternalBrowser(url); };
 
@@ -559,7 +610,6 @@ function GithubStep({ progress, next }: { progress: ReturnType<typeof useSetupPr
   const client = useQueryClient();
   const requestId = useRef<string | null>(null);
   const [copied, setCopied] = useState(false);
-  const [left, setLeft] = useState<number | null>(null);
   const refresh = () => client.invalidateQueries({ queryKey: ["cloudroom-github-auth"] });
   const connect = useMutation({
     mutationFn: async () => {
@@ -586,19 +636,11 @@ function GithubStep({ progress, next }: { progress: ReturnType<typeof useSetupPr
   const connected = state === "connected";
   const code = state === "waiting" ? github.data?.user_code : null;
   const url = state === "waiting" ? github.data?.verification_url : null;
+  const [left, setLeft] = useCountdown(Boolean(url), () => { if (url) openGithub(url); });
   const open = () => {
     setLeft(null);
     if (url) openGithub(url);
   };
-  useEffect(() => {
-    if (left === null || !url) return;
-    const timer = setTimeout(() => {
-      if (left > 1) return setLeft(left - 1);
-      setLeft(null);
-      openGithub(url);
-    }, 1000);
-    return () => clearTimeout(timer);
-  }, [left, url]);
   const copyAgain = async () => {
     if (code && await copyToClipboardWithToast(code, { successMessage: "Code copied." })) setCopied(true);
   };
@@ -625,11 +667,7 @@ function GithubStep({ progress, next }: { progress: ReturnType<typeof useSetupPr
             <button type="button" className={LINK} onClick={() => cancel.mutate()}>Cancel</button>
           </Note>
         </div>
-        {left !== null && (
-          <div className="mt-3.5 h-1.5 w-[360px] bg-(--ob-line)">
-            <span className="bb-hero-progress-fill block h-full bg-(--ob-ink)" style={{ "--bb-hero-slide-duration": `${GITHUB_COUNTDOWN}s` } as CSSProperties} />
-          </div>
-        )}
+        {left !== null && <CountdownBar seconds={GITHUB_COUNTDOWN} />}
         <p className="mt-6 text-sm text-(--ob-muted)">
           On GitHub: press <b className="text-(--ob-ink)">⌘V</b> to paste, then click <b className="text-(--ob-ink)">Authorize</b>. This screen moves on by itself.
         </p>

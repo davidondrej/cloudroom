@@ -41,9 +41,10 @@ const awakeSchema = z.object({
 export type SandboxAccount = { website: string; userId: string; token: string };
 type AccountRequest = { account: SandboxAccount; signal: AbortSignal };
 export type SandboxConnection = { url: string; token: string };
-export type SandboxTrigger = "app_launch" | "app_activity" | "composer" | "thread_typing" | "thread_view";
-/** Why a sleeping thread wakes before any work is sent: the user opened it or started typing (ADR 0176). */
-export type SandboxWakeTrigger = Extract<SandboxTrigger, "thread_typing" | "thread_view">;
+export type SandboxTrigger = "app_launch" | "app_activity" | "composer" | "thread_typing" | "thread_view" | "teleport_local";
+/** Why a sleeping thread wakes before any work is sent: the user opened it or started typing (ADR 0176), or its work
+ *  leaves Cloud (`teleport_local`: Teleport to Local, Copy to Mac, Fork to Local), which may pass the credit limit once a day. */
+export type SandboxWakeTrigger = Extract<SandboxTrigger, "thread_typing" | "thread_view" | "teleport_local">;
 /** Logins the website keeps for every sandbox of an account (ADR 0145). */
 export type SandboxLogin = "claude" | "codex" | "pi" | "github" | "cursor" | "opencode" | "mcp" | "hermes" | "devin" | "openclaw";
 /** GitHub projects also name their repository and cloud folder, so the website can build a template. */
@@ -675,8 +676,9 @@ export class SandboxDirectory {
     }
     if (view?.state === "awake" && view.origin && view.token) return { url: view.origin, token: view.token };
     if (!wake) return null;
-    const waiting = this.backoff.get(thread);
-    if (waiting && Date.now() < waiting.until) {
+    // Work leaving Cloud is a click: it asks again at once and keeps its trigger, so the website can let it out.
+    const exit = trigger === "teleport_local", waiting = this.backoff.get(thread);
+    if (waiting && !exit && Date.now() < waiting.until) {
       const { refusal } = waiting, retry = `Retrying in ${Math.ceil((waiting.until - Date.now()) / 1000)} seconds.`;
       throw !refusal ? new CloudroomConnectionError(`The cloud sandbox could not start. ${retry}`) : !refusal.code && refusal.retryable ? new CloudroomError(`${refusal.message} ${retry}`, refusal.status) : refusal;
     }
@@ -687,7 +689,7 @@ export class SandboxDirectory {
       pending = macHarnessVersions().then(harnesses => {
         this.wakeHarnesses.set(thread, harnesses);
         const target = this.targets.get(thread), from = this.keySource(thread);
-        return this.call({ action: "wake", ...place, ...(target ? { target } : {}), ...(from ? { from } : {}), ...(parent ? { parent } : {}), harnesses, ...(this.backoff.has(thread) ? { trigger: "retry" } : trigger ? { trigger } : {}) });
+        return this.call({ action: "wake", ...place, ...(target ? { target } : {}), ...(from ? { from } : {}), ...(parent ? { parent } : {}), harnesses, ...(this.backoff.has(thread) && !exit ? { trigger: "retry" } : trigger ? { trigger } : {}) });
       }).then(value => this.remember(viewSchema.parse(value))).then(view => {
         this.targets.delete(thread);
         this.woke(view.thread);

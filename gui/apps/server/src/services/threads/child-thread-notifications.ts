@@ -24,6 +24,7 @@ import {
   systemMessageKindForTemplate,
 } from "./system-message-kind.js";
 import { getLastThreadOutput, getTurnErrorText } from "./thread-data.js";
+import { waitForHeldMessageDrain } from "./queued-message-dispatch.js";
 
 export type ChildThreadNotificationSource = ParentSystemThreadMentionSource;
 
@@ -397,6 +398,8 @@ async function flushChildThreadTurnNotificationBatch(
   childThreadTurnNotificationBatches.delete(parentThreadId);
 
   try {
+    // Progress messages a settled interaction just released go first (#851).
+    await waitForHeldMessageDrain(parentThreadId);
     await queueParentSystemMessage(deps, {
       input: buildChildThreadTurnStatusBatchInput({
         items: batch.items,

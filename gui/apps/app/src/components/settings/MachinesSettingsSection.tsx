@@ -153,7 +153,8 @@ export function MachineRowContent({
         "group min-w-0 cursor-pointer transition-colors hover:bg-state-hover focus-within:bg-state-hover",
       )}
       onClick={(event) => {
-        if (targetsResourceAction(event.target)) return;
+        // Menus render in a portal, but React still bubbles their clicks here: only a click inside the card opens it.
+        if (!event.currentTarget.contains(event.target as Node) || targetsResourceAction(event.target)) return;
         navigate(detailPath);
       }}
     >

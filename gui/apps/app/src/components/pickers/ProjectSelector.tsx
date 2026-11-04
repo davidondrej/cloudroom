@@ -43,11 +43,13 @@ export interface ProjectSelectorOption {
   name: string;
 }
 
-/** Repos on this Mac and GitHub that are not projects yet, newest first. `onAdd` resolves to the new project's id. */
+/** Repos on this Mac and GitHub that are not projects yet, newest first. `onAdd` resolves to the new project's id.
+ *  `isLoading` means no repos are known yet; `githubLoading` means GitHub's repos are still on their way. */
 export interface ProjectSelectorSuggestions {
   repos: readonly RepoSuggestion[];
   githubConnected: boolean;
   isLoading: boolean;
+  githubLoading?: boolean;
   addingKey: string | null;
   onAdd: (repo: RepoSuggestion) => Promise<string>;
 }
@@ -95,9 +97,9 @@ export function ProjectSelector({
   const listRef = useResetPickerScroll<HTMLDivElement>(searchQuery);
   const disabled = disabledProp || isLoading;
   const suggestions = createProject?.suggestions;
+  // With repo suggestions the search box shows from the start, so the menu doesn't jump when repos arrive.
   const showSearch =
-    projects.length + (suggestions?.repos.length ?? 0) >
-    PROJECT_SEARCH_MIN_OPTIONS;
+    Boolean(suggestions) || projects.length > PROJECT_SEARCH_MIN_OPTIONS;
   const filteredProjects = useMemo(
     () =>
       showSearch
@@ -377,9 +379,13 @@ function RepoSuggestionsGroup({
 }: RepoSuggestionsGroupProps) {
   const now = Date.now();
   const computer = useThisComputer() === "this PC" ? "PC" : COMPUTER_TITLE;
-  const emptyMessage = suggestions.isLoading
+  const loadingMessage = suggestions.isLoading
     ? "Looking for repos…"
-    : filter === "github" && !suggestions.githubConnected
+    : suggestions.githubLoading && filter !== "mac"
+      ? "Checking GitHub…"
+      : null;
+  const emptyMessage =
+    filter === "github" && !suggestions.githubConnected
       ? "GitHub isn't connected."
       : "No other repos found.";
   return (
@@ -401,8 +407,17 @@ function RepoSuggestionsGroup({
           >
             {id === "all" ? null : (
               <Icon
-                name={id === "github" ? "Github" : "Laptop"}
-                className="size-2.5"
+                name={
+                  id === "github" && suggestions.githubLoading
+                    ? "Loading"
+                    : id === "github"
+                      ? "Github"
+                      : "Laptop"
+                }
+                className={cn(
+                  "size-2.5",
+                  id === "github" && suggestions.githubLoading && "animate-spin",
+                )}
                 aria-hidden
               />
             )}
@@ -410,7 +425,7 @@ function RepoSuggestionsGroup({
           </button>
         ))}
       </div>
-      {repos.map((repo) => {
+      {repos.map((repo, index) => {
         const key = repoKey(repo);
         const adding = suggestions.addingKey === key;
         return (
@@ -420,7 +435,11 @@ function RepoSuggestionsGroup({
             keywords={[repo.name]}
             disabled={suggestions.addingKey !== null && !adding}
             onSelect={() => onAdd(repo)}
-            className={cn(PROJECT_PICKER_ITEM_CLASS_NAME, "group")}
+            className={cn(
+              PROJECT_PICKER_ITEM_CLASS_NAME,
+              "group animate-in fade-in slide-in-from-top-1 fill-mode-both duration-300 motion-reduce:animate-none",
+            )}
+            style={{ animationDelay: `${index * 50}ms` }}
           >
             <Icon
               name={repo.source === "github" ? "Github" : "Laptop"}
@@ -448,7 +467,12 @@ function RepoSuggestionsGroup({
           </CommandItem>
         );
       })}
-      {repos.length === 0 ? (
+      {loadingMessage ? (
+        <div className="flex items-center gap-2 px-2 py-[0.3125rem] text-xs text-muted-foreground max-md:py-2">
+          <Icon name="Loading" className="size-4 animate-spin" aria-hidden />
+          {loadingMessage}
+        </div>
+      ) : repos.length === 0 ? (
         <div className="px-2 py-1.5 text-xs text-muted-foreground max-md:py-2">
           {emptyMessage}
         </div>

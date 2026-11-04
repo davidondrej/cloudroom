@@ -1,5 +1,6 @@
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
+import { failurePause, QUIET_AFTER_MS } from "../lib/paused.js";
 import type { Db } from "./data.js";
 
 // Loops their own failures paused, for the sidebar's paused label (ADR 20261101-191413). Pauses older than a week stay quiet.
@@ -18,7 +19,6 @@ export const pausedLoopSchema = z
   .strict();
 export type PausedLoop = z.infer<typeof pausedLoopSchema>;
 
-const WEEK_MS = 7 * 86_400_000;
 // The website is read at most every 15 minutes: a loop pauses after 3 failed runs, so a later label loses little.
 const CLOUD_EVERY_MS = 15 * 60_000;
 
@@ -26,35 +26,38 @@ const CLOUD_EVERY_MS = 15 * 60_000;
 export function pausedLocal(db: Db, now: number): PausedLoop[] {
   const rows = db
     .prepare(
-      `SELECT id, project_id AS projectId, name, last_error AS lastError,
-         consecutive_failures AS failures, updated_at AS at
+      `SELECT id, project_id AS projectId, name, last_error AS lastError, updated_at AS at
        FROM automations
        WHERE enabled = 0 AND last_error LIKE '%(loop paused after % consecutive failures)' AND updated_at >= ?`,
     )
-    .all(now - WEEK_MS) as {
+    .all(now - QUIET_AFTER_MS) as {
     id: string;
     projectId: string;
     name: string;
     lastError: string;
-    failures: number;
     at: number;
   }[];
-  return rows.map((row) => ({
-    key: `local:${row.id}:${row.at}`,
-    kind: "local",
-    id: row.id,
-    projectId: row.projectId,
-    name: row.name,
-    reason: row.lastError.replace(
-      / \(loop paused after \d+ consecutive failures\)$/,
-      "",
-    ),
-    failures: row.failures,
-    at: row.at,
-  }));
+  return rows.flatMap((row) => {
+    const pause = failurePause({ enabled: false, ...row }, now);
+    return pause
+      ? [
+          {
+            key: `local:${row.id}:${row.at}`,
+            kind: "local" as const,
+            id: row.id,
+            projectId: row.projectId,
+            name: row.name,
+            ...pause,
+            at: row.at,
+          },
+        ]
+      : [];
+  });
 }
 
 let cloud: { at: number; loops: PausedLoop[] } | null = null;
+// Bumped by forgetCloud, so a read that started before a change never caches the old answer.
+let generation = 0;
 
 /** Cloud loops the website paused ("Paused after 3 failed runs. ..."). A failed read keeps the last answer. */
 export async function pausedCloud(
@@ -63,36 +66,38 @@ export async function pausedCloud(
 ): Promise<PausedLoop[]> {
   if (cloud && now - cloud.at < CLOUD_EVERY_MS) return cloud.loops;
   const last = cloud?.loops ?? [];
+  const read = generation;
   cloud = { at: now, loops: last };
   const result = await cloudroom
     .automations({ action: "list" })
     .catch(() => null);
   if (!result) return last;
-  cloud.loops = (result.automations ?? []).flatMap((loop) => {
+  const loops = (result.automations ?? []).flatMap((loop) => {
     const at = Date.parse(loop.last_run_at ?? loop.created_at);
-    if (loop.enabled || !loop.last_error?.startsWith("Paused after "))
-      return [];
-    if (!(now - at < WEEK_MS)) return [];
-    return [
-      {
-        key: `cloud:${loop.id}:${at}`,
-        kind: "cloud" as const,
-        id: loop.id,
-        projectId: null,
-        name: loop.name,
-        reason: loop.last_error.replace(
-          /^Paused after \d+ failed runs\. (Last error: )?/,
-          "",
-        ),
-        failures: loop.failures,
-        at,
-      },
-    ];
+    const pause = failurePause(
+      { enabled: loop.enabled, lastError: loop.last_error, at },
+      now,
+    );
+    return pause
+      ? [
+          {
+            key: `cloud:${loop.id}:${at}`,
+            kind: "cloud" as const,
+            id: loop.id,
+            projectId: null,
+            name: loop.name,
+            ...pause,
+            at,
+          },
+        ]
+      : [];
   });
-  return cloud.loops;
+  if (read === generation) cloud = { at: now, loops };
+  return loops;
 }
 
 /** A Cloud loop changed here (say, resumed): the next read asks the website again. */
 export function forgetCloud(): void {
   cloud = null;
+  generation += 1;
 }

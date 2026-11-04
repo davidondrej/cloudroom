@@ -72,6 +72,17 @@ export function offlinePage(lastSeenAt: number | null): Response {
   return response;
 }
 
+/** A page load the tunnel dropped. Reloads itself up to 3 times within 5 minutes (each try can wait 30 s), then waits for a tap. */
+export function reconnectingPage(status: number): Response {
+  return page(
+    `<h1>Reconnecting to your Mac…</h1>
+     <p id="wait">This takes a few seconds.</p>
+     <button type="button" onclick="location.reload()">Try again</button>
+     <script>try{var s=sessionStorage,t=Date.now(),n=t-(+s.crAt||0)<300000?+(s.crN||0):0;if(n<3){s.crN=n+1;s.crAt=t;setTimeout(function(){location.reload()},2000)}else{s.crN=0;document.getElementById("wait").textContent="Your Mac isn't answering. Check that it's awake and online."}}catch(e){}</script>`,
+    status,
+  );
+}
+
 export function messagePage(title: string, message: string, status: number): Response {
   return page(`<h1>${escapeHtml(title)}</h1><p>${escapeHtml(message)}</p>`, status);
 }

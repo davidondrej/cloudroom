@@ -43,6 +43,7 @@ import {
   saveBinding,
   saveTeleportProgress,
   teleportProgress,
+  TIMED_OUT,
   type TeleportProgress,
 } from "./store.js";
 
@@ -625,7 +626,11 @@ class Teleport {
   }
   recover(): void {
     for (const { threadId, progress } of pendingTeleports(this.deps.db))
-      if (progress.phase !== "checking") this.launch(threadId, progress.id);
+      if (progress.phase === "error") {
+        saveTeleportProgress(this.deps.db, threadId, { ...progress, phase: progress.cloudStarted ? "running" : "uploading", error: undefined });
+        this.notify(threadId);
+        this.launch(threadId, progress.id);
+      } else if (progress.phase !== "checking") this.launch(threadId, progress.id);
       else if (!this.checking.has(progress.id))
         this.dropChecking(
           threadId,
@@ -658,7 +663,11 @@ class Teleport {
           this.finishCancellation(state);
           return;
         }
+        // A request that timed out is a slow link or a busy Core, never a verdict: every step reuses the transfer's
+        // identity, so the recovery loop retries it instead of pausing the transfer behind a Retry button (#751).
+        const timedOut = error instanceof DOMException && error.message === TIMED_OUT;
         const transient =
+          timedOut ||
           (error instanceof CloudroomError && error.retryable) ||
           (error instanceof ApiError &&
             [
@@ -667,8 +676,9 @@ class Teleport {
               "teleport_queue_settling",
               "teleport_source_busy",
             ].includes(error.body.code));
-        const message =
-          error instanceof Error
+        const message = timedOut
+          ? "Cloud is slow to answer. Retrying automatically."
+          : error instanceof Error
             ? error.message
             : "Transfer failed; source history is preserved.";
         saveTeleportProgress(this.deps.db, threadId, {
@@ -678,7 +688,7 @@ class Teleport {
         });
         this.deps.logger.warn(
           { threadId, transferId: id, error: message },
-          "Teleport paused",
+          transient ? "Teleport retrying" : "Teleport paused",
         );
         this.notify(threadId);
       })
@@ -978,6 +988,19 @@ class Teleport {
     const copy = await planProjectCopy(this.deps, client, state.threadId, state.manifest!.workspace, { localPath: state.workspacePath, teleport: true });
     let remote = await client.prepareTeleport(state.manifest!);
     if (copy) copyProject(this.deps, client, copy);
+    // Bytes, not files, so one big chat file never sits at 0 until it lands. Before Cloud starts only the chat text
+    // counts. `rate` is the upload speed of the last pieces alone, so a slow Core never reads as a slow connection.
+    const sizes = state.manifest!.files.map((file) => file.size);
+    let rate: number | undefined;
+    const bytes = () => {
+      const stage = (index: number) => Boolean(remote.session_id) || TEXT.includes(state.manifest!.files[index]!.kind);
+      return {
+        sent: remote.files.reduce((sum, file, index) => sum + (!stage(index) ? 0 : file.complete ? sizes[index]! : file.offset), 0),
+        bytes: sizes.reduce((sum, size, index) => sum + (stage(index) ? size : 0), 0),
+        ...(rate ? { rate: Math.round(rate) } : {}),
+      };
+    };
+    this.progress(state, bytes());
     const cancelled = async () => {
       if (
         teleportProgress(this.deps.db, state.threadId)?.phase === "cancelled" &&
@@ -998,7 +1021,10 @@ class Teleport {
       return true;
     };
     if (await cancelled()) return;
-    if (remote.session_id) await this.bind(state, remote);
+    if (remote.session_id) {
+      await this.bind(state, remote);
+      this.progress(state, bytes());
+    }
     const upload = async (index: number) => {
       let status = remote.files[index]!;
       while (!status.complete) {
@@ -1031,14 +1057,20 @@ class Teleport {
           chunk.size === undefined
         )
           throw new Error("Local transfer chunk is missing.");
+        // A file can change after the manifest; its read size is the one Core checks.
+        sizes[index] = chunk.size;
+        const part = Buffer.from(chunk.data, "base64");
+        const sending = Date.now();
         remote = await client.uploadTeleport(
           id,
           index,
           status.offset,
           chunk.sha256,
-          Buffer.from(chunk.data, "base64"),
+          part,
           chunk.size,
         );
+        const speed = part.length / Math.max(0.05, (Date.now() - sending) / 1000);
+        if (part.length >= 64 * 1024) rate = rate ? rate * 0.7 + speed * 0.3 : speed;
         status = remote.files[index]!;
         this.progress(state, {
           phase: remote.session_id ? "running" : "uploading",
@@ -1046,6 +1078,7 @@ class Teleport {
           total: remote.files.length,
           error: undefined,
           cloudStarted: Boolean(remote.session_id),
+          ...bytes(),
         });
       }
       return true;
@@ -1062,6 +1095,8 @@ class Teleport {
     this.save(state);
     remote = await client.activateTeleport(id, state.retryRequestId);
     await this.bind(state, remote);
+    // Binding resets progress; show the next stage's bytes at once, not after its first piece.
+    this.progress(state, bytes());
     for (let i = 0; i < files.length; i++)
       if (!TEXT.includes(files[i]!.kind) && !(await upload(i)))
         return;

@@ -30,6 +30,7 @@ import {
 } from "@/components/ui/settings-section";
 import { appToast } from "@/components/ui/app-toast";
 import { MachineRenameDialog } from "@/components/settings/MachineRenameDialog";
+import { MacAccessSection } from "@/components/settings/CloudroomAccountSettings";
 import {
   useRenameHost,
   useResumeHost,
@@ -68,7 +69,7 @@ import {
 const PRIMARY_REMOVE_DISABLED_REASON = "Cloudroom's primary machine can't be removed.";
 
 const PERMISSION_LIMIT_DESCRIPTION =
-  "Highest permission mode any thread on the selected machine may run with. Threads that ask for more resolve down to it, and a provider that supports nothing this low can't run here.";
+  "The most a Local thread on this machine may run with. Threads that ask for more resolve down to it, and a provider that supports nothing this low can't run here.";
 
 const PLATFORM_LABELS: Record<HostPlatform, string | null> = {
   darwin: "macOS",
@@ -379,6 +380,8 @@ export function MachineSettingsView() {
             setRenameOpen(true);
           }}
         />
+
+        {isPrimary ? <MacAccessSection /> : null}
 
         <SettingsSection
           title="Permission limit"

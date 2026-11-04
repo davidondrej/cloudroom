@@ -3,14 +3,11 @@ use crate::config::{Config, HarnessConfig};
 use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
-    io::{self, BufRead, BufReader, Read},
+    io::{self, Read},
     path::{Path, PathBuf},
-    sync::mpsc::{Receiver, TryRecvError, sync_channel},
-    time::Duration,
 };
 use tokio::process::Command;
 
-const HISTORY: &str = include_str!("cursor-history.py");
 const PLAIN_CHAT: &str = "Ask the user questions in plain chat. Do not use structured question or plan-approval tools. Never infer the user's answer or approval.";
 
 fn invalid(message: &str) -> io::Error {
@@ -22,9 +19,11 @@ fn invalid(message: &str) -> io::Error {
 pub(super) struct Flavor {
     pub harness: &'static str,
     pub name: &'static str,
-    /// Where the agent keeps a session, from its home and session ID, when Core does not capture it.
+    /// Where the agent keeps a session, from its home and session ID, unless its open reply says so (`capture`).
     pub native_path: fn(&Path, &str) -> PathBuf,
     pub valid_id: fn(&str) -> bool,
+    /// The open reply says where the chat lives (Cursor's print driver). Core never copies the chat itself: Cursor's
+    /// store is one SQLite file, so each copy was all of it and history grew by its size every turn (#606).
     pub capture: bool,
     /// Diagnostics the agent sends as message text; never part of the reply.
     pub notices: &'static [&'static str],
@@ -327,19 +326,13 @@ pub(super) struct Protocol {
     responses: Vec<Value>,
     closing: bool,
     tools: BTreeMap<String, Value>,
-    capture: Capture,
     terminal: Option<(String, String, Option<String>)>,
     message: u64,
     text: String,
     thinking: String,
 }
 impl Protocol {
-    pub fn new(
-        config: &Config,
-        profile: &HarnessConfig,
-        resume: Option<&Resume>,
-        flavor: Flavor,
-    ) -> Self {
+    pub fn new(profile: &HarnessConfig, resume: Option<&Resume>, flavor: Flavor) -> Self {
         Self {
             flavor,
             home: profile.home.clone(),
@@ -353,7 +346,6 @@ impl Protocol {
             responses: Vec::new(),
             closing: false,
             tools: BTreeMap::new(),
-            capture: Capture::new(profile, config.storage.clone()),
             terminal: None,
             message: 0,
             text: String::new(),
@@ -473,8 +465,7 @@ impl Adapter for Protocol {
                         .as_str()
                         .ok_or_else(|| io::Error::other("Missing Cursor chat location"))?,
                 );
-                self.capture.root = chat_root(&self.home, &id, &path)?;
-                self.capture.id = Some(id.clone());
+                chat_root(&self.home, &id, &path)?;
                 path
             } else {
                 (self.flavor.native_path)(&self.home, &id)
@@ -557,9 +548,6 @@ impl Adapter for Protocol {
                         },
                         data,
                     ));
-                    if complete {
-                        self.capture.dirty = true;
-                    }
                 }
                 _ => {}
             }
@@ -606,7 +594,6 @@ impl Adapter for Protocol {
             && value["id"].as_u64() == self.prompt
         {
             self.finish_message(state, &mut events);
-            self.capture.dirty = true;
             let stop = value["result"]["stopReason"].as_str();
             if value.get("error").is_none()
                 && matches!(stop, Some("cancelled" | "end_turn"))
@@ -709,20 +696,16 @@ impl Adapter for Protocol {
         self.responses.clone()
     }
     fn capture(&mut self) -> io::Result<Vec<Event>> {
-        let mut events = self.capture.poll()?;
-        if !self.capture.pending()
-            && let Some((request, status, error)) = self.terminal.take()
-        {
-            events.push(Event::Finished {
+        Ok((self.terminal.take().into_iter())
+            .map(|(request, status, error)| Event::Finished {
                 request,
                 status,
                 error,
-            });
-        }
-        Ok(events)
+            })
+            .collect())
     }
     fn capture_pending(&self) -> bool {
-        self.capture.pending() || self.terminal.is_some()
+        self.terminal.is_some()
     }
     fn close(&mut self) -> Vec<Value> {
         self.closing = true;
@@ -738,145 +721,4 @@ impl Adapter for Protocol {
     fn closed(&mut self, _: &Value) -> bool {
         self.closing && self.prompt.is_none()
     }
-}
-
-struct Capture {
-    policy: Option<crate::workspace::storage::Policy>,
-    root: PathBuf,
-    id: Option<String>,
-    dirty: bool,
-    worker: Option<Receiver<io::Result<Event>>>,
-}
-impl Capture {
-    fn new(profile: &HarnessConfig, policy: Option<crate::workspace::storage::Policy>) -> Self {
-        Self {
-            policy,
-            root: profile.home.join("chats"),
-            id: None,
-            dirty: false,
-            worker: None,
-        }
-    }
-    fn pending(&self) -> bool {
-        self.worker.is_some() || self.dirty && self.id.is_some()
-    }
-    fn poll(&mut self) -> io::Result<Vec<Event>> {
-        let mut events = Vec::new();
-        if let Some(worker) = &self.worker {
-            loop {
-                match worker.try_recv() {
-                    Ok(event) => events.push(event?),
-                    Err(TryRecvError::Empty) => break,
-                    Err(TryRecvError::Disconnected) => {
-                        self.worker = None;
-                        break;
-                    }
-                }
-            }
-        }
-        if self.worker.is_none()
-            && self.dirty
-            && let Some(id) = self.id.clone()
-        {
-            self.dirty = false;
-            let mut command = Command::new("python3");
-            command
-                .env_clear()
-                .env("PATH", "/usr/local/bin:/usr/bin:/bin")
-                .current_dir("/")
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped());
-            command
-                .args(["-I", "-c", HISTORY, "capture"])
-                .arg(&self.root)
-                .arg(id);
-            let group = self
-                .policy
-                .as_ref()
-                .map(|policy| {
-                    let group = super::linux::Workload::create(policy)?;
-                    group.attach(&mut command, policy)?;
-                    Ok::<_, io::Error>(group)
-                })
-                .transpose()?;
-            let (sender, receiver) = sync_channel(8);
-            self.worker = Some(receiver);
-            std::thread::spawn(move || {
-                let _group = group;
-                let result = (|| {
-                    let mut child = command.as_std_mut().spawn()?;
-                    drop(child.stdin.take());
-                    let stdout = child
-                        .stdout
-                        .take()
-                        .ok_or_else(|| io::Error::other("Missing Cursor capture output"))?;
-                    let result = (|| {
-                        for line in BufReader::new(stdout).lines() {
-                            let line = line?;
-                            let value: Value = serde_json::from_str(&line)?;
-                            let native = value["record"]
-                                .as_str()
-                                .ok_or_else(|| io::Error::other("Invalid Cursor snapshot"))?
-                                .to_owned();
-                            let event = Event::Record {
-                                kind: "native_record",
-                                data: json!({"harness":"cursor","snapshot":value["snapshot"],"index":value["index"],"complete":value["complete"]}),
-                                native: Some(native + "\n"),
-                            };
-                            sender.send(Ok(event)).map_err(|_| {
-                                io::Error::other("Cursor capture owner disconnected")
-                            })?;
-                        }
-                        Ok::<_, io::Error>(())
-                    })();
-                    if result.is_err() {
-                        let _ = child.kill();
-                    }
-                    let status = child.wait()?;
-                    if result.is_err() || !status.success() {
-                        // A script stopped mid-line leaves torn JSON; its stderr says why (e.g. the 30-second budget).
-                        let mut error = String::new();
-                        if let Some(stderr) = child.stderr.take() {
-                            let _ = stderr.take(4096).read_to_string(&mut error);
-                        }
-                        let read = result.err().map(|e| format!("{e}; ")).unwrap_or_default();
-                        return Err(io::Error::other(format!(
-                            "Cursor native snapshot failed: {read}{}",
-                            error.trim()
-                        )));
-                    }
-                    Ok(())
-                })();
-                if let Err(error) = result {
-                    let _ = sender.send(Err(error));
-                }
-            });
-        }
-        Ok(events)
-    }
-}
-
-pub(super) fn recover(
-    profile: &HarnessConfig,
-    saved: &Resume,
-    policy: Option<&crate::workspace::storage::Policy>,
-    mut emit: impl FnMut(Event) -> io::Result<()>,
-) -> io::Result<()> {
-    validate(
-        profile,
-        saved,
-        policy.map(|policy| (policy.agent_uid, policy.agent_gid)),
-    )?;
-    let mut capture = Capture::new(profile, policy.cloned());
-    capture.root = chat_root(&profile.home, &saved.id, &saved.path)?;
-    capture.id = Some(saved.id.clone());
-    capture.dirty = true;
-    while capture.pending() {
-        for event in capture.poll()? {
-            emit(event)?;
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    Ok(())
 }

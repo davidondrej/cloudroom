@@ -128,6 +128,8 @@ function threadInterruptedTitle(
       return "Stopped — host daemon restarted";
     case "provider-turn-idle":
       return "Stopped — provider turn stopped responding";
+    case "memory-limit":
+      return "Stopped — used over half of your computer's memory";
     default:
       return assertNever(reason);
   }

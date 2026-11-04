@@ -407,7 +407,7 @@ one.
 `turn.failed` fires after a turn failed and the thread has landed in `error`. It
 carries ids and failure facts only — `threadId`, the failed turn's `requestId`,
 the provider `turnId`, the provider's `ProviderErrorInfo`, the latest
-`ProviderRateLimitState`, `attemptNumber` and `interruptionReason` — and no thread DTO or copy of the
+`ProviderRateLimitState`, `attemptNumber`, `interruptionReason` and `turnStartedBeforeBoot` — and no thread DTO or copy of the
 message, because a retry is asked for by reference with
 `bb.sdk.threads.retry({ threadId, turnRequestId, sendAt })` and anything else is
 one `threads.get` away and fresher for being read when it is used. It is an

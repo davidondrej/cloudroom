@@ -14,6 +14,7 @@ import {
   buildCodexConfig,
   combineWorkspaceWriteRoots,
   gitWritableRootsForWorkspace,
+  keepShellEnvironmentSetKeys,
   resolveCodexInstructionOverrides,
   toCodexDynamicTools,
   toCodexPermissionSettings,
@@ -651,6 +652,33 @@ describe("buildCodexConfig", () => {
     expect(config).not.toMatchObject({
       "shell_environment_policy.set.BAD.KEY": "ignored",
     });
+  });
+
+  it("keeps the thread identity through a user's Codex env allowlist", () => {
+    const config = configFor({
+      ...FULL_OPTIONS,
+      envVars: { ROOM_PROJECT_ID: "p1" },
+    })!;
+    expect(
+      keepShellEnvironmentSetKeys(config, {
+        include_only: ["PATH", "ROOM_PROJECT_ID"],
+      }),
+    ).toEqual({
+      "shell_environment_policy.include_only": [
+        "PATH",
+        "ROOM_PROJECT_ID",
+        "ROOM_THREAD_ID",
+      ],
+    });
+    expect(
+      keepShellEnvironmentSetKeys(config, { filters: { PATH: "include" } }),
+    ).toEqual({
+      "shell_environment_policy.filters.ROOM_THREAD_ID": "include",
+      "shell_environment_policy.filters.ROOM_PROJECT_ID": "include",
+    });
+    expect(
+      keepShellEnvironmentSetKeys(config, { filters: { "AWS_*": "exclude" } }),
+    ).toEqual({});
   });
 
   it("maps the reasoning level onto model_reasoning_effort", () => {

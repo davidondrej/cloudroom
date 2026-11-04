@@ -55,6 +55,7 @@ import {
   PERSONAL_PROJECT_ID,
 } from "./lib/format-schedule.js";
 import { AutomationMetadataItem } from "./metadata.js";
+import { failurePause, type FailurePause } from "./lib/paused.js";
 import {
   LoopTemplatesView,
   type LoopTemplatesState,
@@ -829,6 +830,7 @@ function LoopCard({
   actions,
   toggle,
   onOpen,
+  paused,
 }: {
   name: string;
   cloud: boolean;
@@ -844,13 +846,17 @@ function LoopCard({
   actions?: ReactNode;
   toggle: ReactNode;
   onOpen: () => void;
+  /** Its own failures paused it: the card says why, when it tries again on its own, and offers Resume. */
+  paused?: FailurePause & { retryAt: number | null; now: number; onResume: () => void };
 }) {
   return (
     <div
       data-loop-card=""
       className={cn(
         "group/card relative flex min-w-0 flex-col rounded-xl border border-foreground/10 bg-surface-raised px-3.5 pt-3 pb-2.5 transition-colors hover:border-foreground/20 [contain-intrinsic-size:auto_150px] [content-visibility:auto]",
-        muted && "opacity-60",
+        paused
+          ? "border-destructive/35 hover:border-destructive/55"
+          : muted && "opacity-60",
       )}
     >
       <div className="flex items-start gap-3">
@@ -874,17 +880,26 @@ function LoopCard({
         <span className="inline-flex min-w-0 items-center rounded-full border border-foreground/10 bg-foreground/[0.06] py-0.5 pr-2 pl-1.5 text-[11.5px] font-medium text-foreground/85">
           {agent}
         </span>
-        {badges}
+        {paused ? (
+          <span className="inline-flex shrink-0 items-center gap-1 self-center whitespace-nowrap rounded-full bg-destructive/10 px-2 py-0.5 text-2xs font-medium text-destructive-text">
+            <Icon name="Pause" className="size-2.5 fill-current" aria-hidden />
+            Paused · {paused.failures} failed runs
+          </span>
+        ) : (
+          badges
+        )}
       </div>
       <p
         className={cn(
           "mt-2 line-clamp-2 text-[12.5px] leading-normal",
-          report === null
-            ? "italic text-subtle-foreground"
-            : "text-muted-foreground",
+          paused
+            ? "text-destructive-text"
+            : report === null
+              ? "italic text-subtle-foreground"
+              : "text-muted-foreground",
         )}
       >
-        {report ?? "No reviewed runs yet."}
+        {paused ? paused.reason : (report ?? "No reviewed runs yet.")}
       </p>
       <div className="flex-1" />
       <div className="mt-2 flex min-w-0 items-center gap-1.5 text-[11.5px] text-subtle-foreground">
@@ -894,19 +909,37 @@ function LoopCard({
       </div>
       <div className="mt-2 flex items-center gap-2 border-t border-foreground/[0.06] pt-2 text-[11.5px] text-subtle-foreground">
         <LoopRunDots runs={runs} />
-        <span
-          className={cn(
-            "relative ml-auto whitespace-nowrap font-mono tabular-nums",
-            nextRun === "Running"
-              ? "font-sans font-medium text-primary-text"
-              : "text-muted-foreground",
-          )}
-          title={
-            nextRunAt === null ? undefined : formatScheduleRunTime(nextRunAt)
-          }
-        >
-          {nextRun}
-        </span>
+        {paused ? (
+          <span className="relative ml-auto flex items-center gap-2.5">
+            {paused.retryAt !== null ? (
+              <span className="whitespace-nowrap text-muted-foreground">
+                Retries {formatTimeUntil(paused.retryAt, paused.now)}
+              </span>
+            ) : null}
+            <button
+              type="button"
+              onClick={paused.onResume}
+              className="flex h-[26px] shrink-0 items-center gap-1.5 rounded-md border border-primary/35 px-2.5 text-xs font-medium text-primary hover:border-primary/70 hover:bg-primary/15"
+            >
+              <Icon name="Play" className="size-2.5 fill-current" aria-hidden />
+              Resume
+            </button>
+          </span>
+        ) : (
+          <span
+            className={cn(
+              "relative ml-auto whitespace-nowrap font-mono tabular-nums",
+              nextRun === "Running"
+                ? "font-sans font-medium text-primary-text"
+                : "text-muted-foreground",
+            )}
+            title={
+              nextRunAt === null ? undefined : formatScheduleRunTime(nextRunAt)
+            }
+          >
+            {nextRun}
+          </span>
+        )}
       </div>
     </div>
   );
@@ -922,6 +955,7 @@ export function OverviewRow({
   repo,
   runs = [],
   report = null,
+  paused,
   onNavigate,
   onEnabledChange,
 }: {
@@ -934,6 +968,7 @@ export function OverviewRow({
   repo?: ReactNode;
   runs?: readonly RunTick[];
   report?: string | null;
+  paused?: FailurePause | null;
   onNavigate: (route: AutomationDetailRoute) => void;
   onEnabledChange: (
     enabled: boolean,
@@ -949,11 +984,22 @@ export function OverviewRow({
     lastRunStatus: automation.lastRunStatus,
   });
   const lifecycleLocked = !oneShotLifecycleAllowsToggle(oneShotLifecycle);
+  const setEnabled = (enabled: boolean) => {
+    setTogglePending(true);
+    void onEnabledChange(enabled, route).finally(() =>
+      setTogglePending(false),
+    );
+  };
 
   return (
     <LoopCard
       name={automation.name}
       cloud={false}
+      paused={
+        paused
+          ? { ...paused, retryAt: automation.nextRunAt, now, onResume: () => setEnabled(true) }
+          : undefined
+      }
       agent={
         <AutomationAgentLine
           agents={automationAgents(automation, scriptAgents)}
@@ -990,12 +1036,7 @@ export function OverviewRow({
               : undefined
           }
           label={`${automation.enabled ? "Disable" : "Enable"} ${automation.name}`}
-          onCheckedChange={(enabled) => {
-            setTogglePending(true);
-            void onEnabledChange(enabled, route).finally(() =>
-              setTogglePending(false),
-            );
-          }}
+          onCheckedChange={setEnabled}
         />
       }
     />
@@ -1011,6 +1052,7 @@ export function CloudAutomationRow({
   repo,
   runs = [],
   report = null,
+  paused,
   actions,
 }: {
   automation: CloudAutomation;
@@ -1021,6 +1063,7 @@ export function CloudAutomationRow({
   repo?: ReactNode;
   runs?: readonly RunTick[];
   report?: string | null;
+  paused?: FailurePause | null;
   actions: CloudAutomationActions;
 }) {
   const nextRunAt =
@@ -1029,6 +1072,11 @@ export function CloudAutomationRow({
     <LoopCard
       name={automation.name}
       cloud
+      paused={
+        paused
+          ? { ...paused, retryAt: nextRunAt, now, onResume: () => actions.onEnabledChange(automation, true) }
+          : undefined
+      }
       agent={
         <AutomationAgentLine
           agents={[
@@ -1070,7 +1118,7 @@ export function CloudAutomationRow({
       }
       nextRun={
         !automation.enabled
-          ? "Paused"
+          ? "Off"
           : nextRunAt === null
             ? isCloudWebhook(automation)
               ? "Waits for a webhook"
@@ -1539,6 +1587,27 @@ export function AutomationOverviewView({
         }
       : {}),
   });
+  // Loops their own failures paused leave Off for the Paused group above P1, with the same rule as the sidebar label.
+  const localPause = (automation: OverviewEntry["automation"]) =>
+    "problem" in automation
+      ? null
+      : failurePause(
+          {
+            enabled: automation.enabled,
+            lastError: automation.lastError,
+            at: automation.updatedAt,
+          },
+          now,
+        );
+  const cloudPause = (automation: CloudAutomation) =>
+    failurePause(
+      {
+        enabled: automation.enabled,
+        lastError: automation.last_error,
+        at: Date.parse(automation.last_run_at ?? ""),
+      },
+      now,
+    );
   const repos = new Map<LoopScope, LoopMenuItem<LoopScope>>();
   let offCount = 0;
   const countRepo = (
@@ -1561,11 +1630,13 @@ export function AutomationOverviewView({
     });
   };
   for (const entry of entries ?? []) {
-    if (isActiveEntry(entry)) countRepo(entry.project.id, entry.project.name);
+    if (isActiveEntry(entry) || localPause(entry.automation))
+      countRepo(entry.project.id, entry.project.name);
     else offCount += 1;
   }
   for (const automation of cloudRows) {
-    if (automation.enabled) countRepo(automation.project_id);
+    if (automation.enabled || cloudPause(automation))
+      countRepo(automation.project_id);
     else offCount += 1;
   }
   const repoItems = [...repos.values()].sort(
@@ -1646,6 +1717,7 @@ export function AutomationOverviewView({
           needsYou={needsYou.get(automation.id) ?? 0}
           runs={history.get(automation.id)}
           report={reports.get(automation.id) ?? null}
+          paused={localPause(automation)}
           repo={repoTag(project.id, project.name)}
           leading={
             <LoopPriorityMenu
@@ -1697,6 +1769,7 @@ export function AutomationOverviewView({
           needsYou={needsYou.get(cloudKey(automation)) ?? 0}
           runs={history.get(cloudKey(automation))}
           report={reports.get(cloudKey(automation)) ?? null}
+          paused={cloudPause(automation)}
           repo={repoTag(automation.project_id)}
           leading={
             <LoopPriorityMenu
@@ -1721,10 +1794,12 @@ export function AutomationOverviewView({
     if (activeScope === "off") {
       const offRest = [
         ...visibleEntries
-          .filter((entry) => !isActiveEntry(entry))
+          .filter(
+            (entry) => !isActiveEntry(entry) && !localPause(entry.automation),
+          )
           .map(localItem),
         ...visibleCloud
-          .filter((automation) => !automation.enabled)
+          .filter((automation) => !automation.enabled && !cloudPause(automation))
           .map(cloudItem),
       ];
       const offItems =
@@ -1733,8 +1808,8 @@ export function AutomationOverviewView({
         offItems.length === 0 ? (
           <div className="rounded-lg border border-dashed border-border px-4 py-3 text-xs text-muted-foreground">
             {normalizedQuery === ""
-              ? "No paused loops."
-              : `No paused loops match "${query}".`}
+              ? "No loops are off."
+              : `No loops that are off match "${query}".`}
           </div>
         ) : (
           <section aria-label="Off" className="-mt-6">
@@ -1750,6 +1825,20 @@ export function AutomationOverviewView({
       const activeEntries = visibleEntries.filter(
         (entry) => isActiveEntry(entry) && inScope(entry.project.id),
       );
+      const pausedItems = [
+        ...visibleEntries
+          .filter(
+            (entry) =>
+              localPause(entry.automation) !== null && inScope(entry.project.id),
+          )
+          .map(localItem),
+        ...visibleCloud
+          .filter(
+            (automation) =>
+              cloudPause(automation) !== null && inScope(automation.project_id),
+          )
+          .map(cloudItem),
+      ];
       const problems = activeEntries.filter(
         (entry) => "problem" in entry.automation,
       );
@@ -1850,6 +1939,17 @@ export function AutomationOverviewView({
             now={now}
             onReview={review ? () => onModeChange("review") : undefined}
           />
+          {pausedItems.length > 0 ? (
+            <section aria-label="Paused" className="mt-2">
+              <LoopGroupDivider
+                label="Paused"
+                count={pausedItems.length}
+                className="text-destructive-text"
+                hint="Stopped after failed runs"
+              />
+              {grid(pausedItems)}
+            </section>
+          ) : null}
           {problems.length > 0 ? (
             <div className="mt-6 divide-y divide-foreground/10">
               {problems.map(renderEntry)}

@@ -7,7 +7,8 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@cloudroom/shared-ui/to
 import { cn } from "@cloudroom/shared-ui/lib/utils";
 import { SidebarMenuItem } from "@/components/ui/sidebar";
 import { appToast } from "@/components/ui/app-toast";
-import { useCloudroomAccount, useSetMacAccess } from "@/hooks/queries/cloudroom-queries";
+import { useIsMutating } from "@tanstack/react-query";
+import { MAC_ACCESS_MUTATION_KEY, useCloudroomAccount, useSetMacAccess } from "@/hooks/queries/cloudroom-queries";
 
 export const MAC_ACCESS_LEVELS: { id: MacAccessLevel; label: string; description: string; icon: string; dot: string }[] = [
   { id: "off", label: "Off", description: `Cloud agents can't touch this ${COMPUTER}.`, icon: "Unavailable", dot: "bg-subtle-foreground/60" },
@@ -18,21 +19,19 @@ export const MAC_ACCESS_LEVELS: { id: MacAccessLevel; label: string; description
 
 export const MAC_ACCESS_TITLE = `${COMPUTER_TITLE} access`;
 
+const saved = (access: boolean | MacAccessLevel) => appToast.success(`${MAC_ACCESS_TITLE}: ${MAC_ACCESS_LEVELS.find((level) => level.id === access)?.label ?? access}`);
+
+/** Every menu that shows the level reads the same account cache, so they all change at the same moment (#109). */
 export function useMacAccessLevel() {
   const status = useCloudroomAccount();
-  const macAccess = useSetMacAccess();
-  const pending = macAccess.isPending ? macAccess.variables : undefined;
-  const saved = status.data?.macAccessLevel ?? (status.data?.macAccess ? "full" : "off");
-  const id = pending === undefined ? saved : pending === true ? "full" : pending === false ? "off" : pending;
+  const macAccess = useSetMacAccess(saved);
+  const saving = useIsMutating({ mutationKey: MAC_ACCESS_MUTATION_KEY }) > 0;
+  const id = status.data?.macAccessLevel ?? (status.data?.macAccess ? "full" : "off");
   const current = MAC_ACCESS_LEVELS.find((level) => level.id === id) ?? MAC_ACCESS_LEVELS[0]!;
   const select = (level: (typeof MAC_ACCESS_LEVELS)[number]) => {
-    if (level === current) return;
-    macAccess.mutate(level.id, {
-      onSuccess: () => appToast.success(`${MAC_ACCESS_TITLE}: ${level.label}`),
-      onError: (error) => appToast.error(error.message),
-    });
+    if (level !== current) macAccess.mutate(level.id);
   };
-  return { current, select, saving: macAccess.isPending };
+  return { current, select, saving };
 }
 
 export function MacAccessMenu() {

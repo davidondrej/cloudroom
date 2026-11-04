@@ -226,7 +226,12 @@ The **Remove AI co-authors** toggle in Settings → Defaults defaults to on. Clo
 adds a Git config hook to every process it starts, so commits drop agent
 `Co-authored-by` lines (Claude, Cursor, Codex, Copilot, Gemini, and similar) and
 keep human ones. It also turns off Claude Code's own commit and PR attribution.
-The hook needs Git 2.54 or newer; older Git ignores it. Use
+The hook needs Git 2.54 or newer; older Git ignores it. When it removes a line,
+it prints one line to stderr naming the setting below. In Cloud it only touches
+real repositories: the session's own (any worktree or submodule), `/repos/<name>`,
+and `/code/<name>` in a Personal thread. Test fixture repos in `/tmp` or nested in
+a project keep their trailers. Local still touches every repository, and Cloud
+OpenClaw sessions always strip, even with the setting off. Use
 `room-cli settings general stripAiCoAuthorsEnabled <true|false>`. Start a new
 session after changing it. Cloud threads need a core with `strip_ai_co_authors`
 support.

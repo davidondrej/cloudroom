@@ -4,6 +4,7 @@ import {
   claimAutomationScheduledRun,
   closeAutomationRun,
   listDueAutomations,
+  retryPausedAutomations,
   parseAutomationExecution,
   parseAutomationTrigger,
   setAutomationEnabled,
@@ -188,6 +189,8 @@ export async function sweepDueAutomations(
   },
 ): Promise<void> {
   const now = args.now ?? Date.now();
+  for (const projectId of retryPausedAutomations(db, now))
+    publishAutomationChange(bb, projectId, "automations-changed");
   const due = listDueAutomations(db, { now, limit: DUE_AUTOMATION_BATCH_SIZE });
   if (due.length === 0) return;
   const projectIds = await liveProjectIds(bb);

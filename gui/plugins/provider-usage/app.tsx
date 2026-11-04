@@ -280,7 +280,7 @@ function PlanUsage({
       {plan.meters.map((meter, index) => (
         <p
           key={meter.label}
-          title={`${meter.used.toLocaleString("en-US")} of ${meter.limit.toLocaleString("en-US")} ${meter.label} used, ${plan.period}`}
+          title={`${meter.used.toLocaleString("en-US")} of ${meter.limit.toLocaleString("en-US")} ${meter.label} used, ${meter.period ?? plan.period}`}
         >
           <span aria-hidden="true">
             <UsageLine

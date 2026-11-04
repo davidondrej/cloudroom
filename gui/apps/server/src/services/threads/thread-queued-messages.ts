@@ -1,10 +1,13 @@
+import { eq } from "drizzle-orm";
 import {
   isOrdinaryTurnEndQueuedMessage,
   isThreadQueueAutoSendPaused,
+  queuedThreadMessages,
   type DbQueryConnection,
   type QueuedThreadMessageRow,
 } from "@cloudroom/db";
 import {
+  isStopHeldReport,
   promptInputSchema,
   queuedMessageWaitingOnSchema,
   threadQueuedMessageSchema,
@@ -176,4 +179,24 @@ export function toListedThreadQueuedMessages(
         isOrdinaryTurnEndQueuedMessage(row),
     };
   });
+}
+
+/**
+ * Queued rows block a message edit, except reports Stop is holding (#821). A
+ * claimed row is mid-send, so it always blocks.
+ */
+export function hasQueuedMessagesBlockingEdit(
+  db: DbQueryConnection,
+  threadId: string,
+): boolean {
+  const rows = db
+    .select()
+    .from(queuedThreadMessages)
+    .where(eq(queuedThreadMessages.threadId, threadId))
+    .all();
+  if (rows.length === 0) return false;
+  if (rows.some((row) => row.claimedAt !== null || row.claimToken !== null)) {
+    return true;
+  }
+  return !toListedThreadQueuedMessages(db, rows).every(isStopHeldReport);
 }

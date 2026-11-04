@@ -185,7 +185,7 @@ pub async fn models(config: &Config, kind: Kind) -> (io::Result<Vec<Model>>, Opt
         }
     })
     .await
-    .map_err(|_| io::Error::other("model discovery timed out"))
+    .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "model discovery timed out"))
     .and_then(|result| result);
     handle.request_shutdown();
     (result, drain.await.ok().flatten())
@@ -340,16 +340,28 @@ trait Adapter: Send {
     }
 }
 
-/// A Git 2.54+ config hook that drops AI agent Co-authored-by lines from every commit message.
-fn strip_ai_co_authors_env(command: &mut Command) {
-    const HOOK: &str = r#"cloudroom_strip_ai_co_authors() { grep -viE '^co-authored-by:.*(claude|anthropic|cursor|codex|openai|chatgpt|copilot|gemini|aider\.chat|devin-ai|factory-droid|windsurf|codeium)' "$1" > "$1.cloudroom"; [ $? -le 1 ] && mv "$1.cloudroom" "$1" || rm -f "$1.cloudroom"; }; cloudroom_strip_ai_co_authors"#;
+/// A Git 2.54+ config hook that drops AI agent Co-authored-by lines from commit messages and says so on stderr.
+/// With a session folder, it strips only real repositories (#811): the session's own (any worktree, submodule, or
+/// git dir layout), `/repos/<name>`, or `<session>/<name>` when the session folder is no repository. Throwaway
+/// fixtures elsewhere, even nested inside the project, keep their trailers.
+fn strip_ai_co_authors_env(command: &mut Command, session: Option<&Path>) {
+    const PATTERN: &str = "'^co-authored-by:.*(claude|anthropic|cursor|codex|openai|chatgpt|copilot|gemini|aider\\.chat|devin-ai|factory-droid|windsurf|codeium)'";
+    let scope = session.map_or(String::new(), |session| {
+        let session = format!("'{}'", session.to_string_lossy().replace('\'', r"'\''"));
+        format!(
+            r#"g() ( cd "$1" && env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE git rev-parse --path-format=absolute --git-common-dir ) 2>/dev/null; c=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 0; s=$(g {session}); if [ "$c" != "$s" ]; then p=$(git rev-parse --show-superproject-working-tree 2>/dev/null); [ -n "$p" ] && c=$(g "$p"); fi; p=${{c%/.git}}; case "$c" in "$s") ;; */.git) [ "${{p%/*}}" = /repos ] || {{ [ -z "$s" ] && [ "${{p%/*}}" = "$(cd {session} && pwd -P)" ]; }} || return 0 ;; *) return 0 ;; esac; "#
+        )
+    });
+    let hook = format!(
+        r#"cloudroom_strip_ai_co_authors() {{ grep -qiE {PATTERN} "$1" || return 0; {scope}t=$(mktemp) || return 0; grep -viE {PATTERN} "$1" > "$t"; [ $? -le 1 ] && cat "$t" > "$1" && echo 'Cloudroom removed AI Co-authored-by lines (turn off: room-cli settings general stripAiCoAuthorsEnabled false)' >&2; rm -f "$t"; return 0; }}; cloudroom_strip_ai_co_authors"#
+    );
     command.envs([
         ("GIT_CONFIG_COUNT", "3"),
         (
             "GIT_CONFIG_KEY_0",
             "hook.cloudroom-strip-ai-co-authors.command",
         ),
-        ("GIT_CONFIG_VALUE_0", HOOK),
+        ("GIT_CONFIG_VALUE_0", hook.as_str()),
         (
             "GIT_CONFIG_KEY_1",
             "hook.cloudroom-strip-ai-co-authors.event",
@@ -516,7 +528,6 @@ impl Handle {
             Kind::Cursor => (
                 cursor::command(config, &profile)?,
                 Box::new(cursor::Protocol::new(
-                    config,
                     &profile,
                     resume.as_ref(),
                     cursor::CURSOR,
@@ -526,19 +537,13 @@ impl Handle {
             ),
             Kind::Fx => (
                 fx::command(config, &profile)?,
-                Box::new(cursor::Protocol::new(
-                    config,
-                    &profile,
-                    resume.as_ref(),
-                    fx::FX,
-                )),
+                Box::new(cursor::Protocol::new(&profile, resume.as_ref(), fx::FX)),
                 None,
                 None,
             ),
             Kind::OpenCode => (
                 opencode::command(config, &profile)?,
                 Box::new(cursor::Protocol::new(
-                    config,
                     &profile,
                     resume.as_ref(),
                     opencode::OPENCODE,
@@ -549,7 +554,6 @@ impl Handle {
             Kind::Hermes => (
                 hermes::command(config, &profile)?,
                 Box::new(cursor::Protocol::new(
-                    config,
                     &profile,
                     resume.as_ref(),
                     hermes::HERMES,
@@ -560,7 +564,6 @@ impl Handle {
             Kind::Devin => (
                 devin::command(config, &profile)?,
                 Box::new(cursor::Protocol::new(
-                    config,
                     &profile,
                     resume.as_ref(),
                     devin::DEVIN,
@@ -571,7 +574,6 @@ impl Handle {
             Kind::Droid => (
                 droid::command(config, &profile)?,
                 Box::new(cursor::Protocol::new(
-                    config,
                     &profile,
                     resume.as_ref(),
                     droid::DROID,
@@ -582,7 +584,6 @@ impl Handle {
             Kind::OpenClaw => (
                 openclaw::command(config, &profile)?,
                 Box::new(cursor::Protocol::new(
-                    config,
                     &profile,
                     resume.as_ref(),
                     openclaw::OPENCLAW,
@@ -613,7 +614,7 @@ impl Handle {
         };
         let mut command = command;
         if strip_ai_co_authors {
-            strip_ai_co_authors_env(&mut command);
+            strip_ai_co_authors_env(&mut command, Some(&config.repository));
         }
         let (process, events) = process::Process::spawn(config, command, adapter)?;
         Ok((
@@ -1023,8 +1024,10 @@ pub fn recover_records(
     emit: impl FnMut(Event) -> io::Result<()>,
 ) -> io::Result<()> {
     match kind {
-        Kind::Cursor => cursor::recover(profile, saved, policy, emit),
-        // fx keeps its own session files; Cloudroom stores the ACP stream only.
+        // Cursor and fx keep their own session files; Cloudroom stores the ACP stream only (#606).
+        Kind::Cursor => {
+            cursor::validate(profile, saved, policy.map(|p| (p.agent_uid, p.agent_gid)))
+        }
         Kind::Fx => fx::validate(profile, saved, policy.map(|p| (p.agent_uid, p.agent_gid))),
         Kind::OpenCode => {
             opencode::validate(profile, saved, policy.map(|p| (p.agent_uid, p.agent_gid)))
@@ -1057,6 +1060,30 @@ pub fn recover_records(
             emit,
         ),
     }
+}
+
+/// The cursor `saved`'s records would reach at the end of its chat file, found without recording them. A chat that
+/// arrives whole (Teleport, a Cloud fork) starts there: copying every old line froze Core for minutes, and nothing
+/// reads that copy (ADR 20261104-012035).
+pub fn end_cursor(
+    profile: &HarnessConfig,
+    harness: Kind,
+    saved: &Resume,
+    policy: Option<&crate::workspace::storage::Policy>,
+) -> io::Result<Value> {
+    let mut cursor = saved.cursor.clone();
+    recover_records(profile, harness, saved, policy, |event| {
+        if let Event::Record {
+            kind: "native_record",
+            data,
+            native,
+        } = event
+        {
+            cursor = checkpoint(harness, &cursor, &data, native.as_deref())?;
+        }
+        Ok(())
+    })?;
+    Ok(cursor)
 }
 
 // Legacy records remain byte-for-byte unchanged on disk. Only their read projection changes.
@@ -1231,4 +1258,77 @@ fn plan_limit_error(provider: &str, resets: Option<u64>, said: &str) -> String {
         _ => "Switch accounts to keep working.".into(),
     };
     format!("{provider}'s {PLAN_LIMIT} {when} {provider} said: {said}")
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn co_author_hook_strips_real_repositories_and_keeps_fixtures() {
+        let root =
+            std::env::temp_dir().join(format!("cloudroom-co-authors-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let sh = |script: &str, session: Option<&str>| {
+            let mut hook = tokio::process::Command::new("sh");
+            hook.env_remove("GIT_CONFIG_COUNT")
+                .current_dir(&root)
+                .args(["-ec", script]);
+            if let Some(session) = session {
+                super::strip_ai_co_authors_env(&mut hook, Some(&root.join(session)));
+            }
+            let output = hook
+                .as_std_mut()
+                .envs([
+                    ("GIT_CONFIG_GLOBAL", "/dev/null"),
+                    ("GIT_AUTHOR_NAME", "A"),
+                    ("GIT_AUTHOR_EMAIL", "a@example.com"),
+                    ("GIT_COMMITTER_NAME", "A"),
+                    ("GIT_COMMITTER_EMAIL", "a@example.com"),
+                ])
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{script}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            (
+                String::from_utf8_lossy(&output.stdout).into_owned(),
+                String::from_utf8_lossy(&output.stderr).into_owned(),
+            )
+        };
+        // `alias` stands for macOS temp paths: Git resolves symlinks, the session path may not.
+        sh("ln -s . alias; git init -q main; git -C main commit -q --allow-empty -m init; git -C main worktree add -q ../wt
+            git init -q sm; git -C sm commit -q --allow-empty -m init; git -C main -c protocol.file.allow=always submodule add -q \"$PWD/sm\" sm
+            mkdir -p main/sub main/tmp/fixture main/.git/COMMIT_EDITMSG.cloudroom; git init -q main/tmp/fixture; git init -q outside
+            git init -q --separate-git-dir sep.git separate; git init -q linked; mv linked/.git linked.git; ln -s ../linked.git linked/.git
+            mkdir code; git init -q code/project; git init -q code/project/tmp/fixture", None);
+        for (session, repository, stripped) in [
+            ("alias/main", "main", true),
+            ("alias/main", "main/sub", true),
+            ("alias/main", "wt", true),
+            ("alias/main", "main/sm", true),
+            ("alias/main", "main/tmp/fixture", false),
+            ("alias/main", "outside", false),
+            ("wt", "main", true),
+            ("separate", "separate", true),
+            ("linked", "linked", true),
+            ("code", "code/project", true),
+            ("code", "code/project/tmp/fixture", false),
+        ] {
+            let (body, notice) = sh(&format!("cd {repository}; git commit -q --allow-empty -m X -m 'Co-Authored-By: Claude <noreply@anthropic.com>
+Co-authored-by: Ada <ada@example.com>'; git log -1 --format=%B"), Some(session));
+            let result = (
+                !body.contains("Claude"),
+                notice.contains("stripAiCoAuthorsEnabled false"),
+                body.contains("Ada"),
+            );
+            assert_eq!(
+                result,
+                (stripped, stripped, true),
+                "{session} → {repository}: {notice}"
+            );
+        }
+        std::fs::remove_dir_all(&root).unwrap();
+    }
 }

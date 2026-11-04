@@ -1,23 +1,23 @@
 import { useReducer } from "react";
 import { COMPUTER, type Thread } from "@cloudroom/domain";
-import { Button } from "@cloudroom/shared-ui/button";
 import { Icon } from "@cloudroom/shared-ui/icon";
+import { cn } from "@cloudroom/shared-ui/lib/utils";
 import { GithubFaviconIcon } from "@/components/pull-request/GithubFaviconIcon";
-import { PromptStackCard } from "@/components/promptbox/banner/PromptStackCard";
+import { PROMPT_STACK_CARD_ROW_HEIGHT, PROMPT_STACK_INLAY_SEGMENT_CLASS, PromptStackCard } from "@/components/promptbox/banner/PromptStackCard";
+import { BannerActionSlot, PromptBannerActionButton } from "@/components/promptbox/banner/prompt-banner-actions";
+import { FixPrompt } from "@/components/ui/fix-prompt";
 import { useRetryProjectCopy } from "@/hooks/queries/cloudroom-queries";
 import { useThisComputer } from "@/hooks/useHostDaemon";
-import { useClipboardCopy } from "@/lib/clipboard";
 import { projectFilesFixPrompt } from "@/lib/fix-prompts";
 
 const megabytes = (bytes: number) => Math.max(1, Math.round(bytes / 1e6));
-const timeLeft = (seconds: number) => seconds < 60 ? "under a minute left" : `about ${Math.round(seconds / 60)} min left`;
+export const timeLeft = (seconds: number) => seconds < 60 ? "under a minute left" : `about ${Math.round(seconds / 60)} min left`;
 
 export function ProjectCopyNotice({ thread }: { thread: Thread }) {
   const [, rerender] = useReducer((count: number) => count + 1, 0);
   const retry = useRetryProjectCopy(thread.id);
   const computer = useThisComputer() === "this PC" ? "your PC" : `your ${COMPUTER}`;
   const progress = thread.projectCopy;
-  const fixPrompt = useClipboardCopy({ text: projectFilesFixPrompt(thread.id, progress?.error) });
   const dismissKey = `cloudroom.project-copy.dismissed.${thread.id}`;
   if (!progress || progress.phase === "complete") return null;
   const failed = progress.phase === "error";
@@ -57,22 +57,20 @@ export function ProjectCopyNotice({ thread }: { thread: Thread }) {
     );
   }
   return (
-    <PromptStackCard ariaLabel="Project copy progress" className="ml-auto mr-3 w-fit max-w-[calc(100%-1.5rem)] overflow-hidden sm:mr-4">
-      <div role="status" className="flex items-start gap-3 p-3">
-        <div className="grid size-7 shrink-0 place-items-center rounded-lg bg-warning/15 text-warning">
-          <Icon name="AlertTriangle" aria-hidden className="size-4" />
+    <PromptStackCard ariaLabel="Project copy progress" className="ml-auto mr-3 w-fit max-w-[calc(100%-1.5rem)] overflow-hidden sm:mr-4" style={{ minHeight: PROMPT_STACK_CARD_ROW_HEIGHT }}>
+      <div className="flex items-center gap-0.5 p-0.5 text-xs">
+        <div role="status" className={cn("flex min-w-0 items-center gap-1.5", PROMPT_STACK_INLAY_SEGMENT_CLASS)}>
+          <Icon name="AlertTriangle" aria-hidden className="size-3.5 shrink-0 text-warning" />
+          <span className="shrink-0 text-foreground">Files didn't copy</span>
+          <span className="min-w-0 truncate text-muted-foreground" title={progress.error}>Your agent can still pull them</span>
         </div>
-        <div className="min-w-0 flex-1">
-          <p className="text-sm font-medium text-foreground">Project files didn't copy</p>
-          <p className="text-xs text-muted-foreground">Your agent can still work and pull files itself.</p>
-          <div className="mt-2.5 flex gap-2">
-            {!thread.teleport && <Button size="sm" disabled={retry.isPending} onClick={() => retry.mutate()}>Try again</Button>}
-            <Button size="sm" variant="outline" onClick={() => void fixPrompt.copy()}>{fixPrompt.copied ? "Copied" : "Copy fix prompt"}</Button>
-          </div>
-        </div>
-        <button type="button" aria-label="Dismiss" className="cursor-pointer text-muted-foreground transition-colors hover:text-foreground" onClick={() => { window.localStorage.setItem(dismissKey, "1"); rerender(); }}>
-          <Icon name="X" className="size-4" aria-hidden />
-        </button>
+        <BannerActionSlot hideInTiny={false}>
+          {!thread.teleport && <PromptBannerActionButton disabled={retry.isPending} onClick={() => retry.mutate()}>Try again</PromptBannerActionButton>}
+          <FixPrompt iconOnly prompt={projectFilesFixPrompt(thread.id, progress.error)} />
+          <button type="button" aria-label="Dismiss" className="flex size-5 cursor-pointer items-center justify-center text-muted-foreground transition-colors hover:text-foreground" onClick={() => { window.localStorage.setItem(dismissKey, "1"); rerender(); }}>
+            <Icon name="X" className="size-3" aria-hidden />
+          </button>
+        </BannerActionSlot>
       </div>
     </PromptStackCard>
   );

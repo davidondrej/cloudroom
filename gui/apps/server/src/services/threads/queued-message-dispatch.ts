@@ -23,6 +23,7 @@ import {
 } from "../lib/error-log-fields.js";
 import { isDispatchRequeuedRecently } from "./dispatch-hooks.js";
 import { recordQueuedMessageDrainFailure } from "./queue-drain-failure.js";
+import { parseStoredQueuedThreadMessageWaitingOn } from "./thread-queued-messages.js";
 import {
   clearQueuedMessageWait,
   isQueuedMessageNotDeliveredError,
@@ -82,7 +83,7 @@ const pendingPluginRechecks = new WeakSet<
 function clearThreadQueueWaitsOfKind(
   deps: Pick<QueueDispatchDeps, "db" | "hub">,
   args: { threadId: string; kind: QueuedMessageWaitingOnKind },
-): number {
+): QueuedMessageDispatchRef[] {
   const rows = listQueuedThreadMessagesWaitingOnKind(deps.db, args);
   for (const row of rows) {
     clearQueuedMessageWait(deps, {
@@ -90,7 +91,7 @@ function clearThreadQueueWaitsOfKind(
       threadId: args.threadId,
     });
   }
-  return rows.length;
+  return rows;
 }
 
 function prepareQueuedMessageDispatchWake(
@@ -147,6 +148,7 @@ function schedulePreparedQueuedMessageDispatch(
     if (pendingPluginRechecks.has(deps.lifecycleDedupers)) return;
     pendingPluginRechecks.add(deps.lifecycleDedupers);
   }
+  const run = preparedDispatch(deps, wake);
   deferAfterResponse({
     config: deps.config,
     context: dispatchWakeContext(wake),
@@ -156,7 +158,7 @@ function schedulePreparedQueuedMessageDispatch(
       if (wake.kind === "plugin-recheck") {
         pendingPluginRechecks.delete(deps.lifecycleDedupers);
       }
-      await executePreparedQueuedMessageDispatch(deps, wake);
+      await run();
     },
   });
 }
@@ -215,7 +217,62 @@ export async function runQueuedMessageDispatch(
   wake: QueuedMessageDispatchWake,
 ): Promise<void> {
   for (const prepared of prepareQueuedMessageDispatchWake(deps, wake)) {
-    await executePreparedQueuedMessageDispatch(deps, prepared);
+    await preparedDispatch(deps, prepared)();
+  }
+}
+
+function preparedDispatch(
+  deps: QueueDispatchDeps,
+  wake: PreparedQueuedMessageDispatchWake,
+): () => Promise<void> {
+  const run = () => executePreparedQueuedMessageDispatch(deps, wake);
+  return wake.kind === "interaction-settled"
+    ? chainHeldMessageRelease(wake.threadId, run)
+    : run;
+}
+
+const heldMessageReleases = new Map<string, Promise<void>>();
+
+/**
+ * Registers a release of a thread's interaction-held messages as soon as the
+ * interaction settles, and runs it after that thread's earlier releases. So
+ * releases send in order, and a child notice waits for all of them (#851).
+ */
+function chainHeldMessageRelease(
+  threadId: string,
+  release: () => Promise<void>,
+): () => Promise<void> {
+  const previous = heldMessageReleases.get(threadId);
+  let start = (): void => {};
+  const run = new Promise<void>((resolve) => {
+    start = resolve;
+  })
+    .then(() => previous)
+    .then(release);
+  const settled = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  heldMessageReleases.set(threadId, settled);
+  void settled.then(() => {
+    if (heldMessageReleases.get(threadId) === settled) {
+      heldMessageReleases.delete(threadId);
+    }
+  });
+  return () => {
+    start();
+    return run;
+  };
+}
+
+/** Resolves once every pending release of the thread's held messages is done. */
+export async function waitForHeldMessageDrain(threadId: string): Promise<void> {
+  for (
+    let release = heldMessageReleases.get(threadId);
+    release !== undefined;
+    release = heldMessageReleases.get(threadId)
+  ) {
+    await release;
   }
 }
 
@@ -358,12 +415,36 @@ async function runInteractionSettledDispatch(
   threadId: string,
 ): Promise<void> {
   if (deps.pendingInteractions.hasPendingThreadInteraction(threadId)) return;
-  const cleared = clearThreadQueueWaitsOfKind(deps, {
+  const rows = clearThreadQueueWaitsOfKind(deps, {
     threadId,
     kind: "interaction",
   });
-  if (cleared > 0) {
+  if (rows.length === 0) return;
+  if (getThread(deps.db, threadId)?.status !== "active") {
     await runThreadReadyDispatch(deps, threadId);
+    return;
+  }
+  // Every held row was on its way into the running turn. Send them all now, in
+  // order, not one per later turn, so a child's completion notice can't pass
+  // its own progress messages (#851).
+  for (const row of rows) {
+    await attemptAutomaticQueuedMessage(deps, row, {
+      now: Date.now(),
+      respectRequeuePacing: false,
+    });
+    const status = getThread(deps.db, threadId)?.status;
+    if (status === "active") continue;
+    // A Stop cancels the release. A row it caught mid-send waits behind the
+    // manual-stop pause like the rest, not on the stop, which would send it.
+    const caught = getQueuedThreadMessage(deps.db, row.id);
+    if (
+      caught !== null &&
+      parseStoredQueuedThreadMessageWaitingOn(caught)?.kind === "stopping"
+    ) {
+      clearQueuedMessageWait(deps, { queuedMessageId: row.id, threadId });
+      break;
+    }
+    if (status === "stopping") break;
   }
 }
 

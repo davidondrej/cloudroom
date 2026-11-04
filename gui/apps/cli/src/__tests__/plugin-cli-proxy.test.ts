@@ -3,6 +3,10 @@ import type { AddressInfo } from "node:net";
 import { Writable } from "node:stream";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Agent, getGlobalDispatcher, setGlobalDispatcher } from "undici";
+import {
+  CALLER_PROOF_REQUIRED_CODE,
+  CALLER_PROOF_REQUIRED_MESSAGE,
+} from "@cloudroom/config/caller-proof";
 import { RESERVED_BB_CLI_COMMANDS } from "@cloudroom/domain/plugin-cli";
 
 import {
@@ -673,6 +677,43 @@ describe("runPluginCliCommand", () => {
     ).rejects.toThrow("write interrupted");
     expect(stream.listenerCount("error")).toBe(0);
     expect(stream.listenerCount("close")).toBe(0);
+  });
+
+  it("prints the API's refusal message and code, not a bare HTTP status", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              code: CALLER_PROOF_REQUIRED_CODE,
+              message: CALLER_PROOF_REQUIRED_MESSAGE,
+            }),
+            { status: 401 },
+          ),
+      ),
+    );
+    const writes: Array<{ channel: string; value: string }> = [];
+    const output = (channel: string) =>
+      new Writable({
+        write(chunk, _encoding, callback) {
+          writes.push({ channel, value: chunk.toString() });
+          callback();
+        },
+      });
+
+    await expect(
+      runPluginCliCommand("http://localhost", "loops", ["report"], {
+        stdout: output("stdout"),
+        stderr: output("stderr"),
+      }),
+    ).resolves.toBe(1);
+    expect(writes).toEqual([
+      {
+        channel: "stderr",
+        value: `${CALLER_PROOF_REQUIRED_MESSAGE} (HTTP 401 ${CALLER_PROOF_REQUIRED_CODE})\n`,
+      },
+    ]);
   });
 
   it("materializes an arbitrary stdin flag only in the proxied request", async () => {

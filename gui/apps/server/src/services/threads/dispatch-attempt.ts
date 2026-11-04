@@ -92,6 +92,7 @@ import type { TurnRequestRetryMarker } from "./thread-events.js";
 import { restoreInterruptedThreadStartupRequest } from "./thread-provisioning.js";
 import { isHardQueueHeld } from "./thread-parent.js";
 import { resolveDeferredFirstTurnContext } from "./deferred-first-turn-context.js";
+import { checkRepeatedMessage } from "./repeated-message-guard.js";
 import { emitPluginMessageCancelled } from "../plugins/plugin-thread-events.js";
 import { NotificationBuffer } from "../lib/notification-buffer.js";
 
@@ -406,6 +407,22 @@ async function runDispatchAttempt(
       return;
     }
 
+    // A child can't wake a parent the user stopped: its message waits with the
+    // parent's held notices until the user sends or `queue send`s (#821).
+    if (
+      claimed === null &&
+      senderThreadId !== null &&
+      getThread(deps.db, senderThreadId)?.parentThreadId === thread.id &&
+      isThreadQueueAutoSendPaused(deps.db, thread.id)
+    ) {
+      const held = waitOn({ kind: "thread-busy" }, null);
+      continued.outcome =
+        held.kind === "queued"
+          ? { ...held, entry: { ...held.entry, pausedByStop: true } }
+          : held;
+      return;
+    }
+
     if (thread.status === "stopping") {
       continued.outcome = waitOn({ kind: "stopping" }, null);
       return;
@@ -504,6 +521,29 @@ async function runDispatchAttempt(
     ) {
       continued.outcome = waitOn({ kind: "interaction" }, null);
       return;
+    }
+
+    if (
+      !sendNow &&
+      !firstDispatch &&
+      attempt === "start-turn" &&
+      args.queuePayload.kind === "inline"
+    ) {
+      const repeat = checkRepeatedMessage(deps.db, {
+        input: payload.input,
+        senderThreadId,
+        threadId: thread.id,
+        // A drained row is already a card of its own, so it never joins one.
+        execution: claimed === null ? execution : null,
+      });
+      if (repeat.kind !== "none") {
+        // A looping sender parks one card, not one per call (#264).
+        continued.outcome =
+          repeat.kind === "join"
+            ? { kind: "queued", entry: repeat.entry }
+            : waitOn({ kind: "repeated-message" }, null);
+        return;
+      }
     }
 
     if (firstDispatch) {

@@ -1,101 +1,13 @@
-"""Capture Cursor's per-session SQLite store without copying a live WAL database."""
+"""Restore a teleported Cursor chat (meta.json plus its SQLite store) from one snapshot's JSONL."""
 import base64
 import hashlib
 import json
 import os
 from pathlib import Path
 import sqlite3
-import signal
-import stat
 import sys
 import tempfile
-import time
 import uuid
-
-CHUNK = 64 * 1024
-
-
-def session_directory(root, session_id):
-    if str(uuid.UUID(session_id)) != session_id:
-        raise ValueError('invalid Cursor session ID')
-    path = Path(root) / session_id
-    fd = os.open('/', os.O_RDONLY | os.O_DIRECTORY)
-    try:
-        for part in path.parts[1:]:
-            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
-            os.close(fd)
-            fd = child
-        os.fchdir(fd)
-    finally:
-        os.close(fd)
-    return path
-
-
-def regular(name):
-    info = os.stat(name, follow_symlinks=False)
-    if not stat.S_ISREG(info.st_mode):
-        raise ValueError('Cursor history must be a regular file')
-    return info
-
-
-def capture(root, session_id):
-    def timed_out(*_):
-        raise TimeoutError('Cursor snapshot exceeded the normal 30-second RPC budget')
-    signal.signal(signal.SIGALRM, timed_out)
-    signal.alarm(30)
-    directory = session_directory(root, session_id)
-    regular('meta.json')
-    # Cursor rewrites meta.json in place (truncate, then write). Retry a torn read.
-    for attempt in range(20):
-        meta = Path('meta.json').read_bytes()
-        try:
-            metadata = json.loads(meta)
-            break
-        except ValueError:
-            if attempt == 19:
-                raise
-            time.sleep(0.05)
-    if metadata.get('schemaVersion') != 1 or not isinstance(metadata.get('cwd'), str):
-        raise ValueError('unsupported Cursor metadata')
-    snapshot = str(uuid.uuid4())
-    index = 0
-    digest = hashlib.sha256()
-
-    def emit(value, complete=False):
-        nonlocal index
-        line = json.dumps(value, separators=(',', ':'))
-        print(json.dumps({'snapshot': snapshot, 'index': index, 'complete': complete, 'record': line}), flush=True)
-        digest.update(line.encode() + b'\n')
-        index += 1
-
-    with tempfile.TemporaryDirectory(prefix='.cloudroom-snapshot-', dir=directory) as temporary:
-        # Emit the bytes validated above, not a second read that can be torn.
-        (Path(temporary) / 'meta.json').write_bytes(meta)
-        files = [('meta.json', Path(temporary) / 'meta.json')]
-        if Path('store.db').exists():
-            regular('store.db')
-            for name in ['store.db-wal', 'store.db-shm']:
-                if Path(name).exists():
-                    regular(name)
-            target = Path(temporary) / 'store.db'
-            # WAL sidecars may need recreating after Cursor exits. query_only forbids data writes.
-            with sqlite3.connect((directory / 'store.db').as_uri() + '?mode=rw', uri=True, timeout=4) as source:
-                source.execute('PRAGMA query_only=ON')
-                source.execute('PRAGMA trusted_schema=OFF')
-                with sqlite3.connect(target) as destination:
-                    source.backup(destination, pages=256, progress=lambda *_: None)
-                    if destination.execute('PRAGMA quick_check').fetchone() != ('ok',):
-                        raise ValueError('invalid Cursor database')
-            files.append(('store.db', target))
-        emit({'type': 'cursor_snapshot', 'version': 1, 'session_id': session_id})
-        for name, path in files:
-            with path.open('rb') as source:
-                offset = 0
-                while chunk := source.read(CHUNK):
-                    emit({'file': name, 'offset': offset, 'data': base64.b64encode(chunk).decode()})
-                    offset += len(chunk)
-        emit({'end': True, 'sha256': digest.hexdigest()}, complete=True)
-    signal.alarm(0)
 
 
 def restore(root, cwd=None):
@@ -171,9 +83,7 @@ def restore(root, cwd=None):
 
 if __name__ == '__main__':
     try:
-        if sys.argv[1] == 'capture':
-            capture(sys.argv[2], sys.argv[3])
-        elif sys.argv[1] == 'restore':
+        if sys.argv[1] == 'restore':
             restore(sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else None)
         else:
             raise ValueError('unsupported operation')

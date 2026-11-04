@@ -584,73 +584,78 @@ describe("queued thread messages", () => {
     }
   });
 
-  it("pauses ordinary turn-end rows without pausing system notices", () => {
-    const { db, project } = setup();
-    const thread = createThread(db, noopNotifier, {
-      projectId: project.id,
-      providerId: "codex",
-      status: "idle",
-    });
-    const ordinary = createQueuedThreadMessage(db, noopNotifier, {
-      threadId: thread.id,
-      content: defaultInput,
-      model: "gpt-5",
-      reasoningLevel: "medium",
-      permissionMode: "full",
-      serviceTier: "default",
-      waitingOn: { kind: "thread-busy" },
-      sendAt: null,
-      payload: { kind: "inline" },
-      systemNotice: null,
-    });
-    const notice = createQueuedThreadMessage(db, noopNotifier, {
-      threadId: thread.id,
-      content: altInput,
-      model: "gpt-5",
-      reasoningLevel: "medium",
-      permissionMode: "full",
-      serviceTier: "default",
-      waitingOn: { kind: "thread-busy" },
-      sendAt: null,
-      payload: { kind: "inline" },
-      systemNotice: {
-        kind: "child-completed",
-        subject: {
-          kind: "thread",
-          threadId: "thr_child",
-          threadName: "Child",
-        },
-      },
-    });
-    insertEvents(db, noopNotifier, [
-      {
+  it.each(["manual-stop", "memory-limit"])(
+    "pauses ordinary turn-end rows and child notices after %s (#821)",
+    (reason) => {
+      const { db, project } = setup();
+      const thread = createThread(db, noopNotifier, {
+        projectId: project.id,
+        providerId: "codex",
+        status: "idle",
+      });
+      const ordinary = createQueuedThreadMessage(db, noopNotifier, {
         threadId: thread.id,
-        sequence: 1,
-        type: "system/thread/interrupted",
-        scope: threadScope(),
-        itemId: null,
-        itemKind: null,
-        parentToolCallId: null,
-        data: JSON.stringify({ reason: "manual-stop" }),
-      },
-    ]);
+        content: defaultInput,
+        model: "gpt-5",
+        reasoningLevel: "medium",
+        permissionMode: "full",
+        serviceTier: "default",
+        waitingOn: { kind: "thread-busy" },
+        sendAt: null,
+        payload: { kind: "inline" },
+        systemNotice: null,
+      });
+      const notice = createQueuedThreadMessage(db, noopNotifier, {
+        threadId: thread.id,
+        content: altInput,
+        model: "gpt-5",
+        reasoningLevel: "medium",
+        permissionMode: "full",
+        serviceTier: "default",
+        waitingOn: { kind: "thread-busy" },
+        sendAt: null,
+        payload: { kind: "inline" },
+        systemNotice: {
+          kind: "child-completed",
+          subject: {
+            kind: "thread",
+            threadId: "thr_child",
+            threadName: "Child",
+          },
+        },
+      });
+      insertEvents(db, noopNotifier, [
+        {
+          threadId: thread.id,
+          sequence: 1,
+          type: "system/thread/interrupted",
+          scope: threadScope(),
+          itemId: null,
+          itemKind: null,
+          parentToolCallId: null,
+          data: JSON.stringify({ reason }),
+        },
+      ]);
 
-    expect(
-      listIdleThreadsWithQueuedMessages(db).map((row) => row.threadId),
-    ).toContain(thread.id);
-    expect(
-      claimQueuedThreadMessage(db, noopNotifier, ordinary.id, {
-        kind: "automatic",
-        isEligible: () => true,
-      }),
-    ).toBeNull();
-    expect(
-      claimNextQueuedThreadMessage(db, noopNotifier, thread.id)?.id,
-    ).toBe(notice.id);
-    expect(
-      listQueuedThreadMessages(db, thread.id).map((row) => row.id),
-    ).toEqual([ordinary.id]);
-  });
+      expect(
+        listIdleThreadsWithQueuedMessages(db).map((row) => row.threadId),
+      ).not.toContain(thread.id);
+      for (const row of [ordinary, notice]) {
+        expect(
+          claimQueuedThreadMessage(db, noopNotifier, row.id, {
+            kind: "automatic",
+            isEligible: () => true,
+          }),
+        ).toBeNull();
+      }
+      expect(claimNextQueuedThreadMessage(db, noopNotifier, thread.id)).toBe(
+        null,
+      );
+      expect(claimQueuedThreadMessage(db, noopNotifier, notice.id)?.id).toBe(
+        notice.id,
+      );
+    },
+  );
 
   it("lets a row the user asked for during the stop out of the manual-stop pause", () => {
     const { db, project } = setup();

@@ -47,6 +47,10 @@ import {
  *   `bb thread queue`) have no database to resolve an id against.
  * - `interaction` — the thread has a pending interaction the user has not
  *   settled.
+ * - `repeated-message` — the thread already started turns for this exact text
+ *   several times in a row, so this copy waits for a person to Send now or
+ *   Delete it rather than starting yet another turn (a script calling
+ *   `tell` in a loop). Only Send now clears it.
  * - `plugin` — a plugin's dispatch gate returned `wait(reason)`. This is the
  *   only arm with an authored reason, because it is the only arm whose reason
  *   is not derivable from the kind (plus `sendAt`) by the renderer.
@@ -59,6 +63,7 @@ export const queuedMessageWaitingOnKindValues = [
   "provisioning",
   "host-offline",
   "interaction",
+  "repeated-message",
   "plugin",
 ] as const;
 export const queuedMessageWaitingOnKindSchema = z.enum(
@@ -96,6 +101,7 @@ export const queuedMessageWaitingOnSchema = z.discriminatedUnion("kind", [
     hostName: queuedMessageWaitHostNameSchema,
   }),
   z.object({ kind: z.literal("interaction") }),
+  z.object({ kind: z.literal("repeated-message") }),
   z.object({
     kind: z.literal("plugin"),
     pluginId: pluginIdSchema,

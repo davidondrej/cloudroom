@@ -9,6 +9,7 @@ import {
 } from "@cloudroom/shared-ui/dropdown-menu";
 import { Icon, type IconName } from "@cloudroom/shared-ui/icon";
 import { cn } from "@cloudroom/shared-ui/lib/utils";
+import { CreditsBar } from "@/components/CloudQueue";
 import { useCloseMobileSidebar } from "@/components/ui/sidebar.js";
 import { useCloudroomAccount } from "@/hooks/queries/cloudroom-queries";
 import { getPluginConfigurationRoutePath } from "@/lib/route-paths";
@@ -112,9 +113,11 @@ export function SettingsAccountMenu({ usagePage }: { usagePage: boolean }) {
     : null;
   const connection = ready ? "Cloud connected" : "Cloud unavailable";
   const usage = status?.planUsage;
+  // Plan credits left plus extra credits (packs, ADR 0317), like /billing.
+  const extra = Math.max(0, Math.floor(usage?.extraCredits ?? 0));
   const creditsLeft =
     usage && usage.credits !== null
-      ? Math.max(0, Math.floor(usage.creditsLimit - usage.credits))
+      ? Math.max(0, Math.floor(usage.creditsLimit - usage.credits)) + extra
       : null;
   const go = (to: string) => {
     navigate(to);
@@ -167,7 +170,7 @@ export function SettingsAccountMenu({ usagePage }: { usagePage: boolean }) {
                   <span className="font-semibold text-foreground">
                     {creditsLeft.toLocaleString("en-US")}
                   </span>{" "}
-                  of {usage.creditsLimit.toLocaleString("en-US")} credits left
+                  {extra > 0 ? "credits left" : `of ${usage.creditsLimit.toLocaleString("en-US")} credits left`}
                 </span>
                 <button
                   type="button"
@@ -177,12 +180,27 @@ export function SettingsAccountMenu({ usagePage }: { usagePage: boolean }) {
                   + buy more
                 </button>
               </div>
-              <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-foreground/10">
-                <div
-                  className="h-full rounded-full bg-primary"
-                  style={{ width: `${usage.creditsLimit > 0 ? Math.min(100, (creditsLeft / usage.creditsLimit) * 100) : 0}%` }}
-                />
-              </div>
+              <CreditsBar
+                className="mt-1.5 h-1 bg-foreground/10"
+                plan={creditsLeft - extra}
+                limit={usage.creditsLimit}
+                extra={extra}
+                extraTotal={usage.extraCreditsTotal ?? 0}
+                planClassName="bg-primary"
+                edgeClassName="border-popover"
+              />
+              {extra > 0 && (
+                <p className="mt-1.5 flex gap-3 text-2xs text-muted-foreground tabular-nums">
+                  <span className="flex items-center gap-1">
+                    <span className="size-1.5 bg-sky-400" />
+                    <span className="text-sky-600 dark:text-sky-400">{extra.toLocaleString("en-US")}</span> extra
+                  </span>
+                  <span className="flex items-center gap-1">
+                    <span className="size-1.5 bg-primary" />
+                    {(creditsLeft - extra).toLocaleString("en-US")} plan
+                  </span>
+                </p>
+              )}
             </div>
           )}
           <DropdownMenuSeparator />

@@ -7,6 +7,14 @@ const RELEASES_URL = "https://github.com/davidondrej/cloudroom/releases/latest";
 const said = (text?: string | null) =>
   text?.trim() ? `: "${text.trim().replace(/\s+/g, " ").slice(0, 400)}".` : ".";
 
+/** A technical error as one short, plain line for a banner. The full text stays in its tooltip and the fix prompt. */
+export const plainError = (error: string) =>
+  error.includes("storage unsafe")
+    ? "Cloud disk is full"
+    : error === "Cloudroom request cancelled or timed out"
+      ? "Cloud didn't answer in time"
+      : error.replace(/^Cloudroom rejected the request \(HTTP \d+\): /, "");
+
 const fixPrompt = (problem: string, look: string) =>
   `${problem} ${look} Find the root cause and fix it without losing any work, then tell me what was wrong. If \`room-cli\` is not on your PATH, use ${CLI_PATH}.`;
 

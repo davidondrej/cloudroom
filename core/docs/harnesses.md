@@ -125,7 +125,7 @@ Cursor runs in print mode. Cursor's ACP mode only runs each model at its default
 
 Cursor runs without Command Guard: its tested versions do not run native safety hooks for Cloudroom, so `command_guard_enabled` has no effect on Cursor sessions.
 
-Chats live at `.cursor/chats/<md5 of the working folder>/<chat ID>`. The adapter records bounded native SQLite snapshot chunks, including metadata and WAL-backed data. The Python helper uses SQLite backup with query-only SQL; read/write opening permits required WAL sidecars after Cursor exits. `cursor-history.py restore ROOT CWD` accepts one complete snapshot's native JSONL on stdin, checks its digest, writes it under `ROOT/<md5 of CWD>`, and never replaces an existing session. It restores native history, not workspace files or credentials.
+Chats live at `.cursor/chats/<md5 of the working folder>/<chat ID>`, and Cursor keeps them there: Core records the ACP stream only, like fx and Hermes. It used to copy the chat's whole SQLite store into history after every tool call, turn and restart, which filled a 50 GB disk in days (#606); older journals' copies still replay. `cursor-history.py restore ROOT CWD` (Teleport) accepts one complete snapshot's native JSONL on stdin, checks its digest, writes it under `ROOT/<md5 of CWD>`, and never replaces an existing session. It restores native history, not workspace files or credentials.
 
 Initial sync discovery includes Cursor skills, global rules and the `notifications`, `hints`, and `suggestNextPrompt` preferences. Existing paired roots are preserved. Credentials, session stores, hooks, plugins and MCP configuration do not sync.
 

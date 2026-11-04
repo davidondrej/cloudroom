@@ -55,6 +55,16 @@ describe("pickThreadProcesses", () => {
         (picked) => picked.pid,
       );
     expect(pick("thr_abc", URL)).toEqual([50, 56]);
+    // The memory guard also kills what still runs under the daemon, but never
+    // the daemon's own line, another thread, or another profile's processes.
+    expect(
+      pickThreadProcesses(rows, {
+        threadId: "thr_abc",
+        serverUrl: URL,
+        selfPid: 20,
+        includeLive: true,
+      }).map((picked) => picked.pid),
+    ).toEqual([40, 41, 50, 56]);
     expect(pick("not a thread", URL)).toEqual([]);
     expect(pick("thr_abc", undefined)).toEqual([]);
     expect(pick("thr_abc", "")).toEqual([]);

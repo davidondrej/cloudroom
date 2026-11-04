@@ -62,6 +62,13 @@ export function createQueuedMessageAutoSendPausedError(): ApiError {
   );
 }
 
+export function isQueuedMessageAutoSendPausedError(error: unknown): boolean {
+  return (
+    error instanceof ApiError &&
+    error.body.code === QUEUED_MESSAGE_AUTO_SEND_PAUSED_CODE
+  );
+}
+
 /**
  * A settling row, for the plugin event its transition raises.
  *

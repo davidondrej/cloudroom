@@ -93,25 +93,48 @@ impl Manager {
         {
             return Ok(models.clone());
         }
-        let result = if kind == runtime::Kind::Cursor {
-            runtime::cursor_models::list(&self.config, &self.storage).await
+        let (result, exit) = if kind == runtime::Kind::Cursor {
+            let models = runtime::cursor_models::list(&self.config, &self.storage).await;
+            (models, None)
         } else {
-            let (result, exit) = runtime::models(&self.config, kind).await;
-            if let Some(runtime::Event::Exited {
-                reason,
-                expected,
-                details,
-                ..
-            }) = exit
-            {
-                self.observability
-                    .agent_exit(None, kind, reason, expected, details);
-            }
-            result
+            runtime::models(&self.config, kind).await
         };
-        let models = result.map_err(|_| Error::Conflict("model catalog unavailable"))?;
-        *cached = Some((Instant::now(), models.clone()));
-        Ok(models)
+        let crashed = matches!(
+            exit,
+            Some(runtime::Event::Exited {
+                expected: false,
+                ..
+            })
+        );
+        let started = exit.is_some();
+        if let Some(runtime::Event::Exited {
+            reason,
+            expected,
+            details,
+            ..
+        }) = exit
+        {
+            self.observability
+                .agent_exit(None, kind, reason, expected, details);
+        }
+        // A fixed reason, never the agent's own text (#819). A timed-out agent is killed, so check that first.
+        let failure = match result {
+            Ok(models) => {
+                *cached = Some((Instant::now(), models.clone()));
+                return Ok(models);
+            }
+            Err(_) if kind == runtime::Kind::Cursor => "model catalog unavailable",
+            Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
+                "model catalog unavailable (agent timed out listing models)"
+            }
+            Err(_) if !started => "model catalog unavailable (agent could not start)",
+            Err(_) if crashed => {
+                "model catalog unavailable (agent exited while starting; try again)"
+            }
+            Err(_) => "model catalog unavailable (agent sent an invalid model list)",
+        };
+        eprintln!("{kind:?} {failure}");
+        Err(Error::Conflict(failure))
     }
 
     pub async fn capabilities(&self) -> Value {

@@ -160,6 +160,19 @@ export function reportMacHelperProblem(detail: string): void {
   });
 }
 
+/** Mac access is on, but its helper didn't start (#109). One try per UTC day; the marker keeps it to one a day per install. */
+let helperDownDay = "";
+export function reportMacHelperDown(message: string): void {
+  const day = new Date().toISOString().slice(0, 10);
+  if (!deps || helperDownDay === day) return;
+  helperDownDay = day;
+  const marker = join(deps.config.dataDir, "cloudroom-mac-helper-down.txt");
+  void readFile(marker, "utf8").catch(() => "").then(async (last) => {
+    if (last === day) return;
+    if (await save("mac_helper", { outcome: "failed", code: "helper_not_running", message: scrub(message), seconds_since_first_launch: secondsSinceFirstLaunch() })) await writeFile(marker, day, { mode: 0o600 });
+  }).catch(() => {});
+}
+
 /** Telemetry must never break setup, so building or sending an event can't throw. */
 function capture(name: "setup_snapshot" | "agent_connect" | "cli_install" | "account_sign_in_failed" | "update_install" | "update_ready" | "app_crash", properties: () => Record<string, TelemetryValue>): void {
   try {

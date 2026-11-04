@@ -265,6 +265,8 @@ export interface CloudroomArea {
   checkPreviews(): Promise<void>;
   /** Recently updated repos on this Mac and GitHub that no project uses yet. */
   repoSuggestions(signal?: AbortSignal): Promise<{ githubConnected: boolean; repos: RepoSuggestion[] }>;
+  /** Only this Mac's repos. Fast: no GitHub calls, so the picker shows them while `repoSuggestions` loads. */
+  macRepoSuggestions(signal?: AbortSignal): Promise<{ repos: RepoSuggestion[] }>;
   /** Makes an `owner/name` GitHub repo a project right away. Machines and sandboxes clone it when first needed. */
   addGithubRepo(input: { repo: string }): Promise<{ projectId: string }>;
   /** Another project a new thread's prompt looks like it belongs in, or null. */
@@ -408,6 +410,7 @@ export function createCloudroomArea({ transport }: CreateSdkAreaArgs): Cloudroom
     cancelCodexLogin: (requestId) => transport.readJson(request("/codex/cancel", { requestId })) as Promise<CloudroomCodexAuth>,
     githubAuth: (signal) => transport.readJson(request("/github", undefined, signal)) as Promise<CloudroomCodexAuth>,
     repoSuggestions: (signal) => transport.readJson(request("/repo-suggestions", undefined, signal)) as Promise<{ githubConnected: boolean; repos: RepoSuggestion[] }>,
+    macRepoSuggestions: (signal) => transport.readJson(request("/repo-suggestions/mac", undefined, signal)) as Promise<{ repos: RepoSuggestion[] }>,
     addGithubRepo: (input) => transport.readJson(request("/repo-suggestions/github", input)) as Promise<{ projectId: string }>,
     projectSuggestion: (input, signal) => transport.readJson(request("/project-suggestion", input, signal)) as Promise<{ projectId: string | null }>,
     promptSuggestion: (input, signal) => transport.readJson(request("/prompt-suggestion", input, signal)) as Promise<{ suggestion: string | null }>,

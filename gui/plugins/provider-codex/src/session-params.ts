@@ -594,6 +594,44 @@ function buildShellEnvironmentPolicyConfig(
   return Object.keys(config).length > 0 ? config : undefined;
 }
 
+export interface CodexShellEnvironmentFilters {
+  include_only?: string[] | null;
+  filters?: Record<string, string> | null;
+}
+
+/**
+ * Codex applies a user's `include_only` (or `filters` set to "include") after
+ * `set`, so that allowlist would drop the thread identity Cloudroom sets (#840).
+ * Adds exactly the keys this config sets to the user's allowlist.
+ */
+export function keepShellEnvironmentSetKeys(
+  config: { [key in string]?: JsonValue },
+  policy: CodexShellEnvironmentFilters | null | undefined,
+): { [key in string]?: JsonValue } {
+  const prefix = "shell_environment_policy.set.";
+  const keys = Object.keys(config)
+    .filter((key) => key.startsWith(prefix))
+    .map((key) => key.slice(prefix.length));
+  if (keys.length === 0) return {};
+  if (policy?.filters) {
+    return Object.values(policy.filters).includes("include")
+      ? Object.fromEntries(
+          keys.map((key) => [
+            `shell_environment_policy.filters.${key}`,
+            "include",
+          ]),
+        )
+      : {};
+  }
+  return policy?.include_only?.length
+    ? {
+        "shell_environment_policy.include_only": [
+          ...new Set([...policy.include_only, ...keys]),
+        ],
+      }
+    : {};
+}
+
 export function buildCodexConfig(
   args: BuildCodexConfigArgs,
 ): { [key in string]?: JsonValue } | undefined {

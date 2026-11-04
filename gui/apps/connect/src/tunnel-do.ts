@@ -34,6 +34,8 @@ function tunnelInfo(ws: WebSocket): TunnelInfo {
 }
 
 export const TUNNEL_OFFLINE_HEADER = "x-bb-tunnel-offline";
+/** Marks errors the relay made itself (tunnel dropped, Mac too slow), so the Worker can tell them from the Mac's own. */
+export const TUNNEL_ERROR_HEADER = "x-cloudroom-tunnel-error";
 
 const HOP_HEADERS = new Set([
   "connection",
@@ -73,11 +75,17 @@ export function parseClientProtocolVersion(raw: string | null): number {
 const PORT_SHARE_TOO_OLD =
   "this Mac's Cloudroom is too old for port sharing — update Cloudroom";
 
+type OpenHttp = Extract<Frame, { type: "open-http" }>;
+
 interface PendingHttp {
   resolve: (response: Response) => void;
   writer: WritableStreamDefaultWriter<Uint8Array> | null;
   writeChain: Promise<void>;
   timeout: ReturnType<typeof setTimeout>;
+  deadline: number;
+  /** A bodyless GET or HEAD can be sent once more on the next tunnel, if the Mac hadn't answered when the tunnel dropped. */
+  resend: OpenHttp | null;
+  held: boolean;
 }
 
 export class TunnelDO {
@@ -244,7 +252,7 @@ export class TunnelDO {
         existing.close(1000, "replaced by a new tunnel connection");
       } catch {}
     }
-    this.abandonStreams("tunnel reconnected mid-request", "tunnel reconnected");
+    this.abandonStreams("tunnel reconnected mid-request", "tunnel reconnected", true);
     void this.markPresence(serverId ?? undefined);
     const mac = new URL(request.url).hostname.split(".")[0];
     console.log({ event: "tunnel_connected", mac });
@@ -256,6 +264,7 @@ export class TunnelDO {
       protocolVersion,
     } satisfies TunnelInfo);
     this.state.acceptWebSocket(pair[1], [TUNNEL_TAG]);
+    this.resendHeld(pair[1]);
     return new Response(null, { status: 101, webSocket: pair[0] });
   }
 
@@ -309,35 +318,30 @@ export class TunnelDO {
   ): Promise<Response> {
     const streamId = this.nextStreamId++;
     const hasBody = request.body !== null;
+    const open: OpenHttp = {
+      type: "open-http",
+      streamId,
+      method: request.method,
+      path: url.pathname + url.search,
+      headers: forwardableHeaders(request.headers),
+      hasBody,
+      ...(target !== undefined ? { target } : {}),
+    };
 
     const responsePromise = new Promise<Response>((resolve) => {
-      const timeout = setTimeout(() => {
-        this.failHttpStream(
-          streamId,
-          504,
-          "timed out waiting for the tunnel client",
-        );
-      }, RESP_HEAD_TIMEOUT_MS);
+      const deadline = Date.now() + RESP_HEAD_TIMEOUT_MS;
       this.pendingHttp.set(streamId, {
         resolve,
         writer: null,
         writeChain: Promise.resolve(),
-        timeout,
+        timeout: this.headDeadline(streamId, deadline),
+        deadline,
+        resend: !hasBody && (request.method === "GET" || request.method === "HEAD") ? open : null,
+        held: false,
       });
     });
 
-    const opened = this.trySend(
-      tunnel,
-      encodeFrame({
-        type: "open-http",
-        streamId,
-        method: request.method,
-        path: url.pathname + url.search,
-        headers: forwardableHeaders(request.headers),
-        hasBody,
-        ...(target !== undefined ? { target } : {}),
-      }),
-    );
+    const opened = this.trySend(tunnel, encodeFrame(open));
     if (!opened) {
       const entry = this.pendingHttp.get(streamId);
       if (entry) {
@@ -351,6 +355,26 @@ export class TunnelDO {
       void this.pumpRequestBody(streamId, request.body!, tunnel);
     }
     return responsePromise;
+  }
+
+  private headDeadline(streamId: number, deadline: number): ReturnType<typeof setTimeout> {
+    return setTimeout(() => {
+      this.failHttpStream(streamId, 504, "timed out waiting for the tunnel client");
+    }, Math.max(0, deadline - Date.now()));
+  }
+
+  /** Sends held reads again on the new tunnel, under new stream ids, so late frames from the old tunnel are ignored. */
+  private resendHeld(tunnel: WebSocket): void {
+    for (const [oldId, entry] of [...this.pendingHttp]) {
+      if (!entry.held || !entry.resend) continue;
+      const streamId = this.nextStreamId++;
+      const open = { ...entry.resend, streamId };
+      this.pendingHttp.delete(oldId);
+      clearTimeout(entry.timeout);
+      this.pendingHttp.set(streamId, { ...entry, held: false, resend: null, timeout: this.headDeadline(streamId, entry.deadline) });
+      console.log({ event: "tunnel_request_resent", path: open.path });
+      if (!this.trySend(tunnel, encodeFrame(open))) this.failHttpStream(streamId, 502, "tunnel reconnected mid-request");
+    }
   }
 
   private async pumpRequestBody(
@@ -389,9 +413,14 @@ export class TunnelDO {
     }
   }
 
-  private abandonStreams(httpReason: string, wsReason: string): void {
+  /** With `hold`, unanswered reads wait for the next tunnel instead of failing (until their own deadline). */
+  private abandonStreams(httpReason: string, wsReason: string, hold = false): void {
     const tunnel = this.tunnelSocket();
-    for (const streamId of [...this.pendingHttp.keys()]) {
+    for (const [streamId, entry] of [...this.pendingHttp]) {
+      if (hold && entry.resend && !entry.writer) {
+        entry.held = true;
+        continue;
+      }
       if (tunnel) {
         this.trySend(tunnel, encodeFrame({
           type: "close-stream", streamId, code: 1000, reason: httpReason,
@@ -431,7 +460,7 @@ export class TunnelDO {
       entry.resolve(
         new Response(`cloudroom: ${message}\n`, {
           status,
-          headers: { "content-type": "text/plain; charset=utf-8" },
+          headers: { "content-type": "text/plain; charset=utf-8", [TUNNEL_ERROR_HEADER]: "1" },
         }),
       );
     }
@@ -490,6 +519,7 @@ export class TunnelDO {
         const entry = this.pendingHttp.get(frame.streamId);
         if (!entry) return;
         clearTimeout(entry.timeout);
+        entry.resend = null;
         const headers = frame.headers.filter(
           ([name]) => !HOP_HEADERS.has(name.toLowerCase()),
         );
@@ -599,6 +629,7 @@ export class TunnelDO {
       this.abandonStreams(
         "tunnel disconnected mid-request",
         "tunnel disconnected",
+        true,
       );
       return;
     }

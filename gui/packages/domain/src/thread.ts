@@ -391,9 +391,20 @@ export const threadQueuedMessageSchema = z.object({
 });
 export type ThreadQueuedMessage = z.infer<typeof threadQueuedMessageSchema>;
 
+/**
+ * A row Stop holds that came from another thread or the system, not the user.
+ * It waits out a message edit and sends after the edited turn (#821).
+ */
+export function isStopHeldReport(
+  row: Pick<ThreadQueuedMessage, "initiator" | "pausedByStop">,
+): boolean {
+  return row.pausedByStop === true && row.initiator !== "user";
+}
+
 export const teleportProgressSchema = z.object({
   id: z.string(), owner: z.string(), phase: z.enum(["checking", "stopping", "uploading", "running", "complete", "cancelled", "error", "cancelling"]),
   completed: z.number(), total: z.number(), error: z.string().optional(), cloudStarted: z.boolean().optional(),
+  sent: z.number().optional(), bytes: z.number().optional(), rate: z.number().optional(),
 });
 export type TeleportProgress = z.infer<typeof teleportProgressSchema>;
 export const teleportLocalSteps = ["stopping", "downloading", "copying", "switching"] as const;

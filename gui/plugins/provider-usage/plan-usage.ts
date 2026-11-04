@@ -5,6 +5,8 @@ export interface PlanMeter {
   used: number;
   limit: number;
   unit: string;
+  /** Overrides the plan's period, e.g. for extra credits, which never refill. */
+  period?: string;
 }
 
 export interface PlanSummary {
@@ -18,15 +20,22 @@ const creditsSchema = z.object({
   plan: z.string(),
   credits: z.nullable(z.number()),
   creditsLimit: z.number(),
+  extraCredits: z.optional(z.number()),
+  extraCreditsTotal: z.optional(z.number()),
 });
 
+/** With extra credits (packs, ADR 0317), they get their own row before the plan's, like the account menu. */
 export function fromCredits(usage: z.infer<typeof creditsSchema>): PlanSummary {
+  const extra = Math.max(0, usage.extraCredits ?? 0), total = Math.max(extra, usage.extraCreditsTotal ?? 0);
+  const plan = { used: usage.credits ?? 0, limit: usage.creditsLimit, unit: " credits" };
   return {
     plan: usage.plan,
     period: "last 30 days",
     meters: usage.credits === null
       ? []
-      : [{ label: "credits", used: usage.credits, limit: usage.creditsLimit, unit: " credits" }],
+      : extra > 0
+        ? [{ label: "extra", used: total - extra, limit: total, unit: " credits", period: "never resets" }, { label: "plan", ...plan }]
+        : [{ label: "credits", ...plan }],
   };
 }
 

@@ -275,6 +275,7 @@ const systemThreadInterruptedReasonValues = [
   "manual-stop",
   "host-daemon-restarted",
   "provider-turn-idle",
+  "memory-limit",
 ] as const;
 export const systemThreadInterruptedReasonSchema = z.enum(
   systemThreadInterruptedReasonValues,

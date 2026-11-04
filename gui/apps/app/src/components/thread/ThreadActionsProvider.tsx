@@ -68,17 +68,14 @@ function getSidebarSectionTargets(
   );
 }
 
+// Same rule as Cmd+E / Cmd+L: the section's last top-level thread.
 function findArchiveFallback(
   targets: readonly SidebarThreadShortcutTarget[],
-  threadId: string,
   isAvailable: (target: SidebarThreadShortcutTarget) => boolean,
 ): SidebarThreadShortcutTarget | undefined {
-  const index = targets.findIndex((target) => target.threadId === threadId);
-  if (index < 0) return undefined;
-  return (
-    targets.slice(index + 1).find(isAvailable) ??
-    targets.slice(0, index).reverse().find(isAvailable)
-  );
+  return targets
+    .filter((target) => !target.isChild && isAvailable(target))
+    .at(-1);
 }
 
 export interface ThreadActionsContextValue {
@@ -370,12 +367,8 @@ export function ThreadActionsProvider({
           !archivedThreadIds.has(target.threadId) &&
           listedThreadIds.has(target.threadId);
         const fallback =
-          findArchiveFallback(openedTargets, thread.id, isAvailable) ??
-          findArchiveFallback(
-            getSidebarSectionTargets(thread.id),
-            thread.id,
-            isAvailable,
-          );
+          findArchiveFallback(openedTargets, isAvailable) ??
+          findArchiveFallback(getSidebarSectionTargets(thread.id), isAvailable);
         navigate(
           fallback
             ? getThreadRoutePath({

@@ -409,6 +409,61 @@ describe("public thread default routes", () => {
     });
   });
 
+  it("starts a model given without a level at that model's default (#656)", async () => {
+    await withTestHarness(async (harness) => {
+      const { host, session } = seedHostSession(harness.deps);
+      registerProviderHostRpcResponder(harness, {
+        hostId: host.id,
+        sessionId: session.id,
+        restoreCommandCaptureAfterResponse: true,
+        modelsByProviderId: {
+          codex: {
+            models: [
+              availableModelFixture({ model: "gpt-first", isDefault: true }),
+              availableModelFixture({
+                model: "gpt-xhigh",
+                reasoningLevels: ["high", "xhigh"],
+                defaultReasoningLevel: "xhigh",
+              }),
+            ],
+            selectedOnlyModels: [],
+          },
+        },
+      });
+      const path = "/tmp/thread-defaults-model-only";
+      const { project } = seedProjectWithSource(harness.deps, {
+        hostId: host.id,
+        path,
+      });
+      const environment = seedEnvironment(harness.deps, {
+        hostId: host.id,
+        projectId: project.id,
+        path,
+      });
+
+      const response = await harness.app.request("/api/v1/threads", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          origin: "cli",
+          projectId: project.id,
+          providerId: "codex",
+          model: "gpt-xhigh",
+          input: [{ type: "text", text: "Spawn with --model only" }],
+          environment: { type: "reuse", environmentId: environment.id },
+        }),
+      });
+
+      const { id } = threadSchema.parse(await readJson(response));
+      const { command } = await waitForQueuedCommand(
+        harness,
+        ({ command }) =>
+          command.type === "thread.start" && command.threadId === id,
+      );
+      expect(command).toMatchObject({ options: { reasoningLevel: "xhigh" } });
+    });
+  });
+
   it("creates from displayed execution values when only the provider has a client source", async () => {
     await withTestHarness(async (harness) => {
       const { host, session } = seedHostSession(harness.deps);
@@ -421,6 +476,8 @@ describe("public thread default routes", () => {
             models: [
               availableModelFixture({
                 model: "gpt-provider-default",
+                reasoningLevels: ["medium", "high"],
+                defaultReasoningLevel: "high",
                 isDefault: true,
               }),
             ],
@@ -448,7 +505,7 @@ describe("public thread default routes", () => {
           projectId: project.id,
           providerId: "codex",
           model: "gpt-provider-default",
-          reasoningLevel: "medium",
+          reasoningLevel: "high",
           permissionMode: "full",
           executionInputSources: {
             providerId: "client-preference",
@@ -475,7 +532,7 @@ describe("public thread default routes", () => {
         providerId: "codex",
         options: {
           model: "gpt-provider-default",
-          reasoningLevel: "medium",
+          reasoningLevel: "high",
           permissionMode: "full",
         },
       });

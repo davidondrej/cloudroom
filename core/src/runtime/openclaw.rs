@@ -177,7 +177,8 @@ async fn ensure(
     }
     let mut command = child_command(&profile.binary, config);
     connect(&mut command, port, &token);
-    super::strip_ai_co_authors_env(&mut command);
+    // One Gateway serves every session, so it has no single repository to scope the hook to.
+    super::strip_ai_co_authors_env(&mut command, None);
     // The Mac's chat apps stay on the Mac: a second Gateway would answer them twice.
     command
         .env("OPENCLAW_SKIP_CHANNELS", "1")

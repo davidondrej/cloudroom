@@ -17,7 +17,7 @@ export interface ThreadPromptSelections {
   selectedProviderId: string;
   selectedModel: string;
   serviceTier: ServiceTier | undefined;
-  reasoningLevel: ReasoningLevel;
+  reasoningLevel: ReasoningLevel | undefined;
   permissionMode: PermissionMode;
   environmentSelectionValue: string;
 }
@@ -135,7 +135,7 @@ export function getInitialThreadPromptSelections(
     selectedProviderId: options?.initialProviderId ?? "",
     selectedModel: options?.initialModel ?? "",
     serviceTier: options?.initialServiceTier,
-    reasoningLevel: options?.initialReasoningLevel ?? "medium",
+    reasoningLevel: options?.initialReasoningLevel,
     permissionMode: options?.initialPermissionMode ?? "full",
     environmentSelectionValue: options?.initialEnvironmentSelectionValue ?? "",
   };

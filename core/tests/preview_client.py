@@ -193,6 +193,25 @@ class WindowsLifecycleTests(unittest.TestCase):
             preview.windows(folder, True)  # Stopping a stopped helper is a no-op.
 
 
+@unittest.skipIf(sys.platform == 'win32', 'POSIX file modes')
+class SetupTests(unittest.TestCase):
+    def test_each_account_keeps_its_own_key_and_device(self):
+        # #109: after an account switch on one Mac, setup refused forever, so Mac access never started again. Switching back
+        # must return the first account's device: its sandboxes that slept through the switch refuse any other.
+        with tempfile.TemporaryDirectory() as root:
+            folder, connection = Path(root) / 'preview', Path(root) / 'cloudroom.json'
+            def sign_in(account):
+                connection.write_text(json.dumps({'account': {'id': account}, 'sandboxToken': 'token'})); connection.chmod(0o600)
+                preview.configure(folder, connection, False, None)
+                return preview.private_json(folder / 'config.json')['device'], (folder / 'id_ed25519.pub').read_text()
+            first, second = str(uuid.uuid4()), str(uuid.uuid4())
+            a, b = sign_in(first), sign_in(second)
+            self.assertNotEqual(a[0], b[0])
+            self.assertNotEqual(a[1], b[1])
+            self.assertEqual(sign_in(first), a)
+            self.assertEqual(sign_in(second), b)
+
+
 class MacJobTests(unittest.TestCase):
     def test_job_core_gave_up_on_never_runs(self):
         # Feedback #247: a slow Mac ran a --write job after Core told the agent "Mac unavailable", so a retry ran it twice.

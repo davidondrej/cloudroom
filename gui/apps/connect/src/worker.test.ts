@@ -670,6 +670,44 @@ describe("Cloudroom Connect relay", () => {
     expect(computers.map((computer) => computer.handle)).not.toContain(handle);
   });
 
+  it("sends an unanswered read again on the Mac's next tunnel, but never a write", async () => {
+    const mac = await register("66666666666666666666666666666666");
+    const dialMac = () => fetchRelay(`${mac.serverUrl}/__tunnel?v=1`, {
+      headers: { upgrade: "websocket", authorization: `Bearer ${mac.credential}` },
+    });
+    (await dialMac()).webSocket!.accept();
+    const cookie = await signInPhone(mac);
+    const origin = `https://${mac.handle}.${BASE}`;
+    const read = fetchRelay(`${origin}/slow`, { headers: { ...HTML, cookie } });
+    const write = fetchRelay(`${origin}/api/v1/send`, { method: "POST", headers: { cookie }, body: "hi" });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    serveMac((await dialMac()).webSocket!);
+    const [page, post] = await Promise.all([read, write]);
+    expect(page.status).toBe(200);
+    expect(await page.text()).toBe("mac:app:/slow");
+    expect(post.status).toBe(502);
+    expect(await post.text()).toContain("tunnel reconnected mid-request");
+    expect(seen.some((request) => request.path === "/api/v1/send")).toBe(false);
+  });
+
+  it("shows a page that retries by itself when a page load's tunnel drops twice", async () => {
+    const mac = await register("77777777777777777777777777777777");
+    const dialMac = () => fetchRelay(`${mac.serverUrl}/__tunnel?v=1`, {
+      headers: { upgrade: "websocket", authorization: `Bearer ${mac.credential}` },
+    });
+    (await dialMac()).webSocket!.accept();
+    const cookie = await signInPhone(mac);
+    const read = fetchRelay(`https://${mac.handle}.${BASE}/stuck`, { headers: { ...HTML, cookie } });
+    for (let drop = 0; drop < 2; drop++) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      (await dialMac()).webSocket!.accept();
+    }
+    const page = await read;
+    expect(page.status).toBe(502);
+    expect(page.headers.get("cache-control")).toBe("no-store");
+    expect(await page.text()).toContain("Reconnecting to your Mac");
+  });
+
   it("shows the offline page when the Mac is not connected", async () => {
     const cookie = await signInPhone();
     tunnel.close();

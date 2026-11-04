@@ -716,6 +716,9 @@ export function describeThreadTellOutcome(
   threadId: string,
   response: PostThreadMessageResult,
 ): string {
+  if (response.delivery === "queued" && response.queuedMessage.pausedByStop) {
+    return `Thread ${threadId} was stopped by the user; message ${response.queuedMessage.id} waits until the user messages that thread. Do not resend it or \`queue send\` it.`;
+  }
   if (response.delivery === "queued") {
     // The server says WHY it is waiting, so the CLI does not have to guess
     // from the flags it happened to send. `room-cli thread queue list` shows the
@@ -750,7 +753,7 @@ export function describeQueueWait(row: {
   waitingOn: QueuedMessageWaitingOn | null;
 }): string {
   if (row.pausedByStop === true) {
-    return "paused by Stop; run `queue send`";
+    return "paused by Stop; a new message or `queue send` releases it";
   }
   const waitingOn = row.waitingOn ?? { kind: "thread-busy" as const };
   if (row.hardQueue === true && waitingOn.kind === "thread-busy") {
@@ -773,6 +776,8 @@ export function describeQueueWait(row: {
       return `waiting for ${waitingOn.hostName} to reconnect`;
     case "interaction":
       return "waiting for a pending interaction";
+    case "repeated-message":
+      return "held: this exact message already ran 5 times in a row; a person must send or delete it";
     case "plugin":
       return `${waitingOn.pluginId}: ${waitingOn.reason}`;
   }

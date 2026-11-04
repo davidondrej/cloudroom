@@ -1,15 +1,17 @@
+import { execFileSync, spawnSync } from "node:child_process";
 import { createServer } from "node:http";
 import { once } from "node:events";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, it, vi } from "vitest";
 import { cloudroom } from "../../src/services/cloudroom/commands.js";
-import { binding, saveStatus } from "../../src/services/cloudroom/store.js";
-import { setCopyLogins } from "../../src/services/cloudroom/sync.js";
+import { binding, command, saveStatus } from "../../src/services/cloudroom/store.js";
+import { setCopyLogins, setCopyMacGithub } from "../../src/services/cloudroom/sync.js";
 import { createTestAppHarness } from "../helpers/test-app.js";
+import { PERSONAL_PROJECT_ID } from "@cloudroom/domain";
 import { seedHostSession, seedProjectWithSource } from "../helpers/seed.js";
-import { cloudroomCommands, cloudroomThreads, createThread, getThread } from "@cloudroom/db";
+import { cloudroomCommands, cloudroomThreads, createThread, getThread, setProjectGitRemoteUrlIfMissing } from "@cloudroom/db";
 
 // The Cursor key check runs this computer's Cursor CLI, which rejects the tests' fake keys.
 vi.mock("../../src/services/cloudroom/sandboxes.js", async (original) => ({ ...await original<object>(), cursorKeyRejected: async () => false }));
@@ -398,8 +400,8 @@ it("sends a new thread's first message before its project copy starts, so a slow
   const core: string[] = [];
   let firstPrompt: { text: string; copyStarted: boolean } | null = null;
   let coreUrl = "";
-  // The first workspace lookup plans the copy; the second one is the copy itself starting.
-  const copyStarted = () => core.filter(path => path.startsWith("/v1/workspaces/")).length >= 2;
+  // Workspace lookups: the copy plan, then the `room-cli files wait` status, then the copy itself starting.
+  const copyStarted = () => core.filter(path => path.startsWith("/v1/workspaces/")).length >= 3;
   const coreServer = createServer(async (req, res) => {
     const json = (value: unknown, status = 200) => { res.writeHead(status, { "Content-Type": "application/json" }); res.end(JSON.stringify(value)); };
     core.push(req.url!);
@@ -438,6 +440,98 @@ it("sends a new thread's first message before its project copy starts, so a slow
     await rm(folder, { recursive: true, force: true });
   }
 });
+
+// #816: an existing checkout (a project template) needs only its branch; a fresh folder gets a clone first. A failed or
+// killed branch switch ends as failed. A failed check or status write holds the first message until a retry marks it,
+// and one that keeps failing fails the start. A Personal child's folder comes from its session.
+it.each([
+  ["existing checkout", null], ["fresh clone", null], ["existing checkout", "index.lock"], ["existing checkout", "terminated"],
+  ["existing checkout", "checkout probe"], ["personal child", "checkout probe"], ["existing checkout", "status write"], ["existing checkout", "status write x3"],
+] as const)("`room-cli files wait` reads a new thread's %s as copying until its branch and files are ready (#816, fault: %s)", async (kind, fault) => {
+  const root = await mkdtemp(join(tmpdir(), "cloudroom-files-ready-"));
+  const folder = join(root, "project"), origin = join(root, "origin.git"), mac = join(root, "mac");
+  const git = (cwd: string, ...args: string[]) => execFileSync("git", ["-c", "user.email=a@example.com", "-c", "user.name=A", ...args], { cwd, encoding: "utf8" }).trim();
+  await mkdir(folder); await mkdir(mac);
+  git(root, "init", "-q", "-b", "main", "seed");
+  for (let i = 0; i < 20; i++) await writeFile(join(root, "seed", `file${i}.txt`), `${i}\n`);
+  git(join(root, "seed"), "add", "-A"); git(join(root, "seed"), "commit", "-q", "-m", "Base");
+  git(root, "clone", "-q", "--bare", "seed", origin);
+  if (kind !== "fresh clone") git(root, "clone", "-q", origin, folder);
+  if (fault === "index.lock") await writeFile(join(folder, ".git", "index.lock"), "");
+  let faults = fault === "status write x3" ? 99 : fault === "checkout probe" || fault === "status write" ? 1 : 0;
+  const harness = await createTestAppHarness();
+  const { host } = seedHostSession(harness.deps);
+  const { project: own } = seedProjectWithSource(harness.deps, { hostId: host.id, path: mac });
+  const project = kind === "personal child" ? { id: PERSONAL_PROJECT_ID } : own;
+  const parent = kind === "personal child" ? createThread(harness.deps.db, harness.deps.hub, { executionTarget: "cloud", projectId: PERSONAL_PROJECT_ID, providerId: "codex", status: "idle" }) : null;
+  if (parent) harness.deps.db.insert(cloudroomThreads).values({ threadId: parent.id, coreUrl: `sandbox:${parent.id}`, startRequestId: "parent", model: "test-model", reasoning: "medium" }).run();
+  setProjectGitRemoteUrlIfMissing(harness.db, harness.deps.hub, project.id, "https://github.com/example/project");
+  await setCopyMacGithub(harness.deps, false);
+  const service = cloudroom(harness.deps);
+  const marker = () => readFile(`${folder}.cloudroom-files`, "utf8").catch(() => null);
+  const checkout = () => ({ branch: spawnSync("git", ["symbolic-ref", "--short", "HEAD"], { cwd: folder, encoding: "utf8" }).stdout.trim(), status: spawnSync("git", ["status", "--porcelain"], { cwd: folder, encoding: "utf8" }).stdout.trim() });
+  let atFirstPrompt: string | null | undefined, atDone: { marker: string } & ReturnType<typeof checkout> | undefined, coreUrl = "";
+  const coreServer = createServer(async (req, res) => {
+    const json = (value: unknown, status = 200) => { res.writeHead(status, { "Content-Type": "application/json" }); res.end(JSON.stringify(value)); };
+    if (req.url === "/v1/capabilities") return json({ version: 1, repository: "/code", stop: true, resume: true, launch_settings: true, workspaces: true, direct_workspaces: true, root_workspace: true, command_guard: true, harnesses: [{ id: "codex", model: "test-model" }] });
+    if (req.url?.includes("/stream?")) { res.writeHead(200, { "Content-Type": "text/event-stream" }); res.end(); return; }
+    if (req.url?.startsWith("/v1/workspaces/")) return json({ id: decodeURIComponent(req.url.split("/")[3]!), path: folder });
+    if (req.url === "/v1/sessions/cr_one/workspace") return fault === "checkout probe" && faults-- > 0 ? json({ error: "busy" }, 500) : json({ path: folder, branch: null, head: checkout().branch ? "head" : null });
+    const input = await body(req);
+    if (req.url === "/v1/vm/run") {
+      // Core runs it in bash; the "GitHub" clone comes from a local repository. The thread's branch setup is slow.
+      const command = String(input.command).replaceAll("https://github.com/example/project", origin);
+      if (fault?.startsWith("status write") && command.includes(".cloudroom-files") && faults-- > 0) return json({ code: 1, stdout: "", stderr: Buffer.from("disk full").toString("hex"), truncated: false });
+      if (command.includes("git checkout -q -b")) await new Promise(resolve => setTimeout(resolve, 800));
+      // Killed mid-setup (say, SIGTERM): no exit code, no output.
+      if (fault === "terminated" && command.includes("git checkout -q -b")) return json({ code: null, stdout: "", stderr: "", truncated: false });
+      const result = spawnSync("/bin/bash", ["-c", command], { cwd: input.cwd ?? root, input: Buffer.from(input.stdin ?? "", "hex") });
+      const state = await marker();
+      if (state && state !== "copying") atDone ??= { marker: state, ...checkout() };
+      return json({ code: result.status, stdout: result.stdout.toString("hex"), stderr: result.stderr.toString("hex"), truncated: false });
+    }
+    // Only this thread starts here; the Personal child's parent stays without a session, so it has no code to bring.
+    if (req.url === "/v1/sessions" && input.request_id !== "files-ready") return json({ error: "other thread" }, 400);
+    if (req.url === "/v1/sessions") return json({ session_id: "cr_one", receipt: { request_id: input.request_id, command: "start", input, state: "accepted" }, saving: {} }, 202);
+    if (req.url?.startsWith("/v1/sessions/cr_one/prompts")) {
+      if (atFirstPrompt === undefined) atFirstPrompt = await marker();
+      return json({ session_id: "cr_one", receipt: { request_id: input.request_id, command: "prompt", input, state: "accepted" }, saving: {} }, 202);
+    }
+    return json({}, 404);
+  });
+  const websiteServer = createServer(async (req, res) => {
+    const json = (value: unknown) => { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify(value)); };
+    const input = await body(req);
+    if (req.url === "/api/desktop/logins") return json({ claude: false, codex: false, pi: false, github: false });
+    json({ thread: input.thread, state: "awake", generation: 1, issue: null, origin: coreUrl, token: "t".repeat(64), secrets: [] });
+  });
+  coreUrl = await listen(coreServer);
+  const websiteUrl = await listen(websiteServer);
+  try {
+    await service.configure(null, { id: "11111111-1111-4111-8111-111111111111", email: "sandbox@example.com" }, undefined, websiteUrl, "a".repeat(64));
+    const created = await harness.app.request("/api/v1/threads", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ executionTarget: "cloud", requestId: "files-ready", title: "Files ready", projectId: project.id, parentThreadId: parent?.id, providerId: "codex", origin: "app", model: "test-model", reasoningLevel: "medium", environment: { type: "project-default" }, input: [{ type: "text", text: "test", mentions: [] }] }) });
+    expect(created.status, await created.clone().text()).toBe(201);
+    if (fault === "status write x3") {
+      const thread = (await created.json()) as { id: string };
+      await waitFor(() => command(harness.deps.db, `first_${thread.id}`)?.state === "failed", "failed start", 20_000);
+      expect({ prompt: atFirstPrompt, error: binding(harness.deps.db, thread.id)?.error }).toEqual({ prompt: undefined, error: expect.stringContaining("could not prepare the project folder: disk full") });
+      return;
+    }
+    await waitFor(() => atFirstPrompt !== undefined, "first message");
+    // The agent's first `room-cli files wait` must wait: with no status, a folder with files reads as nothing running.
+    expect(atFirstPrompt).toBe("copying");
+    await waitFor(() => atDone !== undefined, "ready or failed", 15_000);
+    if (fault === "index.lock" || fault === "terminated") expect(atDone).toMatchObject({ marker: expect.stringMatching(fault === "index.lock" ? /^failed: Cloudroom could not switch the folder to the thread's branch room\/.*, so it is still on main\. Git said: .*index\.lock/s : /^failed: .*Git said: exit code null$/), branch: "main" });
+    // The child's parent has no folder, so its code (none) ends as failed, after the branch.
+    else expect(atDone).toEqual({ marker: kind === "personal child" ? expect.stringMatching(/^failed: The source thread's code was not copied/) : "ready", branch: expect.stringMatching(/^room\//), status: "" });
+    expect(await readdir(folder)).toContain("file19.txt");
+  } finally {
+    service.stop();
+    coreServer.close(); websiteServer.close();
+    await harness.cleanup();
+    await rm(root, { recursive: true, force: true });
+  }
+}, 30_000);
 
 it("tells the user to remove forced API login when Codex refuses ChatGPT sign-in", async () => {
   const dir = await mkdtemp(join(tmpdir(), "codex-forced-api-"));
@@ -549,8 +643,10 @@ it("a sleeping thread costs no delivery work until it wakes, opening it connects
   });
   const limit = "You used the Free plan's 25 hours. Upgrade at cloudroom.dev/billing, or wait.";
   let refused = "";
+  const exits: unknown[] = [];
   const websiteServer = createServer(async (req, res) => {
     const input = await body(req);
+    if (input.action === "wake" && input.thread === refused) exits.push(input.trigger);
     res.writeHead(input.action === "wake" && input.thread === refused ? 429 : 200, { "Content-Type": "application/json" });
     if (req.url === "/api/desktop/logins") return res.end(JSON.stringify({ claude: false, codex: false, pi: false, github: false }));
     if (input.action === "awake") return res.end(JSON.stringify({ sandboxes: [], recheck_ms: 60_000 }));
@@ -589,6 +685,10 @@ it("a sleeping thread costs no delivery work until it wakes, opening it connects
       const run = await harness.app.request("/api/v1/cloudroom/vm/run", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ command: "true", threadId: refused }) });
       expect([run.status, (await run.json()).message]).toEqual([429, limit]);
     }
+    // Work leaving Cloud skips the backoff and asks as an exit, so the website can let it past the limit.
+    const asked = exits.length;
+    await expect(service.threadClient(refused, true, "teleport_local")).rejects.toThrow(limit);
+    expect(exits.slice(asked)).toEqual(["teleport_local"]);
   } finally {
     service.stop();
     coreServer.closeAllConnections(); coreServer.close(); websiteServer.close();

@@ -44,7 +44,8 @@ import {
   type LoopReviewState,
 } from "./overview-view";
 import { PERSONAL_PROJECT_ID } from "./lib/format-schedule";
-import { PausedLoopsLabel } from "./paused-notice";
+import { loopsChanged, PausedLoopsLabel } from "./paused-notice";
+import { failurePause } from "./lib/paused.js";
 import type { LoopTemplate } from "./templates";
 import type {
   LoopTarget,
@@ -379,7 +380,11 @@ function useMutations() {
     | "automations_run"
     | "automations_delete";
   const call = useCallback(
-    (method: MutationMethod, route: DetailRoute) => rpc.call(method, route),
+    async (method: MutationMethod, route: DetailRoute) => {
+      const result = await rpc.call(method, route);
+      if (method !== "automations_run") loopsChanged();
+      return result;
+    },
     [rpc],
   );
   return {
@@ -709,6 +714,14 @@ function localLoop(automation: AutomationResponse): LoopDialogLoop {
       : "Local · script",
     secrets: { fixed: `Everything on this ${COMPUTER}` },
     ...(agent ? { usageKey: { automationId: automation.id } } : {}),
+    paused: failurePause(
+      {
+        enabled: automation.enabled,
+        lastError: automation.lastError,
+        at: automation.updatedAt,
+      },
+      Date.now(),
+    ),
   };
 }
 

@@ -317,6 +317,32 @@ describe("provider retry policy", () => {
     ).toEqual({ kind: "decline", reason: "not-resettable" });
   });
 
+  it("never resumes a turn that was running when the computer restarted", () => {
+    expect(
+      decideRetry({
+        failure: overloadedFailure({
+          interruptionReason: "host-daemon-restarted",
+          turnStartedBeforeBoot: true,
+        }),
+        maximumWaitMs: null,
+        now: NOW_MS,
+        random: 0,
+      }),
+    ).toEqual({ kind: "decline", reason: "machine-restarted" });
+    expect(
+      decideRetry({
+        failure: failure({ interruptionReason: "host-daemon-restarted" }),
+        maximumWaitMs: null,
+        now: NOW_MS,
+        random: 0,
+      }),
+    ).toEqual({
+      kind: "retry",
+      sendAt: NOW_MS + 5_000,
+      reason: "App restarted",
+    });
+  });
+
   it("gives up once a turn has been retried its maximum number of times", () => {
     expect(
       decideRetry({

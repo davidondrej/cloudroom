@@ -2,7 +2,7 @@ import { z } from "zod";
 import { createRemoteProject, getProject, listProjectSourcesByProjectIds, listPublicProjects, setProjectGithubRepo, setProjectHidden, type ProjectRow } from "@cloudroom/db";
 import type { AppDeps } from "../../types.js";
 import { cloudroom } from "./commands.js";
-import { localRepos } from "./local-repos.js";
+import { localRepos, type LocalRepo } from "./local-repos.js";
 import { githubRepository } from "./project-copy.js";
 import { macGithubToken } from "./sandboxes.js";
 
@@ -71,13 +71,28 @@ function matcher(repos: (GithubRepo | null)[]) {
   return (repo: GithubRepo | null) => Boolean(repo && ((repo.id && ids.has(repo.id)) || names.has(repo.repo.toLowerCase())));
 }
 
+const macSuggestion = ({ name, path, updatedAt }: LocalRepo): RepoSuggestion => ({ source: "mac", name, path, updatedAt });
+/** Lower-cased folders that projects already use. */
+const projectPaths = (deps: AppDeps, projects: ProjectRow[]) =>
+  new Set(listProjectSourcesByProjectIds(deps.db, projects.map((project) => project.id)).map((source) => source.path.toLowerCase()));
+
+/** Only this Mac's repos, with no network calls, so the picker shows them while GitHub answers.
+ *  Matches projects by folder and remote `owner/name`; the full answer also catches renamed repos. */
+export async function macRepoSuggestions(deps: AppDeps): Promise<{ repos: RepoSuggestion[] }> {
+  const projects = listPublicProjects(deps.db);
+  const paths = projectPaths(deps, projects);
+  const names = new Set(projects.map((project) => repoName(project.gitRemoteUrl)).filter(Boolean));
+  const mac = await localRepos(LIMIT * 2);
+  return { repos: mac.filter((repo) => !paths.has(repo.path.toLowerCase()) && !names.has(repoName(repo.remote))).slice(0, LIMIT).map(macSuggestion) };
+}
+
 /** Recently updated repos on this Mac and GitHub that no project uses yet. A repo on both shows once, as the Mac folder, since it needs no clone. */
 export async function repoSuggestions(deps: AppDeps): Promise<{ githubConnected: boolean; repos: RepoSuggestion[] }> {
   const token = await macGithubToken() || null;
   const [mac, github] = await Promise.all([localRepos(LIMIT * 2), githubRepos(deps, token)]);
   for (const repo of github.repos) if (repo.id) known.set(repo.repo.toLowerCase(), Promise.resolve(repo)).set(`#${repo.id}`, Promise.resolve(repo));
   const projects = listPublicProjects(deps.db);
-  const paths = new Set(listProjectSourcesByProjectIds(deps.db, projects.map((project) => project.id)).map((source) => source.path.toLowerCase()));
+  const paths = projectPaths(deps, projects);
   const macRemote = (remote: string | null) => {
     const name = repoName(remote);
     return name ? lookup(name, token).then((repo) => repo ?? { id: null, repo: name }) : null;
@@ -92,7 +107,7 @@ export async function repoSuggestions(deps: AppDeps): Promise<{ githubConnected:
   return {
     githubConnected: github.connected,
     repos: [
-      ...macRepos.slice(0, LIMIT).map(({ name, path, updatedAt }) => ({ source: "mac" as const, name, path, updatedAt })),
+      ...macRepos.slice(0, LIMIT).map(macSuggestion),
       ...githubOnly.slice(0, LIMIT).map(({ repo, updatedAt }) => ({ source: "github" as const, name: repo.split("/")[1] ?? repo, repo, updatedAt })),
     ],
   };

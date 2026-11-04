@@ -14,6 +14,7 @@ import {
   type HostDaemonEventEnvelope,
   groupHostDaemonEvents,
   type HostDaemonInteractiveInterruptRequest,
+  type HostDaemonThreadMemoryLimitRequest,
   type HostDaemonInteractiveRequest,
   type HostDaemonLoadedEnvironment,
   type HostDaemonProjectAttachmentContentQuery,
@@ -198,6 +199,11 @@ export interface ServerClient {
     reason: string;
     threadIds: readonly string[];
   }): Promise<HostDaemonInteractiveInterruptResponse>;
+  reportThreadMemoryLimit(args: {
+    threadId: string;
+    usedBytes: number;
+    totalBytes: number;
+  }): Promise<void>;
 }
 
 const INTERACTIVE_REQUEST_REGISTRATION_RETRIES = 5;
@@ -666,6 +672,24 @@ export function createServerClient(
       return hostDaemonInteractiveInterruptResponseSchema.parse(
         await response.json(),
       );
+    },
+
+    async reportThreadMemoryLimit(args): Promise<void> {
+      const payload: HostDaemonThreadMemoryLimitRequest = {
+        sessionId: requireSessionId(),
+        ...args,
+      };
+      const response = await fetchFn(
+        buildInternalUrl("/session/thread-memory-limit"),
+        {
+          method: "POST",
+          headers: headers(),
+          body: JSON.stringify(payload),
+        },
+      );
+      if (!response.ok) {
+        throw await createResponseError("report thread memory limit", response);
+      }
     },
   };
 }

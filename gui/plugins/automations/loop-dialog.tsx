@@ -28,6 +28,7 @@ import {
 } from "@cloudroom/shared-ui/dropdown-menu";
 import { Icon } from "@cloudroom/shared-ui/icon";
 import { cn } from "@cloudroom/shared-ui/lib/utils";
+import { failurePause, type FailurePause } from "./lib/paused.js";
 import {
   Select,
   SelectContent,
@@ -202,6 +203,8 @@ export type LoopDialogLoop = {
   /** A fresh-thread Cloud loop's picked API keys and `.env` (null: all of them, ADR 0342), or what other loops get. */
   secrets: { picked: string[] | null } | { fixed: string };
   usageKey?: { automationId: string } | { cloudId: string };
+  /** Its own failures paused it (not turned off by hand). */
+  paused?: FailurePause | null;
 };
 
 export type LoopDialogRepo = { label: string; github: string | null };
@@ -399,7 +402,13 @@ function RecentRuns({
 }
 
 function nextRunText(loop: LoopDialogLoop, schedule: string, now: number) {
-  if (!loop.enabled) return { label: "Status", big: "Paused", small: schedule };
+  if (loop.paused)
+    return {
+      label: "Status",
+      big: "Paused",
+      small: `After ${loop.paused.failures} failed runs: ${loop.paused.reason}`,
+    };
+  if (!loop.enabled) return { label: "Status", big: "Off", small: schedule };
   if (loop.webhook)
     return {
       label: "Trigger",
@@ -609,7 +618,7 @@ export function LoopDialog({
               onCheckedChange={onEnabledChange}
             />
             <span className="text-sm text-foreground">
-              {loop.enabled ? "Active" : "Paused"}
+              {loop.enabled ? "Active" : loop.paused ? "Paused" : "Off"}
             </span>
             <span className="flex-1" />
             <DropdownMenu>
@@ -650,7 +659,14 @@ export function LoopDialog({
               <div className="mt-1 text-[26px] font-semibold leading-tight tracking-[-0.025em] text-foreground tabular-nums">
                 {next.big}
               </div>
-              <div className="mt-0.5 truncate text-xs text-subtle-foreground">
+              <div
+                className={cn(
+                  "mt-0.5 text-xs",
+                  loop.paused
+                    ? "line-clamp-3 text-destructive-text"
+                    : "truncate text-subtle-foreground",
+                )}
+              >
                 {next.small}
               </div>
             </div>
@@ -852,6 +868,14 @@ export function CloudLoopDialog({
         ? { picked: automation.secrets ?? null }
         : { fixed: "Same as its thread" },
       usageKey: { cloudId: automation.id },
+      paused: failurePause(
+        {
+          enabled: automation.enabled,
+          lastError: automation.last_error,
+          at: Date.parse(automation.last_run_at ?? ""),
+        },
+        Date.now(),
+      ),
     }),
     [automation],
   );

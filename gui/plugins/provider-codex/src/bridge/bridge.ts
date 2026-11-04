@@ -65,6 +65,7 @@ import {
 import { parseModelsResponse } from "../models.js";
 import { macOsPermissionPresentation } from "../presentation.js";
 import {
+  keepShellEnvironmentSetKeys,
   resolveCodexInstructionOverrides,
   toCodexDynamicTools,
   toCodexPermissionSettings,
@@ -894,6 +895,23 @@ const codexThreadIdentityResultSchema = z
   .object({ thread: z.object({ id: z.string().min(1) }).passthrough() })
   .passthrough();
 
+const codexConfigReadResultSchema = z
+  .object({
+    config: z
+      .object({
+        features: z.object({ hooks: z.boolean().optional() }).nullish(),
+        shell_environment_policy: z
+          .object({
+            include_only: z.array(z.string()).nullish(),
+            filters: z.record(z.string(), z.string()).nullish(),
+          })
+          .nullish()
+          .catch(null),
+      })
+      .optional(),
+  })
+  .passthrough();
+
 type CodexSessionConstructionRequest =
   | { kind: "start" }
   | { kind: "resume"; providerThreadId: string }
@@ -997,16 +1015,23 @@ async function constructThreadSession(
 
     await initializeChild(connection, translator.buildPostInitializeRequests());
     await signInCloudroomAccount(connection, decoded.sessionOptions.envVars);
-    if (args.options.providerOptions?.commandGuardEnabled !== false) {
-      const settings = await connection.request({
+    const commandGuardEnabled =
+      args.options.providerOptions?.commandGuardEnabled !== false;
+    const settings = await connection
+      .request({
         method: "config/read",
         params: { cwd: args.cwd, includeLayers: false },
-        resultSchema: z.object({ config: z.object({ features: z.object({ hooks: z.boolean().optional() }).nullish() }).optional() }).passthrough(),
+        resultSchema: codexConfigReadResultSchema,
         timeoutMs: CHILD_REQUEST_TIMEOUT_MS,
+      })
+      .catch((error: unknown) => {
+        if (commandGuardEnabled) throw error;
+        return null;
       });
-      if (settings.config?.features?.hooks === false) {
-        throw new Error("Codex hooks are disabled. Enable them in Codex or disable Cloudroom Command Guard before starting a new session.");
-      }
+    if (commandGuardEnabled && settings?.config?.features?.hooks === false) {
+      throw new Error(
+        "Codex hooks are disabled. Enable them in Codex or disable Cloudroom Command Guard before starting a new session.",
+      );
     }
 
     const preparedGitRoots = translator.prepareWorkspaceWriteGitRoots({
@@ -1031,7 +1056,11 @@ async function constructThreadSession(
       serviceTier: toCodexServiceTier(decoded.sessionOptions.serviceTier),
       config: {
         ...preparedGitRoots.config,
-        ...(args.options.providerOptions?.commandGuardEnabled === false ? {} : prepareCodexGuard()),
+        ...keepShellEnvironmentSetKeys(
+          preparedGitRoots.config ?? {},
+          settings?.config?.shell_environment_policy,
+        ),
+        ...(commandGuardEnabled ? prepareCodexGuard() : {}),
       },
       ...(dynamicTools && dynamicTools.length > 0 ? { dynamicTools } : {}),
     };

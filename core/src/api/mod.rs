@@ -574,7 +574,7 @@ impl IntoResponse for session::Error {
             "this thread was asleep and is waking up; try again in a few seconds" => {
                 "session_waking"
             }
-            "model catalog unavailable" => "model_catalog_unavailable",
+            e if e.starts_with("model catalog unavailable") => "model_catalog_unavailable",
             "connect Codex before starting cloud work" => "codex_auth_required",
             "connect Claude Code before starting cloud work" => "claude_auth_required",
             "Claude account could not be verified" => "claude_auth_unavailable",

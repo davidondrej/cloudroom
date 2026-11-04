@@ -66,6 +66,12 @@ def codex():
                 login_cancelled.set()
                 result = {'status': 'canceled'}
             elif method == "model/list":
+                # models-fail: `exit` crashes the probe, `reject` refuses the list (#819).
+                fail = Path("models-fail").read_text() if Path("models-fail").exists() else ""
+                if fail == "exit": os._exit(1)
+                if fail == "reject":
+                    send({"id": message["id"], "error": {"code": -1, "message": "fixture model listing rejected"}})
+                    continue
                 result = {"data": [
                     {"model": "fixture", "supportedReasoningEfforts": [{"reasoningEffort": level} for level in ["low", "medium", "high", "xhigh", "max"]]},
                     {"model": "basic", "supportedReasoningEfforts": [{"reasoningEffort": "high"}]},
@@ -433,6 +439,16 @@ class ReplayTests(unittest.TestCase):
         finally:
             self.service.stop()
             private.chmod(0o700)
+
+    def test_failed_model_discovery_names_a_fixed_reason(self):
+        # #819: the refusal says why discovery failed, never with the agent's own text.
+        (self.repo / 'models-fail').write_text('exit')
+        self.start()
+        start = lambda i: self.service.request('POST', '/v1/sessions', {'request_id': i, 'harness': 'codex', 'model': 'fixture', 'reasoning': 'high'}, 409)
+        self.assertEqual(start('exit'), {'code': 'model_catalog_unavailable', 'error': 'model catalog unavailable (agent exited while starting; try again)'})
+        (self.repo / 'models-fail').write_text('reject')
+        self.assertEqual(start('reject')['error'], 'model catalog unavailable (agent sent an invalid model list)')
+        self.assertNotIn('fixture model listing rejected', (self.root / 'service.log').read_text())
 
     def test_restart_limits_concurrent_startup_not_loaded_sessions(self):
         total = (os.cpu_count() or 1) + 2

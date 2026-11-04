@@ -17,7 +17,8 @@ import { useStopThread } from "@/hooks/mutations/thread-runtime-mutations";
 import { useThisComputer } from "@/hooks/useHostDaemon";
 import { RouteAnchor } from "@/components/ui/app-route-anchor";
 import { FixPrompt } from "@/components/ui/fix-prompt";
-import { projectFilesFixPrompt } from "@/lib/fix-prompts";
+import { plainError, projectFilesFixPrompt } from "@/lib/fix-prompts";
+import { timeLeft } from "./ProjectCopyNotice";
 import { getThreadRoutePath } from "@/lib/route-paths";
 
 export const teleportLocalSteps = (here: string): [TeleportLocalStep, string][] => [
@@ -118,6 +119,12 @@ export function TeleportNotice({
     progress.phase === "error" || Boolean(action.error || stop.error);
   const error = action.error?.message ?? stop.error?.message ?? progress.error;
   const files = `${progress.completed} of ${progress.total} files`;
+  // Megabytes, not files: one big chat file would sit at 0 until it lands. The server sends bytes for this stage.
+  const remaining = progress.bytes === undefined ? undefined : progress.bytes - (progress.sent ?? 0);
+  const seconds = progress.rate && remaining !== undefined ? remaining / progress.rate : undefined;
+  const megabytes = progress.bytes
+    ? `${Math.round((progress.sent ?? 0) / 1e6)} of ${Math.max(1, Math.round(progress.bytes / 1e6))} MB${seconds !== undefined && seconds >= 1 ? ` · ${timeLeft(seconds)}` : ""}`
+    : undefined;
   const [icon, title, detail] = !owner
     ? ["Cloud", "Moved to Cloud", "The parent thread continues this work."]
     : complete
@@ -129,7 +136,7 @@ export function TeleportNotice({
             : "Checking delivery…",
         ]
       : failed
-        ? ["AlertCircle", "Teleport paused", "Local history is safe."]
+        ? ["AlertCircle", "Teleport paused", error ? plainError(error) : "Your chat is safe."]
         : progress.phase === "cancelling"
           ? ["Spinner", "Cancelling", "Keep your laptop online."]
           : progress.phase === "checking"
@@ -141,18 +148,27 @@ export function TeleportNotice({
                   "Spinner",
                   paused ? "Cloud agent stopped" : "Agent working in Cloud",
                   progress.completed < progress.total
-                    ? `Uploading ${files}. Keep your laptop online.`
+                    ? megabytes
+                      ? `Uploading ${megabytes}`
+                      : `Uploading ${files}. Keep your laptop online.`
                     : "Finishing handoff…",
                 ]
               : [
                   "Spinner",
                   "Teleporting to Cloud",
-                  "Sending the conversation…",
+                  megabytes ? `Sending chat · ${megabytes}` : "Sending the conversation…",
                 ];
   const showBar = owner && !complete && !failed;
-  const percent = progress.total
-    ? Math.max(4, (progress.completed / progress.total) * 100)
-    : 4;
+  const percent = progress.bytes
+    ? Math.max(4, ((progress.sent ?? 0) / progress.bytes) * 100)
+    : progress.total
+      ? Math.max(4, (progress.completed / progress.total) * 100)
+      : 4;
+  // Only a slow upload gets a second line, so a long wait never looks broken.
+  const slow =
+    showBar && !error && progress.rate !== undefined && progress.rate < 500_000 && seconds !== undefined && seconds > 30
+      ? `Slow upload (${((progress.rate * 8) / 1e6).toFixed(1)} Mbit/s). ${progress.cloudStarted ? "Keep your laptop online until it's done." : "Cloud starts as soon as the chat arrives."}`
+      : null;
   return (
     <PromptStackCard
       ariaLabel="Teleport progress"
@@ -178,7 +194,10 @@ export function TeleportNotice({
             )}
           />
           <span className="shrink-0 text-foreground">{title}</span>
-          <span className="min-w-0 truncate text-muted-foreground">
+          <span
+            className="min-w-0 truncate text-muted-foreground"
+            title={failed ? error : undefined}
+          >
             {detail}
           </span>
         </div>
@@ -218,6 +237,9 @@ export function TeleportNotice({
               Cancel
             </PromptBannerActionButton>
           )}
+          {owner && failed && (
+            <FixPrompt iconOnly prompt={projectFilesFixPrompt(thread.id, error)} />
+          )}
           {complete && (
             <button
               type="button"
@@ -230,22 +252,16 @@ export function TeleportNotice({
           )}
         </BannerActionSlot>
       </div>
-      {error && (
-        <p
-          role={failed ? "alert" : "status"}
-          className={cn(
-            "whitespace-pre-wrap break-words px-3 pb-2 text-xs",
-            failed ? "text-destructive" : "text-muted-foreground",
-          )}
-        >
-          {error}
+      {slow && (
+        <p role="status" className="flex items-center gap-1.5 px-3 pb-2 text-xs text-muted-foreground">
+          <Icon name="Clock" aria-hidden className="size-3 shrink-0" />
+          {slow}
         </p>
       )}
-      {owner && failed && (
-        <FixPrompt
-          className="mx-3 mb-2"
-          prompt={projectFilesFixPrompt(thread.id, error)}
-        />
+      {error && !failed && (
+        <p role="status" className="truncate px-3 pb-2 text-xs text-muted-foreground" title={error}>
+          {plainError(error)}
+        </p>
       )}
       {showBar && (
         <div className="h-0.5 bg-border">

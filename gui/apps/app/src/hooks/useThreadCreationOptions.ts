@@ -94,7 +94,7 @@ type ClearSelectionHandler = () => void;
 
 interface ModelReasoningSelection {
   model: string;
-  reasoningLevel: ReasoningLevel;
+  reasoningLevel?: ReasoningLevel;
   serviceTier?: ServiceTier;
 }
 
@@ -669,7 +669,8 @@ export function useThreadCreationOptions(
       if (usesStoredCreateSelections) {
         if (effectiveProviderId.length > 0) {
           setStoredSelectedModel(selectedModel);
-          setStoredReasoningLevel(reasoningLevel);
+          if (preferredReasoningLevel !== undefined)
+            setStoredReasoningLevel(reasoningLevel);
         }
         setStoredProviderId(value);
         return;
@@ -710,6 +711,7 @@ export function useThreadCreationOptions(
       }));
     },
     [
+      preferredReasoningLevel,
       effectiveProviderId,
       reasoningLevel,
       selectedModel,
@@ -730,7 +732,11 @@ export function useThreadCreationOptions(
     }: ProviderModelReasoningSelection) => {
       touchedThreadFieldsRef.current.add("selectedProviderId");
       touchedThreadFieldsRef.current.add("selectedModel");
-      touchedThreadFieldsRef.current.add("reasoningLevel");
+      if (
+        nextReasoningLevel !== undefined ||
+        providerId !== effectiveProviderId
+      )
+        touchedThreadFieldsRef.current.add("reasoningLevel");
       if (
         nextServiceTier !== undefined ||
         (!usesStoredCreateSelections && effectiveProviderId !== providerId)
@@ -743,7 +749,8 @@ export function useThreadCreationOptions(
           effectiveProviderId !== providerId
         ) {
           setStoredSelectedModel(selectedModel);
-          setStoredReasoningLevel(reasoningLevel);
+          if (preferredReasoningLevel !== undefined)
+            setStoredReasoningLevel(reasoningLevel);
         }
         setStoredProviderModelReasoning({
           providerId,
@@ -774,7 +781,9 @@ export function useThreadCreationOptions(
       const resolvedReasoningLevel =
         nextReasoningLevel ??
         (providerId === effectiveProviderId
-          ? reasoningLevel
+          ? preferredReasoningLevel === undefined
+            ? undefined
+            : reasoningLevel
           : rememberedSelection?.reasoningLevel ?? reasoningLevel);
       localProviderSelectionsRef.current.set(providerId, {
         model,
@@ -782,6 +791,7 @@ export function useThreadCreationOptions(
         serviceTier: nextTier,
       });
       setLocalProvidersUsingDefaults((current) => {
+        if (resolvedReasoningLevel === undefined) return current;
         if (!current.has(providerId)) return current;
         const next = new Set(current);
         next.delete(providerId);
@@ -796,6 +806,7 @@ export function useThreadCreationOptions(
       }));
     },
     [
+      preferredReasoningLevel,
       effectiveProviderId,
       reasoningLevel,
       selectedModel,
@@ -818,10 +829,11 @@ export function useThreadCreationOptions(
         executionOptionsQuery.data?.selectedOnlyModels.find(
           (model) => model.model === value,
         );
-      const nextReasoningLevel = resolveModelReasoningLevel(
-        nextModel,
-        reasoningLevel,
-      );
+      // Nothing picked yet: keep it unset so the new model's default applies (#656).
+      const nextReasoningLevel =
+        preferredReasoningLevel === undefined
+          ? undefined
+          : resolveModelReasoningLevel(nextModel, reasoningLevel);
       if (usesStoredCreateSelections) {
         setStoredProviderModelReasoning({
           providerId: effectiveProviderId,
@@ -831,6 +843,7 @@ export function useThreadCreationOptions(
         return;
       }
       setLocalProvidersUsingDefaults((current) => {
+        if (nextReasoningLevel === undefined) return current;
         if (!current.has(effectiveProviderId)) return current;
         const next = new Set(current);
         next.delete(effectiveProviderId);
@@ -851,6 +864,7 @@ export function useThreadCreationOptions(
       effectiveProviderId,
       executionOptionsQuery.data?.models,
       executionOptionsQuery.data?.selectedOnlyModels,
+      preferredReasoningLevel,
       reasoningLevel,
       rawServiceTier,
       setStoredProviderModelReasoning,

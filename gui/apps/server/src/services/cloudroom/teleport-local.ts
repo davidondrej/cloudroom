@@ -100,7 +100,7 @@ async function run(deps: AppDeps, threadId: string, step: (value: TeleportLocalS
   if (!nativeId || !/^[A-Za-z0-9_-]+$/.test(nativeId))
     throw new ApiError(409, "teleport_unavailable", "This cloud thread has no saved conversation yet.");
   const environment = await localEnvironment(deps, thread);
-  const client = await cloudroom(deps).teleportClient(threadId);
+  const client = await cloudroom(deps).teleportClient(threadId, "teleport_local");
 
   await cloudroom(deps).control(threadId, "stop");
   await waitUntilStopped(client, saved.sessionId);
@@ -164,7 +164,7 @@ export async function prepareLocalFork(deps: AppDeps, source: Thread, request: {
   if (!saved?.sessionId || !saved.nativeId || !/^[A-Za-z0-9_-]+$/.test(saved.nativeId) || !FORK_HARNESSES.includes(harness))
     throw new ApiError(409, "fork_source_unavailable", `Only a started Claude Code or Codex Cloud thread can be forked to this ${computer}.`);
   const point = cloudForkPoint(deps.db, source, request.sourceSeqEnd);
-  const client = await cloudroom(deps).threadClient(source.id);
+  const client = await cloudroom(deps).threadClient(source.id, true, "teleport_local");
   const vmPath = (await vm(client, findNative(harness, saved.nativeId))).toString().trim();
   if (!vmPath) throw new ApiError(409, "fork_source_unavailable", "The source conversation file was not found in its sandbox.");
   const lineage = harness === "codex" ? await codexLineage(client, vmPath) : [];
@@ -189,7 +189,7 @@ export async function prepareLocalForkCode(deps: AppDeps, source: Thread, folder
   requireThisMac(deps, requested);
   const saved = binding(deps.db, source.id);
   if (!saved?.sessionId) throw new ApiError(409, "fork_source_unavailable", "The source Cloud thread has not started yet.");
-  const client = await cloudroom(deps).threadClient(source.id);
+  const client = await cloudroom(deps).threadClient(source.id, true, "teleport_local");
   const cloud = await client.sessionWorkspace(saved.sessionId);
   const code = await landLocalForkCode(deps, client, source, cloud.path, folder ?? await localForkFolder(deps, source), requested);
   return {
@@ -262,7 +262,7 @@ export async function copyToMac(deps: AppDeps, threadId: string): Promise<{ bran
   const environment = await localEnvironment(deps, thread);
   if (await git(environment.path, ["rev-parse", "--git-dir"]) === null)
     throw new ApiError(409, "copy_unavailable", `This project's folder on this ${computer} is not a Git repository.`);
-  const client = await cloudroom(deps).teleportClient(threadId);
+  const client = await cloudroom(deps).teleportClient(threadId, "teleport_local");
   const cloud = await client.sessionWorkspace(saved.sessionId);
   const folder = await mkdtemp(join(tmpdir(), "cloudroom-copy-"));
   try {

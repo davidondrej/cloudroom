@@ -18,10 +18,22 @@ export interface ProcessTable {
 const THREAD_ID = /^thr_[a-z0-9]+$/u;
 const INSTALLED_APP = /^(?:\/System|\/Users\/[^/]+)?\/Applications\/[^/]+\.app\//u;
 const STOP_GRACE_MS = 3_000;
+const PS_TIMEOUT_MS = 10_000;
+
+/** Installed apps are never killed (the user's own Ollama, Python.app...). */
+export function isInstalledApp(row: ProcessRow): boolean {
+  return INSTALLED_APP.test(row.exe ?? "");
+}
 
 export function pickThreadProcesses(
   rows: readonly ProcessRow[],
-  args: { threadId: string; serverUrl: string | undefined; selfPid: number },
+  args: {
+    threadId: string;
+    serverUrl: string | undefined;
+    selfPid: number;
+    /** Also pick the thread's processes that still run under this daemon. */
+    includeLive?: boolean;
+  },
 ): ProcessRow[] {
   if (!THREAD_ID.test(args.threadId) || !args.serverUrl) return [];
   const tags = [
@@ -49,9 +61,9 @@ export function pickThreadProcesses(
   return rows.filter(
     (row) =>
       tags.every((tag) => row.env.includes(tag)) &&
-      !tree.has(row.pid) &&
+      (args.includeLive === true || !tree.has(row.pid)) &&
       !ancestors.has(row.pid) &&
-      !INSTALLED_APP.test(row.exe ?? ""),
+      !isInstalledApp(row),
   );
 }
 
@@ -99,6 +111,7 @@ async function ps(args: string[]): Promise<Map<number, string>> {
   const { stdout } = await promisify(execFile)("ps", ["-ww", ...args], {
     env: { ...process.env, LC_ALL: "C" },
     maxBuffer: 64 * 1024 * 1024,
+    timeout: PS_TIMEOUT_MS,
   }).catch((error: { stdout?: string }) => ({ stdout: error.stdout ?? "" }));
   return new Map(
     stdout.split("\n").flatMap((line) => {
@@ -154,16 +167,25 @@ const TABLES: Partial<Record<NodeJS.Platform, ProcessTable>> = {
   darwin: mac,
 };
 
+export const currentProcessTable = TABLES[process.platform];
+
+/**
+ * Stops a thread's processes. By default only what escaped its harness, with a
+ * grace period. The memory guard passes `includeLive` and `graceMs: 0` to kill
+ * everything the thread runs, at once.
+ */
 export async function stopThreadProcesses(
   threadId: string,
   serverUrl: string | undefined,
   table = TABLES[process.platform],
+  options: { includeLive?: boolean; graceMs?: number } = {},
 ): Promise<number> {
   if (!table) return 0;
   const picked = pickThreadProcesses(await table.list(), {
     threadId,
     serverUrl,
     selfPid: process.pid,
+    includeLive: options.includeLive,
   });
   if (picked.length === 0) return 0;
   const same = async () => {
@@ -177,9 +199,14 @@ export async function stopThreadProcesses(
       } catch {}
     });
   const stopping = await same();
+  const graceMs = options.graceMs ?? STOP_GRACE_MS;
+  if (graceMs <= 0) {
+    signal(stopping, "SIGKILL");
+    return stopping.length;
+  }
   signal(stopping, "SIGTERM");
   for (
-    const end = Date.now() + STOP_GRACE_MS;
+    const end = Date.now() + graceMs;
     Date.now() < end && (await same()).length > 0;
   ) {
     await new Promise((resolve) => setTimeout(resolve, 200));

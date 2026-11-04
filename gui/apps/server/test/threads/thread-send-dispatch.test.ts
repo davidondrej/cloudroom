@@ -1,10 +1,12 @@
 import {
   archiveThread,
+  createPendingInteraction,
   getQueuedThreadMessage,
   getThread,
   listEvents,
   listQueuedThreadMessages,
   markThreadDeleted,
+  setPendingInteractionResolved,
 } from "@cloudroom/db";
 import type { EnvironmentRow } from "@cloudroom/db";
 import {
@@ -831,6 +833,71 @@ describe("startup queue waits", () => {
       ).toMatchObject({
         target: { mode: "auto", expectedTurnId: "turn-system-notice-ready" },
       });
+    });
+  });
+
+  it("sends every message an answered interaction held, in order, into the running turn (#851)", async () => {
+    await withTestHarness(async (harness) => {
+      const { environment, thread } = seedProviderThreadFixture({
+        harness,
+        status: "active",
+        value: 851,
+      });
+      seedTurnStarted(harness.deps, {
+        environmentId: environment.id,
+        providerThreadId: "provider-send-dispatch-851",
+        threadId: thread.id,
+        turnId: "turn-851",
+      });
+      const child = seedThread(harness.deps, {
+        projectId: thread.projectId,
+        parentThreadId: thread.id,
+      });
+      const interaction = createPendingInteraction(harness.db, {
+        originKind: "plugin",
+        pluginId: "plugin-851",
+        rendererId: "renderer-851",
+        threadId: thread.id,
+        turnId: null,
+        payload: JSON.stringify({ kind: "plugin", title: "Approve" }),
+      });
+      for (const text of ["progress 1", "progress 2"]) {
+        await acceptThreadSendRequest(harness.deps, {
+          payload: {
+            input: textInput(text),
+            mode: "steer-if-active",
+            senderThreadId: child.id,
+          },
+          thread,
+        });
+      }
+      await queueParentSystemMessage(harness.deps, {
+        input: textInput("child completed"),
+        parentThreadId: thread.id,
+        systemMessageKind: "child-completed",
+        systemMessageSubject: null,
+      });
+      expect(listQueuedThreadMessages(harness.db, thread.id)).toHaveLength(3);
+
+      setPendingInteractionResolved(harness.db, {
+        id: interaction.id,
+        resolution: "{}",
+      });
+      await runQueuedMessageDispatch(harness.deps, {
+        kind: "interaction-settled",
+        threadId: thread.id,
+      });
+
+      expect(listQueuedThreadMessages(harness.db, thread.id)).toEqual([]);
+      const sent = listQueuedThreadCommands(harness, "turn.submit", thread.id);
+      expect(
+        sent.map((command) =>
+          command.type === "turn.submit" ? command.target : null,
+        ),
+      ).toEqual(Array(3).fill({ mode: "auto", expectedTurnId: "turn-851" }));
+      expect(JSON.stringify(sent[0])).toContain("progress 1");
+      expect(JSON.stringify(sent[1])).toContain("progress 2");
+      expect(JSON.stringify(sent[2])).toContain("child completed");
     });
   });
 

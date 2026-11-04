@@ -915,6 +915,8 @@ export function createAutomationService(args: {
         automationId: current.id,
         enabled: false,
         nextRunAt: null,
+        // Paused by hand, a loop its failures paused stays off: it no longer tries again on its own.
+        ...(current.lastError?.endsWith("consecutive failures)") ? { lastError: null } : {}),
       });
       if (!updated) throw new Error("Loop not found");
       publishAutomationChange(bb, input.projectId, "automations-changed");

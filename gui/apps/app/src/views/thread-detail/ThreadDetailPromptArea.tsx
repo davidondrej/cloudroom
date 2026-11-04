@@ -4,8 +4,8 @@ import { TeleportCheckCard } from "@/components/thread/TeleportCheckCard";
 import { TryCloudCard } from "@/components/thread/TryCloudCard";
 import { StarCard } from "@/components/StarPrompt";
 import { ProjectCopyNotice } from "@/components/thread/ProjectCopyNotice";
-import { CopyButton } from "@/components/ui/copy-button";
-import { cloudThreadFixPrompt } from "@/lib/fix-prompts";
+import { FixPrompt } from "@/components/ui/fix-prompt";
+import { cloudThreadFixPrompt, plainError } from "@/lib/fix-prompts";
 import { canTeleportLocalThread, canTeleportThread } from "@/components/thread/ThreadActionsMenu";
 import { ClaudeSignIn } from "@/components/ClaudeConnection";
 import { LocalSignInNotice } from "@/components/LocalSignInNotice";
@@ -382,9 +382,6 @@ import { useCloudroomThread, useSetCloudReasoning, useCloudroomThreadWorkspace, 
 import { reasoningLevelSchema, reconcileReasoningLevel } from "@cloudroom/domain";
 import { reasoningLevelLabel } from "@/lib/reasoning-labels";
 import { useCopyCommand } from "@/hooks/useCopyCommand";
-
-const plainCloudError = (error: string) =>
-  error.includes("storage unsafe") ? "Cloud disk is full" : error.replace(/^Cloudroom rejected the request \(HTTP \d+\): /, "");
 
 export function ThreadDetailPromptArea({
   activeBackgroundAgentCount,
@@ -2228,11 +2225,11 @@ export function ThreadDetailPromptArea({
     {cloudReconnectingPill}
     {cloudFixPrompt && !cloudStatusDismissed && <div role="alert" aria-label="Cloud thread status" className="flex min-w-0 max-w-full items-center gap-2 justify-self-center rounded-full border border-border bg-background py-1 pl-3 pr-1.5 text-xs text-muted-foreground">
       <span aria-hidden className="size-1.5 shrink-0 rounded-full bg-destructive" />
-      <span className="truncate text-foreground" title={cloudError ?? undefined}>{cloudError ? plainCloudError(cloudError) : "Cloud thread didn't start"}</span>
+      <span className="truncate text-foreground" title={cloudError ?? undefined}>{cloudError ? plainError(cloudError) : "Cloud thread didn't start"}</span>
       {cloudState.data?.failedStart && <button type="button" className="shrink-0 text-foreground underline underline-offset-2 disabled:opacity-50" disabled={retryCloudStart.isPending} onClick={() => retryCloudStart.mutate()}>Retry</button>}
       {cloudState.isError && !cloudFetchFailed && <button type="button" className="shrink-0 text-foreground underline underline-offset-2 disabled:opacity-50" disabled={cloudState.isFetching} onClick={() => void cloudState.refetch()}>Reconnect</button>}
       <span aria-hidden className="h-3.5 w-px shrink-0 bg-border" />
-      <CopyButton text={cloudFixPrompt} label="Copy fix prompt for your AI agent" className="shrink-0" />
+      <FixPrompt iconOnly prompt={cloudFixPrompt} />
       <button type="button" aria-label="Dismiss" className="flex size-5 shrink-0 cursor-pointer items-center justify-center text-muted-foreground hover:text-foreground" onClick={() => setDismissedCloudStatus(cloudStatusKey)}><Icon name="X" className="size-3" aria-hidden /></button>
     </div>}
   </>) : null);

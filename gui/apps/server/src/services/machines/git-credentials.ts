@@ -17,7 +17,8 @@ const gitConfig = [
 
 const aiCoAuthorPattern =
   "^co-authored-by:.*(claude|anthropic|cursor|codex|openai|chatgpt|copilot|gemini|aider\\.chat|devin-ai|factory-droid|windsurf|codeium)";
-const stripAiCoAuthorsHook = `cloudroom_strip_ai_co_authors() { grep -viE '${aiCoAuthorPattern}' "$1" > "$1.cloudroom"; [ $? -le 1 ] && mv "$1.cloudroom" "$1" || rm -f "$1.cloudroom"; }; cloudroom_strip_ai_co_authors`;
+// Applies machine-wide: Local builds this env without a session's project path (Core scopes Cloud's hook, #811).
+const stripAiCoAuthorsHook = `cloudroom_strip_ai_co_authors() { grep -qiE '${aiCoAuthorPattern}' "$1" || return 0; t=$(mktemp) || return 0; grep -viE '${aiCoAuthorPattern}' "$1" > "$t"; [ $? -le 1 ] && cat "$t" > "$1" && echo 'Cloudroom removed AI Co-authored-by lines (turn off: room-cli settings general stripAiCoAuthorsEnabled false)' >&2; rm -f "$t"; return 0; }; cloudroom_strip_ai_co_authors`;
 const stripAiCoAuthorsConfig = [
   ["hook.cloudroom-strip-ai-co-authors.command", stripAiCoAuthorsHook],
   ["hook.cloudroom-strip-ai-co-authors.event", "prepare-commit-msg"],

@@ -499,6 +499,8 @@ describe("MachinesSettingsSection", () => {
     await screen.findByText("dev-vm");
     await openHostMenu("dev-vm");
     fireEvent.click(await screen.findByRole("menuitem", { name: "Rename" }));
+    // Menus render in a portal, yet React bubbles their clicks to the card: picking an item must not open the machine.
+    expect(screen.getByTestId("location").textContent).toBe("/");
 
     const input = await screen.findByLabelText("Machine name");
     fireEvent.change(input, { target: { value: "build box" } });

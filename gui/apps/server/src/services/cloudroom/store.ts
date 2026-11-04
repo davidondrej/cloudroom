@@ -7,7 +7,26 @@ import { noteTurnFailed } from "../system/auth-failure-telemetry.js";
 export type TeleportProgress = {
   id: string; owner: string; phase: "checking" | "stopping" | "uploading" | "running" | "complete" | "cancelled" | "error" | "cancelling";
   completed: number; total: number; error?: string; cloudStarted?: boolean;
+  /** Bytes sent and to send in this stage (the chat text until Cloud starts, then every file), and bytes a second. */
+  sent?: number; bytes?: number; rate?: number;
 };
+/** Every Core session state (core/docs/api.md) and the thread status it shows. A state missing here is newer than
+ *  this app: `statusOf` answers null and the thread keeps its status. */
+const CORE_STATUS = {
+  pending: "pending", waiting_for_files: "pending",
+  starting: "starting", resuming: "starting",
+  starting_turn: "active", running: "active",
+  interrupting: "stopping", closing: "stopping",
+  failed: "error", process_lost: "error",
+  idle: "idle", sleeping: "idle", suspended: "idle", rewinding: "idle", closed: "idle", saved_history_only: "idle",
+} as const satisfies Record<string, typeof threads.$inferSelect["status"]>;
+export const coreStates = Object.keys(CORE_STATUS);
+export function statusOf(state: string): typeof threads.$inferSelect["status"] | null {
+  return Object.hasOwn(CORE_STATUS, state) ? CORE_STATUS[state as keyof typeof CORE_STATUS] : null;
+}
+/** The session's agent is gone for good: it failed, lost its process, or was closed. */
+export const isDead = (state: string) => state === "failed" || state === "process_lost" || state === "closed";
+
 const teleportNamespace = "cloudroom.teleport";
 export function teleportProgress(db: DbQueryConnection, threadId: string): TeleportProgress | null {
   const row = db.select({ value: threadPluginMetadata.metadataJson }).from(threadPluginMetadata)
@@ -23,11 +42,14 @@ export function saveTeleportProgress(db: DbQueryConnection, threadId: string, va
   db.insert(threadPluginMetadata).values({ threadId, pluginId: teleportNamespace, metadataJson: JSON.stringify(value) })
     .onConflictDoUpdate({ target: [threadPluginMetadata.threadId, threadPluginMetadata.pluginId], set: { metadataJson: JSON.stringify(value) } }).run();
 }
+/** What a timed-out request says. Older apps paused a transfer on it; it is retried now (#751). */
+export const TIMED_OUT = "Cloudroom request cancelled or timed out";
+/** Unfinished transfers to resume, including one an older app paused on a timeout. */
 export function pendingTeleports(db: DbQueryConnection): { threadId: string; progress: TeleportProgress }[] {
   return db.select({ threadId: threadPluginMetadata.threadId, value: threadPluginMetadata.metadataJson }).from(threadPluginMetadata)
     .where(eq(threadPluginMetadata.pluginId, teleportNamespace)).all()
     .map(row => ({ threadId: row.threadId, progress: JSON.parse(row.value) as TeleportProgress }))
-    .filter(row => row.threadId === row.progress.owner && !["complete", "cancelled", "error"].includes(row.progress.phase));
+    .filter(row => row.threadId === row.progress.owner && (!["complete", "cancelled", "error"].includes(row.progress.phase) || (row.progress.phase === "error" && row.progress.error === TIMED_OUT)));
 }
 const projectCopyNamespace = "cloudroom.project-copy";
 export function projectCopyProgress(db: DbQueryConnection, threadId: string): ProjectCopyProgress | null {

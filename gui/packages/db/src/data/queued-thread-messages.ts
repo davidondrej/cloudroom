@@ -160,7 +160,7 @@ export type ReleaseQueuedMessageClaimArgs =
  * The waits that mean "this row is only behind the turn that is running". The
  * manual-stop queue pause exists to hold exactly these back, because a user
  * who stopped a thread did not thereby ask for whatever was lined up behind
- * it.
+ * it. That includes child notices: Stop sticks until the user acts (#821).
  */
 const ORDINARY_TURN_END_WAIT_KINDS = ["thread-busy", "turn-starting"] as const;
 
@@ -191,7 +191,7 @@ function hasOrdinaryTurnEndWait(row: QueuedThreadMessageRow): boolean {
 export function isOrdinaryTurnEndQueuedMessage(
   row: QueuedThreadMessageRow,
 ): boolean {
-  return row.systemNotice === null && hasOrdinaryTurnEndWait(row);
+  return hasOrdinaryTurnEndWait(row);
 }
 
 /**
@@ -430,7 +430,7 @@ function manuallyStoppedQueuePauseQuery(
       and(
         sql`${interruption.threadId} = ${threadId}`,
         eq(interruption.type, "system/thread/interrupted"),
-        sql`json_extract(${interruption.data}, '$.reason') = 'manual-stop'`,
+        sql`json_extract(${interruption.data}, '$.reason') IN ('manual-stop', 'memory-limit')`,
         notExists(
           db
             .select({ sequence: laterInterruption.sequence })
@@ -487,14 +487,11 @@ export function isThreadQueueAutoSendPaused(
  * it mirrors so the two cannot drift silently.
  */
 function notOrdinaryTurnEndQueuedThreadMessage() {
-  return or(
-    isNotNull(queuedThreadMessages.systemNotice),
-    and(
-      isNotNull(queuedThreadMessages.waitingOn),
-      notInArray(
-        sql<string>`json_extract(${queuedThreadMessages.waitingOn}, '$.kind')`,
-        [...ORDINARY_TURN_END_WAIT_KINDS],
-      ),
+  return and(
+    isNotNull(queuedThreadMessages.waitingOn),
+    notInArray(
+      sql<string>`json_extract(${queuedThreadMessages.waitingOn}, '$.kind')`,
+      [...ORDINARY_TURN_END_WAIT_KINDS],
     ),
   );
 }

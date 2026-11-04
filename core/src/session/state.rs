@@ -370,6 +370,11 @@ impl Local {
                     .ok_or_else(|| io::Error::other("missing imported history"))?
                     .into(),
             );
+            // A chat that arrived whole starts at its end (ADR 20261104-012035). Older records copy it from the start.
+            if let Some(cursor) = record.data.get("native_cursor") {
+                session.native_cursor = cursor.clone();
+                session.native_offset = cursor["offset"].as_u64().unwrap_or(0);
+            }
             session.state = SessionState::Suspended;
             let sequences = self.sequences.entry(record.session_id.clone()).or_default();
             sequences.truncate(before);
@@ -820,6 +825,40 @@ mod tests {
             .map(|s| json!([s, Derived::of(s)]))
             .collect();
         json!([sessions, local.sequences])
+    }
+
+    #[test]
+    fn an_arriving_chat_keeps_its_end_and_older_arrivals_start_at_zero() {
+        let dir = std::env::temp_dir().join(format!("cloudroom-arrival-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let mut local = Local::open(&dir).unwrap();
+        let arrival = |cursor: Option<serde_json::Value>| {
+            let mut data = json!({"receipt":{"request_id":"t1","command":"start","state":"completed","input":{"harness":"claude-code"}},"prompts":[],"native_id":"n","native_path":"/n.jsonl"});
+            if let Some(cursor) = cursor {
+                data["native_cursor"] = cursor;
+            }
+            data
+        };
+        local
+            .append(
+                "cr_new",
+                "teleport",
+                arrival(Some(json!({"offset":4096}))),
+                None,
+            )
+            .unwrap();
+        local
+            .append("cr_old", "teleport", arrival(None), None)
+            .unwrap();
+        drop(local);
+        let local = Local::open(&dir).unwrap();
+        assert_eq!(
+            local.sessions["cr_new"].native_cursor,
+            json!({"offset":4096})
+        );
+        assert_eq!(local.sessions["cr_new"].native_offset, 4096);
+        assert!(local.sessions["cr_old"].native_cursor.is_null());
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

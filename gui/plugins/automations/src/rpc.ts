@@ -243,10 +243,10 @@ export function createRpcHandlers(
       input: z.output<typeof cloudAutomationInputSchema>,
     ) {
       if (!sdk) throw new Error("Cloud automations are unavailable.");
-      if (input.action !== "list") forgetCloud();
       const result = await sdk.cloudroom.automations(
         input as Parameters<Cloud["automations"]>[0],
       );
+      if (input.action !== "list") forgetCloud();
       return input.action === "list"
         ? withCloudAgents(sdk.threads, result)
         : result;

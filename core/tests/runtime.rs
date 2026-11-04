@@ -85,21 +85,24 @@ async fn capture_stderr(script: &str, shutdown: bool) -> runtime::ExitDetails {
 }
 
 #[tokio::test]
-async fn harness_commits_drop_ai_co_authors_and_keep_human_ones() {
+async fn harness_commits_drop_ai_co_authors_only_in_the_session_repository() {
     let script = r#"import subprocess, tempfile
-repo = tempfile.mkdtemp()
-git = lambda *args: subprocess.run(["git", "-C", repo, *args], check=True, capture_output=True, text=True).stdout
-git("init", "-q")
-open(repo + "/file.txt", "w").write("content\n")
-git("add", "file.txt")
-git("-c", "user.name=Agent", "-c", "user.email=agent@example.com", "commit", "-q", "--no-verify", "-m", "Add file", "-m",
-    "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>\nCo-authored-by: Cursor <cursoragent@cursor.com>\nCo-authored-by: Ada Lovelace <ada@example.com>")
-os.write(2, git("log", "-1", "--format=%B").encode())
+repo, outside = os.getcwd(), tempfile.mkdtemp()
+git = lambda where, *args: subprocess.run(["git", "-C", where, *args], check=True, capture_output=True, text=True)
+def commit(where, *flags):
+    notice = git(where, "-c", "user.name=Agent", "-c", "user.email=agent@example.com", "commit", "-q", "--allow-empty", *flags,
+        "-m", "Add file", "-m", "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>\nCo-authored-by: Cursor <cursoragent@cursor.com>\nCo-authored-by: Ada Lovelace <ada@example.com>").stderr
+    body = git(where, "log", "-1", "--format=%B").stdout.strip()
+    return ("stripped" if body == "Add file\n\nCo-authored-by: Ada Lovelace <ada@example.com>" else "kept" if "Claude" in body and "Ada" in body else body) + "+notice" * notice.count("stripAiCoAuthorsEnabled false")
+for path in [repo, outside]:
+    git(path, "init", "-q")
+result = [commit(repo), commit(outside, "--no-verify")]
+os.write(2, " ".join(result).encode())
 os._exit(0)"#;
     let details = capture_stderr(script, false).await;
     assert_eq!(
-        String::from_utf8_lossy(details.stderr()).trim(),
-        "Add file\n\nCo-authored-by: Ada Lovelace <ada@example.com>"
+        String::from_utf8_lossy(details.stderr()),
+        "stripped+notice kept"
     );
 }
 
@@ -225,6 +228,62 @@ fn native_recovery_rejects_links_and_special_files_but_reads_valid_history() {
         let (result, contents) = capture(path);
         assert!(result.is_err(), "unsafe history was accepted");
         assert!(contents.is_empty(), "unsafe bytes were emitted");
+    }
+}
+
+#[test]
+fn an_arriving_chat_starts_at_its_end_and_later_lines_are_still_recorded() {
+    let (dir, config) = fixture();
+    let codex = config.harnesses[&runtime::Kind::Codex].clone();
+    let claude = cloudroom::config::HarnessConfig {
+        home: dir.0.join(".claude"),
+        ..codex.clone()
+    };
+    let id = "0b7c6b1e-2f4a-4d7e-9a51-3c2d1e0f9a88";
+    let old = format!("{{\"type\":\"user\",\"sessionId\":\"{id}\"}}\n{{\"type\":\"assistant\"}}\n");
+    let later = "{\"type\":\"user\",\"later\":true}\n";
+    for (kind, profile, path) in [
+        (
+            runtime::Kind::Codex,
+            &codex,
+            codex.home.join("sessions/old.jsonl"),
+        ),
+        (
+            runtime::Kind::Claude,
+            &claude,
+            claude.home.join(format!("projects/repo/{id}.jsonl")),
+        ),
+    ] {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        // A half-written last line is not part of the chat yet.
+        fs::write(&path, format!("{old}{{\"type\":")).unwrap();
+        let mut saved = runtime::Resume {
+            id: id.into(),
+            path: path.clone(),
+            cursor: serde_json::Value::Null,
+            model: None,
+            provider: None,
+            reasoning: None,
+        };
+        saved.cursor = runtime::end_cursor(profile, kind, &saved, None).unwrap();
+        assert_eq!(
+            saved.cursor,
+            serde_json::json!({"offset": old.len()}),
+            "{kind:?}"
+        );
+        fs::write(&path, format!("{old}{later}")).unwrap();
+        let mut recorded = Vec::new();
+        runtime::recover_records(profile, kind, &saved, None, |event| {
+            if let runtime::Event::Record {
+                native: Some(raw), ..
+            } = event
+            {
+                recorded.push(raw);
+            }
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(recorded, [later], "{kind:?}");
     }
 }
 

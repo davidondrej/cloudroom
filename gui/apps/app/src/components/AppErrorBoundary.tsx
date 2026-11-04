@@ -73,9 +73,7 @@ export class AppErrorBoundary extends Component<
             Cloudroom hit an error and stopped
           </h1>
           <p className="mt-2 text-sm text-muted-foreground">
-            A reload is safe. Your threads live on the server and an unsent
-            draft is kept locally. If this repeats, open the browser console and
-            send us the message below.
+            Reloading is safe. Your threads and drafts are kept.
           </p>
           <details className="mt-4">
             <summary className="cursor-pointer text-sm text-muted-foreground">
@@ -92,7 +90,9 @@ export class AppErrorBoundary extends Component<
           >
             Reload Cloudroom
           </button>
-          <FixPrompt className="mt-4" prompt={prompt} />
+          <div className="mt-3 flex justify-center">
+            <FixPrompt prompt={prompt} />
+          </div>
         </div>
       </div>
     );

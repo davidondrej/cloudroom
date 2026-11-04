@@ -1,4 +1,4 @@
-import { COMPUTER } from "@cloudroom/domain";
+import { COMPUTER, reasoningLevelSchema } from "@cloudroom/domain";
 import { cloudExecution, cloudroom, isCloudThread } from "../cloudroom/commands.js";
 import { prepareLocalFork, prepareLocalForkCode } from "../cloudroom/teleport-local.js";
 import { FORK_HARNESSES, forkModel, forkTurn } from "../cloudroom/fork.js";
@@ -6,8 +6,11 @@ import { messagesSeed } from "./thread-harness-switch.js";
 import { threadMessages } from "./thread-transcript.js";
 import { ensureProjectCheckoutForThread } from "../projects/project-source-setup.js";
 import { assertEnvironmentPathAvailable } from "../environments/path-admission.js";
+import { eq } from "drizzle-orm";
 import {
+  cloudroomThreads,
   deleteThread,
+  getProjectExecutionDefaults,
   getEnvironment,
   getLatestCompletedThreadContextClearSequence,
   getProjectSourceByHost,
@@ -77,6 +80,7 @@ import {
 import { deriveTitleFallback } from "./title-generation.js";
 import type { ThreadProvisionEnvironmentIntent } from "./thread-startup-store.js";
 import { resolveSystemProviderModels } from "../system/execution-options.js";
+import { requireConnectedPrimaryHostId } from "../hosts/primary-host.js";
 import {
   getEnvironmentProvider,
   listEnvironmentCompositions,
@@ -115,11 +119,12 @@ interface ResolveCatalogExecutionDefaultsArgs {
   providerId: string;
   providerFallbackCandidates: readonly string[];
   requestedModel: string | null;
+  requestedReasoningLevel: boolean;
 }
 
 async function loadCatalogDefaultForProvider(
   deps: ThreadCreateDeps,
-  args: { cwd?: string; hostId: string; providerId: string },
+  args: { cwd?: string; hostId: string; model?: string; providerId: string },
 ): Promise<ProjectExecutionDefaults | ApiError> {
   const catalog = await resolveSystemProviderModels(deps, {
     ...(args.cwd !== undefined ? { cwd: args.cwd } : {}),
@@ -138,7 +143,11 @@ async function loadCatalogDefaultForProvider(
     );
   }
   const defaultModel =
-    catalog.models.find((model) => model.isDefault) ?? catalog.models[0];
+    args.model === undefined
+      ? (catalog.models.find((model) => model.isDefault) ?? catalog.models[0])
+      : [...catalog.models, ...catalog.selectedOnlyModels].find(
+          (model) => model.model === args.model,
+        );
   if (defaultModel === undefined) {
     return new ApiError(
       503,
@@ -149,7 +158,7 @@ async function loadCatalogDefaultForProvider(
   }
   return buildProviderThreadExecutionDefaults(deps.providerRegistry, {
     providerId: args.providerId,
-    model: defaultModel.model,
+    model: defaultModel,
   });
 }
 
@@ -157,8 +166,19 @@ async function resolveCatalogExecutionDefaults(
   deps: ThreadCreateDeps,
   args: ResolveCatalogExecutionDefaultsArgs,
 ): Promise<ProjectExecutionDefaults | null> {
-  if (args.executionDefaults !== null || args.requestedModel !== null) {
+  if (args.executionDefaults !== null) {
     return args.executionDefaults;
+  }
+  if (args.requestedModel !== null) {
+    // Nothing remembered: start at the requested model's own level (#656).
+    if (args.requestedReasoningLevel || args.hostId === null) return null;
+    const result = await loadCatalogDefaultForProvider(deps, {
+      ...(args.cwd !== undefined ? { cwd: args.cwd } : {}),
+      hostId: args.hostId,
+      model: args.requestedModel,
+      providerId: args.providerId,
+    }).catch(() => null);
+    return result instanceof ApiError ? null : result;
   }
 
   if (args.hostId === null) {
@@ -183,6 +203,51 @@ async function resolveCatalogExecutionDefaults(
     lastError = result;
   }
   throw lastError;
+}
+
+/** A Cloud Claude start with no level uses this Mac's catalog default, which
+ *  reads the same Claude settings Cloud copies to the VM (#656). */
+async function withCloudDefaultReasoningLevel(
+  deps: ThreadCreateDeps,
+  request: ThreadCreateServiceRequestInput,
+): Promise<ThreadCreateServiceRequestInput> {
+  const { model, providerId, requestId } = request;
+  if (
+    request.reasoningLevel !== undefined ||
+    providerId !== "claude-code" ||
+    request.originKind === "fork"
+  )
+    return request;
+  // A retry of the same start keeps its saved level, even if the catalog changed.
+  const saved = requestId
+    ? deps.db
+        .select()
+        .from(cloudroomThreads)
+        .where(eq(cloudroomThreads.startRequestId, requestId))
+        .get()
+    : undefined;
+  const savedLevel = reasoningLevelSchema.safeParse(saved?.reasoning);
+  if (savedLevel.success)
+    return { ...request, reasoningLevel: savedLevel.data };
+  const remembered = getProjectExecutionDefaults(deps.db, {
+    projectId: request.projectId,
+  });
+  if (remembered?.providerId === providerId)
+    return { ...request, reasoningLevel: remembered.reasoningLevel };
+  const defaults = model
+    ? await Promise.resolve()
+        .then(() =>
+          loadCatalogDefaultForProvider(deps, {
+            hostId: requireConnectedPrimaryHostId(deps),
+            model,
+            providerId,
+          }),
+        )
+        .catch(() => null)
+    : null;
+  return defaults && !(defaults instanceof ApiError)
+    ? { ...request, reasoningLevel: defaults.reasoningLevel }
+    : request;
 }
 
 function resolveForkPoint(
@@ -597,7 +662,7 @@ export async function createThreadFromRequest(
     throw new ApiError(409, "cloudroom_unsupported", "Only forks and child threads can start from a Cloud thread; native fallback is blocked.");
   }
   if (rawRequestInput.executionTarget === "cloud" || cloudChild || cloudFork) {
-    const thread = await cloudroom(deps).create({ ...rawRequestInput, origin: rawRequestInput.origin ?? "sdk", originKind: rawRequestInput.originKind ?? null });
+    const thread = await cloudroom(deps).create({ ...(await withCloudDefaultReasoningLevel(deps, rawRequestInput)), origin: rawRequestInput.origin ?? "sdk", originKind: rawRequestInput.originKind ?? null });
     // Cloud threads count in the same anonymous usage events as local ones, tagged with where they run.
     const execution = cloudExecution(deps, thread.id);
     const isChildThread = thread.parentThreadId !== null;
@@ -745,11 +810,13 @@ export async function createThreadFromRequest(
     providerId,
     providerFallbackCandidates,
     requestedModel,
+    requestedReasoningLevel,
   } = resolveProjectExecutionDefaultsForCreate(deps, {
     executionInputSources: requestInput.executionInputSources,
     model: requestInput.model,
     projectId: requestInput.projectId,
     providerId: requestInput.providerId,
+    reasoningLevel: requestInput.reasoningLevel,
   });
   const {
     originKind: _requestedOriginKind,
@@ -837,6 +904,7 @@ export async function createThreadFromRequest(
       providerId,
       providerFallbackCandidates,
       requestedModel,
+      requestedReasoningLevel,
     },
   );
   if (

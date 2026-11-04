@@ -1,5 +1,5 @@
 import { serveWithCache } from "./cache.js";
-import { OFFLINE_HEADER, codePage, messagePage, offlinePage } from "./pages.js";
+import { OFFLINE_HEADER, codePage, messagePage, offlinePage, reconnectingPage } from "./pages.js";
 import {
   GATE_AUTH_HEADER,
   GATE_MACHINE_ID_HEADER,
@@ -44,7 +44,7 @@ import {
   type Server,
   type Session,
 } from "./store.js";
-import { TUNNEL_OFFLINE_HEADER, TunnelDO, type Env } from "./tunnel-do.js";
+import { TUNNEL_ERROR_HEADER, TUNNEL_OFFLINE_HEADER, TunnelDO, type Env } from "./tunnel-do.js";
 
 export { TunnelDO };
 
@@ -612,6 +612,10 @@ async function forward(
     });
   }
   if (offline && wantsHtml(request)) return offlinePage(server.lastSeenAt);
+  // A dropped page load gets a page that retries, not plain text. The Mac's own errors and API calls pass through.
+  if (response.headers.get(TUNNEL_ERROR_HEADER) === "1" && request.method === "GET" && wantsHtml(request)) {
+    return reconnectingPage(response.status);
+  }
   return response;
 }
 

@@ -159,7 +159,7 @@ export function formatScheduleStatusLabel({
     if (oneShotLifecycle === "expired") return "Expired — edit to reschedule";
   }
   if (!enabled) {
-    return "Paused";
+    return "Off";
   }
   if (nextRunAt === null) {
     return trigger?.triggerType === "webhook"
@@ -175,7 +175,7 @@ export function formatOverviewScheduleMetadata(
   const label = formatScheduleStatusLabel(args);
   if (
     label === "Failed" ||
-    label === "Paused" ||
+    label === "Off" ||
     label === "Completed" ||
     label === "Expired — edit to reschedule"
   ) {
@@ -191,7 +191,7 @@ export function formatDetailScheduleStatusLabel(
   args: FormatScheduleStatusLabelArgs,
 ): string | null {
   const label = formatScheduleStatusLabel(args);
-  return label === "Paused" || label === "Completed" ? null : label;
+  return label === "Off" || label === "Completed" ? null : label;
 }
 
 export function matchesAutomationStatusFilters(

@@ -8,6 +8,7 @@ import { makeThread as makeThreadFixture } from "@cloudroom/test-helpers/domain-
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { appToast } from "@/components/ui/app-toast";
 import { sdk } from "@/lib/sdk";
+import { getThreadRoutePath } from "@/lib/route-paths";
 import {
   ThreadActionsProvider,
   useThreadActions,
@@ -20,6 +21,11 @@ const mocks = vi.hoisted(() => ({
   dialogOnOpenChange: vi.fn(),
   mutation: vi.fn(),
   navigate: vi.fn(),
+  viewedThreadId: null as string | null,
+}));
+
+vi.mock("@/components/ui/app-route-anchor", () => ({
+  useRouteNavigate: () => mocks.navigate,
 }));
 
 vi.mock("react-router-dom", async (importOriginal) => {
@@ -90,7 +96,7 @@ vi.mock("@/hooks/useDialogState", () => ({
 }));
 
 vi.mock("@/hooks/useRouteState", () => ({
-  useRouteState: () => ({ threadId: null }),
+  useRouteState: () => ({ threadId: mocks.viewedThreadId }),
 }));
 
 function makeThread(overrides: Partial<Thread> = {}): Thread {
@@ -150,6 +156,53 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
+  mocks.viewedThreadId = null;
+});
+
+function SidebarRow({ id, child = false }: { id: string; child?: boolean }) {
+  return (
+    <a
+      data-sidebar-thread-shortcut-target=""
+      data-sidebar-thread-id={id}
+      data-sidebar-project-id="p1"
+      data-sidebar-thread-child={child ? "" : undefined}
+    >
+      {id}
+    </a>
+  );
+}
+
+describe("ThreadActionsProvider archive navigation", () => {
+  it("lands on the section's last top-level thread, like Cmd+E / Cmd+L", async () => {
+    mocks.viewedThreadId = "thr_child_a";
+    vi.mocked(sdk.threads.archiveAll).mockResolvedValue({
+      archivedThreadIds: ["thr_child_a"],
+      ok: true,
+    });
+    renderProvider(
+      <>
+        <div data-sidebar-sticky-section="">
+          <SidebarRow id="thr_top_a" />
+          <SidebarRow id="thr_child_a" child />
+          <SidebarRow id="thr_child_b" child />
+          <SidebarRow id="thr_top_b" />
+          <SidebarRow id="thr_child_c" child />
+        </div>
+        <ArchiveButton
+          thread={makeThread({ id: "thr_child_a", projectId: "p1" })}
+        />
+      </>,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Archive" }));
+
+    expect(mocks.navigate).toHaveBeenCalledWith(
+      getThreadRoutePath({ projectId: "p1", threadId: "thr_top_b" }),
+    );
+    await vi.waitFor(() => {
+      expect(appToast.success).toHaveBeenCalledTimes(1);
+    });
+  });
 });
 
 describe("ThreadActionsProvider archive feedback", () => {

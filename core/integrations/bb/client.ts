@@ -332,10 +332,11 @@ export class CloudroomClient {
   async cancelTeleport(id: string): Promise<TeleportStatus> {
     return await this.#json(`/v1/teleports/${encodeURIComponent(id)}/cancel`, {}) as unknown as TeleportStatus;
   }
+  /** A part is up to 4 MiB, so it gets the same 2 minutes as a project copy piece: in 30 s it fails on any upload under 1.1 Mbit/s. */
   async uploadTeleport(id: string, index: number, offset: number, sha256: string, bytes: Uint8Array, size?: number): Promise<TeleportStatus> {
     return await this.#json(`/v1/teleports/${encodeURIComponent(id)}/files/${index}?offset=${offset}&sha256=${encodeURIComponent(sha256)}${size === undefined ? "" : `&size=${size}`}`, undefined, undefined, {
       body: new ReadableStream({ start(controller) { controller.enqueue(bytes); controller.close(); } }), length: bytes.length, contentType: "application/octet-stream",
-    }) as unknown as TeleportStatus;
+    }, 120_000) as unknown as TeleportStatus;
   }
 
   /** Runs a shell command on the VM as its agent account (ADR 0113). Without a `signal`, it gives up after

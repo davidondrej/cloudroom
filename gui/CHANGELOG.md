@@ -2,9 +2,23 @@
 
 Also on [cloudroom.dev/changelog](https://www.cloudroom.dev/changelog).
 
+## 141
+
+Runaway threads can't sink your Mac (2026-11-04)
+
+### Changes
+
+- If one thread eats more than half your Mac's memory, Cloudroom stops it before your Mac freezes.
+- After a crash or reboot, a thread that was running no longer restarts on its own.
+- Moving a big chat to Cloud is much faster, and the progress shows megabytes and time left.
+- A Teleport that times out now retries by itself instead of waiting behind Retry.
+- Sending the same message twice to an idle thread no longer starts a second turn.
+- Paused loops get their own group at the top, with the reason and a Resume button.
+- Security fixes.
+
 ## 140
 
-Crashed Cloud agents come back (2026-11-02)
+Crashed Cloud agents come back (2026-11-03)
 
 ### Changes
 
@@ -32,7 +46,7 @@ Archive cleans up after your agents (2026-11-02)
 
 ## 138
 
-Preview Excel, Word, and PowerPoint (2026-11-01)
+Preview Excel, Word, and PowerPoint (2026-11-02)
 
 ### Changes
 
@@ -87,7 +101,7 @@ Cmd+K finds what you mean (2026-10-31)
 
 ## 134
 
-Your phone no longer needs your Mac (2026-10-30)
+Your phone no longer needs your Mac (2026-10-31)
 
 ### Changes
 
@@ -101,7 +115,7 @@ Your phone no longer needs your Mac (2026-10-30)
 
 ## 133
 
-Choose the keys each loop gets (2026-10-30)
+Choose the keys each loop gets (2026-10-31)
 
 ### Changes
 
@@ -115,7 +129,7 @@ Choose the keys each loop gets (2026-10-30)
 
 ## 132
 
-A nudge toward the right project (2026-10-29)
+A nudge toward the right project (2026-10-30)
 
 ### Changes
 
@@ -142,7 +156,7 @@ Agents can ask for a GPU (2026-10-29)
 
 ## 130
 
-Top up Cloud credits anytime (2026-10-28)
+Top up Cloud credits anytime (2026-10-29)
 
 ### Changes
 
@@ -154,7 +168,7 @@ Top up Cloud credits anytime (2026-10-28)
 
 ## 129
 
-One open-source home for Cloudroom (2026-10-28)
+One open-source home for Cloudroom (2026-10-29)
 
 ### Changes
 
@@ -180,7 +194,7 @@ Start threads on your other machines (2026-10-28)
 
 ## 127
 
-Cloudroom comes to Windows (2026-10-27)
+Cloudroom comes to Windows (2026-10-28)
 
 ### Changes
 
@@ -194,7 +208,7 @@ Cloudroom comes to Windows (2026-10-27)
 
 ## 126
 
-Cloud threads ready before you click (2026-10-26)
+Cloud threads ready before you click (2026-10-27)
 
 ### Changes
 
@@ -222,7 +236,7 @@ One-click security scans (2026-10-26)
 
 ## 124
 
-A checklist for your first week (2026-10-25)
+A checklist for your first week (2026-10-26)
 
 ### Changes
 
@@ -278,7 +292,7 @@ A 110 MB smaller app (2026-10-24)
 
 ## 120
 
-Faster threads and replies (2026-10-23)
+Faster threads and replies (2026-10-24)
 
 ### Changes
 
@@ -315,7 +329,7 @@ One dialog for every loop (2026-10-23)
 
 ## 117
 
-Loop templates (2026-10-22)
+Loop templates (2026-10-23)
 
 ### Changes
 
@@ -343,7 +357,7 @@ Move threads between projects (2026-10-22)
 
 ## 115
 
-Organizations in the app (2026-10-21)
+Organizations in the app (2026-10-22)
 
 ### Changes
 
@@ -368,7 +382,7 @@ Security fixes and a leaner app (2026-10-21)
 
 ## 113
 
-Git diff panel for Cloud threads (2026-10-20)
+Git diff panel for Cloud threads (2026-10-21)
 
 ### Changes
 
@@ -381,7 +395,7 @@ Git diff panel for Cloud threads (2026-10-20)
 
 ## 112
 
-Fork between Local and Cloud (2026-10-20)
+Fork between Local and Cloud (2026-10-21)
 
 ### Changes
 
@@ -395,7 +409,7 @@ Fork between Local and Cloud (2026-10-20)
 
 ## 111
 
-Longer Cloud messages, calmer errors (2026-10-19)
+Longer Cloud messages, calmer errors (2026-10-20)
 
 ### Changes
 
@@ -408,7 +422,7 @@ Longer Cloud messages, calmer errors (2026-10-19)
 
 ## 110
 
-New phone app and top-level threads (2026-10-18)
+New phone app and top-level threads (2026-10-19)
 
 ### Changes
 
@@ -436,7 +450,7 @@ Webhook Loops and Cloud without GitHub (2026-10-18)
 
 ## 108
 
-Cloud subagents with your Mac closed (2026-10-17)
+Cloud subagents with your Mac closed (2026-10-18)
 
 ### Changes
 
@@ -450,7 +464,7 @@ Cloud subagents with your Mac closed (2026-10-17)
 
 ## 107
 
-Loops and multiple Codex accounts (2026-10-16)
+Loops and multiple Codex accounts (2026-10-17)
 
 ### Changes
 
@@ -464,7 +478,7 @@ Loops and multiple Codex accounts (2026-10-16)
 
 ## 106
 
-Cloud without GitHub, steadier Mac access (2026-10-15)
+Cloud without GitHub, steadier Mac access (2026-10-16)
 
 ### Changes
 
@@ -490,7 +504,7 @@ Safer archiving and steadier automations (2026-10-15)
 
 ## 104
 
-Steadier Cloud threads and quick forks (2026-10-14)
+Steadier Cloud threads and quick forks (2026-10-15)
 
 ### Changes
 
@@ -504,7 +518,7 @@ Steadier Cloud threads and quick forks (2026-10-14)
 
 ## 103
 
-Cloud queue and clearer threads (2026-10-13)
+Cloud queue and clearer threads (2026-10-14)
 
 ### Changes
 
@@ -531,7 +545,7 @@ Smoother setup and sign-in (2026-10-13)
 
 ## 101
 
-Phone app with your Mac off (2026-10-12)
+Phone app with your Mac off (2026-10-13)
 
 ### Changes
 
@@ -543,7 +557,7 @@ Phone app with your Mac off (2026-10-12)
 
 ## 100
 
-Hermes in Cloud, smoother setup (2026-10-11)
+Hermes in Cloud, smoother setup (2026-10-12)
 
 ### Changes
 
@@ -567,7 +581,7 @@ Cloud automations and a cleaner composer (2026-10-10)
 
 ## 98
 
-Chat export and Cloud fixes (2026-10-09)
+Chat export and Cloud fixes (2026-10-10)
 
 ### Changes
 
@@ -591,7 +605,7 @@ Better search and tables (2026-10-09)
 
 ## 96
 
-Compact usage and better previews (2026-10-07)
+Compact usage and better previews (2026-10-08)
 
 ### Changes
 
@@ -615,7 +629,7 @@ Clearer Claude accounts (2026-10-07)
 
 ## 94
 
-Multiple Claude accounts (2026-10-06)
+Multiple Claude accounts (2026-10-07)
 
 ### Changes
 
@@ -627,7 +641,7 @@ Multiple Claude accounts (2026-10-06)
 
 ## 93
 
-Cloud terminals and side chats (2026-10-05)
+Cloud terminals and side chats (2026-10-06)
 
 ### Changes
 
@@ -639,7 +653,7 @@ Cloud terminals and side chats (2026-10-05)
 
 ## 92
 
-Mac access levels and new Settings (2026-10-04)
+Mac access levels and new Settings (2026-10-05)
 
 ### Changes
 
@@ -663,7 +677,7 @@ Faster Cloud and context history (2026-10-04)
 
 ## 90
 
-/copy and lighter Cloud checks (2026-10-03)
+/copy and lighter Cloud checks (2026-10-04)
 
 ### Changes
 
@@ -674,7 +688,7 @@ Faster Cloud and context history (2026-10-04)
 
 ## 89
 
-OpenCode 2 and smoother Cloud (2026-10-03)
+OpenCode 2 and smoother Cloud (2026-10-04)
 
 ### Changes
 
@@ -686,7 +700,7 @@ OpenCode 2 and smoother Cloud (2026-10-03)
 
 ## 88
 
-Import chats and Local/Cloud tags (2026-10-02)
+Import chats and Local/Cloud tags (2026-10-03)
 
 ### Changes
 
@@ -710,7 +724,7 @@ Cloud subagents and Goals (2026-10-02)
 
 ## 86
 
-Lime skills and a Cloud branch picker (2026-10-01)
+Lime skills and a Cloud branch picker (2026-10-02)
 
 ### Changes
 
@@ -743,7 +757,7 @@ Smoother Claude and Codex sign-in (2026-10-01)
 
 ## 83
 
-Cloud access and friend invites (2026-09-30)
+Cloud access and friend invites (2026-10-01)
 
 ### Changes
 
@@ -755,7 +769,7 @@ Cloud access and friend invites (2026-09-30)
 
 ## 82
 
-Easier first run (2026-09-30)
+Easier first run (2026-10-01)
 
 ### Changes
 
@@ -779,7 +793,7 @@ Faster cloud starts (2026-09-30)
 
 ## 80
 
-Faster project copies (2026-09-29)
+Faster project copies (2026-09-30)
 
 ### Changes
 
@@ -790,7 +804,7 @@ Faster project copies (2026-09-29)
 
 ## 79
 
-Agent bug reports (2026-09-29)
+Agent bug reports (2026-09-30)
 
 ### Changes
 
@@ -850,7 +864,7 @@ Model shortcuts (2026-09-28)
 
 ## 74
 
-Instant cloud queue (2026-09-27)
+Instant cloud queue (2026-09-28)
 
 ### Changes
 
@@ -862,7 +876,7 @@ Instant cloud queue (2026-09-27)
 
 ## 73
 
-Instant cloud follow-ups (2026-09-27)
+Instant cloud follow-ups (2026-09-28)
 
 ### Changes
 
@@ -910,7 +924,7 @@ Cursor in the cloud (2026-09-27)
 
 ## 69
 
-Open cloud files on your Mac (2026-09-26)
+Open cloud files on your Mac (2026-09-27)
 
 ### Changes
 
@@ -921,7 +935,7 @@ Open cloud files on your Mac (2026-09-26)
 
 ## 68
 
-A cloud computer for every thread (2026-09-26)
+A cloud computer for every thread (2026-09-27)
 
 ### Changes
 
@@ -955,7 +969,7 @@ No account needed (2026-09-26)
 
 ## 65
 
-Signed and notarized (2026-09-25)
+Signed and notarized (2026-09-26)
 
 ### Changes
 
@@ -979,7 +993,7 @@ Reliable Teleport (2026-09-25)
 
 ## 60
 
-Opus 1M in Cloud (2026-09-24)
+Opus 1M in Cloud (2026-09-25)
 
 ### Changes
 
@@ -1066,7 +1080,7 @@ Claude skills in Local and Cloud (2026-09-23)
 
 ## 41
 
-Room branding and mobile setup (2026-09-22)
+Room branding and mobile setup (2026-09-23)
 
 ### Changes
 

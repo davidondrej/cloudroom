@@ -10,6 +10,10 @@ import { Icon } from "@cloudroom/shared-ui/icon";
 import type { PausedLoop } from "./src/paused";
 
 const POLL_MS = 60_000;
+const LOOPS_CHANGED = "cloudroom:loops-changed";
+
+/** A loop was turned on, off, or deleted here: the label reloads now, not within a minute. */
+export const loopsChanged = () => window.dispatchEvent(new Event(LOOPS_CHANGED));
 
 async function rpc(method: string, input: unknown = null): Promise<unknown> {
   const response = await fetch(`/api/v1/plugins/automations/rpc/${method}`, {
@@ -47,10 +51,16 @@ export function PausedLoopsLabel() {
   const [done, setDone] = useState<Record<string, string>>({});
   const [offset, setOffset] = useState(14);
   const label = useRef<HTMLSpanElement>(null);
+  // Only the newest answer counts: one that started before a Resume may arrive after it.
+  const latest = useRef(0);
   const load = () => {
     if (document.visibilityState !== "visible") return;
+    const request = ++latest.current;
     rpc("paused_loops").then(
-      (result) => setLoops((result as { loops: PausedLoop[] }).loops),
+      (result) => {
+        if (request === latest.current)
+          setLoops((result as { loops: PausedLoop[] }).loops);
+      },
       () => {},
     );
   };
@@ -58,9 +68,11 @@ export function PausedLoopsLabel() {
     load();
     const timer = window.setInterval(load, POLL_MS);
     document.addEventListener("visibilitychange", load);
+    window.addEventListener(LOOPS_CHANGED, load);
     return () => {
       window.clearInterval(timer);
       document.removeEventListener("visibilitychange", load);
+      window.removeEventListener(LOOPS_CHANGED, load);
     };
   }, []);
   const run = (list: PausedLoop[]) => {

@@ -213,6 +213,9 @@ interface RequestThreadStopArgs extends Omit<ThreadStopCommandArgs, "intent"> {
 
 const AWAITED_THREAD_STOP_TIMEOUT_MS = 60_000;
 
+const MEMORY_LIMIT_STOP_DETAIL =
+  "Thread stopped because it used over half of the computer's memory";
+
 interface RequestThreadStopForCurrentStateEnvironment {
   hostId: string;
   id: string;
@@ -344,6 +347,7 @@ function lifecycleEventForInterruptedThread(
 ): ThreadLifecycleEvent {
   switch (reason) {
     case "manual-stop":
+    case "memory-limit":
       return { type: "stop.settled" };
     case "host-daemon-restarted":
     case "host-connection-lost":
@@ -360,6 +364,8 @@ function pendingInteractionStopReason(
   switch (reason) {
     case "manual-stop":
       return "Thread stopped by user request";
+    case "memory-limit":
+      return MEMORY_LIMIT_STOP_DETAIL;
     case "host-daemon-restarted":
       return "Host daemon restarted while awaiting user interaction";
     case "host-connection-lost":
@@ -376,6 +382,7 @@ function threadCommandFailureMessageForInterruption(
 ): string | null {
   switch (reason) {
     case "manual-stop":
+    case "memory-limit":
       return null;
     case "host-daemon-restarted":
       return "Thread interrupted because the host daemon disconnected";
@@ -394,6 +401,8 @@ function threadCommandFailureDetailForInterruption(
   switch (reason) {
     case "manual-stop":
       return "Thread stopped by user request";
+    case "memory-limit":
+      return MEMORY_LIMIT_STOP_DETAIL;
     case "host-daemon-restarted":
     case "host-connection-lost":
       return "Please retry the thread to continue.";
@@ -1450,6 +1459,7 @@ export function requestThreadStopForCurrentState(
   deps: RequestThreadStopForCurrentStateDeps,
   thread: RequestThreadStopForCurrentStateThread,
   environment: RequestThreadStopForCurrentStateEnvironment | null,
+  interruptionReason: "manual-stop" | "memory-limit" = "manual-stop",
 ): void {
   if (hasLiveThreadRuntime(deps, thread)) {
     if (environment === null) {
@@ -1458,7 +1468,7 @@ export function requestThreadStopForCurrentState(
     requestThreadStop(deps, {
       environmentId: environment.id,
       hostId: environment.hostId,
-      interruptionReason: "manual-stop",
+      interruptionReason,
       threadId: thread.id,
     });
     return;

@@ -814,6 +814,27 @@ impl Manager {
         } else {
             self.teleport_prompts(&transfer).await?
         };
+        // Read the arrived chat to its end once, off Core's workers, so its start copies nothing. If that fails, the
+        // start copies it as before and reports the problem there.
+        let cursor = {
+            let profile = self.config.harnesses[&manifest.harness].clone();
+            let saved = runtime::Resume {
+                id: manifest.native_id.clone(),
+                path: native_path.into(),
+                cursor: Value::Null,
+                model: Some(manifest.model.clone()),
+                provider: manifest.provider.clone(),
+                reasoning: manifest.reasoning.clone(),
+            };
+            let (harness, policy) = (manifest.harness, self.config.storage.clone());
+            tokio::task::spawn_blocking(move || {
+                runtime::end_cursor(&profile, harness, &saved, policy.as_ref())
+            })
+            .await
+            .ok()
+            .and_then(|cursor| cursor.ok())
+            .filter(|cursor| !cursor.is_null())
+        };
         let receipt = Receipt {
             request_id: id.into(),
             command: "start".into(),
@@ -837,7 +858,11 @@ impl Manager {
                 ));
             }
             // This single fsynced record includes all queued work and the ownership decision.
-            local.append(&session_id, "teleport", json!({"receipt":receipt,"prompts":prompts,"native_id":manifest.native_id,"native_path":native_path}), None)?;
+            let mut record = json!({"receipt":receipt,"prompts":prompts,"native_id":manifest.native_id,"native_path":native_path});
+            if let Some(cursor) = cursor {
+                record["native_cursor"] = cursor;
+            }
+            local.append(&session_id, "teleport", record, None)?;
             self.schedule_resume(&mut local, &session_id, false)?;
         }
         self.teleport_files_ready(&transfer)?;

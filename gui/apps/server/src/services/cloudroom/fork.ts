@@ -19,7 +19,7 @@ import { workspaceContextFromPath } from "../environments/workspace-command-targ
 import { CloudroomError, UPLOAD_PART, type CloudroomClient, type Harness, type TeleportManifest } from "./client.js";
 import { cloudroom } from "./commands.js";
 import { PIECE_TIMEOUT, retry, SKIPPED } from "./project-copy.js";
-import { binding } from "./store.js";
+import { binding, isDead } from "./store.js";
 import { codexLineage, download, findNative, vm } from "./teleport-local.js";
 
 /** A Cloud fork: a new Cloud thread, in its own sandbox, that continues another Cloud thread's conversation
@@ -327,7 +327,7 @@ async function idle(client: CloudroomClient, sessionId: string): Promise<void> {
   for (let tries = 0; ; tries++) {
     const session = await client.session(sessionId);
     if (session.state === "idle" || session.current_request !== null) return;
-    if (["failed", "process_lost", "closed"].includes(session.state) || tries === 240)
+    if (isDead(session.state) || tries === 240)
       throw new ApiError(503, "fork_start_failed", `The fork's agent did not start (${session.state}).`);
     await new Promise((resolve) => setTimeout(resolve, 500));
   }

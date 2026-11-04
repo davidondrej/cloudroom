@@ -95,6 +95,7 @@ function createServerClientFixture(args: CreateServerClientFixtureArgs = {}) {
     callTool: unused,
     registerInteractiveRequest: unused,
     interruptInteractiveRequests: unused,
+    reportThreadMemoryLimit: unused,
   } satisfies ServerClient;
 
   return {

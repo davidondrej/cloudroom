@@ -7,7 +7,7 @@ import { LEGACY_CODEX_GOAL_EXTENSION_KIND, reasoningLevelSchema, threadEventSche
 import { z } from "zod";
 import { CloudroomError, type SessionRecord } from "./client.js";
 import { codexErrorFields } from "./codex-errors.js";
-import { binding, command, queuedPrompts, saveBinding, saveCommandState, saveStatus, effectivePrompt, unstartedTurn, type Binding, type Command } from "./store.js";
+import { binding, command, queuedPrompts, saveBinding, saveCommandState, saveStatus, effectivePrompt, statusOf, unstartedTurn, type Binding, type Command } from "./store.js";
 
 const object = z.record(z.string(), z.unknown());
 const nativeFrame = z.object({ method: z.string(), params: object.optional() });
@@ -308,15 +308,13 @@ export function projectRecord(db: DbConnection, threadId: string, record: Sessio
           if (request) emit({ ...base, type: "turn/input/accepted", clientRequestId: bbRequestId(data.request_id) });
         }
       }
-      const status =
-        state === "pending" || state === "waiting_for_files" ? "pending" :
-        ["starting", "resuming"].includes(state) ? "starting" :
-        ["starting_turn", "running"].includes(state) ? "active" :
-        state === "interrupting" ? "stopping" :
-        ["failed", "process_lost"].includes(state) ? "error" : "idle";
-      const waiting = status !== "error" && status !== "stopping" && !saved.queuePaused && unstartedTurn(tx, threadId);
-      saveStatus(tx, threadId, waiting ? "active" : status);
-      if (["failed", "process_lost"].includes(state)) emit({
+      const status = statusOf(state);
+      if (status === null) console.warn(`Cloud thread ${threadId}: unknown Core state "${state}"; its status stays as it was.`);
+      else {
+        const waiting = status !== "error" && status !== "stopping" && !saved.queuePaused && unstartedTurn(tx, threadId);
+        saveStatus(tx, threadId, waiting ? "active" : status);
+      }
+      if (status === "error") emit({
         type: "system/error", scope: threadScope(), threadId,
         message: typeof data.reason === "string" ? data.reason : "Cloudroom execution failed",
         ...(typeof data.stderr === "string" ? { detail: `Harness stderr (last lines):\n${data.stderr}` } : {}),

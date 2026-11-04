@@ -64,13 +64,14 @@ import {
 import { requireReadyThreadEnvironment } from "./thread-turn-dispatch.js";
 import { hasMessageDispatchHooks } from "./dispatch-hooks.js";
 import { attemptDispatch } from "./dispatch-attempt.js";
+import { checkRepeatedMessage } from "./repeated-message-guard.js";
 import { deliverParentSystemMessage } from "./parent-system-messages.js";
 import {
   createQueuedMessageAutoSendPausedError,
   createQueuedMessageClaimLostError,
   createQueuedMessageNotDeliveredError,
+  isQueuedMessageAutoSendPausedError,
   isQueuedMessageNotDeliveredError,
-  QUEUED_MESSAGE_AUTO_SEND_PAUSED_CODE,
   QUEUED_MESSAGE_CLAIM_LOST_CODE,
   settleQueueRowDispatched,
 } from "./queue-waits.js";
@@ -166,6 +167,7 @@ export function createAutomaticQueuedMessageEligibility(
       }
       case "provisioning":
       case "interaction":
+      case "repeated-message":
         return false;
     }
   };
@@ -418,13 +420,6 @@ function isQueuedMessageClaimLostError(error: unknown): boolean {
   );
 }
 
-function isQueuedMessageAutoSendPausedError(error: unknown): boolean {
-  return (
-    error instanceof ApiError &&
-    error.body.code === QUEUED_MESSAGE_AUTO_SEND_PAUSED_CODE
-  );
-}
-
 async function sendClaimedQueuedMessage(
   deps: LoggedPendingInteractionWorkSessionDeps,
   args: SendClaimedQueuedMessageArgs,
@@ -465,6 +460,18 @@ async function sendClaimedQueuedMessageForIdleProviderThread(
   }
   const providerThreadId = getLastProviderThreadId(deps, thread.id);
   if (!providerThreadId) {
+    return null;
+  }
+  // A repeat is decided by the checkpoint, which holds it on the queue.
+  if (
+    !args.sendNow &&
+    checkRepeatedMessage(deps.db, {
+      input: toThreadQueuedMessage(args.queuedMessage).content,
+      senderThreadId: args.queuedMessage.senderThreadId,
+      threadId: thread.id,
+      execution: null,
+    }).kind !== "none"
+  ) {
     return null;
   }
 
@@ -619,6 +626,7 @@ async function sendClaimedSystemNotice(
   const delivered = await deliverParentSystemMessage(deps, {
     input: queuedMessage.content,
     parentThread: args.thread,
+    sendNow: args.sendNow,
     systemMessageKind: notice.kind,
     systemMessageSubject: notice.subject,
   });
@@ -728,6 +736,8 @@ function describeCoreWait(waitingOn: QueuedMessageWaitingOn | null): string {
       return "the current turn is still starting";
     case "stopping":
       return "the thread is still stopping";
+    case "repeated-message":
+      return "the same message already ran several times in a row";
     case "plugin":
       return `it is waiting on the "${waitingOn.pluginId}" plugin`;
     case "time":

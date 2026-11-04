@@ -41,6 +41,7 @@ import { ThreadProviderContext } from "@/components/thread/thread-provider-conte
 import {
   cloudGitEnvironmentId,
   defaultAppSettings,
+  isStopHeldReport,
   resolveEnvironmentMergeBaseBranch,
   type ThreadListEntry,
   type ThreadWithRuntime,
@@ -1086,7 +1087,11 @@ function ThreadDetailViewInternal(props: ThreadRoutePathArgs) {
     !createQueuedMessage.isPending &&
     !editMessage.isPending &&
     !(timelineLoading && timelineRows.length === 0) &&
-    queuedMessagesForEditEligibility.length === 0 &&
+    // Same rule as the server: reports Stop is holding wait out an edit
+    // (#821). Cloud has no such hold, so any queued row blocks it there.
+    (thread.executionTarget === "cloud"
+      ? queuedMessagesForEditEligibility.length === 0
+      : queuedMessagesForEditEligibility.every(isStopHeldReport)) &&
     activeWorkflows.length === 0 &&
     thread.activeBackgroundAgentCount === 0 &&
     activeBackgroundCommands.length === 0;

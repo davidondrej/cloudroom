@@ -379,7 +379,7 @@ describe("useThreadCreationOptions", () => {
     });
   });
 
-  it("uses the medium product default for providers without reasoning history", async () => {
+  it("uses the model default for providers without reasoning history", async () => {
     vi.mocked(sdk.system.executionOptions).mockImplementation(async (args) =>
       providerExecutionOptionsResponse(args?.providerId),
     );
@@ -390,7 +390,7 @@ describe("useThreadCreationOptions", () => {
 
     await waitFor(() => {
       expect(result.current.selectedModel).toBe("global-default");
-      expect(result.current.reasoningLevel).toBe("medium");
+      expect(result.current.reasoningLevel).toBe("low");
     });
 
     act(() => {
@@ -398,8 +398,32 @@ describe("useThreadCreationOptions", () => {
     });
     await waitFor(() => {
       expect(result.current.selectedModel).toBe("project-default");
-      expect(result.current.reasoningLevel).toBe("medium");
+      expect(result.current.reasoningLevel).toBe("high");
     });
+  });
+
+  it("follows each model's default effort until one is picked (#656)", async () => {
+    vi.mocked(sdk.system.executionOptions).mockImplementation(async (args) =>
+      providerExecutionOptionsResponse(args?.providerId),
+    );
+    const { result } = renderHook(
+      () =>
+        useThreadCreationOptions({ initialProviderId: PROJECT_PROVIDER_ID }),
+      { wrapper: createQueryClientTestHarness().wrapper },
+    );
+    await waitFor(() => expect(result.current.reasoningLevel).toBe("high"));
+    const pick = (model: string) =>
+      act(() =>
+        result.current.setProviderModelReasoning({
+          providerId: PROJECT_PROVIDER_ID,
+          model,
+        }),
+      );
+    pick("project-remembered");
+    await waitFor(() => expect(result.current.reasoningLevel).toBe("medium"));
+    act(() => result.current.setSelectedModel("project-default"));
+    await waitFor(() => expect(result.current.reasoningLevel).toBe("high"));
+    expect(result.current.executionInputSources.reasoningLevel).toBeUndefined();
   });
 
   it("persists the reconciled reasoning level when switching to a shorter model ladder", async () => {
@@ -542,7 +566,7 @@ describe("useThreadCreationOptions", () => {
     });
     await waitFor(() => {
       expect(result.current.selectedModel).toBe("project-default");
-      expect(result.current.reasoningLevel).toBe("medium");
+      expect(result.current.reasoningLevel).toBe("high");
     });
     expect(window.localStorage.getItem("bb.promptbox.model")).toBeNull();
 
@@ -568,7 +592,7 @@ describe("useThreadCreationOptions", () => {
 
     await waitFor(() => {
       expect(result.current.selectedModel).toBe("global-default");
-      expect(result.current.reasoningLevel).toBe("medium");
+      expect(result.current.reasoningLevel).toBe("low");
     });
 
     act(() => {
@@ -582,7 +606,7 @@ describe("useThreadCreationOptions", () => {
     await waitFor(() => {
       expect(result.current.selectedProviderId).toBe(PROJECT_PROVIDER_ID);
       expect(result.current.selectedModel).toBe("project-default");
-      expect(result.current.reasoningLevel).toBe("medium");
+      expect(result.current.reasoningLevel).toBe("high");
     });
 
     act(() => {
@@ -678,7 +702,7 @@ describe("useThreadCreationOptions", () => {
 
     await waitFor(() => {
       expect(result.current.selectedModel).toBe("project-default");
-      expect(result.current.reasoningLevel).toBe("medium");
+      expect(result.current.reasoningLevel).toBe("high");
     });
     act(() => {
       result.current.setSelectedModel("project-remembered");

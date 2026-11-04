@@ -16,6 +16,7 @@ import plistlib
 import random
 import select
 import shlex
+import shutil
 import signal
 import socket
 import ssl
@@ -244,6 +245,9 @@ def issuer(url):
 def cores(config):
     """The paired VM's core, if any, then every awake cloud sandbox's core (docs/scopes/sandboxes.md)."""
     connection = private_json(config['connectionFile'])
+    # Another account signed in while this setup still runs (its stop failed): this device never pairs with its cores (#109).
+    if (connection.get('account') or {}).get('id') != config['binding'][1]:
+        return []
     found = [Core(config)] if connection.get('url') else []
     account, token = (connection.get('account') or {}).get('id'), connection.get('sandboxToken')
     if not account or not token:
@@ -796,6 +800,19 @@ def mac_level(config):
     return 'full' if value is True else value if value in MAC_LEVELS else 'off'
 
 
+def saved_level(config):
+    """The level the app saved, which setup may not have applied yet, or None without an app. Unreadable means off."""
+    if not config.get('connectionFile'):
+        return None
+    try:
+        saved = json.loads((Path(config['connectionFile']).parent / 'cloudroom-mac-access.json').read_text())
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError):
+        return 'off'
+    return mac_level({'macAccess': saved.get('level', saved.get('enabled') is True)}) if isinstance(saved, dict) else 'off'
+
+
 # Each Mac command also goes to the website's Jev check (ADR 0224). It runs beside the job and never delays it:
 # at most four reports in flight, a repeated command is skipped for an hour, and failures are dropped.
 REVIEWS = {'sent': {}, 'lock': threading.Lock(), 'slots': threading.BoundedSemaphore(4)}
@@ -931,6 +948,13 @@ class MacJobs:
 
     def enabled(self):
         config = private_json(self.folder / 'config.json')
+        # An old job stream may outlive a failed stop during an account switch (#109).
+        if config.get('connectionFile') and (private_json(config['connectionFile']).get('account') or {}).get('id') != config['binding'][1]:
+            return None
+        # Off or a lower level counts from the next job, before setup applies it (#109). Raising waits for setup.
+        saved = saved_level(config)
+        if saved and MAC_LEVELS.index(saved) < MAC_LEVELS.index(mac_level(config)):
+            config['macAccess'] = saved
         return config if mac_level(config) != 'off' and not config.get('revoked') else None
 
     def approve(self, core, job):
@@ -1035,7 +1059,8 @@ class MacJobs:
         if level == 'read-only':
             return 'Mac access is Read-only, so this command cannot change the Mac. The user can switch it to Ask first or Full in the Cloudroom sidebar.'
         if level == 'ask' and self.approve(core, job):
-            return None
+            # The user may have lowered Mac access while the popup was open.
+            return None if mac_level(self.enabled() or {}) in ('ask', 'full') else 'Mac access was lowered, so this command did not run.'
         return 'The user did not approve this command on their Mac. Do not retry it unless they ask you to.'
 
     def serve(self):
@@ -1197,6 +1222,34 @@ class MacJobs:
             threading.Timer(2, kill, (signal.SIGKILL,)).start()
 
 
+# Each core gets a check every 10 s, not 2 s: that cost about one new HTTPS connection a second on metered networks.
+# Core trusts a report for 15 s (FRESH_SECONDS), and an agent's `room-cli preview` waits 30 s for this Mac.
+POLL_SECONDS = 10
+# Pairing gives the same answer until a sandbox wakes with a new token, so it repeats once a minute or after a failure.
+PAIR_SECONDS = 60
+PAIRED = {}  # core.key -> (pairing answer, when)
+
+
+def paired(core, config, folder):
+    saved = PAIRED.get(core.key)
+    if saved and time.monotonic() - saved[1] < PAIR_SECONDS:
+        return saved[0]
+    PAIRED[core.key] = (core.request('/device', {'device': config['device'], 'public_key': identity(folder)}), time.monotonic())
+    return PAIRED[core.key][0]
+
+
+def rest(folder, seconds):
+    """Waits `seconds`, or less when the app touches `woke` after waking a sandbox, so it is listed at once."""
+    def touched():
+        with contextlib.suppress(OSError):
+            return (folder / 'woke').stat().st_mtime
+    before, end = touched(), time.monotonic() + seconds
+    while (left := end - time.monotonic()) > 0:
+        time.sleep(min(left, 1))
+        if touched() != before:
+            return
+
+
 def run(folder):
     tunnels = {}
     ports_file = folder / 'ports.json'
@@ -1210,13 +1263,10 @@ def run(folder):
     def stop(*_):
         raise KeyboardInterrupt()
     signal.signal(signal.SIGTERM, stop)
-    if not WINDOWS:  # Mac access is macOS and Linux only (macAccessSupported).
-        threading.Thread(target=MacJobs(folder).serve, daemon=True).start()
     with (folder / 'lock').open('a') as lock:
-        if WINDOWS:
-            claim(folder, lock)
-        else:
-            exclusive(lock)
+        claim(folder, lock)  # Before Mac jobs, so a second helper never takes any.
+        if not WINDOWS:  # Mac access is macOS and Linux only (macAccessSupported).
+            threading.Thread(target=MacJobs(folder).serve, daemon=True).start()
         try:
             while True:
                 try:
@@ -1238,10 +1288,12 @@ def run(folder):
                     if denied:
                         raise denied
                     desired, reached, failure = {}, 0, None
+                    for key in set(PAIRED) - {core.key for core in listed}:
+                        del PAIRED[key]
                     # Sandboxes first, so a VM that turns this Mac away can't block their Mac access.
                     for core in sorted(listed, key=lambda core: not core.sandbox):
                         try:
-                            metadata = core.request('/device', {'device': config['device'], 'public_key': identity(folder)})
+                            metadata = paired(core, config, folder)
                             reached += core.sandbox
                             for entry in core.request('')['previews']:
                                 port = entry['port']
@@ -1249,6 +1301,7 @@ def run(folder):
                                     raise ValueError('Invalid preview registration')
                                 desired[(core.key, port)] = (core, entry['generation'], metadata)
                         except (OSError, ValueError) as error:
+                            PAIRED.pop(core.key, None)
                             if not core.sandbox:
                                 raise  # A sandbox may fall asleep at any moment; the others keep working.
                             # An HTTP answer means this Mac reaches sandboxes and the sandbox side declined: paired with
@@ -1299,7 +1352,9 @@ def run(folder):
                             tunnel.core.request('/report', {'device': config['device'], 'port': tunnel.port, 'generation': tunnel.generation,
                                                             'local_port': tunnel.server.server_port if ready else None, 'error': error})
                         except ControlError as failure:
-                            if failure.code != 409 and not tunnel.core.sandbox:
+                            if failure.code == 409:
+                                PAIRED.pop(tunnel.core.key, None)  # Core lost this Mac's pairing: pair at the next check.
+                            elif not tunnel.core.sandbox:
                                 raise
                         except (OSError, ValueError):
                             if not tunnel.core.sandbox:
@@ -1316,9 +1371,10 @@ def run(folder):
                         save(folder / 'status.json', {'state': 'offline', 'message': problem[0], 'detail': problem[1], 'checkedAt': int(time.time() * 1000)})
                     else:
                         save(folder / 'status.json', {'state': 'connected', 'count': len(tunnels), 'ready': ready, 'checkedAt': int(time.time() * 1000)})
-                    delay = 2
+                    delay, wait = 2, POLL_SECONDS
                 except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
                     refresh = True
+                    PAIRED.clear()
                     if time.monotonic() - NET['at'] >= NETWORK_SECONDS:
                         network()  # An unreachable VM may sit behind a proxy that just changed.
                     transient = isinstance(error, (OSError, ControlError)) and not (isinstance(error, ControlError) and error.code not in (429, 500, 502, 503, 504))
@@ -1327,8 +1383,8 @@ def run(folder):
                             tunnel.close()
                         tunnels.clear()
                     save(folder / 'status.json', {'state': 'offline', 'message': str(error) if isinstance(error, ValueError) else 'Preview connection unavailable; reconnecting automatically', 'checkedAt': int(time.time() * 1000)})
-                    delay = min(delay * 2, 30) if not tunnels else 2
-                time.sleep(delay)
+                    delay = wait = min(delay * 2, 30) if not tunnels else 2
+                rest(folder, wait)
         except KeyboardInterrupt:
             pass
         finally:
@@ -1345,7 +1401,7 @@ def systemd(folder, label, stop):
     unit = label + '.service'
     path = Path(os.environ.get('XDG_CONFIG_HOME') or Path.home() / '.config') / 'systemd/user' / unit
     def systemctl(*args):
-        subprocess.run(['systemctl', '--user', *args], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(['systemctl', '--user', *args], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     if stop:
         if path.exists():
             systemctl('disable', '--now', unit)
@@ -1360,6 +1416,8 @@ def systemd(folder, label, stop):
     systemctl('enable', '--now', unit)
 
 
+# A start can be slow at login, or macOS can block the helper from running in the background (#109).
+LOGIN_ITEMS = 'Wait a minute, or allow Cloudroom in System Settings > General > Login Items'
 # Runs the helper under the signed Cloudroom app, so macOS applies Cloudroom's Desktop/Documents/Downloads permission, not python3's.
 LAUNCHER = ("const e={...process.env};delete e.ELECTRON_RUN_AS_NODE;"
             "const c=require('child_process').spawn(process.argv[1],process.argv.slice(2),{stdio:'inherit',env:e});"
@@ -1373,14 +1431,15 @@ def running(folder):
             exclusive(lock)
         except BlockingIOError:
             return True
-        lock.seek(0)
-        msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)
+        if WINDOWS:  # Elsewhere closing the file unlocks it.
+            lock.seek(0)
+            msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)
         return False
 
 
 def claim(folder, lock):
-    """Windows: take the folder's lock (a running() check may hold it for a moment), drop an old stop request, confirm the
-    start to the launcher, and exit as soon as a stop request arrives."""
+    """Take the folder's lock (a running() check may hold it for a moment). Windows: also drop an old stop request, confirm
+    the start to the launcher, and exit as soon as a stop request arrives."""
     deadline = time.monotonic() + 5
     while True:
         try:
@@ -1390,6 +1449,8 @@ def claim(folder, lock):
             if time.monotonic() >= deadline:
                 raise
             time.sleep(.05)
+    if not WINDOWS:
+        return
     (folder / 'stop').unlink(missing_ok=True)
     if os.environ.get('CLOUDROOM_PREVIEW_START'):
         (folder / 'started').write_text(os.environ['CLOUDROOM_PREVIEW_START'])
@@ -1493,18 +1554,37 @@ def launch(folder, stop=False):
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open('wb') as file:
         plistlib.dump(job, file)
-    subprocess.run(['launchctl', 'bootstrap', domain, str(path)], check=True, capture_output=True)
+    started = subprocess.run(['launchctl', 'bootstrap', domain, str(path)], capture_output=True)
+    if started.returncode:
+        reason = ' '.join(started.stderr.decode(errors='replace').split())[:150]
+        raise OSError(f'launchctl failed (exit code {started.returncode})' + (': ' + reason if reason else '') + '. ' + LOGIN_ITEMS)
+
+
+def parked(folder, account):
+    """Where an account's setup waits while another account is signed in (#109)."""
+    return folder.with_name(folder.name + '-' + (str(uuid.UUID(account)) if account else 'none'))
 
 
 def configure(folder, connection_file, activate, allow_private, mac_access=None, launcher=None, restart=False, own=False):
-    folder.mkdir(mode=0o700, parents=True, exist_ok=True); folder.chmod(0o700)
     connection = private_json(connection_file)
     # Sandbox-only accounts have no VM address; their cores come from the website while awake.
     binding = [(connection.get('url') or 'sandboxes').rstrip('/'), (connection.get('account') or {}).get('id')]
     old = private_json(folder / 'config.json') if (folder / 'config.json').exists() else None
-    # The same account may move from its VM to sandboxes; another account never reuses this setup.
+    # The same account may move from its VM to sandboxes. Another account never reuses this setup's key or device: its folder
+    # waits beside this one, and an account that signs in again gets its own back, so sandboxes that slept through the
+    # switch still know its device (#109). Each step is one rename, so nothing is lost halfway.
     if old and old['binding'][1] != binding[1]:
-        raise ValueError('Preview setup belongs to another account; use a separate directory')
+        launch(folder, stop=True)
+        if running(folder):  # Linux skips a helper whose unit file is gone.
+            raise OSError('The previous helper is still running')
+        shutil.rmtree(parked(folder, old['binding'][1]), ignore_errors=True)  # A stale copy; this folder is newer.
+        folder.rename(parked(folder, old['binding'][1]))
+        old = None
+    if not old and parked(folder, binding[1]).is_dir():
+        shutil.rmtree(folder, ignore_errors=True)  # No setup in it.
+        parked(folder, binding[1]).rename(folder)
+        old = private_json(folder / 'config.json') if (folder / 'config.json').exists() else None
+    folder.mkdir(mode=0o700, parents=True, exist_ok=True); folder.chmod(0o700)
     source = Path(__file__).resolve()
     target = folder / 'client.py'
     allow_private = bool(allow_private if allow_private is not None else (old or {}).get('allowPrivateSsh', False))
@@ -1528,7 +1608,7 @@ def configure(folder, connection_file, activate, allow_private, mac_access=None,
                 return {'enabled': True}
         else:
             check = ['systemctl', '--user', 'is-active', '--quiet', label(folder) + '.service'] if sys.platform.startswith('linux') else ['launchctl', 'print', f'gui/{os.getuid()}/' + label(folder)]
-            if subprocess.run(check, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0:
+            if subprocess.run(check, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0 and running(folder):
                 return {'enabled': True}
     if activate:
         launch(folder, stop=True)
@@ -1542,6 +1622,12 @@ def configure(folder, connection_file, activate, allow_private, mac_access=None,
     identity(folder)
     if activate:
         launch(folder)
+        # launchd can take the job and never run it, say when macOS blocks Cloudroom's background items (#109).
+        deadline = time.monotonic() + 10
+        while not running(folder):
+            if time.monotonic() >= deadline:
+                raise OSError("The helper didn't start" + ('. ' + LOGIN_ITEMS if sys.platform == 'darwin' else ''))
+            time.sleep(.2)
     return {'enabled': True}
 
 
@@ -1590,5 +1676,10 @@ if __name__ == '__main__':
     try:
         main()
     except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
-        print(str(error) if isinstance(error, ValueError) else 'Preview setup failed; inspect private configuration, SSH access, and macOS background-job permissions', file=sys.stderr)
+        # The real cause, so Settings can show it (#109). A failed launchctl says why on stderr.
+        text = str(error) if isinstance(error, (ValueError, OSError)) else f'{type(error).__name__}: {error}'
+        if isinstance(error, subprocess.CalledProcessError):
+            output = error.stderr.decode(errors='replace') if isinstance(error.stderr, bytes) else error.stderr or ''
+            text = f'{Path(str(error.cmd[0])).name} failed (exit code {error.returncode})' + (': ' + ' '.join(output.split()) if output.strip() else '')
+        print(text[:300], file=sys.stderr)
         sys.exit(1)

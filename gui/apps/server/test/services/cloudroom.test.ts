@@ -1,18 +1,20 @@
 import { createServer, type ServerResponse } from "node:http";
 import { once } from "node:events";
-import { mkdir, symlink, writeFile } from "node:fs/promises";
+import { mkdir, readFile, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { expect, it, vi } from "vitest";
 import * as sync from "../../src/services/cloudroom/sync.js";
 import { listQueuedCommands } from "../helpers/commands.js";
 import { cloudroom } from "../../src/services/cloudroom/commands.js";
-import { command, saveTeleportProgress } from "../../src/services/cloudroom/store.js";
+import { command, coreStates, saveTeleportProgress } from "../../src/services/cloudroom/store.js";
 import { teleports } from "../../src/services/cloudroom/teleport.js";
 import { SandboxDirectory } from "../../src/services/cloudroom/sandboxes.js";
 import { createTestAppHarness } from "../helpers/test-app.js";
+import { availableModelFixture } from "../helpers/available-models.js";
+import { registerProviderHostRpcResponder } from "../helpers/host-rpc.js";
 import { seedEnvironment, seedEvent, seedHostSession, seedPrimaryHost, seedProjectWithSource, seedThread, seedThreadRuntimeState, seedTurnStarted } from "../helpers/seed.js";
 import { turnScope } from "@cloudroom/domain";
-import { archiveThread, createThread, getThread, setProjectGitRemoteUrlIfMissing, events, cloudroomThreads, cloudroomCommands } from "@cloudroom/db";
+import { archiveThread, createThread, getThread, setProjectGitRemoteUrlIfMissing, upsertProjectExecutionDefaults, events, cloudroomThreads, cloudroomCommands } from "@cloudroom/db";
 
 it("forwards Cursor login and keys without creating conversation records", async () => {
   const harness = await createTestAppHarness();
@@ -633,6 +635,8 @@ it("clones a new Cloud thread's project when the copy plan's first request drops
   const { project } = seedProjectWithSource(harness.deps, { hostId: host.id, path: root });
   setProjectGitRemoteUrlIfMissing(harness.db, harness.deps.hub, project.id, "https://github.com/example/project");
   await sync.setCopyMacGithub(harness.deps, false);
+  // Never install a real sync helper LaunchAgent on the developer's Mac.
+  const setup = vi.spyOn(sync, "setupSync").mockResolvedValue();
   let started = false;
   let lookups = 0;
   const commands: string[] = [];
@@ -662,6 +666,7 @@ it("clones a new Cloud thread's project when the copy plan's first request drops
     await expect.poll(() => commands.some(command => command.includes("git clone") && command.includes("https://github.com/example/project")), { timeout: 15000 }).toBe(true);
     expect(lookups).toBeGreaterThan(1);
   } finally {
+    setup.mockRestore();
     service.stop(); core.closeAllConnections(); await new Promise<void>((resolve) => core.close(() => resolve())); await harness.cleanup();
   }
 }, 20000);
@@ -983,6 +988,45 @@ it("shows a Cloud follow-up in the chat at once, like Local, and queues the next
     await expect.poll(() => harness.db.select().from(cloudroomCommands).all().find((command) => command.id === "now")?.state).toBe("running");
     expect(chat()).toEqual(["start", "now"]);
     expect(service.queue(thread.id).map((item) => item.id)).toEqual(["next"]);
+  } finally {
+    service.stop();
+    core.closeAllConnections();
+    await new Promise<void>((resolve) => core.close(() => resolve()));
+    await harness.cleanup();
+  }
+});
+
+it("starts Cloud Claude with no level at the Mac catalog default, after a retry's saved level and the project's remembered one (#656)", async () => {
+  const harness = await createTestAppHarness();
+  const { host, session } = seedHostSession(harness.deps);
+  seedPrimaryHost(harness.deps, host.id);
+  const { project } = seedProjectWithSource(harness.deps, { hostId: host.id });
+  const catalogDown = registerProviderHostRpcResponder(harness, { hostId: host.id, sessionId: session.id, modelErrorsByProviderId: { "claude-code": { errorCode: "unavailable", errorMessage: "catalog down" } } });
+  const service = cloudroom(harness.deps);
+  const core = createServer(async (req, res) => {
+    let text = ""; for await (const chunk of req) text += chunk;
+    const requestId = text ? JSON.parse(text).request_id : undefined;
+    res.writeHead(requestId ? 202 : 200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify(req.url === "/v1/capabilities" ? { version: 1, repository: "/code/test", stop: true, resume: true, launch_settings: true, direct_workspaces: true, command_guard: true, harnesses: [{ id: "claude-code", model: "test-model" }] }
+      : requestId ? { session_id: "cr_effort", receipt: { request_id: requestId, command: req.url === "/v1/sessions" ? "start" : "prompt", state: "accepted", input: {} }, saving: {} } : {}));
+  });
+  core.listen(0, "127.0.0.1"); await once(core, "listening");
+  const address = core.address();
+  if (!address || typeof address === "string") throw new Error("fixture did not listen");
+  try {
+    await service.configure({ url: `http://127.0.0.1:${address.port}`, token: "x".repeat(40), projectId: project.id });
+    const start = (requestId: string) => harness.app.request("/api/v1/threads", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ executionTarget: "cloud", requestId, projectId: project.id, providerId: "claude-code", origin: "cli", model: "test-model", environment: { type: "project-default" }, input: [{ type: "text", text: "start", mentions: [] }] }) });
+    const level = (requestId: string) => harness.db.select().from(cloudroomThreads).all().find((row) => row.startRequestId === requestId)?.reasoning;
+    expect((await start("first")).status).toBe(201);
+    expect(level("first")).toBe("medium");
+    catalogDown.unregister();
+    registerProviderHostRpcResponder(harness, { hostId: host.id, sessionId: session.id, modelsByProviderId: { "claude-code": { models: [availableModelFixture({ model: "test-model", reasoningLevels: ["medium", "xhigh"], defaultReasoningLevel: "xhigh" })], selectedOnlyModels: [] } } });
+    expect((await start("first")).status).toBe(201); // the retry keeps "medium" instead of a 409
+    expect((await start("second")).status).toBe(201);
+    expect(level("second")).toBe("xhigh");
+    upsertProjectExecutionDefaults(harness.db, { projectId: project.id, providerId: "claude-code", model: "test-model", reasoningLevel: "low", permissionMode: "full", serviceTier: "default" });
+    expect((await start("third")).status).toBe(201);
+    expect(level("third")).toBe("low"); // the project's remembered effort beats the catalog
   } finally {
     service.stop();
     core.closeAllConnections();
@@ -1514,3 +1558,10 @@ it("a message to a lost Cloud agent restarts it from its saved chat, and a refus
     service.stop(); core.closeAllConnections(); await new Promise<void>(resolve => core.close(() => resolve())); await harness.cleanup();
   }
 }, 15000);
+
+it("maps exactly the Core session states core/docs/api.md lists", async () => {
+  const doc = await readFile(new URL("../../../../../core/docs/api.md", import.meta.url), "utf8");
+  const documented = [...(doc.match(/Session `state` values: (.*)/)?.[1] ?? "").matchAll(/`(\w+)`/g)].map((match) => match[1]);
+  expect(documented.length).toBeGreaterThan(10);
+  expect([...documented].sort()).toEqual([...coreStates].sort());
+});

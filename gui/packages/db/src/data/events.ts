@@ -1964,6 +1964,28 @@ export interface StoredThreadEventDataRow {
   type: ThreadEventType;
 }
 
+/** A thread's newest turn starts since `since`; steers and retries left out. */
+export function listRecentNewTurnRequestRows(
+  db: DbQueryConnection,
+  args: { threadId: string; since: number; limit: number },
+): StoredEventRow[] {
+  return db
+    .select(storedEventRowFields)
+    .from(events)
+    .where(
+      and(
+        eq(events.threadId, args.threadId),
+        eq(events.type, "client/turn/requested"),
+        gte(events.createdAt, args.since),
+        sql`json_extract(${events.data}, '$.target.kind') IN ('new-turn', 'thread-start')`,
+        sql`json_extract(${events.data}, '$.retryOfRequestId') IS NULL`,
+      ),
+    )
+    .orderBy(desc(events.sequence))
+    .limit(args.limit)
+    .all();
+}
+
 /**
  * The newest row of any of `types`, optionally restricted to what came after a
  * sequence.
@@ -3619,10 +3641,11 @@ export function listThreadIdsWithLatestHostDaemonRestartInterruption(
 export function getLastStoredTurnRequestEvent(
   db: DbQueryConnection,
   threadId: string,
-): StoredTurnRequestEventRow | null {
+): (StoredTurnRequestEventRow & { createdAt: number }) | null {
   return (
     db
       .select({
+        createdAt: events.createdAt,
         data: events.data,
         sequence: events.sequence,
         threadId: events.threadId,

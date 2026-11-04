@@ -1,5 +1,6 @@
 import { getEnvironmentProvider } from "../plugins/plugin-environment-provider-registry.js";
 import type {
+  AvailableModel,
   PermissionMode,
   ProjectExecutionDefaults,
   RecordedPermissionMode,
@@ -12,6 +13,7 @@ import { DEFAULT_ENVIRONMENT_PROVIDER_ID } from "../environments/environment-pro
 import {
   PERSONAL_PROJECT_ID,
   clampPermissionModeToCeiling,
+  defaultReasoningLevel,
   isLocalPathProjectSource,
 } from "@cloudroom/domain";
 import type {
@@ -34,7 +36,8 @@ import {
 import { isLiveParentThread, type ParentThread } from "./thread-parent.js";
 
 export const DEFAULT_SERVICE_TIER: ServiceTier = "default";
-export const DEFAULT_REASONING_LEVEL: ReasoningLevel = "medium";
+export const DEFAULT_REASONING_LEVEL: ReasoningLevel =
+  defaultReasoningLevel(undefined);
 
 const DEFAULT_PERMISSION_MODE: PermissionMode = "full";
 
@@ -221,14 +224,14 @@ export function resolveCreateThreadExecutionDefaults(
 export function buildProviderThreadExecutionDefaults(
   registry: ProviderRegistryService,
   args: {
-    model: string;
+    model: AvailableModel;
     providerId: string;
   },
 ): ProjectExecutionDefaults {
   return {
     providerId: args.providerId,
-    model: args.model,
-    reasoningLevel: DEFAULT_REASONING_LEVEL,
+    model: args.model.model,
+    reasoningLevel: defaultReasoningLevel(args.model),
     permissionMode: resolveSupportedPermissionMode(registry, {
       providerId: args.providerId,
       preferredPermissionMode: DEFAULT_PERMISSION_MODE,
@@ -390,15 +393,28 @@ export async function resolveCreateThreadEnvironment(
   }
 
   if (hasLiveParent && isImplicitHostDefaultEnvironment(environment)) {
+    const hostId = requireHostEnvironmentId(environment);
+    // An explicit machine that is the parent's own host gets the same
+    // non-Git fallback as project-default: share the parent's folder.
+    const parentEnvironment =
+      parentThread?.projectId === args.projectId && parentThread.environmentId
+        ? getEnvironment(deps.db, parentThread.environmentId)
+        : null;
+    if (
+      parentEnvironment?.hostId === hostId &&
+      !(await hasUsableGitCheckout(deps, {
+        hostId,
+        projectId: args.projectId,
+      }))
+    ) {
+      return { type: "reuse", environmentId: parentEnvironment.id };
+    }
     return {
       type: "provider",
       environmentProviderId: requireDefaultEnvironmentProvider(
         DEFAULT_ENVIRONMENT_PROVIDER_ID.gitWorktree,
       ),
-      machine: {
-        type: "existing",
-        hostId: requireHostEnvironmentId(environment),
-      },
+      machine: { type: "existing", hostId },
       inputs: worktreeProviderInputs({ kind: "default" }),
     };
   }

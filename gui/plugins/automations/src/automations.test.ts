@@ -26,7 +26,7 @@ import {
   migrations,
   setAutomationEnabled,
   setAutomationRunThread,
-  AUTOMATION_RETRY_BASE_MS,
+  AUTOMATION_RETRY_DELAYS_MS,
   type Db,
 } from "./data.js";
 import { ingestLegacyImport } from "./legacy-import.js";
@@ -513,7 +513,7 @@ describe("automation data access", () => {
       now: 1001,
     });
     const restored = getAutomation(db, automation.id);
-    expect(restored?.nextRunAt).toBe(1001 + AUTOMATION_RETRY_BASE_MS);
+    expect(restored?.nextRunAt).toBe(1001 + AUTOMATION_RETRY_DELAYS_MS[0]);
     expect(restored?.runCount).toBe(1);
     expect(restored?.consecutiveFailures).toBe(1);
     expect(restored?.lastRunStatus).toBe("failed");
@@ -547,7 +547,7 @@ describe("automation data access", () => {
     expect(duplicate).toBeNull();
     expect(getAutomation(db, automation.id)?.consecutiveFailures).toBe(1);
     expect(getAutomation(db, automation.id)?.nextRunAt).toBe(
-      1001 + AUTOMATION_RETRY_BASE_MS,
+      1001 + AUTOMATION_RETRY_DELAYS_MS[0],
     );
     expect(first?.run.error).toBe("first failure");
   });
@@ -605,12 +605,12 @@ describe("automation data access", () => {
       expect(current?.consecutiveFailures).toBe(failure);
       if (failure < 3) {
         expectedNextRunAt =
-          failedAt + AUTOMATION_RETRY_BASE_MS * 2 ** (failure - 1);
+          failedAt + AUTOMATION_RETRY_DELAYS_MS[failure - 1]!;
         expect(current?.enabled).toBe(true);
         expect(current?.nextRunAt).toBe(expectedNextRunAt);
       } else {
         expect(current?.enabled).toBe(false);
-        expect(current?.nextRunAt).toBeNull();
+        expect(current?.nextRunAt).toBe(failedAt + 60 * 60_000);
         expect(current?.lastError).toContain(
           "paused after 3 consecutive failures",
         );
@@ -642,11 +642,11 @@ describe("automation data access", () => {
       expect(current?.consecutiveFailures).toBe(failure);
       if (failure < 3) {
         expectedNextRunAt =
-          failedAt + AUTOMATION_RETRY_BASE_MS * 2 ** (failure - 1);
+          failedAt + AUTOMATION_RETRY_DELAYS_MS[failure - 1]!;
         expect(current?.nextRunAt).toBe(expectedNextRunAt);
       } else {
         expect(current?.enabled).toBe(false);
-        expect(current?.nextRunAt).toBeNull();
+        expect(current?.nextRunAt).toBe(failedAt + 60 * 60_000);
       }
     }
   });

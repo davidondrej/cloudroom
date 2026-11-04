@@ -37,6 +37,7 @@ const RESTART_RETRY_DELAY_MS = 5_000;
 export const MAX_RETRY_ATTEMPTS = 5;
 
 export type RetryDeclineReason =
+  | "machine-restarted"
   | "not-retryable"
   | "no-rate-limit-state"
   | "not-resettable"
@@ -114,6 +115,10 @@ export function overloadedSendAtMs(args: {
  */
 export function decideRetry(input: RetryPolicyInput): RetryDecision {
   const { failure } = input;
+  // A turn that was running when the computer crashed may be what crashed it.
+  if (failure.turnStartedBeforeBoot) {
+    return { kind: "decline", reason: "machine-restarted" };
+  }
   if (failure.attemptNumber >= MAX_RETRY_ATTEMPTS) {
     return { kind: "decline", reason: "attempts-exhausted" };
   }

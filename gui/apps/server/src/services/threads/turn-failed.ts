@@ -18,6 +18,7 @@ import {
   type Thread,
   type TurnRequestEventData,
 } from "@cloudroom/domain";
+import os from "node:os";
 import type { PluginTurnFailedEvent } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import { parseStoredTurnRequestEvent } from "./thread-events.js";
@@ -48,6 +49,7 @@ function parseRowData(row: StoredThreadEventDataRow): unknown {
 export interface FailedTurnRecord {
   request: TurnRequestEventData;
   requestSequence: number;
+  requestedAt: number;
 }
 
 /**
@@ -70,6 +72,7 @@ export function loadFailedTurn(
     return {
       request: parseStoredTurnRequestEvent(row),
       requestSequence: row.sequence,
+      requestedAt: row.createdAt,
     };
   } catch {
     return null;
@@ -190,6 +193,9 @@ export function buildTurnFailedEvent(
     rateLimits: latestRateLimits(db, thread),
     attemptNumber: retryChain(failed.request).attemptNumber,
     interruptionReason: interruptionReason(db, { threadId, failed }),
+    turnStartedBeforeBoot:
+      thread.executionTarget !== "cloud" &&
+      failed.requestedAt < Date.now() - os.uptime() * 1_000,
   };
 }
 

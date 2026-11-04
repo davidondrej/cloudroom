@@ -261,6 +261,12 @@ export interface PluginTurnFailedEvent {
    * the app or its host daemon restarted mid-turn. Null for provider failures.
    */
   interruptionReason: SystemThreadInterruptedReason | null;
+  /**
+   * True when a Local turn started before this computer last booted: the
+   * machine restarted (or crashed) mid-turn. A retry policy should not resume
+   * it on its own, since the turn may be what took the machine down.
+   */
+  turnStartedBeforeBoot: boolean;
 }
 
 /**
