@@ -72,6 +72,17 @@ def codex():
                 if fail == "reject":
                     send({"id": message["id"], "error": {"code": -1, "message": "fixture model listing rejected"}})
                     continue
+                catalog = Path('model-catalog.json')
+                if catalog.exists():
+                    state = json.loads(catalog.read_text())
+                    with Path('model-catalog.calls').open('a') as file: file.write('load\n')
+                    if state.get('failures', 0):
+                        state['failures'] -= 1
+                        catalog.write_text(json.dumps(state))
+                        send({'id': message['id'], 'error': {'code': -1, 'message': 'fixture catalog refresh unavailable'}})
+                        continue
+                    send({'id': message['id'], 'result': {'data': state['models'], 'nextCursor': None}})
+                    continue
                 result = {"data": [
                     {"model": "fixture", "supportedReasoningEfforts": [{"reasoningEffort": level} for level in ["low", "medium", "high", "xhigh", "max"]]},
                     {"model": "basic", "supportedReasoningEfforts": [{"reasoningEffort": "high"}]},
