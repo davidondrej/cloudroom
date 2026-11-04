@@ -23,7 +23,7 @@ const listen = async (server: ReturnType<typeof createServer>) => {
 };
 const body = async (req: import("node:http").IncomingMessage) => { let text = ""; for await (const chunk of req) text += chunk; return text ? JSON.parse(text) : {}; };
 // The wake triggers the website accepts. It refuses any other with a 400, so a new one needs the website first.
-const TRIGGERS = [undefined, "retry", "thread_view", "thread_typing", "sidebar_preload"];
+const TRIGGERS = [undefined, "retry", "thread_view", "thread_typing", "sidebar_preload", "teleport_local"];
 const waitFor = async (check: () => boolean, label: string, ms = 5_000) => {
   for (let i = 0; i < ms / 25 && !check(); i++) await new Promise(resolve => setTimeout(resolve, 25));
   if (!check()) throw new Error(`timed out: ${label}`);
@@ -78,7 +78,8 @@ it("out of credits, Teleport to Local still asks the website, then moves the thr
     await waitFor(() => wakes.length > 0, "a delivery wake refused for the limit");
     expect(texts()).toEqual(["Run the orchestrator for the main project", "Out of credits, keep going locally"]);
 
-    // The thread now waits out a backoff. Each click on Teleport still asks the website, as a fresh wake.
+    // The thread now waits out a backoff. Each click on Teleport still asks the website, as work leaving Cloud, which the
+    // website may let past the limit. Here it refuses anyway (say, today's exit is used up).
     for (let click = 1; click <= 2; click++) {
       const before = wakes.length;
       const refused = await teleport({ action: "local" });
@@ -86,7 +87,7 @@ it("out of credits, Teleport to Local still asks the website, then moves the thr
       const error = await refused.json() as { code: string; message: string };
       expect(error.code).toBe("teleport_cloud_unavailable");
       expect(error.message).toContain(limit);
-      expect(wakes.slice(before)).toEqual([{ thread: thread.id, trigger: undefined }]);
+      expect(wakes.slice(before)).toEqual([{ thread: thread.id, trigger: "teleport_local" }]);
     }
     expect(getThread(harness.deps.db, thread.id)?.executionTarget).toBe("cloud");
 
@@ -115,7 +116,7 @@ it("out of credits, Teleport to Local still asks the website, then moves the thr
     const neighbor = createThread(harness.deps.db, harness.deps.hub, { executionTarget: "cloud", projectId: project.id, providerId: "claude-code", status: "idle" });
     harness.deps.db.insert(cloudroomThreads).values({ threadId: neighbor.id, coreUrl: `sandbox:${thread.id}`, sessionId: "cr_1", startRequestId: "start_1", model: "claude-opus-5-5", reasoning: "high" }).run();
     refusing = false;
-    service.sandboxes.retryNow(thread.id);
+    (service.sandboxes as unknown as { backoff: Map<string, unknown> }).backoff.clear();
     await service.wakeAhead(neighbor.id, "thread_view");
     expect(core.filter(path => path.startsWith("/v1/sessions/cr_0"))).toEqual(["/v1/sessions/cr_0/close"]);
     expect(core.findIndex(path => path === "/v1/sessions/cr_0/close")).toBe(0);
