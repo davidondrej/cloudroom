@@ -1023,6 +1023,31 @@ export function VoiceActionRowRecommendation() {
   );
 }
 
+function SuggestionPromptBox() {
+  const [value, setValue] = useState("");
+  return (
+    <PromptBoxInternal
+      value={value}
+      mentionRanges={[]}
+      onChange={setValue}
+      onSubmit={noop}
+      typeahead={makeTypeahead()}
+      mentionMenuPlacement="bottom"
+      submission={makeSubmission()}
+      ghostText="Run the tests and fix any failures"
+    />
+  );
+}
+
+// Keyboards accept with Tab; touch devices get a "Tap to use" chip.
+export function Suggestion() {
+  return (
+    <div className="w-full max-w-4xl p-4">
+      <SuggestionPromptBox />
+    </div>
+  );
+}
+
 export function Overview() {
   return (
     <StoryCard>
