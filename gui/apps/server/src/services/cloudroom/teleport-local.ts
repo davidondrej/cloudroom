@@ -44,7 +44,8 @@ import { CloudroomError, type CloudroomClient } from "./client.js";
 import { BUDGET_LIMIT, startRefused } from "./sandboxes.js";
 import { SKIPPED } from "./project-copy.js";
 import { cloudForkPoint, FORK_HARNESSES, isFiles, localCheckpoint, sourceCode } from "./fork.js";
-import { binding, localTeleports, teleportProgress } from "./store.js";
+import { abandonSession, binding, localTeleports, teleportProgress, unstartedTurn } from "./store.js";
+import { retractStillQueuedPrompts } from "./events.js";
 
 type Harness = "codex" | "pi" | "claude-code" | "acp-cursor" | "acp-opencode";
 const VM_SESSIONS: Record<Harness, string> = {
@@ -115,7 +116,7 @@ async function run(deps: AppDeps, threadId: string, step: (value: TeleportLocalS
     }
     throw error instanceof ApiError ? error : new ApiError(503, error instanceof CloudroomError && error.code ? error.code : "cloudroom_unavailable", `${publicError(error)} The thread stays in Cloud.`);
   });
-  if (!client) return moveWithoutCloud(deps, thread, environment, step);
+  if (!client) return moveWithoutCloud(deps, thread, { coreUrl: saved.coreUrl, sessionId: saved.sessionId }, environment, step);
 
   await cloudroom(deps).control(threadId, "stop");
   await waitUntilStopped(client, saved.sessionId);
@@ -150,18 +151,27 @@ async function run(deps: AppDeps, threadId: string, step: (value: TeleportLocalS
 
 /** Moves a thread whose sandbox can't start, so its session file and changed files can't come along. The local agent
  *  starts a fresh session that gets the conversation so far, like after a harness switch, and messages that never
- *  reached the cloud go with the thread. The sleeping sandbox keeps the cloud session and its files. */
-async function moveWithoutCloud(deps: AppDeps, thread: Thread, environment: { id: string; path: string }, step: (value: TeleportLocalStep) => void): Promise<{ conflicts: number }> {
+ *  reached the cloud go with the thread. The sleeping sandbox keeps the cloud session's files; the session itself is
+ *  closed the next time the app reaches that sandbox, so its old work never runs there. */
+async function moveWithoutCloud(deps: AppDeps, thread: Thread, saved: { coreUrl: string; sessionId: string }, environment: { id: string; path: string }, step: (value: TeleportLocalStep) => void): Promise<{ conflicts: number }> {
+  // Before any await: from here on, delivery leaves the sandbox alone (see leavingCloud in commands.ts).
   step("switching");
+  // A message sent to the idle thread shows as its next turn before it is delivered. It goes to the local queue
+  // instead, so it is sent once, after the conversation so far.
+  const turn = unstartedTurn(deps.db, thread.id);
+  if (turn?.state === "sending") retractStillQueuedPrompts(deps.db, thread.id, [turn.id]);
   const seed = await historySeed(deps, thread, `[Cloudroom] This conversation ran in a Cloud sandbox that could not start, so it moved to the user's ${computer} without its cloud session. You now work in ${environment.path}. Changes the cloud agent did not push stayed in Cloud.`);
-  switchToLocal(deps, thread, environment.id, cloudroom(deps).queue(thread.id, true), (tx) => appendThreadEventInTransaction(tx, {
-    threadId: thread.id, environmentId: environment.id, type: "system/operation", scope: threadScope(),
-    data: {
-      operation: THREAD_HARNESS_SWITCH_OPERATION, operationId: createEventId(), status: "completed",
-      message: `Moved to this ${computer} without the cloud session.`,
-      metadata: { from: thread.providerId, to: thread.providerId, seed },
-    },
-  }));
+  switchToLocal(deps, thread, environment.id, cloudroom(deps).queue(thread.id, true), (tx) => {
+    abandonSession(tx, thread.id, saved.coreUrl, saved.sessionId);
+    appendThreadEventInTransaction(tx, {
+      threadId: thread.id, environmentId: environment.id, type: "system/operation", scope: threadScope(),
+      data: {
+        operation: THREAD_HARNESS_SWITCH_OPERATION, operationId: createEventId(), status: "completed",
+        message: `Moved to this ${computer} without the cloud session.`,
+        metadata: { from: thread.providerId, to: thread.providerId, seed },
+      },
+    });
+  });
   return { conflicts: 0 };
 }
 
