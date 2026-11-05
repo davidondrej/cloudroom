@@ -150,7 +150,7 @@ export function useCloudAutomations(): {
       // A project loop (no thread hosts it) opens its project.
       onOpen: (a) => a.thread_id.startsWith("proj_") ? navigate.toProject(a.thread_id) : navigate.toThread(a.thread_id),
       onRun: (a) =>
-        void act({ action: "run", id: a.id }, "Runs within a minute"),
+        void act({ action: "run", id: a.id }, "Starting now"),
       onNewUrl: (a) =>
         void replaceWebhookUrl(
           async () =>

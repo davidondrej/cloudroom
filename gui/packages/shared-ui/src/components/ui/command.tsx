@@ -33,22 +33,49 @@ const CommandDialog = ({ children, ...props }: DialogProps) => {
   );
 };
 
+type CommandInputProps = React.ComponentPropsWithoutRef<
+  typeof CommandPrimitive.Input
+> & {
+  /** Faint completion right after the typed text, like a shell suggestion. */
+  ghost?: string;
+};
+
 const CommandInput = React.forwardRef<
   React.ElementRef<typeof CommandPrimitive.Input>,
-  React.ComponentPropsWithoutRef<typeof CommandPrimitive.Input>
->(({ className, ...props }, ref) => (
-  <div className="flex items-center border-b px-3" cmdk-input-wrapper="">
-    <Search data-icon-root="" className="mr-2 h-4 w-4 shrink-0 opacity-50" />
-    <CommandPrimitive.Input
-      ref={ref}
-      className={cn(
-        "flex h-10 w-full rounded-md bg-transparent py-3 text-sm outline-none placeholder:text-muted-foreground disabled:cursor-not-allowed disabled:opacity-50",
-        className,
+  CommandInputProps
+>(({ className, ghost, ...props }, ref) => {
+  const inputClassName = cn(
+    "flex h-10 w-full rounded-md bg-transparent py-3 text-sm outline-none placeholder:text-muted-foreground disabled:cursor-not-allowed disabled:opacity-50",
+    className,
+  );
+  const input = (
+    <CommandPrimitive.Input ref={ref} className={inputClassName} {...props} />
+  );
+  return (
+    <div className="flex items-center border-b px-3" cmdk-input-wrapper="">
+      <Search data-icon-root="" className="mr-2 h-4 w-4 shrink-0 opacity-50" />
+      {ghost === undefined ? (
+        input
+      ) : (
+        <div className="relative flex min-w-0 flex-1">
+          {input}
+          {ghost ? (
+            <div
+              aria-hidden
+              className={cn(
+                inputClassName,
+                "pointer-events-none absolute inset-0 items-center overflow-hidden whitespace-pre py-0",
+              )}
+            >
+              <span className="invisible">{props.value}</span>
+              <span className="text-foreground opacity-40">{ghost}</span>
+            </div>
+          ) : null}
+        </div>
       )}
-      {...props}
-    />
-  </div>
-));
+    </div>
+  );
+});
 
 CommandInput.displayName = CommandPrimitive.Input.displayName;
 

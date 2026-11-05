@@ -68,6 +68,21 @@ pub(super) async fn models(handle: &Handle) -> io::Result<Vec<super::Model>> {
     }
 }
 
+const PLAIN_CHAT: &str = "request_user_input and request_user_input_async don't reach the user; ask in plain chat instead.";
+
+/// Plain-chat questions (ADR 0108) for every thread Codex builds: start, resume, fork, rewind.
+/// Codex 0.163+ drops both question tools with these keys. 0.153-0.162 still offer
+/// request_user_input_async, which returns accepted:true though no question reaches the user
+/// (#885), so the instructions say so too.
+fn plain_chat(handle: &Handle, params: &mut Value) {
+    params["config"]["features.default_mode_request_user_input"] = json!(false);
+    params["config"]["tools.experimental_request_user_input.enabled"] = json!(false);
+    params["developerInstructions"] = json!(match &handle.system_prompt {
+        Some(system_prompt) => format!("{PLAIN_CHAT}\n\n{system_prompt}"),
+        None => PLAIN_CHAT.to_owned(),
+    });
+}
+
 /// Starts, resumes, or (for a side chat) forks the session's thread. A fork only reads its source.
 pub(super) async fn start(handle: &Handle, fork: Option<&super::Fork>) -> io::Result<String> {
     initialize(handle).await?;
@@ -75,9 +90,7 @@ pub(super) async fn start(handle: &Handle, fork: Option<&super::Fork>) -> io::Re
     if let Some(reasoning) = &handle.reasoning {
         params["config"] = json!({"model_reasoning_effort":reasoning});
     }
-    if let Some(system_prompt) = &handle.system_prompt {
-        params["developerInstructions"] = json!(system_prompt);
-    }
+    plain_chat(handle, &mut params);
     if let Some(turn) = fork.and_then(|f| f.last_turn_id.as_ref()) {
         params["lastTurnId"] = json!(turn);
     }
@@ -225,9 +238,7 @@ pub(super) async fn compact(handle: &Handle) -> io::Result<()> {
 pub(super) async fn rewind(handle: &Handle, input: &Value) -> io::Result<Value> {
     // Without these, the fork falls back to Codex's own sandbox, which cannot run in Cloud sandboxes.
     let mut params = json!({"threadId":handle.native()?,"approvalPolicy":"never","sandbox":"danger-full-access"});
-    if let Some(system_prompt) = &handle.system_prompt {
-        params["developerInstructions"] = json!(system_prompt);
-    }
+    plain_chat(handle, &mut params);
     if let Some(id) = input["last_turn_id"]
         .as_str()
         .or_else(|| input["lastTurnId"].as_str())
@@ -709,6 +720,8 @@ struct Tail {
     read_offset: u64,
     committed_offset: u64,
     partial: Vec<u8>,
+    /// Bytes read past of a line over MAX_LINE whose end hasn't shown up yet (#375).
+    skipped: u64,
     more: bool,
 }
 impl Tail {
@@ -719,6 +732,7 @@ impl Tail {
             read_offset: offset,
             committed_offset: offset,
             partial: Vec::new(),
+            skipped: 0,
             more: false,
         }
     }
@@ -750,32 +764,40 @@ impl Tail {
         let parsed = (|| {
             let mut consumed = 0;
             let mut offset = self.committed_offset;
+            let mut skipped = self.skipped;
             while let Some(end) = self.partial[consumed..].iter().position(|b| *b == b'\n') {
-                if end + 1 > MAX_LINE {
-                    return Err(io::Error::other("native history record too large"));
+                let length = skipped + end as u64 + 1;
+                if length > MAX_LINE as u64 {
+                    events.push(super::files::omitted(offset, length));
+                } else {
+                    let line = &self.partial[consumed..consumed + end + 1];
+                    let raw = std::str::from_utf8(line)
+                        .map_err(io::Error::other)?
+                        .to_owned();
+                    events.push(Event::Record {
+                        kind: "native_record",
+                        data: json!({"offset":offset}),
+                        native: Some(raw),
+                    });
                 }
-                let line = &self.partial[consumed..consumed + end + 1];
-                let raw = std::str::from_utf8(line)
-                    .map_err(io::Error::other)?
-                    .to_owned();
-                events.push(Event::Record {
-                    kind: "native_record",
-                    data: json!({"offset":offset}),
-                    native: Some(raw),
-                });
                 consumed += end + 1;
-                offset += line.len() as u64;
+                offset += length;
+                skipped = 0;
             }
-            if self.partial.len() - consumed > MAX_LINE {
-                return Err(io::Error::other("native history record too large"));
+            // A line past MAX_LINE is read past, not buffered, until its end shows up.
+            let rest = (self.partial.len() - consumed) as u64;
+            if skipped + rest > MAX_LINE as u64 {
+                skipped += rest;
+                consumed = self.partial.len();
             }
-            Ok((consumed, offset))
+            Ok((consumed, offset, skipped))
         })();
         match parsed {
-            Ok((consumed, offset)) => {
+            Ok((consumed, offset, skipped)) => {
                 self.partial.drain(..consumed);
                 self.read_offset += n as u64;
                 self.committed_offset = offset;
+                self.skipped = skipped;
                 self.more = n > 0;
                 Ok(events)
             }

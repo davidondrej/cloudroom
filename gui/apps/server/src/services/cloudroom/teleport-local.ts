@@ -144,9 +144,22 @@ async function run(deps: AppDeps, threadId: string, step: (value: TeleportLocalS
   deps.hub.notifyThread(threadId, ["status-changed", "queue-changed"]);
   deps.hub.notifyProject(thread.projectId, ["threads-changed"]);
   requestQueuedMessageDispatch(deps, { kind: "thread-ready", threadId });
+  void markLocal(deps, threadId, saved.sessionId);
   await client.close(saved.sessionId, randomUUID()).catch((error: unknown) =>
     deps.logger.warn({ threadId, error }, "Cloud session did not close after Teleport to Local"));
   return { conflicts };
+}
+
+/** Its Cloud subagents report each turn through the website, which would keep sending them to the Cloud session closed
+ *  here, and they would retry forever (2026-11-04). This app tells the thread about them itself now. */
+async function markLocal(deps: AppDeps, threadId: string, session: string): Promise<void> {
+  for (let tries = 1; ; tries++) {
+    try { await cloudroom(deps).sandboxes.markLocal(threadId, session); return; }
+    catch (error) {
+      if (tries === 3) { deps.logger.warn({ threadId, error }, "Cloud did not save the move to the Mac"); return; }
+      await new Promise((resolve) => setTimeout(resolve, tries * 2000));
+    }
+  }
 }
 
 function requireThisMac(deps: AppDeps, requested: CreateThreadEnvironmentArgs): void {

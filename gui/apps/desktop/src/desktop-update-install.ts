@@ -10,6 +10,8 @@ export interface IdleInstallArgs {
   isUpdateDownloaded(): boolean;
   systemIdleSeconds(): number;
   hasRunningThreads(): Promise<boolean>;
+  /** False: never install by itself, only when a window asks (`report` returns true). */
+  autoInstall?: boolean;
   report?(installAt: number | null): Promise<boolean>;
   install(): Promise<void>;
   now?: () => number;
@@ -34,10 +36,11 @@ export function startIdleInstall(args: IdleInstallArgs): {
       }
       const running = await args.hasRunningThreads().catch(() => true);
       if (running) busyAt = now();
-      const installAt = running
-        ? null
-        : Math.max(busyAt, now() - args.systemIdleSeconds() * 1000) +
-          IDLE_INSTALL_AFTER_MS;
+      const installAt =
+        running || args.autoInstall === false
+          ? null
+          : Math.max(busyAt, now() - args.systemIdleSeconds() * 1000) +
+            IDLE_INSTALL_AFTER_MS;
       const requested = (await args.report?.(installAt).catch(() => false)) ?? false;
       if (!requested && (installAt === null || now() < installAt)) return;
       installing = true;
@@ -51,19 +54,44 @@ export function startIdleInstall(args: IdleInstallArgs): {
   return { check, stop: () => clearInterval(timer) };
 }
 
-const REOPEN_SCRIPT = `
+// Our own ShipIt: a process named ShipIt with our launchd job label ("<bundle id>.ShipIt", Squirrel's
+// SQRLShipItLauncher) as one argument, so another app's ShipIt doesn't count. A ShipIt running as root
+// (a password install) counts too, since this user may not see its arguments.
+const OUR_SHIPIT = `
 id=$(defaults read "$1/Contents/Info" CFBundleIdentifier) || exit 1
-running() { [ -n "$(lsappinfo find bundleid="$id")" ]; }
+shipit() {
+  for p in $(pgrep -x ShipIt); do
+    case "$(ps -o uid= -p "$p" | tr -d ' ') $(ps -o args= -p "$p") " in "0 "* | *" $id.ShipIt "*) return 0 ;; esac
+  done
+  return 1
+}
+`;
+
+const REOPEN_SCRIPT = `${OUR_SHIPIT}running() { [ -n "$(lsappinfo find bundleid="$id")" ]; }
 for _ in $(seq 1800); do kill -0 "$2" 2>/dev/null || break; sleep 1; done
 sleep 5
 for _ in $(seq 100); do
   running && exit 0
-  pgrep -x ShipIt >/dev/null || break
+  shipit || break
   sleep 3
 done
 sleep 5
 running || open "$1"
 `;
+
+/** Squirrel.Mac is still installing an update into this app. */
+export function shipItRunning(execPath: string): Promise<boolean> {
+  const bundle = macAppBundle(execPath);
+  if (bundle === null) return Promise.resolve(false);
+  return new Promise((resolve) => {
+    execFile(
+      "/bin/sh",
+      ["-c", `${OUR_SHIPIT}shipit`, "sh", bundle],
+      { timeout: 5_000 },
+      (error) => resolve(error === null),
+    );
+  });
+}
 
 export function macAppBundle(execPath: string): string | null {
   return /^(.+?\.app)\/Contents\/MacOS\/[^/]+$/u.exec(execPath)?.[1] ?? null;

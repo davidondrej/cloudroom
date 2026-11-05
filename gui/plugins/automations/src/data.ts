@@ -873,6 +873,8 @@ export function closeAutomationRun(
     output?: string | null;
     exitCode?: number | null;
     threadId?: string | null;
+    /** A stopped or unreadable run says nothing about the loop's health. */
+    keepFailureStreak?: boolean;
     now: number;
   },
 ): { run: AutomationRunRow; automationId: string } | null {
@@ -924,7 +926,7 @@ export function closeAutomationRun(
     } else {
       db.prepare(
         `UPDATE automations SET
-           consecutive_failures = 0,
+           consecutive_failures = CASE WHEN @keep THEN consecutive_failures ELSE 0 END,
            last_run_status = @status,
            last_run_thread_id = CASE
              WHEN @threadId IS NOT NULL THEN @threadId
@@ -937,6 +939,7 @@ export function closeAutomationRun(
         automationId: existing.automationId,
         status: args.status,
         threadId: args.threadId ?? null,
+        keep: args.keepFailureStreak ? 1 : 0,
         now: args.now,
       });
     }

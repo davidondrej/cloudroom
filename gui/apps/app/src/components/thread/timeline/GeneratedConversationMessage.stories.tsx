@@ -161,6 +161,28 @@ const SYSTEM_ROWS: readonly SystemRowFixture[] = [
     text: "[Cloudroom] Child thread \"Clean up old docs\" (cr_child_9f2a) failed or its outcome is uncertain. Cause: process exited with signal 9. Signal 9 usually means the sandbox ran out of memory. Its turn did not finish; resend the task if it still matters. Check it with `room-cli thread output cr_child_9f2a` before deciding next steps.",
   },
   {
+    label: "Cloud child-failed: Codex login",
+    hint: "A child that never started on its Codex login gets a Sign in button; the raw cause is under the chevron",
+    systemMessageKind: "child-failed",
+    systemMessageSubject: {
+      kind: "thread",
+      threadId: "thr_child7",
+      threadName: "GPT review: Cursor accounts",
+    },
+    text: '[Cloudroom] Child thread "GPT review: Cursor accounts" (thr_child7) failed or its outcome is uncertain. Cause: Connect your ChatGPT subscription to use Codex in Cloud. Your prompt is saved. It did not start.',
+  },
+  {
+    label: "Cloud child-failed: other login",
+    hint: "A login Cloudroom can't redo here (Pi's ChatGPT token): plain words, no Sign in button",
+    systemMessageKind: "child-failed",
+    systemMessageSubject: {
+      kind: "thread",
+      threadId: "thr_child8",
+      threadName: "GPT review: Cursor accounts",
+    },
+    text: '[Cloudroom] Child thread "GPT review: Cursor accounts" (cr_child_6afa) failed or its outcome is uncertain. Cause: OAuth refresh failed for openai-codex: OpenAI Codex token refresh failed (401): {"error":{"code":"refresh_token_reused"}}. Its turn did not finish; resend the task if it still matters. Check it with `room-cli thread output cr_child_6afa` before deciding next steps.',
+  },
+  {
     label: "Cloud child-interrupted",
     hint: "Core's notice text; title only",
     systemMessageKind: "child-interrupted",
@@ -200,6 +222,7 @@ export function Overview() {
               attachments={null}
               mentions={row.mentions ?? []}
               projectId="proj_demo"
+              threadId="thr_parent"
               turnRequest={acceptedMessage}
             />
           </TimelineStage>

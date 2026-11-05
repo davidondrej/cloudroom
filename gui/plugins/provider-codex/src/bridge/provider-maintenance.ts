@@ -2,6 +2,7 @@ import { realpath } from "node:fs/promises";
 import { sep } from "node:path";
 import {
   type ProviderHealthResult,
+  type ProviderInstallationCommand,
   type ProviderInstallationRunResult,
   type ProviderInstallationStatus,
   type ProviderUsage,
@@ -38,6 +39,32 @@ const CODEX_NPM_PACKAGE = "@openai/codex";
 // prompts, and installs to ~/.codex/packages/standalone, which Cloudroom then prefers.
 const CODEX_OFFICIAL_INSTALL =
   "curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_NON_INTERACTIVE=1 sh";
+// Windows has no sh, and most Windows PCs have no Node, so npm fails there (#475). OpenAI's
+// PowerShell installer needs neither. PowerShell gets it as one argument, never through cmd.exe.
+const CODEX_WINDOWS_INSTALL =
+  "$env:CODEX_NON_INTERACTIVE='1'; irm https://chatgpt.com/codex/install.ps1 | iex";
+
+/** OpenAI's own installer, run when npm can't install or update Codex. */
+function codexOfficialInstaller(): ProviderInstallationCommand {
+  return process.platform === "win32"
+    ? {
+        command: "powershell.exe",
+        args: [
+          "-NoProfile",
+          "-NonInteractive",
+          "-ExecutionPolicy",
+          "Bypass",
+          "-Command",
+          CODEX_WINDOWS_INSTALL,
+        ],
+        displayCommand: CODEX_WINDOWS_INSTALL,
+      }
+    : {
+        command: "sh",
+        args: ["-c", CODEX_OFFICIAL_INSTALL],
+        displayCommand: CODEX_OFFICIAL_INSTALL,
+      };
+}
 
 function fetchCodexUsage(headers: Headers): Promise<Response> {
   return fetchWithProxyFallback((init) =>
@@ -208,15 +235,7 @@ function buildCodexProviderInstallationRun(
         ? codexUpdateCommand(status.executablePath, npmPrefix)
         : npmGlobalInstallCommand(CODEX_NPM_PACKAGE),
     verification: installationVerification(status, action),
-    ...(process.platform === "win32"
-      ? {}
-      : {
-          fallback: {
-            command: "sh",
-            args: ["-c", CODEX_OFFICIAL_INSTALL],
-            displayCommand: CODEX_OFFICIAL_INSTALL,
-          },
-        }),
+    fallback: codexOfficialInstaller(),
   };
 }
 

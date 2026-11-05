@@ -1,20 +1,23 @@
-import { COMPUTER } from "@cloudroom/domain";
+import { COMPUTER, findLocalPathProjectSourceForHost, PERSONAL_PROJECT_ID, type GitBranchSelection, type PromptInput } from "@cloudroom/domain";
 import { execFile } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { readFile, rm } from "node:fs/promises";
 import { basename } from "node:path";
 import { promisify } from "node:util";
 import { and, asc, eq } from "drizzle-orm";
-import { events, findLastCompletedRootStoredTurn, findLastRootStoredTurnStarted, getEnvironment, getThread, listStoredTurnCompletedRowsByTurnIds, type DbConnection } from "@cloudroom/db";
+import { events, findLastCompletedRootStoredTurn, findLastRootStoredTurnStarted, getEnvironment, getThread, listProjectSourcesByProjectIds, listStoredTurnCompletedRowsByTurnIds, type DbConnection } from "@cloudroom/db";
 import type { Thread } from "@cloudroom/domain";
 import { gitShell, msysPathToWindows } from "@cloudroom/process-utils";
 import { z } from "zod";
+import type { CreateThreadEnvironmentArgs } from "@cloudroom/server-contract";
 import type { AppDeps } from "../../types.js";
 import { ApiError } from "../../errors.js";
 import { resolveThreadForkPoint } from "../threads/thread-fork-history.js";
 import { getLastExecutionOptions } from "../threads/thread-events.js";
 import { runLiveHostCommand } from "../hosts/live-command.js";
 import { resolvePrimaryHostId } from "../hosts/primary-host.js";
+import { DEFAULT_ENVIRONMENT_PROVIDER_ID } from "../environments/environment-provider-ids.js";
+import { worktreeProviderInputs } from "../threads/thread-environment-placement.js";
 import { workspaceContextFromPath } from "../environments/workspace-command-target.js";
 import { CloudroomError, UPLOAD_PART, type CloudroomClient, type Harness, type TeleportManifest } from "./client.js";
 import { cloudroom } from "./commands.js";
@@ -343,24 +346,61 @@ export async function sourceCode(from: CloudroomClient, workspace: string, id: s
   }, workspace, id);
 }
 
+/** Runs a script on this computer. Windows uses Git for Windows' shell, which prints MSYS paths such as `/c/Users/…`. */
+async function localShell(script: string): Promise<string> {
+  if (process.platform !== "win32") return (await exec("sh", ["-c", script], { maxBuffer: 1024 * 1024 })).stdout;
+  const shell = await gitShell();
+  return (await exec(shell.command, ["-c", script], { env: shell.env, maxBuffer: 1024 * 1024 })).stdout;
+}
+
 async function localCode(workspace: string, id: string): Promise<Code | null> {
   if (await exec("git", ["-C", workspace, "rev-parse", "-q", "--verify", "HEAD"]).then(() => false, () => true)) return null;
-  if (process.platform === "win32") return windowsLocalCode(workspace, id);
+  const windows = process.platform === "win32";
   return packCode({
-    run: async (script) => (await exec("sh", ["-c", script], { maxBuffer: 1024 * 1024 })).stdout,
-    read: async (path) => (await exec("cat", [path], { encoding: "buffer", maxBuffer: 1024 * 1024 * 1024 })).stdout,
-    remove: (path) => exec("rm", ["-f", path]),
+    run: localShell,
+    read: async (path) => windows ? readFile(msysPathToWindows(path)) : (await exec("cat", [path], { encoding: "buffer", maxBuffer: 1024 * 1024 * 1024 })).stdout,
+    remove: (path) => windows ? rm(msysPathToWindows(path), { force: true }) : exec("rm", ["-f", path]),
   }, workspace, id);
 }
 
-/** Windows runs the same script with Git for Windows' shell, which prints MSYS paths such as `/c/Users/…`. */
-async function windowsLocalCode(workspace: string, id: string): Promise<Code | null> {
-  const shell = await gitShell();
-  return packCode({
-    run: async (script) => (await exec(shell.command, ["-c", script], { env: shell.env, maxBuffer: 1024 * 1024 })).stdout,
-    read: (path) => readFile(msysPathToWindows(path)),
-    remove: (path) => rm(msysPathToWindows(path), { force: true }),
-  }, workspace, id);
+/** A Local fork in a new worktree starts from the source folder's code, uncommitted work included, so the two threads
+ *  never edit the same files. Every Local fork (fork button, plugin, CLI) passes here. It falls back to the source's
+ *  folder when a worktree can't hold that code: a personal thread, no Git commits, or a folder outside the project's
+ *  repo. A named base branch or a source on another machine is left as asked. */
+export async function prepareLocalForkWorktree(deps: AppDeps, source: Thread, projectId: string, requested: CreateThreadEnvironmentArgs): Promise<{ environment: CreateThreadEnvironmentArgs; note: PromptInput | null }> {
+  const base: GitBranchSelection | null = requested.type === "provider" && requested.environmentProviderId === DEFAULT_ENVIRONMENT_PROVIDER_ID.gitWorktree
+    ? (requested.inputs as { branch?: GitBranchSelection } | null)?.branch ?? { kind: "default" }
+    : requested.type === "host" && requested.workspace.type === "managed-worktree" ? requested.workspace.baseBranch : null;
+  const folder = source.environmentId ? getEnvironment(deps.db, source.environmentId) : null;
+  if (!base || base.kind === "named" || !folder?.path || !folder.hostId || folder.hostId !== resolvePrimaryHostId(deps)) return { environment: requested, note: null };
+  const checkout = projectId === PERSONAL_PROJECT_ID ? undefined
+    : findLocalPathProjectSourceForHost(listProjectSourcesByProjectIds(deps.db, [projectId]), folder.hostId)?.path;
+  const branch = checkout ? await localForkBranch(folder.path, checkout) : null;
+  if (!branch) return { environment: { type: "reuse", environmentId: folder.id }, note: null };
+  const named = { kind: "named", name: branch } as const;
+  return {
+    environment: requested.type === "host" ? { ...requested, workspace: { type: "managed-worktree", baseBranch: named } } : requested.type === "provider" ? { ...requested, inputs: worktreeProviderInputs(named) } : requested,
+    note: { type: "text", text: `[Local fork]\nThis fork runs in its own new worktree on branch ${branch}, not the source thread's folder. The last commit, "Cloudroom fork: uncommitted changes", holds the work the source thread had not committed.`, mentions: [], visibility: "agent-only" },
+  };
+}
+
+/** The source folder's commits plus its uncommitted work as one extra commit, on a new branch. The source folder is
+ *  untouched. Null when the folder has no Git commits or is not in the same repo as the project's `checkout`. */
+export async function localForkBranch(workspace: string, checkout: string): Promise<string | null> {
+  const branch = `cloudroom/fork-${randomUUID().replaceAll("-", "").slice(0, 12)}`;
+  const repo = (path: string) => `$(cd ${quote(path)} && cd "$(git rev-parse --git-common-dir)" && pwd -P)`;
+  try {
+    const out = await localShell([
+      `cd ${quote(workspace)} && git rev-parse -q --verify HEAD >/dev/null 2>&1 || exit 0`,
+      `[ "${repo(workspace)}" = "${repo(checkout)}" ] 2>/dev/null || exit 0`,
+      ...snapshotScript(`refs/heads/${branch}`, true),
+      "echo ok",
+    ].join("\n"));
+    return out.trim() === "ok" ? branch : null;
+  } catch (error) {
+    const reason = error instanceof Error && "stderr" in error ? String(error.stderr).trim() : "";
+    throw new ApiError(409, "fork_code_unavailable", `The source thread's code could not be copied to the fork: ${reason || "git failed"}`);
+  }
 }
 
 async function packCode(at: { run: (script: string) => Promise<string>; read: (path: string) => Promise<Buffer>; remove: (path: string) => Promise<unknown> }, workspace: string, id: string): Promise<Code | null> {
@@ -383,6 +423,18 @@ async function packCode(at: { run: (script: string) => Promise<string>; read: (p
   };
 }
 
+/** Commits the folder's uncommitted work on top of HEAD to `ref`. A temporary index keeps the folder's own staging
+ *  area as it was (an empty file is not a valid index). `keep: false` deletes the ref when the script exits. */
+function snapshotScript(ref: string, keep: boolean): string[] {
+  return [
+    `index=$(mktemp) && rm -f "$index" && trap 'rm -f "$index"${keep ? "" : `; git update-ref -d ${ref} 2>/dev/null`}' EXIT`,
+    `cp "$(git rev-parse --git-path index)" "$index" 2>/dev/null`,
+    `GIT_INDEX_FILE="$index" git add -A >/dev/null 2>&1 && tree=$(GIT_INDEX_FILE="$index" git write-tree) || exit 1`,
+    `commit=$(git -c user.name=Cloudroom -c user.email=cloudroom@localhost commit-tree "$tree" -p HEAD -m 'Cloudroom fork: uncommitted changes') || exit 1`,
+    `git update-ref ${ref} "$commit" || exit 1`,
+  ];
+}
+
 function codeScript(workspace: string, id: string, thin: boolean): string {
   const ref = `refs/cloudroom/${id}`;
   return [
@@ -392,12 +444,8 @@ function codeScript(workspace: string, id: string, thin: boolean): string {
     // vanishes while packing (a log) is only a warning: tar exits 1 for it.
     `  l="$f.list" && find . -mindepth 1 \\( ${skippedNames()} \\) -prune -o \\( -type f -o -type l \\) -print0 > "$l" && { tar -czf "$f" --ignore-failed-read --warning=no-file-changed --null -T "$l"; [ $? -le 1 ] && [ -s "$f" ]; } && echo "$f"; code=$?; rm -f "$l"; [ $code -eq 0 ] || rm -f "$f"; exit $code`,
     "fi",
-    // A temporary index, so the source's own staging area stays as it was. An empty file is not a valid index.
-    `index=$(mktemp) && rm -f "$index" && trap 'rm -f "$index"; git update-ref -d ${ref} 2>/dev/null' EXIT`,
-    `cp "$(git rev-parse --git-path index)" "$index" 2>/dev/null`,
-    `GIT_INDEX_FILE="$index" git add -A >/dev/null 2>&1 && tree=$(GIT_INDEX_FILE="$index" git write-tree) || exit 1`,
-    `commit=$(git -c user.name=Cloudroom -c user.email=cloudroom@localhost commit-tree "$tree" -p HEAD -m 'Cloudroom fork: uncommitted changes') || exit 1`,
-    `git update-ref ${ref} "$commit" && mkdir -p ~/.cache/cloudroom || exit 1`,
+    ...snapshotScript(ref, false),
+    "mkdir -p ~/.cache/cloudroom || exit 1",
     `f=~/.cache/cloudroom/${id}.bundle`,
     thin
       ? `{ git bundle create -q "$f" ${ref} --not --remotes 2>/dev/null || git bundle create -q "$f" ${ref}; } && echo "$f" || exit 1`

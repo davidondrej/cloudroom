@@ -12,6 +12,12 @@ interface Deps {
 
 let deps: Deps | null = null;
 
+/** Why a Cloud turn failed when the harness left no error of its own: Core's failed state or the prompt's delivery state. */
+export interface CloudFailure {
+  category: string;
+  message?: string | null;
+}
+
 export function installAuthFailureTelemetry(next: Deps): () => void {
   deps = next;
   return () => {
@@ -19,7 +25,7 @@ export function installAuthFailureTelemetry(next: Deps): () => void {
   };
 }
 
-export function noteTurnFailed(threadId: string): void {
+export function noteTurnFailed(threadId: string, cloud?: CloudFailure): void {
   const current = deps;
   if (!current) return;
   setImmediate(() => {
@@ -33,8 +39,8 @@ export function noteTurnFailed(threadId: string): void {
         execution,
         is_child_thread: thread.parentThreadId !== null,
         provider: thread.providerId,
-        error_category: failed?.errorInfo?.category ?? "unknown",
-        ...(process.platform === "win32" ? { error_message: failureText(current.db, threadId, failed?.interruptionReason) } : {}),
+        error_category: failed?.errorInfo?.category ?? cloud?.category ?? "unknown",
+        ...(process.platform === "win32" ? { error_message: failureText(current.db, threadId, failed?.interruptionReason, cloud?.message) } : {}),
       },
     });
     if (failed?.errorInfo?.category !== "unauthorized") return;
@@ -65,12 +71,12 @@ export function noteTurnFailed(threadId: string): void {
   });
 }
 
-function failureText(db: DbConnection, threadId: string, interruption: string | null | undefined): string | null {
+function failureText(db: DbConnection, threadId: string, interruption: string | null | undefined, cloud: string | null | undefined): string | null {
   try {
     const row = getLatestStoredThreadEventOfTypes(db, { threadId, types: ["provider/error", "system/error"], afterSequence: loadFailedTurn(db, threadId)?.requestSequence ?? 0 });
     const data = row ? (JSON.parse(row.data) as { message?: unknown; detail?: unknown }) : {};
     const parts = [data.message, data.detail !== data.message ? data.detail : null].map((part) => (typeof part === "string" ? scrub(part) : null));
-    return parts.filter(Boolean).join(" | ") || (interruption ? `interrupted: ${interruption}` : null);
+    return parts.filter(Boolean).join(" | ") || (cloud ? scrub(cloud) : null) || (interruption ? `interrupted: ${interruption}` : null);
   } catch {
     return null;
   }

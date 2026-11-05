@@ -473,6 +473,30 @@ pub(super) fn transcript(profile: &HarnessConfig, id: &str) -> io::Result<PathBu
     found.ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "Claude transcript is missing"))
 }
 
+/// The next whole transcript line. Lines over MAX_LINE are read past (#375): a scan that needed one fails as not found.
+fn next_line(reader: &mut impl BufRead) -> io::Result<Option<String>> {
+    loop {
+        let mut raw = Vec::new();
+        let n = (&mut *reader)
+            .take((MAX_LINE + 1) as u64)
+            .read_until(b'\n', &mut raw)?;
+        if n == 0 {
+            return Ok(None);
+        }
+        let ended = raw.last() == Some(&b'\n');
+        if n > MAX_LINE {
+            if !ended && files::skip_line(reader)?.is_none() {
+                return Err(io::Error::other("invalid Claude transcript"));
+            }
+            continue;
+        }
+        if !ended {
+            return Err(io::Error::other("invalid Claude transcript"));
+        }
+        return String::from_utf8(raw).map(Some).map_err(io::Error::other);
+    }
+}
+
 pub(super) fn validate(
     profile: &HarnessConfig,
     path: &Path,
@@ -481,18 +505,7 @@ pub(super) fn validate(
 ) -> io::Result<File> {
     let mut file = files::open(&profile.home.join("projects"), path, identity)?;
     let mut reader = BufReader::new(&mut file);
-    loop {
-        let mut raw = String::new();
-        if (&mut reader)
-            .take((MAX_LINE + 1) as u64)
-            .read_line(&mut raw)?
-            == 0
-        {
-            break;
-        }
-        if raw.len() > MAX_LINE || !raw.ends_with('\n') {
-            return Err(io::Error::other("invalid Claude transcript"));
-        }
+    while let Some(raw) = next_line(&mut reader)? {
         let value: Value = serde_json::from_str(&raw)?;
         if value["sessionId"] == id && value["type"] == "user" {
             return Ok(file);
@@ -539,17 +552,7 @@ pub(super) fn checkpoint_parent(
     let file = validate(profile, &saved.path, &saved.id, identity)?;
     let mut reader = BufReader::new(file);
     reader.seek(SeekFrom::Start(0))?;
-    loop {
-        let mut raw = String::new();
-        let n = (&mut reader)
-            .take((MAX_LINE + 1) as u64)
-            .read_line(&mut raw)?;
-        if n == 0 {
-            break;
-        }
-        if n > MAX_LINE || !raw.ends_with('\n') {
-            return Err(io::Error::other("invalid Claude transcript"));
-        }
+    while let Some(raw) = next_line(&mut reader)? {
         let value: Value = serde_json::from_str(&raw)?;
         if value["uuid"] == before && value["type"] == "user" && value["isMeta"] != true {
             let parent = value["parentUuid"].as_str().ok_or_else(|| {
@@ -1404,19 +1407,30 @@ impl Capture {
         let start = self.offset;
         let mut offset = start;
         while offset - start < 65536 {
-            let mut raw = String::new();
+            let mut raw = Vec::new();
             let n = (&mut reader)
                 .take((MAX_LINE + 1) as u64)
-                .read_line(&mut raw)?;
+                .read_until(b'\n', &mut raw)?;
             if n == 0 {
                 break;
             }
             if n > MAX_LINE {
-                return Err(io::Error::other("Claude native record too large"));
+                // Read past, never kept (#375). One still being written waits for its end.
+                let rest = match raw.last() {
+                    Some(b'\n') => 0,
+                    _ => match files::skip_line(&mut reader)? {
+                        Some(rest) => rest,
+                        None => break,
+                    },
+                };
+                events.push(files::omitted(offset, n as u64 + rest));
+                offset += n as u64 + rest;
+                continue;
             }
-            if !raw.ends_with('\n') {
+            if raw.last() != Some(&b'\n') {
                 break;
             }
+            let raw = String::from_utf8(raw).map_err(io::Error::other)?;
             let _: Value = serde_json::from_str(&raw)?;
             events.push(Event::Record {
                 kind: "native_record",

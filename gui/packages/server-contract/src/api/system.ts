@@ -319,6 +319,20 @@ export type SystemInstallCliSkillsResponse = z.infer<
   typeof systemInstallCliSkillsResponseSchema
 >;
 
+export const SKILL_USAGE_RANGES = ["30", "90", "365"] as const;
+export const systemSkillUsageQuerySchema = z.object({
+  days: z.enum(SKILL_USAGE_RANGES).optional(),
+  utcOffsetMinutes: z.string().regex(/^-?\d{1,4}$/).optional(),
+});
+export type SystemSkillUsageQuery = z.infer<typeof systemSkillUsageQuerySchema>;
+
+/** Daily skill runs, oldest day first, most used skill first. */
+export interface SystemSkillUsageResponse {
+  startDate: string;
+  days: number;
+  skills: { name: string; total: number; daily: number[] }[];
+}
+
 export interface SystemWorktreeStorageResponse {
   freeBytes: number | null;
   usedBytes: number | null;

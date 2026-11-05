@@ -292,6 +292,11 @@ builds write `latest-*.yml`, so releases must be marked latest, not prerelease. 
 **Download** when the in-app updater cannot install. Local dev builds skip
 Electron auto-update unless `BB_DESKTOP_AUTO_UPDATE=1` is set.
 
+On Mac, Squirrel.Mac cancels the install ("App Still Running") if the old version opens before it's done,
+e.g. from the Dock right after **Restart to update**. That old version quits once and lets it finish. A restart that
+still leaves the old version shows "The last update didn't install" with Restart and the website **Download**,
+and that run never restarts by itself when idle; a click here, in a browser, or on a phone still does.
+
 Windows reads `latest.yml` from the same release, downloads the `.exe` in the
 background, and runs it silently on quit. **Restart to update** keeps Cloudroom
 open until the installer's progress window shows (the installer then closes it),

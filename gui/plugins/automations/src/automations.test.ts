@@ -42,7 +42,10 @@ import {
   mapScriptResultToRun,
   scriptPathEnv,
 } from "./script-runner.js";
-import { reconcileRunningAutomationRuns } from "./run.js";
+import {
+  closeAutomationRunForSettledThread,
+  reconcileRunningAutomationRuns,
+} from "./run.js";
 import { sweepDueAutomations } from "./sweep.js";
 import { createAutomationService } from "./service.js";
 import { registerAutomationCli } from "./cli.js";
@@ -300,6 +303,10 @@ describe("data migrations", () => {
 describe("startup reconciliation", () => {
   function reconcileBb(threads: {
     get: (args: { threadId: string }) => Promise<unknown>;
+    events?: (args: {
+      threadId: string;
+      types?: readonly string[];
+    }) => Promise<unknown>;
   }) {
     const published: unknown[] = [];
     return {
@@ -307,6 +314,7 @@ describe("startup reconciliation", () => {
         sdk: {
           threads: {
             get: threads.get,
+            events: { list: threads.events ?? (async () => []) },
             send: async () => {
               throw new Error("not expected");
             },
@@ -340,6 +348,20 @@ describe("startup reconciliation", () => {
       deletedAt: extra.deletedAt ?? null,
       archivedAt: extra.archivedAt ?? null,
     };
+  }
+
+  // "r+" starts the root turn ("k+" a child turn), "r:interrupted" ends it,
+  // "stop" is a manual stop and "out" is output.
+  function ev(token: string) {
+    const [turn, status] = token.split(":");
+    const named: Record<string, string> = {
+      stop: "system/thread/interrupted",
+      out: "item/completed",
+    };
+    const type = named[token] ?? (status ? "turn/completed" : "turn/started");
+    const parentToolCallId = turn === "k+" ? "c1" : undefined;
+    const data = { status, reason: "manual-stop", parentToolCallId };
+    return { type, scope: { turnId: turn!.replace("+", "") }, data };
   }
 
   it("settles ghost script runs and threadless agent runs as interrupted", async () => {
@@ -438,6 +460,60 @@ describe("startup reconciliation", () => {
     }
     expect(getAutomation(db, "auto_error")!.consecutiveFailures).toBe(1);
     expect(getAutomation(db, "auto_gone")!.consecutiveFailures).toBe(0);
+  });
+
+  it("skips idle runs the user stopped on their own thread, and only those", async () => {
+    const db = createTestDb();
+    const stopped = "interrupted: manual-stop";
+    // Every row starts at a failure streak of 2; a stop must leave it there.
+    const cases = [
+      ["done", "idle", "r+ out r:completed", "succeeded", 0],
+      ["stopped", "idle", "r+ out stop r:interrupted", stopped, 2],
+      ["restart", "restart", "r+ stop r:interrupted", stopped, 2],
+      ["child", "idle", "r+ k+ stop r:interrupted k:completed", stopped, 2],
+      ["unreadable", "idle", "boom", "outcome unavailable: boom", 2],
+      ["target", "idle", "r+ stop r:interrupted", "succeeded", 0],
+      ["follow_up_failed", "failed", "r+ r:failed", "failed", 3],
+    ] as const;
+    // A loop's target thread predates its runs; a spawned thread does not.
+    const createdAt = (id: string) => (id === "target" ? 0 : 1000);
+    const { bb } = reconcileBb({
+      get: async ({ threadId }) => ({
+        ...thread(threadId, "idle"),
+        createdAt: createdAt(threadId),
+      }),
+      events: async ({ threadId, types }) => {
+        const tokens = cases.find(([id]) => id === threadId)![2];
+        if (tokens === "boom") throw new Error("boom");
+        const events = tokens.split(" ").map(ev);
+        return events.filter((e) => types?.includes(e.type)).reverse();
+      },
+    });
+    for (const [id] of cases) {
+      createScheduledAutomation(db, 0, id);
+      const run = createManualRun(db, {
+        automationId: id,
+        runMode: "agent",
+        now: 1000,
+      }).run;
+      setAutomationRunThread(db, { runId: run.id, threadId: id });
+    }
+    db.exec("UPDATE automations SET consecutive_failures = 2");
+    for (const [threadId, status] of cases) {
+      if (status === "restart") continue;
+      const threadCreatedAt = createdAt(threadId);
+      const args = { threadId, threadCreatedAt, status };
+      await closeAutomationRunForSettledThread(bb, db, args);
+    }
+    await reconcileRunningAutomationRuns(bb, db);
+    const settled = cases.map(([id]) => {
+      const run = listAutomationRuns(db, { automationId: id, limit: 1 })[0]!;
+      const streak = getAutomation(db, id)!.consecutiveFailures;
+      return [id, run.skipReason ?? run.status, streak];
+    });
+    expect(settled).toEqual(
+      cases.map(([id, , , status, streak]) => [id, status, streak]),
+    );
   });
 });
 

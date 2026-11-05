@@ -3,6 +3,7 @@ import type {
   TimelineActivityIntent,
   TimelineConversationAttachments,
   TimelineFileChange,
+  TimelineNonOperationSystemRow,
   TimelineParentChange,
   TimelineRow,
   TimelineRowBase,
@@ -15,6 +16,7 @@ import type {
   TimelineWorkflowWorkRow,
 } from "@cloudroom/server-contract";
 import {
+  THREAD_HARNESS_SWITCH_OPERATION,
   isBackgroundAgentTaskType,
   readTerminalOutputLines,
   type ActiveThinking,
@@ -27,7 +29,6 @@ import {
   type ThreadTimelinePendingTodos,
 } from "@cloudroom/domain";
 import type {
-  EventProjectionErrorMessage,
   EventProjectionFileEditChange,
   EventProjectionMessage,
   EventProjection,
@@ -74,6 +75,7 @@ import {
   buildTimelineErrorDisplay,
   isPlanLimitError,
 } from "./error-display.js";
+import { isTimelineRetryMessage } from "./timeline-message-helpers.js";
 
 interface ThreadTimelineFromEventsBaseOptions {
   completedTurnDisplay: CompletedTurnDisplay;
@@ -361,12 +363,6 @@ function isDelegationLifecycleChildRow(row: TimelineRow): boolean {
 
 function filterDelegationChildRows(childRows: TimelineRow[]): TimelineRow[] {
   return childRows.filter((row) => !isDelegationLifecycleChildRow(row));
-}
-
-function isReconnectErrorMessage(
-  message: EventProjectionErrorMessage,
-): boolean {
-  return message.reconnectAttempt !== undefined || message.willRetry === true;
 }
 
 function toConversationAttachments(
@@ -841,7 +837,7 @@ function convertMessage(
     }
     case "error": {
       const errorDisplay = buildTimelineErrorDisplay(message);
-      const isReconnect = isReconnectErrorMessage(message);
+      const isReconnect = isTimelineRetryMessage(message);
       return [
         {
           ...buildTimelineRowBase(message, options.rowIdPrefix),
@@ -1395,6 +1391,73 @@ function buildTimelineRows(
   );
 }
 
+type PlanLimitSwitch = NonNullable<
+  TimelineNonOperationSystemRow["planLimitSwitch"]
+>;
+
+/** A plan-limit row right before a harness switch says who took over: the first switch's `from`, the last one's `to`. */
+function markPlanLimitSwitches(
+  rows: TimelineRow[],
+  events: readonly ThreadEventWithMeta[],
+): TimelineRow[] {
+  const switches = events.filter(
+    ({ event }) =>
+      event.type === "system/operation" &&
+      event.operation === THREAD_HARNESS_SWITCH_OPERATION,
+  );
+  if (switches.length === 0) return rows;
+  const flat: TimelineRow[] = [];
+  const walk = (list: readonly TimelineRow[]) => {
+    for (const row of list) {
+      flat.push(row);
+      if (row.kind === "turn" && row.children) walk(row.children);
+    }
+  };
+  walk(rows);
+  const marks = new Map<string, PlanLimitSwitch>();
+  for (const { event, meta } of switches) {
+    if (event.type !== "system/operation") continue;
+    const { from, to, resend } = event.metadata ?? {};
+    if (typeof from !== "string" || typeof to !== "string") continue;
+    let before: TimelineRow | undefined;
+    for (const row of flat) {
+      if (row.sourceSeqEnd >= meta.seq) continue;
+      if (
+        !before ||
+        row.sourceSeqEnd > before.sourceSeqEnd ||
+        (row.sourceSeqEnd === before.sourceSeqEnd && row.kind !== "turn")
+      ) {
+        before = row;
+      }
+    }
+    if (
+      before?.kind !== "system" ||
+      before.systemKind !== "error" ||
+      !before.planLimit
+    ) {
+      continue;
+    }
+    marks.set(before.id, {
+      from: marks.get(before.id)?.from ?? from,
+      to,
+      resend: resend === true,
+      at: meta.createdAt,
+    });
+  }
+  if (marks.size === 0) return rows;
+  const mark = (list: TimelineRow[]): TimelineRow[] =>
+    list.map((row) => {
+      if (row.kind === "turn") {
+        return row.children ? { ...row, children: mark(row.children) } : row;
+      }
+      const found = marks.get(row.id);
+      return found && row.kind === "system" && row.systemKind === "error"
+        ? { ...row, planLimitSwitch: found }
+        : row;
+    });
+  return mark(rows);
+}
+
 export function buildThreadTimelineFromEvents(
   args: BuildThreadTimelineFromEventsArgs,
 ): ThreadTimelineFromEventsResult {
@@ -1412,12 +1475,15 @@ export function buildThreadTimelineFromEvents(
   const projection = buildEventProjection(args.events, projectionOptions);
 
   const rows = [
-    ...buildTimelineRows(projection, {
-      completedTurnDisplay: args.options.completedTurnDisplay,
-      includeNestedRows: args.options.includeNestedRows,
-      rowIdPrefix: ROOT_TIMELINE_ROW_ID_PREFIX,
-      workspaceRoot: args.options.workspaceRoot,
-    }),
+    ...markPlanLimitSwitches(
+      buildTimelineRows(projection, {
+        completedTurnDisplay: args.options.completedTurnDisplay,
+        includeNestedRows: args.options.includeNestedRows,
+        rowIdPrefix: ROOT_TIMELINE_ROW_ID_PREFIX,
+        workspaceRoot: args.options.workspaceRoot,
+      }),
+      args.events,
+    ),
     ...buildPendingSteerRowsFromEvents(
       args.acceptedClientRequestContext,
       args.events,

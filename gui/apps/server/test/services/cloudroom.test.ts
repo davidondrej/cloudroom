@@ -473,8 +473,11 @@ it("routes Cloud through the core, projects conversations, pauses queues, and re
     expect(harness.db.select().from(events).all()).toHaveLength(count);
     expect((await request(`/threads/${thread.id}/queued-messages/follow/send`, {})).status).toBe(200);
     await expect.poll(() => getThread(harness.db, thread.id)?.status).toBe("active");
+    // Codex retries, then recovers: the retry folds into the finished turn, not a stale Reconnecting row (#949).
+    native("error", { turnId: active, willRetry: true, error: { message: "Reconnecting... 1/5", codexErrorInfo: null, additionalDetails: "stream disconnected" } });
     finish();
     await expect.poll(() => getThread(harness.db, thread.id)?.status).toBe("idle");
+    expect((await (await request(`/threads/${thread.id}/timeline`)).json()).rows.filter((row: { systemKind?: string }) => row.systemKind === "reconnect")).toEqual([]);
     const stored = harness.db.select().from(events).all();
     expect(stored.some((event) => event.type === "item/agentMessage/delta")).toBe(true);
     expect(stored.filter((event) => event.type === "turn/started")).toHaveLength(2);
@@ -845,8 +848,8 @@ it("keeps each queued follow-up's reasoning and rejects locked or conflicting ch
   const records: object[] = [];
   const streams = new Set<ServerResponse>();
   let sid = "";
-  const record = (kind: string, data: object) => {
-    const value = { sequence: records.length + 1, timestamp_ms: 1700000000000 + records.length, session_id: sid, kind, data };
+  const record = (kind: string, data: object, native?: object) => {
+    const value = { sequence: records.length + 1, timestamp_ms: 1700000000000 + records.length, session_id: sid, kind, data, ...(native ? { native: JSON.stringify(native) } : {}) };
     records.push(value);
     for (const stream of streams) stream.write(`id: ${value.sequence}\nevent: record\ndata: ${JSON.stringify(value)}\n\n`);
   };
@@ -918,6 +921,11 @@ it("keeps each queued follow-up's reasoning and rejects locked or conflicting ch
     // Core restarts a killed agent idle and keeps the cause on the lost turn.
     record("receipt", { request_id: "xhigh-turn", command: "prompt", state: "unknown_after_restart", error: "invalid native state: unmanaged Claude subagent emitted output (signal 9)" });
     await expect.poll(() => harness.db.select().from(events).all().some((event) => event.type === "system/error" && JSON.parse(event.data).message.includes("unmanaged Claude subagent"))).toBe(true);
+    // A Codex error too long for a title keeps its code and text; the failed turn's receipt adds no second card (#949).
+    const full = "Codex ran out of room in the model's context window. Start a new thread or clear earlier history before retrying.";
+    record("native_event", { method: "error" }, { method: "error", params: { threadId: "native", turnId: "t", willRetry: false, error: { message: full, codexErrorInfo: "contextWindowExceeded", additionalDetails: null } } });
+    record("receipt", { request_id: "xhigh-turn", command: "prompt", state: "failed", error: full });
+    await expect.poll(() => harness.db.select().from(events).all().filter((event) => event.type === "system/error" && event.data.includes("context window")).map((event) => JSON.parse(event.data))).toMatchObject([{ code: "contextWindowExceeded", message: "Codex error (contextWindowExceeded)", detail: full }]);
   } finally {
     service.stop();
     core.closeAllConnections();

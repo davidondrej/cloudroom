@@ -167,7 +167,7 @@ export default function providerUsagePlugin(bb: BbPluginApi): void {
         .catch(() => [])
     ).filter((source) => source.method === ACCOUNTS_LIST_METHOD);
     for (const source of sources)
-      for (const providerId of ["claude-code", "codex"]) {
+      for (const providerId of ["claude-code", "codex", "acp-cursor"]) {
         const raw: unknown = await bb.sdk.plugins
           .callRpc({
             pluginId: source.pluginId,

@@ -104,7 +104,7 @@ const ACP_PLAN_STEP_STATUS_BY_ENTRY_STATUS = {
 
 const PLAN_STEPS_CHANNEL = "planSteps";
 const RATE_LIMIT_PATTERN =
-  /\b429\b|rate[ _-]?limit|too many requests|usage limit|free limit reached|clinepass limit|FreeUsageLimitError|PROMOTION_MODEL_LIMIT_REACHED|free-models-per-day/iu;
+  /\b429\b|rate[ _-]?limit|too many requests|usage limit|free limit reached|clinepass limit|FreeUsageLimitError|PROMOTION_MODEL_LIMIT_REACHED|free-models-per-day|USAGE_LIMIT|hit your limit|out of usage|weekly (?:usage|pool)/iu;
 
 function isTerminalAcpStatus(
   status: AcpToolCallUpdateEvent["status"],

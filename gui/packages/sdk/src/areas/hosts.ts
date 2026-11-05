@@ -188,7 +188,7 @@ export function createHostsArea(args: CreateSdkAreaArgs): HostsArea {
         transport.api.v1.hosts[":id"].directory.$get(
           {
             param: { id: input.hostId },
-            query: { path: input.path },
+            query: { path: input.path, search: input.search },
           },
           ...signalRequestArgs(input.signal),
         ),

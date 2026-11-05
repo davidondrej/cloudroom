@@ -2,7 +2,10 @@ export { formatThreadTimelineText } from "./format-timeline-text.js";
 export { parseAgentMessageEnvelope } from "./agent-message-envelope.js";
 export type { ThreadTimelineTextFormat } from "./format-timeline-text.js";
 export { assertNever } from "./assert-never.js";
-export { PROVIDER_AUTH_FAILED_TITLE } from "./error-display.js";
+export {
+  MAX_ERROR_TITLE_LENGTH,
+  PROVIDER_AUTH_FAILED_TITLE,
+} from "./error-display.js";
 export {
   directoryFromPath,
   fileNameFromPath,

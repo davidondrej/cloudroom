@@ -65,6 +65,7 @@ const SYSTEM_THEME_QUERY_KEY = "systemTheme";
 export const SYSTEM_EXECUTION_OPTIONS_QUERY_KEY = "systemExecutionOptions";
 const SYSTEM_CLI_SKILLS_QUERY_KEY = "systemCliSkills";
 const SYSTEM_WORKTREE_STORAGE_QUERY_KEY = "systemWorktreeStorage";
+const SYSTEM_SKILL_USAGE_QUERY_KEY = "systemSkillUsage";
 const SYSTEM_VERSION_QUERY_KEY = "systemVersion";
 const HOST_PROVIDER_CLI_STATUS_QUERY_KEY = "hostProviderCliStatus";
 const SYSTEM_USAGE_LIMITS_QUERY_KEY = "systemUsageLimits";
@@ -1135,6 +1136,12 @@ export function machineEnvironmentQueryKey(): MachineEnvironmentQueryKey {
 
 export function systemCliSkillsQueryKey(): SystemCliSkillsQueryKey {
   return [SYSTEM_CLI_SKILLS_QUERY_KEY];
+}
+
+export function systemSkillUsageQueryKey(
+  days: string,
+): readonly [typeof SYSTEM_SKILL_USAGE_QUERY_KEY, string] {
+  return [SYSTEM_SKILL_USAGE_QUERY_KEY, days];
 }
 
 export function systemWorktreeStorageQueryKey(): SystemWorktreeStorageQueryKey {

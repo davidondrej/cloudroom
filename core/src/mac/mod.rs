@@ -119,6 +119,9 @@ pub struct Device {
 pub struct AppReport {
     access: String,
     problem: Option<String>,
+    /// The app runs where Mac access is hidden (Windows, #871); older apps send none.
+    #[serde(default)]
+    unsupported: bool,
 }
 
 struct Job {
@@ -219,6 +222,7 @@ impl Mac {
         let after = |at: &Instant| left.is_none_or(|left| *at > left);
         let reported = self.report.lock().unwrap();
         match reported.as_ref().filter(|(_, at)| at.elapsed() < REPORTED) {
+            Some((AppReport { unsupported: true, .. }, _)) => ("unsupported", "Mac unavailable: the user's Cloudroom app runs on Windows, where cloud agents can't use their computer yet. There is no setting to turn on, so don't ask them to; continue cloud work.".into()),
             Some((report, _)) if report.access == "off" => ("access_off", "Mac unavailable: the user turned Mac access off. If you need their Mac, ask them to turn it on in Cloudroom; otherwise continue cloud work.".into()),
             Some((AppReport { problem: Some(problem), .. }, at)) if after(at) => ("mac_problem", format!("Mac unavailable: the user's Mac is online, but Mac access can't connect to Cloudroom{since}. Cloudroom shows them why in Settings → Machines, with a Check now link: {problem} Continue cloud work; mention it only if you need their Mac.")),
             Some((_, at)) if after(at) => ("not_connected", format!("Mac unavailable: the user's Mac is online with Mac access on, but it isn't connected to this sandbox{since}. If it doesn't connect within a few minutes, the user can restart Cloudroom on their Mac. Continue cloud work meanwhile.")),
@@ -942,6 +946,21 @@ mod tests {
         let body = serde_json::json!({"command":"true","stdin":"","write":true,"copy":copy});
         let run: super::Run = serde_json::from_value(body).unwrap();
         assert_eq!(serde_json::json!(run.copy), copy);
+    }
+
+    #[test]
+    fn mac_status_says_why_from_the_app_report() {
+        // #871: Windows apps send "off" with `unsupported`, so agents must not ask the user to turn on a hidden setting.
+        for (extra, reason) in [
+            ("", "access_off"),
+            (r#","unsupported":true"#, "unsupported"),
+        ] {
+            let report = format!(r#"{{"access":"off","problem":null{extra}}}"#);
+            let mac = super::Mac::default();
+            let now = std::time::Instant::now();
+            *mac.report.lock().unwrap() = Some((serde_json::from_str(&report).unwrap(), now));
+            assert_eq!(mac.why_unavailable().0, reason, "{report}");
+        }
     }
 
     #[tokio::test]

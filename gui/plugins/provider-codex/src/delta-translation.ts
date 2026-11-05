@@ -25,6 +25,7 @@ import {
   codexHandledEventSchema,
   codexHandledThreadItemSchema,
   isHandledCodexMethod,
+  knownCodexErrorInfoSchema,
   type CodexDynamicToolCallContentItem,
   type CodexErrorInfo,
   type CodexHandledEvent,
@@ -33,6 +34,7 @@ import {
   type CodexRateLimitSnapshot,
   type CodexRateLimitSnapshotUpdate,
   type CodexTurnStatus,
+  type KnownCodexErrorInfo,
 } from "./schemas.js";
 import {
   AGENT_MESSAGE_PRESENTATION,
@@ -65,10 +67,17 @@ interface CodexRetryErrorContext {
   failureText: string;
 }
 
+interface CodexShownTerminalError {
+  turnId: string | undefined;
+  message: string;
+  fromTurn: boolean;
+}
+
 interface CodexEventTranslationState {
   rateLimitsByLimitId: Map<string, CodexRateLimitSnapshot>;
   injectedToolsByName: Map<string, CodexInjectedTool>;
   retryErrorsByTurnKey: Map<string, CodexRetryErrorContext>;
+  lastTerminalErrorByThreadId: Map<string, CodexShownTerminalError>;
 }
 
 export function createCodexEventTranslationState(): CodexEventTranslationState {
@@ -76,6 +85,7 @@ export function createCodexEventTranslationState(): CodexEventTranslationState {
     rateLimitsByLimitId: new Map(),
     injectedToolsByName: new Map(),
     retryErrorsByTurnKey: new Map(),
+    lastTerminalErrorByThreadId: new Map(),
   };
 }
 
@@ -344,7 +354,7 @@ type CodexItemTranslationResult =
   | { kind: "ignored" }
   | { kind: "unhandled" };
 
-function getCodexErrorProviderCode(errorInfo: CodexErrorInfo): string {
+function getCodexErrorProviderCode(errorInfo: KnownCodexErrorInfo): string {
   if (typeof errorInfo === "string") {
     return errorInfo;
   }
@@ -366,7 +376,9 @@ function getCodexErrorProviderCode(errorInfo: CodexErrorInfo): string {
   return assertNever(errorInfo);
 }
 
-function getCodexErrorHttpStatusCode(errorInfo: CodexErrorInfo): number | null {
+function getCodexErrorHttpStatusCode(
+  errorInfo: KnownCodexErrorInfo,
+): number | null {
   if (typeof errorInfo === "string") {
     return null;
   }
@@ -389,7 +401,7 @@ function getCodexErrorHttpStatusCode(errorInfo: CodexErrorInfo): number | null {
 }
 
 function getProviderErrorCategory(
-  errorInfo: CodexErrorInfo,
+  errorInfo: KnownCodexErrorInfo,
 ): ProviderErrorCategory {
   if (typeof errorInfo === "string") {
     switch (errorInfo) {
@@ -409,11 +421,17 @@ function getProviderErrorCategory(
       case "unauthorized":
         return "unauthorized";
       case "badRequest":
+      case "modelNotFound":
         return "bad-request";
       case "threadRollbackFailed":
         return "thread-rollback-failed";
       case "sandboxError":
         return "sandbox";
+      // A short in-stream throttle Codex retries itself, not a plan limit.
+      case "rateLimitExceeded":
+      case "flexUnavailable":
+      case "policyCapacityUnavailable":
+      case "tooManyDenials":
       case "other":
         return "unknown";
     }
@@ -442,10 +460,22 @@ function toProviderErrorInfo(
   if (!errorInfo) {
     return null;
   }
+  const known = knownCodexErrorInfoSchema.safeParse(errorInfo);
+  if (!known.success) {
+    // A code newer than this adapter reads as `other` but keeps its name.
+    return {
+      category: "unknown",
+      providerCode:
+        typeof errorInfo === "string"
+          ? errorInfo
+          : (Object.keys(errorInfo)[0] ?? null),
+      httpStatusCode: null,
+    };
+  }
   return {
-    category: getProviderErrorCategory(errorInfo),
-    providerCode: getCodexErrorProviderCode(errorInfo),
-    httpStatusCode: getCodexErrorHttpStatusCode(errorInfo),
+    category: getProviderErrorCategory(known.data),
+    providerCode: getCodexErrorProviderCode(known.data),
+    httpStatusCode: getCodexErrorHttpStatusCode(known.data),
   };
 }
 
@@ -473,6 +503,38 @@ export function clearCodexEventTranslationThreadState(
       state.retryErrorsByTurnKey.delete(key);
     }
   }
+  state.lastTerminalErrorByThreadId.delete(threadId);
+}
+
+/**
+ * Codex can report a turn's terminal error as an `error` notification, a
+ * failed `turn/completed`, or both, in either order (#941). Shows it once: a
+ * report from the other path with the same message is its twin.
+ */
+function isTwinOfShownTerminalError(
+  state: CodexEventTranslationState,
+  params: CodexErrorParams,
+  fromTurn: boolean,
+): boolean {
+  const { threadId, turnId, error } = params;
+  const last = state.lastTerminalErrorByThreadId.get(threadId);
+  const twin =
+    last !== undefined &&
+    last.fromTurn !== fromTurn &&
+    last.message === error.message &&
+    (last.turnId === undefined ||
+      turnId === undefined ||
+      last.turnId === turnId);
+  if (twin) {
+    state.lastTerminalErrorByThreadId.delete(threadId);
+  } else {
+    state.lastTerminalErrorByThreadId.set(threadId, {
+      turnId,
+      message: error.message,
+      fromTurn,
+    });
+  }
+  return twin;
 }
 
 function resolveCodexErrorInfo(
@@ -497,6 +559,55 @@ function resolveCodexErrorInfo(
   return errorInfo === "other" && retryError?.failureText === failureText
     ? retryError.errorInfo
     : errorInfo;
+}
+
+/**
+ * Codex tags an HTTP 400 it can't classify as `other` and sends the raw body as
+ * the whole message, without the status or request id (#941).
+ */
+const BARE_BAD_REQUEST_PATTERN =
+  /^\s*(?:\{\s*"detail"\s*:\s*"bad request"\s*\}|bad request)\s*$/iu;
+const BAD_REQUEST_RECOVERY =
+  "Send a message to try again. If it keeps failing, start a new thread.";
+const BARE_BAD_REQUEST_NOTE = `The model API returned only a generic Bad Request, and Codex passed it on with no reason or request ID. ${BAD_REQUEST_RECOVERY}`;
+
+function codexProviderErrorDelta(
+  state: CodexEventTranslationState,
+  params: CodexErrorParams,
+): ThreadDelta {
+  const { error, turnId, willRetry } = params;
+  let errorInfo = toProviderErrorInfo(resolveCodexErrorInfo(state, params));
+  const bareBadRequest =
+    willRetry !== true &&
+    (errorInfo?.category ?? "unknown") === "unknown" &&
+    BARE_BAD_REQUEST_PATTERN.test(error.message);
+  if (bareBadRequest) {
+    errorInfo = {
+      category: "bad-request",
+      providerCode: errorInfo?.providerCode ?? null,
+      httpStatusCode: null,
+    };
+  }
+  return {
+    kind: "provider.error",
+    message: "Provider error",
+    detail: [
+      error.message,
+      error.additionalDetails,
+      bareBadRequest
+        ? error.additionalDetails
+          ? BAD_REQUEST_RECOVERY
+          : BARE_BAD_REQUEST_NOTE
+        : null,
+    ]
+      .filter(Boolean)
+      .join("\n"),
+    ...(willRetry !== undefined ? { willRetry } : {}),
+    ...(errorInfo ? { errorInfo } : {}),
+    ...(turnId !== undefined
+      ? { providerTurnId: turnId }
+      : { threadScoped: true }),
+  };
 }
 
 function toRawEvent(rawEvent: JsonRpcMessage): ProviderRawEvent {
@@ -1039,25 +1150,38 @@ export function translateCodexEventToDeltas(
       ];
     }
     case "turn/started":
+      state.lastTerminalErrorByThreadId.delete(handledEvent.params.threadId);
       return [
         { kind: "turn.open", providerTurnId: handledEvent.params.turn.id },
       ];
     case "turn/completed": {
-      takeCodexRetryError(state, {
-        threadId: handledEvent.params.threadId,
-        turnId: handledEvent.params.turn.id,
-      });
-      const status = toTurnStatus(handledEvent.params.turn.status);
+      const { threadId, turn } = handledEvent.params;
+      const status = toTurnStatus(turn.status);
+      // A failed turn shows its error, with its code and details, unless an
+      // `error` notification already did (#941).
+      const failure =
+        status === "failed" && turn.error
+          ? { threadId, turnId: turn.id, error: turn.error, willRetry: false }
+          : null;
+      const deltas: ThreadDelta[] =
+        failure && !isTwinOfShownTerminalError(state, failure, true)
+          ? [codexProviderErrorDelta(state, failure)]
+          : [];
+      if (!failure) {
+        state.lastTerminalErrorByThreadId.delete(threadId);
+      }
+      takeCodexRetryError(state, { threadId, turnId: turn.id });
       return [
+        ...deltas,
         {
           kind: "turn.boundary",
-          providerTurnId: handledEvent.params.turn.id,
+          providerTurnId: turn.id,
           status,
-          ...(handledEvent.params.turn.error?.message
-            ? { error: { message: handledEvent.params.turn.error.message } }
+          ...(turn.error?.message
+            ? { error: { message: turn.error.message } }
             : {}),
           ...(status === "completed" || status === "interrupted"
-            ? { providerCheckpointId: handledEvent.params.turn.id }
+            ? { providerCheckpointId: turn.id }
             : {}),
         },
       ];
@@ -1304,27 +1428,11 @@ export function translateCodexEventToDeltas(
           providerTurnId: handledEvent.params.turnId,
         },
       ];
-    case "error": {
-      const errorInfo = toProviderErrorInfo(
-        resolveCodexErrorInfo(state, handledEvent.params),
-      );
-      return [
-        {
-          kind: "provider.error",
-          message: "Provider error",
-          detail: handledEvent.params.error.additionalDetails
-            ? `${handledEvent.params.error.message}\n${handledEvent.params.error.additionalDetails}`
-            : handledEvent.params.error.message,
-          ...(handledEvent.params.willRetry !== undefined
-            ? { willRetry: handledEvent.params.willRetry }
-            : {}),
-          ...(errorInfo ? { errorInfo } : {}),
-          ...(handledEvent.params.turnId !== undefined
-            ? { providerTurnId: handledEvent.params.turnId }
-            : { threadScoped: true }),
-        },
-      ];
-    }
+    case "error":
+      return handledEvent.params.willRetry !== true &&
+        isTwinOfShownTerminalError(state, handledEvent.params, false)
+        ? []
+        : [codexProviderErrorDelta(state, handledEvent.params)];
     case "deprecationNotice":
       return [
         {

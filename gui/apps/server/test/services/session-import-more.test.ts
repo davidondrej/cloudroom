@@ -1,10 +1,10 @@
 import Database from "better-sqlite3";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, utimes, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { zstdCompressSync } from "node:zlib";
-import { getEnvironment, getThread } from "@cloudroom/db";
+import { applyThreadLifecycleEvent, getEnvironment, getThread } from "@cloudroom/db";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { importNativeSessions, listNativeSessions } from "../../src/services/cloudroom/session-import.js";
 import { resolveDeferredFirstTurnContext } from "../../src/services/threads/deferred-first-turn-context.js";
@@ -42,7 +42,11 @@ async function fixtures() {
   await writeFile(join(root, "claude", "projects", "-claude-project", "claude-1.jsonl"), [
     { type: "user", cwd: join(root, "claude-project"), timestamp: at(1), message: { role: "user", content: "Refactor the API" } },
     { type: "assistant", timestamp: at(2), message: { model: "claude-test", content: [{ type: "text", text: "Done refactoring." }] } },
+    { type: "user", isCompactSummary: true, isVisibleInTranscriptOnly: true, timestamp: at(3), message: { role: "user", content: `This session is being continued from a previous conversation.${" Summary.".repeat(9_000)}` } },
+    { type: "user", timestamp: at(4), message: { role: "user", content: "<command-name>/exit</command-name>" } },
+    { type: "last-prompt", lastPrompt: "Refactor the API" },
   ].map((line) => JSON.stringify(line)).join("\n"));
+  await utimes(join(root, "claude", "projects", "-claude-project", "claude-1.jsonl"), new Date("2026-10-09"), new Date("2026-10-09"));
   await writeFile(join(piDir, "2026-09-01_pi-old.jsonl"), [
     { type: "session", id: "pi-old", timestamp: at(0), cwd: project },
     { type: "message", timestamp: at(1), message: { role: "user", content: "Old format question" } },
@@ -50,18 +54,20 @@ async function fixtures() {
   ].map((line) => JSON.stringify(line)).join("\n"));
   await writeFile(join(piDir, "2026-09-02_bad.jsonl"), JSON.stringify({ type: "session", id: "../victim", cwd: project }) + "\n" + JSON.stringify({ type: "message", id: "x", parentId: null, message: { role: "user", content: "Escape" } }));
   await mkdir(join(piDir, "unreadable.jsonl"));
-  const codexItem = (type: string, text: string) => ({ type: "event_msg", payload: { type: "item_completed", item: { type, content: [{ text }] } } });
+  const codexItem = (type: string, text: string) => ({ timestamp: "2026-09-02T10:00:00.000Z", type: "event_msg", payload: { type: "item_completed", item: { type, content: [{ text }] } } });
   const codexDir = join(root, "codex", "sessions", "2026", "09", "01");
   await mkdir(codexDir, { recursive: true });
   const codexRollout = (id: string, question: string) => [
     { type: "session_meta", payload: { id, cwd: project, source: "cli", originator: "codex_cli_rs" } },
     codexItem("UserMessage", question),
     codexItem("AgentMessage", "Compressed Codex answer"),
+    { timestamp: "2026-10-02T10:00:00.000Z", type: "event_msg", payload: { type: "thread_goal_updated" } },
   ].map((line) => JSON.stringify(line)).join("\n");
   const rollout = (id: string) => join(codexDir, `rollout-2026-09-01T10-00-00-${id}.jsonl`);
   await writeFile(`${rollout("0199a000-0000-7000-8000-00000000000c")}.zst`, zstdCompressSync(codexRollout("0199a000-0000-7000-8000-00000000000c", "Compressed Codex question")));
   await writeFile(`${rollout("0199a000-0000-7000-8000-00000000000d")}.zst`, zstdCompressSync(codexRollout("0199a000-0000-7000-8000-00000000000d", "Stale compressed copy")));
   await writeFile(rollout("0199a000-0000-7000-8000-00000000000d"), codexRollout("0199a000-0000-7000-8000-00000000000d", "Plain Codex question"));
+  await utimes(rollout("0199a000-0000-7000-8000-00000000000d"), new Date("2026-09-01"), new Date("2026-09-01"));
   const db = new Database(join(root, "hermes", "state.db"));
   db.exec(`CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT NOT NULL, model TEXT, started_at REAL NOT NULL, title TEXT, cwd TEXT, archived INTEGER NOT NULL DEFAULT 0);
     CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL, role TEXT NOT NULL, content TEXT, timestamp REAL NOT NULL);`);
@@ -145,6 +151,23 @@ async function t3Fixtures() {
   return { project, worktree, ids };
 }
 
+async function importAll(harness: TestAppHarness, hostId: string, wanted: Parameters<typeof importNativeSessions>[2]) {
+  let importing = true;
+  const attaching = (async () => {
+    while (importing) {
+      const queued = await waitForQueuedCommand(harness, ({ command }) => command.type === "environment.attach" || command.type === "project.inspect", 100).catch(() => null);
+      if (queued?.command.type === "project.inspect") await reportQueuedCommandSuccess(harness, queued, { path: queued.command.path, gitRemoteUrl: null });
+      if (queued?.command.type === "environment.attach") {
+        await reportQueuedCommandSuccess(harness, queued, { path: queued.command.path, isGitRepo: true, isWorktree: false, branchName: "main", defaultBranch: "main", transcript: [] });
+      }
+    }
+  })();
+  const result = await importNativeSessions(harness.deps, hostId, wanted);
+  importing = false;
+  await attaching;
+  return result;
+}
+
 async function sendFirstMessage(harness: TestAppHarness, threadId: string) {
   const deferred = resolveDeferredFirstTurnContext(harness.deps.db, threadId);
   const fork = pendingImportFork(harness.deps.db, threadId);
@@ -177,17 +200,7 @@ describe("Pi, Hermes, and T3 Code chat import", () => {
         ["pi", "pi-old", "Old format question", project],
       ]);
 
-      let importing = true;
-      const attaching = (async () => {
-        while (importing) {
-          const queued = await waitForQueuedCommand(harness, ({ command }) => command.type === "environment.attach" || command.type === "project.inspect", 100).catch(() => null);
-          if (queued?.command.type === "project.inspect") await reportQueuedCommandSuccess(harness, queued, { path: queued.command.path, gitRemoteUrl: null });
-          if (queued?.command.type === "environment.attach") {
-            await reportQueuedCommandSuccess(harness, queued, { path: queued.command.path, isGitRepo: true, isWorktree: false, branchName: "main", defaultBranch: "main", transcript: [] });
-          }
-        }
-      })();
-      const result = await importNativeSessions(harness.deps, host.id, [
+      const result = await importAll(harness, host.id, [
         { harness: "claude-code", id: "claude-1" },
         { harness: "codex", id: "0199a000-0000-7000-8000-00000000000c" },
         { harness: "codex", id: "0199a000-0000-7000-8000-00000000000d" },
@@ -195,8 +208,6 @@ describe("Pi, Hermes, and T3 Code chat import", () => {
         { harness: "pi", id: "pi-old" },
         { harness: "acp-hermes-agent", id: "h-cli" },
       ]);
-      importing = false;
-      await attaching;
       expect(result.skipped).toEqual([]);
       const threadId = (id: string) => result.imported.find((entry) => entry.id === id)!.threadId;
 
@@ -238,6 +249,10 @@ describe("Pi, Hermes, and T3 Code chat import", () => {
       expect(hermes.sent).toContain("Here is the plan.");
       expect(hermes.sent).toContain("What's next?");
       expect(hermes.sent).not.toContain("TOOL_RESULT_TEXT");
+
+      const updatedAt = Object.fromEntries(sessions.map(({ id, updatedAt }) => [id, updatedAt]));
+      expect([updatedAt["claude-1"], updatedAt["0199a000-0000-7000-8000-00000000000d"]]).toEqual([Date.parse("2026-10-01T10:00:02.000Z"), Date.parse("2026-09-02T10:00:00.000Z")]);
+      expect(threadMessages(harness.deps.db, threadId("claude-1"))).toEqual([{ role: "user", text: "Refactor the API" }, { role: "agent", text: "Done refactoring." }, { role: "user", text: "What's next?" }]);
     });
   }, 60_000);
 
@@ -257,19 +272,7 @@ describe("Pi, Hermes, and T3 Code chat import", () => {
       ]);
       expect(Object.keys(sessions[0]!)).not.toContain("native");
 
-      let importing = true;
-      const attaching = (async () => {
-        while (importing) {
-          const queued = await waitForQueuedCommand(harness, ({ command }) => command.type === "environment.attach" || command.type === "project.inspect", 100).catch(() => null);
-          if (queued?.command.type === "project.inspect") await reportQueuedCommandSuccess(harness, queued, { path: queued.command.path, gitRemoteUrl: null });
-          if (queued?.command.type === "environment.attach") {
-            await reportQueuedCommandSuccess(harness, queued, { path: queued.command.path, isGitRepo: true, isWorktree: false, branchName: "main", defaultBranch: "main", transcript: [] });
-          }
-        }
-      })();
-      const result = await importNativeSessions(harness.deps, host.id, sessions.map(({ harness: app, id }) => ({ harness: app, id })));
-      importing = false;
-      await attaching;
+      const result = await importAll(harness, host.id, sessions.map(({ harness: app, id }) => ({ harness: app, id })));
       expect(result.skipped).toEqual([]);
       const threadId = (id: string) => result.imported.find((entry) => entry.id === id)!.threadId;
       const imported = (id: string) => ({ provider: getThread(harness.deps.db, threadId(id))!.providerId, fork: pendingImportFork(harness.deps.db, threadId(id)) });
@@ -293,6 +296,24 @@ describe("Pi, Hermes, and T3 Code chat import", () => {
       expect(cursor.sent).not.toContain("SYSTEM_TEXT");
 
       expect(await listNativeSessions(harness.deps)).toEqual([]);
+    });
+  }, 60_000);
+
+  it("dates imported chats by the original chat, and a later turn still moves one to the top", async () => {
+    const root = await mkdtemp(join(tmpdir(), "import-dates-"));
+    await mkdir(join(root, "claude", "projects", "p"), { recursive: true });
+    for (const name of ["PI_CODING_AGENT_DIR", "BB_PI_BRIDGE_SESSION_DIR", "HERMES_HOME", "CLAUDE_CONFIG_DIR", "CODEX_HOME", "T3CODE_HOME"]) vi.stubEnv(name, join(root, name === "CLAUDE_CONFIG_DIR" ? "claude" : name));
+    const at = (month: number, minute: number) => `2026-0${month}-01T10:0${minute}:00.000Z`;
+    for (const month of [1, 2, 3]) {
+      await writeFile(join(root, "claude", "projects", "p", `chat-${month}.jsonl`), [{ type: "user", cwd: root, timestamp: at(month, 0), message: { role: "user", content: `Chat ${month}` } },
+        { type: "assistant", timestamp: at(month, 5), message: { content: [{ type: "text", text: "Done." }] } }].map((line) => JSON.stringify(line)).join("\n"));
+    }
+    await withTestHarness(async (harness) => {
+      const result = await importAll(harness, seedHostSession(harness.deps, { id: "host-import-dates" }).host.id, [3, 2, 1].map((month) => ({ harness: "claude-code", id: `chat-${month}` })));
+      const threads = () => result.imported.map(({ threadId }) => getThread(harness.deps.db, threadId)!);
+      expect(threads().map((thread) => [thread.title, thread.createdAt, thread.latestAttentionAt])).toEqual([3, 2, 1].map((month) => [`Chat ${month}`, Date.parse(at(month, 0)), Date.parse(at(month, 5))]));
+      for (const type of ["run.preparing", "run.started", "run.succeeded"] as const) applyThreadLifecycleEvent(harness.deps.db, { threadId: result.imported[2]!.threadId, event: { type } });
+      expect(threads()[2]!.latestAttentionAt).toBeGreaterThan(Date.now() - 60_000);
     });
   }, 60_000);
 });

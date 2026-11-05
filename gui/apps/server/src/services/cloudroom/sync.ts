@@ -33,14 +33,17 @@ export async function setCopyLogins(deps: Deps, enabled: boolean): Promise<void>
   if (vm && await readFile(join(folder(deps), "config.json")).then(() => true, () => false)) await setupSync(deps);
 }
 
-/** False once the user disconnected GitHub or picked another account in Settings, so this Mac's `gh` login stops replacing it. */
-const macGithubFile = (deps: Deps) => join(deps.config.dataDir, "cloudroom-github.json");
-export async function copyMacGithub(deps: Deps): Promise<boolean> {
-  return readFile(macGithubFile(deps), "utf8").then((text) => JSON.parse(text).mac !== false, () => true);
+/** False once the user picked another account for Cloud, so this Mac's own login stops replacing it: GitHub after Disconnect
+ *  or another account in Settings, Cursor while an added account (Accounts plugin) is in use. */
+const macLoginFile = (deps: Deps, name: "github" | "cursor") => join(deps.config.dataDir, `cloudroom-${name}.json`);
+export async function copyMacLogin(deps: Deps, name: "github" | "cursor"): Promise<boolean> {
+  return readFile(macLoginFile(deps, name), "utf8").then((text) => JSON.parse(text).mac !== false, () => true);
 }
-export async function setCopyMacGithub(deps: Deps, mac: boolean): Promise<void> {
-  await writeFile(macGithubFile(deps), JSON.stringify({ mac }), { mode: 0o600 });
+export async function setCopyMacLogin(deps: Deps, name: "github" | "cursor", mac: boolean): Promise<void> {
+  await writeFile(macLoginFile(deps, name), JSON.stringify({ mac }), { mode: 0o600 });
 }
+export const copyMacGithub = (deps: Deps) => copyMacLogin(deps, "github");
+export const setCopyMacGithub = (deps: Deps, mac: boolean) => setCopyMacLogin(deps, "github", mac);
 
 /** Agent logins the user disconnected or removed (ADR 0327). They never copy between this Mac and the cloud until the user
  *  connects again. "signed-out" means Disconnect signed the CLI out, so a later login on this Mac is a new sign-in. */

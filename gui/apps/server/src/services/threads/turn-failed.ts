@@ -243,8 +243,14 @@ export function describeFailedTurn(
     last === null
       ? undefined
       : providerErrorDataSchema.safeParse(parseRowData(last)).data;
+  // A provider error's message is generic ("Provider error"), so its detail says why. A system error's message is the
+  // cause and its detail only adds to it (stderr, a diagnostic ID), as in getTurnErrorText (#949).
+  const message =
+    last?.type === "system/error"
+      ? [data?.message, data?.detail].filter(Boolean).join(": ")
+      : data?.detail || data?.message;
   return {
-    message: data?.detail || data?.message || null,
+    message: message || null,
     errorInfo:
       providerError?.errorInfo ??
       doorRejectionErrorInfo(db, { threadId, failed }),

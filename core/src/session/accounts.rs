@@ -141,6 +141,7 @@ impl Session {
         let provider = match self.harness {
             runtime::Kind::Claude => "Claude ",
             runtime::Kind::Codex => "Codex ",
+            runtime::Kind::Cursor => "Cursor ",
             _ => "",
         };
         format!("Resume after {provider}plan limit · {}", self.session_id)
@@ -296,6 +297,12 @@ impl Manager {
     pub fn claude_switched(self: &Arc<Self>) -> Vec<String> {
         self.clear_plan("claude-code", true);
         self.continue_limited(&[runtime::Kind::Claude])
+    }
+
+    /// The website wrote a new Cursor login: continue Cursor work its plan limit stopped. Each Cursor run reads the
+    /// login, so no restart is needed.
+    pub fn cursor_switched(self: &Arc<Self>) -> Vec<String> {
+        self.continue_limited(&[runtime::Kind::Cursor])
     }
 
     /// Send "keep working" to these harnesses' sessions stopped by a usage limit.

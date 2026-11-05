@@ -5,9 +5,9 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, expect, it, vi } from "vitest";
 import { sdk } from "@/lib/sdk";
 import { openUrlInExternalBrowser } from "@/lib/url-open-routing";
-import { CodexConnectionPanel, CursorConnectionPanel, openCodexConnection, openCursorConnection } from "./CodexConnectionPanel";
+import { CodexConnectionPanel, CursorConnectionPanel, openChildSignIn, openCodexConnection, openCursorConnection } from "./CodexConnectionPanel";
 
-vi.mock("@/lib/sdk", () => ({ sdk: { cloudroom: { codexAuth: vi.fn(), codexLogin: vi.fn(), cancelCodexLogin: vi.fn(), cursorAuth: vi.fn(), cursorLogin: vi.fn(), cancelCursorLogin: vi.fn(), cursorApiKey: vi.fn(), retryStart: vi.fn() } } }));
+vi.mock("@/lib/sdk", () => ({ sdk: { cloudroom: { codexAuth: vi.fn(), codexLogin: vi.fn(), cancelCodexLogin: vi.fn(), cursorAuth: vi.fn(), cursorLogin: vi.fn(), cancelCursorLogin: vi.fn(), cursorApiKey: vi.fn(), retryStart: vi.fn() }, threads: { send: vi.fn() } } }));
 vi.mock("@/hooks/queries/cloudroom-queries", () => ({ useCloudroomAccount: () => ({ data: { ready: true, account: { id: "member" } } }) }));
 vi.mock("@/lib/url-open-routing", () => ({ openUrlInExternalBrowser: vi.fn() }));
 vi.mock("@cloudroom/shared-ui/responsive-overlay", () => ({ PersistentResponsiveDrawerShell: ({ open, children }: { open: boolean; children: ReactNode }) => open ? <div role="dialog">{children}</div> : null }));
@@ -99,4 +99,32 @@ it("offers retry for expired login, another account for quota, and no login for 
   await screen.findByText(current.message!);
   expect(screen.getByRole("button", { name: "Sign in with another account" })).toBeDefined();
   expect(screen.getByRole("button", { name: "Check again" })).toBeDefined();
+});
+it("after a child's sign-in, asks the parent by itself to rerun that child", async () => {
+  let current = missing;
+  vi.mocked(sdk.cloudroom.codexAuth).mockImplementation(async () => current);
+  vi.mocked(sdk.cloudroom.codexLogin).mockImplementation(async () => { current = connected; return current; });
+  mount();
+  openChildSignIn("codex", { parent: "thr_parent", label: '"GPT review" (thr_child)' });
+  fireEvent.click(await screen.findByRole("button", { name: "Sign in with ChatGPT" }));
+  await waitFor(() => expect(sdk.threads.send).toHaveBeenCalledOnce());
+  const sent = vi.mocked(sdk.threads.send).mock.calls[0]![0];
+  expect(sent.threadId).toBe("thr_parent");
+  expect(JSON.stringify(sent.input)).toContain('Run \\"GPT review\\" (thr_child) again');
+  expect(sdk.cloudroom.retryStart).not.toHaveBeenCalled();
+});
+it("a sign-in that finishes after Later never restarts the task", async () => {
+  vi.mocked(sdk.cloudroom.codexAuth).mockResolvedValue(missing);
+  let finish!: (status: Status) => void;
+  vi.mocked(sdk.cloudroom.codexLogin).mockImplementation(() => new Promise<Status>(resolve => { finish = resolve; }));
+  const client = mount();
+  openChildSignIn("codex", { child: "thr_child" });
+  fireEvent.click(await screen.findByRole("button", { name: "Sign in with ChatGPT" }));
+  await waitFor(() => expect(sdk.cloudroom.codexLogin).toHaveBeenCalledOnce());
+  fireEvent.click(screen.getByRole("button", { name: "Later" }));
+  finish(connected);
+  await waitFor(() => expect(client.getQueryData(["cloudroom-codex-auth", "member"])).toEqual(connected));
+  await new Promise(resolve => setTimeout(resolve, 50));
+  expect(sdk.cloudroom.retryStart).not.toHaveBeenCalled();
+  expect(sdk.threads.send).not.toHaveBeenCalled();
 });

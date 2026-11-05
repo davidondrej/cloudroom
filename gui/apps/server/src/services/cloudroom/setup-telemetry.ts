@@ -21,7 +21,7 @@ type Deps = Pick<AppDeps, "telemetry" | "config" | "logger" | "db"> & { sandboxe
 let deps: Deps | null = null;
 let firstLaunchAt = Date.now();
 let failureSnapshotSent = false;
-type UpdateAttempt = { from: string; to: string; at: number; location?: string; needs_password?: boolean; quit_timeout?: boolean; updater_error?: string };
+type UpdateAttempt = { from: string; to: string; at: number; location?: string; needs_password?: boolean; quit_timeout?: boolean; updater_error?: string; yielded?: boolean };
 let updateAttempt: Promise<UpdateAttempt | null> = Promise.resolve(null);
 let appReadySeen = false;
 
@@ -105,7 +105,7 @@ async function reportUpdateAttempt(dataDir: string): Promise<void> {
     location: attempt.location ?? null, needs_password: attempt.needs_password ?? null,
     quit_timeout: attempt.quit_timeout ?? false, updater_error: scrub(attempt.updater_error),
     ...(failed ? { code: updateFailureCode(lines), message: scrub(lines.filter(line => /error|abort|cancel|fail/i.test(line)).at(-1)) } : {}),
-  }));
+  }), { yielded: attempt.yielded === true });
 }
 
 export function reportAppReady(): void {
@@ -173,11 +173,11 @@ export function reportMacHelperDown(message: string): void {
   }).catch(() => {});
 }
 
-/** Telemetry must never break setup, so building or sending an event can't throw. */
-function capture(name: "setup_snapshot" | "agent_connect" | "cli_install" | "account_sign_in_failed" | "update_install" | "update_ready" | "app_crash", properties: () => Record<string, TelemetryValue>): void {
+/** Telemetry must never break setup, so building or sending an event can't throw. `postHogOnly` never reaches our database. */
+function capture(name: "setup_snapshot" | "agent_connect" | "cli_install" | "account_sign_in_failed" | "update_install" | "update_ready" | "app_crash", properties: () => Record<string, TelemetryValue>, postHogOnly: Record<string, TelemetryValue> = {}): void {
   try {
     const event: Record<string, TelemetryValue> = { ...properties(), seconds_since_first_launch: secondsSinceFirstLaunch() };
-    deps?.telemetry.capture({ name, properties: event });
+    deps?.telemetry.capture({ name, properties: { ...event, ...postHogOnly } });
     if (event.outcome === "failed" || event.reason === "connect_failed") void save(name, event);
   } catch (error) { deps?.logger.debug({ err: error, event: name }, "Setup telemetry failed"); }
 }

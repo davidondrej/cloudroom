@@ -50,9 +50,10 @@ worktree` only; a provider takes its branch through `--environment-inputs`.
   for example after a plan limit.
 - Use `room-cli thread fork <source-thread-id>` to clone a provider session. The
   fork inherits the source conversation in its timeline. It creates an idle
-  fork in the source environment by default; add `--prompt`, select an existing
-  environment with `--environment`, or create a fresh personal workspace or
-  worktree with `--new-environment personal|worktree`. `--base-branch` matches
+  fork in a new worktree with the source's code, uncommitted changes included
+  (a folder without Git keeps the source folder); add `--prompt`, share the
+  source's folder with `--environment <its id>`, or create a fresh personal
+  workspace or worktree with `--new-environment personal|worktree`. `--base-branch` matches
   spawn for worktrees. `--machine local|cloud` forks across sides (Claude Code
   and Codex): the default is the source's side, or Local when environment flags
   are set. A Cloud fork gets its own sandbox with the source's code; a Local

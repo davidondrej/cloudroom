@@ -928,7 +928,8 @@ function AutomationsPageFrame({
   children: ReactNode;
 }) {
   return (
-    <div className="h-full min-h-0 flex-1 overflow-y-auto">
+    // The Loops page renders at 90% on desktop, a step less zoomed in than the rest of the app.
+    <div className="h-full min-h-0 flex-1 overflow-y-auto md:[zoom:0.9]">
       <div
         className={cn(
           "mx-auto box-border min-h-full w-full max-w-5xl px-4 pb-4 pt-3 md:px-10 md:pt-4",

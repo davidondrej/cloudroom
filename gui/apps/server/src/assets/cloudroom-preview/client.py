@@ -4,6 +4,7 @@ import argparse
 import base64
 import concurrent.futures
 import contextlib
+import errno
 import http.client
 import hashlib
 import http.server
@@ -449,16 +450,17 @@ class Proxy(http.server.BaseHTTPRequestHandler):
 class Server(http.server.ThreadingHTTPServer):
     daemon_threads = True
     # Windows lets a second program bind a port in use: always with SO_REUSEADDR, and on 127.0.0.1 over another program's
-    # 0.0.0.0 or :: listener. Either would take over the user's own local server, so a port that answers counts as taken.
+    # 0.0.0.0 or :: listener; macOS too, with SO_REUSEADDR. That would take over the user's own local server, so a port
+    # that answers counts as taken.
     allow_reuse_address = not WINDOWS
 
     def server_bind(self):
+        port = self.server_address[1]
+        with socket.socket(self.address_family) as probe:
+            probe.settimeout(.5)
+            if port and probe.connect_ex(self.server_address) == 0:
+                raise OSError(f'Port {port} is in use by another program')
         if WINDOWS:
-            port = self.server_address[1]
-            with socket.socket() as probe:
-                probe.settimeout(.5)
-                if port and probe.connect_ex(('127.0.0.1', port)) == 0:
-                    raise OSError(f'Port {port} is in use by another program')
             self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
         super().server_bind()
 
@@ -466,6 +468,10 @@ class Server(http.server.ThreadingHTTPServer):
         connection, address = super().get_request()
         connection.settimeout(15)
         return connection, address
+
+
+class Server6(Server):
+    address_family = socket.AF_INET6
 
 
 # Windows' Python has no Unix sockets, so there each relay is found by its tunnel's socket path and hands out socket pairs.
@@ -497,7 +503,10 @@ class Relay:
             try:
                 client, _ = self.listener.accept()
             except OSError:
-                return
+                # A client that left first or a full file table passes; ending here left the tunnel looking alive but
+                # dead until the preview was reopened (#902). Only terminate() stops it.
+                time.sleep(.1)
+                continue
             threading.Thread(target=self.pipe, args=(client,), daemon=True).start()
 
     def client(self):
@@ -617,14 +626,27 @@ class Tunnel:
         self.capture = threading.Thread(target=capture, daemon=True)
         self.capture.start()
         try:
-            try:
-                self.server = Server(('127.0.0.1', local_port), Proxy)
-            except OSError:
-                self.server = Server(('127.0.0.1', 0), Proxy)
-            self.server.authority = f'p{port}-{device[:8]}.localhost:{self.server.server_port}'
-            self.server.tunnel = self
-            self.thread = threading.Thread(target=self.server.serve_forever, kwargs={'poll_interval': .1}, daemon=True)
-            self.thread.start()
+            # Browsers try ::1 first for *.localhost, so hold the port on both loopbacks. Otherwise another app on
+            # [::1]:port answers the browser while the IPv4 health check still passes (#837).
+            for attempt in (local_port, 0, 0, 0):
+                try:
+                    self.server = Server(('127.0.0.1', attempt), Proxy)
+                except OSError:
+                    continue
+                try:
+                    self.servers = [self.server, Server6(('::1', self.server.server_port), Proxy)]
+                    break
+                except OSError as error:
+                    if error.errno in (errno.EADDRNOTAVAIL, errno.EAFNOSUPPORT, errno.EPROTONOSUPPORT):  # No IPv6 loopback, so browsers use IPv4.
+                        self.servers = [self.server]
+                        break
+                    self.server.server_close()
+            else:
+                raise OSError('No free local preview port')
+            for server in self.servers:
+                server.authority = f'p{port}-{device[:8]}.localhost:{self.server.server_port}'
+                server.tunnel = self
+                threading.Thread(target=server.serve_forever, kwargs={'poll_interval': .1}, daemon=True).start()
         except BaseException:
             self.process.terminate(); self.process.wait(timeout=6)
             self.capture.join(timeout=1); self.process.stderr.close()
@@ -634,16 +656,19 @@ class Tunnel:
         if self.process.poll() is not None or not reachable(self.socket_path):
             return False
         try:
-            with contextlib.closing(http.client.HTTPConnection('127.0.0.1', self.server.server_port, timeout=10)) as connection:
-                connection.request('HEAD', '/', headers={'Host': self.server.authority})
-                response = connection.getresponse()
-                return response.getheader('X-Cloudroom-Preview') == self.generation
+            for server in self.servers:  # Each loopback the browser may use.
+                with contextlib.closing(http.client.HTTPConnection(server.server_address[0], self.server.server_port, timeout=10)) as connection:
+                    connection.request('HEAD', '/', headers={'Host': self.server.authority})
+                    if connection.getresponse().getheader('X-Cloudroom-Preview') != self.generation:
+                        return False
+            return True
         except (OSError, http.client.HTTPException):
             return False
 
     def close(self):
         self.closed = True
-        self.server.shutdown(); self.server.server_close()
+        for server in self.servers:
+            server.shutdown(); server.server_close()
         with self.connections_lock:
             for connection in self.connections:
                 with contextlib.suppress(OSError):

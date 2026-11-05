@@ -220,6 +220,18 @@ function healthResult(args: {
   };
 }
 
+// `hermes --version` also runs Hermes's update check (`git fetch` on git
+// installs). `hermes-acp --version` skips it, but still repairs a half-done
+// update at startup and is missing on older installs. Routine checks only
+// confirm Hermes is installed (#929).
+const CLIS_WITHOUT_SAFE_VERSION = new Set(["hermes"]);
+
+function readAcpCliVersion(command: string): Promise<string | null> {
+  return CLIS_WITHOUT_SAFE_VERSION.has(path.parse(command).name.toLowerCase())
+    ? Promise.resolve(null)
+    : readCliVersion(command);
+}
+
 export async function getAcpProviderHealth(
   target: AcpMaintenanceTarget,
 ): Promise<ProviderHealthResult> {
@@ -234,7 +246,7 @@ export async function getAcpProviderHealth(
   if ((await resolveExecutablePath(command)) === null) {
     return healthResult({ target, status: "not_installed" });
   }
-  const version = await readCliVersion(command);
+  const version = await readAcpCliVersion(command);
   if (maintenance === undefined) {
     return healthResult({
       target,
@@ -269,7 +281,7 @@ export async function getAcpProviderInstallationStatus(
   const installed = resolvedExecutable !== null;
   const currentVersion =
     installed && args.command !== null
-      ? await readCliVersion(args.command)
+      ? await readAcpCliVersion(args.command)
       : null;
   const installAction =
     args.installer !== undefined && !installed

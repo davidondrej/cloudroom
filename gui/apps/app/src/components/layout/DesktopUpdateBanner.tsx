@@ -109,8 +109,12 @@ export function DesktopUpdateBanner() {
   const host = useHostDesktopUpdate(desktopApi === null);
   const [clicked, setRestarting] = useState(false);
   const restarting = clicked || host?.restarting === true;
-  const version =
-    host?.version ?? desktopInfo?.pendingVersion ?? desktopInfo?.latestVersion;
+  // One key for the updater's "139.0.0" and the website's or other windows' "v139", so a dismissal sticks.
+  const version = (
+    host?.version ??
+    desktopInfo?.pendingVersion ??
+    desktopInfo?.latestVersion
+  )?.replace(/^(\d+)\.0\.0$/u, "v$1");
   const dismissal = useDismissal(version);
   const ready =
     host !== null ||
@@ -118,11 +122,13 @@ export function DesktopUpdateBanner() {
   const cannotSelfUpdate =
     desktopInfo?.autoUpdateEnabled !== true ||
     desktopInfo.downloadState === "failed";
+  // The last Restart to update left the old version: say so, and offer the website too.
+  const failed = desktopInfo?.installFailed === true;
   if (
     (host === null && !desktopInfo?.updateAvailable) ||
     !version ||
     dismissal.hidden ||
-    (!ready && !cannotSelfUpdate)
+    (!ready && !cannotSelfUpdate && !failed)
   ) {
     return null;
   }
@@ -130,7 +136,11 @@ export function DesktopUpdateBanner() {
   const dismiss = () => dismissal.dismiss(version);
   // A failed download (e.g. Wi-Fi still off after sleep) retries in-app; the website is only for apps that can't self-update.
   const download = () => {
-    if (desktopInfo?.autoUpdateEnabled === true && desktopApi !== null) {
+    if (
+      !failed &&
+      desktopInfo?.autoUpdateEnabled === true &&
+      desktopApi !== null
+    ) {
       void desktopApi.checkForUpdates().catch(() => undefined);
       return;
     }
@@ -157,7 +167,13 @@ export function DesktopUpdateBanner() {
     >
       <Icon name="Download" className="size-4 shrink-0 text-primary" />
       <span className="min-w-0 flex-1 truncate">
-        {ready ? (
+        {failed ? (
+          <>
+            <strong>The last update didn't install.</strong>{" "}
+            {ready ? "Restart to try again, or download" : "Download"} the new
+            version from the website.
+          </>
+        ) : ready ? (
           <>
             <strong>A new version of Cloudroom is ready.</strong> Restart to
             update.{" "}
@@ -176,11 +192,16 @@ export function DesktopUpdateBanner() {
         <Button size="sm" disabled={restarting} onClick={restart}>
           {restarting ? "Restarting…" : "Restart to update"}
         </Button>
-      ) : (
-        <Button size="sm" onClick={download}>
+      ) : null}
+      {!ready || failed ? (
+        <Button
+          size="sm"
+          variant={ready ? "outline" : "default"}
+          onClick={download}
+        >
           Download
         </Button>
-      )}
+      ) : null}
       <Button
         size="icon"
         variant="ghost"

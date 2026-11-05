@@ -2,6 +2,9 @@ import { type MachineEnvironmentList } from "./api/machine-environment.js";
 import {
   machineEnvironmentReplaceSchema,
   type MachineEnvironmentReplace,
+  systemSkillUsageQuerySchema,
+  type SystemSkillUsageQuery,
+  type SystemSkillUsageResponse,
   type SystemWorktreeStorageResponse,
 } from "./api/system.js";
 import {
@@ -1748,6 +1751,14 @@ export const publicApiRoutes = {
         systemInstallCliSkillsRequestSchema,
       ),
       response: jsonResponse<SystemInstallCliSkillsResponse>(),
+    }),
+    skillUsage: defineRoute({
+      path: "/system/skill-usage",
+      method: "get",
+      request: optionalQueryRequest<EmptyInput, SystemSkillUsageQuery>(
+        systemSkillUsageQuerySchema,
+      ),
+      response: jsonResponse<SystemSkillUsageResponse>(),
     }),
     worktreeStorage: defineRoute({
       path: "/system/worktree-storage",

@@ -1,9 +1,22 @@
 import type { EventProjectionMessage } from "./event-projection-types.js";
 
+/** A provider retry ("Reconnecting... 1/5") is transient: it never ends a turn and folds into its work (#949). */
+export function isTimelineRetryMessage(
+  message: EventProjectionMessage,
+): boolean {
+  return (
+    message.kind === "error" &&
+    (message.reconnectAttempt !== undefined || message.willRetry === true)
+  );
+}
+
 export function isTimelineTerminalMessage(
   message: EventProjectionMessage,
 ): boolean {
-  return message.kind === "assistant-text" || message.kind === "error";
+  return (
+    message.kind === "assistant-text" ||
+    (message.kind === "error" && !isTimelineRetryMessage(message))
+  );
 }
 
 function isTimelineSummaryGroupableSteerMessage(

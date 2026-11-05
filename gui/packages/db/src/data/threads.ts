@@ -277,6 +277,9 @@ export interface CreateThreadInput {
   originPluginId?: string | null;
   pluginMetadata?: { pluginId: string; metadata: JsonObject } | null;
   visibility?: ThreadVisibility;
+  /** Imported chats keep their original dates. */
+  createdAt?: number;
+  latestAttentionAt?: number;
 }
 
 export function createThread(
@@ -311,8 +314,8 @@ export function createThread(
           originPluginId: input.originPluginId ?? null,
           visibility,
           lastReadAt: now,
-          latestAttentionAt: now,
-          createdAt: now,
+          latestAttentionAt: input.latestAttentionAt ?? now,
+          createdAt: input.createdAt ?? now,
           updatedAt: now,
         })
         .returning()

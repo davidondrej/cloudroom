@@ -90,6 +90,19 @@ export function officialCodexPath(
   );
 }
 
+// Every official Codex, ahead of PATH. On Windows, install.ps1 also links its current
+// Codex into LOCALAPPDATA and only adds that to the user's PATH, which an open
+// Cloudroom doesn't see until it restarts.
+function officialCodexPaths(env: NodeJS.ProcessEnv): string[] {
+  const localAppData = env.LOCALAPPDATA?.trim();
+  return [
+    officialCodexPath(env),
+    ...(process.platform === "win32" && localAppData
+      ? [join(localAppData, "Programs", "OpenAI", "Codex", "bin", "codex")]
+      : []),
+  ];
+}
+
 function fallbackCandidates(cli: string, env: NodeJS.ProcessEnv): string[] {
   if (process.platform === "win32") return windowsFallbackCandidates(cli, env);
   if (process.getuid?.() === 0) return [];
@@ -123,7 +136,7 @@ export function findCliExecutable(
   // OpenAI's official Codex wins over PATH: it is the one copy we can always
   // update, however tangled the Mac's npm or Homebrew copies are.
   const official =
-    cli === "codex" && process.getuid?.() !== 0 ? [officialCodexPath(env)] : [];
+    cli === "codex" && process.getuid?.() !== 0 ? officialCodexPaths(env) : [];
   return (
     withWindowsExtensions(
       [

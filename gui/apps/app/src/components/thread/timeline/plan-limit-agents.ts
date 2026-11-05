@@ -44,8 +44,10 @@ export interface PlanLimitAgent {
 /** The id of the timeline's last row, when a plan limit stopped that turn. */
 export const LatestPlanLimitRowIdContext = createContext<string | null>(null);
 
+/** The card shows while the thread is stopped, or while another agent picks up after a switch with resend. */
 export function findLatestPlanLimitRowId(
   rows: readonly ThreadTimelineViewRow[],
+  running: boolean,
 ): string | null {
   let candidates = rows;
   for (;;) {
@@ -54,11 +56,10 @@ export function findLatestPlanLimitRowId(
       candidates = last.children;
       continue;
     }
-    return last?.kind === "system" &&
-      last.systemKind === "error" &&
-      last.planLimit
-      ? last.id
-      : null;
+    if (last?.kind !== "system" || last.systemKind !== "error") return null;
+    if (last.planLimitSwitch)
+      return last.planLimitSwitch.resend ? last.id : null;
+    return last.planLimit && !running ? last.id : null;
   }
 }
 

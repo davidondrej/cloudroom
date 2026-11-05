@@ -33,6 +33,10 @@ export function parseErrorMessage(
     ...(decoded.type === "provider/error" && decoded.willRetry !== undefined
       ? { willRetry: decoded.willRetry }
       : {}),
+    // A retry is a Reconnecting row whatever its wording (#949).
+    ...(decoded.type === "system/error" && decoded.code === "provider_reconnect"
+      ? { willRetry: true }
+      : {}),
     ...(reconnectState
       ? {
           reconnectAttempt: reconnectState.attempt,

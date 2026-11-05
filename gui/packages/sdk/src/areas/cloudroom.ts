@@ -246,6 +246,9 @@ export interface CloudroomArea {
   cursorLogin(requestId: string): Promise<CloudroomCodexAuth>;
   cancelCursorLogin(requestId: string): Promise<CloudroomCodexAuth>;
   cursorApiKey(requestId: string, apiKey: string): Promise<CloudroomCodexAuth>;
+  /** The Accounts plugin's Cursor account in use becomes the Cloud login: its API key, or with `null` this computer's own
+   *  Cursor login again. */
+  cursorAccount(input: { requestId: string; apiKey: string | null }): Promise<CloudroomCodexAuth>;
   piApiKey(provider: string, apiKey: string): Promise<{ providers: string[] }>;
   codexAuth(signal?: AbortSignal): Promise<CloudroomCodexAuth>;
   codexLogin(requestId: string): Promise<CloudroomCodexAuth>;
@@ -404,6 +407,7 @@ export function createCloudroomArea({ transport }: CreateSdkAreaArgs): Cloudroom
     cursorLogin: (requestId) => transport.readJson(request("/cursor/login", { requestId })) as Promise<CloudroomCodexAuth>,
     cancelCursorLogin: (requestId) => transport.readJson(request("/cursor/cancel", { requestId })) as Promise<CloudroomCodexAuth>,
     cursorApiKey: (requestId, apiKey) => transport.readJson(request("/cursor/key", { requestId, apiKey })) as Promise<CloudroomCodexAuth>,
+    cursorAccount: (input) => transport.readJson(request("/cursor/account", input)) as Promise<CloudroomCodexAuth>,
     piApiKey: (provider, apiKey) => transport.readJson(request("/pi/key", { provider, apiKey })) as Promise<{ providers: string[] }>,
     codexAuth: (signal) => transport.readJson(request("/codex", undefined, signal)) as Promise<CloudroomCodexAuth>,
     codexLogin: (requestId) => transport.readJson(request("/codex/login", { requestId })) as Promise<CloudroomCodexAuth>,

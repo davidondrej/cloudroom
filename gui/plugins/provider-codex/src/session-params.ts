@@ -141,17 +141,26 @@ interface CodexInstructionOverrides {
   developerInstructions?: ThreadStartParams["developerInstructions"];
 }
 
+// ADR 0108. Codex 0.153-0.162 offers request_user_input_async despite the config
+// keys below; it returns accepted:true though no question reaches the user (#885).
+const CODEX_PLAIN_CHAT =
+  "request_user_input and request_user_input_async don't reach the user; ask in plain chat instead.";
+
 export function resolveCodexInstructionOverrides(
   command: CodexInstructionSource,
 ): CodexInstructionOverrides {
   const instructions = command.options.instructions?.trim();
-  if (!instructions) {
-    return {};
+  if (instructions && command.instructionMode === "replace") {
+    return {
+      baseInstructions: instructions,
+      developerInstructions: CODEX_PLAIN_CHAT,
+    };
   }
-  if (command.instructionMode === "replace") {
-    return { baseInstructions: instructions };
-  }
-  return { developerInstructions: instructions };
+  return {
+    developerInstructions: instructions
+      ? `${CODEX_PLAIN_CHAT}\n\n${instructions}`
+      : CODEX_PLAIN_CHAT,
+  };
 }
 
 function toWorkspaceWriteCodexSandboxPolicy(
@@ -651,6 +660,9 @@ export function buildCodexConfig(
     );
   }
   config["features.default_mode_request_user_input"] = false;
+  // Codex 0.163+: also removes request_user_input_async, which always returns
+  // accepted:true though Cloudroom has no answer path (ADR 0108, #885).
+  config["tools.experimental_request_user_input.enabled"] = false;
   if (args.options?.providerSubagentsEnabled === false) {
     config["features.multi_agent"] = false;
     config["features.multi_agent_v2.max_concurrent_threads_per_session"] = 1;

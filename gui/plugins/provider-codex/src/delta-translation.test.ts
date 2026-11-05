@@ -244,7 +244,28 @@ describe("codex turn lifecycle translation", () => {
         error: { message: "rate limited" },
       }),
     );
-    expect(events[0]).not.toHaveProperty("providerCheckpointId");
+    expect(events.at(-1)).not.toHaveProperty("providerCheckpointId");
+    // No `error` notification came first, so the failed turn shows its own.
+    expect(events[0]).toMatchObject({
+      type: "provider/error",
+      detail: "rate limited\ntry again",
+      willRetry: false,
+    });
+    // ...and a late twin `error` does not show it again.
+    expect(
+      harness.translate(
+        codexEvent("error", {
+          threadId: "t1",
+          turnId: "turn-1",
+          error: {
+            message: "rate limited",
+            codexErrorInfo: null,
+            additionalDetails: null,
+          },
+          willRetry: false,
+        }),
+      ),
+    ).toEqual([]);
   });
 
   it("stamps the codex turn id as providerCheckpointId on completed turns", () => {
@@ -1921,6 +1942,34 @@ describe("codex error and warning translation", () => {
     ]);
   });
 
+  it("says plainly when Codex sends only a bare Bad Request", () => {
+    const harness = createHarness();
+    const events = harness.translate(
+      codexEvent("error", {
+        threadId: "t1",
+        turnId: "turn-1",
+        error: {
+          message: '{"detail":"Bad Request"}',
+          codexErrorInfo: "other",
+          additionalDetails: null,
+        },
+        willRetry: false,
+      }),
+    );
+    expect(events).toEqual([
+      expect.objectContaining({
+        detail: expect.stringMatching(
+          /^\{"detail":"Bad Request"\}\nThe model API returned only a generic Bad Request, and Codex passed it on with no reason or request ID\./u,
+        ),
+        errorInfo: {
+          category: "bad-request",
+          providerCode: "other",
+          httpStatusCode: null,
+        },
+      }),
+    ]);
+  });
+
   it("maps codexErrorInfo to provider error info", () => {
     const harness = createHarness();
     const events = harness.translate(
@@ -1957,6 +2006,9 @@ describe("codex error and warning translation", () => {
   it.each([
     ["sessionBudgetExceeded", "budget-exceeded"],
     ["misalignmentPolicyViolation", "policy"],
+    ["rateLimitExceeded", "unknown"],
+    // A code newer than the adapter still shows and still ends the turn.
+    ["brandNewCode", "unknown"],
   ] as const)(
     "normalizes %s errors and failed turn completion",
     (codexErrorInfo, category) => {

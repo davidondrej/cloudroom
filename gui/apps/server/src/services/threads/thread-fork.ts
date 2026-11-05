@@ -1,7 +1,7 @@
 import { getEnvironment, getThread } from "@cloudroom/db";
 import type { EnvironmentRow } from "@cloudroom/db";
-import type { PromptInput, Thread } from "@cloudroom/domain";
-import type { ForkThreadRequest } from "@cloudroom/server-contract";
+import { PERSONAL_PROJECT_ID, type PromptInput, type Thread } from "@cloudroom/domain";
+import type { CreateThreadEnvironmentArgs, ForkThreadRequest } from "@cloudroom/server-contract";
 import type { LoggedPendingInteractionWorkSessionDeps } from "../../types.js";
 import { ApiError } from "../../errors.js";
 import { resolveExistingThreadPermissionMode } from "./thread-execution-plan.js";
@@ -9,6 +9,9 @@ import { getLastExecutionOptions } from "./thread-events.js";
 import { createThreadFromRequest } from "./thread-create.js";
 import { cloudExecution, cloudroom, isCloudThread } from "../cloudroom/commands.js";
 import { binding } from "../cloudroom/store.js";
+import { DEFAULT_ENVIRONMENT_PROVIDER_ID } from "../environments/environment-provider-ids.js";
+import { resolvePrimaryHostId } from "../hosts/primary-host.js";
+import { worktreeProviderInputs } from "./thread-environment-placement.js";
 
 type ThreadForkDeps = LoggedPendingInteractionWorkSessionDeps;
 
@@ -59,6 +62,21 @@ function requireSourceEnvironment(
     );
   }
   return environment;
+}
+
+/** A Local fork defaults to a new worktree (createThreadFromRequest gives it the source's code), so the two threads
+ *  never edit the same files. A side chat (ADR 0189, 0273), a personal thread, or a source on another machine keeps
+ *  the source's folder. */
+function defaultLocalForkEnvironment(deps: ThreadForkDeps, sourceThread: Thread, source: EnvironmentRow, fresh: boolean): CreateThreadEnvironmentArgs {
+  if (fresh || sourceThread.projectId === PERSONAL_PROJECT_ID || !source.hostId || source.hostId !== resolvePrimaryHostId(deps)) {
+    return { type: "reuse", environmentId: source.id };
+  }
+  return {
+    type: "provider",
+    environmentProviderId: DEFAULT_ENVIRONMENT_PROVIDER_ID.gitWorktree,
+    machine: { type: "existing", hostId: source.hostId },
+    inputs: worktreeProviderInputs({ kind: "default" }),
+  };
 }
 
 /** A Cloud thread forks into a new sandbox, and its first message makes the native fork, so it needs one. */
@@ -168,10 +186,7 @@ export async function createThreadForkFromRequest(
   return createThreadFromRequest(
     deps,
     {
-      environment: request.environment ?? {
-        type: "reuse",
-        environmentId: sourceEnvironment.id,
-      },
+      environment: request.environment ?? defaultLocalForkEnvironment(deps, sourceThread, sourceEnvironment, request.fresh === true),
       input,
       origin: request.origin,
       ...(request.originPluginId === undefined

@@ -123,7 +123,9 @@ async function claudeSessions(files: string[]): Promise<Found[]> {
     const tail = await tailLines(path, 64 * 1024);
     const named = (type: string, field: string) => [...tail].reverse().find((line) => line.type === type && typeof line[field] === "string" && line[field] !== "New session")?.[field] as string | undefined;
     const title = named("custom-title", "customTitle") ?? named("ai-title", "aiTitle") ?? named("summary", "summary") ?? first;
-    return { harness: "claude-code", id: basename(path, ".jsonl"), title: shorten(title), cwd, updatedAt: (await stat(path)).mtimeMs, path };
+    // Claude rewrites the file with bookkeeping lines on exit and reopen, so its mtime can be days after the chat.
+    const updatedAt = await lastMessageAt(path, (line) => line.isSidechain !== true && (line.type === "assistant" || claudeUserText(line) !== null));
+    return { harness: "claude-code", id: basename(path, ".jsonl"), title: shorten(title), cwd, updatedAt, path };
   }));
 }
 
@@ -139,7 +141,9 @@ async function codexSessions(files: string[]): Promise<Found[]> {
     if (!meta?.id || !meta.cwd || !["cli", "vscode"].includes(meta.source) || OWN_CODEX_ORIGINATORS.test(meta.originator ?? "")) return null;
     const first = lines.map((line) => codexMessage(line, "UserMessage")).find(Boolean);
     if (!first) return null;
-    return { harness: "codex", id: meta.id, title: shorten(names.get(meta.id) ?? first), cwd: meta.cwd, updatedAt: (await stat(path)).mtimeMs, path };
+    // On Windows the mtime often stays at the session start while Codex appends. Compressed files fall back to it.
+    const updatedAt = await lastMessageAt(path, (line) => Boolean(codexMessage(line, "UserMessage") || codexMessage(line, "AgentMessage")));
+    return { harness: "codex", id: meta.id, title: shorten(names.get(meta.id) ?? first), cwd: meta.cwd, updatedAt, path };
   }));
 }
 
@@ -174,8 +178,17 @@ async function codexTurns(path: string): Promise<Turn[]> {
   }
   return turns;
 }
+// The last message's time; a big /compact summary or tool output can push it out of the short tail, so retry with 4 MB.
+async function lastMessageAt(path: string, isMessage: (line: Line) => boolean): Promise<number> {
+  for (const bytes of path.endsWith(".zst") ? [] : [64 * 1024, 4 * 1024 * 1024]) {
+    const at = (await tailLines(path, bytes)).filter(isMessage).map((line) => Date.parse(line.timestamp)).filter((time) => !Number.isNaN(time)).at(-1);
+    if (at !== undefined) return at;
+  }
+  return (await stat(path)).mtimeMs;
+}
+
 function claudeUserText(line: Line): string | null {
-  if (line.type !== "user" || line.isMeta || (line.origin?.kind && line.origin.kind !== "human")) return null;
+  if (line.type !== "user" || line.isMeta || line.isCompactSummary || (line.origin?.kind && line.origin.kind !== "human")) return null;
   const content = line.message?.content;
   const raw = typeof content === "string" ? content : Array.isArray(content) ? content.filter((block: Line) => block.type === "text").map((block: Line) => block.text).join("\n") : "";
   const text = raw.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, "").trim();
@@ -261,7 +274,7 @@ export async function headLines(path: string, bytes: number): Promise<Line[]> {
 
 export async function tailLines(path: string, bytes: number): Promise<Line[]> {
   const size = (await stat(path)).size;
-  const text = await readSlice(path, Math.max(0, size - bytes), bytes);
+  const text = await readSlice(path, Math.max(0, size - bytes), Math.min(size, bytes));
   return compact(text.split("\n").slice(size > bytes ? 1 : 0).map(parseLine));
 }
 

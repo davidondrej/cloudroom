@@ -1,5 +1,14 @@
+import { existsSync } from "node:fs";
+import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { CURSOR_ACP_MAINTENANCE, __testing } from "./provider-maintenance.js";
+import {
+  CURSOR_ACP_MAINTENANCE,
+  __testing,
+  getAcpProviderHealth,
+  getAcpProviderInstallationStatus,
+} from "./provider-maintenance.js";
 
 function cursorMissingInstallationStatus() {
   return {
@@ -95,4 +104,34 @@ describe("ACP provider maintenance", () => {
       message: "opencode install is not available on this host.",
     });
   });
+
+  it.skipIf(process.platform === "win32")(
+    "checks Hermes without running its update-checking --version",
+    async () => {
+      const dir = await mkdtemp(path.join(tmpdir(), "bb-acp-hermes-"));
+      try {
+        const command = path.join(dir, "hermes");
+        await writeFile(
+          command,
+          `#!/bin/sh\ntouch "${dir}/ran"\necho "Hermes Agent v1.0.0"\n`,
+        );
+        await chmod(command, 0o755);
+        const target = {
+          maintenance: undefined,
+          installer: undefined,
+          command,
+        };
+        expect(await getAcpProviderHealth(target)).toMatchObject({
+          health: { status: "ready", installedVersion: null },
+        });
+        expect(await getAcpProviderInstallationStatus(target)).toMatchObject({
+          installed: true,
+          currentVersion: null,
+        });
+        expect(existsSync(path.join(dir, "ran"))).toBe(false);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    },
+  );
 });

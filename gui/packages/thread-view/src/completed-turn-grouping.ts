@@ -7,6 +7,7 @@ import { getMessageStartedAt } from "./format-helpers.js";
 import {
   findLastTerminalTimelineMessage,
   isSingletonContextManagementOperation,
+  isTimelineRetryMessage,
   isTimelineUngroupableMessage,
 } from "./timeline-message-helpers.js";
 
@@ -135,10 +136,17 @@ function splitCompletedTurnMessages(
     );
   }
 
+  // A retry after the answer (a stream that dropped mid-reply) folds into the work, not below the answer.
+  const trailing = messages.slice(terminalIndex + 1);
   return {
-    summaryMessages: messages.slice(0, terminalIndex),
+    summaryMessages: [
+      ...messages.slice(0, terminalIndex),
+      ...trailing.filter(isTimelineRetryMessage),
+    ],
     terminalMessages: [terminalMessageAtIndex],
-    trailingMessages: messages.slice(terminalIndex + 1),
+    trailingMessages: trailing.filter(
+      (message) => !isTimelineRetryMessage(message),
+    ),
   };
 }
 

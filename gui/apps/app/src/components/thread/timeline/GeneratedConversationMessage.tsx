@@ -44,6 +44,7 @@ import { useOverflowMeasurement } from "./conversation-message-overflow.js";
 import { PromptMentionPill } from "./ConversationMessageMentions.js";
 import { useThreadTitleDisplayText } from "@/components/thread/ThreadTitleMentions.js";
 import { getThreadRoutePath } from "@/lib/route-paths";
+import { ChildLoginFix, childLoginFailure } from "./ChildLoginFix.js";
 import {
   boundedMarkdownPreview,
   closeUnterminatedMarkdownCodeSpan,
@@ -102,6 +103,8 @@ interface TimelineTitleSegmentArgs {
 }
 
 interface GeneratedConversationTitleArgs {
+  /** A child that failed on its harness login reads "needs sign-in", not "failed". */
+  loginFailure?: boolean;
   originKind: ThreadOriginKind | null;
   sourceKind: GeneratedConversationSourceKind;
   sourceName: string;
@@ -125,6 +128,8 @@ function cloudChildNoticeRange(text: string): [number, number] | null {
   }
   const cause = text.indexOf(" Cause: ", end);
   const stop = cause === -1 ? -1 : text.indexOf(" Its turn did not finish", cause);
+  // A refused start ends with "It did not start.": keep it, it tells the reader why.
+  if (cause !== -1 && stop === -1 && text.endsWith(" It did not start.")) return [cause + 8, text.length];
   return stop === -1 ? [text.length, text.length] : [cause + 8, stop];
 }
 
@@ -251,6 +256,7 @@ function threadSubjectTitleSegments(
 function systemMessageTitleSegments(
   systemMessageKind: SystemMessageKind,
   subject: SystemMessageSubject | null,
+  loginFailure: boolean,
 ): TimelineTitleSegment[] {
   switch (systemMessageKind) {
     case "ownership-assigned":
@@ -262,7 +268,10 @@ function systemMessageTitleSegments(
     case "child-completed":
       return threadSubjectTitleSegments(subject, "finished");
     case "child-failed":
-      return threadSubjectTitleSegments(subject, "failed");
+      return threadSubjectTitleSegments(
+        subject,
+        loginFailure ? "needs sign-in" : "failed",
+      );
     case "child-interrupted":
       return threadSubjectTitleSegments(subject, "was interrupted");
     case "child-outcome-batch":
@@ -275,6 +284,7 @@ function systemMessageTitleSegments(
 }
 
 export function generatedConversationTitle({
+  loginFailure = false,
   originKind,
   sourceKind,
   sourceName,
@@ -314,7 +324,11 @@ export function generatedConversationTitle({
             truncate: true,
           }),
         ]
-      : systemMessageTitleSegments(systemMessageKind, systemMessageSubject);
+      : systemMessageTitleSegments(
+          systemMessageKind,
+          systemMessageSubject,
+          loginFailure,
+        );
 
   return {
     action: sideChatAction,
@@ -514,6 +528,33 @@ export const GeneratedConversationMessage = memo(
       [mentions, messageText.length, trimStartLength],
     );
     const requestLabel = turnRequestLabel(turnRequest);
+    const childThreadId =
+      systemMessageSubject?.kind === "thread"
+        ? systemMessageSubject.threadId
+        : null;
+    const childTitle =
+      systemMessageSubject?.kind === "thread"
+        ? systemMessageSubject.threadName
+        : null;
+    const loginFailure = useMemo(
+      () =>
+        sourceKind === "system" && systemMessageKind === "child-failed"
+          ? childLoginFailure(messageText)
+          : null,
+      [messageText, sourceKind, systemMessageKind],
+    );
+    const loginFix = useMemo(
+      () =>
+        loginFailure ? (
+          <ChildLoginFix
+            failure={loginFailure}
+            childThreadId={childThreadId}
+            childTitle={childTitle}
+            parentThreadId={threadId}
+          />
+        ) : null,
+      [childThreadId, childTitle, loginFailure, threadId],
+    );
     const linkRouting = useMemo<MarkdownLinkRouting | undefined>(
       () =>
         buildMarkdownMessageLinkRouting({
@@ -527,6 +568,7 @@ export const GeneratedConversationMessage = memo(
     const title = useMemo(
       () =>
         generatedConversationTitle({
+          loginFailure: loginFailure !== null,
           originKind,
           sourceKind,
           sourceName,
@@ -536,6 +578,7 @@ export const GeneratedConversationMessage = memo(
           systemMessageSubject,
         }),
       [
+        loginFailure,
         originKind,
         sourceKind,
         sourceName,
@@ -583,7 +626,8 @@ export const GeneratedConversationMessage = memo(
     });
     const expandable =
       !titleOnly &&
-      (hasExpandedOnlyContent ||
+      (loginFix !== null ||
+        hasExpandedOnlyContent ||
         collapsedPreviewSource.hasAdditionalBodyLines ||
         collapsedPreviewSource.wasCapped ||
         collapsedPreviewOverflowMeasurement === "overflowing");
@@ -601,8 +645,9 @@ export const GeneratedConversationMessage = memo(
         : collapsedPreviewBody.text;
     const suppressGeneratedAgentImages =
       sourceKind === "agent" && !sourceIsPluginSideChat;
-    const collapsedPreview =
-      !titleOnly && collapsedPreviewBody.text ? (
+    const collapsedPreview = loginFix ? (
+      <div className={NESTED_TIMELINE_GROUP_LINE_CLASS_NAME}>{loginFix}</div>
+    ) : !titleOnly && collapsedPreviewBody.text ? (
         <div
           className={`${NESTED_TIMELINE_GROUP_LINE_CLASS_NAME} max-w-full min-w-0`}
         >
@@ -647,7 +692,13 @@ export const GeneratedConversationMessage = memo(
     const renderBody = useCallback(
       () => (
         <div className={NESTED_TIMELINE_GROUP_LINE_CLASS_NAME}>
-          <div className="pl-2 text-sm leading-relaxed text-foreground">
+          {loginFix}
+          <div
+            className={cn(
+              "pl-2 text-sm leading-relaxed text-foreground",
+              loginFix && "mt-2 text-muted-foreground",
+            )}
+          >
             {messageText ? (
               <MarkdownPreview
                 content={messageText}
@@ -690,6 +741,7 @@ export const GeneratedConversationMessage = memo(
         attachmentItems.filePaths,
         attachmentItems.imageItems,
         linkRouting,
+        loginFix,
         messageText,
         messageMentions,
         onOpenLocalFileLink,
@@ -709,11 +761,13 @@ export const GeneratedConversationMessage = memo(
         titleContent={sourceTitleContent}
         collapsedPreview={collapsedPreview}
         expandable={expandable}
-        leadingIcon={leadingIcon}
+        leadingIcon={loginFix ? "Lock" : leadingIcon}
         leadingIconStyle={
-          sourceKind === "system"
-            ? systemMessageIconStyle(systemMessageKind)
-            : undefined
+          loginFix
+            ? { color: "var(--warning)" }
+            : sourceKind === "system"
+              ? systemMessageIconStyle(systemMessageKind)
+              : undefined
         }
         resolveSegmentLinkHref={resolveSegmentLinkHref}
         onTitleAction={onTitleAction}

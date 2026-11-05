@@ -1,7 +1,7 @@
 import { COMPUTER, reasoningLevelSchema } from "@cloudroom/domain";
 import { cloudExecution, cloudroom, isCloudThread } from "../cloudroom/commands.js";
 import { prepareLocalFork, prepareLocalForkCode } from "../cloudroom/teleport-local.js";
-import { FORK_HARNESSES, forkModel, forkTurn } from "../cloudroom/fork.js";
+import { FORK_HARNESSES, forkModel, forkTurn, prepareLocalForkWorktree } from "../cloudroom/fork.js";
 import { messagesSeed } from "./thread-harness-switch.js";
 import { threadMessages } from "./thread-transcript.js";
 import { ensureProjectCheckoutForThread } from "../projects/project-source-setup.js";
@@ -460,13 +460,19 @@ async function createPendingThreadAndAttemptFirstDispatch(
       : getEnvironment(deps.db, args.environmentId);
   if (environment !== null)
     assertEnvironmentPathAvailable(deps, { ...environment, threadId: null });
+  const history = args.fork?.history ?? args.importedText?.history ?? null;
+  // Only chat imports pass rows: date the thread by the original chat so the sidebar sorts it there.
+  const rows = history?.kind === "rows" ? history.rows : [];
   const thread = createThreadRecord(deps, {
     request: args.request,
     environmentId: args.environmentId,
+    ...(rows.length ? {
+      createdAt: rows.reduce((min, row) => Math.min(min, row.createdAt), Infinity),
+      latestAttentionAt: rows.reduce((max, row) => Math.max(max, row.createdAt), 0),
+    } : {}),
   });
   let execution: Awaited<ReturnType<typeof buildExecutionOptions>>;
   try {
-    const history = args.fork?.history ?? args.importedText?.history ?? null;
     if (history !== null && args.request.visibility === "visible") {
       copyForkSourceHistory(deps, { fork: thread, history });
     }
@@ -603,6 +609,12 @@ export async function createThreadFromRequest(
   );
   const sourceId = rawRequestInput.sourceThreadId ?? rawRequestInput.parentThreadId;
   const source = sourceId ? getThread(deps.db, sourceId) : null;
+  // Every Local fork (fork button, plugin, CLI) passes here, so a new worktree always gets the source's code.
+  if (source !== null && !isCloudThread(source) && rawRequestInput.originKind === "fork" && rawRequestInput.sourceThreadId && rawRequestInput.executionTarget !== "cloud" && !options.freshFork) {
+    const prepared = await prepareLocalForkWorktree(deps as AppDeps, source, rawRequestInput.projectId, rawRequestInput.environment);
+    const note = prepared.note && rawRequestInput.input.length > 0 && options.providerInput === undefined ? [prepared.note] : [];
+    rawRequestInput = { ...rawRequestInput, environment: prepared.environment, input: [...note, ...rawRequestInput.input] };
+  }
   const cloudChild = source !== null && isCloudThread(source) && !rawRequestInput.sourceThreadId && !rawRequestInput.originKind;
   const cloudSourceFork = source !== null && isCloudThread(source) && rawRequestInput.originKind === "fork" && Boolean(rawRequestInput.sourceThreadId);
   const localFork = cloudSourceFork && rawRequestInput.executionTarget !== "cloud" && (rawRequestInput.executionTarget === "local" || rawRequestInput.environment.type !== "project-default");

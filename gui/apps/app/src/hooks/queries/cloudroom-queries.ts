@@ -316,6 +316,7 @@ export function useProjectSuggestions(): ProjectSelectorSuggestions | undefined 
   if (!hostId) return undefined;
   const adding = add.isPending ? add.variables.repo : null;
   return {
+    hostId,
     repos: [...(query.data ?? mac.data)?.repos ?? []].sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0)),
     githubConnected: query.data?.githubConnected ?? true,
     isLoading: query.isPending && mac.isPending,

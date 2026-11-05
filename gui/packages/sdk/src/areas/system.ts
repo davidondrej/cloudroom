@@ -22,6 +22,8 @@ import type {
   SystemInstallCliSkillsResponse,
   SystemProviderStatesResponse,
   SystemProvidersQuery,
+  SystemSkillUsageQuery,
+  SystemSkillUsageResponse,
   SystemUsageLimitsQuery,
   SystemVersionQuery,
   SystemVersionResponse,
@@ -61,6 +63,10 @@ export interface SystemVersionArgs {
 export interface SystemVoiceTranscriptionArgs {
   file: Blob;
   prompt?: string;
+  signal?: AbortSignal;
+}
+
+export interface SystemSkillUsageArgs extends SystemSkillUsageQuery {
   signal?: AbortSignal;
 }
 
@@ -134,6 +140,7 @@ export interface SystemArea {
     args: SystemInstallCliSkillsArgs,
   ): Promise<SystemInstallCliSkillsResult>;
   reloadConfig(): Promise<SystemReloadConfigResult>;
+  skillUsage(args?: SystemSkillUsageArgs): Promise<SystemSkillUsageResponse>;
   worktreeStorage(
     args?: SystemWorktreeStorageArgs,
   ): Promise<SystemWorktreeStorageResponse>;
@@ -244,6 +251,14 @@ export function createSystemArea(args: CreateSdkAreaArgs): SystemArea {
     },
     async reloadConfig() {
       return transport.readJson(transport.api.v1.system.config.reload.$post());
+    },
+    async skillUsage({ signal, ...query } = {}) {
+      return transport.readJson(
+        transport.api.v1.system["skill-usage"].$get(
+          { query },
+          ...signalRequestArgs(signal),
+        ),
+      );
     },
     async worktreeStorage(input = {}) {
       return transport.readJson(

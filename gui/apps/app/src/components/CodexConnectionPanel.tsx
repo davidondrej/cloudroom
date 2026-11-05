@@ -15,6 +15,11 @@ export function openCodexConnection(threadId?: string) {
 export function openCursorConnection(threadId?: string) {
   window.dispatchEvent(new CustomEvent("cloudroom:connect-cursor", { detail: threadId ?? null }));
 }
+/** Signs in for a child that failed on its login, then continues by itself: retries a child that never started
+ *  (`child`), or asks the parent to run the task again. */
+export function openChildSignIn(provider: "codex" | "cursor", target: { child: string } | { parent: string; label: string }) {
+  window.dispatchEvent(new CustomEvent(provider === "cursor" ? "cloudroom:connect-cursor" : eventName, { detail: target }));
+}
 export function openTeleportLogin(error: unknown, providerId: string): boolean {
   if (!(error instanceof BbHttpError) || error.code !== "teleport_login_required") return false;
   if (providerId === "acp-cursor") openCursorConnection();
@@ -45,6 +50,8 @@ function ConnectionPanel({ provider }: { provider: "codex" | "cursor" }) {
   const descriptionId = useId();
   const [open, setOpen] = useState(false);
   const [threadId, setThreadId] = useState<string | null>(null);
+  const [parent, setParent] = useState<{ parent: string; label: string } | null>(null);
+  const [autoContinue, setAutoContinue] = useState(false);
   const [copied, setCopied] = useState(false);
   const [signedIn, setSignedIn] = useState(false);
   const requestId = useRef<string | null>(null);
@@ -60,7 +67,11 @@ function ConnectionPanel({ provider }: { provider: "codex" | "cursor" }) {
   });
   useEffect(() => {
     const show = (event: Event) => {
-      setThreadId((event as CustomEvent<string | null>).detail);
+      const detail = (event as CustomEvent<string | { child: string } | { parent: string; label: string } | null>).detail;
+      const target = typeof detail === "object" ? detail : null;
+      setThreadId(typeof detail === "string" ? detail : target && "child" in target ? target.child : null);
+      setParent(target && "parent" in target ? target : null);
+      setAutoContinue(target !== null);
       setOpen(true);
       setCopied(false);
       setSignedIn(false);
@@ -72,8 +83,10 @@ function ConnectionPanel({ provider }: { provider: "codex" | "cursor" }) {
     mutationFn: async (kind: "login" | "cancel" | "continue" | "key") => {
       if (kind === "continue") {
         if (threadId) await sdk.cloudroom.retryStart(threadId);
+        if (parent) await sdk.threads.send({ threadId: parent.parent, mode: "auto", input: [{ type: "text", text: `I signed in to ${name} again. Run ${parent.label} again, same harness and settings.`, mentions: [] }] });
         setOpen(false);
         setThreadId(null);
+        setParent(null);
         await queryClient.invalidateQueries({ queryKey: ["cloudroom-thread"] });
         return;
       }
@@ -94,8 +107,16 @@ function ConnectionPanel({ provider }: { provider: "codex" | "cursor" }) {
     onSettled: () => queryClient.invalidateQueries({ queryKey }),
   });
   const state = auth.data?.state;
+  // A sign-in started from a child's login fix row continues the task by itself, once.
+  const resumed = useRef(false);
+  useEffect(() => { if (open) resumed.current = false; }, [open]);
+  useEffect(() => {
+    if (!autoContinue || !signedIn || state !== "connected" || resumed.current) return;
+    resumed.current = true;
+    action.mutate("continue");
+  }, [autoContinue, signedIn, state, action]);
   const rejected = !cursor && Boolean(threadId) && !signedIn && state === "connected";
-  const close = () => { setApiKey(""); setOpen(false); };
+  const close = () => { setApiKey(""); setAutoContinue(false); setOpen(false); };
   if (!accountId || !account.data?.ready) return null;
   return <PersistentResponsiveDrawerShell
     open={open} onOpenChange={value => { if (!value) close(); }} labelledBy={titleId} describedBy={descriptionId}
@@ -114,7 +135,7 @@ function ConnectionPanel({ provider }: { provider: "codex" | "cursor" }) {
         <Button variant="outline" disabled={action.isPending} onClick={() => action.mutate("continue")}>Try again</Button>
       </> : state === "connected" ? <>
         <p role="status">Connected{auth.data?.email ? ` · ${auth.data.email}` : ""}</p>
-        <Button className="w-full" disabled={action.isPending} onClick={() => action.mutate("continue")}>{threadId ? "Continue to task" : "Done"}</Button>
+        <Button className="w-full" disabled={action.isPending} onClick={() => action.mutate("continue")}>{threadId || parent ? "Continue to task" : "Done"}</Button>
       </> : state === "waiting" ? <>
         <p role="status" className="text-sm">{cursor ? "Open Cursor’s sign-in page. Credentials will be saved on your cloud VM." : auth.data?.user_code ? "Enter this code on OpenAI’s sign-in page." : "Finish signing in to ChatGPT in your browser."}</p>
         {!cursor && auth.data?.user_code && <div className="flex items-center justify-between gap-3 border p-3">

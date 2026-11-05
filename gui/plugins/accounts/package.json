@@ -3,13 +3,13 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Several Claude Code and Codex subscriptions for Local and Cloud threads. Pick the one in use.",
+  "description": "Several Claude Code, Codex, and Cursor subscriptions for Local and Cloud threads. Pick the one in use.",
   "engines": {
     "bb": ">=0.0"
   },
   "bb": {
     "name": "Accounts",
-    "description": "Several Claude Code and Codex subscriptions for Local and Cloud threads. Pick the one in use.",
+    "description": "Several Claude Code, Codex, and Cursor subscriptions for Local and Cloud threads. Pick the one in use.",
     "branding": {
       "icon": "Layers"
     },

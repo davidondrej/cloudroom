@@ -169,6 +169,9 @@ const SETTINGS_SEARCH_ENTRIES: readonly SettingsSearchEntry[] = [
     ["Invite friends", "invite friend referral share $400 credits"],
     ["Or connect your own Core", "self-hosted core url api token server"],
   ]),
+  ...entries("analytics", undefined, [
+    ["Skills", "analytics stats usage most used least used skill runs ridgeline"],
+  ]),
   ...entries("machines", undefined, [
     [`${COMPUTER_TITLE} access`, "mac computer access cloud agents permission full read-only ask off"],
     ["Where your agents run", "machines mac computer devices rename vps server cloud"],

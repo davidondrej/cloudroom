@@ -1,4 +1,4 @@
-import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
@@ -26,6 +26,33 @@ describe("provider maintenance kit", () => {
         );
         await chmod(executable, 0o755);
         expect(await readCliVersion(executable)).toBe("1.2.3");
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    },
+    15_000,
+  );
+
+  it.skipIf(process.platform === "win32")(
+    "ends everything a timed-out version probe started",
+    async () => {
+      const dir = await mkdtemp(path.join(tmpdir(), "bb-cli-hung-version-"));
+      try {
+        const executable = path.join(dir, "updating-cli");
+        const beat = path.join(dir, "beat");
+        // A grandchild in its own session keeps stdout open past the timeout.
+        const ownSession = `require("node:child_process").spawn("sleep", ["8"], { detached: true, stdio: "inherit" }).unref()`;
+        await writeFile(
+          executable,
+          `#!/bin/sh\n"${process.execPath}" -e '${ownSession}'\ni=0; while [ $i -lt 100 ]; do echo >> "${beat}"; sleep 0.2; i=$((i+1)); done &\nsleep 30\n`,
+        );
+        await chmod(executable, 0o755);
+        const startedAt = Date.now();
+        expect(await readCliVersion(executable)).toBeNull();
+        expect(Date.now() - startedAt).toBeLessThan(7_000);
+        const size = (await stat(beat)).size;
+        await new Promise((resolve) => setTimeout(resolve, 600));
+        expect((await stat(beat)).size).toBe(size);
       } finally {
         await rm(dir, { recursive: true, force: true });
       }

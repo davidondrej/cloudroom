@@ -19,6 +19,14 @@ import {
   localCodexEmail,
 } from "./src/codex.js";
 import {
+  cursorAccount,
+  cursorEnv,
+  cursorSecretSchema,
+  cursorUsage,
+  isCursorKey,
+  localCursorEmail,
+} from "./src/cursor.js";
+import {
   ACCOUNTS_CHANGED,
   LOCAL,
   MAX_ACCOUNTS,
@@ -47,6 +55,8 @@ const storedSchema = z.object({
   createdAt: z.number(),
 });
 type Stored = z.infer<typeof storedSchema>;
+// Providers whose accounts this Mac stores, in the order the user set. Codex accounts live on the website (ADR 0195).
+type Ordered = "claude-code" | "acp-cursor";
 const secretSchema = z.object({
   accessToken: z.string(),
   refreshToken: z.string(),
@@ -121,14 +131,19 @@ export default async function plugin(bb: BbPluginApi) {
     await kv.set("accounts:v1", accounts);
   }
   const order = z
-    .object({ "claude-code": z.array(z.string()) })
-    .catch({ "claude-code": [LOCAL] })
+    .object({
+      "claude-code": z.array(z.string()),
+      "acp-cursor": z.array(z.string()).default([LOCAL]),
+    })
+    .catch({ "claude-code": [LOCAL], "acp-cursor": [LOCAL] })
     .parse(await kv.get("order:v1"));
   const limits = z
     .record(z.string(), z.number())
     .catch({})
     .parse(await kv.get("limits:v1"));
   let inCloud = z.string().nullable().catch(null).parse(await kv.get("cloud:v1"));
+  // Before Cursor accounts, Cloud used a copy of the Mac's own Cursor login.
+  let cursorInCloud = z.string().catch(LOCAL).parse(await kv.get("cursor-cloud:v1"));
   const usage = new Map<string, Usage>();
   const threadAccount = new Map<string, string>();
   const claudeLogin = new ClaudeLogin(() =>
@@ -155,32 +170,38 @@ export default async function plugin(bb: BbPluginApi) {
       kv.set("limits:v1", limits),
     ]);
     bb.realtime.publish(ACCOUNTS_CHANGED, {});
-    return { cloud: followInCloud(connect) };
+    return { cloud: followInCloud(connect), cursor: followCursorInCloud() };
   };
-  const ids = (): string[] => {
-    const saved = accounts.map((account) => account.id);
-    const kept = order["claude-code"].filter(
+  const ids = (provider: Ordered = "claude-code"): string[] => {
+    const saved = accounts
+      .filter((account) => account.provider === provider)
+      .map((account) => account.id);
+    const kept = order[provider].filter(
       (id) => id === LOCAL || saved.includes(id),
     );
-    order["claude-code"] = [
+    order[provider] = [
       ...(kept.includes(LOCAL) ? [] : [LOCAL]),
       ...kept,
       ...saved.filter((id) => !kept.includes(id)),
     ];
-    // Claude's own Mac login has no one-year token, so Cloud can't follow it (ADR 0197).
-    return saved.length > 0
-      ? order["claude-code"].filter((id) => id !== LOCAL)
-      : order["claude-code"];
+    // Claude's own Mac login has no one-year token, so Cloud can't follow it (ADR 0197). Cursor's Mac login is copied
+    // to Cloud, so it stays selectable, like Codex's.
+    return provider === "claude-code" && saved.length > 0
+      ? order[provider].filter((id) => id !== LOCAL)
+      : order[provider];
   };
   // The top account is the one every thread uses (ADR 0197).
   const current = (provider: Provider): string =>
-    provider === "codex" ? codexInUse : (ids()[0] ?? LOCAL);
+    provider === "codex" ? codexInUse : (ids(provider)[0] ?? LOCAL);
   const limitedUntil = (provider: Provider, id: string): number | null => {
     const until = limits[`${provider}:${id}`];
     return until !== undefined && until > Date.now() ? until : null;
   };
 
-  const writeSecret = async (id: string, secret: Secret) => {
+  const writeSecret = async (
+    id: string,
+    secret: Secret | z.infer<typeof cursorSecretSchema>,
+  ) => {
     const temp = `${secretPath(id)}.${randomUUID()}.tmp`;
     await fs.writeFile(temp, JSON.stringify(secret), { mode: 0o600 });
     await fs.rename(temp, secretPath(id));
@@ -189,6 +210,10 @@ export default async function plugin(bb: BbPluginApi) {
     secretSchema.parse(
       JSON.parse(await fs.readFile(secretPath(account.id), "utf8")),
     );
+  const readCursorKey = async (account: Stored): Promise<string> =>
+    cursorSecretSchema.parse(
+      JSON.parse(await fs.readFile(secretPath(account.id), "utf8")),
+    ).apiKey;
   // Cloud keeps one Claude login per user, so it follows the account in use (ADR 0197).
   // Resolves to why Cloud is not on the account, or null.
   const followInCloud = async (connect: boolean): Promise<string | null> => {
@@ -217,13 +242,36 @@ export default async function plugin(bb: BbPluginApi) {
     }
   };
 
+  // Cloud keeps one Cursor login per user too: the account in use, or a copy of the Mac's own login.
+  const followCursorInCloud = async (): Promise<string | null> => {
+    const id = current("acp-cursor");
+    if (id === cursorInCloud) return null;
+    const account = accounts.find((entry) => entry.id === id);
+    try {
+      const status = await bb.sdk.cloudroom.cursorAccount({
+        requestId: randomUUID(),
+        apiKey: account ? await readCursorKey(account) : null,
+      });
+      if (status.state !== "connected") return "Cursor isn't connected in Cloud.";
+      cursorInCloud = id;
+      await kv.set("cursor-cloud:v1", id);
+      return null;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      bb.log.warn(`Cloud could not switch Cursor accounts: ${message}`);
+      return message;
+    }
+  };
+
   const refreshUsage = async (account: Stored, force = false) => {
     const previous = usage.get(account.id);
     if (!force && previous && Date.now() - previous.at < USAGE_EVERY_MS) return;
     const before = previous?.error ?? null;
     try {
       usage.set(account.id, {
-        ...(await claudeUsage(await readSecret(account))),
+        ...(account.provider === "acp-cursor"
+          ? { windows: await cursorUsage(await readCursorKey(account)), credits: null }
+          : await claudeUsage(await readSecret(account))),
         error: null,
         signInAgain: false,
         at: Date.now(),
@@ -245,11 +293,15 @@ export default async function plugin(bb: BbPluginApi) {
       await changed();
   };
   // A Claude check is a real 1-token reply that can open a 5-hour window,
-  // so only the account in use is checked in the background.
+  // so only the account in use is checked in the background. Cursor's usage is a plain read.
   const refreshAll = (force = false) =>
     Promise.all(
       accounts
-        .filter((account) => account.id === current("claude-code"))
+        .filter(
+          (account) =>
+            account.provider === "acp-cursor" ||
+            account.id === current("claude-code"),
+        )
         .map((account) => refreshUsage(account, force)),
     );
   const timer = setInterval(() => void refreshAll(), USAGE_EVERY_MS);
@@ -283,10 +335,9 @@ export default async function plugin(bb: BbPluginApi) {
     void refreshUsage(account, true);
   };
 
-  const claudeView = async (): Promise<AccountView[]> => {
-    const using = current("claude-code");
-    const localEmail = await localClaudeEmail();
-    const rows: AccountView[] = ids().map((id) => {
+  const rows = (provider: Ordered, localEmail: string | null): AccountView[] => {
+    const using = current(provider);
+    return ids(provider).map((id) => {
       const account = accounts.find((entry) => entry.id === id);
       const measured = usage.get(id);
       return {
@@ -295,7 +346,7 @@ export default async function plugin(bb: BbPluginApi) {
         email: id === LOCAL ? localEmail : (account?.email ?? null),
         plan: account?.plan ?? null,
         inUse: id === using,
-        limitedUntil: limitedUntil("claude-code", id),
+        limitedUntil: limitedUntil(provider, id),
         error: measured?.error ?? null,
         credits: id === using ? (measured?.credits ?? null) : null,
         // Accounts not in use aren't checked, so a window past its reset shows empty.
@@ -305,13 +356,20 @@ export default async function plugin(bb: BbPluginApi) {
             : window,
         ),
         needsSignIn: false,
-        limitedLogin: account !== undefined && !account.profile,
+        limitedLogin:
+          provider === "claude-code" && account !== undefined && !account.profile,
       };
     });
+  };
+  const claudeView = async (): Promise<AccountView[]> => {
+    const localEmail = await localClaudeEmail();
+    const views = rows("claude-code", localEmail);
     // Keep the Mac's Claude login visible until it is added again (ADR 0197).
-    const macAdded = accounts.some((entry) => entry.email === localEmail);
-    if (localEmail && !rows.some((row) => row.id === LOCAL) && !macAdded)
-      rows.unshift({
+    const macAdded = accounts.some(
+      (entry) => entry.provider === "claude-code" && entry.email === localEmail,
+    );
+    if (localEmail && !views.some((row) => row.id === LOCAL) && !macAdded)
+      views.unshift({
         id: LOCAL,
         name: null,
         email: localEmail,
@@ -324,7 +382,14 @@ export default async function plugin(bb: BbPluginApi) {
         needsSignIn: true,
         limitedLogin: false,
       });
-    return rows;
+    return views;
+  };
+  // "This Mac" is the Mac's own Cursor login and stays selectable: Cloud then uses a copy of it, as before accounts.
+  let cursorLocal: { email: string | null; at: number } | null = null;
+  const cursorView = async (): Promise<AccountView[]> => {
+    if (!cursorLocal || Date.now() - cursorLocal.at > USAGE_EVERY_MS)
+      cursorLocal = { email: await localCursorEmail(), at: Date.now() };
+    return rows("acp-cursor", cursorLocal.email);
   };
   // Codex accounts live on the website (ADR 0195). "This Mac" is the Mac's own `~/.codex` login and stays selectable:
   // Cloud then uses the copy of it the app uploads, as before.
@@ -366,10 +431,10 @@ export default async function plugin(bb: BbPluginApi) {
     bb.realtime.publish(ACCOUNTS_CHANGED, {});
     return views;
   };
-  const move = (id: string, to: number) => {
-    const list = ids().filter((entry) => entry !== id);
+  const move = (id: string, to: number, provider: Ordered = "claude-code") => {
+    const list = ids(provider).filter((entry) => entry !== id);
     list.splice(Math.max(0, Math.min(list.length, to)), 0, id);
-    order["claude-code"] = list;
+    order[provider] = list;
   };
   const stored = (id: string) => {
     if (id === LOCAL)
@@ -388,7 +453,9 @@ export default async function plugin(bb: BbPluginApi) {
       accounts.find((entry) => entry.id === state.replace) ??
       accounts.find(
         (entry) =>
-          entry.org === account.orgId && entry.email === account.email,
+          entry.provider === "claude-code" &&
+          entry.org === account.orgId &&
+          entry.email === account.email,
       );
     if (!existing)
       return add(
@@ -426,6 +493,40 @@ export default async function plugin(bb: BbPluginApi) {
     void refreshUsage(existing, true);
   };
 
+  // An account Cursor already knows (same user) keeps its place and gets the new key.
+  const addCursor = async (apiKey: string) => {
+    const key = apiKey.trim();
+    if (!isCursorKey(key))
+      throw new Error("Paste a Cursor API key from cursor.com/dashboard.");
+    const found = await cursorAccount(key);
+    const existing = accounts.find(
+      (entry) =>
+        entry.provider === "acp-cursor" &&
+        found.accountKey !== null &&
+        entry.accountKey === found.accountKey,
+    );
+    if (!existing && ids("acp-cursor").length > MAX_ACCOUNTS)
+      throw new Error(
+        `You can connect up to ${MAX_ACCOUNTS} accounts per provider.`,
+      );
+    const account: Stored = existing ?? {
+      id: randomUUID(),
+      provider: "acp-cursor",
+      email: found.email,
+      plan: found.plan,
+      accountKey: found.accountKey,
+      createdAt: Date.now(),
+    };
+    await writeSecret(account.id, { apiKey: key });
+    account.email = found.email;
+    account.plan = found.plan;
+    if (!existing) accounts = [...accounts, account];
+    // Cloud gets the new key on its next follow.
+    if (account.id === cursorInCloud) cursorInCloud = "";
+    await changed();
+    void refreshUsage(account, true);
+  };
+
   const remove = async (provider: Provider, id: string) => {
     stored(id);
     delete limits[`${provider}:${id}`];
@@ -437,7 +538,7 @@ export default async function plugin(bb: BbPluginApi) {
     const removed = accounts.find((account) => account.id === id);
     if (removed?.profile) void dropProfile(removed.profile);
     accounts = accounts.filter((account) => account.id !== id);
-    order["claude-code"] = order["claude-code"].filter((entry) => entry !== id);
+    order[provider] = order[provider].filter((entry) => entry !== id);
     usage.delete(id);
     await fs.rm(secretPath(id), { force: true });
     await changed();
@@ -447,7 +548,11 @@ export default async function plugin(bb: BbPluginApi) {
     accountsRpcContract,
     {
       "accounts.list": ({ provider }) =>
-        provider === "codex" ? codexView() : claudeView(),
+        provider === "codex"
+          ? codexView()
+          : provider === "acp-cursor"
+            ? cursorView()
+            : claudeView(),
       "accounts.use": async ({ provider, id, cloud }) => {
         delete limits[`${provider}:${id}`];
         if (provider === "codex") {
@@ -455,8 +560,17 @@ export default async function plugin(bb: BbPluginApi) {
           await kv.set("limits:v1", limits);
           return null;
         }
-        move(id, 0);
-        const following = (await changed(true)).cloud;
+        // This Mac without a Cursor login would leave Cloud on the previous account.
+        if (provider === "acp-cursor" && id === LOCAL) {
+          cursorLocal = { email: await localCursorEmail(), at: Date.now() };
+          if (!cursorLocal.email)
+            throw new Error(
+              "Sign in to Cursor on this Mac first: run `cursor-agent login`.",
+            );
+        }
+        move(id, 0, provider);
+        const follow = await changed(true);
+        const following = provider === "acp-cursor" ? follow.cursor : follow.cloud;
         const account = accounts.find((entry) => entry.id === id);
         if (account) void refreshUsage(account, true);
         const failed = cloud ? await following : null;
@@ -468,7 +582,11 @@ export default async function plugin(bb: BbPluginApi) {
           await codex({ action: "move", id: stored(id), direction });
           return null;
         }
-        move(id, ids().indexOf(id) + (direction === "up" ? -1 : 1));
+        move(
+          id,
+          ids(provider).indexOf(id) + (direction === "up" ? -1 : 1),
+          provider,
+        );
         await changed(true);
         return null;
       },
@@ -478,7 +596,11 @@ export default async function plugin(bb: BbPluginApi) {
       },
       "accounts.clear": async ({ provider }) => {
         const views =
-          provider === "codex" ? await codexView() : await claudeView();
+          provider === "codex"
+            ? await codexView()
+            : provider === "acp-cursor"
+              ? await cursorView()
+              : await claudeView();
         // The account in use goes last, so Cloud never switches to another one on the way.
         const added = views
           .filter((view) => view.id !== LOCAL)
@@ -555,6 +677,10 @@ export default async function plugin(bb: BbPluginApi) {
           state.busy = false;
         }
       },
+      "cursor.add": async ({ apiKey }) => {
+        await addCursor(apiKey);
+        return null;
+      },
       "codex.start": async () =>
         codexStartSchema.parse(
           await bb.sdk.cloudroom.codexAccounts({ action: "start" }),
@@ -571,7 +697,7 @@ export default async function plugin(bb: BbPluginApi) {
     {
       experimental_discoverable: true,
       experimental_description:
-        "Several subscriptions per provider. accounts.list returns one provider's accounts in order, with usage and which one is in use.",
+        "Several subscriptions per provider (Claude Code, Codex, Cursor). accounts.list returns one provider's accounts in order, with usage and which one is in use.",
     },
   );
 
@@ -607,6 +733,23 @@ export default async function plugin(bb: BbPluginApi) {
     },
   );
 
+  bb.providers.experimental_contributeEnv(
+    "acp-cursor",
+    async (context: { threadId: string }) => {
+      const id = current("acp-cursor");
+      threadAccount.set(context.threadId, id);
+      const account = accounts.find((entry) => entry.id === id);
+      const key = account ? await readCursorKey(account).catch(() => null) : null;
+      if (!account || !key) return [];
+      const reason = `Cloudroom account ${account.email ?? account.id}`;
+      return Object.entries(cursorEnv(key)).map(([name, value]) => ({
+        name,
+        value,
+        reason,
+      }));
+    },
+  );
+
   bb.events.on("turn.failed", async (event) => {
     if (event.errorInfo?.category !== "rate-limit") return;
     const thread = await bb.sdk.threads
@@ -617,7 +760,9 @@ export default async function plugin(bb: BbPluginApi) {
     // Cloud threads and Codex use the selected account, so they have no entry here.
     const used = threadAccount.get(event.threadId) ?? current(provider.data);
     const several =
-      provider.data === "codex" ? codexAccounts > 0 : ids().length > 1;
+      provider.data === "codex"
+        ? codexAccounts > 0
+        : ids(provider.data).length > 1;
     if (used === LOCAL && !several) return;
     limits[`${provider.data}:${used}`] =
       blockedUntil(event.rateLimits) ?? Date.now() + DEFAULT_REST_MS;

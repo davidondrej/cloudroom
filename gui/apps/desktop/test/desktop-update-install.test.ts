@@ -81,6 +81,24 @@ describe("idle update install", () => {
     expect(state.installs).toBe(1);
   });
 
+  it("after a failed restart, still reports the update but installs only when a window asks", async () => {
+    let asked = false;
+    const { state, check } = mac({
+      autoInstall: false,
+      report: async (installAt) => {
+        state.reports.push(installAt);
+        return asked;
+      },
+    });
+    state.time = 60 * MINUTE;
+    await check();
+    expect(state.reports).toEqual([null]);
+    expect(state.installs).toBe(0);
+    asked = true;
+    await check();
+    expect(state.installs).toBe(1);
+  });
+
   it("installs only once when a slow check overlaps the next one", async () => {
     let answer: (running: boolean) => void = () => {};
     const slow = new Promise<boolean>((resolve) => (answer = resolve));

@@ -2,6 +2,20 @@
 
 Also on [cloudroom.dev/changelog](https://www.cloudroom.dev/changelog).
 
+## 142
+
+Forks get their own worktree (2026-11-05)
+
+### Changes
+
+- Forking a Local thread gives the fork its own worktree with your code, so two agents never edit the same files.
+- Add several Cursor accounts and switch between them, in Local and Cloud.
+- One huge tool output no longer kills or freezes a thread.
+- When a subagent can't sign in, a Sign in button appears right in the chat.
+- Pick a project by typing a path with Tab completion, or find any folder by name.
+- Codex errors show their real cause instead of "System error".
+- Codex installs on Windows even without npm.
+
 ## 141
 
 Runaway threads can't sink your Mac (2026-11-04)

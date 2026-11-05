@@ -399,9 +399,7 @@ function formatRow(
     case "work":
       return formatWorkRow(row, context);
     case "system":
-      if (row.systemKind === "reconnect") {
-        return rowHeader(row.title, context);
-      }
+      // A Reconnecting row falls through to the title and its cause (#949).
       if (row.systemKind === "error") {
         return [
           rowHeader("Error", context),

@@ -30,7 +30,7 @@ const providerErrorCategoryTitles = {
   unknown: "Provider error",
 } satisfies Record<ProviderErrorCategory, string>;
 
-const MAX_ERROR_TITLE_LENGTH = 80;
+export const MAX_ERROR_TITLE_LENGTH = 80;
 
 /** Core puts this in every Cloud plan-limit error (PLAN_LIMIT in core/src/runtime/mod.rs). */
 const CORE_PLAN_LIMIT = "plan limit (not Cloudroom's).";
@@ -86,9 +86,10 @@ export function buildTimelineErrorDisplay(
   if (title.length <= MAX_ERROR_TITLE_LENGTH) {
     return { title, detail };
   }
+  // Too long for a title: the message leads the detail, so neither is lost (#949).
   return {
     title: genericErrorTitle(message.rawType),
-    detail: detail ?? title,
+    detail: detail === null ? title : `${title}\n\n${detail}`,
   };
 }
 

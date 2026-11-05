@@ -46,6 +46,7 @@ import {
   allSystemProvidersQueryKeyPrefix,
   hostProviderCliStatusQueryKey,
   systemCliSkillsQueryKey,
+  systemSkillUsageQueryKey,
   systemWorktreeStorageQueryKey,
   systemConfigQueryKey,
   systemExecutionOptionsQueryKey,
@@ -430,6 +431,20 @@ export function useCliSkillsStatus(options?: QueryOptions) {
     queryFn: ({ signal }) => sdk.system.cliSkillsStatus({ signal }),
     enabled: options?.enabled ?? true,
     staleTime: 30_000,
+  });
+}
+
+/** Daily skill runs from thread history, in the user's time zone. */
+export function useSkillUsage(days: "30" | "90" | "365") {
+  return useQuery({
+    queryKey: systemSkillUsageQueryKey(days),
+    queryFn: ({ signal }) =>
+      sdk.system.skillUsage({
+        days,
+        utcOffsetMinutes: String(-new Date().getTimezoneOffset()),
+        signal,
+      }),
+    staleTime: 60_000,
   });
 }
 

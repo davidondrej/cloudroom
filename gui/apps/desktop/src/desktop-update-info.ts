@@ -43,6 +43,7 @@ export function mergeDesktopUpdateInfo(
     ...(nativeDownloadState === undefined
       ? {}
       : { downloadState: nativeDownloadState }),
+    ...(args.autoInfo?.installFailed === true ? { installFailed: true } : {}),
     ...(args.autoInfo?.installNeedsPassword === true
       ? { installNeedsPassword: true }
       : {}),

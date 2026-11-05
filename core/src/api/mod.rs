@@ -49,6 +49,7 @@ pub fn router(manager: Arc<Manager>, token: String) -> Router {
         .route("/v1/accounts/codex/import", post(codex_import))
         .route("/v1/accounts/codex/switched", post(codex_switched))
         .route("/v1/accounts/claude/switched", post(claude_switched))
+        .route("/v1/accounts/cursor/switched", post(cursor_switched))
         .route("/v1/accounts/codex/cancel", post(codex_cancel))
         .route("/v1/workspaces/{id}", get(workspace))
         .route("/v1/settings", get(crate::sync::settings))
@@ -339,6 +340,10 @@ async fn codex_switched(State(manager): State<Arc<Manager>>) -> Json<Value> {
 /// The website wrote a new Claude login to this sandbox (ADR 0117).
 async fn claude_switched(State(manager): State<Arc<Manager>>) -> Json<Value> {
     Json(json!({"continued":manager.claude_switched()}))
+}
+/// The website wrote a new Cursor login to this sandbox: the user picked another Cursor account.
+async fn cursor_switched(State(manager): State<Arc<Manager>>) -> Json<Value> {
+    Json(json!({"continued":manager.cursor_switched()}))
 }
 async fn codex_cancel(
     State(manager): State<Arc<Manager>>,

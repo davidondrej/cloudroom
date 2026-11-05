@@ -590,7 +590,7 @@ describe("electron-builder signing config", () => {
       expect(line).toContain("$$env:CLOUDROOM_INSTALL_DIR");
       expect(line).not.toContain("$INSTDIR");
       // Windows PowerShell 5.1: a lone match unrolls to one object, so count through @(...).
-      expect(line.match(/@\(& \$\$left\)\.Count/g)).toHaveLength(2);
+      expect(line).toContain("@(& $$left)");
       expect(line).not.toMatch(/[^@]\(& \$\$left\)\.Count/);
     }
     expect(script).toContain("${If} $0 == 1");

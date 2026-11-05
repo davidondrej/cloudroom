@@ -34,6 +34,7 @@ function areDesktopInfoValuesEqual(
   return (
     left.lastCheckedAt === right.lastCheckedAt &&
     left.downloadState === right.downloadState &&
+    left.installFailed === right.installFailed &&
     left.latestVersion === right.latestVersion &&
     left.pendingVersion === right.pendingVersion &&
     left.platform === right.platform &&

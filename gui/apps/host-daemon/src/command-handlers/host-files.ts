@@ -33,6 +33,7 @@ import {
   readWindowsDriveTypes,
 } from "./filesystem-roots.js";
 import { resolveNonSymlinkDirectoryPath } from "./root-path.js";
+import { folderActivity, isPrivacyFolder, searchFolders } from "./folder-search.js";
 
 const SAFE_GIT_REF_REGEX = /^[A-Za-z0-9_./~^@-]+$/;
 
@@ -134,6 +135,8 @@ export async function listHostPaths(
 }
 
 const DIRECTORY_BROWSE_SKIP_NAMES = new Set(["node_modules"]);
+/** Above this many folders a listing skips the per-folder activity probe. */
+const ACTIVITY_PROBE_MAX_FOLDERS = 2_000;
 const resolveBrowsedDirectory = promisify(resolveSymlinksPreservingDrive);
 
 function compareDirectoryEntries(a: DirectoryEntry, b: DirectoryEntry): number {
@@ -175,8 +178,20 @@ export async function browseHostDirectory(
       ? await resolveBrowsedDirectory(requestedPath)
       : await fs.realpath(requestedPath);
 
+  const parent = path.dirname(directory);
+  const listing = async (entries: DirectoryEntry[]) => ({
+    directory,
+    parent: parent === directory ? null : parent,
+    entries,
+    roots: await listFilesystemRoots({ readDriveTypes }),
+  });
+  if (command.search !== undefined) {
+    return listing(await searchFolders(directory, command.search));
+  }
+
   const dirents = await fs.readdir(directory, { withFileTypes: true });
   const entries: DirectoryEntry[] = [];
+  const links = new Set<string>();
   for (const dirent of dirents) {
     if (dirent.name.startsWith(".")) continue;
     if (DIRECTORY_BROWSE_SKIP_NAMES.has(dirent.name)) continue;
@@ -189,6 +204,7 @@ export async function browseHostDirectory(
       } catch {
         continue;
       }
+      links.add(fullPath);
     } else if (dirent.isDirectory()) {
       kind = "directory";
     } else if (dirent.isFile()) {
@@ -201,14 +217,14 @@ export async function browseHostDirectory(
   }
 
   entries.sort(compareDirectoryEntries);
-
-  const parent = path.dirname(directory);
-  return {
-    directory,
-    parent: parent === directory ? null : parent,
-    entries,
-    roots: await listFilesystemRoots({ readDriveTypes }),
-  };
+  // A link may point into a privacy-protected folder, so it gets no activity probe.
+  const folders = entries.filter((entry) => entry.kind === "directory" && !links.has(entry.path));
+  if (folders.length <= ACTIVITY_PROBE_MAX_FOLDERS) {
+    await Promise.all(folders.map(async (folder) => {
+      Object.assign(folder, await folderActivity(folder.path, !isPrivacyFolder(folder.path)));
+    }));
+  }
+  return listing(entries);
 }
 
 export async function checkHostPathsExist(

@@ -6,8 +6,8 @@ import { appendThreadEventsInTransaction, appendThreadProvisioningEventInTransac
 import { LEGACY_CODEX_GOAL_EXTENSION_KIND, reasoningLevelSchema, threadEventSchema, threadScope, turnScope, encodeClientTurnRequestIdNumber, type ProvisioningTranscriptEntry, type SystemThreadProvisioningStatus, type ThreadEvent, type ThreadEventTurnStatus } from "@cloudroom/domain";
 import { z } from "zod";
 import { CloudroomError, type SessionRecord } from "./client.js";
-import { codexErrorFields } from "./codex-errors.js";
-import { binding, command, queuedPrompts, saveBinding, saveCommandState, saveStatus, effectivePrompt, statusOf, unstartedTurn, type Binding, type Command } from "./store.js";
+import { codexErrorFields, codexErrorFrameFields } from "./codex-errors.js";
+import { binding, command, coreFailure, queuedPrompts, saveBinding, saveCommandState, saveStatus, effectivePrompt, statusOf, unstartedTurn, type Binding, type Command } from "./store.js";
 
 const object = z.record(z.string(), z.unknown());
 const nativeFrame = z.object({ method: z.string(), params: object.optional() });
@@ -24,6 +24,13 @@ export function endedTurn(record: SessionRecord): ThreadEventTurnStatus | null {
   if (!receipt?.success || !["prompt", "auto"].includes(receipt.data.command) || !FINISHED.includes(receipt.data.state)) return null;
   return turnStatus(receipt.data.state);
 }
+// The last error already says this: same title, or a Codex message moved to the start of its detail.
+const sameError = (last: { message?: unknown; detail?: unknown }, message: string) => last.message === message || (typeof last.detail === "string" && `${last.detail}\n\n`.startsWith(`${message}\n\n`));
+// A lost or failed agent: its stderr tail and Core's diagnostic ID (#949), which finds the exit record.
+const exitDetail = (data: Record<string, unknown>) => {
+  const detail = [typeof data.stderr === "string" && `Harness stderr (last lines):\n${data.stderr.trimEnd()}`, typeof data.diagnostic_id === "string" && `Cloudroom diagnostic ID: ${data.diagnostic_id}`].filter(Boolean).join("\n\n");
+  return detail ? { detail } : {};
+};
 const bbRequestId = (id: string) => encodeClientTurnRequestIdNumber({ value: createHash("sha256").update(id).digest().readUIntBE(0, 6) });
 
 function messageReasoning(input: string, fallback: string): string {
@@ -204,7 +211,7 @@ export function projectRecord(db: DbConnection, threadId: string, record: Sessio
       }
       const lastError = () => tx.select({ data: events.data }).from(events).where(and(eq(events.threadId, threadId), eq(events.type, "system/error"))).orderBy(desc(events.sequence)).limit(1).get();
       const error = receipt.error ? codexErrorFields(receipt.error, codexOutage) : null;
-      if (["failed", "unknown", "unknown_after_restart"].includes(receipt.state) && error && !projected.some((event) => event.type === "system/error" && event.message === error.message) && JSON.parse(lastError()?.data ?? "{}").message !== error.message) {
+      if (["failed", "unknown", "unknown_after_restart"].includes(receipt.state) && error && !projected.some((event) => event.type === "system/error" && event.message === error.message) && !sameError(JSON.parse(lastError()?.data ?? "{}"), error.message)) {
         emit({ type: "system/error", scope: threadScope(), threadId, ...error });
       }
       // Codex reports its own compaction; other harnesses only confirm it with this receipt.
@@ -312,12 +319,12 @@ export function projectRecord(db: DbConnection, threadId: string, record: Sessio
       if (status === null) console.warn(`Cloud thread ${threadId}: unknown Core state "${state}"; its status stays as it was.`);
       else {
         const waiting = status !== "error" && status !== "stopping" && !saved.queuePaused && unstartedTurn(tx, threadId);
-        saveStatus(tx, threadId, waiting ? "active" : status);
+        saveStatus(tx, threadId, waiting ? "active" : status, status === "error" ? coreFailure(state, data) : undefined);
       }
       if (status === "error") emit({
         type: "system/error", scope: threadScope(), threadId,
         message: typeof data.reason === "string" ? data.reason : "Cloudroom execution failed",
-        ...(typeof data.stderr === "string" ? { detail: `Harness stderr (last lines):\n${data.stderr}` } : {}),
+        ...exitDetail(data),
       });
     }
     if (harness === "claude-code" && data.harness === "claude-code" && saved.nativeId && typeof data.request_id === "string" && turnStarted(tx, threadId, data.request_id)) {
@@ -473,7 +480,10 @@ export function projectRecord(db: DbConnection, threadId: string, record: Sessio
             if (reason) emit({ ...base, type: "provider/warning", category: "general", summary: reason });
           } else if (method === "error") {
             const error = object.parse(params.error);
-            emit({ type: "system/error", scope: threadScope(), threadId, ...codexErrorFields(z.string().parse(error.message), codexOutage) });
+            // Like Local, a started turn owns its errors (#949): a turn that recovers folds its retries into its work, and
+            // a failed one ends on its error card, not on a stale Reconnecting row.
+            const scope = turnStarted(tx, threadId, saved.turnId) ? base.scope : threadScope();
+            emit({ type: "system/error", scope, threadId, ...codexErrorFrameFields(z.string().parse(error.message), error, params.willRetry, codexOutage) });
           }
         }
       }

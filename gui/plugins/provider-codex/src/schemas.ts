@@ -500,13 +500,18 @@ const codexErrorHttpStatusSchema = z
   })
   .strip();
 
-const codexErrorInfoSchema = z.union([
+export const knownCodexErrorInfoSchema = z.union([
   z.literal("contextWindowExceeded"),
   z.literal("sessionBudgetExceeded"),
   z.literal("usageLimitExceeded"),
+  z.literal("rateLimitExceeded"),
+  z.literal("flexUnavailable"),
   z.literal("serverOverloaded"),
+  z.literal("modelNotFound"),
+  z.literal("policyCapacityUnavailable"),
   z.literal("cyberPolicy"),
   z.literal("misalignmentPolicyViolation"),
+  z.literal("tooManyDenials"),
   z.object({ httpConnectionFailed: codexErrorHttpStatusSchema }),
   z.object({ responseStreamConnectionFailed: codexErrorHttpStatusSchema }),
   z.literal("internalServerError"),
@@ -525,7 +530,16 @@ const codexErrorInfoSchema = z.union([
   }),
   z.literal("other"),
 ]);
+export type KnownCodexErrorInfo = z.infer<typeof knownCodexErrorInfoSchema>;
+// Codex declares the code open-ended; a newer code must still parse, or its
+// `error` and failed `turn/completed` turn unhandled and the turn never ends.
+const codexErrorInfoSchema = z.union([
+  knownCodexErrorInfoSchema,
+  z.string(),
+  z.record(z.string(), z.unknown()),
+]);
 export type CodexErrorInfo = z.infer<typeof codexErrorInfoSchema>;
+// Both sides fold codes into `string`; toProviderErrorInfo's fallback covers new ones.
 const codexErrorInfoSchemaMatchesGenerated: GeneratedCodexErrorInfo extends CodexErrorInfo
   ? CodexErrorInfo extends GeneratedCodexErrorInfo
     ? true

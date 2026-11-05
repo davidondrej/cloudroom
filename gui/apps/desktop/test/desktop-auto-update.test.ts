@@ -531,6 +531,7 @@ describe("desktop auto-update service", () => {
   });
 
   it("offers the download again after a Restart to update that didn't install", () => {
+    const updater = new DesktopAutoUpdaterAdapterStub();
     const service = createDesktopAutoUpdateService({
       currentVersion: "0.0.1",
       enabled: true,
@@ -538,10 +539,22 @@ describe("desktop auto-update service", () => {
       logger: createLogger(createLoggerMessages()),
       now: () => Date.parse(checkedAt),
       platform: "windows",
-      updater: new DesktopAutoUpdaterAdapterStub(),
+      updater,
     });
     service.markInstallFailed("0.0.2");
-    expect(service.getInfo()).toMatchObject({ downloadState: "failed", latestVersion: "0.0.2", updateAvailable: true, updateDownloaded: false });
+    expect(service.getInfo()).toMatchObject({
+      downloadState: "failed",
+      installFailed: true,
+      latestVersion: "0.0.2",
+      updateAvailable: true,
+      updateDownloaded: false,
+    });
+    // Ready again, it still says the last restart didn't install.
+    updater.emitUpdateDownloaded(createDownloadedEvent("0.0.2"));
+    expect(service.getInfo()).toMatchObject({
+      installFailed: true,
+      updateDownloaded: true,
+    });
   });
 
   it("does not initialize electron-updater in dev mode without the override", async () => {

@@ -1,7 +1,7 @@
 import { defineRpcContract } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 
-export const providerSchema = z.enum(["claude-code", "codex"]);
+export const providerSchema = z.enum(["claude-code", "codex", "acp-cursor"]);
 export type Provider = z.infer<typeof providerSchema>;
 export const MAX_ACCOUNTS = 10;
 export const LOCAL = "local";
@@ -77,6 +77,8 @@ export const accountsRpcContract = defineRpcContract({
       expiresAt: z.number(),
     }),
   },
+  // Cursor accounts are added with a user API key from cursor.com/dashboard.
+  "cursor.add": { input: z.object({ apiKey: z.string().max(4096) }), output: ok },
   "claude.poll": { input: poll, output: polled },
   "codex.poll": { input: poll, output: polled },
 });

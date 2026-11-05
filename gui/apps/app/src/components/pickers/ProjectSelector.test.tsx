@@ -1,8 +1,14 @@
 // @vitest-environment jsdom
 
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render as rtlRender, screen } from "@testing-library/react";
+import type { ReactElement } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { createQueryClientTestHarness } from "@/test/queryClientTestHarness";
 import { ProjectSelector } from "./ProjectSelector";
+
+// The picker reads folders through React Query, so every render needs a client.
+const render = (ui: ReactElement) =>
+  rtlRender(ui, { wrapper: createQueryClientTestHarness().wrapper });
 
 const PROJECTS = [
   { id: "proj_alpha", name: "Alpha Web" },

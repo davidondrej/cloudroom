@@ -2255,6 +2255,7 @@ describe("buildThreadTimelineFromEvents", () => {
     const rows = buildTimelineRows([
       turnStartedEvent({ seq: 1 }),
       providerErrorEvent({ detail: longMessage, seq: 2 }),
+      systemErrorEvent({ message: longMessage, detail: "Diagnostic", seq: 3 }),
     ]);
 
     expect(collectSystemRows(rows)).toEqual([
@@ -2263,6 +2264,10 @@ describe("buildThreadTimelineFromEvents", () => {
         status: "error",
         title: "Provider error",
         detail: longMessage,
+      }),
+      expect.objectContaining({
+        title: "System error",
+        detail: `${longMessage}\n\nDiagnostic`,
       }),
     ]);
   });

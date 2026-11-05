@@ -101,6 +101,7 @@ import { ArchivedThreadsSettingsSection } from "@/components/settings/ArchivedTh
 import { ImportChatsSettingsSection } from "@/components/settings/ImportChats";
 import { ExportChatsSettingsSection } from "@/components/settings/ExportChats";
 import { CliSkillsSettingsSection } from "@/components/settings/CliSkillsSettingsSection";
+import { SkillUsageSection } from "@/components/settings/SkillUsageSection";
 import { MarketplacesSettingsSection } from "@/components/settings/MarketplacesSettingsSection";
 import {
   useUpdateGeneralSettings,
@@ -1367,6 +1368,8 @@ export function SettingsView() {
     content = <ProjectsSettingsSection />;
   } else if (activeSection === "account") {
     content = <CloudroomAccountSettings />;
+  } else if (activeSection === "analytics") {
+    content = <SkillUsageSection />;
   } else if (activeSection === "machines") {
     content = <MachinesSettingsPage />;
   } else if (activeSection === "updates") {

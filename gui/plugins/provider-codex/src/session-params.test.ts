@@ -25,6 +25,9 @@ import {
 } from "./session-params.js";
 import type { CodexSessionOptions } from "./session-params.js";
 
+const PLAIN_CHAT =
+  "request_user_input and request_user_input_async don't reach the user; ask in plain chat instead.";
+
 const WORKSPACE_ASK_OPTIONS = {
   permissionMode: "accept-edits",
   permissionScope: "workspace",
@@ -521,7 +524,7 @@ describe("codex permission settings", () => {
         instructionMode: "append",
         options: {},
       }),
-    ).toEqual({});
+    ).toEqual({ developerInstructions: PLAIN_CHAT });
   });
 
   it("maps accept-edits to user-reviewed workspace approvals", () => {
@@ -613,6 +616,7 @@ describe("buildCodexConfig", () => {
 
     expect(config).toMatchObject({
       "features.default_mode_request_user_input": false,
+      "tools.experimental_request_user_input.enabled": false,
     });
     expect(JSON.stringify(config)).not.toContain("tools.web_search");
   });
@@ -715,7 +719,7 @@ describe("resolveCodexInstructionOverrides", () => {
     });
 
     expect(overrides).toEqual({
-      developerInstructions: "Focus on the failing tests first.",
+      developerInstructions: `${PLAIN_CHAT}\n\nFocus on the failing tests first.`,
     });
     expect(overrides).not.toHaveProperty("baseInstructions");
   });
@@ -728,8 +732,8 @@ describe("resolveCodexInstructionOverrides", () => {
 
     expect(overrides).toEqual({
       baseInstructions: "Use this as the complete base prompt.",
+      developerInstructions: PLAIN_CHAT,
     });
-    expect(overrides).not.toHaveProperty("developerInstructions");
   });
 });
 

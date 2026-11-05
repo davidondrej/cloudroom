@@ -77,7 +77,7 @@ class PreviewTests(unittest.TestCase):
         self.server = preview.Server(('127.0.0.1', 0), preview.Proxy)
         self.server.authority = f'p3000-test.localhost:{self.server.server_port}'
         self.server.tunnel = self.tunnel
-        self.tunnel.server = self.server
+        self.tunnel.server, self.tunnel.servers = self.server, [self.server]
         for server in [self.upstream, self.server]:
             threading.Thread(target=server.serve_forever, kwargs={'poll_interval': .01}, daemon=True).start()
             self.addCleanup(server.server_close)
@@ -113,6 +113,24 @@ class PreviewTests(unittest.TestCase):
             self.assertEqual(connection.getresponse().status, 405)
         self.server.RequestHandlerClass = App
         self.assertFalse(preview.Tunnel.healthy(self.tunnel))
+
+    def test_another_app_on_ipv6_loopback_moves_the_preview(self):
+        # Browsers try ::1 first for *.localhost, so an app there would get the preview's browser traffic (#837).
+        with socket.socket(socket.AF_INET6) as other:
+            other.bind(('::1', 0)); other.listen(1)
+            self.tunnel.process.stderr, self.tunnel.stderr = io.BytesIO(), bytearray()
+            preview.Tunnel.listen(self.tunnel, 3000, 'abcdef0123456789', other.getsockname()[1])
+            for server in self.tunnel.servers:
+                self.addCleanup(server.server_close); self.addCleanup(server.shutdown)
+            port = self.tunnel.server.server_port
+            self.assertNotEqual(port, other.getsockname()[1])
+            for host in ['127.0.0.1', '::1']:
+                with contextlib.closing(http.client.HTTPConnection(host, port, timeout=5)) as connection:
+                    connection.request('GET', '/', headers={'Host': self.tunnel.server.authority})
+                    self.assertEqual(connection.getresponse().read(), b'ok')
+            self.assertTrue(preview.Tunnel.healthy(self.tunnel))
+            self.tunnel.servers[1].RequestHandlerClass = App  # A broken IPv6 listener is not ready.
+            self.assertFalse(preview.Tunnel.healthy(self.tunnel))
 
     def test_slow_http_does_not_block_other_browser_requests(self):
         with concurrent.futures.ThreadPoolExecutor() as pool:
@@ -173,6 +191,25 @@ class UpstreamTimeoutTests(unittest.TestCase):
             self.assertEqual(len(failures), 1)
             for client in [*waiting, listener]:
                 client.close()
+
+    @unittest.skipIf(sys.platform == 'win32', 'Unix sockets')
+    def test_relay_keeps_accepting_after_a_failed_accept(self):
+        # #902: one failed accept() ended the relay, so the preview stayed unavailable until it was reopened.
+        for error in (ConnectionAbortedError(53, 'client left first'), OSError(24, 'Too many open files')):
+            with self.subTest(error=error), tempfile.TemporaryDirectory(prefix='cr-preview-', dir='/tmp') as folder:
+                path, real, served = Path(folder) / 'relay.sock', socket.socket.accept, threading.Event()
+                fail = iter([error])
+                def accept(sock):
+                    if failure := next(fail, None):
+                        raise failure
+                    return real(sock)
+                with mock.patch.object(socket.socket, 'accept', accept), \
+                        mock.patch.object(preview.Relay, 'pipe', lambda self, client: (client.close(), served.set())):
+                    relay = preview.Relay(None, 3000, 'device', path)
+                    with socket.socket(socket.AF_UNIX) as client:
+                        client.connect(str(path))
+                        self.assertTrue(served.wait(3), 'the relay stopped accepting')
+                    relay.terminate()
 
 
 @unittest.skipUnless(sys.platform == 'win32', 'Windows helper lifecycle')

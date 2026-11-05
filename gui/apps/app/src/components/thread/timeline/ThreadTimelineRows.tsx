@@ -82,7 +82,7 @@ import {
   MissingProviderCliRow,
   missingProviderCli,
 } from "./MissingProviderCliRow.js";
-import { PlanLimitRow } from "./PlanLimitRow.js";
+import { PlanLimitRow, PlanLimitSwitchedRow } from "./PlanLimitRow.js";
 import {
   LatestPlanLimitRowIdContext,
   findLatestPlanLimitRowId,
@@ -1563,10 +1563,23 @@ function TimelineRowView({
   const staticLeadingIconUrl = useLeadingIconUrlForRow(row);
   const latestPlanLimitRowId = useContext(LatestPlanLimitRowIdContext);
 
+  const planLimitSwitch =
+    row.kind === "system" && row.systemKind === "error"
+      ? row.planLimitSwitch
+      : undefined;
   if (row.id === latestPlanLimitRowId) {
     return (
       <PlanLimitRow
         threadId={row.threadId}
+        switched={planLimitSwitch}
+        className={timelineRowHorizontalPaddingClassName(horizontalPadding)}
+      />
+    );
+  }
+  if (planLimitSwitch) {
+    return (
+      <PlanLimitSwitchedRow
+        switched={planLimitSwitch}
         className={timelineRowHorizontalPaddingClassName(horizontalPadding)}
       />
     );
@@ -2205,7 +2218,7 @@ function ThreadTimelineRowsForTimelineView(props: ThreadTimelineRowsProps) {
     [rows, scopeActive],
   );
   const latestPlanLimitRowId = useMemo(
-    () => (scopeActive ? null : findLatestPlanLimitRowId(rows)),
+    () => findLatestPlanLimitRowId(rows, scopeActive),
     [rows, scopeActive],
   );
   const computedAutoExpansionRowIds = useMemo(

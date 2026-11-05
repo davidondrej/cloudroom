@@ -372,7 +372,7 @@ export class CloudroomClient {
     return value as unknown as VmRunResult;
   }
 
-  async reportMac(report: { access: string; problem: string | null }): Promise<void> {
+  async reportMac(report: { access: string; problem: string | null; unsupported?: boolean }): Promise<void> {
     await this.#json("/v1/mac/helper", report);
   }
 
@@ -897,6 +897,13 @@ export class CloudroomClient {
     let event = "";
     let id = "";
     let frameSize = 0;
+    // An oversized record is read past, not kept, so one huge tool output can't stop the stream for good (#581).
+    let skipping = false;
+    const skip = () => {
+      if (event !== "record" || !/^\d+$/.test(id)) throw new CloudroomError("Cloudroom event exceeds the size limit");
+      skipping = true;
+      data = [];
+    };
     try {
       options.signal.throwIfAborted();
       await options.onConnected?.();
@@ -911,14 +918,14 @@ export class CloudroomClient {
         }).finally(() => clearTimeout(silence));
         if (done) return;
         buffer += decoder.decode(value, { stream: true });
-        if (buffer.length + frameSize > MAX_RESPONSE_BYTES)
-          throw new CloudroomError("Cloudroom event exceeds the size limit");
         let newline: number;
         while ((newline = buffer.indexOf("\n")) !== -1) {
           const line = buffer.slice(0, newline).replace(/\r$/, "");
           buffer = buffer.slice(newline + 1);
           if (line === "") {
-            if (event === "record" && data.length > 0) {
+            // Its place in history stays, shown as a stub like the website's saved one, so the cursor moves on.
+            if (skipping) yield { sequence: sequence(Number(id)), session_id: sessionId, kind: "oversized", data: { oversized_bytes: frameSize } };
+            else if (event === "record" && data.length > 0) {
               let parsed: unknown;
               try {
                 parsed = JSON.parse(data.join("\n"));
@@ -934,12 +941,15 @@ export class CloudroomClient {
             event = "";
             id = "";
             frameSize = 0;
+            skipping = false;
+          } else if (skipping) {
+            frameSize += line.length;
           } else if (!line.startsWith(":")) {
             frameSize += line.length;
-            if (frameSize > MAX_RESPONSE_BYTES)
-              throw new CloudroomError(
-                "Cloudroom event exceeds the size limit",
-              );
+            if (frameSize > MAX_RESPONSE_BYTES) {
+              skip();
+              continue;
+            }
             const separator = line.indexOf(":");
             const field = separator === -1 ? line : line.slice(0, separator);
             const content =
@@ -950,6 +960,11 @@ export class CloudroomClient {
             if (field === "event") event = content;
             if (field === "id") id = content;
           }
+        }
+        if (!skipping && buffer.length + frameSize > MAX_RESPONSE_BYTES) skip();
+        if (skipping) {
+          frameSize += buffer.length;
+          buffer = "";
         }
       }
     } finally {

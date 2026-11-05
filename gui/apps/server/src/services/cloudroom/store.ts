@@ -2,7 +2,7 @@ import { and, eq, getTableColumns, inArray, isNull, sql } from "drizzle-orm";
 import { cloudroomCommands, cloudroomThreads, threads, threadPluginMetadata, type DbQueryConnection } from "@cloudroom/db";
 import type { ProjectCopyProgress, TeleportLocalStep } from "@cloudroom/domain";
 import { emitPluginThreadStatusEntered } from "../plugins/plugin-thread-events.js";
-import { noteTurnFailed } from "../system/auth-failure-telemetry.js";
+import { noteTurnFailed, type CloudFailure } from "../system/auth-failure-telemetry.js";
 
 export type TeleportProgress = {
   id: string; owner: string; phase: "checking" | "stopping" | "uploading" | "running" | "complete" | "cancelled" | "error" | "cancelling";
@@ -21,6 +21,10 @@ const CORE_STATUS = {
   idle: "idle", sleeping: "idle", suspended: "idle", rewinding: "idle", closed: "idle", saved_history_only: "idle",
 } as const satisfies Record<string, typeof threads.$inferSelect["status"]>;
 export const coreStates = Object.keys(CORE_STATUS);
+/** Core's own account of a failed Cloud thread, for telemetry when the harness left no error. */
+export function coreFailure(state: string, data: Record<string, unknown>): CloudFailure {
+  return { category: data.out_of_memory === true ? "out-of-memory" : state === "process_lost" ? "process-lost" : "harness-failed", message: typeof data.reason === "string" ? data.reason : null };
+}
 export function statusOf(state: string): typeof threads.$inferSelect["status"] | null {
   return Object.hasOwn(CORE_STATUS, state) ? CORE_STATUS[state as keyof typeof CORE_STATUS] : null;
 }
@@ -165,7 +169,7 @@ export function unstartedTurn(db: DbQueryConnection, threadId: string): Command 
 export function saveCommandState(db: DbQueryConnection, threadId: string, id: string, state: string): void {
   const unstarted = unstartedTurn(db, threadId)?.id === id;
   db.update(cloudroomCommands).set({ state }).where(and(eq(cloudroomCommands.id, id), eq(cloudroomCommands.threadId, threadId))).run();
-  if (unstarted && !["sending", "accepted", "running", "delivered"].includes(state)) saveStatus(db, threadId, ["failed", "unknown", "unknown_after_restart"].includes(state) ? "error" : "idle");
+  if (unstarted && !["sending", "accepted", "running", "delivered"].includes(state)) saveStatus(db, threadId, ["failed", "unknown", "unknown_after_restart"].includes(state) ? "error" : "idle", { category: `prompt-${state.replaceAll("_", "-")}` });
 }
 
 export function effectivePrompt(db: DbQueryConnection, threadId: string, id: string, pending = false): Record<string, unknown> {
@@ -186,8 +190,8 @@ export function effectivePrompt(db: DbQueryConnection, threadId: string, id: str
   return { ...input, revision };
 }
 
-export function saveStatus(db: DbQueryConnection, threadId: string, status: typeof threads.$inferSelect["status"]): void {
+export function saveStatus(db: DbQueryConnection, threadId: string, status: typeof threads.$inferSelect["status"], cloud?: CloudFailure): void {
   const thread = db.update(threads).set({ status, updatedAt: Date.now(), latestAttentionAt: Date.now() }).where(and(eq(threads.id, threadId), sql`${threads.status} != ${status}`)).returning().get();
   if (thread) emitPluginThreadStatusEntered(thread);
-  if (thread?.status === "error") noteTurnFailed(thread.id);
+  if (thread?.status === "error") noteTurnFailed(thread.id, cloud);
 }

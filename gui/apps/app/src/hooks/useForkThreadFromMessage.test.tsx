@@ -112,7 +112,6 @@ describe("useForkThreadFromMessage", () => {
     expect(mocks.navigate).toHaveBeenCalledWith(getRootComposeRoutePath(), {
       state: expect.objectContaining({
         focusPrompt: true,
-        reuseEnvironmentId: "env_source",
       }),
     });
 

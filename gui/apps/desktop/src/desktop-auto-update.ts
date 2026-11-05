@@ -100,7 +100,7 @@ export interface DesktopAutoUpdateService extends DesktopUpdateService {
   installUpdate(): boolean;
   /** Windows and Linux: whether the downloaded installer is still on disk. If not, offers the download again. */
   installerReady(): boolean;
-  /** The last Restart to update didn't change the version: offer the download again. */
+  /** The last Restart to update didn't change the version: offer the download again, and say so until this app quits. */
   markInstallFailed(version: string): void;
 }
 
@@ -454,7 +454,9 @@ export function createDesktopAutoUpdateService(
       scheduler.updateInfo({
         ...scheduler.getInfo(),
         downloadState: "failed",
-        latestVersion: version,
+        installFailed: true,
+        // The Mac's update-attempt.json says "v139"; electron-updater says "139.0.0".
+        latestVersion: version.replace(/^v(\d+)$/u, "$1.0.0"),
         pendingVersion: null,
         updateAvailable: true,
         updateDownloaded: false,

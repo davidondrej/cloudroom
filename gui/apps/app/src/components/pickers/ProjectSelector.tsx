@@ -1,6 +1,6 @@
 import { useThisComputer } from "@/hooks/useHostDaemon";
-import { COMPUTER_TITLE } from "@cloudroom/domain";
-import { useMemo, useRef, useState } from "react";
+import { COMPUTER_TITLE, getHostPathComparisonKey } from "@cloudroom/domain";
+import { useMemo, useRef, useState, type KeyboardEvent } from "react";
 import type { RepoSuggestion } from "@cloudroom/sdk/browser";
 import { Button } from "@cloudroom/shared-ui/button";
 import {
@@ -21,13 +21,25 @@ import {
 } from "@cloudroom/shared-ui/option-display";
 import { Popover, PopoverContent, PopoverTrigger } from "@cloudroom/shared-ui/popover";
 import { formatRelativeTime } from "@/lib/relative-time";
+import { folderValue, tildePath } from "./folder-path";
+import {
+  FolderKeyHints,
+  FolderPathGroup,
+  FolderSearchGroup,
+  HERE_VALUE,
+  baseName,
+  type PickedFolder,
+} from "./FolderGroups";
 import { searchPickerOptions } from "./picker-search";
+import { useFolderPicker } from "./useFolderPicker";
 import { useResetPickerScroll } from "./useResetPickerScroll";
 
 const PROJECT_SEARCH_MIN_OPTIONS = 5;
 const NO_HIGHLIGHT_VALUE = "__project-picker-idle__";
 const PROJECT_PICKER_ITEM_CLASS_NAME = "py-[0.3125rem] text-xs max-md:py-2";
 const VISIBLE_REPO_SUGGESTIONS = 5;
+const FOLDER_SEARCH_ROWS = 6;
+const NAVIGATION_KEYS = new Set(["ArrowDown", "ArrowUp", "Home", "End"]);
 const REPO_FILTERS = [
   { id: "all", label: "All" },
   { id: "github", label: "GitHub" },
@@ -46,6 +58,8 @@ export interface ProjectSelectorOption {
 /** Repos on this Mac and GitHub that are not projects yet, newest first. `onAdd` resolves to the new project's id.
  *  `isLoading` means no repos are known yet; `githubLoading` means GitHub's repos are still on their way. */
 export interface ProjectSelectorSuggestions {
+  /** This computer's host: its folders can be typed as a path or searched by name. */
+  hostId: string;
   repos: readonly RepoSuggestion[];
   githubConnected: boolean;
   isLoading: boolean;
@@ -90,7 +104,8 @@ export function ProjectSelector({
 }: ProjectSelectorProps) {
   const [open, setOpen] = useState(defaultOpen ?? false);
   const [searchQuery, setSearchQuery] = useState("");
-  const [highlightedValue, setHighlightedValue] = useState(NO_HIGHLIGHT_VALUE);
+  // The row the user moved to, for the query they moved on. A new query falls back to the most likely row.
+  const [chosen, setChosen] = useState({ query: "", value: NO_HIGHLIGHT_VALUE });
   const [repoFilter, setRepoFilter] = useState<RepoFilter>("all");
   const commandRef = useRef<HTMLDivElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
@@ -111,16 +126,102 @@ export function ProjectSelector({
         : projects,
     [projects, searchQuery, showSearch],
   );
+  const folders = useFolderPicker({
+    hostId: suggestions?.hostId ?? null,
+    query: searchQuery,
+    open,
+  });
+  const { pathMode } = folders;
+  // Found folders, minus projects the list above already shows. Exactly these rows render.
+  const folderResults = useMemo(() => {
+    const listed = new Set(filteredProjects.map((project) => project.id));
+    return folders.results
+      .filter((entry) => !entry.projectId || !listed.has(entry.projectId))
+      .slice(0, FOLDER_SEARCH_ROWS);
+  }, [filteredProjects, folders.results]);
   const visibleRepos = useMemo(() => {
+    // A Mac repo found by the folder search shows once, with the folders.
+    const found = new Set(folderResults.map((entry) => getHostPathComparisonKey(entry.path)));
     const repos = (suggestions?.repos ?? []).filter(
-      (repo) => repoFilter === "all" || repo.source === repoFilter,
+      (repo) =>
+        (repoFilter === "all" || repo.source === repoFilter) &&
+        !(repo.source === "mac" && found.has(getHostPathComparisonKey(repo.path))),
     );
     return searchPickerOptions({
       options: repos,
       query: searchQuery,
       getLabel: (repo) => repo.name,
     }).slice(0, VISIBLE_REPO_SUGGESTIONS);
-  }, [repoFilter, searchQuery, suggestions?.repos]);
+  }, [folderResults, repoFilter, searchQuery, suggestions?.repos]);
+  const folderRows = pathMode ? folders.matches : folderResults;
+  // While searching, empty project and repo groups only add noise next to found folders.
+  const searching = Boolean(suggestions && searchQuery.trim());
+  const showProjects =
+    !pathMode && projects.length > 0 && !(searching && filteredProjects.length === 0);
+  const showRepos =
+    Boolean(suggestions) &&
+    !pathMode &&
+    !(searching && visibleRepos.length === 0 && folderResults.length > 0);
+  const topFolder = pathMode
+    ? folders.leaf
+      ? folders.matches[0]
+      : undefined
+    : folderResults[0];
+  // While typing, the most likely row is highlighted, so Enter picks it.
+  // The order matches the rows, so it agrees with cmdk, which highlights the first row after each keystroke.
+  const firstValue = pathMode
+    ? topFolder
+      ? folderValue(topFolder.path)
+      : folders.leaf
+        ? NO_HIGHLIGHT_VALUE
+        : folders.canAddHere
+          ? HERE_VALUE
+          : folders.matches[0]
+            ? folderValue(folders.matches[0].path)
+            : NO_HIGHLIGHT_VALUE
+    : searchQuery.trim()
+      ? (filteredProjects[0]?.id ??
+        (topFolder ? folderValue(topFolder.path) : undefined) ??
+        (visibleRepos[0] ? `repo:${repoKey(visibleRepos[0])}` : undefined) ??
+        NO_HIGHLIGHT_VALUE)
+      : null;
+  const rendered = (row: string) =>
+    row === HERE_VALUE
+      ? folders.canAddHere && !folders.leaf
+      : row === "new-project" || row === "no-project" ||
+        filteredProjects.some((project) => project.id === row) ||
+        folderRows.some((entry) => folderValue(entry.path) === row) ||
+        visibleRepos.some((repo) => `repo:${repoKey(repo)}` === row);
+  const highlightedValue =
+    firstValue !== null && (chosen.query !== searchQuery || !rendered(chosen.value))
+      ? firstValue
+      : chosen.value;
+  const userMoved = useRef(false);
+  const markUserMove = () => {
+    userMoved.current = true;
+    // cmdk reports the move synchronously; anything later is its own re-selection.
+    queueMicrotask(() => {
+      userMoved.current = false;
+    });
+  };
+  const setHighlightedValue = (next: string) => {
+    if (userMoved.current) setChosen({ query: searchQuery, value: next });
+  };
+  const highlightedFolder = folderRows.find(
+    (entry) => folderValue(entry.path) === highlightedValue,
+  );
+  // Plain text completes against home, unless the user moved to a found folder.
+  const pickedFolder = highlightedFolder && chosen.query === searchQuery ? highlightedFolder : undefined;
+  const homeMatch = pathMode ? undefined : folders.homeMatch;
+  // Tab completes the highlighted folder; in path mode, else the most likely one (the newest with no name typed).
+  const completion =
+    pickedFolder ?? homeMatch ?? highlightedFolder ?? (pathMode ? (topFolder ?? folders.matches[0]) : undefined);
+  const ghost =
+    pathMode && completion && (folders.leaf || highlightedFolder)
+      ? `${completion.name}/`.slice(folders.leaf.length)
+      : !pathMode && completion && completion === homeMatch
+        ? `${completion.name}/`.slice(searchQuery.trim().length)
+        : "";
   const selected = value !== null ? projects.find((p) => p.id === value) : null;
   const fallback = !allowNoProject && !selected ? projects[0] : null;
   const triggerLabel = isLoading
@@ -139,7 +240,7 @@ export function ProjectSelector({
     projects.length > 0 && (Boolean(createProjectAction) || allowNoProject);
   const handleOpenChange = (nextOpen: boolean) => {
     setOpen(nextOpen);
-    setHighlightedValue(NO_HIGHLIGHT_VALUE);
+    setChosen({ query: "", value: NO_HIGHLIGHT_VALUE });
     if (!nextOpen) {
       setSearchQuery("");
     }
@@ -155,6 +256,50 @@ export function ProjectSelector({
       () => {},
     );
   };
+  const pickFolder = (folder: PickedFolder) => {
+    if (folder.projectId && projects.some((project) => project.id === folder.projectId)) {
+      return selectProject(folder.projectId);
+    }
+    addRepo({
+      source: "mac",
+      name: folder.name,
+      path: folder.path,
+      updatedAt: folder.activityAt ?? 0,
+    });
+  };
+  const handleSearchKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
+    if (event.key === "Escape" && searchQuery) {
+      event.preventDefault();
+      event.stopPropagation();
+      setSearchQuery("");
+      return;
+    }
+    if (event.key !== "Tab" || event.shiftKey || event.altKey || event.metaKey || event.ctrlKey) return;
+    // Path mode: the name becomes the folder, ready for the next one. Search: a found folder becomes its path.
+    const fill = !completion
+      ? null
+      : pathMode
+        ? `${folders.folder}${completion.name}/`
+        : folders.home?.startsWith("/")
+          ? `${tildePath(completion.path, folders.home)}/`
+          : null;
+    if (fill === null && !pathMode) return;
+    event.preventDefault();
+    if (fill !== null) setSearchQuery(fill);
+  };
+  const here = folders.listing;
+  const enterFolder =
+    highlightedValue === HERE_VALUE && here
+      ? { name: baseName(here.directory), projectId: here.projectId }
+      : highlightedFolder;
+  const enterHint: [string, string][] = enterFolder
+    ? [["enter", `${enterFolder.projectId ? "Select" : "Add"} ${enterFolder.name}`]]
+    : [];
+  const keyHints: [string, string][] = pathMode
+    ? [...(completion ? [["tab", "Complete"] as [string, string]] : []), ...enterHint]
+    : completion && folders.home?.startsWith("/")
+      ? [["tab", `Open ${tildePath(completion.path, folders.home)}/`], ...(highlightedFolder ? enterHint : [])]
+      : [];
 
   return (
     <Popover open={open} onOpenChange={handleOpenChange} modal={modal}>
@@ -201,6 +346,12 @@ export function ProjectSelector({
         align="start"
         aria-label="Project"
         mobileTitle="Project"
+        onEscapeKeyDown={(event) => {
+          // The first Esc clears the search; the next one closes.
+          if (!searchQuery) return;
+          event.preventDefault();
+          setSearchQuery("");
+        }}
         onOpenAutoFocus={(event) => {
           event.preventDefault();
           if (showSearch) {
@@ -220,6 +371,9 @@ export function ProjectSelector({
           shouldFilter={false}
           value={highlightedValue}
           onValueChange={setHighlightedValue}
+          onKeyDown={(event) => {
+            if (NAVIGATION_KEYS.has(event.key) || (event.ctrlKey && "npjk".includes(event.key))) markUserMove();
+          }}
           className="min-h-0"
         >
           {showSearch ? (
@@ -227,18 +381,30 @@ export function ProjectSelector({
               ref={searchInputRef}
               aria-label="Search projects"
               placeholder={
-                suggestions ? "Search projects and repos" : "Search projects"
+                suggestions
+                  ? "Search, or type ~/ for a path"
+                  : "Search projects"
               }
               value={searchQuery}
               onValueChange={setSearchQuery}
+              onKeyDown={handleSearchKeyDown}
+              ghost={suggestions ? ghost : undefined}
               className="h-8 text-xs"
             />
           ) : null}
           <CommandList
             ref={listRef}
+            onPointerMoveCapture={markUserMove}
             className="min-h-0 max-h-none flex-1 overscroll-contain"
           >
-            {projects.length > 0 ? (
+            {pathMode && suggestions ? (
+              <FolderPathGroup
+                folders={folders}
+                addingKey={suggestions.addingKey}
+                onPick={pickFolder}
+              />
+            ) : null}
+            {showProjects ? (
               <CommandGroup
                 heading={
                   suggestions ? (
@@ -293,9 +459,22 @@ export function ProjectSelector({
                 ) : null}
               </CommandGroup>
             ) : null}
-            {suggestions ? (
+            {suggestions && !pathMode && folderResults.length > 0 ? (
               <>
-                {projects.length > 0 ? <CommandSeparator /> : null}
+                {showProjects ? <CommandSeparator /> : null}
+                <FolderSearchGroup
+                  results={folderResults}
+                  home={folders.home}
+                  addingKey={suggestions.addingKey}
+                  onPick={pickFolder}
+                />
+              </>
+            ) : null}
+            {suggestions && showRepos ? (
+              <>
+                {showProjects || folderResults.length > 0 ? (
+                  <CommandSeparator />
+                ) : null}
                 <RepoSuggestionsGroup
                   suggestions={suggestions}
                   repos={visibleRepos}
@@ -305,8 +484,10 @@ export function ProjectSelector({
                 />
               </>
             ) : null}
-            {showActionSeparator || suggestions ? <CommandSeparator /> : null}
-            {createProjectAction || allowNoProject ? (
+            {!pathMode && (showActionSeparator || suggestions) ? (
+              <CommandSeparator />
+            ) : null}
+            {!pathMode && (createProjectAction || allowNoProject) ? (
               <CommandGroup
                 heading={
                   projects.length === 0 && !suggestions ? "Project" : undefined
@@ -356,6 +537,7 @@ export function ProjectSelector({
               </CommandGroup>
             ) : null}
           </CommandList>
+          {suggestions ? <FolderKeyHints hints={keyHints} /> : null}
         </Command>
       </PopoverContent>
     </Popover>

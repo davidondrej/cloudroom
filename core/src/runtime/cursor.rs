@@ -46,6 +46,22 @@ pub(super) const CURSOR: Flavor = Flavor {
     empty_turn: None,
 };
 
+/// Cursor's own words when the account's usage is used up (its PRO_USER_USAGE_LIMIT-style errors). Not its short
+/// capacity limits, which retry on their own.
+fn cursor_plan_limit(message: &str) -> bool {
+    // Error codes like PRO_USER_USAGE_LIMIT read as words.
+    let text = message.to_ascii_lowercase().replace('_', " ");
+    [
+        "usage limit",
+        "hit your limit",
+        "out of usage",
+        "weekly usage",
+        "weekly pool",
+    ]
+    .iter()
+    .any(|words| text.contains(words))
+}
+
 pub(crate) fn capabilities(kind: Kind) -> Value {
     json!({"resume":true,"interrupt":true,"system_notice":false,"interactive_dialogs":false,
         "steer":true,"compact":false,"rewind":false,"attachments":true,
@@ -634,6 +650,18 @@ impl Adapter for Protocol {
                     }
                     match (stop, value["error"]["message"].as_str()) {
                         (Some(stop), _) => format!("{} stopped the turn: {stop}", self.flavor.name),
+                        (None, Some(message))
+                            if self.flavor.harness == "cursor" && cursor_plan_limit(message) =>
+                        {
+                            // Marks the session stopped by a plan limit, so a new Cursor login continues it (ADR 0117).
+                            // Not reported: the website holds loops only at Claude and Codex limits.
+                            let mut limited = super::plan_limited("cursor", None);
+                            if let Event::Record { data, .. } = &mut limited {
+                                data["model_only"] = json!(true);
+                            }
+                            events.push(limited);
+                            super::plan_limit_error("Cursor", None, message)
+                        }
                         (None, Some(message)) => {
                             format!("{} failed the turn: {message}", self.flavor.name)
                         }

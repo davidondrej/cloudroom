@@ -603,6 +603,8 @@ const hostRemovePathCommandSchema = z
 const hostBrowseDirectoryCommandSchema = z.object({
   type: z.literal("host.browse_directory"),
   path: z.string().min(1).optional(),
+  /** Folders anywhere under `path` whose names match, best first. Empty only warms the search. */
+  search: z.string().max(200).optional(),
 });
 
 const hostPathsExistCommandSchema = pathsExistRequestSchema
@@ -711,6 +713,10 @@ const directoryEntrySchema = z.object({
   kind: hostPathEntryKindSchema,
   name: z.string(),
   path: z.string(),
+  /** Folders: when they were last used, from the folder and its Git index. */
+  activityAt: z.number().optional(),
+  /** Folders: a Git repo, or a worktree or submodule of another repo (`.git` is a file). */
+  git: z.enum(["repo", "worktree"]).optional(),
 });
 export type DirectoryEntry = z.infer<typeof directoryEntrySchema>;
 

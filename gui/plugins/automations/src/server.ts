@@ -51,15 +51,16 @@ export default async function plugin(bb: BbPluginApi) {
   bb.events.on("thread.created", ({ thread }) => {
     if (recordCloudRun(db, thread)) reviewChanged(thread.id);
   });
-  bb.events.on("thread.idle", ({ thread }) => {
-    closeAutomationRunForSettledThread(bb, db, {
+  bb.events.on("thread.idle", async ({ thread }) => {
+    await closeAutomationRunForSettledThread(bb, db, {
       threadId: thread.id,
+      threadCreatedAt: thread.createdAt,
       status: "idle",
     });
     reviewChanged(thread.id);
   });
-  bb.events.on("thread.failed", ({ thread, error, errorInfo }) => {
-    closeAutomationRunForSettledThread(bb, db, {
+  bb.events.on("thread.failed", async ({ thread, error, errorInfo }) => {
+    await closeAutomationRunForSettledThread(bb, db, {
       threadId: thread.id,
       status: "failed",
       error,

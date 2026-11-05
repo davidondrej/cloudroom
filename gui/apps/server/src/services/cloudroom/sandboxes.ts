@@ -50,6 +50,8 @@ export type SandboxLogin = "claude" | "codex" | "pi" | "github" | "cursor" | "op
 /** GitHub projects also name their repository and cloud folder, so the website can build a template. */
 export type SandboxProject = { id: string; repository: string | null; folder: string };
 const RECHECK_MS = 60_000;
+// After "Run now": check the awake list every 2 s for 90 s, so the run's new thread shows within seconds.
+const SOON_MS = 2_000, SOON_FOR_MS = 90_000;
 const insideLoginLock = new AsyncLocalStorage<true>();
 const PRELOAD_BATCH = 10, PRELOADS_PER_HOUR = 30, PRELOAD_AGAIN_MS = 3_600_000;
 const placeOf = (thread: string, project: SandboxProject) => ({ thread, project: project.id, ...(project.repository ? { repository: project.repository, folder: project.folder } : {}) });
@@ -99,7 +101,9 @@ export function codexLoginFailure(output: string): string {
 
 type MacCodexLogin = { child: ChildProcess | null; url: string | null; error: string | null; done: boolean };
 let macCodexLoginRun: MacCodexLogin | null = null;
-const codexMissing = () => `Codex is not installed on this ${COMPUTER}.${process.platform === "darwin" ? " Cloudroom never runs the copy inside Codex.app or ChatGPT.app." : ""} Install it with \`npm i -g @openai/codex\`, then click Connect again.`;
+// Most Windows PCs have no Node, so npm would fail there (#475).
+const codexInstallHint = () => process.platform === "win32" ? "Install it in PowerShell with `irm https://chatgpt.com/codex/install.ps1 | iex`" : "Install it with `npm i -g @openai/codex`";
+const codexMissing = () => `Codex is not installed on this ${COMPUTER}.${process.platform === "darwin" ? " Cloudroom never runs the copy inside Codex.app or ChatGPT.app." : ""} ${codexInstallHint()}, then click Connect again.`;
 /** Runs `codex login` on this Mac. Codex opens the default browser and saves the login itself; one run at a time, 10 minutes at most.
  *  No Codex found means not installed: a bare `codex` could reach the one inside Codex.app through PATH (#96). */
 export function startMacCodexLogin(): MacCodexLogin {
@@ -296,12 +300,13 @@ export async function macCursorLogin(): Promise<string | null> {
   return login(accessToken, refreshToken);
 }
 
-/** Whether Cursor rejects this API key, checked with this computer's Cursor CLI. A missing CLI or no answer accepts it. */
+/** Whether Cursor rejects this API key, checked with this computer's Cursor CLI. A missing CLI or no answer accepts it.
+ *  The memory store keeps the key's tokens out of the Keychain, where Cursor would save them over this Mac's own login. */
 export async function cursorKeyRejected(apiKey: string): Promise<boolean> {
   const binary = findCliExecutable("cursor-agent");
   if (!binary) return false;
   try {
-    await execPortableFile(binary, ["--disable-auto-update", "--list-models"], { timeoutMs: 30_000, maxBuffer: 1024 * 1024, env: { ...process.env, CURSOR_API_KEY: apiKey } });
+    await execPortableFile(binary, ["--disable-auto-update", "--list-models"], { timeoutMs: 30_000, maxBuffer: 1024 * 1024, env: { ...process.env, CURSOR_API_KEY: apiKey, AGENT_CLI_CREDENTIAL_STORE: "memory" } });
     return false;
   } catch (error) {
     const { stdout = "", stderr = "" } = error as { stdout?: string; stderr?: string };
@@ -621,6 +626,7 @@ export class SandboxDirectory {
    *  failed check shows on it as before. */
   awakeChecks = 0;
   private awakeNext = 0;
+  private soonUntil = 0;
   private awakeEvery = 60_000;
   private awakeIssue: CloudroomError | null = null;
   private awakeCheck: Promise<void> | null = null;
@@ -637,7 +643,7 @@ export class SandboxDirectory {
         if (listed.runs.length) this.onRuns(listed.runs);
         this.awakeEvery = listed.recheck_ms;
         this.awakeIssue = null;
-        this.awakeNext = Date.now() + listed.recheck_ms;
+        this.awakeNext = Date.now() + (Date.now() < this.soonUntil ? SOON_MS : listed.recheck_ms);
       }, (error: unknown) => {
         if (this.awakeCheck !== check) return;
         this.awakeIssue = error instanceof CloudroomError ? error : new CloudroomError("The website's list of awake cloud sandboxes was unreadable.");
@@ -679,6 +685,8 @@ export class SandboxDirectory {
     // Work leaving Cloud is a click: it asks again at once and keeps its trigger, so the website can let it out.
     const exit = trigger === "teleport_local", waiting = this.backoff.get(thread);
     if (waiting && !exit && Date.now() < waiting.until) {
+      // Pending work must notice restored credits even when no UI is polling its status.
+      if (waiting.refusal?.code === USAGE_LIMIT) this.usageLimited();
       const { refusal } = waiting, retry = `Retrying in ${Math.ceil((waiting.until - Date.now()) / 1000)} seconds.`;
       throw !refusal ? new CloudroomConnectionError(`The cloud sandbox could not start. ${retry}`) : !refusal.code && refusal.retryable ? new CloudroomError(`${refusal.message} ${retry}`, refusal.status) : refusal;
     }
@@ -708,7 +716,9 @@ export class SandboxDirectory {
         // A thread moving to Cloud continues there in about a minute: keep checking.
         const moving = error instanceof CloudroomError && error.code === "sandbox_moving";
         const delay = quick ? 2_000 : moving ? 5_000 : Math.min(Math.max(previous?.delay ?? 0, 2_500) * 2, 300_000);
-        this.backoff.set(thread, { until: Date.now() + delay, delay, tries, refusal: error instanceof CloudroomError && error.status !== null ? error : null });
+        // Out of Cloud Credits: wait until the minute mode check sees credits again (checkMode clears it), not every 5 minutes.
+        const held = error instanceof CloudroomError && error.code === USAGE_LIMIT;
+        this.backoff.set(thread, { until: held ? Infinity : Date.now() + delay, delay, tries, refusal: error instanceof CloudroomError && error.status !== null ? error : null });
         throw error;
       }).finally(() => this.wakes.delete(thread));
       this.wakes.set(thread, pending);
@@ -927,6 +937,10 @@ export class SandboxDirectory {
   async label(thread: string, label: { title: string | null; project_name: string | null; project: string; session: string; harness: string; model: string | null; parent: string | null }): Promise<boolean> {
     return z.object({ saved: z.boolean() }).catch({ saved: false }).parse(await this.call({ action: "label", thread, ...label })).saved;
   }
+  /** Teleport to Local closed `session`: the website stops sending this thread's Cloud subagents' reports there. */
+  async markLocal(thread: string, session: string): Promise<boolean> {
+    return z.object({ saved: z.boolean() }).catch({ saved: false }).parse(await this.call({ action: "local", thread, session })).saved;
+  }
   async archive(thread: string): Promise<void> { this.forget(thread); await this.call({ action: "archive", thread }); }
   async refreshCodex(thread: string): Promise<void> { await this.call({ action: "codex", thread }); }
   /** An unarchive right after an archive finds the sandbox busy until the archive ends (up to ~60 s), so keep trying. */
@@ -990,7 +1004,10 @@ export class SandboxDirectory {
 
   /** Cloud automations live on the website, which runs them while this Mac is off (ADR 0212). */
   async automations(body: Record<string, unknown>): Promise<unknown> {
-    return this.call(body, "automations");
+    const value = await this.call(body, "automations");
+    // The website starts the run at once, so its thread shows within seconds, not at the next minute's check.
+    if (body.action === "run") { this.soonUntil = Date.now() + SOON_FOR_MS; this.awakeNext = 0; }
+    return value;
   }
 
   /** Organizations live on the website (docs/scopes/organizations.md); the Organization plugin's requests pass through. */

@@ -28,7 +28,7 @@ import { assertValidParentThread, isParentNotifiableChildThread } from "../threa
 import { inferThreadMetadata, queueThreadTitle } from "../threads/thread-metadata-inference.js";
 import { getLastThreadOutput } from "../threads/thread-data.js";
 import { cliPlace, reportAgentConnect, reportMacHelperDown, reportMacHelperProblem } from "./setup-telemetry.js";
-import { cloudSkills, copyLogins, copyMacGithub, importCodexLogin, importPiLogin, loginMarkers, macPiSetup, markLogin, setupSync, skillInCloud, stopSync, syncStatus } from "./sync.js";
+import { cloudSkills, copyLogins, copyMacGithub, copyMacLogin, importCodexLogin, importPiLogin, loginMarkers, macPiSetup, markLogin, setCopyMacLogin, setupSync, skillInCloud, stopSync, syncStatus } from "./sync.js";
 import { macClaudeSignedIn } from "./claude-token.js";
 import { helperRunning, macAccess, macAccessSupported, noteWake, previewsSetUp, setupPreviews, stopPreviews, previewStatus } from "./previews.js";
 import { GpuApprovals } from "./gpu.js";
@@ -528,6 +528,7 @@ class CloudroomService {
       }
       const skip = new Set(Object.keys(markers));
       if (!await copyMacGithub(deps)) skip.add("github");
+      if (!await copyMacLogin(deps, "cursor")) skip.add("cursor");
       return skip;
     };
     this.gpuApprovals = new GpuApprovals(deps, body => this.sandboxes.gpu(body));
@@ -547,8 +548,13 @@ class CloudroomService {
    *  parent's tell, stop and archive, by the label's parent (ADR 0259), so `changeParent` saves a new parent there
    *  first, then runs `apply` (the Mac's change), then saves the parent the Mac ended up with: a no-op unless the
    *  change failed. Nothing changes if the first save fails. */
-  private syncLabel(threadId: string): void {
-    void this.oneLabelSave(threadId, () => this.saveLabel(threadId)).catch((error: unknown) => this.warn("Cloud thread label not saved", error, { threadId }));
+  private syncLabel(threadId: string, tries = 0): void {
+    void this.oneLabelSave(threadId, () => this.saveLabel(threadId)).catch((error: unknown) => {
+      this.warn("Cloud thread label not saved", error, { threadId });
+      // A missed label keeps the website on the old session after an agent switch, so its children's reports retry
+      // until it lands. A few spaced tries, then the next change or app start sends it.
+      if (tries < 3 && !this.stopped) setTimeout(() => this.syncLabel(threadId, tries + 1), 60_000 * (tries + 1)).unref();
+    });
   }
 
   private oneLabelSave<T>(threadId: string, save: () => Promise<T>): Promise<T> {
@@ -986,7 +992,9 @@ class CloudroomService {
     const sandboxes = this.sandboxes.awakeSandboxes().filter(({ thread }) => getThread(this.deps.db, thread));
     if (!sandboxes.length) return this.macReports.clear();
     const status = await previewStatus(this.deps, 60_000);
-    const report = { access: macAccessSupported ? await macAccess(this.deps) ?? "off" : "off", problem: status.state === "offline" && status.detail ? status.message : null };
+    const problem = status.state === "offline" && status.detail ? status.message : null;
+    // Windows hides Mac access: "off" keeps older Cores' answer, `unsupported` tells newer ones there is no setting (#871).
+    const report = macAccessSupported ? { access: await macAccess(this.deps) ?? "off", problem } : { access: "off", problem, unsupported: true };
     const key = JSON.stringify(report), sent = this.macReports;
     this.macReports = new Map();
     for (const { url, token } of sandboxes) {
@@ -1217,6 +1225,21 @@ class CloudroomService {
       return { ...sandbox, state: "connected" as const };
     }
     return this.vmCursorAuth(action, requestId, apiKey);
+  }
+
+  /** The Accounts plugin's Cursor account in use: its key becomes the Cloud login, and this Mac's own Cursor login stops
+   *  copying over it. `null` (This Mac) copies this Mac's login again, and fails when it has none. */
+  cursorAccount(requestId: string, apiKey: string | null) {
+    return this.sandboxes.withLogins(async () => {
+      if (apiKey === null) {
+        if (!await macCursorLogin()) throw new ApiError(409, "cursor_auth_required", `Cursor is not signed in on this ${COMPUTER}. Run \`cursor-agent login\`, then pick This ${COMPUTER_TITLE} again.`);
+        await setCopyMacLogin(this.deps, "cursor", true);
+        return this.cursorAuth("login", requestId);
+      }
+      const status = await this.cursorAuth("key", requestId, apiKey);
+      await setCopyMacLogin(this.deps, "cursor", false);
+      return status;
+    });
   }
 
   private async vmCursorAuth(action?: "login" | "cancel" | "key", requestId?: string, apiKey?: string) {
@@ -2756,9 +2779,15 @@ class CloudroomService {
     this.childTurnEnded?.({ ...thread, parentThreadId: thread.parentThreadId }, status);
   }
 
+  /** A parent moving either way holds its children's reports until it lands. Teleport to Local closes the Cloud session
+   *  that Core's reports go to, so without the hold a turn ending meanwhile reaches neither copy. */
   private teleportingParent(threadId: string): boolean {
     const parent = this.reportedParent(getThread(this.deps.db, threadId));
-    return Boolean(parent && !isCloudThread(parent) && teleportBlocked(this.deps.db, parent.id));
+    return Boolean(parent && this.moving(parent.id));
+  }
+
+  private moving(threadId: string): boolean {
+    return teleportBlocked(this.deps.db, threadId) || localTeleports.has(threadId);
   }
 
   private holdChildReport(child: string, status: ThreadEventTurnStatus, turn: string): Promise<void> {
@@ -2775,7 +2804,7 @@ class CloudroomService {
           for (const [key, report] of reports) {
             const thread = getThread(this.deps.db, report.child);
             const parent = this.reportedParent(thread);
-            if (parent && teleportBlocked(this.deps.db, parent.id)) { waiting = true; continue; }
+            if (parent && this.moving(parent.id)) { waiting = true; continue; }
             const status = report.status as ThreadEventTurnStatus;
             if (parent && isCloudThread(parent)) {
               const sent = await this.noticeCloudParent(report.child, status, report.turn).then(() => true, (error: unknown) => { this.warn("A child report could not be sent", error, { threadId: report.child }); return false; });

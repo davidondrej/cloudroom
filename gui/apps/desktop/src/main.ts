@@ -174,6 +174,7 @@ import {
   resumeThreadsAfterUpdate,
   runningLocalThreadIds,
   noteUpdateAttempt,
+  readUpdateAttempt,
   saveUpdateAttempt,
   saveWindowsUpdateMarker,
   stopThreadsForUpdate,
@@ -183,6 +184,7 @@ import {
   installNeedsPassword,
   macAppLocation,
   reopenAfterExit,
+  shipItRunning,
   startIdleInstall,
   takeAppOwnership,
 } from "./desktop-update-install.js";
@@ -2483,6 +2485,38 @@ async function runDesktopApp(): Promise<void> {
     app.setAsDefaultProtocolClient("cloudroom");
   }
   deliverArgvShareLink(process.argv);
+  // Mac: still on the version a Restart to update left means it didn't install. Read before the server reports and deletes it.
+  const attemptDir = resolveDataDirFromEnv({
+    env: process.env,
+    homeDir: homedir(),
+  });
+  const updateAttempt =
+    process.platform === "darwin" && app.isPackaged
+      ? await readUpdateAttempt(attemptDir)
+      : null;
+  const restartFailed =
+    updateAttempt !== null &&
+    updateAttempt.from === getDesktopVersion(process.env.BB_DESKTOP_VERSION);
+  // Squirrel.Mac cancels the install if this old version opens before it's done ("App Still Running"),
+  // e.g. from the Dock right after Restart to update. Quit once and let it finish; the helper reopens whichever version is installed.
+  if (
+    restartFailed &&
+    updateAttempt.yielded !== true &&
+    Date.now() - updateAttempt.at < 60_000 &&
+    (await shipItRunning(process.execPath))
+  ) {
+    const noted = await noteUpdateAttempt(attemptDir, { yielded: true }).then(
+      () => true,
+      () => false,
+    );
+    if (noted && reopenAfterExit(process.execPath, process.pid)) {
+      desktopLogger.info(
+        "The update is still installing; quitting so it can finish.",
+      );
+      app.exit(0);
+      return;
+    }
+  }
   app.on("before-quit", handleBeforeQuit);
   app.on("window-all-closed", () => {
     if (process.platform !== "darwin") {
@@ -2761,6 +2795,12 @@ async function runDesktopApp(): Promise<void> {
   desktopUpdateService.subscribe(() => {
     sendDesktopInfoChanged();
   });
+  if (restartFailed) {
+    desktopLogger.error(
+      `Restart to update didn't install ${updateAttempt.to}; offering it again.`,
+    );
+    desktopAutoUpdateService.markInstallFailed(updateAttempt.to);
+  }
   if (process.platform === "win32") {
     void takeFailedWindowsUpdate(userDataPath, desktopVersion)
       .then((version) => {
@@ -2776,6 +2816,8 @@ async function runDesktopApp(): Promise<void> {
   // A password prompt or Windows installer must never pop up unattended, so skip idle and remote-window installs.
   if (process.platform !== "win32" && !updateNeedsPassword) {
     idleInstall = startIdleInstall({
+      // After a failed restart only a click (here, a browser, or a phone) tries again, never an idle Mac.
+      autoInstall: !restartFailed,
       isUpdateDownloaded: () =>
         desktopAutoUpdateService?.getInfo().updateDownloaded === true,
       systemIdleSeconds: () => powerMonitor.getSystemIdleTime(),

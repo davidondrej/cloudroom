@@ -191,6 +191,15 @@ export const timelineNonOperationSystemRowSchema =
     systemKind: z.enum(["debug", "error", "reconnect"]),
     /** The provider's plan or usage limit stopped the turn. */
     planLimit: z.boolean().optional(),
+    /** The thread then moved to another agent: `from` hit the limit, `to` took over at `at` (ms), right away with `resend`. */
+    planLimitSwitch: z
+      .object({
+        from: z.string(),
+        to: z.string(),
+        resend: z.boolean(),
+        at: z.number(),
+      })
+      .optional(),
   });
 export type TimelineNonOperationSystemRow = z.infer<
   typeof timelineNonOperationSystemRowSchema

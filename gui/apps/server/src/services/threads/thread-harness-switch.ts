@@ -84,6 +84,8 @@ export async function switchThreadHarness(
               to: target.providerId,
               model: target.model,
               seed,
+              // A plan-limit card shows the new agent picking up only after a switch that continues right away.
+              resend: options.resend === true,
             },
           },
         });

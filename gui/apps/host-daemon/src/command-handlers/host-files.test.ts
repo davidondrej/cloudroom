@@ -306,13 +306,17 @@ describe("browseHostDirectory", () => {
 
     expect(result.directory).toBe(realRoot);
     expect(result.parent).toBe(path.dirname(realRoot));
+    // Folders also say when they were last used, for the picker's ranking.
+    const folder = (name: string) => ({
+      kind: "directory",
+      name,
+      path: path.join(realRoot, name),
+      activityAt: expect.any(Number),
+    });
     expect(result.entries).toEqual([
-      {
-        kind: "directory",
-        name: "alpha",
-        path: path.join(realRoot, "alpha"),
-      },
-      { kind: "directory", name: "beta", path: path.join(realRoot, "beta") },
+      folder("alpha"),
+      folder("beta"),
+      // A symlink may point into a privacy-protected folder, so it isn't probed.
       { kind: "directory", name: "link", path: path.join(realRoot, "link") },
       {
         kind: "file",

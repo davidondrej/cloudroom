@@ -35,6 +35,11 @@ type AgentThreadsSdk = {
   output?(
     args: Parameters<BbPluginApi["sdk"]["threads"]["output"]>[0],
   ): Promise<{ output?: string | null }>;
+  events?: {
+    list(
+      args: Parameters<BbPluginApi["sdk"]["threads"]["events"]["list"]>[0],
+    ): Promise<unknown>;
+  };
 };
 export type AgentRunApi = Pick<BbPluginApi, "realtime" | "log"> & {
   sdk: FallbackSdk & { threads: AgentThreadsSdk };
@@ -45,6 +50,7 @@ const sdkThreadSchema = z
     id: z.string(),
     archivedAt: z.number().nullable(),
     deletedAt: z.number().nullable(),
+    createdAt: z.number().optional(),
     status: z.enum([
       "pending",
       "idle",
@@ -385,24 +391,34 @@ export async function executeScriptRun(
   }
 }
 
-export function closeAutomationRunForSettledThread(
-  bb: Pick<BbPluginApi, "realtime">,
+export async function closeAutomationRunForSettledThread(
+  bb: AgentRunApi,
   db: Db,
   args: {
     threadId: string;
+    threadCreatedAt?: number;
     status: "idle" | "failed";
     error?: string | null;
     rateLimited?: boolean;
   },
-): void {
+): Promise<void> {
   const runs = listRunningAutomationRunsByThread(db, args.threadId);
   const now = Date.now();
   const changedProjects = new Set<string>();
   const error = args.error ?? "Turn failed";
   for (const run of runs) {
+    const stopped =
+      args.status === "idle" &&
+      (await stoppedRunSkip(bb, run, args.threadId, args.threadCreatedAt));
     // A plan limit is the agent's account, not the loop: skip the run, so it never counts toward a pause.
-    const closed =
-      args.status === "failed" && args.rateLimited
+    const closed = stopped
+      ? closeAutomationRun(db, {
+          runId: run.id,
+          ...stopped,
+          threadId: args.threadId,
+          now,
+        })
+      : args.status === "failed" && args.rateLimited
         ? closeAutomationRun(db, {
             runId: run.id,
             status: "skipped",
@@ -429,10 +445,52 @@ export function closeAutomationRunForSettledThread(
   }
 }
 
+type TurnEvent = {
+  type: string;
+  scope: { turnId?: string };
+  data: { status?: string; reason?: string; parentToolCallId?: string };
+};
+
+// Idle is not success when the user stopped the run (#911). Only on a thread
+// the run spawned is the newest root turn the run's own. One-way: this can
+// only turn a success into a skip, never into a failure.
+async function stoppedRunSkip(
+  bb: AgentRunApi,
+  run: AutomationRunRow,
+  threadId: string,
+  threadCreatedAt: number | undefined,
+): Promise<ReconcileOutcome | null> {
+  if ((threadCreatedAt ?? 0) < run.startedAt) return null;
+  try {
+    const events = (await bb.sdk.threads.events!.list({
+      threadId,
+      types: ["turn/started", "turn/completed", "system/thread/interrupted"],
+      order: "desc",
+      limit: "100",
+    })) as TurnEvent[];
+    const kids = events.filter((e) => e.data.parentToolCallId);
+    const root = (e: TurnEvent) =>
+      !kids.some((k) => k.scope.turnId === e.scope.turnId);
+    const end = events.find((e) => e.type === "turn/completed" && root(e));
+    const stop = events.find((e) => e.type === "system/thread/interrupted");
+    const reason =
+      end?.data.status === "interrupted" ? stop?.data.reason : null;
+    if (reason !== "manual-stop" && reason !== "memory-limit") return null;
+    return {
+      status: "skipped",
+      skipReason: `interrupted: ${reason}`,
+      keepFailureStreak: true,
+    };
+  } catch (error) {
+    const skipReason = `outcome unavailable: ${errorMessage(error)}`;
+    return { status: "skipped", skipReason, keepFailureStreak: true };
+  }
+}
+
 type ReconcileOutcome =
   | { status: "succeeded" }
   | { status: "failed"; error: string }
-  | { status: "skipped"; skipReason: string };
+  | { status: "skipped"; skipReason: string; keepFailureStreak?: boolean };
 
 export async function reconcileRunningAutomationRuns(
   bb: AgentRunApi,
@@ -513,7 +571,11 @@ async function reconcileOutcome(
   }
   switch (thread.status) {
     case "idle":
-      return { status: "succeeded" };
+      return (
+        (await stoppedRunSkip(bb, run, run.threadId, thread.createdAt)) ?? {
+          status: "succeeded",
+        }
+      );
     case "error":
       return {
         status: "failed",

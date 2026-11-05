@@ -461,6 +461,14 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: Plugin
       return context.json(await cloudroom(deps).cursorAuth(action, input.requestId, "apiKey" in input ? String(input.apiKey) : undefined));
     });
   }
+  // The Accounts plugin's Cursor account in use becomes the Cloud login; `null` goes back to this computer's own login.
+  app.post("/api/v1/cloudroom/account/cursor/account", async context => {
+    const problem = browserRequestProblem(context, deps, { requireJsonForMutation: true });
+    if (problem) return context.json({ message: "Use the local Cloudroom app." }, problem.status);
+    const parsed = z.object({ requestId: z.string().regex(/^[a-zA-Z0-9_-]{1,64}$/), apiKey: z.string().min(1).max(4096).regex(/^[!-~]+$/).nullable() }).strict().safeParse(await context.req.json().catch(() => null));
+    if (!parsed.success) throw new ApiError(400, "invalid_cursor_auth", "Invalid Cursor account request.");
+    return context.json(await cloudroom(deps).cursorAccount(parsed.data.requestId, parsed.data.apiKey));
+  });
   app.post("/api/v1/cloudroom/account/pi/key", async context => {
     const parsed = z.object({ provider: z.string().regex(/^[A-Za-z0-9._-]{1,64}$/), apiKey: z.string().min(1).max(8192).regex(/^[!-~]+$/) }).strict().safeParse(await context.req.json().catch(() => null));
     if (!parsed.success) throw new ApiError(400, "invalid_pi_auth", "Invalid Pi key request.");

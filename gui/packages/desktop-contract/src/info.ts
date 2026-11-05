@@ -43,6 +43,8 @@ export const bbDesktopInfoSchema = z.object({
   autoUpdateEnabled: z.boolean().optional(),
   computers: bbDesktopComputersSchema.optional(),
   downloadState: bbDesktopDownloadStateSchema.optional(),
+  /** The last Restart to update left this version installed. */
+  installFailed: z.boolean().optional(),
   installNeedsPassword: z.boolean().optional(),
   lastCheckedAt: isoUtcDateTimeSchema.nullable(),
   latestVersion: z.string().min(1).nullable(),

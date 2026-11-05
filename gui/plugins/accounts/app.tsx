@@ -43,7 +43,9 @@ function windowLabel(label: string): string {
   return label
     .replace("Five-hour limit", "5h")
     .replace("Weekly limit", "7d")
-    .replace("Weekly", "7d");
+    .replace("Weekly", "7d")
+    .replace("Plan usage", "Plan")
+    .replace("On-demand spend", "Spend");
 }
 
 const tileClass = "flex min-h-32 flex-col rounded-lg border p-3.5 text-sm";
@@ -194,7 +196,7 @@ function AccountTile({
             key={window.label}
             className="flex items-center gap-2 text-xs tabular-nums text-subtle-foreground"
           >
-            <span className="w-5">{windowLabel(window.label)}</span>
+            <span className="min-w-5">{windowLabel(window.label)}</span>
             <span className="h-[3px] flex-1 bg-border">
               <span
                 className="block h-full bg-muted-foreground"
@@ -364,7 +366,80 @@ function SignInRow({
   );
 }
 
-function AccountsSection({ provider }: { provider: Provider }) {
+/** Cursor accounts are added with a user API key, Cursor's own way to use a second account. */
+function KeyRow({ rpc, close }: { rpc: Rpc; close: () => void }) {
+  const navigate = useBbNavigate();
+  const [key, setKey] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const add = () => {
+    setBusy(true);
+    setError(null);
+    rpc.call("cursor.add", { apiKey: key }).then(close, (cause: unknown) => {
+      setError(errorText(cause));
+      setBusy(false);
+    });
+  };
+  return (
+    <div className="space-y-2 py-2.5 text-sm">
+      <div className="flex items-center gap-2">
+        <input
+          autoFocus
+          type="password"
+          aria-label="Cursor API key"
+          placeholder="Cursor API key"
+          value={key}
+          disabled={busy}
+          onChange={(event) => setKey(event.currentTarget.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" && key.trim()) add();
+            if (event.key === "Escape") close();
+          }}
+          className="min-w-0 flex-1 rounded border border-border bg-transparent px-2 py-1 text-sm text-foreground outline-none focus:border-foreground/50"
+        />
+        <Button size="sm" disabled={busy || !key.trim()} onClick={add}>
+          {busy ? "Checking…" : "Add"}
+        </Button>
+        <Button
+          variant="ghost"
+          size="icon"
+          className="size-7 text-muted-foreground"
+          aria-label="Cancel"
+          onClick={close}
+        >
+          <Icon name="X" />
+        </Button>
+      </div>
+      <p className="text-xs text-muted-foreground">
+        {error ? (
+          <span className="text-destructive-text">{error}</span>
+        ) : (
+          <>
+            Sign in to the other Cursor account and create a key in{" "}
+            <button
+              type="button"
+              onClick={() =>
+                navigate.openUrl("https://cursor.com/dashboard?tab=integrations")
+              }
+              className="text-primary-text hover:underline"
+            >
+              Cursor's dashboard
+            </button>
+            .
+          </>
+        )}
+      </p>
+    </div>
+  );
+}
+
+function AccountsSection({
+  provider,
+  title = "Accounts",
+}: {
+  provider: Provider;
+  title?: string;
+}) {
   const rpc = useRpc<typeof accountsRpcContract>();
   const [accounts, setAccounts] = useState<AccountView[] | null>(null);
   const [adding, setAdding] = useState<{
@@ -394,7 +469,7 @@ function AccountsSection({ provider }: { provider: Provider }) {
   return (
     <section className="space-y-2.5">
       <div className="flex items-center justify-between gap-4">
-        <h2 className="text-sm font-semibold text-foreground">Accounts</h2>
+        <h2 className="text-sm font-semibold text-foreground">{title}</h2>
         <Button
           variant="ghost"
           size="sm"
@@ -453,16 +528,26 @@ function AccountsSection({ provider }: { provider: Provider }) {
       )}
       {adding ? (
         <div className="rounded-lg border border-dashed border-border px-3.5">
-          <SignInRow
-            provider={provider}
-            mac={adding.mac}
-            id={adding.id}
-            rpc={rpc}
-            close={() => {
-              setAdding(null);
-              load();
-            }}
-          />
+          {provider === "acp-cursor" ? (
+            <KeyRow
+              rpc={rpc}
+              close={() => {
+                setAdding(null);
+                load();
+              }}
+            />
+          ) : (
+            <SignInRow
+              provider={provider}
+              mac={adding.mac}
+              id={adding.id}
+              rpc={rpc}
+              close={() => {
+                setAdding(null);
+                load();
+              }}
+            />
+          )}
         </div>
       ) : null}
       <p className="text-xs text-subtle-foreground">
@@ -481,5 +566,12 @@ export default definePluginApp((app) => {
   app.slots.settingsSection({
     id: "codex",
     component: () => <AccountsSection provider="codex" />,
+  });
+  // Settings → Agents → ACP, which holds Cursor.
+  app.slots.settingsSection({
+    id: "acp",
+    component: () => (
+      <AccountsSection provider="acp-cursor" title="Cursor accounts" />
+    ),
   });
 });

@@ -35,7 +35,7 @@ import {
   autoStartProviderCliInstall,
   providerCliJobKey,
 } from "@/components/provider-cli/provider-cli-install-store";
-import { PROJECT_CHECKOUT_ENVIRONMENT_PROVIDER_ID } from "@cloudroom/client-core";
+import { GIT_WORKTREE_ENVIRONMENT_PROVIDER_ID, PROJECT_CHECKOUT_ENVIRONMENT_PROVIDER_ID } from "@cloudroom/client-core";
 import {
   encodeProviderValue,
   encodeReuseValue,
@@ -796,10 +796,11 @@ function RootComposeSurface({
       setRootComposeProjectId(nextForkSeed.projectId);
       setProviderModelReasoning(nextForkSeed);
       setPermissionMode(nextForkSeed.permissionMode);
-      // A Cloud fork has no folder to reuse; its seed selects Cloud instead.
+      // A Local fork gets its own worktree with the source's code, so the two threads never edit the same files.
+      // A Cloud fork has no folder; its seed selects Cloud instead.
       if (nextForkSeed.environmentId !== null) {
         seedEnvironmentSelectionValue(
-          encodeReuseValue(nextForkSeed.environmentId),
+          encodeProviderValue(GIT_WORKTREE_ENVIRONMENT_PROVIDER_ID),
         );
       }
     }

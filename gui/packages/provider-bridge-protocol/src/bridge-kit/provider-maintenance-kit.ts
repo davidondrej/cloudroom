@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { type ChildProcess, execFile, spawn } from "node:child_process";
 import { constants as fsConstants } from "node:fs";
 import { access } from "node:fs/promises";
 import path from "node:path";
@@ -8,6 +8,7 @@ import semverValid from "semver/functions/valid.js";
 import { z } from "zod";
 import {
   execPortableFile,
+  killProcessGroup,
   windowsExecutableExtensions,
 } from "@cloudroom/process-utils";
 import type {
@@ -23,6 +24,8 @@ const execFileAsync = promisify(execFile);
 
 const CLI_PROBE_TIMEOUT_MS = 5_000;
 const INSTALLATION_CHECK_TIMEOUT_MS = 15_000;
+const PROBE_KILL_GRACE_MS = 1_000;
+const PROBE_MAX_OUTPUT = 1024 * 1024;
 
 export function selectResolvedExecutable(args: {
   candidates: readonly string[];
@@ -69,21 +72,112 @@ export async function resolveExecutablePath(
   }
 }
 
+// Unix probes run in their own process group, which the runtime's stop of the
+// bridge's group misses: end them when this process ends.
+const liveProbes = new Set<ChildProcess>();
+let probesEndWithProcess = false;
+
+function endProbesWithProcess(): void {
+  if (probesEndWithProcess) return;
+  probesEndWithProcess = true;
+  const endProbes = () => {
+    for (const child of liveProbes) {
+      killProcessGroup({ child, signal: "SIGKILL" });
+    }
+  };
+  process.once("exit", endProbes);
+  for (const signal of ["SIGTERM", "SIGINT"] as const) {
+    const onSignal = () => {
+      endProbes();
+      // With no other handler, keep the signal's default: end this process.
+      if (process.listenerCount(signal) === 1) {
+        process.removeListener(signal, onSignal);
+        process.kill(process.pid, signal);
+      }
+    };
+    process.prependListener(signal, onSignal);
+  }
+}
+
+/**
+ * Runs a short CLI check and returns its stdout and stderr. A timeout ends
+ * everything the CLI started, and only that: on Unix the check gets its own
+ * process group (execFile's timeout ends only the CLI, orphaning e.g. an
+ * update's `git fetch`); Windows' execPortableFile already ends the tree.
+ */
+function runCliProbe(
+  command: string,
+  args: readonly string[],
+  timeoutMs: number,
+): Promise<string> {
+  if (process.platform === "win32") {
+    // execFile can't run npm `.cmd` shims on Windows.
+    return execPortableFile(command, args, { timeoutMs }).then(
+      ({ stdout, stderr }) => `${stdout}\n${stderr}`,
+    );
+  }
+  endProbesWithProcess();
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, [...args], {
+      detached: true,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    liveProbes.add(child);
+    const output = { stdout: "", stderr: "" };
+    let outputBytes = 0;
+    let timedOut = false;
+    const stop = (signal: NodeJS.Signals) =>
+      killProcessGroup({ child, signal });
+    // Answer now: a descendant in its own session may hold the pipes open.
+    const abandon = (message: string) => {
+      child.stdout.destroy();
+      child.stderr.destroy();
+      reject(new Error(`${command} ${message}`));
+    };
+    // Once started, cleanup runs to SIGKILL even if the CLI itself exits:
+    // its descendants may have ignored SIGTERM.
+    const timer = setTimeout(() => {
+      timedOut = true;
+      stop("SIGTERM");
+      setTimeout(() => {
+        stop("SIGKILL");
+        liveProbes.delete(child);
+      }, PROBE_KILL_GRACE_MS);
+      abandon(`timed out after ${timeoutMs} ms`);
+    }, timeoutMs);
+    for (const name of ["stdout", "stderr"] as const) {
+      child[name].setEncoding("utf8").on("data", (chunk: string) => {
+        output[name] += chunk;
+        outputBytes += Buffer.byteLength(chunk);
+        if (outputBytes > PROBE_MAX_OUTPUT) {
+          clearTimeout(timer);
+          stop("SIGKILL");
+          abandon("printed too much output");
+        }
+      });
+    }
+    child.once("error", (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    child.once("close", (code) => {
+      // Keep timed-out groups tracked until escalation, even with closed pipes.
+      if (!timedOut) liveProbes.delete(child);
+      clearTimeout(timer);
+      if (code === 0) resolve(`${output.stdout}\n${output.stderr}`);
+      else reject(new Error(`${command} exited with code ${String(code)}`));
+    });
+  });
+}
+
 export async function commandOutput(
   command: string,
   args: readonly string[],
 ): Promise<string | null> {
   try {
-    // execFile can't run npm `.cmd` shims on Windows.
-    const { stdout, stderr } =
-      process.platform === "win32"
-        ? await execPortableFile(command, args, {
-            timeoutMs: INSTALLATION_CHECK_TIMEOUT_MS,
-          })
-        : await execFileAsync(command, [...args], {
-            timeout: INSTALLATION_CHECK_TIMEOUT_MS,
-          });
-    return `${stdout}\n${stderr}`.trim();
+    return (
+      await runCliProbe(command, args, INSTALLATION_CHECK_TIMEOUT_MS)
+    ).trim();
   } catch {
     return null;
   }
@@ -98,20 +192,9 @@ export function versionFrom(value: string | null): string | null {
 
 export async function readCliVersion(command: string): Promise<string | null> {
   try {
-    if (process.platform === "win32") {
-      const { stdout, stderr } = await execPortableFile(
-        command,
-        ["--version"],
-        { timeoutMs: CLI_PROBE_TIMEOUT_MS },
-      );
-      return versionFrom(`${stdout}\n${stderr}`);
-    }
-    const probe = execFileAsync(command, ["--version"], {
-      timeout: CLI_PROBE_TIMEOUT_MS,
-    });
-    probe.child.stdin?.end();
-    const { stdout, stderr } = await probe;
-    return versionFrom(`${stdout}\n${stderr}`);
+    return versionFrom(
+      await runCliProbe(command, ["--version"], CLI_PROBE_TIMEOUT_MS),
+    );
   } catch {
     return null;
   }
