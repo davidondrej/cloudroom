@@ -3783,9 +3783,7 @@ describe("PromptBoxInternal mention triggers", () => {
     ]);
     const promptEditor = getPromptEditorElement();
     expect(promptEditor.querySelector('[data-icon="Zap"]')).toBeTruthy();
-    expect(
-      promptEditor.querySelector("img:not(.ProseMirror-separator)"),
-    ).toBeNull();
+    expect(promptEditor.querySelector("img:not(.ProseMirror-separator)")).toBeNull();
   });
 
   it("keeps path-first mention results in keyboard navigation order", async () => {
