@@ -38,10 +38,6 @@ For Apple Silicon Macs (macOS 13+), Linux x64, and Windows 11.
 
 ## What's in this repo
 
-<p align="center">
-  <img src=".github/readme/repo.png" alt="One repo: gui/ is the desktop app, core/ is the cloud engine, skills/ holds the agent skills." width="100%">
-</p>
-
 - [`gui/`](gui/): the desktop app, built on [BB](https://github.com/get-bb/bb).
 - [`core/`](core/): the Rust service that runs agents in the cloud and saves their history.
 - [`skills/`](skills/): the skills every Cloudroom agent ships with.
