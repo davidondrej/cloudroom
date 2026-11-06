@@ -166,7 +166,7 @@ export function PluginSidebarFooterDisclosure({
       className="absolute bottom-full left-2 z-[70] w-[calc(100%-1rem)] overflow-hidden rounded-lg border border-sidebar-border bg-sidebar shadow-xl transition-[height] duration-200 ease-out motion-reduce:transition-none"
       style={{ height: contentHeight ?? undefined }}
     >
-      <div ref={contentRef} className="max-h-80 overflow-auto">
+      <div ref={contentRef} className="max-h-[340px] overflow-auto">
         <PluginSlotMount
           pluginId={item.pluginId}
           slotKind="experimental_sidebarFooter"

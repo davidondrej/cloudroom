@@ -1,6 +1,10 @@
 {
   "name": "bb-plugin-environment-project-checkout",
   "version": "0.1.0",
+  "author": {
+    "name": "BB",
+    "url": "https://github.com/get-bb/bb"
+  },
   "private": true,
   "type": "module",
   "description": "Run a thread in the project's own checkout on an enrolled machine, on the branch you choose",

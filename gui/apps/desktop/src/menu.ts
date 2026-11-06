@@ -18,6 +18,7 @@ const NEW_WINDOW_MENU_LABEL = "New Window";
 const ARCHIVE_THREAD_MENU_LABEL = "Archive Thread";
 const CLOSE_WINDOW_MENU_LABEL = "Close Window";
 const OPEN_SETTINGS_MENU_LABEL = "Settings…";
+const CHECK_FOR_UPDATES_MENU_LABEL = "Check for Updates…";
 const TOGGLE_DEVELOPER_TOOLS_MENU_LABEL = "Toggle Developer Tools";
 const TOGGLE_DEVELOPER_TOOLS_ACCELERATOR = "Command+Option+I";
 const RELOAD_ACCELERATOR = "CommandOrControl+R";
@@ -54,6 +55,7 @@ export interface InstallApplicationMenuArgs {
   accelerators: ApplicationMenuAccelerators;
   isLinux: boolean;
   isMac: boolean;
+  checkForUpdates(): void;
   openAbout(): void;
   openNewTab(): void;
   openNewThread(): void;
@@ -136,6 +138,12 @@ export function buildApplicationMenuTemplate(
           label: `About ${app.name}`,
           click() {
             args.openAbout();
+          },
+        },
+        {
+          label: CHECK_FOR_UPDATES_MENU_LABEL,
+          click() {
+            args.checkForUpdates();
           },
         },
         { type: "separator" },

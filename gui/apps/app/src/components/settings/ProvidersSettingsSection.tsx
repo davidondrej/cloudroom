@@ -459,6 +459,8 @@ function FailedNote({
 }
 
 const SIGNS_OUT = new Set(["claude-code", "codex"]);
+/** Agents with several accounts, on Settings → Agents → Accounts (the Accounts plugin). */
+const HAS_ACCOUNTS = new Set(["claude-code", "codex", "acp-cursor"]);
 
 function useAgentAction(onDone: () => void) {
   const queryClient = useQueryClient();
@@ -503,6 +505,7 @@ function ProviderMenu({
   const action = useAgentAction(onDone);
   const [confirm, setConfirm] = useState<"disconnect" | "remove" | null>(null);
   const signsOut = SIGNS_OUT.has(provider.id);
+  const hasAccounts = HAS_ACCOUNTS.has(provider.id);
   const name = provider.displayName;
   const run = (kind: "disconnect" | "remove") =>
     action.mutate(
@@ -532,18 +535,18 @@ function ProviderMenu({
               <Icon name="Star" /> {isDefault ? "Default agent" : "Make default"}
             </DropdownMenuItem>
           ) : null}
-          {signsOut ? (
+          {hasAccounts ? (
             <DropdownMenuItem
               onSelect={() =>
                 navigate(
-                  getPluginConfigurationRoutePath({ pluginId: provider.pluginId }),
+                  `${getPluginConfigurationRoutePath({ pluginId: "accounts" })}?agent=${encodeURIComponent(provider.id)}`,
                 )
               }
             >
               <Icon name="UserRound" /> Accounts…
             </DropdownMenuItem>
           ) : null}
-          {onMakeDefault || signsOut ? <DropdownMenuSeparator /> : null}
+          {onMakeDefault || hasAccounts ? <DropdownMenuSeparator /> : null}
           {signsOut ? (
             <DropdownMenuItem onSelect={() => setConfirm("disconnect")}>
               <Icon name="LogOut" />
@@ -981,7 +984,7 @@ export function ProvidersSettingsSection({
 
   return (
     <SettingsSection
-      title="Providers"
+      title="Harness"
       description="Your agents: logins, versions, updates, and the default. Provider-specific settings are in the tabs above."
     >
       {providersQuery.isPending ? (

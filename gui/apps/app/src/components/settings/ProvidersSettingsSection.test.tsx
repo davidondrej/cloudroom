@@ -86,7 +86,7 @@ describe("ProvidersSettingsSection", () => {
     );
 
     const providersSection = screen
-      .getByRole("heading", { name: "Providers" })
+      .getByRole("heading", { name: "Harness" })
       .closest("section");
     if (providersSection === null) throw new Error("Providers section missing");
     const rows = within(providersSection).getAllByText(/Alpha|Beta|Gamma/);

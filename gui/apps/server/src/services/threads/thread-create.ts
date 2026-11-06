@@ -609,9 +609,10 @@ export async function createThreadFromRequest(
   );
   const sourceId = rawRequestInput.sourceThreadId ?? rawRequestInput.parentThreadId;
   const source = sourceId ? getThread(deps.db, sourceId) : null;
-  // Every Local fork (fork button, plugin, CLI) passes here, so a new worktree always gets the source's code.
-  if (source !== null && !isCloudThread(source) && rawRequestInput.originKind === "fork" && rawRequestInput.sourceThreadId && rawRequestInput.executionTarget !== "cloud" && !options.freshFork) {
-    const prepared = await prepareLocalForkWorktree(deps as AppDeps, source, rawRequestInput.projectId, rawRequestInput.environment);
+  // Every Local fork (fork button, plugin, CLI) passes here, so a new worktree always gets the source's code. Once: a
+  // text fork's recursion (importedText) already carries the prepared environment.
+  if (source !== null && !isCloudThread(source) && rawRequestInput.originKind === "fork" && rawRequestInput.sourceThreadId && rawRequestInput.executionTarget !== "cloud" && !options.freshFork && !options.importedText) {
+    const prepared = await prepareLocalForkWorktree(deps as AppDeps, source, rawRequestInput.projectId, rawRequestInput.environment, rawRequestInput.origin);
     const note = prepared.note && rawRequestInput.input.length > 0 && options.providerInput === undefined ? [prepared.note] : [];
     rawRequestInput = { ...rawRequestInput, environment: prepared.environment, input: [...note, ...rawRequestInput.input] };
   }

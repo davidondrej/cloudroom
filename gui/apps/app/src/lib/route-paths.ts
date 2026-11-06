@@ -6,6 +6,7 @@ import {
   REGISTRY_SKILL_DETAIL_ROUTE_PATH,
   REGISTRY_SKILLS_ROUTE_PATH,
   ROUTE_PATTERNS,
+  SETTINGS_PLUGINS_ROUTE_PATH,
   SKILL_DETAIL_ROUTE_PATH,
   SKILLS_ROUTE_PATH,
   TOOLS_ROUTE_PATH,
@@ -107,6 +108,13 @@ export function isPluginsRoutePath(pathname: string): boolean {
   return (
     matchPath(PLUGINS_ROUTE_PATH, pathname) !== null ||
     matchPath(PLUGIN_DETAIL_ROUTE_PATH, pathname) !== null
+  );
+}
+
+export function isSettingsPluginsRoutePath(pathname: string): boolean {
+  return (
+    pathname === SETTINGS_PLUGINS_ROUTE_PATH ||
+    pathname.startsWith(`${SETTINGS_PLUGINS_ROUTE_PATH}/`)
   );
 }
 

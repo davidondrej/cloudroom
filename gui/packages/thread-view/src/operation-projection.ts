@@ -50,6 +50,10 @@ export interface OperationProjectionState {
     EventProjectionUserQuestionLifecycleMessage
   >;
   threadOperationsById: Map<string, EventProjectionOperationMessage>;
+  repeatedWarningsByKey: Map<
+    string,
+    { message: EventProjectionOperationMessage; count: number }
+  >;
 }
 
 export function createOperationProjectionState(
@@ -63,6 +67,7 @@ export function createOperationProjectionState(
     permissionGrantsByInteractionId: new Map(),
     userQuestionsByInteractionId: new Map(),
     threadOperationsById: new Map(),
+    repeatedWarningsByKey: new Map(),
     fileEditsByCallId: new Map(),
     fileEditStdoutBuffersByScopedCallKey: new Map(),
   };
@@ -267,6 +272,26 @@ function mergeThreadOperationMessage(
     existing: existing.detail,
     incoming: incoming.detail,
   });
+}
+
+/** Folds identical thread warnings (same title and detail) until the next turn into one "×N" row. */
+export function upsertRepeatedWarning(
+  state: OperationProjectionState,
+  incoming: EventProjectionOperationMessage,
+): void {
+  const key = lifecycleMessageKey(
+    `warning:${JSON.stringify([incoming.title, incoming.detail ?? null])}`,
+    incoming,
+  );
+  const seen = state.repeatedWarningsByKey.get(key);
+  if (!seen) {
+    state.repeatedWarningsByKey.set(key, { message: incoming, count: 1 });
+    state.messages.push(incoming);
+    return;
+  }
+  seen.count += 1;
+  updateMessageBounds(seen.message, incoming);
+  seen.message.title = `${incoming.title} ×${seen.count}`;
 }
 
 export function upsertPermissionGrantLifecycleMessage(

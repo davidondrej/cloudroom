@@ -144,7 +144,7 @@ and `null` clears a preference that can be unset.
 answer visible, and `flat` keeps every step visible. Each provider has a
 default (Claude Code is `flat`, the other first-party providers `collapse`).
 `room-cli settings completed-turns <provider-id> <collapse|flat>` overrides it for
-that provider, and `default` removes the override. Settings → Providers has
+that provider, and `default` removes the override. Settings → Agents → Harness has
 the same per-provider switch.
 
 The default-off `changelogPreview` experiment shows the latest release notes

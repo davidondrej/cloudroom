@@ -392,7 +392,7 @@ const unsentWork = (db: DbQueryConnection, threadId: string) => {
 
 class CloudroomService {
   teleportRecovery?: () => void;
-  archiveRequest?: (threadId: string) => void;
+  archiveRequest?: (threadId: string, liveThreadIds?: string[]) => void;
   private readonly heldStarts = new Set<string>();
   childTurnEnded?: (child: Thread & { parentThreadId: string }, status: ThreadEventTurnStatus) => void;
   moveRequest?: (threadId: string, project: string) => void;
@@ -469,6 +469,8 @@ class CloudroomService {
   private readonly streamErrors = new Map<string, string>();
   private readonly connectionIssues = new Map<string, Partial<Record<ConnectionPhase, ConnectionIssue>>>();
   private readonly sentQueues = new Map<string, string>();
+  /** The last Stop receipt seen per thread, for the queue's "paused by Stop" label only (#967). */
+  private readonly stops = new Map<string, { session: string; at: number }>();
   /** Threads whose cloud disk is full or low, from Core's storage records. The composer shows one live card for it. */
   private readonly outOfMemory = new Set<string>();
   private readonly disk = new Map<string, { paused: boolean; reason: "disk_capacity" | "measurement_unavailable"; usedBytes: number | null; totalBytes: number | null }>();
@@ -1050,12 +1052,17 @@ class CloudroomService {
     let storage: Storage | null = null;
     // A core connected by URL and token, with no Cloudroom account: the user hosts it (docs/cloudroom.md).
     let selfHosted = false;
+    let signedOut = false;
     try {
       const saved = await this.savedConnection();
+      signedOut = !saved?.account || !(saved.token || saved.sandboxToken);
       account = saved?.token ? saved.account ?? null : null;
       selfHosted = Boolean(saved?.token && !saved.account);
       projectId = saved?.projectId ?? null;
       if (saved?.sandboxToken && saved.account && await this.newThreadsInSandboxes()) {
+        // Without a VM, nothing above asked the website's mode, which carries the plan and queue (#864): ask in the
+        // background, at most once a minute, so status never waits on it.
+        if (!saved.token) this.sandboxes.usageLimited();
         // New threads start in sandboxes, which sleep between tasks; report their latest capabilities, never a VM's.
         // Null harnesses mean unknown: the composer then lets the sandbox decide instead of blocking.
         // Nothing to learn while in the cloud queue: no sandbox runs, so skip the website call.
@@ -1082,7 +1089,7 @@ class CloudroomService {
       await client.ready();
       void this.ensurePreviews(capabilities);
       return {
-        ready: true, account, selfHosted, projectId, storage, harnesses: capabilities.harnesses,
+        ready: true, account, signedOut, selfHosted, projectId, storage, harnesses: capabilities.harnesses,
         sync: capabilities.sync ? { ...await syncStatus(this.deps), issue: this.syncIssue } : null,
         previews: capabilities.previews ? await this.previews() : null,
         workspaces: capabilities.workspaces, teleport: capabilities.teleport, repository: capabilities.repository,
@@ -1091,7 +1098,7 @@ class CloudroomService {
         compact: capabilities.compact, queue_edit: capabilities.queue_edit, queue_cancel: capabilities.queue_cancel,
         queue_reorder: capabilities.queue_reorder, error: null, usedCloud: lastCloudAt !== null, lastCloudAt, lastNewCloudAt,
       };
-    } catch (error) { return { ready: false, account, selfHosted, projectId, storage, workspaces: false, repository: null, model: null, error: publicError(error) }; }
+    } catch (error) { return { ready: false, account, signedOut, selfHosted, projectId, storage, workspaces: false, repository: null, model: null, error: publicError(error) }; }
   }
 
   /** Mac → cloud access (ADR 0113). Local agents reach this through `room-cli vm`.
@@ -2141,8 +2148,15 @@ class CloudroomService {
       model: saved.model, reasoningLevel: commandReasoning(c.input) ?? saved.reasoning, permissionMode: "full",
       serviceTier: stored.service_tier === "fast" ? "fast" : "default",
       sendAt: null, waitingOn: null, failureReason: null, payload: { kind: "inline" }, editable: (c.state === "sending" || c.state === "accepted") && capabilities?.queue_edit === true,
-      createdAt: c.createdAt, updatedAt: c.createdAt + revision - 1,
+      pausedByStop: this.stopHeld(saved), createdAt: c.createdAt, updatedAt: c.createdAt + revision - 1,
     });
+  }
+
+  /** Stop pauses Core's queue until a resume, even across turns Core starts itself (#967). Only the session that Stop
+   *  paused shows it, and a resume sent after that Stop, still on its way, already lifts it. Delivery never reads this. */
+  private stopHeld(saved: Binding): boolean {
+    const stop = this.stops.get(saved.threadId);
+    return saved.queuePaused && stop?.session === saved.sessionId && !commands(this.deps.db, saved.threadId).some(c => c.command === "resume" && c.createdAt >= stop.at && ["sending", "accepted"].includes(c.state) && !JSON.parse(c.input).keep_paused);
   }
 
   async editQueued(thread: Thread, queuedMessageId: string, payload: { input: PromptInput[]; expectedUpdatedAt: number }) {
@@ -2175,10 +2189,22 @@ class CloudroomService {
     const saved = binding(this.deps.db, thread.id);
     const current = command(this.deps.db, queuedMessageId);
     if (!saved || !current || current.threadId !== thread.id) throw new ApiError(404, "invalid_request", "Queued message not found");
+    await this.requireOwnThread(saved);
+    // Before its session starts, Core has never seen a follow-up, so it is removed here without waking anything (#866).
+    // Read from saved state, whatever the thread's status: a failed start hides its queue but a retry still sends it.
+    // Check and write with no await between: delivery saves the session before it reads which prompts to send.
+    const target = command(this.deps.db, queuedMessageId);
+    if (!binding(this.deps.db, thread.id)?.sessionId && target?.command === "prompt" && target.state === "sending" && target.id !== `first_${thread.id}` && !JSON.parse(target.input).teleport_handoff) {
+      saveCommandState(this.deps.db, thread.id, queuedMessageId, "cancelled");
+      return this.notify(thread.id);
+    }
     if (!feature(await this.queueCapabilities(saved), "queue_cancel")) throw new ApiError(409, "cloudroom_unsupported", "Cloud queue cancellation is not enabled.");
     const id = randomUUID();
     this.enqueue(thread.id, id, "cancel", { target_request_id: queuedMessageId });
-    await this.deliver(thread.id);
+    await this.deliver(thread.id).catch((error: unknown) => {
+      if (!(error instanceof ApiError && error.status === 503) || command(this.deps.db, id)?.state !== "sending") throw error;
+      throw new ApiError(503, error.body.code, `${error.body.message} The delete is saved and is sent once the cloud thread can take it, unless the agent starts this message first.`);
+    });
     if (command(this.deps.db, id)?.state === "failed") throw new ApiError(409, "queued_message_started", "Too late: the agent already started this message.");
   }
 
@@ -2219,7 +2245,7 @@ class CloudroomService {
     // Over a plan limit this fails as a whole, never cancelling the message to send.
     if (active) await this.control(thread.id, "stop", false);
     await this.control(thread.id, "resume");
-    return { ok: true, delivery: "queued", queuedMessage: queued };
+    return { ok: true, delivery: "queued", queuedMessage: { ...queued, pausedByStop: false } };
   }
 
   async compact(thread: Thread) {
@@ -3076,13 +3102,19 @@ class CloudroomService {
           if (ended) await this.noticeCloudParent(saved.threadId, ended, turn);
           const held = ended && this.teleportingParent(saved.threadId) ? ended : null;
           if (held) await this.holdChildReport(saved.threadId, held, turn);
+          const receipt = fresh && record.kind === "receipt" ? record.data as { command?: string; state?: string; input?: { keep_paused?: boolean } } : null;
+          if (receipt?.state === "accepted" && receipt.command === "stop") this.stops.set(saved.threadId, { session: record.session_id, at: Date.now() });
+          if (receipt?.state === "accepted" && receipt.command === "resume" && !receipt.input?.keep_paused) this.stops.delete(saved.threadId);
           const eventTypes = projectRecord(this.deps.db, saved.threadId, record, outage);
           projecting = false;
           this.catchUps.delete(saved.threadId);
           if (held) void this.deliverChildReports();
           else if (ended) this.tellLocalParent(saved.threadId, ended, turn);
           // Agents archive their own thread with `room-cli thread archive --self`; like renames, this applies on reconnect.
-          if (record.kind === "archive") this.archiveRequest?.(saved.threadId);
+          if (record.kind === "archive") {
+            const kept = z.object({ kept_live: z.array(z.string()) }).catch({ kept_live: [] }).parse(record.data).kept_live;
+            this.archiveRequest?.(saved.threadId, bindings(this.deps.db).filter((b) => b.coreUrl === saved.coreUrl && b.sessionId !== null && kept.includes(b.sessionId)).map((b) => b.threadId));
+          }
           if (move && move.success) this.moveRequest?.(saved.threadId, move.data.project);
           if (record.kind === "secret_request") this.secrets.follow(client, saved.threadId, record);
           if (record.kind === "gpu_request" && fresh) this.gpuApprovals.follow(saved.threadId, record);

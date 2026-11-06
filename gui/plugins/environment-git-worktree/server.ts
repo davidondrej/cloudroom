@@ -15,6 +15,8 @@ const REMOVE_TIMEOUT_MS = 15 * 60 * 1000;
 export const worktreeInputsSchema = z
   .object({
     branch: worktreeBaseBranchSchema.default({ kind: "default" }),
+    // A fork of a thread working in another Git checkout starts there, not in the project checkout (#971).
+    sourcePath: z.string().min(1).optional(),
   })
   .default({ branch: { kind: "default" } });
 export type WorktreeInputs = z.infer<typeof worktreeInputsSchema>;
@@ -52,7 +54,8 @@ export default async function worktreePlugin(bb: BbPluginApi): Promise<void> {
           "create",
           {
             operationId,
-            sourcePath: context.projectCheckout.path,
+            sourcePath:
+              context.inputs.sourcePath ?? context.projectCheckout.path,
             pathKey: context.pathKey,
             branchName: context.rebuild
               ? (context.previous?.environment.branchName ??

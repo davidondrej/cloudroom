@@ -8,8 +8,8 @@ import { Switch } from "@cloudroom/shared-ui/switch";
 import { cn } from "@cloudroom/shared-ui/lib/utils";
 import { MachineLaunchCommand } from "@/components/dialogs/AddMachineDialog";
 import { MachineStatusDot } from "@/components/machines/MachineStatusDot";
-import { SETTINGS_CARD_CLASS, SETTINGS_CARD_ROW_CLASS, SettingsBadge } from "@/components/ui/settings-section";
-import { OsTile, osFromName, shortOsName } from "@/components/machines/OsTile";
+import { SETTINGS_CARD_CLASS, SETTINGS_CARD_ROW_CLASS } from "@/components/ui/settings-section";
+import { OsTile, PlaceChip, osFromName, shortOsName } from "@/components/machines/OsTile";
 import { useCloudroomAccount } from "@/hooks/queries/cloudroom-queries";
 import { getMutationErrorMessage } from "@/lib/mutation-errors";
 import { sdk } from "@/lib/sdk";
@@ -51,7 +51,7 @@ export function VpsMachineRow() {
         <div className="min-w-0 flex-1 space-y-0.5">
           <div className="flex min-w-0 items-center gap-1.5">
             <span className="min-w-0 truncate text-sm text-foreground">{label}</span>
-            <SettingsBadge>VPS</SettingsBadge>
+            <PlaceChip place="vps" />
           </div>
           <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-subtle-foreground/75">
             <span className="inline-flex min-w-0 items-center gap-1.5">

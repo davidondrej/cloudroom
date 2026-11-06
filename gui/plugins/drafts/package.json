@@ -1,6 +1,10 @@
 {
   "name": "bb-plugin-drafts",
   "version": "0.1.0",
+  "author": {
+    "name": "BB",
+    "url": "https://github.com/get-bb/bb"
+  },
   "private": true,
   "type": "module",
   "description": "Save a composer draft as a manually sent queued message.",

@@ -1,6 +1,10 @@
 {
   "name": "bb-plugin-plugin-api-docs",
   "version": "0.1.0",
+  "author": {
+    "name": "BB",
+    "url": "https://github.com/get-bb/bb"
+  },
   "private": true,
   "type": "module",
   "description": "Browse the Cloudroom plugin API as an annotated map of the product.",

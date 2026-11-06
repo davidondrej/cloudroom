@@ -4,12 +4,19 @@ import {
   randomBytes,
   timingSafeEqual,
 } from "node:crypto";
-import { constants, type Stats } from "node:fs";
+import {
+  closeSync,
+  constants,
+  fstatSync,
+  openSync,
+  readSync,
+  type Stats,
+  unlinkSync,
+} from "node:fs";
 import {
   chmod,
   lstat,
   mkdir,
-  open,
   readdir,
   rm,
   unlink,
@@ -35,6 +42,39 @@ const MAX_TOKENS = 10_000;
 const MAX_TOKEN_LENGTH = 128;
 const MAX_PROOF_FILE_BYTES = 256;
 const PROOF_ID_PATTERN = /^[0-9a-f]{12}-[0-9a-f]{32}$/u;
+
+const OPEN_POSTS = [
+  /^\/api\/v1\/caller-proofs$/u,
+  /^\/api\/v1\/caller-proofs\/[^/]+$/u,
+];
+
+const OPEN_READS = [
+  /^\/api\/v1\/system\/(?:config|version)$/u,
+  /^\/api\/v1\/plugins(?:\/contributions)?$/u,
+  /^\/api\/v1\/projects\/[^/]+$/u,
+  /^\/api\/v1\/threads$/u,
+  /^\/api\/v1\/threads\/[^/]+$/u,
+  /^\/api\/v1\/threads\/[^/]+\/(?:timeline|output|events|events\/wait)$/u,
+  /^\/api\/v1\/environments\/[^/]+$/u,
+  /^\/api\/v1\/cloudroom\/account\/mcp\/callback$/u,
+  /^\/api\/v1\/file-previews\/[^/]+\/.+$/u,
+];
+
+// The requests a caller without a token may make. The Mac's server and a
+// remote machine's agent proxy both use this list.
+export function isOpenWithoutCallerProof(
+  method: string,
+  path: string,
+): boolean {
+  const verb = method.toUpperCase();
+  if (verb === "POST") {
+    return OPEN_POSTS.some((pattern) => pattern.test(path));
+  }
+  return (
+    (verb === "GET" || verb === "HEAD") &&
+    OPEN_READS.some((pattern) => pattern.test(path))
+  );
+}
 
 export interface StartedCallerProof {
   claim: string;
@@ -93,14 +133,24 @@ async function prepareProofDirectory(dataDir: string): Promise<string> {
   return directory;
 }
 
-async function readProofFile(path: string): Promise<string | null> {
-  const handle = await open(
-    path,
-    constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0),
-  ).catch(() => null);
-  if (handle === null) return null;
+// Sync on purpose: microseconds on a tiny local file. Async calls wait in
+// Node's shared thread pool behind compression, file reads, and DNS; on a busy
+// Mac that held a proof for 40+ s while plain reads stayed fast (#939).
+// O_NONBLOCK keeps a FIFO planted at the path from blocking the event loop.
+function readProofFile(path: string): string | null {
+  let fd: number;
   try {
-    const stats = await handle.stat();
+    fd = openSync(
+      path,
+      constants.O_RDONLY |
+        (constants.O_NOFOLLOW ?? 0) |
+        (constants.O_NONBLOCK ?? 0),
+    );
+  } catch {
+    return null;
+  }
+  try {
+    const stats = fstatSync(fd);
     if (
       !stats.isFile() ||
       stats.nlink !== 1 ||
@@ -109,9 +159,11 @@ async function readProofFile(path: string): Promise<string | null> {
     ) {
       return null;
     }
-    return await handle.readFile("utf8");
+    const buffer = Buffer.alloc(MAX_PROOF_FILE_BYTES + 1);
+    const bytes = readSync(fd, buffer, 0, buffer.length, 0);
+    return buffer.toString("utf8", 0, bytes);
   } finally {
-    await handle.close();
+    closeSync(fd);
   }
 }
 
@@ -160,11 +212,15 @@ export async function createCallerProofIssuer(
       if (age < 0 || age > PROOF_MAX_AGE_MS || finished.has(id)) return null;
       finished.set(id, now());
       const path = join(directory, id);
-      if ((await readProofFile(path)) !== id) {
+      if (readProofFile(path) !== id) {
         finished.delete(id);
         return null;
       }
-      await unlink(path).catch(() => {});
+      try {
+        unlinkSync(path);
+      } catch {
+        // The caller removes it too; a stale file is swept at startup.
+      }
       return issue();
     },
     verify(token) {
@@ -292,16 +348,24 @@ async function proveWithRetries(
   proofPath: string,
 ): Promise<string | null> {
   const deadline = Date.now() + CALLER_PROOF_WAIT_MS;
+  let warned = false;
   for (let delay = FIRST_PROOF_RETRY_DELAY_MS; ; delay *= 2) {
-    const timeout = Math.min(PROOF_MAX_AGE_MS, deadline - Date.now());
+    // No 30 s cap per attempt: time queued on a busy server before it issues
+    // the challenge counted against that cap, so every attempt was aborted
+    // even when the server would have accepted it (#939). A proof that really
+    // got too old is refused, and that retries.
     const attempt = await attemptProof({
       baseUrl,
       fetch: fetchImpl,
       proofPath,
-      signal: AbortSignal.timeout(Math.max(timeout, 1)),
+      signal: AbortSignal.timeout(Math.max(deadline - Date.now(), 1)),
     });
     if (attempt === null) return null;
-    if ("token" in attempt) return attempt.token;
+    if ("token" in attempt) {
+      if (warned) console.warn("Cloudroom caller proof succeeded on retry");
+      return attempt.token;
+    }
+    warned = true;
     const retrying = Date.now() + delay < deadline;
     console.warn(
       `Cloudroom caller proof ${attempt.retry}; ${retrying ? `retrying in ${delay / 1_000} s` : "giving up"}`,
@@ -440,7 +504,13 @@ export function createCallerProofFetch(fetchImpl: typeof fetch): typeof fetch {
       input,
       withCallerToken(input, init, token),
     );
-    if (!isCallerProofRequired(response) || !canReplay(input, init)) {
+    // `null` means this request's proof just failed; proving again would only
+    // wait another 50 s for the same answer (#939).
+    if (
+      token === null ||
+      !isCallerProofRequired(response) ||
+      !canReplay(input, init)
+    ) {
       return response;
     }
     const fresh = await provenToken(url.origin, fetchImpl, {

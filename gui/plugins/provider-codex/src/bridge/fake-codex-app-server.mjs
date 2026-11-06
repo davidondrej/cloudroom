@@ -164,6 +164,12 @@ const archiveStatePath = script?.archiveStatePath ?? null;
  * window between a rollout file's creation and its first record.
  */
 let renameEmptyRolloutFailuresLeft = script?.renameEmptyRolloutFailures ?? 0;
+/**
+ * `resumeActiveWriterFailures`: how many `thread/resume` calls fail with the
+ * real app-server's "already has an active writer" error, as when another
+ * Codex app still holds the thread.
+ */
+let resumeActiveWriterFailuresLeft = script?.resumeActiveWriterFailures ?? 0;
 const archivedThreadIds = new Set();
 /**
  * `processLogPath`: one line per child lifecycle step (`spawn:<pid>:<ppid>`,
@@ -173,6 +179,12 @@ const archivedThreadIds = new Set();
  */
 const processLogPath = script?.processLogPath ?? null;
 const stallThreadStart = script?.stallThreadStart ?? false;
+/**
+ * `steerFindsEndedTurn`: `turn/steer` fails like the real app-server once the
+ * turn ended. Codex refuses steers before its end-of-turn steps send
+ * `turn/completed`, which this sends 100 ms later (#986).
+ */
+const steerFindsEndedTurn = script?.steerFindsEndedTurn ?? false;
 const sigtermDelayMs = script?.sigtermDelayMs ?? 0;
 
 function logProcessStep(step) {
@@ -387,6 +399,15 @@ async function handleRequest(message) {
         );
         return;
       }
+      if (resumeActiveWriterFailuresLeft > 0) {
+        resumeActiveWriterFailuresLeft -= 1;
+        respondError(
+          id,
+          -32600,
+          `thread ${params.threadId} already has an active writer`,
+        );
+        return;
+      }
       // Mirror the real app-server (codex-cli 0.147.0, observed live for
       // #1727): thread/resume replays the rollout's last-turn token usage,
       // scoped to that PREVIOUS turn's id, before any new turn is started.
@@ -493,9 +514,24 @@ async function handleRequest(message) {
       respond(id, {});
       return;
     }
-    case "turn/steer":
-      respond(id, {});
+    case "turn/steer": {
+      if (!steerFindsEndedTurn) {
+        respond(id, {});
+        return;
+      }
+      const endedTurnId = openTurnIdsByThreadId.get(params.threadId);
+      openTurnIdsByThreadId.delete(params.threadId);
+      respondError(id, -32600, "no active turn to steer");
+      if (endedTurnId !== undefined) {
+        setTimeout(() => {
+          notify("turn/completed", {
+            threadId: params.threadId,
+            turn: { id: endedTurnId, status: "completed" },
+          });
+        }, 100);
+      }
       return;
+    }
     case "turn/interrupt": {
       const openTurnId = openTurnIdsByThreadId.get(params.threadId);
       if (openTurnId !== undefined) {

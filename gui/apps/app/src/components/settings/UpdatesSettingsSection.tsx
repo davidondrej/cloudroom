@@ -58,6 +58,7 @@ import {
   RELEASE_META,
   type ChangelogBlock,
 } from "@/components/settings/changelog-preview";
+import { useAppCommandHandler } from "@/components/commands/AppCommandProvider";
 import { appToast } from "@/components/ui/app-toast";
 import { BbLogo } from "@/components/ui/bb-logo";
 import { OverflowFade } from "@/components/ui/overflow-fade";
@@ -1263,7 +1264,7 @@ function AgentCliLinkRow({ onOpen }: { onOpen: () => void }) {
     <ResourceRow
       className={ROW_SPACING}
       actionsVisibility="always"
-      openLabel="Open agent updates in Providers"
+      openLabel="Open agent updates in Harness"
       onOpen={onOpen}
       leading={
         <Icon aria-hidden name="Bot" className="size-3.5 text-muted-foreground" />
@@ -1271,7 +1272,7 @@ function AgentCliLinkRow({ onOpen }: { onOpen: () => void }) {
       title="Agent CLIs"
       state={
         <span className="text-xs text-muted-foreground">
-          Versions, updates, and auto-update are in Agents → Providers
+          Versions, updates, and auto-update are in Agents → Harness
         </span>
       }
       trailingMeta={null}
@@ -1435,6 +1436,16 @@ export function UpdatesSettingsSection({
     handleCheckForUpdates();
     // oxlint-disable-next-line react/exhaustive-deps
   }, [hostsSettled]);
+  // "Check for Updates…" while this page is open: the load check already ran, so run another.
+  // Priority 1 wins over AppLayout's handler, which only opens this page.
+  useAppCommandHandler(
+    "settings.checkForUpdates",
+    () => {
+      if (checkedOnLoad.current) handleCheckForUpdates();
+      return true;
+    },
+    1,
+  );
 
   const appUpdateVisible =
     desktopInfo?.updateAvailable === true ||

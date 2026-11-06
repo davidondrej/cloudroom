@@ -365,3 +365,76 @@ export function createComputersSync(args: {
     },
   };
 }
+
+// The relay marks answers from a Mac that dropped off: 503 plus one of these headers set to "1".
+const OFFLINE_MARKS = ["x-bb-tunnel-offline", "x-cloudroom-offline"];
+
+export function hasOfflineMark(status: number, header: (name: string) => string | null | undefined): boolean {
+  return status === 503 && OFFLINE_MARKS.some((name) => header(name) === "1");
+}
+
+// While this window shows another Mac, ask it every 10 seconds if it's still there.
+export const OTHER_MAC_PING_MS = 10_000;
+const OTHER_MAC_PING_TIMEOUT_MS = 15_000;
+/** Marks the ping, so a 401 on it never counts as "your sign-in to that Mac expired". */
+export const OTHER_MAC_PING_PATH = "/health?from=desktop-ping";
+
+export function watchOtherMac(args: {
+  /** The other Mac's address while this window shows it, else null. */
+  viewing: () => string | null;
+  fetch: (url: string, init: { signal: AbortSignal }) => Promise<Response>;
+  onOffline: () => void;
+}): () => void {
+  let busy = false;
+  const timer = setInterval(() => {
+    const url = args.viewing();
+    if (url === null || busy) return;
+    busy = true;
+    void args
+      .fetch(new URL(OTHER_MAC_PING_PATH, url).href, { signal: AbortSignal.timeout(OTHER_MAC_PING_TIMEOUT_MS) })
+      .then((response) => {
+        if (args.viewing() === url && hasOfflineMark(response.status, (name) => response.headers.get(name))) args.onOffline();
+      })
+      .catch(() => {})
+      .finally(() => {
+        busy = false;
+      });
+  }, OTHER_MAC_PING_MS);
+  timer.unref();
+  return () => clearInterval(timer);
+}
+
+/**
+ * Keeps trying a Mac that dropped while this Mac shows the "Lost MacBook Air" dialog. True once its page is on screen.
+ * `deadline` is null once the user picked "Use this Mac now". `current` is false once something newer owns the window.
+ */
+export async function reconnectOtherMac<Opened>(args: {
+  current: () => boolean;
+  deadline: () => number | null;
+  /** One try to open the Mac on the relay. */
+  open: () => Promise<Opened | null>;
+  /** Loads its page in the window. False when the page didn't load. */
+  load: (opened: Opened) => Promise<boolean>;
+  /** Puts this Mac's own app back on screen. */
+  showThisMac: () => Promise<unknown>;
+  sleep?: (ms: number) => Promise<void>;
+}): Promise<boolean> {
+  const sleep = args.sleep ?? ((ms) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  const trying = () => args.current() && args.deadline() !== null;
+  let retryDelayMs = 1_000;
+  for (;;) {
+    if (!trying()) return false;
+    const opened = await args.open();
+    if (opened !== null && trying()) {
+      const loaded = await args.load(opened);
+      if (!args.current()) return false;
+      if (loaded && args.deadline() !== null) return true;
+      // The page failed, or the user stopped while it loaded: this Mac goes back on screen.
+      await args.showThisMac();
+    }
+    const until = args.deadline();
+    if (!args.current() || until === null || Date.now() + retryDelayMs > until) return false;
+    await sleep(retryDelayMs);
+    retryDelayMs = Math.min(retryDelayMs * 2, 8_000);
+  }
+}

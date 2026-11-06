@@ -342,6 +342,60 @@ describe("Codex credential health and usage", () => {
     },
   );
 
+  // Cloud runs Codex on this Mac's ChatGPT login, so its usage shows without a Codex CLI here.
+  it.skipIf(process.platform === "win32")(
+    "reads usage from the saved ChatGPT login when no Codex CLI is installed",
+    async () => {
+      // Root skips Homebrew and /usr/local, so a Codex on this machine can't answer.
+      const getuid = vi.spyOn(process, "getuid").mockReturnValue(0);
+      try {
+        const binDir = path.join(homeDir, "bin");
+        await fs.rm(path.join(binDir, "codex"));
+        vi.stubEnv("PATH", binDir);
+        const token = (expSeconds: number) =>
+          createAccessToken({
+            accountId: "account-123",
+            email: "codex@example.com",
+            expSeconds,
+          });
+        await writeChatGptAuth(token(Math.floor(Date.now() / 1000) - 60));
+        await expect(getCodexProviderUsage()).resolves.toEqual({
+          supported: true,
+          usage: { status: "not_installed" },
+        });
+        await writeChatGptAuth(token(Math.floor(Date.now() / 1000) + 3600));
+        vi.stubGlobal(
+          "fetch",
+          vi.fn<typeof fetch>().mockResolvedValue(
+            new Response(JSON.stringify({ plan_type: "plus" }), {
+              status: 200,
+            }),
+          ),
+        );
+        await expect(getCodexProviderUsage()).resolves.toMatchObject({
+          usage: { status: "ok", accountKey: "openai:chatgpt:account-123" },
+        });
+        // A rejected login can't be fixed with "Sign in" (`codex login`) without the CLI.
+        vi.stubGlobal(
+          "fetch",
+          vi
+            .fn<typeof fetch>()
+            .mockResolvedValue(new Response("", { status: 401 })),
+        );
+        await expect(getCodexProviderUsage()).resolves.toEqual({
+          supported: true,
+          usage: { status: "not_installed" },
+        });
+        // Local Codex threads still need the CLI.
+        await expect(getCodexProviderHealth()).resolves.toMatchObject({
+          health: { status: "not_installed" },
+        });
+      } finally {
+        getuid.mockRestore();
+      }
+    },
+  );
+
   it("fetches usage with the ChatGPT token and retries once through a Cloudflare challenge", async () => {
     const accessToken = createAccessToken({
       accountId: "account-123",

@@ -96,7 +96,7 @@ limit cannot run there. Set it in Settings → Machines → the machine → Perm
 limit; that page also shows the machine's projects, provider CLIs, update state,
 and rename/remove. There is no CLI or SDK command to set it, and a paired
 machine cannot set it for any machine, so a sandbox machine can stay at Full
-Access while your laptop stays lower. `room-cli machine list --json` and `room-cli machine
+Access while your own computer stays lower. `room-cli machine list --json` and `room-cli machine
 show` report the current limit.
 
 Standalone create does not create a thread or workspace. Omit inputs to use the

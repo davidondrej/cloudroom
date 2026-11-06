@@ -293,7 +293,7 @@ Archiving a thread saves its worktree's work to its branch and removes the
 folder; unarchiving the thread or sending it a message brings it back. There
 is no setting. See [Worktrees](worktrees.md#cleanup).
 
-Settings → Providers lists every registered agent provider in picker order.
+Settings → Agents → Harness lists every registered agent provider in picker order.
 Move a provider up or down to change the order and choose the default for new
 threads. Both are persisted preferences: `providerOrder` is the list of ids
 that lead the picker (ids not listed follow in plugin install order, and an id
@@ -313,7 +313,7 @@ Agents that can be installed but are not appear under "Not installed" with an
 Install button. Settings → Updates covers Cloudroom itself and other machines'
 CLIs; it links here for this Mac's agents.
 
-The "Collapse finished turns" switches in Settings → Providers choose, per
+The "Collapse finished turns" switches in Settings → Agents → Harness choose, per
 provider, how a finished turn appears in the thread timeline. Collapsed, the
 turn's work folds into one "Worked for" row and the final answer stays
 visible. Flat, every step of the finished turn stays visible, as it was while

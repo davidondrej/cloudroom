@@ -190,6 +190,19 @@ export class CommandRouter {
   private executeLiveDaemonCommand(
     command: HostDaemonCommand,
   ): Promise<HostDaemonCommandResultForCommand> {
+    if (
+      command.type === "thread.archive" ||
+      (command.type === "thread.stop" &&
+        (command.intent === "interrupt" || command.immediate === true))
+    ) {
+      // Stop and Archive queue behind the thread's running command. Tell its
+      // bridge now, so a resume still retrying gives up instead (#104).
+      for (const entry of this.options.runtimeManager.listThreadOwnerEntries(
+        command.threadId,
+      )) {
+        entry.runtime.notifyThreadStopRequested?.(command.threadId);
+      }
+    }
     const environmentLaneMode = hostDaemonEnvironmentLaneForCommand(command);
     const threadLaneKey = this.resolveThreadLaneKey(command);
     const task = this.runAfterThreadUnarchiveBarrier(command, () =>

@@ -135,7 +135,7 @@ Rules:
 - `completedTurnDisplay` is the provider's default for finished turns in the
   thread timeline. `"collapse"` folds a finished turn's work into one "Worked
   for" row beside the final answer; `"flat"` keeps every row visible, as while
-  the turn ran. The user overrides it per provider in Settings → Providers or
+  the turn ran. The user overrides it per provider in Settings → Agents → Harness or
   with `bb settings completed-turns`, and the server applies the result to the
   timeline, turn details, conversation outline, and `bb thread log`.
 - Third-party ACP agents (for example Amp) register the same way, with a

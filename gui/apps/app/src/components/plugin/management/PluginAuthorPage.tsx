@@ -1,5 +1,5 @@
 import { useMemo } from "react";
-import { Link, useSearchParams } from "react-router-dom";
+import { Link, useLocation, useSearchParams } from "react-router-dom";
 import { Icon } from "@cloudroom/shared-ui/icon";
 import {
   ResourceCollectionViewport,
@@ -12,7 +12,11 @@ import {
   usePluginCatalogSearch,
 } from "@/hooks/queries/plugin-catalog-queries";
 import { usePluginList } from "@/hooks/queries/plugin-settings-queries";
-import { getPluginsRoutePath } from "@/lib/route-paths";
+import {
+  SETTINGS_PLUGINS_ROUTE_PATH,
+  getPluginsRoutePath,
+  isSettingsPluginsRoutePath,
+} from "@/lib/route-paths";
 import type { AddPluginInitial } from "./AddPluginDialog";
 import {
   PLUGINS_LIST_BAND_CLASSES,
@@ -73,6 +77,7 @@ export function PluginAuthorPage({
   onOpenPlugin: (pluginId: string, trigger: HTMLButtonElement) => void;
 }) {
   const [searchParams, setSearchParams] = useSearchParams();
+  const inSettings = isSettingsPluginsRoutePath(useLocation().pathname);
   const query = searchParams.get("query") ?? "";
   const catalogQuery = usePluginCatalogSearch("", { enabled: true });
   const listQuery = usePluginList({ enabled: true });
@@ -119,14 +124,18 @@ export function PluginAuthorPage({
       <div className={cn("space-y-6 pb-8", PLUGINS_LIST_BAND_CLASSES)}>
         <div className="space-y-2">
           <Link
-            to={{
-              pathname: getPluginsRoutePath(),
-              search: browseSearch === "" ? "" : `?${browseSearch}`,
-            }}
+            to={
+              inSettings
+                ? SETTINGS_PLUGINS_ROUTE_PATH
+                : {
+                    pathname: getPluginsRoutePath(),
+                    search: browseSearch === "" ? "" : `?${browseSearch}`,
+                  }
+            }
             className="-ml-1 inline-flex items-center gap-1 rounded-sm px-1 text-xs text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
           >
             <Icon name="ChevronLeft" className="size-3" aria-hidden />
-            Browse plugins
+            {inSettings ? "Plugins" : "Browse plugins"}
           </Link>
           {author === null ? null : (
             <div className="flex items-center gap-3">

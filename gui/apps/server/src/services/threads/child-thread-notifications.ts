@@ -4,9 +4,12 @@ import type {
   ThreadEventTurnStatus,
 } from "@cloudroom/domain";
 import {
+  events,
   getThread,
   listActiveBackgroundTaskCountsByThreadIds,
 } from "@cloudroom/db";
+import { and, eq, inArray, sql } from "drizzle-orm";
+import { alias } from "drizzle-orm/sqlite-core";
 import { renderTemplate } from "@cloudroom/templates";
 import type { LoggedPendingInteractionWorkSessionDeps } from "../../types.js";
 import {
@@ -29,6 +32,7 @@ import { waitForHeldMessageDrain } from "./queued-message-dispatch.js";
 export type ChildThreadNotificationSource = ParentSystemThreadMentionSource;
 
 export interface ChildThreadTurnNotificationBatchItem {
+  activeBackgroundCommandCount?: number;
   activeWorkflowCount: number;
   childThread: ChildThreadNotificationSource;
   failureReason?: string | null;
@@ -99,10 +103,16 @@ const CHILD_THREAD_RUNNING_WORKFLOW_GUIDANCE =
   "A workflow it started is still running, so this output is not its final result. The thread will report again when the workflow finishes.";
 const CHILD_THREAD_BATCH_RUNNING_WORKFLOW_GUIDANCE =
   "Threads with a workflow still running have not finished; they will report again when their workflow does.";
+const CHILD_THREAD_RUNNING_COMMAND_GUIDANCE =
+  "Background commands it started are still running, so this may not be its final result. Check its thread if you need to know.";
+const CHILD_THREAD_BATCH_RUNNING_COMMAND_GUIDANCE =
+  "Threads with background commands still running may not have finished. Check their threads if you need to know.";
 const childThreadTurnNotificationBatches = new Map<
   string,
   ChildThreadTurnNotificationBatch
 >();
+/** The last turn each waiting child reported while background work ran (#862). */
+const waitingChildThreadNotifiedTurnIds = new Map<string, string>();
 
 function childThreadTurnStatusLabel(turnStatus: ThreadEventTurnStatus): string {
   switch (turnStatus) {
@@ -158,13 +168,26 @@ function formatChildThreadNeedsAttentionSummary(
   return trimmedSummary;
 }
 
-function formatChildThreadRunningWorkflowClause(count: number): string {
-  if (count < 1) {
-    return "";
-  }
-  return count === 1
-    ? ", with 1 workflow still running"
-    : `, with ${count} workflows still running`;
+function hasRunningBackgroundCommands(
+  item: ChildThreadTurnNotificationBatchItem,
+): boolean {
+  return (item.activeBackgroundCommandCount ?? 0) > 0;
+}
+
+function formatChildThreadRunningWorkClause(
+  item: ChildThreadTurnNotificationBatchItem,
+): string {
+  const running = (
+    [
+      [item.activeWorkflowCount, "workflow"],
+      [item.activeBackgroundCommandCount ?? 0, "background command"],
+    ] as const
+  ).flatMap(([count, noun]) =>
+    count > 0 ? [`${count} ${noun}${count === 1 ? "" : "s"}`] : [],
+  );
+  return running.length === 0
+    ? ""
+    : `, with ${running.join(" and ")} still running`;
 }
 
 function buildSingleChildThreadTurnStatusSegments(
@@ -173,18 +196,21 @@ function buildSingleChildThreadTurnStatusSegments(
   const { line } = args;
   switch (line.item.turnStatus) {
     case "completed": {
-      const workflowClause = formatChildThreadRunningWorkflowClause(
-        line.item.activeWorkflowCount,
-      );
-      const workflowGuidance =
-        workflowClause === ""
-          ? ""
-          : `\n\n${CHILD_THREAD_RUNNING_WORKFLOW_GUIDANCE}`;
+      const guidance = [
+        ...(line.item.activeWorkflowCount > 0
+          ? [CHILD_THREAD_RUNNING_WORKFLOW_GUIDANCE]
+          : []),
+        ...(hasRunningBackgroundCommands(line.item)
+          ? [CHILD_THREAD_RUNNING_COMMAND_GUIDANCE]
+          : []),
+      ]
+        .map((text) => `\n\n${text}`)
+        .join("");
       return [
         { kind: "mention", mention: line.mention },
         {
           kind: "text",
-          text: ` completed${workflowClause}:\n\n${formatChildThreadCompletionOutputExcerpt(line.item.terminalOutput)}${workflowGuidance}`,
+          text: ` completed${formatChildThreadRunningWorkClause(line.item)}:\n\n${formatChildThreadCompletionOutputExcerpt(line.item.terminalOutput)}${guidance}`,
         },
       ];
     }
@@ -215,14 +241,11 @@ function buildChildThreadBatchStatusLineSegments(
   args: FormatChildThreadTurnStatusLineArgs,
 ): ParentSystemInputSegment[] {
   const { line } = args;
-  const workflowClause = formatChildThreadRunningWorkflowClause(
-    line.item.activeWorkflowCount,
-  );
   return [
     { kind: "mention", mention: line.mention },
     {
       kind: "text",
-      text: ` ${childThreadTurnStatusLabel(line.item.turnStatus)}${workflowClause}.${line.item.turnStatus === "failed" ? formatChildThreadFailureReason(line.item.failureReason, CHILD_THREAD_BATCH_FAILURE_REASON_CHAR_LIMIT, " Error: ") : ""}`,
+      text: ` ${childThreadTurnStatusLabel(line.item.turnStatus)}${formatChildThreadRunningWorkClause(line.item)}.${line.item.turnStatus === "failed" ? formatChildThreadFailureReason(line.item.failureReason, CHILD_THREAD_BATCH_FAILURE_REASON_CHAR_LIMIT, " Error: ") : ""}`,
     },
   ];
 }
@@ -257,14 +280,88 @@ function getChildThreadCompletionOutput(
   return getLastThreadOutput(deps.db, args.childThread.id, args.turnId);
 }
 
-function getChildThreadActiveWorkflowCount(
+function getChildThreadRunningTaskCounts(
   deps: LoggedPendingInteractionWorkSessionDeps,
   args: QueueChildThreadTurnNotificationArgs,
-): number {
+) {
   const [activity] = listActiveBackgroundTaskCountsByThreadIds(deps.db, {
     threadIds: [args.childThread.id],
   });
-  return activity?.activeWorkflowCount ?? 0;
+  return {
+    activeBackgroundCommandCount: activity?.activeBackgroundCommandCount ?? 0,
+    activeWorkflowCount: activity?.activeWorkflowCount ?? 0,
+  };
+}
+
+/**
+ * Whether a background task finished or a message reached the child since the
+ * reported turn started. A result that lands while that turn is still writing,
+ * or a `tell` steered into it, is answered in a later turn (#862).
+ */
+function hasChildThreadNewsSinceTurnStarted(
+  deps: LoggedPendingInteractionWorkSessionDeps,
+  threadId: string,
+  turnId: string,
+): boolean {
+  const turnStart = alias(events, "reported_turn_start");
+  const turnStartSequence = deps.db
+    .select({ sequence: turnStart.sequence })
+    .from(turnStart)
+    .where(
+      and(
+        eq(turnStart.threadId, threadId),
+        eq(turnStart.turnId, turnId),
+        eq(turnStart.type, "turn/started"),
+      ),
+    )
+    .limit(1);
+  return (
+    deps.db
+      .select({ sequence: events.sequence })
+      .from(events)
+      .where(
+        and(
+          eq(events.threadId, threadId),
+          inArray(events.type, [
+            "item/backgroundTask/completed",
+            "turn/input/accepted",
+          ]),
+          sql`${events.sequence} > coalesce((${turnStartSequence}), 0)`,
+        ),
+      )
+      .limit(1)
+      .get() !== undefined
+  );
+}
+
+/**
+ * A child that woke itself with no background work finished and no message
+ * since its last report has nothing new, so its parent isn't woken again
+ * (#862). Results, failures, and the final turn always report.
+ */
+function isRepeatedChildThreadWaitingUpdate(
+  deps: LoggedPendingInteractionWorkSessionDeps,
+  args: QueueChildThreadTurnNotificationArgs,
+  runningCount: number,
+): boolean {
+  const childThreadId = args.childThread.id;
+  if (
+    args.turnStatus !== "completed" ||
+    runningCount === 0 ||
+    args.turnId === undefined
+  ) {
+    waitingChildThreadNotifiedTurnIds.delete(childThreadId);
+    return false;
+  }
+  const notifiedTurnId = waitingChildThreadNotifiedTurnIds.get(childThreadId);
+  if (
+    notifiedTurnId !== undefined &&
+    !hasChildThreadNewsSinceTurnStarted(deps, childThreadId, notifiedTurnId)
+  ) {
+    return true;
+  }
+  waitingChildThreadNotifiedTurnIds.set(childThreadId, args.turnId);
+  return false;
 }
 
 function buildChildThreadTurnStatusBatchSegments(
@@ -292,6 +389,12 @@ function buildChildThreadTurnStatusBatchSegments(
     segments.push({
       kind: "text",
       text: `\n\n${CHILD_THREAD_BATCH_RUNNING_WORKFLOW_GUIDANCE}`,
+    });
+  }
+  if (args.lines.some((line) => hasRunningBackgroundCommands(line.item))) {
+    segments.push({
+      kind: "text",
+      text: `\n\n${CHILD_THREAD_BATCH_RUNNING_COMMAND_GUIDANCE}`,
     });
   }
   return segments;
@@ -435,8 +538,18 @@ function queueChildThreadTurnNotificationBatchItem(
   deps: LoggedPendingInteractionWorkSessionDeps,
   args: QueueChildThreadTurnNotificationArgs,
 ): void {
+  const counts = getChildThreadRunningTaskCounts(deps, args);
+  if (
+    isRepeatedChildThreadWaitingUpdate(
+      deps,
+      args,
+      counts.activeWorkflowCount + counts.activeBackgroundCommandCount,
+    )
+  ) {
+    return;
+  }
   const item: ChildThreadTurnNotificationBatchItem = {
-    activeWorkflowCount: getChildThreadActiveWorkflowCount(deps, args),
+    ...counts,
     childThread: args.childThread,
     failureReason: getChildThreadFailureReason(deps, args),
     terminalOutput: getChildThreadCompletionOutput(deps, args),

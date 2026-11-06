@@ -69,6 +69,8 @@ type InferenceReasoningEffort =
   ExperimentalAiInferenceCompleteInput["reasoningEffort"];
 
 interface InferenceCompleteArgs<T extends TSchema> {
+  /** A folder the model may read with read-only tools, where the service supports it. */
+  folder?: string;
   model?: string;
   prompt: string;
   reasoningEffort?: InferenceReasoningEffort;
@@ -131,6 +133,7 @@ interface InferenceCompleteWithFallbackArgs<T extends TSchema> {
     timeoutMs: number,
   ) => Promise<Static<T> | null>;
   fallbackModel?: string;
+  folder?: string;
   /** Also try a different fallback model after non-transient failures. */
   fallbackOnAnyError?: boolean;
   label: string;
@@ -161,6 +164,7 @@ export async function inferenceCompleteWithFallback<T extends TSchema>(
       const value = args.complete
         ? await args.complete(model, args.prompt, args.timeoutMs)
         : await inferenceComplete(deps, {
+            ...(args.folder ? { folder: args.folder } : {}),
             model,
             prompt: args.prompt,
             ...(args.reasoningEffort
@@ -296,6 +300,7 @@ async function completeWithAiService<T extends TSchema>(
         JSON.parse(JSON.stringify(args.schema)),
       ),
       timeoutMs,
+      ...(args.folder ? { folder: args.folder } : {}),
     },
     { hostId, timeoutMs: timeoutMs + INFERENCE_POLICY.hostRpcGraceMs },
   );

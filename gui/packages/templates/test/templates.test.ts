@@ -78,7 +78,8 @@ describe("@cloudroom/templates", () => {
 
     expect(render(false)).toContain("room-cli mac pull");
     expect(render(false)).toContain("read the `computer-use` or `cloud-computer-use` skill");
-    expect(render(true)).not.toMatch(/room-cli mac (pull|push)|run it on their Mac/u);
+    expect(render(false)).not.toMatch(/\bMac\b(?! access)|laptop/u);
+    expect(render(true)).not.toMatch(/room-cli mac (pull|push)|run it on the user's computer/u);
     expect(render(true)).not.toContain("read the `computer-use` or");
     expect(render(true)).toContain("Save lasting skills in the repo.");
   });

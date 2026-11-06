@@ -1,6 +1,10 @@
 {
   "name": "bb-plugin-simple-notes",
   "version": "0.2.2",
+  "author": {
+    "name": "BB",
+    "url": "https://github.com/get-bb/bb"
+  },
   "description": "Create and edit Markdown documents across local and connected-host vaults.",
   "private": true,
   "license": "Apache-2.0",

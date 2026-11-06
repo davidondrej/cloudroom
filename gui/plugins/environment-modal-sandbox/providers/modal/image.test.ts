@@ -52,7 +52,7 @@ beforeEach(() => {
 it("builds and publishes the bundled tools image without daemon or credentials", async () => {
   const definition = await readStandardImage();
   expect(definition.reference).toMatch(
-    /^node:22\.19\.0-bookworm-slim@sha256:[a-f0-9]{64}$/,
+    /^node:22\.23\.4-bookworm-slim@sha256:[a-f0-9]{64}$/,
   );
   expect(definition.commands).toContain("USER node");
   expect(definition.commands.join("\n")).toContain("bubblewrap");

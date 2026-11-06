@@ -58,3 +58,25 @@ export function OsTile({ os, className }: { os: OsKind | "cloud" | null; classNa
     </span>
   );
 }
+
+// The new-thread environment picker's options, as a still label: where a machine shows up in that picker.
+const PLACES = {
+  local: { icon: "Laptop", label: "Local", iconClass: "text-muted-foreground" },
+  cloud: { icon: "Cloud", label: "Cloud", iconClass: "text-primary" },
+  vps: { icon: "Server", label: "VPS", iconClass: "text-muted-foreground" },
+} as const;
+
+export function PlaceChip({ place, className }: { place: keyof typeof PLACES; className?: string }) {
+  const { icon, label, iconClass } = PLACES[place];
+  return (
+    <span
+      className={cn(
+        "inline-flex shrink-0 items-center gap-1 rounded-md border border-border px-1.5 py-0.5 align-middle text-xs leading-none text-foreground",
+        className,
+      )}
+    >
+      <Icon name={icon} className={cn("size-3.5", iconClass)} aria-hidden />
+      {label}
+    </span>
+  );
+}

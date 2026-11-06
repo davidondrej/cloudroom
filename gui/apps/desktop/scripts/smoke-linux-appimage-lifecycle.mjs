@@ -14,7 +14,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
-import { createPackagedAppLaunchArguments } from "./packaged-app-launch.mjs";
+import { assertPatchedBrotli, createPackagedAppLaunchArguments } from "./packaged-app-launch.mjs";
 
 const execFileAsync = promisify(execFile);
 const scriptDirectory = dirname(fileURLToPath(import.meta.url));
@@ -488,12 +488,31 @@ async function killIsolatedProcesses({ dataDir, userDataDir }) {
   }
 }
 
+// The AppImage's AppRun adds --no-sandbox, which Node mode rejects, so check the extracted binary.
+async function assertAppImageBrotli(appImage) {
+  const dir = await mkdtemp(join(tmpdir(), "bb-appimage-brotli-"));
+  try {
+    await promisify(execFile)(appImage, ["--appimage-extract"], {
+      cwd: dir,
+      maxBuffer: 256 * 1024 * 1024,
+      timeout: 120_000,
+    });
+    const root = join(dir, "squashfs-root");
+    const binary = (await readdir(root)).find((name) => name.endsWith(".bin"));
+    if (!binary) throw new Error("The AppImage has no <name>.bin app binary.");
+    await assertPatchedBrotli(join(root, binary));
+  } finally {
+    await rm(dir, { force: true, recursive: true });
+  }
+}
+
 async function smokeLinuxAppImageLifecycle() {
   if (process.platform !== "linux") {
     throw new Error("The AppImage lifecycle smoke only runs on Linux.");
   }
 
   const appImage = await resolveAppImage();
+  await assertAppImageBrotli(appImage);
   const smokeRoot = await mkdtemp(
     join(tmpdir(), "bb-appimage-lifecycle-smoke-"),
   );

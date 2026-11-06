@@ -7,8 +7,10 @@ import {
   sweepProviderMachine,
 } from "../machines/provider-orchestration.js";
 import {
+  isThreadQueueAutoSendPaused,
   listLiveThreadsInEnvironment,
   listNonDeletedChildThreads,
+  listQueuedThreadMessages,
   listUnarchivedHiddenSourceThreads,
 } from "@cloudroom/db";
 import type { EnvironmentRow } from "@cloudroom/db";
@@ -35,6 +37,7 @@ import { getThreadProvisionContext } from "./thread-startup-store.js";
 import { isPreStartThreadStatus } from "./thread-status.js";
 import { cloudroom, isCloudThread } from "../cloudroom/commands.js";
 import { teleports } from "../cloudroom/teleport.js";
+import { binding, commands, queuedPrompts } from "../cloudroom/store.js";
 
 type ThreadRow = ReturnType<typeof listNonDeletedChildThreads>[number];
 
@@ -58,6 +61,13 @@ interface ArchiveEnvironmentThreadsArgs {
 
 interface ArchiveThreadAndChildrenArgs {
   parentThread: Thread;
+  includeLive?: boolean;
+  liveThreadIds?: readonly string[];
+}
+
+interface ArchiveThreadAndChildrenResult {
+  archivedThreadIds: string[];
+  keptLiveThreadIds: string[];
 }
 
 export function resolveArchiveThreadEnvironment(
@@ -221,13 +231,15 @@ export function listThreadWithDescendants<T extends Pick<Thread, "id">>(
 export function archiveThreadAndChildren(
   deps: AppDeps,
   args: ArchiveThreadAndChildrenArgs,
-): string[] {
-  const threads = listThreadWithDescendants(deps, args.parentThread).filter(
-    (thread) => thread.archivedAt === null,
-  );
+): ArchiveThreadAndChildrenResult {
+  const kept = args.includeLive
+    ? new Set<string>()
+    : listKeptLiveThreads(deps, args.parentThread, new Set(args.liveThreadIds));
   const archivedThreadIds: string[] = [];
 
-  for (const thread of threads) {
+  for (const thread of listThreadWithDescendants(deps, args.parentThread)) {
+    // A kept thread keeps its side chats too.
+    if (thread.archivedAt !== null || kept.has(thread.id) || kept.has(thread.sourceThreadId ?? "")) continue;
     const environment = resolveArchiveThreadEnvironment(deps, { thread });
     const result = archiveThreadWithLifecycleEffects(deps, {
       environment,
@@ -239,5 +251,51 @@ export function archiveThreadAndChildren(
     archivedThreadIds.push(result.id);
   }
 
-  return archivedThreadIds;
+  return { archivedThreadIds, keptLiveThreadIds: [...kept] };
+}
+
+function listKeptLiveThreads(
+  deps: Pick<AppDeps, "db">,
+  root: Pick<Thread, "id">,
+  liveThreadIds: ReadonlySet<string>,
+): Set<string> {
+  const kept = new Set<string>();
+  const visited = new Set<string>();
+  const walk = (thread: Pick<Thread, "id" | "status" | "archivedAt">, underLive: boolean): boolean => {
+    if (visited.has(thread.id)) return false;
+    visited.add(thread.id);
+    const live =
+      thread.archivedAt === null &&
+      (liveThreadIds.has(thread.id) || isLiveThread(deps, thread));
+    let liveBelow = false;
+    for (const child of listNonDeletedChildThreads(deps.db, { parentThreadId: thread.id })) {
+      if (walk(child, underLive || live)) liveBelow = true;
+    }
+    if (
+      thread.id !== root.id &&
+      thread.archivedAt === null &&
+      (underLive || live || liveBelow)
+    )
+      kept.add(thread.id);
+    return live || liveBelow;
+  };
+  for (const child of listNonDeletedChildThreads(deps.db, { parentThreadId: root.id })) walk(child, false);
+  return kept;
+}
+
+function isLiveThread(
+  deps: Pick<AppDeps, "db">,
+  thread: Pick<Thread, "id" | "status">,
+): boolean {
+  return (
+    thread.status === "pending" ||
+    thread.status === "starting" ||
+    thread.status === "active" ||
+    thread.status === "stopping" ||
+    (!isThreadQueueAutoSendPaused(deps.db, thread.id) &&
+      listQueuedThreadMessages(deps.db, thread.id).some((message) => message.failureReason === null)) ||
+    (!binding(deps.db, thread.id)?.queuePaused &&
+      queuedPrompts(deps.db, thread.id).length > 0) ||
+    commands(deps.db, thread.id).some((command) => command.state === "sending")
+  );
 }

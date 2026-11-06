@@ -106,7 +106,7 @@ it("pairs through a loopback callback, keeps secrets out of status, persists/rec
     expect(callbackResponse.headers.get("content-security-policy")).toContain("default-src 'none'");
     expect(callbackResponse.headers.get("x-content-type-options")).toBe("nosniff");
     const status = await request("").then(r => r.json());
-    expect(status).toMatchObject({ ready: true, account: owners[0], projectId: project.id, signingIn: false });
+    expect(status).toMatchObject({ ready: true, account: owners[0], signedOut: false, projectId: project.id, signingIn: false });
     expect(JSON.stringify(status)).not.toContain(token);
     expect(JSON.stringify(status)).not.toContain(gateToken);
     expect((await stat(savedPath)).mode & 0o777).toBe(0o600);
@@ -125,7 +125,7 @@ it("pairs through a loopback callback, keeps secrets out of status, persists/rec
     const saved = await readFile(savedPath, "utf8");
     expect(saved).not.toContain(token); expect(saved).not.toContain(gateToken);
     expect(saved).toContain(owners[0]!.id);
-    expect(await account.status()).toMatchObject({ ready: false, account: null });
+    expect(await request("").then(r => r.json())).toMatchObject({ ready: false, account: null, signedOut: true });
     expect(harness.db.select().from(cloudroomThreads).all()).toHaveLength(1);
     await expect(cloudroom(harness.deps).control(thread.id, "stop")).rejects.toThrow(/sign in/i);
     expect(coreCalls.some(path => path.includes("/stop") || path.includes("/close"))).toBe(false);

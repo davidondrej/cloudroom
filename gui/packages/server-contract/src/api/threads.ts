@@ -673,6 +673,10 @@ export const updateThreadRequestSchema = z
     "At least one field must be provided",
   );
 export type UpdateThreadRequest = z.infer<typeof updateThreadRequestSchema>;
+/** With `resend`: the new agent's turn started, is still starting, or waits in the queue. A refused start is an error. */
+export type UpdateThreadResponse = ThreadResponse & {
+  resend?: "started" | "starting" | "queued";
+};
 
 export const reorderPinnedThreadRequestSchema = z.object({
   previousThreadId: z.string().min(1).nullable(),
@@ -806,9 +810,15 @@ export type ThreadPaneActionResponse = z.infer<
   typeof threadPaneActionResponseSchema
 >;
 
+export const threadArchiveAllQuerySchema = z.object({
+  includeLive: z.enum(["true", "false"]).optional(),
+});
+export type ThreadArchiveAllQuery = z.infer<typeof threadArchiveAllQuerySchema>;
+
 export const threadArchiveAllResponseSchema = z.object({
   ok: z.literal(true),
   archivedThreadIds: z.array(z.string().min(1)),
+  keptLiveThreadIds: z.array(z.string().min(1)).optional(),
 });
 export type ThreadArchiveAllResponse = z.infer<
   typeof threadArchiveAllResponseSchema

@@ -9,8 +9,9 @@ import type {
 
 type AgentExecution = Extract<AutomationExecution, { mode: "agent" }>;
 export type FallbackSdk = {
-  system?: Pick<BbPluginApi["sdk"]["system"], "usageLimits">;
-  cloudroom?: Pick<BbPluginApi["sdk"]["cloudroom"], "automations">;
+  system?: Pick<BbPluginApi["sdk"]["system"], "usageLimits" | "providerStates">;
+  cloudroom?: Pick<BbPluginApi["sdk"]["cloudroom"], "automations"> &
+    Partial<Pick<BbPluginApi["sdk"]["cloudroom"], "status">>;
   threads: {
     get?(args: { threadId: string }): Promise<unknown>;
     stop?(args: { threadId: string }): Promise<unknown>;
@@ -30,6 +31,7 @@ const OTHER_PROVIDER: Record<string, string> = {
 const CODEX_EFFORTS: ReasoningLevel[] = ["low", "medium", "high", "xhigh"];
 const USAGE_CACHE_MS = 60_000;
 const LIMIT_SUSPECT_MS = 10 * 60_000;
+const CAN_RUN_TIMEOUT_MS = 5_000;
 const usageCache = new Map<
   string,
   { at: number; windows: { usedPercent: number; model?: unknown }[] | null }
@@ -91,6 +93,33 @@ async function atLimit(
   return full;
 }
 
+// Usage shows without a CLI (a Mac with only a Cloud login), so only a provider ready on the loop's host takes over.
+// Only that provider is checked, for at most 5 seconds; no answer in time means it doesn't take over.
+async function canRun(
+  sdk: FallbackSdk,
+  providerId: string,
+  environment: AgentExecution["environment"],
+): Promise<boolean> {
+  const where =
+    environment.type === "reuse"
+      ? { environmentId: environment.environmentId }
+      : environment.type === "host" && environment.hostId
+        ? { hostId: environment.hostId }
+        : {};
+  const states = await safely(() =>
+    sdk.system?.providerStates({
+      ...where,
+      providerId,
+      signal: AbortSignal.timeout(CAN_RUN_TIMEOUT_MS),
+    }),
+  );
+  return (
+    states?.providers.some(
+      (state) => state.providerId === providerId && state.status === "ready",
+    ) ?? false
+  );
+}
+
 async function fallbackOn(sdk: FallbackSdk): Promise<boolean> {
   const settings = await safely(() =>
     sdk.cloudroom?.automations({ action: "settings" }),
@@ -123,7 +152,8 @@ export async function loopAgent(
   const other = sameLevelAgent(execution);
   if (
     (await atLimit(sdk, other.providerId, other.model, false)) !== false ||
-    !(await fallbackOn(sdk))
+    !(await fallbackOn(sdk)) ||
+    !(await canRun(sdk, other.providerId, execution.environment))
   )
     return own;
   const lastThreadId = automation.lastRunThreadId;

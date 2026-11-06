@@ -8,6 +8,7 @@ import {
   hasLiveThreadStopInFlight,
   requestThreadStorageDeletion,
   requestThreadStopForCurrentState,
+  stopThreadForCurrentState,
 } from "../../src/services/threads/thread-lifecycle.js";
 import {
   internalAuthHeaders,
@@ -172,6 +173,49 @@ describe("thread stop dispatch", () => {
       expect(
         listQueuedThreadCommands(harness, "thread.stop", thread.id),
       ).toHaveLength(0);
+    });
+  });
+
+  it("keeps a thread stopping and says so when one more stop can't confirm it (#917)", async () => {
+    await withTestHarness(async (harness) => {
+      const { environment, thread } = seedActiveThreadStopFixture({
+        harness,
+        value: 9,
+      });
+      const stop = () =>
+        stopThreadForCurrentState(
+          harness.deps,
+          getThread(harness.db, thread.id)!,
+          environment,
+        ).catch((error: unknown) => error);
+      const failNextStop = async (immediate?: true) => {
+        const command = await waitForQueuedCommand(
+          harness,
+          ({ command }) =>
+            command.type === "thread.stop" &&
+            command.threadId === thread.id &&
+            command.immediate === immediate,
+        );
+        await reportQueuedCommandError(harness, command, {
+          errorCode: "command_timeout",
+          errorMessage: "Timed out waiting for command result",
+        });
+      };
+
+      const first = stop();
+      await failNextStop();
+      await failNextStop(true);
+      expect(await first).toMatchObject({
+        body: { code: "thread_stop_unconfirmed" },
+      });
+
+      // No turn has started, yet a later Stop still asks the host.
+      const second = stop();
+      await failNextStop(true);
+      expect(await second).toMatchObject({
+        body: { code: "thread_stop_unconfirmed" },
+      });
+      expect(getThread(harness.db, thread.id)?.status).toBe("stopping");
     });
   });
 

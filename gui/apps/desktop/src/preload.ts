@@ -89,6 +89,8 @@ import {
   BB_DESKTOP_TOP_RIGHT_DRAG_CHANNEL,
   BB_DESKTOP_OPEN_NEW_TAB_CHANNEL,
   BB_DESKTOP_OPEN_COMPUTER_CHANNEL,
+  BB_DESKTOP_RECONNECT_COMPUTER_CHANNEL,
+  BB_DESKTOP_REFRESH_COMPUTERS_CHANNEL,
   BB_DESKTOP_OPEN_SERVER_DAEMON_LOGS_CHANNEL,
   BB_DESKTOP_WINDOW_STATE_CHANGED_CHANNEL,
 } from "./desktop-window-command-ipc.js";
@@ -448,6 +450,12 @@ const bbDesktopApi: BbDesktopApi = {
   },
   async openComputer(handle: string | null): Promise<void> {
     await ipcRenderer.invoke(BB_DESKTOP_OPEN_COMPUTER_CHANNEL, handle);
+  },
+  async reconnectComputer(keepTrying: boolean): Promise<void> {
+    await ipcRenderer.invoke(BB_DESKTOP_RECONNECT_COMPUTER_CHANNEL, keepTrying);
+  },
+  refreshComputers(): void {
+    ipcRenderer.send(BB_DESKTOP_REFRESH_COMPUTERS_CHANNEL);
   },
   async openServerDaemonLogs(): Promise<void> {
     await ipcRenderer.invoke(BB_DESKTOP_OPEN_SERVER_DAEMON_LOGS_CHANNEL);

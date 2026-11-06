@@ -943,11 +943,47 @@ describe("createHostDaemonApp", () => {
         {
           providerId: "codex",
           threadIds: ["thr_provider_exit_log"],
+          activeThreadIds: [],
           code: 1,
           signal: null,
           stderr: "OPENAI_API_KEY=sk-test-secret\nUsage limit reached.",
         },
-        "Unexpected provider process exited with stderr",
+        "Provider process exited unexpectedly",
+      );
+
+      // A killed process often leaves no stderr; it is still logged (#912).
+      options.onProcessExit({
+        providerId: "pi",
+        pid: 4242,
+        threads: [
+          {
+            threadId: "thr_provider_exit_log",
+            activeTurnId: "turn-1",
+            pendingTurnStart: false,
+            providerThreadId: "provider-1",
+          },
+          {
+            threadId: "thr_provider_exit_starting",
+            activeTurnId: null,
+            pendingTurnStart: true,
+            providerThreadId: null,
+          },
+        ],
+        code: null,
+        expected: false,
+        signal: "SIGKILL",
+        stderr: null,
+      });
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.objectContaining({
+          bridgePid: 4242,
+          activeThreadIds: [
+            "thr_provider_exit_log",
+            "thr_provider_exit_starting",
+          ],
+          signal: "SIGKILL",
+        }),
+        "Provider process exited unexpectedly",
       );
     } finally {
       await app.daemon.shutdown("test", 0);

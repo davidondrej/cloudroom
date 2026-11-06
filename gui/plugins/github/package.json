@@ -1,6 +1,10 @@
 {
   "name": "bb-plugin-github",
   "version": "0.2.1",
+  "author": {
+    "name": "BB",
+    "url": "https://github.com/get-bb/bb"
+  },
   "description": "Browse GitHub issues and pull requests in Cloudroom, then send them to agents.",
   "private": true,
   "license": "Apache-2.0",

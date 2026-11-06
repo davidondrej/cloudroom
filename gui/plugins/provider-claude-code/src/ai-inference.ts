@@ -61,6 +61,10 @@ function parseResult(
   return { ok: true, model, value: value as InferenceValue };
 }
 
+// Files Claude may never open while exploring a project folder, so no key can reach a summary.
+const SECRET_FILES = ["**/.env*", "**/*.pem", "**/*.key", "**/*.p12", "**/*.pfx", "**/id_rsa*", "**/id_ed25519*",
+  "**/.npmrc", "**/.netrc", "**/.pypirc", "**/.git/**", "**/*credentials*"];
+
 /** One-shot structured inference through the signed-in `claude` CLI. */
 export function completeClaudeInference(
   input: ExperimentalAiInferenceCompleteInput,
@@ -79,13 +83,19 @@ export function completeClaudeInference(
           ? []
           : ["--effort", input.reasoningEffort]),
         "--no-session-persistence",
+        // With a folder, it explores it read-only: --restricted keeps file tools inside it and ignores settings files
+        // that could widen access, and the deny list keeps secret files shut. Otherwise it answers from the prompt alone.
         "--tools",
-        "",
+        input.folder ? "Read,Grep,Glob" : "",
+        ...(input.folder ? ["--restricted"] : []),
         "--no-chrome",
         "--setting-sources",
         "user",
         "--settings",
-        '{"disableAllHooks":true}',
+        JSON.stringify({
+          disableAllHooks: true,
+          ...(input.folder ? { permissions: { deny: SECRET_FILES.map((path) => `Read(${path})`) } } : {}),
+        }),
         "--strict-mcp-config",
         "--mcp-config",
         '{"mcpServers":{}}',
@@ -95,7 +105,7 @@ export function completeClaudeInference(
         "--json-schema",
         JSON.stringify(input.outputSchema),
       ],
-      { cwd: os.homedir(), env, stdio: "pipe" },
+      { cwd: input.folder ?? os.homedir(), env, stdio: "pipe" },
     );
     let stdout = "";
     let stderr = "";

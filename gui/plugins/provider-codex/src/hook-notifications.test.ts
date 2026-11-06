@@ -66,17 +66,39 @@ describe("Codex lifecycle notification diagnostics", () => {
   );
 
   it.each(["failed", "blocked", "stopped"])(
-    "preserves %s hook diagnostics",
+    "shows a %s hook as one warning with its raw notification",
     (status) => {
       const translate = createHarness();
-      expect(translate("hook/completed", { run: { status } })).toEqual([
-        expect.objectContaining({
-          type: "provider/unhandled",
-          rawType: "hook/completed",
-        }),
-      ]);
+      const run = {
+        status,
+        eventName: "preToolUse",
+        sourcePath: "/tmp/hooks.json",
+        statusMessage: null,
+        entries: [{ kind: "error", text: "lint-guard: not found\nstack" }],
+      };
+      const timing = { id: "r1", startedAt: 1, completedAt: 2, durationMs: 1 };
+      const [event] = translate("hook/completed", {
+        run: { ...run, ...timing },
+      });
+      expect(event).toMatchObject({
+        type: "provider/warning",
+        summary: `preToolUse hook in hooks.json ${status}: lint-guard: not found`,
+      });
+      expect(
+        JSON.parse(event?.type === "provider/warning" ? event.details! : ""),
+      ).toEqual({
+        method: "hook/completed",
+        params: { run },
+      });
     },
   );
+
+  it("suppresses routine account/updated notifications", () => {
+    const translate = createHarness();
+    expect(
+      translate("account/updated", { authMode: "chatgpt", planType: "pro" }),
+    ).toEqual([]);
+  });
 
   it("preserves unknown notifications as diagnostics", () => {
     const translate = createHarness();

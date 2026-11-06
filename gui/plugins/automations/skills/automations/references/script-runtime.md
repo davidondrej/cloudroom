@@ -47,10 +47,11 @@ If it cannot find `room-cli`, the script still starts with a warning. A later
   consecutive failure pauses the automation.
 - A successful or skipped run clears the failure count. A resume command also
   clears the count.
-- An unavailable target thread disables every enabled automation that targets
-  the thread immediately. This path does not retry and does not use the failure
-  count. The plugin treats a thread as unavailable when it is missing, deleted,
-  archived, or cannot accept a run.
+- A missing or deleted target thread disables every automation that targets
+  it. This path does not retry and does not use the failure count.
+- An archived target thread pauses its automations with the reason. Unarchiving
+  the thread resumes them. An errored, pending, starting, or stopping thread
+  still gets the run; the server queues it.
 - A timeout or output limit stops the process group. On Windows, it stops the
   direct child.
 - Startup settles runs interrupted by a server restart or plugin reload.

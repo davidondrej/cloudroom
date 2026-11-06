@@ -112,16 +112,20 @@ describe("worktree resource operations", () => {
     });
   });
 
-  it("passes a named base and reuses the branch during rebuild", async () => {
+  it("passes a named base and source checkout, and reuses the branch during rebuild", async () => {
     const fixture = await setup();
     await fixture.provider.create({
       ...fixture.context,
-      inputs: { branch: { kind: "named", name: "release" } },
+      inputs: {
+        branch: { kind: "named", name: "release" },
+        sourcePath: "/checkouts/bb/app",
+      },
       rebuild: true,
       pathKey: "replacement",
       attempt: 2,
     });
     expect(fixture.harness.experimental_hostRpcCalls[0]?.input).toMatchObject({
+      sourcePath: "/checkouts/bb/app",
       baseBranch: { kind: "named", name: "release" },
       branchMode: "reuse-existing",
       pathKey: "replacement",

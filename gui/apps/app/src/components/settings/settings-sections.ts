@@ -13,7 +13,7 @@ export const SETTINGS_NAV_SECTIONS = [
   { icon: "Star", id: "defaults", label: "Defaults" },
   { icon: "Cloud", id: "cloud-environment", label: "Cloud environment" },
   { icon: "Clock", id: "auto-delete", label: "Auto-delete" },
-  { icon: "Bot", id: "providers", label: "Providers" },
+  { icon: "Bot", id: "providers", label: "Harness" },
   { icon: "Download", id: "import", label: "Import chats" },
   { icon: "FolderOpen", id: "export", label: "Export chats" },
   { icon: "Palette", id: "appearance", label: "Appearance" },
@@ -107,6 +107,7 @@ export const SETTINGS_NAV_GROUPS: readonly SettingsNavGroup[] = [
     label: "Agents",
     members: [
       section("providers"),
+      plugin("accounts", "Accounts"),
       section("defaults"),
       section("command-guard"),
       plugin("provider-claude-code", "Claude Code"),

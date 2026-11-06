@@ -269,3 +269,24 @@ it("Teleport to Local never overwrites a dirty file it reaches by another spelli
     rmSync(temp, { recursive: true, force: true });
   }
 });
+
+it.skipIf(process.platform === "win32")("Teleport to Local ignores a cloud .cloudroom link and never writes outside the project", async () => {
+  const temp = mkdtempSync(join(tmpdir(), "cloudroom-teleport-link-"));
+  const [root, cloud, outside] = ["mac", "cloud", "outside"].map((name) => join(temp, name));
+  try {
+    [root, cloud, outside].forEach((folder) => mkdirSync(folder));
+    writeFileSync(join(root, "a.txt"), "mac");
+    writeFileSync(join(cloud, "a.txt"), "cloud");
+    symlinkSync(outside, join(cloud, ".cloudroom"));
+    // An extra "./" must not hide the link.
+    const archive = join(temp, "changes.tgz");
+    execFileSync(tarCommand(), ["-czf", archive, "-C", cloud, "././.cloudroom", "a.txt"]);
+
+    expect(await applyChanges(root, readFileSync(archive), "run", null)).toBe(1);
+    expect(readdirSync(outside)).toEqual([]);
+    expect(readFileSync(join(root, "a.txt"), "utf8")).toBe("mac");
+    expect(readFileSync(join(root, ".cloudroom", "teleport", "run", "a.txt"), "utf8")).toBe("cloud");
+  } finally {
+    rmSync(temp, { recursive: true, force: true });
+  }
+});

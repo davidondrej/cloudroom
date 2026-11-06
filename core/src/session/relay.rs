@@ -53,13 +53,15 @@ fn note_child(m: &Manager, parent: &str, child: &str, state: &str) {
     let _ = m.note(parent, "child_state", json!({"child":child,"state":state}));
 }
 
-/// `tell`, `stop` or `archive` from the calling session to a child in a sandbox of its own.
+/// `tell`, `stop` or `archive` from the calling session to a child in a sandbox of its own. `to_parent`: a
+/// `tell --parent`, which the website sends to the parent it saved now, not `id`, this session's first one (#968).
 pub(super) async fn command(
     m: &Manager,
     caller: &str,
     id: &str,
     action: &str,
     text: Option<&str>,
+    to_parent: bool,
 ) -> Result<Json<Value>, Failure> {
     // A caller sharing another thread's sandbox has no link on the website, so the app passes on commands for its own
     // children, as before, and drops any other. Its `tell` to another thread goes through the website as this
@@ -89,7 +91,7 @@ pub(super) async fn command(
         );
     };
     let key = random_key().map_err(|e| fail(StatusCode::SERVICE_UNAVAILABLE, &e.to_string()))?;
-    let body = json!({"action":action,"thread":id,"text":text,"request_id":format!("relay_{key}"),"label":other});
+    let body = json!({"action":action,"thread":id,"text":text,"request_id":format!("relay_{key}"),"label":other,"parent":to_parent});
     let mut answer = match api.post_waking("relay", &body).await {
         // The website may not know a child that just started yet (#317).
         Err(ApiError::Status(404, _)) if starting(caller).iter().any(|c| c == id) => {
@@ -199,9 +201,14 @@ async fn receive(
         // Like `thread archive --self`: the app archives it whenever it next reads the thread.
         "archive" => {
             retire(&m, &id)?;
-            archive_under(&m, &id)?;
+            let kept = archive_under(&m, &id)?;
             if !archived {
-                let _ = record(&m, &id, "archive", json!({"archived":true}))?;
+                let _ = record(
+                    &m,
+                    &id,
+                    "archive",
+                    json!({"archived":true,"kept_live":kept}),
+                )?;
             }
             return Ok(Json(json!({"id":id,"state":"archived"})));
         }

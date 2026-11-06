@@ -61,7 +61,10 @@ import { handleThreadOwnershipChange } from "../../services/threads/thread-owner
 import { applyThreadExecutionOverride } from "../../services/threads/thread-execution-override.js";
 import { cloudroom, isCloudThread } from "../../services/cloudroom/commands.js";
 import { binding } from "../../services/cloudroom/store.js";
-import { switchThreadHarness } from "../../services/threads/thread-harness-switch.js";
+import {
+  switchThreadHarness,
+  type HarnessSwitchResend,
+} from "../../services/threads/thread-harness-switch.js";
 
 function parseThreadIncludes(query: ThreadGetQuery): Set<ThreadIncludeOption> {
   const includes = new Set<ThreadIncludeOption>();
@@ -400,13 +403,14 @@ export function registerThreadBaseRoutes(app: Hono, deps: AppDeps): void {
 
     // Another harness, or any model change in Cloud (Core fixes a session's model), moves the thread in place (ADR 0211).
     const switchTo = payload.providerId ?? thread.providerId;
+    let resend: HarnessSwitchResend | null = null;
     if (
       typeof payload.model === "string" &&
       (switchTo !== thread.providerId ||
         (isCloudThread(thread) &&
           payload.model !== binding(deps.db, thread.id)?.model))
     ) {
-      await switchThreadHarness(
+      resend = await switchThreadHarness(
         deps,
         thread.id,
         {
@@ -505,7 +509,17 @@ export function registerThreadBaseRoutes(app: Hono, deps: AppDeps): void {
       });
     }
 
-    return context.json(toThreadResponseFromThread(deps, { thread: updated }));
+    if (resend?.delivery === "failed") {
+      throw new ApiError(
+        502,
+        "resend_failed",
+        `Switched to ${updated.providerId}, but its first turn didn't start: ${resend.error}. The conversation is kept; send a message to continue.`,
+      );
+    }
+    return context.json({
+      ...toThreadResponseFromThread(deps, { thread: updated }),
+      ...(resend ? { resend: resend.delivery } : {}),
+    });
   });
 
   del(routes.delete, async (context, payload) => {

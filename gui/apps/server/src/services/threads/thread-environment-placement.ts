@@ -98,8 +98,25 @@ import type { ThreadProvisionEnvironmentIntent } from "./thread-startup-store.js
 
 type PlacementDeps = LoggedPendingInteractionWorkSessionDeps;
 
-export function worktreeProviderInputs(branch: GitBranchSelection): JsonValue {
-  return { branch };
+export function worktreeProviderInputs(
+  branch: GitBranchSelection,
+  sourcePath?: string,
+): JsonValue {
+  return sourcePath === undefined ? { branch } : { branch, sourcePath };
+}
+
+/** The Git checkout a worktree starts from when it is not the project's (#971). */
+export function worktreeSourcePath(
+  environmentProviderId: string | null,
+  inputs: unknown,
+): string | undefined {
+  if (environmentProviderId !== DEFAULT_ENVIRONMENT_PROVIDER_ID.gitWorktree)
+    return undefined;
+  const sourcePath =
+    typeof inputs === "object" && inputs !== null && "sourcePath" in inputs
+      ? inputs.sourcePath
+      : undefined;
+  return typeof sourcePath === "string" ? sourcePath : undefined;
 }
 
 export function checkoutProviderInputs(
@@ -331,7 +348,9 @@ export async function validateProviderSelection(
   if (requires.gitCheckout && projectCheckout !== null) {
     const availability = await resolveGitCheckoutAvailability(deps, {
       hostId: host.id,
-      path: projectCheckout.path,
+      path:
+        worktreeSourcePath(environmentProviderId, args.inputs) ??
+        projectCheckout.path,
     });
     if (availability.status !== "available") {
       throw new ApiError(

@@ -11,6 +11,7 @@ import {
   isThreadQueueAutoSendPaused,
   releaseQueuedMessageClaim,
   releaseStaleQueuedMessageClaims,
+  setQueuedThreadMessageWaitingOn,
   threadHasProviderSession,
   type ClaimedQueuedThreadMessageRow,
   type DbQueryConnection,
@@ -622,6 +623,13 @@ async function sendClaimedSystemNotice(
   const notice = queuedMessageSystemNoticeSchema.parse(
     JSON.parse(claimed.systemNotice),
   );
+  if (args.sendNow && args.thread.status === "stopping") {
+    throw new ApiError(
+      409,
+      "queued_message_still_waiting",
+      `This message cannot be sent yet: ${describeCoreWait({ kind: "stopping" })}.`,
+    );
+  }
   const queuedMessage = toThreadQueuedMessage(claimed);
   const delivered = await deliverParentSystemMessage(deps, {
     input: queuedMessage.content,
@@ -782,6 +790,20 @@ export async function sendQueuedMessage(
     );
   } catch (error) {
     releaseClaim(deps, queuedMessage);
+    if (
+      isQueuedMessageAutoSendPausedError(error) &&
+      parseStoredQueuedThreadMessageWaitingOn(queuedMessage)?.kind ===
+        "host-offline"
+    ) {
+      // The host is back and Stop holds the report now: it waits on the
+      // thread, not on a reconnect that already happened (#917).
+      setQueuedThreadMessageWaitingOn(deps.db, deps.hub, {
+        id: queuedMessage.id,
+        threadId: queuedMessage.threadId,
+        waitingOn: { kind: "thread-busy" },
+        sendAt: null,
+      });
+    }
     if (
       isQueuedMessageAutoSendPausedError(error) ||
       error instanceof ThreadContextClearInProgressError

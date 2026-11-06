@@ -44,8 +44,8 @@ Model lists answer from the machine's last stored list while a background
 refresh runs, so a list can be hours old. A provider whose refresh keeps
 failing or timing out keeps answering from its last stored list.
 
-Provider-native memory can be controlled on the separate Settings → Providers
-→ Codex and Settings → Providers → Claude Code pages. Codex memory controls
+Provider-native memory can be controlled on the separate Settings → Agents
+→ Codex and Settings → Agents → Claude Code pages. Codex memory controls
 both recall (`memories.use_memories`) and future generation
 (`memories.generate_memories`). Claude Code memory controls native auto-memory
 reads and writes (`autoMemoryEnabled`). Both preferences default on and apply

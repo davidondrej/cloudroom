@@ -545,6 +545,51 @@ describe("public thread parenting routes", () => {
     });
   });
 
+  it("keeps a running child open when its parent is archived (#603)", async () => {
+    await withTestHarness(async (harness) => {
+      const { host } = seedHostSession(harness.deps);
+      const { project } = seedProjectWithSource(harness.deps, {
+        hostId: host.id,
+      });
+      const environment = seedEnvironment(harness.deps, {
+        hostId: host.id,
+        projectId: project.id,
+      });
+      const parentThread = seedThread(harness.deps, {
+        environmentId: environment.id,
+        projectId: project.id,
+      });
+      const runningChild = seedThread(harness.deps, {
+        environmentId: environment.id,
+        parentThreadId: parentThread.id,
+        projectId: project.id,
+        status: "active",
+      });
+      const idleChild = seedThread(harness.deps, {
+        environmentId: environment.id,
+        parentThreadId: parentThread.id,
+        projectId: project.id,
+      });
+
+      const response = await harness.app.request(
+        `/api/v1/threads/${parentThread.id}/archive-all`,
+        { method: "POST" },
+      );
+
+      expect(response.status).toBe(200);
+      expect(
+        threadArchiveAllResponseSchema.parse(await readJson(response)),
+      ).toEqual({
+        ok: true,
+        archivedThreadIds: [idleChild.id, parentThread.id],
+        keptLiveThreadIds: [runningChild.id],
+      });
+      const kept = getThread(harness.db, runningChild.id);
+      expect(kept?.archivedAt).toBeNull();
+      expect(kept?.parentThreadId).toBeNull();
+    });
+  });
+
   it("archives hierarchy children and hidden source-derived forks", async () => {
     await withTestHarness(async (harness) => {
       const { host } = seedHostSession(harness.deps);

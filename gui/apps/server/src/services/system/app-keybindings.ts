@@ -157,6 +157,7 @@ export const DEFAULT_APP_KEYBINDINGS: AppDefaultKeybindings = [
   binding("history.back", "[", { mod: true }, historyWithoutModal),
   binding("history.forward", "]", { mod: true }, historyWithoutModal),
   binding("settings.open", ",", { mod: true }, mainWithoutModal),
+  unassignedBinding("settings.checkForUpdates", mainWithoutModal),
   binding("sidebar.toggle", "b", { mod: true }, mainWithoutModal),
   unassignedBinding("notifications.open", mainWithoutModal),
   binding(

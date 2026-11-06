@@ -6,6 +6,7 @@ import {
 } from "../environments/environment-engine.js";
 import {
   and,
+  desc,
   eq,
   gte,
   inArray,
@@ -85,15 +86,24 @@ import {
   type ThreadStartCommandArgs,
   type ThreadStopCommandArgs,
 } from "./thread-commands.js";
+import { ApiError } from "../../errors.js";
 import { ensureHostSessionReadyForWork } from "../hosts/host-lifecycle.js";
-import { isHostUnavailableApiError } from "../hosts/online-rpc.js";
+import {
+  HOST_CONNECTION_INTERRUPTED,
+  isHostUnavailableApiError,
+  threadStartHostOfflineError,
+  threadStartHostWaitMs,
+} from "../hosts/online-rpc.js";
 import {
   LIVE_DAEMON_COMMAND_TIMEOUT_MS,
   runLiveHostCommand,
 } from "../hosts/live-command.js";
 import { createAsyncDeduper } from "../lib/async-deduper.js";
 import { requestQueuedMessageDispatch } from "./queued-message-dispatch.js";
-import { throwThreadNotWritable } from "../lib/lifecycle-api-errors.js";
+import {
+  isSuspendedHostUnavailableError,
+  throwThreadNotWritable,
+} from "../lib/lifecycle-api-errors.js";
 import { NotificationBuffer } from "../lib/notification-buffer.js";
 import { queueChildThreadTurnNotificationBestEffort } from "./child-thread-notifications.js";
 import { isParentNotifiableChildThread } from "./thread-parent.js";
@@ -212,6 +222,16 @@ interface RequestThreadStopArgs extends Omit<ThreadStopCommandArgs, "intent"> {
 }
 
 const AWAITED_THREAD_STOP_TIMEOUT_MS = 60_000;
+// How long Stop waits on a confirming stop before answering. Short, so both
+// tries fit inside the CLI's 75-second request timeout.
+const THREAD_STOP_CONFIRM_WAIT_MS = 10_000;
+
+/**
+ * Stopping threads whose stop the host never confirmed, mapped to the
+ * confirming stop still running, if any. Such a thread keeps its runtime: a
+ * later Stop asks the host again instead of settling it idle (#917).
+ */
+const unconfirmedThreadStops = new Map<string, Promise<void> | null>();
 
 const MEMORY_LIMIT_STOP_DETAIL =
   "Thread stopped because it used over half of the computer's memory";
@@ -415,6 +435,7 @@ function threadCommandFailureDetailForInterruption(
 
 interface DispatchThreadStartFromRequestArgs {
   command: ThreadStartCommand;
+  provisioningId: string | null;
   sourceThreadStatus: ThreadStatus;
   threadId: string;
 }
@@ -543,6 +564,8 @@ function markThreadStoppingWithEventInTransaction(
   if (!outcome.applied) {
     return false;
   }
+  // A new stop starts with nothing left to confirm from an earlier one.
+  unconfirmedThreadStops.delete(args.threadId);
   deps.hub.notifyThread(args.threadId, ["status-changed"]);
   appendThreadInterruptedEventInTransaction(deps.db, {
     threadId: args.threadId,
@@ -668,6 +691,25 @@ function hasTerminalClientTurnRequestEvent(
       .limit(1)
       .get() !== undefined
   );
+}
+
+function hasClientTurnRequestedAfter(
+  deps: ThreadLifecycleReadDeps,
+  args: HasThreadInterruptedEventAtOrAfterArgs,
+): boolean {
+  const latest = deps.db
+    .select({ createdAt: events.createdAt })
+    .from(events)
+    .where(
+      and(
+        eq(events.threadId, args.threadId),
+        eq(events.type, "client/turn/requested"),
+      ),
+    )
+    .orderBy(desc(events.sequence))
+    .limit(1)
+    .get();
+  return latest !== undefined && latest.createdAt > args.createdAt;
 }
 
 function hasThreadInterruptedEventAtOrAfter(
@@ -839,7 +881,23 @@ export function settleThreadStartCommandResult(
     return emptyCommandResultSideEffects();
   }
   if (!args.report.ok) {
+    // A stop supersedes a start whose failure arrives after reconnecting.
+    if (
+      hasThreadInterruptedEventAtOrAfter(args.deps, {
+        createdAt: args.execution.createdAt,
+        threadId: thread.id,
+      })
+    ) {
+      return emptyCommandResultSideEffects();
+    }
     clearThreadProvisionSchedule(thread.id);
+    // The host came back reporting this thread live, so the start arrived.
+    if (
+      args.report.errorCode === HOST_CONNECTION_INTERRUPTED &&
+      thread.status === "active"
+    ) {
+      return emptyCommandResultSideEffects();
+    }
     return settleThreadCommandFailure({
       command: args.command,
       deps: args.deps,
@@ -974,6 +1032,17 @@ export async function prepareReadyThreadTurnCommand(
 export function settleThreadStopCommandResult(
   args: SettleThreadStopCommandResultArgs,
 ): CommandResultSideEffectsResult {
+  // An ack settles only the turn it stopped. A turn asked for since the
+  // command left means that stop already settled another way, and settling
+  // now would end the new turn (#917).
+  if (
+    hasClientTurnRequestedAfter(args.deps, {
+      createdAt: args.execution.createdAt,
+      threadId: args.command.threadId,
+    })
+  ) {
+    return emptyCommandResultSideEffects();
+  }
   if (args.report.ok) {
     settleDanglingBackgroundTasksForStoppedThreadInTransaction(args.deps, {
       threadId: args.command.threadId,
@@ -1158,7 +1227,13 @@ function dispatchThreadStartFromRequest(
         };
       }
 
-      if (isProvisionHandoff && !isPreStartThreadStatus(currentThread.status)) {
+      // A stop, a reconnect that found it running, or a newer request since
+      // this start began each change or clear the startup request (#879).
+      if (
+        (isProvisionHandoff && !isPreStartThreadStatus(currentThread.status)) ||
+        (activeProvisionContext?.state.provisioningId ?? null) !==
+          args.provisioningId
+      ) {
         return {
           completedProvisionSequence: null,
           disposition: "blocked",
@@ -1220,6 +1295,41 @@ export async function requestThreadStart(
   );
 }
 
+const threadStartsWaitingForHost = new Set<string>();
+
+/**
+ * Nothing is sent yet, so a host whose daemon just dropped gets the rest of
+ * the grace. Provisioning runs again when it returns, or fails as offline
+ * once the grace ends. The wait never blocks the caller (#879).
+ */
+async function isHostReadyForThreadStart(
+  deps: CommandResultSideEffectsDeps,
+  args: ThreadStartCommandArgs,
+): Promise<boolean> {
+  const { hostId } = args.environment;
+  try {
+    await ensureHostSessionReadyForWork(deps, { hostId });
+    return true;
+  } catch (error) {
+    const waitMs =
+      isHostUnavailableApiError(error) &&
+      !isSuspendedHostUnavailableError(error)
+        ? threadStartHostWaitMs(deps.hub, hostId)
+        : null;
+    if (waitMs === null) throw error;
+    if (waitMs === 0) throw threadStartHostOfflineError();
+    const threadId = args.thread.id;
+    if (!threadStartsWaitingForHost.has(threadId)) {
+      threadStartsWaitingForHost.add(threadId);
+      void deps.hub.waitForDaemonForHost(hostId, waitMs).finally(() => {
+        threadStartsWaitingForHost.delete(threadId);
+        scheduleThreadProvisioningAdvance(deps, threadId);
+      });
+    }
+    return false;
+  }
+}
+
 async function requestThreadStartOnce(
   deps: CommandResultSideEffectsDeps,
   args: ThreadStartCommandArgs,
@@ -1227,7 +1337,16 @@ async function requestThreadStartOnce(
   if (hasLiveThreadStartInFlight(args.thread.id)) {
     return;
   }
+  const provisioningId =
+    args.thread.status === "starting"
+      ? (getThreadProvisionContext(deps.db, args.thread.id)?.state
+          .provisioningId ?? null)
+      : null;
 
+  // Before the build: it reads workspace files from the host.
+  if (!(await isHostReadyForThreadStart(deps, args))) {
+    return;
+  }
   const command = await buildThreadStartCommand(deps, {
     ...args,
   });
@@ -1235,11 +1354,9 @@ async function requestThreadStartOnce(
     return;
   }
 
-  await ensureHostSessionReadyForWork(deps, {
-    hostId: args.environment.hostId,
-  });
   const result = dispatchThreadStartFromRequest(deps, {
     command,
+    provisioningId,
     sourceThreadStatus: args.thread.status,
     threadId: args.thread.id,
   });
@@ -1451,7 +1568,9 @@ function hasLiveThreadRuntime(
   return (
     thread.status === "active" ||
     hasLiveThreadStartInFlight(thread.id) ||
-    (thread.status === "stopping" && getActiveTurnId(deps, thread.id) !== null)
+    (thread.status === "stopping" &&
+      (getActiveTurnId(deps, thread.id) !== null ||
+        unconfirmedThreadStops.has(thread.id)))
   );
 }
 
@@ -1489,7 +1608,11 @@ export async function stopThreadForCurrentState(
   deps: RequestThreadStopForCurrentStateDeps,
   thread: RequestThreadStopForCurrentStateThread,
   environment: RequestThreadStopForCurrentStateEnvironment | null,
-  options?: { requireStopped: true; immediate?: boolean },
+  options?: {
+    requireStopped?: true;
+    immediate?: boolean;
+    releaseMidTurn?: true;
+  },
 ): Promise<void> {
   const target = getThread(deps.db, thread.id);
   if (target && isCloudThread(target)) return cloudroom(deps).control(thread.id, "stop");
@@ -1530,7 +1653,12 @@ export async function stopThreadForCurrentState(
     ) {
       return;
     }
-    await releaseIdleThreadRuntime(deps, thread.id, environment);
+    await releaseIdleThreadRuntime(
+      deps,
+      thread.id,
+      environment,
+      options?.releaseMidTurn,
+    );
     return;
   }
 
@@ -1543,13 +1671,23 @@ export async function stopThreadForCurrentState(
     return;
   }
 
-  await releaseIdleThreadRuntime(deps, thread.id, environment);
+  await releaseIdleThreadRuntime(
+    deps,
+    thread.id,
+    environment,
+    options?.releaseMidTurn,
+  );
 }
 
+/**
+ * `midTurn` also releases a turn the host still runs but the thread no longer
+ * shows (it failed or lost its host).
+ */
 async function releaseIdleThreadRuntime(
   deps: RequestThreadStopForCurrentStateDeps,
   threadId: string,
   environment: RequestThreadStopForCurrentStateEnvironment | null,
+  midTurn = false,
 ): Promise<void> {
   if (environment === null) {
     return;
@@ -1558,6 +1696,7 @@ async function releaseIdleThreadRuntime(
     command: buildThreadStopCommand({
       environmentId: environment.id,
       hostId: environment.hostId,
+      immediate: midTurn,
       intent: "release",
       threadId,
     }),
@@ -1576,6 +1715,15 @@ async function runAwaitedThreadStopCommand(
   },
 ): Promise<void> {
   await threadStopRequestDeduper.run(args.threadId, async () => {
+    // The slow interrupt already failed once; only the host can confirm now.
+    if (
+      args.command.intent === "interrupt" &&
+      !args.requireStopped &&
+      unconfirmedThreadStops.has(args.threadId)
+    ) {
+      await confirmUnsettledThreadStop(deps, args);
+      return;
+    }
     inFlightThreadRpcGuard.claim(args.threadId, "thread.stop");
     try {
       await runLiveHostCommand(deps, {
@@ -1589,16 +1737,78 @@ async function runAwaitedThreadStopCommand(
         "Awaited thread stop command failed",
       );
       if (args.requireStopped) throw error;
-      if (
-        args.command.intent === "release" &&
-        !isHostUnavailableApiError(error)
-      ) {
-        throw error;
-      }
+      // A host that comes back settles a stopping thread when it reconnects.
+      if (isHostUnavailableApiError(error)) return;
+      if (args.command.intent === "release") throw error;
+      await confirmUnsettledThreadStop(deps, args);
     } finally {
       inFlightThreadRpcGuard.release(args.threadId, "thread.stop");
     }
   });
+}
+
+/**
+ * A failed or timed-out interrupt leaves the agent unconfirmed, so the thread
+ * stays stopping rather than going idle over a process that may still run.
+ * An immediate stop either confirms it ended or the caller hears it didn't.
+ * The daemon runs one stop per thread at a time, so that stop may wait out a
+ * hung first one: it keeps the long timeout, and a late success still settles
+ * the thread, while the caller gets an answer within seconds. Queued messages
+ * and held child reports wait for the stop to land (#917).
+ */
+async function confirmUnsettledThreadStop(
+  deps: RequestThreadStopForCurrentStateDeps,
+  args: { command: ThreadStopCommand; hostId: string; threadId: string },
+): Promise<void> {
+  const stillStopping = () =>
+    getThread(deps.db, args.threadId)?.status === "stopping";
+  if (!stillStopping()) return;
+  const confirming =
+    unconfirmedThreadStops.get(args.threadId) ??
+    startConfirmingThreadStop(deps, args, stillStopping);
+  await new Promise<void>((resolve) => {
+    const timer = setTimeout(resolve, THREAD_STOP_CONFIRM_WAIT_MS);
+    timer.unref();
+    void confirming.finally(() => {
+      clearTimeout(timer);
+      resolve();
+    });
+  });
+  if (!stillStopping()) return;
+  throw new ApiError(
+    502,
+    "thread_stop_unconfirmed",
+    "The agent didn't confirm it stopped, so the thread stays Stopping and its queued messages wait. It settles by itself if the agent stops later. If it stays stuck, restart Cloudroom.",
+  );
+}
+
+function startConfirmingThreadStop(
+  deps: RequestThreadStopForCurrentStateDeps,
+  args: { command: ThreadStopCommand; hostId: string; threadId: string },
+  stillStopping: () => boolean,
+): Promise<void> {
+  const { threadId } = args;
+  const confirming: Promise<void> = runLiveHostCommand(deps, {
+    command: { ...args.command, immediate: true },
+    hostId: args.hostId,
+    timeoutMs: LIVE_DAEMON_COMMAND_TIMEOUT_MS,
+  })
+    .then(
+      () => undefined,
+      (error: unknown) =>
+        deps.logger.warn(
+          { err: error, threadId },
+          "Thread stop could not be confirmed",
+        ),
+    )
+    .finally(() => {
+      if (unconfirmedThreadStops.get(threadId) !== confirming) return;
+      // Failed but still stopping: the next Stop sends a fresh one.
+      if (stillStopping()) unconfirmedThreadStops.set(threadId, null);
+      else unconfirmedThreadStops.delete(threadId);
+    });
+  unconfirmedThreadStops.set(threadId, confirming);
+  return confirming;
 }
 
 export function requestActiveRuntimeThreadStopIfNeeded(

@@ -1,6 +1,10 @@
 {
   "name": "bb-plugin-side-chat",
   "version": "0.1.0",
+  "author": {
+    "name": "BB",
+    "url": "https://github.com/get-bb/bb"
+  },
   "private": true,
   "type": "module",
   "description": "Reply to messages in hidden side-chat forks rendered in a thread panel.",

@@ -617,6 +617,7 @@ export class RuntimeProviderProcessManager {
 
     this.args.onProcessExit?.({
       providerId: args.providerId,
+      pid: args.providerProcess.child.pid,
       threads,
       code: args.code,
       expected,

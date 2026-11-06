@@ -118,6 +118,11 @@ export const APP_COMMAND_GROUPS: readonly AppCommandGroup[] = [
         "Open settings to add or manage Cloudroom servers.",
       ),
       command(
+        "settings.checkForUpdates",
+        "Check for updates",
+        "Open Settings → Updates and check for updates now.",
+      ),
+      command(
         "sidebar.toggle",
         "Toggle sidebar",
         "Show or hide the app sidebar.",

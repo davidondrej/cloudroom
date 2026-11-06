@@ -90,6 +90,18 @@ export const systemProvidersQuerySchema = z
   .superRefine(rejectMultipleWorkspaceSelectors);
 export type SystemProvidersQuery = z.infer<typeof systemProvidersQuerySchema>;
 
+// `providerId` checks just that provider, never waiting on the others.
+export const systemProviderStatesQuerySchema = z
+  .object({
+    ...systemProviderHostQueryFields,
+    providerId: z.string().min(1),
+  })
+  .partial()
+  .superRefine(rejectMultipleWorkspaceSelectors);
+export type SystemProviderStatesQuery = z.infer<
+  typeof systemProviderStatesQuerySchema
+>;
+
 export const systemInstallableProvidersQuerySchema = z
   .object(systemProviderHostQueryFields)
   .partial()

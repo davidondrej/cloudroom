@@ -475,8 +475,23 @@ export async function cloudChanges(client: CloudroomClient, workspace: string, l
   }
 }
 
+const copying = new Map<string, Promise<unknown>>();
+
+/** One Teleport or Fork copy per project at a time, so another copy can't add a link between a check and a write. */
 export async function applyChanges(root: string, archive: Buffer, id: string, base: string | null): Promise<number> {
   const real = await realpath(root);
+  const key = getHostPathComparisonKey(real) ?? real;
+  const run = (copying.get(key) ?? Promise.resolve()).catch(() => {}).then(() => copyChanges(root, real, archive, id, base));
+  const done = run.catch(() => {});
+  copying.set(key, done);
+  try {
+    return await run;
+  } finally {
+    if (copying.get(key) === done) copying.delete(key);
+  }
+}
+
+async function copyChanges(root: string, real: string, archive: Buffer, id: string, base: string | null): Promise<number> {
   const aside = join(root, ".cloudroom", "teleport", id);
   if (!(await inside(real, join(aside, "file"))))
     throw new ApiError(409, "teleport_unavailable", "This project's .cloudroom folder points outside the project. The thread stays in Cloud.");
@@ -488,7 +503,8 @@ export async function applyChanges(root: string, archive: Buffer, id: string, ba
     await mkdir(staged);
     await exec(tarCommand(), ["-xzf", file, "-C", staged]);
     const paths = (await exec(tarCommand(), ["-tzf", file], { maxBuffer: 64 * 1024 * 1024 })).stdout.split(process.platform === "win32" ? /\r?\n/ : "\n")
-      .map((path) => path.replace(/^\.\//, "")).filter((path) => path && !path.endsWith("/") && !isAbsolute(path) && !path.split("/").includes("..") && !inGit(path));
+      .map((path) => path.split("/").filter((part) => part !== ".").join("/")).filter((path) => path && !path.endsWith("/") && !isAbsolute(path) && !path.split("/").includes("..") && !inGit(path)
+        && path.split("/")[0]!.toLowerCase() !== ".cloudroom");
     const top = (await git(root, ["rev-parse", "--show-toplevel"]))?.trim();
     const dirty = base && top && (await realpath(top).catch(() => null)) === real ? await dirtyPaths(root, base) : null;
     const keys = await Promise.all(paths.map((path) => landsAt(root, path)));
@@ -510,6 +526,8 @@ export async function applyChanges(root: string, archive: Buffer, id: string, ba
       if (!replace || !(await inside(real, target))) {
         target = join(aside, path);
         conflicts++;
+        if (!(await inside(real, target)))
+          throw new ApiError(409, "teleport_unavailable", `The cloud file ${path} would land outside this project. The thread stays in Cloud.`);
       }
       await mkdir(dirname(target), { recursive: true });
       await cp(incoming, target, { force: true, verbatimSymlinks: true });
@@ -617,6 +635,15 @@ async function importOpenCode(deps: AppDeps, threadId: string, environment: { id
   }
 }
 
+/** Cloud archives are untrusted: a symlink or hard link in one would let a later write land outside the folder. */
+async function assertPlainTree(folder: string): Promise<void> {
+  for (const entry of await readdir(folder, { recursive: true, withFileTypes: true })) {
+    const info = await lstat(join(entry.parentPath, entry.name));
+    if (!info.isDirectory() && !(info.isFile() && info.nlink === 1))
+      throw new ApiError(409, "teleport_unavailable", "The cloud chat contains a link, so it was not copied. The thread stays in Cloud.");
+  }
+}
+
 // Local Cursor keeps each chat in ~/.cursor/acp-sessions/<id>/, the folder the host's Teleport capture reads.
 async function installCursor(nativeId: string, archive: Buffer, cwd: string) {
   const target = join(homedir(), ".cursor", "acp-sessions", nativeId);
@@ -625,6 +652,7 @@ async function installCursor(nativeId: string, archive: Buffer, cwd: string) {
   try {
     await writeFile(`${staged}.tgz`, archive, { mode: 0o600 });
     await exec(tarCommand(), ["-xzf", `${staged}.tgz`, "-C", staged]);
+    await assertPlainTree(staged);
     const meta = join(staged, "meta.json");
     await writeFile(meta, JSON.stringify({ ...JSON.parse(await readFile(meta, "utf8")), cwd }));
     if (existsSync(target)) await rename(target, `${target}.before-teleport-${Date.now()}`);

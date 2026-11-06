@@ -391,6 +391,44 @@ export default async function plugin(bb: BbPluginApi) {
       cursorLocal = { email: await localCursorEmail(), at: Date.now() };
     return rows("acp-cursor", cursorLocal.email);
   };
+  // "This Mac" Codex usage comes from the reader the usage card uses, on this Mac only. The list never waits for it:
+  // it shows the last bars, and one background read at a time refreshes them at most every 5 minutes.
+  let codexLocal: { at: number; windows: UsageWindow[] } = {
+    at: 0,
+    windows: [],
+  };
+  let codexLocalReading = false;
+  const refreshCodexLocal = async () => {
+    if (codexLocalReading || Date.now() - codexLocal.at < USAGE_EVERY_MS)
+      return;
+    codexLocalReading = true;
+    try {
+      const usage = (
+        await bb.sdk.system
+          .usageLimits({ providerId: "codex" })
+          .catch(() => null)
+      )?.codex;
+      const windows =
+        usage?.status === "ok"
+          ? usage.windows.map((window) => ({
+              label:
+                window.kind === "five-hour" ? "Five-hour limit" : window.label,
+              usedPercent: window.usedPercent,
+              resetsAt: Date.parse(window.resetsAt ?? "") || null,
+            }))
+          : // A failed read keeps the last bars; a signed-out Mac has none.
+            !usage || usage.status === "error"
+            ? codexLocal.windows
+            : [];
+      const changed =
+        JSON.stringify(windows) !== JSON.stringify(codexLocal.windows);
+      codexLocal = { at: Date.now(), windows };
+      // Open lists read again; the fresh bars then come from the cache.
+      if (changed) bb.realtime.publish(ACCOUNTS_CHANGED, {});
+    } finally {
+      codexLocalReading = false;
+    }
+  };
   // Codex accounts live on the website (ADR 0195). "This Mac" is the Mac's own `~/.codex` login and stays selectable:
   // Cloud then uses the copy of it the app uploads, as before.
   const codexView = async (
@@ -402,6 +440,7 @@ export default async function plugin(bb: BbPluginApi) {
     const selected = list.accounts.find((account) => account.inUse);
     codexInUse = selected?.id ?? LOCAL;
     codexAccounts = list.accounts.length;
+    void refreshCodexLocal();
     return [
       {
         id: LOCAL,
@@ -412,7 +451,7 @@ export default async function plugin(bb: BbPluginApi) {
         limitedUntil: limitedUntil("codex", LOCAL),
         error: null,
         credits: null,
-        windows: [],
+        windows: codexLocal.windows,
         needsSignIn: false,
         limitedLogin: false,
       },

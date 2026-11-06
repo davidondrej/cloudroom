@@ -67,6 +67,7 @@ import {
   upsertUserQuestionLifecycleMessage,
   upsertFileEdit,
   upsertProvisioningOperation,
+  upsertRepeatedWarning,
   upsertThreadOperationMessage,
 } from "./operation-projection.js";
 import type { ActiveThinking } from "@cloudroom/domain";
@@ -634,6 +635,7 @@ function buildFlatProjectionData(
         }
       }
       onTurnStarted(state, turnId);
+      state.repeatedWarningsByKey.clear();
     }
 
     const eventParentToolCallId = isAcceptedRootClientTurn
@@ -950,6 +952,15 @@ function buildFlatProjectionData(
       }
       if (operation.kind === "operation" && operation.opType === "operation") {
         upsertThreadOperationMessage(state, operation);
+        continue;
+      }
+      if (
+        operation.kind === "operation" &&
+        operation.scope.kind === "thread" &&
+        decoded.type === "provider/warning" &&
+        decoded.category === "general"
+      ) {
+        upsertRepeatedWarning(state, operation);
         continue;
       }
       if (operation.kind === "permission-grant-lifecycle") {

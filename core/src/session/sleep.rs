@@ -61,8 +61,17 @@ impl Session {
                 .is_some_and(|(now, baseline)| now > baseline)
     }
 
+    /// Started in its parent's sandbox: still true once detached, as when its archived parent kept it open (#603).
+    fn shared_child(&self) -> bool {
+        self.parent_session.is_some()
+            || self
+                .receipts
+                .values()
+                .any(|r| r.command == "start" && r.input["parent_session"].is_string())
+    }
+
     fn idle_limit(&self) -> u64 {
-        if self.parent_session.is_some() {
+        if self.shared_child() {
             SHARED_IDLE_SLEEP_MS
         } else {
             IDLE_SLEEP_MS

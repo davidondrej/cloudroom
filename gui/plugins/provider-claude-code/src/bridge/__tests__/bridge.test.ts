@@ -34,6 +34,7 @@ vi.mock("@anthropic-ai/claude-agent-sdk", () => ({
 }));
 
 import { handleLine } from "../bridge.js";
+import { SdkSession } from "../sdk-session.js";
 import {
   type BuildSessionOptionsArgs,
   buildSessionOptions,
@@ -3775,6 +3776,72 @@ describe("bridge", () => {
       queries[1]?.finish();
       await bridge.waitForResponse(3);
     } finally {
+      bridge.restore();
+    }
+  });
+
+  it("resumes the same Claude session on the next turn after a failed stop", async () => {
+    const bridge = createBridgeJsonRpcTestHarness(handleLine);
+    const queries: ControlledClaudeQuery[] = [];
+    queryMock.mockImplementation(() => {
+      const query = createControlledClaudeQuery();
+      queries.push(query);
+      return query;
+    });
+    const stopError =
+      "Claude stopped, but Cloudroom could not confirm its tool processes ended.";
+    const close = vi
+      .spyOn(SdkSession.prototype, "closeGracefully")
+      .mockRejectedValueOnce(new Error(stopError));
+
+    try {
+      const threadId = "thread-failed-stop";
+      sendResumeThread({
+        bridge,
+        providerThreadId: "provider-failed-stop",
+        requestId: 1,
+        threadId,
+      });
+      await bridge.waitForResponse(1);
+      const stop = {
+        threadId,
+        providerThreadId: threadId,
+        intent: "interrupt",
+        activeTurnId: null,
+      };
+      bridge.sendRequest(2, "thread/stop", stop);
+      expect((await bridge.waitForResponse(2)).error?.message).toBe(stopError);
+
+      bridge.sendRequest(3, "turn/start", {
+        threadId,
+        providerThreadId: "provider-failed-stop",
+        input: [{ type: "text", text: "After unarchive" }],
+        clientRequestId: "creq_abcdefghjk",
+        options: {
+          permissionMode: "accept-edits",
+          permissionScope: "workspace",
+          approvalReviewer: "user",
+          permissionEscalation: "ask",
+          providerOptions: {},
+        },
+      });
+      await bridge.flushWork();
+
+      expect(queries).toHaveLength(2);
+      expect(getLatestQueryOptions()).toMatchObject({
+        resume: "provider-failed-stop",
+      });
+      await expect(readNextPromptText(getLatestQueryCall())).resolves.toBe(
+        "After unarchive",
+      );
+      expect((await bridge.waitForResponse(3)).error).toBeUndefined();
+
+      bridge.sendRequest(4, "thread/stop", stop);
+      await bridge.flushWork();
+      queries[1]?.finish();
+      await bridge.waitForResponse(4);
+    } finally {
+      close.mockRestore();
       bridge.restore();
     }
   });

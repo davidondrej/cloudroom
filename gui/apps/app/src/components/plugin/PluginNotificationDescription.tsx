@@ -1,7 +1,10 @@
 import { type ReactNode } from "react";
-import { Link } from "react-router-dom";
+import { Link, useLocation } from "react-router-dom";
 import { appToast } from "@/components/ui/app-toast";
-import { getPluginDetailRoutePath } from "@/lib/route-paths";
+import {
+  getPluginDetailRoutePath,
+  isSettingsPluginsRoutePath,
+} from "@/lib/route-paths";
 
 interface PluginNotificationTarget {
   id: string;
@@ -10,6 +13,29 @@ interface PluginNotificationTarget {
 
 type PluginView = "catalog" | "installed";
 
+function PluginNotificationLink({
+  plugin,
+  view,
+}: {
+  plugin: PluginNotificationTarget;
+  view: PluginView;
+}) {
+  const inSettings = isSettingsPluginsRoutePath(useLocation().pathname);
+  return (
+    <Link
+      to={getPluginDetailRoutePath({
+        pluginId: plugin.id,
+        ...(view === "installed" || inSettings
+          ? { view: "installed" as const }
+          : {}),
+      })}
+      className="rounded-sm underline underline-offset-2 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+    >
+      {plugin.name ?? plugin.id}
+    </Link>
+  );
+}
+
 export function pluginNotificationDescription(
   plugin: PluginNotificationTarget,
   view: PluginView,
@@ -17,15 +43,7 @@ export function pluginNotificationDescription(
 ): ReactNode {
   return (
     <>
-      <Link
-        to={getPluginDetailRoutePath({
-          pluginId: plugin.id,
-          ...(view === "installed" ? { view } : {}),
-        })}
-        className="rounded-sm underline underline-offset-2 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-      >
-        {plugin.name ?? plugin.id}
-      </Link>
+      <PluginNotificationLink plugin={plugin} view={view} />
       {detail === undefined ? null : <> — {detail}</>}
     </>
   );

@@ -1,5 +1,6 @@
 import { COMPUTER_TITLE } from "@cloudroom/domain/computer-name";
 import {
+  type CSSProperties,
   useCallback,
   useEffect,
   useMemo,
@@ -192,12 +193,16 @@ function UsageBlocks({ usedPercent }: { usedPercent: number }) {
     Math.round((Math.min(100, usedPercent) / 100) * USAGE_BLOCKS),
   );
   return (
-    <span aria-hidden="true" className="flex shrink-0 gap-[1.5px]">
+    // A cramped row (a scrollbar on the narrowest card) takes space from the bar first: 1px blocks, then clipped, never the numbers.
+    <span
+      aria-hidden="true"
+      className="flex min-w-0 gap-[1.5px] overflow-hidden"
+    >
       {Array.from({ length: USAGE_BLOCKS }, (_, index) => (
         <span
           key={index}
           className={cn(
-            "h-[9px] w-[clamp(2px,calc((100cqw_-_11ch_-_125px)/12),5px)] rounded-[1px]",
+            "h-[9px] w-[clamp(2px,calc((100cqw_-_11ch_-_81px_-_var(--usage-label,44px))/12),5px)] min-w-px rounded-[1px]",
             index < lit ? usageBarColorClass(usedPercent) : "bg-sidebar-border",
           )}
         />
@@ -206,14 +211,51 @@ function UsageBlocks({ usedPercent }: { usedPercent: number }) {
   );
 }
 
+/** A row's short label. A model's weekly row ("Weekly · Fable") reads "7d fable"; narrow cards drop its "7d". */
+function rowLabel(label: string): { prefix: string | null; label: string } {
+  const model = /^Weekly · (.+)$/u.exec(label)?.[1];
+  if (model) return { prefix: "7d", label: model };
+  return {
+    prefix: null,
+    label: label
+      .replace(/^Five-hour limit$|^5 hours$/u, "5h")
+      .replace(/^Weekly limit$|^Weekly/u, "7d")
+      .replace(/^Daily limit$/u, "1d")
+      .replace(/^Plan usage$/u, "plan")
+      .replace(/^On-demand spend$/u, "spend"),
+  };
+}
+
+/** Widens an agent's label column to fit its model rows, so all its bars still line up. */
+function labelColumnStyle(
+  windows: readonly { label: string }[],
+): CSSProperties | undefined {
+  const models = windows.flatMap(({ label }) => {
+    const row = rowLabel(label);
+    return row.prefix === null ? [] : [row];
+  });
+  if (models.length === 0) return undefined;
+  // 1px of slack: the prefix and the model are separate text runs, which can round past a whole number of ch.
+  const width = (lengths: number[]) =>
+    `max(2.75rem, calc(${Math.max(...lengths)}ch + 1px))`;
+  return {
+    "--usage-label": width(
+      models.map((row) => `${row.prefix} ${row.label}`.length),
+    ),
+    "--usage-label-narrow": width(models.map((row) => row.label.length)),
+  } as CSSProperties;
+}
+
 function UsageLine({
   last,
   label,
+  prefix = null,
   usedPercent,
   detail,
 }: {
   last: boolean;
   label: string;
+  prefix?: string | null;
   usedPercent: number;
   detail: string;
 }) {
@@ -222,7 +264,11 @@ function UsageLine({
       <span aria-hidden="true" className="text-subtle-foreground">
         {last ? "└" : "├"}
       </span>
-      <span className="w-11 shrink-0 truncate lowercase text-muted-foreground">
+      {/* Under 190px a row can't fit "7d fable" plus bars, percent and countdown, so it shows just "fable". */}
+      <span className="w-[var(--usage-label,2.75rem)] shrink-0 truncate lowercase text-muted-foreground @max-[190px]:w-[var(--usage-label-narrow,2.75rem)]">
+        {prefix === null ? null : (
+          <span className="@max-[190px]:hidden">{prefix} </span>
+        )}
         {label}
       </span>
       <UsageBlocks usedPercent={usedPercent} />
@@ -259,10 +305,11 @@ function PlanUsage({
         className,
       )}
     >
-      <h2 className="flex min-w-0 items-center gap-2 font-normal">
+      {/* Too narrow for one line, "+ buy more" wraps whole onto its own; the plan name gives way first. */}
+      <h2 className="flex min-w-0 flex-wrap items-center gap-x-2 font-normal">
         <img src="/icon-192.png?v=room" alt="" aria-hidden="true" className="size-3 shrink-0 object-contain" />
         <span className="shrink-0 lowercase text-primary-text">cloudroom</span>
-        <span className="min-w-0 truncate text-subtle-foreground">
+        <span className="min-w-0 flex-1 truncate text-subtle-foreground">
           {plan.plan}
         </span>
         {/* Paid plans buy credit packs or upgrade on the billing page (ADR 0317). */}
@@ -315,12 +362,7 @@ function UsageWindow({
       : formatUsdCents(window.cost.usedUsdCents, true) +
         " / " +
         formatUsdCents(window.cost.limitUsdCents, false);
-  const label = window.label
-    .replace(/^Five-hour limit$|^5 hours$/u, "5h")
-    .replace(/^Weekly limit$|^Weekly/u, "7d")
-    .replace(/^Daily limit$/u, "1d")
-    .replace(/^Plan usage$/u, "plan")
-    .replace(/^On-demand spend$/u, "spend");
+  const { prefix, label } = rowLabel(window.label);
   return (
     <button
       type="button"
@@ -333,6 +375,7 @@ function UsageWindow({
       <UsageLine
         last={last}
         label={label}
+        prefix={prefix}
         usedPercent={window.usedPercent}
         detail={countdown ?? "—"}
       />
@@ -468,6 +511,31 @@ function accountName(account: UsageProvider): string | null {
   return (
     account.accountLabel ??
     (account.usage?.status === "ok" ? account.usage.accountEmail : null)
+  );
+}
+
+/** Agents whose accounts live on Settings → Agents → Accounts (the Accounts plugin). */
+const ACCOUNT_AGENTS = new Set(["claude-code", "codex", "acp-cursor"]);
+
+/** A quiet grey "+" at the end of an agent's row: opens the Accounts page on that agent. */
+function AddAccountButton({
+  providerId,
+  name,
+}: {
+  providerId: string;
+  name: string;
+}) {
+  if (!ACCOUNT_AGENTS.has(providerId)) return null;
+  const label = `Add ${name} account`;
+  return (
+    <UrlLink
+      href={`/settings/plugins/accounts?agent=${encodeURIComponent(providerId)}`}
+      title={label}
+      aria-label={label}
+      className="flex size-[18px] shrink-0 items-center justify-center rounded-[4px] bg-sidebar-accent text-muted-foreground no-underline hover:text-sidebar-foreground"
+    >
+      <Icon name="Plus" aria-hidden="true" className="size-3" />
+    </UrlLink>
   );
 }
 
@@ -877,29 +945,43 @@ export function ProviderUsageStatusContent({
           />
         )}
         {providers.map((provider) => (
-          <section key={provider.id} aria-label={provider.displayName}>
-            <h2 className="flex min-w-0 items-center gap-2 font-normal">
-              <ProviderIcon
-                providerKind="agent"
-                provider={provider}
-                fallback="Bot"
-                className="size-3 shrink-0"
+          <section
+            key={provider.id}
+            aria-label={provider.displayName}
+            style={labelColumnStyle(
+              provider.accounts.flatMap((account) =>
+                account.usage?.status === "ok" ? account.usage.windows : [],
+              ),
+            )}
+          >
+            <div className="flex min-w-0 items-center gap-2">
+              <h2 className="flex min-w-0 flex-1 items-center gap-2 font-normal">
+                <ProviderIcon
+                  providerKind="agent"
+                  provider={provider}
+                  fallback="Bot"
+                  className="size-3 shrink-0"
+                />
+                <span className="shrink-0 lowercase text-primary-text">
+                  {provider.displayName}
+                </span>
+                <AccountChip
+                  accounts={provider.accounts}
+                  refresh={() =>
+                    void refreshUsage({
+                      force: false,
+                      machineIds:
+                        activeMachineId === null ? null : [activeMachineId],
+                      maxAgeMs: CARD_MAX_AGE_MS,
+                    })
+                  }
+                />
+              </h2>
+              <AddAccountButton
+                providerId={provider.id}
+                name={provider.displayName}
               />
-              <span className="shrink-0 lowercase text-primary-text">
-                {provider.displayName}
-              </span>
-              <AccountChip
-                accounts={provider.accounts}
-                refresh={() =>
-                  void refreshUsage({
-                    force: false,
-                    machineIds:
-                      activeMachineId === null ? null : [activeMachineId],
-                    maxAgeMs: CARD_MAX_AGE_MS,
-                  })
-                }
-              />
-            </h2>
+            </div>
             {(provider.accounts.some((account) => account.accountId)
               ? [
                   provider.accounts.find((account) => account.inUse) ??

@@ -2,6 +2,7 @@ pub mod api;
 pub mod computer_use;
 pub mod config;
 pub mod gpu;
+pub mod helper;
 pub mod mac;
 mod observability;
 pub mod preview;

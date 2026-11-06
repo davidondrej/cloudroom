@@ -105,6 +105,46 @@ describe("room-cli thread tell command output", () => {
     );
   });
 
+  it.each([
+    [
+      "was not sent",
+      async () =>
+        new Response(JSON.stringify({ code: "caller_proof_required" }), {
+          status: 401,
+        }),
+      "Error: The message was not sent; sending it again is safe. HTTP 401",
+    ],
+    [
+      "was not sent when Cloudroom is down",
+      () =>
+        Promise.reject(
+          new TypeError("fetch failed", {
+            cause: Object.assign(new Error("connect ECONNREFUSED"), {
+              code: "ECONNREFUSED",
+            }),
+          }),
+        ),
+      "Error: The message was not sent; sending it again is safe. Cannot connect to Cloudroom server.",
+    ],
+    [
+      "may already have been sent",
+      () => Promise.reject(new TypeError("fetch failed")),
+      "Error: Cloudroom did not confirm the message, so it may already have been sent (fetch failed). Check `room-cli thread show thread-x` before sending it again.",
+    ],
+  ])(
+    "room-cli thread tell says a failed message %s",
+    async (_, post, error) => {
+      stubTellApi({ "v1.threads.:id.send.$post": post });
+
+      await expect(
+        runCommand(["thread", "tell", "thread-x", "hello"], register),
+      ).rejects.toThrow("process.exit:1");
+      expect(String(vi.mocked(console.error).mock.calls[0]?.[0])).toContain(
+        error,
+      );
+    },
+  );
+
   it("room-cli thread tell --mode queue preserves non-urgent queued delivery", async () => {
     const post = vi.fn(async () => ({ ok: true }));
     stubTellApi({ "v1.threads.:id.send.$post": post });

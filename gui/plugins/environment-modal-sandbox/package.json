@@ -1,6 +1,10 @@
 {
   "name": "bb-plugin-environment-modal-sandbox",
   "version": "0.1.0",
+  "author": {
+    "name": "BB",
+    "url": "https://github.com/get-bb/bb"
+  },
   "private": true,
   "type": "module",
   "description": "Run Cloudroom threads in on-demand, isolated sandboxes",

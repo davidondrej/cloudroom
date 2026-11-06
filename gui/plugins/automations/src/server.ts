@@ -7,7 +7,9 @@ import {
   closeAutomationRunForSettledThread,
   disableAutomationsForDeletedThreadEvent,
   errorMessage,
+  reconcileArchivePausedAutomations,
   reconcileRunningAutomationRuns,
+  resumeAutomationsForUnarchivedThread,
 } from "./run.js";
 import { registerAutomationCli } from "./cli.js";
 import { publishAutomationChange, REVIEW_SIGNAL_PROJECT } from "./realtime.js";
@@ -69,7 +71,10 @@ export default async function plugin(bb: BbPluginApi) {
     reviewChanged(thread.id);
   });
   bb.events.on("thread.archived", ({ thread }) => reviewChanged(thread.id));
-  bb.events.on("thread.unarchived", ({ thread }) => reviewChanged(thread.id));
+  bb.events.on("thread.unarchived", ({ thread }) => {
+    reviewChanged(thread.id);
+    resumeAutomationsForUnarchivedThread(bb, db, thread.id);
+  });
 
   bb.events.on("thread.deleted", ({ thread }) => {
     disableAutomationsForDeletedThreadEvent(bb, db, thread.id);
@@ -79,6 +84,7 @@ export default async function plugin(bb: BbPluginApi) {
     async start(signal) {
       try {
         await reconcileRunningAutomationRuns(bb, db);
+        await reconcileArchivePausedAutomations(bb, db);
       } catch (error) {
         bb.log.error(
           `Automation startup reconciliation failed: ${errorMessage(error)}`,

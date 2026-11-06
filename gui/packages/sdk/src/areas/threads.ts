@@ -43,6 +43,7 @@ import type {
   ThreadPendingInteractionsResponse,
   ThreadQueuedMessageListResponse,
   ThreadResponse,
+  UpdateThreadResponse,
   ThreadPluginMetadataResponse,
   ThreadSearchResponse,
   ThreadStorageFileListResponse,
@@ -300,6 +301,11 @@ export interface ThreadRetryArgs {
 export interface ThreadActionArgs {
   signal?: AbortSignal;
   threadId: string;
+}
+
+export interface ThreadArchiveAllArgs extends ThreadActionArgs {
+  /** Also archive running children. Without it, live children stay open. */
+  includeLive?: boolean;
 }
 
 export interface ThreadUnarchiveArgs extends ThreadActionArgs {
@@ -561,7 +567,7 @@ export interface ThreadQueueArea {
 
 export interface ThreadsArea {
   archive(args: ThreadActionArgs): Promise<ThreadArchiveResult>;
-  archiveAll(args: ThreadActionArgs): Promise<ThreadArchiveAllResult>;
+  archiveAll(args: ThreadArchiveAllArgs): Promise<ThreadArchiveAllResult>;
   childSummary(args: ThreadStatusArgs): Promise<ThreadChildSummaryResult>;
   compact(args: ThreadActionArgs): Promise<ThreadCompactResult>;
   cancelPlan(args: ThreadActionArgs): Promise<ThreadBannerActionResult>;
@@ -626,7 +632,7 @@ export interface ThreadsArea {
   storagePaths(args: ThreadStoragePathsArgs): Promise<ThreadStoragePathsResult>;
   unarchive(args: ThreadUnarchiveArgs): Promise<ThreadUnarchiveResult>;
   unpin(args: ThreadActionArgs): Promise<ThreadMutationResult>;
-  update(args: ThreadUpdateArgs): Promise<ThreadMutationResult>;
+  update(args: ThreadUpdateArgs): Promise<UpdateThreadResponse>;
   wait(args: ThreadWaitArgs): Promise<ThreadWaitResult>;
 }
 
@@ -883,11 +889,12 @@ export function createThreadsArea(args: CreateSdkAreaArgs): ThreadsArea {
       ),
     );
   const archiveAll = async (
-    input: ThreadActionArgs,
+    input: ThreadArchiveAllArgs,
   ): Promise<ThreadArchiveAllResult> =>
     transport.readJson(
       transport.api.v1.threads[":id"]["archive-all"].$post({
         param: { id: input.threadId },
+        ...(input.includeLive ? { query: { includeLive: "true" } } : {}),
       }),
     );
   const events: ThreadEventsArea = {

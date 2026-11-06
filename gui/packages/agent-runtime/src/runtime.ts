@@ -22,6 +22,7 @@ import {
   getJsonRpcStringParam,
   ignoredJsonRpcResultSchema,
   parseJsonRpcLine,
+  sendJsonRpc,
   sendJsonRpcError,
   sendJsonRpcRequest,
   settleJsonRpcResponse,
@@ -229,6 +230,8 @@ interface RequireProviderRequestPlanArgs {
 }
 
 const DEFAULT_THREAD_CREATION_REQUEST_TIMEOUT_MS = 2 * 60_000;
+/** Notification (no reply): a Stop or Archive waits behind this thread's command. */
+const THREAD_STOP_REQUESTED_METHOD = "thread/stopRequested";
 const FAILED_CONSTRUCTION_RELEASE_TIMEOUT_MS = 5_000;
 
 async function delay(ms: number): Promise<void> {
@@ -2137,21 +2140,21 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
           } catch (error) {
             if (
               error instanceof JsonRpcResponseError &&
-              error.recovery?.kind === "staleTurn"
+              (error.recovery?.kind === "staleTurn" ||
+                error.code === BRIDGE_JSON_RPC_ERRORS.NO_ACTIVE_TURN)
             ) {
               options.onStderr?.(
-                `Dropping stale steer for thread "${threadId}": ${error.recovery.message}`,
+                `Dropping stale steer for thread "${threadId}": ${error.recovery?.message ?? error.message}`,
                 threadId,
               );
-              turnState.clearThread(threadId);
-              return { status: "stale", activeTurnId: null };
-            }
-            if (
-              error instanceof JsonRpcResponseError &&
-              error.code === BRIDGE_JSON_RPC_ERRORS.NO_ACTIVE_TURN
-            ) {
-              turnState.clearThread(threadId);
-              return { status: "stale", activeTurnId: null };
+              // A provider can start its next turn before the old steer's reply.
+              if (turnState.getActiveTurnId(threadId) === expectedTurnId) {
+                turnState.clearThread(threadId);
+              }
+              return {
+                status: "stale",
+                activeTurnId: turnState.getActiveTurnId(threadId),
+              };
             }
             throw error;
           }
@@ -2547,6 +2550,20 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
 
     hasThread(threadId) {
       return threadIdentityRegistry.getProviderSession(threadId) !== null;
+    },
+
+    notifyThreadStopRequested(threadId) {
+      let proc: ProviderProcess;
+      try {
+        proc = requireProviderProcessForThread(threadId);
+      } catch {
+        return;
+      }
+      sendJsonRpc(proc.child, {
+        jsonrpc: "2.0",
+        method: THREAD_STOP_REQUESTED_METHOD,
+        params: { threadId },
+      });
     },
 
     getLiveThreadIds() {

@@ -155,11 +155,13 @@ describe("getProviderStates", () => {
   it("asks each provider bridge and preserves model-picker order", async () => {
     await withTestHarness(async (harness) => {
       const { host, session } = seedHostSession(harness.deps);
+      const asked: string[] = [];
       registerHostRpcResponder(harness, {
         hostId: host.id,
         sessionId: session.id,
         handle: (request) => {
           if (request.command.type === "provider.health") {
+            asked.push(request.command.providerId);
             return {
               ok: true,
               result: {
@@ -190,6 +192,17 @@ describe("getProviderStates", () => {
         providerId: "codex",
         status: "ready",
       });
+
+      // One provider is asked alone, so a slow unrelated bridge can't delay it.
+      asked.length = 0;
+      const codex = await getProviderStates(harness.deps, {
+        hostId: host.id,
+        providerId: "codex",
+      });
+      expect(codex.providers.map((provider) => provider.providerId)).toEqual([
+        "codex",
+      ]);
+      expect(asked).toEqual(["codex"]);
     });
   });
 

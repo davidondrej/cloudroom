@@ -540,10 +540,21 @@ async function closeThreadSession(args: {
       }
       await retryUnconfirmedSessionStops(args.threadId);
     })
+    .then(
+      () => {
+        if (threadAttachments.get(args.threadId) === attachment) {
+          threadAttachments.delete(args.threadId);
+        }
+      },
+      (error: unknown) => {
+        // The host keeps a thread whose stop failed, so it stays attached
+        // with no Claude running, and its next turn resumes the session.
+        attachment.closing = false;
+        attachment.residentSession = null;
+        throw error;
+      },
+    )
     .finally(() => {
-      if (threadAttachments.get(args.threadId) === attachment) {
-        threadAttachments.delete(args.threadId);
-      }
       closingSessions.delete(args.threadId);
     });
   closingSessions.set(args.threadId, closePromise);
@@ -559,6 +570,7 @@ function holdUnconfirmedSessionStop(
   unconfirmedSessionStops.set(threadId, sessions);
 }
 
+/** Stops this thread's earlier Claudes again until each stop is confirmed. */
 async function retryUnconfirmedSessionStops(threadId: string): Promise<void> {
   const sessions = unconfirmedSessionStops.get(threadId);
   if (!sessions) return;
@@ -572,13 +584,17 @@ async function retryUnconfirmedSessionStops(threadId: string): Promise<void> {
   const failure = results.find(
     (result): result is PromiseRejectedResult => result.status === "rejected",
   );
-  if (failure) {
-    const message =
-      failure.reason instanceof Error
-        ? failure.reason.message
-        : String(failure.reason);
-    throw new Error(`${message} Restart Cloudroom to try again.`);
+  if (!failure) return;
+  if ([...sessions].some((session) => session.isRunning())) {
+    throw new Error(
+      "An earlier Claude process for this thread is still running, and Cloudroom is stopping it. Try again in a moment.",
+    );
   }
+  const message =
+    failure.reason instanceof Error
+      ? failure.reason.message
+      : String(failure.reason);
+  throw new Error(`${message} Restart Cloudroom to try again.`);
 }
 
 async function closeThreadSessionsGracefully(message: string): Promise<void> {
@@ -590,6 +606,7 @@ async function closeThreadSessionsGracefully(message: string): Promise<void> {
 }
 
 async function closeReplacedThreadSession(threadId: string): Promise<void> {
+  const attachment = threadAttachments.get(threadId);
   const close = closeThreadSession({
     graceful: false,
     message: "Thread session replaced while awaiting permission approval",
@@ -597,6 +614,10 @@ async function closeReplacedThreadSession(threadId: string): Promise<void> {
     threadId,
   });
   await (process.platform === "win32" ? close.catch(() => {}) : close);
+  // A failed close keeps the old attachment; its replacement takes over now.
+  if (threadAttachments.get(threadId) === attachment) {
+    threadAttachments.delete(threadId);
+  }
 }
 
 function permissionPathCovers(
@@ -1406,7 +1427,9 @@ async function getWritableThreadSession(
   }
   const threadSession = attachment.residentSession;
   if (!threadSession) {
-    return undefined;
+    return intent === "new-turn"
+      ? resumeMissingResidentSession(threadId, attachment)
+      : undefined;
   }
   const replacement: ClaudeSessionRestart | null = threadSession.streamEnded
       ? {
@@ -1425,6 +1448,31 @@ async function getWritableThreadSession(
     threadId,
     threadSession,
   });
+}
+
+/**
+ * An attachment with no Claude running (after a failed stop or start)
+ * resumes its same Claude session once, on its next turn.
+ */
+async function resumeMissingResidentSession(
+  threadId: string,
+  attachment: ThreadAttachment,
+): Promise<ThreadSession | undefined> {
+  const providerThreadId = attachment.providerThreadId;
+  if (!providerThreadId) return undefined;
+  await retryUnconfirmedSessionStops(threadId);
+  if (threadAttachments.get(threadId) !== attachment || attachment.closing) {
+    return undefined;
+  }
+  if (attachment.residentSession) return attachment.residentSession;
+  attachment.residentSession = createThreadSession(attachment);
+  const threadSession = startResidentThreadSession(
+    attachment,
+    providerThreadId,
+  );
+  sendThreadIdentity(threadId, providerThreadId);
+  sendSessionReset(threadId);
+  return threadSession;
 }
 
 function getAuthenticationFailureRestartReason(
@@ -2409,6 +2457,11 @@ async function handleThreadResume(
     await closeReplacedThreadSession(threadId);
   }
 
+  if (unconfirmedSessionStops.has(threadId)) {
+    await retryUnconfirmedSessionStops(threadId);
+    // Another request may have attached this thread while this one waited.
+    if (threadAttachments.has(threadId)) return handleThreadResume(id, params);
+  }
   attachThreadSession(id, params, requestedProviderThreadId, true);
 }
 

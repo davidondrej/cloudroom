@@ -390,6 +390,27 @@ it("moving back to the VM: new threads start on the VM while sandbox threads sta
   }
 });
 
+it.each([
+  { mode: { sandboxes: true, plan: "free" }, plan: "free", usage: true, queue: null },
+  { mode: { sandboxes: true, plan: "free", queue: { position: 3, total: 9 } }, plan: "free", usage: false, queue: { position: 3, total: 9, regionBlocked: false } },
+])("a sandbox-only account with no Cloud threads loads its plan, usage and queue from status alone (#864) %#", async ({ mode, plan, usage, queue }) => {
+  const harness = await createTestAppHarness();
+  const service = cloudroom(harness.deps);
+  const asked: string[] = [];
+  const website = createServer(async (req, res) => {
+    const input = await body(req);
+    asked.push(input.action);
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify(input.action === "mode" ? mode : input.action === "usage" ? { plan: "free", credits: 5, credits_limit: 10 } : {}));
+  });
+  try {
+    await service.configure(null, { id: "11111111-1111-4111-8111-111111111111", email: "sandbox@example.com" }, undefined, await listen(website), "a".repeat(64));
+    await vi.waitFor(async () => expect(await service.status()).toMatchObject({ plan, cloudQueue: queue, planUsage: usage ? expect.objectContaining({ plan: "free", credits: 5 }) : null }));
+    await service.status();
+    expect(asked.filter(action => action === "mode")).toHaveLength(1);
+  } finally { service.stop(); website.close(); await harness.cleanup(); }
+});
+
 it("sends a new thread's first message before its project copy starts, so a slow upload can't hold it back", async () => {
   const folder = await mkdtemp(join(tmpdir(), "cloudroom-copy-order-"));
   await writeFile(join(folder, "notes.txt"), "small project not on GitHub");

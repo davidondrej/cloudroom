@@ -614,16 +614,23 @@ export async function createHostDaemonApp(
     },
     onProcessExit: (info) => {
       const threadIds = info.threads.map((thread) => thread.threadId);
-      if (!info.expected && info.stderr) {
+      if (!info.expected) {
         options.logger.warn(
           {
             providerId: info.providerId,
+            bridgePid: info.pid,
             threadIds,
+            activeThreadIds: info.threads
+              .filter(
+                (thread) =>
+                  thread.activeTurnId !== null || thread.pendingTurnStart,
+              )
+              .map((thread) => thread.threadId),
             code: info.code,
             signal: info.signal,
             stderr: info.stderr,
           },
-          "Unexpected provider process exited with stderr",
+          "Provider process exited unexpectedly",
         );
       }
       if (threadIds.length === 0) {

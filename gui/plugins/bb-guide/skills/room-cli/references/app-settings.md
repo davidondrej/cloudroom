@@ -144,7 +144,7 @@ This blocks common catastrophic shell commands; it is not a sandbox.
   display and whether it comes from your setting or the provider default.
 - `room-cli settings completed-turns <provider-id> <collapse|flat|default>` sets the
   display for one provider; `default` removes your setting so the provider
-  default applies again. Settings → Providers has the same switch per
+  default applies again. Settings → Agents → Harness has the same switch per
   provider.
 - The overrides are stored in `providerCompletedTurnDisplay`, a map of provider
   ID to `collapse` or `flat`. The setting applies to every thread of that

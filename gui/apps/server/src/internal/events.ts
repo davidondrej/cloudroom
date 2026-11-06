@@ -496,9 +496,8 @@ async function applyEventEffects(
         if (outcome.applied) {
           addParentTurnNotificationFollowUp({
             failedParentNotificationThreadIds,
-            failureReason: [event.message, event.detail]
-              .filter((part) => part !== undefined && part !== "")
-              .join(": "),
+            // The detail is the provider's raw stderr, which can hold secrets.
+            failureReason: event.message,
             followUps,
             thread,
             turnStatus: "failed",

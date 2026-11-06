@@ -703,7 +703,8 @@ function buildCodexResponsesRequest(
     model: command.model,
     instructions:
       "Follow the user prompt and respond with structured JSON that matches the requested schema.",
-    reasoning: { effort: command.reasoningEffort },
+    // Not every Codex model takes "xhigh", so it gets the highest level they all share.
+    reasoning: { effort: command.reasoningEffort === "xhigh" ? "high" : command.reasoningEffort },
     store: false,
     stream: true,
     input: [

@@ -99,6 +99,8 @@ interface SendThreadMessageArgs {
     forkSourceProviderThreadId: string | null;
     onCommandSettled?: () => void | Promise<void>;
   };
+  /** Hears once whether the host started the new turn (null) or refused it. */
+  onStartSettled?: (error: Error | null) => void;
   payload: SendThreadMessagePayload;
   thread: Thread;
   trigger: SendThreadMessageTrigger;
@@ -743,9 +745,10 @@ async function sendThreadMessageWithoutContextClear(
       command: command.command,
       hostId: readyEnvironment.hostId,
       timeoutMs: LIVE_DAEMON_COMMAND_TIMEOUT_MS,
-      ...(args.historyReplacement?.onCommandSettled !== undefined
-        ? { onSettled: args.historyReplacement.onCommandSettled }
-        : {}),
+      onSettled: async (error) => {
+        await args.historyReplacement?.onCommandSettled?.();
+        args.onStartSettled?.(error);
+      },
       onError: ({ error }) => {
         deps.logger.warn(
           { err: error, threadId: thread.id },

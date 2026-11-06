@@ -2,6 +2,20 @@
 
 Also on [cloudroom.dev/changelog](https://www.cloudroom.dev/changelog).
 
+## 143
+
+All your logins on one page (2026-11-06)
+
+### Changes
+
+- Every Claude Code, Codex, and Cursor account now lives on one Accounts page under Settings → Agents.
+- Quitting while agents are working asks first, so a stray Cmd+Q never stops them.
+- When your other Mac drops, a reconnect dialog replaces the offline banner and brings you back on its own.
+- Check for Updates… is now in the app menu.
+- Codex follow-ups no longer fail after a turn ends, and a stuck Codex turn can no longer run forever.
+- Subagent reports reach their parent even when they arrive mid-turn or during a brief disconnect.
+- Security fixes.
+
 ## 142
 
 Forks get their own worktree (2026-11-05)

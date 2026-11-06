@@ -2,6 +2,8 @@ import { COMPUTER_TITLE } from "@cloudroom/domain/computer-name";
 import { useCallback, useEffect, useState } from "react";
 import {
   definePluginApp,
+  experimental_ProviderIcon as ProviderIcon,
+  experimental_useProviders as useProviders,
   useBbNavigate,
   useRealtime,
   useRpc,
@@ -558,20 +560,96 @@ function AccountsSection({
   );
 }
 
+const AGENTS: readonly { provider: Provider; name: string }[] = [
+  { provider: "claude-code", name: "Claude Code" },
+  { provider: "codex", name: "Codex" },
+  { provider: "acp-cursor", name: "Cursor" },
+];
+
+/** Settings → Agents → Accounts: pick an agent, then manage its accounts. */
+function AccountsPage() {
+  const rpc = useRpc<typeof accountsRpcContract>();
+  const { providers } = useProviders();
+  // The usage box's "+" links here with ?agent=<provider>.
+  const [provider, setProvider] = useState<Provider>(() => {
+    const agent = new URLSearchParams(window.location.search).get("agent");
+    return AGENTS.find((item) => item.provider === agent)?.provider ?? "claude-code";
+  });
+  const [counts, setCounts] = useState<Partial<Record<Provider, number>>>({});
+  const loadCounts = useCallback(() => {
+    for (const { provider: id } of AGENTS)
+      rpc.call("accounts.list", { provider: id }).then(
+        (accounts) =>
+          setCounts((current) => ({
+            ...current,
+            [id]: accounts.filter((account) => !account.needsSignIn).length,
+          })),
+        () => undefined,
+      );
+  }, [rpc]);
+  useEffect(loadCounts, [loadCounts]);
+  useRealtime(ACCOUNTS_CHANGED, loadCounts);
+  const name = AGENTS.find((agent) => agent.provider === provider)!.name;
+  return (
+    <div className="space-y-5">
+      <div
+        role="group"
+        aria-label="Agent"
+        className="inline-flex flex-wrap gap-1 rounded-lg border border-border p-1"
+      >
+        {AGENTS.map((agent) => (
+          <button
+            key={agent.provider}
+            type="button"
+            aria-pressed={provider === agent.provider}
+            onClick={() => setProvider(agent.provider)}
+            className={cn(
+              "flex items-center gap-2 rounded-md px-3 py-1.5 text-sm",
+              provider === agent.provider
+                ? "bg-accent text-foreground"
+                : "text-muted-foreground hover:text-foreground",
+            )}
+          >
+            <ProviderIcon
+              providerKind="agent"
+              provider={
+                providers.find((info) => info.id === agent.provider) ?? {
+                  id: agent.provider,
+                }
+              }
+              fallback="Bot"
+              className="size-4 shrink-0"
+              aria-hidden
+            />
+            {agent.name}
+            {counts[agent.provider] ? (
+              <span className="text-xs tabular-nums text-subtle-foreground">
+                {counts[agent.provider]}
+              </span>
+            ) : null}
+          </button>
+        ))}
+      </div>
+      <AccountsSection
+        key={provider}
+        provider={provider}
+        title={`${name} accounts`}
+      />
+      {provider === "acp-cursor" ? (
+        <p className="text-xs text-subtle-foreground">
+          Grok signs in with your X subscription. One login covers it, so there's nothing to add here.
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
 export default definePluginApp((app) => {
+  // Settings → Agents → Accounts, the one place for every agent's accounts.
   app.slots.settingsSection({
-    id: "claude-code",
-    component: () => <AccountsSection provider="claude-code" />,
-  });
-  app.slots.settingsSection({
-    id: "codex",
-    component: () => <AccountsSection provider="codex" />,
-  });
-  // Settings → Agents → ACP, which holds Cursor.
-  app.slots.settingsSection({
-    id: "acp",
-    component: () => (
-      <AccountsSection provider="acp-cursor" title="Cursor accounts" />
-    ),
+    id: "accounts",
+    title: "Agent accounts",
+    description: "Add and switch Claude Code, Codex, and Cursor subscriptions.",
+    component: AccountsPage,
   });
 });

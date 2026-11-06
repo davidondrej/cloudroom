@@ -681,9 +681,10 @@ export function deleteAutomation(
 
 export function listDueAutomations(
   db: Db,
-  args: { now: number; limit: number },
+  args: { now: number; limit: number; overdueBefore?: number },
 ): AutomationRow[] {
   if (args.limit <= 0) return [];
+  const overdueBefore = args.overdueBefore ?? Number.MIN_SAFE_INTEGER;
   const pageSize = Math.max(args.limit, 100);
   const query = db.prepare(
     `SELECT
@@ -693,14 +694,21 @@ export function listDueAutomations(
        AND trigger_type IN ('schedule', 'once')
        AND next_run_at IS NOT NULL
        AND next_run_at <= ?
-     ORDER BY next_run_at ASC, created_at ASC, id ASC
+       AND NOT EXISTS (
+         SELECT 1 FROM automation_runs r
+         WHERE r.automation_id = automations.id AND r.status = 'running'
+       )
+     ORDER BY MAX(next_run_at, COALESCE((
+         SELECT MAX(r.finished_at) FROM automation_runs r
+         WHERE r.automation_id = automations.id
+       ), 0)) < ? ASC, priority ASC, next_run_at ASC, created_at ASC, id ASC
      LIMIT ? OFFSET ?`,
   );
   const due: AutomationRow[] = [];
   let offset = 0;
   while (due.length < args.limit) {
     const page = query
-      .all(args.now, pageSize, offset)
+      .all(args.now, overdueBefore, pageSize, offset)
       .map(requiredAutomationRow);
     if (page.length === 0) break;
     offset += page.length;
@@ -848,11 +856,12 @@ function recordAutomationFailure(
        END,
        consecutive_failures = @consecutiveFailures,
        last_run_status = 'failed',
-       last_error = @lastError,
+       last_error = CASE WHEN enabled = 0 AND last_error = @archivedError THEN last_error ELSE @lastError END,
        updated_at = @now
      WHERE id = @automationId`,
   ).run({
     automationId: args.automationId,
+    archivedError: THREAD_ARCHIVED_ERROR,
     paused: boolToInt(paused),
     pausedRetryAt: paused ? pausedRetryAt(consecutiveFailures, args.now) : null,
     retryAt,
@@ -932,11 +941,12 @@ export function closeAutomationRun(
              WHEN @threadId IS NOT NULL THEN @threadId
              ELSE last_run_thread_id
            END,
-           last_error = NULL,
+           last_error = CASE WHEN enabled = 0 AND last_error = @archivedError THEN last_error ELSE NULL END,
            updated_at = @now
          WHERE id = @automationId`,
       ).run({
         automationId: existing.automationId,
+        archivedError: THREAD_ARCHIVED_ERROR,
         status: args.status,
         threadId: args.threadId ?? null,
         keep: args.keepFailureStreak ? 1 : 0,
@@ -1138,28 +1148,70 @@ export function listAutomationRuns(
   return rows.map(requiredRunRow);
 }
 
+export const THREAD_ARCHIVED_ERROR =
+  "Paused because its thread is archived. Unarchive the thread to resume this loop.";
+
 export function disableAutomationsForDeletedThread(
   db: Db,
-  args: { threadId: string; now: number },
+  args: { threadId: string; now: number; lastError?: string; alsoId?: string },
 ): AutomationRow[] {
+  const params = {
+    threadId: args.threadId,
+    now: args.now,
+    lastError: args.lastError ?? "target thread deleted",
+    alsoId: args.alsoId ?? null,
+    archivedError: THREAD_ARCHIVED_ERROR,
+  };
   db.prepare(
     `UPDATE automations SET
        enabled = 0,
        next_run_at = NULL,
-       last_error = 'target thread deleted',
+       last_error = @lastError,
        updated_at = @now
-     WHERE target_thread_id = @threadId AND enabled = 1`,
-  ).run(args);
+     WHERE target_thread_id = @threadId
+       AND (enabled = 1 OR id = @alsoId OR last_error = @archivedError)
+       AND (@lastError != @archivedError OR id = @alsoId OR NOT EXISTS (
+         SELECT 1 FROM automation_runs r
+         WHERE r.automation_id = automations.id AND r.status = 'running'
+       ))`,
+  ).run(params);
+  return listThreadAutomationsPausedFor(db, params);
+}
+
+export function listThreadAutomationsPausedFor(
+  db: Db,
+  args: { threadId: string; lastError: string },
+): AutomationRow[] {
   return db
     .prepare(
       `SELECT
          ${AUTOMATION_COLUMNS}
        FROM automations
-       WHERE target_thread_id = @threadId AND last_error = 'target thread deleted'
+       WHERE target_thread_id = @threadId AND enabled = 0 AND last_error = @lastError
        ORDER BY updated_at DESC`,
     )
-    .all(args)
+    .all({ threadId: args.threadId, lastError: args.lastError })
     .map(requiredAutomationRow);
+}
+
+export function listArchivePausedThreadIds(db: Db): string[] {
+  return (
+    db
+      .prepare(
+        `SELECT DISTINCT target_thread_id AS threadId FROM automations
+         WHERE enabled = 0 AND last_error = ? AND target_thread_id IS NOT NULL`,
+      )
+      .all(THREAD_ARCHIVED_ERROR) as { threadId: string }[]
+  ).map((row) => row.threadId);
+}
+
+export function lastRunFinishedAt(db: Db, automationId: string): number {
+  const row = db
+    .prepare(
+      `SELECT MAX(finished_at) AS at FROM automation_runs WHERE automation_id = ?`,
+    )
+    .get(automationId) as { at: number | null } | undefined;
+  return row?.at ?? 0;
 }
 
 export interface ReviewRunRow extends AutomationRunRow {

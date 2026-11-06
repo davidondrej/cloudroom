@@ -12,6 +12,10 @@ import { captureUserMessageSentTelemetry, sendThreadMessage } from "./thread-sen
 interface AcceptThreadSendRequestArgs {
   payload: SendMessageRequest;
   thread: Thread;
+  /** Local only: hears whether the host started a sent message's turn. */
+  onStartSettled?: (error: Error | null) => void;
+  /** Local only: throw to cancel a dispatch that hasn't happened yet. */
+  beforeDispatch?: () => void;
 }
 
 export async function acceptThreadSendRequest(
@@ -49,6 +53,8 @@ export async function acceptThreadSendRequest(
     originPluginId: null,
     startedOnBehalfOf: null,
     trigger: "user",
+    onStartSettled: args.onStartSettled,
+    beforeDispatch: args.beforeDispatch,
   });
   if (outcome.kind === "dispatched") {
     return { ok: true, delivery: "sent" };

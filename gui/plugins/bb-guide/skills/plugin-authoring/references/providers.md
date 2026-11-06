@@ -128,7 +128,7 @@ reserved ahead of time. Registrations replace wholesale on reload like every
 other surface. Disabling the plugin removes the provider (open threads show a
 provider-unavailable state instead of erroring). The provider picker lists
 providers in plugin install order (bundled first-party plugins first); the
-user reorders them and picks a default in Settings → Providers
+user reorders them and picks a default in Settings → Agents → Harness
 (`room-cli settings general providerOrder '["my-agent","codex"]'` and
 `room-cli settings general defaultProviderId my-agent`).
 

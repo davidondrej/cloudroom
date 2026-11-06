@@ -45,6 +45,7 @@ export interface AgentRuntimeProcessExitThreadState {
 
 export interface AgentRuntimeProcessExitInfo {
   providerId: string;
+  pid?: number;
   threads: AgentRuntimeProcessExitThreadState[];
   code: number | null;
   expected: boolean;
@@ -362,6 +363,9 @@ export interface AgentRuntime {
   ): Promise<ReapIdleProviderSessionsResult>;
 
   hasThread(threadId: string): boolean;
+
+  /** Tells the thread's bridge that a Stop or Archive waits behind its current command. */
+  notifyThreadStopRequested?(threadId: string): void;
 
   getLiveThreadIds(): string[];
 

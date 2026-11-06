@@ -1,7 +1,7 @@
 import type {
   SystemProviderState,
+  SystemProviderStatesQuery,
   SystemProviderStatesResponse,
-  SystemProvidersQuery,
 } from "@cloudroom/server-contract";
 import type { ProviderInfo } from "@cloudroom/domain";
 import type { AppDeps } from "../../types.js";
@@ -135,14 +135,24 @@ async function getProviderState(
 
 export async function getProviderStates(
   deps: AppDeps,
-  query: SystemProvidersQuery,
+  query: SystemProviderStatesQuery,
 ): Promise<SystemProviderStatesResponse> {
   const hostId = resolveSystemLookupHostId(deps, query);
   const cwd =
     query.environmentId === undefined
       ? undefined
       : (requireEnvironment(deps.db, query.environmentId).path ?? undefined);
-  const providers = await listSystemProviderInfos(deps, { hostId });
+  // One provider is checked alone: listing would probe, and wait on, every other provider.
+  const { providerId } = query;
+  if (providerId !== undefined)
+    await deps.providerRegistry.whenProviderRegistered(providerId);
+  const one = providerId && deps.providerRegistry.get(providerId)?.info;
+  const providers =
+    providerId === undefined
+      ? await listSystemProviderInfos(deps, { hostId })
+      : one
+        ? [one]
+        : [];
   try {
     requireConnectedHostSession(deps, hostId);
   } catch (error) {

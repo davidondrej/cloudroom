@@ -107,10 +107,30 @@ function formatProviderProcessExitStatus(
   return "unknown status";
 }
 
+const KILL_SIGNALS = new Set([
+  "SIGKILL",
+  "SIGTERM",
+  "SIGINT",
+  "SIGHUP",
+  "SIGQUIT",
+]);
+
+// One process serves every thread of an environment on a provider, so a signal
+// exit names it and how many threads it took down. The sender is not known:
+// any program, the system or a Cloudroom cleanup can send a kill, and other
+// signals (SIGABRT, SIGSEGV...) mean the process crashed. The message reaches
+// parent threads, so it never carries stderr.
 function buildProviderProcessExitMessage(
   info: AgentRuntimeProcessExitInfo,
 ): string {
-  return `Provider "${info.providerId}" exited unexpectedly with ${formatProviderProcessExitStatus(info)}`;
+  if (!info.signal) {
+    return `Provider "${info.providerId}" exited unexpectedly with ${formatProviderProcessExitStatus(info)}`;
+  }
+  const count = info.threads.length;
+  const owner = `${info.pid === undefined ? "its process" : `process ${info.pid}`}, shared by ${count} thread${count === 1 ? "" : "s"},`;
+  return KILL_SIGNALS.has(info.signal)
+    ? `Provider "${info.providerId}" exited unexpectedly: ${owner} was killed with ${info.signal} (sender unknown).`
+    : `Provider "${info.providerId}" exited unexpectedly: ${owner} crashed with ${info.signal}.`;
 }
 
 function buildProviderProcessExitDetail(

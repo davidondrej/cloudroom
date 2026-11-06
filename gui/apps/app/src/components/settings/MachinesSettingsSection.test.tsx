@@ -586,7 +586,7 @@ describe("MachinesSettingsSection", () => {
 
     expect(await screen.findByText("MacBook Air")).toBeDefined();
     expect(screen.getByText("Not running threads yet")).toBeDefined();
-    expect(screen.getByText("Where your agents run")).toBeDefined();
+    expect(screen.getByText("Run threads on")).toBeDefined();
     fireEvent.click(screen.getByRole("button", { name: "Run threads here" }));
     await waitFor(() => {
       expect(vi.mocked(sdk.hosts.experimental_create)).toHaveBeenCalledWith(

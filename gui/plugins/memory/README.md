@@ -4,7 +4,7 @@ Cloudroom's official plugin for durable, progressively disclosed agent memory. I
 provides:
 
 Because this memory store works across providers, we recommend turning off
-provider-native memory under Settings → Providers while using it. That avoids
+provider-native memory on the Claude Code and Codex tabs in Settings → Agents while using it. That avoids
 duplicated or conflicting memories split between Codex, Claude Code, and Cloudroom.
 
 - plugin-private SQLite storage with append-only migrations;

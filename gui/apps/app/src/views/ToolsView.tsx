@@ -57,6 +57,7 @@ import {
   getPluginsRoutePath,
   getRootComposeRoutePath,
   isPluginsRoutePath,
+  isSettingsPluginsRoutePath,
 } from "@/lib/route-paths";
 import { getToolsOwnedCollectionRoutePath } from "@/components/tools/tools-navigation";
 import { cn } from "@cloudroom/shared-ui/lib/utils";
@@ -266,12 +267,19 @@ function PluginDetailToolView({ pluginId }: { pluginId: string }) {
   );
   const handleOpenCatalogPlugin = useCallback(
     (nextPluginId: string) => {
-      navigate({
-        pathname: getPluginDetailRoutePath({ pluginId: nextPluginId }),
-        search: location.search,
-      });
+      navigate(
+        isSettingsPluginsRoutePath(location.pathname)
+          ? getPluginDetailRoutePath({
+              pluginId: nextPluginId,
+              view: "installed",
+            })
+          : {
+              pathname: getPluginDetailRoutePath({ pluginId: nextPluginId }),
+              search: location.search,
+            },
+      );
     },
-    [location.search, navigate],
+    [location.pathname, location.search, navigate],
   );
 
   let detailContent: ReactNode;

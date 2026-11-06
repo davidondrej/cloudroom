@@ -58,6 +58,13 @@ const catalogBlockSchema = z
 
 const catalogFieldsSchema = z.record(z.string(), catalogBlockSchema);
 
+// A bundled plugin Cloudroom adapted from someone else names them in its
+// package.json `author`; the rest are Cloudroom's own.
+const bundledAuthorSchema = z
+  .object({ name: z.string().min(1), url: z.string().url().optional() })
+  .strict()
+  .default({ name: "Cloudroom" });
+
 export interface BundledPluginIdentity {
   name: string;
   pluginId: string;
@@ -262,7 +269,9 @@ export async function generateBbOfficialMarketplace(args: {
         description: manifest.bb.description,
         icon: marketplaceIcon(plugin.name, declaredIcon),
         tags: [],
-        author: { name: "Cloudroom" },
+        author: bundledAuthorSchema.parse(
+          (packageJson as { author?: unknown }).author,
+        ),
         source: { bundled: { plugin: plugin.name } },
         category: catalog.category,
         screenshots: catalog.screenshots,

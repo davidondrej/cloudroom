@@ -1,6 +1,10 @@
 {
   "name": "bb-plugin-provider-usage",
   "version": "0.1.0",
+  "author": {
+    "name": "BB",
+    "url": "https://github.com/get-bb/bb"
+  },
   "private": true,
   "type": "module",
   "description": "View provider usage in plugin settings and an optional sidebar footer card",

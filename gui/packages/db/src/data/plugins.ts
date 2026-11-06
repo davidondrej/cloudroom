@@ -50,45 +50,7 @@ export interface PluginUpdateState {
   statusDetail: string | null;
 }
 
-export interface InstalledPluginRow {
-  id: string;
-  source: string;
-  provenance: "builtin" | "direct" | "catalog";
-  catalogEntryId: string | null;
-  catalogMarketplaceName: string | null;
-  sourceKind: "path" | "builtin" | "npm" | "git";
-  sourcePath: string | null;
-  sourceBuiltinName: string | null;
-  sourceNpmPackage: string | null;
-  sourceNpmRegistry: string | null;
-  sourceNpmRequestedSpec: string | null;
-  sourceNpmSpecKind: "default" | "exact" | "tag" | "range" | null;
-  sourceGitUrl: string | null;
-  sourceGitSubdirectory: string | null;
-  sourceGitRequestedRef: string | null;
-  sourceGitRefKind: "branch" | "tag" | "commit" | null;
-  sourceGitRange: string | null;
-  sourceGitTagPrefix: string | null;
-  sourceGitResolvedTag: string | null;
-  npmResolvedVersion: string | null;
-  npmIntegrity: string | null;
-  gitResolvedCommit: string | null;
-  lastUpdateCheckAt: number | null;
-  availableCompatibleVersion: string | null;
-  newestIncompatibleVersion: string | null;
-  updateStatusDetail: string | null;
-  lastFailureVersion: string | null;
-  lastFailureAt: number | null;
-  lastFailureDetail: string | null;
-  activeArtifactId: string | null;
-  normalizationVersion: number;
-  rootDir: string;
-  version: string;
-  enabled: boolean;
-  removedAt: number | null;
-  installedAt: number;
-  updatedAt: number;
-}
+export type InstalledPluginRow = typeof installedPlugins.$inferSelect;
 
 export interface UpsertInstalledPluginInput {
   id: string;

@@ -58,6 +58,7 @@ export const APP_COMMAND_IDS = [
   "history.forward",
   "settings.open",
   "settings.openServers",
+  "settings.checkForUpdates",
   "sidebar.toggle",
   "panel.newTab",
   "panel.reopenClosedTab",

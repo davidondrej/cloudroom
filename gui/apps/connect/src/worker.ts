@@ -45,6 +45,7 @@ import {
   type Session,
 } from "./store.js";
 import { TUNNEL_ERROR_HEADER, TUNNEL_OFFLINE_HEADER, TunnelDO, type Env } from "./tunnel-do.js";
+import { RelayTimeout, timedDb, withTimeout } from "./timeout.js";
 
 export { TunnelDO };
 
@@ -98,13 +99,33 @@ function computerName(value: unknown): string | null {
   return value.replace(/[\u0000-\u001f\u007f]/g, "").trim().slice(0, 64) || null;
 }
 
-/** Asks the Mac's tunnel object, so it's right the moment a Mac sleeps or wakes. */
+/** The relay object answers within 30 s (its own deadline for a silent Mac). Past that it's stuck. */
+const MAC_CALL_TIMEOUT_MS = 40_000;
+const ONLINE_CHECK_TIMEOUT_MS = 3_000;
+
+/** Calls a Mac's relay object. A stuck call gets an error the app retries, never a hang. */
+function callMac(stub: DurableObjectStub, request: Request): Promise<Response> {
+  const call = stub.fetch(request);
+  return withTimeout(call, MAC_CALL_TIMEOUT_MS, "relay object").catch((error: unknown) => {
+    if (!(error instanceof RelayTimeout)) throw error;
+    void call.then((late) => late.body?.cancel().catch(() => {}), () => {});
+    return new Response("cloudroom: the relay did not answer\n", {
+      status: 504,
+      headers: { "content-type": "text/plain; charset=utf-8", [TUNNEL_ERROR_HEADER]: "1" },
+    });
+  });
+}
+
+/** Asks the Mac's tunnel object, so it's right the moment a Mac sleeps or wakes. A slow answer counts as offline. */
 async function isOnline(env: Env, handle: string): Promise<boolean> {
   const stub = env.TUNNEL_DO.get(env.TUNNEL_DO.idFromName(handle));
-  const status = await stub
-    .fetch(new Request(`https://${handle}.${env.BASE_DOMAIN}/__control/status`))
-    .then((response) => response.json() as Promise<{ online?: unknown }>)
-    .catch(() => null);
+  const status = await withTimeout(
+    stub
+      .fetch(new Request(`https://${handle}.${env.BASE_DOMAIN}/__control/status`))
+      .then((response) => response.json() as Promise<{ online?: unknown }>),
+    ONLINE_CHECK_TIMEOUT_MS,
+    "online check",
+  ).catch(() => null);
   return status?.online === true;
 }
 
@@ -485,7 +506,7 @@ async function visitor(
   if (server.ownerServerId === null && target === null) {
     const installType = request.method === "GET" ? INSTALL_FILES.get(url.pathname) : undefined;
     if (installType !== undefined) {
-      return installFile(await stub.fetch(requestForTunnelDo(request, null)), installType);
+      return installFile(await callMac(stub, requestForTunnelDo(request, null)), installType);
     }
     const presented = request.headers.get(MACHINE_CREDENTIAL_HEADER);
     if (presented !== null) {
@@ -499,7 +520,7 @@ async function visitor(
       if (isHostManagement(request.method, path)) {
         return text("Remote hosts cannot manage machines\n", 403);
       }
-      return stub.fetch(requestForTunnelDo(request, null, machine.id));
+      return callMac(stub, requestForTunnelDo(request, null, machine.id));
     }
     if (url.pathname.startsWith("/internal")) return text("Not found\n", 404);
   }
@@ -587,17 +608,17 @@ async function forward(
   const stub = env.TUNNEL_DO.get(env.TUNNEL_DO.idFromName(server.handle));
   const doRequest = requestForTunnelDo(request, target);
   if (request.headers.get("upgrade")?.toLowerCase() === "websocket") {
-    return stub.fetch(doRequest);
+    return callMac(stub, doRequest);
   }
   const { response } = await serveWithCache(
     request,
     target === null ? server.handle : `${server.handle}--${target}`,
     ctx,
     (init) => {
-      if (init === undefined) return stub.fetch(doRequest);
+      if (init === undefined) return callMac(stub, doRequest);
       const headers = new Headers(doRequest.headers);
       headers.set("if-none-match", init.ifNoneMatch);
-      return stub.fetch(new Request(doRequest, { headers }));
+      return callMac(stub, new Request(doRequest, { headers }));
     },
   );
   const offline = response.status === 503 && response.headers.get(TUNNEL_OFFLINE_HEADER) === "1";
@@ -768,9 +789,9 @@ function route(request: Request, env: Env, ctx: ExecutionContext): Promise<Respo
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     try {
-      return await route(request, env, ctx);
+      return await route(request, { ...env, DB: timedDb(env.DB) }, ctx);
     } catch (error) {
-      if (!String((error as Error)?.message).startsWith("D1_ERROR")) throw error;
+      if (!(error instanceof RelayTimeout) && !String((error as Error)?.message).startsWith("D1_ERROR")) throw error;
       console.log({ event: "db_unavailable", message: (error as Error).message });
       return new Response("Cloudroom is busy. Try again in a few seconds.\n", {
         status: 503,

@@ -8,10 +8,7 @@ import {
 } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { appToast } from "@/components/ui/app-toast.js";
-import {
-  PluginSettingsSections,
-  ProviderAccountsSection,
-} from "@/components/plugin/PluginSettingsSections";
+import { PluginSettingsSections } from "@/components/plugin/PluginSettingsSections";
 import { Button } from "@cloudroom/shared-ui/button";
 import {
   DropdownMenu,
@@ -641,9 +638,6 @@ function PluginSettingsContent({
         />
       </header>
       <ResourceDetailStack className="mt-6">
-        {enabled && plugin.enabled ? (
-          <ProviderAccountsSection pluginId={plugin.id} />
-        ) : null}
         {enabled && plugin.enabled ? (
           <PluginMachineServerAccessNotice pluginId={plugin.id} />
         ) : null}

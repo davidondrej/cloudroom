@@ -13,16 +13,6 @@ export function PluginSettingsSections({ pluginId }: { pluginId: string }) {
   return <PluginSettingsSectionList sections={sections} />;
 }
 
-export function ProviderAccountsSection({ pluginId }: { pluginId: string }) {
-  const { settingsSections } = usePluginSlots();
-  const sections = settingsSections.filter(
-    (section) =>
-      section.pluginId === "accounts" && `provider-${section.id}` === pluginId,
-  );
-  if (sections.length === 0) return null;
-  return <PluginSettingsSectionList sections={sections} />;
-}
-
 function PluginSettingsSectionList({
   sections,
 }: {

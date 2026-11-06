@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { createHash } from "node:crypto";
+import { setTimeout as sleep } from "node:timers/promises";
 import { prepareCodexGuard } from "@get-bb/plugin-sdk/internal/command-guard";
 import {
   isStandaloneBuiltinCompactCommand,
@@ -88,6 +89,7 @@ import {
   type CodexAppServerExitInfo,
   type CodexAppServerRequestResponder,
 } from "./app-server-connection.js";
+import { codexLinuxSandboxError } from "./linux-sandbox.js";
 import {
   getCodexProviderHealth,
   getCodexProviderInstallationRun,
@@ -315,7 +317,16 @@ const CODEX_ALREADY_ARCHIVED_ERROR_PATTERN =
 const CODEX_NOT_ARCHIVED_ERROR_PATTERN =
   /\bno archived rollout found for thread id\b/i;
 const CODEX_EMPTY_ROLLOUT_RENAME_ERROR_PATTERN = /\brollout at .+ is empty\b/i;
+const CODEX_NO_ACTIVE_TURN_ERROR_PATTERN = /\bno active turn to steer\b/i;
 const CODEX_RENAME_RETRY_DELAYS_MS = [50, 200] as const;
+// Codex lets one app-server write a thread. Another holder (often another
+// Codex app on the same ~/.codex) may let go soon, so retry for ~10 s.
+const CODEX_ACTIVE_WRITER_ERROR_PATTERN = /\balready has an active writer\b/i;
+const CODEX_ACTIVE_WRITER_RETRY_DELAYS_MS = [
+  250, 500, 1_000, 2_000, 3_000, 3_000,
+] as const;
+const CODEX_ACTIVE_WRITER_GUIDANCE =
+  "Another Codex app (ChatGPT, the Codex app, VS Code or a terminal) has this thread open. Close it there, wait a minute, then retry.";
 const CODEX_AUTH_REQUIRED_TEXT_PATTERN =
   /\b(?:40[13]|auth(?:entication|orization)?|unauthori[sz]ed)\b/i;
 const CODEX_RATE_LIMITED_TEXT_PATTERN =
@@ -352,11 +363,38 @@ function archivedSessionHint(message: string): ProviderRecoveryHint | null {
     : null;
 }
 
-async function delay(ms: number): Promise<void> {
-  await new Promise<void>((resolve) => {
-    setTimeout(resolve, ms);
-  });
+/**
+ * Resends a request while Codex fails it with `pattern`, waiting each delay in
+ * turn. Once `signal` aborts, it stops at once with the last error, even if
+ * the attempt in flight succeeds, so a waiting Stop never gets a turn first.
+ */
+async function retryOnCodexError<T>(
+  sendOnce: () => Promise<T>,
+  pattern: RegExp,
+  delaysMs: readonly number[],
+  describeRetry: (delayMs: number) => string,
+  signal?: AbortSignal,
+): Promise<T> {
+  const stopped = (): boolean => signal?.aborted === true;
+  let lastError: Error | null = null;
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      const result = await sendOnce();
+      if (lastError === null || !stopped()) return result;
+    } catch (error) {
+      if (!(error instanceof Error) || !pattern.test(error.message)) {
+        throw error;
+      }
+      lastError = error;
+    }
+    const delayMs = delaysMs[attempt];
+    if (delayMs === undefined || stopped()) throw lastError;
+    process.stderr.write(`${describeRetry(delayMs)}\n`);
+    await sleep(delayMs, undefined, { signal }).catch(() => undefined);
+    if (stopped()) throw lastError;
+  }
 }
+
 function missingCodexCliGuidance(): string {
   const brokenLink = findBrokenCliLink("codex");
   const cause =
@@ -401,7 +439,10 @@ function describeCodexLaunchError(error: unknown): string {
   if (error instanceof CodexAppServerExitedError && error.spawnFailed) {
     return missingCodexCliGuidance();
   }
-  return error instanceof Error ? error.message : String(error);
+  const message = error instanceof Error ? error.message : String(error);
+  return CODEX_ACTIVE_WRITER_ERROR_PATTERN.test(message)
+    ? `${message}. ${CODEX_ACTIVE_WRITER_GUIDANCE}`
+    : message;
 }
 
 interface CodexSessionConstruction {
@@ -427,6 +468,8 @@ interface CodexBridgeSession {
   closing: boolean;
   previousChildExit: Promise<void> | null;
   releasePromise: Promise<void> | null;
+  /** Aborted when a Stop or Archive waits for this thread or it is released. */
+  stopRequested: AbortController;
 }
 
 const sessionsByBbThreadId = new Map<string, CodexBridgeSession>();
@@ -457,6 +500,7 @@ function releaseSession(session: CodexBridgeSession): Promise<void> {
     return session.releasePromise;
   }
   session.closing = true;
+  session.stopRequested.abort();
   if (sessionsByBbThreadId.get(session.bbThreadId) === session) {
     sessionsByBbThreadId.delete(session.bbThreadId);
   }
@@ -978,6 +1022,7 @@ async function constructThreadSession(
     closing: false,
     previousChildExit: null,
     releasePromise: null,
+    stopRequested: new AbortController(),
   };
   sessionsByBbThreadId.set(args.threadId, session);
   if (existing) {
@@ -1032,6 +1077,17 @@ async function constructThreadSession(
       throw new Error(
         "Codex hooks are disabled. Enable them in Codex or disable Cloudroom Command Guard before starting a new session.",
       );
+    }
+    if (
+      process.platform === "linux" &&
+      decoded.sessionOptions.permissionScope === "workspace"
+    ) {
+      const sandboxError = await codexLinuxSandboxError({
+        codexCommand: findCliExecutable("codex", process.env) ?? "codex",
+        cwd: args.cwd,
+        env: buildAppServerEnv(),
+      });
+      if (sandboxError !== null) throw new Error(sandboxError);
     }
 
     const preparedGitRoots = translator.prepareWorkspaceWriteGitRoots({
@@ -1107,12 +1163,20 @@ async function constructThreadSession(
       }
     }
 
-    const result = await connection.request({
-      method,
-      params,
-      resultSchema: codexThreadIdentityResultSchema,
-      timeoutMs: CHILD_REQUEST_TIMEOUT_MS,
-    });
+    const result = await retryOnCodexError(
+      () =>
+        connection.request({
+          method,
+          params,
+          resultSchema: codexThreadIdentityResultSchema,
+          timeoutMs: CHILD_REQUEST_TIMEOUT_MS,
+        }),
+      CODEX_ACTIVE_WRITER_ERROR_PATTERN,
+      args.request.kind === "resume" ? CODEX_ACTIVE_WRITER_RETRY_DELAYS_MS : [],
+      (delayMs) =>
+        `codex thread has another active writer; retrying ${method} in ${delayMs}ms.`,
+      session.stopRequested.signal,
+    );
     const codexThreadId = result.thread.id;
     session.codexThreadId = codexThreadId;
     translator.activateThreadGitWritableRoots({
@@ -1164,6 +1228,7 @@ function registerResumableSession(session: CodexBridgeSession): void {
     closing: false,
     previousChildExit: null,
     releasePromise: null,
+    stopRequested: new AbortController(),
   });
 }
 
@@ -1534,7 +1599,56 @@ async function handleTurnSteer(
     ]);
     sendResult(id, { threadId: params.threadId });
   } catch (error) {
-    rejectWithCodexError(id, error);
+    const message = error instanceof Error ? error.message : String(error);
+    if (!CODEX_NO_ACTIVE_TURN_ERROR_PATTERN.test(message)) {
+      rejectWithCodexError(id, error);
+      return;
+    }
+    // Codex already ended the turn Cloudroom still shows open (#986). It
+    // refuses steers before its end-of-turn steps send turn/completed, so wait
+    // as long as Stop does for that, then end the turn as failed. The
+    // stale-turn reply starts this input as a new turn; the ended turn's work
+    // is not replayed. A Stop meanwhile ends it as interrupted and starts
+    // nothing, like a resume retry (#104).
+    const providerTurnId = params.expectedTurnId;
+    const stop = session.stopRequested.signal;
+    const settled = await waitForCodexTurnSettlement(
+      session,
+      providerTurnId,
+      INTERRUPT_SETTLEMENT_TIMEOUT_MS,
+      stop,
+    );
+    if (!settled && !session.closing) {
+      const ended = "Codex ended this turn without reporting its result";
+      sendThreadDeltas(
+        session,
+        stop.aborted
+          ? [{ kind: "turn.boundary", providerTurnId, status: "interrupted" }]
+          : [
+              {
+                kind: "provider.error",
+                message: ended,
+                detail:
+                  "Its work may be incomplete. New messages start a new turn.",
+                willRetry: false,
+                providerTurnId,
+              },
+              {
+                kind: "turn.boundary",
+                providerTurnId,
+                status: "failed",
+                error: { message: ended },
+              },
+            ],
+      );
+    }
+    if (stop.aborted) {
+      rejectWithCodexError(id, error);
+      return;
+    }
+    sendError(id, BRIDGE_JSON_RPC_ERRORS.NO_ACTIVE_TURN, message, {
+      recovery: { kind: "staleTurn", message, retryable: false },
+    });
   }
 }
 
@@ -1675,16 +1789,23 @@ async function pauseActiveGoal(
   }
 }
 
+/** Resolves false on timeout, or at once when `signal` aborts. */
 function waitForCodexTurnSettlement(
   session: CodexBridgeSession,
   codexTurnId: string,
   timeoutMs: number,
+  signal?: AbortSignal,
 ): Promise<boolean> {
   if (!session.openCodexTurnIds.has(codexTurnId)) {
     return Promise.resolve(true);
   }
+  if (signal?.aborted) {
+    return Promise.resolve(false);
+  }
   return new Promise<boolean>((resolve) => {
-    const timer = setTimeout(() => {
+    const giveUp = (): void => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", giveUp);
       const waiters = session.turnSettledWaiters.get(codexTurnId);
       if (waiters !== undefined) {
         session.turnSettledWaiters.set(
@@ -1693,10 +1814,13 @@ function waitForCodexTurnSettlement(
         );
       }
       resolve(false);
-    }, timeoutMs);
+    };
+    const timer = setTimeout(giveUp, timeoutMs);
     timer.unref?.();
+    signal?.addEventListener("abort", giveUp, { once: true });
     const onSettled = (): void => {
       clearTimeout(timer);
+      signal?.removeEventListener("abort", giveUp);
       resolve(true);
     };
     const waiters = session.turnSettledWaiters.get(codexTurnId) ?? [];
@@ -1770,24 +1894,12 @@ async function sendMaintenanceRequestWithRetries(
     await sendOnce();
     return;
   }
-  for (const retryDelayMs of CODEX_RENAME_RETRY_DELAYS_MS) {
-    try {
-      await sendOnce();
-      return;
-    } catch (error) {
-      if (
-        !(error instanceof Error) ||
-        !CODEX_EMPTY_ROLLOUT_RENAME_ERROR_PATTERN.test(error.message)
-      ) {
-        throw error;
-      }
-      process.stderr.write(
-        `codex rollout is not ready; retrying rename in ${retryDelayMs}ms.\n`,
-      );
-      await delay(retryDelayMs);
-    }
-  }
-  await sendOnce();
+  await retryOnCodexError(
+    sendOnce,
+    CODEX_EMPTY_ROLLOUT_RENAME_ERROR_PATTERN,
+    CODEX_RENAME_RETRY_DELAYS_MS,
+    (delayMs) => `codex rollout is not ready; retrying rename in ${delayMs}ms.`,
+  );
 }
 
 async function handleSkillsConfigure(
@@ -1936,7 +2048,20 @@ async function handleRequest(
   }
 }
 
+// Runtime notification (no id): a Stop or Archive waits for this thread.
+// Mirrors THREAD_STOP_REQUESTED_METHOD in @cloudroom/agent-runtime.
+const threadStopRequestedNotificationSchema = z.object({
+  method: z.literal("thread/stopRequested"),
+  params: z.object({ threadId: z.string().min(1) }),
+});
+
 function handleParsedMessage(parsed: unknown): void {
+  const stopRequested = threadStopRequestedNotificationSchema.safeParse(parsed);
+  if (stopRequested.success) {
+    const { threadId } = stopRequested.data.params;
+    sessionsByBbThreadId.get(threadId)?.stopRequested.abort();
+    return;
+  }
   const response = decodeBridgeJsonRpcResponse(parsed);
   if (response && typeof response.id === "number") {
     const pending = pendingRuntimeRequests.get(response.id);

@@ -355,7 +355,7 @@ export function useArchiveThreadAndChildren() {
     mutationFn: ({
       id,
     }: ArchiveThreadAndChildrenMutationRequest): Promise<ThreadArchiveAllResponse> =>
-      sdk.threads.archiveAll({ threadId: id }),
+      sdk.threads.archiveAll({ threadId: id, includeLive: true }),
     onMutate: async ({ id }): Promise<ArchiveThreadsTransaction> =>
       beginArchiveThreadAndChildrenTransaction({
         queryClient,

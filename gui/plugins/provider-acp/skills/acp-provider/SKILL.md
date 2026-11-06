@@ -13,7 +13,7 @@ or machine selector.
 
 To install a missing agent with its official installer, list candidates with
 `room-cli provider list --installable`, then run
-`room-cli machine provider-cli install <machine> <provider-id>`. Settings → Providers
+`room-cli machine provider-cli install <machine> <provider-id>`. Settings → Agents → Harness
 offers the same one-click install.
 
 Cursor project skills come from `.cursor/skills`, which can link to

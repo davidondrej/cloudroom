@@ -76,7 +76,18 @@ describe("bb-official marketplace generator", () => {
       );
       expect(entry?.id).toBe(plugin.pluginId);
       expect(entry?.screenshots).toEqual(fields[plugin.name]?.screenshots);
-      expect(entry?.author).toEqual({ name: "Cloudroom" });
+      const packageJson = JSON.parse(
+        await readFile(
+          new URL(
+            `../../../../../plugins/${plugin.name}/package.json`,
+            import.meta.url,
+          ),
+          "utf8",
+        ),
+      ) as { author?: unknown };
+      expect(entry?.author).toEqual(
+        packageJson.author ?? { name: "Cloudroom" },
+      );
     }
   });
 

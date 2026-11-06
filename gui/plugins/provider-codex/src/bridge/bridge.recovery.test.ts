@@ -1,4 +1,10 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
@@ -185,6 +191,120 @@ it("raises authRequired on a terminal 401 and rebuilds the child before the next
   expect(
     notifications(BRIDGE_NOTIFICATION_METHODS.providerRecovery),
   ).toHaveLength(1);
+}, 30_000);
+
+it("retries a resume on the same app-server while another Codex app holds the thread", async () => {
+  const processLogPath = join(workspaceDir, "app-server-processes.log");
+  stubFakeAppServer({ resumeActiveWriterFailures: 2, processLogPath });
+  harness = createBridgeJsonRpcTestHarness(handleLine);
+
+  harness.sendRequest(1, "thread/resume", {
+    threadId: THREAD_ID,
+    providerThreadId: PROVIDER_THREAD_ID,
+    cwd: workspaceDir,
+    instructionMode: "append",
+    options: { ...FULL_ACCESS_SESSION_OPTIONS },
+  });
+  expect((await harness.waitForResponse(1)).result).toMatchObject({
+    providerThreadId: PROVIDER_THREAD_ID,
+  });
+  const spawns = readFileSync(processLogPath, "utf8").match(/^spawn:/gm);
+  expect(spawns).toHaveLength(1);
+}, 30_000);
+
+it("drops the resume retry at once when a Stop waits, so no turn starts", async () => {
+  const requestLogPath = join(workspaceDir, "requests.log");
+  stubFakeAppServer({ resumeActiveWriterFailures: 99, requestLogPath });
+  harness = createBridgeJsonRpcTestHarness(handleLine);
+  harness.sendRequest(1, "thread/resume", {
+    threadId: THREAD_ID,
+    providerThreadId: PROVIDER_THREAD_ID,
+    cwd: workspaceDir,
+    instructionMode: "append",
+    options: { ...FULL_ACCESS_SESSION_OPTIONS },
+  });
+  const requests = () =>
+    existsSync(requestLogPath) ? readFileSync(requestLogPath, "utf8") : "";
+  await vi.waitFor(() => expect(requests()).toContain('"thread/resume"'));
+
+  const stopAt = Date.now();
+  handleLine(
+    JSON.stringify({
+      jsonrpc: "2.0",
+      method: "thread/stopRequested",
+      params: { threadId: THREAD_ID },
+    }),
+  );
+  const response = await harness.waitForResponse(1);
+  expect(Date.now() - stopAt).toBeLessThan(1_000);
+  expect(response.error?.message).toMatch(/already has an active writer/);
+  expect(requests().match(/"thread\/resume"/g)).toHaveLength(1);
+  expect(requests()).not.toContain('"turn/start"');
+}, 30_000);
+
+it("ends turns Codex ended, so a steer becomes a stale turn", async () => {
+  const started = (id: string) => ({
+    method: "turn/started",
+    params: { threadId: "x", turn: { id, status: "inProgress" } },
+  });
+  stubFakeAppServer({
+    steerFindsEndedTurn: true,
+    turns: [
+      // A turn/completed Cloudroom can't parse still ends its turn.
+      [
+        started("turn-a"),
+        {
+          method: "turn/completed",
+          params: { threadId: "x", turn: { id: "turn-a", status: "unknown" } },
+        },
+      ],
+      // Open until the steer; its turn/completed lands after the refusal.
+      [started("turn-b")],
+    ],
+  });
+  harness = createBridgeJsonRpcTestHarness(handleLine);
+  harness.sendRequest(1, "thread/resume", {
+    threadId: THREAD_ID,
+    providerThreadId: PROVIDER_THREAD_ID,
+    cwd: workspaceDir,
+    instructionMode: "append",
+    options: { ...FULL_ACCESS_SESSION_OPTIONS },
+  });
+  expect((await harness.waitForResponse(1)).error).toBeUndefined();
+  for (const [id, clientRequestId] of [
+    [2, "creq_cdxrcvry24"],
+    [3, "creq_cdxrcvry26"],
+  ] as const) {
+    harness.sendRequest(id, "turn/start", {
+      threadId: THREAD_ID,
+      providerThreadId: PROVIDER_THREAD_ID,
+      clientRequestId,
+      input: [{ type: "text", text: "task", mentions: [] }],
+      options: { ...FULL_ACCESS_SESSION_OPTIONS },
+    });
+    expect((await harness.waitForResponse(id)).error).toBeUndefined();
+  }
+
+  harness.sendRequest(4, "turn/steer", {
+    threadId: THREAD_ID,
+    providerThreadId: PROVIDER_THREAD_ID,
+    expectedTurnId: "turn-b",
+    clientRequestId: "creq_cdxrcvry25",
+    input: [{ type: "text", text: "follow-up", mentions: [] }],
+    options: { ...FULL_ACCESS_SESSION_OPTIONS },
+  });
+  expect((await harness.waitForResponse(4)).error).toMatchObject({
+    code: -32001,
+    data: { recovery: { kind: "staleTurn", retryable: false } },
+  });
+  expect(
+    threadDeltas().filter(
+      (delta) => (delta as { kind?: string }).kind === "turn.boundary",
+    ),
+  ).toEqual([
+    expect.objectContaining({ providerTurnId: "turn-a", status: "failed" }),
+    expect.objectContaining({ providerTurnId: "turn-b", status: "completed" }),
+  ]);
 }, 30_000);
 
 it("retries a rename inside the bridge while the rollout is not ready", async () => {

@@ -17,6 +17,7 @@ import {
   listRunningAutomationRunsByThread,
   linkRunThread,
   setAutomationEnabled,
+  THREAD_ARCHIVED_ERROR,
   setReviewed,
   toAutomationResponse,
   toAutomationRunResponse,
@@ -68,7 +69,7 @@ import {
   scriptAgents,
   writeInlineAutomationScript,
 } from "./script-files.js";
-import { errorMessage, executeAgentRun, executeScriptRun } from "./run.js";
+import { errorMessage, executeAgentRun, executeScriptRun, signedOut } from "./run.js";
 import { listLiveProjects } from "./sweep.js";
 
 type ServiceApi = Pick<BbPluginApi, "realtime" | "log"> & {
@@ -79,7 +80,8 @@ type ServiceApi = Pick<BbPluginApi, "realtime" | "log"> & {
     threads: Pick<BbPluginApi["sdk"]["threads"], "get" | "send" | "spawn"> &
       Partial<Pick<BbPluginApi["sdk"]["threads"], "output">>;
     // Webhook loops' URLs live on the website (ADR 0262).
-    cloudroom?: Pick<BbPluginApi["sdk"]["cloudroom"], "automations">;
+    cloudroom?: Pick<BbPluginApi["sdk"]["cloudroom"], "automations"> &
+      Partial<Pick<BbPluginApi["sdk"]["cloudroom"], "status">>;
   };
 };
 
@@ -597,6 +599,8 @@ export function createAutomationService(args: {
         });
       }
     } catch (error) {
+      // The plugin was reloaded mid-dispatch and closed its database: nothing is left to record.
+      if (!db.open) return;
       closeFailedRun(error);
       bb.log.error(
         `Automation run ${run.id} failed unexpectedly: ${errorMessage(error)}`,
@@ -697,7 +701,9 @@ export function createAutomationService(args: {
           execution: stored.execution,
           origin: payload.origin,
           createdByThreadId: payload.createdByThreadId ?? null,
-          ...(payload.priority !== undefined ? { priority: payload.priority } : {}),
+          ...(payload.priority !== undefined
+            ? { priority: payload.priority }
+            : {}),
           nextRunAt: computeInitialNextRunAt({
             trigger: payload.trigger,
             enabled,
@@ -879,6 +885,18 @@ export function createAutomationService(args: {
           next: patch.execution,
         });
       }
+      if (
+        current.lastError === THREAD_ARCHIVED_ERROR &&
+        updated.targetThreadId !== current.targetThreadId
+      )
+        updated =
+          setAutomationEnabled(db, {
+            projectId: input.projectId,
+            automationId: current.id,
+            enabled: updated.enabled,
+            nextRunAt: updated.nextRunAt,
+            lastError: null,
+          }) ?? updated;
       publishAutomationChange(bb, input.projectId, "automations-changed");
       return toStoredAutomationResponse(pluginDataDir, updated);
     },
@@ -916,7 +934,11 @@ export function createAutomationService(args: {
         enabled: false,
         nextRunAt: null,
         // Paused by hand, a loop its failures paused stays off: it no longer tries again on its own.
-        ...(current.lastError?.endsWith("consecutive failures)") ? { lastError: null } : {}),
+        // An archive-paused one no longer resumes when its thread is unarchived.
+        ...(current.lastError === THREAD_ARCHIVED_ERROR ||
+        current.lastError?.endsWith("consecutive failures)")
+          ? { lastError: null }
+          : {}),
       });
       if (!updated) throw new Error("Loop not found");
       publishAutomationChange(bb, input.projectId, "automations-changed");
@@ -1041,8 +1063,15 @@ export function createAutomationService(args: {
     async report(input) {
       const run = listRunningAutomationRunsByThread(db, input.threadId)[0];
       const automation = run ? getAutomation(db, run.automationId) : null;
-      if (!run || !automation) throw new Error("This thread is not a running loop run, so there is nothing to report.");
-      if (!bb.sdk.cloudroom) throw new Error("Sign in to Cloudroom to save loop reports.");
+      if (!run || !automation)
+        throw new Error(
+          "This thread is not a running loop run, so there is nothing to report.",
+        );
+      if (!bb.sdk.cloudroom || (await signedOut(bb.sdk))) {
+        throw new Error(
+          "Loop reports need a Cloudroom sign-in; this run's local status is still recorded.",
+        );
+      }
       await bb.sdk.cloudroom.automations({
         action: "report",
         local: automation.id,

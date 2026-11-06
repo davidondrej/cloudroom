@@ -72,7 +72,7 @@ export function PlanLimitRow({
   const status = thread?.status;
   const update = useUpdateThread({
     threadId,
-    errorMessage: "Couldn't switch to the other agent.",
+    errorMessage: "Couldn't continue with the other agent.",
   });
   const accountSwitch = useMutation({
     meta: { errorMessage: "Couldn't switch accounts." },

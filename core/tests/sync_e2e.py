@@ -12,7 +12,7 @@ from unittest.mock import patch
 import core_fixture
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src/sync'))
 from client import cycle, Remote, configure
-from files import Tree, Conflict, atomic_json
+from files import Tree, Conflict, atomic_json, transfer
 
 
 class SyncTests(unittest.TestCase):
@@ -23,13 +23,48 @@ class SyncTests(unittest.TestCase):
         self.local = self.root / 'local'; self.local.mkdir()
         self.cloud = Path(self.env['CLOUDROOM_ACCOUNT_HOME']).resolve() / '.agents/skills'; self.cloud.mkdir(parents=True)
         self.client_state = self.root / 'client'; self.client_state.mkdir()
-        self.config = {'device': 'mac', 'roots': [{'id': 'skills-shared', 'tree': {'root': str(self.local), 'kind': 'skills'}}]}
+        self.config = {'device': 'mac', 'connectionFile': str(self.client_state / 'cloudroom.json'), 'roots': [{'id': 'skills-shared', 'tree': {'root': str(self.local), 'kind': 'skills'}}]}
+        self.mac_access('full')
         self.start()
         self.connection = {'url': 'http://' + self.service.address, 'token': self.env['CLOUDROOM_TOKEN']}
         self.remote = Remote(self.connection, 'mac')
 
     def sync(self):
         return cycle(self.config, self.connection, self.client_state)
+
+    def mac_access(self, level):
+        atomic_json(self.client_state / 'cloudroom-mac-access.json', {'level': level})
+
+    def test_below_full_mac_access_nothing_from_the_cloud_reaches_the_mac(self):
+        self.prepare()
+        (self.local / 'skill').write_text('mac')
+        self.sync()
+        for level in ['off', 'read-only', 'ask', None]:
+            with self.subTest(level=level):
+                if level: self.mac_access(level)
+                else: (self.client_state / 'cloudroom-mac-access.json').unlink()
+                (self.cloud / 'skill').write_text('vm edit'); (self.cloud / 'planted').write_text('vm file')
+                self.sync()
+                self.assertEqual((self.local / 'skill').read_text(), 'mac')
+                self.assertFalse((self.local / 'planted').exists())
+        (self.local / 'skill').write_text('mac edit')
+        self.sync()
+        self.assertEqual((self.cloud / 'skill').read_text(), 'mac edit')
+        # Off saved mid-sync: after the scan, and while a download is in flight.
+        self.mac_access('full'); (self.cloud / 'skill').unlink()
+        scan = Remote.scan
+        def revoke(remote, root):
+            self.mac_access('off')
+            return scan(remote, root)
+        with patch.object(Remote, 'scan', revoke): self.sync()
+        self.assertEqual((self.local / 'skill').read_text(), 'mac edit')
+        self.assertFalse((self.local / 'planted').exists())
+        with self.assertRaises(Conflict):
+            Tree(self.local).apply('late', None, transfer(io.BytesIO(b'x'), 'file', False), io.BytesIO(b'x'), lambda: False)
+        self.assertFalse((self.local / 'late').exists())
+        self.mac_access('full'); self.sync()
+        self.assertEqual((self.local / 'planted').read_text(), 'vm file')
+        self.assertFalse((self.local / 'skill').exists())
 
     def test_external_skill_link_does_not_block_other_skills_or_delete_old_copy(self):
         self.prepare()

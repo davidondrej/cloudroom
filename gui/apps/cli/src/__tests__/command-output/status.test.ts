@@ -63,6 +63,35 @@ describe("room-cli status command output", () => {
     );
   });
 
+  it("room-cli status keeps the environment when provider names are denied", async () => {
+    vi.stubEnv("ROOM_THREAD_ID", "thread-1");
+    stubServerApi({
+      "v1.threads.:id.$get": async () =>
+        fixtures.makeThread({
+          id: "thread-1",
+          projectId: "proj-1",
+          providerId: "codex",
+          environmentId: "env-1",
+        }),
+      "v1.environments.:id.$get": async () =>
+        fixtures.makeEnvironment({
+          id: "env-1",
+          projectId: "proj-1",
+          hostId: "host-1",
+          environmentProviderId: "git-worktree",
+        }),
+      "v1.system.environment-providers.$get": async () => {
+        throw new Error("HTTP 401: Caller proof required");
+      },
+    });
+
+    await runCommand(["status"], register);
+
+    expect(collectLogLines(vi.mocked(console.log))).toContain(
+      "  Environment: git-worktree (env-1)",
+    );
+  });
+
   it("room-cli status prints pinned state for pinned thread context", async () => {
     vi.stubEnv("ROOM_PROJECT_ID", "proj-1");
     vi.stubEnv("ROOM_THREAD_ID", "thread-pinned-1");

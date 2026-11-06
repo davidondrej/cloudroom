@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { existsSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { appendFile, readFile, rename, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -6,7 +7,7 @@ import { promisify } from "node:util";
 import { z } from "zod";
 import type { AppDeps } from "../../types.js";
 import { ApiError } from "../../errors.js";
-import { CLOUDROOM_PYTHON_PATH, CLOUDROOM_PREVIEW_SCRIPT_PATH } from "../../cloudroom-workspace-asset.js";
+import { CLOUDROOM_CORE_PATH, CLOUDROOM_PYTHON_PATH, CLOUDROOM_PREVIEW_SCRIPT_PATH } from "../../cloudroom-workspace-asset.js";
 
 export const macAccessLevels = ["off", "read-only", "ask", "full"] as const;
 export type MacAccessLevel = typeof macAccessLevels[number];
@@ -18,6 +19,14 @@ const folder = (deps: Deps) => join(deps.config.dataDir, "cloudroom-preview");
 // Cloudroom Dev shares the real app's account, so its helper uses only the sandboxes of threads Dev woke.
 const devBuild = (deps: Deps) => deps.config.appVersion.startsWith("0.0.0");
 const noted = new Set<string>();
+/**
+ * Trial switch: a `rust-helper` file in the data folder runs the Rust helper in the bundled Core instead of client.py
+ * (macOS only). Both use the same files and LaunchAgent, so deleting the file and restarting the app switches back.
+ */
+const helper = (deps: Deps, args: string[]): [string, string[]] =>
+  process.platform === "darwin" && existsSync(CLOUDROOM_CORE_PATH) && existsSync(join(deps.config.dataDir, "rust-helper"))
+    ? [CLOUDROOM_CORE_PATH, ["helper", ...args]]
+    : [CLOUDROOM_PYTHON_PATH, ["-B", "-E", "-s", CLOUDROOM_PREVIEW_SCRIPT_PATH, ...args]];
 
 /** After a wake the helper lists the new sandbox now instead of at its next minute check. */
 export async function noteWake(deps: Deps, thread: string): Promise<void> {
@@ -76,7 +85,7 @@ export async function setupPreviews(deps: Deps): Promise<void> {
   const launcher = process.platform === "darwin" && process.versions.electron ? ["--launcher", process.execPath] : [];
   const restart = restartedThisLaunch ? [] : ["--restart"];
   try {
-    await promisify(execFile)(CLOUDROOM_PYTHON_PATH, ["-B", "-E", "-s", CLOUDROOM_PREVIEW_SCRIPT_PATH, "configure", folder(deps), "--connection", join(deps.config.dataDir, "cloudroom.json"), "--mac-access", await macAccess(deps) ?? "off", ...launcher, ...restart, ...(devBuild(deps) ? ["--own-threads"] : [])], { timeout: 30_000, maxBuffer: 64 * 1024 });
+    await promisify(execFile)(...helper(deps, ["configure", folder(deps), "--connection", join(deps.config.dataDir, "cloudroom.json"), "--mac-access", await macAccess(deps) ?? "off", ...launcher, ...restart, ...(devBuild(deps) ? ["--own-threads"] : [])]), { timeout: 30_000, maxBuffer: 64 * 1024 });
     restartedThisLaunch = true;
   } catch (error) {
     // The helper's own reason, such as launchctl's, so Settings and the API say why (#109).
@@ -92,6 +101,6 @@ export const helperRunning = (deps: Deps) => stat(join(folder(deps), "status.jso
 export async function stopPreviews(deps: Deps): Promise<void> {
   if (!await readFile(join(folder(deps), "config.json")).then(() => true, () => false)) return;
   try {
-    await promisify(execFile)(CLOUDROOM_PYTHON_PATH, ["-B", "-E", "-s", CLOUDROOM_PREVIEW_SCRIPT_PATH, "stop", folder(deps)], { timeout: 20_000, maxBuffer: 64 * 1024 });
+    await promisify(execFile)(...helper(deps, ["stop", folder(deps)]), { timeout: 20_000, maxBuffer: 64 * 1024 });
   } catch { throw new ApiError(503, "cloudroom_preview_stop", "Preview shutdown or SSH-key revocation could not be confirmed. Retry sign-out when the cloud is reachable."); }
 }

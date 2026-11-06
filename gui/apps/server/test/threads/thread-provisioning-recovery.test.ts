@@ -1,6 +1,9 @@
 import { intendedThreadHostId } from "../../src/services/threads/dispatch-attempt.js";
 import { dispatchTurnDuringReprovision } from "../../src/services/threads/thread-turn-dispatch.js";
-import { requestThreadStopForCurrentState } from "../../src/services/threads/thread-lifecycle.js";
+import {
+  hasLiveThreadStartInFlight,
+  requestThreadStopForCurrentState,
+} from "../../src/services/threads/thread-lifecycle.js";
 import { runEnvironmentProvisioningSweep } from "../../src/services/system/periodic-sweeps.js";
 import { eq } from "drizzle-orm";
 import {
@@ -931,6 +934,84 @@ it("resumes workspace setup when the same daemon reconnects", async () => {
       errorCode: "test_cleanup",
       errorMessage: "test cleanup",
     });
+  });
+});
+
+it("keeps a thread start that was in flight when the same daemon reconnects running it", async () => {
+  await withTestHarness(async (harness) => {
+    const { host, session } = seedHostSession(harness.deps, {
+      id: "host-thread-start-blip",
+    });
+    const { project } = seedProjectWithSource(harness.deps, {
+      hostId: host.id,
+    });
+    const environment = seedEnvironment(harness.deps, {
+      hostId: host.id,
+      projectId: project.id,
+      path: "/tmp/thread-start-blip",
+      status: "ready",
+    });
+    const thread = seedThread(harness.deps, {
+      projectId: project.id,
+      environmentId: environment.id,
+      status: "starting",
+    });
+    requestThreadProvision(harness.deps, {
+      thread,
+      environmentIntent: { type: "reuse", environmentId: environment.id },
+      execution: THREAD_START_EXECUTION,
+      fork: null,
+      input: textInput("start through a blip"),
+      startedOnBehalfOf: null,
+      titleProvided: true,
+    });
+    await advanceThreadProvisioning(harness.deps, { threadId: thread.id });
+    await waitForQueuedCommand(
+      harness,
+      ({ command }) => command.type === "thread.start",
+    );
+
+    handleDaemonSocketClosed(harness.deps, { sessionId: session.id });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(getThread(harness.db, thread.id)?.status).toBe("starting");
+    const response = await harness.app.request("/internal/session/open", {
+      method: "POST",
+      headers: internalAuthHeaders(harness, { hostId: host.id }),
+      body: JSON.stringify({
+        hostId: host.id,
+        instanceId: session.instanceId,
+        hostName: host.name,
+        hasMachineCredential: false,
+        platform: "darwin",
+        dataDir: "/tmp/thread-start-blip-host-data",
+        localApiPort: null,
+        protocolVersion: HOST_DAEMON_PROTOCOL_VERSION,
+        activeThreads: [{ threadId: thread.id }],
+      }),
+    });
+    expect(response.status).toBe(201);
+    const reconnected = getLatestSessionForHost(harness.db, {
+      hostId: host.id,
+    })!;
+    onDaemonSocketOpen(harness.deps, {
+      hostId: host.id,
+      sessionId: reconnected.id,
+      socket: registerTestHostRpcCapture(harness, {
+        hostId: host.id,
+        sessionId: reconnected.id,
+      }),
+    });
+
+    await vi.waitFor(() =>
+      expect(hasLiveThreadStartInFlight(thread.id)).toBe(false),
+    );
+    expect(getThread(harness.db, thread.id)?.status).toBe("active");
+    expect(
+      listEvents(harness.db, { threadId: thread.id }).map((row) => row.type),
+    ).not.toContain("system/error");
+    expect(
+      listQueuedThreadCommands(harness, "thread.start", thread.id),
+    ).toEqual([]);
   });
 });
 

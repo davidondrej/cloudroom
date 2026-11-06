@@ -31,7 +31,7 @@ import {
 import { AppBreadcrumbs } from "./AppBreadcrumbs";
 import { DesktopUpdateBanner, GitForWindowsBanner } from "./DesktopUpdateBanner";
 import { LowDiskBanner } from "./LowDiskBanner";
-import { ComputerFallbackBanner } from "@/components/settings/YourComputers";
+import { LostMacDialog } from "@/components/settings/YourComputers";
 import { resourceRouteLabelAtom } from "./resourceRouteLabelAtom";
 import { AppPageHeader, HEADER_ICON_BUTTON_CLASS } from "./AppPageHeader";
 import { stripProjectThreads } from "@/hooks/queries/project-queries";
@@ -84,6 +84,7 @@ import { useServerUpdateReload } from "@/hooks/useServerUpdateReload";
 import {
   getLegacyProjectComposeRoutePath,
   getSettingsProjectRoutePath,
+  getSettingsRoutePath,
   getRootComposeRoutePath,
   getThreadRoutePath,
   isProjectlessProjectId,
@@ -499,6 +500,11 @@ export function AppLayout({ children }: AppLayoutProps) {
     void navigate(`${SETTINGS_ROUTE_PATH}/servers`);
     return true;
   });
+  // Settings → Updates checks when it loads. While it's open, its own handler checks instead.
+  useAppCommandHandler("settings.checkForUpdates", () => {
+    void navigate(getSettingsRoutePath("updates"));
+    return true;
+  });
   useServerDaemonLogsCommand();
   const archivedSectionId = isArchivedView
     ? new URLSearchParams(location.search).get("sectionId")
@@ -840,7 +846,7 @@ export function AppLayout({ children }: AppLayoutProps) {
                       meta={meta}
                     />
                   ) : null}
-                  <ComputerFallbackBanner />
+                  <LostMacDialog />
                   <GitForWindowsBanner />
                   <DesktopUpdateBanner />
                   <LowDiskBanner />

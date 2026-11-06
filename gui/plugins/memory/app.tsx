@@ -186,7 +186,7 @@ function MemorySettings() {
     <div className="space-y-4">
       <div className="rounded-md border border-border bg-muted/20 p-3 text-sm text-muted-foreground">
         This plugin shares memory across providers. We recommend disabling
-        provider-native memory under Settings → Providers to avoid duplicate or
+        provider-native memory on the Claude Code and Codex tabs in Settings → Agents to avoid duplicate or
         conflicting stores.
       </div>
       {error ? (

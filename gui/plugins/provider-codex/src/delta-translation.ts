@@ -19,6 +19,10 @@ import {
   experimental_toolPresentation as toolPresentation,
   experimental_webFetchPresentation as webFetchPresentation,
   experimental_webSearchPresentation as webSearchPresentation,
+  experimental_presentationTitle as presentationTitle,
+  getRecordProperty,
+  getStringProperty,
+  isRecord,
 } from "@get-bb/plugin-sdk/provider-bridge";
 import {
   codexBridgeEnvelopeSchema,
@@ -52,6 +56,7 @@ import {
   type CodexGoalState,
 } from "./extension-kinds.js";
 import { codexVisibilityMetadata } from "./visibility.js";
+import { z } from "zod";
 
 function assertNever(value: never): never {
   throw new Error(`Unexpected value: ${String(value)}`);
@@ -655,6 +660,50 @@ function buildUnhandledCodexDeltas(
   ];
 }
 
+const unreadableTurnCompletedSchema = z
+  .object({
+    threadId: z.string(),
+    turn: z.object({ id: z.string().min(1) }).passthrough(),
+  })
+  .passthrough();
+
+/**
+ * A turn/completed Cloudroom can't parse (say, a newer status) still ends the
+ * turn it names, as failed. Dropping it left the turn running forever, and
+ * every steer failed with "no active turn to steer" (#986).
+ */
+function endUnreadableCodexTurn(
+  state: CodexEventTranslationState,
+  rawEvent: JsonRpcMessage,
+): ThreadDelta[] {
+  const parsed =
+    rawEvent.method === "turn/completed"
+      ? unreadableTurnCompletedSchema.safeParse(rawEvent.params)
+      : null;
+  if (!parsed?.success) {
+    return [];
+  }
+  const { threadId, turn } = parsed.data;
+  takeCodexRetryError(state, { threadId, turnId: turn.id });
+  const message =
+    "Codex ended this turn, but Cloudroom couldn't read how it finished";
+  return [
+    {
+      kind: "provider.error",
+      message,
+      detail: "Its work may be incomplete. Updating Cloudroom may fix this.",
+      willRetry: false,
+      providerTurnId: turn.id,
+    },
+    {
+      kind: "turn.boundary",
+      providerTurnId: turn.id,
+      status: "failed",
+      error: { message },
+    },
+  ];
+}
+
 function toTurnStatus(status: CodexTurnStatus): ThreadEventTurnStatus {
   switch (status) {
     case "completed":
@@ -1105,6 +1154,46 @@ function translateCodexItemShape(
   }
 }
 
+// A failed, blocked or stopped hook becomes a warning; the timeline folds
+// identical repeats into one "×N" row. The detail is the raw notification
+// minus the per-run id and timings, so repeats of one failure stay identical.
+function hookProblemWarning(
+  params: Record<string, unknown> | undefined,
+): ThreadDelta | null {
+  const run = params ? getRecordProperty(params, "run") : null;
+  const status = run ? getStringProperty(run, "status") : undefined;
+  if (
+    !run ||
+    !(status === "failed" || status === "blocked" || status === "stopped")
+  ) {
+    return null;
+  }
+  const entries: unknown[] = Array.isArray(run.entries) ? run.entries : [];
+  const reason = [
+    getStringProperty(run, "statusMessage"),
+    ...entries.map((entry) =>
+      isRecord(entry) ? getStringProperty(entry, "text") : undefined,
+    ),
+  ]
+    .map((text) => text?.trim())
+    .find(Boolean);
+  const source = getStringProperty(run, "sourcePath")?.split(/[\\/]/).pop();
+  const hook = `${getStringProperty(run, "eventName") ?? "Codex"} hook${source ? ` in ${source}` : ""}`;
+  const { id, startedAt, completedAt, durationMs, ...stableRun } = run;
+  return {
+    kind: "provider.warning",
+    category: "general",
+    summary:
+      presentationTitle(`${hook} ${status}${reason ? `: ${reason}` : ""}`) ??
+      hook,
+    details: JSON.stringify(
+      { method: "hook/completed", params: { ...params, run: stableRun } },
+      null,
+      2,
+    ),
+  };
+}
+
 export function translateCodexEventToDeltas(
   event: ProviderRuntimeEvent,
   state: CodexEventTranslationState,
@@ -1117,6 +1206,8 @@ export function translateCodexEventToDeltas(
   if (envelope.data.method === "hook/completed") {
     const reason = commandGuardBlockReason(envelope.data.params);
     if (reason) return [{ kind: "provider.warning", category: "general", summary: reason }];
+    const problem = hookProblemWarning(envelope.data.params);
+    if (problem) return [problem];
   }
 
   const rawEvent: JsonRpcMessage = {
@@ -1127,9 +1218,12 @@ export function translateCodexEventToDeltas(
 
   const parsed = codexHandledEventSchema.safeParse(rawEvent);
   if (!parsed.success) {
-    return isHandledCodexMethod(rawEvent.method)
-      ? buildUnhandledCodexDeltas({ rawEvent, rawType: rawEvent.method })
-      : buildUnhandledCodexDeltas({ rawEvent });
+    return [
+      ...(isHandledCodexMethod(rawEvent.method)
+        ? buildUnhandledCodexDeltas({ rawEvent, rawType: rawEvent.method })
+        : buildUnhandledCodexDeltas({ rawEvent })),
+      ...endUnreadableCodexTurn(state, rawEvent),
+    ];
   }
 
   const handledEvent: CodexHandledEvent = parsed.data;

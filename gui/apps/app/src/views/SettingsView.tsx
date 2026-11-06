@@ -121,6 +121,7 @@ import { useRewriteLocalhostLinksPreference } from "@/lib/localhost-link-rewrite
 import { useRichTextEditingPreference } from "@/lib/rich-text-editing-preference";
 import {
   SETTINGS_ROUTE_PATH,
+  getPluginDetailRoutePath,
   getRootComposeRoutePath,
 } from "@/lib/route-paths";
 import { useNavigateToThreadAfterCreatePreference } from "@/lib/root-compose-create-preference";
@@ -1190,6 +1191,32 @@ export function ExperimentsSettingsSection({
 
 const SETTINGS_CONTENT_ID = "settings-content";
 
+export function SettingsPluginsContent() {
+  const location = useLocation();
+  const navigate = useNavigate();
+  const pluginId = matchPath(SETTINGS_PLUGIN_ROUTE_PATH, location.pathname)
+    ?.params.pluginId;
+  if (pluginId) {
+    return <PluginDetailPaneView key={pluginId} pluginId={pluginId} />;
+  }
+  const pluginAuthorKey = new URLSearchParams(location.search).get("author");
+  return (
+    <div className="flex min-h-0 flex-1 flex-col pt-4 md:pt-5">
+      <PluginsOverview
+        mode={pluginAuthorKey === null ? "installed" : "browse"}
+        onOpenPlugin={(nextPluginId) =>
+          navigate(
+            getPluginDetailRoutePath({
+              pluginId: nextPluginId,
+              view: "installed",
+            }),
+          )
+        }
+      />
+    </div>
+  );
+}
+
 export function SettingsView() {
   const navigate = useNavigate();
   const themePreference = useThemePreference();
@@ -1219,7 +1246,6 @@ export function SettingsView() {
   const appearance = systemConfigQuery.data?.appearance ?? defaultAppTheme;
   const updateAppearanceMutation = useUpdateAppearance();
   const appThemePreview = useAppThemePreview();
-  const location = useLocation();
   const navigation = useSettingsNavState();
   const { activePluginId, activeSection, hasUnknownSection } = navigation;
   const searchTargetKey = useRevealSettingsTarget(SETTINGS_CONTENT_ID);
@@ -1236,8 +1262,6 @@ export function SettingsView() {
   );
 
   if (activeSection === "plugins") {
-    const pluginId = matchPath(SETTINGS_PLUGIN_ROUTE_PATH, location.pathname)
-      ?.params.pluginId;
     return (
       <div
         key={searchTargetKey}
@@ -1245,13 +1269,7 @@ export function SettingsView() {
         className="-mx-4 -mt-4 flex min-h-0 flex-1 flex-col overflow-hidden md:-mx-5 md:-mt-5"
       >
         <div className="shrink-0 px-4 pt-4 md:px-5 md:pt-5">{groupTabs}</div>
-        {pluginId ? (
-          <PluginDetailPaneView pluginId={pluginId} />
-        ) : (
-          <div className="flex min-h-0 flex-1 flex-col pt-4 md:pt-5">
-            <PluginsOverview mode="installed" />
-          </div>
-        )}
+        <SettingsPluginsContent />
       </div>
     );
   }
@@ -1522,7 +1540,7 @@ export function SettingsView() {
 export function MachinesSettingsPage() {
   const location = useLocation();
   return (
-    <div className="space-y-6">
+    <div className="space-y-14">
       <MachinesSettingsSection />
       <div className={SETTINGS_CARD_CLASS}>
         <details

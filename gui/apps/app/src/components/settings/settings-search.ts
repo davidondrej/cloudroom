@@ -135,7 +135,7 @@ const SETTINGS_SEARCH_ENTRIES: readonly SettingsSearchEntry[] = [
     })),
   ),
   ...entries("providers", undefined, [
-    ["Providers", "claude code codex pi acp cli install harness agents version update auto-update login log in connect cloud mac"],
+    ["Harness", "providers claude code codex pi acp cli install harnesses agents version update auto-update login log in connect cloud mac"],
     ["Not installed", "install add agent cli harness provider"],
     ["Collapse finished turns", "timeline"],
   ]),
@@ -174,7 +174,8 @@ const SETTINGS_SEARCH_ENTRIES: readonly SettingsSearchEntry[] = [
   ]),
   ...entries("machines", undefined, [
     [`${COMPUTER_TITLE} access`, "mac computer access cloud agents permission full read-only ask off"],
-    ["Where your agents run", "machines mac computer devices rename vps server cloud"],
+    ["Switch Mac", "switch open another mac computer you're looking at other macs remote"],
+    ["Run threads on", "machines mac computer devices rename vps server cloud where agents run"],
     ["Connection method", "ssh remote machine access"],
     ["Server address", "url host remote"],
     ["Machine environment", "environment variables path gh_token shell"],

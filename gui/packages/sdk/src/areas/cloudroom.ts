@@ -19,6 +19,8 @@ export interface CloudroomStatus {
   storage?: CloudroomStorage | null;
   ready: boolean;
   account: { id: string; email: string } | null;
+  /** True only when the saved connection confirms no signed-in Cloudroom account (#872). */
+  signedOut?: boolean;
   /** Connected to a core the user hosts, by URL and token, without a Cloudroom account. */
   selfHosted?: boolean;
   projectId: string | null;

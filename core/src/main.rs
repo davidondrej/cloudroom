@@ -22,6 +22,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("{}", cloudroom::FEATURES.join("\n"));
         return Ok(());
     }
+    if args.first().map(String::as_str) == Some("helper") {
+        if let Err(error) = cloudroom::helper::cli(&args[1..]).await {
+            eprintln!("{error}");
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
     if args.first().map(String::as_str) == Some("preview") {
         cloudroom::preview::cli(&args[1..]).await?;
         return Ok(());

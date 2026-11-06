@@ -47,7 +47,8 @@ worktree` only; a provider takes its branch through `--environment-inputs`.
 - To move a thread to another agent or model in place, use `room-cli thread update
   THREAD --provider PROVIDER --model MODEL` (ADR 0211). The next turn carries the
   conversation so far. Add `--resend` to have the new agent continue right away,
-  for example after a plan limit.
+  for example after a plan limit. It fails if that turn doesn't start; `resend`
+  in `--json` says `started`, `starting` (not confirmed yet), or `queued`.
 - Use `room-cli thread fork <source-thread-id>` to clone a provider session. The
   fork inherits the source conversation in its timeline. It creates an idle
   fork in a new worktree with the source's code, uncommitted changes included

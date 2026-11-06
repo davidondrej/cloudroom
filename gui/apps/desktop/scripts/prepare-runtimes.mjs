@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
-import { createReadStream, createWriteStream } from "node:fs";
+import { createReadStream, createWriteStream, existsSync } from "node:fs";
 import { cp, mkdir, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { execFileSync } from "node:child_process";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
@@ -62,6 +63,20 @@ async function prepareWindowsPython() {
   console.log("Bundled Python 3.12.13 for Windows x64: checksums verified; licenses included.");
 }
 
+/** The Rust Mac helper (`cloudroom helper` in Core), behind the rust-helper switch in the server's previews.ts. */
+async function prepareHelper() {
+  const core = fileURLToPath(new URL("../../../../core/", import.meta.url));
+  const rustup = join(homedir(), ".cargo/bin/cargo");
+  const cargo = process.env.CARGO ?? (existsSync(rustup) ? rustup : "cargo");
+  execFileSync(cargo, ["build", "--release", "--locked", "--manifest-path", join(core, "Cargo.toml")], { stdio: "inherit" });
+  const binary = join(root, "cloudroom-core/cloudroom");
+  await rm(join(root, "cloudroom-core"), { recursive: true, force: true });
+  await mkdir(join(root, "cloudroom-core"));
+  await cp(join(process.env.CARGO_TARGET_DIR ?? join(core, "target"), "release/cloudroom"), binary);
+  execFileSync("/usr/bin/strip", ["-x", binary]);
+  execFileSync(binary, ["--version"], { stdio: "inherit" });
+}
+
 export async function prepareRuntimes() {
   if (process.platform === "win32" && process.arch === "x64") return prepareWindowsPython();
   if (process.platform !== "darwin" || process.arch !== "arm64") {
@@ -96,6 +111,7 @@ export async function prepareRuntimes() {
   await rm(staging, { recursive: true, force: true });
   execFileSync(join(root, "python/bin/python3"), ["-I", "-B", "-c", pythonCheck], { stdio: "inherit" });
   execFileSync(join(git, "bin/git"), ["--version"], { stdio: "inherit" });
+  await prepareHelper();
   console.log("Bundled Python 3.12.13 and Git 2.53.0: checksums verified; licenses and Git sources included.");
 }
 

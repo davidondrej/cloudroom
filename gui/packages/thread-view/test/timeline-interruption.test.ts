@@ -167,6 +167,39 @@ describe("timeline interruption projection", () => {
     );
   });
 
+  it("folds an identical thread warning until the next turn into one ×N row", () => {
+    const event = createTimelineEventFactory({ threadId: "thread-1" });
+    const hook = (details = "run") =>
+      event.warning({ summary: "Hook failed", details });
+    const denied = (details: string) =>
+      event.providerWarning({ summary: "Bash was denied", details });
+    const timeline = renderIdleTimeline([
+      event.turnStarted({ turnId: "turn-1" }),
+      hook(),
+      hook(),
+      hook("other run"),
+      denied("reason A"),
+      denied("reason A"),
+      event.turnCompleted({ turnId: "turn-1" }),
+      event.turnStarted({ turnId: "turn-2" }),
+      hook(),
+    ]);
+
+    expect(
+      timeline.messages.flatMap((message) =>
+        message.kind === "operation" && message.opType === "warning"
+          ? [`${message.title}: ${message.detail}`]
+          : [],
+      ),
+    ).toEqual([
+      "Bash was denied: reason A",
+      "Bash was denied: reason A",
+      "Hook failed ×2: run",
+      "Hook failed: other run",
+      "Hook failed: run",
+    ]);
+  });
+
   it("interrupts post-turn compaction when the thread is explicitly interrupted", () => {
     const event = createTimelineEventFactory({ threadId: "thread-1" });
     const timeline = renderIdleTimeline([

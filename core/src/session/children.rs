@@ -691,6 +691,21 @@ impl Manager {
         }
     }
 
+    /// Makes the kept live children directly under `parent`, which is being archived, top-level threads, so their
+    /// reports never wake it (#603). The app detaches them too, once it sees the archive.
+    pub(crate) fn detach_kept(&self, parent: &str, kept: &[String]) -> Result<()> {
+        let mut local = self.local.lock().unwrap();
+        for id in kept {
+            let Some(session) = local.sessions.get(id) else {
+                continue;
+            };
+            if session.parent_session.as_deref() == Some(parent) {
+                local.append(id, "detach", json!({}), None)?;
+            }
+        }
+        Ok(())
+    }
+
     /// Makes a child a top-level thread, so its parent hears no more about it (docs/scopes/sandboxes.md).
     pub(crate) fn detach(&self, id: &str) -> Result<()> {
         let mut local = self.local.lock().unwrap();
@@ -812,14 +827,29 @@ impl Manager {
         ))
     }
 
-    /// Every thread under this one, at any depth, with whether it is already archived.
-    pub(crate) fn descendants(&self, id: &str) -> Vec<(String, bool)> {
+    /// Every thread under `id`: its ID, whether it is archived, and whether to keep it open because it, a thread
+    /// above it (below `id`), or a thread under it still works: a turn, queued prompts, or background jobs (#603).
+    pub(crate) fn descendants(&self, id: &str) -> Vec<(String, bool, bool)> {
         let local = self.local.lock().unwrap();
-        local
+        let all: Vec<&Session> = local
             .sessions
             .values()
             .filter(|c| under(&local, id, c))
-            .map(|c| (c.session_id.clone(), c.archived))
+            .collect();
+        let live: Vec<&Session> = all
+            .iter()
+            .copied()
+            .filter(|c| c.busy() || c.has_background_jobs())
+            .collect();
+        all.iter()
+            .map(|c| {
+                let keep = live.iter().any(|l| {
+                    l.session_id == c.session_id
+                        || under(&local, &c.session_id, l)
+                        || under(&local, &l.session_id, c)
+                });
+                (c.session_id.clone(), c.archived, keep)
+            })
             .collect()
     }
 

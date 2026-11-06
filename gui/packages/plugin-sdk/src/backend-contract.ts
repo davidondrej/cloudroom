@@ -1555,7 +1555,7 @@ export interface PluginProviderDeclaration {
    * "Worked for" row and leaves the final answer visible. `"flat"` keeps
    * every row of a finished turn visible, as it was while the turn ran. This
    * is only the provider's default: the user can choose either display for
-   * each provider in Settings → Providers or with
+   * each provider in Settings → Agents → Harness or with
    * `bb settings completed-turns`, and that choice wins.
    */
   completedTurnDisplay?: PluginProviderCompletedTurnDisplay;

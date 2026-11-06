@@ -53,10 +53,10 @@ const SAFE_SETTINGS_SEARCH = /^(?=.{2,40}$)\p{L}+(?: \p{L}+){0,3}$/u;
 
 export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: PluginService): void {
   cloudroom(deps).teleportRecovery = () => teleports(deps).recover();
-  cloudroom(deps).archiveRequest = (threadId) => {
+  cloudroom(deps).archiveRequest = (threadId, liveThreadIds) => {
     const thread = getThread(deps.db, threadId);
     if (!thread || thread.archivedAt || thread.deletedAt) return;
-    try { archiveThreadAndChildren(deps, { parentThread: thread }); }
+    try { archiveThreadAndChildren(deps, { parentThread: thread, liveThreadIds }); }
     catch (error) { deps.logger.warn({ error, threadId }, "Cloud self-archive failed"); }
   };
   cloudroom(deps).childTurnEnded = (child, turnStatus) => void queueChildThreadTurnNotificationBestEffort(deps, { childThread: child, parentThreadId: child.parentThreadId, turnStatus });

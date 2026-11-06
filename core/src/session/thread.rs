@@ -37,7 +37,7 @@ room-cli thread tell THREAD_ID|--parent TEXT
 room-cli thread stop CHILD_ID
 room-cli thread archive CHILD_ID";
 const SPAWN_NOTE: &str = "Started in this sandbox and folder. Keep working: Cloudroom sends you a message each time it finishes a turn.";
-const OWN_NOTE: &str = "Started in its own sandbox with a copy of your code (commits and uncommitted changes), on its own branch. It doesn't see your later edits; share work through Git. Use this ID with tell, stop and archive. Keep working: Cloudroom sends you a message each time it finishes a turn.";
+const OWN_NOTE: &str = "Started in its own sandbox with a copy of your code (commits and uncommitted changes, without gitignored files or dependencies; nested Git repos arrive empty or without history), on its own branch. It doesn't see your later edits; share work through Git. Use this ID with tell, stop and archive. Keep working: Cloudroom sends you a message each time it finishes a turn.";
 /// What `thread tell` answers once its message is steered, unconfirmed or queued: for a subagent, which reports back,
 /// or for another thread, which doesn't (#177). The website words its own relayed tells the same.
 const CHILD_NOTES: [&str; 3] = [
@@ -51,7 +51,7 @@ const OTHER_NOTES: [&str; 3] = [
     "Queued. It isn't your subagent, so Cloudroom won't tell you when it finishes.",
 ];
 const FALLBACK_NOTE: &str = " The user's Cloudroom app didn't start it in its own sandbox (it's probably closed), so it runs here.";
-const FORK_NOTE: &str = "Forked this thread at its last finished turn: a new thread with this conversation and your code (commits and uncommitted changes), on its own branch where the project uses Git. It runs on its own and doesn't report back to you; it doesn't see your later edits.";
+const FORK_NOTE: &str = "Forked this thread at its last finished turn: a new thread with this conversation and your code (commits and uncommitted changes, without gitignored files or dependencies; nested Git repos arrive empty or without history), on its own branch where the project uses Git. It runs on its own and doesn't report back to you; it doesn't see your later edits.";
 const TOP_NOTE: &str = "Started as a top-level thread in its own sandbox, from the project's GitHub repo (push your work first) and .env files. It is not your child: it doesn't report back, and you can't tell, stop or read it. It shows in the user's sidebar within a minute.";
 /// How long `spawn --top-level` keeps retrying a start the website could not finish (say, a slow wake).
 const LAUNCH_RETRY: Duration = Duration::from_secs(240);
@@ -267,8 +267,13 @@ async fn archive(
     ConnectInfo(peer): ConnectInfo<Peer>,
 ) -> Result<Json<Value>, Failure> {
     let session = caller(&m, peer, "thread")?;
-    archive_under(&m, &session)?;
-    record(&m, &session, "archive", json!({"archived":true}))
+    let kept = archive_under(&m, &session)?;
+    record(
+        &m,
+        &session,
+        "archive",
+        json!({"archived":true,"kept_live":kept}),
+    )
 }
 
 /// The app moves this thread to another project once its turn ends: a fresh session in that project's folder, in
@@ -294,15 +299,23 @@ async fn move_project(
 }
 
 /// Stops and archives every thread under `id` now: the app archives them too, but never stops them,
-/// and it may be offline. An archived thread is stopped again, in case it still runs.
-pub(super) fn archive_under(m: &Arc<Manager>, id: &str) -> Result<(), Failure> {
-    for (child, archived) in m.descendants(id) {
+/// and it may be offline. An archived thread is stopped again, in case it still runs. Children that still work
+/// stay open, like the app's own archive (#603); returns their IDs.
+pub(super) fn archive_under(m: &Arc<Manager>, id: &str) -> Result<Vec<String>, Failure> {
+    let mut kept = Vec::new();
+    for (child, archived, keep) in m.descendants(id) {
+        // Core never clears `archived`, and the app may have restored the thread since: keep whatever still works.
+        if keep {
+            kept.push(child);
+            continue;
+        }
         retire(m, &child)?;
         if !archived {
             let _ = record(m, &child, "archive", json!({"id":child,"archived":true}))?;
         }
     }
-    Ok(())
+    m.detach_kept(id, &kept).map_err(session_failure)?;
+    Ok(kept)
 }
 
 /// Stops an archived thread's turn, and its agent exits once that turn settles. It frees its memory now, not after
@@ -791,7 +804,8 @@ async fn tell(
             "Use a message of 1-262144 bytes",
         ));
     }
-    let id = if id == "parent" {
+    let to_parent = id == "parent";
+    let id = if to_parent {
         // `thread tell --parent`: the thread that started this one, in this sandbox or another.
         let local = m.local.lock().unwrap();
         let session = local.sessions.get(&sender);
@@ -805,7 +819,7 @@ async fn tell(
         id
     };
     if relay::thread_id(&id) {
-        return relay::command(&m, &sender, &id, "tell", Some(&input.text)).await;
+        return relay::command(&m, &sender, &id, "tell", Some(&input.text), to_parent).await;
     }
     let under = m.tell_target(&sender, &id).map_err(session_failure)?;
     let text = if under {
@@ -909,7 +923,7 @@ async fn stop_child(
 ) -> Result<Json<Value>, Failure> {
     let parent = caller(&m, peer, "thread stop")?;
     if relay::thread_id(&id) {
-        return relay::command(&m, &parent, &id, "stop", None).await;
+        return relay::command(&m, &parent, &id, "stop", None, false).await;
     }
     m.own_child(&parent, &id).map_err(session_failure)?;
     let request =
@@ -928,13 +942,18 @@ async fn archive_child(
 ) -> Result<Json<Value>, Failure> {
     let parent = caller(&m, peer, "thread archive")?;
     if relay::thread_id(&id) {
-        return relay::command(&m, &parent, &id, "archive", None).await;
+        return relay::command(&m, &parent, &id, "archive", None, false).await;
     }
     m.own_child(&parent, &id).map_err(session_failure)?;
     // A child that already ended has nothing to stop. Stop it first, so it starts no new children.
     retire(&m, &id)?;
-    archive_under(&m, &id)?;
-    record(&m, &id, "archive", json!({"id":id,"archived":true}))
+    let kept = archive_under(&m, &id)?;
+    record(
+        &m,
+        &id,
+        "archive",
+        json!({"id":id,"archived":true,"kept_live":kept}),
+    )
 }
 
 /// Flag value after `name`, for `room-cli thread spawn`.

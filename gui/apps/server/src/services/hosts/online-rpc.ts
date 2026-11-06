@@ -19,8 +19,13 @@ import {
 } from "../../ws/hub.js";
 import { ensureHostSessionReadyForWork } from "./host-lifecycle.js";
 import { inactiveHostUnavailableDetails } from "../lib/lifecycle-api-errors.js";
+import { DAEMON_ACTIVE_WORK_DISCONNECT_GRACE_MS } from "../../constants.js";
 
 const HOST_DAEMON_REGISTRATION_WAIT_MS = 1_000;
+// A Local thread start rides out a daemon or relay blip as long as running
+// work does, instead of failing with "Host is not connected" (#879).
+const THREAD_START_HOST_WAIT_MS = DAEMON_ACTIVE_WORK_DISCONNECT_GRACE_MS;
+export const HOST_CONNECTION_INTERRUPTED = "host_connection_interrupted";
 
 interface CallHostOnlineRpcArgs<TCommand extends HostDaemonRpcCommand> {
   command: TCommand;
@@ -224,11 +229,32 @@ async function callHostOnlineRpcWithRetry(
           ...args,
           timeoutMs: Math.max(1, Math.floor(args.timeoutMs / 2)),
         };
+  // Read before sending: a reconnect can mark the thread active before the
+  // dropped request's rejection arrives.
+  const startsNewThread =
+    args.command.type === "thread.start" &&
+    getThread(deps.db, args.command.threadId)?.status === "starting";
   const response = await requestHostOnlineRpcResponse(
     deps,
     firstAttemptArgs,
   ).catch(async (error) => {
     if (!options.retryOnTransportFailure) {
+      // The start may have reached the daemon, so never resend it. Wait for
+      // the host: once back, its reconnect has already marked the thread
+      // active if the start arrived.
+      if (error instanceof HostOnlineRpcUnavailableError && startsNewThread) {
+        // Already true when a reconnect replaced the dropped socket.
+        const waitMs = threadStartHostWaitMs(deps.hub, args.hostId) ?? 0;
+        if (await deps.hub.waitForDaemonForHost(args.hostId, waitMs)) {
+          throw new ApiError(
+            502,
+            HOST_CONNECTION_INTERRUPTED,
+            "The connection to the host dropped while the thread was starting, so it may still start. Wait a minute, then retry the thread if it hasn't.",
+            false,
+          );
+        }
+        throw threadStartHostOfflineError();
+      }
       throwOnlineRpcError(error);
     }
     if (error instanceof HostOnlineRpcUnavailableError) {
@@ -280,6 +306,29 @@ async function waitForRetryableHostRpcTransport(
     );
   }
   await prepareHostForWork(deps, args, false);
+}
+
+/**
+ * How much longer a thread start waits for a host whose daemon dropped.
+ * Null when it hasn't dropped since this server started, so nothing waits.
+ */
+export function threadStartHostWaitMs(
+  hub: Pick<WorkSessionDeps["hub"], "getDaemonDisconnectedAt">,
+  hostId: string,
+): number | null {
+  const droppedAt = hub.getDaemonDisconnectedAt(hostId);
+  return droppedAt === null
+    ? null
+    : Math.max(0, droppedAt + THREAD_START_HOST_WAIT_MS - Date.now());
+}
+
+export function threadStartHostOfflineError(): ApiError {
+  return new ApiError(
+    502,
+    "host_unavailable",
+    `Host is offline. It did not reconnect within ${THREAD_START_HOST_WAIT_MS / 1000} seconds. Retry the thread once it is back online.`,
+    false,
+  );
 }
 
 export function isHostUnavailableApiError(error: unknown): boolean {

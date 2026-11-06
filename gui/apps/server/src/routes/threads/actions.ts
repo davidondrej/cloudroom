@@ -556,15 +556,13 @@ export function registerThreadActionRoutes(app: Hono, deps: AppDeps): void {
     return context.json(buildActivePinnedThreadRootListResponse(deps));
   });
 
-  post(routes.archiveAll, (context) => {
+  post(routes.archiveAll, (context, query) => {
     const thread = requirePublicThread(deps.db, context.req.param("id"));
-    const archivedThreadIds = archiveThreadAndChildren(deps, {
+    const result = archiveThreadAndChildren(deps, {
       parentThread: thread,
+      includeLive: query.includeLive === "true",
     });
-    return context.json({
-      ok: true,
-      archivedThreadIds,
-    });
+    return context.json({ ok: true, ...result });
   });
 
   post(routes.unarchive, (context, query) => {

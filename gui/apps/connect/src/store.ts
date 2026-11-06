@@ -47,8 +47,12 @@ function cached<T>(
   const hit = map.get(key);
   if (!fresh && hit && hit.expires > now) return hit.value;
   const value = load();
-  map.set(key, { value, expires: now + ttl });
-  value.catch(() => map.delete(key));
+  const entry = { value, expires: now + ttl };
+  map.set(key, entry);
+  // A failed lookup is dropped at once, so the next request starts its own instead of waiting on it.
+  value.catch(() => {
+    if (map.get(key) === entry) map.delete(key);
+  });
   return value;
 }
 

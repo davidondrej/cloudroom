@@ -2,11 +2,11 @@ import { COMPUTER, findLocalPathProjectSourceForHost, PERSONAL_PROJECT_ID, type 
 import { execFile } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { readFile, rm } from "node:fs/promises";
-import { basename } from "node:path";
+import { basename, isAbsolute } from "node:path";
 import { promisify } from "node:util";
 import { and, asc, eq } from "drizzle-orm";
-import { events, findLastCompletedRootStoredTurn, findLastRootStoredTurnStarted, getEnvironment, getThread, listProjectSourcesByProjectIds, listStoredTurnCompletedRowsByTurnIds, type DbConnection } from "@cloudroom/db";
-import type { Thread } from "@cloudroom/domain";
+import { events, findLastCompletedRootStoredTurn, findLastRootStoredTurnStarted, getEnvironment, getThread, listProjectSourcesByProjectIds, listStoredTurnCompletedRowsByTurnIds, type DbConnection, type EnvironmentRow } from "@cloudroom/db";
+import type { Thread, ThreadCreateOrigin } from "@cloudroom/domain";
 import { gitShell, msysPathToWindows } from "@cloudroom/process-utils";
 import { z } from "zod";
 import type { CreateThreadEnvironmentArgs } from "@cloudroom/server-contract";
@@ -17,7 +17,10 @@ import { getLastExecutionOptions } from "../threads/thread-events.js";
 import { runLiveHostCommand } from "../hosts/live-command.js";
 import { resolvePrimaryHostId } from "../hosts/primary-host.js";
 import { DEFAULT_ENVIRONMENT_PROVIDER_ID } from "../environments/environment-provider-ids.js";
-import { worktreeProviderInputs } from "../threads/thread-environment-placement.js";
+import {
+  worktreeProviderInputs,
+  worktreeSourcePath,
+} from "../threads/thread-environment-placement.js";
 import { workspaceContextFromPath } from "../environments/workspace-command-target.js";
 import { CloudroomError, UPLOAD_PART, type CloudroomClient, type Harness, type TeleportManifest } from "./client.js";
 import { cloudroom } from "./commands.js";
@@ -41,6 +44,8 @@ export type CloudFork = z.infer<typeof cloudForkSchema>;
  *  commits a thin bundle leaves out. */
 type Code = { data: Buffer; origin: string; ref: string; full?: () => Promise<Buffer> };
 export const isFiles = (data: Buffer) => data[0] === 0x1f && data[1] === 0x8b;
+/** Untracked dependencies and caches a Git source leaves out, so a repo without a .gitignore fits the copy (#604). */
+const UNPACKED = ["node_modules", ".venv", "venv", "__pycache__", ".next", ".turbo", ".cache", "target"];
 const skippedNames = () => [...SKIPPED, ".cloudroom"].map((name) => `-name ${quote(name)}`).join(" -o ");
 /** `applyForkCode`'s exit code when the folder lacks history the bundle needs. */
 const MISSING_HISTORY = 3;
@@ -84,7 +89,7 @@ for n in names:
 `;
 
 export const FORK_HARNESSES: readonly string[] = ["claude-code", "codex"];
-export const FORK_HINT = "[Cloud fork]\nThis conversation was forked from another thread and now runs in its own new sandbox. Cloudroom is copying that thread's code (its commits and uncommitted changes) into this folder. Run `room-cli files wait` before you read or change files; it returns once the code lands. Never recreate missing files.";
+export const FORK_HINT = "[Cloud fork]\nThis conversation was forked from another thread and now runs in its own new sandbox. Cloudroom is copying that thread's code (its commits and uncommitted changes, without gitignored files or dependencies; nested Git repos arrive empty or without history) into this folder. Run `room-cli files wait` before you read or change files; it returns once the code lands. Never recreate missing files.";
 // Core takes teleport uploads in 1 MB parts.
 const PART = 1024 * 1024;
 const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
@@ -279,8 +284,9 @@ export function forkModel(deps: Pick<AppDeps, "db">, threadId: string): string |
   return binding(deps.db, threadId)?.model ?? getLastExecutionOptions(deps, threadId)?.model;
 }
 
-export const CHILD_HINT = "[Cloud child]\nYou run in your own sandbox. Cloudroom is copying your parent thread's code (its commits and uncommitted changes) into this folder. Run `room-cli files wait` before you read or change files; it returns once the code lands. Never recreate missing files.";
+export const CHILD_HINT = "[Cloud child]\nYou run in your own sandbox. Cloudroom is copying your parent thread's code (its commits and uncommitted changes, without gitignored files or dependencies; nested Git repos arrive empty or without history) into this folder. Run `room-cli files wait` before you read or change files; it returns once the code lands. Never recreate missing files.";
 
+const MAX_PACK_MB = 500;
 /** How long a parent's pack waits for siblings started in the same fan-out, so they share it. */
 export const GATHER_MS = 5_000;
 /** Per parent: the pack that children asking while another runs will share, and the last queued pack. */
@@ -341,7 +347,10 @@ async function idle(client: CloudroomClient, sessionId: string): Promise<void> {
 export async function sourceCode(from: CloudroomClient, workspace: string, id: string): Promise<Code | null> {
   return packCode({
     run: async (script) => (await vm(from, script, AbortSignal.timeout(PIECE_TIMEOUT))).toString(),
-    read: (path) => download(from, path, 500, (command) => retry(() => vm(from, command, AbortSignal.timeout(PIECE_TIMEOUT)))),
+    read: (path) => download(from, path, MAX_PACK_MB, (command) => retry(() => vm(from, command, AbortSignal.timeout(PIECE_TIMEOUT)))).catch((error: unknown) => {
+      if (!(error instanceof ApiError) || error.body.code !== "cloud_file_too_large") throw error;
+      throw new ApiError(413, "cloud_file_too_large", `The code is over ${MAX_PACK_MB} MB, usually from large untracked files. Commit and push the source thread's branch, then fetch it`);
+    }),
     remove: (path) => vm(from, `rm -f ${quote(path)}`, AbortSignal.timeout(PIECE_TIMEOUT)),
   }, workspace, id);
 }
@@ -366,15 +375,44 @@ async function localCode(workspace: string, id: string): Promise<Code | null> {
 /** A Local fork in a new worktree starts from the source folder's code, uncommitted work included, so the two threads
  *  never edit the same files. Every Local fork (fork button, plugin, CLI) passes here. It falls back to the source's
  *  folder when a worktree can't hold that code: a personal thread, no Git commits, or a folder outside the project's
- *  repo. A named base branch or a source on another machine is left as asked. */
-export async function prepareLocalForkWorktree(deps: AppDeps, source: Thread, projectId: string, requested: CreateThreadEnvironmentArgs): Promise<{ environment: CreateThreadEnvironmentArgs; note: PromptInput | null }> {
+ *  repo. A named base branch is kept; CLI, SDK and plugin forks use the source's repo when it differs (#971).
+ *  A source on another machine is left as asked. */
+export async function prepareLocalForkWorktree(deps: AppDeps, source: Thread, projectId: string, requested: CreateThreadEnvironmentArgs, origin: ThreadCreateOrigin | null): Promise<{ environment: CreateThreadEnvironmentArgs; note: PromptInput | null }> {
   const base: GitBranchSelection | null = requested.type === "provider" && requested.environmentProviderId === DEFAULT_ENVIRONMENT_PROVIDER_ID.gitWorktree
     ? (requested.inputs as { branch?: GitBranchSelection } | null)?.branch ?? { kind: "default" }
     : requested.type === "host" && requested.workspace.type === "managed-worktree" ? requested.workspace.baseBranch : null;
   const folder = source.environmentId ? getEnvironment(deps.db, source.environmentId) : null;
-  if (!base || base.kind === "named" || !folder?.path || !folder.hostId || folder.hostId !== resolvePrimaryHostId(deps)) return { environment: requested, note: null };
+  if (!base || !folder?.path || !folder.hostId || folder.hostId !== resolvePrimaryHostId(deps)) return { environment: requested, note: null };
   const checkout = projectId === PERSONAL_PROJECT_ID ? undefined
     : findLocalPathProjectSourceForHost(listProjectSourcesByProjectIds(deps.db, [projectId]), folder.hostId)?.path;
+  if (base.kind === "named") {
+    // The app's branch picker lists the project's branches, so keep resolving them in that repo.
+    if (origin === "app") return { environment: requested, note: null };
+    // `room-cli thread worktree` starts from the thread's own commit, so its worktree comes from the thread's checkout (#971).
+    const sourcePath = checkout
+      ? await forkWorktreeSource(folder, folder.path, checkout)
+      : undefined;
+    if (!sourcePath) return { environment: requested, note: null };
+    const inputs = worktreeProviderInputs(base, sourcePath);
+    return {
+      environment:
+        requested.type === "host"
+          ? {
+              type: "provider",
+              environmentProviderId:
+                DEFAULT_ENVIRONMENT_PROVIDER_ID.gitWorktree,
+              machine: {
+                type: "existing",
+                hostId: requested.hostId ?? folder.hostId,
+              },
+              inputs,
+            }
+          : requested.type === "provider"
+            ? { ...requested, inputs }
+            : requested,
+      note: null,
+    };
+  }
   const branch = checkout ? await localForkBranch(folder.path, checkout) : null;
   if (!branch) return { environment: { type: "reuse", environmentId: folder.id }, note: null };
   const named = { kind: "named", name: branch } as const;
@@ -382,6 +420,41 @@ export async function prepareLocalForkWorktree(deps: AppDeps, source: Thread, pr
     environment: requested.type === "host" ? { ...requested, workspace: { type: "managed-worktree", baseBranch: named } } : requested.type === "provider" ? { ...requested, inputs: worktreeProviderInputs(named) } : requested,
     note: { type: "text", text: `[Local fork]\nThis fork runs in its own new worktree on branch ${branch}, not the source thread's folder. The last commit, "Cloudroom fork: uncommitted changes", holds the work the source thread had not committed.`, mentions: [], visibility: "agent-only" },
   };
+}
+
+/** The checkout a fork's worktree starts from when the source folder is in another Git repo than the project's
+ *  `checkout`: that repo's main checkout, or the one its own worktree came from. Undefined otherwise, so it uses the
+ *  project's. The main checkout, not the folder, so a removed subfolder or hand-made worktree can't break a restore. */
+async function forkWorktreeSource(
+  folder: EnvironmentRow,
+  path: string,
+  checkout: string,
+): Promise<string | undefined> {
+  const inherited = worktreeSourcePath(
+    folder.environmentProviderId,
+    folder.environmentProviderSelection?.inputs,
+  );
+  if (inherited || path === checkout) return inherited;
+  const repo = (dir: string) =>
+    exec("git", [
+      "-C",
+      dir,
+      "rev-parse",
+      "--path-format=absolute",
+      "--git-common-dir",
+    ]).then(
+      ({ stdout }) => {
+        // Git before 2.31 prints the unknown --path-format flag back and exits 0: then act as before.
+        const commonDir = stdout.trim();
+        return commonDir.includes("\n") || !isAbsolute(commonDir)
+          ? null
+          : commonDir;
+      },
+      () => null,
+    );
+  const [own, project] = await Promise.all([repo(path), repo(checkout)]);
+  if (own === null || own === project) return undefined;
+  return own.endsWith("/.git") ? own.slice(0, -"/.git".length) : path;
 }
 
 /** The source folder's commits plus its uncommitted work as one extra commit, on a new branch. The source folder is
@@ -424,12 +497,16 @@ async function packCode(at: { run: (script: string) => Promise<string>; read: (p
 }
 
 /** Commits the folder's uncommitted work on top of HEAD to `ref`. A temporary index keeps the folder's own staging
- *  area as it was (an empty file is not a valid index). `keep: false` deletes the ref when the script exits. */
-function snapshotScript(ref: string, keep: boolean): string[] {
+ *  area as it was (an empty file is not a valid index). `keep: false` deletes the ref when the script exits. Untracked
+ *  files in folders named in `skip` stay out; tracked changes there still count. */
+function snapshotScript(ref: string, keep: boolean, skip: readonly string[] = []): string[] {
+  const add = skip.length
+    ? `git add -u -- :/ >/dev/null 2>&1 && GIT_INDEX_FILE="$index" git add -A -- :/ ${skip.map((name) => quote(`:(top,exclude,glob)**/${name}/**`)).join(" ")}`
+    : "git add -A";
   return [
     `index=$(mktemp) && rm -f "$index" && trap 'rm -f "$index"${keep ? "" : `; git update-ref -d ${ref} 2>/dev/null`}' EXIT`,
     `cp "$(git rev-parse --git-path index)" "$index" 2>/dev/null`,
-    `GIT_INDEX_FILE="$index" git add -A >/dev/null 2>&1 && tree=$(GIT_INDEX_FILE="$index" git write-tree) || exit 1`,
+    `GIT_INDEX_FILE="$index" ${add} >/dev/null 2>&1 && tree=$(GIT_INDEX_FILE="$index" git write-tree) || exit 1`,
     `commit=$(git -c user.name=Cloudroom -c user.email=cloudroom@localhost commit-tree "$tree" -p HEAD -m 'Cloudroom fork: uncommitted changes') || exit 1`,
     `git update-ref ${ref} "$commit" || exit 1`,
   ];
@@ -444,7 +521,7 @@ function codeScript(workspace: string, id: string, thin: boolean): string {
     // vanishes while packing (a log) is only a warning: tar exits 1 for it.
     `  l="$f.list" && find . -mindepth 1 \\( ${skippedNames()} \\) -prune -o \\( -type f -o -type l \\) -print0 > "$l" && { tar -czf "$f" --ignore-failed-read --warning=no-file-changed --null -T "$l"; [ $? -le 1 ] && [ -s "$f" ]; } && echo "$f"; code=$?; rm -f "$l"; [ $code -eq 0 ] || rm -f "$f"; exit $code`,
     "fi",
-    ...snapshotScript(ref, false),
+    ...snapshotScript(ref, false, UNPACKED),
     "mkdir -p ~/.cache/cloudroom || exit 1",
     `f=~/.cache/cloudroom/${id}.bundle`,
     thin

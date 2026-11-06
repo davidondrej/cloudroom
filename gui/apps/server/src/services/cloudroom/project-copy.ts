@@ -175,7 +175,8 @@ async function run(deps: Deps, client: CloudroomClient, job: ProjectCopyJob, rep
   if (job.clone && job.repository) {
     const branch = job.teleport && job.localPath ? (await git(job.localPath, ["rev-parse", "--abbrev-ref", "HEAD"]))?.trim() : job.branch;
     cloneError = await clone(deps, client, target, job.repository, branch);
-    if (cloneError) cloneError = await clone(deps, client, target, job.repository, branch);
+    // A short pause first, since an immediate retry often hits the same GitHub timeout (#555).
+    if (cloneError) cloneError = await new Promise((resolve) => setTimeout(resolve, 10_000)).then(() => clone(deps, client, target, job.repository!, branch));
   }
   const cloned = job.clone && !cloneError;
   // Git for Windows checks text files out with CRLF, so the cloud checkout must ignore line-ending-only changes.
@@ -281,6 +282,8 @@ async function clone(deps: Deps, client: CloudroomClient, target: string, reposi
 
 function cloneHint(error: string, login: string): string {
   const fix = "in Settings → Cloud environment → GitHub, then start a new thread";
+  // A dropped or slow connection, not access (#555).
+  if (/HTTP (408|429|5\d\d)|RPC failed|expected 'packfile'|early EOF|promisor remote|Could not resolve host|timed out|Connection reset/i.test(error)) return "GitHub timed out or dropped the connection. That is usually temporary, not an access problem.";
   if (/could not read Username/i.test(error)) return `Cloud sandboxes have no working GitHub login, so they can only clone public repositories. Connect or switch the account ${fix}.`;
   if (/Authentication failed|Invalid username or token/i.test(error)) return `GitHub rejected the cloud's GitHub login, which may have expired. Connect or switch the account ${fix}.`;
   if (!/repository .*not found/i.test(error)) return "Check that the project's GitHub remote exists and you can access it.";

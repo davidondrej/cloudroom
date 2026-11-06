@@ -30,6 +30,7 @@ function menuArgs(
       reopenClosedTab: undefined,
     },
     archiveThread: () => {},
+    checkForUpdates: () => {},
     closeWindowOrSideTab: () => {},
     connectServersSkipReason: null,
     createNewWindow: () => {},
@@ -60,6 +61,24 @@ function findServerSubmenu(
 }
 
 describe("application menu", () => {
+  it.each([true, false])(
+    "puts Check for Updates… right under About (isMac: %s)",
+    (isMac) => {
+      const checkForUpdates = vi.fn();
+      const template = buildApplicationMenuTemplate(
+        menuArgs(() => {}, { checkForUpdates, isMac }),
+      );
+      const appMenu = template[0]?.submenu as MenuItemConstructorOptions[];
+
+      expect(appMenu.slice(0, 2).map((item) => item.label)).toEqual([
+        "About bb",
+        "Check for Updates…",
+      ]);
+      appMenu[1]?.click?.({} as never, undefined, {} as never);
+      expect(checkForUpdates).toHaveBeenCalledTimes(1);
+    },
+  );
+
   it("reopens the last closed tab from the File menu", () => {
     const reopenClosedTab = vi.fn();
     const template = buildApplicationMenuTemplate(

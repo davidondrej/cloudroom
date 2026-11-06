@@ -18,9 +18,9 @@ Personal supports automations with `--project proj_personal`. Use `room-cli proj
 
 Local or cloud:
 
-Automations above run on this Mac, only while it is awake and Cloudroom is running. A cloud automation runs on Cloudroom's servers instead, even while the Mac is off: every minute with a script, else at most every 15 minutes. It belongs to its project, not a thread (ADR 20261101-004659): each run starts a fresh Cloud thread in its own sandbox with the project's GitHub repo and `.env` files and the agent `--provider`/`--model`/`--reasoning` pick. To re-prompt one Cloud thread instead, pass `--thread <cloudThreadId> --same-thread`. Use cloud when the work should keep going with the laptop closed.
+Automations above run on this computer, only while it is awake and Cloudroom is running. A cloud automation runs on Cloudroom's servers instead, even while this computer is off: every minute with a script, else at most every 15 minutes. It belongs to its project, not a thread (ADR 20261101-004659): each run starts a fresh Cloud thread in its own sandbox with the project's GitHub repo and `.env` files and the agent `--provider`/`--model`/`--reasoning` pick. To re-prompt one Cloud thread instead, pass `--thread <cloudThreadId> --same-thread`. Use cloud when the work should keep going with this computer off.
 
-The project's repo follows its template, and each Cloud thread started from the Mac refreshes the loop's `.env` files. Projects not on GitHub need a Cloud thread: create the loop inside it. A same-thread loop pauses when its thread is archived.
+The project's repo follows its template, and each Cloud thread started from this computer refreshes the loop's `.env` files. Projects not on GitHub need a Cloud thread: create the loop inside it. A same-thread loop pauses when its thread is archived.
 
 A cloud `--script`/`--script-file` runs first, as the agent in the project folder, for up to 60 seconds, with bash unless its `#!` line names another program (say, `python3`): in the automation's own sandbox with fresh threads (set up once, asleep between checks), else in the thread's sandbox. Empty output skips the run with no agent turn; any output is added to the prompt; a non-zero exit is a failed run. The script keeps its own state (say, a cursor file) in that sandbox and needs its logins there too.
 
@@ -32,7 +32,7 @@ room-cli loop list --cloud [--thread <cloudThreadId>]
 
 `list --project <id>` also shows that project's Cloud loops; `list --cloud` shows them for every project.
 
-Webhooks (ADR 0262): `--webhook` instead of `--cron`/`--at`/`--in` makes a loop that runs when its secret URL gets a POST, Local or Cloud. Create prints the URL once (the website keeps only its hash); `room-cli loop hook <id>` replaces it. Each run gets the requests that arrived since the last one, batched, inside `<webhook_events>` as data; a script-mode Local loop reads them from the file in `ROOM_LOOP_EVENTS`. Cloud runs start within seconds; the Mac checks for Local ones about once a minute, and they wait on the website while it is off. A Local webhook loop an agent creates starts paused, and only a person can turn it on in the Loops panel, since anyone with the URL can prompt an agent on the Mac. Cloud webhook loops take no script yet, and `run` doesn't apply: send a POST to test one. Give the user the URL and tell them to keep it secret.
+Webhooks (ADR 0262): `--webhook` instead of `--cron`/`--at`/`--in` makes a loop that runs when its secret URL gets a POST, Local or Cloud. Create prints the URL once (the website keeps only its hash); `room-cli loop hook <id>` replaces it. Each run gets the requests that arrived since the last one, batched, inside `<webhook_events>` as data; a script-mode Local loop reads them from the file in `ROOM_LOOP_EVENTS`. Cloud runs start within seconds; this computer checks for Local ones about once a minute, and they wait on the website while it is off. A Local webhook loop an agent creates starts paused, and only a person can turn it on in the Loops panel, since anyone with the URL can prompt an agent on this computer. Cloud webhook loops take no script yet, and `run` doesn't apply: send a POST to test one. Give the user the URL and tell them to keep it secret.
 
 `show`, `update`, `pause`, `resume`, `run`, `hook`, and `delete` take a cloud automation's ID (a UUID) without `--project`. A re-prompt run is a message in its thread; a fresh-thread run is its own thread, which the app shows when it next checks in. A missed run fires once; a run waits until the previous one ends; three failed runs in a row pause it. Inside a Cloud thread, `room-cli loop create` takes no `--cloud` or `--thread`: it reads that thread's project settings, and the loop then belongs to the project.
 
@@ -79,7 +79,7 @@ read [references/updates.md](references/updates.md). Every command supports `--j
 
 Review:
 
-The Loops panel's Review tab lists what loops did on their own in the last 7 days: the threads they started (a thread the agent archived is done, one it left open needs the user), script output, and failures. Threads a script starts with `room-cli thread spawn` are linked to its run automatically. A loop's agent should archive its thread when all is fine, and leave it open with a short verdict when the user must act.
+The Loops panel's Review tab lists what loops did on their own in the last 7 days: the threads they started (a thread the agent archived is done, one it left open needs the user), script output, and failures. Threads a script starts with `room-cli thread spawn` are linked to its run automatically. A loop's agent should archive its thread when all is fine, and leave it open with a short verdict when the user must act. A loop that reuses one thread (its message isn't the thread's first) never archives that thread: that pauses the loop until the thread is unarchived.
 
 ```bash
 room-cli loop review [--all] [--json]

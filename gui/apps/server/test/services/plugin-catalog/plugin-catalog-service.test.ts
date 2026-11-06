@@ -211,7 +211,7 @@ describe("plugin catalog service", () => {
       marketplaceDisplayName: "Cloudroom Official",
       publisherKey: "bb-official",
       publisherLabel: "Cloudroom Official",
-      author: { name: "Cloudroom", url: null },
+      author: { name: "BB", url: "https://github.com/get-bb/bb" },
       installed: false,
       compatible: true,
     });

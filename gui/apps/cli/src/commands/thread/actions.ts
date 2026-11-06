@@ -7,13 +7,19 @@ import {
   type ServiceTier,
   type ThreadVisibility,
 } from "@cloudroom/domain";
+import { CALLER_PROOF_REQUIRED_CODE } from "@cloudroom/config/caller-proof";
 import { action } from "../../action.js";
 import { createCliBbSdk } from "../../client.js";
-import type { ThreadRetryResult, ThreadSendResult } from "@cloudroom/sdk";
+import {
+  BbHttpError,
+  type ThreadRetryResult,
+  type ThreadSendResult,
+} from "@cloudroom/sdk";
 import type { QueuedMessageWaitingOn } from "@cloudroom/domain";
 import {
   collectOption,
   confirmDestructiveAction,
+  getErrorMessage,
   outputJson,
   parseReasoningLevel,
   prependErrorContext,
@@ -284,6 +290,15 @@ export function registerActionsCommands(
           if (visibility) {
             console.log(`Visibility: ${visibility}`);
           }
+          if (thread.resend) {
+            console.log(
+              {
+                started: "Resend: the new agent started its first turn.",
+                starting: `Resend: sent, but the new agent hasn't confirmed its first turn yet. Check \`room-cli thread show ${thread.id}\`.`,
+                queued: `Resend: queued; it starts when the thread can run. See \`room-cli thread queue list ${thread.id}\`.`,
+              }[thread.resend],
+            );
+          }
         },
       ),
     );
@@ -327,9 +342,11 @@ export function registerActionsCommands(
           const threadId = requireThreadIdOrSelf(id, opts);
           const sdk = createCliBbSdk(getUrl());
           let archivedThreadIds: string[] = [threadId];
+          let keptLiveThreadIds: string[] = [];
           try {
             const result = await sdk.threads.archive({ threadId });
             archivedThreadIds = result.archivedThreadIds;
+            keptLiveThreadIds = result.keptLiveThreadIds ?? [];
           } catch (err: unknown) {
             throw prependErrorContext(
               `Failed to archive thread ${threadId}`,
@@ -341,9 +358,15 @@ export function registerActionsCommands(
               ok: true,
               threadId,
               archivedThreadIds,
+              keptLiveThreadIds,
             })
           ) {
             return;
+          }
+          if (keptLiveThreadIds.length > 0) {
+            console.log(
+              `Left ${keptLiveThreadIds.length} live child thread(s) open: ${keptLiveThreadIds.join(", ")}`,
+            );
           }
           const cascadedCount = archivedThreadIds.filter(
             (archivedId) => archivedId !== threadId,
@@ -623,7 +646,16 @@ export function registerActionsCommands(
           const threadId = requireThreadIdOrSelf(id, opts);
           const sdk = createCliBbSdk(getUrl());
           const result: { ok: true; cancelledRetries?: number } =
-            await sdk.threads[method]({ threadId });
+            await sdk.threads[method]({ threadId }).catch((error: unknown) => {
+              // Name the code the room-cli skill tells agents to look for.
+              if (
+                error instanceof BbHttpError &&
+                error.code === "thread_stop_unconfirmed"
+              ) {
+                throw new Error(`${error.message} (${error.code})`);
+              }
+              throw error;
+            });
           if (outputJson(opts, { ...result, threadId })) return;
           const cancelled = result.cancelledRetries ?? 0;
           console.log(
@@ -693,7 +725,7 @@ export async function postThreadMessage(
         .projectId,
     sdk,
   });
-  const response = await sdk.threads.send({
+  const sending = sdk.threads.send({
     threadId: args.threadId,
     input,
     mode:
@@ -709,7 +741,48 @@ export async function postThreadMessage(
     ...(args.senderThreadId ? { senderThreadId: args.senderThreadId } : {}),
     ...(args.sendAt === undefined ? {} : { sendAt: args.sendAt }),
   });
+  const response = await sending.catch((error: unknown) => {
+    throw describeFailedSend(args.threadId, error);
+  });
   return { ...response, mode };
+}
+
+const CONNECT_FAILURE_CODES = new Set([
+  "ECONNREFUSED",
+  "ENOENT",
+  "ENOTFOUND",
+  "UND_ERR_CONNECT_TIMEOUT",
+]);
+
+/** Say whether a failed send reached the thread, so nobody resends blindly. */
+function describeFailedSend(threadId: string, error: unknown): unknown {
+  // A caller-proof refusal or a failed connect happens before the server
+  // looks at the message.
+  const notSent =
+    error instanceof BbHttpError
+      ? error.code === CALLER_PROOF_REQUIRED_CODE
+      : neverConnected(error);
+  if (notSent) {
+    return new Error(
+      `The message was not sent; sending it again is safe. ${getErrorMessage(error)}`,
+    );
+  }
+  if (error instanceof BbHttpError) return error;
+  return new Error(
+    `Cloudroom did not confirm the message, so it may already have been sent (${getErrorMessage(error)}). Check \`room-cli thread show ${threadId}\` before sending it again.`,
+  );
+}
+
+function neverConnected(error: unknown): boolean {
+  let current = error;
+  while (current instanceof Error) {
+    const code = (current as { code?: unknown }).code;
+    if (typeof code === "string" && CONNECT_FAILURE_CODES.has(code)) {
+      return true;
+    }
+    current = current.cause;
+  }
+  return false;
 }
 
 export function describeThreadTellOutcome(

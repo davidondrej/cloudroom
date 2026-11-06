@@ -113,6 +113,16 @@ def configuration_roots(roots):
     return [r for r in roots if r['tree']['kind'] in {'skills', 'codex', 'pi', 'claude', 'cursor', *MCP}]
 
 
+def full_mac_access(config):
+    """Only Full Mac access (ADR 0186) lets the cloud write to this Mac. Missing or unreadable counts as Off, as in the helper."""
+    try:
+        saved = json.loads((Path(config['connectionFile']).parent / 'cloudroom-mac-access.json').read_text())
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
+    level = saved.get('level', 'full' if saved.get('enabled') is True else 'off') if isinstance(saved, dict) else 'off'
+    return level == 'full'
+
+
 def import_codex(config, connection, folder):
     folder = Path(folder)
     folder.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -290,6 +300,7 @@ def cycle(config, connection, state_dir):
         base = previous['base']
         tree = Tree(**root['tree'])
         conflicts = []
+        full = full_mac_access(config)  # Picks the root's mode; each cloud write below rechecks it.
         try:
             local, cloud = tree.scan(previous.get('cache')), remote.scan(identity)
             skipped = local.get('skipped', []) + cloud.get('skipped', [])
@@ -302,7 +313,8 @@ def cycle(config, connection, state_dir):
                 left, right = local['files'].get(path), cloud['files'].get(path)
                 a, b, old = (left or {}).get('tag'), (right or {}).get('tag'), base.get(path)
                 # Mac to VM only: never edit the Mac's agent configuration or copy VM code that Pi would run on the Mac.
-                push = tree.kind in MCP or identity == 'extensions-pi'
+                # Below Full Mac access, nothing from the cloud reaches the Mac.
+                push = tree.kind in MCP or identity == 'extensions-pi' or not full
                 if a == b:
                     base[path] = a
                     continue
@@ -322,9 +334,13 @@ def cycle(config, connection, state_dir):
                             remote.upload(identity, path, b, None, None)
                         base[path] = a
                     else:
+                        # Access may drop mid-sync: check before the write and again before a download is installed.
+                        allowed = lambda: full_mac_access(config)
+                        if not allowed():
+                            continue
                         if right:
                             with remote.request(remote.path(identity, path, expected=b)) as data:
-                                tree.apply(path, a, right, data)
+                                tree.apply(path, a, right, data, allowed)
                         else:
                             tree.apply(path, a, None, None)
                         base[path] = b

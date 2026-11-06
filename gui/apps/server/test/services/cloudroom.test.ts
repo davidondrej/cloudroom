@@ -6,7 +6,7 @@ import { expect, it, vi } from "vitest";
 import * as sync from "../../src/services/cloudroom/sync.js";
 import { listQueuedCommands } from "../helpers/commands.js";
 import { cloudroom } from "../../src/services/cloudroom/commands.js";
-import { command, coreStates, saveTeleportProgress } from "../../src/services/cloudroom/store.js";
+import { command, coreStates, saveBinding, saveTeleportProgress } from "../../src/services/cloudroom/store.js";
 import { teleports } from "../../src/services/cloudroom/teleport.js";
 import { SandboxDirectory } from "../../src/services/cloudroom/sandboxes.js";
 import { createTestAppHarness } from "../helpers/test-app.js";
@@ -494,7 +494,7 @@ it("routes Cloud through the core, projects conversations, pauses queues, and re
     expect((await request(`/threads/${thread.id}/send`, { ...followUp, requestId: "archive-queued" })).status).toBe(200);
     const archived = await request(`/threads/${thread.id}/archive-all`, {});
     expect(archived.status, await archived.clone().text()).toBe(200);
-    expect(await archived.json()).toEqual({ ok: true, archivedThreadIds: [thread.id] });
+    expect(await archived.json()).toEqual({ ok: true, archivedThreadIds: [thread.id], keptLiveThreadIds: [] });
     expect(getThread(harness.db, thread.id)?.archivedAt).not.toBeNull();
     await expect.poll(() => service.threadStatus(thread.id)?.paused).toBe(true);
     await expect.poll(() => getThread(harness.db, thread.id)?.status).toBe("idle");
@@ -681,14 +681,20 @@ it.each(["starting", "stopping"] as const)("archives and restores a %s Cloud chi
     const { project } = seedProjectWithSource(harness.deps, { hostId: host.id });
     const parent = seedThread(harness.deps, { projectId: project.id });
     const child = createThread(harness.db, harness.hub, { projectId: project.id, parentThreadId: parent.id, executionTarget: "cloud", providerId: "codex", status });
-    const response = await harness.app.request(`/api/v1/threads/${parent.id}/archive-all`, { method: "POST" });
+    const response = await harness.app.request(`/api/v1/threads/${parent.id}/archive-all?includeLive=true`, { method: "POST" });
     expect(response.status, await response.clone().text()).toBe(200);
-    expect(await response.json()).toEqual({ ok: true, archivedThreadIds: [child.id, parent.id] });
+    expect(await response.json()).toEqual({ ok: true, archivedThreadIds: [child.id, parent.id], keptLiveThreadIds: [] });
     for (const id of [parent.id, child.id]) {
       expect(getThread(harness.db, id)?.archivedAt).not.toBeNull();
       expect((await harness.app.request(`/api/v1/threads/${id}/unarchive`, { method: "POST" })).status).toBe(200);
       expect(getThread(harness.db, id)?.archivedAt).toBeNull();
     }
+    const live = createThread(harness.db, harness.hub, { projectId: project.id, parentThreadId: parent.id, executionTarget: "cloud", providerId: "codex", status });
+    const kept = await harness.app.request(`/api/v1/threads/${parent.id}/archive-all`, { method: "POST" });
+    const keptBody = await kept.json() as { archivedThreadIds: string[]; keptLiveThreadIds: string[] };
+    expect(keptBody.archivedThreadIds).toEqual([parent.id]);
+    expect(keptBody.keptLiveThreadIds.sort()).toEqual([child.id, live.id].sort());
+    expect(getThread(harness.db, live.id)?.archivedAt).toBeNull();
   } finally {
     await harness.cleanup();
   }
@@ -1115,7 +1121,7 @@ it("queues Cloud follow-ups at once while the cloud is still starting, then deli
   const streams = new Set<ServerResponse>();
   let release = () => {};
   let starting: Promise<void> | null = null;
-  let holdCapabilities = false;
+  let holdCapabilities = false, failStart = false, blocked = false;
   const record = (kind: string, data: object) => {
     const value = { sequence: records.length + 1, timestamp_ms: 1700000000000 + records.length, session_id: "cr_slow", kind, data };
     records.push(value);
@@ -1123,10 +1129,10 @@ it("queues Cloud follow-ups at once while the cloud is still starting, then deli
   };
   const core = createServer(async (req, res) => {
     const json = (body: unknown, status = 200) => { res.writeHead(status, { "Content-Type": "application/json" }); res.end(JSON.stringify(body)); };
-    if (req.url === "/v1/health") return json({});
+    if (req.url === "/v1/health") return json(blocked ? { storage: { enabled: true, level: "blocked", reason: "disk_capacity", workspace_available_bytes: 0, history_available_bytes: 0, workspace_total_bytes: 80e9, history_total_bytes: 80e9, sampled_at: Date.now() } } : {});
     if (req.url === "/v1/capabilities") {
       if (holdCapabilities && starting) await starting;
-      return json({ version: 1, repository: "/code/test", stop: true, resume: true, launch_settings: true, direct_workspaces: true, command_guard: true, harnesses: [{ id: "codex", model: "test-model" }] });
+      return json({ version: 1, repository: "/code/test", stop: true, resume: true, launch_settings: true, direct_workspaces: true, command_guard: true, queue_cancel: true, harnesses: [{ id: "codex", model: "test-model" }] });
     }
     if (req.url === "/v1/ready") return json({ ready: true });
     if (req.url?.includes("/stream?")) {
@@ -1139,6 +1145,7 @@ it("queues Cloud follow-ups at once while the cloud is still starting, then deli
     const body = JSON.parse(text);
     if (req.url === "/v1/sessions") {
       if (starting) await starting;
+      if (failStart) return json({ error: "refused" }, 400);
       record("native_identity", { id: "native" });
       record("state", { state: "idle" });
       return json({ session_id: "cr_slow", receipt: { request_id: body.request_id, command: "start", state: "completed", input: {} }, saving: {} }, 202);
@@ -1162,10 +1169,31 @@ it("queues Cloud follow-ups at once while the cloud is still starting, then deli
     expect(getThread(harness.db, thread.id)?.status).toBe("pending");
     expect(await quick(send(thread.id, "second"))).toMatchObject({ delivery: "queued" });
     expect(await quick(send(thread.id, "third"))).toMatchObject({ delivery: "queued" });
-    expect(service.queue(thread.id).map((item) => item.id)).toEqual(["second", "third"]);
+    expect(await quick(send(thread.id, "fourth"))).toMatchObject({ delivery: "queued" });
+    expect(service.queue(thread.id).map((item) => item.id)).toEqual(["second", "third", "fourth"]);
     expect(prompts).toEqual([]);
+    // #866: before its session starts, a follow-up is removed at once with no request: with the VM gone and, as after a
+    // restart, no capabilities cached, or after a failed start whose retry would send it. Missing or blank IDs are refused.
+    const remove = async (id: string) => { const response = await harness.app.request(`/api/v1/threads/${thread.id}/queued-messages/${id}`, { method: "DELETE" }); return { status: response.status, ...await response.json() }; };
+    const config = join(harness.config.dataDir, "cloudroom.json"), connection = await readFile(config, "utf8");
+    await writeFile(config, JSON.stringify({ sandboxToken: "a".repeat(64) }), { mode: 0o600 });
+    (service as unknown as { lastCapabilities: null }).lastCapabilities = null;
+    for (const [id, status] of [["%20", 404], ["missing", 404], ["second", 200]] as const) {
+      expect(await quick(remove(id))).toMatchObject({ status });
+    }
+    await writeFile(config, connection, { mode: 0o600 });
+    expect(service.queue(thread.id).map((item) => item.id)).toEqual(["third", "fourth"]);
+    failStart = true;
     release();
-    await expect.poll(() => prompts, { timeout: 5000 }).toEqual([`first_${thread.id}`, "second", "third"]);
+    await expect.poll(() => command(harness.db, `first_${thread.id}`)?.state).toBe("failed");
+    expect(await remove("third")).toMatchObject({ status: 200 });
+    failStart = false;
+    await harness.app.request(`/api/v1/cloudroom/threads/${thread.id}/retry-start`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+    await expect.poll(() => prompts, { timeout: 2000 }).toEqual([`first_${thread.id}`, "fourth"]);
+    // A cancel Core can't take yet keeps its cause, here blocked storage, and says the delete is saved.
+    blocked = true;
+    await send(thread.id, "fifth");
+    expect(await remove("fifth")).toMatchObject({ status: 503, message: expect.stringMatching(/disk.*The delete is saved/is) });
   } finally {
     release();
     service.stop();
@@ -1542,11 +1570,18 @@ it("a message to a lost Cloud agent restarts it from its saved chat, and a refus
     // #844 review: Stop paused an older message. Two quick sends restart once, keeping the pause until a message is first.
     keepPausedCapability = false;
     await service.status();
+    harness.db.insert(cloudroomCommands).values({ id: "older-resume", threadId, command: "resume", input: "{}", state: "accepted", createdAt: Date.now() - 1000 }).run();
     record("receipt", { request_id: "stop", command: "stop", state: "accepted", input: {} });
     record("receipt", { request_id: "older", command: "prompt", state: "accepted", input: { text: "Older" } });
     lose();
     await expect.poll(() => getThread(harness.db, threadId)?.status).toBe("error");
     expect(service.threadStatus(threadId)?.paused).toBe(true);
+    // #967: a message Stop holds says so, not that it waits for the current turn, despite an older accepted resume; a
+    // session that replaced the stopped one isn't held by it.
+    for (const [sessionId, held] of [["cr_replaced", false], [sid, true]] as const) {
+      saveBinding(harness.db, threadId, { sessionId });
+      expect(service.queue(threadId).map(row => row.pausedByStop), sessionId).toEqual([held]);
+    }
     calls.length = 0;
     const unsupported = await tell(threadId, "Correction A", "correction-a");
     expect(unsupported.ok).toBe(false);

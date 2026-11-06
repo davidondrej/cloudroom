@@ -1049,14 +1049,14 @@ describe("thread command dispatch", () => {
     ).rejects.toThrow();
   });
 
-  it("cleans up staged thread.start attachments when runtime start fails", async () => {
+  it("keeps staged thread.start attachments when a runtime start times out", async () => {
     const threadStorageRootPath = await makeTempDir(
       "bb-runtime-failed-start-attachments-",
     );
     const harness = createHarness();
     const requestId = nextClientRequestId();
     harness.runtime.startThread = async () => {
-      throw new Error("runtime start failed");
+      throw new Error("JSON-RPC request timed out: turn/start");
     };
     const fetchProjectAttachment = vi.fn<FetchProjectAttachment>(async () => ({
       bytes: Buffer.from("content"),
@@ -1097,7 +1097,8 @@ describe("thread command dispatch", () => {
           fetchProjectAttachment,
         },
       ),
-    ).rejects.toThrow("runtime start failed");
+    ).rejects.toThrow("JSON-RPC request timed out: turn/start");
+    // The provider can still start the turn late and read the file (#1047).
     await expect(
       fs.stat(
         path.join(
@@ -1107,17 +1108,17 @@ describe("thread command dispatch", () => {
           "runtime-failed-uploaded.txt",
         ),
       ),
-    ).rejects.toThrow();
+    ).resolves.toBeTruthy();
   });
 
-  it("cleans up staged turn.submit attachments when runtime turn fails", async () => {
+  it("keeps staged turn.submit attachments when a runtime turn times out", async () => {
     const threadStorageRootPath = await makeTempDir(
       "bb-runtime-failed-turn-attachments-",
     );
     const harness = createHarness();
     const requestId = nextClientRequestId();
     harness.runtime.runTurn = async () => {
-      throw new Error("runtime turn failed");
+      throw new Error("JSON-RPC request timed out: turn/start");
     };
     const fetchProjectAttachment = vi.fn<FetchProjectAttachment>(async () => ({
       bytes: Buffer.from("content"),
@@ -1163,7 +1164,7 @@ describe("thread command dispatch", () => {
           fetchProjectAttachment,
         },
       ),
-    ).rejects.toThrow("runtime turn failed");
+    ).rejects.toThrow("JSON-RPC request timed out: turn/start");
     await expect(
       fs.stat(
         path.join(
@@ -1173,7 +1174,7 @@ describe("thread command dispatch", () => {
           "runtime-turn-uploaded.txt",
         ),
       ),
-    ).rejects.toThrow();
+    ).resolves.toBeTruthy();
   });
 
   it("covers thread lifecycle commands", async () => {

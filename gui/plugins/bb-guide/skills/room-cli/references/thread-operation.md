@@ -66,6 +66,10 @@
   JSON). Send one with `queue send` or discard it with `queue delete`; do not
   re-send it with `tell`, because the next turn resumes the queue and the
   paused copy would send too.
+- If `room-cli thread stop` fails with `thread_stop_unconfirmed`, the agent may
+  still be running. The thread stays `stopping`, its queue waits, and it
+  settles by itself if the agent stops later. Running stop again asks the host
+  again. Do not resend queued messages.
 - `room-cli thread queue send <thread-id> <message-id> --mode steer` re-attempts the
   row as a steer with the same send-now behavior: it bypasses the row's schedule
   and plugin waits, while core waits still apply. During provisioning it reports

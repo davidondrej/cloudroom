@@ -24,7 +24,7 @@ import { AddMachineDialog } from "@/components/dialogs/AddMachineDialog";
 import { MachineAccessControls } from "@/components/settings/MachineAccessSettings";
 import { ConnectVpsDialog, VpsMachineRow, useCloudVps } from "@/components/settings/VpsSettings";
 import { MacAccessControl } from "@/components/settings/CloudroomAccountSettings";
-import { OsTile, osFromPlatform, type OsKind } from "@/components/machines/OsTile";
+import { OsTile, PlaceChip, osFromPlatform, type OsKind } from "@/components/machines/OsTile";
 import { getSettingsSectionRoutePath } from "@/components/settings/settings-sections";
 import { useCloudroomAccount } from "@/hooks/queries/cloudroom-queries";
 import { DESKTOP_DOWNLOAD_URL } from "@/hooks/useDesktopUpdateInfo";
@@ -38,7 +38,13 @@ import {
   machineStatusTone,
 } from "@/components/machines/machine-status";
 import { MachineRenameDialog } from "@/components/settings/MachineRenameDialog";
-import { OpenMacButton, YourMacRow, useYourMacs } from "@/components/settings/YourComputers";
+import {
+  OpenMacButton,
+  ViewingMacCard,
+  YourMacRow,
+  useYourMacs,
+  withoutOldCopies,
+} from "@/components/settings/YourComputers";
 import { MachineIcon } from "@/components/machines/MachineLabel";
 import {
   SETTINGS_CARD_CLASS,
@@ -179,6 +185,7 @@ export function MachineRowContent({
             <span className="min-w-0 truncate text-sm text-foreground">
               {host.name}
             </span>
+            {host.type === "persistent" ? <PlaceChip place="local" /> : null}
             {isThisMachine ? <SettingsBadge>This {COMPUTER}</SettingsBadge> : null}
             {showPrimaryBadge && !isThisMachine ? <SettingsBadge>primary</SettingsBadge> : null}
           </div>
@@ -279,7 +286,8 @@ export function MachinesSettingsSection() {
   const [removeTarget, setRemoveTarget] = useState<Host | null>(null);
 
   const hosts = hostsQuery.data;
-  const macs = useYourMacs().data ?? [];
+  const macs = withoutOldCopies(useYourMacs().data ?? []);
+  const vpsConnected = useCloudVps().data?.connected === true;
   const hostIds = new Set(hosts?.map((host) => host.id));
   const macByHostId = new Map(
     macs.flatMap((mac) => (mac.hostId === null ? [] : [[mac.hostId, mac] as const])),
@@ -403,10 +411,23 @@ export function MachinesSettingsSection() {
 
   return (
     <>
+      <ViewingMacCard />
       <SettingsSection
         plain
-        title="Where your agents run"
-        description={`Your ${COMPUTER}s, your VPS, and Cloud. You pick one when you start a thread.`}
+        title={<span className="text-base">Run threads on</span>}
+        description={
+          <>
+            Computers your agents can use. Pick <PlaceChip place="local" className="mx-0.5" />
+            {vpsConnected ? ", " : " or "}
+            <PlaceChip place="cloud" className="mx-0.5" />
+            {vpsConnected ? (
+              <>
+                , or <PlaceChip place="vps" className="mx-0.5" />
+              </>
+            ) : null}{" "}
+            when you start a thread.
+          </>
+        }
         bodyClassName="flex flex-col gap-3"
       >
         {hosts === undefined ? (
@@ -493,9 +514,10 @@ function CloudRow() {
     >
       <OsTile os="cloud" />
       <div className="min-w-0 flex-1 space-y-0.5">
-        <span className="block min-w-0 truncate text-sm text-foreground">
-          Cloudroom Cloud
-        </span>
+        <div className="flex min-w-0 items-center gap-1.5">
+          <span className="min-w-0 truncate text-sm text-foreground">Cloudroom Cloud</span>
+          <PlaceChip place="cloud" />
+        </div>
         <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-subtle-foreground/75">
           <span className="inline-flex min-w-0 items-center gap-1.5">
             <MachineStatusDot connected={ready} />
@@ -534,7 +556,7 @@ function AddPlaceRow() {
         <DropdownMenuTrigger asChild>
           <button type="button" className={ADD_ROW_CLASS}>
             {PLUS_TILE}
-            {canAddVps ? `Add a ${COMPUTER} or VPS` : `Add a ${COMPUTER}`}
+            Add a machine
           </button>
         </DropdownMenuTrigger>
         <DropdownMenuContent align="start" className="w-80 p-1.5">

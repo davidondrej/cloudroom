@@ -541,7 +541,8 @@ class Tree:
         except FileNotFoundError:
             return None
 
-    def apply(self, relative, expected, entry, stream):
+    def apply(self, relative, expected, entry, stream, allowed=None):
+        """`allowed`, if given, is asked once more after the download, right before the file is installed."""
         safe_path(relative)
         if expected is not None and (not isinstance(expected, str) or not re.fullmatch('[a-f0-9]{64}', expected)):
             raise ValueError('invalid baseline')
@@ -626,6 +627,8 @@ class Tree:
                     if (self.tag(relative) != expected or (original_signature is not None
                             and self.signature(os.stat(name, dir_fd=fd, follow_symlinks=False)) != original_signature)):
                         raise Conflict('destination changed during transfer')
+                    if allowed is not None and not allowed():
+                        raise Conflict('write no longer allowed')
                     if exists:
                         incoming = os.stat(temporary, dir_fd=recovery, follow_symlinks=False)
                         save_recovery([incoming.st_dev, incoming.st_ino])

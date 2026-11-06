@@ -1,5 +1,5 @@
 # Debian with Node.js and npm, pinned for reproducible machine images.
-FROM node:22.19.0-bookworm-slim@sha256:4a4884e8a44826194dff92ba316264f392056cbe243dcc9fd3551e71cea02b90
+FROM node:22.23.4-bookworm-slim@sha256:4b150b48b4116e2a22f2c39cc27025fbf4f153e2078fd3b14d159fdb5c7279da
 
 # Git/GitHub access, HTTP and JSON tools, fast search, and native build support.
 RUN apt-get update \

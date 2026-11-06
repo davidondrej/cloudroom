@@ -11,7 +11,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import Database from "better-sqlite3";
 import type { PluginCliRegistration } from "@get-bb/plugin-sdk";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   claimAutomationScheduledRun,
   closeAutomationRun,
@@ -44,9 +44,11 @@ import {
 } from "./script-runner.js";
 import {
   closeAutomationRunForSettledThread,
+  executeAgentRun,
   reconcileRunningAutomationRuns,
 } from "./run.js";
 import { sweepDueAutomations } from "./sweep.js";
+import { loopAgent, type FallbackSdk } from "./fallback.js";
 import { createAutomationService } from "./service.js";
 import { registerAutomationCli } from "./cli.js";
 import { automationScriptDir } from "./script-files.js";
@@ -925,6 +927,84 @@ describe("automation data access", () => {
     ).toHaveLength(0);
   });
 
+  it("starts overdue loops one a minute without delaying on-time ones (#609)", async () => {
+    const db = createTestDb();
+    const now = 10 * 3_600_000;
+    const overdue = Array.from({ length: 120 }, (_, i) => `auto_old_${i}`);
+    overdue.forEach((id, i) =>
+      createScheduledAutomation(db, now - 3_600_000 + i, id),
+    );
+    createScheduledAutomation(db, now - 1_000, "auto_on_time");
+    createScheduledAutomation(db, now - 600_000, "auto_slow");
+    const slowRun = createManualRun(db, {
+      automationId: "auto_slow",
+      runMode: "agent",
+      now: now - 600_000,
+    }).run;
+    closeAutomationRun(db, {
+      runId: slowRun.id,
+      status: "succeeded",
+      now: now - 5_000,
+    });
+    let spawned = 0;
+    const notExpected = async () => {
+      throw new Error("not expected");
+    };
+    const bb = {
+      sdk: {
+        projects: { list: async () => [{ id: "proj_test" }] },
+        hosts: {
+          list: async () => [
+            {
+              id: "host_test",
+              name: "host",
+              status: "connected",
+              lastSeenAt: null,
+              createdAt: 1,
+              updatedAt: 1,
+            },
+          ],
+        },
+        threads: {
+          get: notExpected,
+          send: notExpected,
+          spawn: async () => ({
+            id: `thr_${++spawned}`,
+            status: "active",
+            archivedAt: null,
+            deletedAt: null,
+          }),
+        },
+      },
+      realtime: { publish: () => undefined },
+      log: {
+        debug: () => undefined,
+        error: () => undefined,
+        info: () => undefined,
+        warn: () => undefined,
+      },
+    };
+    const runs = (id: string) =>
+      listAutomationRuns(db, { automationId: id, limit: 5 }).length;
+    const overdueStarted = () =>
+      overdue.reduce((total, id) => total + runs(id), 0);
+    const sweep = (at: number) =>
+      sweepDueAutomations(bb, db, {
+        pluginDataDir: "/tmp",
+        serverUrl: "http://127.0.0.1:38886",
+        now: at,
+      });
+
+    await sweep(now);
+    expect(runs("auto_on_time")).toBe(1);
+    expect(runs("auto_slow")).toBe(2);
+    expect(overdueStarted()).toBe(1);
+    await sweep(now + 30_000);
+    expect(overdueStarted()).toBe(1);
+    await sweep(now + 90_000);
+    expect(overdueStarted()).toBe(2);
+  });
+
   it("keeps automations of hidden projects and pauses those of deleted ones", async () => {
     const db = createTestDb();
     const automation = createScheduledAutomation(db, 1000);
@@ -1380,6 +1460,32 @@ describe("automation service", () => {
       await rm(pluginDataDir, { recursive: true, force: true });
     }
   });
+
+  it("asks for loop reports only when they can be sent (#872)", async () => {
+    const rows = [
+      { status: async () => ({ account: null, signedOut: true }), ask: false },
+      { status: async () => ({ account: { id: "u" }, signedOut: false }), ask: true },
+      { status: async () => ({ account: null, error: "unreadable" }), ask: true },
+      { status: () => Promise.reject(new Error("down")), ask: true },
+      { status: () => new Promise(() => {}), ask: true },
+    ];
+    for (const { status, ask } of rows) {
+      const db = createTestDb();
+      const automation = createScheduledAutomation(db, 1000);
+      const { run } = createManualRun(db, { automationId: automation.id, runMode: "agent", now: 1 });
+      const prompts: string[] = [];
+      const base = createAutomationServiceBb();
+      const thread = { id: "thr_run", archivedAt: null, deletedAt: null, status: "active" };
+      const spawn = async (input: { prompt?: string }) => (prompts.push(input.prompt!), thread as never);
+      const cloudroom = { automations: async () => ({}), status: status as never };
+      const bb = { ...base, sdk: { ...base.sdk, cloudroom, threads: { ...base.sdk.threads, spawn } } };
+      await executeAgentRun(bb, db, { automation, run, execution: automation.execution as never, onFailure: () => {} });
+      expect(prompts[0]!.includes("room-cli loop report")).toBe(ask);
+      const report = createAutomationService({ bb, db, pluginDataDir: "/tmp", serverUrl: "" })
+        .report({ threadId: "thr_run", outcome: "done", confidence: "high", reason: "ok", actions: [] });
+      await (ask ? expect(report).resolves.toEqual({ reported: true }) : expect(report).rejects.toThrow("need a Cloudroom sign-in"));
+    }
+  });
 });
 
 describe("automation CLI --script-file", () => {
@@ -1727,7 +1833,11 @@ describe("room CLI injection for script runs", () => {
       bbBinaryCandidates({ ROOM_CLI: "  ", BB_CLI_DIR: "", PATH: "" }),
     ).toEqual(["/opt/homebrew/bin/room-cli", "/usr/local/bin/room-cli"]);
     expect(
-      bbBinaryCandidates({ ROOM_CLI: "./room", BB_CLI_DIR: "rel/dir", PATH: "" }),
+      bbBinaryCandidates({
+        ROOM_CLI: "./room",
+        BB_CLI_DIR: "rel/dir",
+        PATH: "",
+      }),
     ).toEqual(["/opt/homebrew/bin/room-cli", "/usr/local/bin/room-cli"]);
   });
 
@@ -1946,5 +2056,79 @@ describe("legacy import", () => {
         await rm(pluginDataDir, { recursive: true, force: true });
       }
     }
+  });
+});
+
+describe("loop fallback", () => {
+  // Codex usage shows on a Mac with only a Cloud login and no CLI, so usage alone can't pick it.
+  it("switches to the other agent only when it is ready on the loop's machine", async () => {
+    let codexHealth = "not_installed";
+    const providerStates = vi.fn(async (_args: { signal: AbortSignal }) => ({
+      providers: [{ providerId: "codex", status: codexHealth }],
+    }));
+    const sdk = {
+      system: {
+        usageLimits: async ({ providerId }: { providerId: string }) => ({
+          [providerId]: {
+            status: "ok",
+            windows: [
+              {
+                label: "Weekly limit",
+                usedPercent: providerId === "claude-code" ? 100 : 40,
+                resetsAt: null,
+              },
+            ],
+          },
+        }),
+        providerStates,
+      },
+      threads: {},
+    } as unknown as FallbackSdk;
+    const automation = {
+      lastRunStatus: "failed",
+      lastRunThreadId: null,
+    } as unknown as Parameters<typeof loopAgent>[1];
+    const execution = {
+      mode: "agent",
+      providerId: "claude-code",
+      model: "claude-fable-5-1",
+      reasoningLevel: "high",
+      environment: {
+        type: "host",
+        hostId: "host-mac",
+        workspace: { type: "personal" },
+      },
+    } as unknown as Parameters<typeof loopAgent>[2];
+
+    expect(await loopAgent(sdk, automation, execution)).toMatchObject({
+      providerId: "claude-code",
+    });
+    // Only Codex is checked, with a bounded wait, so an unrelated slow agent can't hold the loop.
+    expect(providerStates).toHaveBeenCalledWith({
+      hostId: "host-mac",
+      providerId: "codex",
+      signal: expect.any(AbortSignal),
+    });
+    codexHealth = "ready";
+    // A check that doesn't answer within its 5 s bound counts as not ready.
+    const timeout = vi
+      .spyOn(AbortSignal, "timeout")
+      .mockReturnValueOnce(AbortSignal.abort());
+    providerStates.mockImplementationOnce(
+      ({ signal }) =>
+        new Promise((_resolve, reject) => {
+          if (signal.aborted) reject(signal.reason);
+          signal.addEventListener("abort", () => reject(signal.reason));
+        }),
+    );
+    expect(await loopAgent(sdk, automation, execution)).toMatchObject({
+      providerId: "claude-code",
+    });
+    expect(timeout).toHaveBeenCalledWith(5_000);
+    timeout.mockRestore();
+    expect(await loopAgent(sdk, automation, execution)).toMatchObject({
+      providerId: "codex",
+      model: "gpt-6-astra",
+    });
   });
 });

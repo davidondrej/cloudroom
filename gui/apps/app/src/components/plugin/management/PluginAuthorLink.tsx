@@ -1,7 +1,11 @@
 import { Link, useLocation } from "react-router-dom";
 import type { ReactNode } from "react";
 import type { PluginCatalogSearchEntry } from "@/hooks/queries/plugin-catalog-queries";
-import { getPluginsRoutePath } from "@/lib/route-paths";
+import {
+  SETTINGS_PLUGINS_ROUTE_PATH,
+  getPluginsRoutePath,
+  isSettingsPluginsRoutePath,
+} from "@/lib/route-paths";
 import { pluginMarketplaceAuthorKey } from "./plugin-marketplace-author";
 
 export function pluginAuthorPageSearch(
@@ -30,7 +34,9 @@ export function PluginAuthorLink({
   return (
     <Link
       to={{
-        pathname: getPluginsRoutePath(),
+        pathname: isSettingsPluginsRoutePath(location.pathname)
+          ? SETTINGS_PLUGINS_ROUTE_PATH
+          : getPluginsRoutePath(),
         search: pluginAuthorPageSearch(location.search, authorKey),
       }}
       className={className}

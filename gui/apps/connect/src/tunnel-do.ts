@@ -10,6 +10,7 @@ import {
 import { relayedResponse } from "./response-encoding.js";
 import { TUNNEL_MACHINE_HEADER, TUNNEL_SESSION_HEADER, TUNNEL_TARGET_HEADER, TUNNEL_VPS_HEADER } from "./protocol-headers.js";
 import { machineOwner, markServerSeen, sessionByToken } from "./store.js";
+import { timedDb } from "./timeout.js";
 
 export interface Env {
   TUNNEL_DO: DurableObjectNamespace;
@@ -92,10 +93,14 @@ export class TunnelDO {
   private readonly pendingHttp = new Map<number, PendingHttp>();
   private nextStreamId: number;
 
+  private readonly env: Env;
+
   constructor(
     private readonly state: DurableObjectState,
-    private readonly env: Env,
+    env: Env,
   ) {
+    // Its sign-in checks run under blockConcurrencyWhile, so a hung query would stall the whole object.
+    this.env = { ...env, DB: timedDb(env.DB) };
     let maxSeen = 0;
     for (const ws of this.state.getWebSockets()) {
       const attachment = ws.deserializeAttachment() as {

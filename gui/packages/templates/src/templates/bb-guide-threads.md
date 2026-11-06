@@ -39,7 +39,7 @@ Spawning:
                                    provider's inputs as JSON Schema (null when it takes
                                    none). Required when the provider declares inputs,
                                    refused when it does not
-    --machine <id-or-name>         Run on a machine; local selects this Mac, cloud selects the Rust core (--host is an alias)
+    --machine <id-or-name>         Run on a machine; local selects this computer, cloud selects the Rust core (--host is an alias)
     --request-id <id>              Stable Cloud creation ID; reuse after an unconfirmed submission
     --service-tier <tier>          Service tier: fast, default
     --permission-mode <mode>       Permission mode: accept-edits, auto, or full
@@ -102,6 +102,8 @@ Switching agents:
   room-cli thread update THREAD --provider PROVIDER --model MODEL.
   When a plan limit stops a turn, the error offers "Continue with <agent>":
   it switches the same way and the new agent picks up at once (--resend).
+  A resend whose turn doesn't start fails; --json's "resend" says started,
+  starting (not confirmed yet), or queued.
 
 Forking:
 
@@ -336,7 +338,7 @@ Ownership:
   Clearing a parent inherits the former parent's section unless --section or
   --clear-section is also supplied. Children released by environment archiving
   also inherit their former parent's section. Parent changes and unarchive run
-  from the Mac app or a Local thread; a Cloud thread's room-cli has neither.
+  from the desktop app or a Local thread; a Cloud thread's room-cli has neither.
 
   Cloudroom validates model and reasoning updates against the provider's current
   model catalog, applies them on the next turn, and keeps using them until
@@ -348,7 +350,7 @@ Ownership:
 
   Moves a Local or Cloud thread to another project. It keeps its ID and chat;
   its next turn starts a fresh session in that project's folder (on the same
-  Mac, or in the same sandbox) with the conversation so far. The old folder
+  computer, or in the same sandbox) with the conversation so far. The old folder
   stays as it is. A running thread moves when its current turn ends.
 
   room-cli thread read [id]                      Mark read

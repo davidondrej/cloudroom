@@ -14,7 +14,9 @@ const git = (cwd: string, args: string[]) =>
 export function registerWorktreeCommand(parent: Command, getUrl: () => string): void {
   parent
     .command("worktree [thread-id]")
-    .description("Move a Local thread (default: this one) into a new Cloudroom-managed worktree, starting from its current commit")
+    .description(
+      "Fork a Local thread (default: this one) into a new thread in a Cloudroom-managed worktree, starting from its current commit",
+    )
     .option("--allow-dirty", "Leave uncommitted changes behind instead of refusing")
     .option("--json", "Print machine-readable JSON output")
     .action(
@@ -60,7 +62,9 @@ export function registerWorktreeCommand(parent: Command, getUrl: () => string): 
           ],
         });
         if (outputJson(opts, thread)) return;
-        console.log(`Moved to a new worktree: ${thread.id} (from commit ${head.slice(0, 9)})`);
+        console.log(
+          `Forked into a new thread in a new worktree: ${thread.id} (from commit ${head.slice(0, 9)})`,
+        );
         console.log(`Stop now and tell the user to continue in @thread:${thread.id}, then archive ${threadId}.`);
       }),
     );

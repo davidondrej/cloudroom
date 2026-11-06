@@ -1,6 +1,10 @@
 {
   "name": "bb-plugin-memory",
   "version": "0.2.0",
+  "author": {
+    "name": "BB",
+    "url": "https://github.com/get-bb/bb"
+  },
   "private": true,
   "type": "module",
   "description": "Provider-independent durable memory for agents. We recommend disabling provider-native memory when using this plugin.",

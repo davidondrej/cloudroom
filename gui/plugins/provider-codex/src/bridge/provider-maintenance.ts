@@ -432,13 +432,17 @@ function normalizeUsage(raw: unknown, email: string | null): ProviderUsage {
 }
 
 export async function getCodexProviderUsage(): Promise<ProviderUsageResult> {
-  if (findCliExecutable("codex") === null) {
-    return { supported: true, usage: { status: "not_installed" } };
-  }
+  // Usage needs only the saved ChatGPT login, not the CLI: Cloud runs Codex on this Mac's login without one.
+  const installed = findCliExecutable("codex") !== null;
+  const notInstalled: ProviderUsageResult = {
+    supported: true,
+    usage: { status: "not_installed" },
+  };
   let credentials: CodexAuthCredentials | null;
   try {
     credentials = await readCredentials();
   } catch (error) {
+    if (!installed) return notInstalled;
     return {
       supported: true,
       usage: {
@@ -449,6 +453,8 @@ export async function getCodexProviderUsage(): Promise<ProviderUsageResult> {
       },
     };
   }
+  if (!installed && (credentials?.type !== "chatgpt" || credentials.expired))
+    return notInstalled;
   if (credentials === null) {
     return { supported: true, usage: { status: "unauthenticated" } };
   }
@@ -478,7 +484,10 @@ export async function getCodexProviderUsage(): Promise<ProviderUsageResult> {
     if (credentials.isFedrampAccount) headers.set("X-OpenAI-Fedramp", "true");
     const response = await fetchCodexUsage(headers);
     if (response.status === 401) {
-      return { supported: true, usage: { status: "expired" } };
+      // Without a CLI, "Sign in" (`codex login`) can't run, so the card hides Codex instead.
+      return installed
+        ? { supported: true, usage: { status: "expired" } }
+        : notInstalled;
     }
     if (!response.ok) {
       return {

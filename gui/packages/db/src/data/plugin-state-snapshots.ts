@@ -21,32 +21,7 @@ import {
 import type { PluginKvRow, PluginSettingRow } from "./plugin-storage.js";
 import type { PluginScheduleRow } from "./plugin-schedules.js";
 
-export interface PluginStateSnapshotRow {
-  id: string;
-  pluginId: string;
-  fromArtifactId: string | null;
-  toArtifactId: string;
-  snapshotPath: string;
-  databasePath: string | null;
-  statePath: string;
-  secretsPath: string | null;
-  registrationPath: string | null;
-  status:
-    | "pending"
-    | "ready"
-    | "rollback-pending"
-    | "restoring"
-    | "restored"
-    | "failed";
-  rollbackCandidateVersion: string | null;
-  rollbackSourceFingerprint: string | null;
-  rollbackBbVersion: string | null;
-  rollbackSdkVersion: string | null;
-  rollbackDetail: string | null;
-  createdAt: number;
-  retainedUntil: number;
-  updatedAt: number;
-}
+export type PluginStateSnapshotRow = typeof pluginStateSnapshots.$inferSelect;
 
 export function createPluginStateSnapshot(
   db: DbConnection,

@@ -97,6 +97,7 @@ import type {
   RestartTerminalRequest,
   DeleteThreadSectionRequest,
   DeleteThreadRequest,
+  ThreadArchiveAllQuery,
   ThreadUnarchiveQuery,
   EnvironmentActionApiError,
   EnvironmentActionRequest,
@@ -200,6 +201,7 @@ import type {
   SystemMachineProvidersResponse,
   SystemProviderInfo,
   SystemProvidersQuery,
+  SystemProviderStatesQuery,
   SystemProviderStatesResponse,
   SystemUsageLimitsQuery,
   SystemVersionQuery,
@@ -264,6 +266,7 @@ import type {
   UpdateProjectSourceRequest,
   UpdateThreadPluginMetadataRequest,
   UpdateThreadRequest,
+  UpdateThreadResponse,
   UpdateQueuedMessageRequest,
   UploadedPromptAttachment,
   WorkspaceFileListResponse,
@@ -301,6 +304,7 @@ import {
   updateThreadPluginMetadataRequestSchema,
   threadPluginMetadataQuerySchema,
   deleteThreadRequestSchema,
+  threadArchiveAllQuerySchema,
   threadUnarchiveQuerySchema,
   environmentActionRequestSchema,
   environmentDiffBranchesQuerySchema,
@@ -352,6 +356,7 @@ import {
   systemEnvironmentProvidersQuerySchema,
   systemInstallableProvidersQuerySchema,
   systemProvidersQuerySchema,
+  systemProviderStatesQuerySchema,
   systemUsageLimitsQuerySchema,
   systemVersionQuerySchema,
   threadEventWaitQuerySchema,
@@ -1209,7 +1214,7 @@ export const publicApiRoutes = {
       request: jsonRequest<PathId, UpdateThreadRequest>(
         updateThreadRequestSchema,
       ),
-      response: jsonResponse<ThreadResponse>(),
+      response: jsonResponse<UpdateThreadResponse>(),
     }),
     pluginMetadata: {
       get: defineRoute({
@@ -1461,7 +1466,9 @@ export const publicApiRoutes = {
     archiveAll: defineRoute({
       path: "/threads/:id/archive-all",
       method: "post",
-      request: noRequest<PathId>(),
+      request: optionalQueryRequest<PathId, ThreadArchiveAllQuery>(
+        threadArchiveAllQuerySchema,
+      ),
       response: jsonResponse<ThreadArchiveAllResponse>(),
     }),
     unarchive: defineRoute({
@@ -1823,8 +1830,8 @@ export const publicApiRoutes = {
     providerStates: defineRoute({
       path: "/system/providers/state",
       method: "get",
-      request: optionalQueryRequest<EmptyInput, SystemProvidersQuery>(
-        systemProvidersQuerySchema,
+      request: optionalQueryRequest<EmptyInput, SystemProviderStatesQuery>(
+        systemProviderStatesQuerySchema,
       ),
       response: jsonResponse<SystemProviderStatesResponse>(),
     }),

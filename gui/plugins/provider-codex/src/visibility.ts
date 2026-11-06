@@ -125,7 +125,7 @@ const CODEX_SERVER_NOTIFICATION_METHODS = {
 const CODEX_NOTIFICATION_COVERAGE = {
   "account/login/completed": "unknown",
   "account/rateLimits/updated": "normalized",
-  "account/updated": "unknown",
+  "account/updated": "noise",
   "app/list/updated": "unknown",
   "autoApprovalReview/strictReviewRequired": "unknown",
   "command/exec/outputDelta": "unknown",
@@ -272,7 +272,11 @@ function describeParsedCodexRawEvent(
           coverage:
             status === "running" || status === "completed"
               ? "noise"
-              : "unknown",
+              : status === "failed" ||
+                  status === "blocked" ||
+                  status === "stopped"
+                ? "normalized"
+                : "unknown",
         };
       }
       if (

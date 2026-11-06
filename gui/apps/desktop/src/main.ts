@@ -111,14 +111,19 @@ import {
   computerName,
   createComputersSync,
   fetchRelayCredential,
+  hasOfflineMark,
   isRelayUrl,
   listComputers,
   createRelaySessionKeeper,
   OPEN_RETRY_MS,
+  OTHER_MAC_PING_PATH,
   openComputer,
+  reconnectOtherMac,
   relayCookieOrigins,
   RELAY_CREDENTIAL_FILE_NAME,
+  watchOtherMac,
   type ComputerList,
+  type OpenedComputer,
   type ComputersFailure,
   type ComputersSync,
   type RelaySessionKeeper,
@@ -132,7 +137,9 @@ import {
   registerDesktopShutdownSignalHandlers,
 } from "./desktop-shutdown.js";
 import {
+  applyRoute,
   createDesktopWindowFactory,
+  routeFromUrl,
   type DesktopBrowserWindow,
   type DesktopBrowserWindowCreator,
   type DesktopWindowFactory,
@@ -198,6 +205,7 @@ import {
   BB_DESKTOP_FOCUS_WINDOW_CHANNEL,
   BB_DESKTOP_SET_BADGE_COUNT_CHANNEL,
 } from "./desktop-update-ipc.js";
+import { allowQuitWithoutAsking, canQuitNow } from "./desktop-quit-prompt.js";
 import {
   BB_DESKTOP_APP_COMMAND_CHANNEL,
   BB_DESKTOP_CLOSE_WINDOW_REQUEST_CHANNEL,
@@ -207,6 +215,8 @@ import {
   BB_DESKTOP_OPEN_NEW_TAB_CHANNEL,
   BB_DESKTOP_OPEN_COMPUTER_CHANNEL,
   BB_DESKTOP_OPEN_SERVER_DAEMON_LOGS_CHANNEL,
+  BB_DESKTOP_RECONNECT_COMPUTER_CHANNEL,
+  BB_DESKTOP_REFRESH_COMPUTERS_CHANNEL,
   BB_DESKTOP_TOP_RIGHT_DRAG_CHANNEL,
   BB_DESKTOP_WINDOW_STATE_CHANGED_CHANNEL,
   CLOSE_WINDOW_REQUEST_TIMEOUT_MS,
@@ -394,6 +404,8 @@ let startupRetryUrl: string | null = null;
 let startupRetryPending = false;
 let stoppingForQuit = false;
 let quitting = false;
+// Set once an update install starts, until it fails without exiting.
+let updateInstallStarted = false;
 let serverTargetStore: ServerTargetStore | null = null;
 let computersSync: ComputersSync | null = null;
 let relaySessionKeeper: RelaySessionKeeper | null = null;
@@ -402,8 +414,13 @@ let computerList: ComputerList | null = null;
 let computersSkipReason: ComputersFailure | null = null;
 let relayCredentialCache: ConnectCredentialCache | null = null;
 let relayCredential: ConnectCredential | null = null;
-// Set while this Mac stands in for the chosen Mac because it was offline at launch.
-let computerFallback: { handle: string; name: string; back: boolean } | null = null;
+// Set while this Mac stands in for the chosen Mac because it didn't answer. `retryUntil` is set while the
+// "Lost MacBook Air" dialog keeps trying it.
+let computerFallback: { handle: string; name: string; back: boolean; retryUntil: number | null } | null = null;
+// The running retry loop's "still current" check, so a newer target can start its own loop.
+let activeRetry: (() => boolean) | null = null;
+// Each retry loop's ID. "Use this Mac now" bumps it, so a loop it stopped can't switch the window later.
+let retryAttempt = 0;
 let thisComputerName = BUILTIN_SERVER_NAME;
 let builtinServerUrl: string = DEFAULT_BB_SERVER_URL;
 let desktopBridgePath: string | null = null;
@@ -764,7 +781,8 @@ function connectServerMenuId(handle: string): string {
 
 function listMenuConnectServers(): ConnectServerRef[] {
   const servers: ConnectServerRef[] = (computerList?.computers ?? [])
-    .filter((computer) => computer.handle !== computerList?.selfHandle)
+    // Offline Macs can't be opened, and old installs of a Mac pile up offline on the relay.
+    .filter((computer) => computer.live && computer.handle !== computerList?.selfHandle)
     .map(({ handle, name, url }) => ({ handle, name, url }));
   const selected = serverTargetStore?.getConnectServer() ?? null;
   if (
@@ -808,6 +826,13 @@ function buildMenuServerItems(connectServers: ConnectServerRef[]): Array<{
   return items;
 }
 
+// The app's Settings → Updates route; loading views (data: URLs) stay as they are.
+function settingsUpdatesWindowUrl(): string | null {
+  return currentWindowUrl !== null && routeFromUrl(currentWindowUrl) !== null
+    ? applyRoute(currentWindowUrl, "/settings/updates")
+    : currentWindowUrl;
+}
+
 function refreshApplicationMenu(): void {
   const connectServers = listMenuConnectServers();
   installApplicationMenu({
@@ -821,6 +846,30 @@ function refreshApplicationMenu(): void {
         initialUrl: currentWindowUrl,
         stateKey: null,
       });
+    },
+    checkForUpdates() {
+      // Once an install or quit has started, a new window or check can cancel the update or delete its staged installer.
+      if (updateInstallStarted || quitting || stoppingForQuit) return;
+      // Check here too: a loading window, the server error page, or an older server's app can't take the command.
+      checkForDesktopUpdates().catch((error: unknown) => {
+        desktopLogger.error(`Check for Updates… failed: ${String(error)}`);
+      });
+      const browserWindow = getFocusedApplicationWindow();
+      if (browserWindow === null) {
+        // Mac keeps running with every window closed. Settings → Updates checks when it loads.
+        void createApplicationWindow({
+          initialUrl: settingsUpdatesWindowUrl(),
+          stateKey: null,
+        });
+        return;
+      }
+      if (browserWindow.isMinimized()) browserWindow.restore();
+      browserWindow.focus();
+      sendToApplicationRenderer(
+        browserWindow,
+        BB_DESKTOP_APP_COMMAND_CHANNEL,
+        "settings.checkForUpdates",
+      );
     },
     openAbout() {
       void showAboutDialog();
@@ -1241,7 +1290,8 @@ async function retryStartup(): Promise<void> {
   }
 }
 
-async function applyServerTarget(): Promise<void> {
+/** `dropped`: the Mac on screen just went offline, so skip the first quick try and show the reconnect dialog. */
+async function applyServerTarget({ dropped = false }: { dropped?: boolean } = {}): Promise<void> {
   startupRetryUrl = null;
   desktopBrowserBrokerClient?.reconnect();
   if (serverTargetStore === null) {
@@ -1262,14 +1312,15 @@ async function applyServerTarget(): Promise<void> {
     target = serverTargetStore.getTarget();
   }
 
-  // Your other Mac on cloudroom.run. If it doesn't answer, use this Mac until it's back.
+  // Your other Mac on cloudroom.run. If it doesn't answer, show this Mac with the reconnect dialog and keep trying.
+  let retryOtherMacAfterLoad = false;
   if (target.kind === "connect") {
     if (!isRelayUrl(target.server.url)) {
       desktopLogger.info(
         `[desktop] ${target.server.name} was a getbb.app address, which no longer works — opening ${BUILTIN_SERVER_NAME}`,
       );
       await serverTargetStore.setTarget("builtin");
-    } else if (await openRelayComputer(target.server.handle, isCurrent)) {
+    } else if (!dropped && (await openOtherMacOnce(target.server.handle, isCurrent))) {
       refreshApplicationMenu();
       return;
     } else {
@@ -1277,36 +1328,19 @@ async function applyServerTarget(): Promise<void> {
         return;
       }
       desktopLogger.info(
-        `[desktop] ${target.server.name} did not answer — opening ${BUILTIN_SERVER_NAME} instead`,
+        `[desktop] ${target.server.name} did not answer — opening ${BUILTIN_SERVER_NAME} while it keeps trying`,
       );
-      setComputerFallback({ handle: target.server.handle, name: target.server.name, back: false });
+      setComputerFallback({ handle: target.server.handle, name: target.server.name, back: false, retryUntil: null });
+      retryOtherMacAfterLoad = true;
     }
   }
 
   if (target.kind !== "custom") {
-    const attached = await ensureBuiltinRuntimeAttached();
-    if (!isCurrent()) {
+    if (!(await showThisMac(isCurrent))) {
+      if (isCurrent()) refreshApplicationMenu();
       return;
     }
-    if (!attached) {
-      await loadStartupError({
-        details:
-          `Could not connect to the local Cloudroom server on this ${COMPUTER}. Check that the port is free or that a compatible Cloudroom server is running.`,
-        logs: "",
-        retryable: true,
-        title: "Could not connect",
-      });
-      refreshApplicationMenu();
-      return;
-    }
-    const localServerUrl = currentRuntime?.serverUrl ?? builtinServerUrl;
-    startSystemConfigSync(localServerUrl);
-    await loadBbApp(
-      resolveDesktopWindowUrl({
-        env: process.env,
-        serverUrl: localServerUrl,
-      }),
-    );
+    if (retryOtherMacAfterLoad && isCurrent()) void retryOtherMac(isCurrent);
   } else {
     await loadRemoteServerTarget(target.url, isCurrent);
     if (!isCurrent()) {
@@ -1316,12 +1350,98 @@ async function applyServerTarget(): Promise<void> {
   refreshApplicationMenu();
 }
 
+/** Loads this Mac's own app, which also restores its local sign-in. False when its server can't start. */
+async function showThisMac(isCurrent: () => boolean): Promise<boolean> {
+  const attached = await ensureBuiltinRuntimeAttached();
+  if (!isCurrent()) return false;
+  if (!attached) {
+    await loadStartupError({
+      details:
+        `Could not connect to the local Cloudroom server on this ${COMPUTER}. Check that the port is free or that a compatible Cloudroom server is running.`,
+      logs: "",
+      retryable: true,
+      title: "Could not connect",
+    });
+    return false;
+  }
+  const localServerUrl = currentRuntime?.serverUrl ?? builtinServerUrl;
+  startSystemConfigSync(localServerUrl);
+  await loadBbApp(
+    resolveDesktopWindowUrl({
+      env: process.env,
+      serverUrl: localServerUrl,
+    }),
+  );
+  return true;
+}
+
 function setComputerFallback(fallback: typeof computerFallback): void {
   if (fallback === null && computerFallback === null) return;
+  const switched = (fallback === null) !== (computerFallback === null);
   computerFallback = fallback;
-  computersSync?.setFallback(fallback !== null);
-  desktopBrowserBrokerClient?.reconnect();
+  if (switched) {
+    computersSync?.setFallback(fallback !== null);
+    desktopBrowserBrokerClient?.reconnect();
+  }
   sendDesktopInfoChanged();
+}
+
+/** Keeps trying the chosen Mac until `retryUntil`. The window shows this Mac and the reconnect dialog meanwhile. */
+async function retryOtherMac(isCurrent: () => boolean): Promise<void> {
+  const fallback = computerFallback;
+  if (fallback === null || activeRetry?.()) return;
+  activeRetry = isCurrent;
+  const attempt = ++retryAttempt;
+  setComputerFallback({ ...fallback, back: false, retryUntil: Date.now() + OPEN_RETRY_MS });
+  let opened = false;
+  try {
+    opened = await reconnectOtherMac({
+      current: isCurrent,
+      deadline: () =>
+        retryAttempt === attempt && computerFallback?.handle === fallback.handle ? computerFallback.retryUntil : null,
+      open: () => openOnRelay(fallback.handle),
+      load: (opened) => loadOtherMac(fallback.handle, opened, isCurrent),
+      showThisMac: () => showThisMac(isCurrent),
+    });
+  } finally {
+    if (activeRetry === isCurrent) activeRetry = null;
+  }
+  if (!isCurrent()) return;
+  if (opened) {
+    setComputerFallback(null);
+  } else if (computerFallback !== null) {
+    desktopLogger.info(`[desktop] ${fallback.name} still did not answer — staying on ${BUILTIN_SERVER_NAME}`);
+    setComputerFallback({ ...computerFallback, retryUntil: null });
+  }
+  refreshApplicationMenu();
+}
+
+/** The reconnect dialog's buttons: "Keep trying" gives it another 30 seconds; "Use this Mac now" stops trying. */
+function answerReconnect(keepTrying: boolean): void {
+  if (computerFallback === null) return;
+  if (!keepTrying) {
+    retryAttempt += 1;
+    setComputerFallback({ ...computerFallback, retryUntil: null });
+  } else if (activeRetry?.()) {
+    setComputerFallback({ ...computerFallback, retryUntil: Date.now() + OPEN_RETRY_MS });
+  } else {
+    const generation = serverTargetGeneration;
+    void retryOtherMac(() => serverTargetGeneration === generation);
+  }
+}
+
+/** The other Mac on screen went offline: show this Mac and the reconnect dialog. */
+function otherMacDropped(): void {
+  const target = serverTargetStore?.getTarget();
+  if (target?.kind !== "connect" || computerFallback !== null) return;
+  desktopLogger.info(`[desktop] ${target.server.name} went offline`);
+  void applyServerTarget({ dropped: true });
+}
+
+/** The other Mac's address while this window shows it. */
+function viewedOtherMacUrl(): string | null {
+  const target = serverTargetStore?.getTarget();
+  return target?.kind === "connect" && computerFallback === null && isRelayUrl(target.server.url) ? target.server.url : null;
 }
 
 async function getRelayCredential(startLocal: boolean): Promise<ConnectCredential | null> {
@@ -1363,31 +1483,31 @@ async function clearRelayCredential(): Promise<void> {
   await relayCredentialCache?.clear();
 }
 
-async function openRelayComputer(handle: string, isCurrent: () => boolean): Promise<boolean> {
-  const giveUpAt = Date.now() + OPEN_RETRY_MS;
-  let retryDelayMs = 1_000;
-  let credentialRetried = false;
-  for (;;) {
+/** One try to open another Mac on the relay: its signed-in address, or null. */
+async function openOnRelay(handle: string): Promise<OpenedComputer | null> {
+  for (let tries = 0; tries < 2; tries += 1) {
     const credential = await getRelayCredential(true);
-    if (credential === null || !isCurrent()) return false;
+    if (credential === null) return null;
     const opened = await openComputer(credential, handle, session.defaultSession.cookies);
-    if (opened.ok) {
-      if (!isCurrent() || !(await loadRemoteServerTarget(opened.value.url, isCurrent, true))) return false;
-      relaySessionKeeper?.track(handle, opened.value);
-      return true;
-    }
+    if (opened.ok) return opened.value;
     desktopLogger.info(`[desktop] could not open Mac ${handle} (${opened.reason})`);
-    if (opened.reason === "unauthorized") {
-      // One more try covers a key the Connect plugin replaced since this app saved it.
-      if (credentialRetried) return false;
-      credentialRetried = true;
-      await clearRelayCredential();
-      continue;
-    }
-    if (Date.now() + retryDelayMs > giveUpAt) return false;
-    await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
-    retryDelayMs = Math.min(retryDelayMs * 2, 8_000);
+    // One more try covers a key the Connect plugin replaced since this app saved it.
+    if (opened.reason !== "unauthorized") return null;
+    await clearRelayCredential();
   }
+  return null;
+}
+
+/** Loads another Mac's page in the window. False when it didn't load in time. */
+async function loadOtherMac(handle: string, opened: OpenedComputer, isCurrent: () => boolean): Promise<boolean> {
+  if (!(await loadRemoteServerTarget(opened.url, isCurrent, true))) return false;
+  relaySessionKeeper?.track(handle, opened);
+  return true;
+}
+
+async function openOtherMacOnce(handle: string, isCurrent: () => boolean): Promise<boolean> {
+  const opened = await openOnRelay(handle);
+  return opened !== null && isCurrent() && loadOtherMac(handle, opened, isCurrent);
 }
 
 /** Opens one of your Macs in this window; null or this Mac's handle means this Mac. */
@@ -1838,6 +1958,12 @@ async function stopOwnedRuntime(): Promise<void> {
 }
 
 function handleBeforeQuit(event: Event): void {
+  // The update install sets `quitting` first, so it never asks.
+  const runtimeUrl = currentRuntime?.serverUrl ?? null;
+  if (!quitting && !canQuitNow(runtimeUrl, () => app.quit())) {
+    event.preventDefault();
+    return;
+  }
   quitting = true;
   if (stoppingForQuit) {
     return;
@@ -1913,6 +2039,7 @@ async function installDownloadedUpdate(): Promise<void> {
   if (!desktopAutoUpdateService.beginInstall()) {
     return;
   }
+  updateInstallStarted = true;
   const reopens =
     process.platform === "darwin" &&
     app.isPackaged &&
@@ -1980,6 +2107,7 @@ async function installDownloadedUpdate(): Promise<void> {
     }
     handedOff = desktopAutoUpdateService.installUpdate();
   } finally {
+    if (!handedOff && !reopens) updateInstallStarted = false;
     // Windows: the backend may already be stopped, so an install that didn't hand off reopens this version.
     if (process.platform === "win32" && !handedOff) {
       desktopAutoUpdateService.endInstall();
@@ -2002,6 +2130,14 @@ async function installDownloadedUpdate(): Promise<void> {
   if (process.platform === "win32" && handedOff) await new Promise<never>(() => {});
 }
 
+// Shares a check that is still running, so the Updates page's own check joins it if it starts before this one ends.
+async function checkForDesktopUpdates(): Promise<void> {
+  await Promise.all([
+    desktopUpdateService?.checkForUpdates() ?? Promise.resolve(null),
+    desktopAutoUpdateService?.checkForUpdates() ?? Promise.resolve(null),
+  ]);
+}
+
 function registerDesktopUpdateIpc(): void {
   ipcMain.handle(BB_DESKTOP_GET_INFO_CHANNEL, (event) => {
     if (!isAppWindowMainFrameSender(event)) return null;
@@ -2019,12 +2155,18 @@ function registerDesktopUpdateIpc(): void {
     if (!isPrivilegedAppSender(event)) return;
     await openComputerTarget(typeof handle === "string" ? handle : null);
   });
+  ipcMain.handle(BB_DESKTOP_RECONNECT_COMPUTER_CHANNEL, (event, keepTrying: unknown) => {
+    if (!isPrivilegedAppSender(event)) return;
+    answerReconnect(keepTrying === true);
+  });
+  // Settings → Machines opened: refresh which Macs are online (at most once a minute, like Window → Server).
+  ipcMain.on(BB_DESKTOP_REFRESH_COMPUTERS_CHANNEL, (event) => {
+    if (!isPrivilegedAppSender(event)) return;
+    computersSync?.onListRequested();
+  });
   ipcMain.handle(BB_DESKTOP_CHECK_FOR_UPDATES_CHANNEL, async (event) => {
     if (!isPrivilegedAppSender(event)) return null;
-    await Promise.all([
-      desktopUpdateService?.checkForUpdates() ?? Promise.resolve(null),
-      desktopAutoUpdateService?.checkForUpdates() ?? Promise.resolve(null),
-    ]);
+    await checkForDesktopUpdates();
     return getCurrentDesktopInfo();
   });
   ipcMain.handle(BB_DESKTOP_INSTALL_UPDATE_CHANNEL, (event) => {
@@ -2537,6 +2679,21 @@ async function runDesktopApp(): Promise<void> {
     refreshRemoteSystemConfig?.();
   });
   app.on("browser-window-created", (_event, browserWindow) => {
+    // Windows and Linux quit when the last window closes, so ask while it is still open.
+    if (process.platform !== "darwin") {
+      browserWindow.on("close", (event) => {
+        const lastWindow = BrowserWindow.getAllWindows().every(
+          (other) => other === browserWindow || other.isDestroyed(),
+        );
+        if (quitting || !lastWindow) return;
+        const retry = () => {
+          if (!browserWindow.isDestroyed()) browserWindow.close();
+        };
+        const runtimeUrl = currentRuntime?.serverUrl ?? null;
+        if (!canQuitNow(runtimeUrl, retry)) event.preventDefault();
+      });
+      browserWindow.on("session-end", allowQuitWithoutAsking);
+    }
     if (desktopBrowserViewManager === null) {
       return;
     }
@@ -2561,6 +2718,7 @@ async function runDesktopApp(): Promise<void> {
   });
 
   await app.whenReady();
+  powerMonitor.on("shutdown", allowQuitWithoutAsking);
   installDefaultSessionPermissionHandlers();
   if (app.isPackaged) {
     await session.defaultSession.clearCache();
@@ -2718,10 +2876,23 @@ async function runDesktopApp(): Promise<void> {
   );
   // "Sign in required" from the Mac on screen: its sign-in expired or "Sign out all phones" ended it.
   session.defaultSession.webRequest.onCompleted((details) => {
-    if (details.statusCode === 401 && isRelayUrl(details.url)) {
+    if (details.statusCode === 401 && isRelayUrl(details.url) && !details.url.includes(OTHER_MAC_PING_PATH)) {
       void relaySessionKeeper?.onSignInRequired(details.url, details.resourceType === "mainFrame");
     }
+    // The Mac on screen dropped off the relay. Its page's own requests tell us first.
+    const viewed = details.statusCode === 503 ? viewedOtherMacUrl() : null;
+    if (viewed !== null && details.url.startsWith(`${new URL(viewed).origin}/`)) {
+      const headers = Object.fromEntries(
+        Object.entries(details.responseHeaders ?? {}).map(([name, values]) => [name.toLowerCase(), values[0]]),
+      );
+      if (hasOfflineMark(details.statusCode, (name) => headers[name])) otherMacDropped();
+    }
     localCallerAuth.completed(details);
+  });
+  watchOtherMac({
+    viewing: viewedOtherMacUrl,
+    fetch: (url, init) => session.defaultSession.fetch(url, { ...init, credentials: "include" }),
+    onOffline: otherMacDropped,
   });
   computersSync = createComputersSync({
     async fetchList() {

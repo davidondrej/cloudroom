@@ -1,13 +1,21 @@
 import { COMPUTER } from "@cloudroom/domain";
-import { useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Button } from "@cloudroom/shared-ui/button";
+import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@cloudroom/shared-ui/dialog";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@cloudroom/shared-ui/dropdown-menu";
 import { Icon } from "@cloudroom/shared-ui/icon";
 import { cn } from "@cloudroom/shared-ui/lib/utils";
 import { SETTINGS_CARD_ROW_CLASS } from "@/components/ui/settings-section";
 import { appToast } from "@/components/ui/app-toast";
-import { useDesktopUpdateInfo } from "@/hooks/useDesktopUpdateInfo";
-import { publishBannerHeight } from "@/components/layout/DesktopUpdateBanner";
+import { DESKTOP_DOWNLOAD_URL, useDesktopUpdateInfo } from "@/hooks/useDesktopUpdateInfo";
+import { OsTile } from "@/components/machines/OsTile";
+import { openUrlInExternalBrowser } from "@/lib/url-open-routing";
 import { callPluginRpc } from "@/lib/plugin-sdk-hooks";
 import { getMutationErrorMessage } from "@/lib/mutation-errors";
 import { sdk } from "@/lib/sdk";
@@ -37,9 +45,35 @@ export function useYourMacs() {
   });
 }
 
+interface MacLike {
+  name: string;
+  online: boolean;
+  self: boolean;
+}
+
+// Every install that ever signed in stays on the relay, so one Mac can show up
+// several times. Keep this Mac and online Macs; keep one offline Mac per name.
+export function withoutOldCopies<T extends MacLike>(macs: readonly T[]): T[] {
+  const live = macs.filter((mac) => mac.self || mac.online);
+  const seen = new Set(live.map((mac) => mac.name));
+  return macs.filter((mac) => {
+    if (mac.self || mac.online) return true;
+    if (seen.has(mac.name)) return false;
+    seen.add(mac.name);
+    return true;
+  });
+}
+
+// True when the "You're looking at" card can switch Macs, so rows skip their own Open buttons.
+export function useMacSwitcher() {
+  const { desktopApi, desktopInfo } = useDesktopUpdateInfo();
+  return !isPhoneApp() && Boolean(desktopInfo?.computers && desktopApi?.openComputer);
+}
+
 export function OpenMacButton({ mac }: { mac: YourMac }) {
   const { desktopApi, desktopInfo } = useDesktopUpdateInfo();
   const [opening, setOpening] = useState(false);
+  const switcher = useMacSwitcher();
   const computers = desktopInfo?.computers;
   const onScreen =
     computers?.viewing ??
@@ -51,7 +85,7 @@ export function OpenMacButton({ mac }: { mac: YourMac }) {
     : desktopApi?.openComputer && mac.handle !== onScreen
       ? () => desktopApi.openComputer?.(mac.handle)
       : null;
-  if (!open || !mac.online) return null;
+  if (switcher || !open || !mac.online) return null;
   return (
     <Button
       variant="ghost"
@@ -140,52 +174,265 @@ export function YourMacRow({ mac }: { mac: YourMac }) {
   );
 }
 
-// Shown while this Mac stands in for your chosen Mac, which didn't answer at launch.
-export function ComputerFallbackBanner() {
+// A Mac you were using dropped: keep trying it for 30 seconds, then stay on this Mac (design C, 2026-11-06).
+// Once it's back, a toast offers to switch. The app never switches by itself mid-work.
+export function LostMacDialog() {
   const { desktopApi, desktopInfo } = useDesktopUpdateInfo();
-  const fallback = desktopInfo?.computers?.fallback;
-  const [retrying, setRetrying] = useState(false);
-  if (!fallback || !desktopApi?.openComputer) return null;
-  const retry = () => {
-    setRetrying(true);
-    void desktopApi
-      .openComputer?.(fallback.handle)
-      .finally(() => setRetrying(false));
-  };
+  const fallback = desktopInfo?.computers?.fallback ?? null;
+  const retryUntil = fallback?.retryUntil ?? null;
+  const seconds = useSecondsLeft(retryUntil);
+  const back = fallback?.back === true && retryUntil === null ? fallback : null;
+  const backHandle = back?.handle ?? null;
+  const backName = back?.name ?? null;
+  const openComputer = desktopApi?.openComputer;
+
+  useEffect(() => {
+    if (backHandle === null || backName === null || !openComputer) return;
+    const id = `mac-back-${backHandle}`;
+    appToast.message(`${backName} is back`, {
+      id,
+      duration: Infinity,
+      action: { label: "Switch", onClick: () => void openComputer(backHandle) },
+    });
+    return () => {
+      appToast.dismiss(id);
+    };
+  }, [backHandle, backName, openComputer]);
+
+  const reconnect = desktopApi?.reconnectComputer;
+  if (fallback === null || retryUntil === null || !reconnect) return null;
+  const stay = (event: Event) => event.preventDefault();
   return (
-    <div
-      ref={publishBannerHeight}
-      role="status"
-      className="flex shrink-0 items-center gap-3 border-b border-primary/30 bg-primary/10 px-4 py-2 text-sm"
-    >
-      <Icon
-        name="Laptop"
-        className="size-4 shrink-0 text-primary"
-        aria-hidden
-      />
-      <span className="min-w-0 flex-1 truncate">
-        {fallback.back ? (
-          <>
-            <strong>{fallback.name} is back.</strong> Switch to keep working
-            there.
-          </>
-        ) : (
-          <>
-            <strong>{fallback.name} is offline.</strong> You're using this {COMPUTER}
-            until it's back.
-          </>
-        )}
-      </span>
-      <Button size="sm" disabled={retrying} onClick={retry}>
-        {retrying ? "Opening…" : fallback.back ? "Switch" : "Retry"}
-      </Button>
-      <Button
-        size="sm"
-        variant="ghost"
-        onClick={() => void desktopApi.openComputer?.(null)}
+    <Dialog open>
+      <DialogContent
+        hideCloseButton
+        className="max-w-[500px] justify-items-center gap-0 rounded-xl p-8 text-center"
+        onOpenAutoFocus={stay}
+        onEscapeKeyDown={stay}
+        onPointerDownOutside={stay}
+        onInteractOutside={stay}
       >
-        Use this {COMPUTER}
-      </Button>
+        <div className="flex items-start">
+          <MacPicture name={fallback.name} lost />
+          <div className="flex h-14 w-28 items-center px-1">
+            <div className="w-full border-t-2 border-dashed border-warning" />
+          </div>
+          <MacPicture name={`This ${COMPUTER}`} />
+        </div>
+        <DialogTitle className="mt-6 text-2xl font-semibold">Lost {fallback.name}</DialogTitle>
+        <DialogDescription className="mt-2 text-[15px] text-muted-foreground">
+          Switching to this {COMPUTER} in {seconds} {seconds === 1 ? "second" : "seconds"}
+        </DialogDescription>
+        <div className="mt-6 flex gap-2.5">
+          <Button variant="ghost" onClick={() => void reconnect(true)}>
+            Keep trying
+          </Button>
+          <Button variant="outline" onClick={() => void reconnect(false)}>
+            Use this {COMPUTER} now
+          </Button>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function MacPicture({ name, lost = false }: { name: string; lost?: boolean }) {
+  return (
+    <div className={cn("flex w-32 flex-col items-center gap-2.5", lost && "opacity-45")}>
+      <OsTile os={MAC_OS} className={BIG_TILE} />
+      <span className="max-w-full truncate text-sm text-foreground">{name}</span>
     </div>
+  );
+}
+
+function useSecondsLeft(until: number | null): number {
+  const [now, setNow] = useState(Date.now);
+  useEffect(() => {
+    if (until === null) return;
+    const timer = setInterval(() => setNow(Date.now()), 1_000);
+    return () => clearInterval(timer);
+  }, [until]);
+  return until === null ? 0 : Math.max(0, Math.floor((until - now) / 1_000));
+}
+
+const MAC_OS = COMPUTER === "Mac" ? "macos" : "linux";
+const BIG_TILE = "size-14 rounded-2xl [&_svg]:size-6";
+const CARD_BUTTON = "h-9 px-3.5 text-[13px]";
+
+// Settings → Machines: which Mac this window shows, and a switch to your other Macs (ADR 0261).
+export function ViewingMacCard() {
+  const { desktopApi, desktopInfo } = useDesktopUpdateInfo();
+  const [opening, setOpening] = useState<string | null>(null);
+  const computers = desktopInfo?.computers;
+  const openComputer = desktopApi?.openComputer;
+  const refreshComputers = desktopApi?.refreshComputers;
+  // The desktop app's list of Macs can be minutes old: ask for a fresh one when this card opens.
+  useEffect(() => refreshComputers?.(), [refreshComputers]);
+  if (isPhoneApp() || !computers || !openComputer) return null;
+
+  const macs = withoutOldCopies(computers.list);
+  const self = computers.list.find((mac) => mac.self);
+  const selfName = self?.name ?? `This ${COMPUTER}`;
+  const onScreen = computers.viewing ?? self?.handle ?? null;
+  const viewed = computers.list.find((mac) => !mac.self && mac.handle === computers.viewing);
+  const others = macs.filter((mac) => !mac.self);
+  const fallback = computers.fallback;
+  const open = (handle: string | null, name: string) => {
+    setOpening(name);
+    void openComputer(handle)
+      .catch((error: unknown) =>
+        appToast.error(getMutationErrorMessage({ error, fallbackMessage: `Couldn't open ${name}.` })),
+      )
+      .finally(() => setOpening(null));
+  };
+
+  const switchMenu = others.length > 0 && (
+    <DropdownMenu onOpenChange={(open) => open && refreshComputers?.()}>
+      <DropdownMenuTrigger asChild>
+        <Button variant="outline" className={CARD_BUTTON}>
+          Switch {COMPUTER}
+          <Icon name="ChevronDown" className="text-muted-foreground" aria-hidden />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="w-80 p-1.5">
+        {macs.map((mac) => {
+          const here = mac.handle === onScreen;
+          const canOpen = !here && (mac.self || mac.online);
+          return (
+            <DropdownMenuItem
+              key={mac.handle}
+              disabled={!here && !canOpen}
+              className="gap-2.5 px-2.5 py-2"
+              onSelect={() => {
+                if (canOpen) open(mac.self ? null : mac.handle, mac.name);
+              }}
+            >
+              <OsTile os={MAC_OS} className={cn(!here && !canOpen && "opacity-55")} />
+              <span className={cn("min-w-0 flex-1", !here && !canOpen && "opacity-55")}>
+                <span className="block truncate text-sm text-foreground">{mac.name}</span>
+                <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                  {!here && !mac.self ? <StatusDot online={mac.online} /> : null}
+                  {here ? "Showing now" : mac.self ? `This ${COMPUTER}` : mac.online ? "Online" : "Offline"}
+                </span>
+              </span>
+              {here ? (
+                <Icon name="Check" className="text-primary" aria-hidden />
+              ) : canOpen ? (
+                <span className="rounded-md bg-primary px-2.5 py-1 text-xs font-medium text-primary-foreground">
+                  Open
+                </span>
+              ) : null}
+            </DropdownMenuItem>
+          );
+        })}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+
+  let label = "You’re looking at";
+  let name = selfName;
+  let detail: ReactNode = (
+    <>
+      <span className="inline-flex items-center gap-1.5">
+        <StatusDot online />
+        This {COMPUTER}
+      </span>
+      <span>
+        {others.length === 0
+          ? `No other ${COMPUTER}s yet`
+          : `${others.length} other ${others.length === 1 ? COMPUTER : `${COMPUTER}s`} on your account`}
+      </span>
+    </>
+  );
+  let tone = "ring-primary/35";
+  let actions: ReactNode = switchMenu || (
+    <Button
+      variant="outline"
+      className={CARD_BUTTON}
+      onClick={() => openUrlInExternalBrowser(DESKTOP_DOWNLOAD_URL)}
+    >
+      <Icon name="Plus" aria-hidden />
+      Add another {COMPUTER}
+    </Button>
+  );
+
+  if (opening !== null) {
+    label = "Opening";
+    name = opening;
+    detail = (
+      <span className="inline-flex items-center gap-1.5 text-primary">
+        <Icon name="Spinner" className="size-3.5 animate-spin" aria-hidden />
+        Connecting…
+      </span>
+    );
+    actions = null;
+  } else if (fallback?.back) {
+    detail = (
+      <>
+        <span className="inline-flex items-center gap-1.5">
+          <StatusDot online />
+          This {COMPUTER}
+        </span>
+        <span className="text-primary">{fallback.name} is back online</span>
+      </>
+    );
+    actions = (
+      <>
+        <Button variant="ghost" className={CARD_BUTTON} onClick={() => void openComputer(null)}>
+          Stay here
+        </Button>
+        <Button className={CARD_BUTTON} onClick={() => open(fallback.handle, fallback.name)}>
+          Switch to {fallback.name}
+        </Button>
+      </>
+    );
+  } else if (viewed) {
+    label = `You’re looking at another ${COMPUTER}`;
+    name = viewed.name;
+    detail = (
+      <>
+        <span className="inline-flex items-center gap-1.5">
+          <StatusDot online={viewed.online} />
+          {viewed.online ? "Online" : "Offline"}
+        </span>
+        <span>You’re sitting at {selfName}</span>
+      </>
+    );
+    tone = "ring-primary/70 bg-primary/[0.07]";
+    actions = (
+      <>
+        <Button variant="outline" className={CARD_BUTTON} onClick={() => open(null, selfName)}>
+          <Icon name="ArrowLeft" aria-hidden />
+          Back to this {COMPUTER}
+        </Button>
+        {switchMenu}
+      </>
+    );
+  }
+
+  return (
+    <div className={cn("flex items-center gap-4 rounded-xl bg-surface-recessed p-5 ring-1 ring-inset", tone)}>
+      <OsTile os={MAC_OS} className={BIG_TILE} />
+      <div className="min-w-0 flex-1">
+        <div className="text-xs text-subtle-foreground/75">{label}</div>
+        <div className="truncate text-base font-semibold text-foreground">{name}</div>
+        <div className="mt-0.5 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-subtle-foreground/75">
+          {detail}
+        </div>
+      </div>
+      {actions ? <div className="flex shrink-0 items-center gap-2">{actions}</div> : null}
+    </div>
+  );
+}
+
+function StatusDot({ online }: { online: boolean }) {
+  return (
+    <span
+      aria-hidden
+      className={cn(
+        "size-1.5 shrink-0 rounded-full",
+        online ? "bg-success" : "border border-subtle-foreground/75",
+      )}
+    />
   );
 }

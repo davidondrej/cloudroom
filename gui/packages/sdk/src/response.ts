@@ -144,6 +144,7 @@ export async function resolveResponse<TResponse extends SdkResponseLike>(
     if (isTypeErrorWithCauseCode(error, "ECONNREFUSED")) {
       throw new Error(
         "Cannot connect to Cloudroom server. Ensure it is running and ROOM_SERVER_URL is correct.",
+        { cause: error },
       );
     }
     throw error;

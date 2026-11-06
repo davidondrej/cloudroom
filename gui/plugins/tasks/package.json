@@ -1,6 +1,10 @@
 {
   "name": "bb-plugin-tasks",
   "version": "0.1.2",
+  "author": {
+    "name": "BB",
+    "url": "https://github.com/get-bb/bb"
+  },
   "description": "Plan and track work in Cloudroom, delegate tasks to agents, and keep task context connected to worker threads.",
   "private": true,
   "license": "Apache-2.0",

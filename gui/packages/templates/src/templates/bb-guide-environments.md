@@ -180,7 +180,7 @@ truncation markers are preserved.
 
 Remote access (cloudroom connect):
 
-  Cloudroom Connect opens this Mac's Cloudroom from a phone or another computer at
+  Cloudroom Connect opens this computer's Cloudroom from a phone or another computer at
   https://<id>.cloudroom.run. It sets itself up once you are signed in to Cloudroom:
   the server registers with the relay, holds the tunnel itself, and reconnects on
   restart. A phone opens cloudroom.dev/m and signs in with the Cloudroom account.
@@ -198,13 +198,13 @@ Remote access (cloudroom connect):
   choice for expose, unexpose, and shares. Server-host URLs use
   `https://<id>--<port>.cloudroom.run`; remote-host URLs use
   `https://<machine-id>--<port>.cloudroom.run` and proxy directly through that
-  machine's daemon. Only phones and browsers signed in to this Mac can open them;
+  machine's daemon. Only phones and browsers signed in to this computer can open them;
   they are not public internet links. Agents should run expose from the thread that
   started the server, share the returned URL, and unexpose from the same thread when
   it stops. `room-cli connect status` shows all shares with host + URL. `shares --json`
   returns the resolved `host` and rows with `hostId`, `hostName`, `port`, and `url`.
 
-  Remote hosts added in Settings → Machines reach this Mac through the same relay
+  Remote hosts added in Settings → Machines reach this computer through the same relay
   with their own credential. Removing the machine revokes it.
 
   Remote access is owned by the builtin "connect" plugin. Disabling the plugin

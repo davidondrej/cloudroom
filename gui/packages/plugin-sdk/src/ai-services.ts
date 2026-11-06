@@ -53,12 +53,14 @@ export const experimental_aiInferenceCompleteInputSchema = z
     serviceId: z.string().min(1),
     /** The model segment of the user's `<serviceId>/<model>` setting. */
     model: z.string().min(1),
-    /** Thread titles use "none"; thread purposes use the user's setting. */
-    reasoningEffort: z.enum(["none", "low", "medium", "high"]),
+    /** Thread titles use "none"; thread purposes use the user's setting; project summaries use "xhigh". */
+    reasoningEffort: z.enum(["none", "low", "medium", "high", "xhigh"]),
     prompt: z.string().min(1),
     /** A JSON Schema object the structured result must satisfy. */
     outputSchema: jsonObjectSchema,
     timeoutMs: z.number().int().positive(),
+    /** A folder the model may explore with read-only file tools first. Services without file tools ignore it. */
+    folder: z.string().min(1).optional(),
   })
   .strict();
 export type ExperimentalAiInferenceCompleteInput = z.infer<

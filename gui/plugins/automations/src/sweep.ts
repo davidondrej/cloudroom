@@ -8,6 +8,7 @@ import {
   parseAutomationExecution,
   parseAutomationTrigger,
   setAutomationEnabled,
+  lastRunFinishedAt,
   type AutomationRow,
   type AutomationRunRow,
   type Db,
@@ -23,6 +24,9 @@ import {
 
 const DUE_AUTOMATION_BATCH_SIZE = 100;
 export const SWEEP_INTERVAL_MS = 10_000;
+export const OVERDUE_MS = 2 * 60_000;
+export const OVERDUE_SPACING_MS = 60_000;
+const lastOverdueStart = new WeakMap<Db, number>();
 
 const hostListSchema = z.array(
   z.object({ status: z.enum(["connected", "disconnected"]) }).passthrough(),
@@ -86,8 +90,8 @@ async function processDueAutomation(
     agentHostsAvailable: boolean;
     serverUrl: string;
   },
-): Promise<void> {
-  if (args.automation.nextRunAt === null) return;
+): Promise<boolean> {
+  if (args.automation.nextRunAt === null) return false;
   const expectedNextRunAt = args.automation.nextRunAt;
   let newNextRunAt: number | null;
   let execution;
@@ -106,11 +110,11 @@ async function processDueAutomation(
     bb.log.error(
       `Skipping due automation ${args.automation.id} with invalid stored configuration: ${errorMessage(error)}`,
     );
-    return;
+    return false;
   }
 
   if (execution.mode === "agent" && !args.agentHostsAvailable) {
-    return;
+    return false;
   }
 
   const claim = claimAutomationScheduledRun(db, {
@@ -119,7 +123,7 @@ async function processDueAutomation(
     newNextRunAt,
     now: args.now,
   });
-  if (!claim.advanced) return;
+  if (!claim.advanced) return false;
   publishAutomationChange(bb, args.automation.projectId, [
     "automations-changed",
     "automation-runs-changed",
@@ -148,6 +152,7 @@ async function processDueAutomation(
       );
     });
   }
+  return true;
 }
 
 async function hasConnectedHost(
@@ -189,13 +194,26 @@ export async function sweepDueAutomations(
   },
 ): Promise<void> {
   const now = args.now ?? Date.now();
+  const startedAt = Date.now();
   for (const projectId of retryPausedAutomations(db, now))
     publishAutomationChange(bb, projectId, "automations-changed");
-  const due = listDueAutomations(db, { now, limit: DUE_AUTOMATION_BATCH_SIZE });
+  const due = listDueAutomations(db, {
+    now,
+    limit: DUE_AUTOMATION_BATCH_SIZE,
+    overdueBefore: now - OVERDUE_MS,
+  });
   if (due.length === 0) return;
   const projectIds = await liveProjectIds(bb);
   const agentHostsAvailable = await hasConnectedHost(bb);
+  let overdueStarted =
+    now - (lastOverdueStart.get(db) ?? -Infinity) < OVERDUE_SPACING_MS;
   for (const automation of due) {
+    const nextRunAt = automation.nextRunAt ?? now;
+    const overdue =
+      now - nextRunAt > OVERDUE_MS &&
+      now - Math.max(nextRunAt, lastRunFinishedAt(db, automation.id)) >
+        OVERDUE_MS;
+    if (overdue && overdueStarted) continue;
     // A deleted project's automations would run unseen, so pause them.
     if (projectIds.size > 0 && !projectIds.has(automation.projectId)) {
       setAutomationEnabled(db, {
@@ -211,13 +229,17 @@ export async function sweepDueAutomations(
       continue;
     }
     try {
-      await processDueAutomation(bb, db, {
+      const started = await processDueAutomation(bb, db, {
         pluginDataDir: args.pluginDataDir,
         automation,
         now,
         agentHostsAvailable,
         serverUrl: args.serverUrl,
       });
+      if (overdue && started) {
+        overdueStarted = true;
+        lastOverdueStart.set(db, now + Date.now() - startedAt);
+      }
     } catch (error) {
       bb.log.error(
         `Failed to process due automation ${automation.id}: ${errorMessage(error)}`,

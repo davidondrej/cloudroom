@@ -3,6 +3,7 @@ import { queuedMessageWaitingOnSchema } from "@cloudroom/domain";
 import { sendMessageResponseSchema } from "@cloudroom/server-contract";
 import { describe, expect, it } from "vitest";
 import { applyLoggedThreadLifecycleEvent } from "../../src/services/threads/lifecycle-outcome.js";
+import { queueParentSystemMessage } from "../../src/services/threads/parent-system-messages.js";
 import { runQueuedMessageDispatch } from "../../src/services/threads/queued-message-dispatch.js";
 import { onDaemonSocketOpen } from "../../src/ws/daemon-protocol.js";
 import {
@@ -166,6 +167,69 @@ describe("offline host follow-ups", () => {
       expect(listEvents(harness.db, { threadId: thread.id })).toHaveLength(
         eventCountBeforeSend + 1,
       );
+    });
+  });
+
+  it("keeps a child report the offline host missed and sends it once on reconnect (#917)", async () => {
+    await withTestHarness(async (harness) => {
+      const host = seedHost(harness.deps, { id: "host-offline-report" });
+      const { project } = seedProjectWithSource(harness.deps, {
+        hostId: host.id,
+      });
+      const environment = seedEnvironment(harness.deps, {
+        hostId: host.id,
+        projectId: project.id,
+        path: "/tmp/offline-report",
+      });
+      const parent = seedThread(harness.deps, {
+        projectId: project.id,
+        environmentId: environment.id,
+      });
+      seedThreadRuntimeState(harness.deps, {
+        threadId: parent.id,
+        environmentId: environment.id,
+        providerThreadId: "provider-offline-report",
+      });
+
+      await queueParentSystemMessage(harness.deps, {
+        input: [{ type: "text", text: "Child finished", mentions: [] }],
+        parentThreadId: parent.id,
+        systemMessageKind: "child-completed",
+        systemMessageSubject: {
+          kind: "thread",
+          threadId: "child-1",
+          threadName: "Child",
+        },
+      });
+      expect(
+        JSON.parse(
+          listQueuedThreadMessages(harness.db, parent.id)[0]!.waitingOn!,
+        ),
+      ).toMatchObject({ kind: "host-offline" });
+
+      const session = seedSession(harness.deps, host.id);
+      const socket = registerTestHostRpcCapture(harness.deps, {
+        hostId: host.id,
+        sessionId: session.id,
+      });
+      onDaemonSocketOpen(harness.deps, {
+        hostId: host.id,
+        sessionId: session.id,
+        socket,
+      });
+      await waitForQueuedCommand(
+        harness,
+        ({ command }) =>
+          command.type === "turn.submit" && command.threadId === parent.id,
+      );
+      await runQueuedMessageDispatch(harness.deps, {
+        kind: "host-connected",
+        hostId: host.id,
+      });
+      expect(
+        listQueuedThreadCommands(harness, "turn.submit", parent.id),
+      ).toHaveLength(1);
+      expect(listQueuedThreadMessages(harness.db, parent.id)).toEqual([]);
     });
   });
 });

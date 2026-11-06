@@ -3,21 +3,7 @@ import type { DbConnection } from "../connection.js";
 import { installedPlugins, pluginArtifacts } from "../schema.js";
 import { likePrefixPattern } from "./sql-like.js";
 
-export interface PluginArtifactRow {
-  id: string;
-  pluginId: string;
-  sourceKind: "npm" | "git";
-  npmResolvedVersion: string | null;
-  gitResolvedCommit: string | null;
-  gitCheckoutRoot: string | null;
-  path: string;
-  integrity: string | null;
-  contentHash: string | null;
-  validationResult: "pending" | "valid";
-  createdAt: number;
-  updatedAt: number;
-  validatedAt: number | null;
-}
+export type PluginArtifactRow = typeof pluginArtifacts.$inferSelect;
 
 interface PluginArtifactInputBase {
   id: string;

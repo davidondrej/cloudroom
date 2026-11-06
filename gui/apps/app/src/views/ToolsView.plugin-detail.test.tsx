@@ -30,7 +30,7 @@ import {
   resetPluginSlotStoreForTest,
   setPluginSlotRegistrations,
 } from "@/lib/plugin-slots";
-import { PluginsOverview } from "@/components/plugin/PluginsOverview";
+import { SettingsPluginsContent } from "./SettingsView";
 import { PluginDetailPaneView, PluginsView } from "./ToolsView";
 import { AppRoutes } from "../App";
 import {
@@ -116,11 +116,7 @@ function RoutedPluginsView() {
     <>
       <TooltipProvider>
         {isSettings ? (
-          pluginId ? (
-            <PluginDetailPaneView pluginId={pluginId} />
-          ) : (
-            <PluginsOverview mode="installed" />
-          )
+          <SettingsPluginsContent />
         ) : (
           <PluginsView pluginId={pluginId} />
         )}
@@ -918,7 +914,7 @@ describe("Cloudroom Official plugin detail routing", () => {
     "/settings/plugins",
     "/plugins/github?view=installed",
     "/plugins?view=installed",
-  ])("opens installed plugin settings from %s", async (path) => {
+  ])("opens a related plugin from %s", async (path) => {
     const author = {
       name: "BB",
       github: "get-bb",
@@ -1014,20 +1010,30 @@ describe("Cloudroom Official plugin detail routing", () => {
     });
     expect(screen.getAllByText("GitHub", { selector: "h1" })).toHaveLength(1);
     fireEvent.click(relatedPluginButton);
+    const inSettings = path.startsWith("/settings/plugins");
     await waitFor(() => {
       expect(screen.getByTestId("route-path").textContent).toBe(
-        "/plugins/automations",
+        inSettings ? "/settings/plugins/automations" : "/plugins/automations",
       );
     });
     expect(screen.getByTestId("route-search").textContent).toBe(
       "?view=installed",
     );
-    expect(
-      await screen.findByRole("button", { name: "Close Automations" }),
-    ).toBeTruthy();
+    if (inSettings) {
+      expect(
+        await screen.findByText("Automations", { selector: "h1" }),
+      ).toBeTruthy();
+    } else {
+      expect(
+        await screen.findByRole("button", { name: "Close Automations" }),
+      ).toBeTruthy();
+    }
   });
 
-  it("routes the detail author link to the restored author page", async () => {
+  it.each([
+    ["/plugins/github", "/plugins"],
+    ["/settings/plugins/github?view=installed", "/settings/plugins"],
+  ])("routes the detail author link from %s to %s", async (startPath, authorPath) => {
     const author = {
       name: "BB",
       github: "get-bb",
@@ -1067,9 +1073,10 @@ describe("Cloudroom Official plugin detail routing", () => {
 
     const { wrapper: QueryClientWrapper } = createQueryClientTestHarness();
     render(
-      <MemoryRouter initialEntries={["/plugins/github"]}>
+      <MemoryRouter initialEntries={[startPath]}>
         <Routes>
           <Route path="/plugins/*" element={<RoutedPluginsView />} />
+          <Route path="/settings/plugins/*" element={<RoutedPluginsView />} />
         </Routes>
       </MemoryRouter>,
       { wrapper: QueryClientWrapper },
@@ -1081,7 +1088,7 @@ describe("Cloudroom Official plugin detail routing", () => {
     const authorLinks = screen.getAllByRole("link", { name: "BB" });
     fireEvent.click(authorLinks.at(-1)!);
     await waitFor(() => {
-      expect(screen.getByTestId("route-path").textContent).toBe("/plugins");
+      expect(screen.getByTestId("route-path").textContent).toBe(authorPath);
     });
     expect(await screen.findByRole("heading", { name: /^BB/u })).toBeTruthy();
     expect(
@@ -1089,6 +1096,31 @@ describe("Cloudroom Official plugin detail routing", () => {
         screen.getByTestId("route-search").textContent ?? "",
       ).get("author"),
     ).toBe("11:bb-official:github:get-bb");
+    if (authorPath !== "/settings/plugins") return;
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Open Automations details" }),
+    );
+    await waitFor(() => {
+      expect(screen.getByTestId("route-path").textContent).toBe(
+        "/settings/plugins/automations",
+      );
+    });
+    expect(screen.getByTestId("route-search").textContent).toBe(
+      "?view=installed",
+    );
+    expect(
+      await screen.findByText("Automations", { selector: "h1" }),
+    ).toBeTruthy();
+
+    fireEvent.click(screen.getAllByRole("link", { name: "BB" }).at(-1)!);
+    fireEvent.click(await screen.findByRole("link", { name: "Plugins" }));
+    await waitFor(() => {
+      expect(screen.getByTestId("route-path").textContent).toBe(
+        "/settings/plugins",
+      );
+    });
+    expect(screen.getByTestId("route-search").textContent).toBe("");
   });
 });
 

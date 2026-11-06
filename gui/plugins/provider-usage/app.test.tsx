@@ -134,6 +134,12 @@ describe("provider usage footer disclosure", () => {
                             resetsAt: "2026-09-02T18:42:00.000Z",
                             cost: null,
                           },
+                          {
+                            label: "Weekly · Fable",
+                            usedPercent: 6,
+                            resetsAt: null,
+                            cost: null,
+                          },
                         ],
                       },
                     },
@@ -287,6 +293,14 @@ describe("provider usage footer disclosure", () => {
     expect(slot.getByText("82%")).toBeTruthy();
     expect(slot.getByText("37%")).toBeTruthy();
     expect(slot.getByText("claude@example.com")).toBeTruthy();
+    // A model's weekly row shows "7d fable" in a column sized for it, shared by the agent's rows; never "7d · …".
+    expect(
+      slot.getByTitle("Weekly · Fable · Reset time not reported").textContent,
+    ).toBe("└7d Fable6%—");
+    expect(claudeSection.style.getPropertyValue("--usage-label")).toBe(
+      "max(2.75rem, calc(8ch + 1px))",
+    );
+    expect(codexSection.style.getPropertyValue("--usage-label")).toBe("");
 
     fireEvent.pointerDown(
       slot.getByRole("button", { name: "Usage machine: M4" }),

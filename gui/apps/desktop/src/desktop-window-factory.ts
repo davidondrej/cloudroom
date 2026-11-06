@@ -200,7 +200,7 @@ function createWindowOptions(
 
 // App page path (e.g. "/threads/thr_abc") to reopen after a restart.
 // Loading and error views are data: URLs, so they have no route.
-function routeFromUrl(url: string): string | null {
+export function routeFromUrl(url: string): string | null {
   if (!url.startsWith("http://") && !url.startsWith("https://")) {
     return null;
   }
@@ -208,7 +208,7 @@ function routeFromUrl(url: string): string | null {
   return `${parsed.pathname}${parsed.search}${parsed.hash}`;
 }
 
-function applyRoute(url: string, route: string): string {
+export function applyRoute(url: string, route: string): string {
   const parsed = new URL(url);
   const target = new URL(route, parsed);
   parsed.pathname = target.pathname;

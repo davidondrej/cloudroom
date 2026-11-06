@@ -76,6 +76,15 @@ async fn wait(cwd: &Path) -> io::Result<i32> {
     let mut announced = false;
     loop {
         match check(cwd, start.elapsed()) {
+            // A copy that says ready but left nothing here may have failed quietly (#604). A new project can be empty
+            // on purpose, so warn instead of failing.
+            Some(Copy::Ready(folder)) if looks_empty(&folder) => {
+                println!(
+                    "Cloudroom finished copying, but {} is empty. If the project should have files, do not wait for them: if it is on GitHub, clone it into this folder; otherwise pull what you need from the user's Mac with `room-cli mac pull`.",
+                    folder.display()
+                );
+                return Ok(0);
+            }
             Some(Copy::Ready(folder)) => {
                 println!("Project files are ready in {}.", folder.display());
                 return Ok(0);

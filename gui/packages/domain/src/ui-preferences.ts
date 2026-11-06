@@ -273,7 +273,7 @@ export const uiPreferenceDefinitions = {
   ),
   "projectNudge.confidence": defineUiPreference(
     z.number().int().min(1).max(99),
-    60,
+    70,
     "How sure Jev must be, in percent (1–99), before the hint suggests another project. Lower shows it more often.",
   ),
   "search.smart": defineUiPreference(

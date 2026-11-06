@@ -10,6 +10,8 @@ import type { Context, Hono } from "hono";
 import { z } from "zod";
 import { ApiError } from "./errors.js";
 
+export { isOpenWithoutCallerProof } from "@cloudroom/config/caller-proof";
+
 const CALLER_TRUSTED_CONTEXT_KEY = "cloudroomCallerTrusted";
 const CALLER_TOKEN_REJECTED_CONTEXT_KEY = "cloudroomCallerTokenRejected";
 
@@ -22,23 +24,6 @@ declare module "hono" {
 
 export const PLUGIN_WIRE_HTTP_PATH =
   /^\/api\/v1\/plugins\/[^/]+\/http(?:\/|$)/u;
-
-const OPEN_POSTS = [
-  /^\/api\/v1\/caller-proofs$/u,
-  /^\/api\/v1\/caller-proofs\/[^/]+$/u,
-];
-
-const OPEN_READS = [
-  /^\/api\/v1\/system\/(?:config|version)$/u,
-  /^\/api\/v1\/plugins(?:\/contributions)?$/u,
-  /^\/api\/v1\/projects\/[^/]+$/u,
-  /^\/api\/v1\/threads$/u,
-  /^\/api\/v1\/threads\/[^/]+$/u,
-  /^\/api\/v1\/threads\/[^/]+\/(?:timeline|output|events|events\/wait)$/u,
-  /^\/api\/v1\/environments\/[^/]+$/u,
-  /^\/api\/v1\/cloudroom\/account\/mcp\/callback$/u,
-  /^\/api\/v1\/file-previews\/[^/]+\/.+$/u,
-];
 
 const PREVIEW_READS = [
   /^\/api\/v1\/threads\/[^/]+\/worktree\/files\/.+$/u,
@@ -99,16 +84,6 @@ export function arrivedOverLoopback(context: Pick<Context, "env">): boolean {
 
 export function isTrustedCaller(context: CallerTrustReader): boolean {
   return context.get(CALLER_TRUSTED_CONTEXT_KEY) === true;
-}
-
-export function isOpenWithoutCallerProof(
-  method: string,
-  path: string,
-): boolean {
-  if (method.toUpperCase() === "POST") {
-    return OPEN_POSTS.some((pattern) => pattern.test(path));
-  }
-  return isRead(method) && OPEN_READS.some((pattern) => pattern.test(path));
 }
 
 export function callerProofRequiredResponse(

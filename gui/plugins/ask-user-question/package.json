@@ -1,6 +1,10 @@
 {
   "name": "bb-plugin-ask-user-question",
   "version": "0.1.0",
+  "author": {
+    "name": "BB",
+    "url": "https://github.com/get-bb/bb"
+  },
   "private": true,
   "type": "module",
   "description": "Let any provider ask the user a multiple-choice question, the way Claude Code's AskUserQuestion does natively.",

@@ -232,6 +232,9 @@ export class NotificationHub implements DbNotifier {
     Set<DaemonSessionCloseWaiter>
   >();
   private readonly daemonSessionIdsByHost = new Map<string, string>();
+  // When each host's daemon last dropped. Memory only: after a restart no
+  // host counts as just dropped (#879).
+  private readonly daemonDisconnectedAtByHost = new Map<string, number>();
   private readonly hostOnlineRpcWaiters = new Map<
     string,
     HostOnlineRpcWaiter
@@ -552,6 +555,7 @@ export class NotificationHub implements DbNotifier {
         this.daemonSessionPlatformsBySessionId.get(sessionId) ?? "unknown",
       socket,
     });
+    this.daemonDisconnectedAtByHost.delete(hostId);
     this.daemonSessionIdsByHost.set(hostId, sessionId);
     this.resolveDaemonRegistrationWaiters(hostId);
     this.notifyHost(hostId, ["host-connected"]);
@@ -568,6 +572,7 @@ export class NotificationHub implements DbNotifier {
     this.rejectHostOnlineRpcWaitersForSession(sessionId);
     if (this.daemonSessionIdsByHost.get(entry.hostId) === sessionId) {
       this.daemonSessionIdsByHost.delete(entry.hostId);
+      this.daemonDisconnectedAtByHost.set(entry.hostId, Date.now());
     }
     const waiters = this.daemonSessionCloseWaiters.get(sessionId);
     if (waiters !== undefined) {
@@ -582,6 +587,10 @@ export class NotificationHub implements DbNotifier {
   hasDaemonForHost(hostId: string): boolean {
     const sessionId = this.daemonSessionIdsByHost.get(hostId);
     return sessionId !== undefined && this.daemonSessions.has(sessionId);
+  }
+
+  getDaemonDisconnectedAt(hostId: string): number | null {
+    return this.daemonDisconnectedAtByHost.get(hostId) ?? null;
   }
 
   getDaemonSessionIdForHost(hostId: string): string | null {

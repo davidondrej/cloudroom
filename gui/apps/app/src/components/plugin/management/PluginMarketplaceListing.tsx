@@ -27,6 +27,7 @@ import { PluginAuthorLink } from "./PluginAuthorLink";
 import {
   entriesByMarketplaceAuthor,
   pluginAuthorGithub,
+  pluginImprovedByCloudroom,
   pluginMarketplaceAuthorKey,
 } from "./plugin-marketplace-author";
 
@@ -36,6 +37,11 @@ export function PluginMarketplaceHeaderMetadata({
   entry: PluginCatalogSearchEntry;
 }) {
   if (entry.author === null) return null;
+  if (pluginImprovedByCloudroom(entry)) {
+    return (
+      <span className="text-xs text-subtle-foreground">Official plugin</span>
+    );
+  }
   const author = entry.author;
   return (
     <span className="inline-flex min-w-0 items-center gap-1.5">
@@ -101,6 +107,27 @@ function PluginMarketplaceDetails({
             </time>
           </PluginMarketplaceDetail>
         )}
+        {entry.author !== null && pluginImprovedByCloudroom(entry) ? (
+          <>
+            <PluginMarketplaceDetail label="Created by">
+              {entry.author.url === null ? (
+                entry.author.name
+              ) : (
+                <a
+                  href={entry.author.url}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="rounded-sm underline underline-offset-2 hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                >
+                  {entry.author.name}
+                </a>
+              )}
+            </PluginMarketplaceDetail>
+            <PluginMarketplaceDetail label="Improved by">
+              Cloudroom
+            </PluginMarketplaceDetail>
+          </>
+        ) : null}
         <PluginMarketplaceDetail label="Marketplace">
           {entry.marketplaceDisplayName}
         </PluginMarketplaceDetail>

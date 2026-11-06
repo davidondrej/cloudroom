@@ -54,7 +54,7 @@ interface StartLiveHostCommandArgs<
   TType extends HostDaemonSettledCommandType,
 > extends RunLiveHostCommandArgs<TType> {
   onError?: LiveHostCommandErrorHandler<TType>;
-  onSettled?: () => void | Promise<void>;
+  onSettled?: (error: Error | null) => void | Promise<void>;
 }
 
 type LiveHostCommandResultReportForType<
@@ -324,10 +324,12 @@ export function startLiveHostCommand<
 ): void {
   const execution =
     args.execution ?? createLiveHostCommandExecution(args.hostId);
+  let settledError: Error | null = null;
   void runLiveHostCommand(deps, { ...args, execution })
     .catch((error) => {
       const normalized =
         error instanceof Error ? error : new Error(String(error));
+      settledError = normalized;
       const handlerArgs: LiveHostCommandErrorHandlerArgs<TType> = {
         command: args.command,
         error: normalized,
@@ -350,7 +352,7 @@ export function startLiveHostCommand<
     })
     .finally(async () => {
       try {
-        await args.onSettled?.();
+        await args.onSettled?.(settledError);
       } catch (error) {
         deps.logger.error(
           { err: error, commandType: args.command.type },

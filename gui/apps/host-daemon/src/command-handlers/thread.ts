@@ -81,9 +81,14 @@ interface ThreadStartRuntime {
   entry: RuntimeEntry;
 }
 
+// Only a refusal by the host daemon itself proves the turn never got the
+// files. A runtime error, like a turn/start timeout, can still run the turn
+// late, so its staged files stay with the thread's storage (#1047).
 async function cleanupAfterPostStagingFailure(
   cleanup: () => Promise<void>,
+  error: unknown,
 ): Promise<void> {
+  if (!(error instanceof CommandDispatchError)) return;
   try {
     await cleanup();
   } catch {}
@@ -256,7 +261,7 @@ export async function startThread(
     });
     return result;
   } catch (error) {
-    await cleanupAfterPostStagingFailure(staged.cleanup);
+    await cleanupAfterPostStagingFailure(staged.cleanup, error);
     throw error;
   }
 }
@@ -505,7 +510,7 @@ export async function submitTurn(
         return await steerSubmittedTurn(stagedCommand, entry, resolvedTurnId);
     }
   } catch (error) {
-    await cleanupAfterPostStagingFailure(staged.cleanup);
+    await cleanupAfterPostStagingFailure(staged.cleanup, error);
     throw error;
   }
 }

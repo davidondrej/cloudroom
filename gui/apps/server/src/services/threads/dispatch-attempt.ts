@@ -244,6 +244,8 @@ export interface DispatchAttemptArgs {
   startedOnBehalfOf: StartedOnBehalfOf | null;
   /** Execution defaults resolved by creation, which the thread row lacks. */
   executionDefaults?: Parameters<typeof buildExecutionOptions>[2];
+  /** See `sendThreadMessage`; not called when the message queues or cold-starts. */
+  onStartSettled?: (error: Error | null) => void;
   trigger: "auto-dispatch" | "user";
 }
 
@@ -663,6 +665,7 @@ async function runDispatchAttempt(
       payload: resolvedPayload,
       thread,
       trigger: args.trigger,
+      onStartSettled: args.onStartSettled,
       ...(args.retryOf !== undefined ? { retryOf: args.retryOf } : {}),
       beforeAppendInTransaction: ({ tx }) => {
         args.beforeDispatch?.();

@@ -1,6 +1,10 @@
 {
   "name": "bb-plugin-push-notifications",
   "version": "0.1.0",
+  "author": {
+    "name": "BB",
+    "url": "https://github.com/get-bb/bb"
+  },
   "private": true,
   "type": "module",
   "description": "Desktop and web notifications when a thread needs you",

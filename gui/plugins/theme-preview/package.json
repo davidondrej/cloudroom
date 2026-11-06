@@ -1,6 +1,10 @@
 {
   "name": "bb-plugin-theme-preview",
   "version": "0.1.0",
+  "author": {
+    "name": "BB",
+    "url": "https://github.com/get-bb/bb"
+  },
   "private": true,
   "type": "module",
   "description": "Preview and validate Cloudroom themes across representative app screens, components, overlays, style tokens, and contrast checks.",
