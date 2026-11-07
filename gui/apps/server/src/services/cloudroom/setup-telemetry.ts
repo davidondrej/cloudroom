@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, statSync, statfsSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, realpathSync, statSync, statfsSync } from "node:fs";
 import { readFile, rm, writeFile } from "node:fs/promises";
 import { cpus, homedir, release, totalmem } from "node:os";
 import { delimiter, dirname, join } from "node:path";
@@ -7,7 +7,7 @@ import { execPortableFile, findCliExecutable, type KnownCli } from "@cloudroom/p
 import { readOrCreateSecretFile } from "@cloudroom/secret-storage";
 import type { AppDeps } from "../../types.js";
 import { TELEMETRY_ID_FILE_NAME, type TelemetryValue } from "../system/telemetry.js";
-import { claudeAuthStatus, claudeBinary, desktopClaude } from "./claude-token.js";
+import { claudeBinary, desktopClaude } from "./claude-token.js";
 import { macAccess } from "./previews.js";
 import type { SandboxDirectory } from "./sandboxes.js";
 import { copyLogins } from "./sync.js";
@@ -15,6 +15,7 @@ import { copyLogins } from "./sync.js";
 /**
  * Onboarding telemetry (ADR 0198): a snapshot of this Mac's agent setup, plus connect and install results.
  * Only categories, versions, booleans, and day counts. Never paths, emails, tokens, or file contents.
+ * It never runs another app's binary, only Apple's own tools: macOS can move a whole app to the Bin when a binary inside it runs (issue #96).
  * Failures also go to our database with the account (ADR 0201).
  */
 type Deps = Pick<AppDeps, "telemetry" | "config" | "logger" | "db"> & { sandboxes: Pick<SandboxDirectory, "setupEvent">; telemetryAllowed: boolean };
@@ -203,7 +204,7 @@ function save(event: string, context: Record<string, TelemetryValue>): Promise<b
   }).catch(error => { deps?.logger.debug({ err: error, event }, "Setup event not saved"); return false; });
 }
 
-const run = (file: string, args: string[]) => execPortableFile(file, args, { timeoutMs: 8_000 }).then(({ stdout }) => stdout.trim(), (error: { stdout?: unknown }) => (process.platform === "win32" ? "" : String(error.stdout ?? "").trim()));
+const run = (file: "/usr/bin/sw_vers" | "/usr/bin/plutil" | "/usr/sbin/scutil", args: string[]) => execPortableFile(file, args, { timeoutMs: 8_000 }).then(({ stdout }) => stdout.trim(), (error: { stdout?: unknown }) => (process.platform === "win32" ? "" : String(error.stdout ?? "").trim()));
 const version = (text: string) => text.match(/\d+\.\d+(?:\.\d+)?/)?.[0] ?? null;
 const home = (...parts: string[]) => join(homedir(), ...parts);
 const onPath = (cli: string) => (process.env.PATH ?? "").split(delimiter).some(dir => dir && existsSync(join(dir, cli)));
@@ -232,6 +233,33 @@ function jwtClaims(token: unknown): Record<string, unknown> | null {
 }
 const plan = (value: unknown) => (typeof value === "string" && /^[a-z_]{1,32}$/.test(value) ? value : null);
 
+/** A CLI's version from its install's files. Null when they don't say, as for the copy inside Codex.app. */
+function cliVersion(binary: string | null, npmPackage: string): string | null {
+  if (!binary) return null;
+  let path = binary;
+  try { path = realpathSync(binary); } catch { /* keep the link */ }
+  // npm: the package above its bin script, or beside a shim (Windows' npm folder, ~/.claude/local).
+  const dirs = [join(dirname(binary), "node_modules", npmPackage)];
+  for (let dir = dirname(path); dir !== dirname(dir); dir = dirname(dir)) dirs.push(dir);
+  for (const dir of dirs) {
+    try {
+      const json = JSON.parse(readFileSync(join(dir, "package.json"), "utf8")) as { name?: unknown; version?: unknown };
+      if (json.name === npmPackage && typeof json.version === "string") return version(json.version);
+    } catch { /* not here */ }
+  }
+  // Claude's and Codex's installers, the Claude app, and Homebrew keep each version in its own folder.
+  return version(path.replaceAll("\\", "/").match(/\/(?:claude\/versions|standalone\/releases|claude-code|(?:Cellar|Caskroom)\/[^/]+)\/(\d+\.\d+\.\d+)/)?.[1] ?? "");
+}
+
+/** Claude Code's login from its files, where `claude auth status` reads it. The Mac keeps the plan in its Keychain, so it's null there. */
+async function claudeLogin(installed: boolean): Promise<Record<string, TelemetryValue>> {
+  const dir = process.env.CLAUDE_CONFIG_DIR;
+  const read = (file: string) => readFile(file, "utf8").then(text => JSON.parse(text) as Record<string, unknown> | null).catch(() => null);
+  const [config, credentials] = await Promise.all([read(join(dir || homedir(), ".claude.json")), read(join(dir || home(".claude"), ".credentials.json"))]);
+  const oauth = credentials?.claudeAiOauth as { subscriptionType?: unknown } | undefined;
+  return { claude_logged_in: installed ? Boolean(config?.oauthAccount || config?.primaryApiKey || oauth || process.env.ANTHROPIC_API_KEY) : null, claude_plan: plan(oauth?.subscriptionType) };
+}
+
 async function codexLogin(): Promise<Record<string, TelemetryValue>> {
   const text = await readFile(join(process.env.CODEX_HOME || home(".codex"), "auth.json"), "utf8").catch(() => null);
   if (text === null) return { codex_login: null, codex_plan: null, codex_token_expired: null };
@@ -250,11 +278,9 @@ async function codexLogin(): Promise<Record<string, TelemetryValue>> {
 async function sendSnapshot(reason: "first_launch" | "connect_failed"): Promise<void> {
   if (!deps) return;
   const claude = claudeBinary() ?? null, codex = findCliExecutable("codex") ?? null;
-  const [osVersion, claudeVersion, codexVersion, claudeStatus, codexAuth, claudeApp, codexApp, chatgptApp, proxy, logins, access] = await Promise.all([
+  const [osVersion, claudeAuth, codexAuth, claudeApp, codexApp, chatgptApp, proxy, logins, access] = await Promise.all([
     process.platform === "darwin" ? run("/usr/bin/sw_vers", ["-productVersion"]) : Promise.resolve(release()),
-    claude ? run(claude, ["--version"]).then(version) : null,
-    codex ? run(codex, ["--version"]).then(version) : null,
-    claudeAuthStatus(),
+    claudeLogin(claude !== null),
     codexLogin(),
     appVersion("Claude.app"),
     appVersion("Codex.app"),
@@ -275,15 +301,14 @@ async function sendSnapshot(reason: "first_launch" | "connect_failed"): Promise<
     data_dir_age_days: Math.floor(secondsSinceFirstLaunch() / 86_400),
     claude_cli_place: cliPlace(claude),
     claude_cli_on_path: onPath("claude"),
-    claude_cli_version: claudeVersion,
-    claude_logged_in: typeof claudeStatus?.loggedIn === "boolean" ? claudeStatus.loggedIn : null,
-    claude_plan: plan(claudeStatus?.subscriptionType),
+    claude_cli_version: cliVersion(claude, "@anthropic-ai/claude-code"),
+    ...claudeAuth,
     claude_app_version: claudeApp,
     claude_app_cli_version: desktopClaude() ? newest(home("Library/Application Support/Claude/claude-code")) : null,
     claude_last_used_days: daysSince(home(".claude", "history.jsonl"), ...children(home(".claude", "projects"))),
     codex_cli_place: cliPlace(codex),
     codex_cli_on_path: onPath("codex"),
-    codex_cli_version: codexVersion,
+    codex_cli_version: cliVersion(codex, "@openai/codex"),
     ...codexAuth,
     codex_app_version: codexApp,
     chatgpt_app_version: chatgptApp,
