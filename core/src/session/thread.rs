@@ -24,6 +24,9 @@ use std::{
 };
 use tokio::sync::oneshot;
 
+#[cfg(test)]
+mod tests;
+
 const USAGE: &str = "room-cli thread update --self --title TITLE
 room-cli thread update --self --reasoning-level LEVEL
 room-cli thread archive --self
@@ -386,6 +389,17 @@ async fn spawn(
     ))
 }
 
+fn catalog_unavailable(message: &str) -> bool {
+    let message = message
+        .strip_prefix("The remote state changed: ")
+        .and_then(|message| message.strip_suffix(". Reload and try again."))
+        .unwrap_or(message);
+    message == "model catalog unavailable"
+        || message
+            .strip_prefix("model catalog unavailable (")
+            .is_some_and(|detail| detail.ends_with(')'))
+}
+
 /// Asks the website to start a top-level thread (ADR 0267), so it works while the Mac is off. It runs as a task of
 /// its own, so an agent that stops waiting never cuts a start in half, and a retry with the same request ID
 /// continues the same start instead of making a second thread.
@@ -405,8 +419,18 @@ async fn launch(
     let started = Instant::now();
     let task = tokio::spawn(async move {
         let mut wait = Duration::from_secs(10);
+        let mut catalog_retried = false;
         loop {
             match api.post_waking("launch", &body).await {
+                // Failed discovery is not cached by Core. Repeat the same launch once so the target
+                // can load its catalog again, keeping real model/effort rejections final.
+                Err(super::history::ApiError::Status(409, message))
+                    if !catalog_retried
+                        && started.elapsed() < LAUNCH_RETRY
+                        && catalog_unavailable(&message) =>
+                {
+                    catalog_retried = true;
+                }
                 // The website's time ran out, or the new sandbox is still busy with the last try's wake.
                 Err(super::history::ApiError::Network(_))
                 | Err(super::history::ApiError::Status(500..=599, _))
