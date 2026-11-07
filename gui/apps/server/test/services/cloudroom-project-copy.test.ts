@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { expect, it } from "vitest";
 import type { CloudroomClient } from "../../src/services/cloudroom/client.js";
-import { copyProject, localFiles } from "../../src/services/cloudroom/project-copy.js";
+import { cloneableRepository, copyProject, githubRepository, localFiles } from "../../src/services/cloudroom/project-copy.js";
 import { createTestAppHarness } from "../helpers/test-app.js";
 
 it("Teleport to Cloud copies staged, unstaged, and untracked work plus ignored .env files", async () => {
@@ -82,6 +82,38 @@ it("sends a Cloud loop run's child no .env files when the run didn't pick them (
     expect(await copied(false)).toEqual([".env", ".env.local", "app.js"]);
   } finally {
     rmSync(root, { recursive: true, force: true });
+    await harness.cleanup();
+  }
+});
+
+it("clones GitHub remotes as before and other URL-form remotes as written, never local or scp-style ones", () => {
+  expect(cloneableRepository("git@github.com:acme/app.git")).toBe("https://github.com/acme/app.git");
+  expect(cloneableRepository("https://github.com/acme/app")).toBe(githubRepository("https://github.com/acme/app"));
+  expect(cloneableRepository("entire://aws-us-east-2.entire.io/et/acme/app")).toBe("entire://aws-us-east-2.entire.io/et/acme/app");
+  expect(cloneableRepository(" https://gitlab.com/acme/app.git ")).toBe("https://gitlab.com/acme/app.git");
+  for (const remote of [null, "", "/Users/me/app", "../app", "file:///srv/app.git", "git@gitlab.com:acme/app.git", "entire://host-only", "https://gitlab.com/ acme", "https://SECRET@gitlab.com/acme/app.git", "https://user:pass@github.com/acme/app.git"]) {
+    expect(cloneableRepository(remote)).toBeNull();
+  }
+});
+
+it("clones a non-GitHub remote with the sandbox's own Git setup and never the Mac's GitHub login", async () => {
+  const harness = await createTestAppHarness();
+  try {
+    const commands: string[] = [];
+    const stdins: string[] = [];
+    const client = {
+      workspace: async () => ({ path: "/code/project" }),
+      runOnVm: async (input: { command: string; stdin: string }) => { commands.push(input.command); stdins.push(input.stdin); return { code: 0, stdout: "", stderr: "" }; },
+    } as unknown as CloudroomClient;
+    const repository = "entire://aws-us-east-2.entire.io/et/acme/app";
+    await new Promise<void>((resolve, reject) => copyProject(harness.deps, client, { threadId: "thr_entire", workspace: "w", key: "copy-entire", localPath: null, repository, clone: true, copyAll: false, teleport: false }, (error) => error ? reject(new Error(error)) : resolve()));
+    const clone = commands.find(command => command.includes("git clone"));
+    expect(clone).toContain(`'${repository}'`);
+    expect(clone).toContain('export PATH="$HOME/.local/bin:$PATH"');
+    expect(clone).not.toContain("gh auth");
+    expect(clone).not.toContain("gh api");
+    expect(stdins.every(stdin => stdin === "")).toBe(true);
+  } finally {
     await harness.cleanup();
   }
 });
