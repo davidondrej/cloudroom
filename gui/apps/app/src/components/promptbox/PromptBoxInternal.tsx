@@ -3577,6 +3577,7 @@ export function PromptBoxInternal({
                           <button
                             type="button"
                             aria-label={`Dismiss ${failure.name}`}
+                            onMouseDown={(event) => event.preventDefault()}
                             onClick={() => onDismissAttachmentFailure(index)}
                             className="inline-flex size-4 shrink-0 items-center justify-center rounded text-destructive hover:bg-state-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring max-md:pointer-coarse:size-7"
                           >

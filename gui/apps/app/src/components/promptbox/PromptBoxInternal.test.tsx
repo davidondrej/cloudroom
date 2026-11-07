@@ -2688,6 +2688,91 @@ describe("PromptBoxInternal compact layout", () => {
     }
   });
 
+  it.each([
+    { coarse: false, running: false },
+    { coarse: false, running: true },
+    { coarse: true, running: false },
+    { coarse: true, running: true },
+  ])(
+    "keeps editor focus while dismissing a failed upload (coarse: $coarse, running: $running)",
+    ({ coarse, running }) => {
+      const restoreMatchMedia = mockPointerCoarse(coarse);
+      try {
+        const onSubmit = vi.fn();
+        const onStop = vi.fn();
+        const onDismissFailure = vi.fn();
+        function FailedUploadPrompt() {
+          const [failures, setFailures] = useState([
+            { name: "screenshot.png", reason: "Upload failed" },
+            { name: "second.png", reason: "Upload failed" },
+          ]);
+          return (
+            <PromptBoxInternal
+              {...createPromptBoxProps({
+                value: "Keep this draft.",
+                onSubmit,
+                submission: { isRunning: running, onStop },
+                attachments: {
+                  items: [
+                    {
+                      type: "localFile",
+                      path: "notes.txt",
+                      name: "notes.txt",
+                      sizeBytes: 5,
+                    },
+                  ],
+                  failures,
+                  onDismissFailure: (index) => {
+                    onDismissFailure(index);
+                    setFailures((current) =>
+                      current.filter((_, i) => i !== index),
+                    );
+                  },
+                },
+              })}
+            />
+          );
+        }
+        render(<FailedUploadPrompt />);
+        const editor = getPromptEditorElement();
+        act(() => editor.focus());
+        const dismiss = screen.getByRole("button", {
+          name: "Dismiss screenshot.png",
+        });
+        fireEvent.pointerDown(dismiss, {
+          button: 0,
+          pointerType: coarse ? "touch" : "mouse",
+        });
+        fireEvent.pointerUp(dismiss, {
+          button: 0,
+          pointerType: coarse ? "touch" : "mouse",
+        });
+
+        // A mobile browser can dismiss the keyboard before dispatching click.
+        const allowsFocusChange = fireEvent.mouseDown(dismiss, { button: 0 });
+        if (allowsFocusChange) act(() => editor.blur());
+        expect(document.activeElement).toBe(editor);
+        fireEvent.mouseUp(dismiss, { button: 0 });
+        fireEvent.click(dismiss, { detail: 1 });
+
+        expect(onDismissFailure).toHaveBeenCalledExactlyOnceWith(0);
+        expect(
+          screen.queryByRole("button", { name: "Dismiss screenshot.png" }),
+        ).toBeNull();
+        expect(
+          screen.getByRole("button", { name: "Dismiss second.png" }),
+        ).toBeTruthy();
+        expect(screen.getByText("notes.txt")).toBeTruthy();
+        expect(editor.textContent).toBe("Keep this draft.");
+        expect(document.activeElement).toBe(editor);
+        expect(onSubmit).not.toHaveBeenCalled();
+        expect(onStop).not.toHaveBeenCalled();
+      } finally {
+        restoreMatchMedia();
+      }
+    },
+  );
+
   it("sends before dismissing the keyboard when a touch synthesizes mousedown", () => {
     const restoreMatchMedia = mockPointerCoarse(true);
     try {
