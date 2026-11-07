@@ -269,10 +269,23 @@ export class CommandRouter {
     command: HostDaemonCommand,
     work: () => Promise<T>,
   ): Promise<T> {
-    if (command.type !== "thread.start" && command.type !== "turn.submit") {
-      return work();
+    // Every command that can start or resume the thread's agent waits for its
+    // process cleanup, in any environment, so cleanup never ends new work (#607).
+    switch (command.type) {
+      case "thread.start":
+      case "turn.submit":
+      case "thread.goal.set":
+      case "thread.goal.clear":
+      case "thread.rewind.prepare":
+      case "thread.processes.stop":
+        return runInSerialLane(
+          this.threadTurnLaneTails,
+          command.threadId,
+          work,
+        );
+      default:
+        return work();
     }
-    return runInSerialLane(this.threadTurnLaneTails, command.threadId, work);
   }
 
   private createDispatchOptions(): CommandDispatchOptions {

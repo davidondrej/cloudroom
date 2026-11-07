@@ -255,6 +255,26 @@ describe("Codex credential health and usage", () => {
         accountEmail: null,
       },
     });
+
+    // A launcher whose native binary is gone must not look ready (#907)...
+    const codex = path.join(homeDir, "bin", "codex");
+    await fs.writeFile(
+      codex,
+      "#!/bin/sh\necho 'Error: Missing optional dependency @openai/codex-darwin-arm64. Reinstall Codex: pnpm add -g @openai/codex@latest' >&2\nexit 1\n",
+    );
+    await expect(getCodexProviderHealth()).resolves.toMatchObject({
+      health: {
+        status: "unknown",
+        statusMessage: expect.stringContaining(
+          "Reinstall Codex: pnpm add -g @openai/codex@latest",
+        ),
+      },
+    });
+    // ...but an unclear probe failure keeps it ready.
+    await fs.writeFile(codex, "#!/bin/sh\nexit 1\n");
+    await expect(getCodexProviderHealth()).resolves.toMatchObject({
+      health: { status: "ready" },
+    });
   });
 
   it("surfaces an auth.json that is not JSON as unknown health, not as unauthenticated", async () => {

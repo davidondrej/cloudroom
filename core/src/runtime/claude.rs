@@ -282,7 +282,8 @@ pub(super) fn model_catalog(value: &Value) -> io::Result<Vec<super::Model>> {
 
 pub(super) async fn start(handle: &Handle) -> io::Result<String> {
     let info = initialize(handle).await?;
-    if let Some(reasoning) = &handle.reasoning {
+    // `none` runs any model without an effort override; a start picks it for a model without effort (#1059).
+    if let Some(reasoning) = handle.reasoning.as_deref().filter(|r| *r != "none") {
         let models = model_catalog(&info)?;
         super::supports(
             super::Kind::Claude,
@@ -291,14 +292,12 @@ pub(super) async fn start(handle: &Handle) -> io::Result<String> {
             reasoning,
         )
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
-        if reasoning != "none" {
-            handle
-                .call(
-                    "apply_flag_settings",
-                    json!({"settings":{"effortLevel":reasoning,"fastMode":false}}),
-                )
-                .await?;
-        }
+        handle
+            .call(
+                "apply_flag_settings",
+                json!({"settings":{"effortLevel":reasoning,"fastMode":false}}),
+            )
+            .await?;
     }
     handle
         .call(
@@ -350,48 +349,25 @@ pub(super) async fn send(handle: &Handle, request: &str, input: &Value) -> io::R
     handle
         .call("apply_flag_settings", json!({"settings":settings}))
         .await?;
-    let mut content = Vec::new();
-    // Attachments are staged by Workspace, using the same safe reader as Pi.
-    let reader = handle.clone();
-    let payload = input.clone();
-    let images = tokio::task::spawn_blocking(move || files::images(&reader, &payload, MAX_LINE))
-        .await
-        .map_err(io::Error::other)?
-        .map_err(|e| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("cannot read Claude image attachment: {e}"),
-            )
-        })?;
-    for image in images {
-        if !matches!(
-            image["mimeType"].as_str(),
-            Some("image/png" | "image/jpeg" | "image/gif" | "image/webp")
-        ) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "Claude requires PNG, JPEG, GIF or WebP images",
-            ));
+    // Attachments staged by Workspace go as notes Claude opens with its Read tool, as Local's Claude does. Read
+    // shrinks each photo, so an accepted batch never has to fit one 16 MiB native frame as base64 (#1122).
+    let images = (input["content"].as_array().into_iter().flatten())
+        .filter(|part| matches!(part["type"].as_str(), Some("image" | "localImage")))
+        .filter_map(|part| part["path"].as_str().or_else(|| part["url"].as_str()))
+        .map(|path| (true, path));
+    let attachments = (input["attachments"].as_array().into_iter().flatten())
+        .filter_map(|a| a["path"].as_str().map(|path| (a["kind"] == "image", path)));
+    for (image, path) in images.chain(attachments) {
+        if !text.is_empty() {
+            text.push('\n');
         }
-        content.push(json!({"type":"image","source":{"type":"base64","media_type":image["mimeType"],"data":image["data"]}}));
+        text.push_str(&if image {
+            format!("[Attached image: {path}] Use the Read tool to view it.")
+        } else {
+            format!("[Attached file: {path}] Use the Read tool to inspect it.")
+        });
     }
-    // Claude Code reads a slash command only from the last block, so images go first and file notes join the text.
-    if let Some(attachments) = input["attachments"].as_array() {
-        for attachment in attachments.iter().filter(|a| a["kind"] != "image") {
-            if let Some(path) = attachment["path"].as_str() {
-                if !text.is_empty() {
-                    text.push('\n');
-                }
-                text.push_str(&format!(
-                    "[Attached file: {path}] Use the Read tool to inspect it."
-                ));
-            }
-        }
-    }
-    if !text.is_empty() {
-        content.push(json!({"type":"text","text":text}));
-    }
-    if content.is_empty() {
+    if text.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "Claude prompt is empty",
@@ -399,7 +375,11 @@ pub(super) async fn send(handle: &Handle, request: &str, input: &Value) -> io::R
     }
     handle
         .process
-        .call("prompt", json!({"content":content}), Some(request))
+        .call(
+            "prompt",
+            json!({"content":[{"type":"text","text":text}]}),
+            Some(request),
+        )
         .await?;
     Ok(warnings)
 }
@@ -1095,7 +1075,18 @@ impl Adapter for Protocol {
             {
                 let id = block["tool_use_id"].as_str().unwrap_or("");
                 self.skills.remove(id);
-                events.push(Event::Record{kind:"item_completed",data:json!({"harness":"claude-code","request_id":request,"item_id":id,"item_type":"tool_use","tool_name":self.tools.get(id),"result":block["content"],"is_error":block["is_error"]}),native:None});
+                // An image a tool returned stays in Claude's own transcript; apps and history get a placeholder (#1122).
+                let result = match block["content"].as_array() {
+                    Some(parts) => parts
+                        .iter()
+                        .map(|p| match p["type"] == "image" {
+                            true => json!({"type":"text","text":"[image]"}),
+                            false => p.clone(),
+                        })
+                        .collect(),
+                    None => block["content"].clone(),
+                };
+                events.push(Event::Record{kind:"item_completed",data:json!({"harness":"claude-code","request_id":request,"item_id":id,"item_type":"tool_use","tool_name":self.tools.get(id),"result":result,"is_error":block["is_error"]}),native:None});
             }
         }
         // A hard rejection, as the app's Local Claude reads it: over the plan limit, with no overage to fall back on.

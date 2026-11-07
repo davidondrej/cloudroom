@@ -972,20 +972,30 @@ describe("ThreadDetailPromptArea", () => {
     expect(screen.getByTestId("submit-mode").textContent).not.toBe(":");
   });
 
-  it("clears the neutral reconnect notice while idle and keeps genuine errors visible", async () => {
-    const queryKey = ["cloudroom-thread", "thr_1"];
-    testQueryClient.setQueryDefaults(queryKey, { staleTime: Infinity });
-    const status = { sessionId: "cloud-session", paused: false, model: "gpt-6-astra", reasoning: "medium", error: null, pendingDelivery: 0, reconnecting: true };
-    testQueryClient.setQueryData(queryKey, status);
-    renderPromptArea({ thread: makeThread({ executionTarget: "cloud", status: "idle" }) });
-    expect(screen.getByRole("status").textContent).toBe("Reconnecting…");
-    expect(screen.queryByRole("alert")).toBeNull();
-    await act(async () => { testQueryClient.setQueryData(queryKey, { ...status, reconnecting: false }); });
-    await waitFor(() => expect(screen.queryByText("Reconnecting…")).toBeNull());
-    await act(async () => { testQueryClient.setQueryData(queryKey, { ...status, error: "Cloudroom authentication failed" }); });
-    await waitFor(() => expect(screen.getByRole("alert").textContent).toBe("Cloudroom authentication failed"));
-    expect(screen.queryByText("Reconnecting…")).toBeNull();
-    expect(mocks.sendMessageMutateAsync).not.toHaveBeenCalled();
+  it("shows the reconnect notice only after 15 s, clears it at once, and keeps genuine errors visible", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const queryKey = ["cloudroom-thread", "thr_1"];
+      testQueryClient.setQueryDefaults(queryKey, { staleTime: Infinity });
+      const status = { sessionId: "cloud-session", paused: false, model: "gpt-6-astra", reasoning: "medium", error: null, pendingDelivery: 0, reconnecting: true };
+      const advance = (ms: number, data?: object) => act(async () => { if (data) testQueryClient.setQueryData(queryKey, data); vi.advanceTimersByTime(ms); });
+      testQueryClient.setQueryData(queryKey, status);
+      renderPromptArea({ thread: makeThread({ executionTarget: "cloud", status: "idle" }) });
+      // A sandbox going to sleep reconnects within seconds, so no pill flashes.
+      await advance(14_000);
+      expect(screen.queryByText("Reconnecting…")).toBeNull();
+      await advance(1_000);
+      expect(screen.getByRole("status").textContent).toBe("Reconnecting…");
+      expect(screen.queryByRole("alert")).toBeNull();
+      await advance(0, { ...status, reconnecting: false });
+      expect(screen.queryByText("Reconnecting…")).toBeNull();
+      await advance(0, { ...status, error: "Cloudroom authentication failed" });
+      expect(screen.getByRole("alert").textContent).toBe("Cloudroom authentication failed");
+      expect(screen.queryByText("Reconnecting…")).toBeNull();
+      expect(mocks.sendMessageMutateAsync).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it.each([

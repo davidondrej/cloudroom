@@ -575,6 +575,45 @@ describe("automations server plugin harness", () => {
     },
   );
 
+  it.each([
+    ["C:\\work\\sample", "unmanaged"],
+    ["C:/work/sample", "unmanaged"],
+    ["\\\\server\\share\\sample", "unmanaged"],
+    ["env_routed", "reuse"],
+  ])(
+    "routes --environment %s as %s on create and update",
+    async (value, kind) => {
+      const { harness } = await bootAutomationsPlugin();
+      const expected =
+        kind === "reuse"
+          ? { type: "reuse", environmentId: value }
+          : {
+              type: "host",
+              hostId: "host_test",
+              workspace: { type: "unmanaged", path: value },
+            };
+      const created = await createAgentAutomation(harness);
+      const create =
+        "create --name Env --in 1h --prompt hi --provider codex --model gpt-5";
+      for (const command of [create.split(" "), ["update", created.id]]) {
+        const result = await harness.runCli([
+          ...command,
+          "--project",
+          PROJECT_ID,
+          "--environment",
+          value,
+          "--json",
+        ]);
+        expect(result.exitCode).toBe(0);
+        expect(
+          automationResponseSchema.parse(JSON.parse(result.stdout ?? ""))
+            .execution,
+        ).toMatchObject({ environment: expected });
+      }
+      await harness.dispose();
+    },
+  );
+
   it("rejects an explicit mode the automation provider does not support", async () => {
     const { harness } = await bootAutomationsPlugin(["accept-edits", "full"]);
     const result = await harness.runCli([

@@ -26,7 +26,7 @@ export type TelemetryValue = string | number | boolean | null;
 export type TelemetryEvent =
   | { name: "app_started"; properties?: { update_needs_password: boolean } }
   /** Onboarding telemetry (ADR 0198); built in services/cloudroom/setup-telemetry.ts. */
-  | { name: "setup_snapshot" | "agent_connect" | "cli_install" | "account_sign_in_failed" | "update_install" | "update_ready" | "app_crash"; properties: Record<string, TelemetryValue> }
+  | { name: "setup_snapshot" | "agent_connect" | "cli_install" | "account_sign_in_failed" | "update_install" | "update_ready" | "app_crash" | "windows_install"; properties: Record<string, TelemetryValue> }
   | {
       name: "thread_created";
       properties: {

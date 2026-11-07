@@ -17,6 +17,7 @@ export const worktreeInputsSchema = z
     branch: worktreeBaseBranchSchema.default({ kind: "default" }),
     // A fork of a thread working in another Git checkout starts there, not in the project checkout (#971).
     sourcePath: z.string().min(1).optional(),
+    diffBase: worktreeBaseBranchSchema.optional(),
   })
   .default({ branch: { kind: "default" } });
 export type WorktreeInputs = z.infer<typeof worktreeInputsSchema>;
@@ -62,6 +63,9 @@ export default async function worktreePlugin(bb: BbPluginApi): Promise<void> {
                 context.suggestedBranchName)
               : context.suggestedBranchName,
             baseBranch: context.inputs.branch,
+            ...(context.inputs.diffBase
+              ? { diffBase: context.inputs.diffBase }
+              : {}),
             branchMode: context.rebuild ? "reuse-existing" : "reset",
           },
           { hostId, signal: context.signal, timeoutMs: CREATE_TIMEOUT_MS },

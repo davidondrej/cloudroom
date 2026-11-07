@@ -169,6 +169,118 @@ describe("createProviderInstallationGate", () => {
     expect(probe).toHaveBeenCalledTimes(2);
   });
 
+  it("re-runs an interrupted probe until its caller gives up, then falls back to the last pass", async () => {
+    const gate = createProviderInstallationGate({
+      ttlMs: 1_000,
+      now: () => 0,
+      retryDelayMs: 1,
+    });
+    await gate.run("codex", async () => status());
+    gate.clear();
+    // No I/O: only the gate's pause between re-runs lets the deadline fire.
+    const interrupted = vi.fn(async (): Promise<ProviderInstallationStatus> => {
+      gate.clear();
+      throw new Error("Runtime shutting down");
+    });
+
+    await expect(
+      gate.run("codex", interrupted, AbortSignal.timeout(30)),
+    ).resolves.toEqual(status());
+    const calls = interrupted.mock.calls.length;
+    expect(calls).toBeGreaterThan(2);
+    // Nobody waits anymore: at most the attempt already running finishes.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(interrupted.mock.calls.length).toBeLessThanOrEqual(calls + 1);
+  });
+
+  it("keeps an unsupported answer over an earlier pass, through retries and failures", async () => {
+    const gate = createProviderInstallationGate({
+      ttlMs: 1_000,
+      now: () => 0,
+      retryDelayMs: 1,
+    });
+    await gate.run("codex", async () => status());
+    gate.clear();
+    const unsupported = status({
+      currentVersion: "0.135.0",
+      versionUnsupported: true,
+    });
+    const probe = vi
+      .fn<() => Promise<ProviderInstallationStatus>>()
+      .mockImplementationOnce(async () => {
+        gate.clear();
+        return unsupported;
+      })
+      .mockRejectedValue(new Error("bridge unavailable"));
+
+    await expect(gate.run("codex", probe)).resolves.toEqual(unsupported);
+    await expect(gate.run("codex", probe)).resolves.toEqual(unsupported);
+    expect(probe).toHaveBeenCalledTimes(3);
+  });
+
+  it("releases a stalled re-run when its caller gives up", async () => {
+    const gate = createProviderInstallationGate({
+      ttlMs: 1_000,
+      now: () => 0,
+      retryDelayMs: 1,
+    });
+    const probe = vi
+      .fn<() => Promise<ProviderInstallationStatus>>()
+      .mockImplementationOnce(async () => {
+        gate.clear();
+        throw new Error("Runtime shutting down");
+      })
+      .mockImplementationOnce(() => new Promise(() => {}))
+      .mockResolvedValueOnce(status());
+    const caller = new AbortController();
+
+    const first = gate.run("codex", probe, caller.signal);
+    await vi.waitFor(() => expect(probe).toHaveBeenCalledTimes(2));
+    caller.abort();
+    await expect(first).rejects.toThrow();
+    await expect(gate.run("codex", probe)).resolves.toEqual(status());
+    expect(probe).toHaveBeenCalledTimes(3);
+  });
+
+  it("forgets saved answers after an install or update", async () => {
+    const gate = createProviderInstallationGate({ ttlMs: 1_000, now: () => 0 });
+    const unsupported = status({
+      currentVersion: "0.135.0",
+      versionUnsupported: true,
+    });
+    const failing = async (): Promise<ProviderInstallationStatus> => {
+      throw new Error("bridge unavailable");
+    };
+
+    await gate.run("codex", async () => unsupported);
+    gate.reset({ key: "codex", status: status() });
+    await expect(gate.run("codex", failing)).resolves.toEqual(status());
+    gate.reset();
+    await expect(gate.run("codex", failing)).rejects.toThrow(
+      "bridge unavailable",
+    );
+  });
+
+  it("gives a caller still waiting on a released probe the newer answer", async () => {
+    const gate = createProviderInstallationGate({ ttlMs: 1_000, now: () => 0 });
+    const late = createDeferredPromise<ProviderInstallationStatus>();
+    const unsupported = status({
+      currentVersion: "0.135.0",
+      versionUnsupported: true,
+    });
+    const probe = vi
+      .fn<() => Promise<ProviderInstallationStatus>>()
+      .mockReturnValueOnce(late.promise)
+      .mockResolvedValueOnce(unsupported);
+
+    const timedOut = gate.run("codex", probe, AbortSignal.abort());
+    const waiting = gate.run("codex", probe);
+    await expect(timedOut).rejects.toThrow();
+    await expect(gate.run("codex", probe)).resolves.toEqual(unsupported);
+    late.resolve(status());
+    await expect(waiting).resolves.toEqual(unsupported);
+  });
+
   it("probes again once the remembered status expires", async () => {
     let currentTime = 0;
     const gate = createProviderInstallationGate({

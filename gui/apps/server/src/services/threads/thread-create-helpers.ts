@@ -1,18 +1,33 @@
+import { createHash } from "node:crypto";
+import { and, asc, eq } from "drizzle-orm";
 import {
   createThread,
+  events,
+  getEnvironment,
   getThreadSectionById,
   getProjectSourceByHost,
   getProject,
   getThread,
   isSqliteForeignKeyConstraint,
+  queuedThreadMessages,
 } from "@cloudroom/db";
 import type { DbNotifier } from "@cloudroom/db";
 import type { HostDaemonCommand } from "@cloudroom/host-daemon-contract";
-import type { LocalPathProjectSource } from "@cloudroom/domain";
+import {
+  GENERATED_ID_ALPHABET,
+  GENERATED_ID_SUFFIX_LENGTH,
+  type LocalPathProjectSource,
+  type PromptInput,
+  type Thread,
+} from "@cloudroom/domain";
 import type { AppDeps } from "../../types.js";
 import { ApiError } from "../../errors.js";
 import { emitPluginThreadCreated } from "../plugins/plugin-thread-events.js";
-import type { ThreadCreateServiceRequest } from "./thread-create-request.js";
+import { uploadedAttachmentName } from "../projects/attachments.js";
+import type {
+  ThreadCreateServiceRequest,
+  ThreadCreateServiceRequestInput,
+} from "./thread-create-request.js";
 import { sanitizeGeneratedBranchSlug } from "./title-generation.js";
 import { queueThreadTitle } from "./thread-metadata-inference.js";
 
@@ -87,6 +102,136 @@ export function buildEnvironmentProvisionCommand(
   };
 }
 
+/** A Local spawn's request ID names its thread within its project, so a retry
+ *  after an unanswered request finds that thread instead of a duplicate (#860). */
+export function requestThreadId(projectId: string, requestId: string): string {
+  const digest = createHash("sha256")
+    .update(`spawn:${projectId}:${requestId}`)
+    .digest();
+  const suffix = [...digest.subarray(0, GENERATED_ID_SUFFIX_LENGTH)].map(
+    (byte) => GENERATED_ID_ALPHABET[byte % GENERATED_ID_ALPHABET.length],
+  );
+  return `thr_${suffix.join("")}`;
+}
+
+/** What a spawn asked for. A missing field was not given, so it never conflicts. */
+export type SpawnIntent = Partial<
+  Record<
+    | "environmentId"
+    | "hostId"
+    | "model"
+    | "parentId"
+    | "prompt"
+    | "providerId"
+    | "reasoningLevel",
+    string | null
+  >
+>;
+
+/** The full visible prompt. A re-upload gets a new path, so files count by their uploaded name. */
+function promptKey(input: readonly PromptInput[]): string | undefined {
+  const parts = input
+    .filter((part) => part.visibility !== "agent-only")
+    .map((part) =>
+      part.type === "text"
+        ? part.text.trim()
+        : `[${part.type} ${part.type === "image" ? part.url : uploadedAttachmentName(part.path)}]`,
+    );
+  return parts.join("\n").trim() || undefined;
+}
+
+export function spawnIntent(
+  request: ThreadCreateServiceRequestInput,
+): SpawnIntent {
+  const { environment } = request;
+  return {
+    prompt: promptKey(request.input),
+    providerId: request.providerId,
+    model: request.model,
+    reasoningLevel: request.reasoningLevel,
+    hostId:
+      environment.type === "host"
+        ? environment.hostId
+        : environment.type === "provider" &&
+            environment.machine?.type === "existing"
+          ? environment.machine.hostId
+          : undefined,
+    environmentId:
+      environment.type === "reuse" ? environment.environmentId : undefined,
+    parentId: request.originKind
+      ? (request.sourceThreadId ?? request.parentThreadId)
+      : request.parentThreadId,
+  };
+}
+
+/** What the thread saved. A canceled scheduled first message leaves only the thread's own fields. */
+export function savedSpawnIntent(
+  deps: Pick<AppDeps, "db">,
+  thread: Thread,
+): SpawnIntent {
+  const turn = deps.db
+    .select({ data: events.data })
+    .from(events)
+    .where(
+      and(
+        eq(events.threadId, thread.id),
+        eq(events.type, "client/turn/requested"),
+      ),
+    )
+    .orderBy(asc(events.sequence))
+    .limit(1)
+    .get();
+  const queued = turn
+    ? undefined
+    : deps.db
+        .select()
+        .from(queuedThreadMessages)
+        .where(eq(queuedThreadMessages.threadId, thread.id))
+        .orderBy(asc(queuedThreadMessages.createdAt))
+        .limit(1)
+        .get();
+  const first: {
+    input?: PromptInput[];
+    execution?: { model?: string; reasoningLevel?: string };
+  } | null = turn
+    ? JSON.parse(turn.data)
+    : queued
+      ? { input: JSON.parse(queued.content), execution: queued }
+      : null;
+  // A fork's first saved turn may be its source's copied history.
+  const fork = thread.originKind !== null;
+  return {
+    prompt: fork ? undefined : promptKey(first?.input ?? []),
+    providerId: thread.providerId,
+    model: fork ? undefined : first?.execution?.model,
+    reasoningLevel: fork ? undefined : first?.execution?.reasoningLevel,
+    hostId:
+      thread.environmentId === null
+        ? undefined
+        : getEnvironment(deps.db, thread.environmentId)?.hostId,
+    environmentId: thread.environmentId ?? undefined,
+    parentId: (fork ? thread.sourceThreadId : thread.parentThreadId) ?? null,
+  };
+}
+
+export function spawnConflicts(
+  retry: SpawnIntent,
+  first: SpawnIntent,
+): boolean {
+  return Object.entries(retry).some(([key, value]) => {
+    const saved = first[key as keyof SpawnIntent];
+    return value !== undefined && saved !== undefined && value !== saved;
+  });
+}
+
+export function requestConflict(message = "with different content"): ApiError {
+  return new ApiError(
+    409,
+    "request_conflict",
+    `Request ID was already used ${message}`,
+  );
+}
+
 export function createThreadRecord(
   deps: Pick<AppDeps, "db"> & { hub: DbNotifier },
   args: {
@@ -103,6 +248,11 @@ export function createThreadRecord(
 
   try {
     const thread = createThread(deps.db, deps.hub, {
+      ...(args.request.requestId
+        ? {
+            id: requestThreadId(args.request.projectId, args.request.requestId),
+          }
+        : {}),
       projectId: args.request.projectId,
       environmentId: args.environmentId,
       providerId: args.request.providerId,

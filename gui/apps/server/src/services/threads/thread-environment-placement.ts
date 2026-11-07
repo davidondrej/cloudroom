@@ -101,8 +101,13 @@ type PlacementDeps = LoggedPendingInteractionWorkSessionDeps;
 export function worktreeProviderInputs(
   branch: GitBranchSelection,
   sourcePath?: string,
+  diffBase?: GitBranchSelection,
 ): JsonValue {
-  return sourcePath === undefined ? { branch } : { branch, sourcePath };
+  return {
+    branch,
+    ...(sourcePath === undefined ? {} : { sourcePath }),
+    ...(diffBase ? { diffBase } : {}),
+  };
 }
 
 /** The Git checkout a worktree starts from when it is not the project's (#971). */

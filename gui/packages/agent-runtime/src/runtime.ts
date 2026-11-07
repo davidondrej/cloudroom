@@ -102,6 +102,7 @@ interface PreparedThreadRewind {
 interface PreparingThreadRewind {
   state: "preparing";
   promise: Promise<{ providerThreadId: string }>;
+  threadId: string;
 }
 
 type StagedThreadRewind = PreparingThreadRewind | PreparedThreadRewind;
@@ -1791,6 +1792,7 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
       stagedThreadRewinds.set(leaseId, {
         state: "preparing",
         promise: preparation,
+        threadId,
       });
       try {
         return await preparation;
@@ -2577,6 +2579,12 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
 
     hasOpenBackgroundWork() {
       return backgroundWorkState.hasOpenWork();
+    },
+
+    hasStagedRewind(threadId) {
+      return [...stagedThreadRewinds.values()].some(
+        (staged) => staged.threadId === threadId,
+      );
     },
 
     async shutdown() {

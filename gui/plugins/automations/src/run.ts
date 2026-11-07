@@ -128,7 +128,7 @@ export function lastNote(reply: string): string | null {
 
 // Loop run records (ADR 0298): every run reports what it did, why, and how sure it was. Same text as Cloud loops.
 const REPORT_ASK =
-  'Before replying, run `room-cli loop report --outcome done|acted|needs-you|failed --confidence high|medium|low --reason "why"`, plus one `--action "..."` per change.';
+  'Before replying, run `room-cli loop report --outcome done|acted|needs-you|failed --confidence high|medium|low --reason "why"`, plus up to ten `--action "..."` values: group related changes into one, as the run\'s transcript keeps the full details.';
 
 /** Reports are saved on the website, so a signed-out app can't send them (#872). Only a confirmed sign-out counts:
  *  a failed, unknown, or slow (over 2 s) status keeps today's report instruction. */

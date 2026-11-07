@@ -6,8 +6,9 @@ For Cloud, use `room-cli thread spawn --project PROJECT --machine cloud --provid
 
 - In the Cloudroom fork, `--machine cloud --provider codex --model MODEL` uses
   the configured Rust core and prepared repository. `--machine local` selects
-  the local machine. Cloud creation accepts `--request-id ID`; reuse it after
-  an unconfirmed submission. Cloud uses full permissions, not native environment
+  the local machine. Every spawn accepts `--request-id ID`; reuse it after an
+  unanswered spawn (the error prints one) to get that thread, not a duplicate.
+  Cloud uses full permissions, not native environment
   options or forks. Attachments and fast service tier require the corresponding
   connected-core/harness capability.
 
@@ -152,9 +153,10 @@ download <project-id> <attachment-path> --client-file <path>` writes existing
 - Use `room-cli project show|update|delete` for one project. Use `room-cli project source
 update|delete` for one source. Use `room-cli project branches` for branch data.
 - Direct environment inspection accepts any environment ID: use `room-cli environment
-status|branches|paths|diff|diff-files|diff-file|diff-patch <id>` and `bb
-environment pull-request show <id>`. Diff commands require an explicit target
-  and the matching merge-base or commit flags; all support `--json`.
+status|branches|paths|diff|diff-files|diff-file|diff-patch <id>` and
+  `room-cli environment pull-request show <id>`. Diff commands require an
+  explicit target and the matching merge-base or commit flags; all support
+  `--json`.
 - `room-cli environment pull-request ready|draft|merge` manages pull-request state;
   `room-cli environment archive-threads` bulk-archives an environment's threads.
 - Use `room-cli environment show|update|commit` for environment metadata

@@ -1,7 +1,7 @@
 import { existsSync, readdirSync, statSync, statfsSync } from "node:fs";
 import { readFile, rm, writeFile } from "node:fs/promises";
 import { cpus, homedir, release, totalmem } from "node:os";
-import { delimiter, join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
 import { getAppSettings } from "@cloudroom/db";
 import { execPortableFile, findCliExecutable, type KnownCli } from "@cloudroom/process-utils";
 import { readOrCreateSecretFile } from "@cloudroom/secret-storage";
@@ -37,6 +37,7 @@ export function startSetupTelemetry(appDeps: Deps): void {
     linkInstall();
     void reportUpdateAttempt(appDeps.config.dataDir).catch(error => appDeps.logger.debug({ err: error }, "Update report failed"));
     if (process.platform === "win32") void reportCrashes(appDeps.config.dataDir).catch(error => appDeps.logger.debug({ err: error }, "Crash report failed"));
+    if (process.platform === "win32") void reportWindowsInstall().catch(error => appDeps.logger.debug({ err: error }, "Install report failed"));
     void readFile(marker).then(() => {}, async () => {
       await sendSnapshot("first_launch");
       await writeFile(marker, JSON.stringify({ sentAt: Date.now() }), { mode: 0o600 });
@@ -92,6 +93,16 @@ export function cliPlace(path: string | null | undefined): string | null {
  * "Restart to update" leaves update-attempt.json (desktop-update-resume.ts). Still on the old version
  * means the install failed, so report why from macOS's installer log. Failures reach our database.
  */
+/** Windows: the installer leaves how long it took next to Cloudroom.exe (build/installer.nsh). Sent once. */
+async function reportWindowsInstall(): Promise<void> {
+  const file = join(dirname(process.execPath), "install-timing.json");
+  const text = await readFile(file, "utf8").catch(() => null);
+  if (text === null) return;
+  await rm(file, { force: true });
+  const { ms, update } = JSON.parse(text) as { ms?: unknown; update?: unknown };
+  if (typeof ms === "number" && ms >= 0) capture("windows_install", () => ({ ms, update: update === true }));
+}
+
 async function reportUpdateAttempt(dataDir: string): Promise<void> {
   const attempt = await updateAttempt;
   if (attempt === null) return;
@@ -174,7 +185,7 @@ export function reportMacHelperDown(message: string): void {
 }
 
 /** Telemetry must never break setup, so building or sending an event can't throw. `postHogOnly` never reaches our database. */
-function capture(name: "setup_snapshot" | "agent_connect" | "cli_install" | "account_sign_in_failed" | "update_install" | "update_ready" | "app_crash", properties: () => Record<string, TelemetryValue>, postHogOnly: Record<string, TelemetryValue> = {}): void {
+function capture(name: "setup_snapshot" | "agent_connect" | "cli_install" | "account_sign_in_failed" | "update_install" | "update_ready" | "app_crash" | "windows_install", properties: () => Record<string, TelemetryValue>, postHogOnly: Record<string, TelemetryValue> = {}): void {
   try {
     const event: Record<string, TelemetryValue> = { ...properties(), seconds_since_first_launch: secondsSinceFirstLaunch() };
     deps?.telemetry.capture({ name, properties: { ...event, ...postHogOnly } });

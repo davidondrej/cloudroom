@@ -7,8 +7,8 @@ use super::{
     children::{FINISHED, NOTICE_REPLY_CHARS, notice, notice_ids},
     history::ApiError,
     thread::{
-        Failure, archive_under, deliver, fail, random_key, record, retire, session_failure,
-        starting, website_failure,
+        Failure, NO_PARENT, archive_under, deliver, fail, random_key, record, retire,
+        session_failure, starting, website_failure,
     },
 };
 use axum::{
@@ -20,16 +20,32 @@ use axum::{
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
-    sync::{Arc, Mutex},
+    collections::HashSet,
+    sync::{Arc, LazyLock, Mutex},
     time::{Duration, Instant},
 };
 
 /// Since when reports have failed. After `GIVE_UP_AWAKE`, the sandbox may sleep; the next wake retries them.
 static FAILING_SINCE: Mutex<Option<Instant>> = Mutex::new(None);
 const GIVE_UP_AWAKE: Duration = Duration::from_secs(30 * 60);
+/// The child starts a task drives right now, by session and request ID, so each has one.
+static DRIVING: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(Mutex::default);
+/// The spawns still waiting for their child's ID, by session and request ID: a refusal reaches the agent through one,
+/// and through a notice once none waits (thread.rs).
+pub(super) static WAITING: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(Mutex::default);
 const APP_NOTE: &str = "Passed to the user's Cloudroom app, which applies it while it is open.";
 /// Core can't tell whether the app counts this thread as the caller's child: the user may have moved it there.
 const MAYBE_NOTE: &str = "Not linked to this thread, so it went to the user's Cloudroom app. The app applies it only to a thread this one started (such as one the user moved here), while it is open; otherwise nothing happens.";
+/// The website's answer when the parent's Core refused the message (web/lib/mobile.ts).
+const PARENT_BUSY: &str = "The other thread's Cloudroom is busy or updating. Try again shortly.";
+fn unconfirmed(why: &str) -> String {
+    format!(
+        "Could not confirm your parent got it ({why}). It may have, so sending it again may deliver it twice."
+    )
+}
+/// The website's answer for a thread that moved to the Mac (web/lib/mobile.ts, `threadCore`).
+const MOVED: &str = "This thread moved to the Mac.";
+const PARENT_MOVED: &str = "Not delivered: your parent moved to the user's Mac, and Cloud children can't message a Local parent yet. The app can still forward your completed-turn reply to your current Local parent while it is open.";
 const STARTING: &str = "This child is still starting in its own sandbox. Retry in a few seconds.";
 
 /// The website delivers here, with this Core's token.
@@ -63,23 +79,29 @@ pub(super) async fn command(
     text: Option<&str>,
     to_parent: bool,
 ) -> Result<Json<Value>, Failure> {
-    // A caller sharing another thread's sandbox has no link on the website, so the app passes on commands for its own
-    // children, as before, and drops any other. Its `tell` to another thread goes through the website as this
-    // sandbox's thread, which reaches the same tree. `label` has the website name that thread as the sender, since
-    // this caller's session ID means nothing in another sandbox (#177). What the website doesn't link still goes to
-    // the app, which knows a child the user moved under this caller.
-    let (shared, mine) = {
+    // A caller sharing another thread's sandbox has no link of its own on the website: its children in sandboxes of
+    // their own are linked to this sandbox's thread (ADR 20261104-015709), so commands for them go through the
+    // website as that thread. Its `tell` to another thread does too, which reaches the same tree; `label` has the
+    // website name that thread as the sender, since this caller's session ID means nothing in another sandbox
+    // (#177). The app passes on its other commands, and what the website doesn't link, as before: it knows a child
+    // the user moved under this caller, or one an older Core had the app start.
+    let (shared, mine, up) = {
         let local = m.local.lock().unwrap();
         let session = local.sessions.get(caller);
         let mine = session.is_some_and(|s| s.child_states.contains_key(id));
-        (session.is_some_and(|s| s.parent_session.is_some()), mine)
+        let up = to_parent || session.and_then(|s| s.parent_thread()) == Some(id);
+        (
+            session.is_some_and(|s| s.parent_session.is_some()),
+            mine,
+            up,
+        )
     };
     let other = shared && !mine;
     let Some(api) = m
         .history
         .api
         .as_ref()
-        .filter(|_| !shared || (other && action == "tell"))
+        .filter(|_| !other || action == "tell")
     else {
         return via_app(
             m,
@@ -94,11 +116,42 @@ pub(super) async fn command(
     let body = json!({"action":action,"thread":id,"text":text,"request_id":format!("relay_{key}"),"label":other,"parent":to_parent});
     let mut answer = match api.post_waking("relay", &body).await {
         // The website may not know a child that just started yet (#317).
-        Err(ApiError::Status(404, _)) if starting(caller).iter().any(|c| c == id) => {
+        Err(ApiError::Status(404, _)) if starting(m, caller).iter().any(|c| c == id) => {
             return Err(fail(StatusCode::SERVICE_UNAVAILABLE, STARTING));
         }
-        Err(ApiError::Status(404, _)) if other => {
-            return via_app(m, caller, id, action, text, MAYBE_NOTE);
+        Err(ApiError::Status(403 | 404, _)) if shared && !up => {
+            return via_app(
+                m,
+                caller,
+                id,
+                action,
+                text,
+                if other { MAYBE_NOTE } else { APP_NOTE },
+            );
+        }
+        // Core had no parent, and the website has none it can reach: as before (#994).
+        Err(ApiError::Status(404, _)) if id == "parent" => {
+            return Err(fail(StatusCode::CONFLICT, NO_PARENT));
+        }
+        // The parent may have it already, and a resend gets a new request ID, so never ask for one. Only the
+        // website's own "parent busy" 503 means the parent refused it.
+        Err(ApiError::Status(status, ref message))
+            if id == "parent" && status >= 500 && !(status == 503 && message == PARENT_BUSY) =>
+        {
+            return Err(fail(
+                StatusCode::BAD_GATEWAY,
+                &unconfirmed(&format!("HTTP {status}")),
+            ));
+        }
+        Err(ApiError::Network(_)) if id == "parent" => {
+            return Err(fail(StatusCode::BAD_GATEWAY, &unconfirmed("network error")));
+        }
+        // Its parent moved to the Mac (#1015): the website refuses that closed Cloud session and never wakes it, and
+        // nothing here reaches a Local parent yet. The same 410, in words the agent can act on.
+        Err(ApiError::Status(410, message))
+            if action == "tell" && up && !other && message == MOVED =>
+        {
+            return Err(fail(StatusCode::GONE, PARENT_MOVED));
         }
         answer => answer.map_err(|error| website_failure(error, "reach the child"))?,
     };
@@ -107,7 +160,7 @@ pub(super) async fn command(
         "stop" => "stopped",
         _ => "archived",
     };
-    if !other {
+    if !other && id != "parent" {
         note_child(m, caller, id, state);
     }
     answer["id"] = json!(id);
@@ -167,6 +220,26 @@ async fn receive(
     {
         return Err(bad("invalid request_id"));
     }
+    // A child that a session sharing this sandbox started is linked to this sandbox's thread: its reports and
+    // messages go to the session that started it.
+    let from = match input.action.as_str() {
+        "report" => input.child.clone(),
+        "tell" => input.text.as_deref().and_then(|t| {
+            let rest = t.strip_prefix("[bb message from thread:")?;
+            Some(rest[..rest.find(']')?].to_owned())
+        }),
+        _ => None,
+    };
+    let owner = from.as_deref().and_then(|child| starter(&m, child));
+    // A report from a child no session here has named yet, while a start is still unnamed, may be that start's:
+    // it waits, so it can't land on the wrong session.
+    if input.action == "report" && owner.is_none() && unnamed_start(&m.local.lock().unwrap()) {
+        return Err(fail(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "This child's start isn't recorded yet. Retry shortly.",
+        ));
+    }
+    let id = owner.unwrap_or(id);
     let archived = m
         .local
         .lock()
@@ -192,11 +265,16 @@ async fn receive(
             note_child(&m, &id, &child, known);
             notice(&child, input.title, state, input.error, input.reply)
         }
+        // Then its agent exits with everything it started, like `thread stop` in one sandbox (#607), Codex aside.
         "stop" => {
-            return m
-                .command(&id, request, "stop", json!({}))
-                .map(|receipt| Json(json!({"id":id,"state":receipt.state})))
-                .map_err(session_failure);
+            let receipt = m
+                .command(&id, request.clone(), "stop", json!({}))
+                .map_err(session_failure)?;
+            if m.stop_sleeps(&id) {
+                let sleep = json!({"end_jobs":true});
+                let _ = m.command(&id, format!("{request}_sleep"), "sleep", sleep);
+            }
+            return Ok(Json(json!({"id":id,"state":receipt.state})));
         }
         // Like `thread archive --self`: the app archives it whenever it next reads the thread.
         "archive" => {
@@ -224,6 +302,27 @@ async fn receive(
         ));
     }
     Ok(answer)
+}
+
+/// The session sharing this sandbox that started `child` through the website. The thread's own sessions take what
+/// the website addresses to it: after a model switch, that is the current one, not the one that started it.
+fn starter(m: &Manager, child: &str) -> Option<String> {
+    let local = m.local.lock().unwrap();
+    local
+        .sessions
+        .values()
+        .find(|s| s.parent_session.is_some() && s.started.contains(child))
+        .map(|s| s.session_id.clone())
+}
+
+/// A child start here the website hasn't named yet.
+fn unnamed_start(local: &Local) -> bool {
+    local.sessions.values().any(|s| {
+        !s.archived
+            && s.child_starts
+                .values()
+                .any(|c| c.child.is_none() && !c.done && c.error.is_none())
+    })
 }
 
 /// The first finished turn not yet reported, of a session whose parent runs in another sandbox.
@@ -254,16 +353,31 @@ fn next_report(local: &Local) -> Option<(String, String, Value)> {
 /// what this thread last heard of each, or else its sandbox's state. Ones started in the last few minutes show as
 /// `starting` until their sandbox wakes, linked or not.
 pub(super) async fn own_children(m: &Manager, caller: &str, archived: bool, answer: &mut Value) {
-    let (shared, known) = {
+    // The website links every child started here to this sandbox's thread: each session lists the ones it started,
+    // and the sandbox's thread also those an older app started.
+    let (shared, known, mine, others) = {
         let local = m.local.lock().unwrap();
         let session = local.sessions.get(caller);
-        let shared = session.is_some_and(|s| s.parent_session.is_some());
+        // Only sessions sharing the sandbox keep theirs apart: the thread lists what its earlier sessions started.
+        let others: HashSet<String> = local
+            .sessions
+            .values()
+            .filter(|s| s.session_id != caller && s.parent_session.is_some())
+            .flat_map(|s| s.started.iter().cloned())
+            .collect();
         (
-            shared,
+            session.is_some_and(|s| s.parent_session.is_some()),
             session.map(|s| s.child_states.clone()).unwrap_or_default(),
+            session.map(|s| s.started.clone()).unwrap_or_default(),
+            others,
         )
     };
-    let Some(api) = m.history.api.as_ref().filter(|_| !shared) else {
+    let Some(api) = m
+        .history
+        .api
+        .as_ref()
+        .filter(|_| !shared || !mine.is_empty())
+    else {
         return;
     };
     let flag = if archived { "1" } else { "0" };
@@ -280,9 +394,16 @@ pub(super) async fn own_children(m: &Manager, caller: &str, archived: bool, answ
     let Some(list) = answer["children"].as_array_mut() else {
         return;
     };
-    let recent = starting(caller);
+    let recent = starting(m, caller);
     for child in found["children"].as_array().into_iter().flatten() {
         let id = child["id"].as_str().unwrap_or_default();
+        if if shared {
+            !mine.contains(id)
+        } else {
+            others.contains(id)
+        } {
+            continue;
+        }
         let sandbox = child["state"].as_str().unwrap_or("unknown");
         let state = match sandbox {
             "archived" | "deleted" => "archived",
@@ -321,7 +442,180 @@ pub(super) fn report_pending(local: &Local) -> bool {
     next_report(local).is_some() && failing.is_none_or(|since| since.elapsed() < GIVE_UP_AWAKE)
 }
 
+/// Child starts the website hasn't finished, by session, request ID and the request to repeat. An archived thread's
+/// stay unstarted.
+fn pending_starts(local: &Local) -> Vec<(String, String, Value)> {
+    local
+        .sessions
+        .values()
+        .filter(|s| !s.archived)
+        .flat_map(|s| {
+            s.child_starts
+                .iter()
+                .filter(|(_, start)| !start.done && start.error.is_none())
+                .map(|(request, start)| (s.session_id.clone(), request.clone(), start.body.clone()))
+        })
+        .collect()
+}
+
+/// Since when child starts have failed, until one call goes through.
+static STARTS_FAILING: Mutex<Option<Instant>> = Mutex::new(None);
+
+/// A child start still waits for the website, so the sandbox must not sleep yet, unless calls have failed for a
+/// long time. It stays saved either way: the next wake goes on with it.
+pub(super) fn start_pending(local: &Local) -> bool {
+    let failing = *STARTS_FAILING.lock().unwrap();
+    !pending_starts(local).is_empty() && failing.is_none_or(|since| since.elapsed() < GIVE_UP_AWAKE)
+}
+
+/// Whether this start still waits: not settled, not cancelled, and its thread not archived.
+fn still_pending(m: &Manager, session: &str, request: &str) -> bool {
+    let local = m.local.lock().unwrap();
+    local.sessions.get(session).is_some_and(|s| {
+        !s.archived
+            && s.child_starts
+                .get(request)
+                .is_some_and(|c| !c.done && c.error.is_none())
+    })
+}
+
+/// Repeats a child start until the website says its first prompt is in (each call continues the same start, keyed by
+/// this thread and the request ID), refuses it for good, or its thread is archived. Outages are never final: the
+/// request stays saved. The parent hears of a refusal the agent wasn't told.
+async fn drive_start(
+    m: Arc<Manager>,
+    api: super::history::Api,
+    session: String,
+    request: String,
+    body: Value,
+) {
+    let mut wait = Duration::from_secs(3);
+    // The child's ID, for the notice of a failure.
+    let mut named = m
+        .local
+        .lock()
+        .unwrap()
+        .sessions
+        .get(&session)
+        .and_then(|s| s.child_starts.get(&request)?.child.clone());
+    let error = loop {
+        if m.is_stopping() || !still_pending(&m, &session, &request) {
+            break None;
+        }
+        let answer = api.post_waking("child", &body).await;
+        {
+            let mut failing = STARTS_FAILING.lock().unwrap();
+            *failing = match &answer {
+                Ok(_) | Err(ApiError::Status(..500, _)) => None,
+                Err(_) => failing.or(Some(Instant::now())),
+            };
+        }
+        match answer {
+            Ok(answer) => {
+                let Some(child) = answer["id"].as_str().filter(|c| thread_id(c)) else {
+                    break Some("the website gave no thread ID".to_owned());
+                };
+                let started = answer["started"] == true;
+                note_child(
+                    &m,
+                    &session,
+                    child,
+                    if started { "running" } else { "starting" },
+                );
+                if started {
+                    // The app shows it under this thread, Mac on or off (ADR 20261104-015709).
+                    let _ = m.note(&session, "own_child", answer.clone());
+                }
+                if m.note(
+                    &session,
+                    "child_start_state",
+                    json!({"request_id":request,"child":child,"done":started}),
+                )
+                .is_ok()
+                {
+                    named = Some(child.to_owned());
+                }
+                if started {
+                    break None;
+                }
+                // The website keeps starting it meanwhile.
+                wait = Duration::from_secs(10);
+            }
+            // Refused for good: out of credits, a missing login, an archived parent.
+            Err(ApiError::Status(status, error)) if status < 500 => break Some(error),
+            Err(_) => {}
+        }
+        tokio::time::sleep(wait).await;
+        wait = (wait * 2).min(Duration::from_secs(300));
+    };
+    if let Some(error) = error {
+        let error = error.trim().trim_end_matches('.').to_owned();
+        // Recorded under the waiting spawns' lock: a spawn still waiting answers with it, and the parent hears it here
+        // only once none does, once per request (thread.rs).
+        let (recorded, waiting) = {
+            let waiting = WAITING.lock().unwrap();
+            let recorded = m
+                .note(
+                    &session,
+                    "child_start_state",
+                    json!({"request_id":request,"error":error}),
+                )
+                .is_ok();
+            (recorded, waiting.contains(&format!("{session}/{request}")))
+        };
+        if recorded && !waiting {
+            let text = match &named {
+                Some(child) => {
+                    note_child(&m, &session, child, "error");
+                    format!("[Cloudroom] Child thread {child} could not be started: {error}.")
+                }
+                None => format!(
+                    "[Cloudroom] The child thread you spawned with request ID {request} could not be started: {error}."
+                ),
+            };
+            let id: String = request.chars().take(40).collect();
+            let _ = deliver(&m, &session, &format!("start_{id}"), &text, true).await;
+        }
+    }
+    DRIVING
+        .lock()
+        .unwrap()
+        .remove(&format!("{session}/{request}"));
+}
+
 impl Manager {
+    /// Drives each child start the website hasn't finished, saved or new, one task per start.
+    pub(super) fn watch_child_starts(self: &Arc<Self>, local: &Local) {
+        let Some(api) = self.history.api.clone() else {
+            return;
+        };
+        let manager = self.clone();
+        let mut changed = local.changed.subscribe();
+        tokio::spawn(async move {
+            while !manager.is_stopping() {
+                let due = pending_starts(&manager.local.lock().unwrap());
+                for (session, request, body) in due {
+                    if DRIVING
+                        .lock()
+                        .unwrap()
+                        .insert(format!("{session}/{request}"))
+                    {
+                        tokio::spawn(drive_start(
+                            manager.clone(),
+                            api.clone(),
+                            session,
+                            request,
+                            body,
+                        ));
+                    }
+                }
+                if changed.changed().await.is_err() {
+                    return;
+                }
+            }
+        });
+    }
+
     /// Reports each finished turn of a child whose parent runs in another sandbox, until the website takes it.
     /// One task for this Core's life: a report that fails waits and retries, so later ones keep their order.
     pub(super) fn watch_reports(self: &Arc<Self>, local: &Local) {

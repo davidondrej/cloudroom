@@ -108,9 +108,15 @@ export function useCloudroomAccount() {
 export function useCloudroomSignIn() {
   const client = useQueryClient();
   return useMutation({
+    // Returns the sign-in link, so setup can offer it for a browser other than the default.
     mutationFn: async (action: "signIn" | "cancel") => {
-      if (action === "cancel") await sdk.cloudroom.cancel();
-      else openUrlInExternalBrowser((await sdk.cloudroom.signIn({})).url);
+      if (action === "cancel") {
+        await sdk.cloudroom.cancel();
+        return null;
+      }
+      const { url } = await sdk.cloudroom.signIn({});
+      openUrlInExternalBrowser(url);
+      return url;
     },
     onSuccess: () => client.invalidateQueries({ queryKey: ["cloudroom-account"] }),
     onError: (error) => appToast.error(error.message),

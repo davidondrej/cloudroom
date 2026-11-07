@@ -98,6 +98,7 @@ Context breakdowns are optional snapshots on `contextWindow` deltas:
 - `experimental_presentationDetail`
 - `experimental_presentationFileName`
 - `experimental_presentationTitle`
+- `experimental_probeCliVersion`
 - `experimental_probeNpmGlobalPackage`
 - `experimental_readBoundedLines`
 - `experimental_readCliVersion`

@@ -519,3 +519,147 @@ async fn background_process_outlives_its_result() {
     );
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[tokio::test]
+async fn a_fake_core_gets_no_more_kept_than_core_sends() {
+    // Security fix: a sandbox's agent has root, so it can answer the helper in place of Core, with jobs and input of any
+    // size. The helper keeps no more than a real Core sends.
+    let root = folder("limits");
+    let config = root.join("config.json");
+    let access = |level: &str| {
+        std::fs::write(&config, json!({"macAccess": level}).to_string()).unwrap();
+        std::fs::set_permissions(&config, std::os::unix::fs::PermissionsExt::from_mode(0o600))
+            .unwrap();
+    };
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<(String, Value)>::new()));
+    // The fake Core: one job stream, results it keeps, and a confirmation for the streamed job it never answers.
+    tokio::spawn({
+        let seen = seen.clone();
+        async move {
+            loop {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let seen = seen.clone();
+                tokio::spawn(async move {
+                    let (mut data, mut chunk) = (Vec::new(), [0u8; 65536]);
+                    let end = loop {
+                        let read = stream.read(&mut chunk).await.unwrap();
+                        data.extend_from_slice(&chunk[..read]);
+                        if let Some(end) = data.windows(4).position(|window| window == b"\r\n\r\n")
+                        {
+                            break end;
+                        }
+                    };
+                    let head = String::from_utf8_lossy(&data[..end]).to_lowercase();
+                    let length: usize = head
+                        .lines()
+                        .find_map(|line| line.strip_prefix("content-length:"))
+                        .map_or(0, |value| value.trim().parse().unwrap());
+                    let mut body = data[end + 4..].to_vec();
+                    while body.len() < length {
+                        let read = stream.read(&mut chunk).await.unwrap();
+                        body.extend_from_slice(&chunk[..read]);
+                    }
+                    let line = head.lines().next().unwrap_or_default().to_owned();
+                    let body = serde_json::from_slice(&body).unwrap_or(Value::Null);
+                    seen.lock().unwrap().push((line.clone(), body));
+                    if line.starts_with("get /v1/mac/jobs?") {
+                        // The longest job a real Core sends (up to 0.1.75, with its input inside), then a line longer
+                        // than any job.
+                        let longest = json!({"id": "streamed", "command": "\u{1}".repeat(65536),
+                            "cwd": "\u{1}".repeat(4096), "stdin": "00".repeat(jobs::LIMIT)});
+                        let events = format!(
+                            "event: job\ndata: {longest}\n\ndata: {}\n",
+                            "x".repeat(jobs::LINE)
+                        );
+                        let head = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n";
+                        let _ = stream.write_all(head.as_bytes()).await;
+                        let _ = stream.write_all(events.as_bytes()).await;
+                    } else if line.starts_with("post /v1/mac/results/streamed") {
+                        std::future::pending::<()>().await;
+                    } else {
+                        let _ = stream
+                            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}")
+                            .await;
+                    }
+                });
+            }
+        }
+    });
+    let jobs = std::sync::Arc::new(jobs::Jobs::new(std::sync::Arc::new(
+        super::net::Shared::new(root.clone()),
+    )));
+    let core = super::net::Core {
+        url: url.clone(),
+        headers: Vec::new(),
+        sandbox: false,
+        thread: None,
+        key: (url.clone(), String::new()),
+        config: Value::Null,
+        connection: Value::Null,
+    };
+    // Input over Core's own 16 MiB, or a size no Core sends, is refused without a download. So is any input once Mac
+    // access is Off.
+    let unusable = "The Mac could not download this command's input from the cloud, so it did not run. Try again.";
+    let mut expected = Vec::new();
+    for (level, job, refused) in [
+        (
+            "off",
+            json!({"id": "off", "stdin_bytes": 5}),
+            "Mac access is off.",
+        ),
+        (
+            "full",
+            json!({"id": "big", "stdin_bytes": jobs::LIMIT + 1}),
+            unusable,
+        ),
+        (
+            "full",
+            json!({"id": "negative", "stdin_bytes": -2}),
+            unusable,
+        ),
+        (
+            "full",
+            json!({"id": "inline", "stdin": "00".repeat(jobs::LIMIT + 1)}),
+            unusable,
+        ),
+    ] {
+        access(level);
+        let mut job = job;
+        job["command"] = json!("true");
+        jobs.clone().execute(core.clone(), "mac".into(), job).await;
+        expected.push((json!(126), json!(super::hex(refused.as_bytes()))));
+    }
+    let done: Vec<(Value, Value)> = seen
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(_, body)| body["state"] == "done")
+        .map(|(_, body)| (body["code"].clone(), body["stderr"].clone()))
+        .collect();
+    assert_eq!(done, expected);
+    assert!(
+        !seen
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(line, _)| line.contains("/stdin"))
+    );
+    // The longest real job is taken, and a line longer than any job ends the stream.
+    let ended = jobs.stream(&core, "mac", &mut false).await;
+    assert!(matches!(ended, Err(super::net::Error::Value(text)) if text == "Mac job is too large"));
+    let taken = || {
+        seen.lock().unwrap().iter().any(|(line, body)| {
+            line.starts_with("post /v1/mac/results/streamed") && body["state"] == "running"
+        })
+    };
+    for _ in 0..100 {
+        if taken() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(taken());
+    std::fs::remove_dir_all(root).unwrap();
+}

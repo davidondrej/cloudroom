@@ -30,6 +30,7 @@ import {
   LEGACY_SHIM_SPECIFIERS,
   PLUGIN_SDK_APP_SPECIFIER,
   RUNTIME_SLOT_BY_SPECIFIER,
+  SHARED_UI_BROWSER_DIMMING_SPECIFIER,
   SHARED_UI_ICON_SPECIFIER,
 } from "./runtime-shims.mjs";
 import {
@@ -42,18 +43,29 @@ export {
   SHIMMED_TYPE_PACKAGES,
 } from "./runtime-shims.mjs";
 
-const SHARED_UI_ICON_MODULE_SUFFIX = "/shared-ui/src/components/ui/icon";
+// shared-ui modules its own components import relatively, routed to host
+// slots: the icon map (size) and the browser-dimming hook (a no-op outside
+// the app, so plugin dialogs would sit under the native browser view).
+const SHARED_UI_RELATIVE_SHIMS: Readonly<Record<string, string>> = {
+  "/shared-ui/src/components/ui/icon": SHARED_UI_ICON_SPECIFIER,
+  "/shared-ui/src/hooks/useBrowserDimmingModal":
+    SHARED_UI_BROWSER_DIMMING_SPECIFIER,
+};
 const SHARED_UI_SOURCE_IMPORTER = /[\\/]shared-ui[\\/]src[\\/]/;
 
-export function isSharedUiIconRelativeImport(
+/** The host shim specifier for a shared-ui relative import, if it has one. */
+export function sharedUiRelativeShim(
   importPath: string,
   importer: string,
-): boolean {
-  if (!SHARED_UI_SOURCE_IMPORTER.test(importer)) return false;
+): string | undefined {
+  if (!SHARED_UI_SOURCE_IMPORTER.test(importer)) return undefined;
   const resolved = resolve(dirname(importer), importPath)
     .replace(/\\/g, "/")
     .replace(/\.(?:tsx?|jsx?)$/, "");
-  return resolved.endsWith(SHARED_UI_ICON_MODULE_SUFFIX);
+  for (const [suffix, specifier] of Object.entries(SHARED_UI_RELATIVE_SHIMS)) {
+    if (resolved.endsWith(suffix)) return specifier;
+  }
+  return undefined;
 }
 
 let freshFacadeImportSequence = 0;
@@ -136,16 +148,18 @@ export function runtimeShimPlugin(pluginSdkAppModuleUrl?: string): Plugin {
         path: LEGACY_SHIM_SPECIFIERS[args.path] ?? args.path,
         namespace: SHIM_NAMESPACE,
       }));
-      build.onResolve({ filter: /(^|\/)icon(\.[jt]sx?)?$/ }, (args) => {
-        if (
-          args.namespace !== "file" ||
-          !args.path.startsWith(".") ||
-          !isSharedUiIconRelativeImport(args.path, args.importer)
-        ) {
-          return undefined;
-        }
-        return { path: SHARED_UI_ICON_SPECIFIER, namespace: SHIM_NAMESPACE };
-      });
+      build.onResolve(
+        { filter: /(^|\/)(icon|useBrowserDimmingModal)(\.[jt]sx?)?$/ },
+        (args) => {
+          if (args.namespace !== "file" || !args.path.startsWith(".")) {
+            return undefined;
+          }
+          const specifier = sharedUiRelativeShim(args.path, args.importer);
+          return specifier === undefined
+            ? undefined
+            : { path: specifier, namespace: SHIM_NAMESPACE };
+        },
+      );
       build.onLoad(
         { filter: /.*/, namespace: SHIM_NAMESPACE },
         async (args) => ({

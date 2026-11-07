@@ -22,6 +22,7 @@ import type { CommandResultSideEffectsDeps } from "../../internal/command-result
 import { ApiError } from "../../errors.js";
 import {
   LIVE_DAEMON_COMMAND_TIMEOUT_MS,
+  countThreadStartsSent,
   startLiveHostCommand,
 } from "../hosts/live-command.js";
 import { getLastProviderThreadId } from "./thread-events.js";
@@ -474,29 +475,55 @@ export function scheduleArchivedThreadProcessStop(
     environment: { id: string; hostId: string };
   },
 ): void {
-  const warn = (error: unknown) =>
-    deps.logger.warn(
-      { err: error, threadId: args.threadId },
-      "Stopping an archived thread's processes failed",
-    );
+  const startsSent = countThreadStartsSent(args.threadId);
   setTimeout(() => {
     try {
       const thread = getThread(deps.db, args.threadId);
       if (thread && thread.archivedAt !== args.archivedAt) return;
-      startLiveHostCommand(deps, {
-        command: {
-          type: "thread.processes.stop",
-          environmentId: args.environment.id,
-          threadId: args.threadId,
-        },
-        hostId: args.environment.hostId,
-        timeoutMs: 60_000,
-        onError: ({ error }) => warn(error),
-      });
+      sendThreadProcessesStop(deps, { ...args, startsSent });
     } catch (error) {
-      warn(error);
+      deps.logger.warn(
+        { err: error, threadId: args.threadId },
+        "Stopping an archived thread's processes failed",
+      );
     }
   }, ARCHIVED_THREAD_PROCESS_STOP_DELAY_MS).unref();
+}
+
+/**
+ * Has the host free the thread's idle agent session and end what it left
+ * running. Archive sends it, and so does `room-cli thread stop` of an idle
+ * thread (#607); other stops end only the agent. `startsSent` is the count
+ * when the stop or archive began: newer work since then keeps its jobs.
+ */
+export function sendThreadProcessesStop(
+  deps: CommandResultSideEffectsDeps,
+  args: {
+    threadId: string;
+    environment: { id: string; hostId: string };
+    startsSent: number;
+  },
+): void {
+  if (countThreadStartsSent(args.threadId) !== args.startsSent) return;
+  const warn = (error: unknown) =>
+    deps.logger.warn(
+      { err: error, threadId: args.threadId },
+      "Stopping a thread's processes failed",
+    );
+  try {
+    startLiveHostCommand(deps, {
+      command: {
+        type: "thread.processes.stop",
+        environmentId: args.environment.id,
+        threadId: args.threadId,
+      },
+      hostId: args.environment.hostId,
+      timeoutMs: 60_000,
+      onError: ({ error }) => warn(error),
+    });
+  } catch (error) {
+    warn(error);
+  }
 }
 
 /** Pushes a generated title to a local thread's live provider session, when it has one. */

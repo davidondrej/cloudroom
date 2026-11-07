@@ -238,6 +238,19 @@ describe("worktree host entry", () => {
     expect(
       (await git(result.path, "rev-parse", "--abbrev-ref", "HEAD")).trim(),
     ).toBe("bb/named-thr_1");
+    // A fork starts from its snapshot branch but compares against main.
+    const fork = await harness.experimental_call("create", {
+      operationId: "fork",
+      sourcePath,
+      pathKey: "thr_2",
+      branchName: "bb/fork-thr_2",
+      baseBranch: { kind: "named", name: "release" },
+      diffBase: { kind: "named", name: "main" },
+      branchMode: "reset",
+    });
+    expect(fork).toMatchObject({ status: "created", baseBranch: "main" });
+    if (fork.status !== "created") throw new Error(fork.message);
+    expect(existsSync(join(fork.path, "release.txt"))).toBe(true);
     await harness.experimental_dispose();
   });
 

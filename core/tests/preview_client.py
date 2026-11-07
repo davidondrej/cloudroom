@@ -282,13 +282,14 @@ class MacJobTests(unittest.TestCase):
                                        fetch=lambda url, body, *_: results.append(body) if body['state'] == 'done' else None,
                                        config={'connectionFile': str(folder / 'cloudroom.json')},
                                        connection={'account': {'id': '11111111-1111-4111-8111-111111111111'}, 'sandboxToken': 'a' * 64})
-            jobs = preview.MacJobs(folder)
+            jobs, downloads = preview.MacJobs(folder), []
             def run(name, on):
-                jobs.execute(on, 'mac', {'id': name, 'command': f'touch {folder}/{name}'})
+                jobs.execute(on, 'mac', {'id': name, 'command': f'touch {folder}/{name}', 'stdin_bytes': 5})
                 return results[-1]['code'], bytes.fromhex(results[-1]['stderr']).decode()
             run_sandbox, next_wake, vm = core('run'), core('next wake'), core('vm', sandbox=False)
             unconfirmed = "The Mac could not confirm this sandbox's API keys with Cloudroom, so the command did not run. Try again."
-            with mock.patch.object(preview, 'control', control), mock.patch.object(preview, 'review', lambda *_: None):
+            with mock.patch.object(preview, 'control', control), mock.patch.object(preview, 'review', lambda *_: None), \
+                    mock.patch.object(preview, 'mac_stdin', lambda core, device, job: downloads.append(job['id']) or ''):
                 # Failed, from an older website, without a sandbox row, or garbled: each refuses and asks again next time.
                 answers[:] = [preview.ControlError(503), {'secrets': None}, {'secrets': None, 'found': False}, {'secrets': '.env', 'found': True}]
                 for name in ('failed', 'old', 'missing', 'garbled'):
@@ -311,6 +312,69 @@ class MacJobTests(unittest.TestCase):
             self.assertEqual([body for _, body in asked], [{'action': 'secrets', 'thread': 'thr_run'}] * 6)
             self.assertTrue(all(url == 'https://www.cloudroom.dev/api/desktop/sandboxes' for url, _ in asked))
             self.assertEqual(sorted(path.name for path in folder.iterdir() if path.suffix != '.json'), ['allowed', 'vm'])
+            # A sandbox refused for its key list never makes the Mac download a job's input.
+            self.assertEqual(downloads, ['allowed', 'vm'])
+
+    def test_a_fake_core_gets_no_more_kept_than_core_sends(self):
+        # Security fix: a sandbox's agent has root, so it can answer the helper in place of Core, with jobs, input, and
+        # stops of any size. The helper keeps no more than a real Core sends.
+        with tempfile.TemporaryDirectory() as folder:
+            folder = Path(folder)
+            preview.save(folder / 'config.json', {'macAccess': 'off'})
+            jobs, opened, results, started, held = preview.MacJobs(folder), [], [], [], threading.Event()
+            core = SimpleNamespace(url='http://core', headers={}, key='core', sandbox=False, connection={},
+                                   config={'connectionFile': str(folder / 'cloudroom.json')},
+                                   fetch=lambda url, body, *_: results.append(body))
+            # The longest job a real Core sends (up to 0.1.75, with its input inside), a short one, two stops, and a line
+            # longer than any job.
+            longest = {'id': 'longest', 'command': '\x01' * 65536, 'cwd': '\x01' * 4096, 'stdin': '00' * preview.MAC_LIMIT}
+            events = [('job', longest), ('job', {'id': 'short'}), ('cancel', {'id': 'other'}), ('cancel', {'id': 'short'})]
+            stream = ''.join(f'event: {name}\ndata: {json.dumps(data)}\n\n' for name, data in events)
+            stream = (stream + 'data: ' + 'x' * preview.MAC_LINE + '\n').encode()
+            def open(request, timeout):
+                opened.append(request.full_url)
+                if len(opened) == 1:
+                    return io.BytesIO(stream)
+                jobs.wanted = set()
+                raise OSError('Stream closed')
+            def execute(core, device, job):
+                started.append(job['id'])
+                held.wait(10)
+            with mock.patch.dict(preview.NET, opener=SimpleNamespace(open=open)):
+                # Input over Core's own 16 MiB, or a size no Core sends, is refused without a download. So is any input
+                # once Mac access is Off.
+                for size in (preview.MAC_LIMIT + 1, -2, '5', 1.5, True):
+                    self.assertIsNone(preview.mac_stdin(core, 'mac', {'id': 'x', 'stdin_bytes': size}))
+                self.assertIsNone(preview.mac_stdin(core, 'mac', {'id': 'x', 'stdin': '00' * (preview.MAC_LIMIT + 1)}))
+                jobs.execute(core, 'mac', {'id': 'off', 'command': 'true', 'stdin_bytes': 5})
+                self.assertEqual((opened, bytes.fromhex(results[-1]['stderr']).decode()), ([], 'Mac access is off.'))
+                with mock.patch.object(jobs, 'execute', execute):
+                    jobs.wanted = {'core'}
+                    follow = threading.Thread(target=jobs.follow, args=(core, 'mac'))
+                    follow.start()
+                    while follow.is_alive():
+                        with preview.NUDGE:  # Skips the wait before reconnecting.
+                            preview.NUDGE.notify_all()
+                        follow.join(.05)
+                    for _ in range(200):
+                        if len(started) == 2:
+                            break
+                        time.sleep(.01)
+                    # The longest real job is taken, a stop is kept only for a job taken, and the long line ends the stream.
+                    self.assertEqual((sorted(started), jobs.taken, jobs.cancelled, len(opened)),
+                                     (['longest', 'short'], {'longest': 1, 'short': 1}, {'short'}, 2))
+                    held.set()
+                    for _ in range(200):
+                        if not jobs.taken:
+                            break
+                        time.sleep(.01)
+                    self.assertEqual((jobs.taken, jobs.cancelled), ({}, set()))
+            # The review list keeps a fixed-size key, never the command. Its report goes to a closed local port.
+            reviewed = SimpleNamespace(url='http://core', config={}, thread=None,
+                                       connection={'account': {'id': 'a'}, 'sandboxToken': 't', 'websiteUrl': 'http://127.0.0.1:9'})
+            with mock.patch.dict(preview.REVIEWS, sent={}), mock.patch.object(preview, 'control', lambda *_: None):
+                preview.review(reviewed, {'command': 'x' * 65536}, 'full', False)
+                self.assertEqual([len(key) for key in preview.REVIEWS['sent']], [32])
 
     @unittest.skipIf(os.name == 'nt', 'Read-only needs the macOS sandbox')
     def test_read_only_hides_every_cloudroom_folder_with_keys(self):

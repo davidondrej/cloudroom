@@ -52,30 +52,6 @@ function windowLabel(label: string): string {
 
 const tileClass = "flex min-h-32 flex-col rounded-lg border p-3.5 text-sm";
 
-/** The Mac's own login, before Cloudroom has its own sign-in for it. */
-function TerminalTile({
-  account,
-  onSignIn,
-}: {
-  account: AccountView;
-  onSignIn: () => void;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onSignIn}
-      className={cn(
-        tileClass,
-        "items-center justify-center gap-2.5 border-dashed border-border text-center text-muted-foreground hover:border-foreground/50 hover:text-foreground",
-      )}
-    >
-      <Icon name="Terminal" className="size-4" />
-      <span className="font-medium text-foreground">Add Terminal login</span>
-      <span className="max-w-full truncate text-xs">{account.email}</span>
-    </button>
-  );
-}
-
 function AccountTile({
   account,
   index,
@@ -210,14 +186,14 @@ function AccountTile({
             </span>
           </div>
         ))}
-        {account.inUse ? null : (
+        {account.inUse && !account.needsSignIn ? null : (
           <Button
             variant="outline"
             size="sm"
             className="mt-1.5"
             onClick={onUse}
           >
-            Use
+            {account.inUse ? "Approve for Cloud" : "Use"}
           </Button>
         )}
       </div>
@@ -336,7 +312,9 @@ function SignInRow({
                 </span>
               </>
             ) : provider === "claude-code" ? (
-              step.second ? (
+              mac ? (
+                "Approve this Mac's account for Cloud"
+              ) : step.second ? (
                 "Approve once more, for Cloud · 2 of 2"
               ) : (
                 "Waiting for sign-in · 1 of 2"
@@ -485,24 +463,18 @@ function AccountsSection({
         <p className="py-2.5 text-xs text-muted-foreground">Loading…</p>
       ) : (
         <div className="grid grid-cols-[repeat(auto-fill,minmax(13rem,1fr))] gap-3">
-          {[...accounts]
-            .sort((a, b) => Number(a.needsSignIn) - Number(b.needsSignIn))
-            .map((account, index) =>
-              account.needsSignIn ? (
-                <TerminalTile
-                  key={account.id}
-                  account={account}
-                  onSignIn={() => setAdding({ mac: true, id: null })}
-                />
-              ) : (
+          {accounts.map((account, index) => (
                 <AccountTile
                   key={account.id}
                   account={account}
                   index={index}
                   onUse={() =>
-                    void run(() =>
-                      rpc.call("accounts.use", { provider, id: account.id }),
-                    )
+                    // The Mac's own Claude login needs one approval before Cloud can follow it.
+                    account.needsSignIn
+                      ? setAdding({ mac: true, id: null })
+                      : void run(() =>
+                          rpc.call("accounts.use", { provider, id: account.id }),
+                        )
                   }
                   onRename={(name) =>
                     void run(() =>
@@ -524,8 +496,7 @@ function AccountsSection({
                       : undefined
                   }
                 />
-              ),
-            )}
+              ))}
         </div>
       )}
       {adding ? (

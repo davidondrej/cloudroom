@@ -47,6 +47,7 @@ import { addGithubRepo, githubBranches, macRepoSuggestions, repoSuggestions } fr
 import { projectSuggestion } from "./project-nudge.js";
 import { promptSuggestion, promptSuggestionEvent } from "../threads/prompt-suggestion.js";
 import { readUiPreferences } from "../system/ui-preferences.js";
+import { forgetCloudAccountSwitch, noteCloudAccountSwitch } from "./account-switches.js";
 import { ACTIVATION_STEPS, CLOUD_CHOICE_ACTIONS, CLOUD_CHOICE_REASONS, POPUP_DETAILS, POPUPS, SETUP_ACTIONS, SETUP_AGENTS, SETUP_DETAILS, SETUP_STEPS, STARTER_PROMPTS, UPGRADE_PROMPTS } from "../system/telemetry.js";
 
 const SAFE_SETTINGS_SEARCH = /^(?=.{2,40}$)\p{L}+(?: \p{L}+){0,3}$/u;
@@ -430,12 +431,19 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: Plugin
     await startClaudeToken(requestId, async token => cloudroom(deps).claudeAuth("token", requestId, token, await claudePlan()), deps);
     return context.json(await claudeStatus());
   });
+  // The Accounts plugin names the accounts a switch moves between, for the line it leaves in limited threads.
+  const switchedSchema = z.object({ from: z.string().min(1).max(320), to: z.string().min(1).max(320) }).strict().optional();
   // The Accounts plugin saves the account in use as the Cloud login (ADR 0197).
   app.post("/api/v1/cloudroom/account/claude/token", async context => {
     const problem = browserRequestProblem(context, deps, { requireJsonForMutation: true });
     if (problem) return context.json({ message: "Use the local Cloudroom app." }, problem.status);
-    const input = z.object({ requestId: z.string().regex(/^[a-zA-Z0-9_-]{1,64}$/), token: z.string().regex(/^sk-ant-oat[A-Za-z0-9_-]{20,}$/), plan: z.string().regex(/^[a-z_]{1,32}$/).optional(), follow: z.boolean().optional() }).strict().parse(await context.req.json());
-    const status = await cloudroom(deps).claudeAuth("token", input.requestId, input.token, input.plan, input.follow);
+    const input = z.object({ requestId: z.string().regex(/^[a-zA-Z0-9_-]{1,64}$/), token: z.string().regex(/^sk-ant-oat[A-Za-z0-9_-]{20,}$/), plan: z.string().regex(/^[a-z_]{1,32}$/).optional(), follow: z.boolean().optional(), switched: switchedSchema }).strict().parse(await context.req.json());
+    noteCloudAccountSwitch("claude-code", input.switched);
+    const status = await cloudroom(deps).claudeAuth("token", input.requestId, input.token, input.plan, input.follow).catch((error: unknown) => {
+      forgetCloudAccountSwitch("claude-code");
+      throw error;
+    });
+    if (status.state !== "connected") forgetCloudAccountSwitch("claude-code");
     cloudroom(deps).restartAwake("claude-code");
     return context.json(status);
   });
@@ -465,9 +473,15 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: Plugin
   app.post("/api/v1/cloudroom/account/cursor/account", async context => {
     const problem = browserRequestProblem(context, deps, { requireJsonForMutation: true });
     if (problem) return context.json({ message: "Use the local Cloudroom app." }, problem.status);
-    const parsed = z.object({ requestId: z.string().regex(/^[a-zA-Z0-9_-]{1,64}$/), apiKey: z.string().min(1).max(4096).regex(/^[!-~]+$/).nullable() }).strict().safeParse(await context.req.json().catch(() => null));
+    const parsed = z.object({ requestId: z.string().regex(/^[a-zA-Z0-9_-]{1,64}$/), apiKey: z.string().min(1).max(4096).regex(/^[!-~]+$/).nullable(), switched: switchedSchema }).strict().safeParse(await context.req.json().catch(() => null));
     if (!parsed.success) throw new ApiError(400, "invalid_cursor_auth", "Invalid Cursor account request.");
-    return context.json(await cloudroom(deps).cursorAccount(parsed.data.requestId, parsed.data.apiKey));
+    noteCloudAccountSwitch("acp-cursor", parsed.data.switched);
+    const status = await cloudroom(deps).cursorAccount(parsed.data.requestId, parsed.data.apiKey).catch((error: unknown) => {
+      forgetCloudAccountSwitch("acp-cursor");
+      throw error;
+    });
+    if (status.state !== "connected") forgetCloudAccountSwitch("acp-cursor");
+    return context.json(status);
   });
   app.post("/api/v1/cloudroom/account/pi/key", async context => {
     const parsed = z.object({ provider: z.string().regex(/^[A-Za-z0-9._-]{1,64}$/), apiKey: z.string().min(1).max(8192).regex(/^[!-~]+$/) }).strict().safeParse(await context.req.json().catch(() => null));

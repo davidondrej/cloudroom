@@ -98,6 +98,7 @@ import type {
   DeleteThreadSectionRequest,
   DeleteThreadRequest,
   ThreadArchiveAllQuery,
+  ThreadStopQuery,
   ThreadUnarchiveQuery,
   EnvironmentActionApiError,
   EnvironmentActionRequest,
@@ -305,6 +306,7 @@ import {
   threadPluginMetadataQuerySchema,
   deleteThreadRequestSchema,
   threadArchiveAllQuerySchema,
+  threadStopQuerySchema,
   threadUnarchiveQuerySchema,
   environmentActionRequestSchema,
   environmentDiffBranchesQuerySchema,
@@ -1337,7 +1339,9 @@ export const publicApiRoutes = {
     stop: defineRoute({
       path: "/threads/:id/stop",
       method: "post",
-      request: noRequest<PathId>(),
+      request: optionalQueryRequest<PathId, ThreadStopQuery>(
+        threadStopQuerySchema,
+      ),
       response: jsonResponse<{ ok: true; cancelledRetries: number }>(),
     }),
     compact: defineRoute({

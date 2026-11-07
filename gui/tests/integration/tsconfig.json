@@ -5,7 +5,7 @@
     "declaration": false,
     "declarationMap": false,
     "outDir": "dist",
-    "rootDir": "../..",
+    "rootDir": "../../..",
     "sourceMap": false,
     "types": ["node"]
   },

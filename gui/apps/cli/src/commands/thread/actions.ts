@@ -646,7 +646,11 @@ export function registerActionsCommands(
           const threadId = requireThreadIdOrSelf(id, opts);
           const sdk = createCliBbSdk(getUrl());
           const result: { ok: true; cancelledRetries?: number } =
-            await sdk.threads[method]({ threadId }).catch((error: unknown) => {
+            await sdk.threads[method]({
+              threadId,
+              // Only this explicit stop ends what the agent left running (#607).
+              ...(method === "stop" ? { endProcesses: true } : {}),
+            }).catch((error: unknown) => {
               // Name the code the room-cli skill tells agents to look for.
               if (
                 error instanceof BbHttpError &&

@@ -26,7 +26,7 @@ import { CloudroomError, UPLOAD_PART, type CloudroomClient, type Harness, type T
 import { cloudroom } from "./commands.js";
 import { PIECE_TIMEOUT, retry, SKIPPED } from "./project-copy.js";
 import { binding, isDead } from "./store.js";
-import { codexLineage, download, findNative, vm } from "./teleport-local.js";
+import { allowance, codexLineage, download, findNative, vm } from "./teleport-local.js";
 
 /** A Cloud fork: a new Cloud thread, in its own sandbox, that continues another Cloud thread's conversation
  *  from a chosen turn, with that thread's code (docs/scopes/sandboxes.md). Saved in the fork's first message. */
@@ -203,12 +203,14 @@ async function cloudForkSource(deps: Parameters<typeof cloudroom>[0], sourceId: 
     files: async () => {
       const path = (await vm(from, findNative(harness as "codex" | "claude-code", nativeId))).toString().trim();
       if (!path) throw new ApiError(409, "fork_source_unavailable", "The source conversation file was not found in its sandbox.");
-      const file = await download(from, path);
+      // The conversation and its parents are all held at once, so they share one allowance.
+      const allowed = allowance();
+      const file = await download(from, path, allowed);
       // The source may be writing its next turn; a partial last line is not part of the fork.
       const files: ForkFile[] = [{ path: basename(path), kind: "native", data: file.subarray(0, file.lastIndexOf(10) + 1) }];
       // A source that is itself a Codex fork (a rewind) needs its parent files too.
       for (const parent of harness === "codex" ? await codexLineage(from, path) : [])
-        files.push({ path: basename(parent), kind: "lineage", data: await download(from, parent) });
+        files.push({ path: basename(parent), kind: "lineage", data: await download(from, parent, allowed) });
       return files;
     },
   };
@@ -415,9 +417,13 @@ export async function prepareLocalForkWorktree(deps: AppDeps, source: Thread, pr
   }
   const branch = checkout ? await localForkBranch(folder.path, checkout) : null;
   if (!branch) return { environment: { type: "reuse", environmentId: folder.id }, note: null };
-  const named = { kind: "named", name: branch } as const;
+  // Start from the snapshot, but compare against the source's base like any other worktree, not the frozen snapshot.
+  const diffBase: GitBranchSelection = folder.mergeBaseBranch && !folder.mergeBaseBranch.startsWith("cloudroom/fork-") ? { kind: "named", name: folder.mergeBaseBranch } : { kind: "default" };
+  const inputs = worktreeProviderInputs({ kind: "named", name: branch }, undefined, diffBase);
   return {
-    environment: requested.type === "host" ? { ...requested, workspace: { type: "managed-worktree", baseBranch: named } } : requested.type === "provider" ? { ...requested, inputs: worktreeProviderInputs(named) } : requested,
+    environment: requested.type === "host"
+      ? { type: "provider", environmentProviderId: DEFAULT_ENVIRONMENT_PROVIDER_ID.gitWorktree, machine: { type: "existing", hostId: requested.hostId ?? folder.hostId }, inputs }
+      : requested.type === "provider" ? { ...requested, inputs } : requested,
     note: { type: "text", text: `[Local fork]\nThis fork runs in its own new worktree on branch ${branch}, not the source thread's folder. The last commit, "Cloudroom fork: uncommitted changes", holds the work the source thread had not committed.`, mentions: [], visibility: "agent-only" },
   };
 }

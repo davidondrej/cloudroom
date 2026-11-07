@@ -1,7 +1,7 @@
 import { z } from "zod";
 import type { BbDesktopBrowserApi } from "./browser.js";
 import { bbDesktopVersionFeedPlatformSchema } from "./version-feed.js";
-import type { AppCommandId } from "@cloudroom/domain";
+import type { AppCommandId, AppShortcutInput } from "@cloudroom/domain";
 
 const isoUtcDateTimeSchema = z.iso.datetime();
 
@@ -51,6 +51,8 @@ export const bbDesktopInfoSchema = z.object({
   downloadState: bbDesktopDownloadStateSchema.optional(),
   /** The last Restart to update left this version installed. */
   installFailed: z.boolean().optional(),
+  /** Mac: opened from the disk image or Downloads, so it can't update itself until it's moved to Applications. */
+  installNeedsMove: z.boolean().optional(),
   installNeedsPassword: z.boolean().optional(),
   lastCheckedAt: isoUtcDateTimeSchema.nullable(),
   latestVersion: z.string().min(1).nullable(),
@@ -82,7 +84,11 @@ export type BbDesktopWindowStateChangeHandler = (
 ) => void;
 export type BbDesktopOpenNewTabHandler = () => void;
 export type BbDesktopOpenLinkHandler = (url: string) => void;
-export type BbDesktopAppCommandHandler = (command: AppCommandId) => void;
+// A command, or a shortcut pressed in a focused browser page that the renderer
+// resolves with its own context.
+export type BbDesktopAppCommandHandler = (
+  command: AppCommandId | AppShortcutInput,
+) => void;
 export type BbDesktopCloseWindowRequestHandler = () => boolean;
 
 export interface BbDesktopApi extends BbDesktopInfo {
@@ -92,6 +98,8 @@ export interface BbDesktopApi extends BbDesktopInfo {
   getWindowState?(): Promise<BbDesktopWindowState>;
   getZoomFactor?(): number;
   installUpdate(): Promise<void>;
+  /** Mac: copies the app into Applications and reopens it from there. False when it didn't move. */
+  moveToApplications?(): Promise<boolean>;
   onChange(listener: BbDesktopInfoChangeHandler): BbDesktopInfoUnsubscribe;
   onWindowStateChange?(
     listener: BbDesktopWindowStateChangeHandler,

@@ -165,7 +165,13 @@ function runCliProbe(
       if (!timedOut) liveProbes.delete(child);
       clearTimeout(timer);
       if (code === 0) resolve(`${output.stdout}\n${output.stderr}`);
-      else reject(new Error(`${command} exited with code ${String(code)}`));
+      else
+        reject(
+          Object.assign(
+            new Error(`${command} exited with code ${String(code)}`),
+            { output: `${output.stdout}\n${output.stderr}` },
+          ),
+        );
     });
   });
 }
@@ -190,14 +196,28 @@ export function versionFrom(value: string | null): string | null {
     : null;
 }
 
-export async function readCliVersion(command: string): Promise<string | null> {
+/** readCliVersion, plus the output of a `--version` that exited non-zero (Unix only; null on a timeout). */
+export async function probeCliVersion(
+  command: string,
+): Promise<{ version: string | null; failedOutput: string | null }> {
   try {
-    return versionFrom(
-      await runCliProbe(command, ["--version"], CLI_PROBE_TIMEOUT_MS),
+    const output = await runCliProbe(
+      command,
+      ["--version"],
+      CLI_PROBE_TIMEOUT_MS,
     );
-  } catch {
-    return null;
+    return { version: versionFrom(output), failedOutput: null };
+  } catch (error) {
+    const output = (error as { output?: unknown } | null)?.output;
+    return {
+      version: null,
+      failedOutput: typeof output === "string" ? output : null,
+    };
   }
+}
+
+export async function readCliVersion(command: string): Promise<string | null> {
+  return (await probeCliVersion(command)).version;
 }
 
 export function compareVersions(left: string, right: string): number {

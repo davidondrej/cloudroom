@@ -3,7 +3,6 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { z } from "zod";
 import { COMPUTER_TITLE } from "@cloudroom/domain/computer-name";
 import { callPluginRpc } from "@/lib/plugin-sdk-hooks";
-import { sdk } from "@/lib/sdk";
 import { wsManager } from "@/lib/ws";
 
 const PLUGIN = "accounts";
@@ -97,8 +96,8 @@ export function usePlanLimitAccounts(providerId: string) {
 }
 
 /**
- * Picks the account every thread uses (ADR 0197), then continues this thread on it.
- * Cloud threads continue on their own: Core sends "keep working" after a new login (ADR 0117).
+ * Picks the account every thread uses (ADR 0197). The plugin then continues every Local thread the old account's limit
+ * stopped, this one included (ADR 20261107-082836); Core does the same for Cloud threads after the new login (ADR 0117).
  */
 export async function switchAccount(args: {
   providerId: string;
@@ -110,27 +109,6 @@ export async function switchAccount(args: {
     provider: args.providerId,
     id: args.accountId,
     cloud: args.isCloud,
+    ...(args.isCloud ? {} : { threadId: args.threadId }),
   });
-  if (args.isCloud) return;
-  try {
-    await sdk.threads.retry({
-      threadId: args.threadId,
-      reason: "Switched account",
-    });
-  } catch (error) {
-    if (Reflect.get(Object(error), "code") !== "retry_already_queued") {
-      throw error;
-    }
-    const queued = await sdk.threads.queuedMessages.list({
-      threadId: args.threadId,
-    });
-    const retry = queued.find((row) => row.payload.kind === "retry");
-    if (retry) {
-      await sdk.threads.queuedMessages.send({
-        threadId: args.threadId,
-        queuedMessageId: retry.id,
-        mode: "auto",
-      });
-    }
-  }
 }

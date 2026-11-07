@@ -1673,7 +1673,7 @@ describe("dispatchCommand", () => {
     expect(runtime.startThread).toHaveBeenCalledTimes(2);
   });
 
-  it("does not remember an unsupported installation", async () => {
+  it("probes again after an unsupported installation", async () => {
     const runtime = createRuntime();
     const manager = new RuntimeManager({
       createRuntime: () => runtime,

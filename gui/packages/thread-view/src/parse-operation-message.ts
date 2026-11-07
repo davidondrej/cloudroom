@@ -8,6 +8,7 @@ import type {
 } from "@cloudroom/domain";
 import {
   THREAD_CONTEXT_CLEAR_OPERATION,
+  THREAD_ACCOUNT_SWITCH_OPERATION,
   THREAD_HARNESS_SWITCH_OPERATION,
   THREAD_IMPORT_OPERATION,
   isApprovalInteractionLifecycle,
@@ -580,6 +581,7 @@ export function parseOperationMessage(
       decoded.operation === "edit_message" ||
       decoded.operation === "checkpoint" ||
       decoded.operation === THREAD_HARNESS_SWITCH_OPERATION ||
+      decoded.operation === THREAD_ACCOUNT_SWITCH_OPERATION ||
       decoded.operation === THREAD_IMPORT_OPERATION ||
       // Cloud disk notices show as one live card above the composer instead.
       STORAGE_OPERATIONS.has(decoded.operation)

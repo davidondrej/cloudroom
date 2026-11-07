@@ -91,6 +91,7 @@ import {
 } from "./app-server-connection.js";
 import { codexLinuxSandboxError } from "./linux-sandbox.js";
 import {
+  codexBrokenInstallHint,
   getCodexProviderHealth,
   getCodexProviderInstallationRun,
   getCodexProviderInstallationStatus,
@@ -438,6 +439,15 @@ function buildAppServerEnv(): NodeJS.ProcessEnv {
 function describeCodexLaunchError(error: unknown): string {
   if (error instanceof CodexAppServerExitedError && error.spawnFailed) {
     return missingCodexCliGuidance();
+  }
+  const brokenHint =
+    error instanceof CodexAppServerExitedError
+      ? codexBrokenInstallHint(error.message)
+      : null;
+  if (brokenHint !== null && error instanceof Error) {
+    // "spawn" and "ENOENT" make the host daemon report missing_executable, so
+    // the server and CLI say "reinstall" instead of "retry" or "sign in" (#907).
+    return `Codex is installed but broken: it could not spawn its native binary (ENOENT). ${brokenHint}\n\n${error.message}`;
   }
   const message = error instanceof Error ? error.message : String(error);
   return CODEX_ACTIVE_WRITER_ERROR_PATTERN.test(message)

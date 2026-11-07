@@ -31,7 +31,8 @@ import {
   type BbDesktopBrowserViewportBounds,
   type BbDesktopBrowserViewBounds,
 } from "@cloudroom/desktop-contract";
-import type { AppCommandId, AppShortcutInput } from "@cloudroom/domain";
+import type { AppShortcutInput } from "@cloudroom/domain";
+import type { DesktopBrowserShortcut } from "./desktop-browser-shortcuts.js";
 import {
   BB_DESKTOP_BROWSER_FIND_RESULT_CHANNEL,
   BB_DESKTOP_BROWSER_OPEN_TAB_CHANNEL,
@@ -212,16 +213,15 @@ export interface DesktopBrowserHostWindow {
   webContents: DesktopBrowserHostWebContents;
 }
 
-interface DispatchDesktopBrowserAppCommandArgs {
-  command: AppCommandId;
-  hostWebContentsId: number;
-}
-
 export interface CreateDesktopBrowserViewManagerArgs {
-  dispatchAppCommand: (args: DispatchDesktopBrowserAppCommandArgs) => void;
+  dispatchAppShortcut: (
+    args: DesktopBrowserShortcut & { hostWebContentsId: number },
+  ) => void;
+  findShortcutCandidates: (
+    input: AppShortcutInput,
+  ) => DesktopBrowserShortcut | null;
   focusHostWebContents: (hostWebContentsId: number) => void;
   partition?: string;
-  resolveAppCommand: (input: AppShortcutInput) => AppCommandId | null;
 }
 
 interface HostScopedRequestArgs<TRequest> {
@@ -626,21 +626,24 @@ export function createDesktopBrowserViewManager(
       if (input.type !== "keyDown" || input.isAutoRepeat || input.isComposing) {
         return;
       }
-      const command = args.resolveAppCommand({
+      const shortcut: AppShortcutInput = {
         altKey: input.alt,
         code: input.code,
         ctrlKey: input.control,
         key: input.key,
         metaKey: input.meta,
         shiftKey: input.shift,
-      });
-      if (command === null) return;
+      };
+      const target = args.findShortcutCandidates(shortcut);
+      if (target === null) return;
       event.preventDefault();
-      if (command === "browser.focusLocation" || command === "browser.find") {
+      // Reload keeps the page focused. Every other command acts on app UI,
+      // which only gets the next keystrokes once the host window has focus.
+      if (!("command" in target) || target.command !== "browser.reload") {
         args.focusHostWebContents(hostWindow.webContents.id);
       }
-      args.dispatchAppCommand({
-        command,
+      args.dispatchAppShortcut({
+        ...target,
         hostWebContentsId: hostWindow.webContents.id,
       });
     });

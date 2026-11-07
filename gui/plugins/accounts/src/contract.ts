@@ -24,7 +24,7 @@ export const accountViewSchema = z.object({
   error: z.string().nullable(),
   credits: z.object({ detail: z.string().nullable() }).nullable(),
   windows: z.array(usageWindowSchema),
-  // The Mac's own Claude login, shown but not selectable until it is signed in again.
+  // The Mac's own Claude login while Cloud is on another account: Use first asks for one approval for Cloud.
   needsSignIn: z.boolean(),
   // A Claude account added before full logins: it runs on its one-year token, without claude.ai connectors.
   limitedLogin: z.boolean(),
@@ -47,8 +47,12 @@ export const accountsRpcContract = defineRpcContract({
     output: z.array(accountViewSchema),
   },
   "accounts.use": {
-    // `cloud` waits until Cloud is on the account too, and fails if it isn't.
-    input: target.extend({ cloud: z.boolean().optional() }),
+    // `cloud` waits until Cloud is on the account too, and fails if it isn't. `threadId` is the thread it was picked
+    // from, at its plan limit: it continues with every other thread that limit stopped (ADR 20261107-082836).
+    input: target.extend({
+      cloud: z.boolean().optional(),
+      threadId: z.string().min(1).optional(),
+    }),
     output: ok,
   },
   "accounts.move": {
@@ -62,6 +66,7 @@ export const accountsRpcContract = defineRpcContract({
     input: target.extend({ name: z.string().max(60) }),
     output: ok,
   },
+  // `mac` only approves the Mac's own login for Cloud (one-year token); `id` signs an added account in again.
   "claude.start": {
     input: z
       .object({ mac: z.boolean().optional(), id: z.string().optional() })

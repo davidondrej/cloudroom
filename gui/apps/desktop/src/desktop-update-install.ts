@@ -120,6 +120,23 @@ export function installNeedsPassword(execPath: string): boolean {
   return bundle !== null && !(canWrite(bundle) && canWrite(dirname(bundle)));
 }
 
+// Opened from the disk image or translocated from Downloads: no password helps, Squirrel.Mac
+// refuses a read-only app ("Cannot update while running on a read-only volume").
+export function appOnReadOnlyVolume(execPath: string): boolean {
+  const bundle = macAppBundle(execPath);
+  if (bundle === null) return false;
+  try {
+    accessSync(bundle, constants.W_OK);
+    return false;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EROFS";
+  }
+}
+
+// An unanswered prompt (hidden behind windows, on another screen) would leave Restart to update
+// spinning forever; after this the prompt closes and the button works again.
+const OWNERSHIP_PROMPT_TIMEOUT_MS = 2 * 60_000;
+
 const TAKE_OWNERSHIP_SCRIPT = [
   "on run argv",
   'do shell script "/usr/sbin/chown -R " & item 1 of argv & " " & quoted form of item 2 of argv & " && /bin/chmod -R u+w " & quoted form of item 2 of argv with prompt "Cloudroom needs your password once, so future updates install by themselves." with administrator privileges',
@@ -130,15 +147,16 @@ const TAKE_OWNERSHIP_SCRIPT = [
 // again. Only a writable folder (e.g. /Applications for admins) can be fixed this way.
 export function takeAppOwnership(
   execPath: string,
-): Promise<"fixed" | "canceled" | "failed" | "skipped"> {
+): Promise<"fixed" | "canceled" | "timed-out" | "failed" | "skipped"> {
   const bundle = macAppBundle(execPath);
   if (bundle === null || !canWrite(dirname(bundle))) {
     return Promise.resolve("skipped");
   }
   const args = [...TAKE_OWNERSHIP_SCRIPT, String(userInfo().uid), bundle];
   return new Promise((resolve) => {
-    execFile("/usr/bin/osascript", args, (error, _stdout, stderr) => {
+    execFile("/usr/bin/osascript", args, { timeout: OWNERSHIP_PROMPT_TIMEOUT_MS }, (error, _stdout, stderr) => {
       if (error === null) resolve(canWrite(bundle) ? "fixed" : "failed");
+      else if (error.killed) resolve("timed-out");
       else resolve(/\(-128\)/u.test(stderr) ? "canceled" : "failed");
     });
   });

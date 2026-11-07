@@ -1828,6 +1828,91 @@ describe("acp bridge", () => {
     expect(notifications("session/replaced")).toHaveLength(1);
   });
 
+  it.each([
+    {
+      stop: undefined,
+      failLoad: false,
+      sent: ["one", "two", "three"],
+      launches: 2,
+    },
+    { stop: undefined, failLoad: true, sent: ["one", "two"], launches: 3 },
+    { stop: "thread/stop", failLoad: false, sent: ["one", "two"], launches: 1 },
+    {
+      stop: "thread/stopRequested",
+      failLoad: false,
+      sent: ["one", "two"],
+      launches: 1,
+    },
+  ])(
+    "recovers a closed provider stream only by reloading it (#890): %o",
+    async ({ stop, failLoad, sent, launches }) => {
+      const promptLog = join(workspaceDir, "prompts.log");
+      const launchLog = join(workspaceDir, "launches.log");
+      const { bbThreadId, providerThreadId } = await startThread({
+        envVars: {
+          FAKE_ACP_LOAD_SESSION: "1",
+          ...(failLoad ? { FAKE_ACP_FAIL_LOAD: "1" } : {}),
+          FAKE_ACP_CLOSED_STREAM_FILE: join(workspaceDir, "closed-stream"),
+          FAKE_ACP_PROMPT_LOG: promptLog,
+          FAKE_ACP_LAUNCH_LOG: launchLog,
+        },
+      });
+      const send = (text: string) =>
+        sendTurnRequest("turn/start", providerThreadId, {
+          input: [{ type: "text", text, mentions: [] }],
+        });
+      for (const [index, text] of ["one", "two"].entries()) {
+        expect((await waitForResponse(send(text))).error).toBeUndefined();
+        await waitFor(() => threadEventsOfType("turn/completed")[index], text);
+      }
+      expect(notifications("error").map((m) => m.params)).toEqual([
+        expect.objectContaining({
+          message: expect.stringContaining(
+            "WritableIterable is closed. The agent lost",
+          ),
+        }),
+      ]);
+
+      const third = send("three");
+      if (stop === "thread/stop") {
+        sendRequest("thread/stop", {
+          threadId: bbThreadId,
+          providerThreadId,
+          intent: "interrupt",
+          activeTurnId: null,
+        });
+      } else if (stop !== undefined) {
+        handleLine(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            method: stop,
+            params: { threadId: bbThreadId },
+          }),
+        );
+      }
+      const response = await waitForResponse(third);
+      if (sent.length === 3) {
+        expect(response.error).toBeUndefined();
+        await waitFor(() => threadEventsOfType("turn/completed")[2], "three");
+        expect(agentMessageTexts()).toEqual(["echo:one", "echo:three"]);
+      } else {
+        expect(response.error?.message).toContain("message was not sent");
+      }
+      if (failLoad) {
+        // Still marked: the retry reloads again rather than starting fresh.
+        expect((await waitForResponse(send("three"))).error?.message).toContain(
+          "not sent",
+        );
+      }
+      expect(readFileSync(promptLog, "utf8").trim().split("\n")).toEqual(
+        sent.map((t) => JSON.stringify(t)),
+      );
+      expect(readFileSync(launchLog, "utf8").trim().split("\n")).toHaveLength(
+        launches,
+      );
+    },
+  );
+
   it("authenticates ACP sessions with cached tokens when advertised", async () => {
     const { providerThreadId } = await startThread({
       envVars: { FAKE_ACP_AUTH_METHODS: "cached_token" },

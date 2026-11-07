@@ -83,6 +83,7 @@ import {
   prepareTurnSubmitCommandPayload,
   dispatchArchivedThreadProviderArchiveCommand,
   dispatchThreadRenameCommand,
+  sendThreadProcessesStop,
   type ThreadStartCommandArgs,
   type ThreadStopCommandArgs,
 } from "./thread-commands.js";
@@ -95,6 +96,7 @@ import {
   threadStartHostWaitMs,
 } from "../hosts/online-rpc.js";
 import {
+  countThreadStartsSent,
   LIVE_DAEMON_COMMAND_TIMEOUT_MS,
   runLiveHostCommand,
 } from "../hosts/live-command.js";
@@ -1612,8 +1614,12 @@ export async function stopThreadForCurrentState(
     requireStopped?: true;
     immediate?: boolean;
     releaseMidTurn?: true;
+    /** `room-cli thread stop` only: an idle thread's agent tree ends too (#607). */
+    endProcesses?: true;
   },
 ): Promise<void> {
+  // Work sent after the stop begins keeps its jobs (#607).
+  const release = { ...options, startsSent: countThreadStartsSent(thread.id) };
   const target = getThread(deps.db, thread.id);
   if (target && isCloudThread(target)) return cloudroom(deps).control(thread.id, "stop");
   if (options?.immediate) {
@@ -1653,12 +1659,7 @@ export async function stopThreadForCurrentState(
     ) {
       return;
     }
-    await releaseIdleThreadRuntime(
-      deps,
-      thread.id,
-      environment,
-      options?.releaseMidTurn,
-    );
+    await releaseIdleThreadRuntime(deps, thread.id, environment, release);
     return;
   }
 
@@ -1671,23 +1672,18 @@ export async function stopThreadForCurrentState(
     return;
   }
 
-  await releaseIdleThreadRuntime(
-    deps,
-    thread.id,
-    environment,
-    options?.releaseMidTurn,
-  );
+  await releaseIdleThreadRuntime(deps, thread.id, environment, release);
 }
 
 /**
- * `midTurn` also releases a turn the host still runs but the thread no longer
- * shows (it failed or lost its host).
+ * `releaseMidTurn` also releases a turn the host still runs but the thread no
+ * longer shows (it failed or lost its host).
  */
 async function releaseIdleThreadRuntime(
   deps: RequestThreadStopForCurrentStateDeps,
   threadId: string,
   environment: RequestThreadStopForCurrentStateEnvironment | null,
-  midTurn = false,
+  options: { releaseMidTurn?: true; endProcesses?: true; startsSent: number },
 ): Promise<void> {
   if (environment === null) {
     return;
@@ -1696,13 +1692,17 @@ async function releaseIdleThreadRuntime(
     command: buildThreadStopCommand({
       environmentId: environment.id,
       hostId: environment.hostId,
-      immediate: midTurn,
+      immediate: options.releaseMidTurn === true,
       intent: "release",
       threadId,
     }),
     hostId: environment.hostId,
     threadId,
   });
+  if (options.endProcesses) {
+    const { startsSent } = options;
+    sendThreadProcessesStop(deps, { threadId, environment, startsSent });
+  }
 }
 
 async function runAwaitedThreadStopCommand(

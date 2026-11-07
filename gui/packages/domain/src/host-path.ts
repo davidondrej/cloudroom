@@ -219,3 +219,14 @@ export function getRelativeHostPath({
   const candidateSegments = parseHostPath(candidatePath)?.segments ?? [];
   return candidateSegments.slice(rootSegments.length).join("/");
 }
+
+/** True for CLI target values that name a path rather than an ID. */
+export function looksLikePath(value: string): boolean {
+  return (
+    value.includes("/") ||
+    value.includes("\\") ||
+    /^[A-Za-z]:/u.test(value) ||
+    value.startsWith(".") ||
+    value.startsWith("~")
+  );
+}

@@ -331,7 +331,7 @@ export function registerThreadActionRoutes(app: Hono, deps: AppDeps): void {
     return context.json({ ok: true });
   });
 
-  post(routes.stop, async (context) => {
+  post(routes.stop, async (context, query) => {
     const thread = requirePublicThread(deps.db, context.req.param("id"));
     const environment = resolveThreadHostCommandEnvironment({
       db: deps.db,
@@ -340,7 +340,12 @@ export function registerThreadActionRoutes(app: Hono, deps: AppDeps): void {
     teleports(deps).abandon(thread.id);
     const cancelledRetries = cancelRetriesForExplicitStop(deps, thread.id);
     cancelInterruptedThreadStartInput(deps.db, thread.id);
-    await stopThreadForCurrentState(deps, thread, environment);
+    await stopThreadForCurrentState(
+      deps,
+      thread,
+      environment,
+      query.endProcesses === "true" ? { endProcesses: true } : undefined,
+    );
     return context.json({ ok: true, cancelledRetries });
   });
 

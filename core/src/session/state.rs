@@ -414,6 +414,8 @@ impl Local {
                     | "native_history_unavailable"
                     | "parent_report"
                     | "child_state"
+                    | "child_start_state"
+                    | "own_child"
             )
         {
             session.last_activity = record.timestamp_ms.or(session.last_activity);
@@ -707,7 +709,16 @@ impl Local {
                 session.rewind_request = None;
                 session.state = SessionState::Idle;
             }
-            "archive" => session.archived = true,
+            "archive" => {
+                session.archived = true;
+                // Its children still starting never start (relay.rs).
+                for start in session.child_starts.values_mut() {
+                    if !start.done && start.error.is_none() {
+                        start.error = Some("its thread was archived".to_owned());
+                        start.body = Value::Null;
+                    }
+                }
+            }
             "detach" => session.parent_session = None,
             "child_state" => {
                 if let (Some(child), Some(state)) =
@@ -716,6 +727,43 @@ impl Local {
                     session
                         .child_states
                         .insert(child.to_owned(), state.to_owned());
+                }
+            }
+            "child_start" => {
+                if let Some(request) = record.data["request_id"].as_str() {
+                    let at_ms = record.timestamp_ms.unwrap_or_default();
+                    // Settled starts are forgotten after an hour: the website still finds the same child by request ID.
+                    session.child_starts.retain(|_, start| {
+                        (!start.done && start.error.is_none())
+                            || at_ms.saturating_sub(start.at_ms) < 3_600_000
+                    });
+                    session
+                        .child_starts
+                        .entry(request.to_owned())
+                        .or_insert_with(|| super::ChildStart {
+                            body: record.data["body"].clone(),
+                            at_ms,
+                            ..Default::default()
+                        });
+                }
+            }
+            "child_start_state" => {
+                if let Some(start) = record.data["request_id"]
+                    .as_str()
+                    .and_then(|request| session.child_starts.get_mut(request))
+                {
+                    if let Some(child) = record.data["child"].as_str() {
+                        start.child = Some(child.to_owned());
+                        session.started.insert(child.to_owned());
+                    }
+                    start.done |= record.data["done"] == true;
+                    if let Some(error) = record.data["error"].as_str() {
+                        start.error = Some(error.to_owned());
+                    }
+                    // Its prompt isn't needed once it settled, and sessions are read whole.
+                    if start.done || start.error.is_some() {
+                        start.body = Value::Null;
+                    }
                 }
             }
             "child_reply" => {
@@ -825,6 +873,43 @@ mod tests {
             .map(|s| json!([s, Derived::of(s)]))
             .collect();
         json!([sessions, local.sequences])
+    }
+
+    #[test]
+    fn child_starts_survive_a_restart_and_archiving_cancels_the_unsettled_ones() {
+        let dir =
+            std::env::temp_dir().join(format!("cloudroom-child-starts-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let mut local = Local::open(&dir).unwrap();
+        for (kind, data) in [
+            (
+                "child_start",
+                json!({"request_id":"r1","body":{"prompt":"one"}}),
+            ),
+            (
+                "child_start",
+                json!({"request_id":"r2","body":{"prompt":"two"}}),
+            ),
+            (
+                "child_start_state",
+                json!({"request_id":"r1","child":"thr_one","done":true}),
+            ),
+        ] {
+            local.append("a", kind, data, None).unwrap();
+        }
+        drop(local);
+        let mut local = Local::open(&dir).unwrap();
+        let a = &local.sessions["a"];
+        // A settled start keeps who it started, not its request; an unsettled one keeps its request to repeat.
+        assert!(a.child_starts["r1"].body.is_null() && a.started.contains("thr_one"));
+        assert_eq!(a.child_starts["r2"].body["prompt"], "two");
+        local
+            .append("a", "archive", json!({"archived":true}), None)
+            .unwrap();
+        let r2 = &local.sessions["a"].child_starts["r2"];
+        assert_eq!(r2.error.as_deref(), Some("its thread was archived"));
+        assert!(r2.body.is_null() && local.sessions["a"].child_starts["r1"].error.is_none());
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

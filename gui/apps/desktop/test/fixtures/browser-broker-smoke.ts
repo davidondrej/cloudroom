@@ -29,9 +29,9 @@ async function main() {
   );
   const manager = createDesktopBrowserViewManager({
     partition: "broker-smoke-personal",
-    dispatchAppCommand: () => {},
+    dispatchAppShortcut: () => {},
+    findShortcutCandidates: () => null,
     focusHostWebContents: () => {},
-    resolveAppCommand: () => null,
   });
   const broker = createDesktopBrowserBroker({ manager, product: "BB smoke" });
   broker.registerWindow(window);

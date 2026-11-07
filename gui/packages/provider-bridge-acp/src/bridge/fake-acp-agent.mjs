@@ -63,6 +63,10 @@
  *                              count model-discovery spawns in cache/TTL tests)
  * - FAKE_ACP_PROMPT_LOG      → append one JSON-encoded prompt text per request
  * - FAKE_ACP_PROMPT_ERROR=1  → reject every session/prompt request
+ * - FAKE_ACP_CLOSED_STREAM_FILE
+ *                            → like Cursor (#890): the first launch (file not
+ *                              yet written) fails every prompt after the first
+ *                              with "WritableIterable is closed"
  * - FAKE_ACP_COMPACT_STOP_REASON
  *                            → stop reason returned for /compact
  */
@@ -78,6 +82,10 @@ const usageOnLoad = process.env.FAKE_ACP_USAGE_ON_LOAD === "1";
 const usageSessionId = process.env.FAKE_ACP_USAGE_SESSION_ID;
 const modelConfig = process.env.FAKE_ACP_MODEL_CONFIG === "1";
 const modelsField = process.env.FAKE_ACP_MODELS_FIELD === "1";
+const closedStreamFile = process.env.FAKE_ACP_CLOSED_STREAM_FILE;
+let closedStreamPrompts =
+  closedStreamFile !== undefined && !existsSync(closedStreamFile) ? 0 : -1;
+if (closedStreamPrompts === 0) writeFileSync(closedStreamFile, "");
 const thoughtLevelConfig = process.env.FAKE_ACP_THOUGHT_LEVEL_CONFIG === "1";
 const unmappedReasoningConfig =
   process.env.FAKE_ACP_UNMAPPED_REASONING_CONFIG === "1";
@@ -424,6 +432,20 @@ async function handlePrompt(message) {
       process.env.FAKE_ACP_PROMPT_LOG,
       `${JSON.stringify(text)}\n`,
     );
+  }
+
+  if (closedStreamPrompts >= 0 && closedStreamPrompts++ > 0) {
+    activePromptId = null;
+    send({
+      jsonrpc: "2.0",
+      id: message.id,
+      error: {
+        code: -32603,
+        message: "Internal error",
+        data: { details: "WritableIterable is closed" },
+      },
+    });
+    return;
   }
 
   if (process.env.FAKE_ACP_PROMPT_ERROR === "1") {

@@ -5,6 +5,7 @@ import {
   type ServerResponse,
 } from "node:http";
 import { once } from "node:events";
+import { brotliCompressSync, gzipSync, zstdCompressSync } from "node:zlib";
 import { test } from "node:test";
 import { CloudroomClient, CloudroomConnectionError, CloudroomError } from "./client.ts";
 
@@ -639,4 +640,85 @@ test("reads core status without exposing private fields as client configuration"
   assert.equal(state.native_id, "native-1");
   assert.equal(state.receipts.p2.state, "accepted");
   assert.deepEqual(state.queue, ["p2"]);
+});
+
+test("a VM command answer is read up to Core's 80 MiB limit and no further", async (t) => {
+  // 16 MiB of output, hex encoded: the most a real Core sends for each of stdout and stderr.
+  const hex = "0123456789abcdef".repeat(2 * 1024 * 1024);
+  let mode = "real";
+  let sent = 0;
+  const service = await fixture(async (_req, res) => {
+    if (mode === "real") return sendJson(res, { code: 0, stdout: hex, stderr: hex, truncated: true });
+    if (mode === "error") return sendJson(res, { error: "VM folder not found" }, 409);
+    if (mode === "complex") return sendJson(res, Array.from({ length: 2 ** 21 }, () => ({})));
+    // Buffer.from() takes `{ length: n }` too: 69 bytes would make a caller allocate 64 MiB.
+    if (mode === "shape") return sendJson(res, { code: 0, stdout: { length: 2 ** 26 }, stderr: "", truncated: false });
+    res.writeHead(mode === "endless-500" ? 500 : 200, { "Content-Type": "application/json" });
+    res.write('{"code":0,"stdout":"');
+    const chunk = Buffer.alloc(1024 * 1024, 0x61);
+    const closed = once(res, "close");
+    for (sent = 0; !res.destroyed && sent < 1024 ** 3; sent += chunk.length)
+      if (!res.write(chunk)) await Promise.race([once(res, "drain"), closed]);
+  });
+  t.after(() => service.close());
+  const run = () => service.client.runOnVm({ command: "true", stdin: "" });
+  const result = await run();
+  assert.equal(result.stdout.length + result.stderr.length, 2 * hex.length);
+  mode = "error";
+  await assert.rejects(run(), (error: unknown) => error instanceof CloudroomError && error.status === 409 && error.message === "VM folder not found");
+  mode = "complex";
+  await assert.rejects(run(), /too complex/);
+  mode = "shape";
+  await assert.rejects(run(), /Invalid Cloudroom response/);
+  mode = "endless-200";
+  await assert.rejects(run(), /over the 80 MiB limit/);
+  assert(sent < 160 * 1024 * 1024, `the server sent ${sent} bytes`);
+  mode = "endless-500";
+  await assert.rejects(run(), (error: unknown) => error instanceof CloudroomError && error.status === 500 && error.message === "Cloudroom rejected the request (HTTP 500)");
+  assert(sent < 64 * 1024 * 1024, `the server sent ${sent} bytes`);
+});
+
+test("compressed answers are refused before they are read, and every request asks for none", async (t) => {
+  const asked: unknown[] = [];
+  let encoding = "";
+  const service = await fixture((req, res) => {
+    asked.push(req.headers["accept-encoding"]);
+    const body = Buffer.from(JSON.stringify(req.url === "/v1/vm/run" ? { code: 0, stdout: "", stderr: "", truncated: false } : { ok: true }));
+    const encode = { zstd: zstdCompressSync, br: brotliCompressSync, gzip: gzipSync }[encoding] ?? ((value: Buffer) => value);
+    res.writeHead(200, { "Content-Type": "application/json", ...(encoding ? { "Content-Encoding": encoding } : {}) });
+    res.end(encode(body));
+  });
+  t.after(() => service.close());
+  for (encoding of ["zstd", "br"]) {
+    await assert.rejects(service.client.health(), /compressed/);
+    await assert.rejects(service.client.runOnVm({ command: "true", stdin: "" }), /compressed/);
+  }
+  // gzip keeps a 32 KiB window, so a proxy that compresses anyway still works.
+  encoding = "gzip";
+  assert.deepEqual(await service.client.health(), { ok: true });
+  assert.equal((await service.client.runOnVm({ command: "true", stdin: "" })).code, 0);
+  assert.deepEqual(new Set(asked), new Set(["identity"]));
+});
+
+test("replay stops past its limits, and a record with too many values is read past", async (t) => {
+  let mode = "text";
+  const service = await fixture(async (req, res) => {
+    if (req.url === "/v1/sessions/s1") return sendJson(res, snapshot(2 ** 40));
+    res.writeHead(200, { "Content-Type": "text/event-stream" });
+    if (mode === "complex") return res.end(frame(1, Array(300_000).fill(0)) + frame(2, { text: "next" }));
+    // Each record is small enough on its own: 64 KiB of text, or 120k empty objects (about 12 MiB once parsed).
+    const data = mode === "text" ? { text: "x".repeat(64 * 1024) } : Array(120_000).fill({});
+    const closed = once(res, "close");
+    for (let sequence = 1; !res.destroyed && sequence < 10_000; sequence++)
+      if (!res.write(frame(sequence, data))) await Promise.race([once(res, "drain"), closed]);
+  });
+  t.after(() => service.close());
+  for (mode of ["text", "objects"]) await assert.rejects(service.client.events("s1"), /replay limit/);
+  mode = "complex";
+  const records = [];
+  for await (const item of service.client.stream("s1", { signal: AbortSignal.timeout(5000) })) {
+    records.push([item.sequence, item.kind]);
+    if (records.length === 2) break;
+  }
+  assert.deepEqual(records, [[1, "oversized"], [2, "native"]]);
 });

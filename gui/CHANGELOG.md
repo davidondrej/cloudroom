@@ -2,6 +2,20 @@
 
 Also on [cloudroom.dev/changelog](https://www.cloudroom.dev/changelog).
 
+## 144
+
+Switch accounts, every stalled chat resumes (2026-11-07)
+
+### Changes
+
+- When a plan limit stops your agents, switching accounts once continues every stopped thread, Local and Cloud.
+- A Mac app opened from the disk image now offers to move itself to Applications in one click, so updates work.
+- App shortcuts like Cmd+J and Cmd+T now work while a page in the built-in browser has focus.
+- The Windows installer is about 30% smaller and installs faster.
+- Background dev servers keep running through account switches, harness switches, and /clear.
+- Sign-in now has a Copy link button, for when your default browser is not the one you use.
+- Security fixes.
+
 ## 143
 
 All your logins on one page (2026-11-06)

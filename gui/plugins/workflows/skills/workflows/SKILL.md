@@ -86,14 +86,15 @@ The agent tool accepts script, scriptPath, or name. The CLI accepts --script,
 After a successful agent-tool call, copy its previewDirective into the
 assistant response as one standalone line. Do not edit or repeat it.
 
-Use cloudroom workflows status for compact progress. Redirect bounded history pages
-into ROOM_THREAD_STORAGE before inspection because history can contain full
-prompts and results.
+Use `room-cli workflows status <run-id>` for compact progress. Redirect bounded
+history pages into ROOM_THREAD_STORAGE before inspection because history can
+contain full prompts and results.
 
 ## Quality check
 
 - The user explicitly requested workflow orchestration.
-- The source passes cloudroom workflows validate.
+- The source passes
+  `room-cli workflows validate (--script '<javascript>'|--file <path>|--name <name>)`.
 - Every explicit provider tuple exists in the live catalog.
 - Each phase name matches its meta entry.
 - Independent items use pipeline without an unnecessary barrier.

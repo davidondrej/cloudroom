@@ -1,8 +1,8 @@
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { codexGuardConfig, codexHookSource, shellQuote } from "./command-guard-runtime.mjs";
-export { checkCommand, commandGuardBlockReason } from "./command-guard-runtime.mjs";
+import { codexGuardConfig, codexHookSource, shellQuote } from "../../../../../core/src/runtime/command-guard.mjs";
+export { checkCommand, commandGuardBlockReason } from "../../../../../core/src/runtime/command-guard.mjs";
 
 let config: ReturnType<typeof codexGuardConfig> | undefined;
 

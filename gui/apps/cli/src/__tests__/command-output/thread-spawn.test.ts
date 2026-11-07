@@ -46,6 +46,7 @@ describe("room-cli thread spawn command output", () => {
 
     expect(post).toHaveBeenCalledWith({
       json: {
+        requestId: expect.any(String),
         origin: "cli",
         startedOnBehalfOf: null,
         originKind: null,
@@ -292,6 +293,7 @@ describe("room-cli thread spawn command output", () => {
     expect(resolveLocalHostIdMock).not.toHaveBeenCalled();
     expect(post).toHaveBeenCalledWith({
       json: {
+        requestId: expect.any(String),
         origin: "cli",
         startedOnBehalfOf: null,
         originKind: null,
@@ -340,6 +342,7 @@ describe("room-cli thread spawn command output", () => {
 
     expect(post).toHaveBeenCalledWith({
       json: {
+        requestId: expect.any(String),
         origin: "cli",
         startedOnBehalfOf: null,
         originKind: null,
@@ -575,6 +578,7 @@ describe("room-cli thread spawn command output", () => {
 
     expect(post).toHaveBeenCalledWith({
       json: {
+        requestId: expect.any(String),
         origin: "cli",
         startedOnBehalfOf: null,
         originKind: null,
@@ -621,6 +625,7 @@ describe("room-cli thread spawn command output", () => {
 
     expect(post).toHaveBeenCalledWith({
       json: {
+        requestId: expect.any(String),
         origin: "cli",
         startedOnBehalfOf: null,
         originKind: null,
@@ -818,6 +823,7 @@ describe("room-cli thread spawn command output", () => {
 
     expect(post).toHaveBeenCalledWith({
       json: {
+        requestId: expect.any(String),
         origin: "cli",
         startedOnBehalfOf: null,
         originKind: null,
@@ -866,6 +872,7 @@ describe("room-cli thread spawn command output", () => {
     expect(resolveLocalHostIdMock).toHaveBeenCalledTimes(1);
     expect(post).toHaveBeenCalledWith({
       json: {
+        requestId: expect.any(String),
         origin: "cli",
         startedOnBehalfOf: null,
         originKind: null,
@@ -947,6 +954,7 @@ describe("room-cli thread spawn command output", () => {
 
     expect(post).toHaveBeenCalledWith({
       json: {
+        requestId: expect.any(String),
         origin: "cli",
         startedOnBehalfOf: null,
         originKind: null,

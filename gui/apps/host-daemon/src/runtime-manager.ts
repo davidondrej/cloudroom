@@ -444,6 +444,15 @@ export class RuntimeManager {
     );
   }
 
+  /** Its session, or a message edit's staged copy, still holds the thread's agent (#607). */
+  holdsThreadAgent(threadId: string): boolean {
+    return [...this.entries.values()].some(
+      (entry) =>
+        entry.runtime.hasThread(threadId) ||
+        entry.runtime.hasStagedRewind?.(threadId) === true,
+    );
+  }
+
   markTerminalActive(environmentId: string, terminalId: string): void {
     this.entries.get(environmentId)?.terminals.add(terminalId);
   }
@@ -763,8 +772,11 @@ export class RuntimeManager {
     return null;
   }
 
-  async invalidateProviderMaintenanceRuntime(): Promise<void> {
-    this.providerInstallationGate.clear();
+  /** After an install or update: the CLI changed, so saved answers go. */
+  async invalidateProviderMaintenanceRuntime(
+    verified?: Parameters<ProviderInstallationGate["reset"]>[0],
+  ): Promise<void> {
+    this.providerInstallationGate.reset(verified);
     try {
       await this.shutdownProviderMaintenanceRuntime();
     } catch (error) {

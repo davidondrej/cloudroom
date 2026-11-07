@@ -15,6 +15,8 @@ import type {
 import type { ReasoningLevel } from "@cloudroom/domain";
 import { useQueryClient } from "@tanstack/react-query";
 import { useAtomValue } from "jotai";
+import { useInRouterContext, useNavigate } from "react-router-dom";
+import { getSettingsRoutePath } from "@/lib/route-paths";
 import {
   stripModelBrandPrefix,
   type ProviderPickerOption,
@@ -45,6 +47,7 @@ import {
 } from "@cloudroom/shared-ui/popover";
 import { Skeleton } from "@cloudroom/shared-ui/skeleton";
 import { Switch } from "@cloudroom/shared-ui/switch";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@cloudroom/shared-ui/tooltip";
 import { LIST_HOVER_TRANSITION } from "@cloudroom/shared-ui/motion";
 import {
   MENU_ITEM_LAST_HOVERED_CLASS,
@@ -268,6 +271,7 @@ export function ModelReasoningPicker({
     [allReasoningOptions, reasoningValue, showUltraEfforts],
   );
   const isCompactViewport = useIsCompactViewport();
+  const inRouter = useInRouterContext();
   const [open, setOpen] = useState(false);
   const [effortOpen, setEffortOpen] = useState(false);
   const triggerRef = useRef<HTMLButtonElement>(null);
@@ -1079,6 +1083,12 @@ export function ModelReasoningPicker({
                   </button>
                 );
               })}
+              {inRouter ? (
+                <ConnectHarnessButton
+                  compact={isCompactViewport}
+                  onClose={() => setOpen(false)}
+                />
+              ) : null}
             </div>
           ) : null}
 
@@ -1558,6 +1568,50 @@ function ReasoningEffortMenu({
         ) : null}
       </DropdownMenuContent>
     </DropdownMenu>
+  );
+}
+
+// Last tab in the harness row: opens Settings → Harness to connect another agent.
+function ConnectHarnessButton({
+  compact,
+  onClose,
+}: {
+  compact: boolean;
+  onClose: () => void;
+}) {
+  const navigate = useNavigate();
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <button
+          type="button"
+          aria-label="Connect agent"
+          onMouseDown={(event) => event.preventDefault()}
+          onClick={() => {
+            onClose();
+            void navigate(getSettingsRoutePath("providers"));
+          }}
+          className={cn(
+            "group/connect flex items-center justify-center text-subtle-foreground hover:text-foreground focus-visible:text-foreground focus-visible:outline-none",
+            LIST_HOVER_TRANSITION,
+            compact
+              ? "aspect-square min-w-0 max-w-10 flex-1 rounded-full"
+              : "h-8 w-7 max-md:pointer-coarse:h-10 max-md:pointer-coarse:w-9",
+          )}
+        >
+          <span
+            className={cn(
+              "flex items-center justify-center bg-foreground/5 group-hover/connect:bg-foreground/10 group-focus-visible/connect:bg-foreground/10",
+              LIST_HOVER_TRANSITION,
+              compact ? "size-7 rounded-full" : "size-5 rounded-md",
+            )}
+          >
+            <Icon name="Plus" className="size-3" aria-hidden />
+          </span>
+        </button>
+      </TooltipTrigger>
+      <TooltipContent side="top">Connect agent</TooltipContent>
+    </Tooltip>
   );
 }
 

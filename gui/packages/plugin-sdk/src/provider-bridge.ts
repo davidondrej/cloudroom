@@ -211,6 +211,7 @@ export {
   presentationDetail as experimental_presentationDetail,
   presentationFileName as experimental_presentationFileName,
   presentationTitle as experimental_presentationTitle,
+  probeCliVersion as experimental_probeCliVersion,
   probeNpmGlobalPackage as experimental_probeNpmGlobalPackage,
   readBoundedLines as experimental_readBoundedLines,
   readCliVersion as experimental_readCliVersion,

@@ -1,6 +1,14 @@
 //! Read-only views: the session list, dashboard, harness capabilities, and model checks.
 use super::*;
 
+/// What starting Claude with an exact model its catalog omits found for that model (#1059).
+#[derive(Clone)]
+enum Probe {
+    Listed(Vec<String>),
+    Unlisted,
+    Failed(Instant),
+}
+
 impl Manager {
     pub fn dashboard(&self) -> Value {
         let (sampled_at, resources) = self.observability.resources();
@@ -80,7 +88,78 @@ impl Manager {
         check(&self.model_catalog(kind).await?).ok_or(Error::Conflict("invalid model"))
     }
 
-    async fn catalog(&self, kind: runtime::Kind, saved_ok: bool) -> Result<Vec<runtime::Model>> {
+    /// Why the catalog refuses `reasoning` for `model`, naming the levels it takes (ADR 0123).
+    pub(super) async fn effort_refusal(
+        &self,
+        kind: runtime::Kind,
+        model: &str,
+        reasoning: &str,
+    ) -> Option<Error> {
+        let models = self.catalog(kind, true).await.ok()?;
+        runtime::supports(kind, &models, model, reasoning)
+            .err()
+            .map(Error::Effort)
+    }
+
+    /// The effort levels of a Claude model's own catalog row. Claude lists an exact model its catalog omits only once
+    /// it runs it, so that row comes from a Claude started with the model, without inference (#1059). One probe per
+    /// model runs at a time, within the startup limit, in a task of its own, so a dropped request never cuts it short.
+    /// Its answer is kept, even "not listed"; a failure only for a minute.
+    pub(super) async fn claude_levels(self: &Arc<Self>, model: &str) -> Option<Vec<String>> {
+        type Slots =
+            Mutex<std::collections::HashMap<String, Arc<tokio::sync::Mutex<Option<Probe>>>>>;
+        static PROBES: std::sync::LazyLock<Slots> = std::sync::LazyLock::new(Mutex::default);
+        let models = self.catalog(runtime::Kind::Claude, true).await.ok()?;
+        if let Some(entry) = models.into_iter().find(|entry| entry.model == model) {
+            return Some(entry.reasoning_levels);
+        }
+        let slot = PROBES
+            .lock()
+            .unwrap()
+            .entry(model.to_owned())
+            .or_default()
+            .clone();
+        let (manager, model) = (self.clone(), model.to_owned());
+        let probe = tokio::spawn(async move {
+            let mut answer = slot.lock().await;
+            match &*answer {
+                Some(Probe::Failed(at)) if at.elapsed() >= Duration::from_secs(60) => {}
+                Some(found) => return found.clone(),
+                None => {}
+            }
+            let found = match manager.startups.acquire().await {
+                Ok(_startup) => {
+                    let mut config = manager.config.clone();
+                    match config.harnesses.get_mut(&runtime::Kind::Claude) {
+                        Some(profile) => profile.model.clone_from(&model),
+                        None => return Probe::Failed(Instant::now()),
+                    }
+                    match runtime::models(&config, runtime::Kind::Claude).await.0 {
+                        Ok(models) => models
+                            .into_iter()
+                            .find(|entry| entry.model == model)
+                            .map_or(Probe::Unlisted, |entry| {
+                                Probe::Listed(entry.reasoning_levels)
+                            }),
+                        Err(_) => Probe::Failed(Instant::now()),
+                    }
+                }
+                Err(_) => Probe::Failed(Instant::now()),
+            };
+            *answer = Some(found.clone());
+            found
+        });
+        match probe.await.ok()? {
+            Probe::Listed(levels) => Some(levels),
+            Probe::Unlisted | Probe::Failed(_) => None,
+        }
+    }
+
+    pub(super) async fn catalog(
+        &self,
+        kind: runtime::Kind,
+        saved_ok: bool,
+    ) -> Result<Vec<runtime::Model>> {
         let cache = match kind {
             runtime::Kind::Codex => &self.codex_models,
             runtime::Kind::Claude => &self.claude_models,

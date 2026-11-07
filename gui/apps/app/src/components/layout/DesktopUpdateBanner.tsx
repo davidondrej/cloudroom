@@ -181,6 +181,12 @@ export function DesktopUpdateBanner() {
               ? "Enter your Mac password once, and future updates install by themselves."
               : "Running agents resume automatically."}
           </>
+        ) : desktopInfo?.installNeedsMove ? (
+          <>
+            <strong>Cloudroom {version} is available.</strong> Move Cloudroom
+            to your Applications folder and open it from there, so it can
+            update itself.
+          </>
         ) : (
           <>
             <strong>Cloudroom {version} is available.</strong> You have{" "}
@@ -190,7 +196,11 @@ export function DesktopUpdateBanner() {
       </span>
       {ready ? (
         <Button size="sm" disabled={restarting} onClick={restart}>
-          {restarting ? "Restarting…" : "Restart to update"}
+          {!restarting
+            ? "Restart to update"
+            : desktopInfo?.installNeedsPassword
+              ? "Waiting for password…"
+              : "Restarting…"}
         </Button>
       ) : null}
       {!ready || failed ? (

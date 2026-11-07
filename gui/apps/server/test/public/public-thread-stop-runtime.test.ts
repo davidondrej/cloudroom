@@ -14,6 +14,7 @@ import {
   reportQueuedCommandError,
   reportQueuedCommandSuccess,
   waitForQueuedCommand,
+  waitForQueuedCommandAfter,
 } from "../helpers/commands.js";
 import { readJson } from "../helpers/json.js";
 import {
@@ -61,6 +62,71 @@ describe("thread runtime stop", () => {
           (event) => event.type === "system/thread/interrupted",
         ),
       ).toHaveLength(0);
+      // The in-app Stop keeps what the agent left running; only `room-cli
+      // thread stop` asks to end it (#607).
+      const explicit = harness.app.request(
+        `/api/v1/threads/${thread.id}/stop?endProcesses=true`,
+        { method: "POST" },
+      );
+      const release = await waitForQueuedCommandAfter(
+        harness,
+        stop.row.cursor,
+        ({ command }) =>
+          command.type === "thread.stop" && command.threadId === thread.id,
+      );
+      await reportQueuedCommandSuccess(harness, release, {
+        providerCheckpointId: null,
+      });
+      expect((await explicit).status).toBe(200);
+      await waitForQueuedCommand(
+        harness,
+        ({ command }) =>
+          command.type === "thread.processes.stop" &&
+          command.threadId === thread.id,
+      );
+      expect(
+        listQueuedThreadCommands(harness, "thread.processes.stop", thread.id),
+      ).toHaveLength(1);
+      // A send during that release is newer work: its jobs stay.
+      const again = harness.app.request(
+        `/api/v1/threads/${thread.id}/stop?endProcesses=true`,
+        { method: "POST" },
+      );
+      const racedRelease = await waitForQueuedCommandAfter(
+        harness,
+        release.row.cursor,
+        ({ command }) =>
+          command.type === "thread.stop" && command.threadId === thread.id,
+      );
+      void harness.app.request(`/api/v1/threads/${thread.id}/send`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          input: [{ type: "text", text: "next", mentions: [] }],
+          mode: "auto",
+          model: "gpt-5",
+          permissionMode: "full",
+          reasoningLevel: "medium",
+          serviceTier: "default",
+        }),
+      });
+      await waitForQueuedCommand(
+        harness,
+        ({ command }) =>
+          command.type === "thread.start" && command.threadId === thread.id,
+      );
+      await reportQueuedCommandSuccess(harness, racedRelease, {
+        providerCheckpointId: null,
+      });
+      expect((await again).status).toBe(200);
+      await expect(
+        waitForQueuedCommandAfter(
+          harness,
+          racedRelease.row.cursor,
+          ({ command }) => command.type === "thread.processes.stop",
+          300,
+        ),
+      ).rejects.toThrow("Timed out");
     });
   });
 
@@ -348,8 +414,8 @@ describe("thread runtime stop", () => {
 
       await vi.waitFor(() => {
         expect(listQueuedThreadMessages(harness.db, thread.id)).toEqual([]);
+        expect(getThread(harness.db, thread.id)?.status).toBe("active");
       });
-      expect(getThread(harness.db, thread.id)?.status).toBe("active");
     });
   });
 
@@ -409,8 +475,8 @@ describe("thread runtime stop", () => {
         expect(
           listQueuedThreadMessages(harness.db, thread.id).map((row) => row.id),
         ).toEqual([heldBack!.id]);
+        expect(getThread(harness.db, thread.id)?.status).toBe("active");
       });
-      expect(getThread(harness.db, thread.id)?.status).toBe("active");
       expect(isThreadQueueAutoSendPaused(harness.db, thread.id)).toBe(true);
     });
   });
@@ -473,8 +539,8 @@ describe("thread runtime stop", () => {
 
       await vi.waitFor(() => {
         expect(listQueuedThreadMessages(harness.db, thread.id)).toEqual([]);
+        expect(getThread(harness.db, thread.id)?.status).toBe("active");
       });
-      expect(getThread(harness.db, thread.id)?.status).toBe("active");
     });
   });
 

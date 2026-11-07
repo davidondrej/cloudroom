@@ -32,9 +32,9 @@ The builtin Accounts plugin is always on. It lets one user connect up to 10
 Claude Code and up to 10 Codex subscriptions. Add them at the top of Settings →
 Agents → Claude Code or Codex; the machine's own CLI login is the first entry
 and is never copied. Every Local and Cloud thread uses the account in use, and
-**Use** picks another; nothing switches automatically. Once a Claude account is
-added, the machine's own login needs **Add Terminal login** before it can be
-picked. Codex accounts need a Cloudroom sign-in: cloudroom.dev keeps and renews
+**Use** picks another; nothing switches automatically. Adding an account never
+switches. Once Cloud is on another Claude account, picking the machine's own login
+first asks for one browser approval for Cloud. Codex accounts need a Cloudroom sign-in: cloudroom.dev keeps and renews
 them, and this machine gets only access tokens.
 Claude Code runs on the account's own Claude folder (`CLAUDE_CONFIG_DIR`), with a full
 login and shared history, and Cloud gets its one-year token; Codex signs its

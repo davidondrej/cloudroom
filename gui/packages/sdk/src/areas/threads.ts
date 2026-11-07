@@ -296,11 +296,18 @@ export interface ThreadRetryArgs {
   sendAt?: number;
   /** Why the turn is being retried, shown verbatim on the queued row. */
   reason?: string;
+  /** The retry continues on another account of the same agent; the plan-limit row then says so in one line. */
+  accountSwitch?: RetryTurnRequest["accountSwitch"];
 }
 
 export interface ThreadActionArgs {
   signal?: AbortSignal;
   threadId: string;
+}
+
+export interface ThreadStopArgs extends ThreadActionArgs {
+  /** `room-cli thread stop`: an idle thread's agent also ends what it left running. */
+  endProcesses?: boolean;
 }
 
 export interface ThreadArchiveAllArgs extends ThreadActionArgs {
@@ -620,7 +627,7 @@ export interface ThreadsArea {
   search(args: ThreadSearchArgs): Promise<ThreadSearchResult>;
   send(args: ThreadSendArgs): Promise<ThreadSendResult>;
   spawn(args: ThreadSpawnArgs): Promise<ThreadSpawnResult>;
-  stop(args: ThreadActionArgs): Promise<ThreadStopResult>;
+  stop(args: ThreadStopArgs): Promise<ThreadStopResult>;
   tabs: ThreadTabsArea;
   context(args: ThreadStatusArgs): Promise<ThreadContextResult>;
   timeline(args: ThreadTimelineArgs): Promise<ThreadTimelineResult>;
@@ -710,6 +717,7 @@ function retryJson(args: ThreadRetryArgs): RetryTurnRequest {
     turnRequestId: args.turnRequestId ?? null,
     sendAt: args.sendAt ?? null,
     reason: args.reason ?? DEFAULT_TURN_RETRY_REASON,
+    ...(args.accountSwitch ? { accountSwitch: args.accountSwitch } : {}),
   };
 }
 
@@ -1324,6 +1332,7 @@ export function createThreadsArea(args: CreateSdkAreaArgs): ThreadsArea {
       const result: { cancelledRetries?: number } = await transport.readJson(
         transport.api.v1.threads[":id"].stop.$post({
           param: { id: input.threadId },
+          ...(input.endProcesses ? { query: { endProcesses: "true" } } : {}),
         }),
       );
       return { ok: true, cancelledRetries: result.cancelledRetries ?? 0 };

@@ -53,6 +53,17 @@ function assertSafeGitRef(ref: string): void {
   }
 }
 
+// Agents often write Windows paths as `/C:/...` (file-URL style). On Windows
+// that form never names a real file (`:` is invalid in names), so drop the slash.
+export function normalizeWindowsDrivePath(
+  filePath: string,
+  platform: NodeJS.Platform = process.platform,
+): string {
+  return platform === "win32" && /^\/[A-Za-z]:[\\/]/u.test(filePath)
+    ? filePath.slice(1)
+    : filePath;
+}
+
 function assertAbsoluteHostDiskPathCommand(command: HostDiskPathCommand): void {
   if (!path.isAbsolute(command.path)) {
     throw new CommandDispatchError("invalid_path", "Path must be absolute");
@@ -248,6 +259,7 @@ export async function readHostFile(
   command: CommandOf<"host.read_file">,
   options?: Pick<CommandDispatchOptions, "runtimeManager">,
 ): Promise<HostDaemonOnlineRpcResult<"host.read_file">> {
+  command = { ...command, path: normalizeWindowsDrivePath(command.path) };
   assertAbsoluteHostDiskPathCommand(command);
 
   if (command.ref !== undefined) {
@@ -285,6 +297,7 @@ export async function readHostFile(
 export async function readHostFileMetadata(
   command: CommandOf<"host.file_metadata">,
 ): Promise<HostDaemonOnlineRpcResult<"host.file_metadata">> {
+  command = { ...command, path: normalizeWindowsDrivePath(command.path) };
   assertAbsoluteHostDiskPathCommand(command);
   return readFileMetadataForTransport({
     resolvedPath: command.path,
@@ -305,7 +318,7 @@ export async function readHostRelativeFile(
 
 async function pathExists(path: string): Promise<boolean> {
   try {
-    await fs.stat(path);
+    await fs.stat(normalizeWindowsDrivePath(path));
     return true;
   } catch (error) {
     if (

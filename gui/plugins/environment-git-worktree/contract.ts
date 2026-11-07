@@ -17,6 +17,8 @@ export const worktreeHostContract = defineRpcContract({
         pathKey: z.string().min(1),
         branchName: z.string().min(1),
         baseBranch: worktreeBaseBranchSchema,
+        // What the diff panel compares against, when not the start branch: a fork starts from its snapshot branch but compares against main.
+        diffBase: worktreeBaseBranchSchema.optional(),
         branchMode: z.enum(["reset", "reuse-existing"]),
       })
       .strict(),

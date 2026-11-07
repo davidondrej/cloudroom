@@ -1,10 +1,10 @@
 import { COMPUTER } from "@cloudroom/domain";
 import { execFile, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { lstat, mkdtemp, open, readdir, rm, stat } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { homedir, tmpdir } from "node:os";
+import { basename, dirname, isAbsolute, join, parse, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import { z } from "zod";
 import { getProject, getThread, listProjectSourcesByProjectIds, setProjectGitRemoteUrlIfMissing } from "@cloudroom/db";
@@ -107,7 +107,8 @@ export async function planProjectCopyOrThrow(deps: Deps, client: CloudroomClient
   const empty = !existing || check === 0;
   if (!empty && teleport) return null;
   const clone = empty && Boolean(repository);
-  const copyAll = empty && !repository && !teleport && path !== null && await smallProject(path);
+  // A home folder is never uploaded whole, since it holds other projects and logins (#1120).
+  const copyAll = empty && !repository && !teleport && path !== null && !envRefusal(path, repository) && await smallProject(path);
   // A Cloud loop's run that didn't pick `.env` files passes none to its children and forks (keyFields in commands.ts).
   const noEnv = z.object({ no_env: z.boolean().optional() }).safeParse(JSON.parse(command(deps.db, `first_${threadId}`)?.input ?? "{}")).data?.no_env === true;
   const job = { threadId, workspace, key, localPath: path, repository, clone, copyAll, teleport, ...(branch ? { branch } : {}), ...(noEnv ? { noEnv } : {}) };
@@ -184,13 +185,13 @@ async function run(deps: Deps, client: CloudroomClient, job: ProjectCopyJob, rep
     await vm(client, `git -C ${quote(target)} config core.autocrlf input`);
   if (!cloned) report({ phase: "uploading", completed: 0, total: 0 });
   // A failed clone of a small project falls back to uploading it, like a project not on GitHub.
-  const scope = job.teleport ? (cloned ? "changed" : "all") : job.copyAll || (cloneError && job.localPath && await smallProject(job.localPath)) ? "all" : "env";
+  const scope = job.teleport ? (job.localPath && homeFolder(job.localPath) ? "env" : cloned ? "changed" : "all") : job.copyAll || (cloneError && job.localPath && !envRefusal(job.localPath, job.repository) && await smallProject(job.localPath)) ? "all" : "env";
   let partial: string | undefined;
   if (job.localPath) {
     const folder = await mkdtemp(join(tmpdir(), "cloudroom-copy-"));
     const archive = join(folder, "project.tgz");
     try {
-      const packed = await packProject(job.localPath, scope, archive, job.noEnv);
+      const packed = await packProject(job.localPath, scope, archive, job.noEnv, job.repository);
       partial = packed.partial;
       if (packed.files) await send(client, archive, target, scope !== "changed", report);
     } finally {
@@ -299,6 +300,34 @@ export async function checksOutCrlf(path: string): Promise<boolean> {
 
 const isEnv = (path: string) => basename(path).startsWith(".env");
 
+function resolvedPath(path: string): string {
+  try { return realpathSync(path); }
+  // A folder on another host may not exist here; still check its written path.
+  catch { return resolve(path); }
+}
+
+/** Whether a folder is a home folder or holds one: this computer's, or any `/home/<name>` or `/Users/<name>`, such as a
+ *  WSL home seen from Windows (#1120). */
+export function homeFolder(root: string): boolean {
+  const folder = resolvedPath(root), above = relative(folder, resolvedPath(homedir()));
+  return (!isAbsolute(above) && above.split(sep)[0] !== "..") || [resolve(root), folder].some(path => {
+    const [top, , deeper] = relative(parse(path).root, path).split(sep);
+    return !deeper && (!top || /^(home|users)$/i.test(top));
+  });
+}
+
+/** Why a project folder's `.env` files are other projects' secrets, so none may leave this computer (#1120): the folder is
+ *  a home folder or holds one, or a GitHub project's folder is no Git checkout below home. #140's rule still covers a
+ *  workspace folder picked on purpose. */
+export function envRefusal(root: string, repository: string | null): string | undefined {
+  if (homeFolder(root))
+    return `The \`.env\` files were not copied, because the project's folder \`${root}\` is a home folder or holds one, so they include other projects' secrets. Set the project's folder to the project itself to copy them.`;
+  const home = resolvedPath(homedir());
+  const checkout = (path: string): boolean => path !== home && (existsSync(join(path, ".git")) || (dirname(path) !== path && checkout(dirname(path))));
+  if (repository && !checkout(resolvedPath(root)))
+    return `The \`.env\` files were not copied, because the project's folder \`${root}\` is not a Git checkout of ${repository}, so they may belong to other projects. Set the project's folder to its checkout to copy them.`;
+}
+
 /** `all`: every project file; `changed`: uncommitted and untracked files; `env`: only `.env` files. Ignored `.env` files always count.
  *  Throws once the files pass `limit` bytes. */
 export async function localFiles(root: string, scope: "all" | "changed" | "env", limit = MAX_TOTAL): Promise<string[]> {
@@ -341,13 +370,16 @@ async function* walk(root: string, folder: string): AsyncGenerator<string> {
 
 /** Lists and packs the files on the Mac. A full copy that fails here for any reason (too large, cloud-only Dropbox or
  *  iCloud files, unreadable files) packs only the `.env` files instead and says why. Clones and uncommitted edits never fall back. */
-async function packProject(root: string, scope: "all" | "changed" | "env", archive: string, noEnv = false): Promise<{ files: number; partial?: string }> {
+async function packProject(root: string, scope: "all" | "changed" | "env", archive: string, noEnv = false, repository: string | null = null): Promise<{ files: number; partial?: string }> {
+  // `.env` files other projects own stay here, and the agent is told why (#1120).
+  const refused = noEnv ? undefined : envRefusal(root, repository);
   try {
-    const files = (await localFiles(root, scope)).filter(path => !noEnv || !isEnv(path));
+    const listed = await localFiles(root, scope);
+    const files = listed.filter(path => !(noEnv || refused) || !isEnv(path));
     if (files.length) await pack(root, files, archive);
-    return { files: files.length };
+    return { files: files.length, ...(refused && files.length < listed.length ? { partial: refused } : {}) };
   } catch (error) {
-    if (scope !== "all" || noEnv) throw error;
+    if (scope !== "all" || noEnv || refused) throw error;
     const files = await localFiles(root, "env").catch(() => { throw error; });
     if (files.length) await pack(root, files, archive).catch(() => { throw error; });
     const reason = error instanceof Error ? error.message : String(error);

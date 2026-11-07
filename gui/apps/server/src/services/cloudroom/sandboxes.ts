@@ -8,7 +8,7 @@ import { promisify } from "node:util";
 import { gzipSync } from "node:zlib";
 import type { HostDaemonContributedEnvEntry } from "@cloudroom/host-daemon-contract";
 import { cursorAuthFile, execPortableFile, findCliExecutable, killPortableProcess, spawnPortableProcess, tarCommand, userEnvironmentEntries } from "@cloudroom/process-utils";
-import { rawThreadIdSchema, reasoningLevelSchema, COMPUTER } from "@cloudroom/domain";
+import { rawThreadIdSchema, reasoningLevelSchema, COMPUTER, type ThreadCreateOrigin } from "@cloudroom/domain";
 import { z } from "zod";
 import { hasSupportedFrontmatterDelimiter, parseFrontmatter } from "../skills/injected-skills.js";
 import { macClaudeSignedIn } from "./claude-token.js";
@@ -31,7 +31,9 @@ type View = z.infer<typeof viewSchema>;
 // Threads the website started (ADR 0239, 0267): `source` is the automation's own Cloud thread or the thread that
 // launched it, and `harness`/`model`/`reasoning` the thread's own agent (ADR 0250).
 const runSchema = z.object({ thread: rawThreadIdSchema, project: z.string(), title: z.string().nullable(), session: z.string().regex(/^cr_[A-Za-z0-9_-]{1,80}$/), source: z.string(),
-  harness: z.string().nullable().optional().catch(null), model: z.string().nullable().optional().catch(null), reasoning: reasoningLevelSchema.nullable().optional().catch(null) });
+  harness: z.string().nullable().optional().catch(null), model: z.string().nullable().optional().catch(null), reasoning: reasoningLevelSchema.nullable().optional().catch(null),
+  // The website's parent link (ADR 20261104-015709); missing from websites before 20261107-093805.
+  parent: z.string().nullable().optional().catch(undefined) });
 export type AutomationRun = z.infer<typeof runSchema>;
 const awakeSchema = z.object({
   sandboxes: z.array(z.object({ thread: z.string(), origin: z.string().url(), token: z.string() })),
@@ -45,6 +47,7 @@ export type SandboxTrigger = "app_launch" | "app_activity" | "composer" | "threa
 /** Why a sleeping thread wakes before any work is sent: the user opened it or started typing (ADR 0176), or its work
  *  leaves Cloud (`teleport_local`: Teleport to Local, Copy to Mac, Fork to Local), which may pass the credit limit once a day. */
 export type SandboxWakeTrigger = Extract<SandboxTrigger, "thread_typing" | "thread_view" | "teleport_local">;
+type FirstWake = { target?: "vps" | "cloud"; launch?: ThreadCreateOrigin };
 /** Logins the website keeps for every sandbox of an account (ADR 0145). */
 export type SandboxLogin = "claude" | "codex" | "pi" | "github" | "cursor" | "opencode" | "mcp" | "hermes" | "devin" | "openclaw";
 /** GitHub projects also name their repository and cloud folder, so the website can build a template. */
@@ -481,8 +484,9 @@ export function revokeDesktopToken(account: SandboxAccount): void {
 /** Each cloud thread's own sandbox, managed by the website (docs/scopes/sandboxes.md). Lookups never wake it. */
 export class SandboxDirectory {
   private readonly views = new Map<string, View>();
-  /** A new thread's VPS-or-Cloud pick, sent with its first wake (ADR 0319). */
-  private readonly targets = new Map<string, "vps" | "cloud">();
+  /** A new thread's first-wake hints: its VPS-or-Cloud pick (ADR 0319) and how it was started (`launch`: app, cli,
+   *  sdk or plugin), which the website saves on the start's events. */
+  private readonly firstWake = new Map<string, FirstWake>();
   /** The sandbox whose API keys a new child or fork gets (ADR 0342), from its saved first message, so an app restart
    *  never loses it. Sent with each wake; the website reads it only when it registers the thread. */
   keySource: (thread: string) => string | undefined = () => undefined;
@@ -696,10 +700,10 @@ export class SandboxDirectory {
       // The Mac's harness versions: the sandbox upgrades to them before its agent starts (ADR 0133).
       pending = macHarnessVersions().then(harnesses => {
         this.wakeHarnesses.set(thread, harnesses);
-        const target = this.targets.get(thread), from = this.keySource(thread);
-        return this.call({ action: "wake", ...place, ...(target ? { target } : {}), ...(from ? { from } : {}), ...(parent ? { parent } : {}), harnesses, ...(this.backoff.has(thread) && !exit ? { trigger: "retry" } : trigger ? { trigger } : {}) });
+        const hints = this.firstWake.get(thread), from = this.keySource(thread);
+        return this.call({ action: "wake", ...place, ...hints, ...(from ? { from } : {}), ...(parent ? { parent } : {}), harnesses, ...(this.backoff.has(thread) && !exit ? { trigger: "retry" } : trigger ? { trigger } : {}) });
       }).then(value => this.remember(viewSchema.parse(value))).then(view => {
-        this.targets.delete(thread);
+        this.firstWake.delete(thread);
         this.woke(view.thread);
         this.backoff.delete(thread);
         this.capped.delete(thread);
@@ -934,7 +938,7 @@ export class SandboxDirectory {
 
   /** Saves a thread's title, project name, harness, model, Core session ID, and the thread that started it on the
    *  website (ADR 0182, 0239, 0256). */
-  async label(thread: string, label: { title: string | null; project_name: string | null; project: string; session: string; harness: string; model: string | null; parent: string | null }): Promise<boolean> {
+  async label(thread: string, label: { title: string | null; project_name: string | null; project: string; session: string; harness: string; model: string | null; parent?: string | null; moved?: true }): Promise<boolean> {
     return z.object({ saved: z.boolean() }).catch({ saved: false }).parse(await this.call({ action: "label", thread, ...label })).saved;
   }
   /** Teleport to Local closed `session`: the website stops sending this thread's Cloud subagents' reports there. */
@@ -997,9 +1001,9 @@ export class SandboxDirectory {
     return value;
   }
 
-  /** Remembers a new Cloud thread's VPS-or-Cloud pick until its first wake sends it. */
-  target(thread: string, target: "vps" | "cloud"): void {
-    this.targets.set(thread, target);
+  /** Remembers a new Cloud thread's first-wake hints until its first wake sends them. */
+  firstWakeHints(thread: string, hints: FirstWake): void {
+    this.firstWake.set(thread, hints);
   }
 
   /** Cloud automations live on the website, which runs them while this Mac is off (ADR 0212). */

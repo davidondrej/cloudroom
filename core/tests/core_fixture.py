@@ -173,6 +173,8 @@ def codex():
                 goal = {**(goal or {}), "status": params.get("status", "active")}
                 result = {"goal": goal}
             elif method == "turn/interrupt":
+                while Path("hold-interrupt").exists():
+                    time.sleep(.01)
                 event("turn/completed", turn={"id": turn, "status": "interrupted"})
             elif method == "thread/backgroundTerminals/terminate":
                 child = children.pop(params["processId"], None)
@@ -884,6 +886,23 @@ class RecoveryTests(unittest.TestCase):
         self.assertFalse(self.status()["queue_paused"])
         self.service.request("POST", "/v1/sessions/cr_seed/resume", {"request_id": "resume"}, 202)
         self.assertEqual((self.repo / (self.native + ".requests")).read_text().splitlines(), ["running", "queued"])
+
+    def test_a_tell_during_a_stop_waits_paused_once(self):
+        # #982: a child's tell while its parent's Stop was landing was refused, so the report was lost.
+        self.seed(); self.start(); self.ready()
+        self.prompt("running", "hold")
+        self.wait(lambda: self.status()["state"] == "running", "running turn")
+        (self.repo / "hold-interrupt").touch()
+        self.service.request("POST", "/v1/sessions/cr_seed/stop", {"request_id": "stop"}, 202)
+        tell = {"request_id": "relay_report", "action": "tell", "text": "done"}
+        self.assertTrue(self.service.request("POST", "/v1/sessions/cr_seed/relay", tell)["paused"])
+        # A retry keeps the one accepted message.
+        self.assertEqual(self.service.request("POST", "/v1/sessions/cr_seed/relay", tell)["state"], "accepted")
+        (self.repo / "hold-interrupt").unlink()
+        self.wait(lambda: self.status()["receipts"]["stop"]["state"] == "completed", "stop")
+        self.ready()
+        self.assertTrue(self.status()["queue_paused"])
+        self.assertEqual(self.status()["queue"], ["relay_report"])
 
     def test_child_notice_steers_a_busy_parent_and_queues_for_an_idle_one(self):
         self.seed(); self.start(); self.ready()

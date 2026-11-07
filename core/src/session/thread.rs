@@ -1,8 +1,8 @@
 //! Cloud agents rename or archive their own thread, change its effort, and start, stop and archive child threads in their own sandbox. Each request
 //! is a session record, so the app applies it whenever it next reads the thread, including after it was offline.
-//! A child gets a sandbox of its own by default (ADR 0229). The app starts it, so Core records the request and
-//! waits briefly for the app's answer; without one, the child starts in this sandbox instead. Once started, the
-//! website carries its `tell`, `stop`, `archive` and turn reports, even while the app is closed (relay.rs).
+//! A child gets a sandbox of its own by default (ADR 0229). The website starts it, so it never needs the user's
+//! app (ADR 20261104-015709); only `--shared-sandbox` runs it here. Once started, the website carries its `tell`,
+//! `stop`, `archive` and turn reports, even while the app is closed (relay.rs).
 //! `thread fork` asks the app the same way to fork this thread into a new Cloud thread; without an answer there is no
 //! fork. Only the user forks to their Mac, from the app.
 //! `spawn --top-level` asks the website to start a top-level thread instead, with no link back (ADR 0267).
@@ -50,53 +50,43 @@ const OTHER_NOTES: [&str; 3] = [
     "Could not confirm its running turn got it. Sending it again may deliver it twice.",
     "Queued. It isn't your subagent, so Cloudroom won't tell you when it finishes.",
 ];
-const FALLBACK_NOTE: &str = " The user's Cloudroom app didn't start it in its own sandbox (it's probably closed), so it runs here.";
+const PAUSED_NOTE: &str = "Queued, paused by a Stop. It sends when that thread is resumed.";
 const FORK_NOTE: &str = "Forked this thread at its last finished turn: a new thread with this conversation and your code (commits and uncommitted changes, without gitignored files or dependencies; nested Git repos arrive empty or without history), on its own branch where the project uses Git. It runs on its own and doesn't report back to you; it doesn't see your later edits.";
 const TOP_NOTE: &str = "Started as a top-level thread in its own sandbox, from the project's GitHub repo (push your work first) and .env files. It is not your child: it doesn't report back, and you can't tell, stop or read it. It shows in the user's sidebar within a minute.";
 /// How long `spawn --top-level` keeps retrying a start the website could not finish (say, a slow wake).
 const LAUNCH_RETRY: Duration = Duration::from_secs(240);
-/// How long a spawn waits for the app to start the child in its own sandbox, and how long after a miss spawns
-/// share this sandbox right away, so a closed app costs one wait, not one per child.
-const APP_WAIT: Duration = Duration::from_secs(60);
-const APP_MISSED_FOR: Duration = Duration::from_secs(300);
+/// How long a spawn waits for the website to name a child it starts in a sandbox of its own. It stays under Claude
+/// Code's 2-minute command limit; the start goes on after that (relay.rs).
+const SPAWN_WAIT: Duration = Duration::from_secs(75);
 /// How long a fork waits for the app. It stays under Claude Code's 2-minute command limit, so the agent always
 /// sees the outcome instead of a killed command it might retry. The app ignores older requests (AGENT_FORK_WAIT).
 const FORK_WAIT: Duration = Duration::from_secs(90);
 /// How long a child request's outcome is remembered, so a retried spawn or a repeated app answer gets the same one.
 const OUTCOME_KEPT: Duration = Duration::from_secs(3600);
-/// Each child request's outcome, by parent session and request ID. It is decided once, under this lock, so a
-/// child never runs both in its own sandbox and here.
+/// Each fork request's outcome, by session and request ID. It is decided once, under this lock, so a late answer
+/// never makes a fork the agent was told failed.
 static CHILDREN: LazyLock<Mutex<HashMap<String, Outcome>>> = LazyLock::new(Mutex::default);
-static APP_MISSED: Mutex<Option<Instant>> = Mutex::new(None);
-/// How long a child the app just started in a sandbox of its own counts as starting, while the website may not link
-/// it to this thread yet. Older apps link it only once its Core runs (#317).
-const STARTING_FOR: Duration = Duration::from_secs(300);
 
-/// The calling session's children started in sandboxes of their own in the last few minutes, oldest first.
-pub(super) fn starting(parent: &str) -> Vec<String> {
-    let prefix = format!("{parent}/own_");
-    let children = CHILDREN.lock().unwrap();
-    let mut started: Vec<_> = children
+/// The calling session's children in sandboxes of their own whose start the website hasn't finished yet.
+pub(super) fn starting(m: &Manager, parent: &str) -> Vec<String> {
+    let local = m.local.lock().unwrap();
+    let Some(session) = local.sessions.get(parent) else {
+        return Vec::new();
+    };
+    session
+        .child_states
         .iter()
-        .filter_map(|(slot, outcome)| match outcome {
-            Outcome::Started(thread, at)
-                if slot.starts_with(&prefix) && at.elapsed() < STARTING_FOR =>
-            {
-                Some((*at, thread.clone()))
-            }
-            _ => None,
-        })
-        .collect();
-    started.sort();
-    started.into_iter().map(|(_, thread)| thread).collect()
+        .filter(|(_, state)| *state == "starting")
+        .map(|(child, _)| child.clone())
+        .collect()
 }
 
 enum Outcome {
-    /// Waiting for the app: its thread ID, or why it could not start the child.
+    /// Waiting for the app: the fork's thread ID, or why it could not make it.
     Waiting(oneshot::Sender<Result<String, String>>),
-    /// The app started the child in its own sandbox.
+    /// The app made the fork.
     Started(String, Instant),
-    /// The app did not answer in time (or the agent gave up): the child runs here, and a late start is cancelled.
+    /// The app did not answer in time (or the agent gave up): a late fork is cancelled.
     Here(Instant),
 }
 pub(crate) type Failure = (StatusCode, Json<Value>);
@@ -321,10 +311,10 @@ pub(super) fn archive_under(m: &Arc<Manager>, id: &str) -> Result<Vec<String>, F
 /// Stops an archived thread's turn, and its agent exits once that turn settles. It frees its memory now, not after
 /// 30 idle minutes (feedback #614). A later message still resumes it.
 pub(super) fn retire(m: &Arc<Manager>, id: &str) -> Result<(), Failure> {
-    for command in ["stop", "sleep"] {
+    for (command, input) in [("stop", json!({})), ("sleep", json!({"end_jobs":true}))] {
         let request =
             random_key().map_err(|e| fail(StatusCode::SERVICE_UNAVAILABLE, &e.to_string()))?;
-        let _ = m.command(id, request, command, json!({}));
+        let _ = m.command(id, request, command, input);
     }
     Ok(())
 }
@@ -332,7 +322,7 @@ pub(super) fn retire(m: &Arc<Manager>, id: &str) -> Result<(), Failure> {
 pub(super) fn session_failure(error: super::Error) -> Failure {
     let status = match error {
         super::Error::NotFound => StatusCode::NOT_FOUND,
-        super::Error::Conflict(_) => StatusCode::CONFLICT,
+        super::Error::Conflict(_) | super::Error::Effort(_) => StatusCode::CONFLICT,
         super::Error::Storage(_) => StatusCode::SERVICE_UNAVAILABLE,
     };
     fail(status, &error.message())
@@ -376,19 +366,8 @@ async fn spawn(
         }
         return launch(&m, &parent, key, input).await;
     }
-    let mut note = SPAWN_NOTE.to_owned();
     if !input.shared {
-        match own_sandbox_child(&m, &parent, &key, &input).await? {
-            Some(thread) => {
-                let _ = m.note(
-                    &parent,
-                    "child_state",
-                    json!({"child":thread,"state":"running"}),
-                );
-                return Ok(Json(json!({"id":thread,"note":OWN_NOTE})));
-            }
-            None => note.push_str(FALLBACK_NOTE),
-        }
+        return own_child(&m, &parent, key, harness, input).await;
     }
     let spawn = super::Spawn {
         harness,
@@ -403,7 +382,7 @@ async fn spawn(
         .await
         .map_err(session_failure)?;
     Ok(Json(
-        json!({"id":id,"harness":receipt.input["harness"],"model":receipt.model,"note":note}),
+        json!({"id":id,"harness":receipt.input["harness"],"model":receipt.model,"note":SPAWN_NOTE}),
     ))
 }
 
@@ -457,35 +436,106 @@ async fn launch(
     }
 }
 
-/// Asks the app to start the child in a sandbox of its own with a copy of this thread's code, and waits for
-/// its answer. None means no answer: the app is closed or too old, so the child starts in this sandbox.
-async fn own_sandbox_child(
-    m: &Manager,
+/// Asks the website to start the child in a sandbox of its own with a copy of this thread's code (ADR
+/// 20261104-015709), so it never needs the user's app. The request is saved first, and a worker (relay.rs) repeats it
+/// until the child's first prompt is in, so a restart or a lost answer never loses or doubles it. This waits for the
+/// child's thread ID.
+async fn own_child(
+    m: &Arc<Manager>,
     parent: &str,
-    key: &str,
-    input: &SpawnBody,
-) -> Result<Option<String>, Failure> {
-    let mut data = json!({"id":format!("own_{key}"),"prompt":input.prompt});
-    for (name, value) in [
-        ("provider", &input.provider),
-        ("model", &input.model),
-        ("reasoning", &input.reasoning),
-        ("title", &input.title.as_ref().map(|t| t.trim().to_owned())),
-        ("service_tier", &input.service_tier),
-    ] {
-        if let Some(value) = value {
-            data[name] = json!(value);
+    key: String,
+    harness: Option<crate::runtime::Kind>,
+    input: SpawnBody,
+) -> Result<Json<Value>, Failure> {
+    if m.history.api.is_none() {
+        return Err(fail(
+            StatusCode::CONFLICT,
+            "Only Cloudroom cloud threads start children in sandboxes of their own. Add --shared-sandbox to start it here.",
+        ));
+    }
+    let known = || {
+        let local = m.local.lock().unwrap();
+        local
+            .sessions
+            .get(parent)
+            .and_then(|s| s.child_starts.get(&key).cloned())
+    };
+    let mut changed = m.subscribe();
+    if known().is_none() {
+        let title = input.title.as_ref().map(|t| t.trim().to_owned());
+        // With no effort given, the website picks medium or the parent's level; a Claude model without effort gets
+        // none, and a level its own row lacks is refused before the website starts a sandbox (#1059).
+        let claude = match input.reasoning.as_deref() {
+            Some("none") => None,
+            _ => {
+                m.child_claude_levels(parent, harness, input.model.as_deref())
+                    .await
+            }
+        };
+        let mut reasoning = input.reasoning.clone();
+        if reasoning.is_none() && claude.as_ref().is_some_and(|(_, l)| *l == ["none"]) {
+            reasoning = Some("none".into());
+        }
+        let refusal = super::children::claude_effort_refusal(claude.as_ref(), reasoning.as_deref());
+        if let Some(error) = refusal {
+            return Err(fail(StatusCode::CONFLICT, &error.message()));
+        }
+        let body = json!({"request_id":key,"session":parent,"prompt":input.prompt,"title":title,"harness":input.provider,"model":input.model,"reasoning":reasoning,"service_tier":input.service_tier});
+        let _ = record(
+            m,
+            parent,
+            "child_start",
+            json!({"request_id":key,"body":body}),
+        )?;
+    }
+    // While this waits, a refusal comes back here; once it stops, the parent gets a notice instead (relay.rs).
+    struct Waiting(String);
+    impl Drop for Waiting {
+        fn drop(&mut self) {
+            relay::WAITING.lock().unwrap().remove(&self.0);
         }
     }
-    match ask_app(m, parent, "child_request", data, APP_WAIT).await? {
-        Asked::Started(thread) => Ok(Some(thread)),
-        Asked::Refused(error) => Err(fail(
-            StatusCode::CONFLICT,
-            &format!(
-                "The child could not start in its own sandbox: {error}. Retry, or add --shared-sandbox to start it here."
-            ),
-        )),
-        Asked::Missed => Ok(None),
+    let slot = format!("{parent}/{key}");
+    relay::WAITING.lock().unwrap().insert(slot.clone());
+    let _waiting = Waiting(slot.clone());
+    // Under the lock the worker records a refusal with: this either answers with it, or has stopped waiting before
+    // it lands, so the worker sends the notice instead. Never both, never neither.
+    let settle = |done: bool| {
+        let mut waiting = relay::WAITING.lock().unwrap();
+        let start = known();
+        let answer = match start.as_ref().and_then(|s| s.error.clone()) {
+            Some(error) => Some(Err(fail(
+                StatusCode::CONFLICT,
+                &format!("The child could not be started: {error}"),
+            ))),
+            None => start
+                .and_then(|s| s.child)
+                .map(|child| Ok(Json(json!({"id":child,"note":OWN_NOTE})))),
+        };
+        if answer.is_some() || done {
+            waiting.remove(&slot);
+        }
+        answer
+    };
+    let deadline = tokio::time::Instant::now() + SPAWN_WAIT;
+    loop {
+        if let Some(answer) = settle(false) {
+            return answer;
+        }
+        if !matches!(
+            tokio::time::timeout_at(deadline, changed.changed()).await,
+            Ok(Ok(()))
+        ) {
+            if let Some(answer) = settle(true) {
+                return answer;
+            }
+            return Err(fail(
+                StatusCode::SERVICE_UNAVAILABLE,
+                &format!(
+                    "The child is still starting, and Cloudroom keeps starting it. Run the same command with --request-id {key} to get its ID; it never starts twice."
+                ),
+            ));
+        }
     }
 }
 
@@ -604,15 +654,6 @@ async fn ask_app(
             }
             None => {}
         }
-        // After a recent miss a spawn shares this sandbox right away; a fork has no such fallback, so it asks.
-        if kind == "child_request"
-            && APP_MISSED
-                .lock()
-                .unwrap()
-                .is_some_and(|at| at.elapsed() < APP_MISSED_FOR)
-        {
-            return Ok(Asked::Missed);
-        }
         children.insert(slot.clone(), Outcome::Waiting(reply));
     }
     // If the agent stops waiting before the app answers, nothing starts and a late start is cancelled.
@@ -629,10 +670,7 @@ async fn ask_app(
     let _ = record(m, parent, kind, data)?;
     let answer = tokio::time::timeout(wait, answer).await;
     match answer {
-        Ok(Ok(Ok(thread))) => {
-            *APP_MISSED.lock().unwrap() = None;
-            Ok(Asked::Started(thread))
-        }
+        Ok(Ok(Ok(thread))) => Ok(Asked::Started(thread)),
         Ok(Ok(Err(error))) => Ok(Asked::Refused(error)),
         // No answer in time: decide under the lock, since the app may be answering right now.
         _ => {
@@ -641,10 +679,6 @@ async fn ask_app(
                 Some(Outcome::Started(thread, _)) => Ok(Asked::Started(thread.clone())),
                 Some(outcome) => {
                     *outcome = Outcome::Here(Instant::now());
-                    // Only a missed spawn moves later spawns into this sandbox; an app may not know forks yet.
-                    if kind == "child_request" {
-                        *APP_MISSED.lock().unwrap() = Some(Instant::now());
-                    }
                     Ok(Asked::Missed)
                 }
                 None => Ok(Asked::Missed),
@@ -775,7 +809,9 @@ async fn output(
         let all = if query.all { "1" } else { "0" };
         return match api.get("chat", &[("thread", &id), ("all", all)]).await {
             // The website may not know a child that just started yet, or has no chat of it yet (#317).
-            Err(super::history::ApiError::Status(404, _)) if starting(&parent).contains(&id) => {
+            Err(super::history::ApiError::Status(404, _))
+                if starting(&m, &parent).contains(&id) =>
+            {
                 Ok(Json(
                     json!({"id":id,"state":"starting","note":"Its sandbox is still starting. Its replies arrive as messages when its turns end."}),
                 ))
@@ -806,7 +842,9 @@ async fn tell(
     }
     let to_parent = id == "parent";
     let id = if to_parent {
-        // `thread tell --parent`: the thread that started this one, in this sandbox or another.
+        // `thread tell --parent`: the thread that started this one, in this sandbox or another. A sandbox's thread
+        // that started without one (the user moved it, or its start left it out) asks the website for its saved
+        // parent (#994).
         let local = m.local.lock().unwrap();
         let session = local.sessions.get(&sender);
         let up = session.and_then(|s| {
@@ -814,11 +852,15 @@ async fn tell(
                 .clone()
                 .or_else(|| s.parent_thread().map(str::to_owned))
         });
-        up.ok_or_else(|| fail(StatusCode::CONFLICT, "This thread has no parent that `thread tell --parent` can reach. If another thread started it, Cloudroom passes it your reply when this turn ends."))?
+        match up {
+            Some(up) => up,
+            None if session.is_some() && m.history.api.is_some() => id,
+            None => return Err(fail(StatusCode::CONFLICT, NO_PARENT)),
+        }
     } else {
         id
     };
-    if relay::thread_id(&id) {
+    if relay::thread_id(&id) || id == "parent" {
         return relay::command(&m, &sender, &id, "tell", Some(&input.text), to_parent).await;
     }
     let under = m.tell_target(&sender, &id).map_err(session_failure)?;
@@ -831,6 +873,8 @@ async fn tell(
         random_key().map_err(|e| fail(StatusCode::SERVICE_UNAVAILABLE, &e.to_string()))?;
     deliver(&m, &id, &request, &text, under).await
 }
+
+pub(super) const NO_PARENT: &str = "This thread has no parent that `thread tell --parent` can reach. If another thread started it, Cloudroom passes it your reply when this turn ends.";
 
 /// A message to a thread that isn't the sender's subagent says who sent it, as in Local threads, where the app shows
 /// it as an agent's message.
@@ -868,8 +912,14 @@ pub(super) async fn deliver(
         None => {}
     }
     let receipt = m
-        .command(id, request.to_owned(), "prompt", json!({"text":text}))
+        .command_held(id, request.to_owned(), "prompt", json!({"text":text}), true)
         .map_err(session_failure)?;
+    let local = m.local.lock().unwrap();
+    if local.sessions.get(id).is_some_and(|s| s.queue_paused) {
+        return Ok(Json(
+            json!({"id":id,"state":receipt.state,"note":PAUSED_NOTE,"paused":true}),
+        ));
+    }
     Ok(Json(json!({"id":id,"state":receipt.state,"note":notes[2]})))
 }
 
@@ -915,7 +965,8 @@ async fn steer(m: &Arc<Manager>, id: &str, request: &str, text: &str) -> Option<
     (state != "failed").then_some(state)
 }
 
-/// Stops the child's running turn and pauses its queue, like the app's stop button.
+/// Stops the child's running turn and pauses its queue, like the app's stop button. Then its agent, unless Codex
+/// (#605), exits with everything it started (#607); its next message resumes it.
 async fn stop_child(
     State(m): State<Arc<Manager>>,
     ConnectInfo(peer): ConnectInfo<Peer>,
@@ -926,11 +977,13 @@ async fn stop_child(
         return relay::command(&m, &parent, &id, "stop", None, false).await;
     }
     m.own_child(&parent, &id).map_err(session_failure)?;
-    let request =
-        random_key().map_err(|e| fail(StatusCode::SERVICE_UNAVAILABLE, &e.to_string()))?;
+    let key = || random_key().map_err(|e| fail(StatusCode::SERVICE_UNAVAILABLE, &e.to_string()));
     let receipt = m
-        .command(&id, request, "stop", json!({}))
+        .command(&id, key()?, "stop", json!({}))
         .map_err(session_failure)?;
+    if m.stop_sleeps(&id) {
+        let _ = m.command(&id, key()?, "sleep", json!({"end_jobs":true}));
+    }
     Ok(Json(json!({"id":id,"state":receipt.state})))
 }
 

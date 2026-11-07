@@ -16,7 +16,10 @@ export interface ProcessTable {
 }
 
 const THREAD_ID = /^thr_[a-z0-9]+$/u;
-const INSTALLED_APP = /^(?:\/System|\/Users\/[^/]+)?\/Applications\/[^/]+\.app\//u;
+// Any app bundle under /Applications, /System/Applications or ~/Applications,
+// also in a subfolder: "DaVinci Resolve/", "Utilities/".
+const INSTALLED_APP =
+  /^(?:\/System|\/Users\/[^/]+)?\/Applications\/(?:[^/]+\/)*?[^/]+\.app\//u;
 const STOP_GRACE_MS = 3_000;
 const PS_TIMEOUT_MS = 10_000;
 
@@ -25,12 +28,19 @@ export function isInstalledApp(row: ProcessRow): boolean {
   return INSTALLED_APP.test(row.exe ?? "");
 }
 
+/**
+ * The thread's processes, by its tags. By default those it left running
+ * outside the daemon (#530). `agent`: its agent and what that runs, under a
+ * provider bridge; a thread terminal hangs directly off the daemon and is left
+ * alone (#607). `all`: both.
+ */
 export function pickThreadProcesses(
   rows: readonly ProcessRow[],
   args: {
     threadId: string;
     serverUrl: string | undefined;
     selfPid: number;
+    scope?: "agent" | "all";
     /** Also pick the thread's processes that still run under this daemon. */
     includeLive?: boolean;
   },
@@ -40,6 +50,8 @@ export function pickThreadProcesses(
     `ROOM_THREAD_ID=${args.threadId}`,
     `ROOM_SERVER_URL=${args.serverUrl}`,
   ];
+  const tagged = (row: ProcessRow) =>
+    tags.every((tag) => row.env.includes(tag));
   const byPid = new Map(rows.map((row) => [row.pid, row]));
   const ancestors = new Set<number>();
   for (
@@ -48,23 +60,25 @@ export function pickThreadProcesses(
     pid = byPid.get(pid)?.ppid ?? 0
   )
     ancestors.add(pid);
-  const children = new Map<number, number[]>();
-  for (const row of rows)
-    children.set(row.ppid, [...(children.get(row.ppid) ?? []), row.pid]);
-  const tree = new Set<number>();
-  for (const pending = [args.selfPid]; pending.length > 0;) {
-    const pid = pending.pop()!;
-    if (tree.has(pid)) continue;
-    tree.add(pid);
-    pending.push(...(children.get(pid) ?? []));
-  }
-  return rows.filter(
-    (row) =>
-      tags.every((tag) => row.env.includes(tag)) &&
-      (args.includeLive === true || !tree.has(row.pid)) &&
-      !ancestors.has(row.pid) &&
-      !isInstalledApp(row),
-  );
+  // The daemon's own child each process descends from, if any.
+  const top = (row: ProcessRow): ProcessRow | undefined => {
+    let at: ProcessRow | undefined = row;
+    for (let hops = 0; at && hops < rows.length; hops++) {
+      if (at.ppid === args.selfPid) return at;
+      at = byPid.get(at.ppid);
+    }
+    return undefined;
+  };
+  return rows.filter((row) => {
+    if (!tagged(row) || ancestors.has(row.pid) || isInstalledApp(row))
+      return false;
+    if (args.includeLive === true) return true;
+    const under = top(row);
+    const agent = under !== undefined && !tagged(under);
+    if (args.scope === "all") return under === undefined || agent;
+    if (args.scope === "agent") return agent;
+    return under === undefined;
+  });
 }
 
 async function linuxStat(pid: number | string) {
@@ -169,6 +183,22 @@ const TABLES: Partial<Record<NodeJS.Platform, ProcessTable>> = {
 
 export const currentProcessTable = TABLES[process.platform];
 
+/** After a stop or archive (#607): processes the thread still runs, its agent's included. */
+export async function countThreadProcesses(
+  threadId: string,
+  serverUrl: string | undefined,
+  table = TABLES[process.platform],
+): Promise<number> {
+  if (!table) return 0;
+  const rows = await table.list();
+  return pickThreadProcesses(rows, {
+    threadId,
+    serverUrl,
+    selfPid: process.pid,
+    scope: "all",
+  }).length;
+}
+
 /**
  * Stops a thread's processes. By default only what escaped its harness, with a
  * grace period. The memory guard passes `includeLive` and `graceMs: 0` to kill
@@ -187,6 +217,40 @@ export async function stopThreadProcesses(
     selfPid: process.pid,
     includeLive: options.includeLive,
   });
+  return endProcesses(picked, table, options.graceMs);
+}
+
+/**
+ * Before a stop releases the thread's agent: lists the agent and what it runs
+ * while they are still attached, and answers a function that ends whichever of
+ * them outlive the release (#607).
+ */
+export async function listAgentTree(
+  threadId: string,
+  serverUrl: string | undefined,
+  table = TABLES[process.platform],
+): Promise<() => Promise<number>> {
+  if (!table) return async () => 0;
+  // A listing error never blocks the stop itself.
+  const rows = await table.list().catch(() => []);
+  const picked = pickThreadProcesses(rows, {
+    threadId,
+    serverUrl,
+    selfPid: process.pid,
+    scope: "agent",
+  });
+  return () => endProcesses(picked, table);
+}
+
+/**
+ * SIGTERM, then SIGKILL after a grace, only to processes whose start time
+ * still matches, so a reused PID is never hit.
+ */
+async function endProcesses(
+  picked: readonly ProcessRow[],
+  table: ProcessTable,
+  graceMs = STOP_GRACE_MS,
+): Promise<number> {
   if (picked.length === 0) return 0;
   const same = async () => {
     const now = await table.started(picked.map((row) => row.pid));
@@ -199,7 +263,6 @@ export async function stopThreadProcesses(
       } catch {}
     });
   const stopping = await same();
-  const graceMs = options.graceMs ?? STOP_GRACE_MS;
   if (graceMs <= 0) {
     signal(stopping, "SIGKILL");
     return stopping.length;

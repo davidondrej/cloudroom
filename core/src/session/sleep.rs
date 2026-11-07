@@ -31,6 +31,15 @@ impl Session {
             .any(|r| r.command == "sleep" && r.state == "accepted")
     }
 
+    /// A pending sleep from archive or `thread stop` (`end_jobs`) ends background jobs too; one after an account
+    /// switch waits for them, as before (#607).
+    fn ends_jobs(&self) -> bool {
+        (self.archived && self.sleep_pending())
+            || self.receipts.values().any(|r| {
+                r.command == "sleep" && r.state == "accepted" && r.input["end_jobs"] == true
+            })
+    }
+
     pub(super) fn has_work(&self) -> bool {
         !self.queue.is_empty() && !self.queue_paused
     }
@@ -104,6 +113,27 @@ pub(super) enum Browser {
 }
 
 impl Local {
+    /// Resuming after `thread stop` or archive keeps the agent: their sleep, if not begun, is dropped, so it never
+    /// ends the new work's background jobs (#607). An account switch's sleep stays, for the new login.
+    pub(super) fn drop_pending_sleep(&mut self, id: &str) -> Result<()> {
+        let session = &self.sessions[id];
+        if session.releasing {
+            return Ok(());
+        }
+        let pending: Vec<_> = session
+            .receipts
+            .values()
+            .filter(|r| {
+                r.command == "sleep" && r.state == "accepted" && r.input["end_jobs"] == true
+            })
+            .map(|r| r.request_id.clone())
+            .collect();
+        for request in pending {
+            self.finish_receipt(id, &request, "interrupted")?;
+        }
+        Ok(())
+    }
+
     fn set_browser(&mut self, next: Browser) {
         // At startup Paused is only an assumption; enforce it on every idle check.
         if next == Browser::Paused || self.browser == Browser::Paused {
@@ -166,8 +196,7 @@ impl Local {
             && s.close_request.is_none()
             && !s.interrupt_pending()
             && !s.storage_paused
-            // An archived thread asked to exit leaves its background jobs behind (thread.rs `retire`).
-            && (!background || (s.archived && s.sleep_pending()))
+            && (!background || s.ends_jobs())
             && !self
                 .sessions
                 .values()
@@ -215,6 +244,9 @@ impl Manager {
         if super::relay::report_pending(&local) {
             return json!({"drained":false,"reason":"report_pending"});
         }
+        if super::relay::start_pending(&local) {
+            return json!({"drained":false,"reason":"child_start_pending"});
+        }
         // ADR 0031: background jobs keep the sandbox awake. The website stops it two hours after the last activity.
         if local.agent_counts().background > 0 {
             return json!({"drained":false,"reason":"background_jobs"});
@@ -222,7 +254,23 @@ impl Manager {
         local.draining = true;
         // The sandbox stops next, so its next start replays almost nothing.
         local.save_snapshot();
-        json!({"drained":true,"pending_records":local.journal.last() - local.journal.saved()})
+        // Saved with the website's sleep event, to tell busy sandboxes from idle ones: counts only, never content.
+        let (mut prompts, mut failed) = (0u64, 0u64);
+        for receipt in local.sessions.values().flat_map(|s| s.receipts.values()) {
+            if receipt.command != "prompt" {
+                continue;
+            }
+            match receipt.state.as_str() {
+                "completed" | "interrupted" => prompts += 1,
+                "failed" | "unknown_after_restart" => (prompts, failed) = (prompts + 1, failed + 1),
+                _ => {}
+            }
+        }
+        json!({
+            "drained": true,
+            "pending_records": local.journal.last() - local.journal.saved(),
+            "work": {"prompts": prompts, "failed": failed},
+        })
     }
 
     pub fn start_idle_sleeper(self: &Arc<Self>) {
@@ -281,17 +329,29 @@ impl Manager {
         changed
     }
 
-    /// Archive asks for sleep. It applies once any running turn or interrupt settles.
+    /// `thread stop` also frees the agent, except Codex: its resume is still unreliable (#605), so it only stops the
+    /// turn and the 30-minute idle sleep frees it later.
+    pub(super) fn stop_sleeps(&self, id: &str) -> bool {
+        self.local
+            .lock()
+            .unwrap()
+            .sessions
+            .get(id)
+            .is_some_and(|s| s.harness != runtime::Kind::Codex)
+    }
+
+    /// Archive and `thread stop` ask for sleep. It applies once any running turn or interrupt settles.
     pub(super) fn request_sleep(
         self: &Arc<Self>,
         local: &mut Local,
         id: &str,
         request: String,
+        input: Value,
     ) -> Result<Receipt> {
         let receipt = Receipt {
             request_id: request.clone(),
             command: "sleep".into(),
-            input: json!({}),
+            input,
             state: "accepted".into(),
             model: None,
             provider: None,

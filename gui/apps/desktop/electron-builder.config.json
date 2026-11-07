@@ -18,6 +18,12 @@
     "node_modules/**",
     "package.json",
     "!**/*.map",
+    "!node_modules/date-fns/fp{,/**/*}",
+    "!node_modules/date-fns/locale/!(_lib|en-US|en-US.cjs){,/**/*}",
+    "!node_modules/date-fns/**/*.{js,d.ts,d.cts}",
+    "!node_modules/bb-app/app/dist/**/*.gz",
+    "!node_modules/bb-app/server/dist/drizzle/meta/*_snapshot.json",
+    "!node_modules/npm/{docs,man}{,/**/*}",
     {
       "from": "node_modules/bb-app/server/dist/app-scaffold-template",
       "to": "node_modules/bb-app/server/dist/app-scaffold-template",
@@ -80,16 +86,11 @@
   },
   "win": {
     "icon": "assets/icon.png",
-    "files": [
-      "!node_modules/date-fns/fp{,/**/*}",
-      "!node_modules/date-fns/locale/!(_lib|en-US|en-US.cjs){,/**/*}",
-      "!node_modules/date-fns/**/*.{js,d.ts,d.cts}"
-    ],
     "extraResources": [
       {
         "from": ".bundled-runtimes/python",
         "to": "app.asar.unpacked/node_modules/bb-app/server/dist/assets/python",
-        "filter": ["**/*", "!**/__pycache__/**", "!**/*.pyc", "!{include,tcl}/**", "!Lib/{idlelib,tkinter,turtledemo}/**"]
+        "filter": ["**/*", "!**/__pycache__/**", "!**/*.pyc", "!{include,tcl}/**"]
       }
     ],
     "target": [{ "target": "nsis", "arch": ["x64"] }]

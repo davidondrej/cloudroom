@@ -1,10 +1,10 @@
 import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { expect, it } from "vitest";
 import type { CloudroomClient } from "../../src/services/cloudroom/client.js";
-import { copyProject, localFiles } from "../../src/services/cloudroom/project-copy.js";
+import { copyProject, envRefusal, localFiles } from "../../src/services/cloudroom/project-copy.js";
 import { createTestAppHarness } from "../helpers/test-app.js";
 
 it("Teleport to Cloud copies staged, unstaged, and untracked work plus ignored .env files", async () => {
@@ -40,6 +40,8 @@ it("copies a non-repo-root project's .env files only from its root and the roots
     }
     expect((await localFiles(root, "env")).sort()).toEqual([".env", "api/.env.production", "web/.env"]);
     expect((await localFiles(root, "all")).sort()).toEqual([".env", "api/.env.production", "app.js", "web/.env"]);
+    // But a home folder, or a GitHub project's folder that is no checkout of it, sends none (#1120).
+    expect([envRefusal(homedir(), null), envRefusal(root, "https://github.com/a/b"), envRefusal(root, null), envRefusal(join(root, "api"), "https://github.com/a/b")].map(Boolean)).toEqual([true, true, false, false]);
 
     // A project folder inside another Git checkout is listed by Git, but gets the same rule.
     const inner = join(root, "checkout/workspace");

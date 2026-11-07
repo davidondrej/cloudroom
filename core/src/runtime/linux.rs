@@ -14,9 +14,20 @@ const AGENT_DIR: &str = "/run/cloudroom/agent";
 /// Sourced by every non-interactive bash a harness starts (BASH_ENV; Claude Code's command shells skip it and source
 /// CLAUDE_ENV_FILE instead), so each command an agent runs, and all it starts, is what the kernel kills first when
 /// memory runs out, never the agent or Core. A harness launched through a bash wrapper (its parent is Core) keeps 0.
+/// It runs after login startup files, so a Mac environment they set (#1034, #1033) can't hide tools or logins: the
+/// system tool folders go back on PATH, last, so the user's own folders still win. HOME, XDG_CONFIG_HOME and
+/// GH_CONFIG_DIR change only when they name a missing Mac folder. Plain sh, since CLAUDE_ENV_FILE may meet zsh.
 const BASH_ENV: &str = r#"{ read -r _cloudroom_parent < /proc/$PPID/comm; } 2>/dev/null
 [ "$_cloudroom_parent" = cloudroom ] || { echo 500 > /proc/$$/oom_score_adj; } 2>/dev/null
-unset _cloudroom_parent
+for _cloudroom_dir in /usr/local/bin /usr/bin /bin; do
+  case ":${PATH-}:" in *":$_cloudroom_dir:"*) ;; *) PATH="${PATH:+$PATH:}$_cloudroom_dir" ;; esac
+done
+case "${HOME-}" in /Users/*|/Volumes/*)
+  if [ ! -e "$HOME" ] && _cloudroom_dir=$(getent passwd "$(id -u)" | cut -d: -f6) && [ -d "$_cloudroom_dir" ]; then HOME=$_cloudroom_dir; fi ;;
+esac
+case "${XDG_CONFIG_HOME-}" in /Users/*|/Volumes/*) [ -e "$XDG_CONFIG_HOME" ] || unset XDG_CONFIG_HOME ;; esac
+case "${GH_CONFIG_DIR-}" in /Users/*|/Volumes/*) [ -e "$GH_CONFIG_DIR" ] || unset GH_CONFIG_DIR ;; esac
+unset _cloudroom_parent _cloudroom_dir
 "#;
 /// A container's `os.cpus()` lists every host CPU, and tools such as Next.js start a worker per CPU.
 const NODE_CPUS: &str = r#"const os = require('node:os'), cpus = os.cpus, usable = os.availableParallelism?.();
@@ -563,6 +574,46 @@ pub(super) async fn reply<T>(
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn login_startup_files_never_hide_the_system_tools_or_home() {
+        let home = std::env::temp_dir().join(format!("bash-env-test-{}", std::process::id()));
+        fs::create_dir_all(&home).unwrap();
+        fs::write(home.join("hook.sh"), BASH_ENV).unwrap();
+        let account = std::process::Command::new("sh")
+            .args(["-c", "getent passwd \"$(id -u)\" | cut -d: -f6"])
+            .output()
+            .unwrap();
+        let account = String::from_utf8_lossy(&account.stdout).trim().to_owned();
+        for (startup, expected) in [
+            (
+                "PATH=/opt/homebrew/bin:/usr/bin HOME=/Users/a GH_CONFIG_DIR=/Users/a/gh",
+                format!("/opt/homebrew/bin:/usr/bin:/usr/local/bin:/bin|{account}|-"),
+            ),
+            (
+                "PATH=/a/bin:/usr/local/bin:/usr/bin:/bin GH_CONFIG_DIR=/tmp/no-gh",
+                format!(
+                    "/a/bin:/usr/local/bin:/usr/bin:/bin|{}|/tmp/no-gh",
+                    home.display()
+                ),
+            ),
+            (
+                "set -eu; unset HOME PATH",
+                "/usr/local/bin:/usr/bin:/bin||-".into(),
+            ),
+        ] {
+            fs::write(home.join(".bash_profile"), format!("{startup}\n")).unwrap();
+            let output = std::process::Command::new("/bin/bash")
+                .args(["-lc", "printf %s \"${PATH-}|${HOME-}|${GH_CONFIG_DIR--}\""])
+                .env_clear()
+                .env("HOME", &home)
+                .env("BASH_ENV", home.join("hook.sh"))
+                .output()
+                .unwrap();
+            assert_eq!(String::from_utf8_lossy(&output.stdout), expected);
+        }
+        let _ = fs::remove_dir_all(home);
+    }
 
     #[test]
     fn a_full_disk_stops_the_writing_tool_command_not_the_harness() {

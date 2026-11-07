@@ -389,6 +389,20 @@ pub(super) fn notice(
     }
 }
 
+/// A level a Claude child's model's own row lacks is refused as for a model its catalog lists; `none` always runs.
+pub(super) fn claude_effort_refusal(
+    claude: Option<&(String, Vec<String>)>,
+    reasoning: Option<&str>,
+) -> Option<Error> {
+    let ((model, levels), reasoning) = (claude?, reasoning.filter(|r| *r != "none")?);
+    let row = [runtime::Model {
+        model: model.clone(),
+        reasoning_levels: levels.clone(),
+    }];
+    let refusal = runtime::supports(runtime::Kind::Claude, &row, model, reasoning).err();
+    refusal.map(Error::Effort)
+}
+
 impl Manager {
     /// Starts a child thread in the parent's folder with any supported harness and model. The parent keeps
     /// working; Core queues it a notice whenever one of the child's turns ends, even while the app is offline.
@@ -400,6 +414,16 @@ impl Manager {
     ) -> Result<(String, Receipt)> {
         let id = format!("cr_child_{key}");
         let start_id = format!("child_{key}");
+        // A Claude model's own row gives a child with no effort `none` if it takes none, and refuses a level it lacks (#1059).
+        let claude = match spawn.reasoning.as_deref() {
+            Some("none") => None,
+            _ => {
+                self.child_claude_levels(parent, spawn.harness, spawn.model.as_deref())
+                    .await
+            }
+        };
+        let no_effort =
+            spawn.reasoning.is_none() && claude.as_ref().is_some_and(|(_, l)| *l == ["none"]);
         let (kind, input, model, provider, workspace) = {
             let local = self.local.lock().unwrap();
             let p = local.sessions.get(parent).ok_or(Error::NotFound)?;
@@ -431,6 +455,7 @@ impl Manager {
             let reasoning = spawn
                 .reasoning
                 .clone()
+                .or(no_effort.then(|| "none".into()))
                 .or(same.then(|| p.reasoning.clone()).flatten())
                 .or((kind != runtime::Kind::Pi).then(|| "medium".into()));
             let mut input =
@@ -483,9 +508,24 @@ impl Manager {
         } else {
             (model, provider)
         };
-        if let Some(reasoning) = input["reasoning"].as_str() {
-            self.execution_supported(kind, model.as_ref(), reasoning)
-                .await?;
+        if let Some(reasoning) = input["reasoning"].as_str()
+            && let Err(error) = self
+                .execution_supported(kind, model.as_ref(), reasoning)
+                .await
+        {
+            let selected = model
+                .as_ref()
+                .unwrap_or(&self.config.harnesses[&kind].model);
+            return Err(match error {
+                Error::Conflict("invalid reasoning effort") => self
+                    .effort_refusal(kind, selected, reasoning)
+                    .await
+                    .unwrap_or(error),
+                error => error,
+            });
+        }
+        if let Some(error) = claude_effort_refusal(claude.as_ref(), input["reasoning"].as_str()) {
+            return Err(error);
         }
         let profile = &self.config.harnesses[&kind];
         let receipt = Receipt {
@@ -530,6 +570,29 @@ impl Manager {
             manager.launch(child, start_id).await;
         });
         Ok((id, receipt))
+    }
+
+    /// A Claude child's model and its own row's levels, read before the spawn settles its effort (#1059).
+    pub(super) async fn child_claude_levels(
+        self: &Arc<Self>,
+        parent: &str,
+        harness: Option<runtime::Kind>,
+        model: Option<&str>,
+    ) -> Option<(String, Vec<String>)> {
+        let claude = runtime::Kind::Claude;
+        let model = {
+            let local = self.local.lock().unwrap();
+            let p = local.sessions.get(parent)?;
+            let kind = harness.unwrap_or(p.harness);
+            if kind != claude {
+                return None;
+            }
+            let model = model.map(str::to_owned);
+            model.or((kind == p.harness).then(|| p.model.clone()).flatten())
+        };
+        let model = model.or_else(|| Some(self.config.harnesses.get(&claude)?.model.clone()))?;
+        let levels = self.claude_levels(&model).await?;
+        Some((model, levels))
     }
 
     /// `anthropic/claude-opus-5.5` from a parent on OpenRouter may name OpenRouter's model of that

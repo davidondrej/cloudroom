@@ -353,6 +353,15 @@ export const retryTurnRequestSchema = z
     sendAt: z.number().int().nonnegative().nullable().default(null),
     /** Why the turn is being retried, shown verbatim on the queued row. */
     reason: queuedMessageWaitReasonSchema.default(DEFAULT_TURN_RETRY_REASON),
+    /** The retry continues on another account of the same agent; the plan-limit row then says so in one line. */
+    accountSwitch: z
+      .object({
+        provider: z.string().min(1),
+        from: z.string().min(1),
+        to: z.string().min(1),
+      })
+      .strict()
+      .optional(),
   })
   .strict();
 export type RetryTurnRequest = z.infer<typeof retryTurnRequestSchema>;
@@ -809,6 +818,12 @@ export const threadPaneActionResponseSchema = z.object({
 export type ThreadPaneActionResponse = z.infer<
   typeof threadPaneActionResponseSchema
 >;
+
+/** `room-cli thread stop`: an idle thread's agent also ends what it left running (#607). */
+export const threadStopQuerySchema = z.object({
+  endProcesses: z.enum(["true", "false"]).optional(),
+});
+export type ThreadStopQuery = z.infer<typeof threadStopQuerySchema>;
 
 export const threadArchiveAllQuerySchema = z.object({
   includeLive: z.enum(["true", "false"]).optional(),

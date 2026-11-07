@@ -57,6 +57,7 @@ export function findLatestPlanLimitRowId(
       continue;
     }
     if (last?.kind !== "system" || last.systemKind !== "error") return null;
+    if (last.planLimitAccountSwitch) return null;
     if (last.planLimitSwitch)
       return last.planLimitSwitch.resend ? last.id : null;
     return last.planLimit && !running ? last.id : null;

@@ -58,7 +58,13 @@ import { emitPluginThreadDeleted } from "../plugins/plugin-thread-events.js";
 import {
   createThreadRecord,
   getThreadSafe,
+  requestConflict,
+  requestThreadId,
   requirePublicProjectForThreadCreate,
+  savedSpawnIntent,
+  spawnConflicts,
+  spawnIntent,
+  type SpawnIntent,
 } from "./thread-create-helpers.js";
 import {
   resolveStableThreadRequestEnvironment,
@@ -131,6 +137,18 @@ async function loadCatalogDefaultForProvider(
     hostId: args.hostId,
     providerId: args.providerId,
   });
+  if (catalog.modelLoadError?.code === "missing_executable") {
+    // A missing or broken CLI needs a reinstall; retrying can't fix it (#907).
+    const info = deps.providerRegistry.get(args.providerId)?.info;
+    const name = info?.displayName ?? args.providerId;
+    const installUrl = info?.strings?.installUrl;
+    return new ApiError(
+      409,
+      "provider_cli_missing",
+      `${name} can't start on this host: its CLI, or a file it needs, is missing. Reinstall ${name}${installUrl ? ` (${installUrl})` : ""}, then try again.`,
+      { details: catalog.modelLoadError, retryable: false },
+    );
+  }
   if (catalog.modelLoadError !== null) {
     return new ApiError(
       503,
@@ -591,6 +609,37 @@ function resolveCreateThreadPluginMetadata(
   };
 }
 
+const createsInFlight = new Map<
+  string,
+  { intent: SpawnIntent; created: Promise<Thread> }
+>();
+
+/** A retry sent while the first request with its request ID still runs waits
+ *  for that request instead of racing it (#860). */
+export async function createThreadOnce(
+  deps: ThreadCreateDeps,
+  request: ThreadCreateServiceRequestInput,
+): Promise<Thread> {
+  if (request.requestId === undefined)
+    return createThreadFromRequest(deps, request);
+  const key = `${request.projectId}:${request.requestId}`;
+  const intent = spawnIntent(request);
+  const running = createsInFlight.get(key);
+  if (running) {
+    if (spawnConflicts(intent, running.intent)) throw requestConflict();
+    return running.created;
+  }
+  const created = createThreadFromRequest(deps, request).finally(() =>
+    createsInFlight.delete(key),
+  );
+  // Leaving out the parent means no parent, not "any parent".
+  createsInFlight.set(key, {
+    intent: { ...intent, parentId: intent.parentId ?? null },
+    created,
+  });
+  return created;
+}
+
 export async function createThreadFromRequest(
   deps: ThreadCreateDeps,
   rawRequestInput: ThreadCreateServiceRequestInput,
@@ -602,11 +651,44 @@ export async function createThreadFromRequest(
     importedText?: ImportedText;
     forkPoint?: ThreadForkPoint;
   } = {},
-) {
+): Promise<Thread> {
   const project = requirePublicProjectForThreadCreate(
     deps,
     rawRequestInput.projectId,
   );
+  // Cloud keeps its own request IDs; a Local one names the thread it made.
+  const requested =
+    rawRequestInput.requestId && rawRequestInput.executionTarget !== "cloud"
+      ? getThread(
+          deps.db,
+          requestThreadId(rawRequestInput.projectId, rawRequestInput.requestId),
+        )
+      : null;
+  if (requested !== null) {
+    if (requested.projectId !== rawRequestInput.projectId)
+      throw requestConflict("in another project");
+    if (requested.deletedAt !== null)
+      throw requestConflict("by a deleted thread; pick a new one");
+    // A Local create saves its start before the first message, and a Local thread
+    // never returns to pending: without it, the create stopped (say, the app quit). Redo it.
+    if (
+      requested.executionTarget === "local" &&
+      requested.status === "pending" &&
+      requested.startupContext === null
+    ) {
+      emitPluginThreadDeleted({ ...requested, deletedAt: Date.now() });
+      deleteThread(deps.db, deps.hub, requested.id);
+    } else {
+      if (
+        spawnConflicts(
+          spawnIntent(rawRequestInput),
+          savedSpawnIntent(deps, requested),
+        )
+      )
+        throw requestConflict();
+      return requested;
+    }
+  }
   const sourceId = rawRequestInput.sourceThreadId ?? rawRequestInput.parentThreadId;
   const source = sourceId ? getThread(deps.db, sourceId) : null;
   // Every Local fork (fork button, plugin, CLI) passes here, so a new worktree always gets the source's code. Once: a

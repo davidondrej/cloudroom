@@ -178,6 +178,9 @@ export interface ThreadDetailSentMessageEdit {
 }
 
 const THREAD_DETAIL_COMPOSER_TEXTAREA_ID = "thread-detail-follow-up-composer";
+// A sandbox going to sleep ends its stream, and network blips drop it too. Real app logs show nearly all of these
+// clear within seconds, so the Reconnecting pill waits 15 s and only shows for a connection that stays lost.
+const CLOUD_RECONNECTING_GRACE_MS = 15_000;
 const EMPTY_QUEUED_MESSAGES: readonly ThreadQueuedMessage[] = [];
 
 interface ThreadDetailPromptAreaProps {
@@ -2193,7 +2196,14 @@ export function ThreadDetailPromptArea({
   const cloudFetchFailed = cloudState.error instanceof TypeError;
   const cloudOffline = cloudFetchFailed || (typeof navigator !== "undefined" && !navigator.onLine);
   const cloudError = cloudState.data?.move === "moving" ? undefined : retryCloudStart.error?.message ?? (cloudFetchFailed ? undefined : cloudState.error?.message) ?? cloudState.data?.error;
-  const cloudReconnecting = !cloudError && (cloudOffline || cloudState.data?.reconnecting);
+  const cloudReconnectingNow = Boolean(!cloudError && (cloudOffline || cloudState.data?.reconnecting));
+  const [cloudReconnectingLong, setCloudReconnectingLong] = useState(false);
+  useEffect(() => {
+    if (!cloudReconnectingNow) return;
+    const timer = window.setTimeout(() => setCloudReconnectingLong(true), CLOUD_RECONNECTING_GRACE_MS);
+    return () => { window.clearTimeout(timer); setCloudReconnectingLong(false); };
+  }, [cloudReconnectingNow]);
+  const cloudReconnecting = cloudReconnectingNow && cloudReconnectingLong;
   const vpsNotice = cloudState.data?.vps || cloudState.data?.move ? <VpsThreadNotice threadId={thread.id} move={cloudState.data.move} outOfMemory={cloudState.data.outOfMemory} /> : null;
   const cloudLimitNotice = isCloud && !shouldHideComposer ? cloudState.data?.usageLimit ? <CloudUsageLimitNotice /> : cloudState.data?.disk ? <><CloudDiskNotice disk={cloudState.data.disk} />{vpsNotice}</> : vpsNotice : null;
   const cloudFixPrompt = cloudError || cloudState.data?.failedStart ? cloudThreadFixPrompt(thread.id, thread.providerId, cloudError) : null;

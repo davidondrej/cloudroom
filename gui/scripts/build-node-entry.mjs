@@ -6,7 +6,7 @@ const [entryPointArg, outfileArg, ...flags] = process.argv.slice(2);
 
 if (!entryPointArg || !outfileArg) {
   throw new Error(
-    "Usage: node scripts/build-node-entry.mjs <entrypoint> <outfile> [--clean-dist] [--split] [--external <pattern>] [--copy-dir <from> <to>]",
+    "Usage: node scripts/build-node-entry.mjs <entrypoint> <outfile> [--clean-dist] [--split] [--external <pattern>] [--copy-dir <from> <to>] (a folder or file)",
   );
 }
 

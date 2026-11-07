@@ -81,8 +81,9 @@ pub fn reasoning_levels<'a>(kind: Kind, models: &'a [Model], model: &str) -> Opt
     if let Some(entry) = models.iter().find(|entry| entry.model == model) {
         return Some(entry.reasoning_levels.iter().map(String::as_str).collect());
     }
+    // `none` runs any model without an effort override, so an omitted model without effort still starts (#1059).
     (kind == Kind::Claude).then(|| {
-        let mut levels = Vec::new();
+        let mut levels = vec!["none"];
         for level in models.iter().flat_map(|entry| &entry.reasoning_levels) {
             if !levels.contains(&level.as_str()) {
                 levels.push(level.as_str());

@@ -24,6 +24,7 @@ import { runQueuedMessageDispatch } from "../../src/services/threads/queued-mess
 import {
   createAutomaticQueuedMessageEligibility,
   createQueuedMessageForThread,
+  sendNextQueuedMessageIfPresent,
   sendQueuedMessage,
   sendQueuedMessageNow,
 } from "../../src/services/threads/queued-messages.js";
@@ -149,6 +150,15 @@ describe("queued message dispatch hook", () => {
       const queued = seedQueuedMessage(harness.deps, {
         threadId: thread.id,
         content: textInput("queued while idle"),
+        waitingOn: { kind: "time" },
+        sendAt: Date.now() - 1,
+      });
+      const sending = runQueuedMessageDispatch(harness.deps, {
+        kind: "time-reached",
+        now: Date.now(),
+      });
+      expect(getQueuedThreadMessage(harness.db, queued.id)).toMatchObject({
+        claimedAt: expect.any(Number),
       });
 
       archiveThread(harness.db, harness.hub, thread.id);
@@ -157,22 +167,7 @@ describe("queued message dispatch hook", () => {
         archivedAt: expect.any(Number),
       });
 
-      await expect(
-        sendQueuedMessage(harness.deps, {
-          claimPolicy: {
-            kind: "automatic",
-            isEligible: createAutomaticQueuedMessageEligibility(
-              harness.deps,
-              { now: Date.now(), thread },
-            ),
-          },
-          threadId: thread.id,
-          queuedMessageId: queued.id,
-          mode: "auto",
-        }),
-      ).rejects.toMatchObject({
-        body: { code: "queued_message_claim_lost" },
-      });
+      await expect(sending).resolves.toBeUndefined();
 
       expect(
         listQueuedThreadCommands(harness, "turn.submit", thread.id),
@@ -180,7 +175,10 @@ describe("queued message dispatch hook", () => {
       expect(
         listQueuedThreadCommands(harness, "thread.start", thread.id),
       ).toHaveLength(0);
-      expect(getQueuedThreadMessage(harness.db, queued.id)).not.toBeNull();
+      expect(getQueuedThreadMessage(harness.db, queued.id)).toMatchObject({
+        claimedAt: null,
+        failureReason: null,
+      });
       expect(
         listQueuedThreadMessages(harness.db, thread.id).map((row) => row.id),
       ).toContain(queued.id);
@@ -197,25 +195,16 @@ describe("queued message dispatch hook", () => {
         threadId: thread.id,
         content: textInput("queued while idle"),
       });
+      const sending = sendNextQueuedMessageIfPresent(harness.deps, {
+        threadId: thread.id,
+      });
+      expect(getQueuedThreadMessage(harness.db, queued.id)).toMatchObject({
+        claimedAt: expect.any(Number),
+      });
 
       markThreadDeleted(harness.db, harness.hub, { threadId: thread.id });
 
-      await expect(
-        sendQueuedMessage(harness.deps, {
-          claimPolicy: {
-            kind: "automatic",
-            isEligible: createAutomaticQueuedMessageEligibility(
-              harness.deps,
-              { now: Date.now(), thread },
-            ),
-          },
-          threadId: thread.id,
-          queuedMessageId: queued.id,
-          mode: "auto",
-        }),
-      ).rejects.toMatchObject({
-        body: { code: "queued_message_claim_lost" },
-      });
+      await expect(sending).resolves.toBe(false);
 
       expect(
         listQueuedThreadCommands(harness, "turn.submit", thread.id),
@@ -223,7 +212,10 @@ describe("queued message dispatch hook", () => {
       expect(
         listQueuedThreadCommands(harness, "thread.start", thread.id),
       ).toHaveLength(0);
-      expect(getQueuedThreadMessage(harness.db, queued.id)).not.toBeNull();
+      expect(getQueuedThreadMessage(harness.db, queued.id)).toMatchObject({
+        claimedAt: null,
+        failureReason: null,
+      });
     });
   });
 });
@@ -1281,6 +1273,7 @@ describe("service tier execution lifecycle", () => {
       const { thread } = seedProviderThreadFixture({
         harness,
         value: 81,
+        status: "active",
         serviceTier: "fast",
       });
       const older = await createQueuedMessageForThread(harness.deps, {
@@ -1301,17 +1294,12 @@ describe("service tier execution lifecycle", () => {
       await expect(
         buildExecutionOptions(harness.deps, {}, { threadId: thread.id }),
       ).resolves.toMatchObject({ serviceTier: "fast" });
-      await sendQueuedMessage(harness.deps, {
-        claimPolicy: {
-          kind: "automatic",
-          isEligible: createAutomaticQueuedMessageEligibility(
-            harness.deps,
-            { now: Date.now(), thread },
-          ),
-        },
+      applyLoggedThreadLifecycleEvent(harness.deps, {
+        event: { type: "run.succeeded" },
         threadId: thread.id,
-        queuedMessageId: older.id,
-        mode: "auto",
+      });
+      await sendNextQueuedMessageIfPresent(harness.deps, {
+        threadId: thread.id,
       });
       expect(
         threadEvents.getLastExecutionOptions(harness.deps, thread.id),
@@ -1406,7 +1394,10 @@ describe("service tier execution lifecycle", () => {
 describe("concurrent idle dispatch regression", () => {
   it("retains every concurrent queue-mode send", async () => {
     await withTestHarness(async (harness) => {
-      const { thread } = seedProviderThreadFixture({ harness, value: 3716 });
+      const { environment, thread } = seedProviderThreadFixture({
+        harness,
+        value: 3716,
+      });
       const results = await Promise.allSettled(
         Array.from({ length: 4 }, (_, index) =>
           acceptThreadSendRequest(harness.deps, {
@@ -1429,6 +1420,42 @@ describe("concurrent idle dispatch regression", () => {
         `queued=${listQueuedThreadMessages(harness.db, thread.id).length}; commands=${listQueuedThreadCommands(harness, "turn.submit", thread.id).length}`,
       ).toEqual(Array.from({ length: 4 }, () => "fulfilled"));
       expect(listQueuedThreadMessages(harness.db, thread.id)).toHaveLength(3);
+
+      seedQueuedMessage(harness.deps, {
+        threadId: thread.id,
+        content: textInput("scheduled concurrent message"),
+        waitingOn: { kind: "time" },
+        sendAt: Date.now() - 1,
+      });
+      applyLoggedThreadLifecycleEvent(harness.deps, {
+        event: { type: "run.succeeded" },
+        threadId: thread.id,
+      });
+      // The idle drain and a scheduled wake may both claim work before either sends.
+      await Promise.all([
+        sendNextQueuedMessageIfPresent(harness.deps, { threadId: thread.id }),
+        runQueuedMessageDispatch(harness.deps, {
+          kind: "time-reached",
+          now: Date.now(),
+        }),
+      ]);
+      seedTurnStarted(harness.deps, {
+        environmentId: environment.id,
+        providerThreadId: threadEvents.getLastProviderThreadId(
+          harness.deps,
+          thread.id,
+        )!,
+        threadId: thread.id,
+        turnId: "concurrent-drain-turn",
+      });
+      await runQueuedMessageDispatch(harness.deps, {
+        kind: "turn-started",
+        threadId: thread.id,
+      });
+      expect(listQueuedThreadMessages(harness.db, thread.id)).toHaveLength(3);
+      expect(
+        listQueuedThreadCommands(harness, "turn.submit", thread.id),
+      ).toHaveLength(2);
     });
   });
 });

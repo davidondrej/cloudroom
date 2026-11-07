@@ -13,7 +13,11 @@ use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 pub(super) const LEVELS: [&str; 4] = ["off", "read-only", "ask", "full"];
-const LIMIT: usize = 16 * 1024 * 1024;
+pub(super) const LIMIT: usize = 16 * 1024 * 1024;
+// A sandbox's agent has root, so it can answer in place of Core: the helper keeps no more than a real Core sends. The
+// longest job line comes from cores up to 0.1.75, which send a job's input inside it as hex, beside a 64 KiB command
+// that JSON escaping can make 6 times longer.
+pub(super) const LINE: usize = 2 * LIMIT + 1024 * 1024;
 // Hex characters per result request: some sandbox proxies drop requests over about 8 MB,
 // and each part must upload within POST on a slow home connection.
 const PART: usize = 1024 * 1024;
@@ -614,7 +618,10 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
 #[derive(Default)]
 struct Processes {
     running: HashMap<String, u32>,
-    /// Jobs the agent stopped before they started; execute skips them.
+    /// How many jobs taken from the streams are not finished, by ID (two sandboxes' Cores can use the same one), and
+    /// which of those IDs the agent stopped before they started; execute skips those. A stop for any other job is
+    /// dropped, so a sandbox's Core can't fill this.
+    taken: HashMap<String, usize>,
     cancelled: HashSet<String>,
 }
 
@@ -632,8 +639,9 @@ pub(super) struct Jobs {
     checking: tokio::sync::Mutex<()>,
     wanted: Mutex<HashSet<Key>>,
     /// Each Mac command also goes to the website's Jev check (ADR 0224). It never delays the job: at most four reports
-    /// in flight, a repeated command is skipped for an hour, and failures are dropped.
-    reviews: Mutex<HashMap<(String, String), Instant>>,
+    /// in flight, a repeated command is skipped for an hour, and failures are dropped. Commands are kept as fixed-size
+    /// hashes, at most 4,096 of them, so a sandbox's many long commands can't fill memory.
+    reviews: Mutex<HashMap<String, Instant>>,
     slots: AtomicUsize,
 }
 
@@ -748,7 +756,12 @@ impl Jobs {
         }
     }
 
-    async fn stream(self: &Arc<Self>, core: &Core, device: &str, opened: &mut bool) -> Result<()> {
+    pub(super) async fn stream(
+        self: &Arc<Self>,
+        core: &Core,
+        device: &str,
+        opened: &mut bool,
+    ) -> Result<()> {
         let url = format!(
             "{}/v1/mac/jobs?device={device}&boot={}&fetch=true",
             core.url, self.shared.boot
@@ -779,9 +792,15 @@ impl Jobs {
             .map_err(|_| timeout())?
             .map_err(net::network_error)?
         {
+            // What was kept holds no line break, so only the new bytes are searched.
+            let mut from = buffer.len();
             buffer.extend_from_slice(&chunk);
-            while let Some(end) = buffer.iter().position(|byte| *byte == b'\n') {
-                let line: Vec<u8> = buffer.drain(..=end).collect();
+            while let Some(end) = buffer[from..].iter().position(|byte| *byte == b'\n') {
+                let line: Vec<u8> = buffer.drain(..=from + end).collect();
+                from = 0;
+                if line.len() > LINE {
+                    return Err(Error::value("Mac job is too large"));
+                }
                 let line = String::from_utf8_lossy(&line);
                 let line = line.trim_end_matches(['\r', '\n']);
                 if let Some(name) = line.strip_prefix("event:") {
@@ -790,13 +809,7 @@ impl Jobs {
                     let data: Value = serde_json::from_str(data)
                         .map_err(|error| Error::value(error.to_string()))?;
                     match event.as_deref() {
-                        Some("job") => {
-                            tokio::spawn(self.clone().execute(
-                                core.clone(),
-                                device.to_owned(),
-                                data,
-                            ));
-                        }
+                        Some("job") => self.take(core, device, data),
                         Some("cancel") => self.cancel(data["id"].as_str().unwrap_or_default()),
                         _ => {}
                     }
@@ -807,16 +820,47 @@ impl Jobs {
                     return Ok(());
                 }
             }
+            if buffer.len() > LINE {
+                return Err(Error::value("Mac job is too large"));
+            }
         }
         Ok(())
     }
 
+    /// Starts a job from the stream. Until it ends, a stop for it is kept (see cancel).
+    fn take(self: &Arc<Self>, core: &Core, device: &str, job: Value) {
+        let id = job["id"].as_str().unwrap_or_default().to_owned();
+        *self
+            .processes
+            .lock()
+            .unwrap()
+            .taken
+            .entry(id.clone())
+            .or_default() += 1;
+        let (jobs, core, device) = (self.clone(), core.clone(), device.to_owned());
+        tokio::spawn(async move {
+            jobs.clone().execute(core, device, job).await;
+            let mut processes = jobs.processes.lock().unwrap();
+            if let Some(count) = processes.taken.get_mut(&id) {
+                *count -= 1;
+                if *count == 0 {
+                    processes.taken.remove(&id);
+                    processes.cancelled.remove(&id);
+                }
+            }
+        });
+    }
+
     /// A job's input, downloaded after confirming it, so a big push never holds up other jobs on the stream (#576).
-    /// Older cores send it inside the job instead. None if it can't be downloaded.
+    /// Older cores send it inside the job instead. None if it can't be downloaded or is over Core's 16 MiB limit.
     async fn stdin(&self, core: &Core, device: &str, job: &Value) -> Option<String> {
-        let size = job["stdin_bytes"].as_u64().unwrap_or(0) as usize;
+        let size = match &job["stdin_bytes"] {
+            Value::Null => 0,
+            size => size.as_u64().filter(|size| *size <= LIMIT as u64)? as usize,
+        };
         if size == 0 {
-            return Some(job["stdin"].as_str().unwrap_or_default().to_owned());
+            let stdin = job["stdin"].as_str().unwrap_or_default();
+            return (stdin.len() <= 2 * LIMIT).then(|| stdin.to_owned());
         }
         let url = format!(
             "{}/v1/mac/jobs/{}/stdin?device={}",
@@ -834,7 +878,8 @@ impl Jobs {
                 Ok(mut response) => {
                     let mut data = Vec::new();
                     while let Ok(Some(chunk)) = response.chunk().await {
-                        data.extend_from_slice(&chunk);
+                        // At most one byte past the size, as client.py reads.
+                        data.extend_from_slice(&chunk[..chunk.len().min(size + 1 - data.len())]);
                         if data.len() > size {
                             break;
                         }
@@ -904,15 +949,21 @@ impl Jobs {
         limited.then(|| LIMITED.into())
     }
 
-    /// Why this job may not run as asked, or None. Everything else that is not full access runs read-only.
-    pub(super) async fn refusal(&self, core: &Core, job: &mut Value) -> Option<String> {
+    /// The access level, and why this sandbox may not use the Mac at all now (Off or a key list), or None.
+    async fn closed(&self, core: &Core) -> (&'static str, Option<String>) {
         let current = level(&self.enabled().unwrap_or(Value::Null));
         self.track(current);
         if current == "off" {
-            return Some(OFF.into());
+            return (current, Some(OFF.into()));
         }
-        if let Some(limited) = self.limited(core).await {
-            return Some(limited);
+        (current, self.limited(core).await)
+    }
+
+    /// Why this job may not run as asked, or None. Everything else that is not full access runs read-only.
+    pub(super) async fn refusal(&self, core: &Core, job: &mut Value) -> Option<String> {
+        let (current, closed) = self.closed(core).await;
+        if closed.is_some() {
+            return closed;
         }
         // After Off and the key list, so a sandbox without Mac access can't learn which Mac folders exist from a push.
         if let Some(unusable) = as_copy(job, &home(), &TEMP_FOLDERS) {
@@ -985,10 +1036,13 @@ impl Jobs {
             return;
         };
         let command = job["command"].as_str().unwrap_or_default().to_owned();
-        let key = (core.url.clone(), command.clone());
+        let key = super::sha256(format!("{}\0{command}", core.url).as_bytes());
         {
             let mut sent = self.reviews.lock().unwrap();
             sent.retain(|_, at| at.elapsed() <= Duration::from_secs(3600));
+            if sent.len() >= 4096 {
+                sent.clear();
+            }
             if sent.contains_key(&key) || self.slots.fetch_add(1, Ordering::SeqCst) >= 4 {
                 if !sent.contains_key(&key) {
                     self.slots.fetch_sub(1, Ordering::SeqCst);
@@ -1055,19 +1109,21 @@ impl Jobs {
             }
         }
         // Core may have taken a confirmation whose reply was lost, so it still gets this result instead of waiting forever.
-        let stdin = if confirmed {
-            self.stdin(&core, &device, &job).await
+        // Off and the key list come before the input, so a sandbox that may not use the Mac never makes it download any.
+        let mut refused = if confirmed {
+            self.closed(&core).await.1
         } else {
-            Some(String::new())
-        };
-        job["stdin"] = json!(stdin);
-        let refused = if !confirmed {
             Some("The Mac could not confirm this command with the cloud, so it did not run. Try again.".to_owned())
-        } else if stdin.is_none() {
-            Some("The Mac could not download this command's input from the cloud, so it did not run. Try again.".to_owned())
-        } else {
-            self.refusal(&core, &mut job).await
         };
+        if refused.is_none() {
+            refused = match self.stdin(&core, &device, &job).await {
+                Some(stdin) => {
+                    job["stdin"] = json!(stdin);
+                    self.refusal(&core, &mut job).await
+                }
+                None => Some("The Mac could not download this command's input from the cloud, so it did not run. Try again.".to_owned()),
+            };
+        }
         // Refused commands are checked too, but a script file is read only for a command that will run.
         self.review(
             &core,
@@ -1274,7 +1330,9 @@ impl Jobs {
             match processes.running.get(id) {
                 Some(pid) => Some(*pid as i32),
                 None => {
-                    processes.cancelled.insert(id.to_owned());
+                    if processes.taken.contains_key(id) {
+                        processes.cancelled.insert(id.to_owned());
+                    }
                     None
                 }
             }

@@ -488,6 +488,28 @@ describe("retrying a failed turn", () => {
       expect(userRequests).toHaveLength(1);
       // The row was consumed by the dispatch rather than left on the queue.
       expect(listQueuedThreadMessages(harness.db, thread.id)).toEqual([]);
+
+      failThread(harness, thread.id);
+      await retryFailedTurn(harness.deps, {
+        thread: requireThread(harness, thread.id),
+        request: { turnRequestId: null, sendAt, reason: "Rate limited" },
+      });
+      // Another turn can finish while the scheduled retry is waiting.
+      applyLoggedThreadLifecycleEvent(harness.deps, {
+        event: { type: "run.started" },
+        threadId: thread.id,
+      });
+      applyLoggedThreadLifecycleEvent(harness.deps, {
+        event: { type: "run.succeeded" },
+        threadId: thread.id,
+      });
+      await sweepPastResume(harness);
+      expect(lastTurnRequest(harness, thread.id)).toMatchObject({
+        initiator: "system",
+        retryOfRequestId: requestId,
+        retryAttempt: 3,
+      });
+      expect(listQueuedThreadMessages(harness.db, thread.id)).toEqual([]);
     });
   });
 

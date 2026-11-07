@@ -141,14 +141,20 @@ pub(super) async fn start(handle: &Handle) -> io::Result<String> {
         .as_str()
         .ok_or_else(|| io::Error::other("missing Pi session ID"))?;
     let path = handle.session_file.as_ref().unwrap();
-    if state["sessionFile"].as_str() != path.to_str()
-        || state["model"]["id"].as_str() != Some(&handle.profile.model)
+    // Pi falls back to a custom ID it reshapes (`openrouter/x` becomes `x`) when its list lacks the model.
+    if state["model"]["id"].as_str() != Some(&handle.profile.model)
         || state["model"]["provider"].as_str() != handle.profile.provider.as_deref()
+    {
+        return Err(io::Error::other(
+            "This Pi doesn't know the selected model. Pick another model",
+        ));
+    }
+    if state["sessionFile"].as_str() != path.to_str()
         || state["isStreaming"] != false
         || state["isCompacting"] != false
     {
         return Err(io::Error::other(
-            "Pi startup state does not match configured session/model",
+            "Pi startup state does not match configured session",
         ));
     }
     if handle.resume.as_ref().is_some_and(|s| s.id != id) {

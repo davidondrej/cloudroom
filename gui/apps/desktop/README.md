@@ -297,6 +297,13 @@ e.g. from the Dock right after **Restart to update**. That old version quits onc
 still leaves the old version shows "The last update didn't install" with Restart and the website **Download**,
 and that run never restarts by itself when idle; a click here, in a browser, or on a phone still does.
 
+When this Mac user can't write the app, **Restart to update** first asks for the Mac password. An unanswered
+prompt closes after 2 minutes and the button works again. An app opened from the disk image or translocated
+from Downloads is read-only, so Squirrel.Mac can never replace it: it skips the in-app update. A pop-up over
+the app (and over setup) offers **Move to Applications** (`app.moveToApplicationsFolder()`), which stops Local
+agents, copies the app, and reopens it from Applications; the agents resume. **Not now** hides it until the
+next launch, and the update banner still asks to move it.
+
 Windows reads `latest.yml` from the same release, downloads the `.exe` in the
 background, and runs it silently on quit. **Restart to update** keeps Cloudroom
 open until the installer's progress window shows (the installer then closes it),

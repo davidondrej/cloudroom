@@ -6,7 +6,7 @@ import {
 import { Command } from "commander";
 import { jsonValueSchema, type Host, type JsonValue } from "@cloudroom/domain";
 import { action, CliExitError } from "../action.js";
-import { createCliBbSdk } from "../client.js";
+import { CLI_READ_TIMEOUT_MS, createCliBbSdk } from "../client.js";
 import { columnWidths, printBorderlessTable } from "../table.js";
 import { outputJson } from "./helpers.js";
 import { confirmDestructiveAction } from "./helpers.js";
@@ -178,7 +178,10 @@ export async function resolveMachineHostId(args: {
   serverUrl: string;
   target: string;
 }): Promise<string> {
-  const hosts = await createCliBbSdk(args.serverUrl).hosts.list({
+  const hosts = await createCliBbSdk(
+    args.serverUrl,
+    CLI_READ_TIMEOUT_MS,
+  ).hosts.list({
     includeCreating: true,
   });
   const hostId = resolveMachineId(hosts, args.target);

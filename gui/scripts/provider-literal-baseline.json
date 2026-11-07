@@ -1,6 +1,6 @@
 {
   "_comment": "Provider-literal ratchet (G1). Per-file occurrence count of provider-ID references in core. May only go DOWN. Regenerate: node scripts/check-provider-literal-ratchet.mjs --write. Every counted file must have an `allowlist` entry (count, reason, owner, diesAt); the entries are authored by hand and survive --write. Delete this file and the guard when empty.",
-  "total": 102,
+  "total": 91,
   "files": {
     "apps/app/src/components/CodexConnectionPanel.tsx": 2,
     "apps/app/src/components/promptbox/NewThreadComposer.tsx": 1,
@@ -10,7 +10,6 @@
     "apps/cli/src/commands/cloudroom.ts": 1,
     "apps/cli/src/commands/thread/spawn.ts": 1,
     "apps/host-daemon/src/command-handlers/teleport.ts": 7,
-    "apps/server/src/services/cloudroom/client.ts": 11,
     "apps/server/src/services/cloudroom/commands.ts": 30,
     "apps/server/src/services/cloudroom/events.ts": 12,
     "apps/server/src/services/cloudroom/teleport.ts": 13,
@@ -82,12 +81,6 @@
       "reason": "Existing Codex default for Cloudroom-targeted CLI starts only; local provider defaults are unaffected.",
       "owner": "Cloudroom GUI",
       "diesAt": "when the Cloudroom API supplies the default harness"
-    },
-    "apps/server/src/services/cloudroom/client.ts": {
-      "count": 11,
-      "reason": "Vendored canonical Cloudroom API client: wire types, default harness, and response validation.",
-      "owner": "Cloudroom core integration client",
-      "diesAt": "when the canonical core API client no longer requires these harness discriminators"
     },
     "apps/server/src/services/cloudroom/commands.ts": {
       "count": 30,

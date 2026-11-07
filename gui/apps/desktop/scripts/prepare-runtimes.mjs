@@ -25,6 +25,24 @@ const windowsArchives = [
   ["python-windows-full.tar.zst", pythonRelease + "cpython-3.12.13+20260510-x86_64-pc-windows-msvc-pgo-full.tar.zst", "e6dd25775677966bde76d1764cabd81be87611cbe5c3ce0a91b69ee1ac686a3d"],
   archives.at(-1),
 ];
+// Windows: the standard library goes into python312.zip (precompiled, read in place by Python), and pip and the C
+// headers' import libraries are dropped. ~1,100 fewer files, which Defender would scan on every install and update.
+const zipWindowsStdlib = `
+import os, py_compile, shutil, sys, tempfile, zipfile
+root = sys.argv[1]; lib = os.path.join(root, "Lib"); pyc = os.path.join(tempfile.mkdtemp(), "m.pyc")
+skip = {"site-packages", "__pycache__", "test", "idlelib", "tkinter", "turtledemo", "ensurepip", "lib2to3"}
+with zipfile.ZipFile(os.path.join(root, "python312.zip"), "w", zipfile.ZIP_DEFLATED) as z:
+    for folder, folders, files in os.walk(lib):
+        folders[:] = [name for name in folders if name not in skip]
+        for name in files:
+            path = os.path.join(folder, name); entry = os.path.relpath(path, lib).replace(os.sep, "/")
+            if not name.endswith(".py"):
+                z.write(path, entry); continue
+            py_compile.compile(path, cfile=pyc, dfile=entry, doraise=True, invalidation_mode=py_compile.PycInvalidationMode.UNCHECKED_HASH)
+            z.write(pyc, entry + "c")
+for name in ("Lib", "libs", "Scripts"):
+    shutil.rmtree(os.path.join(root, name))
+`;
 const pythonCheck = "import ssl, sqlite3, sys, tomllib; assert ssl.create_default_context(cafile=sys.prefix + '/cacert.pem').cert_store_stats()['x509_ca'] > 100";
 
 async function checksum(path) {
@@ -59,6 +77,7 @@ async function prepareWindowsPython() {
   execFileSync(tar, ["-xf", join(root, "python-windows.tar.gz"), "-C", root]);
   execFileSync(tar, ["-xf", join(root, "python-windows-full.tar.zst"), "-C", root, "python/licenses"]);
   await cp(join(root, "cacert.pem"), join(root, "python/cacert.pem"));
+  execFileSync(join(root, "python/python.exe"), ["-I", "-B", "-c", zipWindowsStdlib, join(root, "python")], { stdio: "inherit" });
   execFileSync(join(root, "python/python.exe"), ["-I", "-B", "-c", pythonCheck], { stdio: "inherit" });
   console.log("Bundled Python 3.12.13 for Windows x64: checksums verified; licenses included.");
 }

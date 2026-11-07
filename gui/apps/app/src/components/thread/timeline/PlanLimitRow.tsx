@@ -41,6 +41,9 @@ type Agent = Logo & { name: string };
 type PlanLimitSwitch = NonNullable<
   TimelineNonOperationSystemRow["planLimitSwitch"]
 >;
+type PlanLimitAccountSwitch = NonNullable<
+  TimelineNonOperationSystemRow["planLimitAccountSwitch"]
+>;
 
 /** A switch whose new agent never got going (say its message is still queued) stops showing as in progress. */
 const SWITCH_STALE_MS = 3 * 60_000;
@@ -337,6 +340,43 @@ export function PlanLimitSwitchedRow({
       {to.name} took over
     </p>
   );
+}
+
+/** After an account switch, the plan-limit row is one quiet line (ADR 20261107-082837). */
+export function PlanLimitAccountSwitchedRow({
+  switched,
+  detail,
+  className,
+}: {
+  switched: PlanLimitAccountSwitch;
+  /** The limit error's text, which names the window Claude hit. */
+  detail: string | null;
+  className?: string;
+}) {
+  const agent = useAgentOf()(switched.provider);
+  return (
+    <p
+      className={cn(
+        "flex flex-wrap items-center gap-2 py-1 text-sm text-muted-foreground",
+        className,
+      )}
+    >
+      <LogoIcon logo={agent} className="size-3.5" />
+      {switched.from} hit its {limitName(detail)}
+      <Icon name="ArrowRight" className="size-3.5" aria-hidden />
+      <LogoIcon logo={agent} className="size-3.5" />
+      Continued on {switched.to}
+    </p>
+  );
+}
+
+/** Claude names the window it hit ("You've hit your weekly limit"); otherwise it is the plan limit. */
+function limitName(detail: string | null): string {
+  const named =
+    /\b(weekly|session|daily|monthly|5-hour|five-hour) limit\b/i.exec(
+      detail ?? "",
+    );
+  return named ? named[0].toLowerCase() : "plan limit";
 }
 
 function useAgentOf(): (providerId: string) => Agent {

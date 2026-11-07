@@ -23,7 +23,7 @@ import { useQuickCreateProjectController } from "@/hooks/useQuickCreateProject";
 import { usePromptBoxProviderPreference } from "@/hooks/thread-creation-options/persisted-selection-fields";
 import { booleanLocalStorage } from "@/lib/browser-storage";
 import { getBbDesktopInfo, MACOS_APP_REGION_NO_DRAG_CLASS, MACOS_WINDOW_DRAG_CLASS } from "@/lib/bb-desktop";
-import { copyTextToClipboard, copyToClipboardWithToast } from "@/lib/clipboard";
+import { copyTextToClipboard, copyToClipboardWithToast, useClipboardCopy } from "@/lib/clipboard";
 import { fetchWithAppSurface } from "@/lib/app-surface";
 import { useSystemConfig, useSystemProviders } from "@/hooks/queries/system-queries";
 import { getProviderIconInfo, getProviderIconTintStyle } from "@/lib/provider-icon";
@@ -356,6 +356,12 @@ const TickStamp = () => (
   </span>
 );
 
+// Keyed by the link, so "Copied" never carries over to a new sign-in attempt.
+function CopyLink({ url }: { url: string }) {
+  const { copied, copy } = useClipboardCopy({ text: url });
+  return <button type="button" className={LINK} onClick={() => void copy()}>{copied ? "Copied" : "Copy link"}</button>;
+}
+
 const SIGN_IN_COUNTDOWN = 3;
 function AccountStep({ email, signingIn, next, fresh }: { email: string | null; signingIn: boolean; next: () => void; fresh: boolean }) {
   const signIn = useCloudroomSignIn();
@@ -384,7 +390,11 @@ function AccountStep({ email, signingIn, next, fresh }: { email: string | null; 
       ) : busy ? (
         <div className="mt-8 flex max-w-[420px] flex-col gap-3">
           <Cta disabled className="w-full"><Icon name="Loading" className="animate-spin" aria-hidden />Waiting for your browser…</Cta>
-          <Note>Finish logging in in your browser. <button type="button" className={LINK} onClick={() => signIn.mutate("cancel")}>Cancel</button></Note>
+          <Note>
+            Finish in your browser.{" "}
+            {signIn.data && <>Wrong browser? <CopyLink key={signIn.data} url={signIn.data} /> · </>}
+            <button type="button" className={LINK} onClick={() => signIn.mutate("cancel")}>Cancel</button>
+          </Note>
         </div>
       ) : left !== null ? (
         <>

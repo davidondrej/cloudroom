@@ -305,13 +305,18 @@ impl Manager {
         self.continue_limited(&[runtime::Kind::Cursor])
     }
 
-    /// Send "keep working" to these harnesses' sessions stopped by a usage limit.
-    /// The harness restarts or wakes first, so it loads the new login before the prompt runs.
+    /// Send "keep working" to these harnesses' sessions stopped by a usage limit. Turns still running on the old login
+    /// continue too, once the limit stops them (`advance`).
     fn continue_limited(self: &Arc<Self>, harnesses: &[runtime::Kind]) -> Vec<String> {
         if self.is_stopping() || self.storage.blocks() {
             return Vec::new();
         }
         let mut local = self.local.lock().unwrap();
+        for session in local.sessions.values_mut() {
+            if harnesses.contains(&session.harness) && session.current_request.is_some() {
+                session.switched_mid_turn = true;
+            }
+        }
         let ids: Vec<_> = local
             .sessions
             .values()
@@ -332,6 +337,19 @@ impl Manager {
             })
             .map(|s| s.session_id.clone())
             .collect();
+        self.continue_sessions(&mut local, ids)
+    }
+
+    /// Send these sessions "keep working". The harness restarts or wakes first, so it loads the new login before the
+    /// prompt runs.
+    pub(super) fn continue_sessions(
+        self: &Arc<Self>,
+        local: &mut Local,
+        ids: Vec<String>,
+    ) -> Vec<String> {
+        if self.is_stopping() || self.storage.blocks() {
+            return Vec::new();
+        }
         let mut continued = Vec::new();
         for id in ids {
             // The continuation of a `plan_only` loop run stays `plan_only` (ADR 0292).
@@ -357,7 +375,7 @@ impl Manager {
             }
             if let Some(handle) = &local.sessions[&id].handle {
                 handle.request_shutdown();
-            } else if self.wake(&mut local, &id).is_err() {
+            } else if self.wake(local, &id).is_err() {
                 continue;
             }
             continued.push(id);

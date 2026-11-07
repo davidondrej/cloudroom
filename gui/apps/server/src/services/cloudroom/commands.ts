@@ -3,7 +3,7 @@ import { readFile, writeFile, mkdir, stat, rename, rm } from "node:fs/promises";
 import { join, win32 } from "node:path";
 import { and, desc, eq, inArray, isNull, max, notInArray } from "drizzle-orm";
 import { createThread, findLastCompletedRootStoredTurn, getAppSettings, getProject, getThread, getThreadExecutionOverride, setThreadExecutionOverride, updateThread, cloudroomThreads, cloudroomCommands, events, threads, type DbConnection, type DbQueryConnection, type DbTransaction } from "@cloudroom/db";
-import { PERSONAL_PROJECT_ID, encodeClientTurnRequestIdNumber, isStandaloneBuiltinCompactCommand, promptInputSchema, reasoningLevelSchema, reconcileReasoningLevel, defaultReasoningLevel, threadQueuedMessageSchema, type Thread, type PromptInput, type ThreadEventType, type ThreadEventTurnStatus, type ThreadChangeKind, type ReasoningLevel, COMPUTER, COMPUTER_TITLE } from "@cloudroom/domain";
+import { PERSONAL_PROJECT_ID, rawThreadIdSchema, encodeClientTurnRequestIdNumber, isStandaloneBuiltinCompactCommand, promptInputSchema, reasoningLevelSchema, reconcileReasoningLevel, defaultReasoningLevel, threadQueuedMessageSchema, type Thread, type PromptInput, type ThreadEventType, type ThreadEventTurnStatus, type ThreadChangeKind, type ReasoningLevel, COMPUTER, COMPUTER_TITLE } from "@cloudroom/domain";
 import type { CreateThreadRequest, ForkThreadRequest, SendMessageRequest, SendMessageResponse } from "@cloudroom/server-contract";
 import { z } from "zod";
 import { findCliExecutable } from "@cloudroom/process-utils";
@@ -27,6 +27,7 @@ import { buildSuggestedBranchName } from "../threads/thread-create-helpers.js";
 import { assertValidParentThread, isParentNotifiableChildThread } from "../threads/thread-parent.js";
 import { inferThreadMetadata, queueThreadTitle } from "../threads/thread-metadata-inference.js";
 import { getLastThreadOutput } from "../threads/thread-data.js";
+import { saveCloudImages } from "./teleport-local.js";
 import { cliPlace, reportAgentConnect, reportMacHelperDown, reportMacHelperProblem } from "./setup-telemetry.js";
 import { cloudSkills, copyLogins, copyMacGithub, copyMacLogin, importCodexLogin, importPiLogin, loginMarkers, macPiSetup, markLogin, setCopyMacLogin, setupSync, skillInCloud, stopSync, syncStatus } from "./sync.js";
 import { macClaudeSignedIn } from "./claude-token.js";
@@ -255,9 +256,33 @@ function coreModel(harness: CloudProvider, model: string, capabilities: z.infer<
 
 function reasoningLevels(harness: string, model: string, capabilities: Capabilities): string[] | undefined {
   const profile = harnessProfile(capabilities, harness);
-  // Claude runs exact models its catalog omits, such as claude-opus-5-5[1m]; core allows any VM level (ADR 0133).
-  const anyLevel = harness === "claude-code" ? [...new Set(profile?.models?.flatMap((item) => item.reasoning_levels))] : undefined;
+  // Claude runs exact models its catalog omits, such as claude-opus-5-5[1m]; core allows any VM level (ADR 0133),
+  // and `none`, which runs any model without an effort override (#1059).
+  const anyLevel =
+    harness === "claude-code"
+      ? [
+          ...new Set([
+            "none",
+            ...(profile?.models ?? []).flatMap((item) => item.reasoning_levels),
+          ]),
+        ]
+      : undefined;
   return profile?.models ? (profile.models.find((item) => item.model === model)?.reasoning_levels ?? anyLevel) : profile?.reasoning_levels;
+}
+
+/** The model's own catalog row takes no effort, such as Claude's Haiku (#1059). */
+function takesNoEffort(
+  capabilities: Capabilities | null,
+  harness: string,
+  model: string | null | undefined,
+): boolean {
+  const row =
+    capabilities && model
+      ? harnessProfile(capabilities, harness)?.models?.find(
+          (item) => item.model === model,
+        )
+      : undefined;
+  return row?.reasoning_levels.join() === "none";
 }
 
 function validateReasoning(harness: string, model: string, reasoning: string, capabilities: z.infer<typeof capabilitiesSchema>): void {
@@ -270,7 +295,12 @@ function validateReasoning(harness: string, model: string, reasoning: string, ca
     const claudeHint = harness !== "claude-code" && model.startsWith("claude") ? " Use the claude-code provider for Claude." : "";
     throw new ApiError(400, "invalid_model", `${model} is not a ${name} model on Cloud.${offers ? ` ${name} offers ${offers}.` : ""}${claudeHint}`);
   }
-  if (!levels?.includes(reasoning)) throw new ApiError(400, "invalid_reasoning_effort", "This reasoning level is unavailable for the cloud model. Select a supported level.");
+  if (!levels?.includes(reasoning))
+    throw new ApiError(
+      400,
+      "invalid_reasoning_effort",
+      `This reasoning level is unavailable for the cloud model.${levels?.length ? ` ${model} supports: ${levels.join(", ")}.` : ""} Select a supported level.`,
+    );
 }
 
 function followUpPayload(harness: string, saved: Binding, payload: SendMessageRequest, reasoning: string | null, capabilities: Capabilities) {
@@ -373,6 +403,8 @@ type ConnectionIssue = { message: string; reconnecting: boolean };
 
 const AGENT_FORKS = "cloudroom-agent-forks.json";
 const CHILD_REPORTS = "cloudroom-child-reports.json";
+/** How a child the website started names its first request: `sub_` and a hash (web/lib/cloud-start.ts spawnChild). */
+const WEBSITE_CHILD = "sub_";
 const childReportSchema = z.object({ child: z.string(), status: z.string(), turn: z.string() });
 const AGENT_FORK_WAIT = 90_000;
 
@@ -516,7 +548,7 @@ class CloudroomService {
       void noteWake(deps, thread).catch(() => {});
       this.macReportDue = 0;
     });
-    this.sandboxes.onRuns = runs => { for (const run of runs) this.adoptRun(run); };
+    this.sandboxes.onRuns = runs => { for (const run of runs) void this.adoptRun(run).catch((error: unknown) => this.warn("A Cloud thread could not be shown", error, { threadId: run.thread })); };
     this.sandboxes.keySource = thread => keySourceOf(command(deps.db, `first_${thread}`)?.input);
     this.sandboxes.skipLogins = async () => {
       const markers = await loginMarkers(deps);
@@ -570,13 +602,23 @@ class CloudroomService {
   private async saveLabel(threadId: string, parent?: string | null): Promise<boolean | null> {
     const saved = binding(this.deps.db, threadId), thread = getThread(this.deps.db, threadId);
     if (!saved?.sessionId || !thread || sandboxThread(saved.coreUrl) !== threadId) return null;
-    const label = { title: thread.title ?? thread.titleFallback ?? null, project_name: getProject(this.deps.db, thread.projectId)?.name ?? null, project: thread.projectId, session: saved.sessionId, harness: thread.providerId, model: thread.modelOverride ?? saved.model, parent: parent === undefined ? thread.parentThreadId ?? null : parent };
+    const label = { title: thread.title ?? thread.titleFallback ?? null, project_name: getProject(this.deps.db, thread.projectId)?.name ?? null, project: thread.projectId, session: saved.sessionId, harness: thread.providerId, model: thread.modelOverride ?? saved.model,
+      // The website's link is the truth for a child it started: only a move changes it (ADR 20261104-015709).
+      ...(parent === undefined && saved.startRequestId?.startsWith(WEBSITE_CHILD) ? {} : { parent: this.linkParent(saved, parent === undefined ? thread.parentThreadId ?? null : parent) }) };
     const key = JSON.stringify(label);
     if (this.labels.get(threadId) === key) return null;
     this.labels.delete(threadId);
-    const stored = await this.sandboxes.label(threadId, label);
+    // A move is the only label that may take a child the website started out from under its parent (ADR 20261104-015709).
+    const stored = await this.sandboxes.label(threadId, parent === undefined ? label : { ...label, moved: true });
     this.labels.set(threadId, key);
     return stored;
+  }
+
+  /** The parent the website links: for a child it started, the thread whose sandbox runs that parent, since one
+   *  sharing another thread's sandbox has none of its own (ADR 20261104-015709). The app still shows the real one. */
+  private linkParent(child: Binding, parent: string | null): string | null {
+    if (!parent || !child.startRequestId?.startsWith(WEBSITE_CHILD)) return parent;
+    return sandboxThread(binding(this.deps.db, parent)?.coreUrl ?? "") ?? parent;
   }
 
   async changeParent(threadId: string, parent: string | null, apply: () => Promise<void>): Promise<void> {
@@ -603,14 +645,24 @@ class CloudroomService {
    *  another Cloud thread launched (ADR 0267). It shows like any Cloud thread; its history streams in once its
    *  sandbox is awake or opened. Only the Mac that has its project shows it, and a thread this app already has is
    *  left alone. */
-  private adoptRun(run: AutomationRun): void {
+  private async adoptRun(run: AutomationRun): Promise<void> {
     // The run's own label names its agent (a launch may pick another); older runs fall back to the source thread's (ADR 0250).
     const source = getThread(this.deps.db, run.source), home = binding(this.deps.db, run.source), own = isCloudProvider(run.harness ?? undefined) && run.model;
     const providerId = own ? run.harness : source && home ? source.providerId : run.harness, model = own ? run.model : home?.model ?? run.model;
-    if (!providerId || !model || (source && source.projectId !== run.project) || !getProject(this.deps.db, run.project) || getThread(this.deps.db, run.thread)) return;
+    // A child the website started goes under the parent the website links (ADR 20261104-015709), so a move made on
+    // any Mac stays, and one an older app showed top-level gets its parent. A website too old to say: who started it.
+    const child = run.session.startsWith(`cr_${WEBSITE_CHILD}`), linked = !child ? null : run.parent === undefined ? run.source : run.parent;
+    const found = linked ? getThread(this.deps.db, linked) : null, parent = found?.projectId === run.project ? found : null, existing = getThread(this.deps.db, run.thread);
+    if (existing) {
+      const shown = binding(this.deps.db, existing.id);
+      // Shown under a session that shares the linked thread's sandbox counts as linked.
+      if (child && run.parent !== undefined && shown && this.linkParent(shown, existing.parentThreadId) !== run.parent) updateThread(this.deps.db, this.deps.hub, existing.id, { parentThreadId: parent?.id ?? null });
+      return;
+    }
+    if (!providerId || !model || (source && source.projectId !== run.project) || !getProject(this.deps.db, run.project)) return;
     const adopted = this.deps.db.transaction(tx => {
       if (getThread(tx, run.thread) || tx.select().from(cloudroomThreads).where(eq(cloudroomThreads.sessionId, run.session)).get()) return null;
-      const thread = createThread(tx, this.deps.hub, { id: run.thread, executionTarget: "cloud", projectId: run.project, providerId, title: run.title, titleFallback: "Loop run", status: "pending" });
+      const thread = createThread(tx, this.deps.hub, { id: run.thread, executionTarget: "cloud", projectId: run.project, providerId, ...(parent ? { parentThreadId: parent.id } : {}), title: run.title, titleFallback: parent ? `${HARNESS_NAMES[providerId as CloudProvider] ?? "Cloud"} child` : "Loop run", status: "pending" });
       tx.insert(cloudroomThreads).values({ threadId: run.thread, coreUrl: SANDBOX_PREFIX + run.thread, sessionId: run.session, startRequestId: run.session.replace(/^cr_/, ""), model, reasoning: run.reasoning ?? home?.reasoning ?? "medium" }).run();
       return thread;
     });
@@ -618,6 +670,35 @@ class CloudroomService {
     emitPluginThreadCreated(adopted);
     this.notify(run.thread);
     void this.deliver(run.thread).catch(() => {});
+  }
+
+
+  /** A child this Cloud thread started in a sandbox of its own through the website (ADR 20261104-015709), from Core's
+   *  `own_child` record, so it shows under its parent even if it started while this Mac was off. A thread already
+   *  shown as a Loop-style run moves under its parent. */
+  private async adoptChild(parent: Binding, data: unknown): Promise<void> {
+    const child = z.object({ id: rawThreadIdSchema, session: z.string().regex(/^cr_[A-Za-z0-9_-]{1,80}$/), title: z.string().nullish(), harness: z.string().nullish(), model: z.string().nullish(), reasoning: reasoningLevelSchema.nullish().catch(null) }).parse(data);
+    const parentThread = getThread(this.deps.db, parent.threadId), existing = getThread(this.deps.db, child.id);
+    if (!parentThread) return;
+    if (existing) {
+      if (existing.parentThreadId === parentThread.id || existing.projectId !== parentThread.projectId) return;
+      // The website links the sandbox's thread; a session sharing it is the closer parent. Anything else is the
+      // website's to say (adoptRun), so a move stays.
+      if (existing.parentThreadId && existing.parentThreadId === sandboxThread(parent.coreUrl)) updateThread(this.deps.db, this.deps.hub, child.id, { parentThreadId: parentThread.id });
+      return;
+    }
+    const providerId = isCloudProvider(child.harness ?? undefined) ? child.harness as CloudProvider : parentThread.providerId, model = child.model ?? parent.model;
+    if (!isCloudProvider(providerId) || !model) return;
+    const adopted = this.deps.db.transaction(tx => {
+      if (getThread(tx, child.id) || tx.select().from(cloudroomThreads).where(eq(cloudroomThreads.sessionId, child.session)).get()) return null;
+      const thread = createThread(tx, this.deps.hub, { id: child.id, executionTarget: "cloud", projectId: parentThread.projectId, providerId, parentThreadId: parentThread.id, title: child.title ?? null, titleFallback: `${HARNESS_NAMES[providerId]} child`, status: "pending" });
+      tx.insert(cloudroomThreads).values({ threadId: child.id, coreUrl: SANDBOX_PREFIX + child.id, sessionId: child.session, startRequestId: child.session.replace(/^cr_/, ""), model, reasoning: child.reasoning ?? parent.reasoning ?? "medium" }).run();
+      return thread;
+    });
+    if (!adopted) return;
+    emitPluginThreadCreated(adopted);
+    this.notify(child.id);
+    void this.deliver(child.id).catch(() => {});
   }
 
   /** New cloud threads get their own sandbox when the account has sandboxes (docs/scopes/sandboxes.md). */
@@ -1465,7 +1546,12 @@ class CloudroomService {
     const payload = promptPayload(request.input, request.providerId, capabilities?.attachments === false ? false : profile?.attachments ?? true, cloudPromptLimit(capabilities));
     const model = request.model;
     const piDefault = request.providerId === "pi" && !request.reasoningLevel;
-    const reasoning = request.reasoningLevel ?? defaultReasoningLevel(undefined);
+    // A model whose own row takes no effort, such as Claude's Haiku, starts without one; others keep medium (#1059).
+    const reasoning =
+      request.reasoningLevel ??
+      (takesNoEffort(capabilities, request.providerId, model)
+        ? "none"
+        : defaultReasoningLevel(undefined));
     if (!model) throw new ApiError(400, "model_required", "Select a Codex model");
     const startRequestId = request.requestId ?? randomUUID();
     const existingThread = (db: DbQueryConnection) => {
@@ -1539,7 +1625,7 @@ class CloudroomService {
         appendStartProgress(tx, thread.id, [cloudStep(Boolean(sandbox))], "active", true);
       });
     }
-    if (created && request.cloudTarget) this.sandboxes.target(thread.id, request.cloudTarget);
+    if (created && sandbox) this.sandboxes.firstWakeHints(thread.id, { ...(request.cloudTarget ? { target: request.cloudTarget } : {}), launch: request.origin });
     this.notify(thread.id, ["client/turn/requested", "system/thread-provisioning"]);
     void this.selectOnboardingProject(project.id).catch(() => {});
     this.start();
@@ -2860,6 +2946,8 @@ class CloudroomService {
     if (parentSaved && await this.otherAccountThread(parentSaved)) return;
     const first = command(this.deps.db, `first_${child.id}`);
     if (status !== "not_started" && status !== "refused" && status !== "blocked" && first && JSON.parse(first.input).parent_thread && parentSaved?.coreUrl === SANDBOX_PREFIX + parent.id) return;
+    // A child the website started has Core report its turns (ADR 20261104-015709).
+    if (binding(this.deps.db, child.id)?.startRequestId?.startsWith(WEBSITE_CHILD)) return;
     const name = child.title ? `"${child.title}" (${child.id})` : child.id;
     const reply = getLastThreadOutput(this.deps.db, child.id)?.trim();
     const text = status === "refused" || status === "blocked"
@@ -2918,7 +3006,23 @@ class CloudroomService {
         const profile = input.model || same ? null : harnessProfile(await this.savedCapabilities() ?? await this.capabilities(client), providerId);
         const model = input.model ?? (same ? parent.model : profile && (providerId === "pi" && profile.provider ? `${profile.provider}/${profile.model}` : profile.model));
         const piDefault = providerId === "pi" && (model !== parent.model || (JSON.parse(command(this.deps.db, `first_${parent.threadId}`)?.input ?? "{}").default_reasoning && !getThreadExecutionOverride(this.deps.db, parent.threadId)?.reasoningLevelOverride));
-        const reasoning = reasoningLevelSchema.safeParse(input.reasoning ?? (same && !piDefault ? binding(this.deps.db, parent.threadId)?.reasoning : undefined));
+        // With no effort given, a model without effort starts without one, never at the parent's level (#1059).
+        const inherit =
+          same &&
+          !piDefault &&
+          !input.reasoning &&
+          !takesNoEffort(
+            (await this.savedCapabilities()) ??
+              (await this.capabilities(client)),
+            providerId,
+            model,
+          );
+        const reasoning = reasoningLevelSchema.safeParse(
+          input.reasoning ??
+            (inherit
+              ? binding(this.deps.db, parent.threadId)?.reasoning
+              : undefined),
+        );
         if (input.reasoning && !reasoning.success) throw new ApiError(400, "cloudroom_reasoning", `Unknown effort level ${input.reasoning}.`);
         child = (await this.create({
           projectId: parentThread.projectId, providerId, ...(model ? { model } : {}), ...(reasoning.success ? { reasoningLevel: reasoning.data } : {}), ...(input.title ? { title: input.title } : {}), ...(input.service_tier ? { serviceTier: input.service_tier } : {}),
@@ -3081,6 +3185,9 @@ class CloudroomService {
             await this.ownSandboxChild(saved, client, record).catch((error: unknown) => this.warn("A Cloud child request failed", error, { threadId: saved.threadId }));
             if (controller.signal.aborted) return;
           }
+          if (record.kind === "own_child") {
+            await this.adoptChild(saved, record.data).catch((error: unknown) => this.warn("A Cloud child thread could not be shown", error, { threadId: saved.threadId }));
+          }
           if (record.kind === "fork_request" && record.sequence > (binding(this.deps.db, saved.threadId)?.cursor ?? 0)) {
             await this.agentFork(saved, client, record).catch((error: unknown) => this.warn("A Cloud fork request failed", error, { threadId: saved.threadId }));
             if (controller.signal.aborted) return;
@@ -3110,6 +3217,8 @@ class CloudroomService {
           this.catchUps.delete(saved.threadId);
           if (held) void this.deliverChildReports();
           else if (ended) this.tellLocalParent(saved.threadId, ended, turn);
+          const reply = ended ? getLastThreadOutput(this.deps.db, saved.threadId) : null;
+          if (reply) void saveCloudImages(this.deps, saved.threadId, reply).catch((error: unknown) => this.warn("Chat images could not be saved", error, { threadId: saved.threadId }));
           // Agents archive their own thread with `room-cli thread archive --self`; like renames, this applies on reconnect.
           if (record.kind === "archive") {
             const kept = z.object({ kept_live: z.array(z.string()) }).catch({ kept_live: [] }).parse(record.data).kept_live;

@@ -82,7 +82,11 @@ import {
   MissingProviderCliRow,
   missingProviderCli,
 } from "./MissingProviderCliRow.js";
-import { PlanLimitRow, PlanLimitSwitchedRow } from "./PlanLimitRow.js";
+import {
+  PlanLimitAccountSwitchedRow,
+  PlanLimitRow,
+  PlanLimitSwitchedRow,
+} from "./PlanLimitRow.js";
 import {
   LatestPlanLimitRowIdContext,
   findLatestPlanLimitRowId,
@@ -1567,6 +1571,19 @@ function TimelineRowView({
     row.kind === "system" && row.systemKind === "error"
       ? row.planLimitSwitch
       : undefined;
+  if (
+    row.kind === "system" &&
+    row.systemKind === "error" &&
+    row.planLimitAccountSwitch
+  ) {
+    return (
+      <PlanLimitAccountSwitchedRow
+        switched={row.planLimitAccountSwitch}
+        detail={row.detail}
+        className={timelineRowHorizontalPaddingClassName(horizontalPadding)}
+      />
+    );
+  }
   if (row.id === latestPlanLimitRowId) {
     return (
       <PlanLimitRow

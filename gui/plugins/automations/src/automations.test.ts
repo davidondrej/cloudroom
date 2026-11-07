@@ -1761,6 +1761,45 @@ describe("automation CLI --script-file", () => {
     }
   });
 
+  it("--prompt-file keeps option-like and multiline text as the agent prompt (#974)", async () => {
+    const t = await setup();
+    const prompt = "--script=echo review-only\r\n---\ntitle: x\n---\n\"q\" & | ^ %PATH%\n";
+    const update = "---\nsecond\n";
+    await writeFile(join(t.srcDir, "p.md"), `\uFEFF${prompt}`);
+    await writeFile(join(t.srcDir, "u.md"), update);
+    const agent = ["--provider", "codex", "--model", "gpt-5", "--json"];
+    try {
+      const created = await t.cli.run(
+        ["create", "--project", "proj_test", "--name", "p", "--in", "30m", "--prompt-file", "p.md", ...agent],
+        { cwd: t.srcDir },
+      );
+      expect(created.stderr ?? "").toBe("");
+      const id = JSON.parse(created.stdout!).id as string;
+      expect(JSON.parse(created.stdout!).execution).toMatchObject({ mode: "agent", prompt });
+      const updated = await t.cli.run(
+        ["update", id, "--project", "proj_test", "--prompt-file", join(t.srcDir, "u.md"), "--json"],
+        {},
+      );
+      expect(JSON.parse(updated.stdout!).execution).toMatchObject({ mode: "agent", prompt: update });
+      const both = await t.cli.run(
+        ["update", id, "--project", "proj_test", "--prompt", "x", "--prompt-file", "u.md"],
+        { cwd: t.srcDir },
+      );
+      expect(both.stderr).toContain("Choose only one of --prompt and --prompt-file.");
+      // The 1 MB limit counts the file's bytes, BOM included, not characters.
+      for (const big of ["\u00e9".repeat(786_432), `\uFEFF${"a".repeat(1024 * 1024 - 1)}`]) {
+        await writeFile(join(t.srcDir, "big.md"), big);
+        const tooBig = await t.cli.run(
+          ["update", id, "--project", "proj_test", "--prompt-file", "big.md"],
+          { cwd: t.srcDir },
+        );
+        expect(tooBig.stderr).toContain("--prompt-file is larger than 1 MB.");
+      }
+    } finally {
+      await t.cleanup();
+    }
+  });
+
   it("prints a refresh command that keeps script settings and quotes the path", async () => {
     const t = await setup();
     const sourcePath = join(t.srcDir, "my check $(id).py");

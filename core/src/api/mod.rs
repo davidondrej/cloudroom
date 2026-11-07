@@ -533,6 +533,10 @@ impl IntoResponse for session::Error {
         let (status, error) = match self {
             Self::NotFound => (StatusCode::NOT_FOUND, "session not found"),
             Self::Conflict(message) => (StatusCode::CONFLICT, message),
+            Self::Effort(_) => {
+                let body = json!({"error": self.message(), "code": "invalid_reasoning_effort"});
+                return (StatusCode::CONFLICT, Json(body)).into_response();
+            }
             Self::Storage(detail) => {
                 eprintln!("storage unavailable: {detail}");
                 return (

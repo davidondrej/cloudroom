@@ -53,6 +53,11 @@ const VM_SESSIONS: Record<Harness, string> = {
 const CHUNK = 3 * 1024 * 1024;
 const PREVIEW_MB = 20;
 const DOWNLOAD_MB = 200;
+/** What one Teleport, Fork, or copy downloads in all: the Mac holds it at once, and the sandbox reports every size. */
+const MAX_DOWNLOAD_MB = 1024;
+/** The bytes left for one operation's downloads, which they share. */
+export type Allowance = { mb: number; bytes: number };
+export const allowance = (mb = MAX_DOWNLOAD_MB): Allowance => ({ mb, bytes: mb * 1024 * 1024 });
 const exec = promisify(execFile);
 // User-facing wording: Windows says "PC", as in claude-token.ts.
 const computer = process.platform === "win32" ? "PC" : COMPUTER;
@@ -110,10 +115,11 @@ async function run(deps: AppDeps, threadId: string, step: (value: TeleportLocalS
   if (!vmPath) throw new ApiError(409, "teleport_unavailable", "The cloud conversation file was not found. The thread stays in Cloud.");
   const cloud = await client.sessionWorkspace(saved.sessionId);
   const lineage = harness === "codex" ? await codexLineage(client, vmPath) : [];
+  const allowed = allowance();
   const [session, changes, parents] = await Promise.all([
-    download(client, vmPath),
-    cloudChanges(client, cloud.path, await git(environment.path, ["rev-parse", "HEAD"]), thread.createdAt),
-    Promise.all(lineage.map((path) => download(client, path))),
+    download(client, vmPath, allowed),
+    cloudChanges(client, cloud.path, await git(environment.path, ["rev-parse", "HEAD"]), thread.createdAt, allowed),
+    downloadEach(client, lineage, allowed),
   ]);
   step("copying");
   if (harness === "acp-cursor" || harness === "acp-opencode") await vm(client, `rm -f ${quote(vmPath)}`).catch(() => {});
@@ -181,7 +187,8 @@ export async function prepareLocalFork(deps: AppDeps, source: Thread, request: {
   const vmPath = (await vm(client, findNative(harness, saved.nativeId))).toString().trim();
   if (!vmPath) throw new ApiError(409, "fork_source_unavailable", "The source conversation file was not found in its sandbox.");
   const lineage = harness === "codex" ? await codexLineage(client, vmPath) : [];
-  const [file, parents] = await Promise.all([download(client, vmPath), Promise.all(lineage.map((path) => download(client, path)))]);
+  const allowed = allowance();
+  const [file, parents] = await Promise.all([download(client, vmPath, allowed), downloadEach(client, lineage, allowed)]);
   const session = file.subarray(0, file.lastIndexOf(10) + 1);
   const checkpoint = localCheckpoint(harness, session, point);
   const folder = await localForkFolder(deps, source);
@@ -260,7 +267,7 @@ async function landLocalForkCode(deps: AppDeps, client: CloudroomClient, source:
     await rm(temporary, { recursive: true, force: true });
   }
   return {
-    environment: { type: "provider", environmentProviderId: DEFAULT_ENVIRONMENT_PROVIDER_ID.gitWorktree, machine: { type: "existing", hostId: hostId! }, inputs: worktreeProviderInputs({ kind: "named", name: branch }) },
+    environment: { type: "provider", environmentProviderId: DEFAULT_ENVIRONMENT_PROVIDER_ID.gitWorktree, machine: { type: "existing", hostId: hostId! }, inputs: worktreeProviderInputs({ kind: "named", name: branch }, undefined, { kind: "default" }) },
     note: `It runs in a new worktree based on branch ${branch}, which holds the Cloud thread's code. The last commit, "Cloudroom fork: uncommitted changes", holds the work the Cloud thread had not committed.`,
   };
 }
@@ -329,11 +336,40 @@ export async function openOnMac(deps: AppDeps, threadId: string, path: string): 
   return { path: target };
 }
 
-export async function cloudFile(deps: AppDeps, threadId: string, path: string): Promise<Buffer> {
-  if (!isAbsolute(path)) throw new ApiError(400, "invalid_path", "Cloud file paths must be absolute.");
+type ImageDeps = Pick<AppDeps, "db" | "hub" | "config" | "providerRegistry">;
+/** This Mac's copy of a cloud file the chat showed, so it still shows once the sandbox no longer has it. */
+async function savedCloudFile(deps: ImageDeps, threadId: string, path: string): Promise<string> {
   const hostId = resolvePrimaryHostId(deps);
   if (!hostId) throw new ApiError(409, "host_unavailable", "This computer's local host is not ready.");
-  const saved = join(await requireThreadStoragePath(deps, { hostId, threadId }), "Cloud files", normalize(path));
+  return join(await requireThreadStoragePath(deps, { hostId, threadId }), "Cloud files", normalize(path));
+}
+
+const CHAT_IMAGE = /!\[[^\]]*\]\(\s*(?:<([^>]+)>|([^)\s]+))/g;
+const CODE = /```[\s\S]*?```|`[^`\n]*`/g;
+
+/** When a turn ends, its sandbox is still awake: saves the images its last message shows, so they still show after the
+ *  sandbox is rebuilt from a copy without /tmp (a failover's move home, cold storage). Never wakes the sandbox. */
+export async function saveCloudImages(deps: ImageDeps, threadId: string, text: string): Promise<void> {
+  const paths = new Set<string>();
+  for (const [, wrapped, bare] of text.replace(CODE, "").matchAll(CHAT_IMAGE)) {
+    const path = (() => { try { return decodeURI(wrapped ?? bare ?? ""); } catch { return ""; } })();
+    if (path.startsWith("/") && /\.(png|jpe?g|gif|webp|avif|bmp|svg)$/i.test(path)) paths.add(path);
+  }
+  if (!paths.size) return;
+  const client = await cloudroom(deps).threadClient(threadId, false).catch(() => null);
+  if (!client) return;
+  for (const path of [...paths].slice(0, 10)) {
+    const data = await download(client, path, PREVIEW_MB).catch(() => null);
+    if (!data) continue;
+    const saved = await savedCloudFile(deps, threadId, path);
+    await mkdir(dirname(saved), { recursive: true });
+    await writeFile(saved, data);
+  }
+}
+
+export async function cloudFile(deps: AppDeps, threadId: string, path: string): Promise<Buffer> {
+  if (!isAbsolute(path)) throw new ApiError(400, "invalid_path", "Cloud file paths must be absolute.");
+  const saved = await savedCloudFile(deps, threadId, path);
   try {
     const data = await download(await cloudroom(deps).threadClient(threadId, !existsSync(saved)), path, PREVIEW_MB);
     await mkdir(dirname(saved), { recursive: true });
@@ -435,20 +471,38 @@ for _ in range(64):
     if not path: sys.exit("The parent conversation %s of this forked Codex chat is missing." % id)
     print(path)
 else: sys.exit("This forked Codex chat has too many parents.")`;
-  return (await vm(client, `python3 -I -c ${quote(script)} ${quote(path)}`)).toString().split("\n").filter(Boolean);
+  const parents = (await vm(client, `python3 -I -c ${quote(script)} ${quote(path)}`)).toString().split("\n").filter(Boolean);
+  // The script stops at 64, but a replaced Core can answer anything.
+  if (parents.length > 64) throw new Error("This forked Codex chat has too many parents.");
+  return parents;
 }
 
-export async function download(client: CloudroomClient, path: string, maxMb = Infinity, run = (command: string) => vm(client, command)): Promise<Buffer> {
+export async function download(client: CloudroomClient, path: string, limit: number | Allowance = MAX_DOWNLOAD_MB, run = (command: string) => vm(client, command)): Promise<Buffer> {
+  const allowed = typeof limit === "number" ? allowance(limit) : limit;
   const size = Number((await run(`[ -f ${quote(path)} ] && wc -c < ${quote(path)} || echo -1`)).toString().trim());
   if (size < 0) throw new ApiError(404, "cloud_file_missing", `${path} is not a file in the cloud.`);
-  if (size > maxMb * 1024 * 1024) throw new ApiError(413, "cloud_file_too_large", `${basename(path)} is over the ${maxMb} MB limit.`);
+  if (!Number.isSafeInteger(size)) throw new Error(`The cloud sent no valid size for ${basename(path)}.`);
+  if (size > allowed.bytes) throw new ApiError(413, "cloud_file_too_large", `${basename(path)} is over the ${allowed.mb} MB limit.`);
+  allowed.bytes -= size;
   const parts: Buffer[] = [];
-  for (let offset = 0; offset < size; offset += CHUNK)
-    parts.push(await run(`tail -c +${offset + 1} ${quote(path)} | head -c ${CHUNK}`));
+  for (let offset = 0; offset < size; offset += CHUNK) {
+    const wanted = Math.min(CHUNK, size - offset);
+    const part = await run(`tail -c +${offset + 1} ${quote(path)} | head -c ${wanted}`);
+    // `head -c` never sends more, so a download keeps at most its reported size, even of a file still growing.
+    if (part.length > wanted) throw new Error(`The cloud sent more of ${basename(path)} than was asked for.`);
+    parts.push(part);
+  }
   return Buffer.concat(parts);
 }
 
-export async function cloudChanges(client: CloudroomClient, workspace: string, localHead: string | null, since: number): Promise<{ archive: Buffer; base: string | null }> {
+/** One file at a time, so a sandbox can't start many reads at once. */
+async function downloadEach(client: CloudroomClient, paths: string[], allowed: Allowance): Promise<Buffer[]> {
+  const files: Buffer[] = [];
+  for (const path of paths) files.push(await download(client, path, allowed));
+  return files;
+}
+
+export async function cloudChanges(client: CloudroomClient, workspace: string, localHead: string | null, since: number, allowed: number | Allowance = MAX_DOWNLOAD_MB): Promise<{ archive: Buffer; base: string | null }> {
   const head = localHead?.trim();
   const archive = `.cache/cloudroom/teleport-local-${randomUUID()}.tgz`;
   const skipped = [...SKIPPED, ".cloudroom"].map((name) => `-name ${quote(name)}`).join(" -o ");
@@ -469,7 +523,7 @@ export async function cloudChanges(client: CloudroomClient, workspace: string, l
     const created = (await vm(client, `timeout -k 5s 240s bash -c ${quote(command)} || { code=$?; [ $code = 124 ] && echo ${quote(slow)} >&2; exit $code; }`)).toString().trim();
     const [proven, base, path] = (created.split("\n").pop() ?? "").split(" ");
     if (!path) throw new Error("The cloud file changes could not be packed. The thread stays in Cloud.");
-    return { archive: await download(client, path), base: proven === "1" && base && /^[0-9a-f]{40,64}$/.test(base) ? base : null };
+    return { archive: await download(client, path, allowed), base: proven === "1" && base && /^[0-9a-f]{40,64}$/.test(base) ? base : null };
   } finally {
     await vm(client, `rm -f ~/${archive}`).catch(() => {});
   }

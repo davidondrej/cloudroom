@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { AppCommandId } from "@cloudroom/domain";
+import type { AppCommandId, AppShortcutInput } from "@cloudroom/domain";
 import type {
   BbDesktopApi,
   BbDesktopBrowserFindResult,
@@ -397,7 +397,15 @@ describe("desktop preload browser API", () => {
     const findResults: BbDesktopBrowserFindResult[] = [];
     let closeWindowRequestCount = 0;
     let openNewTabCount = 0;
-    const appCommands: AppCommandId[] = [];
+    const appCommands: (AppCommandId | AppShortcutInput)[] = [];
+    const shortcut: AppShortcutInput = {
+      altKey: false,
+      code: "Digit1",
+      ctrlKey: true,
+      key: "1",
+      metaKey: false,
+      shiftKey: false,
+    };
     const windowStates: BbDesktopWindowState[] = [];
     const state: BbDesktopBrowserState = {
       tabId: "browser:a",
@@ -532,6 +540,14 @@ describe("desktop preload browser API", () => {
       payload: "thread.new",
     });
     emitIpcPayload({
+      channel: BB_DESKTOP_APP_COMMAND_CHANNEL,
+      payload: { ...shortcut, extra: true },
+    });
+    emitIpcPayload({
+      channel: BB_DESKTOP_APP_COMMAND_CHANNEL,
+      payload: shortcut,
+    });
+    emitIpcPayload({
       channel: BB_DESKTOP_CLOSE_WINDOW_REQUEST_CHANNEL,
       payload: null,
     });
@@ -545,7 +561,7 @@ describe("desktop preload browser API", () => {
     expect(windowStates).toEqual([{ isFullScreen: true }]);
     expect(closeWindowRequestCount).toBe(1);
     expect(openNewTabCount).toBe(1);
-    expect(appCommands).toEqual(["thread.new"]);
+    expect(appCommands).toEqual(["thread.new", shortcut]);
     expect(electronMock.sendCalls).toContainEqual({
       channel: BB_DESKTOP_CLOSE_WINDOW_RESPONSE_CHANNEL,
       payload: true,

@@ -188,6 +188,7 @@ import {
   takeFailedWindowsUpdate,
 } from "./desktop-update-resume.js";
 import {
+  appOnReadOnlyVolume,
   installNeedsPassword,
   macAppLocation,
   reopenAfterExit,
@@ -200,6 +201,7 @@ import {
   BB_DESKTOP_GET_INFO_CHANNEL,
   BB_DESKTOP_INFO_CHANGED_CHANNEL,
   BB_DESKTOP_INSTALL_UPDATE_CHANNEL,
+  BB_DESKTOP_MOVE_TO_APPLICATIONS_CHANNEL,
   BB_DESKTOP_OPEN_EXTERNAL_URL_CHANNEL,
   BB_DESKTOP_SET_THEME_CHANNEL,
   BB_DESKTOP_FOCUS_WINDOW_CHANNEL,
@@ -225,7 +227,7 @@ import {
   createDesktopBrowserViewManager,
   type DesktopBrowserViewManager,
 } from "./desktop-browser-view.js";
-import { resolveDesktopBrowserAppCommand } from "./desktop-browser-shortcuts.js";
+import { findDesktopBrowserShortcutCandidates } from "./desktop-browser-shortcuts.js";
 import { registerDesktopBrowserIpc } from "./desktop-browser-main-ipc.js";
 import { createBrowserImportService } from "./browser-import/browser-import.js";
 import { readMacAppIcon } from "./browser-import/mac-app-icon.js";
@@ -406,6 +408,12 @@ let stoppingForQuit = false;
 let quitting = false;
 // Set once an update install starts, until it fails without exiting.
 let updateInstallStarted = false;
+// Opened from the disk image or translocated from Downloads: Restart to update can never
+// work there, so the app doesn't update itself and the banner asks to move it to Applications.
+const updateNeedsMove =
+  process.platform === "darwin" &&
+  app.isPackaged &&
+  appOnReadOnlyVolume(process.execPath);
 let serverTargetStore: ServerTargetStore | null = null;
 let computersSync: ComputersSync | null = null;
 let relaySessionKeeper: RelaySessionKeeper | null = null;
@@ -531,6 +539,7 @@ function getCurrentDesktopInfo(): BbDesktopInfo | null {
   return {
     ...info,
     computers: describeComputers(),
+    ...(updateNeedsMove ? { installNeedsMove: true } : {}),
     serverDaemonLogsAvailable: shouldEnableServerDaemonLogsMenu(),
     ...(macVitals ? { vitals: macVitals } : {}),
   };
@@ -2026,8 +2035,10 @@ async function installDownloadedUpdate(): Promise<void> {
   if (appUpdateNeedsPassword()) {
     const ownership = await takeAppOwnership(process.execPath);
     desktopLogger.info(`Taking ownership of the Cloudroom app before updating: ${ownership}.`);
-    if (ownership === "canceled") {
-      throw new Error("The password prompt was canceled, so the update wasn't installed.");
+    if (ownership === "canceled" || ownership === "timed-out") {
+      throw new Error(
+        `The password prompt ${ownership === "canceled" ? "was canceled" : "timed out"}, so the update wasn't installed.`,
+      );
     }
   }
   // A window left frozen while the app quits gets reopened, and macOS then
@@ -2130,6 +2141,41 @@ async function installDownloadedUpdate(): Promise<void> {
   if (process.platform === "win32" && handedOff) await new Promise<never>(() => {});
 }
 
+// Opened from the disk image or Downloads: copy Cloudroom into Applications and reopen it from there.
+// Local agents stop first and resume after the relaunch, like Restart to update.
+async function moveToApplications(): Promise<boolean> {
+  if (!updateNeedsMove || quitting || stoppingForQuit) return false;
+  const runtime = currentRuntime?.ownership === "spawned" ? currentRuntime : null;
+  const resumeArgs = runtime && {
+    logger: desktopLogger,
+    serverUrl: runtime.serverUrl,
+    userDataPath: app.getPath("userData"),
+  };
+  if (resumeArgs) {
+    await stopThreadsForUpdate(resumeArgs).catch((error: unknown) => {
+      desktopLogger.error(`Stopping threads before the move failed: ${String(error)}`);
+    });
+  }
+  // The relaunch quits this copy, so never ask about running agents.
+  quitting = true;
+  let moved = false;
+  try {
+    moved = app.moveToApplicationsFolder();
+  } catch (error: unknown) {
+    desktopLogger.error(`Moving Cloudroom to Applications failed: ${String(error)}`);
+  }
+  desktopLogger.info(`Move to Applications: ${moved ? "moved, reopening from Applications" : "not moved"}.`);
+  if (!moved) {
+    quitting = false;
+    if (resumeArgs) {
+      void resumeThreadsAfterUpdate(resumeArgs).catch((error: unknown) => {
+        desktopLogger.error(`Resuming threads after a failed move failed: ${String(error)}`);
+      });
+    }
+  }
+  return moved;
+}
+
 // Shares a check that is still running, so the Updates page's own check joins it if it starts before this one ends.
 async function checkForDesktopUpdates(): Promise<void> {
   await Promise.all([
@@ -2172,6 +2218,10 @@ function registerDesktopUpdateIpc(): void {
   ipcMain.handle(BB_DESKTOP_INSTALL_UPDATE_CHANNEL, (event) => {
     if (!isPrivilegedAppSender(event)) return;
     return installDownloadedUpdate();
+  });
+  ipcMain.handle(BB_DESKTOP_MOVE_TO_APPLICATIONS_CHANNEL, (event) => {
+    if (!isPrivilegedAppSender(event)) return false;
+    return moveToApplications();
   });
   ipcMain.on(BB_DESKTOP_SET_THEME_CHANNEL, (event, payload: unknown) => {
     if (!isPrivilegedAppSender(event)) return;
@@ -2943,7 +2993,11 @@ async function runDesktopApp(): Promise<void> {
     platform: desktopPlatform,
   });
   const updateNeedsPassword = appUpdateNeedsPassword();
-  if (updateNeedsPassword) {
+  if (updateNeedsMove) {
+    desktopLogger.warn(
+      "Cloudroom runs from a read-only place (the disk image or Downloads), so it can't update itself until it's moved to Applications.",
+    );
+  } else if (updateNeedsPassword) {
     desktopLogger.warn(
       "This user can't write the Cloudroom app, so the next Restart to update asks for a password once.",
     );
@@ -2951,6 +3005,7 @@ async function runDesktopApp(): Promise<void> {
   desktopAutoUpdateService = createDesktopAutoUpdateService({
     currentVersion: desktopVersion,
     enabled:
+      !updateNeedsMove &&
       desktopUpdateSupport.autoUpdate &&
       shouldEnableDesktopAutoUpdate({
         env: process.env,
@@ -3014,9 +3069,9 @@ async function runDesktopApp(): Promise<void> {
     });
   }
   desktopBrowserViewManager = createDesktopBrowserViewManager({
-    dispatchAppCommand({ command, hostWebContentsId }) {
+    dispatchAppShortcut(target) {
       const browserWindow = BrowserWindow.getAllWindows().find(
-        (candidate) => candidate.webContents.id === hostWebContentsId,
+        (candidate) => candidate.webContents.id === target.hostWebContentsId,
       );
       if (browserWindow === undefined) {
         return;
@@ -3024,8 +3079,15 @@ async function runDesktopApp(): Promise<void> {
       sendToApplicationRenderer(
         browserWindow,
         BB_DESKTOP_APP_COMMAND_CHANNEL,
-        command,
+        "command" in target ? target.command : target.input,
       );
+    },
+    findShortcutCandidates(input) {
+      return findDesktopBrowserShortcutCandidates({
+        input,
+        isMac: process.platform === "darwin",
+        keybindings: currentAppKeybindings,
+      });
     },
     focusHostWebContents(hostWebContentsId) {
       const browserWindow = BrowserWindow.getAllWindows().find(
@@ -3034,13 +3096,6 @@ async function runDesktopApp(): Promise<void> {
       if (browserWindow !== undefined) {
         browserWindow.webContents.focus();
       }
-    },
-    resolveAppCommand(input) {
-      return resolveDesktopBrowserAppCommand({
-        input,
-        isMac: process.platform === "darwin",
-        keybindings: currentAppKeybindings,
-      });
     },
   });
   registerDesktopBrowserIpc(desktopBrowserViewManager, isPrivilegedAppSender);

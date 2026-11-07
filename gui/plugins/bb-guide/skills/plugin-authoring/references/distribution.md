@@ -29,10 +29,10 @@ does not cover:
      app), which the plugin's `tsconfig.json` maps
      `@get-bb/plugin-sdk` onto. Read whichever the plugin in front of you has.
      That layout still works for existing entries, but migrate before adding
-     `bb.host` so the `/host` and `/testing/host` subpaths are present; `bb
-plugin migrate` converts such a plugin to the npm package (it prints the plan
-     and asks first, and needs `--yes` when stdin is not a terminal). Never
-     migrate a plugin the user did not ask you to migrate.
+     `bb.host` so the `/host` and `/testing/host` subpaths are present;
+     `room-cli plugin migrate` converts such a plugin to the npm package (it
+     prints the plan and asks first, and needs `--yes` when stdin is not a
+     terminal). Never migrate a plugin the user did not ask you to migrate.
 3. **`git clone --depth 1 https://github.com/davidondrej/cloudroom`** for host behavior or
    a reference implementation: `packages/plugin-sdk/src/`,
    `apps/server/src/services/plugins/`, `plugins/`.

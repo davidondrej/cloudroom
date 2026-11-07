@@ -26,9 +26,9 @@ description: Connect Modal and create reusable cloud machines with the bundled s
 Settings edits the Default image's Dockerfile, adds named Dockerfile or Modal
 image-ID entries, and adds named CPU/memory presets. One or zero choices use the
 default without adding a composer chip; multiple choices share one chip. Agents
-can run
-`room-cli modal image show > Dockerfile`, edit the file, then run `cloudroom modal image set
---file ./Dockerfile`. `cloudroom modal image reset` restores the bundled default.
+can run `room-cli modal image show > Dockerfile`, edit the file, then run
+`room-cli modal image set --file ./Dockerfile`. `room-cli modal image reset`
+restores the bundled default.
 Append `--json` for structured output. File paths resolve from the CLI directory
 on the current thread's host, or the server primary host without thread context.
 Typed RPCs `image.definition`, `image.set({dockerfile})`, and `image.reset`

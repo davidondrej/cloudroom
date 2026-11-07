@@ -45,6 +45,11 @@ function buildStoredFilename(originalName: string): string {
   return `${stem}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}${extension}`;
 }
 
+/** The same file uploaded again gets the same name: a stored name minus its upload suffix. */
+export function uploadedAttachmentName(path: string): string {
+  return path.replace(/-\d{13}-[0-9a-z]{1,6}(?=(\.[^./\\]*)?$)/u, "");
+}
+
 function projectAttachmentDir(dataDir: string, projectId: string): string {
   return join(dataDir, "attachments", projectId);
 }

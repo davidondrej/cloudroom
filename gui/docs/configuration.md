@@ -879,9 +879,10 @@ organization. Local Claude Code runs with `CLAUDE_CONFIG_DIR` set to the folder,
 so claude.ai connectors load, and rebuilds its session silently on a switch. The
 folder links chat history, settings, skills, and plugins to `~/.claude` and gets
 a copy of the user's MCP servers before each turn. Accounts added before full
-logins keep running on `CLAUDE_CODE_OAUTH_TOKEN` until **Sign in again**. Once a Claude account is added, the machine's own login stays
-listed but can't be picked, because Cloud needs a one-year token. **Add Terminal
-login** adds it as an account, labeled with the Mac's email, and selects it. The
+logins keep running on `CLAUDE_CODE_OAUTH_TOKEN` until **Sign in again**. Adding
+an account never switches; the machine's own login stays a tile. Once Cloud is on
+another account, the first **Use** on it asks for one `setup-token` approval so
+Cloud can follow it. The
 selected Claude account becomes the Cloud Claude login through
 `POST /api/v1/cloudroom/account/claude/token`.
 

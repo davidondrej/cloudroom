@@ -30,6 +30,7 @@ import {
 } from "./queue-waits.js";
 import {
   createAutomaticQueuedMessageEligibility,
+  isQueuedMessageAutoSendCandidate,
   releaseStaleQueuedMessageDispatchClaims,
   sendNextQueuedMessageIfPresent,
   sendQueuedMessage,
@@ -479,6 +480,8 @@ async function attemptAutomaticQueuedMessage(
       });
       return;
     }
+    if (!isQueuedMessageAutoSendCandidate(getThread(deps.db, row.threadId)))
+      return;
     if (isCommandTimeoutError(error)) {
       deps.logger.debug(
         {

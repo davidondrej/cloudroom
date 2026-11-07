@@ -237,7 +237,10 @@ export type CodexAccountsResult =
   | { sessionId: string; verificationUri: string; userCode: string; expiresAt: number }
   | { status: "pending" | "complete" | "error"; message: string | null };
 
-export interface ClaudeAccountInput { action?: "login" | "cancel" | "complete" | "setup-token" | "key" | "token"; requestId?: string; code?: string; state?: string; apiKey?: string; token?: string; plan?: string; follow?: boolean }
+/** The accounts a Cloud login switch moves between, by name, for the line it leaves in limited threads. */
+export interface CloudAccountSwitch { from: string; to: string }
+
+export interface ClaudeAccountInput { action?: "login" | "cancel" | "complete" | "setup-token" | "key" | "token"; requestId?: string; code?: string; state?: string; apiKey?: string; token?: string; plan?: string; follow?: boolean; switched?: CloudAccountSwitch }
 
 export interface CloudroomArea {
   claudeAuth(input?: ClaudeAccountInput, signal?: AbortSignal): Promise<CloudroomCodexAuth>;
@@ -250,7 +253,7 @@ export interface CloudroomArea {
   cursorApiKey(requestId: string, apiKey: string): Promise<CloudroomCodexAuth>;
   /** The Accounts plugin's Cursor account in use becomes the Cloud login: its API key, or with `null` this computer's own
    *  Cursor login again. */
-  cursorAccount(input: { requestId: string; apiKey: string | null }): Promise<CloudroomCodexAuth>;
+  cursorAccount(input: { requestId: string; apiKey: string | null; switched?: CloudAccountSwitch }): Promise<CloudroomCodexAuth>;
   piApiKey(provider: string, apiKey: string): Promise<{ providers: string[] }>;
   codexAuth(signal?: AbortSignal): Promise<CloudroomCodexAuth>;
   codexLogin(requestId: string): Promise<CloudroomCodexAuth>;
@@ -403,7 +406,7 @@ export function createCloudroomArea({ transport }: CreateSdkAreaArgs): Cloudroom
     ...(body === undefined ? {} : { headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }),
   });
   return {
-    claudeAuth: (input, signal) => transport.readJson(request(`/claude${input?.action ? `/${input.action}` : ""}`, input?.action ? { requestId: input.requestId, ...(input.action === "complete" ? { code: input.code, state: input.state } : {}), ...(input.action === "key" ? { apiKey: input.apiKey } : {}), ...(input.action === "token" ? { token: input.token, plan: input.plan, ...(input.follow ? { follow: true } : {}) } : {}) } : undefined, signal)) as Promise<CloudroomCodexAuth>,
+    claudeAuth: (input, signal) => transport.readJson(request(`/claude${input?.action ? `/${input.action}` : ""}`, input?.action ? { requestId: input.requestId, ...(input.action === "complete" ? { code: input.code, state: input.state } : {}), ...(input.action === "key" ? { apiKey: input.apiKey } : {}), ...(input.action === "token" ? { token: input.token, plan: input.plan, ...(input.follow ? { follow: true } : {}), ...(input.switched ? { switched: input.switched } : {}) } : {}) } : undefined, signal)) as Promise<CloudroomCodexAuth>,
     codexAccounts: (input, signal) => transport.readJson(request("/codex-accounts", input, signal)) as Promise<CodexAccountsResult>,
     cursorAuth: (signal) => transport.readJson(request("/cursor", undefined, signal)) as Promise<CloudroomCodexAuth>,
     cursorLogin: (requestId) => transport.readJson(request("/cursor/login", { requestId })) as Promise<CloudroomCodexAuth>,
