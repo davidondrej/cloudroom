@@ -4,6 +4,7 @@ import type {
   UpdateDownloadedEvent,
   UpdateInfo,
 } from "electron-updater";
+import type { App } from "electron";
 import { existsSync } from "node:fs";
 import type { BbDesktopInfo } from "@cloudroom/desktop-contract";
 import {
@@ -147,6 +148,7 @@ interface SquirrelUpdater {
 export function createElectronAutoUpdaterAdapter(
   updater: AppUpdater,
   squirrel: SquirrelUpdater,
+  app: Pick<App, "releaseSingleInstanceLock" | "exit">,
 ): DesktopAutoUpdaterAdapter {
   return {
     checkForUpdates() {
@@ -173,6 +175,15 @@ export function createElectronAutoUpdaterAdapter(
       squirrel.on("update-downloaded", () => handler());
     },
     quitAndInstall() {
+      if (process.platform === "linux") {
+        // AppImageUpdater launches the replacement before it queues app.quit().
+        // Let the new GUI take the lock, then bypass cancellable quit handlers.
+        // main has already awaited finishQuit(), including the owned runtime.
+        app.releaseSingleInstanceLock();
+        updater.quitAndInstall();
+        app.exit(0);
+        return;
+      }
       // Windows: show only the installer's progress window, then reopen Cloudroom.
       if (process.platform === "win32") updater.quitAndInstall(false, true);
       else updater.quitAndInstall();
