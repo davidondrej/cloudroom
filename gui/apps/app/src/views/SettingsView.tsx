@@ -68,6 +68,7 @@ import { SidebarNavigationSetting } from "@/components/settings/SidebarNavigatio
 import { SplitDimmingSetting } from "@/components/settings/SplitDimmingSetting";
 import { StarterPromptsSetting } from "@/components/ActivationChecklist";
 import { HarnessIconsSetting } from "@/components/settings/HarnessIconsSetting";
+import { ReadingSettings } from "@/components/settings/ReadingSettings";
 import { useSettingsNavState } from "@/components/settings/settings-nav";
 import { useRevealSettingsTarget } from "@/components/settings/settings-search";
 import {
@@ -766,6 +767,7 @@ export function AppearanceSettingsSection({
         <SidebarNavigationSetting />
         <CollapseSubagentsSetting />
         <HarnessIconsSetting />
+        <ReadingSettings />
         <CodeRendererSettings />
         <SettingsWithControl label="Theme">
           <DropdownMenu>

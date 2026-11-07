@@ -556,11 +556,11 @@
     var(--canvas) 60%
   );
   --sidebar-ring: var(--primary);
-  --font-sans: "Inter Variable", Inter, sans-serif;
+  --font-sans: "Inter Variable", Inter, var(--font-script, sans-serif), sans-serif;
   --font-serif: Georgia, serif;
   --font-mono:
-    ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono",
-    "Courier New", monospace;
+    "Arabic Script Code", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+    "Liberation Mono", "Courier New", monospace;
   --font-terminal:
     "JetBrainsMono Nerd Font Mono", "MesloLGS NF", "Symbols Nerd Font Mono",
     ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono",
@@ -784,11 +784,11 @@
     var(--canvas) 67%
   );
   --sidebar-ring: var(--primary);
-  --font-sans: "Inter Variable", Inter, sans-serif;
+  --font-sans: "Inter Variable", Inter, var(--font-script, sans-serif), sans-serif;
   --font-serif: Georgia, serif;
   --font-mono:
-    ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono",
-    "Courier New", monospace;
+    "Arabic Script Code", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+    "Liberation Mono", "Courier New", monospace;
   --radius: 0.5rem;
   /* Dark shadows are pure black at higher alpha — a 20%-gray shadow is
    * invisible on the dark canvas, so floating surfaces (popovers, dropdowns)

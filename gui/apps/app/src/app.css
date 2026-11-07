@@ -1,5 +1,22 @@
 @import "@fontsource-variable/inter";
+@import "@fontsource-variable/vazirmatn";
 @import "@/components/ui/theme.css";
+
+/*
+ * Arabic-script glyphs only, for code. Monospace fonts either lack them or
+ * (Menlo, Courier New) draw them badly; the unicode-range keeps Latin code
+ * on the real monospace font.
+ */
+@font-face {
+  font-family: "Arabic Script Code";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 100 900;
+  src: url("../node_modules/@fontsource-variable/vazirmatn/files/vazirmatn-arabic-wght-normal.woff2")
+    format("woff2-variations");
+  unicode-range: U+0600-06FF, U+0750-077F, U+08A0-08FF, U+FB50-FDFF,
+    U+FE70-FEFF;
+}
 
 @layer base {
   /*
@@ -1098,4 +1115,29 @@
 :root[data-corners="sharp"] *::before,
 :root[data-corners="sharp"] *::after {
   border-radius: 0 !important;
+}
+
+/*
+ * Reading preferences: chat text size and line height from Settings >
+ * Appearance (see lib/reading-preferences.ts). Unlayered so it beats the
+ * text-sm/leading-relaxed utilities on these containers only; children with
+ * their own size classes (tool rows, code) keep them.
+ */
+[data-message-column],
+[data-user-message],
+[data-message-column] [data-markdown-preview],
+[data-user-message] [data-markdown-preview],
+.ProseMirror[contenteditable] {
+  font-size: var(--chat-font-size, 14px);
+  line-height: var(--chat-line-height, 1.625);
+}
+
+/*
+ * Each composer paragraph takes its direction from its first strong
+ * character, so Arabic, Persian or Hebrew lines run right-to-left while
+ * typing and Latin lines stay left-to-right.
+ */
+.ProseMirror[contenteditable] :is(p, li, h1, h2, h3, blockquote) {
+  unicode-bidi: plaintext;
+  text-align: start;
 }

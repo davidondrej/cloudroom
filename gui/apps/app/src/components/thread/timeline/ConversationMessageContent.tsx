@@ -287,7 +287,7 @@ function CollapsibleMessageText({
         }
       >
         {collapsedPreview?.parseAsMarkdown === false ? (
-          <span>{body.text}</span>
+          <span dir="auto">{body.text}</span>
         ) : (
           <MarkdownPreview
             content={
@@ -438,7 +438,7 @@ function UserConversationMessage({
           </div>
         ) : null}
         <div className="flex w-fit max-w-full flex-col items-end">
-          <div className="max-w-full rounded-xl bg-background px-4 py-2.5 shadow-message dark:bg-surface-recessed text-sm leading-relaxed text-foreground">
+          <div data-user-message="" className="max-w-full rounded-xl bg-background px-4 py-2.5 shadow-message dark:bg-surface-recessed text-sm leading-relaxed text-foreground">
             {messageText ? (
               <CollapsibleMessageText
                 mentions={mentions}

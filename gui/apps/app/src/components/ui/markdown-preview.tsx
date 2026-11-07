@@ -42,6 +42,7 @@ import remarkMath from "remark-math";
 import { ImageLightbox, getWrappedImageIndex } from "./image-lightbox.js";
 import { InlineImageGalleryContext } from "./inline-image-gallery-context.js";
 import { remarkLineBreaks } from "./markdown-line-breaks.js";
+import { rehypeAutoDirection } from "./markdown-auto-direction.js";
 import { normalizeMathFences } from "./markdown-math-fences.js";
 import {
   markdownMayContainMath,
@@ -302,11 +303,11 @@ interface MarkdownHastNode {
 const MARKDOWN_TABLE_CLASS =
   "w-full border-separate border-spacing-0 text-[13px] leading-normal";
 const MARKDOWN_TABLE_HEADER_CLASS =
-  "whitespace-nowrap border-b border-foreground/10 bg-surface-recessed-solid text-left align-bottom text-xs font-medium text-muted-foreground/70";
+  "whitespace-nowrap border-b border-foreground/10 bg-surface-recessed-solid text-start align-bottom text-xs font-medium text-muted-foreground/70";
 const MARKDOWN_TABLE_CELL_CLASS =
   "border-b border-foreground/[0.07] align-top first:font-medium first:text-foreground";
 const MARKDOWN_TABLE_STICKY_COLUMN_CLASS =
-  "first:sticky first:left-0 first:shadow-[inset_-1px_0_0_color-mix(in_oklab,var(--foreground)_12%,transparent)]";
+  "first:sticky first:start-0 first:shadow-[inset_-1px_0_0_color-mix(in_oklab,var(--foreground)_12%,transparent)]";
 const MARKDOWN_TABLE_SHORT_CELL_LENGTH = 24;
 const MarkdownTableExpandedContext = createContext(false);
 const MARKDOWN_SOURCE_COLOR_SCHEME_MEDIA_PATTERN =
@@ -314,9 +315,12 @@ const MARKDOWN_SOURCE_COLOR_SCHEME_MEDIA_PATTERN =
 const MARKDOWN_HTML_REHYPE_PLUGINS: MarkdownRehypePlugins = [
   rehypeRaw,
   rehypeSanitize,
+  rehypeAutoDirection,
 ];
 
-const MARKDOWN_PLAIN_REHYPE_PLUGINS: MarkdownRehypePlugins = [];
+const MARKDOWN_PLAIN_REHYPE_PLUGINS: MarkdownRehypePlugins = [
+  rehypeAutoDirection,
+];
 
 function resolveRehypePlugins({
   allowHtml,
@@ -914,49 +918,49 @@ function MarkdownPre({ children }: MarkdownPreProps) {
   return <>{children}</>;
 }
 
-function MarkdownH1({ children }: MarkdownHeadingProps) {
+function MarkdownH1({ children, dir }: MarkdownHeadingProps) {
   return (
-    <h1 className="mb-2 mt-4 text-lg font-semibold text-foreground first:mt-0">
+    <h1 dir={dir} className="mb-2 mt-4 text-lg font-semibold text-foreground first:mt-0">
       {children}
     </h1>
   );
 }
 
-function MarkdownH2({ children }: MarkdownHeadingProps) {
+function MarkdownH2({ children, dir }: MarkdownHeadingProps) {
   return (
-    <h2 className="mb-2 mt-4 text-base font-semibold text-foreground first:mt-0">
+    <h2 dir={dir} className="mb-2 mt-4 text-base font-semibold text-foreground first:mt-0">
       {children}
     </h2>
   );
 }
 
-function MarkdownH3({ children }: MarkdownHeadingProps) {
+function MarkdownH3({ children, dir }: MarkdownHeadingProps) {
   return (
-    <h3 className="mb-2 mt-3 text-sm font-semibold text-foreground first:mt-0">
+    <h3 dir={dir} className="mb-2 mt-3 text-sm font-semibold text-foreground first:mt-0">
       {children}
     </h3>
   );
 }
 
-function MarkdownH4({ children }: MarkdownHeadingProps) {
+function MarkdownH4({ children, dir }: MarkdownHeadingProps) {
   return (
-    <h4 className="mb-1 mt-3 text-sm font-medium text-foreground first:mt-0">
+    <h4 dir={dir} className="mb-1 mt-3 text-sm font-medium text-foreground first:mt-0">
       {children}
     </h4>
   );
 }
 
-function MarkdownH5({ children }: MarkdownHeadingProps) {
+function MarkdownH5({ children, dir }: MarkdownHeadingProps) {
   return (
-    <h5 className="mb-1 mt-2 text-sm font-semibold uppercase text-muted-foreground first:mt-0">
+    <h5 dir={dir} className="mb-1 mt-2 text-sm font-semibold uppercase text-muted-foreground first:mt-0">
       {children}
     </h5>
   );
 }
 
-function MarkdownH6({ children }: MarkdownHeadingProps) {
+function MarkdownH6({ children, dir }: MarkdownHeadingProps) {
   return (
-    <h6 className="mb-1 mt-2 text-xs font-semibold uppercase text-muted-foreground first:mt-0">
+    <h6 dir={dir} className="mb-1 mt-2 text-xs font-semibold uppercase text-muted-foreground first:mt-0">
       {children}
     </h6>
   );
@@ -975,8 +979,11 @@ function MarkdownParagraph({
   );
 }
 
-function MarkdownUnorderedList({ children }: MarkdownUnorderedListProps) {
-  return <ul className="mb-2 list-disc pl-5 text-foreground">{children}</ul>;
+function MarkdownUnorderedList({
+  children,
+  dir,
+}: MarkdownUnorderedListProps) {
+  return <ul dir={dir} className="mb-2 list-disc ps-5 text-foreground">{children}</ul>;
 }
 
 function MarkdownOrderedList({
@@ -993,10 +1000,10 @@ function MarkdownOrderedList({
   return (
     <ol
       {...orderedListProps}
-      className="mb-2 list-decimal pl-5 text-foreground"
+      className="mb-2 list-decimal ps-5 text-foreground"
       style={
         extraDigits > 0
-          ? { paddingLeft: `calc(1.25rem + ${extraDigits}ch)` }
+          ? { paddingInlineStart: `calc(1.25rem + ${extraDigits}ch)` }
           : undefined
       }
     >
@@ -1009,9 +1016,9 @@ function MarkdownListItem({ children }: MarkdownListItemProps) {
   return <li className="mb-1 text-foreground">{children}</li>;
 }
 
-function MarkdownBlockquote({ children }: MarkdownBlockquoteProps) {
+function MarkdownBlockquote({ children, dir }: MarkdownBlockquoteProps) {
   return (
-    <blockquote className="my-2 border-l-2 border-surface-selected-border pl-3 text-muted-foreground">
+    <blockquote dir={dir} className="my-2 border-s-2 border-surface-selected-border ps-3 text-muted-foreground">
       {children}
     </blockquote>
   );
@@ -1047,7 +1054,7 @@ function previousMarkdownHeadingText(
   return null;
 }
 
-function MarkdownTable({ children, node }: MarkdownTableProps) {
+function MarkdownTable({ children, dir, node }: MarkdownTableProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [expandedTitle, setExpandedTitle] = useState<string | null>(null);
   const closeExpanded = useCallback(() => setExpandedTitle(null), []);
@@ -1055,13 +1062,14 @@ function MarkdownTable({ children, node }: MarkdownTableProps) {
   return (
     <div
       ref={containerRef}
+      dir={dir}
       className="group/table relative my-3 w-full overflow-hidden rounded-lg border border-border"
     >
       <MarkdownTableScroller>
         <table
           className={cn(
             MARKDOWN_TABLE_CLASS,
-            "[&_tbody_tr:last-child_td]:border-b-0 [&_thead_th:last-child]:pr-11",
+            "[&_tbody_tr:last-child_td]:border-b-0 [&_thead_th:last-child]:pe-11",
           )}
         >
           {children}
@@ -1078,7 +1086,7 @@ function MarkdownTable({ children, node }: MarkdownTableProps) {
                   previousMarkdownHeadingText(containerRef.current) ?? "Table",
                 )
               }
-              className="absolute right-1.5 top-1.5 z-[2] inline-flex size-6 cursor-pointer items-center justify-center rounded-md bg-surface-recessed-solid text-muted-foreground/60 transition-colors hover:bg-foreground/10 hover:text-foreground group-hover/table:text-muted-foreground"
+              className="absolute end-1.5 top-1.5 z-[2] inline-flex size-6 cursor-pointer items-center justify-center rounded-md bg-surface-recessed-solid text-muted-foreground/60 transition-colors hover:bg-foreground/10 hover:text-foreground group-hover/table:text-muted-foreground"
             >
               <Icon name="Maximize2" className="size-3.5" />
             </button>
