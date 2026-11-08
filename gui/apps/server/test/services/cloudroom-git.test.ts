@@ -3,8 +3,10 @@ import { once } from "node:events";
 import { createServer } from "node:http";
 import { existsSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { delimiter, dirname, join } from "node:path";
+import { pathToFileURL } from "node:url";
+import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { findGitShellPath } from "@cloudroom/process-utils";
 import { cloudGitEnvironmentId } from "@cloudroom/domain";
 import { cloudroomThreads, createThread } from "@cloudroom/db";
 import { cloudroom } from "../../src/services/cloudroom/commands.js";
@@ -15,12 +17,32 @@ import { CloudGitError, cloudGitBranches, cloudGitDiffFiles, cloudGitDiffPatch, 
 
 let repo: string;
 let origin: string;
+let bash = "/bin/bash";
+
+beforeAll(async () => {
+  if (process.platform !== "win32") return;
+  const shell = await findGitShellPath();
+  if (!shell) throw new Error("Cloud Git tests need Git for Windows Bash.");
+  bash = join(dirname(shell), "bash.exe");
+});
+
+function runBash(script: string, cwd?: string, input: Buffer = Buffer.alloc(0), login = false) {
+  const result = spawnSync(bash, [login ? "-lc" : "-c", script], {
+    cwd, input, maxBuffer: 64 << 20,
+    ...(process.platform === "win32" ? { env: { ...process.env, PATH: `${dirname(bash)}${delimiter}${process.env.PATH ?? ""}` } } : {}),
+  });
+  if (result.error) throw result.error;
+  return result;
+}
+
+// Git Bash accepts drive paths with forward slashes, including in shell literals.
+const shellPath = (path: string) => process.platform === "win32" ? path.replaceAll("\\", "/") : path;
 
 const git = (...args: string[]) => execFileSync("git", args, { cwd: repo, encoding: "utf8" }).trim();
 const write = (path: string, text: string) => writeFileSync(join(repo, path), text);
 // Runs the script the way Core's /v1/vm/run does: bash, in the checkout, stdin piped.
 const runIn = (cwd: () => string): CloudGitRun => async (script, stdin) => {
-  const result = spawnSync("/bin/bash", ["-c", script], { cwd: cwd(), input: stdin ?? Buffer.alloc(0), maxBuffer: 64 << 20 });
+  const result = runBash(script, cwd(), stdin);
   if (result.status !== 0) throw new CloudGitError(result.stderr.toString().trim() || `exit ${result.status} ${result.signal ?? ""}`, result.status);
   return result.stdout;
 };
@@ -31,6 +53,7 @@ beforeEach(() => {
   repo = mkdtempSync(join(tmpdir(), "cloud-git-"));
   execFileSync("git", ["init", "-q", "--bare", "-b", "main", origin]);
   git("init", "-q", "-b", "main");
+  git("config", "core.autocrlf", "false");
   git("config", "user.email", "agent@example.com");
   git("config", "user.name", "Agent");
   write("keep.txt", "one\ntwo\n");
@@ -112,7 +135,7 @@ describe("cloud git", () => {
     const before = readdirSync(join(repo, ".git")).sort();
     const objects = git("count-objects", "-v");
     write("big.bin", "x".repeat(2 * 1024 * 1024));
-    const odd = "we\x1eird name\n";
+    const odd = process.platform === "win32" ? "we'ird name ü.txt" : "we\x1eird name\n";
     write(odd, "odd\n");
 
     const status = await cloudGitStatus(run);
@@ -157,11 +180,11 @@ describe("cloud git", () => {
 
     await expect(cloudGitDiffFiles(run, { type: "branch_committed", mergeBaseBranch: "nope" })).rejects.toMatchObject({ exitCode: 5 });
     expect(await cloudGitBranches(run, undefined, 50, "origin/main")).toMatchObject({ branches: ["main", "room/feature"], remoteBranches: ["origin/main"], selectedBranch: { name: "origin/main", kind: "remote" } });
-  });
+  }, process.platform === "win32" ? 30000 : undefined);
 
   it("never runs hooks or textconv", async () => {
-    writeFileSync(join(repo, ".git", "hooks", "post-index-change"), `#!/bin/sh\ntouch "${join(repo, "hook-ran")}"\n`, { mode: 0o755 });
-    git("config", "hook.cloudroom-test.command", `touch "${join(repo, "config-hook-ran")}"`);
+    writeFileSync(join(repo, ".git", "hooks", "post-index-change"), `#!/bin/sh\ntouch "${shellPath(join(repo, "hook-ran"))}"\n`, { mode: 0o755 });
+    git("config", "hook.cloudroom-test.command", `touch "${shellPath(join(repo, "config-hook-ran"))}"`);
     git("config", "hook.cloudroom-test.event", "post-index-change");
     git("config", "diff.sample.textconv", "sed s/^/X/");
     git("config", "diff.sample.cachetextconv", "true");
@@ -196,7 +219,7 @@ describe("cloud git", () => {
       git("add", "other.txt");
       git("commit", "-q", "-m", "Main moves on");
       git("push", "-q", bare, "side:main");
-      execFileSync("git", ["clone", "-q", "--filter=blob:none", "--branch", "feature", `file://${bare}`, clone], { stdio: "ignore" });
+      execFileSync("git", ["-c", "core.autocrlf=false", "clone", "-q", "--filter=blob:none", "--branch", "feature", pathToFileURL(bare).href, clone], { stdio: "ignore" });
       const inClone = runIn(() => clone);
       const packs = readdirSync(join(clone, ".git", "objects", "pack")).sort();
       const expected = { aheadCount: 1, behindCount: 1, commits: [expect.objectContaining({ subject: "Change file" })], files: [{ path: "file.txt", status: "M", insertions: null, deletions: null }], lineStatsComplete: false };
@@ -235,7 +258,7 @@ it("serves a Cloud thread's Git status and diff through the environment API, and
       let text = "";
       for await (const chunk of req) text += chunk;
       const input = JSON.parse(text) as { command: string; stdin: string; cwd: string };
-      const result = spawnSync("/bin/bash", ["-lc", input.command], { cwd: input.cwd, input: Buffer.from(input.stdin, "hex"), maxBuffer: 64 << 20 });
+      const result = runBash(input.command, input.cwd, Buffer.from(input.stdin, "hex"), true);
       return json({ code: result.status, stdout: result.stdout.toString("hex"), stderr: result.stderr.toString("hex"), truncated: false });
     }
     json({}, 404);
@@ -289,7 +312,7 @@ it("checks which files exist in a Cloud thread's sandbox, past login-shell outpu
       let text = "";
       for await (const chunk of req) text += chunk;
       const input = JSON.parse(text) as { command: string };
-      const result = spawnSync("/bin/bash", ["-c", input.command]);
+      const result = runBash(input.command);
       return json({ code: result.status, stdout: Buffer.concat([Buffer.from("Welcome banner\n1\n"), result.stdout]).toString("hex"), stderr: "", truncated: false });
     }
     res.writeHead(404); res.end();
@@ -305,10 +328,10 @@ it("checks which files exist in a Cloud thread's sandbox, past login-shell outpu
     const response = await harness.app.request(`/api/v1/threads/${thread.id}/host-files/exist`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ paths: [join(repo, "keep.txt"), join(repo, "missing.md"), "relative.md"] }),
+      body: JSON.stringify({ paths: [shellPath(join(repo, "keep.txt")), shellPath(join(repo, "missing.md")), "relative.md"] }),
     });
     expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({ existence: { [join(repo, "keep.txt")]: true, [join(repo, "missing.md")]: false } });
+    expect(await response.json()).toEqual({ existence: { [shellPath(join(repo, "keep.txt"))]: true, [shellPath(join(repo, "missing.md"))]: false } });
   } finally {
     service.stop(); core.closeAllConnections(); await new Promise<void>(resolve => core.close(() => resolve())); await harness.cleanup();
   }
