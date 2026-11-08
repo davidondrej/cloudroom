@@ -331,7 +331,9 @@ exec '${process.execPath}' "$@"
       expect(result.status).not.toBe(0);
       expect(result.stderr).not.toContain("HOME");
       expect(existsSync(join(fixture.dataDir, "resolved-home"))).toBe(unset);
-      expect(existsSync(join(fixture.homeDir, ".local/bin/room-cli"))).toBe(true);
+      expect(existsSync(join(fixture.homeDir, ".local/bin/room-cli"))).toBe(
+        true,
+      );
       expect(existsSync(join(fixture.dataDir, "auth.json"))).toBe(false);
     },
   );
@@ -817,6 +819,38 @@ fs.writeFileSync(path.join(process.env.ROOM_DATA_DIR, "config.json"), JSON.strin
       readFileSync(join(fixture.dataDir, "install-daemon.pid"), "utf8"),
     );
     process.kill(daemonPid, "SIGTERM");
+  });
+
+  it("reinstalls a cached artifact on retry when its bundled CLI is missing", () => {
+    const fixture = createFixture();
+    writeServerInstallTools(fixture, 200);
+    const env = { BB_INSTALL_SKIP_SERVICE: "1" };
+    const first = runScript(JOIN_ARGS, fixture, env);
+    expect(first.status, first.stderr).toBe(0);
+    rmSync(
+      join(
+        fixture.dataDir,
+        "npm/lib/node_modules/bb-app/host-daemon/dist/room-cli",
+      ),
+    );
+
+    const second = runScript(JOIN_ARGS, fixture, env);
+    expect(second.status).toBe(1);
+    expect(second.stderr).toContain(
+      "Could not make the bundled Cloudroom CLI executable",
+    );
+    expect(existsSync(join(fixture.dataDir, "host-artifact.sha256"))).toBe(
+      false,
+    );
+
+    const third = runScript(JOIN_ARGS, fixture, env);
+    expect(third.status, third.stderr).toBe(0);
+    expect(
+      readFileSync(join(fixture.dataDir, "npm.log"), "utf8").trim().split("\n"),
+    ).toHaveLength(2);
+    expect(
+      readFileSync(join(fixture.dataDir, "host-artifact.sha256"), "utf8"),
+    ).toBe(`${FIXTURE_ARTIFACT_DIGEST}\n`);
   });
 
   it("rejects a server host artifact whose digest does not match", () => {

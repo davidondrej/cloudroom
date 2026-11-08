@@ -161,7 +161,7 @@ const defaultRunProcess: SelfUpdateProcessRunner = async (
 const BB_APP_ALLOW_SCRIPTS_ARG =
   "--allow-scripts=better-sqlite3,node-pty,@parcel/watcher";
 
-async function ensureInstalledCliExecutable(): Promise<void> {
+async function ensureInstalledCliExecutable(digestPath: string): Promise<void> {
   const prefix = process.env.BB_APP_NPM_PREFIX?.trim();
   if (!prefix || process.platform === "win32") return;
   if (!isAbsolute(prefix))
@@ -169,8 +169,14 @@ async function ensureInstalledCliExecutable(): Promise<void> {
   const cli = join(prefix, "lib/node_modules/bb-app/host-daemon/dist/room-cli");
   // npm only fixes executable modes for declared bin entries. A package
   // produced on Windows can leave this nested launcher without execute bits.
-  const { mode } = await stat(cli);
-  await chmod(cli, mode | 0o100);
+  try {
+    const { mode } = await stat(cli);
+    await chmod(cli, mode | 0o100);
+  } catch (error) {
+    // A broken installation must be downloaded again on the next attempt.
+    await rm(digestPath, { force: true });
+    throw error;
+  }
 }
 
 async function defaultInstallTarball(
@@ -319,7 +325,7 @@ export function createProtocolSelfUpdater(
                 }),
           });
           if (response.status === 304 && installedDigest !== null) {
-            await ensureInstalledCliExecutable();
+            await ensureInstalledCliExecutable(installedArtifactDigestPath);
             options.logger.info(
               { artifactDigest: installedDigest },
               "The server-matched Cloudroom host artifact is already installed; restarting the daemon.",
@@ -343,7 +349,7 @@ export function createProtocolSelfUpdater(
           }
           await writeFile(tarballPath, bytes, { mode: 0o600 });
           await installTarball(tarballPath);
-          await ensureInstalledCliExecutable();
+          await ensureInstalledCliExecutable(installedArtifactDigestPath);
           if (expectedDigest === null) {
             await rm(installedArtifactDigestPath, { force: true });
           } else {

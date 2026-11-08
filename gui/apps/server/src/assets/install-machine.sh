@@ -654,6 +654,7 @@ if [ -n "$bb_app_npm_prefix" ]; then
   # npm fixes its declared bin entries, but this nested launcher is not one.
   # Repair it here even when the identical artifact was reused (HTTP 304).
   if ! chmod u+x "$bb_app_root/host-daemon/dist/room-cli"; then
+    rm -f "$host_artifact_digest_file"
     fail_step "Could not make the bundled Cloudroom CLI executable. Reinstall this machine's bb-app package."
     exit 1
   fi
