@@ -196,7 +196,7 @@ export function versionFrom(value: string | null): string | null {
     : null;
 }
 
-/** readCliVersion, plus the output of a `--version` that exited non-zero (Unix only; null on a timeout). */
+/** readCliVersion, plus the output of a `--version` that exited non-zero (null on a timeout). */
 export async function probeCliVersion(
   command: string,
 ): Promise<{ version: string | null; failedOutput: string | null }> {
@@ -208,7 +208,20 @@ export async function probeCliVersion(
     );
     return { version: versionFrom(output), failedOutput: null };
   } catch (error) {
-    const output = (error as { output?: unknown } | null)?.output;
+    const failure = error as {
+      output?: unknown;
+      code?: unknown;
+      stdout?: unknown;
+      stderr?: unknown;
+    } | null;
+    // Windows execPortableFile returns the two streams on non-zero exits.
+    const output =
+      failure?.output ??
+      (typeof failure?.code === "number" &&
+      typeof failure.stdout === "string" &&
+      typeof failure.stderr === "string"
+        ? `${failure.stdout}\n${failure.stderr}`
+        : null);
     return {
       version: null,
       failedOutput: typeof output === "string" ? output : null,

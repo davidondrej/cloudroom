@@ -95,15 +95,30 @@ describe("Codex provider maintenance", () => {
         displayCommand: "codex update",
       },
       verification: { kind: "version_at_least", version: "1.1.0" },
-      fallback: {
-        command: "sh",
-        args: [
-          "-c",
-          "curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_NON_INTERACTIVE=1 sh",
-        ],
-        displayCommand:
-          "curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_NON_INTERACTIVE=1 sh",
-      },
+      fallback:
+        process.platform === "win32"
+          ? {
+              command: "powershell.exe",
+              args: [
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                "$env:CODEX_NON_INTERACTIVE='1'; irm https://chatgpt.com/codex/install.ps1 | iex",
+              ],
+              displayCommand:
+                "$env:CODEX_NON_INTERACTIVE='1'; irm https://chatgpt.com/codex/install.ps1 | iex",
+            }
+          : {
+              command: "sh",
+              args: [
+                "-c",
+                "curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_NON_INTERACTIVE=1 sh",
+              ],
+              displayCommand:
+                "curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_NON_INTERACTIVE=1 sh",
+            },
     });
     expect(
       __testing.buildProviderInstallationRun(
@@ -113,7 +128,7 @@ describe("Codex provider maintenance", () => {
       ),
     ).toMatchObject({
       command: {
-        command: "npm",
+        command: process.platform === "win32" ? "npm.cmd" : "npm",
         args: [
           "install",
           "-g",
@@ -174,16 +189,20 @@ describe("Codex credential health and usage", () => {
     const binDir = path.join(homeDir, "bin");
     await fs.mkdir(binDir);
     await fs.writeFile(
-      path.join(binDir, "codex"),
-      '#!/bin/sh\necho "codex-cli 0.150.0"\n',
+      path.join(binDir, process.platform === "win32" ? "codex.cmd" : "codex"),
+      process.platform === "win32"
+        ? "@echo off\r\necho codex-cli 0.150.0\r\n"
+        : '#!/bin/sh\necho "codex-cli 0.150.0"\n',
       { mode: 0o755 },
     );
     vi.stubEnv("HOME", homeDir);
+    vi.spyOn(os, "homedir").mockReturnValue(homeDir);
     vi.stubEnv("CODEX_HOME", "");
     vi.stubEnv("PATH", `${binDir}${path.delimiter}${process.env.PATH ?? ""}`);
   });
 
   afterEach(async () => {
+    vi.restoreAllMocks();
     vi.unstubAllEnvs();
     vi.unstubAllGlobals();
     resetChatGptCloudflareCookiesForTests();
@@ -206,7 +225,10 @@ describe("Codex credential health and usage", () => {
         minimumSupportedVersion: "0.136.0",
         canInstall: true,
         canUpdate: true,
-        loginCommand: `${path.join(homeDir, "bin", "codex")} login`,
+        loginCommand:
+          process.platform === "win32"
+            ? "codex login"
+            : `${path.join(homeDir, "bin", "codex")} login`,
       },
     });
     await expect(getCodexProviderUsage()).resolves.toEqual({
@@ -257,10 +279,16 @@ describe("Codex credential health and usage", () => {
     });
 
     // A launcher whose native binary is gone must not look ready (#907)...
-    const codex = path.join(homeDir, "bin", "codex");
+    const codex = path.join(
+      homeDir,
+      "bin",
+      process.platform === "win32" ? "codex.cmd" : "codex",
+    );
     await fs.writeFile(
       codex,
-      "#!/bin/sh\necho 'Error: Missing optional dependency @openai/codex-darwin-arm64. Reinstall Codex: pnpm add -g @openai/codex@latest' >&2\nexit 1\n",
+      process.platform === "win32"
+        ? "@echo off\r\necho Error: Missing optional dependency @openai/codex-win32-x64. Reinstall Codex: pnpm add -g @openai/codex@latest 1>&2\r\nexit /b 1\r\n"
+        : "#!/bin/sh\necho 'Error: Missing optional dependency @openai/codex-darwin-arm64. Reinstall Codex: pnpm add -g @openai/codex@latest' >&2\nexit 1\n",
     );
     await expect(getCodexProviderHealth()).resolves.toMatchObject({
       health: {
@@ -271,7 +299,12 @@ describe("Codex credential health and usage", () => {
       },
     });
     // ...but an unclear probe failure keeps it ready.
-    await fs.writeFile(codex, "#!/bin/sh\nexit 1\n");
+    await fs.writeFile(
+      codex,
+      process.platform === "win32"
+        ? "@echo off\r\nexit /b 1\r\n"
+        : "#!/bin/sh\nexit 1\n",
+    );
     await expect(getCodexProviderHealth()).resolves.toMatchObject({
       health: { status: "ready" },
     });

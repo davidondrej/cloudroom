@@ -8,12 +8,36 @@ import {
   formatCommand,
   installationVerification,
   npmGlobalInstallSource,
+  probeCliVersion,
   readCliVersion,
   selectResolvedExecutable,
   versionFrom,
 } from "./provider-maintenance-kit.js";
 
 describe("provider maintenance kit", () => {
+  it("preserves failed version-probe output on Windows and Unix", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "bb-cli-failed-version-"));
+    try {
+      const executable = path.join(
+        dir,
+        process.platform === "win32" ? "broken.cmd" : "broken",
+      );
+      await writeFile(
+        executable,
+        process.platform === "win32"
+          ? "@echo off\r\necho launcher output\r\necho Missing optional dependency 1>&2\r\nexit /b 1\r\n"
+          : "#!/bin/sh\necho launcher output\necho Missing optional dependency >&2\nexit 1\n",
+      );
+      await chmod(executable, 0o755);
+      const result = await probeCliVersion(executable);
+      expect(result.version).toBeNull();
+      expect(result.failedOutput).toContain("launcher output");
+      expect(result.failedOutput).toContain("Missing optional dependency");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it.skipIf(process.platform === "win32")(
     "reads the version of a CLI that keeps reading stdin until EOF",
     async () => {
