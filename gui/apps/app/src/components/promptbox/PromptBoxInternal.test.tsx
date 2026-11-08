@@ -4745,6 +4745,15 @@ describe("PromptBoxInternal reasoning commands", () => {
 });
 
 describe("PromptBoxInternal fast mode command", () => {
+  it("shows and clears an active Ultrafast selection", () => {
+    const onChange = vi.fn();
+    const command = promptFastModeCommand({ value: "ultrafast", onChange, supported: true });
+    expect(command?.enabled).toBe(true);
+    expect(command?.label).toBe("Ultrafast");
+    command?.onToggle();
+    expect(onChange).toHaveBeenCalledExactlyOnceWith("default");
+  });
+
   it("hides the command unless fast mode is supported", () => {
     expect(
       promptFastModeCommand({

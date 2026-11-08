@@ -327,17 +327,31 @@ export async function resolveExistingThreadExecutionPlan(
     reasoningLevel,
   );
 
+  const provider = deps.providerRegistry.get(thread.providerId)?.info;
   const supportsServiceTier =
-    deps.providerRegistry.get(thread.providerId)?.info.capabilities
-      .supportsServiceTier ?? true;
+    provider?.capabilities.supportsServiceTier ?? true;
+  // Ultrafast runs only where the provider declares it; Standard and Fast keep
+  // their existing rules.
+  const supportsUltrafast =
+    provider?.serviceTiers?.some((tier) => tier.id === "ultrafast") ?? false;
+  const requestedServiceTier = args.input.serviceTier?.value;
+  if (requestedServiceTier === "ultrafast" && !supportsUltrafast) {
+    throw new ProviderCapabilityValidationError(
+      400,
+      "invalid_request",
+      `Provider ${thread.providerId} does not support the ultrafast service tier.`,
+    );
+  }
+  const runnable = (tier: ServiceTier | undefined) =>
+    tier === "ultrafast" && !supportsUltrafast ? undefined : tier;
   const serviceTier = resolveFieldWithDefault<ServiceTier>(
     supportsServiceTier
       ? [
-          args.input.serviceTier?.value,
-          lastExecution?.serviceTier,
-          projectExecution?.serviceTier,
+          requestedServiceTier,
+          runnable(lastExecution?.serviceTier),
+          runnable(projectExecution?.serviceTier),
         ]
-      : [args.input.serviceTier?.value],
+      : [requestedServiceTier],
     DEFAULT_SERVICE_TIER,
   );
 

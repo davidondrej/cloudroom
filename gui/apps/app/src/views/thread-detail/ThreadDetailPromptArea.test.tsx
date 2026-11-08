@@ -6,6 +6,7 @@ import type {
   PermissionMode,
   PromptTextMention,
   ReasoningLevel,
+  ServiceTier,
   ResolvedThreadExecutionOptions,
   ThreadQueuedMessage,
   ThreadTimelineActivePromptMode,
@@ -80,7 +81,7 @@ const mocks = vi.hoisted(() => ({
   sendMessageMutateAsync: vi.fn(),
   sendQueuedMessageMutateAsync: vi.fn(),
   stopThreadMutate: vi.fn(),
-  serviceTier: undefined as "default" | "fast" | undefined,
+  serviceTier: undefined as ServiceTier | undefined,
   supportsServiceTier: false,
   toastError: vi.fn(),
   unarchiveThreadMutate: vi.fn(),
@@ -90,6 +91,10 @@ const mocks = vi.hoisted(() => ({
   useThreadCreationOptions: vi.fn(),
   useThreadPromptHistory: vi.fn(),
   useThreadQueuedMessages: vi.fn(),
+}));
+
+vi.mock("@/components/layout/DesktopUpdateBanner", () => ({
+  DesktopUpdateCard: () => null,
 }));
 
 vi.mock("react-router-dom", async (importOriginal) => {
@@ -964,6 +969,105 @@ describe("environment follow-up summary", () => {
 });
 
 describe("ThreadDetailPromptArea", () => {
+  it.each([
+    ["ultrafast", "default"],
+    ["fast", "fast"],
+    ["default", "default"],
+  ] as const)(
+    "normalizes Cloud follow-ups from %s to %s",
+    async (tier, expected) => {
+      mocks.serviceTier = tier;
+      mocks.promptDraft.text = "Cloud follow-up";
+      for (const [key, value] of [
+        [
+          ["cloudroom-thread", "thr_1"],
+          {
+            sessionId: "cloud-session",
+            paused: false,
+            model: "gpt-6-astra",
+            reasoning: "medium",
+            error: null,
+            pendingDelivery: 0,
+          },
+        ],
+        [
+          ["cloudroom-connection"],
+          {
+            ready: true,
+            projectId: null,
+            repository: "/code/test",
+            model: "gpt-6-astra",
+            error: null,
+            harnesses: [{ id: "codex", service_tier: true }],
+          },
+        ],
+      ] as const) {
+        testQueryClient.setQueryDefaults(key, { staleTime: Infinity });
+        testQueryClient.setQueryData(key, value);
+      }
+      renderPromptArea({ thread: makeThread({ executionTarget: "cloud" }) });
+      expect(screen.getByTestId("selected-service-tier").textContent).toBe(
+        expected,
+      );
+      fireEvent.click(screen.getByRole("button", { name: "Submit composer" }));
+      await waitFor(() =>
+        expect(mocks.sendMessageMutateAsync).toHaveBeenCalledWith(
+          expect.objectContaining({ serviceTier: expected }),
+        ),
+      );
+    },
+  );
+
+  it("normalizes a stale Ultrafast tier in a Cloud sent-message edit", () => {
+    mocks.serviceTier = "ultrafast";
+    const threadKey = ["cloudroom-thread", "thr_1"];
+    const connectionKey = ["cloudroom-connection"];
+    testQueryClient.setQueryDefaults(threadKey, { staleTime: Infinity });
+    testQueryClient.setQueryDefaults(connectionKey, { staleTime: Infinity });
+    testQueryClient.setQueryData(threadKey, {
+      sessionId: "cloud-session",
+      paused: false,
+      model: "gpt-6-astra",
+      reasoning: "medium",
+      error: null,
+      pendingDelivery: 0,
+    });
+    testQueryClient.setQueryData(connectionKey, {
+      ready: true,
+      projectId: null,
+      repository: "/code/test",
+      model: "gpt-6-astra",
+      error: null,
+      harnesses: [{ id: "codex", service_tier: true }],
+    });
+    const hostElement = document.createElement("div");
+    hostElement.dataset.sentMessageEditorTestHost = "";
+    document.body.append(hostElement);
+    const onSubmit = vi.fn();
+    renderPromptArea({
+      thread: makeThread({ executionTarget: "cloud" }),
+      sentMessageEdit: {
+        draft: { text: "Edited request", mentions: [], attachments: [] },
+        hostElement,
+        isSubmitting: false,
+        operationId: "speed-edit-1",
+        onCancel: vi.fn(),
+        onSubmit,
+        updateDraft: vi.fn(),
+      },
+    });
+    const editor = within(hostElement);
+    expect(editor.getByTestId("selected-service-tier").textContent).toBe(
+      "default",
+    );
+    fireEvent.click(editor.getByRole("button", { name: "Submit composer" }));
+    expect(onSubmit).toHaveBeenCalledWith(
+      expect.objectContaining({
+        execution: expect.objectContaining({ serviceTier: "default" }),
+      }),
+    );
+  });
+
   it("keeps the composer usable while a new cloud thread starts, so follow-ups can be queued", () => {
     const queryKey = ["cloudroom-thread", "thr_1"];
     testQueryClient.setQueryDefaults(queryKey, { staleTime: Infinity });

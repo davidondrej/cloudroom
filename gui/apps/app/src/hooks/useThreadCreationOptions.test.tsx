@@ -10,7 +10,11 @@ import { sdk } from "@/lib/sdk";
 import { createQueryClientTestHarness } from "@/test/queryClientTestHarness";
 import type { ProviderModelCatalogScope } from "@cloudroom/domain";
 import type { QueryClient } from "@tanstack/react-query";
-import { hostsQueryKey, systemProvidersQueryKey } from "./queries/query-keys";
+import {
+  allSystemExecutionOptionsQueryKeyPrefix,
+  hostsQueryKey,
+  systemProvidersQueryKey,
+} from "./queries/query-keys";
 import { getProjectScopedStorageKey } from "@/lib/project-scoped-storage";
 import { useThreadCreationOptions } from "./useThreadCreationOptions";
 import {
@@ -294,6 +298,147 @@ afterEach(() => {
 });
 
 describe("useThreadCreationOptions", () => {
+  it.each(
+    (["component-local", "new-thread"] as const).flatMap((scope) =>
+      ["claude-code", "pi", "acp-example"].map((providerId) => ({
+        scope,
+        providerId,
+      })),
+    ),
+  )(
+    "normalizes a carried Ultrafast choice for $providerId in $scope and restores it on Codex",
+    async ({ scope, providerId }) => {
+      const response = executionOptionsResponse();
+      const template = response.providers[0]!;
+      response.providers = ["codex", providerId].map((id) => ({
+        ...template,
+        id,
+        serviceTiers: [
+          { id: "default", label: "Standard" },
+          { id: "fast", label: "Fast" },
+          ...(id === "codex" ? [{ id: "ultrafast", label: "Ultrafast" }] : []),
+        ],
+      }));
+      vi.mocked(sdk.system.executionOptions).mockResolvedValue(response);
+      const { wrapper } = createQueryClientTestHarness();
+      const { result } = renderHook(
+        () =>
+          useThreadCreationOptions({
+            scope,
+            initialProviderId: "codex",
+            initialModel: "global-model",
+          }),
+        { wrapper },
+      );
+      await waitFor(() =>
+        expect(result.current.modelCatalogIsVerified).toBe(true),
+      );
+      act(() => result.current.setServiceTier("ultrafast"));
+      expect(result.current.serviceTier).toBe("ultrafast");
+      act(() =>
+        result.current.setProviderModelReasoning({
+          providerId,
+          model: "global-model",
+          serviceTier: "ultrafast",
+        }),
+      );
+      await waitFor(() =>
+        expect(result.current.selectedProviderId).toBe(providerId),
+      );
+      // This is the shared value read by ExecutionControls and local submit.
+      expect(result.current.serviceTier).toBe("default");
+      expect(result.current.supportsUltrafast).toBe(false);
+      act(() => result.current.setSelectedProviderId("codex"));
+      await waitFor(() => expect(result.current.serviceTier).toBe("ultrafast"));
+      act(() => result.current.setSelectedProviderId(providerId));
+      await waitFor(() => expect(result.current.serviceTier).toBe("default"));
+    },
+  );
+
+  it("preserves a stored Ultrafast preference when provider metadata temporarily omits it", async () => {
+    const response = executionOptionsResponse();
+    response.providers[0]!.serviceTiers = [
+      { id: "ultrafast", label: "Ultrafast" },
+    ];
+    vi.mocked(sdk.system.executionOptions).mockResolvedValue(response);
+    const { wrapper, queryClient } = createQueryClientTestHarness();
+    const first = renderHook(
+      () =>
+        useThreadCreationOptions({
+          scope: "new-thread",
+          initialProviderId: GLOBAL_PROVIDER_ID,
+        }),
+      { wrapper },
+    );
+    await waitFor(() =>
+      expect(first.result.current.supportsUltrafast).toBe(true),
+    );
+    act(() => first.result.current.setServiceTier("ultrafast"));
+    first.unmount();
+    const { result } = renderHook(
+      () =>
+        useThreadCreationOptions({
+          scope: "new-thread",
+          initialProviderId: GLOBAL_PROVIDER_ID,
+        }),
+      { wrapper },
+    );
+    await waitFor(() => expect(result.current.supportsUltrafast).toBe(true));
+    expect(result.current.serviceTier).toBe("ultrafast");
+    const withoutUltrafast = {
+      ...response,
+      providers: response.providers.map((provider) => ({
+        ...provider,
+        serviceTiers: undefined,
+      })),
+    };
+    act(() =>
+      queryClient.setQueriesData(
+        { queryKey: allSystemExecutionOptionsQueryKeyPrefix() },
+        withoutUltrafast,
+      ),
+    );
+    await waitFor(() => expect(result.current.serviceTier).toBe("default"));
+    expect(result.current.executionInputSources.serviceTier).toBe(
+      "client-preference",
+    );
+    act(() =>
+      queryClient.setQueriesData(
+        { queryKey: allSystemExecutionOptionsQueryKeyPrefix() },
+        response,
+      ),
+    );
+    await waitFor(() => expect(result.current.serviceTier).toBe("ultrafast"));
+  });
+
+  it.each([false, true])(
+    "derives Ultrafast support from provider metadata (%s)",
+    async (supported) => {
+      const response = executionOptionsResponse();
+      response.providers = response.providers.map((provider) => ({
+        ...provider,
+        serviceTiers: supported
+          ? [{ id: "ultrafast", label: "Ultrafast" }]
+          : [{ id: "fast", label: "Fast" }],
+      }));
+      vi.mocked(sdk.system.executionOptions).mockResolvedValue(response);
+      const { wrapper } = createQueryClientTestHarness();
+      const { result } = renderHook(
+        () =>
+          useThreadCreationOptions({
+            scope: "component-local",
+            initialProviderId: GLOBAL_PROVIDER_ID,
+            initialModel: "global-model",
+          }),
+        { wrapper },
+      );
+      await waitFor(() =>
+        expect(result.current.modelCatalogIsVerified).toBe(true),
+      );
+      expect(result.current.supportsUltrafast).toBe(supported);
+    },
+  );
+
   it("keeps the selected remembered provider branded while models load", () => {
     window.localStorage.setItem("bb.promptbox.provider", "codex");
     writeCachedProviderList(

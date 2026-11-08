@@ -72,7 +72,7 @@ function isPermissionMode(value: string): value is PermissionMode {
 }
 
 function isServiceTier(value: string): value is ServiceTier {
-  return value === "fast" || value === "default";
+  return value === "fast" || value === "default" || value === "ultrafast";
 }
 
 function isStoredServiceTier(value: string): value is StoredServiceTier {

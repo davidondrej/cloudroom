@@ -29,6 +29,9 @@ const mocks = vi.hoisted(() => ({
   sendQueuedMessageMutateAsync: vi.fn(),
   sendThreadMessageMutateAsync: vi.fn(),
   threadRuntimeDisplayStatus: "idle" as string,
+  executionTarget: undefined as "cloud" | undefined,
+  serviceTier: undefined as string | undefined,
+  supportsServiceTier: false,
   timelineRows: [] as Array<{ text: string }>,
   injectedTimelineProps: [] as Array<unknown>,
   timelinePanelProps: [] as Array<Record<string, unknown>>,
@@ -192,7 +195,7 @@ vi.mock("@/hooks/useThreadCreationOptions", () => ({
     selectedProviderComposerActions: [],
     selectedModel: "gpt-5",
     setSelectedModel: vi.fn(),
-    serviceTier: undefined,
+    serviceTier: mocks.serviceTier,
     setServiceTier: vi.fn(),
     reasoningLevel: "medium",
     setReasoningLevel: vi.fn(),
@@ -206,7 +209,8 @@ vi.mock("@/hooks/useThreadCreationOptions", () => ({
     reasoningOptions: [],
     permissionModeOptions: [],
     supportsPermissionModeSelection: true,
-    supportsServiceTier: false,
+    supportsServiceTier: mocks.supportsServiceTier,
+    supportsUltrafast: true,
     serviceTierSupportByProvider: {},
     isLoadingModels: false,
   }),
@@ -242,6 +246,7 @@ vi.mock("@/hooks/queries/thread-queries", () => ({
             id: threadId,
             status: "active",
             runtime: { displayStatus: mocks.threadRuntimeDisplayStatus },
+            executionTarget: mocks.executionTarget,
             environmentId: null,
             latestAttentionAt: 1,
           }
@@ -405,6 +410,9 @@ describe("EmbeddedThreadChat", () => {
     mocks.readTrackingThreads = [];
     mocks.sendQueuedMessageMutateAsync.mockReset().mockResolvedValue({});
     mocks.threadRuntimeDisplayStatus = "idle";
+    mocks.executionTarget = undefined;
+    mocks.serviceTier = undefined;
+    mocks.supportsServiceTier = false;
     mocks.timelineRows = [];
     mocks.injectedTimelineProps = [];
     mocks.timelinePanelProps = [];
@@ -531,6 +539,28 @@ describe("EmbeddedThreadChat", () => {
       }),
     );
   });
+
+  it.each([
+    [undefined, "ultrafast"],
+    ["cloud", "default"],
+  ] as const)(
+    "sends Ultrafast from a %s thread as %s",
+    async (executionTarget, sent) => {
+      mocks.executionTarget = executionTarget;
+      mocks.serviceTier = "ultrafast";
+      mocks.supportsServiceTier = true;
+      renderEmbeddedChat();
+      fireEvent.change(screen.getByTestId("embedded-chat-composer"), {
+        target: { value: "Go" },
+      });
+      fireEvent.click(screen.getByText("Send"));
+      await vi.waitFor(() => {
+        expect(mocks.sendThreadMessageMutateAsync).toHaveBeenCalledWith(
+          expect.objectContaining({ serviceTier: sent }),
+        );
+      });
+    },
+  );
 
   it("keeps queued messages adjacent to the composer", () => {
     mocks.queuedMessages = [{ id: "q1" }, { id: "q2" }];

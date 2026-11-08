@@ -142,6 +142,7 @@ interface UseThreadCreationOptionsResult<TExecutionInputSources> {
   supportsPermissionModeSelection: boolean;
   permissionModeIsVerified: boolean;
   supportsServiceTier: boolean;
+  supportsUltrafast: boolean;
   serviceTierSupportByProvider: Record<string, boolean>;
   serviceTierFastLabel: string;
   executionInputSources: TExecutionInputSources;
@@ -551,6 +552,9 @@ export function useThreadCreationOptions(
     return supportByProvider;
   }, [providers]);
   const serviceTierFastLabel = fastServiceTierLabel(selectedProviderInfo);
+  const supportsUltrafast = selectedProviderInfo?.serviceTiers?.some(
+    (tier) => tier.id === "ultrafast",
+  ) ?? false;
 
   const {
     selectedModel,
@@ -582,8 +586,14 @@ export function useThreadCreationOptions(
     ],
   );
   const serviceTier = useMemo(
-    () => (supportsServiceTier ? rawServiceTier : undefined),
-    [rawServiceTier, supportsServiceTier],
+    () => {
+      if (!supportsServiceTier) return undefined;
+      // Keep the preference so returning to a supporting provider restores it.
+      return rawServiceTier === "ultrafast" && !supportsUltrafast
+        ? "default"
+        : rawServiceTier;
+    },
+    [rawServiceTier, supportsServiceTier, supportsUltrafast],
   );
 
   const permissionMode = resolvePermissionModeSelection({
@@ -618,7 +628,12 @@ export function useThreadCreationOptions(
         storedValues: {
           selectedProviderId: storedProviderId,
           selectedModel: storedSelectedModel,
-          serviceTier: storedServiceTier,
+          // The normalized value still belongs to the stored preference;
+          // otherwise submit metadata would treat Standard as display-only.
+          serviceTier:
+            storedServiceTier === rawServiceTier && serviceTier !== undefined
+              ? serviceTier
+              : storedServiceTier,
           reasoningLevel: storedReasoningLevel,
           permissionMode: storedPermissionMode,
         },
@@ -632,6 +647,7 @@ export function useThreadCreationOptions(
       isUnavailableModelRecovery,
       permissionMode,
       reasoningLevel,
+      rawServiceTier,
       scope,
       selectedModel,
       serviceTier,
@@ -1003,6 +1019,7 @@ export function useThreadCreationOptions(
     supportsServiceTier,
     serviceTierSupportByProvider,
     serviceTierFastLabel,
+    supportsUltrafast,
     executionInputSources,
   };
 }

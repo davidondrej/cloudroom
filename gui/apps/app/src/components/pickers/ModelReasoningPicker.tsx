@@ -12,7 +12,7 @@ import type {
   SystemExecutionOptionsModelLoadError,
   SystemProvidersQuery,
 } from "@cloudroom/server-contract";
-import type { ReasoningLevel } from "@cloudroom/domain";
+import type { ReasoningLevel, ServiceTier } from "@cloudroom/domain";
 import { useQueryClient } from "@tanstack/react-query";
 import { useAtomValue } from "jotai";
 import { useInRouterContext, useNavigate } from "react-router-dom";
@@ -73,6 +73,7 @@ import {
 } from "@cloudroom/shared-ui/option-display";
 import { type PickerOption } from "./OptionPicker";
 import { PickerLoadingRows } from "./PickerLoadingRows";
+import { SpeedTierIcon } from "./SpeedTierIcon";
 import { ModelUnavailable } from "./ModelUnavailable";
 import type { ModelPickerOption } from "./model-picker-option";
 import { searchPickerOptions } from "./picker-search";
@@ -216,6 +217,8 @@ interface ModelReasoningPickerProps {
   fastModeEnabled: boolean;
   onFastModeChange: (enabled: boolean) => void;
   showFastModeToggle: boolean;
+  serviceTierValue?: ServiceTier;
+  onServiceTierChange?: (value: ServiceTier) => void;
   commandShortcutsEnabled?: boolean;
   serviceTierSupportByProvider?: Record<string, boolean>;
   className?: string;
@@ -231,6 +234,8 @@ interface ModelReasoningPickerProps {
    */
   onSelectModel?: (selection: ModelReasoningPickerSelection) => void;
 }
+
+const SPEED_TIERS: readonly ServiceTier[] = ["default", "fast", "ultrafast"];
 
 export function ModelReasoningPicker({
   providerOptions,
@@ -254,6 +259,8 @@ export function ModelReasoningPicker({
   fastModeEnabled,
   onFastModeChange,
   showFastModeToggle,
+  serviceTierValue,
+  onServiceTierChange,
   commandShortcutsEnabled = true,
   serviceTierSupportByProvider,
   className,
@@ -561,8 +568,11 @@ export function ModelReasoningPicker({
     ? fastServiceTierLabel(previewProvider)
     : (fastModeLabel ?? "Fast");
   const fastModeText = `${effectiveFastModeLabel} mode`;
+  const speedLabels = ["Standard", effectiveFastModeLabel, "Ultrafast"];
   const showSelectedFastMode =
-    hasSelectedModel && fastModeEnabled && modelOptions.length > 0;
+    hasSelectedModel &&
+    (fastModeEnabled || serviceTierValue === "ultrafast") &&
+    modelOptions.length > 0;
 
   const resetBrowseState = useCallback(() => {
     setPreviewProviderId(null);
@@ -852,7 +862,9 @@ export function ModelReasoningPicker({
       : triggerModelLabel;
   const triggerTitle = [
     `${selectedProviderLabel}: ${triggerTitleModelLabel}`,
-    showSelectedFastMode ? " (Fast mode)" : "",
+    showSelectedFastMode
+      ? ` (${serviceTierValue === "ultrafast" ? "Ultrafast" : effectiveFastModeLabel} mode)`
+      : "",
   ].join("");
   const halfClassName = cn(
     OPTION_BASE_CLASS_NAME,
@@ -912,11 +924,6 @@ export function ModelReasoningPicker({
               className="h-3 w-8 shrink-0 rounded-sm"
             />
           </>
-        ) : showSelectedFastMode ? (
-          <Icon
-            name="Zap"
-            className="size-3.5 shrink-0 fill-current text-subtle-foreground"
-          />
         ) : TriggerIcon ? (
           <TriggerIcon className="size-4 shrink-0" />
         ) : null}
@@ -934,6 +941,11 @@ export function ModelReasoningPicker({
               <span className="shrink-0 text-subtle-foreground">
                 {triggerModelTag}
               </span>
+            ) : null}
+            {showSelectedFastMode ? (
+              <SpeedTierIcon
+                tier={serviceTierValue === "ultrafast" ? "ultrafast" : "fast"}
+              />
             ) : null}
           </>
         )}
@@ -1246,24 +1258,55 @@ export function ModelReasoningPicker({
                   <>
                     <div className="shrink-0 border-t border-border" />
                     <div className="shrink-0 p-1">
-                      <label className="flex cursor-pointer items-center justify-between gap-3 rounded-sm px-2 py-[0.3125rem] text-xs">
-                        <span className="flex min-w-0 items-center gap-2">
-                          <Icon
-                            name="Zap"
-                            className="size-4 fill-current text-muted-foreground"
+                      {onServiceTierChange ? (
+                        <div
+                          role="group"
+                          aria-label="Speed"
+                          className="inline-flex gap-0.5 rounded-md bg-foreground/5 p-0.5 text-xs"
+                        >
+                          {SPEED_TIERS.map((tier, index) => {
+                            const selected =
+                              tier === (serviceTierValue ?? "default");
+                            return (
+                              <button
+                                key={tier}
+                                type="button"
+                                aria-pressed={selected}
+                                onClick={() => onServiceTierChange(tier)}
+                                className={cn(
+                                  "flex items-center gap-1 rounded-sm px-2 py-1 text-muted-foreground hover:text-foreground focus-visible:outline-foreground dark:focus-visible:outline-ring",
+                                  LIST_HOVER_TRANSITION,
+                                  selected && "bg-state-active text-foreground",
+                                )}
+                              >
+                                {tier === "default" ? null : (
+                                  <SpeedTierIcon tier={tier} />
+                                )}
+                                {speedLabels[index]}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      ) : (
+                        <label className="flex cursor-pointer items-center justify-between gap-3 rounded-sm px-2 py-[0.3125rem] text-xs">
+                          <span className="flex min-w-0 items-center gap-2">
+                            <Icon
+                              name="Zap"
+                              className="size-4 fill-current text-muted-foreground"
+                            />
+                            <span>{fastModeText}</span>
+                          </span>
+                          <Switch
+                            checked={fastModeEnabled}
+                            onCheckedChange={onFastModeChange}
+                            aria-label={fastModeText}
+                            className={cn(
+                              LIST_HOVER_TRANSITION,
+                              "[&>span]:size-3.5",
+                            )}
                           />
-                          <span>{fastModeText}</span>
-                        </span>
-                        <Switch
-                          checked={fastModeEnabled}
-                          onCheckedChange={onFastModeChange}
-                          aria-label={fastModeText}
-                          className={cn(
-                            LIST_HOVER_TRANSITION,
-                            "[&>span]:size-3.5",
-                          )}
-                        />
-                      </label>
+                        </label>
+                      )}
                     </div>
                   </>
                 ) : null}

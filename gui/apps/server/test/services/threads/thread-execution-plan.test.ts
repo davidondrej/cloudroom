@@ -1,5 +1,5 @@
 import { updateHost, upsertProjectExecutionDefaults } from "@cloudroom/db";
-import type { PermissionMode } from "@cloudroom/domain";
+import type { PermissionMode, ServiceTier } from "@cloudroom/domain";
 import { describe, expect, it } from "vitest";
 import {
   buildExistingThreadExecutionInput,
@@ -150,6 +150,182 @@ describe("thread execution plan input sources", () => {
     });
   });
 });
+describe("provider service tiers", () => {
+  async function seedServiceTierThread(
+    harness: TestAppHarness,
+    args: {
+      declaredTiers?: ServiceTier[];
+      supportsServiceTier?: boolean;
+      lastTier?: ServiceTier;
+      projectTier?: ServiceTier;
+    },
+  ) {
+    const codex = harness.deps.providerRegistry.get("codex");
+    if (!codex) throw new Error("Expected the bundled Codex provider");
+    const providerId = "tier-test-provider";
+    harness.deps.providerRegistry.register({
+      ...codex,
+      pluginId: "tier-test-plugin",
+      info: {
+        ...codex.info,
+        id: providerId,
+        serviceTiers: args.declaredTiers?.map((id) => ({ id, label: id })),
+        capabilities: {
+          ...codex.info.capabilities,
+          supportsServiceTier: args.supportsServiceTier ?? true,
+        },
+      },
+    });
+    const { host } = seedHostSession(harness.deps);
+    const { project } = seedProjectWithSource(harness.deps, {
+      hostId: host.id,
+    });
+    const thread = seedThread(harness.deps, {
+      projectId: project.id,
+      providerId,
+    });
+    if (args.lastTier !== undefined) {
+      seedThreadRuntimeState(harness.deps, {
+        environmentId: null,
+        providerThreadId: "tier-test-thread",
+        threadId: thread.id,
+        serviceTier: args.lastTier,
+      });
+    }
+    if (args.projectTier !== undefined) {
+      upsertProjectExecutionDefaults(harness.deps.db, {
+        projectId: project.id,
+        providerId,
+        model: "gpt-5",
+        reasoningLevel: "medium",
+        permissionMode: "full",
+        serviceTier: args.projectTier,
+      });
+    }
+    return thread;
+  }
+
+  it("rejects an explicit Ultrafast the provider doesn't declare with a clear 400", async () => {
+    await withTestHarness(async (harness) => {
+      const thread = await seedServiceTierThread(harness, {
+        declaredTiers: ["default", "fast"],
+        lastTier: "default",
+      });
+      await expect(
+        resolveExistingThreadExecutionPlan(harness.deps, {
+          executionSource: "client/turn/requested",
+          threadId: thread.id,
+          input: { serviceTier: { source: "explicit", value: "ultrafast" } },
+        }),
+      ).rejects.toMatchObject({
+        status: 400,
+        body: {
+          code: "invalid_request",
+          message:
+            "Provider tier-test-provider does not support the ultrafast service tier.",
+        },
+      });
+    });
+  });
+
+  it.each([
+    ["ultrafast", undefined, "default"],
+    [undefined, "ultrafast", "default"],
+    ["ultrafast", "fast", "fast"],
+    ["ultrafast", "ultrafast", "default"],
+    ["fast", "ultrafast", "fast"],
+  ] as const)(
+    "filters inherited last=%s and project=%s to %s",
+    async (lastTier, projectTier, expected) => {
+      await withTestHarness(async (harness) => {
+        const thread = await seedServiceTierThread(harness, {
+          declaredTiers: ["default", "fast"],
+          lastTier,
+          projectTier,
+        });
+        const plan = await resolveExistingThreadExecutionPlan(harness.deps, {
+          executionSource: "client/turn/requested",
+          threadId: thread.id,
+          input: { model: { source: "explicit", value: "gpt-5" } },
+        });
+        expect(plan.resolvedExecution.serviceTier).toBe(expected);
+      });
+    },
+  );
+
+  it.each(["default", "fast", "ultrafast"] as const)(
+    "accepts declared %s",
+    async (tier) => {
+      await withTestHarness(async (harness) => {
+        const thread = await seedServiceTierThread(harness, {
+          declaredTiers: ["default", "fast", "ultrafast"],
+          lastTier: "ultrafast",
+        });
+        const input = {
+          serviceTier: { source: "explicit" as const, value: tier },
+        };
+        const plan = await resolveExistingThreadExecutionPlan(harness.deps, {
+          executionSource: "client/turn/requested",
+          threadId: thread.id,
+          input,
+        });
+        expect(plan.resolvedExecution.serviceTier).toBe(tier);
+        const inherited = await resolveExistingThreadExecutionPlan(
+          harness.deps,
+          {
+            executionSource: "client/turn/requested",
+            threadId: thread.id,
+            input: {},
+          },
+        );
+        expect(inherited.resolvedExecution.serviceTier).toBe("ultrafast");
+      });
+    },
+  );
+
+  it("retains legacy Fast support without allowing undeclared Ultrafast", async () => {
+    await withTestHarness(async (harness) => {
+      const thread = await seedServiceTierThread(harness, {
+        lastTier: "ultrafast",
+      });
+      const plan = await resolveExistingThreadExecutionPlan(harness.deps, {
+        executionSource: "client/turn/requested",
+        threadId: thread.id,
+        input: { serviceTier: { source: "explicit", value: "fast" } },
+      });
+      expect(plan.resolvedExecution.serviceTier).toBe("fast");
+      await expect(
+        resolveExistingThreadExecutionPlan(harness.deps, {
+          executionSource: "client/turn/requested",
+          threadId: thread.id,
+          input: { serviceTier: { source: "explicit", value: "ultrafast" } },
+        }),
+      ).rejects.toMatchObject({ status: 400 });
+    });
+  });
+
+  it("keeps Standard and Fast handling unchanged when a provider declares fewer tiers", async () => {
+    await withTestHarness(async (harness) => {
+      const thread = await seedServiceTierThread(harness, {
+        declaredTiers: ["default"],
+        lastTier: "fast",
+      });
+      const inherited = await resolveExistingThreadExecutionPlan(harness.deps, {
+        executionSource: "client/turn/requested",
+        threadId: thread.id,
+        input: {},
+      });
+      expect(inherited.resolvedExecution.serviceTier).toBe("fast");
+      const explicit = await resolveExistingThreadExecutionPlan(harness.deps, {
+        executionSource: "client/turn/requested",
+        threadId: thread.id,
+        input: { serviceTier: { source: "explicit", value: "fast" } },
+      });
+      expect(explicit.resolvedExecution.serviceTier).toBe("fast");
+    });
+  });
+});
+
 describe("machine permission ceiling", () => {
   async function seedCappedThread(
     harness: TestAppHarness,
