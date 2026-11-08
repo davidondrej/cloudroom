@@ -182,6 +182,27 @@ describe("application menu", () => {
     expect(reloadWindow).toHaveBeenNthCalledWith(2, focusedWindow, true);
   });
 
+  it.each([
+    { platform: "Windows", isLinux: false },
+    { platform: "Linux", isLinux: true },
+  ])("keeps Reload without advertising Ctrl+R on $platform", ({ isLinux }) => {
+    const reloadWindow = vi.fn();
+    const template = buildApplicationMenuTemplate(
+      menuArgs(reloadWindow, { isLinux, isMac: false }),
+    );
+    const submenu = template.find((item) => item.label === "View")
+      ?.submenu as MenuItemConstructorOptions[];
+    const reload = submenu.find((item) => item.label === "Reload");
+    const forceReload = submenu.find((item) => item.label === "Force Reload");
+
+    expect(reload?.accelerator).toBeUndefined();
+    expect(forceReload?.accelerator).toBeUndefined();
+    reload?.click?.({} as never, undefined, {} as never);
+    forceReload?.click?.({} as never, undefined, {} as never);
+    expect(reloadWindow).toHaveBeenNthCalledWith(1, undefined, false);
+    expect(reloadWindow).toHaveBeenNthCalledWith(2, undefined, true);
+  });
+
   it("builds a Window ▸ Server radio submenu with a Set Server URL item", () => {
     const selectServer = vi.fn();
     const setServerUrl = vi.fn();
@@ -277,6 +298,42 @@ describe("application menu", () => {
   });
 
   it.each([
+    { platform: "Windows", isLinux: false, isMac: false },
+    { platform: "Linux", isLinux: true, isMac: false },
+    { platform: "macOS", isLinux: false, isMac: true },
+  ])(
+    "registers extra zoom shortcuts only outside macOS ($platform)",
+    ({ isLinux, isMac }) => {
+      const template = buildApplicationMenuTemplate(
+        menuArgs(() => {}, { isLinux, isMac }),
+      );
+      const submenu = template.find((item) => item.label === "View")
+        ?.submenu as MenuItemConstructorOptions[];
+
+      for (const [role, accelerator] of [
+        ["zoomIn", "CommandOrControl+="],
+        ["zoomIn", "CommandOrControl+numadd"],
+        ["zoomOut", "CommandOrControl+numsub"],
+        ["resetZoom", "CommandOrControl+num0"],
+      ]) {
+        expect(
+          submenu.some(
+            (item) =>
+              item.role === role &&
+              item.accelerator === accelerator &&
+              item.visible === false,
+          ),
+        ).toBe(!isMac);
+      }
+      expect(
+        submenu.some(
+          (item) => item.role === "zoomIn" && item.accelerator === undefined,
+        ),
+      ).toBe(true);
+    },
+  );
+
+  it.each([
     { platform: "Windows", isLinux: false, isMac: false, fullScreen: true },
     { platform: "macOS", isLinux: false, isMac: true, fullScreen: false },
     { platform: "Linux", isLinux: true, isMac: false, fullScreen: false },
@@ -291,6 +348,41 @@ describe("application menu", () => {
       expect(
         viewSubmenu.some((item) => item.role === "togglefullscreen"),
       ).toBe(fullScreen);
+    },
+  );
+
+  it.each([
+    {
+      platform: "Windows",
+      isLinux: false,
+      isMac: false,
+      label: "Server && Daemon Logs",
+    },
+    {
+      platform: "Linux",
+      isLinux: true,
+      isMac: false,
+      label: "Server && Daemon Logs",
+    },
+    {
+      platform: "macOS",
+      isLinux: false,
+      isMac: true,
+      label: "Server & Daemon Logs",
+    },
+  ])(
+    "escapes the ampersand in the logs label where menus use access keys ($platform)",
+    ({ isLinux, isMac, label }) => {
+      const openServerDaemonLogs = vi.fn();
+      const template = buildApplicationMenuTemplate(
+        menuArgs(() => {}, { isLinux, isMac, openServerDaemonLogs }),
+      );
+      const viewSubmenu = template.find((item) => item.label === "View")
+        ?.submenu as MenuItemConstructorOptions[];
+      const logs = viewSubmenu.find((item) => item.label === label);
+
+      logs?.click?.({} as never, undefined, {} as never);
+      expect(openServerDaemonLogs).toHaveBeenCalledTimes(1);
     },
   );
 });
