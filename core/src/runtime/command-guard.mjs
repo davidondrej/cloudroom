@@ -40,7 +40,7 @@ export function codexGuardConfig(command) {
   const hook = { async: false, command, timeout: 10, type: "command" };
   const identity = { event_name: "pre_tool_use", hooks: [hook], matcher: "Bash" };
   const hash = "sha256:" + createHash("sha256").update(JSON.stringify(identity)).digest("hex");
-  // Codex resolves its synthetic session config against C:\ on Windows and / on Unix.
+  // Codex uses a fixed synthetic root (C:\ on Windows, / on Unix), regardless of cwd.
   const path = process.platform === "win32"
     ? String.raw`C:\<session-flags>\config.toml`
     : "/<session-flags>/config.toml";
