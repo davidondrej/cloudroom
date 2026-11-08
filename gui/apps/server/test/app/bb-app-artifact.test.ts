@@ -156,7 +156,7 @@ describe("bb-app artifact service (desktop packaging)", () => {
       const artifact = await service.getArtifact();
       const listing = (
         await execFileAsync(tarCommand(), ["-tzf", artifact.path])
-      ).stdout.split("\n");
+      ).stdout.split(/\r?\n/u);
       expect(listing).toEqual(
         expect.arrayContaining([
           "package/package.json",
@@ -209,7 +209,7 @@ describe("bb-app artifact service (desktop packaging)", () => {
     });
 
     await expect(service.getArtifact()).rejects.toMatchObject({
-      code: expect.stringMatching(/^(EISDIR|ENOTSUP)$/u),
+      code: expect.stringMatching(/^(EISDIR|ENOTSUP|EPERM)$/u),
       path: readmePath,
     });
   });
@@ -248,7 +248,7 @@ describe.each(MODES)("bb-app artifact service (%s)", (mode) => {
       await expect(service.getVersion()).resolves.toBe("1.2.3-test");
       const listing = (
         await execFileAsync(tarCommand(), ["-tzf", artifact.path])
-      ).stdout.split("\n");
+      ).stdout.split(/\r?\n/u);
       expect(listing).toContain("package/package.json");
       expect(listing).toContain("package/dist/bb-app.js");
       expect(listing).toContain("package/dist/room-cli.js");
