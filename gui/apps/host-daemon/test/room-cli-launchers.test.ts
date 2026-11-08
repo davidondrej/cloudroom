@@ -100,6 +100,19 @@ describe("room-cli launchers", () => {
     ).toBe(true);
   });
 
+  it.each([
+    [
+      "room-cli.cmd, which waits for the GUI exe",
+      "elseif ($env:ROOM_CLI_ARGV.Length -le 8000) { $app = Join-Path $PSScriptRoot 'room-cli.cmd'; $cli = @() }",
+    ],
+    [
+      "the direct launch for arguments too long for cmd.exe",
+      "    $env:ELECTRON_RUN_AS_NODE = '1'",
+    ],
+  ])("runs Cloudroom.exe from PowerShell through %s", (_, line) => {
+    expect(ROOM_CLI_PS1).toContain(line);
+  });
+
   it.runIf(process.platform === "win32")(
     "passes PowerShell arguments to the CLI verbatim, without cmd.exe",
     () => {

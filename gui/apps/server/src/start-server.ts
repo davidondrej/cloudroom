@@ -81,7 +81,11 @@ export async function runServer(serverConfig: ServerConfig): Promise<void> {
 
   const selfDir = dirname(fileURLToPath(import.meta.url));
   const appDir = resolve(selfDir, "../../app");
-  const appDistDir = join(appDir, "dist");
+  // The desktop app packs the web app inside app.asar (fewer files to install); Electron's Node reads it there.
+  const unpackedAppDistDir = join(appDir, "dist");
+  const appDistDir = existsSync(unpackedAppDistDir)
+    ? unpackedAppDistDir
+    : unpackedAppDistDir.replace(/app\.asar\.unpacked(?=[\\/])/u, "app.asar");
   const isProduction = process.env.NODE_ENV === "production";
   const staticDir =
     isProduction && existsSync(appDistDir) ? appDistDir : undefined;

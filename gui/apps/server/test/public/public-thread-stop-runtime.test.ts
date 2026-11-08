@@ -1,4 +1,5 @@
 import {
+  getQueuedThreadMessage,
   getThread,
   isThreadQueueAutoSendPaused,
   listEvents,
@@ -24,10 +25,13 @@ import {
   seedStoredEvent,
   seedThread,
   seedThreadFixture,
+  seedThreadRuntimeState,
 } from "../helpers/seed.js";
 import { withTestHarness } from "../helpers/test-app.js";
 import { runQueuedMessageDispatch } from "../../src/services/threads/queued-message-dispatch.js";
 import { stopThreadForCurrentState } from "../../src/services/threads/thread-lifecycle.js";
+import { applyLoggedThreadLifecycleEvent } from "../../src/services/threads/lifecycle-outcome.js";
+import { sendNextQueuedMessageIfPresent } from "../../src/services/threads/queued-messages.js";
 
 describe("thread runtime stop", () => {
   it("releases an idle runtime without changing thread state", async () => {
@@ -421,10 +425,15 @@ describe("thread runtime stop", () => {
 
   it("keeps rows the user did not ask for behind the manual-stop pause when one is sent now", async () => {
     await withTestHarness(async (harness) => {
-      const { thread } = seedThreadFixture(harness, {
+      const { environment, thread } = seedThreadFixture(harness, {
         thread: { status: "active", visibility: "hidden" },
       });
-      for (const text of ["Run this next", "But not this one"]) {
+      seedThreadRuntimeState(harness.deps, {
+        environmentId: environment.id,
+        providerThreadId: "provider-stop-drain-race",
+        threadId: thread.id,
+      });
+      for (const text of ["But not this one", "Run this next"]) {
         const queueResponse = await harness.app.request(
           `/api/v1/threads/${thread.id}/queued-messages`,
           {
@@ -443,11 +452,41 @@ describe("thread runtime stop", () => {
           201,
         );
       }
-      const [sentNow, heldBack] = listQueuedThreadMessages(
+      const [heldBack, sentNow] = listQueuedThreadMessages(
         harness.db,
         thread.id,
       );
 
+      applyLoggedThreadLifecycleEvent(harness.deps, {
+        event: { type: "run.succeeded" },
+        threadId: thread.id,
+      });
+      let releaseDrain!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        releaseDrain = resolve;
+      });
+      const registry = harness.deps.providerRegistry;
+      const whenSettled = registry.whenRegistrationsSettled.bind(registry);
+      let drainWaiting = false;
+      const registrationWait = vi
+        .spyOn(registry, "whenRegistrationsSettled")
+        .mockImplementationOnce(async () => {
+          drainWaiting = true;
+          await gate;
+          return whenSettled();
+        });
+      const draining = sendNextQueuedMessageIfPresent(harness.deps, {
+        threadId: thread.id,
+      });
+      await vi.waitFor(() => expect(drainWaiting).toBe(true));
+      expect(getQueuedThreadMessage(harness.db, heldBack!.id)).toMatchObject({
+        claimedAt: expect.any(Number),
+      });
+      // A new turn and Stop catch the older row while its send is in flight.
+      applyLoggedThreadLifecycleEvent(harness.deps, {
+        event: { type: "run.started" },
+        threadId: thread.id,
+      });
       const stopResponsePromise = harness.app.request(
         `/api/v1/threads/${thread.id}/stop`,
         { method: "POST" },
@@ -457,6 +496,22 @@ describe("thread runtime stop", () => {
         ({ command }) =>
           command.type === "thread.stop" && command.threadId === thread.id,
       );
+      releaseDrain();
+      await draining;
+      registrationWait.mockRestore();
+      await reportQueuedCommandSuccess(harness, stop, {
+        providerCheckpointId: null,
+      });
+      expect((await stopResponsePromise).status).toBe(200);
+      await runQueuedMessageDispatch(harness.deps, {
+        kind: "thread-ready",
+        threadId: thread.id,
+      });
+      expect(
+        listQueuedThreadMessages(harness.db, thread.id).map((row) => row.id),
+      ).toEqual([heldBack!.id, sentNow!.id]);
+      expect(getThread(harness.db, thread.id)?.status).toBe("idle");
+
       const sendResponse = await harness.app.request(
         `/api/v1/threads/${thread.id}/queued-messages/${sentNow!.id}/send`,
         {
@@ -466,10 +521,6 @@ describe("thread runtime stop", () => {
         },
       );
       expect(sendResponse.status).toBe(200);
-      await reportQueuedCommandSuccess(harness, stop, {
-        providerCheckpointId: null,
-      });
-      expect((await stopResponsePromise).status).toBe(200);
 
       await vi.waitFor(() => {
         expect(

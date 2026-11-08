@@ -17,26 +17,21 @@ function closeTerminal(terminalId: string | null): void {
     .catch(() => undefined);
 }
 
-export function ProviderLoginButton({
-  className,
-  command,
-  displayName,
-  hostId,
-  onDone,
-}: {
-  className?: string;
-  command: string;
-  displayName: string;
-  hostId: string;
-  onDone: () => void;
-}) {
+/** Runs a provider's login command in a terminal drawer. `start` can be called from any trigger. */
+export function useProviderLogin(hostId: string | null, onDone: () => void) {
   const titleId = useId();
   const [session, setSession] = useState<TerminalSession | null>(null);
+  const [displayName, setDisplayName] = useState("");
   const [starting, setStarting] = useState(false);
   const terminalId = useRef<string | null>(null);
   useEffect(() => () => closeTerminal(terminalId.current), []);
 
-  const start = () => {
+  const start = (command: string, name: string) => {
+    if (hostId === null) {
+      appToast.error(`Couldn't find the machine to log in to ${name}. Try again in a moment.`);
+      return;
+    }
+    setDisplayName(name);
     setStarting(true);
     sdk.terminals
       .create({
@@ -44,7 +39,7 @@ export function ProviderLoginButton({
         cols: DEFAULT_TERMINAL_COLS,
         rows: DEFAULT_TERMINAL_ROWS,
         start: { mode: "command", command },
-        title: `Log in to ${displayName}`,
+        title: `Log in to ${name}`,
       })
       .then(
         (created) => {
@@ -65,6 +60,61 @@ export function ProviderLoginButton({
     onDone();
   };
 
+  const drawer = (
+    <PersistentResponsiveDrawerShell
+      open={session !== null}
+      onOpenChange={(open) => {
+        if (!open) close();
+      }}
+      labelledBy={titleId}
+      backdropClassName="bg-black/25 backdrop-blur-xs"
+      contentClassName="inset-0 m-auto h-fit w-[calc(100%-2rem)] max-w-2xl overflow-y-auto rounded-xl p-6 shadow-2xl data-[state=closed]:invisible [&>[data-persistent-drawer-handle]]:hidden"
+    >
+      <div className="space-y-4">
+        <div className="space-y-1">
+          <h2 id={titleId} className="text-lg font-semibold">
+            Log in to {displayName}
+          </h2>
+          <p className="text-sm text-muted-foreground">
+            Follow the steps below. Your browser may open to finish signing in.
+          </p>
+        </div>
+        <div className="h-80 overflow-hidden rounded-md border border-border bg-sidebar">
+          {session ? (
+            <ThreadTerminalView
+              autoFocus
+              isPanelOpen
+              session={session}
+              onSessionChange={(next) => {
+                setSession(next);
+                if (next.status === "exited") onDone();
+              }}
+            />
+          ) : null}
+        </div>
+        <Button className="w-full" onClick={close}>
+          Done
+        </Button>
+      </div>
+    </PersistentResponsiveDrawerShell>
+  );
+  return { start, starting, drawer };
+}
+
+export function ProviderLoginButton({
+  className,
+  command,
+  displayName,
+  hostId,
+  onDone,
+}: {
+  className?: string;
+  command: string;
+  displayName: string;
+  hostId: string;
+  onDone: () => void;
+}) {
+  const login = useProviderLogin(hostId, onDone);
   return (
     <>
       <Button
@@ -72,47 +122,12 @@ export function ProviderLoginButton({
         size="sm"
         className={className}
         aria-label={`Log in to ${displayName}`}
-        disabled={starting}
-        onClick={start}
+        disabled={login.starting}
+        onClick={() => login.start(command, displayName)}
       >
-        {starting ? "Starting…" : "Log in"}
+        {login.starting ? "Starting…" : "Log in"}
       </Button>
-      <PersistentResponsiveDrawerShell
-        open={session !== null}
-        onOpenChange={(open) => {
-          if (!open) close();
-        }}
-        labelledBy={titleId}
-        backdropClassName="bg-black/25 backdrop-blur-xs"
-        contentClassName="inset-0 m-auto h-fit w-[calc(100%-2rem)] max-w-2xl overflow-y-auto rounded-xl p-6 shadow-2xl data-[state=closed]:invisible [&>[data-persistent-drawer-handle]]:hidden"
-      >
-        <div className="space-y-4">
-          <div className="space-y-1">
-            <h2 id={titleId} className="text-lg font-semibold">
-              Log in to {displayName}
-            </h2>
-            <p className="text-sm text-muted-foreground">
-              Follow the steps below. Your browser may open to finish signing in.
-            </p>
-          </div>
-          <div className="h-80 overflow-hidden rounded-md border border-border bg-sidebar">
-            {session ? (
-              <ThreadTerminalView
-                autoFocus
-                isPanelOpen
-                session={session}
-                onSessionChange={(next) => {
-                  setSession(next);
-                  if (next.status === "exited") onDone();
-                }}
-              />
-            ) : null}
-          </div>
-          <Button className="w-full" onClick={close}>
-            Done
-          </Button>
-        </div>
-      </PersistentResponsiveDrawerShell>
+      {login.drawer}
     </>
   );
 }

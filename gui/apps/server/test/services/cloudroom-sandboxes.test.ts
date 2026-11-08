@@ -140,7 +140,7 @@ it("gives each cloud thread its own sandbox, wakes it only for work, and archive
     harness.deps.db.insert(cloudroomCommands).values({ id: "edit-queued", threadId: thread.id, command: "edit", input: JSON.stringify({ target_request_id: "over-limit", expected_revision: 1, text: "Not now, edited" }), createdAt: Date.now() + 1 }).run();
     // A delivery is preparing to wake the sandbox for the message, copying logins first, when Stop lands. Every login is
     // skipped, so no real one is read.
-    const allLogins = new Set(["codex", "pi", "opencode", "hermes", "devin", "openclaw", "cursor", "github"]);
+    const allLogins = new Set(["codex", "pi", "opencode", "hermes", "devin", "kimi", "openclaw", "cursor", "github"]);
     let releaseLogins: (() => void) | null = null;
     service.sandboxes.skipLogins = () => releaseLogins ? Promise.resolve(allLogins) : new Promise(resolve => { releaseLogins = () => resolve(allLogins); });
     await setCopyLogins(harness.deps, true);

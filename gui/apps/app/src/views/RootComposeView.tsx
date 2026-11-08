@@ -26,6 +26,7 @@ import {
   type NewThreadComposerSubmission,
 } from "@/components/promptbox/NewThreadComposer";
 import { ProviderCliVersionBanner } from "@/components/promptbox/banner/ProviderCliVersionBanner";
+import { DesktopUpdateCard } from "@/components/layout/DesktopUpdateBanner";
 import {
   buildProviderCliIssue,
   hasProviderCliAction,
@@ -1958,7 +1959,7 @@ function RootComposeSurface({
     id: "root-compose-prompt",
     autoFocus: !isProviderCliVersionBlocked,
     allowSoftKeyboardAutoFocus: isCompactViewport,
-    banner: promptBanner,
+    banner: promptBanner ?? <DesktopUpdateCard attached={false} />,
     header: promptHeader,
     blockedReason: isProviderCliVersionBlocked
       ? `Update ${selectedProviderCliStatus?.displayName ?? selectedProviderId} before starting a thread.`

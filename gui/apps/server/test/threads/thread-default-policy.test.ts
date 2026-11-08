@@ -110,6 +110,7 @@ describe("resolveCreateThreadExecutionDefaults", () => {
         "acp-droid",
         "acp-kilo",
         "acp-cline",
+        "acp-kimi",
       ],
     });
   });
@@ -139,6 +140,7 @@ describe("resolveCreateThreadExecutionDefaults", () => {
       "acp-droid",
       "acp-kilo",
       "acp-cline",
+      "acp-kimi",
     ]);
     expect(
       resolveCreateThreadExecutionDefaults(userRegistry, {
@@ -188,6 +190,7 @@ describe("resolveCreateThreadExecutionDefaults", () => {
       "acp-droid",
       "acp-kilo",
       "acp-cline",
+      "acp-kimi",
     ]);
   });
 
@@ -267,6 +270,7 @@ describe("resolveCreateThreadExecutionDefaults", () => {
         "acp-droid",
         "acp-kilo",
         "acp-cline",
+        "acp-kimi",
       ],
     });
   });

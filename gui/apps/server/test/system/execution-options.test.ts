@@ -46,6 +46,7 @@ const INSTALLED_ONLY_PROVIDER_IDS = [
   "acp-droid",
   "acp-kilo",
   "acp-cline",
+  "acp-kimi",
 ] as const;
 
 function registerInstalledOnlyProviderFixtures(harness: TestAppHarness): void {

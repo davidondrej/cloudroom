@@ -406,6 +406,11 @@ describe("buildPluginProviderRegistration", () => {
         logoUrl: "/api/v1/system/providers/acp-cline/logo",
         icon: undefined,
       },
+      {
+        id: "acp-kimi",
+        logoUrl: "/api/v1/system/providers/acp-kimi/logo",
+        icon: undefined,
+      },
     ]);
   });
 
@@ -438,6 +443,7 @@ describe("buildPluginProviderRegistration", () => {
       "acp-droid": "collapse",
       "acp-kilo": "collapse",
       "acp-cline": "collapse",
+      "acp-kimi": "collapse",
     });
   });
 });

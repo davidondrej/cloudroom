@@ -263,8 +263,15 @@ class Tree:
                         if lineage:
                             output.write(line)
                         else:
+                            source, roots, posix = metadata.get('cwd'), metadata.get('runtime_workspace_roots'), native['cwd'].startswith('/')
                             metadata['cwd'] = native['cwd']
                             metadata.pop('dynamic_tools', None)
+                            # Codex refuses to resume with another platform's roots: the old cwd maps here, other foreign roots go.
+                            if isinstance(source, str) and isinstance(roots, list) and source.startswith('/') != posix:
+                                key = lambda path: path if path.startswith('/') else path.replace('/', '\\').rstrip('\\').lower()
+                                mapped = list(dict.fromkeys(native['cwd'] if key(root) == key(source) else root for root in roots
+                                                            if isinstance(root, str) and (key(root) == key(source) or root.startswith('/') == posix)))
+                                metadata['runtime_workspace_roots'] = mapped or roots and [native['cwd']]  # [] would mean "no workspace"
                             output.write((json.dumps(header, separators=(',', ':')) + '\n').encode())
                     while chunk := stream.read(CHUNK):
                         count += len(chunk)

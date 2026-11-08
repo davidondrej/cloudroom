@@ -1,5 +1,5 @@
 import { useEffect, useState, type ComponentType } from "react";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQueryClient, type QueryClient } from "@tanstack/react-query";
 import type {
   SystemExecutionOptionsModelLoadError,
   SystemProvidersQuery,
@@ -25,6 +25,36 @@ function shortReason(error: SystemExecutionOptionsModelLoadError | null) {
 }
 
 const signInsInProgress = new Set<string>();
+
+/** Reloads a provider's models on its route, e.g. after a sign-in, and updates the picker's cache. */
+export async function restartProviderModels(
+  queryClient: QueryClient,
+  providerId: string,
+  routing?: SystemProvidersQuery,
+) {
+  const identity = {
+    providerId,
+    environmentId: routing?.environmentId ?? null,
+    hostId: routing?.hostId ?? null,
+  };
+  const queryKey = systemExecutionOptionsQueryKey(identity);
+  await queryClient.cancelQueries({ queryKey, exact: true });
+  const result = await sdk.providers.restartModelDiscovery({
+    providerId,
+    ...(routing?.environmentId
+      ? { environmentId: routing.environmentId }
+      : routing?.hostId
+        ? { hostId: routing.hostId }
+        : {}),
+  });
+  queryClient.setQueryData(queryKey, result);
+  if (!result.modelLoadError && result.models.length > 0)
+    writeCachedModelCatalog(modelCatalogCacheKey(identity), {
+      models: result.models,
+      selectedOnlyModels: result.selectedOnlyModels,
+    });
+  return result;
+}
 
 export function ModelUnavailable({
   providerId,
@@ -68,16 +98,7 @@ export function ModelUnavailable({
         await queryClient.refetchQueries({ queryKey, exact: true });
         return;
       }
-      await queryClient.cancelQueries({ queryKey, exact: true });
-      const result = await sdk.providers.restartModelDiscovery({
-        providerId,
-        ...(routing?.environmentId
-          ? { environmentId: routing.environmentId }
-          : routing?.hostId
-            ? { hostId: routing.hostId }
-            : {}),
-      });
-      queryClient.setQueryData(queryKey, result);
+      const result = await restartProviderModels(queryClient, providerId, routing);
       if (result.modelLoadError) {
         throw new Error(
           formatModelLoadErrorText({
@@ -89,10 +110,6 @@ export function ModelUnavailable({
       if (result.models.length === 0) {
         throw new Error(`${providerLabel} still returned no models.`);
       }
-      writeCachedModelCatalog(modelCatalogCacheKey(identity), {
-        models: result.models,
-        selectedOnlyModels: result.selectedOnlyModels,
-      });
       signInsInProgress.delete(signInKey);
     },
   });

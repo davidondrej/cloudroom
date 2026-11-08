@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Real HTTP sync checks for skills/settings/login, including safe repository-sync retirement."""
+import hashlib
 import io
 import json
 import os
@@ -338,6 +339,16 @@ class SyncTests(unittest.TestCase):
             (self.local / 'file').write_text('concurrent edit')
             with self.assertRaises(Conflict): tree.apply('file', old, entry, data)
         self.assertEqual((self.local / 'file').read_text(), 'concurrent edit')
+
+    def test_cross_platform_codex_teleport_maps_workspace_roots(self):
+        native = {'harness': 'codex', 'id': '01a1b544-cd8e-7663-b01e-2cfebbb19098', 'cwd': '/code/demo'}
+        for index, (source, roots, expected) in enumerate([('C:\\demo', ['C:\\demo', 'D:\\x', '/kept'], ['/code/demo', '/kept']),
+                                                           ('C:\\Demo', ['c:/demo/'], ['/code/demo']), ('C:\\demo', ['D:\\x'], ['/code/demo']),
+                                                           ('C:\\demo', None, None), ('/Users/me', ['/Users/me'], ['/Users/me'])]):
+            data = json.dumps({'type': 'session_meta', 'payload': {'id': native['id'], 'cwd': source, 'runtime_workspace_roots': roots}}).encode() + b'\n{}\n'
+            request = {'path': 'rollout.jsonl', 'size': len(data), 'sha256': hashlib.sha256(data).hexdigest(), 'native': native}
+            written = Path(Tree(self.root / str(index), create=True).install_transfer(request, io.BytesIO(data))['path']).read_bytes()
+            self.assertEqual(json.loads(written.split(b'\n')[0])['payload']['runtime_workspace_roots'], expected)
 
 
 if __name__ == '__main__': unittest.main()

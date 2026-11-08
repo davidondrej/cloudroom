@@ -19,6 +19,7 @@ const AGENTS: Record<string, { login: Exclude<SandboxLogin, "mcp" | "github">; s
   "acp-opencode": { login: "opencode" },
   "acp-hermes-agent": { login: "hermes" },
   "acp-devin": { login: "devin" },
+  "acp-kimi": { login: "kimi" },
   "acp-openclaw": { login: "openclaw" },
   "acp-cursor": { login: "cursor" },
 };

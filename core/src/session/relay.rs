@@ -8,7 +8,7 @@ use super::{
     history::ApiError,
     thread::{
         Failure, NO_PARENT, archive_under, deliver, fail, random_key, record, retire,
-        session_failure, starting, website_failure,
+        session_failure, start_error, starting, website_failure,
     },
 };
 use axum::{
@@ -69,6 +69,26 @@ fn note_child(m: &Manager, parent: &str, child: &str, state: &str) {
     let _ = m.note(parent, "child_state", json!({"child":child,"state":state}));
 }
 
+/// Notes a start's outcome for `child` only while the parent knows it as starting, checked and written under one lock:
+/// a late start answer never undoes a reply, stop or archive it heard since (#1058). False when it heard one.
+fn note_start(m: &Manager, parent: &str, child: &str, state: &str) -> bool {
+    let mut local = m.local.lock().unwrap();
+    let known = local.sessions.get(parent).map(|s| &s.child_states);
+    if known
+        .and_then(|s| s.get(child))
+        .is_some_and(|s| s != "starting")
+    {
+        return false;
+    }
+    let _ = local.append(
+        parent,
+        "child_state",
+        json!({"child":child,"state":state}),
+        None,
+    );
+    true
+}
+
 /// `tell`, `stop` or `archive` from the calling session to a child in a sandbox of its own. `to_parent`: a
 /// `tell --parent`, which the website sends to the parent it saved now, not `id`, this session's first one (#968).
 pub(super) async fn command(
@@ -114,10 +134,24 @@ pub(super) async fn command(
     };
     let key = random_key().map_err(|e| fail(StatusCode::SERVICE_UNAVAILABLE, &e.to_string()))?;
     let body = json!({"action":action,"thread":id,"text":text,"request_id":format!("relay_{key}"),"label":other,"parent":to_parent});
+    let failed = start_error(m, caller, id).filter(|_| action != "archive");
     let mut answer = match api.post_waking("relay", &body).await {
         // The website may not know a child that just started yet (#317).
         Err(ApiError::Status(404, _)) if starting(m, caller).iter().any(|c| c == id) => {
             return Err(fail(StatusCode::SERVICE_UNAVAILABLE, STARTING));
+        }
+        // Its start was refused, so no agent runs there to message or stop. A stop of one that never woke gets the
+        // website's 409 "it may still start" instead, which a final refusal makes untrue (#1058).
+        Err(ApiError::Status(status, _))
+            if failed.is_some() && (status == 404 || (status == 409 && action == "stop")) =>
+        {
+            let why = failed.unwrap_or_default();
+            return Err(fail(
+                StatusCode::CONFLICT,
+                &format!(
+                    "This child could not be started ({why}), so nothing runs there. To clean it up: room-cli thread archive {id}"
+                ),
+            ));
         }
         Err(ApiError::Status(403 | 404, _)) if shared && !up => {
             return via_app(
@@ -411,8 +445,9 @@ pub(super) async fn own_children(m: &Manager, caller: &str, archived: bool, answ
             _ => known.get(id).map_or(sandbox, String::as_str),
         };
         let mut item = json!({"id":id,"title":child["title"],"state":state,"parent":child["parent"],"sandbox":"own"});
-        // Its sandbox didn't start yet, say after a failed wake.
-        if let Some(issue) = child["issue"].as_str() {
+        // Its sandbox didn't start yet, say after a failed wake, or its start was refused (#1058).
+        let refused = start_error(m, caller, id).filter(|_| state == "error");
+        if let Some(issue) = refused.as_deref().or(child["issue"].as_str()) {
             item["issue"] = json!(issue);
         }
         list.push(item);
@@ -516,7 +551,7 @@ async fn drive_start(
                     break Some("the website gave no thread ID".to_owned());
                 };
                 let started = answer["started"] == true;
-                note_child(
+                note_start(
                     &m,
                     &session,
                     child,
@@ -563,10 +598,14 @@ async fn drive_start(
                 .is_ok();
             (recorded, waiting.contains(&format!("{session}/{request}")))
         };
-        if recorded && !waiting {
+        // A named child shows the refusal in `list`, `output` and `tell` even when a waiting spawn answers with it. One
+        // the parent has heard of since (say, archived it) keeps that, and gets no late failure notice.
+        let fresh = named
+            .as_deref()
+            .is_none_or(|child| recorded && note_start(&m, &session, child, "error"));
+        if recorded && !waiting && fresh {
             let text = match &named {
                 Some(child) => {
-                    note_child(&m, &session, child, "error");
                     format!("[Cloudroom] Child thread {child} could not be started: {error}.")
                 }
                 None => format!(

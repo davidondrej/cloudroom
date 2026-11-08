@@ -17,6 +17,7 @@ import {
 } from "../../src/services/plugins/plugin-hook-registry.js";
 import { setPluginThreadEventEmitter } from "../../src/services/plugins/plugin-thread-events.js";
 import { applyLoggedThreadLifecycleEvent } from "../../src/services/threads/lifecycle-outcome.js";
+import { resolveDeferredFirstTurnContext } from "../../src/services/threads/deferred-first-turn-context.js";
 import { runQueuedMessageDispatch } from "../../src/services/threads/queued-message-dispatch.js";
 import { toThreadQueuedMessage } from "../../src/services/threads/thread-queued-messages.js";
 import { buildTurnFailedEvent } from "../../src/services/threads/turn-failed.js";
@@ -897,6 +898,48 @@ describe("retrying a failed turn", () => {
       await expect(retry(requestId)).rejects.toMatchObject({
         body: { code: "retry_already_queued" },
       });
+    });
+  });
+
+  it("never carries a skill from a refused retry into later messages (#1038)", async () => {
+    await withTestHarness(async (harness) => {
+      const { thread } = seedFailableThread(harness, "host-skill");
+      failThread(harness, thread.id);
+      const resource = {
+        kind: "command",
+        trigger: "/",
+        name: "demo",
+        source: "skill",
+        origin: "user",
+        label: "demo",
+        argumentHint: null,
+      };
+      const sent = await harness.app.request(
+        `/api/v1/threads/${thread.id}/send`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            input: [
+              {
+                type: "text",
+                text: "/demo go",
+                mentions: [{ start: 0, end: 5, resource }],
+              },
+            ],
+            mode: "auto",
+          }),
+        },
+      );
+      expect(sent.status).toBe(200);
+      failThread(harness, thread.id);
+      await retryFailedTurn(harness.deps, {
+        thread: requireThread(harness, thread.id),
+        request: { turnRequestId: null, sendAt: null, reason: "Retry" },
+      });
+      failThread(harness, thread.id);
+
+      expect(resolveDeferredFirstTurnContext(harness.db, thread.id)).toBeNull();
     });
   });
 });

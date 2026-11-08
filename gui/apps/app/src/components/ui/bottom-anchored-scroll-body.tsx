@@ -8,7 +8,7 @@ import {
   useRef,
   useState,
 } from "react";
-import type { ReactNode } from "react";
+import type { ReactNode, RefObject } from "react";
 import { useStore } from "jotai";
 import { cn } from "@cloudroom/shared-ui/lib/utils";
 import { usePointerCoarse } from "@cloudroom/shared-ui/hooks/use-pointer-coarse";
@@ -69,6 +69,15 @@ const DIRECT_TIMELINE_ROW_SELECTOR = [
   `:scope > ${TIMELINE_ROW_ID_SELECTOR}`,
   `${TIMELINE_VIRTUAL_SPACER_SELECTOR} > ${TIMELINE_ROW_ID_SELECTOR}`,
 ].join(", ");
+// Thread scroll thumb: thin at rest, grows as the mouse comes within reach.
+const THUMB_WIDTH_PX = 6;
+const THUMB_GROW_WIDTH_PX = 10;
+const THUMB_GROW_HEIGHT_PX = 36;
+const THUMB_REACH_PX = 70;
+const THUMB_EDGE_PX = 2;
+const THUMB_INSET_PX = 4;
+const THUMB_MIN_HEIGHT_PX = 32;
+const THUMB_GROW_TAU_MS = 50;
 const SCROLL_INTENT_KEYS = new Set([
   "ArrowDown",
   "ArrowUp",
@@ -218,6 +227,238 @@ function isKeyboardEventFromScrollArea(
     return true;
   }
   return scrollArea.contains(target);
+}
+
+interface ThreadScrollThumbProps {
+  scrollAreaRef: RefObject<HTMLDivElement | null>;
+  onDragStart: () => void;
+  onWheel: (event: WheelEvent) => void;
+}
+
+// Custom scroll thumb for mouse users. The native thumb can't animate its
+// size, so this overlay draws the thumb, follows the mouse, and handles drags.
+function ThreadScrollThumb({
+  scrollAreaRef,
+  onDragStart,
+  onWheel,
+}: ThreadScrollThumbProps) {
+  const thumbRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const scrollArea = scrollAreaRef.current;
+    const thumb = thumbRef.current;
+    const host = scrollArea?.parentElement;
+    if (!scrollArea || !thumb || !host) return;
+
+    let grow = 0;
+    let targetGrow = 0;
+    let frame: number | null = null;
+    let lastFrameAt = 0;
+    let pointer: { x: number; y: number } | null = null;
+    // A drag maps mouse movement from an origin. The origin is reset whenever
+    // the content changes (older messages load, a reply streams in), so the
+    // chat never jumps back to a stale position.
+    let drag: {
+      originY: number;
+      originScrollTop: number;
+      scrollPerPx: number;
+      lastY: number;
+      lastScrollTop: number;
+    } | null = null;
+
+    // Sizes come from ResizeObserver entries, never scrollHeight or
+    // clientHeight, so scrolling never forces a layout read.
+    const size = { client: 0, content: 0 };
+    // The thumb's place and size at a given growth (0 = rest, 1 = full). It
+    // touches the track's ends exactly when the chat reaches its ends.
+    const geometry = (growth: number) => {
+      const max = size.content - size.client;
+      const track = size.client - 2 * THUMB_INSET_PX;
+      const height =
+        Math.max(
+          THUMB_MIN_HEIGHT_PX,
+          (track * size.client) / Math.max(1, size.content),
+        ) +
+        THUMB_GROW_HEIGHT_PX * growth;
+      const scrolled = max > 0 ? Math.min(scrollArea.scrollTop, max) / max : 0;
+      const top = THUMB_INSET_PX + scrolled * (track - height);
+      return {
+        max,
+        height,
+        top,
+        scrollPerPx: max / Math.max(1, track - height),
+      };
+    };
+
+    const render = () => {
+      const { max, height, top } = geometry(grow);
+      thumb.hidden = max <= 1;
+      thumb.style.top = `${top}px`;
+      thumb.style.height = `${height}px`;
+      thumb.style.width = `${THUMB_WIDTH_PX + THUMB_GROW_WIDTH_PX * grow}px`;
+      thumb.style.setProperty("--grow", grow.toFixed(3));
+    };
+
+    const animate = (time: number) => {
+      const elapsed = lastFrameAt ? time - lastFrameAt : 16;
+      lastFrameAt = time;
+      grow +=
+        (targetGrow - grow) * (1 - Math.exp(-elapsed / THUMB_GROW_TAU_MS));
+      if (Math.abs(targetGrow - grow) < 0.005) grow = targetGrow;
+      render();
+      frame = grow === targetGrow ? null : requestAnimationFrame(animate);
+    };
+
+    const setGrow = (next: number) => {
+      targetGrow = next;
+      if (frame !== null || grow === next) return;
+      lastFrameAt = 0;
+      frame = requestAnimationFrame(animate);
+    };
+
+    const updateProximity = () => {
+      if (drag) return setGrow(1);
+      if (!pointer) {
+        thumb.removeAttribute("data-near");
+        return setGrow(0);
+      }
+      const rect = scrollArea.getBoundingClientRect();
+      const { height, top } = geometry(0);
+      const right = rect.right - THUMB_EDGE_PX;
+      const thumbTop = rect.top + top;
+      const dx = Math.max(
+        0,
+        right - THUMB_WIDTH_PX - pointer.x,
+        pointer.x - right,
+      );
+      const dy = Math.max(
+        0,
+        thumbTop - pointer.y,
+        pointer.y - thumbTop - height,
+      );
+      thumb.toggleAttribute("data-near", right - pointer.x < THUMB_REACH_PX);
+      setGrow(Math.max(0, 1 - Math.hypot(dx, dy) / THUMB_REACH_PX) ** 1.6);
+    };
+
+    const resetDragOrigin = () => {
+      if (!drag) return;
+      drag.originY = drag.lastY;
+      drag.originScrollTop = drag.lastScrollTop = scrollArea.scrollTop;
+      drag.scrollPerPx = geometry(1).scrollPerPx;
+    };
+
+    const handlePointerMove = (event: PointerEvent) => {
+      if (drag) {
+        if (Math.abs(scrollArea.scrollTop - drag.lastScrollTop) > 1) {
+          resetDragOrigin();
+        }
+        scrollArea.scrollTop =
+          drag.originScrollTop +
+          (event.clientY - drag.originY) * drag.scrollPerPx;
+        drag.lastY = event.clientY;
+        drag.lastScrollTop = scrollArea.scrollTop;
+      }
+      if (event.pointerType !== "mouse") return;
+      pointer = { x: event.clientX, y: event.clientY };
+      updateProximity();
+    };
+
+    const handlePointerLeave = () => {
+      pointer = null;
+      updateProximity();
+    };
+
+    const handlePointerDown = (event: PointerEvent) => {
+      if (event.button !== 0) return;
+      const { max, scrollPerPx } = geometry(1);
+      if (max <= 0) return;
+      event.preventDefault();
+      thumb.setPointerCapture(event.pointerId);
+      const scrollTop = scrollArea.scrollTop;
+      drag = {
+        originY: event.clientY,
+        originScrollTop: scrollTop,
+        scrollPerPx,
+        lastY: event.clientY,
+        lastScrollTop: scrollTop,
+      };
+      thumb.setAttribute("data-dragging", "");
+      onDragStart();
+      updateProximity();
+    };
+
+    const endDrag = () => {
+      if (!drag) return;
+      drag = null;
+      thumb.removeAttribute("data-dragging");
+      updateProximity();
+    };
+
+    // The thumb sits outside the scroll area, so pass wheel scrolls through.
+    const handleWheel = (event: WheelEvent) => {
+      onWheel(event);
+      scrollArea.scrollTop += event.deltaY;
+    };
+
+    const handleScroll = () => {
+      if (pointer || drag) updateProximity();
+      render();
+    };
+
+    const handleResize = (entries: ResizeObserverEntry[]) => {
+      for (const entry of entries) {
+        if (entry.target === scrollArea) {
+          size.client =
+            entry.contentBoxSize[0]?.blockSize ?? entry.contentRect.height;
+        } else {
+          size.content =
+            entry.borderBoxSize[0]?.blockSize ?? entry.contentRect.height;
+        }
+      }
+      resetDragOrigin();
+      render();
+    };
+
+    const resizeObserver =
+      typeof ResizeObserver === "undefined"
+        ? undefined
+        : new ResizeObserver(handleResize);
+    resizeObserver?.observe(scrollArea);
+    if (scrollArea.firstElementChild) {
+      resizeObserver?.observe(scrollArea.firstElementChild);
+    }
+    host.addEventListener("pointermove", handlePointerMove);
+    host.addEventListener("pointerleave", handlePointerLeave);
+    thumb.addEventListener("pointerdown", handlePointerDown);
+    thumb.addEventListener("pointerup", endDrag);
+    thumb.addEventListener("pointercancel", endDrag);
+    thumb.addEventListener("lostpointercapture", endDrag);
+    thumb.addEventListener("wheel", handleWheel, { passive: true });
+    scrollArea.addEventListener("scroll", handleScroll, { passive: true });
+    render();
+
+    return () => {
+      resizeObserver?.disconnect();
+      host.removeEventListener("pointermove", handlePointerMove);
+      host.removeEventListener("pointerleave", handlePointerLeave);
+      thumb.removeEventListener("pointerdown", handlePointerDown);
+      thumb.removeEventListener("pointerup", endDrag);
+      thumb.removeEventListener("pointercancel", endDrag);
+      thumb.removeEventListener("lostpointercapture", endDrag);
+      thumb.removeEventListener("wheel", handleWheel);
+      scrollArea.removeEventListener("scroll", handleScroll);
+      if (frame !== null) cancelAnimationFrame(frame);
+    };
+  }, [scrollAreaRef, onDragStart, onWheel]);
+
+  return (
+    <div
+      ref={thumbRef}
+      aria-hidden
+      className="thread-scroll-thumb"
+      style={{ right: THUMB_EDGE_PX }}
+    />
+  );
 }
 
 export function BottomAnchoredScrollBody({
@@ -908,11 +1149,12 @@ export function BottomAnchoredScrollBody({
       <TimelineScrollRestoreRowIdContext.Provider
         value={initialScrollRestoreRowId}
       >
-        <div className="grid min-h-0 flex-1 grid-rows-[minmax(auto,1fr)] overflow-hidden">
+        <div className="relative grid min-h-0 flex-1 grid-rows-[minmax(auto,1fr)] overflow-hidden">
           <div
             ref={scrollAreaRef}
             className={cn(
               "thread-scrollbar @container/page col-start-1 row-start-1 min-h-0 overflow-x-hidden overflow-y-auto",
+              !isPointerCoarse && "has-scroll-thumb",
               scrollAreaClassName,
             )}
           >
@@ -944,6 +1186,13 @@ export function BottomAnchoredScrollBody({
               ) : null}
             </div>
           </div>
+          {isPointerCoarse ? null : (
+            <ThreadScrollThumb
+              scrollAreaRef={scrollAreaRef}
+              onDragStart={startPointerScrollIntent}
+              onWheel={markWheelScrollIntent}
+            />
+          )}
           {scrollOverlay ? (
             <div
               data-scroll-overlay=""

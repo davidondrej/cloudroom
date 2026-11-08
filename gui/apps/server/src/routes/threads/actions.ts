@@ -61,6 +61,7 @@ import {
   installThreadMoves,
   moveThreadToProject,
 } from "../../services/threads/thread-move.js";
+import { requestThreadWorktreeMove } from "../../services/threads/thread-worktree-move.js";
 import {
   buildExecutionOptions,
   dispatchThreadUnarchiveCommand,
@@ -523,6 +524,13 @@ export function registerThreadActionRoutes(app: Hono, deps: AppDeps): void {
       ...result,
       thread: toThreadResponseFromThread(deps, { thread: result.thread }),
     });
+  });
+
+  post(routes.worktree, (context, payload) => {
+    const thread = requirePublicThread(deps.db, context.req.param("id"));
+    return context.json(
+      requestThreadWorktreeMove(deps, thread.id, payload.carry ?? []),
+    );
   });
 
   post(routes.pin, (context) => {

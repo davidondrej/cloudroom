@@ -20,6 +20,8 @@ import {
 import type {
   MoveThreadRequest,
   MoveThreadResponse,
+  MoveThreadToWorktreeRequest,
+  MoveThreadToWorktreeResponse,
   CreateQueuedMessageRequest,
   CreateThreadRequest,
   QueuedMessageListQuery,
@@ -83,6 +85,7 @@ import { signalRequestArgs, type CreateSdkAreaArgs } from "./common.js";
 
 export const DEFAULT_THREAD_WAIT_TIMEOUT_MS = 20 * 60 * 1000;
 export const DEFAULT_THREAD_WAIT_POLL_INTERVAL_MS = 250;
+const THREAD_WAIT_QUEUED_IDLE_GRACE_MS = 5_000;
 
 export interface ThreadListArgs {
   archived?: boolean;
@@ -338,6 +341,10 @@ export interface ThreadPinOrderArgs extends ReorderPinnedThreadRequest {
 }
 
 export interface ThreadMoveArgs extends MoveThreadRequest {
+  threadId: string;
+}
+
+export interface ThreadWorktreeArgs extends MoveThreadToWorktreeRequest {
   threadId: string;
 }
 
@@ -609,6 +616,8 @@ export interface ThreadsArea {
   paneAction(args: ThreadPaneActionArgs): Promise<ThreadPaneActionResult>;
   output(args: ThreadOutputArgs): Promise<ThreadOutputResponse>;
   move(args: ThreadMoveArgs): Promise<MoveThreadResponse>;
+  /** Moves a Local thread into a new managed worktree when its turn ends. */
+  worktree(args: ThreadWorktreeArgs): Promise<MoveThreadToWorktreeResponse>;
   pin(args: ThreadActionArgs): Promise<ThreadMutationResult>;
   promptHistory(
     args: ThreadPromptHistoryArgs,
@@ -1259,6 +1268,14 @@ export function createThreadsArea(args: CreateSdkAreaArgs): ThreadsArea {
         }),
       );
     },
+    async worktree(input) {
+      return transport.readJson(
+        transport.api.v1.threads[":id"].worktree.$post({
+          param: { id: input.threadId },
+          json: { carry: input.carry ?? [] },
+        }),
+      );
+    },
     async pin(input) {
       return transport.readJson(
         transport.api.v1.threads[":id"].pin.$post({
@@ -1481,13 +1498,31 @@ export function createThreadsArea(args: CreateSdkAreaArgs): ThreadsArea {
       const { pollIntervalMs, target, timeoutMs } =
         validateThreadWaitArgs(input);
       const deadline = Date.now() + timeoutMs;
+      let queuedIdleUntil: number | null = null;
       while (true) {
         if (target.kind === "status") {
           const thread = await getThread({
             signal: input.signal,
             threadId: input.threadId,
           });
-          if (thread.status === target.status) {
+          // A turn ends at idle before its queued follow-up dispatches (#1111),
+          // so idle with queued or dispatching messages is briefly not final.
+          // Bounded, so a scheduled or failed row delays the match by at most
+          // the grace and never past the deadline.
+          const now = Date.now();
+          const settling =
+            target.status === "idle" &&
+            thread.status === "idle" &&
+            (thread.queuedMessageCount > 0 ||
+              (thread.dispatchingMessageCount ?? 0) > 0);
+          queuedIdleUntil = settling
+            ? (queuedIdleUntil ?? now + THREAD_WAIT_QUEUED_IDLE_GRACE_MS)
+            : null;
+          if (
+            thread.status === target.status &&
+            (queuedIdleUntil === null ||
+              now >= Math.min(queuedIdleUntil, deadline))
+          ) {
             return {
               matched: true,
               target,
@@ -1502,13 +1537,19 @@ export function createThreadsArea(args: CreateSdkAreaArgs): ThreadsArea {
               threadId: input.threadId,
             });
           }
-          if (Date.now() >= deadline) {
+          if (now >= deadline) {
             throw new ThreadWaitTimeoutError({
               target,
               threadId: input.threadId,
             });
           }
-          await sleep(pollIntervalMs);
+          await sleep(
+            Math.min(
+              pollIntervalMs,
+              deadline - now,
+              (queuedIdleUntil ?? deadline) - now,
+            ),
+          );
           continue;
         }
 

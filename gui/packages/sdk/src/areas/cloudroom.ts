@@ -60,6 +60,8 @@ export interface CloudroomCodexAuth {
   login_id: string | null;
   verification_url: string | null;
   user_code: string | null;
+  /** Claude: when Cloudroom started installing Claude Code for this sign-in, in ms since 1970. */
+  installing_since?: number | null;
 }
 
 /** This Mac's Cloudroom Connect address and tunnel credential (ADR 0184). */
