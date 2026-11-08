@@ -154,6 +154,10 @@ pub struct Session {
     // What this parent last heard of each child in its own sandbox, by thread ID (relay.rs).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub child_states: BTreeMap<String, String>,
+    // The reports an archived child could still send, by thread ID: its turns not reported yet when it took this
+    // parent's archive (relay.rs, #1000).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub late_reports: BTreeMap<String, std::collections::BTreeSet<String>>,
     // Children this session asked the website to start in sandboxes of their own, by request ID (relay.rs).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub child_starts: BTreeMap<String, ChildStart>,
@@ -1633,6 +1637,7 @@ impl Manager {
                 let reasoning = prompt::reasoning(&input).or_else(|| session.reasoning.clone());
                 (input, reasoning)
             };
+            let (input, notice) = prompt::with_notice(&self.config.state_dir, input);
             // The stored handle keeps the launch level. This copy is only for the turn being started.
             let handle = handle.with_reasoning(reasoning);
             let result = async {
@@ -1640,6 +1645,9 @@ impl Manager {
                 handle.send_prompt(&request, &input).await
             }
             .await;
+            if let (Err(_), Some(note)) = (&result, &notice) {
+                prompt::put_back_notice(&self.config.state_dir, note);
+            }
             let state = match &result {
                 Ok(_) => "delivered",
                 Err(e) if e.kind() == io::ErrorKind::InvalidInput => "failed",

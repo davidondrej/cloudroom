@@ -590,6 +590,8 @@ export function registerSpawnCommand(
             ? { initiator: "agent" as const, senderThreadId: parentThreadId }
             : null;
 
+        // The calling agent, so the website can tell which agent starts Cloud threads (docs/scopes/credit-burn.md).
+        const launcherThreadId = resolveContextThreadId();
         // Sent on every spawn, so an unanswered one can be retried without a duplicate.
         const requestId = opts.requestId ?? randomUUID();
         let thread: Thread;
@@ -628,6 +630,7 @@ export function registerSpawnCommand(
             ...(visibility ? { visibility } : {}),
             environment,
             startedOnBehalfOf,
+            ...(launcherThreadId && /^thr_[a-z0-9]{1,40}$/.test(launcherThreadId) ? { launcherThreadId } : {}),
             originKind: opts.originKind ?? null,
             ...(parentThreadId ? { parentThreadId } : {}),
             ...(opts.section ? { sectionId: opts.section } : {}),

@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import { accessSync, constants as fsConstants } from "node:fs";
 import { posix as posixPath } from "node:path";
 import {
   hasProcessExited,
@@ -313,19 +314,92 @@ export function createBbAppProcessLaunch(
   };
 }
 
+interface CloseInheritedFdsArgs {
+  bashPath?: string;
+  launch: BbAppProcessLaunch;
+  platform: NodeJS.Platform;
+}
+
+const LINUX_BASH_PATH = "/bin/bash";
+// bash reads these before the script runs: they could stop startup or skip
+// the fd cleanup, so with any of them set bb-app spawns directly.
+const BASH_STARTUP_ENV_KEYS = ["BASH_ENV", "BASHOPTS", "ENV", "SHELLOPTS"];
+// Vars bash adds when the parent did not set them. Its exec still adds
+// SHLVL=0, which a login shell treats the same as an unset SHLVL.
+const BASH_ADDED_ENV_KEYS = ["OLDPWD", "PWD"];
+
+// Electron's main process holds many descriptors without close-on-exec
+// (Chromium shared memory, .pak files, sockets), and Node's spawn keeps them
+// open in the child. bb-app, the host daemon, terminals and agent tools all
+// inherited them (#1089). On Linux, close every fd above stdio in a bash that
+// then execs the real command, keeping the same PID. dash cannot close fds
+// above 9, so without bash this spawns directly, as before.
+function isExecutable(filePath: string): boolean {
+  try {
+    accessSync(filePath, fsConstants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function closeInheritedFdsOnLinux(
+  args: CloseInheritedFdsArgs,
+): BbAppProcessLaunch {
+  const bashPath = args.bashPath ?? LINUX_BASH_PATH;
+  const env = args.launch.env;
+  if (
+    args.platform !== "linux" ||
+    BASH_STARTUP_ENV_KEYS.some((key) => env[key] !== undefined) ||
+    Object.keys(env).some((key) => key.startsWith("BASH_FUNC_")) ||
+    !isExecutable(bashPath)
+  ) {
+    return args.launch;
+  }
+  const addedKeys = BASH_ADDED_ENV_KEYS.filter((key) => env[key] === undefined);
+  const unset = addedKeys.length > 0 ? `unset ${addedKeys.join(" ")}; ` : "";
+  const script =
+    'for f in /proc/self/fd/*; do n="${f##*/}"; ' +
+    '[ "$n" -gt 2 ] 2>/dev/null && eval "exec $n>&-"; done; ' +
+    `${unset}exec "$0" "$@"`;
+  return {
+    args: [
+      "--noprofile",
+      "--norc",
+      "-c",
+      script,
+      args.launch.executablePath,
+      ...args.launch.args,
+    ],
+    env,
+    executablePath: bashPath,
+  };
+}
+
 export function startBbAppProcess(args: StartBbAppProcessArgs): BbAppProcess {
   const logs = createRuntimeLogBuffer({ maxLines: args.logLineLimit });
-  const launch = createBbAppProcessLaunch({
+  const directLaunch = createBbAppProcessLaunch({
     bridgePath: args.bridgePath,
     env: args.env,
     runtime: args.runtime,
   });
-  const childProcess = spawn(launch.executablePath, launch.args, {
-    cwd: args.cwd,
-    detached: args.runtime.kind === "appimage",
-    env: launch.env,
-    stdio: ["ignore", "pipe", "pipe"],
+  const launch = closeInheritedFdsOnLinux({
+    launch: directLaunch,
+    platform: process.platform,
   });
+  const spawnLaunch = (target: BbAppProcessLaunch): ChildProcess =>
+    spawn(target.executablePath, target.args, {
+      cwd: args.cwd,
+      detached: args.runtime.kind === "appimage",
+      env: target.env,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+  let childProcess = spawnLaunch(launch);
+  if (launch !== directLaunch && childProcess.pid === undefined) {
+    // The bash wrapper could not start: launch directly, as before.
+    childProcess.once("error", () => undefined);
+    childProcess = spawnLaunch(directLaunch);
+  }
   const pid = childProcess.pid;
   if (pid === undefined) {
     throw new Error("bb-app child process did not expose a PID");

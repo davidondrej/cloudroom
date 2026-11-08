@@ -16,7 +16,7 @@ import { buildThreadStatusChangeMetadata } from "../threads/thread-runtime-displ
 import { cloudPluginInstructions, cloudroomSystemPrompt, prepareCloudInstructionInput, resolveCustomInstructions } from "../threads/custom-instructions.js";
 import { baseBranch, binding, bindings, command, commands, coreInUse, localTeleports, openBindings, queuedPrompts, saveBinding, saveCommandState, saveStatus, effectivePrompt, projectCopyProgress, stampBindings, teleportBlocked, unstartedTurn, type Binding, type Command, type OpenBinding, isDead, statusOf } from "./store.js";
 import { syncLoopEnv } from "./project-loops.js";
-import { copyProject, copyRunning, githubRepository, localProjectNote, localProjectPath, planNewProjectCopy, workspaceId, workspaceName, planProjectCopy, planProjectCopyOrThrow, reportProjectCopy, writeFilesState, type ProjectCopyJob } from "./project-copy.js";
+import { copyProject, copyRunning, githubRepository, localFilesNote, localProjectNote, localProjectPath, planNewProjectCopy, workspaceId, workspaceName, planProjectCopy, planProjectCopyOrThrow, reportProjectCopy, writeFilesState, type ProjectCopyJob } from "./project-copy.js";
 import { CHILD_HINT, cloudForkOf, cloudForkPoint, codeFromOf, FORK_HARNESSES, FORK_HINT, landForkCode, localForkPoint, startCloudFork, threadCode, uploadInParts } from "./fork.js";
 import { copyForkSourceHistory } from "../threads/thread-fork-history.js";
 import { CloudGitError, savedWorkspacePath } from "./git.js";
@@ -144,6 +144,37 @@ function storageMessage(storage: Storage | null): string | null {
 }
 type Deps = Pick<AppDeps, "db" | "hub" | "config" | "providerRegistry"> & Partial<LoggedWorkSessionDeps> & Partial<Pick<AppDeps, "pendingInteractions">>;
 const services = new WeakMap<DbConnection, CloudroomService>();
+/** "Clear caches & builds" on a full Cloud disk: package-manager caches (Core's npm cache too, never `_npx`, which holds
+ *  running tools), plus Git-ignored dependency and build folders in each repository. Build folders holding a `.env*` file
+ *  or another repository are skipped. Everything moves to one trash folder first, an instant rename, and is deleted last,
+ *  so a resuming agent never sees a half-deleted folder. Prints the bytes freed. */
+const CLEAR_DISK = String.raw`avail() { df -B1 --output=avail "$HOME" | tail -1; }
+before=$(avail)
+trash="$HOME/.cache/cloudroom-trash"
+rm -rf "$trash" && mkdir -p "$trash" || exit 1
+dev=$(stat -c %d "$trash")
+bin() {
+  [ -e "$1" ] || return 0
+  if [ "$(stat -c %d -- "$1")" = "$dev" ] && d=$(mktemp -d "$trash/XXXXXX") && mv -- "$1" "$d/x"; then :; else rm -rf -- "$1"; fi
+}
+cache=$(sed -n 's/.*"cache_dir":"\([^"]*\)".*/\1/p' /etc/cloudroom/storage.json 2>/dev/null)
+[ -n "$cache" ] && bin "$cache/npm/_cacache"
+for c in ~/.npm/_cacache ~/.cache/pip ~/.cache/uv ~/.cache/yarn ~/.cache/pnpm ~/.cache/go-build ~/.cache/node-gyp ~/.local/share/pnpm/store ~/.bun/install/cache; do bin "$c"; done
+for repo in /code/*/ /repos/*/; do
+  [ -e "$repo.git" ] || continue
+  git -C "$repo" ls-files -z --others --ignored --exclude-standard --directory 2>/dev/null | while IFS= read -r -d '' path; do
+    case "$path" in */) ;; *) continue ;; esac
+    dir="$repo$path"
+    case "$(basename "$path")" in
+      node_modules) bin "$dir" ;;
+      .next|.nuxt|.svelte-kit|.turbo|.parcel-cache|.vite|dist|build|target|__pycache__|.pytest_cache|.mypy_cache|.ruff_cache|coverage|.gradle)
+        [ -z "$(find "$dir" \( -name '.env*' -o -name .git \) -print -quit 2>/dev/null)" ] && bin "$dir" ;;
+    esac
+  done
+done
+rm -rf "$trash"
+sync -f "$HOME" 2>/dev/null
+echo $(( $(avail) - before ))`;
 const ROOT_WORKSPACE = "root";
 const cloudStep = (sandbox: boolean, status: StartStep["status"] = "started"): StartStep => ({ key: "cloud", text: sandbox ? "Starting cloud sandbox" : "Connecting to cloud VM", status });
 
@@ -211,9 +242,11 @@ export function promptPayload(input: PromptInput[], harness: string, attachments
       for (const { resource, start, end } of part.mentions) {
         // Thread tags stay as plain `@thread:thr_...` text; the cloud agent reads that thread through Mac access.
         if (resource.kind === "thread") continue;
+        // Project and folder tags stay as plain text too, like local threads; workspace paths are relative to the sandbox's project copy (#1253).
+        if (resource.kind === "project" || (resource.kind === "path" && resource.source === "workspace")) continue;
         // `/context` stays plain text; Claude Code runs it as its own command.
         if (harness === "claude-code" && resource.kind === "command" && resource.source === "command" && resource.origin === "builtin" && resource.name === "context") continue;
-        if (resource.kind !== "command" || resource.source !== "skill") throw new ApiError(400, "cloudroom_unsupported", "Cloud supports skill and thread tags, but other mentions and commands are not enabled.");
+        if (resource.kind !== "command" || resource.source !== "skill") throw new ApiError(400, "cloudroom_unsupported", "Cloud supports skill, thread, project, and folder tags, but other mentions and commands are not enabled.");
         if (!resource.name || /\s/.test(resource.name) || start >= end || end > part.text.length || part.text.slice(start, end) !== `/${resource.name}`) throw new ApiError(400, "invalid_request", "The selected skill tag is invalid. Remove it and select the skill again.");
         skills.push({ name: resource.name, chunk, start, end });
       }
@@ -380,6 +413,12 @@ function publicError(error: unknown): string {
   return error instanceof Error ? `${connectionOrReplayFailed}: ${error.message}` : connectionOrReplayFailed;
 }
 
+/** A sandbox put to sleep or stopped answers at its saved address with a 404 (Upstash, Vercel removed) or 410 (Vercel
+ *  stopped) and no Cloudroom code: the address is stale, not a refusal (feedback #596). */
+function staleSandboxAddress(error: unknown): boolean {
+  return error instanceof CloudroomError && (error.status === 404 || error.status === 410) && !error.code;
+}
+
 function connectionFailure(error: unknown): boolean {
   return error instanceof CloudroomConnectionError
     || (error instanceof DOMException && error.name === "AbortError")
@@ -528,8 +567,10 @@ class CloudroomService {
   private readonly retrying = new Set<string>();
   /** Failed tries to mark a new thread's files status, so a lasting failure fails its start (#816). */
   private readonly prepTries = new Map<string, number>();
+  /** When Core began refusing a thread's start with a retryable 409, until another outcome (#865). */
+  private readonly refusedSince = new Map<string, number>();
   private readonly catchUps = new Map<string, number>();
-  /** Threads whose sandbox address just answered 404 and is being woken again (feedback #596). */
+  /** Threads whose sandbox address just answered as stale (404 or 410) and is being woken again (feedback #596). */
   private readonly rewoken = new Set<string>();
   /** The Cloud Credits level (80 or 95 %) each Cloud thread's agent was last told, so each note comes once (#610). */
   private readonly creditsTold = new Map<string, number>();
@@ -1182,6 +1223,18 @@ class CloudroomService {
     } catch (error) { return { ready: false, account, signedOut, selfHosted, projectId, storage, workspaces: false, repository: null, model: null, error: publicError(error) }; }
   }
 
+  /** Runs `CLEAR_DISK` through Core's emergency access, which still works while a full disk pauses the agent.
+   *  Once space is back, Core resumes work and the waiting message sends by itself. */
+  async clearDisk(threadId: string): Promise<{ freedBytes: number }> {
+    const result = await this.runOnVm({ command: CLEAR_DISK }, threadId, AbortSignal.timeout(10 * 60_000));
+    const output = Buffer.from(result.stdout, "hex").toString().trim();
+    const freed = Number(output.split("\n").at(-1));
+    if (result.code !== 0 || result.truncated || !output || !Number.isFinite(freed)) throw new ApiError(503, "cloud_disk_clear", "Caches and builds could not be cleared. Try again.");
+    const saved = binding(this.deps.db, threadId);
+    if (saved) void this.client(saved).then(client => this.measureDisk(threadId, client), () => {});
+    return { freedBytes: Math.max(0, freed) };
+  }
+
   /** Mac → cloud access (ADR 0113). Local agents reach this through `room-cli vm`.
    *  `threadId` picks a Cloud thread's sandbox and wakes it; without one, only the account's VM can run it. */
   async runOnVm(input: VmRun, threadId?: string, signal?: AbortSignal): Promise<VmRunResult> {
@@ -1480,6 +1533,19 @@ class CloudroomService {
   }
 
   /** Records only say paused or not, so each one also reads the disk size for the card's meter. */
+  /** The disk pill from Core's own measurement: a full disk shows it, a disk with space clears it. A refusal alone never
+   *  does, because older Cores also refuse uploads as "storage unsafe" while a sandbox stops. */
+  private measureDisk(threadId: string, client: CloudroomClient): void {
+    this.storage(client).then((storage) => {
+      if (!storage?.enabled) return;
+      if (storage.level === "normal") this.disk.delete(threadId);
+      else if (storage.level === "blocked" && storage.reason === "disk_capacity" && storage.workspace_total_bytes !== null && storage.workspace_available_bytes !== null) {
+        this.disk.set(threadId, { paused: true, reason: "disk_capacity", usedBytes: storage.workspace_total_bytes - storage.workspace_available_bytes, totalBytes: storage.workspace_total_bytes });
+      } else return;
+      this.notify(threadId);
+    }, () => {});
+  }
+
   private noteDisk(threadId: string, client: CloudroomClient, data: unknown): void {
     const record = z.object({ paused: z.boolean().optional(), reason: z.string().optional() }).catch({}).parse(data);
     const previous = this.disk.get(threadId);
@@ -1625,7 +1691,7 @@ class CloudroomService {
         appendStartProgress(tx, thread.id, [cloudStep(Boolean(sandbox))], "active", true);
       });
     }
-    if (created && sandbox) this.sandboxes.firstWakeHints(thread.id, { ...(request.cloudTarget ? { target: request.cloudTarget } : {}), launch: request.origin });
+    if (created && sandbox) this.sandboxes.firstWakeHints(thread.id, { ...(request.cloudTarget ? { target: request.cloudTarget } : {}), launch: request.origin, ...(request.launcherThreadId ? { launcher: request.launcherThreadId } : {}) });
     this.notify(thread.id, ["client/turn/requested", "system/thread-provisioning"]);
     void this.selectOnboardingProject(project.id).catch(() => {});
     this.start();
@@ -2051,6 +2117,7 @@ class CloudroomService {
   }
 
   archive(threadId: string): void {
+    this.refusedSince.delete(threadId);
     const saved = binding(this.deps.db, threadId);
     if (!saved) return;
     const sandbox = sandboxThread(saved.coreUrl);
@@ -2104,6 +2171,7 @@ class CloudroomService {
 
   /** Delete: the website erases the thread's own sandbox, snapshots, saved copy, and chat history. Children share it. */
   remove(threadId: string): void {
+    this.refusedSince.delete(threadId);
     const saved = binding(this.deps.db, threadId);
     if (!saved) return;
     this.detach(threadId);
@@ -2560,11 +2628,13 @@ class CloudroomService {
     let rejectedCommand = false;
     // A new thread's project copy waits until its first message is sent or fails (ADR 0160).
     let releaseCopy: (() => void) | undefined;
+    let delivering: CloudroomClient | undefined;
     try {
       const bound = saved;
       let catchUp = false;
       const work = () => !bound.sessionId || unsentWork(this.deps.db, threadId) || (catchUp ||= this.catchUpForParent(bound));
       const client = await this.client(saved, work);
+      delivering = client;
       if (epoch !== this.epoch) return;
       if (saved.sessionId) {
         this.follow(saved, client);
@@ -2635,7 +2705,7 @@ class CloudroomService {
         // is told, and pulls what it needs (docs/scopes/sandboxes.md, David, 2026-10-13).
         const macPath = planned instanceof Error ? localProjectPath(this.deps, getThread(this.deps.db, threadId)?.projectId ?? "") : undefined;
         const unplanned = planned instanceof Error ? `The copy could not start: ${planned.message}`.slice(0, 500)
-          + (macPath ? ` The full project is on the user's ${COMPUTER} at \`${macPath}\`. Pull only what the task needs with \`room-cli mac pull\`.` : "") : undefined;
+          + (macPath ? ` ${localFilesNote(macPath)}` : "") : undefined;
         if (unplanned) {
           this.warn("Cloud project copy could not be planned", planned, { threadId });
           if (!macPath) reportProjectCopy(this.deps, threadId, { phase: "error", completed: 0, total: 0, error: unplanned });
@@ -2671,6 +2741,7 @@ class CloudroomService {
           throw new ApiError(400, "cloudroom_files", `Cloudroom could not prepare the project folder: ${error instanceof Error ? error.message : String(error)}`);
         });
         saveBinding(this.deps.db, threadId, { sessionId: started.sessionId, error: null });
+        this.refusedSince.delete(threadId);
         saved = binding(this.deps.db, threadId)!;
         const marked = workspace ? Promise.resolve() : null;
         const landed = this.landing(threadId, client, started, files.length > 0, workspace, marked);
@@ -2796,8 +2867,8 @@ class CloudroomService {
           if (command(this.deps.db, pending.id)?.state === "sending") saveCommandState(this.deps.db, threadId, pending.id, accepted.receipt.state);
           if (pending.command === "prompt") void this.rememberCloudMessage(sessionId, pending.id, epoch).catch(() => {});
         } catch (error) {
-          // A sandbox put to sleep answers 404 at its stale address: the catch below wakes it once, so keep the command unsent.
-          const stale = sandboxThread(saved.coreUrl) && error instanceof CloudroomError && error.status === 404 && !error.code && !this.rewoken.has(threadId);
+          // A stale sandbox address: the catch below wakes it once, so keep the command unsent.
+          const stale = sandboxThread(saved.coreUrl) && staleSandboxAddress(error) && !this.rewoken.has(threadId);
           if (!stale && refused(error, ["steer", "edit", "cancel", "reorder"].includes(pending.command))) {
             if (pending.command === "steer") {
               // Usually its turn just ended. It queues ahead of anything sent after it; the same ID makes a repeat harmless.
@@ -2822,15 +2893,15 @@ class CloudroomService {
       if (pendingCommands.length > 0) this.notify(threadId);
     } catch (error) {
       if (epoch !== this.epoch) return;
-      // A sandbox put to sleep loses its address, so a 404 there means a stale one: forget it and wake it again, once,
-      // instead of failing the thread's start (feedback #596).
+      // A stale sandbox address: forget it and wake it again, once, instead of failing the thread's start (feedback #596).
       const sandbox = sandboxThread(saved.coreUrl);
-      if (sandbox && error instanceof CloudroomError && error.status === 404 && !error.code && !this.rewoken.has(threadId)) {
+      if (sandbox && staleSandboxAddress(error) && !this.rewoken.has(threadId)) {
         this.rewoken.add(threadId);
         this.sandboxes.forget(sandbox);
         return;
       }
       if (error instanceof SandboxAsleep) return this.asleep(threadId);
+      if (delivering && error instanceof CloudroomError && error.code === "storage_blocked") this.measureDisk(threadId, delivering);
       const message = publicError(error);
       const permanent = error instanceof CloudroomError ? !error.retryable : error instanceof ApiError && error.status === 400;
       if (!binding(this.deps.db, threadId)?.sessionId && permanent) this.failStart(threadId, message);
@@ -2840,7 +2911,15 @@ class CloudroomService {
         this.setConnectionIssue(threadId, "delivery");
         this.notify(threadId);
       }
-      if (startRefused(error) && !binding(this.deps.db, threadId)?.sessionId) void this.noticeCloudParent(threadId, error.code === CLOUD_REGION ? "blocked" : "refused", "refused", message).catch((error: unknown) => this.warn("A child report could not be sent", error, { threadId }));
+      // A start Core refuses "for now" (a failing login or model check) retries forever. After 2 minutes of that, its
+      // Cloud parent hears why, once, so it doesn't wait blind or spawn a twin (#865).
+      const unstarted = !binding(this.deps.db, threadId)?.sessionId, live = getThread(this.deps.db, threadId);
+      // A refusal that lands after an archive or removal starts no clock: it would outlive an unarchive.
+      const refusing = unstarted && Boolean(live && !live.archivedAt && !live.deletedAt) && error instanceof CloudroomError && error.status === 409 && error.retryable;
+      if (!refusing) this.refusedSince.delete(threadId);
+      else if (!this.refusedSince.has(threadId)) this.refusedSince.set(threadId, Date.now());
+      const stuck = refusing && Date.now() - this.refusedSince.get(threadId)! >= 120_000;
+      if ((startRefused(error) || stuck) && unstarted) void this.noticeCloudParent(threadId, error instanceof CloudroomError && error.code === CLOUD_REGION ? "blocked" : "refused", "refused", message).catch((error: unknown) => this.warn("A child report could not be sent", error, { threadId }));
       throw new ApiError(permanent ? 400 : 503, error instanceof CloudroomError ? error.code ?? "cloudroom_unavailable" : "cloudroom_unavailable", message);
     } finally { releaseCopy?.(); }
   }
@@ -2944,6 +3023,9 @@ class CloudroomService {
     if (!child || !parent || !isCloudThread(parent)) return;
     const parentSaved = binding(this.deps.db, parent.id);
     if (parentSaved && await this.otherAccountThread(parentSaved)) return;
+    // A start notice is stale once the child was archived, removed or started meanwhile (#865).
+    const now = getThread(this.deps.db, threadId);
+    if ((status === "refused" || status === "blocked") && (!now || now.archivedAt || now.deletedAt || binding(this.deps.db, threadId)?.sessionId)) return;
     const first = command(this.deps.db, `first_${child.id}`);
     if (status !== "not_started" && status !== "refused" && status !== "blocked" && first && JSON.parse(first.input).parent_thread && parentSaved?.coreUrl === SANDBOX_PREFIX + parent.id) return;
     // A child the website started has Core report its turns (ADR 20261104-015709).

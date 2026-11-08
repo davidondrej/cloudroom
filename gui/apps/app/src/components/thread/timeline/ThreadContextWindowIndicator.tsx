@@ -268,7 +268,7 @@ export function ThreadContextWindowIndicator({
             setPinned((value) => !value);
           }}
           className={cn(
-            "-m-1 inline-flex h-8 min-w-8 cursor-pointer items-center justify-center gap-1 rounded-full transition-colors hover:bg-state-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+            "group -m-1 inline-flex h-8 min-w-8 cursor-pointer items-center justify-center gap-1 rounded-full transition-colors hover:bg-state-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
             compactions > 0 && "px-2",
           )}
           aria-label={`Context window ${usedPercent}% used${compactions > 0 ? `, compacted ${compactions} times` : ""}`}
@@ -300,7 +300,7 @@ export function ThreadContextWindowIndicator({
             />
           </svg>
           {compactions > 0 ? (
-            <span className="text-xs tabular-nums text-muted-foreground">
+            <span className="text-xs tabular-nums text-muted-foreground opacity-40 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100 group-data-[state=open]:opacity-100 motion-reduce:transition-none">
               {compactions}
             </span>
           ) : null}

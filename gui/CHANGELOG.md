@@ -2,6 +2,20 @@
 
 Also on [cloudroom.dev/changelog](https://www.cloudroom.dev/changelog).
 
+## 146
+
+One click clears a full Cloud disk (2026-11-08)
+
+### Changes
+
+- When a Cloud disk fills up, one pill with a Clear caches & builds button frees space.
+- Hover the effort label to step reasoning effort up or down with small arrows.
+- Typing a thread name after @ keeps that thread above files and folders with similar names.
+- Forked threads show a thin divider in the chat instead of a banner.
+- Settings → Analytics shows when your Cloud Credits were used.
+- Cloud threads now accept folder and project tags.
+- Security fixes.
+
 ## 145
 
 Long messages fold to fit (2026-11-08)

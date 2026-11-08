@@ -99,6 +99,11 @@ worktree` only; a provider takes its branch through `--environment-inputs`.
   workspace, or combine it with `--new-environment worktree`. Do not combine a
   machine selector with an existing environment ID, which already owns its
   machine.
+- A connected VPS also appears in the text `room-cli machine list` output.
+  Inspect it with `room-cli machine show vps` (or its hostname or short name),
+  with optional `--json`. Native machines take precedence over matching VPS names.
+  `machine list --json` stays a native-host list. Start VPS threads from the app's
+  new-thread picker; `thread spawn --machine vps` is not supported yet.
 - Each machine carries a permission limit (`maxPermissionMode`, default
   `full`): the highest permission mode a thread on that machine may run with.
   The server resolves any higher request down to it, and refuses a provider

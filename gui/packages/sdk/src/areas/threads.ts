@@ -833,6 +833,41 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+// After an event-loop stall, Node's 5 s keep-alive timer can close a socket
+// before the server reads the poll already sent on it, so a wait read sees a
+// reset while the server is fine (#1046). Wait reads are GETs, safe to repeat,
+// so retry a few resets in a row before the deadline; all else throws as before.
+const THREAD_WAIT_RESET_RETRIES = 3;
+const CONNECTION_RESET_CODES = new Set([
+  "ECONNRESET",
+  "EPIPE",
+  "UND_ERR_SOCKET",
+]);
+
+async function retryConnectionReset<T>(
+  deadline: number,
+  read: () => Promise<T>,
+): Promise<T> {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await read();
+    } catch (error) {
+      const code =
+        error instanceof TypeError
+          ? (error.cause as { code?: unknown } | null | undefined)?.code
+          : undefined;
+      if (
+        attempt >= THREAD_WAIT_RESET_RETRIES ||
+        Date.now() >= deadline ||
+        typeof code !== "string" ||
+        !CONNECTION_RESET_CODES.has(code)
+      ) {
+        throw error;
+      }
+    }
+  }
+}
+
 function resolveThreadWaitTarget(args: ThreadWaitArgs): ThreadWaitTarget {
   const hasStatus = args.status !== undefined;
   const hasEvent = args.event !== undefined;
@@ -1501,10 +1536,9 @@ export function createThreadsArea(args: CreateSdkAreaArgs): ThreadsArea {
       let queuedIdleUntil: number | null = null;
       while (true) {
         if (target.kind === "status") {
-          const thread = await getThread({
-            signal: input.signal,
-            threadId: input.threadId,
-          });
+          const thread = await retryConnectionReset(deadline, () =>
+            getThread({ signal: input.signal, threadId: input.threadId }),
+          );
           // A turn ends at idle before its queued follow-up dispatches (#1111),
           // so idle with queued or dispatching messages is briefly not final.
           // Bounded, so a scheduled or failed row delays the match by at most
@@ -1553,14 +1587,17 @@ export function createThreadsArea(args: CreateSdkAreaArgs): ThreadsArea {
           continue;
         }
 
-        const remainingMs = Math.max(0, deadline - Date.now());
-        const waitMs = Math.floor(Math.min(remainingMs, 30_000));
-        const event = await events.wait({
-          signal: input.signal,
-          threadId: input.threadId,
-          type: target.eventType,
-          waitMs: String(waitMs),
-        });
+        // Each attempt asks only for the time left, so a retry ends on time.
+        const event = await retryConnectionReset(deadline, () =>
+          events.wait({
+            signal: input.signal,
+            threadId: input.threadId,
+            type: target.eventType,
+            waitMs: String(
+              Math.floor(Math.min(Math.max(0, deadline - Date.now()), 30_000)),
+            ),
+          }),
+        );
         if (event !== null) {
           return {
             event,

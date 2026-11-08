@@ -8,7 +8,7 @@ import { cn } from "@cloudroom/shared-ui/lib/utils";
 import { useClaudeConnection } from "@/components/ClaudeConnection";
 import { useCloudLogin } from "@/components/CodexConnectionPanel";
 import { InviteTicketCard } from "@/components/InviteOffer";
-import { CreditsBar } from "@/components/CloudQueue";
+import { CreditsBar, refillText } from "@/components/CloudQueue";
 import { BbLogo } from "@/components/ui/bb-logo";
 import { SETTINGS_CARD_CLASS, SETTINGS_CARD_ROW_CLASS } from "@/components/ui/settings-section";
 import { useCloudroomAccount } from "@/hooks/queries/cloudroom-queries";
@@ -84,7 +84,7 @@ function MembershipCard({ email, plan, login, usage }: { email: string; plan: st
       <CreditsBar className="mt-2 h-1.5 bg-primary-foreground/15" plan={left} limit={usage.creditsLimit} extra={extra} extraTotal={usage.extraCreditsTotal ?? 0} planClassName="bg-primary-foreground" edgeClassName="border-primary" />
       {extra > 0
         ? <p className="mt-1.5 flex justify-between gap-3 text-2xs font-semibold tabular-nums"><span>{count(extra)} extra · used last</span><span className="opacity-65">{count(left)} of {count(usage.creditsLimit)} plan</span></p>
-        : <p className="mt-1.5 text-2xs opacity-65">Refills every rolling 30 days</p>}
+        : <p className="mt-1.5 text-2xs opacity-65">{refillText(usage.resetsAt)}</p>}
     </div>}
   </div>;
 }

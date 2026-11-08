@@ -10,6 +10,7 @@ import {
   experimental_compareVersions as compareVersions,
   experimental_execPortableFile as execPortableFile,
   experimental_formatCommand as formatCommand,
+  experimental_installationRunUnavailable as installationRunUnavailable,
   experimental_installationVerification as installationVerification,
   experimental_npmGlobalInstallCommand as npmGlobalInstallCommand,
   experimental_npmGlobalInstallSource as npmGlobalInstallSource,
@@ -226,10 +227,7 @@ export async function getPiProviderInstallationRun(
 ): Promise<ProviderInstallationRunResult> {
   const status = await getPiProviderInstallationStatus();
   if (status.installAction?.kind !== action) {
-    return {
-      available: false,
-      message: `Pi ${action} is no longer available on this host.`,
-    };
+    return installationRunUnavailable("Pi", action, status);
   }
   return {
     available: true,

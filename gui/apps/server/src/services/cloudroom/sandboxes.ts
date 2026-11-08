@@ -47,7 +47,7 @@ export type SandboxTrigger = "app_launch" | "app_activity" | "composer" | "threa
 /** Why a sleeping thread wakes before any work is sent: the user opened it or started typing (ADR 0176), or its work
  *  leaves Cloud (`teleport_local`: Teleport to Local, Copy to Mac, Fork to Local), which may pass the credit limit once a day. */
 export type SandboxWakeTrigger = Extract<SandboxTrigger, "thread_typing" | "thread_view" | "teleport_local">;
-type FirstWake = { target?: "vps" | "cloud"; launch?: ThreadCreateOrigin };
+type FirstWake = { target?: "vps" | "cloud"; launch?: ThreadCreateOrigin; launcher?: string };
 /** Logins the website keeps for every sandbox of an account (ADR 0145). */
 export type SandboxLogin = "claude" | "codex" | "pi" | "github" | "cursor" | "opencode" | "mcp" | "hermes" | "devin" | "kimi" | "openclaw";
 /** GitHub projects also name their repository and cloud folder, so the website can build a template. */
@@ -61,8 +61,9 @@ const placeOf = (thread: string, project: SandboxProject) => ({ thread, project:
 export type CloudQueue = { position: number; total: number; regionBlocked: boolean };
 /** The account's Cloud Credits in the rolling 30 days (ADR 0307), for the sidebar card; null credits while metering is stale.
  *  `og` is the OG letter, which the website sends only to OGs still on the free Pro it gave them (ADR 0218). */
-/** Plan credits used in the rolling 30 days, and credits left in live packs (ADR 0317): 0 from older websites. */
-export type PlanUsage = { plan: string; credits: number | null; creditsLimit: number; extraCredits: number; extraCreditsTotal: number; og: { name: string | null; endsAt: string } | null };
+/** Plan credits used this credit period, when they refill (ADR 20261108-142517; null from older websites), and credits
+ *  left in live packs (ADR 0317): 0 from older websites. */
+export type PlanUsage = { plan: string; credits: number | null; creditsLimit: number; resetsAt: string | null; extraCredits: number; extraCreditsTotal: number; og: { name: string | null; endsAt: string } | null };
 const USAGE_LIMIT = "cloud_usage_limit";
 const AGENT_LIMIT = "cloud_agent_limit";
 /** Free's shared daily budget is spent: like the limits above, the website refused before starting the sandbox. */
@@ -498,8 +499,9 @@ export function revokeDesktopToken(account: SandboxAccount): void {
 /** Each cloud thread's own sandbox, managed by the website (docs/scopes/sandboxes.md). Lookups never wake it. */
 export class SandboxDirectory {
   private readonly views = new Map<string, View>();
-  /** A new thread's first-wake hints: its VPS-or-Cloud pick (ADR 0319) and how it was started (`launch`: app, cli,
-   *  sdk or plugin), which the website saves on the start's events. */
+  /** A new thread's first-wake hints: its VPS-or-Cloud pick (ADR 0319), how it was started (`launch`: app, cli,
+   *  sdk or plugin), and the agent thread whose `room-cli` call started it (`launcher`), which the website saves on
+   *  the start's events. */
   private readonly firstWake = new Map<string, FirstWake>();
   /** The sandbox whose API keys a new child or fork gets (ADR 0342), from its saved first message, so an app restart
    *  never loses it. Sent with each wake; the website reads it only when it registers the thread. */
@@ -839,12 +841,12 @@ export class SandboxDirectory {
       this.checkingUsage = true;
       void this.call({ action: "usage" }).then((value) => {
         // A website without credits (say, rolled back) shows no card rather than old units.
-        const parsed = z.object({ plan: z.string(), credits: z.number().nullable(), credits_limit: z.number(),
+        const parsed = z.object({ plan: z.string(), credits: z.number().nullable(), credits_limit: z.number(), resets_at: z.string().nullable().catch(null),
           extra_credits: z.number().catch(0), extra_credits_total: z.number().catch(0),
           og: z.object({ name: z.string().nullable(), ends_at: z.string() }).nullable().catch(null) }).safeParse(value);
         const recheck = z.object({ recheck_seconds: z.number().default(600) }).parse(value).recheck_seconds;
         this.usage = {
-          value: parsed.success ? { plan: parsed.data.plan, credits: parsed.data.credits, creditsLimit: parsed.data.credits_limit,
+          value: parsed.success ? { plan: parsed.data.plan, credits: parsed.data.credits, creditsLimit: parsed.data.credits_limit, resetsAt: parsed.data.resets_at,
             extraCredits: parsed.data.extra_credits, extraCreditsTotal: parsed.data.extra_credits_total,
             og: parsed.data.plan === "pro" && parsed.data.og ? { name: parsed.data.og.name, endsAt: parsed.data.og.ends_at } : null } : null,
           next: Date.now() + Math.max(recheck, 60) * 1000,
@@ -853,6 +855,11 @@ export class SandboxDirectory {
     }
     // A plan change shows nothing until the next check, never the old plan's card.
     return this.usage?.value?.plan === this.plan ? this.usage.value : null;
+  }
+
+  /** When the account's credits were used, hour by hour (Settings → Analytics). Asked only while that page is open. */
+  async usageWave(): Promise<unknown> {
+    return z.object({ wave: z.unknown() }).parse(await this.call({ action: "usage_wave" })).wave ?? null;
   }
 
   /** What the account's cloud offers, read by the website from a running spare or sandbox. Null until one runs. */

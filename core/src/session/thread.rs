@@ -67,23 +67,23 @@ const OUTCOME_KEPT: Duration = Duration::from_secs(3600);
 /// never makes a fork the agent was told failed.
 static CHILDREN: LazyLock<Mutex<HashMap<String, Outcome>>> = LazyLock::new(Mutex::default);
 
-/// The calling session's children in sandboxes of their own whose start the website hasn't finished yet, in its first
-/// 10 minutes. After that `tell`, `stop` and `output` stop asking to retry and pass on the website's answer (#1058).
-pub(super) fn starting(m: &Manager, parent: &str) -> Vec<String> {
+/// The calling session's children in sandboxes of their own whose start the website hasn't finished yet. `fresh`: only
+/// those in their first 10 minutes, for which `tell`, `stop` and `output` still ask to retry (#1058).
+pub(super) fn starting(m: &Manager, parent: &str, fresh: bool) -> Vec<String> {
     let local = m.local.lock().unwrap();
     let Some(session) = local.sessions.get(parent) else {
         return Vec::new();
     };
     let since = crate::observability::now_ms().saturating_sub(10 * 60_000);
-    let fresh = session.child_starts.values().filter(|s| s.at_ms > since);
-    fresh
-        .filter_map(|s| s.child.clone())
-        .filter(|child| {
-            session
-                .child_states
-                .get(child)
-                .is_some_and(|s| s == "starting")
-        })
+    let recent = |child: &String| {
+        let mut starts = session.child_starts.values();
+        starts.any(|s| s.child.as_ref() == Some(child) && s.at_ms > since)
+    };
+    session
+        .child_states
+        .iter()
+        .filter(|(child, state)| *state == "starting" && (!fresh || recent(child)))
+        .map(|(child, _)| child.clone())
         .collect()
 }
 
@@ -832,7 +832,7 @@ async fn output(
         return match api.get("chat", &[("thread", &id), ("all", all)]).await {
             // The website may not know a child that just started yet, or has no chat of it yet (#317).
             Err(super::history::ApiError::Status(404, _))
-                if starting(&m, &parent).contains(&id) =>
+                if starting(&m, &parent, true).contains(&id) =>
             {
                 Ok(
                     json!({"id":id,"state":"starting","note":"Its sandbox is still starting. Its replies arrive as messages when its turns end."}),

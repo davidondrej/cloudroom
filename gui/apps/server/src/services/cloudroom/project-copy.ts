@@ -12,6 +12,7 @@ import { tarCommand } from "@cloudroom/process-utils";
 import type { ProjectCopyProgress } from "@cloudroom/domain";
 import type { AppDeps } from "../../types.js";
 import { CloudroomError, UPLOAD_PART, type CloudroomClient } from "./client.js";
+import { macAccessSupported } from "./previews.js";
 import { command, saveProjectCopyProgress } from "./store.js";
 import { copyMacGithub } from "./sync.js";
 
@@ -69,9 +70,23 @@ async function smallProject(root: string): Promise<boolean> {
 export async function localProjectNote(deps: Deps, projectId: string): Promise<string | undefined> {
   const project = getProject(deps.db, projectId);
   const path = project ? localProjectPath(deps, project.id) : undefined;
-  if (!project || !path || githubRepository(await projectRemote(deps, project, path)) || await smallProject(path)) return undefined;
-  return `This project is not on GitHub and too large to copy, so only its \`.env\` files are here. The rest is on the user's ${COMPUTER} at \`${path}\`. Pull only what the task needs with \`room-cli mac pull\`.`;
+  if (!project || !path) return undefined;
+  const remote = await projectRemote(deps, project, path);
+  if (githubRepository(remote) || (await smallProject(path))) return undefined;
+  // A project with another remote (GitLab, Azure) keeps it, so pushing to GitHub wouldn't help; Teleport uploads it.
+  const rest = macAccessSupported
+    ? `The rest is on the user's ${COMPUTER} at \`${path}\`. Pull only what the task needs with \`room-cli mac pull\`.`
+    : remote
+      ? "Cloud agents can't reach the user's Windows computer, so ask the user to start the thread Local and Teleport it to Cloud, which uploads the project."
+      : "Cloud agents can't reach the user's Windows computer, so ask the user to push the project to GitHub, then start a new thread.";
+  return `This project is not on GitHub and too large to copy, so only its \`.env\` files are here. ${rest}`;
 }
+
+/** What the agent does when a failed copy left the project on the user's computer. Cloud agents can't reach Windows (ADR 0294). */
+export const localFilesNote = (path: string) =>
+  macAccessSupported
+    ? `The full project is on the user's ${COMPUTER} at \`${path}\`. Pull only what the task needs with \`room-cli mac pull\`.`
+    : "Cloud agents can't reach the user's Windows computer. Tell the user what failed: pass on any fix the message names, otherwise ask them to start a new thread.";
 
 export function planProjectCopy(...args: Parameters<typeof planProjectCopyOrThrow>): Promise<ProjectCopyJob | null> {
   return planProjectCopyOrThrow(...args).catch(() => null);
@@ -207,7 +222,7 @@ async function writeFailureNote(client: CloudroomClient, job: ProjectCopyJob, me
   const target = (await client.workspace(job.workspace))?.path;
   if (!target) return;
   const next = job.localPath
-    ? `The full project is on the user's ${COMPUTER} at \`${job.localPath}\`. Pull only what the task needs with \`room-cli mac pull\`.`
+    ? localFilesNote(job.localPath)
     : "Tell the user, since the files are not available anywhere else.";
   const note = `Cloudroom could not copy this project into the cloud, so do not wait for more files.\n\n${message}\n\n${next}\n`;
   await vm(client, `mkdir -p -- ${quote(`${target}/.cloudroom`)} && cat > ${quote(`${target}/${FAILURE_NOTE}`)}`, Buffer.from(note));

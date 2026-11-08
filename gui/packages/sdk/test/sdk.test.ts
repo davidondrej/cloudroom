@@ -2030,6 +2030,85 @@ describe("@cloudroom/sdk", () => {
     ]);
   });
 
+  // Fake server steps: a reset code, a late reset (after the deadline), a
+  // thread status, or an event long-poll that holds for its waitMs, then 204.
+  it.each([
+    ["one reset", ["ECONNRESET", "idle"], 2, true],
+    ["socket closed", ["UND_ERR_SOCKET", "idle"], 2, true],
+    ["lasting resets", Array(4).fill("ECONNRESET"), 4, false],
+    ["refused", ["ECONNREFUSED"], 1, false],
+    [
+      "count restarts after a success",
+      [
+        ...Array(3).fill("ECONNRESET"),
+        "active",
+        ...Array(3).fill("ECONNRESET"),
+        "idle",
+      ],
+      8,
+      true,
+    ],
+    ["no retry after the deadline", ["late", "idle"], 1, false],
+    [
+      "event retry asks only for the time left",
+      ["late", "long-poll"],
+      2,
+      false,
+    ],
+  ])(
+    "thread wait retries only brief resets: %s",
+    async (name, steps, expectedPolls, matches) => {
+      const event = name.startsWith("event");
+      const timeoutMs = steps[0] === "late" ? (event ? 200 : 50) : 1_000;
+      const deadline = Date.now() + timeoutMs;
+      const remaining = [...steps];
+      let overAsked = false;
+      let polls = 0;
+      const sdk = createBbSdk({
+        transport: createHttpTransport({
+          baseUrl: "http://bb.test",
+          fetch: async (input) => {
+            polls += 1;
+            const waitMs = new URL(String(input)).searchParams.get("waitMs");
+            if (waitMs && Number(waitMs) > deadline - Date.now() + 5) {
+              overAsked = true;
+            }
+            const step = remaining.shift();
+            if (step === "long-poll") {
+              const until = Date.now() + Number(waitMs);
+              // A Node timer can wake early; hold for the full requested wait.
+              while (Date.now() < until) {
+                await new Promise((r) => setTimeout(r, until - Date.now()));
+              }
+              return new Response(null, { status: 204 });
+            }
+            if (step === "idle" || step === "active") {
+              return jsonResponse({ body: { id: "thr_wait", status: step } });
+            }
+            if (step === "late") {
+              await new Promise((r) => setTimeout(r, 60));
+            }
+            const code = step === "late" ? "ECONNRESET" : step;
+            throw new TypeError("fetch failed", { cause: { code } });
+          },
+          runtime: "node",
+        }),
+      });
+
+      const waiting = sdk.threads.wait({
+        threadId: "thr_wait",
+        ...(event ? { event: "turn/completed" } : { status: "idle" }),
+        timeoutMs,
+        pollIntervalMs: 1,
+      });
+      await (matches
+        ? expect(waiting).resolves.toMatchObject({ matched: true })
+        : expect(waiting).rejects.toThrow());
+      expect(polls).toBe(expectedPolls);
+      expect(overAsked).toBe(false);
+    },
+  );
+
   it("throws a typed timeout error from thread wait", async () => {
     const queue = createFetchQueue([
       { body: { id: "thr_wait", status: "active" } },

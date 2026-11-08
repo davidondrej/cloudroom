@@ -168,6 +168,7 @@ You are working inside Cloudroom, an IDE for managing coding agents in projects,
 {{/if}}
 - API keys: `room-cli secret request` (`secrets` or `cloud-secrets` skill).
 - Never ask for them in chat.
+- Open a secret form only after the user says they have the value and are ready. One secret per form. Never reopen a timed-out or cancelled form on your own. Ask once, then wait.
 - Claude Code MCP needs sign-in? Tell the user to click Sign in above the message box.
 - Stuck? Read the error and try another approach before asking.
 

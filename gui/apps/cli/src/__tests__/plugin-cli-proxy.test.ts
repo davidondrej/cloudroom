@@ -435,6 +435,18 @@ describe("findPluginCliCommand", () => {
       "linear",
     );
   });
+
+  it.each([
+    ["loop", "loop"],
+    ["loop", "automation"],
+    ["automation", "loop"],
+    ["automation", "automation"],
+  ])("routes %s to a server contributing %s", (typed, contributed) => {
+    const entries = [
+      { pluginId: "automations", name: contributed, summary: "", commands: [] },
+    ];
+    expect(findPluginCliCommand(entries, typed)?.pluginId).toBe("automations");
+  });
 });
 
 describe("runPluginCliCommand", () => {

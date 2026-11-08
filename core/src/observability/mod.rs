@@ -28,6 +28,8 @@ const CAPACITY: usize = 1024;
 const LOCAL_BYTES: u64 = 8 * 1024 * 1024;
 const SUMMARY_INTERVAL: Duration = Duration::from_secs(60);
 const CPU_INTERVAL: Duration = Duration::from_secs(60);
+/// How often the sampler glances at `/proc` between CPU minutes, so short commands keep their names.
+const GLANCE_INTERVAL: Duration = Duration::from_secs(2);
 const SLOW_API_MS: u64 = 1000;
 const STDERR_CAPACITY: usize = 32;
 const STDERR_BATCH: usize = 8;
@@ -275,6 +277,7 @@ impl Observability {
         let mut pending = VecDeque::new();
         let mut sampler = system::Sampler::default();
         let mut sample_at = Instant::now();
+        let mut glance_at = Instant::now();
         let (mut cpu_at, mut cpu_since_ms, mut busy) = (Instant::now(), now_ms(), false);
         let mut summaries = BTreeMap::new();
         let mut summary_at = Instant::now() + SUMMARY_INTERVAL;
@@ -295,6 +298,10 @@ impl Observability {
                     Ok(record) => batch.push(record),
                     Err(_) => break,
                 }
+            }
+            if !stopping && Instant::now() >= glance_at {
+                sampler.glance();
+                glance_at = Instant::now() + GLANCE_INTERVAL;
             }
             if !stopping && Instant::now() >= sample_at {
                 let mut resources = sampler.sample(&config).await;

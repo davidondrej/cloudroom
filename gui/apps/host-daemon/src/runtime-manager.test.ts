@@ -1205,18 +1205,31 @@ describe("RuntimeManager", () => {
       .fn()
       .mockReturnValueOnce(firstRuntime)
       .mockReturnValueOnce(secondRuntime);
+    // fnm makes a new per-shell link on every login shell run.
+    const links = path.join(await makeTempDir("bb-fnm-"), "fnm_multishells");
+    await fs.mkdir(links);
+    await fs.symlink("/node/v24", path.join(links, "1_1"));
+    await fs.symlink("/node/v24", path.join(links, "2_2"));
+    await fs.symlink("/node/v22", path.join(links, "3_3"));
     const manager = new RuntimeManager({
       provisionWorkspace,
       createRuntime,
-      shellEnv: {
-        PATH: "/old/bin:/usr/bin",
-      },
+      shellEnv: { PATH: `${links}/1_1/bin:/old/bin:/usr/bin` },
     });
 
     await manager.ensureEnvironment({
       environmentId: "env-1",
       workspacePath: "/tmp/env-1",
     });
+    // A new link to the same Node is not a change; a different Node is.
+    await manager.replaceBaseShellEnv({
+      PATH: `${links}/2_2/bin:/old/bin:/usr/bin`,
+    });
+    expect(firstRuntime.shutdown).not.toHaveBeenCalled();
+    await manager.replaceBaseShellEnv({
+      PATH: `${links}/3_3/bin:/old/bin:/usr/bin`,
+    });
+    expect(firstRuntime.shutdown).toHaveBeenCalledTimes(1);
     await manager.replaceBaseShellEnv({
       PATH: "/new/bin:/usr/bin",
     });
@@ -1418,7 +1431,7 @@ describe("RuntimeManager", () => {
       provisionWorkspace,
       createRuntime: () => runtime,
       shellEnv: {
-        PATH: "/tmp/fnm_multishells/first/bin:/usr/bin",
+        PATH: "/tmp/first/bin:/usr/bin",
       },
     });
 
@@ -1429,7 +1442,7 @@ describe("RuntimeManager", () => {
     runtime.setPendingTurnStart("thread-1", true);
 
     await manager.replaceBaseShellEnv({
-      PATH: "/tmp/fnm_multishells/second/bin:/usr/bin",
+      PATH: "/tmp/second/bin:/usr/bin",
     });
 
     expect(manager.get("env-1")?.runtime).toBe(runtime);
@@ -1437,7 +1450,7 @@ describe("RuntimeManager", () => {
 
     runtime.setPendingTurnStart("thread-1", false);
     await manager.replaceBaseShellEnv({
-      PATH: "/tmp/fnm_multishells/third/bin:/usr/bin",
+      PATH: "/tmp/third/bin:/usr/bin",
     });
 
     expect(manager.get("env-1")).toBeUndefined();

@@ -87,7 +87,13 @@ room-cli machine retry-cleanup <id-or-name> Retry failed teardown now
 room-cli machine remove <id-or-name> [--yes] Revoke and remove a machine
 room-cli machine provider-cli status <machine>
 room-cli machine provider-cli install <machine> <provider-id>
---action <install|update>
+--action <install|update> (default: the action status offers)
+
+A connected VPS also appears in the text `room-cli machine list` output.
+Inspect it with `room-cli machine show vps` (or its hostname or short name),
+with optional `--json`. Native machines take precedence over matching VPS names.
+`machine list --json` stays a native-host list. Start VPS threads from the app's
+new-thread picker; `thread spawn --machine vps` is not supported yet.
 
 Each machine has a permission limit: the highest permission mode any thread on
 that machine can run with. The default is Full Access. A thread that asks for

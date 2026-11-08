@@ -348,6 +348,30 @@ export function installationVerification(
         };
 }
 
+/** Refuses an install or update the host no longer offers, saying what it has now. */
+export function installationRunUnavailable(
+  name: string,
+  action: "install" | "update",
+  status: Pick<
+    ProviderInstallationStatus,
+    "installed" | "currentVersion" | "installAction"
+  >,
+): { available: false; message: string } {
+  const current = !status.installed
+    ? `${name} is not installed`
+    : status.currentVersion === null
+      ? `${name} is installed (version unknown)`
+      : `${name} ${status.currentVersion} is installed`;
+  const next =
+    status.installAction === null || status.installAction.kind === action
+      ? "Cloudroom has no install or update to run."
+      : `Run ${status.installAction.kind} instead.`;
+  return {
+    available: false,
+    message: `${name} ${action} is not available on this host: ${current}. ${next}`,
+  };
+}
+
 export function downloadedInstallerCommand(
   url: string,
   options: { platform?: NodeJS.Platform; powershellUrl?: string } = {},

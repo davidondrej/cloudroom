@@ -180,6 +180,7 @@ import {
   reportDesktopUpdate,
   resumeThreadsAfterUpdate,
   runningLocalThreadIds,
+  hasLocalBackgroundWork,
   noteUpdateAttempt,
   readUpdateAttempt,
   saveUpdateAttempt,
@@ -3050,6 +3051,8 @@ async function runDesktopApp(): Promise<void> {
       hasRunningThreads: async () =>
         currentRuntime?.ownership === "spawned" &&
         (await runningLocalThreadIds(currentRuntime.serverUrl)).length > 0,
+      hasBackgroundWork: async () =>
+        currentRuntime?.ownership === "spawned" && (await hasLocalBackgroundWork(currentRuntime.serverUrl)),
       report: async (installAt) => {
         const version = desktopAutoUpdateService?.getInfo().pendingVersion;
         if (currentRuntime?.ownership !== "spawned" || !version) return false;

@@ -15,6 +15,11 @@ const MS_PER_TICK: u64 = 10;
 /// A minute with no agent working that still used half a CPU is idle burn: a leftover job, or a bug.
 const IDLE_BURN_MS: u64 = 30_000;
 const TOP_PROGRAMS: usize = 5;
+/// A glance between minutes reads `/proc` only after the container used this much CPU since the last one (a quarter
+/// of a CPU over the 2 s between glances), so an idle sandbox never pays for it.
+const GLANCE_BUSY_US: u64 = 500_000;
+/// More processes than any sandbox runs in a minute; a fork storm only loses names, never CPU.
+const GLANCE_MAX: usize = 20_000;
 
 #[derive(Serialize)]
 pub(crate) struct Resources {
@@ -39,7 +44,7 @@ pub(crate) struct Resources {
 #[derive(Serialize)]
 pub(crate) struct CpuMinute {
     total_ms: u64,
-    /// The top programs, `(exited)` for processes that ended during the minute, and `(other)` for the rest.
+    /// The top programs, `(exited)` for processes that ended during the minute unseen, and `(other)` for the rest.
     programs: BTreeMap<String, u64>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     idle_burn: bool,
@@ -80,6 +85,11 @@ pub(super) struct Sampler {
     minute_usage: Option<u64>,
     /// Without that counter: ticks counted twice in an earlier minute, still to be taken back.
     over_counted: u64,
+    /// Each process's latest ticks from this minute's glances, so short commands (installs, builds, tests) that end
+    /// before the minute's reading keep their names instead of all reading `(exited)`.
+    seen: Processes,
+    /// The container's CPU counter at the last glance.
+    glance_usage: Option<u64>,
 }
 
 impl Sampler {
@@ -143,15 +153,32 @@ impl Sampler {
         self.tally(processes, usage, busy)
     }
 
+    /// Between minutes, every 2 s: remembers what each process has used so far, only while the container is busy.
+    pub fn glance(&mut self) {
+        let Some(usage) = container_usage().filter(|_| cgroup_cpus().is_some()) else {
+            return;
+        };
+        let last = self.glance_usage.replace(usage);
+        if last.is_none_or(|last| usage.saturating_sub(last) < GLANCE_BUSY_US) {
+            return;
+        }
+        for (key, ticks) in processes() {
+            if self.seen.len() < GLANCE_MAX || self.seen.contains_key(&key) {
+                self.seen.insert(key, ticks);
+            }
+        }
+    }
+
     fn tally(&mut self, now: Processes, usage: Option<u64>, busy: bool) -> Option<CpuMinute> {
         let usage_before = std::mem::replace(&mut self.minute_usage, usage);
+        let seen = std::mem::take(&mut self.seen);
         let before = self.processes.replace(now)?;
-        let (mut used, children) = account(&before, self.processes.as_ref()?);
-        used.sort_by_key(|(_, ticks)| std::cmp::Reverse(*ticks));
+        let now = self.processes.as_ref()?;
+        let (used, children) = account(&before, now);
         let own_ms = used.iter().map(|(_, ticks)| ticks).sum::<u64>() * MS_PER_TICK;
         // `/proc` can't be read all at once: a process reaped between two reads counts in both its own and its
         // parent's numbers. The container's counter is exact, so it sets the total and the rest is `(exited)`.
-        let exited_ms = match usage.zip(usage_before) {
+        let mut exited_ms = match usage.zip(usage_before) {
             Some((now, before)) => (now.saturating_sub(before) / 1000).saturating_sub(own_ms),
             None => {
                 let net = children - i128::from(self.over_counted);
@@ -160,14 +187,27 @@ impl Sampler {
             }
         };
         let total_ms = own_ms + exited_ms;
+        // Processes a glance saw that ended before this reading take their names back out of `(exited)`, never
+        // more than it holds, so the total stays the counter's.
+        let mut by_name: HashMap<String, u64> = used
+            .into_iter()
+            .map(|(program, ticks)| (program, ticks * MS_PER_TICK))
+            .collect();
+        for (program, ticks) in ended(&before, now, &seen) {
+            let ms = (ticks * MS_PER_TICK).min(exited_ms);
+            exited_ms -= ms;
+            *by_name.entry(program).or_default() += ms;
+        }
+        let mut used: Vec<_> = by_name.into_iter().filter(|(_, ms)| *ms > 0).collect();
+        used.sort_by_key(|(_, ms)| std::cmp::Reverse(*ms));
         let mut programs = BTreeMap::new();
-        for (i, (program, ticks)) in used.into_iter().enumerate() {
+        for (i, (program, ms)) in used.into_iter().enumerate() {
             let name = if i < TOP_PROGRAMS {
                 program
             } else {
                 "(other)".into()
             };
-            *programs.entry(name).or_default() += ticks * MS_PER_TICK;
+            *programs.entry(name).or_default() += ms;
         }
         if exited_ms > 0 {
             programs.insert("(exited)".into(), exited_ms);
@@ -197,6 +237,19 @@ fn account(before: &Processes, now: &Processes) -> (Vec<(String, u64)>, i128) {
     }
     let used = used.into_iter().filter(|(_, ticks)| *ticks > 0).collect();
     (used, children)
+}
+
+/// Own ticks since the last reading of processes a glance saw that are gone now, by program, most first. Only their
+/// own: their children's ticks may belong to processes a glance named too.
+fn ended(before: &Processes, now: &Processes, seen: &Processes) -> Vec<(String, u64)> {
+    let mut ended: HashMap<String, u64> = HashMap::new();
+    for (key, last) in seen.iter().filter(|(key, _)| !now.contains_key(key)) {
+        let old = before.get(key).map_or(0, |process| process.own);
+        *ended.entry(last.program.clone()).or_default() += last.own.saturating_sub(old);
+    }
+    let mut ended: Vec<_> = ended.into_iter().filter(|(_, ticks)| *ticks > 0).collect();
+    ended.sort_by_key(|(_, ticks)| std::cmp::Reverse(*ticks));
+    ended
 }
 
 /// Every process `/proc` shows, parents (lower pids) first: a child that ends mid-walk then lands in its parent's
@@ -237,10 +290,17 @@ fn processes() -> Processes {
     found
 }
 
-/// The process name. For Node (`node`, or `node-MainThread` in newer versions), the npm package its script
+/// The process name. For Node (`node`, `node-MainThread`, or `MainThread` from Node 24), the npm package its script
 /// belongs to (`typescript`, `@anthropic-ai/claude-code`), so tools and harnesses don't all read `node`.
 fn program(pid: u32, comm: &str) -> String {
-    if !matches!(comm, "node" | "node-MainThread") {
+    if !matches!(comm, "node" | "node-MainThread" | "MainThread") {
+        return comm.to_owned();
+    }
+    // Other programs may name their main thread `MainThread` too: only Node's own binary reads as `node`.
+    let node = comm != "MainThread"
+        || fs::read_link(format!("/proc/{pid}/exe"))
+            .is_ok_and(|exe| exe.file_name().is_some_and(|name| name == "node"));
+    if !node {
         return comm.to_owned();
     }
     let cmdline = fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default();
@@ -418,6 +478,28 @@ fn cpu_minute_counts_ended_processes_once() {
     used.sort();
     assert_eq!(used, [("cargo".to_owned(), 40), ("claude".to_owned(), 10)]);
     assert_eq!(exited, 70);
+
+    // Glances saw the build at 340 ticks and the command at 15: they keep those names, and the unseen rest of
+    // the 120 ticks the container counted stays `(exited)`.
+    let mut sampler = Sampler::default();
+    sampler.tally(before, Some(0), true);
+    sampler.seen = Processes::from([
+        ((2, 5), ticks("tsc", 340, 0)),
+        ((4, 2), ticks("make", 15, 0)),
+    ]);
+    let minute = sampler.tally(now, Some(1_200_000), true).unwrap();
+    let expected = [
+        ("(exited)", 150),
+        ("cargo", 400),
+        ("claude", 100),
+        ("make", 150),
+        ("tsc", 400),
+    ];
+    assert_eq!(minute.total_ms, 1200);
+    assert_eq!(
+        minute.programs,
+        expected.map(|(name, ms)| (name.to_owned(), ms)).into()
+    );
 }
 
 #[test]

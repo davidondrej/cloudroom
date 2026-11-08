@@ -51,6 +51,8 @@ import { forgetCloudAccountSwitch, noteCloudAccountSwitch } from "./account-swit
 import { ACTIVATION_STEPS, CLOUD_CHOICE_ACTIONS, CLOUD_CHOICE_REASONS, POPUP_DETAILS, POPUPS, SETUP_ACTIONS, SETUP_AGENTS, SETUP_DETAILS, SETUP_STEPS, STARTER_PROMPTS, UPGRADE_PROMPTS } from "../system/telemetry.js";
 
 const SAFE_SETTINGS_SEARCH = /^(?=.{2,40}$)\p{L}+(?: \p{L}+){0,3}$/u;
+// A Cloud loop run's request (auto_<loop>_<due>), the website's name for the run that starts its thread.
+const CLOUD_RUN = /^auto_[a-f0-9]{32}_[0-9]{1,16}$/;
 
 export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: PluginService): void {
   cloudroom(deps).teleportRecovery = () => teleports(deps).recover();
@@ -241,6 +243,7 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: Plugin
     return context.json(await reportBug(deps, input));
   });
   app.get("/api/v1/cloudroom/account/invites", async (context) => context.json(await cloudroom(deps).sandboxes.invites("list")));
+  app.get("/api/v1/cloudroom/account/usage-wave", async (context) => context.json({ wave: await cloudroom(deps).sandboxes.usageWave() }));
   app.post("/api/v1/cloudroom/account/invites", async (context) => {
     z.object({}).strict().parse(await context.req.json());
     return context.json(await cloudroom(deps).sandboxes.invites("create"));
@@ -284,7 +287,7 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: Plugin
   // Cloud automations (ADR 0212): the website stores and runs them, so they keep running while this Mac is off.
   // A child Cloud thread shares its parent's sandbox, so the website gets the parent and the child's own session.
   app.post("/api/v1/cloudroom/account/automations", async (context) => {
-    const input = z.object({ action: z.enum(["list", "create", "update", "run", "runs", "history", "delete", "hook", "unhook", "events", "ack", "settings", "report"]), thread: z.string().min(1).max(64).optional(), project: z.string().min(1).max(64).optional() }).passthrough().parse(await context.req.json());
+    const input = z.object({ action: z.enum(["list", "create", "update", "run", "runs", "history", "delete", "hook", "unhook", "events", "ack", "settings", "report", "reports"]), thread: z.string().min(1).max(64).optional(), project: z.string().min(1).max(64).optional() }).passthrough().parse(await context.req.json());
     let body: Record<string, unknown> = input;
     // A fresh-thread loop made from a project needs no thread: this Mac sends the project's settings (ADR 20261101-004659).
     // From a Local thread, with no Cloud thread to re-prompt, it is made from that thread's project.
@@ -293,6 +296,11 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: Plugin
     if (input.action === "create" && project && (!input.thread || !input.project && local && !isCloudThread(local))) {
       const { thread: _thread, ...rest } = input;
       body = { ...rest, project, settings: await projectLoopSettings(deps, project, cloudroom(deps).sandboxes.vpsConnected) };
+    } else if (input.action === "reports") {
+      // Loops → Review (ADR 0298): a Cloud loop run's report is found by the run's request, which started its thread's session.
+      const ids = z.object({ runs: z.array(z.string()).max(300), threads: z.array(z.string()).max(300) }).parse(input);
+      const requests = ids.threads.flatMap((id) => binding(deps.db, id)?.startRequestId ?? []).filter((request) => CLOUD_RUN.test(request));
+      body = { action: "reports", runs: [...ids.runs, ...requests] };
     } else if (input.action === "create") {
       const thread = input.thread ? getThread(deps.db, input.thread) : null;
       if (!thread || !isCloudThread(thread) || thread.archivedAt || thread.deletedAt) throw new ApiError(400, "cloud_automation", "Cloud automations need an open Cloud thread.");
@@ -604,6 +612,11 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: Plugin
     if (problem) return context.json({ message: "Use the local Cloudroom app or CLI." }, problem.status);
     await cloudroom(deps).retryStart(context.req.param("id"));
     return context.json({ ok: true });
+  });
+  app.post("/api/v1/cloudroom/threads/:id/clear-disk", async (context) => {
+    const problem = browserRequestProblem(context, deps, { requireJsonForMutation: true });
+    if (problem) return context.json({ message: "Use the local Cloudroom app or CLI." }, problem.status);
+    return context.json(await cloudroom(deps).clearDisk(context.req.param("id")));
   });
   app.post("/api/v1/cloudroom/threads/:id/move", async (context) => {
     const problem = browserRequestProblem(context, deps, { requireJsonForMutation: true });

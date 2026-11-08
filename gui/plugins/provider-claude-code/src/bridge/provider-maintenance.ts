@@ -17,6 +17,7 @@ import {
   experimental_downloadedInstallerCommand as downloadedInstallerCommand,
   experimental_findCliExecutable as findCliExecutable,
   experimental_formatCommand as formatCommand,
+  experimental_installationRunUnavailable as installationRunUnavailable,
   experimental_installationVerification as installationVerification,
   experimental_npmCommand as npmCommand,
   experimental_npmGlobalInstallSource as npmGlobalInstallSource,
@@ -305,10 +306,7 @@ function buildClaudeProviderInstallationRun(
 ): ProviderInstallationRunResult {
   const command = action === "install" ? claudeInstallerCommand() : update;
   if (status.installAction?.kind !== action || command === null) {
-    return {
-      available: false,
-      message: `Claude Code ${action} is no longer available on this host.`,
-    };
+    return installationRunUnavailable("Claude Code", action, status);
   }
   return {
     available: true,

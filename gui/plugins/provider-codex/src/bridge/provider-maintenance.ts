@@ -14,6 +14,7 @@ import {
   experimental_findCliExecutable as findCliExecutable,
   experimental_formatCommand as formatCommand,
   experimental_npmCommand as npmCommand,
+  experimental_installationRunUnavailable as installationRunUnavailable,
   experimental_installationVerification as installationVerification,
   experimental_npmGlobalInstallCommand as npmGlobalInstallCommand,
   experimental_npmGlobalInstallSource as npmGlobalInstallSource,
@@ -223,10 +224,7 @@ function buildCodexProviderInstallationRun(
   npmPrefix: string | null = null,
 ): ProviderInstallationRunResult {
   if (status.installAction?.kind !== action) {
-    return {
-      available: false,
-      message: `Codex ${action} is no longer available on this host.`,
-    };
+    return installationRunUnavailable("Codex", action, status);
   }
   return {
     available: true,

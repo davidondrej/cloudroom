@@ -12,8 +12,10 @@ import type {
 } from "@cloudroom/domain";
 import { SYSTEM_EXECUTION_OPTIONS_QUERY_KEY } from "@/hooks/queries/query-keys";
 import { permissionModeValues } from "@cloudroom/domain";
+import { z } from "zod";
 import type {
   SystemCliSkillsStatusResponse,
+  SystemSkillUsageResponse,
   SystemWorktreeStorageResponse,
   SystemExecutionOptionsResponse,
   SystemProvidersQuery,
@@ -27,6 +29,7 @@ import type {
 } from "@cloudroom/host-daemon-contract";
 import { BbHttpError, sdk } from "@/lib/sdk";
 import { isAbortLikeError } from "@/lib/mutation-errors";
+import { createLastKnownCache } from "@/lib/last-known-cache";
 import {
   modelCatalogCacheKey,
   readCachedModelCatalog,
@@ -434,16 +437,44 @@ export function useCliSkillsStatus(options?: QueryOptions) {
   });
 }
 
-/** Daily skill runs from thread history, in the user's time zone. */
+// The last result per range, so Analytics opens instantly, even after a restart.
+const skillUsageCache = createLastKnownCache<SystemSkillUsageResponse>({
+  prefix: "bb.skill-usage",
+  version: "1",
+  schema: z.object({
+    startDate: z.string(),
+    days: z.number(),
+    skills: z.array(
+      z.object({
+        name: z.string(),
+        total: z.number(),
+        daily: z.array(z.number()),
+      }),
+    ),
+  }),
+  maxEntries: 3,
+});
+
+/**
+ * Daily skill runs from thread history, in the user's time zone. Shows the
+ * last saved result at once, then refreshes it in the background.
+ */
 export function useSkillUsage(days: "30" | "90" | "365") {
+  const cacheKey = skillUsageCache.key(days);
   return useQuery({
     queryKey: systemSkillUsageQueryKey(days),
-    queryFn: ({ signal }) =>
-      sdk.system.skillUsage({
+    queryFn: async ({ signal }) => {
+      const usage = await sdk.system.skillUsage({
         days,
         utcOffsetMinutes: String(-new Date().getTimezoneOffset()),
         signal,
-      }),
+      });
+      skillUsageCache.write(cacheKey, usage);
+      return usage;
+    },
+    initialData: () => skillUsageCache.read(cacheKey) ?? undefined,
+    // Saved data counts as stale, so every first visit refetches.
+    initialDataUpdatedAt: 0,
     staleTime: 60_000,
   });
 }

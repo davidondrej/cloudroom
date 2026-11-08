@@ -12,6 +12,7 @@ import { describe, expect, it } from "vitest";
 import type { PromptInput, RuntimePermissionPolicy } from "@cloudroom/domain";
 import {
   buildCodexConfig,
+  codexManagedPolicyError,
   combineWorkspaceWriteRoots,
   gitWritableRootsForWorkspace,
   keepShellEnvironmentSetKeys,
@@ -598,6 +599,77 @@ describe("codex permission settings", () => {
         networkAccess: true,
       },
     });
+  });
+});
+
+describe("codexManagedPolicyError", () => {
+  const ON_REQUEST_USER_ONLY = {
+    allowedApprovalPolicies: ["on-request"],
+    allowedApprovalsReviewers: ["user"],
+  };
+  const SOL_NEEDS_AUTO_REVIEW = {
+    autoReview: { requiredOnModels: ["gpt-6.1-sol"] },
+  };
+  it.each([
+    [FULL_OPTIONS, null, null, null],
+    [FULL_OPTIONS, { allowedApprovalPolicies: null }, null, null],
+    [WORKSPACE_ASK_OPTIONS, ON_REQUEST_USER_ONLY, null, null],
+    [
+      FULL_OPTIONS,
+      ON_REQUEST_USER_ONLY,
+      null,
+      `does not allow approval_policy "never" (allowed: "on-request"). Switch this thread's permission mode to Manual.`,
+    ],
+    [
+      AUTO_ASK_OPTIONS,
+      ON_REQUEST_USER_ONLY,
+      null,
+      `does not allow approvals_reviewer "auto_review" (allowed: "user"). Switch this thread's permission mode to Manual.`,
+    ],
+    // Codex 0.136 reports auto_review as guardian_subagent.
+    [
+      AUTO_ASK_OPTIONS,
+      { allowedApprovalsReviewers: ["guardian_subagent"] },
+      null,
+      null,
+    ],
+    [
+      FULL_OPTIONS,
+      { allowedSandboxModes: ["workspace-write"] },
+      null,
+      `does not allow sandbox_mode "danger-full-access" (allowed: "workspace-write"). Switch this thread's permission mode to Manual or Auto.`,
+    ],
+    [
+      WORKSPACE_ASK_OPTIONS,
+      { allowedSandboxModes: ["read-only"] },
+      null,
+      "No Cloudroom permission mode fits it; ask your Codex admin.",
+    ],
+    [
+      WORKSPACE_ASK_OPTIONS,
+      SOL_NEEDS_AUTO_REVIEW,
+      "gpt-6.1-sol",
+      `does not allow model "gpt-6.1-sol" with approvals_reviewer "user" (allowed: "auto_review"). Switch this thread's permission mode to Auto.`,
+    ],
+    // Codex strips one provider prefix before matching.
+    [
+      WORKSPACE_ASK_OPTIONS,
+      SOL_NEEDS_AUTO_REVIEW,
+      "openai/gpt-6.1-sol",
+      `does not allow model "openai/gpt-6.1-sol" with approvals_reviewer "user"`,
+    ],
+    [WORKSPACE_ASK_OPTIONS, SOL_NEEDS_AUTO_REVIEW, "gpt-5.5", null],
+    // Codex's default model may need auto review, so Manual is not suggested.
+    [
+      FULL_OPTIONS,
+      { ...SOL_NEEDS_AUTO_REVIEW, allowedApprovalPolicies: ["on-request"] },
+      null,
+      `(allowed: "on-request"). Switch this thread's permission mode to Auto.`,
+    ],
+  ])("%o under %o on %s", (options, requirements, model, expected) => {
+    const error = codexManagedPolicyError(options, requirements, model);
+    if (expected === null) expect(error).toBeNull();
+    else expect(error).toContain(expected);
   });
 });
 

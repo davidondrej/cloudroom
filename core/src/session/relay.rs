@@ -64,20 +64,30 @@ pub(crate) fn thread_id(id: &str) -> bool {
     })
 }
 
-/// What the parent last knew of a child in its own sandbox, for `thread list`.
-fn note_child(m: &Manager, parent: &str, child: &str, state: &str) {
-    let _ = m.note(parent, "child_state", json!({"child":child,"state":state}));
+/// What the parent last knew of a child in its own sandbox, for `thread list`, and the reports it may still send.
+fn note_child(m: &Manager, parent: &str, child: &str, state: &str, late: &Value) {
+    let data = json!({"child":child,"state":state,"late":late});
+    let _ = m.note(parent, "child_state", data);
 }
 
 /// Notes a start's outcome for `child` only while the parent knows it as starting, checked and written under one lock:
 /// a late start answer never undoes a reply, stop or archive it heard since (#1058). False when it heard one.
 fn note_start(m: &Manager, parent: &str, child: &str, state: &str) -> bool {
+    note_unless(m, parent, child, state, |s| {
+        s.child_states.get(child).is_some_and(|s| s != "starting")
+    })
+}
+
+/// Notes `state` for `child` unless what the parent knows `kept` it, checked and written under one lock.
+fn note_unless(
+    m: &Manager,
+    parent: &str,
+    child: &str,
+    state: &str,
+    kept: impl FnOnce(&super::Session) -> bool,
+) -> bool {
     let mut local = m.local.lock().unwrap();
-    let known = local.sessions.get(parent).map(|s| &s.child_states);
-    if known
-        .and_then(|s| s.get(child))
-        .is_some_and(|s| s != "starting")
-    {
+    if local.sessions.get(parent).is_some_and(kept) {
         return false;
     }
     let _ = local.append(
@@ -137,7 +147,7 @@ pub(super) async fn command(
     let failed = start_error(m, caller, id).filter(|_| action != "archive");
     let mut answer = match api.post_waking("relay", &body).await {
         // The website may not know a child that just started yet (#317).
-        Err(ApiError::Status(404, _)) if starting(m, caller).iter().any(|c| c == id) => {
+        Err(ApiError::Status(404, _)) if starting(m, caller, true).iter().any(|c| c == id) => {
             return Err(fail(StatusCode::SERVICE_UNAVAILABLE, STARTING));
         }
         // Its start was refused, so no agent runs there to message or stop. A stop of one that never woke gets the
@@ -195,7 +205,9 @@ pub(super) async fn command(
         _ => "archived",
     };
     if !other && id != "parent" {
-        note_child(m, caller, id, state);
+        // An archive its child's Core took names the reports it may still send (#1000); a queued one names none.
+        let late = answer["late"].take();
+        note_child(m, caller, id, state, &late);
     }
     answer["id"] = json!(id);
     Ok(Json(answer))
@@ -296,7 +308,14 @@ async fn receive(
                 "interrupted" => "stopped",
                 _ => "error",
             };
-            note_child(&m, &id, &child, known);
+            // A report the archived child had in flight never shows it again (#1000). Any other report updates it,
+            // say from a session that replaced it after a restore.
+            note_unless(&m, &id, &child, known, |s| {
+                s.child_states.get(&child).is_some_and(|s| s == "archived")
+                    && s.late_reports
+                        .get(&child)
+                        .is_some_and(|l| l.contains(&request))
+            });
             notice(&child, input.title, state, input.error, input.reply)
         }
         // Then its agent exits with everything it started, like `thread stop` in one sandbox (#607), Codex aside.
@@ -322,7 +341,18 @@ async fn receive(
                     json!({"archived":true,"kept_live":kept}),
                 )?;
             }
-            return Ok(Json(json!({"id":id,"state":"archived"})));
+            // Archived, it sends no new reports, but one may be in flight, and an earlier session of this thread (say,
+            // before a harness switch) may still send its own: the parent holds the archive against those.
+            let local = m.local.lock().unwrap();
+            let sending = local
+                .sessions
+                .values()
+                .filter(|s| s.session_id == id || (!s.archived && s.parent_thread().is_some()));
+            let late: Vec<String> = sending
+                .flat_map(|s| unreported(s).map(|r| notice_ids(&s.session_id, &r.request_id).1))
+                .collect();
+            drop(local);
+            return Ok(Json(json!({"id":id,"state":"archived","late":late})));
         }
         _ => return Err(bad("unknown action")),
     };
@@ -359,6 +389,15 @@ fn unnamed_start(local: &Local) -> bool {
     })
 }
 
+/// A session's finished turns not yet reported to its parent in another sandbox.
+fn unreported(s: &super::Session) -> impl Iterator<Item = &super::Receipt> {
+    s.receipts.values().filter(|r| {
+        r.command == "prompt"
+            && FINISHED.contains(&r.state.as_str())
+            && !s.reported.contains(&r.request_id)
+    })
+}
+
 /// The first finished turn not yet reported, of a session whose parent runs in another sandbox.
 fn next_report(local: &Local) -> Option<(String, String, Value)> {
     local
@@ -366,11 +405,7 @@ fn next_report(local: &Local) -> Option<(String, String, Value)> {
         .values()
         .filter(|s| !s.archived && s.parent_thread().is_some())
         .find_map(|s| {
-            let r = s.receipts.values().find(|r| {
-                r.command == "prompt"
-                    && FINISHED.contains(&r.state.as_str())
-                    && !s.reported.contains(&r.request_id)
-            })?;
+            let r = unreported(s).next()?;
             let reply = s
                 .replies
                 .iter()
@@ -428,7 +463,7 @@ pub(super) async fn own_children(m: &Manager, caller: &str, archived: bool, answ
     let Some(list) = answer["children"].as_array_mut() else {
         return;
     };
-    let recent = starting(m, caller);
+    let recent = starting(m, caller, false);
     for child in found["children"].as_array().into_iter().flatten() {
         let id = child["id"].as_str().unwrap_or_default();
         if if shared {

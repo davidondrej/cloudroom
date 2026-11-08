@@ -99,8 +99,10 @@ async function reportWindowsInstall(): Promise<void> {
   const text = await readFile(file, "utf8").catch(() => null);
   if (text === null) return;
   await rm(file, { force: true });
-  const { ms, update } = JSON.parse(text) as { ms?: unknown; update?: unknown };
-  if (typeof ms === "number" && ms >= 0) capture("windows_install", () => ({ ms, update: update === true }));
+  const { ms, update, lock_wait_ms, prompts } = JSON.parse(text) as Record<string, unknown>;
+  const count = (value: unknown) => typeof value === "number" && value >= 0 ? value : null;
+  // lock_wait_ms: setup waited for Cloudroom.exe to unlock. prompts: "Cloudroom is still running" dialogs shown.
+  if (typeof ms === "number" && ms >= 0) capture("windows_install", () => ({ ms, update: update === true, lock_wait_ms: count(lock_wait_ms), prompts: count(prompts) }));
 }
 
 async function reportUpdateAttempt(dataDir: string): Promise<void> {

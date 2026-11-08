@@ -71,7 +71,6 @@ import {
   ThreadPromptContextBanner,
   type ContextBannerMergeBaseConfig,
   type ThreadPromptContextBannerExpandedSection,
-  type ThreadPromptParentThreadSection,
   type ThreadPromptPullRequestSection,
 } from "@/components/promptbox/banner/ThreadPromptContextBanner";
 import { ThreadGoalCard } from "@/components/promptbox/banner/ThreadGoalCard";
@@ -219,7 +218,6 @@ interface ThreadDetailPromptAreaProps {
   modelFallback: ThreadTimelineModelFallback | null;
   activeWorkflows: TimelineWorkflowWorkRow[];
   activeBackgroundCommands: TimelineWorkflowWorkRow[];
-  parentThreadSection: ThreadPromptParentThreadSection | null;
   childPendingInteractions: readonly ChildThreadPendingAttention[];
   pullRequest: ThreadPullRequest | null;
   sendMessage: SendMessageMutationLike;
@@ -422,7 +420,6 @@ export function ThreadDetailPromptArea({
   modelFallback,
   activeWorkflows,
   activeBackgroundCommands,
-  parentThreadSection,
   childPendingInteractions,
   pullRequest,
   sendMessage,
@@ -2048,7 +2045,6 @@ export function ThreadDetailPromptArea({
               ? null
               : { status: environmentGoneStatus }
           }
-          parentThreadSection={parentThreadSection}
           pullRequestSection={pullRequestSection}
           gitSection={
             workspaceChangedFilesSection
@@ -2140,7 +2136,6 @@ export function ThreadDetailPromptArea({
       activeBackgroundCommands,
       isBackgroundCommandsExpanded,
       modelFallback,
-      parentThreadSection,
       pullRequestSection,
       pendingTodos,
       displayedProcessingQueuedMessage,
@@ -2206,7 +2201,7 @@ export function ThreadDetailPromptArea({
   }, [cloudReconnectingNow]);
   const cloudReconnecting = cloudReconnectingNow && cloudReconnectingLong;
   const vpsNotice = cloudState.data?.vps || cloudState.data?.move ? <VpsThreadNotice threadId={thread.id} move={cloudState.data.move} outOfMemory={cloudState.data.outOfMemory} /> : null;
-  const cloudLimitNotice = isCloud && !shouldHideComposer ? cloudState.data?.usageLimit ? <CloudUsageLimitNotice /> : cloudState.data?.disk ? <><CloudDiskNotice disk={cloudState.data.disk} />{vpsNotice}</> : vpsNotice : null;
+  const cloudLimitNotice = isCloud && !shouldHideComposer ? cloudState.data?.usageLimit ? <CloudUsageLimitNotice /> : cloudState.data?.disk ? <><CloudDiskNotice threadId={thread.id} disk={cloudState.data.disk} />{vpsNotice}</> : vpsNotice : null;
   const cloudFixPrompt = cloudError || cloudState.data?.failedStart ? cloudThreadFixPrompt(thread.id, thread.providerId, cloudError) : null;
   const cloudStatusKey = `${thread.id}|${cloudState.data?.failedStart ? "failed" : ""}|${cloudError ?? ""}`;
   const cloudStatusDismissed = dismissedCloudStatus === cloudStatusKey;

@@ -166,6 +166,13 @@ function refreshUsage({
   })();
 }
 
+/** Time until plan credits refill. A paid plan's wait for its renewal, charged during that day, so a day past it the
+ *  payment is late. */
+function refillCountdown(resetsAt: string): string {
+  if (Date.now() >= Date.parse(resetsAt) + 86_400_000) return "after payment";
+  return formatResetCountdown(resetsAt) ?? "—";
+}
+
 function formatResetCountdown(resetsAt: string | null): string | null {
   if (resetsAt === null) return null;
   const remaining = new Date(resetsAt).getTime() - Date.now();
@@ -202,7 +209,7 @@ function UsageBlocks({ usedPercent }: { usedPercent: number }) {
         <span
           key={index}
           className={cn(
-            "h-[9px] w-[clamp(2px,calc((100cqw_-_11ch_-_81px_-_var(--usage-label,44px))/12),5px)] min-w-px rounded-[1px]",
+            "h-[9px] w-[clamp(2px,calc((100cqw_-_12ch_-_81px_-_var(--usage-label,calc(7ch_+_1px)))/12),5px)] min-w-px rounded-[1px]",
             index < lit ? usageBarColorClass(usedPercent) : "bg-sidebar-border",
           )}
         />
@@ -237,7 +244,7 @@ function labelColumnStyle(
   if (models.length === 0) return undefined;
   // 1px of slack: the prefix and the model are separate text runs, which can round past a whole number of ch.
   const width = (lengths: number[]) =>
-    `max(2.75rem, calc(${Math.max(...lengths)}ch + 1px))`;
+    `calc(${Math.max(7, ...lengths)}ch + 1px)`;
   return {
     "--usage-label": width(
       models.map((row) => `${row.prefix} ${row.label}`.length),
@@ -265,7 +272,7 @@ function UsageLine({
         {last ? "└" : "├"}
       </span>
       {/* Under 190px a row can't fit "7d fable" plus bars, percent and countdown, so it shows just "fable". */}
-      <span className="w-[var(--usage-label,2.75rem)] shrink-0 truncate lowercase text-muted-foreground @max-[190px]:w-[var(--usage-label-narrow,2.75rem)]">
+      <span className="w-[var(--usage-label,calc(7ch+1px))] shrink-0 truncate lowercase text-muted-foreground @max-[190px]:w-[var(--usage-label-narrow,calc(7ch+1px))]">
         {prefix === null ? null : (
           <span className="@max-[190px]:hidden">{prefix} </span>
         )}
@@ -282,7 +289,7 @@ function UsageLine({
       </span>
       <span
         aria-hidden="true"
-        className="min-w-0 truncate tabular-nums text-subtle-foreground"
+        className="ml-[1ch] min-w-0 truncate tabular-nums text-subtle-foreground"
       >
         {detail}
       </span>
@@ -331,10 +338,10 @@ function PlanUsage({
         >
           <span aria-hidden="true">
             <UsageLine
-              last={index === plan.meters.length - 1}
+              last={!plan.left && index === plan.meters.length - 1}
               label={meter.label}
               usedPercent={planMeterPercent(meter)}
-              detail={planMeterLeft(meter)}
+              detail={meter.label !== "extra" && plan.resetsAt ? refillCountdown(plan.resetsAt) : planMeterLeft(meter)}
             />
           </span>
           <span className="sr-only">
@@ -342,6 +349,14 @@ function PlanUsage({
           </span>
         </p>
       ))}
+      {/* Like the agents' rows: % used, then time until every plan credit comes back (ADR 20261108-142517); the
+          credits left go on the line below. */}
+      {plan.left && (
+        <p className="flex items-center gap-[7px] whitespace-nowrap text-subtle-foreground">
+          <span aria-hidden="true">└</span>
+          <span className="min-w-0 truncate tabular-nums">{plan.left}</span>
+        </p>
+      )}
     </section>
   );
 }

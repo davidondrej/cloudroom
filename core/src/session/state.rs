@@ -727,6 +727,15 @@ impl Local {
                     session
                         .child_states
                         .insert(child.to_owned(), state.to_owned());
+                    let late = record.data["late"].as_array().into_iter().flatten();
+                    let late: std::collections::BTreeSet<String> = late
+                        .filter_map(|id| Some(id.as_str()?.to_owned()))
+                        .collect();
+                    if late.is_empty() {
+                        session.late_reports.remove(child);
+                    } else {
+                        session.late_reports.insert(child.to_owned(), late);
+                    }
                 }
             }
             "child_start" => {

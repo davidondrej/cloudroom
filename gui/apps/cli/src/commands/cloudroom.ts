@@ -406,6 +406,10 @@ export function registerCloudCommands(program: Command, getUrl: () => string): v
     await createCliBbSdk(getUrl()).cloudroom.retryStart(threadId);
     if (!outputJson(options, { ok: true })) console.log("Cloud start retried with the original request ID.");
   }));
+  group.command("clear-disk <thread-id>").description("Free a full Cloud disk: deletes package caches and Git-ignored node_modules, dist, .next and other build folders. Code, .env files and chats stay").option("--json", "Print JSON").action(action(async (threadId: string, options: JsonOutputOptions) => {
+    const result = await createCliBbSdk(getUrl()).cloudroom.clearDisk(threadId);
+    if (!outputJson(options, result)) console.log(`Cleared ${(result.freedBytes / 1e9).toFixed(1)} GB of caches and builds.`);
+  }));
   group.command("thread-workspace <thread-id>").description("Show a cloud thread's current checkout and branch").option("--json", "Print JSON").action(action(async (threadId: string, options: JsonOutputOptions) => {
     const workspace = await createCliBbSdk(getUrl()).cloudroom.threadWorkspace(threadId);
     if (!outputJson(options, workspace)) console.log(workspace ? `${workspace.path}\n${workspace.branch ?? workspace.head ?? "No Git repository"}` : "Cloud session is not ready.");

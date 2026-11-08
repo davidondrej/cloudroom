@@ -59,6 +59,14 @@ const share = (used: number, limit: number) => limit > 0 ? Math.min(used / limit
 
 /** Cloud Credits left as one bar, like /billing: extra credits first, in blue, then the plan's. A bar empties from the
  *  right, so extra reads as used last, as it is (ADR 0317). Without extra credits it is the plan's bar alone. */
+/** When plan credits refill, all at once (ADR 20261108-142517). A paid plan's wait for that payment, charged during
+ *  the day, so it's late only once the day is over. Older websites send none. */
+export function refillText(resetsAt: string | null | undefined, now = Date.now()) {
+  if (!resetsAt) return "Your credits refill every month.";
+  if (now >= Date.parse(resetsAt) + 86_400_000) return "Your credits refill once your next payment goes through.";
+  return `Your credits refill on ${new Date(resetsAt).toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" })}.`;
+}
+
 export function CreditsBar({ plan, limit, extra, extraTotal, className, planClassName, edgeClassName }: { plan: number; limit: number; extra: number; extraTotal: number; className: string; planClassName: string; edgeClassName: string }) {
   const room = limit + (extra > 0 ? Math.max(extra, extraTotal) : 0), width = (part: number) => `${room > 0 ? Math.min(100, (part / room) * 100) : 0}%`;
   return (
@@ -163,7 +171,7 @@ export function CreditsExplainer() {
             <span className={cn("uppercase text-muted-foreground", mono)}>{usage.plan}</span>
           </p>
           <div className="mt-4 h-1 bg-foreground/10"><div className="h-full min-w-[3%] bg-primary" style={{ width: `${share(used, usage.creditsLimit) * 100}%` }} /></div>
-          <p className={cn("mt-2.5 flex justify-between text-muted-foreground", mono)}><span>{Math.floor(used).toLocaleString("en-US")} used</span><span>refills on a rolling 30 days</span></p>
+          <p className={cn("mt-2.5 flex justify-between text-muted-foreground", mono)}><span>{Math.floor(used).toLocaleString("en-US")} used</span><span>refills in full every month</span></p>
         </div>
         <div className={cn("grid grid-cols-[0.8fr_1.2fr] border-t border-white/10", mono)}>
           <div className="border-r border-dashed border-white/10 py-6 pl-8 pr-4">

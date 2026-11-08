@@ -198,6 +198,7 @@ export {
   getRawSdkMessage,
   getRecordProperty,
   getStringProperty,
+  installationRunUnavailable as experimental_installationRunUnavailable,
   installationVerification as experimental_installationVerification,
   isRecord,
   jsonRpcEnvelopeSchema,

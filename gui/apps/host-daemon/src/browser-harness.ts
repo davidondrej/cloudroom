@@ -56,6 +56,98 @@ ipc="$venv/lib/python3.12/site-packages/browser_harness/_ipc.py"
 if grep -qs 'start_unix_server(handler, path=path)' "$ipc"; then
   sed -i.bak 's|start_unix_server(handler, path=path)|start_unix_server(handler, path=path, limit=1 << 26)|' "$ipc" 2>/dev/null && rm -f "$ipc.bak" || true
 fi
+# 0.1.13 runs snippets in run.py's own globals, so a snippet variable like "time" or "sys" replaced the
+# runner's module and broke every later helper and the error report. Run each snippet in its own module
+# instead, registered in sys.modules so dataclasses and pickling still find it. Swapped in by rename, so a
+# parallel run never finds run.py missing.
+run="$venv/lib/python3.12/site-packages/browser_harness/run.py"
+if grep -qs 'exec(code, globals())' "$run"; then
+  sed 's|exec(code, globals())|snippet = __import__("types").ModuleType("browser_harness_snippet"); snippet.__dict__.update(globals(), __name__=snippet.__name__); sys.modules[snippet.__name__] = snippet; exec(code, snippet.__dict__)|' "$run" > "$run.$$" 2>/dev/null && mv -f "$run.$$" "$run" 2>/dev/null || rm -f "$run.$$"
+fi
+# 0.1.13 press_key sends a printable key's text as a separate char event, so a page that cancels the keydown (a "?"
+# shortcut that opens a search box) still got the character. Put the text on keyDown, as Puppeteer does, so Chromium
+# drops it when the page cancels. Changes nothing unless both lines match; swapped in by rename like run.py.
+helpers="$venv/lib/python3.12/site-packages/browser_harness/helpers.py"
+if grep -qs 'type="char", text=text' "$helpers"; then
+  "$venv/bin/python" -I - "$helpers" <<'PY' 2>/dev/null || true
+import os, sys
+path = sys.argv[1]
+src = open(path).read()
+down = '**({} if printable_char or not text else {"text": text})'
+char = '''    if printable_char:
+        cdp("Input.dispatchKeyEvent", type="char", text=text, **{k: v for k, v in base.items() if k != "text"})
+'''
+if src.count(down) == 1 and src.count(char) == 1:
+    open(path + ".tmp%d" % os.getpid(), "w").write(src.replace(down, '**({"text": text} if text else {})').replace(char, ""))
+    os.replace(path + ".tmp%d" % os.getpid(), path)
+PY
+fi
+
+# 0.1.13 retries a daemon that exits at startup three times, then reports only "didn't come up", so the
+# daemon's own reason (such as Chrome's remote debugging being off) never reached the agent. Add a fixed
+# hint when the log bytes this start wrote contain a known failure. Log text is never shown, so nothing in
+# it can leak. Runs once and swaps the file in by rename; skips itself once a release changes these lines.
+admin="$venv/lib/python3.12/site-packages/browser_harness/admin.py"
+if grep -qs '^    raise RuntimeError(f"daemon .* come up -- check {ipc.log_path(name or NAME)}")$' "$admin"; then
+  "$venv/bin/python" - "$admin" <<'PY' 2>/dev/null || true
+import os, sys
+path = sys.argv[1]
+lines = open(path, encoding="utf-8").read().splitlines()
+helpers = '''# Cloudroom (#1115): fixed hints for known daemon failures. Log text is never shown.
+_CLOUDROOM_HINTS = (
+    ((b"Operation not permitted", b"DevToolsActivePort"), "macOS blocked reading a browser profile folder. Ask the user to turn on Full Disk Access for Cloudroom (System Settings > Privacy & Security > Full Disk Access), then quit and reopen Cloudroom."),
+    ((b"chrome://inspect/#remote-debugging",), "Chrome is running without remote debugging. Ask the user to open chrome://inspect/#remote-debugging in Chrome and tick 'Allow remote debugging for this browser instance', then retry."),
+    ((b"chrome-not-running",), "No Chromium-based browser is running. Ask the user to open Chrome, then retry."),
+)
+
+
+def _cloudroom_log_state(name):
+    try:
+        st = ipc.log_path(name or NAME).stat()
+        return st.st_size, st.st_mtime_ns
+    except OSError:
+        return 0, None
+
+
+def _cloudroom_hint(name, before):
+    """Fixed hint for a known failure in the log bytes written since before, else ""."""
+    try:
+        size, mtime = before
+        log = ipc.log_path(name or NAME)
+        st = log.stat()
+        if (st.st_size, st.st_mtime_ns) == (size, mtime):
+            return ""
+        # The daemon truncates its log when it starts: a log that did not grow was rewritten.
+        start = size if st.st_size > size else 0
+        with open(log, "rb") as f:
+            f.seek(max(start, st.st_size - 65536))
+            data = f.read(65536)
+        for markers, hint in _CLOUDROOM_HINTS:
+            if all(m in data for m in markers):
+                return ". " + hint
+    except Exception:
+        pass
+    return ""
+'''
+nl = chr(10)
+spawn = "                    p = subprocess.Popen("
+final = '    raise RuntimeError(f"daemon {name or NAME} didn' + "'" + 't come up -- check {ipc.log_path(name or NAME)}")'
+anchors = ("def ensure_daemon(wait=None, name=None, env=None):", spawn, final)
+if all(lines.count(a) == 1 for a in anchors):
+    out = []
+    for line in lines:
+        if line == anchors[0]:
+            out.append(helpers)
+        elif line == spawn:
+            out.append("                    cloudroom_log = _cloudroom_log_state(name)")
+        elif line == final:
+            line = line[:-1] + ' + _cloudroom_hint(name, locals().get("cloudroom_log")))'
+        out.append(line)
+    tmp = f"{path}.{os.getpid()}"
+    open(tmp, "w", encoding="utf-8").write(nl.join(out) + nl)
+    os.replace(tmp, path)
+PY
+fi
 
 # Use the user's default browser: when it is Chromium-based and closed, open it in the background so
 # browser-harness attaches to it. Safari and Firefox have no DevTools protocol.

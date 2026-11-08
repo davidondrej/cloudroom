@@ -1,10 +1,12 @@
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
+import { closeSync, openSync } from "node:fs";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  closeInheritedFdsOnLinux,
   createBbAppProcessLaunch,
   createBbAppProcessEnv,
   resolveBbAppProcessRuntime,
@@ -30,6 +32,35 @@ interface LinuxProcessStat {
   processGroupId: number;
   state: string;
 }
+
+interface FdCleanupRow {
+  bashPath: string;
+  extraEnv: Record<string, string>;
+  leaked: boolean;
+  platform: NodeJS.Platform;
+}
+
+// bash reads these at startup, so the launch must stay direct.
+const BASH_STARTUP_ENVS: Record<string, string>[] = [
+  { BASH_ENV: "/dev/null" },
+  { BASHOPTS: "nullglob" },
+  { ENV: "/dev/null" },
+  { SHELLOPTS: "noexec" },
+  { "BASH_FUNC_hook%%": "() { exit 37; }" },
+];
+
+const FD_CLEANUP_ROWS: FdCleanupRow[] = [
+  { bashPath: "/bin/bash", extraEnv: {}, leaked: false, platform: "linux" },
+  { bashPath: "/bin/bash", extraEnv: {}, leaked: true, platform: "darwin" },
+  { bashPath: "/missing/bash", extraEnv: {}, leaked: true, platform: "linux" },
+  { bashPath: "/dev/null", extraEnv: {}, leaked: true, platform: "linux" },
+  ...BASH_STARTUP_ENVS.map((extraEnv) => ({
+    bashPath: "/bin/bash",
+    extraEnv,
+    leaked: true,
+    platform: "linux" as const,
+  })),
+];
 
 const tempScripts: TempScript[] = [];
 const processes: BbAppProcess[] = [];
@@ -312,6 +343,41 @@ process.stdout.write(\`grandchild=\${grandchild.pid}\\n\`);
       mode: "node",
     });
   });
+
+  it.runIf(process.platform === "linux").each(FD_CLEANUP_ROWS)(
+    "closes a stray inherited fd 201: $platform via $bashPath with $extraEnv",
+    async ({ bashPath, extraEnv, platform, leaked }) => {
+      const launch = closeInheritedFdsOnLinux({
+        bashPath,
+        launch: {
+          args: [
+            "-e",
+            'process.stdout.write(String(require("fs").existsSync("/proc/self/fd/201")) + " " + String(process.env.OLDPWD))',
+          ],
+          env: { PATH: process.env.PATH, ...extraEnv },
+          executablePath: process.execPath,
+        },
+        platform,
+      });
+      // stdio slot 201 plants an inheritable fd 201 in the child, like the
+      // Chromium descriptors Electron's main process leaks.
+      const strayFd = openSync("/dev/null", "r");
+      const stdio = Array.from({ length: 202 }, (_, fd) =>
+        fd === 1 ? "pipe" : fd === 201 ? strayFd : "ignore",
+      );
+      const child = spawn(launch.executablePath, launch.args, {
+        env: launch.env,
+        stdio,
+      });
+      closeSync(strayFd);
+      let output = "";
+      child.stdout?.on("data", (chunk: Buffer) => {
+        output += chunk.toString("utf8");
+      });
+      await new Promise((resolveExit) => child.once("exit", resolveExit));
+      expect(output).toBe(`${String(leaked)} undefined`);
+    },
+  );
 
   it("escalates to SIGKILL when the bridge ignores SIGTERM", async () => {
     const script = await createTempScript({

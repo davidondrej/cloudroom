@@ -11,7 +11,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import Database from "better-sqlite3";
 import type { PluginCliRegistration } from "@get-bb/plugin-sdk";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   claimAutomationScheduledRun,
   closeAutomationRun,
@@ -24,6 +24,7 @@ import {
   listDueAutomations,
   listAutomationRuns,
   migrations,
+  addReviewThread,
   setAutomationEnabled,
   setAutomationRunThread,
   AUTOMATION_RETRY_DELAYS_MS,
@@ -47,9 +48,10 @@ import {
   executeAgentRun,
   reconcileRunningAutomationRuns,
 } from "./run.js";
-import { sweepDueAutomations } from "./sweep.js";
-import { loopAgent, type FallbackSdk } from "./fallback.js";
+import { RECOVERY_WAIT_MS, sweepDueAutomations } from "./sweep.js";
+import type { FallbackSdk } from "./fallback.js";
 import { createAutomationService } from "./service.js";
+import { buildReview } from "./review.js";
 import { registerAutomationCli } from "./cli.js";
 import { automationScriptDir } from "./script-files.js";
 
@@ -1004,6 +1006,63 @@ describe("automation data access", () => {
     await sweep(now + 90_000);
     expect(overdueStarted()).toBe(2);
   });
+
+  // A failed loop thread can come back on its own: provider-retry re-runs a turn an app restart cut 5 s later (#887).
+  it.each([
+    ["still active", "active", 0, ["thr_1"]],
+    ["active past the cap", "active", RECOVERY_WAIT_MS, ["thr_1", "thr_2"]],
+    ["idle", "idle", 0, ["thr_1", "thr_2"]],
+    ["error", "error", 0, ["thr_1", "thr_2"]],
+  ] as const)(
+    "a loop retry when its failed thread is %s (#887)",
+    async (_name, status, wait, atRetry) => {
+      const db = createTestDb();
+      const automation = createScheduledAutomation(db, 1000);
+      const spawned: string[] = [];
+      let threadStatus: string = "active";
+      const bb = {
+        sdk: {
+          projects: { list: async () => [{ id: "proj_test" }] },
+          hosts: { list: async () => [{ id: "host_test", status: "connected" }] },
+          threads: {
+            get: async ({ threadId }: { threadId: string }) => ({
+              id: threadId,
+              status: threadStatus,
+              archivedAt: null,
+              deletedAt: null,
+            }),
+            send: async () => {
+              throw new Error("not expected");
+            },
+            spawn: async () => {
+              spawned.push(`thr_${spawned.length + 1}`);
+              return { id: spawned.at(-1), status: "active", archivedAt: null, deletedAt: null };
+            },
+          },
+        },
+        realtime: { publish: () => undefined },
+        log: { debug: () => undefined, error: () => undefined, info: () => undefined, warn: () => undefined },
+      };
+      const sweep = (now: number) =>
+        sweepDueAutomations(bb, db, { pluginDataDir: "/tmp", serverUrl: "http://127.0.0.1:38886", now });
+
+      await sweep(1000);
+      await closeAutomationRunForSettledThread(bb, db, {
+        threadId: "thr_1",
+        status: "failed",
+        error: "host daemon restarted",
+      });
+      threadStatus = status;
+      const retryAt = getAutomation(db, automation.id)!.nextRunAt! + wait;
+      await sweep(retryAt);
+      expect(spawned).toEqual(atRetry);
+
+      // Once the old thread settles, the waiting retry runs as before.
+      threadStatus = "idle";
+      await sweep(retryAt + 10_000);
+      expect(spawned).toEqual(["thr_1", "thr_2"]);
+    },
+  );
 
   it("keeps automations of hidden projects and pauses those of deleted ones", async () => {
     const db = createTestDb();
@@ -2099,6 +2158,12 @@ describe("legacy import", () => {
 });
 
 describe("loop fallback", () => {
+  // fallback.ts caches usage per provider for the whole process: a fresh copy keeps other tests' mocks out.
+  let loopAgent: typeof import("./fallback.js").loopAgent;
+  beforeEach(async () => {
+    vi.resetModules();
+    ({ loopAgent } = await import("./fallback.js"));
+  });
   // Codex usage shows on a Mac with only a Cloud login and no CLI, so usage alone can't pick it.
   it("switches to the other agent only when it is ready on the loop's machine", async () => {
     let codexHealth = "not_installed";
@@ -2169,5 +2234,62 @@ describe("loop fallback", () => {
       providerId: "codex",
       model: "gpt-6-astra",
     });
+  });
+});
+
+describe("loop review", () => {
+  it("shows each run's saved report over its thread's summary (#1078)", async () => {
+    const now = Date.now();
+    const db = createTestDb();
+    createScheduledAutomation(db, now + 60_000);
+    const { run } = createManualRun(db, { automationId: "auto_test", runMode: "agent", now: now - 4_000 });
+    setAutomationRunThread(db, { runId: run.id, threadId: "thr_local" });
+    closeAutomationRun(db, { runId: run.id, status: "succeeded", now: now - 3_000 });
+    for (const [threadId, at] of [["thr_cloud", 1], ["thr_busy", 2], ["thr_quiet", 3]] as const)
+      addReviewThread(db, { threadId, automationId: null, runId: null, loopName: "PR loop", createdAt: now - at * 1_000 });
+    const thread = (id: string) => ({
+      id, projectId: "proj_test", title: id, titleFallback: "Loop run", purpose: { text: "Work has not started" },
+      status: id === "thr_busy" ? "active" : "idle", archivedAt: null, deletedAt: null, createdAt: now - 5_000, executionTarget: "cloud",
+    });
+    // The website's rows. This app's server swaps each Cloud thread for the request that started it, and the website
+    // answers only the requested runs: a same-thread run on a child session or a Local run sharing the thread never matches.
+    const starts: Record<string, string> = { thr_cloud: "auto_c_1", thr_busy: "auto_b_1", thr_quiet: "auto_q_1" };
+    const rows = [
+      { request: "auto_child_9", thread_id: "thr_cloud", outcome: "done", reason: "A child session's same-thread run" },
+      { request: "arun_other", thread_id: "thr_cloud", outcome: "acted", reason: "A Local run on this thread" },
+      { request: "auto_c_1", thread_id: "thr_cloud", outcome: "needs_you", reason: "PR #12 needs a decision" },
+      { request: "auto_b_1", thread_id: "thr_busy", outcome: "done", reason: "Merged #13" },
+      { request: run.id, thread_id: "thr_local", outcome: "failed", reason: "Tests broke" },
+    ];
+    const website = (extra: object[]) => async (input: { runs?: string[]; threads?: string[] }) => {
+      const asked = [...(input.runs ?? []), ...(input.threads ?? []).map((id) => starts[id])];
+      return { reports: [...rows.filter((row) => asked.includes(row.request)), ...extra] };
+    };
+    const stale = { status: "needs-you", report: "Work has not started" };
+    const before = {
+      "thread:thr_cloud": stale,
+      "thread:thr_busy": { status: "running", report: "Work has not started" },
+      "thread:thr_quiet": stale,
+      [`run:${run.id}`]: stale,
+    };
+    for (const [answer, expected] of [
+      [website([]), {
+        "thread:thr_cloud": { status: "needs-you", report: "PR #12 needs a decision" },
+        "thread:thr_busy": { status: "running", report: "Merged #13" },
+        "thread:thr_quiet": stale,
+        [`run:${run.id}`]: { status: "failed", report: "Tests broke" },
+      }],
+      // One unexpected row, or an older website that refuses the lookup: Review shows what the threads say, as before.
+      [website([{ request: "auto_q_1", thread_id: "thr_quiet", outcome: "skipped", reason: null }]), before],
+      [async () => { throw new Error("Invalid automation request."); }, before],
+    ] as const) {
+      const automations = vi.fn(answer);
+      const review = await buildReview({
+        log: { warn: vi.fn() } as never,
+        sdk: { threads: { get: async ({ threadId }) => thread(threadId) as never }, projects: { list: async () => [] }, cloudroom: { automations } as never },
+      }, db, now);
+      expect(Object.fromEntries(review.items.map((item) => [item.id, { status: item.status, report: item.report }]))).toEqual(expected);
+      expect(automations).toHaveBeenCalledWith({ action: "reports", runs: [run.id], threads: ["thr_cloud", "thr_busy", "thr_quiet"] });
+    }
   });
 });

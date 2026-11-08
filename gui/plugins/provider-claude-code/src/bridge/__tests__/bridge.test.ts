@@ -3780,6 +3780,86 @@ describe("bridge", () => {
     }
   });
 
+  it.each([
+    { name: "mid-turn", end: "finish", statuses: ["failed", "completed"] },
+    { name: "after a result", end: "result", statuses: ["completed"] },
+    { name: "during Stop", end: "stop", statuses: ["interrupted"] },
+  ] as const)(
+    "fails the open turn only when the SDK stream ends cleanly $name (#1075)",
+    async ({ end, statuses }) => {
+      const bridge = createBridgeJsonRpcTestHarness(handleLine);
+      const queries: ControlledClaudeQuery[] = [];
+      queryMock.mockImplementation(() => {
+        const query = createControlledClaudeQuery();
+        queries.push(query);
+        return query;
+      });
+      try {
+        const threadId = `thread-clean-stream-end-${end}`;
+        // The SDK messages below report this Claude session.
+        const providerThreadId = "session-1";
+        sendResumeThread({
+          bridge,
+          providerThreadId,
+          requestId: 1,
+          threadId,
+        });
+        await bridge.waitForResponse(1);
+        bridge.sendRequest(3, "turn/start", {
+          threadId,
+          providerThreadId: threadId,
+          input: [{ type: "text", text: "work" }],
+          clientRequestId: "creq_abcdefghjk",
+          options: canonicalOptions({}),
+        });
+        await readNextPromptText(getLatestQueryCall());
+        await bridge.waitForResponse(3);
+        queries[0]?.emit(
+          createAssistantToolUseMessage({
+            parentToolUseId: null,
+            toolInput: { command: "sleep 600" },
+            toolName: "Bash",
+            toolUseId: "tool-open",
+          }),
+        );
+        await bridge.flushWork();
+        if (end === "stop") {
+          await stopBridgeThread({ bridge, queries, threadId });
+        } else {
+          if (end === "result") {
+            queries[0]?.emit(createSuccessfulResultMessage(providerThreadId));
+          }
+          queries[0]?.finish();
+          await bridge.flushWork();
+        }
+        if (end === "finish") {
+          // Retry resumes the same Claude session and completes.
+          bridge.sendRequest(4, "turn/start", {
+            threadId,
+            providerThreadId,
+            input: [{ type: "text", text: "retry" }],
+            clientRequestId: "creq_abcdefghjm",
+            options: canonicalOptions({}),
+          });
+          await readNextPromptText(getLatestQueryCall());
+          await bridge.waitForResponse(4);
+          expect(getLatestQueryOptions()).toMatchObject({
+            resume: providerThreadId,
+          });
+          queries[1]?.emit(createSuccessfulResultMessage(providerThreadId));
+          await bridge.flushWork();
+        }
+        expect(
+          assembleCapturedThreadEvents(bridge.messages, "claude-code").flatMap(
+            (event) => (event.type === "turn/completed" ? [event.status] : []),
+          ),
+        ).toEqual(statuses);
+      } finally {
+        bridge.restore();
+      }
+    },
+  );
+
   it("resumes the same Claude session on the next turn after a failed stop", async () => {
     const bridge = createBridgeJsonRpcTestHarness(handleLine);
     const queries: ControlledClaudeQuery[] = [];

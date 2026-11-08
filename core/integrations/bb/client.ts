@@ -154,6 +154,8 @@ async function rejection(response: Response): Promise<{ code: string | null; err
   const legacy: Record<string, string> = {
     "invalid reasoning effort": "invalid_reasoning_effort", "invalid model": "invalid_model",
     "storage unsafe; new execution is blocked": "storage_blocked", "service is stopping": "service_stopping", "service is draining": "service_draining",
+    // Core 0.1.100 and older also says this while a sandbox stops. Retried, so a message with an image is not lost.
+    "storage unsafe; uploads are blocked": "storage_blocked",
   };
   return { code: error !== null && Object.hasOwn(legacy, error) ? legacy[error] : null, error };
 }

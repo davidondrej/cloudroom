@@ -45,6 +45,7 @@ import {
 import { useSidebarNavigation } from "@/hooks/queries/sidebar-navigation-query";
 import { usePluginSlots } from "@/lib/plugin-slots";
 import { getMutationErrorMessage } from "@/lib/mutation-errors";
+import { BbHttpError } from "@cloudroom/sdk/browser";
 import { PluginMachineServerAccessNotice } from "@/components/machines/MachineServerAccessNotice";
 import { invalidateMachineProviders } from "@/hooks/cache-owners/system-cache-effects";
 import {
@@ -452,10 +453,35 @@ function AutosavingPluginSetting({
   );
 }
 
+const SETTINGS_LOAD_FAILED = "Could not load this plugin's settings.";
+
 export function PluginSettingsForm({ pluginId }: { pluginId: string }) {
   const viewQuery = usePluginSettingsView(pluginId, { enabled: true });
-  const view = viewQuery.data ?? null;
-  if (view === null || Object.keys(view.schema).length === 0) return null;
+  const view = viewQuery.data;
+  if (view === undefined && viewQuery.isError) {
+    return (
+      <div className="flex items-center justify-between gap-3" role="alert">
+        <p className="min-w-0 break-words text-xs text-destructive">
+          {viewQuery.error instanceof BbHttpError
+            ? getMutationErrorMessage({
+                error: viewQuery.error,
+                fallbackMessage: SETTINGS_LOAD_FAILED,
+              }).slice(0, 300)
+            : SETTINGS_LOAD_FAILED}
+        </p>
+        <Button
+          variant="outline"
+          size="sm"
+          disabled={viewQuery.isFetching}
+          onClick={() => void viewQuery.refetch()}
+        >
+          Retry
+        </Button>
+      </div>
+    );
+  }
+  if (view === undefined) return <PluginSettingsFieldSkeleton />;
+  if (Object.keys(view.schema).length === 0) return null;
 
   return (
     <div className="space-y-4">

@@ -127,7 +127,8 @@ describe("Codex provider maintenance", () => {
       __testing.buildProviderInstallationRun(installationStatus(), "install"),
     ).toEqual({
       available: false,
-      message: "Codex install is no longer available on this host.",
+      message:
+        "Codex install is not available on this host: Codex 1.0.0 is installed. Run update instead.",
     });
   });
 });

@@ -133,6 +133,8 @@ export const createThreadRequestSchema = z
     sourceThreadId: z.string().min(1).optional(),
     sourceSeqEnd: z.number().int().nonnegative().optional(),
     startedOnBehalfOf: startedOnBehalfOfSchema.nullable().default(null),
+    /** The agent thread whose `room-cli` call made this thread, logged with a Cloud thread's first start (docs/scopes/credit-burn.md). */
+    launcherThreadId: z.string().regex(/^thr_[a-z0-9]{1,40}$/).optional(),
     originKind: threadOriginKindSchema.nullable().default(null),
     /**
      * Epoch ms at which this thread's first message should dispatch. Present ⇒
