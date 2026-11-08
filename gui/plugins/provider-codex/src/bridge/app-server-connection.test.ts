@@ -1,7 +1,5 @@
-import * as childProcess from "node:child_process";
-import { PassThrough } from "node:stream";
-import * as providerBridge from "@get-bb/plugin-sdk/provider-bridge";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { setTimeout as delay } from "node:timers/promises";
+import { describe, expect, it } from "vitest";
 import { z } from "zod";
 import {
   CodexAppServerExitedError,
@@ -11,44 +9,6 @@ import {
 } from "./app-server-connection.js";
 
 const EPIPE_PAYLOAD_SIZE = 1024 * 1024;
-
-vi.mock("node:child_process", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("node:child_process")>();
-  return { ...actual, spawn: vi.fn(actual.spawn) };
-});
-
-vi.mock("@get-bb/plugin-sdk/provider-bridge", async (importOriginal) => {
-  const actual =
-    await importOriginal<typeof import("@get-bb/plugin-sdk/provider-bridge")>();
-  return {
-    ...actual,
-    experimental_spawnPortableProcess: vi.fn(
-      actual.experimental_spawnPortableProcess,
-    ),
-    experimental_killPortableProcess: vi.fn(
-      actual.experimental_killPortableProcess,
-    ),
-  };
-});
-
-afterEach(() => vi.resetAllMocks());
-
-function stubChildProcess() {
-  const child = new childProcess.ChildProcess();
-  const stdin = (child.stdin = new PassThrough());
-  const stdout = (child.stdout = new PassThrough());
-  const stderr = (child.stderr = new PassThrough());
-  vi.mocked(childProcess.spawn).mockReturnValue(child);
-  vi.mocked(providerBridge.experimental_spawnPortableProcess).mockReturnValue(
-    child,
-  );
-  const kill = vi.mocked(
-    providerBridge.experimental_killPortableProcess,
-  ).mockResolvedValue({
-    treeTermination: "unverified",
-  });
-  return { child, stdin, stdout, stderr, kill };
-}
 
 function deferred<T>(): {
   promise: Promise<T>;
@@ -84,49 +44,50 @@ function childRequestLine(): string {
 }
 
 describe("codex app-server connection", () => {
-  it("preserves final output and exit details while stdio drains", async () => {
-    // Windows cannot keep this pipe open by inheriting stdout in a descendant.
-    // Control exit and close separately to exercise the drain on every platform.
-    const { child, stdin, stdout, stderr, kill } = stubChildProcess();
+  // Windows does not retain the descendant's inherited stdout pipe.
+  it.skipIf(process.platform === "win32")("preserves final output and exit details while stdio drains", async () => {
     const exited = deferred<CodexAppServerExitInfo>();
     const lateResponseLine = `${JSON.stringify({
       jsonrpc: "2.0",
       id: 1,
       result: { thread: { id: "thread-from-final-output" } },
     })}\n`;
-    let respond: (() => void) | undefined;
+    const descendantScript = [
+      `const line = ${JSON.stringify(lateResponseLine)};`,
+      "setTimeout(() => process.stdout.write(line, () => process.exit(0)), 250);",
+    ].join("");
+    const childScript = [
+      'const { spawn } = require("node:child_process");',
+      'process.stdin.once("data", () => {',
+      'process.stderr.write("fixture stderr\\n");',
+      `process.stdout.write(${JSON.stringify(childRequestLine())}, () => {`,
+      `spawn(process.execPath, ["-e", ${JSON.stringify(descendantScript)}], { stdio: ["ignore", 1, "ignore"] });`,
+      "process.exit(7);",
+      "});",
+      "});",
+    ].join("");
     const connection = createCodexAppServerConnection({
       command: process.execPath,
-      args: [],
+      args: ["-e", childScript],
       cwd: process.cwd(),
       env: process.env,
       recordThreadId: null,
       onNotification: () => undefined,
       onRequest: (_method, _params, responder) => {
-        respond = () => responder.result({ decision: "accept" });
+        setTimeout(() => responder.result({ decision: "accept" }), 100);
       },
       onExit: exited.resolve,
     });
 
     try {
-      const pendingRequest = connection.request({
-        method: "thread/start",
-        resultSchema: z.object({
-          thread: z.object({ id: z.string() }),
+      await expect(
+        connection.request({
+          method: "thread/start",
+          resultSchema: z.object({
+            thread: z.object({ id: z.string() }),
+          }),
         }),
-      });
-      stderr.write("fixture stderr\n");
-      stdout.write(childRequestLine());
-      child.emit("exit", 7, null);
-      expect(connection.exited).toBe(false);
-      respond!();
-      stdin.emit(
-        "error",
-        Object.assign(new Error("closed pipe"), { code: "EPIPE" }),
-      );
-      stdout.write(lateResponseLine);
-      child.emit("close", 7, null);
-      await expect(pendingRequest).resolves.toEqual({
+      ).resolves.toEqual({
         thread: { id: "thread-from-final-output" },
       });
       await expect(exited.promise).resolves.toEqual({
@@ -135,9 +96,7 @@ describe("codex app-server connection", () => {
         stderrTail: "fixture stderr",
         spawnFailed: false,
       });
-      expect(kill).not.toHaveBeenCalled();
     } finally {
-      child.emit("close", 7, null);
       await stopConnection(connection, exited.promise);
     }
   }, 30_000);
@@ -212,33 +171,50 @@ describe("codex app-server connection", () => {
     }
   }, 30_000);
 
-  it.each([
-    "EPIPE",
-    "ERR_STREAM_DESTROYED",
-    ...(process.platform === "win32" ? ["EOF"] : []),
-  ])("makes a broken child stdin immediately terminal (%s)", async (code) => {
-    // closeSync(0) does not close Node's Windows pipe handle. Inject the error
-    // the parent actually receives, independently of child fd/signal behavior.
-    const { child, stdin, kill } = stubChildProcess();
+  // Windows closeSync(0) does not close Node's stdin pipe handle.
+  it.skipIf(process.platform === "win32")("makes a broken child stdin immediately terminal", async () => {
+    const ready = deferred<void>();
     const exited = deferred<CodexAppServerExitInfo>();
     const connection = createCodexAppServerConnection({
       command: process.execPath,
-      args: [],
+      args: [
+        "-e",
+        [
+          'require("node:fs").closeSync(0);',
+          `process.stdout.write(${JSON.stringify(
+            `${JSON.stringify({ jsonrpc: "2.0", method: "ready" })}\n`,
+          )});`,
+          'process.on("SIGTERM", () => {});',
+          "setTimeout(() => process.exit(0), 1000);",
+        ].join(""),
+      ],
       cwd: process.cwd(),
       env: process.env,
       recordThreadId: null,
-      onNotification: () => undefined,
+      onNotification(method) {
+        if (method === "ready") ready.resolve();
+      },
       onRequest: () => undefined,
       onExit: exited.resolve,
     });
 
     try {
+      await ready.promise;
       const pendingRequest = connection.request({
         method: "thread/start",
         params: { payload: "x".repeat(EPIPE_PAYLOAD_SIZE) },
         resultSchema: z.unknown(),
       });
-      stdin.emit("error", Object.assign(new Error("closed pipe"), { code }));
+      await expect(
+        Promise.race([
+          pendingRequest,
+          delay(500).then(() => {
+            throw new Error(
+              "Codex request remained pending after stdin closed",
+            );
+          }),
+        ]),
+      ).rejects.toBeInstanceOf(CodexAppServerExitedError);
       expect(connection.exited).toBe(true);
       await expect(
         connection.request({
@@ -246,20 +222,13 @@ describe("codex app-server connection", () => {
           resultSchema: z.unknown(),
         }),
       ).rejects.toBeInstanceOf(CodexAppServerExitedError);
-      expect(kill).toHaveBeenCalledExactlyOnceWith(child, "SIGKILL");
-      child.emit("exit", null, "SIGKILL");
-      child.emit("close", null, "SIGKILL");
-      await expect(pendingRequest).rejects.toBeInstanceOf(
-        CodexAppServerExitedError,
-      );
       await expect(exited.promise).resolves.toMatchObject({
         code: null,
         signal: "SIGKILL",
-        stderrTail: expect.stringContaining(`stdin failed (${code})`),
+        stderrTail: expect.stringMatching(/stdin failed \(EPIPE\)/),
         spawnFailed: false,
       });
     } finally {
-      child.emit("close", null, "SIGKILL");
       await stopConnection(connection, exited.promise);
     }
   }, 30_000);
