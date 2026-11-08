@@ -119,4 +119,51 @@ describe("Codex lifecycle notification diagnostics", () => {
       }),
     ]);
   });
+
+  it("puts a failed hook's error before its progress label", () => {
+    const translate = createHarness();
+    expect(
+      translate("hook/completed", {
+        run: {
+          status: "failed",
+          eventName: "postToolUse",
+          sourcePath: "C:\\Users\\test\\.codex\\hooks.json",
+          statusMessage: "Checking UI changes",
+          entries: [
+            { kind: "feedback", text: "Starting UI check" },
+            {
+              kind: "error",
+              text: "Missing type name after '['.\nParserError",
+            },
+          ],
+        },
+      }),
+    ).toEqual([
+      expect.objectContaining({
+        type: "provider/warning",
+        summary:
+          "postToolUse hook in hooks.json failed: Missing type name after '['.",
+      }),
+    ]);
+  });
+
+  it("keeps the hook progress label when no error detail is available", () => {
+    const translate = createHarness();
+    expect(
+      translate("hook/completed", {
+        run: {
+          status: "failed",
+          eventName: "stop",
+          sourcePath: "C:\\Users\\test\\.codex\\hooks.json",
+          statusMessage: "Design deep pass",
+          entries: [{ kind: "error", text: "  " }],
+        },
+      }),
+    ).toEqual([
+      expect.objectContaining({
+        type: "provider/warning",
+        summary: "stop hook in hooks.json failed: Design deep pass",
+      }),
+    ]);
+  });
 });
