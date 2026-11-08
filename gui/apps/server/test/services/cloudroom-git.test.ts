@@ -234,7 +234,7 @@ describe("cloud git", () => {
       rmSync(bare, { recursive: true, force: true });
       rmSync(clone, { recursive: true, force: true });
     }
-  });
+  }, process.platform === "win32" ? 30000 : undefined);
 
   it("reports a folder that is not a Git repository", async () => {
     rmSync(join(repo, ".git"), { recursive: true, force: true });
