@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, sep } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
@@ -185,10 +185,11 @@ describe("bb app process", () => {
       contents: 'process.stdout.write("child mount\\n");\n',
     });
     const launch = createBbAppProcessLaunch({
-      bridgePath: desktopMountScript.path,
+      // AppImage paths are POSIX, even when constructing the launch on Windows.
+      bridgePath: desktopMountScript.path.split(sep).join("/"),
       env: process.env,
       runtime: {
-        appDirPath: desktopMountScript.root,
+        appDirPath: desktopMountScript.root.split(sep).join("/"),
         executablePath: process.execPath,
         kind: "appimage",
         mode: "electron-node",
@@ -197,7 +198,7 @@ describe("bb app process", () => {
 
     expect(launch.args.slice(-3)).toEqual([
       "--",
-      desktopMountScript.path,
+      desktopMountScript.path.split(sep).join("/"),
       "--no-sandbox",
     ]);
     if (process.platform !== "linux") {
@@ -313,7 +314,8 @@ process.stdout.write(\`grandchild=\${grandchild.pid}\\n\`);
     });
   });
 
-  it("escalates to SIGKILL when the bridge ignores SIGTERM", async () => {
+  // Windows terminates a process on SIGTERM; the child cannot ignore it.
+  it.skipIf(process.platform === "win32")("escalates to SIGKILL when the bridge ignores SIGTERM", async () => {
     const script = await createTempScript({
       contents: `
 process.on("SIGTERM", () => {

@@ -463,8 +463,11 @@ describe("electron-builder signing config", () => {
       await expect(readFile(unixTerminalPath, "utf8")).resolves.toContain(
         "helperPath.replace(/app\\.asar(?!\\.unpacked)/g, 'app.asar.unpacked')",
       );
-      expect((await stat(helperPath)).mode & 0o777).toBe(0o755);
-      expect((await stat(rebuiltHelperPath)).mode & 0o777).toBe(0o755);
+      // Windows chmod cannot set POSIX execute bits; still check the patch above.
+      if (process.platform !== "win32") {
+        expect((await stat(helperPath)).mode & 0o777).toBe(0o755);
+        expect((await stat(rebuiltHelperPath)).mode & 0o777).toBe(0o755);
+      }
     } finally {
       await rm(appOutDir, { force: true, recursive: true });
     }
@@ -492,6 +495,15 @@ describe("electron-builder signing config", () => {
         resolve(nodeModules, "better-sqlite3"),
         { recursive: true },
       );
+      if (process.platform === "win32") {
+        // Native prep also verifies the Windows watcher. Let it copy the platform
+        // binary from the workspace, as it does for a real packaged app.
+        await cp(
+          dirname(requireFromRuntime.resolve("@parcel/watcher/package.json")),
+          resolve(nodeModules, "@parcel/watcher"),
+          { recursive: true },
+        );
+      }
       const result = await runNativePrepScript(appOutDir, [
         `--electron-version=${electronVersion}`,
       ]);
