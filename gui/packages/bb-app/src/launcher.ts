@@ -2485,13 +2485,23 @@ export async function runBundledCliCommand(
   args: RunBundledCliCommandArgs,
 ): Promise<number> {
   const bbCliOverride = toOptionalString(args.env.ROOM_CLI);
-  const cliPath = bbCliOverride ?? join(args.context.daemonBundleDir, "room-cli");
-  const launch = resolveBundledCliLaunch({
-    args: args.args,
-    cliPath,
-    nodePath: process.execPath,
-    platform: process.platform,
-  });
+  const cliPath =
+    bbCliOverride ?? join(args.context.daemonBundleDir, "room-cli");
+  // The bundled CLI is JavaScript on every platform. Windows-built packages
+  // can lack Unix execute bits, so invoke Node rather than the shebang.
+  // Explicit ROOM_CLI overrides may be native binaries or shell scripts.
+  const launch =
+    bbCliOverride === undefined
+      ? {
+          command: process.execPath,
+          args: [cliPath, ...args.args],
+        }
+      : resolveBundledCliLaunch({
+          args: args.args,
+          cliPath,
+          nodePath: process.execPath,
+          platform: process.platform,
+        });
   const childProcess = spawn(launch.command, launch.args, {
     cwd: process.cwd(),
     env: createCliEnv({ context: args.context, env: args.env }),

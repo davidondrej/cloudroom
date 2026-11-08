@@ -1,10 +1,19 @@
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { resolvePluginNpmCli } from "@cloudroom/plugin-build";
+import { tarCommand } from "@cloudroom/process-utils";
 import {
   createBbAppArtifactService,
   resolveBbAppPackage,
@@ -43,9 +52,19 @@ function isRepoMode(mode: Mode): boolean {
   return mode !== "packaged";
 }
 
+async function runNpm(args: readonly string[], cwd: string): Promise<string> {
+  return (
+    await execFileAsync(process.execPath, [resolvePluginNpmCli(), ...args], {
+      cwd,
+    })
+  ).stdout;
+}
+
 async function writeHostPackage(root: string, readme: string): Promise<void> {
   await mkdir(join(root, "dist"), { recursive: true });
-  await mkdir(join(root, "host-daemon/dist/room-cli-chunks"), { recursive: true });
+  await mkdir(join(root, "host-daemon/dist/room-cli-chunks"), {
+    recursive: true,
+  });
   await writeFile(join(root, "package.json"), JSON.stringify(packageJson));
   await writeFile(join(root, "dist/bb-app.js"), "#!/usr/bin/env node\n");
   await writeFile(
@@ -96,12 +115,33 @@ async function fixture(mode: Mode) {
 }
 
 afterEach(async () => {
+  vi.unstubAllEnvs();
   await Promise.all(
     roots.splice(0).map((root) => rm(root, { force: true, recursive: true })),
   );
 });
 
 describe("bb-app artifact service (desktop packaging)", () => {
+  it(
+    "packs with bundled npm when no npm command is on PATH",
+    async () => {
+      const test = await fixture("packaged");
+      const emptyPath = join(test.root, "empty-bin");
+      await mkdir(emptyPath);
+      vi.stubEnv("PATH", emptyPath);
+      const service = createBbAppArtifactService({
+        dataDir: join(test.root, "cache with spaces & punctuation"),
+        serverEntryUrl: pathToFileURL(test.serverEntry).href,
+      });
+
+      const artifact = await service.getArtifact();
+
+      expect((await stat(artifact.path)).size).toBe(artifact.size);
+      expect(artifact.size).toBeGreaterThan(0);
+    },
+    ARTIFACT_LIFECYCLE_TIMEOUT_MS,
+  );
+
   it(
     "packs the runtime when Electron Builder omits the README",
     async () => {
@@ -115,7 +155,7 @@ describe("bb-app artifact service (desktop packaging)", () => {
       await expect(service.getVersion()).resolves.toBe("1.2.3-test");
       const artifact = await service.getArtifact();
       const listing = (
-        await execFileAsync("tar", ["-tzf", artifact.path])
+        await execFileAsync(tarCommand(), ["-tzf", artifact.path])
       ).stdout.split("\n");
       expect(listing).toEqual(
         expect.arrayContaining([
@@ -191,7 +231,7 @@ describe.each(MODES)("bb-app artifact service (%s)", (mode) => {
           await test.refreshHostPackage();
           return "built";
         }
-        return (await execFileAsync(command, [...args], { cwd })).stdout;
+        return runNpm(args, cwd);
       };
       const resolved = await resolveBbAppPackage(
         pathToFileURL(test.serverEntry).href,
@@ -207,7 +247,7 @@ describe.each(MODES)("bb-app artifact service (%s)", (mode) => {
       const artifact = await service.getArtifact();
       await expect(service.getVersion()).resolves.toBe("1.2.3-test");
       const listing = (
-        await execFileAsync("tar", ["-tzf", artifact.path])
+        await execFileAsync(tarCommand(), ["-tzf", artifact.path])
       ).stdout.split("\n");
       expect(listing).toContain("package/package.json");
       expect(listing).toContain("package/dist/bb-app.js");
@@ -223,7 +263,7 @@ describe.each(MODES)("bb-app artifact service (%s)", (mode) => {
       );
       const packedPackageJson = JSON.parse(
         (
-          await execFileAsync("tar", [
+          await execFileAsync(tarCommand(), [
             "-xOzf",
             artifact.path,
             "package/package.json",
@@ -270,7 +310,7 @@ describe.each(MODES)("bb-app artifact service (%s)", (mode) => {
           await test.refreshHostPackage();
           return "built";
         }
-        return (await execFileAsync(command, [...args], { cwd })).stdout;
+        return runNpm(args, cwd);
       };
       const options = {
         dataDir: join(test.root, "data"),
@@ -287,7 +327,7 @@ describe.each(MODES)("bb-app artifact service (%s)", (mode) => {
       expect(second.digest).not.toBe(first.digest);
       expect(
         (
-          await execFileAsync("tar", [
+          await execFileAsync(tarCommand(), [
             "-xOzf",
             second.path,
             "package/README.md",
@@ -308,7 +348,7 @@ describe.each(MODES)("bb-app artifact service (%s)", (mode) => {
           await test.refreshHostPackage();
           return "built";
         }
-        return (await execFileAsync(command, [...args], { cwd })).stdout;
+        return runNpm(args, cwd);
       };
       const baseOptions = {
         dataDir: join(test.root, "data"),
@@ -342,7 +382,7 @@ describe.each(MODES)("bb-app artifact service (%s)", (mode) => {
           return "built";
         }
         if (failNextPack) throw new Error("npm pack exploded");
-        return (await execFileAsync(command, [...args], { cwd })).stdout;
+        return runNpm(args, cwd);
       };
       const options = {
         dataDir: join(test.root, "data"),
@@ -357,8 +397,13 @@ describe.each(MODES)("bb-app artifact service (%s)", (mode) => {
       const service = createBbAppArtifactService(options);
       await expect(service.getArtifact()).rejects.toThrow("npm pack exploded");
       expect(
-        (await execFileAsync("tar", ["-xOzf", first.path, "package/README.md"]))
-          .stdout,
+        (
+          await execFileAsync(tarCommand(), [
+            "-xOzf",
+            first.path,
+            "package/README.md",
+          ])
+        ).stdout,
       ).toBe("fixture\n");
 
       failNextPack = false;
@@ -366,7 +411,7 @@ describe.each(MODES)("bb-app artifact service (%s)", (mode) => {
       expect(second.path).not.toBe(first.path);
       expect(
         (
-          await execFileAsync("tar", [
+          await execFileAsync(tarCommand(), [
             "-xOzf",
             second.path,
             "package/README.md",

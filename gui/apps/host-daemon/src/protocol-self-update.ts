@@ -1,5 +1,13 @@
 import { execFile } from "node:child_process";
-import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdir,
+  readFile,
+  rename,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import { delimiter, dirname, isAbsolute, join } from "node:path";
 import { promisify } from "node:util";
 import { calculateExponentialBackoffDelay } from "@cloudroom/domain";
@@ -153,6 +161,18 @@ const defaultRunProcess: SelfUpdateProcessRunner = async (
 const BB_APP_ALLOW_SCRIPTS_ARG =
   "--allow-scripts=better-sqlite3,node-pty,@parcel/watcher";
 
+async function ensureInstalledCliExecutable(): Promise<void> {
+  const prefix = process.env.BB_APP_NPM_PREFIX?.trim();
+  if (!prefix || process.platform === "win32") return;
+  if (!isAbsolute(prefix))
+    throw new Error("BB_APP_NPM_PREFIX must be an absolute path");
+  const cli = join(prefix, "lib/node_modules/bb-app/host-daemon/dist/room-cli");
+  // npm only fixes executable modes for declared bin entries. A package
+  // produced on Windows can leave this nested launcher without execute bits.
+  const { mode } = await stat(cli);
+  await chmod(cli, mode | 0o100);
+}
+
 async function defaultInstallTarball(
   tarballPath: string,
   runProcess: SelfUpdateProcessRunner,
@@ -299,6 +319,7 @@ export function createProtocolSelfUpdater(
                 }),
           });
           if (response.status === 304 && installedDigest !== null) {
+            await ensureInstalledCliExecutable();
             options.logger.info(
               { artifactDigest: installedDigest },
               "The server-matched Cloudroom host artifact is already installed; restarting the daemon.",
@@ -322,6 +343,7 @@ export function createProtocolSelfUpdater(
           }
           await writeFile(tarballPath, bytes, { mode: 0o600 });
           await installTarball(tarballPath);
+          await ensureInstalledCliExecutable();
           if (expectedDigest === null) {
             await rm(installedArtifactDigestPath, { force: true });
           } else {

@@ -1,5 +1,13 @@
 import { createHash } from "node:crypto";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { HOST_DAEMON_PROTOCOL_VERSION } from "@cloudroom/host-daemon-contract";
@@ -37,7 +45,7 @@ async function createFixture(
   const installTarball = vi.fn(async () => {
     if (args.installFailure) throw args.installFailure;
   });
-  const runProcess = vi.fn(async () => undefined);
+  const runProcess = vi.fn(async (): Promise<void> => undefined);
   const fetchFn = vi.fn(async (input: RequestInfo | URL) => {
     const url = String(input);
     if (url.endsWith("/install/version")) {
@@ -194,8 +202,18 @@ describe("protocol self-update", () => {
   });
 
   it("updates an installer-managed bb-app inside its machine-specific prefix", async () => {
-    vi.stubEnv("BB_APP_NPM_PREFIX", "/machine-data/npm");
     const test = await createFixture({ useDefaultInstaller: true });
+    const prefix = join(test.dataDir, "npm");
+    const cli = join(
+      prefix,
+      "lib/node_modules/bb-app/host-daemon/dist/room-cli",
+    );
+    vi.stubEnv("BB_APP_NPM_PREFIX", prefix);
+    test.runProcess.mockImplementationOnce(async () => {
+      await mkdir(dirname(cli), { recursive: true });
+      await writeFile(cli, "// installed CLI\n", { mode: 0o640 });
+      await chmod(cli, 0o640);
+    });
 
     await expect(test.updater.handleProtocolMismatch()).resolves.toBe(
       "updated",
@@ -208,12 +226,68 @@ describe("protocol self-update", () => {
         "-g",
         "--allow-scripts=better-sqlite3,node-pty,@parcel/watcher",
         "--prefix",
-        "/machine-data/npm",
+        prefix,
         expect.stringContaining("bb-app-update-"),
       ],
       expect.any(Object),
     );
+    if (process.platform !== "win32") {
+      expect((await stat(cli)).mode & 0o777).toBe(0o740);
+    }
   });
+
+  it.skipIf(process.platform === "win32")(
+    "repairs a cached installed CLI without reinstalling",
+    async () => {
+      const test = await createFixture();
+      const prefix = join(test.dataDir, "npm");
+      const cli = join(
+        prefix,
+        "lib/node_modules/bb-app/host-daemon/dist/room-cli",
+      );
+      vi.stubEnv("BB_APP_NPM_PREFIX", prefix);
+      await mkdir(dirname(cli), { recursive: true });
+      await writeFile(cli, "// cached CLI\n", { mode: 0o640 });
+      await chmod(cli, 0o640);
+      await writeFile(
+        join(test.dataDir, "host-artifact.sha256"),
+        "b".repeat(64),
+      );
+      test.fetchFn.mockImplementation(async (input: RequestInfo | URL) => {
+        if (String(input).endsWith("/install/version")) {
+          return Response.json({
+            version: "9.0.0-test",
+            protocolVersion: HOST_DAEMON_PROTOCOL_VERSION + 1,
+          });
+        }
+        return new Response(null, { status: 304 });
+      });
+
+      await expect(test.updater.handleProtocolMismatch()).resolves.toBe(
+        "updated",
+      );
+      expect((await stat(cli)).mode & 0o777).toBe(0o740);
+      expect(test.installTarball).not.toHaveBeenCalled();
+    },
+  );
+
+  it.skipIf(process.platform === "win32")(
+    "fails an update when the installed CLI is missing",
+    async () => {
+      const test = await createFixture({ useDefaultInstaller: true });
+      vi.stubEnv("BB_APP_NPM_PREFIX", join(test.dataDir, "npm"));
+
+      await expect(test.updater.handleProtocolMismatch()).resolves.toBe(
+        "failed",
+      );
+      expect(test.logger.error).toHaveBeenCalledWith(
+        expect.objectContaining({
+          err: expect.objectContaining({ code: "ENOENT" }),
+        }),
+        expect.stringContaining("self-update failed"),
+      );
+    },
+  );
 
   it("keeps legacy global updates when the installer prefix is blank", async () => {
     vi.stubEnv("BB_APP_NPM_PREFIX", " ");

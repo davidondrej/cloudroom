@@ -650,6 +650,13 @@ if [ -n "$bb_app_npm_prefix" ]; then
   # allowScripts policy, or ignore-scripts=true in an npmrc). Without this
   # check the join only fails later, in the daemon, with a raw stack trace.
   bb_app_root="$bb_app_npm_prefix/lib/node_modules/bb-app"
+  # A Windows-built host tarball may lack Unix execute bits.
+  # npm fixes its declared bin entries, but this nested launcher is not one.
+  # Repair it here even when the identical artifact was reused (HTTP 304).
+  if ! chmod u+x "$bb_app_root/host-daemon/dist/room-cli"; then
+    fail_step "Could not make the bundled Cloudroom CLI executable. Reinstall this machine's bb-app package."
+    exit 1
+  fi
   if ! node -e '
     const root = process.argv[1];
     require(root + "/node_modules/node-pty");

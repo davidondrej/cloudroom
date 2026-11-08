@@ -843,10 +843,12 @@ describe("bb-app launcher", () => {
     const daemonBundleDir = join(root, "host-daemon", "dist");
     const markerPath = join(root, "ran.txt");
     mkdirSync(daemonBundleDir, { recursive: true });
+    writeFileSync(join(root, "package.json"), '{"type":"module"}\n');
     writeFileSync(
       join(daemonBundleDir, "room-cli"),
-      `#!/bin/sh\nprintf '%s' "$1" > '${markerPath}'\n`,
-      { mode: 0o755 },
+      `#!/usr/bin/env node\nimport { writeFileSync } from "node:fs";\nwriteFileSync(${JSON.stringify(markerPath)}, process.argv[2]);\n`,
+      // Windows-generated archives may lack Unix execute bits.
+      { mode: 0o644 },
     );
 
     const exitCode = await runBundledCliCommand({
