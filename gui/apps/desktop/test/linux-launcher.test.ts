@@ -34,7 +34,8 @@ async function modeOf(path: string): Promise<number> {
 }
 
 describe("installLinuxLauncher", () => {
-  it("leaves no group- or world-writable files from the Electron zip", async () => {
+  // Windows does not implement POSIX group/world permission bits.
+  it.skipIf(process.platform === "win32")("leaves no group- or world-writable files from the Electron zip", async () => {
     root = await mkdtemp(join(tmpdir(), "linux-launcher-"));
     // electron-builder applies the modes stored in Electron's Linux zip: 0777 binaries, 0666 data.
     await writeFile(join(root, "gui-cloudroom"), "elf");

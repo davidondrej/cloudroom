@@ -11,7 +11,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, normalize, sep } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   appImageRoomCliShim,
@@ -56,7 +56,7 @@ describe("room-cli shim", () => {
         "/Applications/Cloudroom.app/Contents/Resources/app.asar",
       ),
     ).toBe(
-      "/Applications/Cloudroom.app/Contents/Resources/app.asar.unpacked/node_modules/bb-app/host-daemon/dist/room-cli",
+      normalize("/Applications/Cloudroom.app/Contents/Resources/app.asar.unpacked/node_modules/bb-app/host-daemon/dist/room-cli"),
     );
   });
 
@@ -72,7 +72,9 @@ describe("room-cli shim", () => {
     expect(await readlink(shimPath)).toBe(cliPath);
   });
 
-  it("repoints a link left by a moved app or an old CLI name", async () => {
+  // Windows readlink canonicalizes the POSIX target. This shim is installed
+  // only on macOS/Linux, whose bundled targets use forward slashes.
+  it.skipIf(process.platform === "win32")("repoints a link left by a moved app or an old CLI name", async () => {
     const cliPath = await installApp("Moved/Cloudroom.app");
     await mkdir(dirname(shimPath), { recursive: true });
     await symlink(
@@ -117,14 +119,16 @@ describe("room-cli shim", () => {
     expect(await readFile(shimPath, "utf8")).toBe(ours);
 
     await rm(shimPath);
-    await symlink("/Users/me/code/room-cli-dev", shimPath);
+    const userCliPath = join(root, "code", "room-cli-dev");
+    await symlink(userCliPath, shimPath);
     await expect(
       ensureRoomCliShim({ cliPath, homeDir }),
     ).resolves.toMatchObject({ reason: "user-owned" });
-    expect(await readlink(shimPath)).toBe("/Users/me/code/room-cli-dev");
+    expect(await readlink(shimPath)).toBe(userCliPath);
   });
 
-  it("runs the AppImage itself, so a new mount after a restart still works", async () => {
+  // These integration tests execute POSIX shell scripts and check execute bits.
+  it.skipIf(process.platform === "win32")("runs the AppImage itself, so a new mount after a restart still works", async () => {
     const appImagePath = join(root, "Apps/Cloud'room.AppImage");
     const oldCli = await installApp(".mount_old", "resources");
     const newCli = await installApp(".mount_new", "resources");
@@ -160,7 +164,7 @@ describe("room-cli shim", () => {
     expect(await readlink(shimPath)).toBe(newCli);
   });
 
-  it("prefers a bundled ROOM_CLI over mounting the AppImage", async () => {
+  it.skipIf(process.platform === "win32")("prefers a bundled ROOM_CLI over mounting the AppImage", async () => {
     const appImagePath = join(root, "Cloudroom.AppImage");
     const envCli = join(root, "bundled room-cli");
     await writeFile(appImagePath, "#!/bin/sh\necho appimage\n", {
@@ -189,15 +193,20 @@ describe("room-cli shim", () => {
     }
   });
 
-  it("does not link to a missing or translocated app", async () => {
+  it("does not link to a missing app", async () => {
     await expect(
       ensureRoomCliShim({ cliPath: join(root, "missing/room-cli"), homeDir }),
     ).resolves.toMatchObject({ reason: "missing-cli" });
+    await expect(lstat(shimPath)).rejects.toThrow();
+  });
+
+  it("does not link to a translocated app", async () => {
     const translocated = await installApp(
       "AppTranslocation/ABC/d/Cloudroom.app",
     );
     await expect(
-      ensureRoomCliShim({ cliPath: translocated, homeDir }),
+      // AppTranslocation paths use POSIX separators, regardless of the test host.
+      ensureRoomCliShim({ cliPath: translocated.split(sep).join("/"), homeDir }),
     ).resolves.toMatchObject({
       reason: "translocated",
     });
