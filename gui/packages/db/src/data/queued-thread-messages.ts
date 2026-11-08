@@ -970,6 +970,25 @@ export function listQueuedThreadMessagesForApi(
     .all();
 }
 
+/** Rows a drain has claimed and is dispatching right now (#1111). */
+export function countClaimedQueuedThreadMessages(
+  db: DbQueryConnection,
+  threadId: string,
+): number {
+  return (
+    db
+      .select({ n: count() })
+      .from(queuedThreadMessages)
+      .where(
+        and(
+          eq(queuedThreadMessages.threadId, threadId),
+          isNotNull(queuedThreadMessages.claimedAt),
+        ),
+      )
+      .get()?.n ?? 0
+  );
+}
+
 export interface QueuedThreadMessageCounts {
   threadId: string;
   queuedMessageCount: number;

@@ -49,7 +49,7 @@ export type SandboxTrigger = "app_launch" | "app_activity" | "composer" | "threa
 export type SandboxWakeTrigger = Extract<SandboxTrigger, "thread_typing" | "thread_view" | "teleport_local">;
 type FirstWake = { target?: "vps" | "cloud"; launch?: ThreadCreateOrigin };
 /** Logins the website keeps for every sandbox of an account (ADR 0145). */
-export type SandboxLogin = "claude" | "codex" | "pi" | "github" | "cursor" | "opencode" | "mcp" | "hermes" | "devin" | "openclaw";
+export type SandboxLogin = "claude" | "codex" | "pi" | "github" | "cursor" | "opencode" | "mcp" | "hermes" | "devin" | "kimi" | "openclaw";
 /** GitHub projects also name their repository and cloud folder, so the website can build a template. */
 export type SandboxProject = { id: string; repository: string | null; folder: string };
 const RECHECK_MS = 60_000;
@@ -232,6 +232,20 @@ async function macHermesLogin(): Promise<string | null> {
   const [auth, env, config] = await Promise.all([read("auth.json"), read(".env").then(withoutComments), read("config.yaml").then(withoutComments)]);
   const login = Object.fromEntries(Object.entries({ auth, env, config }).filter(([, value]) => value.trim()));
   return auth.trim() || env.trim() ? JSON.stringify(login) : null;
+}
+
+/** This computer's Kimi Code login: config.toml (providers, models, API keys) and every OAuth token in credentials/, one
+ *  per region, or null when Kimi is signed out here. Kimi keeps them as plain files, never in the Keychain. Token names
+ *  follow KIMI_TOKEN in web/lib/sandbox-logins.ts; the mcp/ folder stays here. */
+export async function macKimiLogin(): Promise<string | null> {
+  const home = process.env.KIMI_CODE_HOME || join(homedir(), ".kimi-code");
+  const read = (path: string) => readFile(join(home, path), "utf8").catch(() => "");
+  const names = (await readdir(join(home, "credentials")).catch(() => [] as string[])).sort().filter(name => /^[A-Za-z0-9_-][A-Za-z0-9_.-]{0,127}\.json$/.test(name));
+  const tokens = await Promise.all(names.map(async name => [name, await read(join("credentials", name))] as const));
+  const credentials = Object.fromEntries(tokens.filter(([, text]) => text.trim()));
+  const config = await read("config.toml");
+  if (!config.trim() || (!Object.keys(credentials).length && !/^\s*api_key\s*=\s*\S/m.test(config))) return null;
+  return JSON.stringify({ config, credentials });
 }
 
 /** This computer's Devin CLI login file, or null when Devin is signed out here. */
@@ -1107,7 +1121,7 @@ export class SandboxDirectory {
   /** Which logins the website holds for this account's sandboxes. */
   async logins(): Promise<Record<SandboxLogin, boolean>> {
     // Missing names mean an older website that cannot hold that login yet.
-    return z.object({ claude: z.boolean(), codex: z.boolean(), pi: z.boolean(), github: z.boolean(), cursor: z.boolean().default(false), opencode: z.boolean().default(false), mcp: z.boolean().default(false), hermes: z.boolean().default(false), devin: z.boolean().default(false), openclaw: z.boolean().default(false) }).parse(await this.call({ action: "status" }, "logins"));
+    return z.object({ claude: z.boolean(), codex: z.boolean(), pi: z.boolean(), github: z.boolean(), cursor: z.boolean().default(false), opencode: z.boolean().default(false), mcp: z.boolean().default(false), hermes: z.boolean().default(false), devin: z.boolean().default(false), kimi: z.boolean().default(false), openclaw: z.boolean().default(false) }).parse(await this.call({ action: "status" }, "logins"));
   }
 
   /** Who the account's GitHub login belongs to, or null when GitHub or an older website can't tell. */
@@ -1138,7 +1152,7 @@ export class SandboxDirectory {
 
   private copiedAt = 0;
   get loginsCopied(): boolean { return this.copiedAt > 0; }
-  /** Copies this Mac's Codex, Pi, opencode, Hermes, Devin, OpenClaw, Cursor, and GitHub logins when the user allowed it (ADRs 0128, 0130).
+  /** Copies this Mac's Codex, Pi, opencode, Hermes, Devin, Kimi Code, OpenClaw, Cursor, and GitHub logins when the user allowed it (ADRs 0128, 0130).
    *  At most once a minute, unless the user just clicked Connect. */
   copyMacLogins(force = false): Promise<void> {
     if (!force && Date.now() - this.copiedAt < RECHECK_MS) return Promise.resolve();
@@ -1152,7 +1166,7 @@ export class SandboxDirectory {
     const files = [["codex", codexAuthPath()], ["pi", join(piHome, "auth.json")]] as const;
     // One failed login never stops the others; all failures are reported together.
     const failed: string[] = [];
-    const save = (name: "codex" | "pi" | "opencode" | "hermes" | "devin" | "openclaw" | "cursor" | "github", value: string) => this.putLogin(name, value).catch((error: unknown) => { failed.push(`${name}: ${error instanceof Error ? error.message : String(error)}`); });
+    const save = (name: "codex" | "pi" | "opencode" | "hermes" | "devin" | "kimi" | "openclaw" | "cursor" | "github", value: string) => this.putLogin(name, value).catch((error: unknown) => { failed.push(`${name}: ${error instanceof Error ? error.message : String(error)}`); });
     for (const [name, path] of files) {
       if (skip.has(name)) continue;
       const value = await readFile(path, "utf8").catch(() => null);
@@ -1160,7 +1174,7 @@ export class SandboxDirectory {
       try { JSON.parse(value); } catch { continue; }
       await save(name, value);
     }
-    const copy = async (name: "opencode" | "hermes" | "devin" | "openclaw" | "cursor", read: () => Promise<string | null>) => {
+    const copy = async (name: "opencode" | "hermes" | "devin" | "kimi" | "openclaw" | "cursor", read: () => Promise<string | null>) => {
       if (skip.has(name)) return;
       const value = await read().catch((error: unknown) => { failed.push(`${name}: ${error instanceof Error ? error.message : String(error)}`); return null; });
       if (value) await save(name, value);
@@ -1168,6 +1182,7 @@ export class SandboxDirectory {
     await copy("opencode", macOpencodeCloudLogin);
     await copy("hermes", macHermesLogin);
     await copy("devin", macDevinLogin);
+    await copy("kimi", macKimiLogin);
     await copy("openclaw", macOpenclawLogin);
     await copy("cursor", macCursorLogin);
     const githubToken = skip.has("github") ? "" : await macGithubToken();

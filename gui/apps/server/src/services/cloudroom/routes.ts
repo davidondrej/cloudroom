@@ -16,7 +16,7 @@ import { secondsSinceFirstLaunch } from "./setup-telemetry.js";
 import { teleports } from "./teleport.js";
 import { binding, teleportBlocked, teleportProgress } from "./store.js";
 import { browserRequestProblem } from "../../browser-request-guard.js";
-import { cancelClaudeToken, claudePlan, ensureClaudeCli, isClaudeApiKey, startClaudeToken, withClaudeTokenRun } from "./claude-token.js";
+import { cancelClaudeToken, claudePlan, connectClaude, isClaudeApiKey, withClaudeTokenRun } from "./claude-token.js";
 import { startClaudeVersionSync } from "./harness-versions.js";
 import { macSignedInAgents } from "./mac-agents.js";
 import { disconnectAgent, restoreAgent } from "./agent-logins.js";
@@ -427,8 +427,7 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: Plugin
     const problem = browserRequestProblem(context, deps, { requireJsonForMutation: true });
     if (problem) return context.json({ message: "Use the local Cloudroom app." }, problem.status);
     const { requestId } = z.object({ requestId: z.string().regex(/^[a-zA-Z0-9_-]{1,64}$/) }).strict().parse(await context.req.json());
-    await ensureClaudeCli((error) => deps.logger.warn({ error }, "Claude Code could not be installed in the background"));
-    await startClaudeToken(requestId, async token => cloudroom(deps).claudeAuth("token", requestId, token, await claudePlan()), deps);
+    await connectClaude(requestId, async token => cloudroom(deps).claudeAuth("token", requestId, token, await claudePlan()), deps);
     return context.json(await claudeStatus());
   });
   // The Accounts plugin names the accounts a switch moves between, for the line it leaves in limited threads.

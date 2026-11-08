@@ -72,8 +72,14 @@ function spawnSeedContext(
     request.request.method === "turn/start" &&
     request.target.kind === "new-turn" &&
     getThread(db, threadId)?.status === "error";
-  const leadingInput = getLeadingAgentOnlyInput(request.input);
-  const context = leadingInput.length > 0 ? [...leadingInput] : null;
+  // A failed retry saves the user's own message as agent-only. Never carry a skill or
+  // command they picked: one refused skill would refuse every later message (#1038).
+  const leadingInput = getLeadingAgentOnlyInput(request.input).filter(
+    (part) =>
+      part.type !== "text" ||
+      !part.mentions.some(({ resource }) => resource.kind === "command"),
+  );
+  const context = leadingInput.length > 0 ? leadingInput : null;
   if (
     context === null ||
     (!isSeedRequest && !isUndeliveredRetry) ||

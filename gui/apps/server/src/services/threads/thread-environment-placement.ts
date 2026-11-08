@@ -773,13 +773,42 @@ export async function resolveRestoreOperationContext(
   const host = getNonDestroyedHostWithStatus(deps, environment.hostId);
   if (host === null)
     throw new Error("The machine that held this worktree no longer exists.");
+  return existingHostOperationContext(
+    deps,
+    thread,
+    host,
+    environment.environmentProviderSelection?.inputs ?? null,
+    record,
+  );
+}
+
+/** Context to create a fresh worktree for a Local thread that already runs in another folder (`room-cli thread worktree`). */
+export async function resolveNewWorktreeOperationContext(
+  deps: Pick<ThreadProvisioningDeps, "db" | "hub">,
+  thread: Thread,
+  hostId: string,
+  inputs: JsonValue,
+  record: PluginEnvironmentProviderRecord,
+): Promise<ProviderOperationContext> {
+  const host = getNonDestroyedHostWithStatus(deps, hostId);
+  if (host === null)
+    throw new ApiError(409, "host_unavailable", "This computer is not connected to Cloudroom.");
+  const context = await existingHostOperationContext(deps, thread, host, inputs, record);
+  // A new worktree, not a rebuild of the folder the thread is in now.
+  return { ...context, environment: null };
+}
+
+async function existingHostOperationContext(
+  deps: Pick<ThreadProvisioningDeps, "db" | "hub">,
+  thread: Thread,
+  host: NonNullable<ReturnType<typeof getNonDestroyedHostWithStatus>>,
+  inputs: JsonValue | null,
+  record: PluginEnvironmentProviderRecord,
+): Promise<ProviderOperationContext> {
   const project = requirePublicProject(deps.db, thread.projectId);
   return buildProviderOperationContext(deps, {
     host,
-    inputs: await parseProviderInputs(
-      record,
-      environment.environmentProviderSelection?.inputs ?? null,
-    ),
+    inputs: await parseProviderInputs(record, inputs),
     machine: { type: "existing", hostId: host.id },
     project,
     projectCheckout: toProviderProjectCheckout(deps.db, {

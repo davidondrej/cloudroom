@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { atom, useAtom, useAtomValue, useSetAtom } from "jotai";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { fetchWithAppSurface } from "@/lib/app-surface";
@@ -100,4 +100,21 @@ export function usePopup(id: Popup, eligible: boolean | null) {
     void saveClosed({ popup: id, ...(detail ? { detail } : {}) });
   };
   return { open: open === id, close };
+}
+
+/** A "hidden until" time saved on this Mac. The thing shows again by itself once the time is up. */
+export function useHiddenUntil(key: string) {
+  const [until, setUntil] = useState(() => Number(getLocalStorage()?.getItem(key)) || 0);
+  useEffect(() => {
+    const left = until - Date.now();
+    if (left <= 0) return;
+    const timer = setTimeout(() => setUntil(0), left);
+    return () => clearTimeout(timer);
+  }, [until]);
+  const save = (next: number) => {
+    if (next) getLocalStorage()?.setItem(key, String(next));
+    else getLocalStorage()?.removeItem(key);
+    setUntil(next);
+  };
+  return { hidden: until > Date.now(), hideFor: (ms: number) => save(Date.now() + ms), show: () => save(0) };
 }

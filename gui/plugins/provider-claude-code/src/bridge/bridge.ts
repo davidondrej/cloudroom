@@ -1251,7 +1251,7 @@ function buildSessionTrackingHooks(
             hookEventName: "PreToolUse",
             permissionDecision: "deny",
             permissionDecisionReason:
-              "bb has disabled Claude Code native subagents; use bb delegation instead.",
+              "Cloudroom has disabled Claude Code native subagents; use room-cli thread spawn instead.",
           },
         };
       }
@@ -1265,7 +1265,7 @@ function buildSessionTrackingHooks(
             hookEventName: "PreToolUse",
             permissionDecision: "deny",
             permissionDecisionReason:
-              "bb has disabled the Claude Code Workflow tool.",
+              "Cloudroom has disabled the Claude Code Workflow tool.",
           },
         };
       }

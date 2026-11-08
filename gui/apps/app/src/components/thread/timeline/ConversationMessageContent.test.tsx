@@ -192,9 +192,10 @@ describe("ConversationMessageContent long user messages", () => {
     );
   }
 
-  it("renders the complete message after expanding a capped preview", () => {
-    const hiddenTail = "FULL_MESSAGE_TAIL";
-    const text = `${"a".repeat(USER_MESSAGE_CHAR_CAP)}\n\n${hiddenTail}`;
+  it("shows the start and end of a capped preview, and the middle after expanding", () => {
+    const hiddenMiddle = "FULL_MESSAGE_MIDDLE";
+    const tail = "FULL_MESSAGE_TAIL";
+    const text = `${"a".repeat(USER_MESSAGE_CHAR_CAP)}\n\n${hiddenMiddle}\n\n${"b\n".repeat(USER_MESSAGE_CHAR_CAP)}\n\n${tail}`;
 
     render(
       <MemoryRouter>
@@ -221,16 +222,17 @@ describe("ConversationMessageContent long user messages", () => {
       </MemoryRouter>,
     );
 
-    expect(screen.queryByText(hiddenTail)).toBeNull();
+    expect(screen.queryByText(hiddenMiddle)).toBeNull();
+    expect(screen.getByText(tail)).not.toBeNull();
 
     fireEvent.click(screen.getByRole("button", { name: "Show more" }));
 
-    expect(screen.getByText(hiddenTail)).not.toBeNull();
+    expect(screen.getByText(hiddenMiddle)).not.toBeNull();
     expect(screen.queryByText("[truncated]")).toBeNull();
 
     fireEvent.click(screen.getByRole("button", { name: "Show less" }));
 
-    expect(screen.queryByText(hiddenTail)).toBeNull();
+    expect(screen.queryByText(hiddenMiddle)).toBeNull();
   });
 
   it("does not manufacture a pill when an inline-code span crosses the collapsed cap", () => {
@@ -286,7 +288,8 @@ describe("ConversationMessageContent long user messages", () => {
     const { container } = renderLongUserMessage(text);
 
     expect(screen.queryByRole("link", { name: "Should stay code" })).toBeNull();
-    expect(container.textContent).not.toContain(rawThreadId);
+    // The collapsed end shows the path as plain text, never as a pill.
+    expect(container.textContent).toContain(`${rawThreadId}/path`);
 
     fireEvent.click(screen.getByRole("button", { name: "Show more" }));
 

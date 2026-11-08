@@ -34,7 +34,10 @@ import type {
   LoggedPendingInteractionWorkSessionDeps,
 } from "../../types.js";
 import { ApiError } from "../../errors.js";
-import { isCommandTimeoutError } from "../lib/error-log-fields.js";
+import {
+  isCommandTimeoutError,
+  runtimeErrorLogFields,
+} from "../lib/error-log-fields.js";
 import {
   parseStoredQueuedThreadMessageWaitingOn,
   toThreadQueuedMessage,
@@ -662,13 +665,23 @@ export async function sendNextQueuedMessageIfPresent(
     );
   } catch (error) {
     releaseClaim(deps, nextQueuedMessage);
+    const currentThread = getThread(deps.db, args.threadId);
     if (
-      !isQueuedMessageAutoSendCandidate(getThread(deps.db, args.threadId)) ||
+      !isQueuedMessageAutoSendCandidate(currentThread) ||
       isQueuedMessageClaimLostError(error) ||
       isQueuedMessageNotDeliveredError(error) ||
       isQueuedMessageAutoSendPausedError(error) ||
       error instanceof ThreadContextClearInProgressError
     ) {
+      deps.logger.debug(
+        {
+          queuedMessageId: nextQueuedMessage.id,
+          threadId: args.threadId,
+          threadStatus: currentThread?.status,
+          ...runtimeErrorLogFields(deps.config, error),
+        },
+        "Queued message auto-send interrupted",
+      );
       return false;
     }
     // Nobody is listening to this attempt, so the row itself has to carry what

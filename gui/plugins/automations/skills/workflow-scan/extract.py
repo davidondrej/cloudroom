@@ -10,7 +10,7 @@ Reads local agent chats (Claude Code, Codex, Pi, OpenCode, Hermes), keeps only t
   extract.py sessions OUT --ids c-1a2b3c4d,x-... [--chars 6000]  -> prints those chats
   extract.py reduce OUT [--top 25]                       -> counts the tags in OUT/reports/*.txt, prints a compact digest
 """
-import glob, hashlib, json, os, re, sqlite3, sys, time
+import glob, hashlib, io, json, locale, os, re, sqlite3, sys, time
 from collections import Counter, defaultdict
 
 H = os.path.expanduser("~")
@@ -354,9 +354,9 @@ def cmd_groups(out, top=12, per=15, chars=2500):
         repos = Counter(c["repo"] for c in members).most_common(3)
         head = f"group {i:02d} · key: {f} · {len(members)} chats over {wk} weeks · {members[0]['start']} to {members[-1]['start']} · repos: {repos}\n"
         lines_out.append(head.strip())
-        with open(os.path.join(out, "groups", f"group-{i:02d}.txt"), "w") as fh:
+        with open(os.path.join(out, "groups", f"group-{i:02d}.txt"), "w", encoding="utf-8") as fh:
             fh.write(head + f"all chat ids: {', '.join(c['id'] for c in members)}\n\n" + "\n".join(chat_block(c, chars, full=True) for c in sample))
-    open(os.path.join(out, "groups", "overview.txt"), "w").write("\n".join(lines_out) + "\n")
+    open(os.path.join(out, "groups", "overview.txt"), "w", encoding="utf-8").write("\n".join(lines_out) + "\n")
     print("\n".join(lines_out))
     print(f"{len(keep) - len(left)} of {len(keep)} kept chats fall in these groups")
 
@@ -372,7 +372,12 @@ def cmd_reduce(out, top=25):
     index = {c["id"]: c for c in load(out)}
     tags, abouts = defaultdict(list), {}
     for path in sorted(glob.glob(os.path.join(out, "reports", "*.txt"))):
-        for line in open(path, errors="ignore"):
+        raw = open(path, "rb").read()
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError:  # a legacy report in the locale's code page (cp1252 on Windows): read it as before
+            text = raw.decode(locale.getpreferredencoding(False), "ignore")
+        for line in io.StringIO(text, newline=None):
             parts = [x.strip() for x in line.split("|")]
             if len(parts) >= 3 and parts[0] in index:
                 abouts[parts[0]] = parts[1]
@@ -393,6 +398,8 @@ def cmd_reduce(out, top=25):
 
 
 if __name__ == "__main__":
+    if sys.platform == "win32":  # a redirected Windows stdout uses the ANSI code page (cp1252), which can't print most chat text
+        sys.stdout.reconfigure(encoding="utf-8")
     a = sys.argv[1:]
     opts = {a[i][2:]: a[i + 1] for i in range(2, len(a) - 1, 2) if a[i].startswith("--")}
     num = lambda k, d: int(opts.get(k, d))

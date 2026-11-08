@@ -646,7 +646,17 @@ async function installNative(harness: Harness, nativeId: string, vmPath: string,
   if (lineage) nativeId = /^rollout-.{19}-(.+)\.jsonl$/.exec(basename(vmPath))?.[1] ?? "";
   else if (harness !== "claude-code") {
     const header = JSON.parse(bytes.subarray(0, end).toString("utf8"));
-    if (harness === "codex" && header.type === "session_meta") header.payload.cwd = cwd;
+    if (harness === "codex" && header.type === "session_meta") {
+      const { cwd: source, runtime_workspace_roots: roots } = header.payload;
+      header.payload.cwd = cwd;
+      // Codex refuses to resume with another platform's roots: the old cwd maps here, other foreign roots go.
+      if (typeof source === "string" && Array.isArray(roots) && source.startsWith("/") !== cwd.startsWith("/")) {
+        const key = (path: string) => (path.startsWith("/") ? path : path.replace(/\//g, "\\").replace(/\\+$/, "").toLowerCase());
+        const mapped = [...new Set(roots.filter((root) => typeof root === "string" && (key(root) === key(source) || root.startsWith("/") === cwd.startsWith("/")))
+          .map((root: string) => (key(root) === key(source) ? cwd : root)))];
+        header.payload.runtime_workspace_roots = mapped.length || !roots.length ? mapped : [cwd]; // [] would mean "no workspace"
+      }
+    }
     if (harness === "pi" && header.type === "session") header.cwd = cwd;
     data = Buffer.concat([Buffer.from(JSON.stringify(header)), bytes.subarray(end)]);
   }

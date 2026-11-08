@@ -1155,9 +1155,13 @@ export function resolveBbAppStartContext(
     env: args.env,
     name: "BB_HOST_DAEMON_PORT",
   });
-  const appDistDir = runsFromSourceCheckout
+  const unpackedAppDistDir = runsFromSourceCheckout
     ? resolve(workspaceRoot, "apps", "app", "dist")
     : resolve(packageRoot, "app", "dist");
+  // The desktop app packs the web app inside app.asar (fewer files to install); Electron's Node reads it there.
+  const appDistDir = existsSync(unpackedAppDistDir)
+    ? unpackedAppDistDir
+    : unpackedAppDistDir.replace(/app\.asar\.unpacked(?=[\\/])/u, "app.asar");
   const daemonBundleDir = runsFromSourceCheckout
     ? resolve(workspaceRoot, "apps", "host-daemon", "dist")
     : resolve(packageRoot, "host-daemon", "dist");

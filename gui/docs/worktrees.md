@@ -50,6 +50,17 @@ pnpm bb thread spawn \
 Omit `--base-branch` for bb's smart default. Explicit values are exact:
 `main` is local and `origin/main` is remote.
 
+## Move a running thread into a worktree
+
+`room-cli thread worktree` moves a Local thread out of the project checkout
+into a new managed worktree, starting from its current commit. It keeps its ID
+and chat; the move happens when its current turn ends, and messages wait until
+it finishes. Uncommitted files stay behind unless the agent names them with
+`--carry`, since other agents may share the checkout. Carried files land before
+`.bb-env-setup.sh` runs. Claude Code and Codex threads only for now: Pi resumes
+in its old folder. To fork into a new thread instead, use
+`room-cli thread fork --new-environment worktree`.
+
 ## Copy local files with `.worktreeinclude`
 
 A new worktree checks out tracked files only. Your `.env`, your local

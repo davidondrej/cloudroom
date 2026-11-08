@@ -63,6 +63,7 @@ export function LocalAndCloud() {
           selected: cloudSelected,
           unavailableReason: null,
           onSelect: () => setCloudSelected(true),
+          onAddMachine: noop,
         }}
         onSelectProvider={(provider) => {
           setCloudSelected(false);

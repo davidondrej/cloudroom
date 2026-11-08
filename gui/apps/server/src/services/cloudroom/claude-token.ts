@@ -37,17 +37,6 @@ function installClaude(): Promise<string> {
   return installing;
 }
 
-/**
- * Connecting Claude means the user wants Claude Code in Cloudroom, so a missing CLI is installed silently (ADR 0193).
- * With the Claude desktop app's copy, sign-in goes ahead and the install runs in the background.
- */
-export async function ensureClaudeCli(onError: (error: unknown) => void): Promise<void> {
-  if (claudeBinary()) return;
-  const install = installClaude();
-  if (!desktopClaude()) await install;
-  else void install.catch(onError);
-}
-
 /** The Claude Code that the Claude desktop app keeps for itself: its newest fully downloaded version. */
 export function desktopClaude(): string | undefined {
   if (process.platform !== "darwin") return undefined;
@@ -229,22 +218,58 @@ function reportSetupToken(error: string | null, output: string, binary: string, 
 }
 
 /** Starts Claude sign-in (or joins the running one) and waits briefly for its sign-in link. */
-export async function startClaudeToken(id: string, save: (token: string) => Promise<unknown>, deps?: AppDeps): Promise<void> {
+async function startClaudeToken(id: string, save: (token: string) => Promise<unknown>, deps?: AppDeps): Promise<void> {
   if (!tokenRun || tokenRun.done) tokenRun = runSetupToken(id, save, deps);
   const run = tokenRun;
   for (let waited = 0; !run.url && !run.done && waited < 15_000; waited += 250) await new Promise(resolve => setTimeout(resolve, 250));
 }
 
-/** Stops the running sign-in; false when none was running. */
-export function cancelClaudeToken(): boolean {
-  const run = tokenRun;
-  tokenRun = null;
-  run?.stop();
-  return Boolean(run);
+interface InstallWait { id: string; since: number; error: string | null }
+let installWait: InstallWait | null = null;
+
+/**
+ * Starts Claude sign-in. Connecting Claude means the user wants Claude Code in Cloudroom, so a missing CLI is installed
+ * silently (ADR 0193). With the Claude desktop app's copy, sign-in goes ahead and the install runs in the background.
+ * With no Claude Code at all, this returns at once: the status shows the install, and sign-in starts once it's done.
+ */
+export async function connectClaude(id: string, save: (token: string) => Promise<unknown>, deps: AppDeps): Promise<void> {
+  if (installWait?.error) installWait = null;
+  if (claudeBinary()) return startClaudeToken(id, save, deps);
+  if (installWait) return;
+  const install = installClaude();
+  if (desktopClaude()) {
+    void install.catch((error: unknown) => deps.logger.warn({ error }, "Claude Code could not be installed in the background"));
+    return startClaudeToken(id, save, deps);
+  }
+  const wait: InstallWait = { id, since: Date.now(), error: null };
+  installWait = wait;
+  void install.then(() => {
+    if (installWait !== wait) return;
+    if (!tokenRun || tokenRun.done) tokenRun = runSetupToken(id, save, deps);
+    installWait = null;
+  }).catch((error: unknown) => {
+    if (installWait === wait) wait.error = error instanceof Error ? error.message : String(error);
+  });
 }
 
-/** Shows a running sign-in as `waiting` with its link. A finished run is reported once, then forgotten. */
+/** Stops the running sign-in, or the sign-in waiting for its install; false when neither was running. The install itself goes on. */
+export function cancelClaudeToken(): boolean {
+  const run = tokenRun, wait = installWait;
+  tokenRun = null;
+  installWait = null;
+  run?.stop();
+  return Boolean(run || wait);
+}
+
+/** Shows an install or a running sign-in as `waiting`, with the sign-in link once there is one. A failed install stays until the user
+ *  retries, cancels, or connects another way (such as an API key); a failed sign-in is reported once, then forgotten. */
 export function withClaudeTokenRun<T extends { state: string; message: string | null; login_id: string | null; verification_url: string | null }>(status: T): T {
+  const wait = installWait;
+  if (wait && !wait.error) return { ...status, state: "waiting", message: null, login_id: wait.id, verification_url: null, installing_since: wait.since };
+  if (wait) {
+    if (status.state !== "connected") return { ...status, state: "error", message: wait.error };
+    installWait = null;
+  }
   const run = tokenRun;
   if (!run) return status;
   if (!run.done) return { ...status, state: "waiting", message: null, login_id: run.id, verification_url: run.url };

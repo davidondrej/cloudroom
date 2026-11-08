@@ -173,6 +173,8 @@ import type {
   ReorderPinnedThreadRequest,
   MoveThreadRequest,
   MoveThreadResponse,
+  MoveThreadToWorktreeRequest,
+  MoveThreadToWorktreeResponse,
   ReorderProjectRequest,
   ReorderQueuedMessageRequest,
   ResolvePendingInteractionRequest,
@@ -344,6 +346,7 @@ import {
   promptHistoryQuerySchema,
   reorderPinnedThreadRequestSchema,
   moveThreadRequestSchema,
+  moveThreadToWorktreeRequestSchema,
   reorderProjectRequestSchema,
   reorderQueuedMessageRequestSchema,
   resolvePendingInteractionRequestSchema,
@@ -1430,6 +1433,14 @@ export const publicApiRoutes = {
       method: "post",
       request: jsonRequest<PathId, MoveThreadRequest>(moveThreadRequestSchema),
       response: jsonResponse<MoveThreadResponse>(),
+    }),
+    worktree: defineRoute({
+      path: "/threads/:id/worktree",
+      method: "post",
+      request: jsonRequest<PathId, MoveThreadToWorktreeRequest>(
+        moveThreadToWorktreeRequestSchema,
+      ),
+      response: jsonResponse<MoveThreadToWorktreeResponse>(),
     }),
     interactions: defineRoute({
       path: "/threads/:id/interactions",

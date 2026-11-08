@@ -136,7 +136,7 @@ impl Manager {
 }
 
 /// Harnesses a cloud agent may start as a child thread; the app has no Cloud thread type for the others.
-const CHILD_HARNESSES: [runtime::Kind; 8] = [
+const CHILD_HARNESSES: [runtime::Kind; 9] = [
     runtime::Kind::Codex,
     runtime::Kind::Claude,
     runtime::Kind::Pi,
@@ -144,6 +144,7 @@ const CHILD_HARNESSES: [runtime::Kind; 8] = [
     runtime::Kind::Hermes,
     runtime::Kind::Devin,
     runtime::Kind::Droid,
+    runtime::Kind::Kimi,
     runtime::Kind::OpenClaw,
 ];
 pub(super) const FINISHED: [&str; 5] = [
@@ -433,7 +434,7 @@ impl Manager {
             let kind = spawn.harness.unwrap_or(p.harness);
             if !CHILD_HARNESSES.contains(&kind) {
                 return Err(Error::Conflict(
-                    "child threads support codex, claude-code, pi, opencode, hermes, devin, droid and openclaw",
+                    "child threads support codex, claude-code, pi, opencode, hermes, devin, droid, kimi and openclaw",
                 ));
             }
             let same = kind == p.harness;

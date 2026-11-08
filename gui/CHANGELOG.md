@@ -2,6 +2,20 @@
 
 Also on [cloudroom.dev/changelog](https://www.cloudroom.dev/changelog).
 
+## 145
+
+Long messages fold to fit (2026-11-08)
+
+### Changes
+
+- Long messages you send collapse to their start and end, so the chat stays easy to scan.
+- Kimi Code now runs in Local and Cloud threads.
+- The chat scrollbar grows as your mouse gets close, so it is easier to grab.
+- A new Connect agents button replaces the Claude check, and the Claude Code install shows progress with a Cancel button.
+- Agents can move their own thread into a fresh worktree with room-cli thread worktree.
+- When your app is 3 or more days behind, a small card above the chat offers the update.
+- A refused skill message no longer blocks every message after it.
+
 ## 144
 
 Switch accounts, every stalled chat resumes (2026-11-07)

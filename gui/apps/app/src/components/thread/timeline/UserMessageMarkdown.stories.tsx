@@ -1,4 +1,7 @@
-import type { PromptMentionResource, PromptTextMention } from "@cloudroom/domain";
+import type {
+  PromptMentionResource,
+  PromptTextMention,
+} from "@cloudroom/domain";
 import type { TimelineConversationTurnRequest } from "@cloudroom/server-contract";
 import type { TimelineTitleLink } from "@cloudroom/thread-view";
 import type { ReactNode } from "react";
@@ -183,7 +186,7 @@ export function Overview() {
       </StoryRow>
       <StoryRow
         label="long (collapsible)"
-        hint="clamped to ~15 lines with a Show more / Show less toggle"
+        hint="over 22 lines: the start, an N more lines divider, then the end"
       >
         <UserMessage
           text={LONG_BODY}

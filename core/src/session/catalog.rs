@@ -246,6 +246,7 @@ impl Manager {
                 | runtime::Kind::Hermes
                 | runtime::Kind::Devin
                 | runtime::Kind::Droid
+                | runtime::Kind::Kimi
                 | runtime::Kind::OpenClaw => {
                     let capabilities = runtime::cursor::capabilities(*kind);
                     for (key, value) in capabilities.as_object().unwrap() {
@@ -256,6 +257,7 @@ impl Manager {
                         runtime::Kind::Hermes => runtime::HERMES_REASONING_LEVELS,
                         runtime::Kind::Devin => runtime::DEVIN_REASONING_LEVELS,
                         runtime::Kind::Droid => runtime::DROID_REASONING_LEVELS,
+                        runtime::Kind::Kimi => runtime::KIMI_REASONING_LEVELS,
                         runtime::Kind::OpenClaw => runtime::OPENCLAW_REASONING_LEVELS,
                         _ => runtime::PI_REASONING_LEVELS,
                     });
@@ -317,6 +319,7 @@ impl Manager {
                     | runtime::Kind::Hermes
                     | runtime::Kind::Devin
                     | runtime::Kind::Droid
+                    | runtime::Kind::Kimi
                     | runtime::Kind::OpenClaw
             ) && session.reasoning.as_deref() != Some(reasoning)
             {
@@ -340,6 +343,7 @@ impl Manager {
             runtime::Kind::Hermes => runtime::HERMES_REASONING_LEVELS.contains(&reasoning),
             runtime::Kind::Devin => runtime::DEVIN_REASONING_LEVELS.contains(&reasoning),
             runtime::Kind::Droid => runtime::DROID_REASONING_LEVELS.contains(&reasoning),
+            runtime::Kind::Kimi => runtime::KIMI_REASONING_LEVELS.contains(&reasoning),
             runtime::Kind::OpenClaw => runtime::OPENCLAW_REASONING_LEVELS.contains(&reasoning),
         };
         if !supported {

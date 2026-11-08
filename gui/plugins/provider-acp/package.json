@@ -28,7 +28,8 @@
         "devin": "./icons/devin.svg",
         "droid": "./icons/droid.svg",
         "kilo": "./icons/kilo.svg",
-        "cline": "./icons/cline.svg"
+        "cline": "./icons/cline.svg",
+        "kimi": "./icons/kimi.svg"
       }
     },
     "server": "./server.ts",

@@ -286,7 +286,6 @@ function MacLogin({
       <ClaudeConnectionButton
         target="local"
         hostId={hostId}
-        presentation="inline"
         className={TABLE_BUTTON}
         text="Log in"
         onConnected={onChange}
@@ -312,7 +311,6 @@ function ClaudeCloudLogin() {
   return (
     <ClaudeConnectionButton
       target="cloud"
-      presentation="inline"
       className={TABLE_BUTTON}
       text="Connect"
     />

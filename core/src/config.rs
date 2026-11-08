@@ -85,6 +85,7 @@ impl Config {
             "hermes" => Kind::Hermes,
             "devin" => Kind::Devin,
             "droid" => Kind::Droid,
+            "kimi" => Kind::Kimi,
             "openclaw" => Kind::OpenClaw,
             _ => return Err(io::Error::other("unsupported CLOUDROOM_HARNESS")),
         };
@@ -155,6 +156,7 @@ impl Config {
             (Kind::Hermes, "hermes", ".hermes"),
             (Kind::Devin, "devin", ".local/share/devin"),
             (Kind::Droid, "droid", ".factory"),
+            (Kind::Kimi, "kimi", ".kimi-code"),
         ] {
             let home = account_home.join(home);
             let binary = [

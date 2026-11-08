@@ -520,6 +520,9 @@ export const threadResponseSchema = threadWithRuntimeSchema.extend({
   // `GET /threads/:id/queued-messages` supplies the reasons once a surface
   // actually renders them.
   queuedMessageCount: z.number().int().nonnegative(),
+  // Queued messages a drain has claimed but not yet sent; only GET /threads/:id
+  // sets it, so `thread wait` can tell a turn's end from its follow-up (#1111).
+  dispatchingMessageCount: z.number().int().nonnegative().optional(),
 });
 export type ThreadResponse = z.infer<typeof threadResponseSchema>;
 
@@ -704,6 +707,18 @@ export interface MoveThreadResponse {
   thread: ThreadResponse;
   moved: boolean;
   previousPath: string | null;
+}
+
+/** `room-cli thread worktree`: the uncommitted files to bring along, relative to the thread's folder. */
+export const moveThreadToWorktreeRequestSchema = z.object({
+  carry: z.array(z.string().min(1)).max(10_000).optional(),
+});
+export type MoveThreadToWorktreeRequest = z.infer<
+  typeof moveThreadToWorktreeRequestSchema
+>;
+
+export interface MoveThreadToWorktreeResponse {
+  previousPath: string;
 }
 
 export const panelFileSourceSchema = z.enum(["workspace", "thread-storage"]);

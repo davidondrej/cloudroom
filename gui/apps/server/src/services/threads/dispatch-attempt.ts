@@ -426,7 +426,11 @@ async function runDispatchAttempt(
     }
 
     if (thread.status === "stopping") {
-      continued.outcome = waitOn({ kind: "stopping" }, null);
+      // A Stop caught this older row; it must not gain permission to resume.
+      continued.outcome = waitOn(
+        { kind: respectManualStopPause ? "thread-busy" : "stopping" },
+        null,
+      );
       return;
     }
 

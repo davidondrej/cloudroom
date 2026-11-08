@@ -423,7 +423,8 @@ type ExpectedThreadsKey =
   | "unarchive"
   | "unpin"
   | "update"
-  | "wait";
+  | "wait"
+  | "worktree";
 
 type ExpectedThreadEventsKey = "list" | "wait";
 /**

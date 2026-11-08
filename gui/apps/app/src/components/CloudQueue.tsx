@@ -9,7 +9,7 @@ import { appToast } from "@/components/ui/app-toast";
 import { useCloudroomAccount } from "@/hooks/queries/cloudroom-queries";
 import { UpgradeTip } from "@/components/UpgradeTip";
 import { openUpgrade, useUpgradePromptViewed } from "@/lib/upgrade-prompt";
-import { useCreditsCohort, usePopup } from "@/lib/popups";
+import { useCreditsCohort, useHiddenUntil, usePopup } from "@/lib/popups";
 
 // The cloud queue (docs/scopes/public-launch.md): Free accounts wait in line to start Cloud threads. Everything else,
 // including Local threads, works as usual. The website decides; these only show it.
@@ -69,49 +69,67 @@ export function CreditsBar({ plan, limit, extra, extraTotal, className, planClas
   );
 }
 
-/** Free accounts always see their Cloud Credits left (ADR 0307). Paid plans see a quiet meter once 75% are used, and
- *  while running on pack credits. */
+/** Free accounts always see their Cloud Credits left (ADR 0307). The chevron shrinks the card to the one-line meter for
+ *  72 hours on this Mac, then it opens again. It also opens once credits run low (80% used): a shrink from before then
+ *  doesn't count, but one made while low survives a refill. Paid plans see the meter once 75% are used, and while on pack credits. */
+const SHRUNK_KEY = "cloudroom.planCard.shrunkUntil", SHRUNK_LOW_KEY = "cloudroom.planCard.shrunkLowUntil";
+const SHRINK_MS = 72 * 3_600_000;
+
 export function PlanCard() {
   const usage = useCloudroomAccount().data?.planUsage ?? null;
+  const calmShrink = useHiddenUntil(SHRUNK_KEY), lowShrink = useHiddenUntil(SHRUNK_LOW_KEY);
   const used = usage?.credits ?? null, limit = usage?.creditsLimit ?? 0;
   const free = usage?.plan === "free";
   const hidden = !usage || used === null || (!free && share(used, limit) < 0.75);
   useUpgradePromptViewed(hidden ? null : "plan_card");
   if (!usage || used === null || hidden) return null;
   if (!free) return <PlanMeter plan={usage.plan} used={used} limit={limit} extra={usage.extraCredits ?? 0} extraTotal={usage.extraCreditsTotal ?? 0} />;
-  const low = share(used, limit) >= 0.8;
+  const low = share(used, limit) >= 0.8, shrunk = low ? lowShrink : calmShrink;
+  if (shrunk.hidden) return <PlanMeter plan="free" used={used} limit={limit} extra={0} extraTotal={0} onExpand={shrunk.show} />;
   return (
     <section aria-label="Free plan" className="rounded-lg border border-border bg-surface-raised-solid p-3">
-      <p className="text-xs text-muted-foreground">Free plan</p>
-      <div className="mt-2.5">
+      <p className="flex items-center justify-between text-xs text-muted-foreground">
+        Free plan
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <button type="button" aria-label="Shrink for 3 days" className="-m-1 rounded p-1 text-muted-foreground/60 hover:text-foreground" onClick={() => { shrunk.hideFor(SHRINK_MS); if (low) calmShrink.hideFor(SHRINK_MS); }}>
+              <Icon name="ChevronDown" className="size-3.5" aria-hidden />
+            </button>
+          </TooltipTrigger>
+          <TooltipContent>Shrink for 3 days</TooltipContent>
+        </Tooltip>
+      </p>
+      <div className="mt-2">
         <p className="mb-1.5 text-sm text-foreground"><span className={cn("font-semibold", low && "text-warning")}>{Math.max(0, Math.floor(limit - used)).toLocaleString("en-US")}</span> Cloud Credits left</p>
         <div className="h-1 overflow-hidden rounded-full bg-foreground/10"><div className={cn("h-full rounded-full", low ? "bg-warning" : "bg-primary")} style={{ width: `${share(used, limit) * 100}%` }} /></div>
       </div>
-      <Button type="button" size="sm" className="mt-3 w-full justify-start" onClick={() => openUpgrade("plan_card")}>
-        <span className="min-w-0 truncate">Upgrade to Pro</span><span className="ml-auto shrink-0 font-normal opacity-70">$50/mo</span><Icon name="ArrowRight" aria-hidden />
-      </Button>
+      <div className="mt-3 flex justify-end">
+        <Button type="button" size="sm" className="h-7 gap-1 px-2.5 text-xs" onClick={() => openUpgrade("plan_card")}>Upgrade to Pro<Icon name="ArrowRight" aria-hidden /></Button>
+      </div>
     </section>
   );
 }
 
 /** "Pro · 9,000 credits left" over a thin bar: amber from 75%, red at 0. With extra credits (ADR 0317) the number is
- *  plan + extra and the bar is CreditsBar. The white "+ buy more" chip opens /billing: a pack or the next plan. */
-function PlanMeter({ plan, used, limit, extra, extraTotal }: { plan: string; used: number; limit: number; extra: number; extraTotal: number }) {
+ *  plan + extra and the bar is CreditsBar. The white "+ buy more" chip opens /billing: a pack or the next plan.
+ *  Free's shrunk card: lime until 80% used, an "Upgrade" chip, and clicking the line opens the card again. */
+function PlanMeter({ plan, used, limit, extra, extraTotal, onExpand }: { plan: string; used: number; limit: number; extra: number; extraTotal: number; onExpand?: () => void }) {
   const name = plan.charAt(0).toUpperCase() + plan.slice(1);
   const planLeft = Math.max(0, limit - used), onExtra = planLeft === 0 && extra > 0, out = used >= limit && extra <= 0;
-  const left = planLeft + Math.max(0, extra);
+  const left = planLeft + Math.max(0, extra), calm = plan === "free" && share(used, limit) < 0.8;
+  const label = <>{name} · <span className={cn("font-semibold tabular-nums", extra > 0 || calm ? "text-foreground" : out ? "text-destructive" : "text-warning-text")}>{Math.floor(left).toLocaleString("en-US")}</span> {onExtra ? "extra credits left" : "credits left"}</>;
   return (
     <div className="w-full px-2 pb-1">
       <p className="flex items-center justify-between gap-2 text-xs">
-        <span className="min-w-0 truncate text-muted-foreground">
-          {name} · <span className={cn("font-semibold tabular-nums", extra > 0 ? "text-foreground" : out ? "text-destructive" : "text-warning-text")}>{Math.floor(left).toLocaleString("en-US")}</span> {onExtra ? "extra credits left" : "credits left"}
-        </span>
-        <button type="button" className="shrink-0 border border-foreground/30 px-1.5 leading-5 text-foreground hover:bg-foreground/5" onClick={() => openUpgrade("plan_card")}>+ buy more</button>
+        {onExpand
+          ? <button type="button" title="Show the full card" className="flex min-w-0 items-center gap-1 truncate text-muted-foreground hover:text-foreground" onClick={onExpand}>{label}<Icon name="ChevronUp" className="size-3 shrink-0" aria-hidden /></button>
+          : <span className="min-w-0 truncate text-muted-foreground">{label}</span>}
+        <button type="button" className="shrink-0 border border-foreground/30 px-1.5 leading-5 text-foreground hover:bg-foreground/5" onClick={() => openUpgrade("plan_card")}>{plan === "free" ? "Upgrade" : "+ buy more"}</button>
       </p>
       {extra > 0
         ? <CreditsBar className="mt-1.5 h-1 bg-foreground/10" plan={planLeft} limit={limit} extra={extra} extraTotal={extraTotal} planClassName="bg-warning" edgeClassName="border-sidebar" />
         : <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-foreground/10">
-          <div className={cn("h-full rounded-full", out ? "bg-destructive" : "bg-warning")} style={{ width: `${share(used, limit) * 100}%` }} />
+          <div className={cn("h-full rounded-full", out ? "bg-destructive" : calm ? "bg-primary" : "bg-warning")} style={{ width: `${share(used, limit) * 100}%` }} />
         </div>}
     </div>
   );

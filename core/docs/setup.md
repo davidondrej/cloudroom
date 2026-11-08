@@ -186,7 +186,7 @@ In the [Cloudroom app](https://www.cloudroom.dev/download) (v83 or newer), open 
 
 **Works on your own server:**
 
-- Codex and Pi, set up in `core.env`. Claude Code, Cursor, OpenCode, Hermes, Devin, Droid, fx, and OpenClaw turn on once they are installed and signed in under the agent account.
+- Codex and Pi, set up in `core.env`. Claude Code, Cursor, OpenCode, Hermes, Devin, Droid, Kimi Code, fx, and OpenClaw turn on once they are installed and signed in under the agent account.
 - Cloud threads from the desktop app, with Mac access, web previews, secret requests, and synced skills and logins.
 - Saved history, kept on this machine.
 

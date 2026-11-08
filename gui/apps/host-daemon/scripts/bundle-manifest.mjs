@@ -41,13 +41,20 @@ export const ROOM_CLI_CMD = [
   "",
 ].join("\r\n");
 
+// Cloudroom.exe is a GUI-subsystem exe, and PowerShell doesn't wait for one. cmd.exe
+// does and passes the console's stdio, so the app path runs room-cli.cmd; the CLI
+// still takes its arguments from ROOM_CLI_ARGV (#757). cmd.exe drops environment
+// variables over 8,191 chars, so longer arguments keep the direct (silent) launch.
 export const ROOM_CLI_PS1 = [
   "$app = @('Cloudroom.exe', 'Cloudroom Nightly.exe') | ForEach-Object { Join-Path $PSScriptRoot \"..\\..\\..\\..\\..\\..\\$_\" } | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1",
   "$cli = Join-Path $PSScriptRoot 'room-cli'",
   "$saved = $env:ELECTRON_RUN_AS_NODE, $env:ROOM_CLI_ARGV",
   "try {",
   '  $env:ROOM_CLI_ARGV = ConvertTo-Json -Compress -InputObject @($args | ForEach-Object { "$_" })',
-  "  if ($app) { $env:ELECTRON_RUN_AS_NODE = '1' } else { $app = 'node' }",
+  "  if (-not $app) { $app = 'node' } elseif ($env:ROOM_CLI_ARGV.Length -le 8000) { $app = Join-Path $PSScriptRoot 'room-cli.cmd'; $cli = @() } else {",
+  "    [Console]::Error.WriteLine('room-cli: arguments too long to show output in PowerShell; use --prompt-file')",
+  "    $env:ELECTRON_RUN_AS_NODE = '1'",
+  "  }",
   "  if ($MyInvocation.ExpectingInput) { $input | & $app $cli } else { & $app $cli }",
   "} finally {",
   "  $env:ELECTRON_RUN_AS_NODE, $env:ROOM_CLI_ARGV = $saved",

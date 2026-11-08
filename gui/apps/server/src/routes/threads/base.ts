@@ -1,6 +1,7 @@
 import {
   THREAD_SEARCH_LIMIT_PER_GROUP_DEFAULT,
   THREAD_SEARCH_LIMIT_PER_GROUP_MAX,
+  countClaimedQueuedThreadMessages,
   countNonDeletedAssignedChildThreads,
   countThreads,
   getEnvironment,
@@ -360,12 +361,16 @@ export function registerThreadBaseRoutes(app: Hono, deps: AppDeps): void {
 
   get(routes.get, (context, query) => {
     const thread = requirePublicThread(deps.db, context.req.param("id"));
-    return context.json(
-      buildThreadResponse(deps, {
+    return context.json({
+      ...buildThreadResponse(deps, {
         includes: parseThreadIncludes(query),
         thread,
       }),
-    );
+      dispatchingMessageCount: countClaimedQueuedThreadMessages(
+        deps.db,
+        thread.id,
+      ),
+    });
   });
 
   function getThreadChildSummary(thread: Thread): ThreadChildSummaryResponse {

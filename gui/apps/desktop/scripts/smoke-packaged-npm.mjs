@@ -190,7 +190,8 @@ export async function smokePackagedNpm(appBinary) {
     const auditScript = join(fixture, "audit-dependencies.mjs");
     await writeFile(
       auditScript,
-      `await (${auditDependencies.toString()})(${JSON.stringify(join(resources, "app.asar.unpacked", "node_modules"))});\n`,
+      // npm ships inside app.asar; Electron's Node resolves and runs it there.
+      `await (${auditDependencies.toString()})(${JSON.stringify(join(resources, "app.asar", "node_modules"))});\n`,
     );
     const audit = await run(
       appBinary,

@@ -29,8 +29,8 @@ room-cli thread update --self --reasoning-level LEVEL
 room-cli thread archive --self
 room-cli thread move --self --project PROJECT
 room-cli thread stop --self
-room-cli thread spawn --provider codex|claude-code|pi|opencode|hermes|devin|droid|fx|openclaw [--model MODEL] [--reasoning-level LEVEL] [--service-tier default|fast] [--title TITLE] [--shared-sandbox|--top-level] --prompt TEXT|--prompt-file PATH
-room-cli thread fork [--provider codex|claude-code|pi|opencode|hermes|devin|droid|fx|openclaw] [--model MODEL] [--reasoning-level LEVEL] [--title TITLE] --prompt TEXT|--prompt-file PATH
+room-cli thread spawn --provider codex|claude-code|pi|opencode|hermes|devin|droid|kimi|fx|openclaw [--model MODEL] [--reasoning-level LEVEL] [--service-tier default|fast] [--title TITLE] [--shared-sandbox|--top-level] --prompt TEXT|--prompt-file PATH
+room-cli thread fork [--provider codex|claude-code|pi|opencode|hermes|devin|droid|kimi|fx|openclaw] [--model MODEL] [--reasoning-level LEVEL] [--title TITLE] --prompt TEXT|--prompt-file PATH
 room-cli thread list [--include-archived]
 room-cli thread output CHILD_ID [--all]
 room-cli thread tell THREAD_ID|--parent TEXT
@@ -67,18 +67,39 @@ const OUTCOME_KEPT: Duration = Duration::from_secs(3600);
 /// never makes a fork the agent was told failed.
 static CHILDREN: LazyLock<Mutex<HashMap<String, Outcome>>> = LazyLock::new(Mutex::default);
 
-/// The calling session's children in sandboxes of their own whose start the website hasn't finished yet.
+/// The calling session's children in sandboxes of their own whose start the website hasn't finished yet, in its first
+/// 10 minutes. After that `tell`, `stop` and `output` stop asking to retry and pass on the website's answer (#1058).
 pub(super) fn starting(m: &Manager, parent: &str) -> Vec<String> {
     let local = m.local.lock().unwrap();
     let Some(session) = local.sessions.get(parent) else {
         return Vec::new();
     };
-    session
-        .child_states
-        .iter()
-        .filter(|(_, state)| *state == "starting")
-        .map(|(child, _)| child.clone())
+    let since = crate::observability::now_ms().saturating_sub(10 * 60_000);
+    let fresh = session.child_starts.values().filter(|s| s.at_ms > since);
+    fresh
+        .filter_map(|s| s.child.clone())
+        .filter(|child| {
+            session
+                .child_states
+                .get(child)
+                .is_some_and(|s| s == "starting")
+        })
         .collect()
+}
+
+/// Why the website refused the calling session's start of `child` for good, while the parent knows nothing newer of it
+/// and Core still keeps that start (#1058).
+pub(super) fn start_error(m: &Manager, parent: &str, child: &str) -> Option<String> {
+    let local = m.local.lock().unwrap();
+    let session = local.sessions.get(parent)?;
+    if session.child_states.get(child)? != "error" {
+        return None;
+    }
+    let start = session
+        .child_starts
+        .values()
+        .find(|s| s.child.as_deref() == Some(child));
+    start?.error.clone()
 }
 
 enum Outcome {
@@ -594,7 +615,7 @@ fn check_start(
     provider
         .map(|p| {
             serde_json::from_value(json!(p)).map_err(|_| {
-                bad("Use --provider codex, claude-code, pi, opencode, hermes, devin, droid, fx or openclaw")
+                bad("Use --provider codex, claude-code, pi, opencode, hermes, devin, droid, kimi, fx or openclaw")
             })
         })
         .transpose()
@@ -807,19 +828,37 @@ async fn output(
             ));
         };
         let all = if query.all { "1" } else { "0" };
+        let failed = start_error(&m, &parent, &id);
         return match api.get("chat", &[("thread", &id), ("all", all)]).await {
             // The website may not know a child that just started yet, or has no chat of it yet (#317).
             Err(super::history::ApiError::Status(404, _))
                 if starting(&m, &parent).contains(&id) =>
             {
-                Ok(Json(
+                Ok(
                     json!({"id":id,"state":"starting","note":"Its sandbox is still starting. Its replies arrive as messages when its turns end."}),
-                ))
+                )
             }
-            answer => answer
-                .map(Json)
-                .map_err(|error| website_failure(error, "read the child's chat")),
-        };
+            // Its start was refused: no chat, or only what came before. The same story as `thread list` (#1058).
+            Err(super::history::ApiError::Status(404, _)) if failed.is_some() => {
+                Ok(json!({"id":id}))
+            }
+            answer => answer,
+        }
+        .map(|mut answer| {
+            // A chat with a reply or an agent at work started after all: never call it failed (#1058).
+            let ran = answer["reply"].is_string()
+                || matches!(
+                    answer["state"].as_str(),
+                    Some("starting" | "starting_turn" | "running" | "resuming")
+                );
+            if let Some(error) = failed.filter(|_| answer.is_object() && !ran) {
+                answer["state"] = json!("error");
+                answer["issue"] = json!(error);
+                answer["note"] = json!(format!("It could not be started. To clean it up: room-cli thread archive {id}"));
+            }
+            Json(answer)
+        })
+        .map_err(|error| website_failure(error, "read the child's chat"));
     }
     m.own_child(&parent, &id).map_err(session_failure)?;
     Ok(Json(

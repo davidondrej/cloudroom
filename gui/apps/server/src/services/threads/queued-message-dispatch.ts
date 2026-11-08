@@ -480,8 +480,19 @@ async function attemptAutomaticQueuedMessage(
       });
       return;
     }
-    if (!isQueuedMessageAutoSendCandidate(getThread(deps.db, row.threadId)))
+    const currentThread = getThread(deps.db, row.threadId);
+    if (!isQueuedMessageAutoSendCandidate(currentThread)) {
+      deps.logger.debug(
+        {
+          queuedMessageId: row.id,
+          threadId: row.threadId,
+          threadStatus: currentThread?.status,
+          ...runtimeErrorLogFields(deps.config, error),
+        },
+        "Queued message auto-send interrupted",
+      );
       return;
+    }
     if (isCommandTimeoutError(error)) {
       deps.logger.debug(
         {

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import type { ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useAtom, useAtomValue } from "jotai";
 import { matchPath, useLocation, useNavigate } from "react-router-dom";
@@ -10,7 +10,7 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@cloud
 import { SettingsWithControl } from "@/components/ui/settings-section";
 import { useCloudroomAccount } from "@/hooks/queries/cloudroom-queries";
 import { createBooleanPreferenceAtom } from "@/lib/browser-storage";
-import { useChecklistHides } from "@/lib/popups";
+import { useChecklistHides, useHiddenUntil } from "@/lib/popups";
 import { useIsNativeBrowserViewShown } from "@/hooks/useBrowserDimmingModal";
 import { fetchWithAppSurface } from "@/lib/app-surface";
 import { getPluginConfigurationRoutePath, getRootComposeRoutePath, LEGACY_PROJECT_COMPOSE_ROUTE_PATH } from "@/lib/route-paths";
@@ -26,7 +26,10 @@ const STEPS: { id: Step; title: string; prompt?: (second: string) => string }[] 
   { id: "phone", title: "Open Cloudroom on your phone" },
   { id: "loop", title: "Set up a daily Loop", prompt: () => "Create a Cloud loop for this repo that runs every weekday at 9am: check for new security issues and only tell me if you find one." },
 ];
-const HIDE_MS = 8 * 60 * 60 * 1000;
+// Free plans: each Hide lasts longer, by the account's hides so far (8 hours, 3 days, then 7 days).
+const HIDES = [{ ms: 8 * 3_600_000, label: "8 hours" }, { ms: 3 * 86_400_000, label: "3 days" }, { ms: 7 * 86_400_000, label: "7 days" }];
+const hideFor = (hides: number | null) => HIDES[Math.min(hides ?? 0, HIDES.length - 1)];
+const RETIRED_AT = 50; // threads started: an active user doesn't need the checklist
 const HIDDEN_KEY = "cloudroom.activation.hiddenUntil";
 
 function useActivation() {
@@ -81,9 +84,10 @@ function useStartersShown(data: Activation | undefined) {
   return data !== undefined && (always || data.started <= 10);
 }
 
-export function StarterPrompts({ onPick }: { onPick: (prompt: string) => void }) {
+/** The one-click prompts, or `fallback` once they're gone. Never both, and nothing while loading, so nothing flashes. */
+export function StarterPrompts({ onPick, fallback }: { onPick: (prompt: string) => void; fallback?: ReactNode }) {
   const data = useActivation();
-  if (!useStartersShown(data)) return null;
+  if (!useStartersShown(data)) return data === undefined ? null : fallback;
   const pick = (starter: (typeof STARTERS)[number]) => {
     void fetchWithAppSurface("/api/v1/cloudroom/activation", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ starter: starter.id }) }).catch(() => {});
     onPick(starter.prompt);
@@ -119,13 +123,7 @@ export function StarterPrompts({ onPick }: { onPick: (prompt: string) => void })
 
 export function ActivationChecklist() {
   const navigate = useNavigate();
-  const [hiddenUntil, setHiddenUntil] = useState(() => Number(localStorage.getItem(HIDDEN_KEY)) || 0);
-  useEffect(() => {
-    const left = hiddenUntil - Date.now();
-    if (left <= 0) return;
-    const timer = setTimeout(() => setHiddenUntil(0), left);
-    return () => clearTimeout(timer);
-  }, [hiddenUntil]);
+  const hidden = useHiddenUntil(HIDDEN_KEY);
   const nativeBrowserShown = useIsNativeBrowserViewShown();
   const { pathname } = useLocation();
   const composing = pathname === getRootComposeRoutePath() || matchPath(LEGACY_PROJECT_COMPOSE_ROUTE_PATH, pathname) !== null;
@@ -134,7 +132,7 @@ export function ActivationChecklist() {
   const plan = useCloudroomAccount().data?.plan;
   const paid = Boolean(plan && plan !== "free");
   const [hides, saveHides] = useChecklistHides();
-  if (!data || hiddenUntil > Date.now() || nativeBrowserShown || (paid && (hides === null || hides >= 2))) return null;
+  if (!data || hidden.hidden || nativeBrowserShown || data.started >= RETIRED_AT || (paid && (hides === null || hides >= 2))) return null;
   const done = STEPS.filter((step) => data.steps[step.id]).length;
   const next = STEPS.find((step) => !data.steps[step.id]);
   if (!next) return null;
@@ -142,9 +140,7 @@ export function ActivationChecklist() {
     fetchWithAppSurface("/api/v1/cloudroom/activation", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ step, action }) })
       .then((response) => response.json() as Promise<{ hides?: number | null }>).catch(() => ({ hides: null }));
   const hide = () => {
-    const until = Date.now() + HIDE_MS;
-    localStorage.setItem(HIDDEN_KEY, String(until));
-    setHiddenUntil(until);
+    hidden.hideFor((paid ? HIDES[0] : hideFor(hides)).ms);
     void report(next.id, "hidden").then(({ hides: saved }) => { if (typeof saved === "number") saveHides(saved); });
   };
   const start = (step: (typeof STEPS)[number]) => {
@@ -194,7 +190,7 @@ export function ActivationChecklist() {
               <button type="button" onClick={hide} className="rounded px-1 text-[11px] text-muted-foreground/50 hover:text-muted-foreground">Hide</button>
             </TooltipTrigger>
             <TooltipContent side="bottom">
-              {!paid ? "Hides this for 8 hours. It goes away for good once you finish all 5 steps."
+              {!paid ? `Hides this for ${hideFor(hides).label}. It goes away for good once you finish all 5 steps or start ${RETIRED_AT} threads.`
                 : hides ? "Hide it now and it's gone for good." : "Hides this for 8 hours. Hide it twice and it's gone for good."}
             </TooltipContent>
           </Tooltip>
