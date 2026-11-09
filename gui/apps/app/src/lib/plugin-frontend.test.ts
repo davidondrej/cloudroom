@@ -153,6 +153,7 @@ describe("installPluginRuntime", () => {
       unknown
     >;
     expect(Object.keys(runtime).sort()).toEqual([
+      "browserDimming",
       "classVarianceAuthority",
       "clsx",
       "jsxDevRuntime",

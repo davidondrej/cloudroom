@@ -1,7 +1,7 @@
 use super::Receipt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, fs, path::Path};
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct PromptState {
@@ -83,6 +83,43 @@ pub fn apply(prompts: &mut BTreeMap<String, PromptState>, receipt: &Receipt) {
             }
         }
         _ => {}
+    }
+}
+
+/// The website leaves `notice` in the state folder when it restores a thread onto a fresh machine
+/// (web/lib/sandboxes.ts). The next prompt the agent gets carries it, once: deleting the file claims it, so two
+/// sessions never both add it. A prompt starting with a slash command stays as it is; the note waits for the next one.
+/// Returns the note it took, so a send that fails can put it back (`put_back_notice`).
+pub fn with_notice(state_dir: &Path, mut input: Value) -> (Value, Option<String>) {
+    if !input.is_object() || text(&input).trim_start().starts_with('/') {
+        return (input, None);
+    }
+    let path = state_dir.join("notice");
+    let Ok(note) = fs::read_to_string(&path) else {
+        return (input, None);
+    };
+    if fs::remove_file(&path).is_err() || note.trim().is_empty() {
+        return (input, None);
+    }
+    let note = note.trim().to_owned();
+    if let Some(parts) = input.get_mut("content").and_then(Value::as_array_mut)
+        && !parts.is_empty()
+    {
+        parts.push(serde_json::json!({"type":"text","text":format!("\n{note}")}));
+    }
+    input["text"] = Value::String(format!("{}\n\n{note}", text(&input)));
+    (input, Some(note))
+}
+
+/// A note whose prompt never reached the agent waits for the next one. It never replaces a note written since.
+pub fn put_back_notice(state_dir: &Path, note: &str) {
+    use std::io::Write;
+    let file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(state_dir.join("notice"));
+    if let Ok(mut file) = file {
+        let _ = file.write_all(note.as_bytes());
     }
 }
 

@@ -10,6 +10,7 @@ import {
 import { MemoryRouter } from "react-router-dom";
 import type { ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { BbDesktopApi } from "@cloudroom/desktop-contract";
 import { defaultAppSettings, type AppCommandId } from "@cloudroom/domain";
 import {
   AppCommandProvider,
@@ -21,6 +22,7 @@ import {
 
 const testState = vi.hoisted(() => ({
   calls: [] as string[],
+  desktop: null as Pick<BbDesktopApi, "onAppCommand"> | null,
   showKeyboardHints: true,
   keybindings: [
     {
@@ -151,6 +153,22 @@ const testState = vi.hoisted(() => ({
       when: { all: ["mainSurface" as const], none: [] },
     },
     {
+      command: "pane.focus.1" as const,
+      desktopOnly: true,
+      shortcut: {
+        key: "1",
+        mod: true,
+        meta: false,
+        control: false,
+        alt: false,
+        shift: false,
+      },
+      when: {
+        all: ["mainSurface" as const, "splitActive" as const],
+        none: [],
+      },
+    },
+    {
       command: "question.select.1" as const,
       desktopOnly: false,
       shortcut: {
@@ -224,7 +242,7 @@ vi.mock("@/hooks/queries/system-queries", () => ({
 }));
 
 vi.mock("@/lib/bb-desktop", () => ({
-  getBbDesktopInfo: () => null,
+  getBbDesktopInfo: () => testState.desktop,
 }));
 
 interface HandlerProps {
@@ -251,6 +269,11 @@ function Handler({
     priority,
     enabled,
   );
+  return null;
+}
+
+function SplitContext({ active }: { active: boolean }) {
+  useAppCommandContext("splitActive", active);
   return null;
 }
 
@@ -311,6 +334,7 @@ afterEach(() => {
   vi.restoreAllMocks();
   testState.calls.length = 0;
   testState.showKeyboardHints = true;
+  testState.desktop = null;
 });
 
 describe("AppCommandProvider", () => {
@@ -696,5 +720,40 @@ describe("AppCommandProvider", () => {
 
     expect(event.defaultPrevented).toBe(false);
     expect(testState.calls).toEqual([]);
+  });
+
+  it("resolves shortcuts forwarded from a browser page with the renderer's context", () => {
+    let forward: Parameters<BbDesktopApi["onAppCommand"] & {}>[0] | undefined;
+    testState.desktop = {
+      onAppCommand: (listener) => {
+        forward = listener;
+        return () => undefined;
+      },
+    };
+    const tree = (splitActive: boolean) => (
+      <MemoryRouter>
+        <AppCommandProvider>
+          <SplitContext active={splitActive} />
+          <Handler command="thread.jump.1" name="thread" result={true} />
+          <Handler command="pane.focus.1" name="pane" result={true} />
+        </AppCommandProvider>
+      </MemoryRouter>
+    );
+    const modOne = {
+      altKey: false,
+      code: "Digit1",
+      ctrlKey: true,
+      key: "1",
+      metaKey: false,
+      shiftKey: false,
+    };
+    const view = render(tree(false));
+
+    act(() => forward?.(modOne));
+    expect(testState.calls).toEqual(["thread"]);
+
+    view.rerender(tree(true));
+    act(() => forward?.(modOne));
+    expect(testState.calls).toEqual(["thread", "pane"]);
   });
 });

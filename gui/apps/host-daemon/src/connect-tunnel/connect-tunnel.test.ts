@@ -125,6 +125,7 @@ describe("ConnectTunnelClient", () => {
       resolveTrustedConnectGate("http://owner.bb.localhost:42745"),
     ).toEqual({
       apiOrigin: "http://owner.bb.localhost:42745",
+      apexOrigin: null,
       baseDomain: "bb.localhost:42745",
     });
     expect(
@@ -208,6 +209,40 @@ describe("ConnectTunnelClient", () => {
     expect(requestedUrls).toHaveLength(1);
     client.shutdown();
   });
+
+  const NO = "Machine not authorized\n"; // the relay's refusal at an owner address
+  it.each([
+    ["sawyermac2.getbb.app", NO, 200, 2, false],
+    ["sawyermac2.getbb.app", "WAF", 200, 1, true],
+    ["relay.example.net", NO, 200, 1, true],
+    ["sawyermac2.getbb.app", NO, 503, 2, true],
+    ["sawyermac2.getbb.app", NO, 307, 2, true],
+  ] as const)(
+    "label at %s (403 %j), apex %i",
+    async (host, body, apex, requests, latched) => {
+      const sent: string[] = [];
+      const client = new ConnectTunnelClient({
+        serverUrl: `https://${host}`,
+        hostName: "Sawyer Air",
+        machineCredential: "bbcm_machine-secret",
+        logger,
+        fetchFn: async (input, init) => {
+          sent.push(new URL(input).host);
+          if (sent.length === 1) return new Response(body, { status: 403 });
+          if (apex !== 307)
+            return Response.json({ label: "x" }, { status: apex });
+          if (init?.redirect !== "error") sent.push("evil.test"); // followed it
+          throw new TypeError("redirect");
+        },
+      });
+      await client.ensureTunnelIdentity().catch(() => undefined);
+      await client.ensureTunnelIdentity().catch(() => undefined); // latched or cached: no new requests
+      expect(sent).toEqual(
+        [host, host.replace(/^[^.]+\./, "")].slice(0, requests),
+      );
+      expect(client.status().credentialRejected).toBe(latched);
+    },
+  );
 
   it("proxies only explicitly shared HTTP targets to loopback", async () => {
     const originRequests: Array<{ host: string; path: string }> = [];

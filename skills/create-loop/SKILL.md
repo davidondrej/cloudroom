@@ -5,12 +5,24 @@ description: Create a recurring Cloudroom Loop that starts an agent to check one
 
 # Create loop
 
-The user describes the job in a sentence. Fill in everything else from the defaults. Anything the user says overrides a default. Ask only when the job itself is unclear. For flags, Cloud loops, and scripts, read the `automations` skill.
+The user describes the job in a sentence.
+Fill in everything else from the defaults.
+Anything the user says overrides a default.
+Ask only when the job itself is unclear.
+
+For flags, Cloud loops, and scripts:
+
+- **Local threads:** read the `automations` skill.
+- **Cloud threads:** run `room-cli loop --help`.
+  Then read the `room-cli` skill.
+  Cloud steps differ: see "In a Cloud thread" below.
 
 ## Defaults
 
 - **Schedule:** every 4 hours in the user's timezone: `--cron "0 */4 * * *" --timezone <IANA zone>`.
-- **Agent:** the same harness, model, and effort as this thread (`room-cli thread show --self --json`).
+- **Agent:** the same harness, model, and effort as this thread.
+  Locally, read them with `room-cli thread show --self --json`.
+  Cloud loops use them by default.
 - **Where:** a Local loop in the project's main checkout (first line of `git worktree list`). No new worktrees. Use a Cloud loop when it must run with the user's computer off, and always from a Cloud thread.
 - **One thread per run:** every run is its own top-level thread. Never point a loop at one manager thread that re-prompts and spawns sub-agents: the runs pile up nested under it. Local loops and Cloud `--cron` loops already start a fresh thread per run, so don't add `--same-thread`. A script that starts threads itself spawns them top-level: no `--parent-self` locally, `--top-level` in a Cloud thread, never `--shared-sandbox`.
 - **Access:** read only. No edits, commits, or pushes until the user approves a fix.
@@ -32,8 +44,21 @@ The user describes the job in a sentence. Fill in everything else from the defau
      --environment "<main checkout>" --prompt "$(cat /tmp/<name>-prompt.txt)" --json
    ```
 
-4. **Test it once.** `room-cli loop run ID --project "$ROOM_PROJECT_ID"`, then `room-cli loop runs ID --project "$ROOM_PROJECT_ID" --limit 1 --json` gives its thread. Confirm it started and renamed itself.
+4. **Test it once.** In a Cloud thread, see "In a Cloud thread" below.
+   Locally: `room-cli loop run ID --project "$ROOM_PROJECT_ID"`, then `room-cli loop runs ID --project "$ROOM_PROJECT_ID" --limit 1 --json` gives its thread.
+   Confirm it started and renamed itself.
 5. **Tell the user** the loop's name, schedule, and test thread, plus anything surprising from step 1.
+
+## In a Cloud thread
+
+- Drop `--project` and `--environment`.
+  Cloud uses this thread's project.
+- `room-cli loop run ID` only makes the loop due.
+- Within a minute or two, find the loop's ID in `room-cli loop list`.
+- Check that `runs` and `last_run_at` went up.
+  Check that `last_error` is empty.
+- Cloud can't see the run's thread or output.
+- Ask the user to confirm its title and verdict in the app.
 
 ## Prompt template
 

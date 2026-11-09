@@ -4,6 +4,7 @@ import type {
   PluginCliContext,
   PluginCliResult,
 } from "@get-bb/plugin-sdk";
+import { looksLikePath } from "@cloudroom/domain";
 import { z } from "zod";
 import type { AutomationService } from "./service.js";
 import { LOOP_TEMPLATES } from "../templates.js";
@@ -350,10 +351,6 @@ function parseScriptEnv(
   return parsed.data;
 }
 
-function looksLikePath(value: string): boolean {
-  return value.includes("/") || value.startsWith(".") || value.startsWith("~");
-}
-
 async function resolveConnectedHostId(
   bb: Pick<BbPluginApi, "sdk">,
 ): Promise<string> {
@@ -495,26 +492,52 @@ async function loadScriptFileSource(
     }
     return undefined;
   }
+  return readCliTextFile(bb, ctx, "--script-file", scriptFile, hostOverride);
+}
+
+async function readCliTextFile(
+  bb: Pick<BbPluginApi, "sdk">,
+  ctx: Pick<PluginCliContext, "cwd" | "threadId">,
+  flagName: string,
+  file: string,
+  hostOverride: string | undefined,
+): Promise<ScriptFileSource & { sizeBytes: number }> {
   let path: string;
-  if (isAbsolute(scriptFile)) {
-    path = scriptFile;
+  if (isAbsolute(file)) {
+    path = file;
   } else {
     if (ctx.cwd === undefined || !isAbsolute(ctx.cwd)) {
       throw new Error(
-        "Relative --script-file paths need the invoking CLI cwd; pass an absolute path.",
+        `Relative ${flagName} paths need the invoking CLI cwd; pass an absolute path.`,
       );
     }
-    path = resolve(ctx.cwd, scriptFile);
+    path = resolve(ctx.cwd, file);
   }
   const hostId = await resolveScriptFileHostId(bb, ctx, hostOverride);
-  const file = await bb.sdk.files.read({
+  const read = await bb.sdk.files.read({
     ...(hostId !== undefined ? { hostId } : {}),
     path,
   });
-  if (file.contentEncoding !== "utf8") {
-    throw new Error(`--script-file is not UTF-8 text: ${path}`);
+  if (read.contentEncoding !== "utf8") {
+    throw new Error(`${flagName} is not UTF-8 text: ${path}`);
   }
-  return { path, hostId, content: file.content };
+  return { path, hostId, content: read.content, sizeBytes: read.sizeBytes };
+}
+
+// Multiline prompts survive Windows' room-cli.cmd only through a file (#974).
+async function applyPromptFile(
+  bb: Pick<BbPluginApi, "sdk">,
+  args: ParsedArgs,
+  ctx: Pick<PluginCliContext, "cwd" | "threadId">,
+): Promise<void> {
+  if (!args.flags.has("prompt-file")) return;
+  if (args.flags.has("prompt")) {
+    throw new Error("Choose only one of --prompt and --prompt-file.");
+  }
+  const file = requireFlag(args, "prompt-file");
+  const { content, sizeBytes } = await readCliTextFile(bb, ctx, "--prompt-file", file, undefined);
+  if (sizeBytes > 1024 * 1024) throw new Error("--prompt-file is larger than 1 MB.");
+  args.flags.set("prompt", content.replace(/^\uFEFF/u, ""));
 }
 
 type BuiltExecution = {
@@ -999,10 +1022,11 @@ room-cli loop delete <loopId> --project <id> --yes
 room-cli loop hook <loopId> --project <id>   Replace a webhook loop's secret URL
 room-cli loop review [--all]                List what loops did in the last 7 days (threads they started, script output, failures)
 room-cli loop review mark <itemId...> [--undo]
-room-cli loop report --outcome done|acted|needs-you|failed --confidence high|medium|low --reason TEXT [--action TEXT]...   Inside a loop run: record what it did and why
+room-cli loop report --outcome done|acted|needs-you|failed --confidence high|medium|low --reason TEXT [--action TEXT]...   Inside a loop run: record what it did and why (reason up to 500 characters; up to 10 actions of up to 200)
 room-cli loop scan-progress --data JSON   Inside a Workflow scan: save its progress for the progress card
 room-cli loop settings [--stop-at-limit on|off] [--fallback on|off]   Cloud loops wait while their agent is at its plan limit; loops at a Claude or Codex limit switch to the other (both on by default)
 
+--prompt-file <path> reads --prompt from a UTF-8 file on create and update. Use it for multiline prompts on Windows.
 Priority is P1 (essential) to P4 (niche); loops start at P3, or at their template's.
 Cloud loops run on Cloudroom's servers, even while this Mac is off: every minute with a script, else at most every
 15 minutes. A --cron run starts a fresh Cloud thread in its own sandbox from that thread's project and agent;
@@ -1383,6 +1407,9 @@ export function registerAutomationCli(args: {
           return { exitCode: 0, stdout: optionalJson(parsed, LOOP_TEMPLATES) ?? printTemplates() };
         }
         if (command === "settings") return await runSettingsCommand(bb, parsed);
+        if (command === "create" || command === "update") {
+          await applyPromptFile(bb, parsed, ctx);
+        }
         if (command === "create") await applyTemplate(bb, parsed);
         if (isCloudCommand(parsed)) return await runCloudCommand(bb, parsed, ctx);
         if (command === "review") return await runReviewCommand(service, parsed);

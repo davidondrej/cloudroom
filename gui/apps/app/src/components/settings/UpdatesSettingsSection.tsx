@@ -1572,12 +1572,15 @@ export function UpdatesSettingsSection({
                         ? null
                         : () => {
                             setIsRelaunching(true);
-                            void desktopApi.installUpdate().catch((error) => {
-                              setIsRelaunching(false);
-                              appToast.error("Relaunch failed", {
-                                description: checkErrorDescription(error),
-                              });
-                            });
+                            // A canceled or timed-out password prompt resolves without quitting.
+                            void desktopApi
+                              .installUpdate()
+                              .catch((error) => {
+                                appToast.error("Relaunch failed", {
+                                  description: checkErrorDescription(error),
+                                });
+                              })
+                              .finally(() => setIsRelaunching(false));
                           }
                     }
                     onRetryDesktop={

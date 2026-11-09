@@ -2,6 +2,48 @@
 
 Also on [cloudroom.dev/changelog](https://www.cloudroom.dev/changelog).
 
+## 146
+
+One click clears a full Cloud disk (2026-11-08)
+
+### Changes
+
+- When a Cloud disk fills up, one pill with a Clear caches & builds button frees space.
+- Hover the effort label to step reasoning effort up or down with small arrows.
+- Typing a thread name after @ keeps that thread above files and folders with similar names.
+- Forked threads show a thin divider in the chat instead of a banner.
+- Settings → Analytics shows when your Cloud Credits were used.
+- Cloud threads now accept folder and project tags.
+- Security fixes.
+
+## 145
+
+Long messages fold to fit (2026-11-08)
+
+### Changes
+
+- Long messages you send collapse to their start and end, so the chat stays easy to scan.
+- Kimi Code now runs in Local and Cloud threads.
+- The chat scrollbar grows as your mouse gets close, so it is easier to grab.
+- A new Connect agents button replaces the Claude check, and the Claude Code install shows progress with a Cancel button.
+- Agents can move their own thread into a fresh worktree with room-cli thread worktree.
+- When your app is 3 or more days behind, a small card above the chat offers the update.
+- A refused skill message no longer blocks every message after it.
+
+## 144
+
+Switch accounts, every stalled chat resumes (2026-11-07)
+
+### Changes
+
+- When a plan limit stops your agents, switching accounts once continues every stopped thread, Local and Cloud.
+- A Mac app opened from the disk image now offers to move itself to Applications in one click, so updates work.
+- App shortcuts like Cmd+J and Cmd+T now work while a page in the built-in browser has focus.
+- The Windows installer is about 30% smaller and installs faster.
+- Background dev servers keep running through account switches, harness switches, and /clear.
+- Sign-in now has a Copy link button, for when your default browser is not the one you use.
+- Security fixes.
+
 ## 143
 
 All your logins on one page (2026-11-06)

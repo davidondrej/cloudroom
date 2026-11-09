@@ -9,14 +9,23 @@ and each spawn and wait saves progress for the scan's progress card (room-cli lo
                                           or archived reader once; prints "done" (and writes DIR/lines.txt) or "running N/M"
   readers.py archive DIR               -> archives every reader thread
 """
-import glob, hashlib, json, os, subprocess, sys, time
+import glob, hashlib, json, os, shutil, subprocess, sys, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PROJECT = os.environ.get("ROOM_PROJECT_ID") or "proj_personal"
+WIN = sys.platform == "win32"
+CLI = (shutil.which("room-cli") if WIN else None) or "room-cli"
+
+
+def cli(*args, check=False):
+    # Windows: subprocess can't start room-cli.cmd by bare name, and cmd.exe would re-parse its arguments
+    # (cutting a prompt at its first newline). room-cli reads them from ROOM_CLI_ARGV instead, like room-cli.ps1 passes them.
+    env = {**os.environ, "ROOM_CLI_ARGV": json.dumps(args)} if WIN else None
+    return subprocess.run([CLI] if WIN else [CLI, *args], env=env, check=check, capture_output=True, encoding="utf-8", errors="replace")
 
 
 def room(*args):
-    return json.loads(subprocess.run(["room-cli", *args, "--json"], check=True, capture_output=True, text=True).stdout)
+    return json.loads(cli(*args, "--json", check=True).stdout)
 
 
 def load(d):
@@ -44,16 +53,21 @@ def report(d, state, stage):
             read[int(day)] += count
     data = {"stage": stage, "chats": progress["chats"], "days": progress["days"], "read": read,
             "readers": len(state["readers"]), "readersDone": len(finished), "secrets": progress["secrets"]}
-    subprocess.run(["room-cli", "loop", "scan-progress", "--data=" + json.dumps(data)], capture_output=True)
+    cli("loop", "scan-progress", "--data=" + json.dumps(data))
 
 
 def start(d, state, n):
-    prompt = open(os.path.join(HERE, "reader.md")).read() + open(os.path.join(d, "slices", f"slice-{n}.txt")).read()
+    prompt = open(os.path.join(HERE, "reader.md"), encoding="utf-8").read() + open(os.path.join(d, "slices", f"slice-{n}.txt"), encoding="utf-8").read()
+    prompt_args = ["--prompt", prompt]
+    if WIN:  # too long for ROOM_CLI_ARGV (32K); room-cli reads the file back as UTF-8
+        prompt_args = ["--prompt-file", os.path.join(d, "slices", f"prompt-{n}.txt")]
+        with open(prompt_args[1], "wb") as f:
+            f.write(prompt.encode())
     parent = ["--parent-self"] if os.environ.get("ROOM_THREAD_ID") else []
     tries = state["readers"].get(n, {}).get("tries", 0) + 1
     request = f"scan-{hashlib.sha1(os.path.abspath(d).encode()).hexdigest()[:12]}-{n}-{tries}"
     thread = room("thread", "spawn", *parent, "--request-id", request, "--visibility", "hidden", "--project", PROJECT, "--machine", "cloud", "--provider", state["provider"],
-                  "--model", state["model"], "--reasoning-level", "low", "--title", f"Workflow scan · reader {n}", "--prompt", prompt)
+                  "--model", state["model"], "--reasoning-level", "low", "--title", f"Workflow scan · reader {n}", *prompt_args)
     state["readers"][n] = {"id": thread["id"], "tries": tries}
     state["all"].append(thread["id"])
 
@@ -82,13 +96,13 @@ def wait(d, limit=540):
             if " | " in output or r["tries"] >= 2:
                 r["output"] = output
             else:
-                subprocess.run(["room-cli", "thread", "archive", r["id"]], capture_output=True)
+                cli("thread", "archive", r["id"])
                 start(d, state, n)
         save(d, state)
         done = sum("output" in r for r in state["readers"].values())
         report(d, state, "patterns" if done == len(state["readers"]) else "reading")
         if done == len(state["readers"]):
-            with open(os.path.join(d, "lines.txt"), "w") as f:
+            with open(os.path.join(d, "lines.txt"), "w", encoding="utf-8") as f:
                 f.write("\n\n".join(r["output"] for r in state["readers"].values() if r["output"]))
             failed = [n for n, r in state["readers"].items() if not r["output"]]
             return print("done" + (f", no output from readers {', '.join(failed)}" if failed else ""))
@@ -99,7 +113,7 @@ def wait(d, limit=540):
 
 def archive(d):
     for thread_id in load(d)["all"]:
-        subprocess.run(["room-cli", "thread", "archive", thread_id], capture_output=True)
+        cli("thread", "archive", thread_id)
 
 
 if __name__ == "__main__":

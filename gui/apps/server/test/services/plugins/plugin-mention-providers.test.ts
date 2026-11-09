@@ -446,7 +446,7 @@ describe("plugin mention providers (bb.ui.registerMentionProvider)", () => {
     ]);
   });
 
-  it("resolves plugin mentions when a queued message dispatches on the idle-provider fast path", async () => {
+  it("resolves plugin mentions when a queued message dispatches on an idle thread", async () => {
     const { thread } = seedWarmIdleThreadFixture(harness, 5);
     const queued = seedQueuedMessage(harness.deps, {
       threadId: thread.id,

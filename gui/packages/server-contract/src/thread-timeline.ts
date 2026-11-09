@@ -200,6 +200,10 @@ export const timelineNonOperationSystemRowSchema =
         at: z.number(),
       })
       .optional(),
+    /** The thread then continued on another account of the same agent: `from` hit the limit, `to` took over. */
+    planLimitAccountSwitch: z
+      .object({ provider: z.string(), from: z.string(), to: z.string() })
+      .optional(),
   });
 export type TimelineNonOperationSystemRow = z.infer<
   typeof timelineNonOperationSystemRowSchema

@@ -3,7 +3,11 @@ import { dirname, join } from "node:path";
 
 const BUNDLED_CLI_TARGET = /\/node_modules\/bb-app\/host-daemon\/dist\/[^/]+$/;
 const SHIM_MARKER = "#!/bin/sh\n# Managed by Cloudroom";
-const SHIM_HEAD = `${SHIM_MARKER}, which rewrites it on launch. Delete this line to keep your own edits.\nELECTRON_RUN_AS_NODE=1 exec `;
+// Agent sandboxes often hide FUSE (#1091), so run the bundled CLI Cloudroom
+// puts in ROOM_CLI before mounting the AppImage (the CLI's own re-exec rule).
+const SHIM_HEAD = `${SHIM_MARKER}, which rewrites it on launch. Delete this line to keep your own edits.
+[ "$ROOM_CLI_REEXEC" != 1 ] && [ -f "$ROOM_CLI" ] && [ -x "$ROOM_CLI" ] && ROOM_CLI_REEXEC=1 exec "$ROOM_CLI" "$@"
+ELECTRON_RUN_AS_NODE=1 exec `;
 const SHIM_TAIL = ` --input-type=module --eval 'if (process.argv.at(-1) === "--no-sandbox") process.argv.pop(); process.argv[1] = process.env.APPDIR + "/resources/app.asar.unpacked/node_modules/bb-app/host-daemon/dist/room-cli"; await import(process.getBuiltinModule("node:url").pathToFileURL(process.argv[1]).href);' -- room-cli "$@" --no-sandbox\n`;
 
 export type RoomCliShimResult =

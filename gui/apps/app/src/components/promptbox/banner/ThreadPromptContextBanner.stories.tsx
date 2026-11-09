@@ -11,7 +11,6 @@ import {
   type ThreadPromptArchivedSection,
   type ThreadPromptContextBannerExpandedSection,
   type ThreadPromptEnvironmentGoneSection,
-  type ThreadPromptParentThreadSection,
 } from "@/components/promptbox/banner/ThreadPromptContextBanner";
 import {
   selectWorkspaceChangedFilesSection,
@@ -338,24 +337,6 @@ const featureBranchMergeBase: ContextBannerMergeBaseConfig = {
   onChange: noop,
 };
 
-const parentThreadFixture: ThreadPromptParentThreadSection = {
-  parentThreadTitle: "Parent thread",
-  href: "/projects/proj-1/threads/thr_parent_demo",
-  relationship: "parent",
-};
-
-const forkedFromFixture: ThreadPromptParentThreadSection = {
-  parentThreadTitle: "Investigate flaky test",
-  href: "/projects/proj-1/threads/thr_source_demo",
-  relationship: "fork",
-};
-
-const sideChatFromFixture: ThreadPromptParentThreadSection = {
-  parentThreadTitle: "Investigate flaky test",
-  href: "/projects/proj-1/threads/thr_source_demo",
-  relationship: "side-chat",
-};
-
 function buildPullRequestFixture(
   overrides: Partial<ThreadPullRequest> = {},
 ): ThreadPullRequest {
@@ -563,7 +544,6 @@ interface RowConfig {
   mergeBase?: ContextBannerMergeBaseConfig | null;
   archived?: ThreadPromptArchivedSection | null;
   environmentGone?: ThreadPromptEnvironmentGoneSection | null;
-  parentThread?: ThreadPromptParentThreadSection | null;
   pullRequest?: ThreadPullRequest | null;
   pullRequestActions?: boolean;
   pullRequestMergeMethod?: PullRequestMergeMethod;
@@ -575,7 +555,6 @@ function ContextBannerPreview({
   mergeBase = featureBranchMergeBase,
   archived = null,
   environmentGone = null,
-  parentThread = null,
   pullRequest = null,
   pullRequestActions = false,
   pullRequestMergeMethod = "merge",
@@ -601,7 +580,6 @@ function ContextBannerPreview({
         gitSectionPending={false}
         archivedSection={archived}
         environmentGoneSection={environmentGone}
-        parentThreadSection={parentThread}
         pullRequestSection={
           pullRequest
             ? {
@@ -661,16 +639,6 @@ export function Overview() {
         <Row archived={archivedFixture} mergeBase={null} />
       </StoryRow>
       <StoryRow
-        label="archived + child thread"
-        hint="archived row plus parent context; action is hidden because archived is not the only segment"
-      >
-        <Row
-          archived={archivedFixture}
-          parentThread={parentThreadFixture}
-          mergeBase={null}
-        />
-      </StoryRow>
-      <StoryRow
         label="archived thread (with other context, all suppressed)"
         hint="archived takes precedence — git/child work are hidden, so the unarchive action remains available"
       >
@@ -687,16 +655,6 @@ export function Overview() {
         <Row environmentGone={destroyedEnvironmentFixture} mergeBase={null} />
       </StoryRow>
       <StoryRow
-        label="environment archived + child thread"
-        hint="archived-environment row plus parent context"
-      >
-        <Row
-          environmentGone={destroyedEnvironmentFixture}
-          parentThread={parentThreadFixture}
-          mergeBase={null}
-        />
-      </StoryRow>
-      <StoryRow
         label="environment archived (with other context, all suppressed)"
         hint="archived environment takes precedence — git/child work are hidden"
       >
@@ -704,37 +662,6 @@ export function Overview() {
           environmentGone={destroyedEnvironmentFixture}
           section={uncommittedSection}
           mergeBase={null}
-        />
-      </StoryRow>
-      <StoryRow label="child thread (alone)" hint="inline parent link">
-        <Row parentThread={parentThreadFixture} mergeBase={null} />
-      </StoryRow>
-      <StoryRow
-        label="forked thread (alone)"
-        hint={'renders "Forked from …" instead of "Parent …"'}
-      >
-        <Row parentThread={forkedFromFixture} mergeBase={null} />
-      </StoryRow>
-      <StoryRow
-        label="side-chat thread (alone)"
-        hint={'renders "Side chat of …"'}
-      >
-        <Row parentThread={sideChatFromFixture} mergeBase={null} />
-      </StoryRow>
-      <StoryRow
-        label="child thread + uncommitted"
-        hint="with other context, the parent-thread segment collapses to an icon-only toggle"
-      >
-        <Row section={uncommittedSection} parentThread={parentThreadFixture} />
-      </StoryRow>
-      <StoryRow
-        label="metadata + pull request + git"
-        hint="relationship metadata renders first, then GitHub PR, then git status"
-      >
-        <Row
-          parentThread={forkedFromFixture}
-          pullRequest={pullRequestFixture}
-          section={uncommittedSection}
         />
       </StoryRow>
       {pullRequestStateRows.map(({ label, hint, pullRequest }) => (

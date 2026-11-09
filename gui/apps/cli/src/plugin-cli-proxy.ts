@@ -249,8 +249,10 @@ export async function findDisabledPluginForCommand(
   }
 }
 
+// Servers before the Loops rename (ADR 0259) contribute `automation`; newer ones `loop`.
 const PLUGIN_COMMAND_ALIASES: Readonly<Record<string, string>> = {
   automation: "loop",
+  loop: "automation",
 };
 
 export function findPluginCliCommand(

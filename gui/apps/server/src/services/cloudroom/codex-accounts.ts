@@ -2,6 +2,8 @@ import { randomUUID } from "node:crypto";
 import { readFile, rename, rm, writeFile } from "node:fs/promises";
 import { z } from "zod";
 import type { HostDaemonContributedEnvEntry } from "@cloudroom/host-daemon-contract";
+import { COMPUTER_TITLE } from "@cloudroom/domain/computer-name";
+import { forgetCloudAccountSwitch, noteCloudAccountSwitch } from "./account-switches.js";
 
 const CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
 const AUTH = "https://auth.openai.com";
@@ -103,9 +105,23 @@ export class CodexAccounts {
     if (input.action === "start") return this.start();
     if (input.action === "poll") return this.poll(input.sessionId);
     if (input.action === "list") return this.view(await this.load());
-    const before = (await this.load().catch(() => null))?.selected ?? null;
-    const state = await this.save(input);
-    if (state.selected !== before) this.switched();
+    const previous = await this.load().catch(() => null);
+    const before = previous?.selected ?? null;
+    const name = (from: Remote | null, id: string | null) => {
+      const account = from?.accounts.find(each => each.id === id);
+      return id === null ? `This ${COMPUTER_TITLE}` : account?.name ?? account?.email ?? "another account";
+    };
+    // Noted before the website applies it: it resumes Cloud sessions as soon as it has the new login.
+    const picked = input.action === "use" && input.id !== before;
+    if (picked) noteCloudAccountSwitch("codex", { from: name(previous, before), to: name(previous, input.id) });
+    const state = await this.save(input).catch((error: unknown) => {
+      if (picked) forgetCloudAccountSwitch("codex");
+      throw error;
+    });
+    if (state.selected !== before) {
+      if (!picked) noteCloudAccountSwitch("codex", { from: name(previous, before), to: name(state, state.selected) });
+      this.switched();
+    } else if (picked) forgetCloudAccountSwitch("codex");
     return this.view(state);
   }
 

@@ -5,8 +5,9 @@ import {
 } from "./machine-enrollment.js";
 import { Command } from "commander";
 import { jsonValueSchema, type Host, type JsonValue } from "@cloudroom/domain";
+import type { CloudVps } from "@cloudroom/sdk/node";
 import { action, CliExitError } from "../action.js";
-import { createCliBbSdk } from "../client.js";
+import { CLI_READ_TIMEOUT_MS, createCliBbSdk } from "../client.js";
 import { columnWidths, printBorderlessTable } from "../table.js";
 import { outputJson } from "./helpers.js";
 import { confirmDestructiveAction } from "./helpers.js";
@@ -41,6 +42,8 @@ interface MachineProviderInstallOptions extends MachineListCommandOptions {
 
 const MACHINE_LIFECYCLE_TIMEOUT_MS = 15 * 60_000;
 const MACHINE_LIFECYCLE_POLL_MS = 500;
+// Longer than the website's 5 s VPS health probe, so an unresponsive VPS still lists, as offline.
+const VPS_HINT_TIMEOUT_MS = 10_000;
 
 async function waitForMachineLifecycle(args: {
   host: Host;
@@ -118,7 +121,7 @@ export function resolveMachineId(
     );
   }
   throw new Error(
-    `Machine '${trimmedTarget}' was not found. Available machines: ${describeMachines(hosts)}.`,
+    `Machine '${trimmedTarget}' was not found. Available machines: ${describeMachines(hosts)}.${trimmedTarget.toLowerCase() === "vps" ? " To start a thread on your VPS, use VPS in the app's new-thread picker for now." : ""}`,
   );
 }
 
@@ -178,7 +181,10 @@ export async function resolveMachineHostId(args: {
   serverUrl: string;
   target: string;
 }): Promise<string> {
-  const hosts = await createCliBbSdk(args.serverUrl).hosts.list({
+  const hosts = await createCliBbSdk(
+    args.serverUrl,
+    CLI_READ_TIMEOUT_MS,
+  ).hosts.list({
     includeCreating: true,
   });
   const hostId = resolveMachineId(hosts, args.target);
@@ -189,6 +195,45 @@ export async function resolveMachineHostId(args: {
     throw new Error(`Machine '${args.target.trim()}' is disconnected.`);
   }
   return hostId;
+}
+
+/** A native machine, or the account's connected VPS (ADR 0319) when `target` names it (`vps`, its hostname or short
+ *  name) and no native machine does, so native machines keep their names. */
+async function resolveMachineOrVps(args: {
+  serverUrl: string;
+  target: string;
+}): Promise<
+  { hostId: string; vps?: never } | { hostId?: never; vps: CloudVps }
+> {
+  const sdk = createCliBbSdk(args.serverUrl, CLI_READ_TIMEOUT_MS);
+  const target = args.target.trim();
+  const hosts = await sdk.hosts.list({ includeCreating: true });
+  const native = () => ({ hostId: resolveMachineId(hosts, target) });
+  if (hosts.some((host) => host.id === target || host.name === target))
+    return native();
+  const wanted = target.toLowerCase();
+  const asked = wanted === "vps";
+  const vps = await sdk.cloudroom.vps().catch((error: unknown) => {
+    if (asked) throw error;
+    return null;
+  });
+  if (!vps?.connected) {
+    if (asked)
+      throw new Error(
+        "No VPS is connected to this account. Connect one in Settings.",
+      );
+    return native();
+  }
+  const names = ["vps", vps.name, vps.name?.split(".")[0]];
+  return names.some((name) => name?.toLowerCase() === wanted)
+    ? { vps }
+    : native();
+}
+
+function vpsStatus(vps: CloudVps): string {
+  if (!vps.health) return "offline";
+  if (vps.busy) return `busy: ${vps.busy}`;
+  return `online, ${vps.health.running} ${vps.health.running === 1 ? "agent" : "agents"} running`;
 }
 
 export function registerMachineCommands(
@@ -339,16 +384,26 @@ export function registerMachineCommands(
     .option("--json", "Print machine-readable JSON output")
     .action(
       action(async (opts: MachineEnumerationOptions) => {
-        const hosts = selectMachines(
-          await createCliBbSdk(getUrl()).hosts.list({ includeCreating: true }),
-          opts.all ? "all" : "persistent",
-        );
+        // The VPS lives on the website, not in the machine list; JSON keeps its list of native machines.
+        // Its status is a hint here, so a slow website holds up the list for VPS_HINT_TIMEOUT_MS at most.
+        const [all, vps] = await Promise.all([
+          createCliBbSdk(getUrl(), CLI_READ_TIMEOUT_MS).hosts.list({
+            includeCreating: true,
+          }),
+          opts.json
+            ? null
+            : createCliBbSdk(getUrl(), VPS_HINT_TIMEOUT_MS)
+                .cloudroom.vps()
+                .catch(() => null),
+        ]);
+        const hosts = selectMachines(all, opts.all ? "all" : "persistent");
         if (outputJson(opts, hosts)) return;
-        if (hosts.length === 0) {
-          console.log("No machines found");
-          return;
-        }
-        printMachineTable(hosts);
+        if (hosts.length > 0) printMachineTable(hosts);
+        else if (!vps?.connected) console.log("No machines found");
+        if (vps?.connected)
+          console.log(
+            `VPS: ${vps.name ?? "your VPS"} (${vpsStatus(vps)}). Start threads on it from the app's new-thread picker; \`room-cli machine show vps\` shows it.`,
+          );
       }),
     );
 
@@ -358,11 +413,15 @@ export function registerMachineCommands(
     .option("--json", "Print machine-readable JSON output")
     .action(
       action(async (target: string, opts: MachineListCommandOptions) => {
-        const sdk = createCliBbSdk(getUrl());
-        const hostId = await resolveMachineHostId({
+        const sdk = createCliBbSdk(getUrl(), CLI_READ_TIMEOUT_MS);
+        const { hostId, vps } = await resolveMachineOrVps({
           serverUrl: getUrl(),
           target,
         });
+        if (vps) {
+          if (!outputJson(opts, vps)) console.log(JSON.stringify(vps, null, 2));
+          return;
+        }
         const host = await sdk.hosts.get({ hostId });
         if (outputJson(opts, host)) return;
         console.log(JSON.stringify(host, null, 2));
@@ -552,7 +611,10 @@ export function registerMachineCommands(
   providerCli
     .command("install <id-or-name> <provider>")
     .description("Install or update a registered provider CLI by provider ID")
-    .option("--action <action>", "Action: install or update", "install")
+    .option(
+      "--action <action>",
+      "Action: install or update (default: the one status offers)",
+    )
     .option("--json", "Print machine-readable JSON output")
     .action(
       action(
@@ -561,7 +623,11 @@ export function registerMachineCommands(
           provider: string,
           opts: MachineProviderInstallOptions,
         ) => {
-          if (opts.action !== "install" && opts.action !== "update") {
+          if (
+            opts.action !== undefined &&
+            opts.action !== "install" &&
+            opts.action !== "update"
+          ) {
             throw new Error("--action must be install or update.");
           }
           const sdk = createCliBbSdk(getUrl());
@@ -569,10 +635,20 @@ export function registerMachineCommands(
             serverUrl: getUrl(),
             target,
           });
+          const providerId = parseProviderCliKey(provider);
+          // Status offers Pi's update as `npm install -g …`: follow its action
+          // instead of assuming install (#849). One failing provider fails the
+          // whole status, so fall back to install rather than block this one.
+          const actionKind =
+            opts.action ??
+            (await sdk.hosts.providerCliStatus({ hostId }).catch(() => null))?.[
+              providerId
+            ]?.installAction?.kind ??
+            "install";
           const events = await sdk.hosts.installProviderCli({
             hostId,
-            provider: parseProviderCliKey(provider),
-            actionKind: opts.action,
+            provider: providerId,
+            actionKind,
           });
           if (outputJson(opts, events)) return;
           for (const event of events) console.log(JSON.stringify(event));

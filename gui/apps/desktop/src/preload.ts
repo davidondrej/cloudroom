@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer, webFrame } from "electron";
-import { appCommandIdSchema } from "@cloudroom/domain";
+import { appCommandIdSchema, appShortcutInputSchema } from "@cloudroom/domain";
 import {
   desktopBrowserImportOutcomeSchema,
   desktopBrowserImportSourceSchema,
@@ -45,6 +45,7 @@ import {
   BB_DESKTOP_GET_INFO_CHANNEL,
   BB_DESKTOP_INFO_CHANGED_CHANNEL,
   BB_DESKTOP_INSTALL_UPDATE_CHANNEL,
+  BB_DESKTOP_MOVE_TO_APPLICATIONS_CHANNEL,
   BB_DESKTOP_OPEN_EXTERNAL_URL_CHANNEL,
   BB_DESKTOP_SET_THEME_CHANNEL,
   BB_DESKTOP_FOCUS_WINDOW_CHANNEL,
@@ -411,6 +412,11 @@ const bbDesktopApi: BbDesktopApi = {
   installUpdate() {
     return invokeInstallUpdate();
   },
+  moveToApplications() {
+    return ipcRenderer
+      .invoke(BB_DESKTOP_MOVE_TO_APPLICATIONS_CHANNEL)
+      .then((moved: unknown) => moved === true, () => false);
+  },
   onChange(listener: BbDesktopInfoChangeHandler): BbDesktopInfoUnsubscribe {
     return addListener(listeners, listener);
   },
@@ -497,7 +503,7 @@ ipcRenderer.on(BB_DESKTOP_OPEN_NEW_TAB_CHANNEL, () => {
 
 forwardParsed(
   BB_DESKTOP_APP_COMMAND_CHANNEL,
-  appCommandIdSchema,
+  z.union([appCommandIdSchema, appShortcutInputSchema]),
   appCommandListeners,
 );
 

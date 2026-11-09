@@ -8,7 +8,7 @@ Stop your computer from going to sleep while Cloudroom runs long agent work. Ena
 
 ## How it works
 
-The plugin runs on each selected host and keeps the Mac and its display awake while Cloudroom is running. On power, it also blocks system sleep. When Cloudroom stops, this stops with it. Closing the lid or choosing Sleep still puts the Mac to sleep. On Linux, it uses `systemd-inhibit` to block idle and system sleep.
+The plugin runs on each selected host and keeps the Mac and its display awake while Cloudroom is running. On power, it also blocks system sleep. When Cloudroom stops, this stops with it. Closing the lid or choosing Sleep still puts the Mac to sleep. On GNOME, it uses `gnome-session-inhibit` to stop idle sleep and keep the display on, and closing the lid or choosing Suspend still works. On other Linux desktops, it uses `systemd-inhibit` to block idle and system sleep.
 
 Use the settings page or the CLI to manage the plugin:
 

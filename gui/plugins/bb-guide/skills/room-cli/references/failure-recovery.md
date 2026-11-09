@@ -27,8 +27,9 @@ sendAt?, reason? })`.
   thread, treat that as intentional unless they ask you to continue.
 - Use `room-cli thread stop <id>` when a thread is stuck or no longer needed.
 - `room-cli thread stop <id>` also releases an idle or stuck agent runtime and
-  cancels pending automatic retries. The command is idempotent and preserves
-  thread history.
+  cancels pending automatic retries. On an idle Local thread it then also ends
+  what the agent left running, as archive does; stopping a running turn never
+  does. The command is idempotent and preserves thread history.
 - Use `room-cli thread compact <id>` to send the built-in `/compact` command to an idle or errored thread. Completion or failure appears in the timeline. Provider support varies; consult its skill and reported capabilities.
 - Use `room-cli thread clear <id>` on an idle or failed thread to reset its active
   timeline and model context in place while keeping the same Cloudroom thread,

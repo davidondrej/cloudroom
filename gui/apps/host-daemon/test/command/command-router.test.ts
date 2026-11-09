@@ -378,6 +378,61 @@ describe("CommandRouter", () => {
     );
   });
 
+  it("orders turn.submit and goal commands after the thread's process cleanup in another environment", async () => {
+    const harness = createHarness({ workspacePath: "/tmp/env-router" });
+    const cleanupEntered = createDeferredPromise<void>();
+    const releaseCleanup = createDeferredPromise<void>();
+    vi.spyOn(harness.manager, "reapIdleProviderSessions").mockImplementation(
+      async () => {
+        cleanupEntered.resolve();
+        await releaseCleanup.promise;
+        return { reapedSessions: [] };
+      },
+    );
+    const resume = vi.spyOn(
+      harness.manager,
+      "releaseThreadFromOtherEnvironments",
+    );
+    const router = createRouter(harness);
+    const cleanupTask = runRouterCommand({
+      command: {
+        type: "thread.processes.stop",
+        environmentId: "env-router-old",
+        threadId: "thread-router",
+      },
+      requestId: "cleanup-before-turn",
+      router,
+    });
+    await cleanupEntered.promise;
+    const submit = createTurnSubmitCommand();
+    const turnTask = runRouterCommand({
+      command: submit,
+      requestId: "turn-behind-cleanup",
+      router,
+    });
+    const goalTask = runRouterCommand({
+      command: {
+        type: "thread.goal.set",
+        environmentId: submit.environmentId,
+        threadId: submit.threadId,
+        objective: "ship it",
+        options: submit.options,
+        bridgeLaunch: submit.bridgeLaunch,
+        resumeContext: submit.resumeContext,
+      },
+      requestId: "goal-behind-cleanup",
+      router,
+    });
+    await flushAsyncWork();
+
+    expect(resume).not.toHaveBeenCalled();
+    releaseCleanup.resolve();
+    expect((await cleanupTask).ok).toBe(true);
+    expect((await turnTask).ok).toBe(true);
+    await goalTask;
+    expect(resume).toHaveBeenCalledTimes(2);
+  });
+
   it("waits for an old-environment turn before resuming the moved thread", async () => {
     const harness = createHarness({ workspacePath: "/tmp/env-router" });
     const oldHarness = createFakeRuntime();

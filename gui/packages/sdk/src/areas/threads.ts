@@ -20,6 +20,8 @@ import {
 import type {
   MoveThreadRequest,
   MoveThreadResponse,
+  MoveThreadToWorktreeRequest,
+  MoveThreadToWorktreeResponse,
   CreateQueuedMessageRequest,
   CreateThreadRequest,
   QueuedMessageListQuery,
@@ -83,6 +85,7 @@ import { signalRequestArgs, type CreateSdkAreaArgs } from "./common.js";
 
 export const DEFAULT_THREAD_WAIT_TIMEOUT_MS = 20 * 60 * 1000;
 export const DEFAULT_THREAD_WAIT_POLL_INTERVAL_MS = 250;
+const THREAD_WAIT_QUEUED_IDLE_GRACE_MS = 5_000;
 
 export interface ThreadListArgs {
   archived?: boolean;
@@ -296,11 +299,18 @@ export interface ThreadRetryArgs {
   sendAt?: number;
   /** Why the turn is being retried, shown verbatim on the queued row. */
   reason?: string;
+  /** The retry continues on another account of the same agent; the plan-limit row then says so in one line. */
+  accountSwitch?: RetryTurnRequest["accountSwitch"];
 }
 
 export interface ThreadActionArgs {
   signal?: AbortSignal;
   threadId: string;
+}
+
+export interface ThreadStopArgs extends ThreadActionArgs {
+  /** `room-cli thread stop`: an idle thread's agent also ends what it left running. */
+  endProcesses?: boolean;
 }
 
 export interface ThreadArchiveAllArgs extends ThreadActionArgs {
@@ -331,6 +341,10 @@ export interface ThreadPinOrderArgs extends ReorderPinnedThreadRequest {
 }
 
 export interface ThreadMoveArgs extends MoveThreadRequest {
+  threadId: string;
+}
+
+export interface ThreadWorktreeArgs extends MoveThreadToWorktreeRequest {
   threadId: string;
 }
 
@@ -602,6 +616,8 @@ export interface ThreadsArea {
   paneAction(args: ThreadPaneActionArgs): Promise<ThreadPaneActionResult>;
   output(args: ThreadOutputArgs): Promise<ThreadOutputResponse>;
   move(args: ThreadMoveArgs): Promise<MoveThreadResponse>;
+  /** Moves a Local thread into a new managed worktree when its turn ends. */
+  worktree(args: ThreadWorktreeArgs): Promise<MoveThreadToWorktreeResponse>;
   pin(args: ThreadActionArgs): Promise<ThreadMutationResult>;
   promptHistory(
     args: ThreadPromptHistoryArgs,
@@ -620,7 +636,7 @@ export interface ThreadsArea {
   search(args: ThreadSearchArgs): Promise<ThreadSearchResult>;
   send(args: ThreadSendArgs): Promise<ThreadSendResult>;
   spawn(args: ThreadSpawnArgs): Promise<ThreadSpawnResult>;
-  stop(args: ThreadActionArgs): Promise<ThreadStopResult>;
+  stop(args: ThreadStopArgs): Promise<ThreadStopResult>;
   tabs: ThreadTabsArea;
   context(args: ThreadStatusArgs): Promise<ThreadContextResult>;
   timeline(args: ThreadTimelineArgs): Promise<ThreadTimelineResult>;
@@ -710,6 +726,7 @@ function retryJson(args: ThreadRetryArgs): RetryTurnRequest {
     turnRequestId: args.turnRequestId ?? null,
     sendAt: args.sendAt ?? null,
     reason: args.reason ?? DEFAULT_TURN_RETRY_REASON,
+    ...(args.accountSwitch ? { accountSwitch: args.accountSwitch } : {}),
   };
 }
 
@@ -814,6 +831,41 @@ function timelineQuery(args: ThreadTimelineArgs): ThreadTimelineQuery {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// After an event-loop stall, Node's 5 s keep-alive timer can close a socket
+// before the server reads the poll already sent on it, so a wait read sees a
+// reset while the server is fine (#1046). Wait reads are GETs, safe to repeat,
+// so retry a few resets in a row before the deadline; all else throws as before.
+const THREAD_WAIT_RESET_RETRIES = 3;
+const CONNECTION_RESET_CODES = new Set([
+  "ECONNRESET",
+  "EPIPE",
+  "UND_ERR_SOCKET",
+]);
+
+async function retryConnectionReset<T>(
+  deadline: number,
+  read: () => Promise<T>,
+): Promise<T> {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await read();
+    } catch (error) {
+      const code =
+        error instanceof TypeError
+          ? (error.cause as { code?: unknown } | null | undefined)?.code
+          : undefined;
+      if (
+        attempt >= THREAD_WAIT_RESET_RETRIES ||
+        Date.now() >= deadline ||
+        typeof code !== "string" ||
+        !CONNECTION_RESET_CODES.has(code)
+      ) {
+        throw error;
+      }
+    }
+  }
 }
 
 function resolveThreadWaitTarget(args: ThreadWaitArgs): ThreadWaitTarget {
@@ -1251,6 +1303,14 @@ export function createThreadsArea(args: CreateSdkAreaArgs): ThreadsArea {
         }),
       );
     },
+    async worktree(input) {
+      return transport.readJson(
+        transport.api.v1.threads[":id"].worktree.$post({
+          param: { id: input.threadId },
+          json: { carry: input.carry ?? [] },
+        }),
+      );
+    },
     async pin(input) {
       return transport.readJson(
         transport.api.v1.threads[":id"].pin.$post({
@@ -1324,6 +1384,7 @@ export function createThreadsArea(args: CreateSdkAreaArgs): ThreadsArea {
       const result: { cancelledRetries?: number } = await transport.readJson(
         transport.api.v1.threads[":id"].stop.$post({
           param: { id: input.threadId },
+          ...(input.endProcesses ? { query: { endProcesses: "true" } } : {}),
         }),
       );
       return { ok: true, cancelledRetries: result.cancelledRetries ?? 0 };
@@ -1472,13 +1533,30 @@ export function createThreadsArea(args: CreateSdkAreaArgs): ThreadsArea {
       const { pollIntervalMs, target, timeoutMs } =
         validateThreadWaitArgs(input);
       const deadline = Date.now() + timeoutMs;
+      let queuedIdleUntil: number | null = null;
       while (true) {
         if (target.kind === "status") {
-          const thread = await getThread({
-            signal: input.signal,
-            threadId: input.threadId,
-          });
-          if (thread.status === target.status) {
+          const thread = await retryConnectionReset(deadline, () =>
+            getThread({ signal: input.signal, threadId: input.threadId }),
+          );
+          // A turn ends at idle before its queued follow-up dispatches (#1111),
+          // so idle with queued or dispatching messages is briefly not final.
+          // Bounded, so a scheduled or failed row delays the match by at most
+          // the grace and never past the deadline.
+          const now = Date.now();
+          const settling =
+            target.status === "idle" &&
+            thread.status === "idle" &&
+            (thread.queuedMessageCount > 0 ||
+              (thread.dispatchingMessageCount ?? 0) > 0);
+          queuedIdleUntil = settling
+            ? (queuedIdleUntil ?? now + THREAD_WAIT_QUEUED_IDLE_GRACE_MS)
+            : null;
+          if (
+            thread.status === target.status &&
+            (queuedIdleUntil === null ||
+              now >= Math.min(queuedIdleUntil, deadline))
+          ) {
             return {
               matched: true,
               target,
@@ -1493,24 +1571,33 @@ export function createThreadsArea(args: CreateSdkAreaArgs): ThreadsArea {
               threadId: input.threadId,
             });
           }
-          if (Date.now() >= deadline) {
+          if (now >= deadline) {
             throw new ThreadWaitTimeoutError({
               target,
               threadId: input.threadId,
             });
           }
-          await sleep(pollIntervalMs);
+          await sleep(
+            Math.min(
+              pollIntervalMs,
+              deadline - now,
+              (queuedIdleUntil ?? deadline) - now,
+            ),
+          );
           continue;
         }
 
-        const remainingMs = Math.max(0, deadline - Date.now());
-        const waitMs = Math.floor(Math.min(remainingMs, 30_000));
-        const event = await events.wait({
-          signal: input.signal,
-          threadId: input.threadId,
-          type: target.eventType,
-          waitMs: String(waitMs),
-        });
+        // Each attempt asks only for the time left, so a retry ends on time.
+        const event = await retryConnectionReset(deadline, () =>
+          events.wait({
+            signal: input.signal,
+            threadId: input.threadId,
+            type: target.eventType,
+            waitMs: String(
+              Math.floor(Math.min(Math.max(0, deadline - Date.now()), 30_000)),
+            ),
+          }),
+        );
         if (event !== null) {
           return {
             event,

@@ -1,4 +1,4 @@
-//! `room-cli mac pull` and `push`. Up to 16 MiB still travels in one Mac job, as before. Bigger copies, up to
+//! `room-cli mac pull` and `push`. Up to 15 MiB still travels in one Mac job. Bigger copies, up to
 //! 2 GiB, go in 8 MiB pieces through the same jobs: staged in a Mac temp folder, then checked with SHA-256.
 //! Every piece of a copy runs the same command, with its number in stdin, so the Mac helper's Jev check
 //! (ADR 0224) reviews one command per copy, not one per piece.
@@ -19,6 +19,8 @@ const MAX: u64 = 2048 * MIB;
 const TRIES: u32 = 3;
 /// The pack job's exit code when its archive is too big for one job and waits in a Mac temp folder.
 const STAGED: i32 = 75;
+/// One job's biggest pull, leaving room under its 16 MiB output for that text.
+const SMALL: u64 = LIMIT as u64 - MIB;
 /// SHA-256 of stdin on macOS and Linux.
 const SHA: &str = "{ sha256sum 2>/dev/null || shasum -a 256; } | cut -c1-64";
 /// Read-only Mac access may write in /tmp.
@@ -44,30 +46,39 @@ pub(super) async fn pull(socket: &str, source: &str, target: &str) -> io::Result
     // `head` stops the archive one byte past the limit, so an oversized pull never fills the Mac's disk. A source
     // like `.` or `dir/..` becomes the folder it names, so the archive always holds one named entry; its name
     // comes back on stderr for "to".
+    // A pull's data follows its own line with a fresh random mark: a login shell's startup text can come first, or
+    // a logout's after (#1012). The Mac temp folder is named after the same mark, so cleanup never trusts the output.
+    let mut random = [0; 8];
+    fs::File::open("/dev/urandom")?.read_exact(&mut random)?;
+    let mark = format!("cloudroom-copy-{}", hex(&random));
+    let dir = format!("/tmp/{mark}");
     let pack = format!(
-        "p={}; {RESOLVE} t=$({MKTEMP}) || exit 1; cd -- \"$(dirname -- \"$p\")\" || {{ rm -rf \"$t\"; exit 1; }}; \
+        "p={}; {RESOLVE} t={dir}; mkdir -m 700 \"$t\" || exit 1; cd -- \"$(dirname -- \"$p\")\" || {{ rm -rf \"$t\"; exit 1; }}; \
          {{ COPYFILE_DISABLE=1 tar --no-xattrs -czf - -- \"$n\" || touch \"$t/failed\"; }} \
          | head -c {} > \"$t/a.tgz\"; s=$(wc -c < \"$t/a.tgz\" | tr -d ' '); \
          if [ \"$s\" -gt {MAX} ]; then rm -rf \"$t\"; echo 'The packed files are over the 2 GiB limit' >&2; exit 1; fi; \
          if [ -e \"$t/failed\" ]; then rm -rf \"$t\"; exit 1; fi; printf '%s\\n' \"$n\" >&2; \
-         if [ \"$s\" -le {LIMIT} ]; then cat \"$t/a.tgz\"; rm -rf \"$t\"; exit 0; fi; \
-         printf '%s\\n%s\\n%s' \"$t\" \"$s\" \"$(cat \"$t/a.tgz\" | {SHA})\"; exit {STAGED}",
+         if [ \"$s\" -le {SMALL} ]; then printf '\\n%s\\n%s\\n' {mark} \"$s\"; cat \"$t/a.tgz\"; rm -rf \"$t\"; exit 0; fi; \
+         printf '\\n%s\\n%s %s\\n' {mark} \"$s\" \"$(cat \"$t/a.tgz\" | {SHA})\"; exit {STAGED}",
         quote(source),
         MAX + 1
     );
     let archive = Temp::file("pull")?;
     let name = match run(socket, pack, &[], false, Value::Null).await? {
         (Some(0), stdout, stderr) => {
-            fs::write(&archive.0, stdout)?;
+            let (size, data) = framed(&stdout, &mark)?;
+            let Some(data) = size.parse().ok().and_then(|size| data.get(..size)) else {
+                return Err(invalid());
+            };
+            fs::write(&archive.0, data)?;
             stderr
         }
         (Some(STAGED), stdout, stderr) => {
-            let text = String::from_utf8_lossy(&stdout);
-            let &[dir, size, sha] = &text.split('\n').collect::<Vec<_>>()[..] else {
-                return Err(io::Error::other("invalid Mac archive"));
+            let fetched = match framed(&stdout, &mark).map(|(head, _)| head.split_once(' ')) {
+                Ok(Some((size, sha))) => fetch(socket, &dir, &mark, size, sha, &archive.0).await,
+                Ok(None) => Err(invalid()),
+                Err(error) => Err(error),
             };
-            let dir = temp_dir(dir)?;
-            let fetched = fetch(socket, &dir, size, sha, &archive.0).await;
             let _ = job(socket, format!("rm -rf {dir}"), &[], false).await;
             fetched?;
             stderr
@@ -130,7 +141,14 @@ pub(super) async fn pull(socket: &str, source: &str, target: &str) -> io::Result
 }
 
 /// Copies a staged Mac archive into `path` piece by piece, then checks its SHA-256.
-async fn fetch(socket: &str, dir: &str, size: &str, sha: &str, path: &Path) -> io::Result<()> {
+async fn fetch(
+    socket: &str,
+    dir: &str,
+    mark: &str,
+    size: &str,
+    sha: &str,
+    path: &Path,
+) -> io::Result<()> {
     let size: u64 = size
         .parse()
         .map_err(|_| io::Error::other("invalid Mac archive size"))?;
@@ -142,13 +160,13 @@ async fn fetch(socket: &str, dir: &str, size: &str, sha: &str, path: &Path) -> i
     let mut file = fs::File::create(path)?;
     let pieces = size.div_ceil(PIECE);
     let command = format!(
-        "dd if={dir}/a.tgz bs={MIB} count={} skip=$(cat)",
+        "printf '\\n%s\\n\\n' {mark}; dd if={dir}/a.tgz bs={MIB} count={} skip=$(cat)",
         PIECE / MIB
     );
     for i in 0..pieces {
         let skip = (i * (PIECE / MIB)).to_string();
         let want = PIECE.min(size - i * PIECE);
-        let bytes = piece(socket, &command, skip.as_bytes(), Some(want)).await?;
+        let bytes = piece(socket, &command, skip.as_bytes(), Some((mark, want))).await?;
         file.write_all(&bytes)?;
         progress(i, pieces);
     }
@@ -302,21 +320,27 @@ fn failed(stderr: &[u8]) -> io::Error {
 }
 
 /// One piece, tried up to three times. A piece only reads or overwrites its own bytes, so repeating it is safe.
-/// A pulled piece must bring exactly `want` bytes; a pushed piece's output is ignored.
+/// A pulled piece must bring `want` bytes after its `mark`; a pushed piece's output is ignored.
 async fn piece(
     socket: &str,
     command: &str,
     stdin: &[u8],
-    want: Option<u64>,
+    want: Option<(&str, u64)>,
 ) -> io::Result<Vec<u8>> {
     let mut tries = 1;
     loop {
         let error = match (job(socket, command.to_owned(), stdin, false).await, want) {
-            (Ok(bytes), Some(want)) if bytes.len() as u64 != want => io::Error::other(format!(
-                "a piece arrived with {} of {want} bytes",
-                bytes.len()
-            )),
-            (Ok(bytes), _) => return Ok(bytes),
+            (Ok(bytes), Some((mark, want))) => match framed(&bytes, mark) {
+                Ok(("", data)) if data.len() as u64 >= want => {
+                    return Ok(data[..want as usize].to_vec());
+                }
+                Ok((_, data)) => io::Error::other(format!(
+                    "a piece arrived with {} of {want} bytes",
+                    data.len()
+                )),
+                Err(error) => error,
+            },
+            (Ok(bytes), None) => return Ok(bytes),
             (Err(error), _) => error,
         };
         if tries == TRIES {
@@ -337,6 +361,22 @@ fn progress(i: u64, pieces: u64) {
 /// The last line a Mac command printed: a chatty login shell may print before it.
 fn last_line(text: &str) -> &str {
     text.trim().lines().last().unwrap_or_default()
+}
+
+/// After the first line that is exactly `mark`: the next line, then the bytes after it.
+fn framed<'a>(stdout: &'a [u8], mark: &str) -> io::Result<(&'a str, &'a [u8])> {
+    let head = format!("{mark}\n");
+    let start = (0..stdout.len())
+        .find(|&i| (i == 0 || stdout[i - 1] == b'\n') && stdout[i..].starts_with(head.as_bytes()))
+        .ok_or_else(invalid)?;
+    let rest = &stdout[start + head.len()..];
+    let end = rest.iter().position(|&b| b == b'\n').ok_or_else(invalid)?;
+    let line = std::str::from_utf8(&rest[..end]).map_err(|_| invalid())?;
+    Ok((line, &rest[end + 1..]))
+}
+
+fn invalid() -> io::Error {
+    io::Error::other("invalid Mac archive")
 }
 
 /// The Mac temp folder from `MKTEMP`, checked before any `rm -rf`, so cleanup never removes anything else.
@@ -405,5 +445,40 @@ impl Drop for Temp {
             true => fs::remove_dir_all(&self.0),
             false => fs::remove_file(&self.0),
         };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn framed_skips_login_shell_text_and_forged_marks() {
+        let mark = "cloudroom-copy-00ff";
+        for (stdout, want) in [
+            (
+                &b"cloudroom-copy-00ff\n5\ngzip!bye"[..],
+                Some(("5", &b"gzip!bye"[..])),
+            ),
+            (
+                b"Welcome!\r\ncloudroom-copy-00ff\n9 abc\n",
+                Some(("9 abc", &b""[..])),
+            ),
+            // A banner with another copy's mark, or this mark mid-line, is never trusted (#1012).
+            (
+                b"cloudroom-copy-0000\n1 x\nx cloudroom-copy-00ff\n2 y\n",
+                None,
+            ),
+            (b"cloudroom-copy-00ffX\n1\nz", None),
+            // An unterminated banner: every mark is printed after a newline.
+            (
+                b"Welcome\ncloudroom-copy-00ff\n2\nok",
+                Some(("2", &b"ok"[..])),
+            ),
+            (b"Welcomecloudroom-copy-00ff\n2\nok", None),
+            // Bad metadata fails, and a staged pull still removes its Mac folder.
+            (b"cloudroom-copy-00ff\n\xff 1\n", None),
+            (b"no mark", None),
+        ] {
+            assert_eq!(super::framed(stdout, mark).ok(), want);
+        }
     }
 }

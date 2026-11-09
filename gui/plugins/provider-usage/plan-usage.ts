@@ -12,14 +12,19 @@ export interface PlanMeter {
 export interface PlanSummary {
   plan: string;
   period: string;
+  /** When plan credits refill (ADR 20261108-142517); null from older websites, whose rows show credits left instead. */
+  resetsAt: string | null;
+  /** Plan credits left, for the line under the meters, e.g. "478,265 credits left"; null without `resetsAt`. */
+  left: string | null;
   meters: PlanMeter[];
 }
 
-// Cloud Credits in the rolling 30 days (ADR 0307); null credits while metering is stale.
+// Cloud Credits this credit period (ADR 20261108-142517); null credits while metering is stale.
 const creditsSchema = z.object({
   plan: z.string(),
   credits: z.nullable(z.number()),
   creditsLimit: z.number(),
+  resetsAt: z.optional(z.nullable(z.string())),
   extraCredits: z.optional(z.number()),
   extraCreditsTotal: z.optional(z.number()),
 });
@@ -30,7 +35,9 @@ export function fromCredits(usage: z.infer<typeof creditsSchema>): PlanSummary {
   const plan = { used: usage.credits ?? 0, limit: usage.creditsLimit, unit: " credits" };
   return {
     plan: usage.plan,
-    period: "last 30 days",
+    period: "this month",
+    resetsAt: usage.resetsAt ?? null,
+    left: usage.resetsAt && usage.credits !== null ? planMeterLeft({ label: "plan", ...plan }) : null,
     meters: usage.credits === null
       ? []
       : extra > 0

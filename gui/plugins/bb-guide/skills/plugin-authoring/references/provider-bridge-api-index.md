@@ -88,6 +88,7 @@ Context breakdowns are optional snapshots on `contextWindow` deltas:
 - `experimental_findBrokenCliLink`
 - `experimental_findCliExecutable`
 - `experimental_formatCommand`
+- `experimental_installationRunUnavailable`
 - `experimental_installationVerification`
 - `experimental_isProviderBridgeRecording`
 - `experimental_npmCommand`
@@ -98,6 +99,7 @@ Context breakdowns are optional snapshots on `contextWindow` deltas:
 - `experimental_presentationDetail`
 - `experimental_presentationFileName`
 - `experimental_presentationTitle`
+- `experimental_probeCliVersion`
 - `experimental_probeNpmGlobalPackage`
 - `experimental_readBoundedLines`
 - `experimental_readCliVersion`

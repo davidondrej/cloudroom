@@ -3,14 +3,16 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import type { BbPluginApi, PluginTurnFailedEvent } from "@get-bb/plugin-sdk";
 import { z } from "zod";
+import { COMPUTER_TITLE } from "@cloudroom/domain/computer-name";
 import {
   ClaudeLogin,
   claudeSecret,
   claudeUsage,
-  localClaudeEmail,
+  localClaudeAccount,
   profileAccount,
   signOut,
   tokenOrganization,
+  type MacClaude,
 } from "./src/claude.js";
 import {
   codexListSchema,
@@ -36,10 +38,13 @@ import {
   type Provider,
   type UsageWindow,
 } from "./src/contract.js";
+import { limitedThreads } from "./src/limited-threads.js";
 import { prepareProfile, releaseProfile } from "./src/profile.js";
 import { SignInAgainError, type Secret, type SignedIn } from "./src/tokens.js";
 
 const USAGE_EVERY_MS = 5 * 60_000;
+const MAC_NEEDS_CLOUD =
+  "Approve this Mac's Claude account for Cloud first: click Use on it in Settings → Agents → Accounts.";
 const DEFAULT_REST_MS = 60 * 60_000;
 
 const storedSchema = z.object({
@@ -66,7 +71,8 @@ const secretSchema = z.object({
 });
 type Adding = {
   login: string;
-  profile: string;
+  // Missing for the Mac's own login, which only needs Cloud's one-year token.
+  profile?: string;
   replace: string | null;
   mac: boolean;
   account?: Awaited<ReturnType<typeof profileAccount>>;
@@ -142,6 +148,28 @@ export default async function plugin(bb: BbPluginApi) {
     .catch({})
     .parse(await kv.get("limits:v1"));
   let inCloud = z.string().nullable().catch(null).parse(await kv.get("cloud:v1"));
+  // The Mac's own Claude login, and the organization of the one-year token Cloud uses for it.
+  let mac: MacClaude | null = (await localClaudeAccount()) ?? null;
+  // Signing the Mac in or out can change the account in use; Cloud then follows it.
+  const refreshMac = async () => {
+    const read = await localClaudeAccount();
+    if (read === undefined) return mac;
+    const before = current("claude-code");
+    mac = read;
+    if (current("claude-code") !== before) void changed();
+    return mac;
+  };
+  // The Mac login approved for Cloud: its identity (`~/.claude.json`) and plan. Its one-year token is secrets/local.json.
+  const macCloudSchema = z.object({
+    email: z.string(),
+    org: z.string().nullable(),
+    plan: z.string().nullable(),
+  });
+  let macCloud = macCloudSchema.nullable().catch(null).parse(await kv.get("mac-cloud:v1"));
+  // `inCloud` is the account Cloud last confirmed. `cloudStale`: it has a newer token to upload.
+  let cloudStale = z.boolean().catch(false).parse(await kv.get("cloud-stale:v1"));
+  let cloudPending: string | null = null;
+  let cloudQueue: Promise<unknown> = Promise.resolve();
   // Before Cursor accounts, Cloud used a copy of the Mac's own Cursor login.
   let cursorInCloud = z.string().catch(LOCAL).parse(await kv.get("cursor-cloud:v1"));
   const usage = new Map<string, Usage>();
@@ -170,7 +198,28 @@ export default async function plugin(bb: BbPluginApi) {
       kv.set("limits:v1", limits),
     ]);
     bb.realtime.publish(ACCOUNTS_CHANGED, {});
-    return { cloud: followInCloud(connect), cursor: followCursorInCloud() };
+    return {
+      cloud: followInCloud(connect),
+      cursor: followCursorInCloud(),
+      resumed: Promise.all([
+        noteInUse("claude-code", current("claude-code")),
+        noteInUse("acp-cursor", current("acp-cursor")),
+      ]),
+    };
+  };
+  // The Mac's Claude login shows unless it is signed out or already added as an account.
+  const macShown = () => {
+    const login = mac;
+    return (
+      login !== null &&
+      !accounts.some(
+        (entry) =>
+          entry.provider === "claude-code" &&
+          login.org !== null &&
+          entry.org === login.org &&
+          entry.email === login.email,
+      )
+    );
   };
   const ids = (provider: Ordered = "claude-code"): string[] => {
     const saved = accounts
@@ -179,16 +228,16 @@ export default async function plugin(bb: BbPluginApi) {
     const kept = order[provider].filter(
       (id) => id === LOCAL || saved.includes(id),
     );
+    // A missing Mac login goes last, so its return never switches accounts.
     order[provider] = [
-      ...(kept.includes(LOCAL) ? [] : [LOCAL]),
       ...kept,
       ...saved.filter((id) => !kept.includes(id)),
+      ...(kept.includes(LOCAL) ? [] : [LOCAL]),
     ];
-    // Claude's own Mac login has no one-year token, so Cloud can't follow it (ADR 0197). Cursor's Mac login is copied
-    // to Cloud, so it stays selectable, like Codex's.
-    return provider === "claude-code" && saved.length > 0
-      ? order[provider].filter((id) => id !== LOCAL)
-      : order[provider];
+    // A hidden Mac login leaves the order, so it comes back last.
+    if (provider === "claude-code" && saved.length > 0 && !macShown())
+      order[provider] = order[provider].filter((id) => id !== LOCAL);
+    return order[provider];
   };
   // The top account is the one every thread uses (ADR 0197).
   const current = (provider: Provider): string =>
@@ -197,6 +246,64 @@ export default async function plugin(bb: BbPluginApi) {
     const until = limits[`${provider}:${id}`];
     return until !== undefined && until > Date.now() ? until : null;
   };
+  // Cloud keeps one Claude login (ADR 0197). The Mac's own login has no one-year token, so once Cloud is on
+  // another account, picking the Mac's login needs one approval for Cloud first.
+  const macCloudReady = () =>
+    mac !== null && macCloud?.email === mac.email && macCloud.org === mac.org;
+  // Cloud is on, or switching to, a login other than the approved Mac one. Null: Cloud keeps its own login.
+  const macNeedsCloud = () => !macCloudReady() && (cloudPending ?? inCloud) !== null;
+  // Until now the Mac's Claude login was hidden, never in use, once accounts existed. It now shows last, once.
+  if (!(await kv.get("mac-login:v1"))) {
+    ids();
+    if (accounts.some((account) => account.provider === "claude-code"))
+      order["claude-code"] = [
+        ...order["claude-code"].filter((id) => id !== LOCAL),
+        LOCAL,
+      ];
+    await kv.set("order:v1", order);
+    await kv.set("mac-login:v1", true);
+  }
+  const accountName = async (provider: Provider, id: string) => {
+    const views = await (
+      provider === "codex"
+        ? codexView()
+        : provider === "acp-cursor"
+          ? cursorView()
+          : claudeView()
+    ).catch(() => []);
+    const view = views.find((entry) => entry.id === id);
+    return (
+      view?.name ??
+      view?.email ??
+      (id === LOCAL ? `This ${COMPUTER_TITLE}` : "another account")
+    );
+  };
+  const limited = await limitedThreads(bb, accountName);
+  // Cloud gets the names too: Core's "keep working" after the switch then shows as the same one line.
+  const cloudSwitch = async (
+    provider: Provider,
+    from: string | null,
+    to: string,
+  ) =>
+    from && from !== to
+      ? {
+          from: await accountName(provider, from),
+          to: await accountName(provider, to),
+        }
+      : null;
+  // The account each agent's threads use. A new one, picked from any thread or Settings, continues every thread a plan
+  // limit stopped on another account (ADR 20261107-082836). Codex learns its account from the website's list.
+  const inUse: Partial<Record<Provider, string>> = {
+    "claude-code": current("claude-code"),
+    "acp-cursor": current("acp-cursor"),
+  };
+  const noteInUse = async (provider: Provider, id: string) => {
+    const before = inUse[provider];
+    inUse[provider] = id;
+    if (before !== undefined && before !== id)
+      await limited.switched(provider, id);
+  };
+  let codexResumed: Promise<void> = Promise.resolve();
 
   const writeSecret = async (
     id: string,
@@ -206,40 +313,57 @@ export default async function plugin(bb: BbPluginApi) {
     await fs.writeFile(temp, JSON.stringify(secret), { mode: 0o600 });
     await fs.rename(temp, secretPath(id));
   };
-  const readSecret = async (account: Stored): Promise<Secret> =>
-    secretSchema.parse(
-      JSON.parse(await fs.readFile(secretPath(account.id), "utf8")),
-    );
+  const readSecret = async (id: string): Promise<Secret> =>
+    secretSchema.parse(JSON.parse(await fs.readFile(secretPath(id), "utf8")));
   const readCursorKey = async (account: Stored): Promise<string> =>
     cursorSecretSchema.parse(
       JSON.parse(await fs.readFile(secretPath(account.id), "utf8")),
     ).apiKey;
   // Cloud keeps one Claude login per user, so it follows the account in use (ADR 0197).
   // Resolves to why Cloud is not on the account, or null.
-  const followInCloud = async (connect: boolean): Promise<string | null> => {
+  // Switches run one at a time.
+  const followInCloud = (connect: boolean): Promise<string | null> => {
+    const run = cloudQueue.then(() => followOnce(connect));
+    cloudQueue = run.catch(() => null);
+    return run;
+  };
+  const followOnce = async (connect: boolean): Promise<string | null> => {
     const id = current("claude-code");
     const account = accounts.find((entry) => entry.id === id);
-    if (!account || id === inCloud) return null;
+    if (id === inCloud && !cloudStale) return null;
+    if (!account && !(id === LOCAL && macCloudReady())) return null;
+    const plan = account ? account.plan : macCloud?.plan;
+    cloudPending = id;
     try {
-      const secret = await readSecret(account);
+      const secret = await readSecret(id);
+      const switched = await cloudSwitch("claude-code", inCloud, id);
       const status = await bb.sdk.cloudroom.claudeAuth({
         action: "token",
         requestId: randomUUID(),
         token: secret.accessToken,
-        ...(account.plan ? { plan: account.plan } : {}),
+        ...(plan ? { plan } : {}),
         follow: !connect,
+        ...(switched ? { switched } : {}),
       });
       // A disconnected Claude skips background saves, so Cloud is still not on this account.
       if (status.state !== "connected")
         return "Claude isn't connected in Cloud.";
       inCloud = id;
+      cloudStale = false;
       await kv.set("cloud:v1", id);
+      await kv.set("cloud-stale:v1", false);
       return null;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       bb.log.warn(`Cloud could not switch Claude accounts: ${message}`);
       return message;
+    } finally {
+      cloudPending = null;
     }
+  };
+  const markStale = async () => {
+    cloudStale = true;
+    await kv.set("cloud-stale:v1", true);
   };
 
   // Cloud keeps one Cursor login per user too: the account in use, or a copy of the Mac's own login.
@@ -248,9 +372,11 @@ export default async function plugin(bb: BbPluginApi) {
     if (id === cursorInCloud) return null;
     const account = accounts.find((entry) => entry.id === id);
     try {
+      const switched = await cloudSwitch("acp-cursor", cursorInCloud, id);
       const status = await bb.sdk.cloudroom.cursorAccount({
         requestId: randomUUID(),
         apiKey: account ? await readCursorKey(account) : null,
+        ...(switched ? { switched } : {}),
       });
       if (status.state !== "connected") return "Cursor isn't connected in Cloud.";
       cursorInCloud = id;
@@ -271,7 +397,7 @@ export default async function plugin(bb: BbPluginApi) {
       usage.set(account.id, {
         ...(account.provider === "acp-cursor"
           ? { windows: await cursorUsage(await readCursorKey(account)), credits: null }
-          : await claudeUsage(await readSecret(account))),
+          : await claudeUsage(await readSecret(account.id))),
         error: null,
         signInAgain: false,
         at: Date.now(),
@@ -304,17 +430,25 @@ export default async function plugin(bb: BbPluginApi) {
         )
         .map((account) => refreshUsage(account, force)),
     );
-  const timer = setInterval(() => void refreshAll(), USAGE_EVERY_MS);
+  // A token Cloud hasn't confirmed yet is retried every few minutes, and at start.
+  const timer = setInterval(() => {
+    void refreshAll();
+    if (cloudStale) void followInCloud(false);
+  }, USAGE_EVERY_MS);
+  if (cloudStale) void followInCloud(false);
   timer.unref();
   bb.onDispose(() => clearInterval(timer));
   void refreshAll();
 
+  // Adding never switches accounts: the one in use stays in use.
   const add = async (
     signedIn: SignedIn,
-    use: boolean,
     login: Pick<Stored, "profile" | "org">,
   ) => {
-    if (ids().length >= MAX_ACCOUNTS)
+    if (
+      accounts.filter((account) => account.provider === "claude-code").length >=
+      MAX_ACCOUNTS
+    )
       throw new Error(
         `You can connect up to ${MAX_ACCOUNTS} accounts per provider.`,
       );
@@ -328,9 +462,11 @@ export default async function plugin(bb: BbPluginApi) {
       createdAt: Date.now(),
     };
     await writeSecret(account.id, { ...signedIn.secret, issuedAt: Date.now() });
+    const macInUse = current("claude-code") === LOCAL;
     accounts = [...accounts, account];
+    // Adding the Mac's own account hides its tile: the copy keeps the selection.
+    if (macInUse && !macShown()) move(account.id, 0);
     ids();
-    if (use) move(account.id, 0);
     await changed(true);
     void refreshUsage(account, true);
   };
@@ -362,27 +498,11 @@ export default async function plugin(bb: BbPluginApi) {
     });
   };
   const claudeView = async (): Promise<AccountView[]> => {
-    const localEmail = await localClaudeEmail();
-    const views = rows("claude-code", localEmail);
-    // Keep the Mac's Claude login visible until it is added again (ADR 0197).
-    const macAdded = accounts.some(
-      (entry) => entry.provider === "claude-code" && entry.email === localEmail,
+    await refreshMac();
+    const needsCloud = macNeedsCloud();
+    return rows("claude-code", mac?.email ?? null).map((row) =>
+      row.id === LOCAL && needsCloud ? { ...row, needsSignIn: true } : row,
     );
-    if (localEmail && !views.some((row) => row.id === LOCAL) && !macAdded)
-      views.unshift({
-        id: LOCAL,
-        name: null,
-        email: localEmail,
-        plan: null,
-        inUse: false,
-        limitedUntil: null,
-        error: null,
-        credits: null,
-        windows: [],
-        needsSignIn: true,
-        limitedLogin: false,
-      });
-    return views;
   };
   // "This Mac" is the Mac's own Cursor login and stays selectable: Cloud then uses a copy of it, as before accounts.
   let cursorLocal: { email: string | null; at: number } | null = null;
@@ -440,6 +560,7 @@ export default async function plugin(bb: BbPluginApi) {
     const selected = list.accounts.find((account) => account.inUse);
     codexInUse = selected?.id ?? LOCAL;
     codexAccounts = list.accounts.length;
+    codexResumed = noteInUse("codex", codexInUse);
     void refreshCodexLocal();
     return [
       {
@@ -499,13 +620,12 @@ export default async function plugin(bb: BbPluginApi) {
     if (!existing)
       return add(
         { email: account.email, plan: account.plan, accountKey: null, secret },
-        state.mac,
         { profile: state.profile, org: account.orgId },
       );
     // A revoked token can't name its account; anything else unconfirmed keeps the saved login.
     const before =
       existing.org ??
-      (await readSecret(existing)
+      (await readSecret(existing.id)
         .then((saved) => tokenOrganization(saved.accessToken))
         .catch((error: unknown) =>
           error instanceof SignInAgainError ? account.orgId : null,
@@ -526,10 +646,32 @@ export default async function plugin(bb: BbPluginApi) {
     existing.profile = state.profile;
     existing.org = account.orgId;
     if (old) void dropProfile(old);
-    if (existing.id === inCloud) inCloud = null;
-    if (state.mac) move(existing.id, 0);
+    // Cloud gets the new token on its next follow, even after a restart.
+    if (existing.id === inCloud) await markStale();
     await changed(true);
     void refreshUsage(existing, true);
+  };
+
+  // One approval gives Cloud a one-year token for the Mac's own login, which then goes in use once Cloud has it.
+  const saveMac = async (token: string) => {
+    const login = await refreshMac();
+    const status = await profileAccount().catch(() => null);
+    if (!login || !status?.orgId || status.orgId !== (await tokenOrganization(token)))
+      throw new Error(
+        `Approve with ${login?.email ?? "the Claude account this Mac uses"}. Start again.`,
+      );
+    await writeSecret(LOCAL, { ...claudeSecret(token), issuedAt: Date.now() });
+    macCloud = { email: login.email, org: login.org, plan: status.plan };
+    await kv.set("mac-cloud:v1", macCloud);
+    if (inCloud === LOCAL) await markStale();
+    const before = [...order["claude-code"]];
+    move(LOCAL, 0);
+    const failed = await (await changed(true)).cloud;
+    if (failed) {
+      order["claude-code"] = before;
+      await changed();
+      throw new Error(`Cloud didn't switch accounts: ${failed}. Click Use to try again.`);
+    }
   };
 
   // An account Cursor already knows (same user) keeps its place and gets the new key.
@@ -580,6 +722,11 @@ export default async function plugin(bb: BbPluginApi) {
     order[provider] = order[provider].filter((entry) => entry !== id);
     usage.delete(id);
     await fs.rm(secretPath(id), { force: true });
+    // Cloud can't follow the Mac's login without its approval, so the next added account goes in use.
+    if (provider === "claude-code" && current(provider) === LOCAL && macNeedsCloud()) {
+      const next = ids(provider).find((entry) => entry !== LOCAL);
+      if (next) move(next, 0);
+    }
     await changed();
   };
 
@@ -592,12 +739,29 @@ export default async function plugin(bb: BbPluginApi) {
           : provider === "acp-cursor"
             ? cursorView()
             : claudeView(),
-      "accounts.use": async ({ provider, id, cloud }) => {
+      "accounts.use": async ({ provider, id, cloud, threadId }) => {
         delete limits[`${provider}:${id}`];
+        // The thread it was picked from continues too: the user asked, even after a Stop or a limit this plugin
+        // never noted.
+        if (threadId)
+          await limited.record(
+            threadId,
+            provider,
+            limited.account(threadId) ?? current(provider),
+          );
         if (provider === "codex") {
+          inUse.codex ??= codexInUse;
           await codex({ action: "use", id: id === LOCAL ? null : id });
           await kv.set("limits:v1", limits);
+          await codexResumed;
           return null;
+        }
+        if (provider === "claude-code" && id === LOCAL) {
+          if (!(await refreshMac()))
+            throw new Error(
+              "Sign in to Claude Code on this Mac first: run `claude`.",
+            );
+          if (macNeedsCloud()) throw new Error(MAC_NEEDS_CLOUD);
         }
         // This Mac without a Cursor login would leave Cloud on the previous account.
         if (provider === "acp-cursor" && id === LOCAL) {
@@ -612,6 +776,7 @@ export default async function plugin(bb: BbPluginApi) {
         const following = provider === "acp-cursor" ? follow.cursor : follow.cloud;
         const account = accounts.find((entry) => entry.id === id);
         if (account) void refreshUsage(account, true);
+        await follow.resumed;
         const failed = cloud ? await following : null;
         if (failed) throw new Error(`Cloud didn't switch accounts: ${failed}`);
         return null;
@@ -621,15 +786,35 @@ export default async function plugin(bb: BbPluginApi) {
           await codex({ action: "move", id: stored(id), direction });
           return null;
         }
+        const before = [...order[provider]];
         move(
           id,
           ids(provider).indexOf(id) + (direction === "up" ? -1 : 1),
           provider,
         );
+        if (
+          provider === "claude-code" &&
+          current(provider) === LOCAL &&
+          macNeedsCloud()
+        ) {
+          order[provider] = before;
+          throw new Error(MAC_NEEDS_CLOUD);
+        }
         await changed(true);
         return null;
       },
       "accounts.remove": async ({ provider, id }) => {
+        const others = ids("claude-code").filter((entry) => entry !== id && entry !== LOCAL);
+        if (
+          provider === "claude-code" &&
+          id === current(provider) &&
+          others.length === 0 &&
+          !macCloudReady() &&
+          (cloudPending ?? inCloud) === id
+        )
+          throw new Error(
+            "Cloud still runs on this account. Use your Mac's Claude login first (one approval), or Disconnect Claude Code.",
+          );
         await remove(provider, id);
         return null;
       },
@@ -645,6 +830,16 @@ export default async function plugin(bb: BbPluginApi) {
           .filter((view) => view.id !== LOCAL)
           .sort((a, b) => Number(a.inUse) - Number(b.inUse));
         for (const view of added) await remove(provider, view.id);
+        // Disconnect signs Claude out in Cloud too, so the Mac's Cloud token goes as well.
+        if (provider === "claude-code") {
+          macCloud = null;
+          inCloud = null;
+          cloudStale = false;
+          await fs.rm(secretPath(LOCAL), { force: true });
+          await kv.set("mac-cloud:v1", null);
+          await kv.set("cloud:v1", null);
+          await kv.set("cloud-stale:v1", false);
+        }
         return null;
       },
       "accounts.rename": async ({ provider, id, name }) => {
@@ -659,6 +854,20 @@ export default async function plugin(bb: BbPluginApi) {
         return null;
       },
       "claude.start": async (input) => {
+        // The Mac's own login already runs Local threads: Cloud only needs its one-year token.
+        if (input?.mac) {
+          if (!(await refreshMac()))
+            throw new Error(
+              "Sign in to Claude Code on this Mac first: run `claude`.",
+            );
+          const started = await claudeLogin.start();
+          adding.set(started.sessionId, {
+            login: started.sessionId,
+            replace: null,
+            mac: true,
+          });
+          return started;
+        }
         const replace = input?.id ? stored(input.id) : null;
         const profile = randomUUID();
         try {
@@ -668,7 +877,7 @@ export default async function plugin(bb: BbPluginApi) {
             login: started.sessionId,
             profile,
             replace,
-            mac: input?.mac ?? false,
+            mac: false,
           });
           return started;
         } catch (error) {
@@ -694,8 +903,13 @@ export default async function plugin(bb: BbPluginApi) {
         try {
           const result = claudeLogin.poll(state.login);
           if (!result) return pending;
+          if (state.mac) {
+            adding.delete(sessionId);
+            await saveMac(result);
+            return { status: "complete" as const, message: null, authorizeUrl: null };
+          }
           if (!state.account) {
-            state.account = await profileAccount(profilePath(state.profile));
+            state.account = await profileAccount(profilePath(state.profile!));
             const next = await claudeLogin.start();
             state.login = next.sessionId;
             state.url = next.authorizeUrl;
@@ -706,7 +920,7 @@ export default async function plugin(bb: BbPluginApi) {
           return { status: "complete" as const, message: null, authorizeUrl: null };
         } catch (error) {
           adding.delete(sessionId);
-          void dropProfile(state.profile);
+          if (state.profile) void dropProfile(state.profile);
           return {
             status: "error" as const,
             message: error instanceof Error ? error.message : String(error),
@@ -743,6 +957,7 @@ export default async function plugin(bb: BbPluginApi) {
   bb.providers.experimental_contributeEnv(
     "claude-code",
     async (context: { threadId: string }) => {
+      await refreshMac();
       const id = current("claude-code");
       threadAccount.set(context.threadId, id);
       const account = accounts.find((entry) => entry.id === id);
@@ -763,7 +978,7 @@ export default async function plugin(bb: BbPluginApi) {
           { name: "ANTHROPIC_API_KEY", value: "", reason },
         ];
       }
-      const secret = await readSecret(account).catch(() => null);
+      const secret = await readSecret(account.id).catch(() => null);
       if (!secret) return [];
       return [
         { name: "CLAUDE_CODE_OAUTH_TOKEN", value: secret.accessToken, reason },
@@ -802,9 +1017,40 @@ export default async function plugin(bb: BbPluginApi) {
       provider.data === "codex"
         ? codexAccounts > 0
         : ids(provider.data).length > 1;
-    if (used === LOCAL && !several) return;
-    limits[`${provider.data}:${used}`] =
-      blockedUntil(event.rateLimits) ?? Date.now() + DEFAULT_REST_MS;
-    await changed();
+    if (used !== LOCAL || several) {
+      limits[`${provider.data}:${used}`] =
+        blockedUntil(event.rateLimits) ?? Date.now() + DEFAULT_REST_MS;
+      await changed();
+    }
+    // Core continues Cloud threads on a new login (ADR 0117).
+    if (thread?.executionTarget === "cloud") return;
+    // Noted even with one account: adding and picking a second one continues it too.
+    await limited.record(
+      event.threadId,
+      provider.data,
+      used,
+      event.requestId,
+    );
+    const now = current(provider.data);
+    // It ran on an account the user already switched away from: it continues on the new one at once.
+    if (used !== now && limitedUntil(provider.data, now) === null)
+      await limited.resume(event.threadId, now);
   });
+
+  // A thread that runs again, or is gone, no longer waits for a switch.
+  for (const name of [
+    "thread.active",
+    "thread.archived",
+    "thread.deleted",
+  ] as const)
+    bb.events.on(name, ({ thread }) => limited.forget(thread.id));
+
+  // Codex signs in from the app (codex-accounts.ts); this only notes which account each thread starts on.
+  bb.providers.experimental_contributeEnv(
+    "codex",
+    async (context: { threadId: string }) => {
+      threadAccount.set(context.threadId, codexInUse);
+      return [];
+    },
+  );
 }

@@ -358,6 +358,27 @@ export const KNOWN_ACP_AGENTS: readonly AcpAgentDefinition[] = [
       env: {},
     },
   },
+  {
+    id: "acp-kimi",
+    displayName: "Kimi Code",
+    icon: declaredIcon("kimi"),
+    signInCommand: "kimi login",
+    installUrl: "https://www.kimi.com/code/docs/en/kimi-code-cli/guides/getting-started",
+    installer: { scriptUrl: "https://code.kimi.com/kimi-code/install.sh" },
+    visibility: "installed",
+    fork: "tip",
+    launch: {
+      displayName: "Kimi Code",
+      command: "kimi",
+      args: ["acp"],
+      env: {},
+      // Kimi reads ~/.kimi-code/skills (KIMI_CODE_HOME) and ~/.agents/skills; projects add the same two at their root.
+      nativeSkillRoots: {
+        user: plainRoots([".kimi-code/skills", ".agents/skills"]),
+        project: ancestorRoots([".kimi-code/skills", ".agents/skills"]),
+      },
+    },
+  },
 ];
 
 export const RESERVED_ACP_PROVIDER_IDS: ReadonlySet<string> = new Set(

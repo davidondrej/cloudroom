@@ -3,7 +3,6 @@ import {
   useCallback,
   useEffect,
   useMemo,
-  useReducer,
   useRef,
   useState,
   type ReactNode,
@@ -50,6 +49,7 @@ import type {
   PullRequestMergeMethod,
   TerminalSession,
   TimelineRow,
+  TimelineUserConversationRow,
 } from "@cloudroom/server-contract";
 import type { WorkspaceOpenTarget } from "@cloudroom/host-daemon-contract";
 import { appToast } from "@/components/ui/app-toast";
@@ -155,10 +155,7 @@ import {
   promptInputToDraft,
   type PromptDraftState,
 } from "@cloudroom/client-core";
-import {
-  createLocalStorageEnumStorage,
-  withLocalStorage,
-} from "@/lib/browser-storage";
+import { createLocalStorageEnumStorage } from "@/lib/browser-storage";
 import {
   getProjectComposeRoutePath,
   getRootComposeRoutePath,
@@ -180,10 +177,11 @@ import {
   ThreadDetailPromptArea,
   type ThreadDetailSentMessageEdit,
 } from "./ThreadDetailPromptArea";
+import { type ContextBannerMergeBaseConfig } from "@/components/promptbox/banner/ThreadPromptContextBanner";
 import {
-  type ContextBannerMergeBaseConfig,
-  type ThreadPromptParentThreadSection,
-} from "@/components/promptbox/banner/ThreadPromptContextBanner";
+  ThreadOriginMarker,
+  type ThreadOrigin,
+} from "@/components/thread/timeline/ThreadOriginMarker";
 import { ThreadDetailSecondaryContent } from "./ThreadDetailSecondaryContent";
 import {
   useThreadSecondaryPanelDrawerVisibility,
@@ -383,6 +381,19 @@ function hasTimelineRowId(
         row.children !== null &&
         hasTimelineRowId(row.children, rowId)),
   );
+}
+
+function findFirstUserRow(
+  rows: readonly TimelineRow[],
+): TimelineUserConversationRow | null {
+  for (const row of rows) {
+    if (row.kind === "conversation" && row.role === "user") return row;
+    if (row.kind === "turn" && row.children !== null) {
+      const userRow = findFirstUserRow(row.children);
+      if (userRow !== null) return userRow;
+    }
+  }
+  return null;
 }
 
 function getPullRequestMergeLoadingTitle(
@@ -2040,69 +2051,53 @@ function ThreadDetailViewInternal(props: ThreadRoutePathArgs) {
     enabled: threadOpenContext !== null,
     ...(threadOpenContext ? { openContext: threadOpenContext } : {}),
   });
-  const parentBannerDismissKey = `cloudroom.parentBanner.dismissed.${thread?.id}`;
-  const [, rerenderParentBanner] = useReducer((count: number) => count + 1, 0);
-  const dismissParentBanner = useCallback(() => {
-    withLocalStorage(
-      (storage) => storage.setItem(parentBannerDismissKey, "1"),
-      undefined,
-    );
-    rerenderParentBanner();
-  }, [parentBannerDismissKey]);
-  const parentBannerDismissed = withLocalStorage(
-    (storage) => storage.getItem(parentBannerDismissKey) === "1",
-    false,
-  );
-  const parentThreadSection: ThreadPromptParentThreadSection | null =
-    useMemo(() => {
-      const relatedThreadId =
-        threadOriginKind !== null
-          ? threadSourceThreadId
-          : thread?.parentThreadId;
-      if (!thread || !relatedThreadId || parentBannerDismissed) return null;
-      const relationship = isSideChatThread
-        ? "side-chat"
-        : threadOriginKind === "fork"
-          ? "fork"
-          : "parent";
-      const relatedThread =
-        relationship === "parent" ? parentThread : sourceThread;
-      const href = getThreadRoutePath({
-        projectId: relatedThread?.projectId ?? thread.projectId,
-        threadId: relatedThreadId,
-      });
-      if (relatedThread === undefined) {
-        return {
-          parentThreadTitle: relatedThreadId.slice(0, 8),
-          href,
-          relationship,
-          onDismiss: dismissParentBanner,
-        };
-      }
-      if (
-        relatedThread.archivedAt !== null ||
-        relatedThread.deletedAt !== null ||
-        (relationship !== "parent" &&
-          relatedThread.projectId !== thread.projectId)
-      ) {
-        return null;
-      }
-      return {
-        parentThreadTitle: getThreadDisplayTitle(relatedThread),
-        href,
-        relationship,
-        onDismiss: dismissParentBanner,
-      };
-    }, [
-      dismissParentBanner,
-      isSideChatThread,
-      parentBannerDismissed,
-      parentThread,
-      sourceThread,
-      thread,
-      threadOriginKind,
-      threadSourceThreadId,
-    ]);
+  const threadOrigin: ThreadOrigin | null = useMemo(() => {
+    const relatedThreadId =
+      threadOriginKind !== null ? threadSourceThreadId : thread?.parentThreadId;
+    if (!thread || !relatedThreadId) return null;
+    // Show the marker only at the real start of the timeline. Skip it when the
+    // first message came from the related thread: that message already names it.
+    if (
+      hasOlderTimelineRows ||
+      (timelineLoading && timelineRows.length === 0) ||
+      findFirstUserRow(timelineRows)?.senderThreadId === relatedThreadId
+    ) {
+      return null;
+    }
+    const relationship = isSideChatThread
+      ? "side-chat"
+      : threadOriginKind === "fork"
+        ? "fork"
+        : "parent";
+    const relatedThread =
+      relationship === "parent" ? parentThread : sourceThread;
+    const href = getThreadRoutePath({
+      projectId: relatedThread?.projectId ?? thread.projectId,
+      threadId: relatedThreadId,
+    });
+    if (relatedThread === undefined) {
+      return { title: relatedThreadId.slice(0, 8), href, relationship };
+    }
+    if (
+      relatedThread.archivedAt !== null ||
+      relatedThread.deletedAt !== null ||
+      (relationship !== "parent" &&
+        relatedThread.projectId !== thread.projectId)
+    ) {
+      return null;
+    }
+    return { title: getThreadDisplayTitle(relatedThread), href, relationship };
+  }, [
+    hasOlderTimelineRows,
+    isSideChatThread,
+    parentThread,
+    sourceThread,
+    thread,
+    threadOriginKind,
+    threadSourceThreadId,
+    timelineLoading,
+    timelineRows,
+  ]);
   const pendingChildThreads: readonly ChildThreadPendingAttentionSource[] =
     useMemo(
       () =>
@@ -2811,7 +2806,6 @@ function ThreadDetailViewInternal(props: ThreadRoutePathArgs) {
       modelFallback={modelFallback}
       activeWorkflows={activeWorkflows}
       activeBackgroundCommands={activeBackgroundCommands}
-      parentThreadSection={parentThreadSection}
       childPendingInteractions={childPendingInteractions}
       pullRequest={pullRequest}
       thread={thread}
@@ -3198,6 +3192,9 @@ function ThreadDetailViewInternal(props: ThreadRoutePathArgs) {
               threadOriginKind,
               hasOlderTimelineRows,
               hostConnectionNotice,
+              leadingContent: threadOrigin ? (
+                <ThreadOriginMarker origin={threadOrigin} />
+              ) : undefined,
               isLoadingOlderTimelineRows,
               isThreadTimelinePending,
               timelineError: Boolean(timelineError),

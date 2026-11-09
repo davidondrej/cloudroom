@@ -29,6 +29,24 @@ import {
 
 export const LIVE_DAEMON_COMMAND_TIMEOUT_MS = 24 * 60 * 60 * 1000;
 
+const THREAD_START_COMMANDS: ReadonlySet<string> = new Set([
+  "thread.start",
+  "turn.submit",
+  "thread.goal.set",
+  "thread.goal.clear",
+  "thread.rewind.prepare",
+]);
+const threadStartsSent = new Map<string, number>();
+
+/**
+ * Starts and resumes sent to a thread's host so far. A stop or archive's
+ * process cleanup is dropped once newer work was sent, so it never ends that
+ * work's jobs (#607).
+ */
+export function countThreadStartsSent(threadId: string): number {
+  return threadStartsSent.get(threadId) ?? 0;
+}
+
 interface RunLiveHostCommandArgs<TType extends HostDaemonSettledCommandType> {
   command: Extract<HostDaemonCommand, { type: TType }>;
   execution?: HostDaemonCommandExecutionRecord;
@@ -230,6 +248,9 @@ export async function runLiveHostCommand<
   args: RunLiveHostCommandArgs<TType>,
 ): Promise<HostDaemonCommandResult<TType>> {
   if ("threadId" in args.command && typeof args.command.threadId === "string") {
+    const { threadId } = args.command;
+    if (THREAD_START_COMMANDS.has(args.command.type))
+      threadStartsSent.set(threadId, countThreadStartsSent(threadId) + 1);
     const thread = getThread(deps.db, args.command.threadId);
     if (thread) {
       const transfer = teleportProgress(deps.db, thread.id);

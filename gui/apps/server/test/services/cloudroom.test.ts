@@ -14,7 +14,7 @@ import { availableModelFixture } from "../helpers/available-models.js";
 import { registerProviderHostRpcResponder } from "../helpers/host-rpc.js";
 import { seedEnvironment, seedEvent, seedHostSession, seedPrimaryHost, seedProjectWithSource, seedThread, seedThreadRuntimeState, seedTurnStarted } from "../helpers/seed.js";
 import { turnScope } from "@cloudroom/domain";
-import { archiveThread, createThread, getThread, setProjectGitRemoteUrlIfMissing, upsertProjectExecutionDefaults, events, cloudroomThreads, cloudroomCommands } from "@cloudroom/db";
+import { archiveThread, unarchiveThread, createThread, getThread, setProjectGitRemoteUrlIfMissing, upsertProjectExecutionDefaults, events, cloudroomThreads, cloudroomCommands } from "@cloudroom/db";
 
 it("forwards Cursor login and keys without creating conversation records", async () => {
   const harness = await createTestAppHarness();
@@ -1607,4 +1607,36 @@ it("maps exactly the Core session states core/docs/api.md lists", async () => {
   const documented = [...(doc.match(/Session `state` values: (.*)/)?.[1] ?? "").matchAll(/`(\w+)`/g)].map((match) => match[1]);
   expect(documented.length).toBeGreaterThan(10);
   expect([...documented].sort()).toEqual([...coreStates].sort());
+});
+
+it("tells a Cloud parent once when Core keeps refusing its child's start for now, and keeps it trying (#865)", async () => {
+  const harness = await createTestAppHarness(), service = cloudroom(harness.deps);
+  const { project } = seedProjectWithSource(harness.deps, { hostId: seedHostSession(harness.deps).host.id });
+  // Every start gets the 409 Core gives while its agent's model check fails, which says it will pass.
+  let held: (() => void) | null = null, hold = false;
+  const core = createServer(async (req, res) => { if (hold && req.url === "/v1/sessions") await new Promise<void>(resolve => { held = resolve; }); res.writeHead(req.url === "/v1/sessions" ? 409 : 200, { "Content-Type": "application/json" }); res.end(JSON.stringify(req.url === "/v1/capabilities" ? { version: 1, repository: "/code/test", stop: true, resume: true, launch_settings: true, direct_workspaces: true, harnesses: [{ id: "codex", model: "test-model" }] } : { error: "model catalog unavailable", code: "model_catalog_unavailable" })); });
+  core.listen(0, "127.0.0.1"); await once(core, "listening");
+  const url = `http://127.0.0.1:${(core.address() as { port: number }).port}`, now = Date.now();
+  try {
+    await service.configure({ url, token: "x".repeat(40), projectId: project.id });
+    const parent = createThread(harness.db, harness.hub, { projectId: project.id, executionTarget: "cloud", providerId: "codex", status: "idle" });
+    const [child, archived] = [0, 1].map(() => createThread(harness.db, harness.hub, { projectId: project.id, parentThreadId: parent.id, executionTarget: "cloud", providerId: "codex", status: "pending" }));
+    harness.db.insert(cloudroomThreads).values([{ threadId: parent.id, coreUrl: "http://127.0.0.1:9", sessionId: "cr_parent" }, { threadId: child.id, coreUrl: url }, { threadId: archived.id, coreUrl: url }].map(row => ({ startRequestId: `start_${row.threadId}`, model: "test-model", reasoning: "medium", ...row }))).run();
+    harness.db.insert(cloudroomCommands).values([child, archived].map(({ id }) => ({ id: `first_${id}`, threadId: id, command: "prompt" as const, input: JSON.stringify({ text: "Start" }), state: "sending" as const, createdAt: now }))).run();
+    const notices = () => harness.db.select().from(cloudroomCommands).all().filter(row => row.threadId === parent.id).map(row => JSON.parse(row.input).text);
+    // The last row archives its child while the start that crosses 2 minutes is still waiting for Core.
+    // The last row unarchives it 3 minutes later: its next refusal starts a new 2 minutes.
+    for (const [id, after, sent, archive, unarchive] of [[child.id, 0, 0], [child.id, 60_000, 0], [child.id, 120_000, 1], [child.id, 600_000, 1], [archived.id, 0, 1], [archived.id, 120_000, 1, true], [archived.id, 300_000, 1, false, true]] as const) {
+      vi.spyOn(Date, "now").mockReturnValue(now + after);
+      hold = Boolean(archive);
+      if (unarchive) unarchiveThread(harness.db, harness.hub, id);
+      const started = (service as unknown as { deliver(id: string): Promise<void> }).deliver(id);
+      if (archive) { await expect.poll(() => held, { interval: 5 }).not.toBeNull(); archiveThread(harness.db, harness.hub, id); held!(); }
+      await expect(started).rejects.toThrow();
+      await new Promise(resolve => setImmediate(resolve));
+      vi.restoreAllMocks();
+      expect({ id, after, sent: notices().length, first: command(harness.db, `first_${id}`)?.state }).toEqual({ id, after, sent, first: "sending" });
+    }
+    expect(notices()[0]).toMatch(/has not started: Cloud model discovery is unavailable.*don't spawn a replacement/);
+  } finally { service.stop(); core.closeAllConnections(); core.close(); await harness.cleanup(); }
 });

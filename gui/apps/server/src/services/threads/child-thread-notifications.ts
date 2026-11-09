@@ -6,6 +6,7 @@ import type {
 import {
   events,
   getThread,
+  isThreadQueueAutoSendPaused,
   listActiveBackgroundTaskCountsByThreadIds,
 } from "@cloudroom/db";
 import { and, eq, inArray, sql } from "drizzle-orm";
@@ -28,6 +29,7 @@ import {
 } from "./system-message-kind.js";
 import { getLastThreadOutput, getTurnErrorText } from "./thread-data.js";
 import { waitForHeldMessageDrain } from "./queued-message-dispatch.js";
+import { isParentNotifiableChildThread } from "./thread-parent.js";
 
 export type ChildThreadNotificationSource = ParentSystemThreadMentionSource;
 
@@ -639,5 +641,79 @@ export async function queueChildThreadNeedsAttentionNotificationBestEffort(
       },
       "Failed to queue parent needs-attention notification",
     );
+  }
+}
+
+const CHILD_THREAD_LOST_WORK_GUIDANCE =
+  "Nothing was rerun, and lost work never reports back. Check the thread before running anything again.";
+
+/**
+ * A child waiting on background work never hears that a Cloudroom restart
+ * ended it, so its parent is told once (#1026). Skips a stopped child.
+ */
+export async function queueChildThreadLostBackgroundWorkNotifications(
+  deps: LoggedPendingInteractionWorkSessionDeps,
+  lost: ReadonlyMap<string, readonly { itemId: string; description: string }[]>,
+): Promise<void> {
+  const byParent = new Map<
+    string,
+    { child: ChildThreadNotificationSource; names: string[] }[]
+  >();
+  for (const [threadId, tasks] of lost) {
+    if (tasks.length === 0) continue;
+    const child = getThread(deps.db, threadId);
+    if (
+      (child?.status !== "idle" && child?.status !== "error") ||
+      child.archivedAt !== null ||
+      child.deletedAt !== null ||
+      !isParentNotifiableChildThread(child) ||
+      (child.visibility === "hidden" &&
+        getThread(deps.db, child.parentThreadId)?.visibility === "visible") ||
+      isThreadQueueAutoSendPaused(deps.db, threadId)
+    ) {
+      continue;
+    }
+    const names = tasks.map(
+      ({ description: d }) => `"${d.length > 80 ? `${d.slice(0, 79)}…` : d}"`,
+    );
+    const siblings = byParent.get(child.parentThreadId) ?? [];
+    byParent.set(child.parentThreadId, [...siblings, { child, names }]);
+  }
+  for (const [parentThreadId, children] of byParent) {
+    const segments = children.flatMap(
+      ({ child, names }, index): ParentSystemInputSegment[] => [
+        ...(children.length > 1
+          ? [{ kind: "text" as const, text: index === 0 ? "- " : "\n- " }]
+          : []),
+        {
+          kind: "mention",
+          mention: buildParentSystemThreadMention({ thread: child }),
+        },
+        {
+          kind: "text",
+          text: ` lost its background work when Cloudroom restarted: ${names.join(", ")}.`,
+        },
+      ],
+    );
+    const single = children.length === 1 ? children[0]!.child : null;
+    await queueParentSystemMessage(deps, {
+      input: buildParentSystemInputFromTemplateSlot({
+        renderedText: renderTemplate("systemMessageChildThreadOutcomeBatch", {
+          updates: CHILD_THREAD_OUTCOME_BATCH_UPDATES_SLOT,
+        }),
+        slot: CHILD_THREAD_OUTCOME_BATCH_UPDATES_SLOT,
+        segments: [
+          ...segments,
+          { kind: "text", text: `\n\n${CHILD_THREAD_LOST_WORK_GUIDANCE}` },
+        ],
+      }),
+      parentThreadId,
+      systemMessageKind: single
+        ? systemMessageKindForTemplate("systemMessageChildThreadNeedsAttention")
+        : "child-outcome-batch",
+      systemMessageSubject: single
+        ? childThreadSubject(single)
+        : { kind: "thread-batch", count: children.length },
+    }).catch(() => undefined);
   }
 }

@@ -795,14 +795,21 @@ MAC_PART = 1024 * 1024
 MAC_POST_SECONDS = 60
 # New per helper process: when it changes, Core ends jobs the old process was running (#569).
 MAC_BOOT = uuid.uuid4().hex
+# A sandbox's agent has root, so it can answer in place of Core: the helper keeps no more than a real Core sends. The
+# longest job line comes from cores up to 0.1.75, which send a job's input inside it as hex, beside a 64 KiB command
+# that JSON escaping can make 6 times longer.
+MAC_LINE = 2 * MAC_LIMIT + 1024 * 1024
 
 
 def mac_stdin(core, device, job):
     """A job's input, downloaded after confirming it, so a big push never holds up other jobs on the stream (#576).
-    Older cores send it inside the job instead. None if it can't be downloaded."""
+    Older cores send it inside the job instead. None if it can't be downloaded or is over Core's 16 MiB limit."""
     size = job.get('stdin_bytes')
     if not size:
-        return job.get('stdin') or ''
+        stdin = job.get('stdin') or ''
+        return stdin if len(stdin) <= 2 * MAC_LIMIT else None
+    if type(size) is not int or not 0 < size <= MAC_LIMIT:
+        return None
     url = core.url + '/v1/mac/jobs/' + urllib.parse.quote(job['id']) + '/stdin?device=' + urllib.parse.quote(device)
     for _ in range(3):
         try:
@@ -839,7 +846,8 @@ def saved_level(config):
 
 
 # Each Mac command also goes to the website's Jev check (ADR 0224). It runs beside the job and never delays it:
-# at most four reports in flight, a repeated command is skipped for an hour, and failures are dropped.
+# at most four reports in flight, a repeated command is skipped for an hour, and failures are dropped. Commands are
+# kept as fixed-size hashes, at most 4,096 of them, so a sandbox's many long commands can't fill memory.
 REVIEWS = {'sent': {}, 'lock': threading.Lock(), 'slots': threading.BoundedSemaphore(4)}
 SCRIPT_TYPES = ('.sh', '.bash', '.zsh', '.py', '.js', '.mjs', '.cjs', '.ts', '.rb', '.pl')
 
@@ -857,11 +865,14 @@ def script_of(job):
 
 def review(core, job, level, script):
     account, token = (core.connection.get('account') or {}).get('id'), core.connection.get('sandboxToken')
-    key, now = (core.url, job.get('command')), time.monotonic()
+    key = hashlib.sha256(f"{core.url}\0{job.get('command')}".encode(errors='surrogatepass')).digest()
+    now = time.monotonic()
     with REVIEWS['lock']:
         sent = REVIEWS['sent']
         for old in [k for k, at in sent.items() if now - at > 3600]:
             del sent[old]
+        if len(sent) >= 4096:
+            sent.clear()
         if not account or not token or key in sent or not REVIEWS['slots'].acquire(blocking=False):
             return
         sent[key] = now
@@ -962,8 +973,10 @@ class MacJobs:
     """Mac access (ADR 0113, levels in ADR 0186): run commands from the user's cloud agents as this user, only while enabled."""
     def __init__(self, folder):
         self.folder, self.running, self.lock = folder, {}, threading.Lock()
-        # Jobs the agent stopped before they started; execute skips them.
-        self.cancelled = set()
+        # How many jobs taken from the streams are not finished, by ID (two sandboxes' Cores can use the same one), and which
+        # of those IDs the agent stopped before they started; execute skips those. A stop for any other job is dropped,
+        # so a sandbox's Core can't fill this.
+        self.taken, self.cancelled = {}, set()
         # Ask first: one dialog at a time. "Allow for this sandbox" trusts every agent on that sandbox's core (jobs carry no
         # thread), until the helper restarts or the access level changes.
         self.asking, self.trusted, self.level = threading.Lock(), set(), None
@@ -1064,15 +1077,17 @@ class MacJobs:
                     'If the loop needs the Mac, the user can give it all secrets in its Secrets row. That applies from its next run.')
         return None
 
-    def refusal(self, core, job):
-        """Why this job may not run as asked, or None. Everything else that is not full access runs read-only."""
+    def closed(self, core):
+        """The access level, and why this sandbox may not use the Mac at all now (Off or a key list), or None."""
         level = mac_level(self.enabled() or {})
         self.track(level)
-        if level == 'off':
-            return 'Mac access is off.'
-        limited = self.limited(core)
-        if limited:
-            return limited
+        return level, 'Mac access is off.' if level == 'off' else self.limited(core)
+
+    def refusal(self, core, job):
+        """Why this job may not run as asked, or None. Everything else that is not full access runs read-only."""
+        level, closed = self.closed(core)
+        if closed:
+            return closed
         # After Off and the key list, so a sandbox without Mac access can't learn which Mac folders exist from a push.
         unusable = as_copy(job)
         if unusable:
@@ -1111,12 +1126,14 @@ class MacJobs:
                                                  headers={**core.headers, 'Accept': 'text/event-stream'})
                 with NET['opener'].open(request, timeout=60) as stream:
                     delay, event = 2, None
-                    for raw in stream:
+                    while raw := stream.readline(MAC_LINE + 1):
+                        if len(raw) > MAC_LINE:
+                            raise ValueError('Mac job is too large')
                         line = raw.decode().rstrip('\r\n')
                         if line.startswith('event:'):
                             event = line[6:].strip()
                         elif line.startswith('data:') and event == 'job':
-                            threading.Thread(target=self.execute, args=(core, device, json.loads(line[5:])), daemon=True).start()
+                            self.take(core, device, json.loads(line[5:]))
                         elif line.startswith('data:') and event == 'cancel':
                             self.cancel(json.loads(line[5:])['id'])
                         elif line.startswith(':') and (not self.enabled() or core.key not in self.wanted):
@@ -1130,6 +1147,21 @@ class MacJobs:
                         delay = 1
             with NUDGE:  # Check now wakes this wait.
                 NUDGE.wait(delay)
+
+    def take(self, core, device, job):
+        """Starts a job from the stream. Until it ends, a stop for it is kept (see cancel)."""
+        with self.lock:
+            self.taken[job['id']] = self.taken.get(job['id'], 0) + 1
+        def run():
+            try:
+                self.execute(core, device, job)
+            finally:
+                with self.lock:
+                    self.taken[job['id']] -= 1
+                    if not self.taken[job['id']]:
+                        del self.taken[job['id']]
+                        self.cancelled.discard(job['id'])
+        threading.Thread(target=run, daemon=True).start()
 
     def execute(self, core, device, job):
         def post(body, timeout=MAC_POST_SECONDS):
@@ -1150,10 +1182,13 @@ class MacJobs:
                 time.sleep(1)
         result = {'state': 'done', 'code': 127, 'stdout': '', 'stderr': '', 'truncated': False}
         # Core may have taken a confirmation whose reply was lost, so it still gets this result instead of waiting forever.
-        job['stdin'] = mac_stdin(core, device, job) if confirmed else ''
+        # Off and the key list come before the input, so a sandbox that may not use the Mac never makes it download any.
         refused = ('The Mac could not confirm this command with the cloud, so it did not run. Try again.' if not confirmed else
-                   "The Mac could not download this command's input from the cloud, so it did not run. Try again." if job['stdin'] is None else
-                   self.refusal(core, job))
+                   self.closed(core)[1])
+        if not refused:
+            job['stdin'] = mac_stdin(core, device, job)
+            refused = ("The Mac could not download this command's input from the cloud, so it did not run. Try again." if job['stdin'] is None else
+                       self.refusal(core, job))
         # Refused commands are checked too, but a script file is read only for a command that will run.
         with contextlib.suppress(OSError, ValueError, KeyError, TypeError):
             review(core, job, mac_level(self.enabled() or {}), not refused)
@@ -1237,7 +1272,7 @@ class MacJobs:
     def cancel(self, job):
         with self.lock:
             process = self.running.get(job)
-            if not process:
+            if not process and job in self.taken:
                 self.cancelled.add(job)
         if process:
             def kill(signal_number):

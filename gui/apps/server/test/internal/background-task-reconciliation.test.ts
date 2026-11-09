@@ -3,7 +3,9 @@ import {
   getAppSettings,
   getThread,
   listEvents,
+  listQueuedThreadMessages,
   setAppSettings,
+  setThreadExecutionOverride,
 } from "@cloudroom/db";
 import {
   HOST_DAEMON_PROTOCOL_VERSION,
@@ -52,6 +54,8 @@ function backgroundTaskItemData(args: {
 }
 
 interface SeedOpenBackgroundTaskArgs {
+  /** The task runs in a child of the fixture thread. */
+  asChild?: boolean;
   itemId?: string;
   taskStatus?: string;
   status?: string;
@@ -62,9 +66,16 @@ function seedOpenBackgroundTaskThread(
   args: SeedOpenBackgroundTaskArgs = {},
 ) {
   const fixture = seedThreadFixture(harness, {});
+  const thread = args.asChild
+    ? seedThread(harness.deps, {
+        projectId: fixture.project.id,
+        environmentId: fixture.environment.id,
+        parentThreadId: fixture.thread.id,
+      })
+    : fixture.thread;
   const itemId = args.itemId ?? "task:wf-1";
   seedStoredEvent(harness.deps, {
-    threadId: fixture.thread.id,
+    threadId: thread.id,
     environmentId: fixture.environment.id,
     sequence: 1,
     type: "turn/started",
@@ -73,7 +84,7 @@ function seedOpenBackgroundTaskThread(
     data: { providerThreadId: "claude-session-1" },
   });
   seedStoredEvent(harness.deps, {
-    threadId: fixture.thread.id,
+    threadId: thread.id,
     environmentId: fixture.environment.id,
     sequence: 2,
     type: "item/started",
@@ -88,7 +99,7 @@ function seedOpenBackgroundTaskThread(
     }),
   });
   seedStoredEvent(harness.deps, {
-    threadId: fixture.thread.id,
+    threadId: thread.id,
     environmentId: fixture.environment.id,
     sequence: 3,
     type: "item/backgroundTask/progress",
@@ -102,7 +113,7 @@ function seedOpenBackgroundTaskThread(
       taskStatus: args.taskStatus ?? "running",
     }),
   });
-  return { ...fixture, itemId };
+  return { ...fixture, parent: fixture.thread, thread, itemId };
 }
 
 function seedActiveTurnThread(harness: TestAppHarness) {
@@ -453,6 +464,55 @@ describe("background-task lifecycle reconciliation triggers", () => {
       ]);
     });
   });
+
+  it.each([
+    ["a new daemon tells", "instance-restarted", 1],
+    ["the same daemon never tells", "instance-1", 0],
+  ])(
+    "%s an idle child's parent about its lost background work",
+    async (_label, instanceId, notices) => {
+      await withTestHarness(async (harness) => {
+        const { host, session, parent } = seedOpenBackgroundTaskThread(
+          harness,
+          { asChild: true },
+        );
+        setThreadExecutionOverride(harness.deps.db, {
+          threadId: parent.id,
+          modelOverride: "gpt-5",
+        });
+        vi.useFakeTimers({ toFake: ["setTimeout"] });
+        handleDaemonSocketClosed(harness.deps, { sessionId: session.id });
+        vi.advanceTimersByTime(DAEMON_DISCONNECT_GRACE_MS + 1);
+        vi.useRealTimers();
+
+        await harness.app.request("/internal/session/open", {
+          method: "POST",
+          headers: internalAuthHeaders(harness, { hostId: host.id }),
+          body: JSON.stringify({
+            hostId: host.id,
+            instanceId,
+            hostName: host.name,
+            hasMachineCredential: false,
+            platform: "darwin",
+            dataDir: "/tmp/host-daemon-task-lost-notice",
+            localApiPort: null,
+            protocolVersion: HOST_DAEMON_PROTOCOL_VERSION,
+            activeThreads: [],
+          }),
+        });
+
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        expect(
+          [
+            ...listQueuedThreadMessages(harness.deps.db, parent.id),
+            ...listEvents(harness.deps.db, { threadId: parent.id }),
+          ].filter((row) =>
+            JSON.stringify(row).includes("lost its background work"),
+          ),
+        ).toHaveLength(notices);
+      });
+    },
+  );
 
   it("settles open tasks after the disconnect grace elapses without a reconnect", async () => {
     await withTestHarness(async (harness) => {

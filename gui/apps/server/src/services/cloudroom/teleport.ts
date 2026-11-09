@@ -30,7 +30,7 @@ import { stopThreadForCurrentState } from "../threads/thread-lifecycle.js";
 import { resolveThreadRuntimeCommandConfig } from "../threads/thread-runtime-config.js";
 import { cloudroomSystemPrompt } from "../threads/custom-instructions.js";
 import { cloudPromptLimit, cloudroom, promptPayload } from "./commands.js";
-import { copyProject, planProjectCopy } from "./project-copy.js";
+import { copyProject, homeFolder, planProjectCopy } from "./project-copy.js";
 import { SANDBOX_PREFIX } from "./sandboxes.js";
 import {
   CloudroomError,
@@ -224,6 +224,13 @@ class Teleport {
         409,
         "teleport_unavailable",
         "Teleport requires a local parent thread with a workspace.",
+      );
+    // Its files would be other projects' files and secrets, so none could go (#1120), and the agent would have nothing.
+    if (homeFolder(environment.path))
+      throw new ApiError(
+        409,
+        "teleport_unavailable",
+        `This thread's folder, ${environment.path}, is a home folder or holds one, so it would carry other projects' files and secrets to the cloud. Open a project folder instead, then Teleport.`,
       );
     if (!harnessOf(thread.providerId) || thread.providerId === "acp-cursor")
       throw new ApiError(

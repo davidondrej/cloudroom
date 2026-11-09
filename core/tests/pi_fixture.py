@@ -18,6 +18,9 @@ if args == ['--version']:
 path = Path(args[args.index('--session') + 1])
 model = args[args.index('--model') + 1]
 provider = args[args.index('--provider') + 1]
+# Like Pi 1.2.0: an unlisted `provider/x` becomes custom model `x` (#952).
+if model.startswith(provider + '/'):
+    model = model[len(provider) + 1:]
 helper = Path(args[args.index('-e') + 1])
 if not path.read_text():
     path.write_text(json.dumps({'type':'session','version':3,'id':str(uuid.uuid4()),'cwd':str(Path.cwd())})+'\n')

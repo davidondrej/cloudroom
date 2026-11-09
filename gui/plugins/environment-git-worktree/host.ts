@@ -76,7 +76,14 @@ export function createWorktreeHostEntry() {
             }),
             signal: context.signal,
           });
-          return { status: "created", path: created.path, baseBranch } as const;
+          const diffBase = input.diffBase
+            ? await resolveWorktreeBaseBranch(input.sourcePath, input.diffBase)
+            : baseBranch;
+          return {
+            status: "created",
+            path: created.path,
+            baseBranch: diffBase,
+          } as const;
         } catch (error) {
           if (context.signal.aborted) throw error;
           return {

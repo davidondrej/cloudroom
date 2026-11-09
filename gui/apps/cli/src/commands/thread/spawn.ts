@@ -1,6 +1,8 @@
+import { randomUUID } from "node:crypto";
 import { Command } from "commander";
 import {
   jsonValueSchema,
+  looksLikePath,
   PERSONAL_PROJECT_ID,
   threadVisibilitySchema,
   type GitBranchSelection,
@@ -9,8 +11,12 @@ import {
   type JsonValue,
 } from "@cloudroom/domain";
 import type { CreateThreadEnvironmentArgs } from "@cloudroom/server-contract";
+import {
+  BbRequestTimeoutError,
+  DEFAULT_BB_REQUEST_TIMEOUT_MS,
+} from "@cloudroom/sdk/node";
 import { action } from "../../action.js";
-import { createCliBbSdk } from "../../client.js";
+import { CLI_READ_TIMEOUT_MS, createCliBbSdk } from "../../client.js";
 import {
   resolveExplicitIdFlag,
   resolveContextThreadId,
@@ -21,7 +27,9 @@ import {
   resolveMachineTargetOption,
 } from "../machine.js";
 import {
+  addPromptFileOption,
   collectOption,
+  getErrorMessage,
   outputJson,
   parseReasoningLevel,
   prependErrorContext,
@@ -36,6 +44,8 @@ import {
   parseServiceTier,
 } from "./helpers.js";
 import { SEND_AT_HELP, parseSendAt } from "./send-time.js";
+
+const SPAWN_ATTEMPTS = 3;
 
 const PROVIDER_HELP =
   "Provider ID for the thread, such as claude-code or codex. Required with --machine cloud; otherwise omit to use the project's remembered provider choice";
@@ -73,15 +83,7 @@ interface ThreadSpawnCommandOptions {
   sendAt?: string;
 }
 
-export function looksLikePath(value: string): boolean {
-  return (
-    value.includes("/") ||
-    value.includes("\\") ||
-    /^[A-Za-z]:/u.test(value) ||
-    value.startsWith(".") ||
-    value.startsWith("~")
-  );
-}
+export { looksLikePath };
 
 export function requireHostId(hostId: string | null): string {
   if (!hostId) {
@@ -113,7 +115,8 @@ async function preferCallerModel(
   try {
     const own = await sdk.threads.defaultExecutionOptions({ threadId });
     return own?.model === `${model}[1m]` ? own.model : model;
-  } catch {
+  } catch (error) {
+    if (error instanceof BbRequestTimeoutError) throw error;
     return model;
   }
 }
@@ -244,6 +247,7 @@ async function buildProviderSpawnEnvironment(args: {
   const requested = args.environmentProvider.trim();
   const providers = await createCliBbSdk(
     args.serverUrl,
+    CLI_READ_TIMEOUT_MS,
   ).environments.listProviders({ projectId: args.projectId });
   const match = providers.find((provider) => provider.id === requested);
   if (match === undefined) {
@@ -326,13 +330,18 @@ export function registerSpawnCommand(
   parent: Command,
   getUrl: () => string,
 ): void {
-  parent
-    .command("spawn")
-    .description(
-      "Spawn a new thread; omitted execution flags use remembered project defaults, then the target provider catalog default",
+  addPromptFileOption(
+    parent
+      .command("spawn")
+      .description(
+        "Spawn a new thread; omitted execution flags use remembered project defaults, then the target provider catalog default",
+      )
+      .requiredOption("--prompt <prompt>", "Initial prompt for the thread"),
+  )
+    .option(
+      "--request-id <id>",
+      "Stable request ID; after an unanswered spawn, re-run with it to get that thread instead of a duplicate",
     )
-    .requiredOption("--prompt <prompt>", "Initial prompt for the thread")
-    .option("--request-id <id>", "Stable Cloud request ID; reuse after an unconfirmed submission")
     .option("--json", "Print machine-readable JSON output")
     .requiredOption("--project <id>", "Project ID")
     .option(
@@ -438,7 +447,6 @@ export function registerSpawnCommand(
         if (cloudTarget && (environmentValue || opts.newEnvironment || opts.environmentProvider || opts.newMachine || opts.machineInputs || opts.environmentInputs)) throw new Error("Cloud uses its prepared repository; native environment and machine options cannot be combined with --machine cloud.");
         if (cloudTarget && !opts.provider?.trim()) throw new Error("Select a provider with --provider for Cloud, such as claude-code or codex.");
         if (cloudTarget && !opts.model) throw new Error("Select a model with --model for Cloud.");
-        if (!cloudTarget && opts.requestId) throw new Error("--request-id currently applies only to Cloud.");
         if (machineTarget && opts.newMachine) {
           throw new Error(
             "Cannot combine --new-machine with --machine or --host.",
@@ -461,7 +469,10 @@ export function registerSpawnCommand(
         }
         const machineProvider = opts.newMachine
           ? (
-              await createCliBbSdk(getUrl()).hosts.experimental_listProviders()
+              await createCliBbSdk(
+                getUrl(),
+                CLI_READ_TIMEOUT_MS,
+              ).hosts.experimental_listProviders()
             ).find((provider) => provider.id === opts.newMachine?.trim())
           : undefined;
         if (opts.newMachine && machineProvider === undefined) {
@@ -579,9 +590,13 @@ export function registerSpawnCommand(
             ? { initiator: "agent" as const, senderThreadId: parentThreadId }
             : null;
 
+        // The calling agent, so the website can tell which agent starts Cloud threads (docs/scopes/credit-burn.md).
+        const launcherThreadId = resolveContextThreadId();
+        // Sent on every spawn, so an unanswered one can be retried without a duplicate.
+        const requestId = opts.requestId ?? randomUUID();
         let thread: Thread;
         try {
-          const sdk = createCliBbSdk(getUrl());
+          const sdk = createCliBbSdk(getUrl(), DEFAULT_BB_REQUEST_TIMEOUT_MS);
           const model = opts.model && (await preferCallerModel(sdk, opts.model));
           const input = await uploadClientAttachmentInputs({
             input: buildPromptInputs({
@@ -593,8 +608,16 @@ export function registerSpawnCommand(
             resolveProjectId: async () => projectId,
             sdk,
           });
-          thread = await sdk.threads.spawn({
-            ...(cloudTarget ? { executionTarget: "cloud" as const, ...(opts.requestId ? { requestId: opts.requestId } : {}), ...(opts.baseBranch?.trim() ? { baseBranch: opts.baseBranch.trim() } : {}) } : {}),
+          const spawnArgs: Parameters<typeof sdk.threads.spawn>[0] = {
+            requestId,
+            ...(cloudTarget
+              ? {
+                  executionTarget: "cloud" as const,
+                  ...(opts.baseBranch?.trim()
+                    ? { baseBranch: opts.baseBranch.trim() }
+                    : {}),
+                }
+              : {}),
             origin: "cli",
             projectId,
             ...(providerId ? { providerId } : {}),
@@ -607,13 +630,40 @@ export function registerSpawnCommand(
             ...(visibility ? { visibility } : {}),
             environment,
             startedOnBehalfOf,
+            ...(launcherThreadId && /^thr_[a-z0-9]{1,40}$/.test(launcherThreadId) ? { launcherThreadId } : {}),
             originKind: opts.originKind ?? null,
             ...(parentThreadId ? { parentThreadId } : {}),
             ...(opts.section ? { sectionId: opts.section } : {}),
             ...(opts.sourceThread ? { sourceThreadId: opts.sourceThread } : {}),
             ...(sourceSeqEnd !== undefined ? { sourceSeqEnd } : {}),
             ...(sendAt !== undefined ? { sendAt } : {}),
-          });
+          };
+          let unconfirmed = false;
+          for (let attempt = 1; ; attempt += 1) {
+            try {
+              thread = await sdk.threads.spawn(spawnArgs);
+              break;
+            } catch (error) {
+              // Only a timeout or a dropped connection leaves the outcome unknown.
+              const timedOut = error instanceof BbRequestTimeoutError;
+              const unknown = timedOut || error instanceof TypeError;
+              const reason = timedOut
+                ? `no answer within ${DEFAULT_BB_REQUEST_TIMEOUT_MS / 1000} seconds; it may be busy`
+                : getErrorMessage(error);
+              // Said at once: an agent's command timeout can stop this before the last attempt.
+              if (unknown && !unconfirmed)
+                console.error(
+                  `Cloudroom at ${getUrl()} has not confirmed the spawn (${reason}); retrying. If this command stops, re-run it with --request-id ${requestId} to get the thread instead of a duplicate.`,
+                );
+              unconfirmed ||= unknown;
+              if (!unconfirmed) throw error;
+              // The same request ID joins a slow create still running (a first clone, a waking machine).
+              if (unknown && attempt < SPAWN_ATTEMPTS) continue;
+              throw new Error(
+                `Cloudroom at ${getUrl()} did not confirm the spawn (${reason}). The thread may already exist: re-run with --request-id ${requestId} to get it instead of a duplicate.`,
+              );
+            }
+          }
           const loopRunId = process.env.BB_AUTOMATION_RUN_ID?.trim();
           if (loopRunId) {
             await sdk.plugins

@@ -533,6 +533,10 @@ impl IntoResponse for session::Error {
         let (status, error) = match self {
             Self::NotFound => (StatusCode::NOT_FOUND, "session not found"),
             Self::Conflict(message) => (StatusCode::CONFLICT, message),
+            Self::Effort(_) => {
+                let body = json!({"error": self.message(), "code": "invalid_reasoning_effort"});
+                return (StatusCode::CONFLICT, Json(body)).into_response();
+            }
             Self::Storage(detail) => {
                 eprintln!("storage unavailable: {detail}");
                 return (
@@ -573,7 +577,9 @@ impl IntoResponse for session::Error {
             | "saved session has no matching receipt" => "request_conflict",
             "agent setup is incomplete" | "harness is not configured" => "harness_not_configured",
             "invalid workspace" | "workspace mapping unavailable" => "invalid_workspace",
-            "storage unsafe; new execution is blocked" => "storage_blocked",
+            "storage unsafe; new execution is blocked" | "storage unsafe; uploads are blocked" => {
+                "storage_blocked"
+            }
             "service is stopping" => "service_stopping",
             "service is draining" => "service_draining",
             "this thread was asleep and is waking up; try again in a few seconds" => {
@@ -1292,7 +1298,11 @@ async fn attach(
             "session journal is not writable".into(),
         ));
     }
-    if manager.is_stopping() || manager.storage.blocks() {
+    // A stopping Core (sleep, move) is not a full disk: the app wakes the sandbox and retries.
+    if manager.is_stopping() {
+        return Err(session::Error::Conflict("service is stopping"));
+    }
+    if manager.storage.blocks() {
         return Err(session::Error::Conflict(
             "storage unsafe; uploads are blocked",
         ));

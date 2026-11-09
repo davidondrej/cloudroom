@@ -16,7 +16,7 @@ import { secondsSinceFirstLaunch } from "./setup-telemetry.js";
 import { teleports } from "./teleport.js";
 import { binding, teleportBlocked, teleportProgress } from "./store.js";
 import { browserRequestProblem } from "../../browser-request-guard.js";
-import { cancelClaudeToken, claudePlan, ensureClaudeCli, isClaudeApiKey, startClaudeToken, withClaudeTokenRun } from "./claude-token.js";
+import { cancelClaudeToken, claudePlan, connectClaude, isClaudeApiKey, withClaudeTokenRun } from "./claude-token.js";
 import { startClaudeVersionSync } from "./harness-versions.js";
 import { macSignedInAgents } from "./mac-agents.js";
 import { disconnectAgent, restoreAgent } from "./agent-logins.js";
@@ -47,9 +47,12 @@ import { addGithubRepo, githubBranches, macRepoSuggestions, repoSuggestions } fr
 import { projectSuggestion } from "./project-nudge.js";
 import { promptSuggestion, promptSuggestionEvent } from "../threads/prompt-suggestion.js";
 import { readUiPreferences } from "../system/ui-preferences.js";
+import { forgetCloudAccountSwitch, noteCloudAccountSwitch } from "./account-switches.js";
 import { ACTIVATION_STEPS, CLOUD_CHOICE_ACTIONS, CLOUD_CHOICE_REASONS, POPUP_DETAILS, POPUPS, SETUP_ACTIONS, SETUP_AGENTS, SETUP_DETAILS, SETUP_STEPS, STARTER_PROMPTS, UPGRADE_PROMPTS } from "../system/telemetry.js";
 
 const SAFE_SETTINGS_SEARCH = /^(?=.{2,40}$)\p{L}+(?: \p{L}+){0,3}$/u;
+// A Cloud loop run's request (auto_<loop>_<due>), the website's name for the run that starts its thread.
+const CLOUD_RUN = /^auto_[a-f0-9]{32}_[0-9]{1,16}$/;
 
 export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: PluginService): void {
   cloudroom(deps).teleportRecovery = () => teleports(deps).recover();
@@ -240,6 +243,7 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: Plugin
     return context.json(await reportBug(deps, input));
   });
   app.get("/api/v1/cloudroom/account/invites", async (context) => context.json(await cloudroom(deps).sandboxes.invites("list")));
+  app.get("/api/v1/cloudroom/account/usage-wave", async (context) => context.json({ wave: await cloudroom(deps).sandboxes.usageWave() }));
   app.post("/api/v1/cloudroom/account/invites", async (context) => {
     z.object({}).strict().parse(await context.req.json());
     return context.json(await cloudroom(deps).sandboxes.invites("create"));
@@ -283,7 +287,7 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: Plugin
   // Cloud automations (ADR 0212): the website stores and runs them, so they keep running while this Mac is off.
   // A child Cloud thread shares its parent's sandbox, so the website gets the parent and the child's own session.
   app.post("/api/v1/cloudroom/account/automations", async (context) => {
-    const input = z.object({ action: z.enum(["list", "create", "update", "run", "runs", "history", "delete", "hook", "unhook", "events", "ack", "settings", "report"]), thread: z.string().min(1).max(64).optional(), project: z.string().min(1).max(64).optional() }).passthrough().parse(await context.req.json());
+    const input = z.object({ action: z.enum(["list", "create", "update", "run", "runs", "history", "delete", "hook", "unhook", "events", "ack", "settings", "report", "reports"]), thread: z.string().min(1).max(64).optional(), project: z.string().min(1).max(64).optional() }).passthrough().parse(await context.req.json());
     let body: Record<string, unknown> = input;
     // A fresh-thread loop made from a project needs no thread: this Mac sends the project's settings (ADR 20261101-004659).
     // From a Local thread, with no Cloud thread to re-prompt, it is made from that thread's project.
@@ -292,6 +296,11 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: Plugin
     if (input.action === "create" && project && (!input.thread || !input.project && local && !isCloudThread(local))) {
       const { thread: _thread, ...rest } = input;
       body = { ...rest, project, settings: await projectLoopSettings(deps, project, cloudroom(deps).sandboxes.vpsConnected) };
+    } else if (input.action === "reports") {
+      // Loops → Review (ADR 0298): a Cloud loop run's report is found by the run's request, which started its thread's session.
+      const ids = z.object({ runs: z.array(z.string()).max(300), threads: z.array(z.string()).max(300) }).parse(input);
+      const requests = ids.threads.flatMap((id) => binding(deps.db, id)?.startRequestId ?? []).filter((request) => CLOUD_RUN.test(request));
+      body = { action: "reports", runs: [...ids.runs, ...requests] };
     } else if (input.action === "create") {
       const thread = input.thread ? getThread(deps.db, input.thread) : null;
       if (!thread || !isCloudThread(thread) || thread.archivedAt || thread.deletedAt) throw new ApiError(400, "cloud_automation", "Cloud automations need an open Cloud thread.");
@@ -426,16 +435,22 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: Plugin
     const problem = browserRequestProblem(context, deps, { requireJsonForMutation: true });
     if (problem) return context.json({ message: "Use the local Cloudroom app." }, problem.status);
     const { requestId } = z.object({ requestId: z.string().regex(/^[a-zA-Z0-9_-]{1,64}$/) }).strict().parse(await context.req.json());
-    await ensureClaudeCli((error) => deps.logger.warn({ error }, "Claude Code could not be installed in the background"));
-    await startClaudeToken(requestId, async token => cloudroom(deps).claudeAuth("token", requestId, token, await claudePlan()), deps);
+    await connectClaude(requestId, async token => cloudroom(deps).claudeAuth("token", requestId, token, await claudePlan()), deps);
     return context.json(await claudeStatus());
   });
+  // The Accounts plugin names the accounts a switch moves between, for the line it leaves in limited threads.
+  const switchedSchema = z.object({ from: z.string().min(1).max(320), to: z.string().min(1).max(320) }).strict().optional();
   // The Accounts plugin saves the account in use as the Cloud login (ADR 0197).
   app.post("/api/v1/cloudroom/account/claude/token", async context => {
     const problem = browserRequestProblem(context, deps, { requireJsonForMutation: true });
     if (problem) return context.json({ message: "Use the local Cloudroom app." }, problem.status);
-    const input = z.object({ requestId: z.string().regex(/^[a-zA-Z0-9_-]{1,64}$/), token: z.string().regex(/^sk-ant-oat[A-Za-z0-9_-]{20,}$/), plan: z.string().regex(/^[a-z_]{1,32}$/).optional(), follow: z.boolean().optional() }).strict().parse(await context.req.json());
-    const status = await cloudroom(deps).claudeAuth("token", input.requestId, input.token, input.plan, input.follow);
+    const input = z.object({ requestId: z.string().regex(/^[a-zA-Z0-9_-]{1,64}$/), token: z.string().regex(/^sk-ant-oat[A-Za-z0-9_-]{20,}$/), plan: z.string().regex(/^[a-z_]{1,32}$/).optional(), follow: z.boolean().optional(), switched: switchedSchema }).strict().parse(await context.req.json());
+    noteCloudAccountSwitch("claude-code", input.switched);
+    const status = await cloudroom(deps).claudeAuth("token", input.requestId, input.token, input.plan, input.follow).catch((error: unknown) => {
+      forgetCloudAccountSwitch("claude-code");
+      throw error;
+    });
+    if (status.state !== "connected") forgetCloudAccountSwitch("claude-code");
     cloudroom(deps).restartAwake("claude-code");
     return context.json(status);
   });
@@ -465,9 +480,15 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: Plugin
   app.post("/api/v1/cloudroom/account/cursor/account", async context => {
     const problem = browserRequestProblem(context, deps, { requireJsonForMutation: true });
     if (problem) return context.json({ message: "Use the local Cloudroom app." }, problem.status);
-    const parsed = z.object({ requestId: z.string().regex(/^[a-zA-Z0-9_-]{1,64}$/), apiKey: z.string().min(1).max(4096).regex(/^[!-~]+$/).nullable() }).strict().safeParse(await context.req.json().catch(() => null));
+    const parsed = z.object({ requestId: z.string().regex(/^[a-zA-Z0-9_-]{1,64}$/), apiKey: z.string().min(1).max(4096).regex(/^[!-~]+$/).nullable(), switched: switchedSchema }).strict().safeParse(await context.req.json().catch(() => null));
     if (!parsed.success) throw new ApiError(400, "invalid_cursor_auth", "Invalid Cursor account request.");
-    return context.json(await cloudroom(deps).cursorAccount(parsed.data.requestId, parsed.data.apiKey));
+    noteCloudAccountSwitch("acp-cursor", parsed.data.switched);
+    const status = await cloudroom(deps).cursorAccount(parsed.data.requestId, parsed.data.apiKey).catch((error: unknown) => {
+      forgetCloudAccountSwitch("acp-cursor");
+      throw error;
+    });
+    if (status.state !== "connected") forgetCloudAccountSwitch("acp-cursor");
+    return context.json(status);
   });
   app.post("/api/v1/cloudroom/account/pi/key", async context => {
     const parsed = z.object({ provider: z.string().regex(/^[A-Za-z0-9._-]{1,64}$/), apiKey: z.string().min(1).max(8192).regex(/^[!-~]+$/) }).strict().safeParse(await context.req.json().catch(() => null));
@@ -591,6 +612,11 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: Plugin
     if (problem) return context.json({ message: "Use the local Cloudroom app or CLI." }, problem.status);
     await cloudroom(deps).retryStart(context.req.param("id"));
     return context.json({ ok: true });
+  });
+  app.post("/api/v1/cloudroom/threads/:id/clear-disk", async (context) => {
+    const problem = browserRequestProblem(context, deps, { requireJsonForMutation: true });
+    if (problem) return context.json({ message: "Use the local Cloudroom app or CLI." }, problem.status);
+    return context.json(await cloudroom(deps).clearDisk(context.req.param("id")));
   });
   app.post("/api/v1/cloudroom/threads/:id/move", async (context) => {
     const problem = browserRequestProblem(context, deps, { requireJsonForMutation: true });

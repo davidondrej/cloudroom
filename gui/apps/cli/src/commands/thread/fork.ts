@@ -9,7 +9,12 @@ import { action } from "../../action.js";
 import { createCliBbSdk } from "../../client.js";
 import { resolveExplicitIdFlag } from "../../context-env.js";
 import { resolveLocalHostId } from "../../daemon.js";
-import { collectOption, outputJson, prependErrorContext } from "../helpers.js";
+import {
+  addPromptFileOption,
+  collectOption,
+  outputJson,
+  prependErrorContext,
+} from "../helpers.js";
 import {
   buildPromptInputs,
   parsePermissionMode,
@@ -95,10 +100,12 @@ export function registerForkCommand(
   parent: Command,
   getUrl: () => string,
 ): void {
-  parent
-    .command("fork <source-thread-id>")
-    .description("Fork a thread at its tip or a source event sequence")
-    .option("--prompt <prompt>", "Optional first prompt; omit for an idle fork")
+  addPromptFileOption(
+    parent
+      .command("fork <source-thread-id>")
+      .description("Fork a thread at its tip or a source event sequence")
+      .option("--prompt <prompt>", "Optional first prompt; omit for an idle fork"),
+  )
     .option("--title <title>", "Thread title")
     .option(
       "--source-seq-end <seq>",

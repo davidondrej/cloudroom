@@ -1092,7 +1092,7 @@ whether `retryable` should be per kind (only `sessionArchived` and
 `rateLimited` read it today) and whether the runtime should bound the
 `rateLimited` ladder from the hint rather than from a constant.
 
-## Provider maintenance toolkit (`experimental_findCliExecutable`, `experimental_findBrokenCliLink`, `experimental_resolveExecutablePath`, `experimental_readCliVersion`, `experimental_commandOutput`, `experimental_versionFrom`, `experimental_compareVersions`, `experimental_formatCommand`, `experimental_npmCommand`, `experimental_npmGlobalInstallCommand`, `experimental_npmLatestVersion`, `experimental_probeNpmGlobalPackage`, `experimental_npmGlobalInstallSource`, `experimental_installationVerification`, `experimental_downloadedInstallerCommand`, `experimental_clampPercent`) (`@get-bb/plugin-sdk/provider-bridge`)
+## Provider maintenance toolkit (`experimental_findCliExecutable`, `experimental_findBrokenCliLink`, `experimental_resolveExecutablePath`, `experimental_readCliVersion`, `experimental_probeCliVersion`, `experimental_commandOutput`, `experimental_versionFrom`, `experimental_compareVersions`, `experimental_formatCommand`, `experimental_npmCommand`, `experimental_npmGlobalInstallCommand`, `experimental_npmLatestVersion`, `experimental_probeNpmGlobalPackage`, `experimental_npmGlobalInstallSource`, `experimental_installationVerification`, `experimental_installationRunUnavailable`, `experimental_downloadedInstallerCommand`, `experimental_clampPercent`) (`@get-bb/plugin-sdk/provider-bridge`)
 
 **What it does.** The host-local probes and install-action plumbing behind a
 bridge's `provider/health`, `provider/usage` and `provider/installation/*`
@@ -1108,6 +1108,9 @@ hit, null when absent; 5 s), `experimental_readCliVersion` (`<command>
 --version` with stdin closed, so CLIs that start a stdio server on unknown
 flags exit instead of hitting the timeout; the first version token on stdout
 or stderr, or null if it is invalid SemVer; 5 s),
+`experimental_probeCliVersion` (the same probe, plus the output of a
+`--version` that exited non-zero, so a bridge can tell a broken install
+from a slow one; null on a timeout and on Windows),
 `experimental_commandOutput` (any command's trimmed stdout+stderr or null on
 failure; 15 s), `experimental_versionFrom` (the first version token in a
 banner, or null if it is invalid SemVer), `experimental_npmLatestVersion` (`npm view <package> version`) and
@@ -1118,7 +1121,10 @@ metadata; throws `TypeError` for invalid inputs), `experimental_npmGlobalInstall
 the executable sits inside npm's global bin, `external` otherwise,
 `notInstalled` when absent) and `experimental_installationVerification` (an
 install verifies by existence; an update by reaching the latest version the
-status saw, or by any change when the registry was unreachable). The
+status saw, or by any change when the registry was unreachable) and
+`experimental_installationRunUnavailable` (refuses an install or update the
+fresh status no longer offers, naming the installed version and the action
+it does offer). The
 actions: `experimental_npmGlobalInstallCommand` (`npm install -g
 <package>@latest` with its display string), `experimental_downloadedInstallerCommand`
 (a vendor's `curl | bash` script run from a temp file),

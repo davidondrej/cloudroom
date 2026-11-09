@@ -22,7 +22,7 @@ room-cli loop list
 room-cli loop update ID [--name NAME] [--priority 1-4] [--prompt TEXT] [--cron EXPR [--timezone ZONE] | --at ISO_TIME | --in 30m] [--script TEXT|--script-file PATH] [--provider P] [--model M] [--reasoning LEVEL] [--secrets KEY,.env|none|all]
 room-cli loop pause|resume|run|delete|hook ID
 room-cli loop report --outcome done|acted|needs-you|failed --confidence high|medium|low --reason TEXT [--action TEXT]...
-A loop runs on a schedule even while the user's Mac is off (`room-cli automation` is the same command): every minute with a script, else at most every 15 minutes. A --webhook loop runs when its secret URL gets a POST instead: create prints the URL once, `hook ID` replaces it, and each run gets the requests that arrived as data. Each --cron run starts a fresh Cloud thread in its own sandbox, from this thread's project and agent; --same-thread re-prompts this thread instead. A one-time --at/--in run re-prompts this thread; --new-thread gives it a fresh one. A fresh-thread automation saves this thread's settings, so it keeps running after this thread is archived. Its runs use this thread's agent unless --provider, --model, or --reasoning picks another (fresh-thread loops only); `list` shows each loop's agent, and `update` changes it. --priority is P1 (essential) to P4 (niche); loops start at P3. --secrets picks the only API keys (names from Settings → Cloud environment) a fresh-thread loop's runs and script get, plus .env for the project's .env files: pick just what the prompt and script need, like --secrets SENTRY_TOKEN,.env, or none. Without it a loop gets all of them; `list` shows each loop's secrets (null: all). A script runs first (60 s), in the automation's own sandbox with fresh threads, else in this one: no output skips the run (exit 0 or 1; other exit codes fail it, and 3 failures in a row pause it), and its output is added to the prompt. Cloudroom fills in the next run within a minute; check `list` for it or an error. Inside a loop run, `report` records what the run did, why, and how sure it was (ADR 0298): one --action per change, like --action \"merged #419\".";
+A loop runs on a schedule even while the user's Mac is off (`room-cli automation` is the same command): every minute with a script, else at most every 15 minutes. A --webhook loop runs when its secret URL gets a POST instead: create prints the URL once, `hook ID` replaces it, and each run gets the requests that arrived as data. Each --cron run starts a fresh Cloud thread in its own sandbox, from this thread's project and agent; --same-thread re-prompts this thread instead. A one-time --at/--in run re-prompts this thread; --new-thread gives it a fresh one. A fresh-thread automation saves this thread's settings, so it keeps running after this thread is archived. Its runs use this thread's agent unless --provider, --model, or --reasoning picks another (fresh-thread loops only); `list` shows each loop's agent, and `update` changes it. --priority is P1 (essential) to P4 (niche); loops start at P3. --secrets picks the only API keys (names from Settings → Cloud environment) a fresh-thread loop's runs and script get, plus .env for the project's .env files: pick just what the prompt and script need, like --secrets SENTRY_TOKEN,.env, or none. Without it a loop gets all of them; `list` shows each loop's secrets (null: all). A script runs first (60 s), in the automation's own sandbox with fresh threads, else in this one: no output skips the run (exit 0 or 1; other exit codes fail it, and 3 failures in a row pause it), and its output is added to the prompt. Cloudroom fills in the next run within a minute; check `list` for it or an error. Inside a loop run, `report` records what the run did, why, and how sure it was (ADR 0298): a --reason of up to 500 characters and up to 10 --action values of up to 200 characters each, like --action \"merged #419\": group related changes, as the run's transcript keeps the details.";
 const MAX_PROMPT: usize = 32_000;
 
 #[derive(Deserialize, Serialize)]
@@ -263,20 +263,28 @@ fn check(input: &Body) -> Result<(), Failure> {
         );
     }
     if input.action == "report" {
-        let text = |t: &Option<String>, max: usize| {
-            t.as_ref()
-                .is_some_and(|t| !t.trim().is_empty() && t.chars().count() <= max)
+        let text = |t: Option<&String>, max: usize| {
+            t.is_some_and(|t| !t.trim().is_empty() && t.trim().chars().count() <= max)
         };
         let actions = input.actions.as_deref().unwrap_or_default();
-        if !text(&input.outcome, 20) || !text(&input.confidence, 20) || !text(&input.reason, 2000) {
+        // The website's limits (docs/database/0092): it saves a report whole or refuses it (#918).
+        if !text(input.outcome.as_ref(), 20)
+            || !text(input.confidence.as_ref(), 20)
+            || input.reason.is_none()
+        {
             return bad("Give --outcome, --confidence, and --reason");
         }
-        if actions.len() > 10
-            || actions
-                .iter()
-                .any(|a| a.trim().is_empty() || a.chars().count() > 500)
-        {
-            return bad("Give up to 10 --action values of 1-500 characters");
+        if !text(input.reason.as_ref(), 500) {
+            return bad("Give a --reason of 1-500 characters");
+        }
+        if actions.len() > 10 {
+            return bad(&format!(
+                "Give up to 10 --action values (got {}): group related changes; the run's transcript keeps the details",
+                actions.len()
+            ));
+        }
+        if actions.iter().any(|a| !text(Some(a), 200)) {
+            return bad("Give --action values of 1-200 characters");
         }
         return Ok(());
     }

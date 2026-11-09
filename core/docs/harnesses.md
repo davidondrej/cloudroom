@@ -47,7 +47,7 @@ Steering writes the message into the running turn, as Local's Claude does; a ste
 
 Structured prompt `content` can carry skill mentions with UTF-16 `start`/`end` offsets and a `resource` containing `kind: "command"`, `source: "skill"`, `name`, and `origin: "user" | "project"`. Its text blocks, joined with newlines, must match `text`. The Claude harness advertises `skill_mentions: true`; GUI clients must not drop these mentions when using an older core.
 
-Before each send, core loads the selected user/project `SKILL.md` bodies on the execution machine under the agent's file permissions. Tags work anywhere and repeated selections load once. Saved requests stay unchanged. A missing skill becomes a `prompt_warning` and an agent note; ambiguous or oversized skills fail before delivery. Bodies are literal instructions. A skill with Claude Code settings (tools, model, hooks, shell, `$ARGUMENTS`) is sent as typed when its tag starts the message, so Claude Code runs it natively; later in the message it fails before delivery. Images go before the prompt text and file notes join it, because Claude Code reads a slash command only from the last block. A `context: fork` skill fails before delivery: the subagent guard above only lets Skill calls run forks.
+Before each send, core loads the selected user/project `SKILL.md` bodies on the execution machine under the agent's file permissions. Tags work anywhere and repeated selections load once. Saved requests stay unchanged. A missing skill becomes a `prompt_warning` and an agent note; ambiguous or oversized skills fail before delivery. Bodies are literal instructions. A skill with Claude Code settings (tools, model, hooks, shell, `$ARGUMENTS`) is sent as typed when its tag starts the message, so Claude Code runs it natively; later in the message it fails before delivery. Image and file notes join the prompt text after it, so a leading slash command still runs; Claude opens them with its Read tool, as Local does, so a photo batch never has to fit one 16 MiB frame (#1122). Tool results reach records with each image as an `[image]` placeholder. A `context: fork` skill fails before delivery: the subagent guard above only lets Skill calls run forks.
 
 ### Verification boundary
 
@@ -109,9 +109,8 @@ Codex hooks were verified with 0.155.1; Pi uses the version above. Core Codex
 startup also requires the system Node runtime already used by Pi. Missing Node
 fails startup rather than silently dropping the guard.
 
-`src/runtime/command-guard.mjs` owns the shared rules and hook source. Keep its
-GUI copy, `gui/packages/plugin-sdk/src/internal/command-guard-runtime.mjs`,
-byte-identical when preparing a release.
+`src/runtime/command-guard.mjs` owns the shared rules and hook source. The GUI's
+plugin SDK imports this same file for Local threads.
 
 ## Cursor implementation preview
 
@@ -152,6 +151,12 @@ Hosted sandboxes copy the Mac's OpenClaw sign-ins and API keys (its state databa
 `src/runtime/droid.rs` runs Factory's `droid exec --output-format acp` over the shared ACP protocol. Core discovers `droid` in the agent account's `.local/bin` or `/usr/local/bin` once `~/.factory` exists. Sessions start in `auto-high` (full access, ADR 0045); the CLI's `--auto` flag does not apply to ACP sessions. Model and `reasoning_effort` are session options, and an effort the model does not offer is skipped. Droid keeps sessions in `~/.factory/sessions/<folder>/<id>.jsonl` and replays them on `session/load`; Core stores only the ACP stream.
 
 A browser login can't run in a sandbox: Droid signs in with `FACTORY_API_KEY` from the user's Cloud environment variables. Without one, a start fails with a message that says where to add it.
+
+## Kimi Code
+
+`src/runtime/kimi.rs` runs Moonshot's `kimi acp` over the shared ACP protocol. Core discovers `kimi` in the agent account's `.local/bin` or `/usr/local/bin` once `~/.kimi-code` exists, and pins `KIMI_CODE_HOME` there, with auto-update and telemetry off. Sessions start in `auto` mode (full access, ADR 0045): every tool call is approved and Kimi decides instead of asking questions. The model and `thinking` level are session options; an effort the model does not offer is skipped. Kimi keeps sessions in `~/.kimi-code/sessions/<folder>/session_<uuid>/`; resume uses `session/resume`, which replays nothing, and Core stores only the ACP stream.
+
+Hosted sandboxes copy the Mac's `config.toml` and every token in `credentials/` (one per region: `kimi-code.json` for kimi.com, `kimi-code-env-<hash>.json` for kimi.ai) at wake, and save the sandbox's renewed copies before sleep. Kimi rotates refresh tokens, so the Mac and a sandbox may sign each other out (ADR 20261107-081737). Without a login, a start fails with a message to run `kimi login` on the Mac.
 
 ## Queue, completion and recovery
 

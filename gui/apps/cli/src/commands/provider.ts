@@ -134,13 +134,20 @@ export function registerProviderCommands(
           });
           if (outputJson(opts, models)) return;
           if (models.length === 0) {
-            const signInHint = executionOptions.providers.find(
-              (entry) => entry.id === providerId,
-            )?.strings?.signInHint;
+            const error = executionOptions.modelLoadError;
+            const entry = executionOptions.providers.find(
+              (candidate) => candidate.id === providerId,
+            );
+            // A broken install needs a reinstall, not a sign-in (#907).
+            const broken = executionOptions.providers.find(
+              (candidate) => candidate.id === error?.providerId,
+            );
+            const hint =
+              error?.code === "missing_executable"
+                ? `${broken?.displayName ?? error.providerId} can't start: its CLI, or a file it needs, is missing. Reinstall it${broken?.strings?.installUrl ? ` (${broken.strings.installUrl})` : ""}.`
+                : entry?.strings?.signInHint;
             console.log(
-              signInHint
-                ? `No models available. ${signInHint}`
-                : "No models available",
+              hint ? `No models available. ${hint}` : "No models available",
             );
             return;
           }

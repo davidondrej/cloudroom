@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import {
   chmod,
   lstat,
@@ -158,6 +158,35 @@ describe("room-cli shim", () => {
       ensureRoomCliShim({ cliPath: newCli, homeDir }),
     ).resolves.toMatchObject({ kind: "repaired" });
     expect(await readlink(shimPath)).toBe(newCli);
+  });
+
+  it("prefers a bundled ROOM_CLI over mounting the AppImage", async () => {
+    const appImagePath = join(root, "Cloudroom.AppImage");
+    const envCli = join(root, "bundled room-cli");
+    await writeFile(appImagePath, "#!/bin/sh\necho appimage\n", {
+      mode: 0o755,
+    });
+    await writeFile(
+      envCli,
+      '#!/bin/sh\necho "$ROOM_CLI_REEXEC" "$@"\nexit 3\n',
+      { mode: 0o755 },
+    );
+    await ensureRoomCliShim({
+      appImagePath,
+      cliPath: await installApp("a"),
+      homeDir,
+    });
+    for (const [env, stdout, status] of [
+      [{ ROOM_CLI: envCli }, "1 status Ada's thread\n", 3],
+      [{ ROOM_CLI: join(root, "gone") }, "appimage\n", 0],
+      [{ ROOM_CLI: envCli, ROOM_CLI_REEXEC: "1" }, "appimage\n", 0],
+    ] as const) {
+      const run = spawnSync(shimPath, ["status", "Ada's thread"], {
+        encoding: "utf8",
+        env,
+      });
+      expect([run.stdout, run.status]).toEqual([stdout, status]);
+    }
   });
 
   it("does not link to a missing or translocated app", async () => {

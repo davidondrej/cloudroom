@@ -59,6 +59,35 @@ describe("room-cli thread wait command output", () => {
     );
   });
 
+  it.each([
+    // #1111: idle with a queued (or claimed, dispatching) follow-up is the gap
+    // before it starts; the deadline still bounds a row that never starts.
+    // Reads are "status queued dispatching"; the last one repeats.
+    { timeout: "5", poll: "1", reads: ["idle 1 0", "active 0 0", "idle 0 0"] },
+    {
+      timeout: "5",
+      poll: "1",
+      reads: ["idle 1 0", "idle 0 1", "active 0 0", "idle 0 0"],
+    },
+    { timeout: "0", poll: "1", reads: ["idle 1 0"] },
+    { timeout: "1", poll: "10000", reads: ["idle 1 0", "idle 1 0"] },
+  ])("thread wait --timeout $timeout reads $reads", async (row) => {
+    const get = vi.fn(async () => {
+      const i = Math.min(get.mock.calls.length, row.reads.length) - 1;
+      const [status, queued, dispatching] = row.reads[i]!.split(" ");
+      return {
+        id: "t",
+        status,
+        queuedMessageCount: Number(queued),
+        dispatchingMessageCount: Number(dispatching),
+      };
+    });
+    stubServerApi({ "v1.threads.:id.$get": get });
+    const args = ["--timeout", row.timeout, "--poll-interval", row.poll];
+    await runCommand(["thread", "wait", "t", ...args], register);
+    expect(get).toHaveBeenCalledTimes(row.reads.length);
+  });
+
   it("room-cli thread wait --status exits with timeout code when the status is not reached", async () => {
     const get = vi.fn(async () =>
       fixtures.makeThread({

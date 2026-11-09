@@ -140,10 +140,10 @@ diff viewers, and the new-thread composer.
   overlays behaves correctly. "Import freely" is about the bundle: `tsc`
   still needs each one's declarations in `node_modules`, so every shimmed
   package is a **type-only `devDependencies` entry at the host's version**
-  (the scaffold declares all of them; `room-cli plugin types` repins them; `bb
-plugin types --check` reports drift). Never list one in `dependencies` —
-  the build would not read it, and a git install would bundle a second
-  copy of a singleton.
+  (the scaffold declares all of them; `room-cli plugin types` repins them;
+  `room-cli plugin types --check` reports drift). Never list one in
+  `dependencies` — the build would not read it, and a git install would
+  bundle a second copy of a singleton.
 - Also never bundled, for size rather than singleton reasons: `clsx`,
   `tailwind-merge`, and `class-variance-authority`. Your app bundle uses the
   host's installed copies (tailwind-merge ^3, clsx ^2, cva ^0.7), so keep

@@ -344,8 +344,22 @@ async function handleRequest(message) {
     case "initialize":
       respond(id, {});
       return;
+    case "configRequirements/read":
+      // "hang" never answers, like a stuck app-server; absent is unknown method.
+      if (script?.configRequirements === "hang") return;
+      if (script?.configRequirements !== undefined) {
+        respond(id, { requirements: script.configRequirements });
+        return;
+      }
+      respondError(id, -32601, `Unknown method "${method}"`);
+      return;
     case "config/read":
-      respond(id, { config: { features: { hooks: true } } });
+      respond(id, {
+        config: {
+          model: script?.configModel ?? null,
+          features: { hooks: true },
+        },
+      });
       return;
     case "account/rateLimits/read":
       respond(id, { rateLimits: {} });

@@ -52,10 +52,14 @@ function claudeBinary(): string | null {
   return null;
 }
 
-// A stray token or API key would win over the account's own login.
-export function profileEnv(profile: string): NodeJS.ProcessEnv {
-  if (!path.isAbsolute(profile)) throw new Error("Claude profile folder must be absolute.");
-  const env: NodeJS.ProcessEnv = { ...process.env, CLAUDE_CONFIG_DIR: profile };
+// A stray token or API key would win over the account's own login. No profile means the Mac's own login.
+export function profileEnv(profile?: string): NodeJS.ProcessEnv {
+  if (profile !== undefined && !path.isAbsolute(profile))
+    throw new Error("Claude profile folder must be absolute.");
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    ...(profile ? { CLAUDE_CONFIG_DIR: profile } : {}),
+  };
   for (const key of [
     "CLAUDE_CODE_OAUTH_TOKEN",
     "ANTHROPIC_API_KEY",
@@ -309,21 +313,39 @@ export async function claudeUsage(
   return { windows, credits: credits ? { detail: null } : null };
 }
 
-export async function localClaudeEmail(): Promise<string | null> {
+export type MacClaude = { email: string; org: string | null };
+
+/** The Mac's own Claude login: null when signed out, undefined when Claude is mid-write and the file can't be read. */
+export async function localClaudeAccount(): Promise<
+  MacClaude | null | undefined
+> {
+  let text: string;
   try {
-    const value: unknown = JSON.parse(
-      await fs.readFile(path.join(os.homedir(), ".claude.json"), "utf8"),
-    );
-    const email = z
-      .object({ oauthAccount: z.object({ emailAddress: z.string() }) })
-      .safeParse(value);
-    return email.success ? email.data.oauthAccount.emailAddress : null;
+    text = await fs.readFile(path.join(os.homedir(), ".claude.json"), "utf8");
   } catch {
     return null;
   }
+  try {
+    const login = z
+      .object({
+        oauthAccount: z.object({
+          emailAddress: z.string(),
+          organizationUuid: z.string().nullish(),
+        }),
+      })
+      .safeParse(JSON.parse(text));
+    return login.success
+      ? {
+          email: login.data.oauthAccount.emailAddress,
+          org: login.data.oauthAccount.organizationUuid ?? null,
+        }
+      : null;
+  } catch {
+    return undefined;
+  }
 }
 
-const execClaude = (binary: string, args: string[], profile: string) =>
+const execClaude = (binary: string, args: string[], profile?: string) =>
   windows
     ? execPortableFile(binary, args, {
         env: profileEnv(profile),
@@ -334,7 +356,7 @@ const execClaude = (binary: string, args: string[], profile: string) =>
         timeout: 30_000,
       });
 
-export async function profileAccount(profile: string) {
+export async function profileAccount(profile?: string) {
   const binary = claudeBinary();
   if (!binary) throw new Error("Install Claude Code on this computer, then try again.");
   const { stdout } = await execClaude(

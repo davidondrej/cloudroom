@@ -28,6 +28,14 @@ export const LEGACY_PLUGIN_SDK_APP_SPECIFIER = "@bb/plugin-sdk/app";
  */
 export const SHARED_UI_ICON_SPECIFIER = "@cloudroom/shared-ui/icon";
 
+/**
+ * shared-ui's browser-dimming hook. Its `Dialog` imports it relatively and it
+ * is a no-op outside the app, so the build routes it to the host's real hook:
+ * a plugin dialog then hides the native browser view like an app dialog does.
+ */
+export const SHARED_UI_BROWSER_DIMMING_SPECIFIER =
+  "@cloudroom/shared-ui/browser-dimming";
+
 export const LEGACY_SHIM_SPECIFIERS = Object.freeze({
   "@bb/shared-ui/icon": SHARED_UI_ICON_SPECIFIER,
   "@bb/shared-ui/question-form-host": "@cloudroom/shared-ui/question-form-host",
@@ -92,6 +100,7 @@ export const RUNTIME_SLOT_BY_SPECIFIER = Object.freeze({
   "class-variance-authority": "classVarianceAuthority",
   [SHARED_UI_ICON_SPECIFIER]: "sharedUiIcon",
   "@cloudroom/shared-ui/question-form-host": "questionFormHost",
+  [SHARED_UI_BROWSER_DIMMING_SPECIFIER]: "browserDimming",
 });
 
 /** The npm package owning a specifier: `react/jsx-runtime` → `react`. */

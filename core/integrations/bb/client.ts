@@ -5,7 +5,7 @@ export type Json =
   | string
   | Json[]
   | { [key: string]: Json };
-export type Harness = "codex" | "pi" | "cursor" | "claude-code" | "fx" | "opencode" | "hermes" | "devin" | "droid" | "openclaw";
+export type Harness = "codex" | "pi" | "cursor" | "claude-code" | "fx" | "opencode" | "hermes" | "devin" | "droid" | "kimi" | "openclaw";
 export type CodexAuthStatus = {
   state: "missing" | "waiting" | "connected" | "limited" | "unavailable" | "error" | "expired";
   email: string | null; plan: string | null; message: string | null;
@@ -145,33 +145,67 @@ export class CloudroomConnectionError extends CloudroomError {
 /** Reads the core's `{ code, error }` body. The error text is shown to the user (ADR 0123). */
 async function rejection(response: Response): Promise<{ code: string | null; error: string | null }> {
   const none = { code: null, error: null };
+  const text = await read(response, 4096).catch(() => null);
+  if (text === null) return none;
+  let body: { code?: unknown; error?: unknown } | null = null;
+  try { body = JSON.parse(text); } catch { return { code: null, error: text.trim().slice(0, 500) || null }; }
+  const error = typeof body?.error === "string" ? body.error.slice(0, 500) : null;
+  if (typeof body?.code === "string" && Object.hasOwn(rejectionMessages, body.code)) return { code: body.code, error };
+  const legacy: Record<string, string> = {
+    "invalid reasoning effort": "invalid_reasoning_effort", "invalid model": "invalid_model",
+    "storage unsafe; new execution is blocked": "storage_blocked", "service is stopping": "service_stopping", "service is draining": "service_draining",
+    // Core 0.1.100 and older also says this while a sandbox stops. Retried, so a message with an image is not lost.
+    "storage unsafe; uploads are blocked": "storage_blocked",
+  };
+  return { code: error !== null && Object.hasOwn(legacy, error) ? legacy[error] : null, error };
+}
+
+/** A sandbox's agent can replace its Core, so no answer is trusted to end: this reads at most `limit` bytes, else null. */
+async function read(response: Response, limit: number): Promise<string | null> {
   const reader = response.body?.getReader();
-  if (!reader) return none;
-  const chunks: Uint8Array[] = [];
+  if (!reader) return "";
+  const decoder = new TextDecoder();
+  let text = "";
   let length = 0;
   try {
     while (true) {
       const { done, value } = await reader.read();
-      if (done) break;
+      if (done) return text + decoder.decode();
       length += value.byteLength;
-      if (length > 4096) return none;
-      chunks.push(value);
+      if (length > limit) return null;
+      text += decoder.decode(value, { stream: true });
     }
-    const bytes = new Uint8Array(length);
-    let offset = 0;
-    for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.length; }
-    const text = new TextDecoder().decode(bytes);
-    let body: { code?: unknown; error?: unknown } | null = null;
-    try { body = JSON.parse(text); } catch { return { code: null, error: text.trim().slice(0, 500) || null }; }
-    const error = typeof body?.error === "string" ? body.error.slice(0, 500) : null;
-    if (typeof body?.code === "string" && Object.hasOwn(rejectionMessages, body.code)) return { code: body.code, error };
-    const legacy: Record<string, string> = {
-      "invalid reasoning effort": "invalid_reasoning_effort", "invalid model": "invalid_model",
-      "storage unsafe; new execution is blocked": "storage_blocked", "service is stopping": "service_stopping", "service is draining": "service_draining",
-    };
-    return { code: error !== null && Object.hasOwn(legacy, error) ? legacy[error] : null, error };
-  } catch { return none; }
-  finally { await reader.cancel().catch(() => {}); reader.releaseLock(); }
+  } finally {
+    await reader.cancel().catch(() => {});
+    reader.releaseLock();
+  }
+}
+
+/** Core never compresses. Node's fetch decodes br and zstd whatever the request asks for, and their windows (up to
+ *  128 MiB) are memory no limit here sees, so only gzip's and deflate's 32 KiB window is allowed (as in #1129). */
+async function uncompressed(response: Response): Promise<void> {
+  if (["identity", "gzip", "x-gzip", "deflate"].includes(response.headers.get("content-encoding")?.trim().toLowerCase() || "identity")) return;
+  await response.body?.cancel().catch(() => {});
+  throw new CloudroomError("Cloudroom sent a compressed answer this app does not read");
+}
+
+/** JSON values in `text`, counted without parsing it as in web/lib/history.ts, and only until the count passes `limit`.
+ *  Parsing tiny values (`[{},{},...]`) takes about 30 times their bytes in memory, so a byte limit alone doesn't bound it. */
+function values(text: string, limit: number): number {
+  let count = 1;
+  for (let i = 0; i < text.length && count <= limit; i++) {
+    const char = text.charCodeAt(i);
+    if (char === 0x2c || char === 0x5b || char === 0x7b) count++;
+    else if (char === 0x22) {
+      // A string is skipped whole: its closing quote has an even number of backslashes before it.
+      for (let slashes = 1; slashes % 2 && i !== -1;) {
+        i = text.indexOf('"', i + 1);
+        for (slashes = 0; text.charCodeAt(i - 1 - slashes) === 0x5c; slashes++);
+      }
+      if (i === -1) break;
+    }
+  }
+  return count;
 }
 
 /** fetch() hides the network cause (ECONNREFUSED, DNS, TLS) in `error.cause`. */
@@ -267,6 +301,15 @@ function sessionPath(id: string): string {
 }
 
 const MAX_RESPONSE_BYTES = 16 * 1024 * 1024;
+/** Core's largest `vm run` answer: 16 MiB each of stdout and stderr, hex encoded (`BODY` in core/src/mac/mod.rs). */
+const VM_RUN_BYTES = 5 * MAX_RESPONSE_BYTES;
+/** `events()` keeps every record it replays, so it stops past this many characters or JSON values of them. */
+const REPLAY_CHARS = 64 * 1024 * 1024;
+const REPLAY_VALUES = 1024 * 1024;
+/** JSON values per answer. At 16 bytes a value, the byte limits bind first for any real answer. */
+const ANSWER_VALUES = 1024 * 1024;
+/** JSON values per record, as in saved history and the phone's stream (web/lib/history.ts). */
+const RECORD_VALUES = 256 * 1024;
 const STREAM_SILENCE_MS = 45_000;
 /** The most one upload request may carry: some sandbox proxies drop requests over about 8 MB. */
 export const UPLOAD_PART = 4 * 1024 * 1024;
@@ -347,14 +390,7 @@ export class CloudroomClient {
     try {
       response = await fetch(`${this.#base}/v1/vm/run${raw}`, {
         method: "POST",
-        headers: {
-          Authorization: `Bearer ${this.#token}`,
-          // Some sandbox proxies replace Authorization with their own login.
-          "X-Cloudroom-Token": this.#token,
-          ...(this.#gateToken ? { Cookie: `_port_auth=${this.#gateToken}` } : {}),
-          Accept: "application/json",
-          "Content-Type": bytes ? "application/octet-stream" : "application/json",
-        },
+        headers: { ...this.#headers(), Accept: "application/json", "Content-Type": bytes ? "application/octet-stream" : "application/json" },
         body: bytes ?? JSON.stringify(input),
         redirect: "error",
         signal,
@@ -362,18 +398,40 @@ export class CloudroomClient {
     } catch (error) {
       throw new CloudroomConnectionError(`Cloudroom is unreachable: ${describe(error)}`, error);
     }
-    const value = await response.json().catch((error: unknown) => {
-      if (response.ok) throw new CloudroomConnectionError(`The cloud's answer was cut off: ${describe(error)}`, error);
-      return null;
-    }) as Record<string, unknown> | null;
-    if (!response.ok || !value) {
-      throw new CloudroomError(typeof value?.error === "string" ? value.error : `Cloudroom rejected the request (HTTP ${response.status})`, response.status);
+    await uncompressed(response);
+    if (!response.ok) {
+      // Only Core's own `{ error }` is shown, not a proxy's page.
+      const { error } = response.headers.get("content-type")?.includes("application/json") ? await rejection(response) : { error: null };
+      await response.body?.cancel().catch(() => {});
+      throw new CloudroomError(error ?? `Cloudroom rejected the request (HTTP ${response.status})`, response.status);
     }
-    return value as unknown as VmRunResult;
+    const cutOff = (error: unknown) => new CloudroomConnectionError(`The cloud's answer was cut off: ${describe(error)}`, error);
+    const text = await read(response, VM_RUN_BYTES).catch((error: unknown) => { throw cutOff(error); });
+    if (text === null) throw new CloudroomError("The cloud's answer is over the 80 MiB limit");
+    if (values(text, ANSWER_VALUES) > ANSWER_VALUES) throw new CloudroomError("The cloud's answer is too complex to read");
+    let value: unknown;
+    try { value = JSON.parse(text); } catch (error) { throw cutOff(error); }
+    // Callers turn the output into Buffers, and Buffer.from() also takes `{ length: n }`, so every field is checked.
+    const { code, stdout, stderr, truncated } = object(value);
+    const output = (hex: unknown) => typeof hex === "string" && hex.length <= 2 * MAX_RESPONSE_BYTES && hex.length % 2 === 0;
+    if ((code !== null && !Number.isSafeInteger(code)) || !output(stdout) || !output(stderr))
+      throw new CloudroomError("Invalid Cloudroom response");
+    return { code, stdout, stderr, truncated: truncated === true } as VmRunResult;
   }
 
   async reportMac(report: { access: string; problem: string | null; unsupported?: boolean }): Promise<void> {
     await this.#json("/v1/mac/helper", report);
+  }
+
+  /** Every request's headers. Core never compresses, so they ask for no encoding (see `uncompressed`). */
+  #headers(): Record<string, string> {
+    return {
+      Authorization: `Bearer ${this.#token}`,
+      // Some sandbox proxies replace Authorization with their own login.
+      "X-Cloudroom-Token": this.#token,
+      ...(this.#gateToken ? { Cookie: `_port_auth=${this.#gateToken}` } : {}),
+      "Accept-Encoding": "identity",
+    };
   }
 
   async #request(
@@ -387,10 +445,7 @@ export class CloudroomClient {
       response = await fetch(`${this.#base}${path}`, {
         method: body === undefined && !upload ? "GET" : "POST",
         headers: {
-          Authorization: `Bearer ${this.#token}`,
-          // Some sandbox proxies replace Authorization with their own login.
-          "X-Cloudroom-Token": this.#token,
-          ...(this.#gateToken ? { Cookie: `_port_auth=${this.#gateToken}` } : {}),
+          ...this.#headers(),
           Accept: path.includes("/stream?")
             ? "text/event-stream"
             : "application/json",
@@ -412,6 +467,7 @@ export class CloudroomClient {
         error,
       );
     }
+    await uncompressed(response);
     if (!response.ok) {
       // Auth failures may echo credentials, so their body is never read.
       if (response.status === 401 || response.status === 403) {
@@ -452,36 +508,19 @@ export class CloudroomClient {
       await response.body?.cancel();
       throw new CloudroomError("Expected a Cloudroom JSON response");
     }
-    const reader = response.body?.getReader();
-    if (!reader) throw new CloudroomError("Empty Cloudroom response");
-    const chunks: Uint8Array[] = [];
-    let length = 0;
+    if (!response.body) throw new CloudroomError("Empty Cloudroom response");
+    const text = await read(response, MAX_RESPONSE_BYTES).catch((error: unknown) => {
+      throw new CloudroomConnectionError("Cloudroom response disconnected. Retry unconfirmed commands with the same request_id.", error);
+    });
+    if (text === null) throw new CloudroomError("Cloudroom response exceeds the size limit");
+    if (values(text, ANSWER_VALUES) > ANSWER_VALUES) throw new CloudroomError("Cloudroom response is too complex to read");
     try {
-      while (true) {
-        const { done, value } = await reader.read().catch((error: unknown) => {
-          throw new CloudroomConnectionError("Cloudroom response disconnected. Retry unconfirmed commands with the same request_id.", error);
-        });
-        if (done) break;
-        length += value.byteLength;
-        if (length > MAX_RESPONSE_BYTES)
-          throw new CloudroomError("Cloudroom response exceeds the size limit");
-        chunks.push(value);
-      }
-      const bytes = new Uint8Array(length);
-      let offset = 0;
-      for (const chunk of chunks) {
-        bytes.set(chunk, offset);
-        offset += chunk.length;
-      }
-      return object(JSON.parse(new TextDecoder().decode(bytes)));
+      return object(JSON.parse(text));
     } catch (error) {
       if (error instanceof CloudroomError) throw error;
       throw new CloudroomError(
         "Incomplete or invalid Cloudroom response. Retry unconfirmed commands with the same request_id.",
       );
-    } finally {
-      await reader.cancel().catch(() => {});
-      reader.releaseLock();
     }
   }
 
@@ -587,7 +626,7 @@ export class CloudroomClient {
   }
 
   start(id: string, harness: Harness = "codex", options: { model?: string; reasoning?: string; workspace?: string; workspace_name?: string; provider?: string; command_guard_enabled?: boolean; strip_ai_co_authors?: boolean; system_prompt?: string; parent_session?: string; parent_thread?: string; prompt?: string; title?: string; fork?: { session: string; fresh?: boolean; before?: string; last_turn_id?: string } } = {}) {
-    if (harness !== "codex" && harness !== "pi" && harness !== "cursor" && harness !== "claude-code" && harness !== "fx" && harness !== "opencode" && harness !== "hermes" && harness !== "devin" && harness !== "droid" && harness !== "openclaw")
+    if (harness !== "codex" && harness !== "pi" && harness !== "cursor" && harness !== "claude-code" && harness !== "fx" && harness !== "opencode" && harness !== "hermes" && harness !== "devin" && harness !== "droid" && harness !== "kimi" && harness !== "openclaw")
       throw new CloudroomError("Unsupported Cloudroom harness");
     return this.#command("/v1/sessions", "start", { request_id: id, harness, ...options });
   }
@@ -810,7 +849,7 @@ export class CloudroomClient {
     );
     if (
       value.session_id !== sessionId ||
-      (value.harness !== "codex" && value.harness !== "pi" && value.harness !== "cursor" && value.harness !== "claude-code" && value.harness !== "fx" && value.harness !== "opencode" && value.harness !== "hermes" && value.harness !== "devin" && value.harness !== "droid" && value.harness !== "openclaw")
+      (value.harness !== "codex" && value.harness !== "pi" && value.harness !== "cursor" && value.harness !== "claude-code" && value.harness !== "fx" && value.harness !== "opencode" && value.harness !== "hermes" && value.harness !== "devin" && value.harness !== "droid" && value.harness !== "kimi" && value.harness !== "openclaw")
     ) {
       throw new CloudroomError(
         "Cloudroom session mismatch or unsupported harness",
@@ -836,6 +875,8 @@ export class CloudroomClient {
     };
   }
 
+  /** Replays history up to the session's current end. It keeps every record, so it is for short histories and stops
+   *  past `REPLAY_CHARS` or `REPLAY_VALUES`; `stream()` reads a long one without keeping it. */
   async events(
     sessionId: string,
     after = 0,
@@ -848,13 +889,18 @@ export class CloudroomClient {
       .last_sequence;
     if (cursor >= lastSequence) return [];
     const records: SessionRecord[] = [];
-    for await (const item of this.#stream(sessionId, {
+    const kept = { chars: 0, values: 0 };
+    for await (const [item, chars, count] of this.#stream(sessionId, {
       after,
       signal: replaySignal,
     })) {
       if (item.sequence <= cursor)
         throw new CloudroomError("Cloudroom history is out of order");
       if (item.sequence > lastSequence) break;
+      kept.chars += chars;
+      kept.values += count;
+      if (kept.chars > REPLAY_CHARS || kept.values > REPLAY_VALUES)
+        throw new CloudroomError("Cloudroom history exceeds the replay limit");
       records.push(item);
       cursor = item.sequence;
       if (cursor === lastSequence) return records;
@@ -867,7 +913,7 @@ export class CloudroomClient {
     options: { after?: number; signal: AbortSignal; onConnected?: () => void | Promise<void> },
   ): AsyncGenerator<SessionRecord> {
     let cursor = sequence(options.after ?? 0);
-    for await (const item of this.#stream(sessionId, options)) {
+    for await (const [item] of this.#stream(sessionId, options)) {
       if (item.sequence > cursor) {
         cursor = item.sequence;
         yield item;
@@ -875,10 +921,11 @@ export class CloudroomClient {
     }
   }
 
+  /** Yields each record with its JSON text's length and value count (0 and 1 for a stub). */
   async *#stream(
     sessionId: string,
     options: { after?: number; signal: AbortSignal; onConnected?: () => void | Promise<void> },
-  ): AsyncGenerator<SessionRecord> {
+  ): AsyncGenerator<[SessionRecord, number, number]> {
     const cursor = sequence(options.after ?? 0);
     const response = await this.#request(
       `${sessionPath(sessionId)}/stream?after=${cursor}`,
@@ -923,19 +970,23 @@ export class CloudroomClient {
           const line = buffer.slice(0, newline).replace(/\r$/, "");
           buffer = buffer.slice(newline + 1);
           if (line === "") {
+            const text = skipping ? "" : data.join("\n");
+            const count = values(text, RECORD_VALUES);
+            // A record with too many values is read past too, as saved history does.
+            if (event === "record" && count > RECORD_VALUES) skip();
             // Its place in history stays, shown as a stub like the website's saved one, so the cursor moves on.
-            if (skipping) yield { sequence: sequence(Number(id)), session_id: sessionId, kind: "oversized", data: { oversized_bytes: frameSize } };
+            if (skipping) yield [{ sequence: sequence(Number(id)), session_id: sessionId, kind: "oversized", data: { oversized_bytes: frameSize } }, 0, 1];
             else if (event === "record" && data.length > 0) {
               let parsed: unknown;
               try {
-                parsed = JSON.parse(data.join("\n"));
+                parsed = JSON.parse(text);
               } catch {
                 throw new CloudroomError("Invalid Cloudroom event JSON");
               }
               const item = record(parsed, sessionId);
               if (id !== String(item.sequence))
                 throw new CloudroomError("Cloudroom event cursor mismatch");
-              yield item;
+              yield [item, text.length, count];
             }
             data = [];
             event = "";

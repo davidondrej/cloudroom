@@ -396,6 +396,8 @@ describe("electron-builder signing config", () => {
 
     expect(config.files.indexOf("!**/*.map")).toBeGreaterThan(-1);
     expect(config.files.indexOf("!**/*.map")).toBeLessThan(firstFileSet);
+    // A platform `files` list of only exclusions makes electron-builder pack the whole app folder.
+    for (const platform of ["mac", "linux", "win"]) expect(JSON.parse(configText)[platform].files).toBeUndefined();
   });
 
   it("copies the app scaffold template as a dedicated file set", async () => {
@@ -582,7 +584,7 @@ describe("electron-builder signing config", () => {
     const script = await readFile(resolve(desktopPackageRoot, "build", "installer.nsh"), "utf8");
     const powershell = script.split("\n").filter((line) => line.includes("powershell.exe"));
 
-    expect(script).toMatch(/!macro customInit\s+!insertmacro stopPreviewHelper/);
+    expect(script).toMatch(/!macro customInit(?:(?!!macroend)[\s\S])*!insertmacro stopPreviewHelper/);
     expect(script).toMatch(/!macro customUnInit\s+!insertmacro stopPreviewHelper/);
     expect(script).toMatch(/!macro customCheckAppRunning[\s\S]*!insertmacro cloudroomAppCheck/);
     expect(powershell).toHaveLength(2);

@@ -371,5 +371,8 @@ export interface AgentRuntime {
 
   hasOpenBackgroundWork(): boolean;
 
+  /** A message edit's staged copy of the thread's agent, until it is discarded (#607). */
+  hasStagedRewind?(threadId: string): boolean;
+
   shutdown(): Promise<void>;
 }

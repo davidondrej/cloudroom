@@ -865,6 +865,8 @@ room-cli mac push VM_PATH [MAC_PATH]
 room-cli mac result JOB
 room-cli mac status
 Runs on the user's paired Mac as the user, in their home folder by default.
+Flags go before COMMAND: room-cli mac run --cwd DIR 'COMMAND'. Later words,
+flags included, go to COMMAND. DIR is relative to their home folder, or absolute.
 Add --write when a command changes the Mac. Unless the user gives Full access,
 other commands run read-only, and --write needs their approval.
 pull and push work like cp: into an existing folder or a path ending in /,

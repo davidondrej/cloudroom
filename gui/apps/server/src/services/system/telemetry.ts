@@ -18,7 +18,7 @@ export type TelemetryExecution = "local" | "cloud_sandbox" | "cloud_vm";
 /** The desktop app's first-run setup funnel: which step people see, act on, finish, skip, or leave. */
 export const SETUP_STEPS = ["account", "agent", "github", "project"] as const;
 export const SETUP_ACTIONS = ["viewed", "started", "done", "skipped", "closed", "detected", "waitlist"] as const;
-export const SETUP_AGENTS = ["pi", "opencode", "cursor", "hermes", "grok", "devin", "droid", "fx", "openclaw"] as const;
+export const SETUP_AGENTS = ["pi", "opencode", "cursor", "hermes", "grok", "devin", "droid", "kimi", "fx", "openclaw"] as const;
 export const SETUP_DETAILS = ["github", "google", "email", "claude", "codex", "both", "none", "existing", "found", "folder", "recent_folder", "bb_import", "chat_import", "auto", "manual", ...SETUP_AGENTS] as const;
 
 export type TelemetryValue = string | number | boolean | null;
@@ -26,7 +26,7 @@ export type TelemetryValue = string | number | boolean | null;
 export type TelemetryEvent =
   | { name: "app_started"; properties?: { update_needs_password: boolean } }
   /** Onboarding telemetry (ADR 0198); built in services/cloudroom/setup-telemetry.ts. */
-  | { name: "setup_snapshot" | "agent_connect" | "cli_install" | "account_sign_in_failed" | "update_install" | "update_ready" | "app_crash"; properties: Record<string, TelemetryValue> }
+  | { name: "setup_snapshot" | "agent_connect" | "cli_install" | "account_sign_in_failed" | "update_install" | "update_ready" | "app_crash" | "windows_install"; properties: Record<string, TelemetryValue> }
   | {
       name: "thread_created";
       properties: {

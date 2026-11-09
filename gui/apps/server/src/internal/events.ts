@@ -51,6 +51,7 @@ import {
 } from "../services/lib/error-log-fields.js";
 import { applyLoggedThreadLifecycleEvent } from "../services/threads/lifecycle-outcome.js";
 import { applyTurnCompletedEvent } from "./turn-completed-events.js";
+import { forgetLostBackgroundTask } from "./session-owner-side-effects.js";
 import {
   getInactiveSessionLogFields,
   requireAuthenticatedDaemonSession,
@@ -1035,6 +1036,18 @@ export function registerInternalEventRoutes(app: Hono, deps: AppDeps): void {
         eventInputs,
         insertedInputIndexes: appendResult.insertedInputIndexes,
       });
+      // The daemon says a job finished, by completion or progress, so it was
+      // never lost, even if the server already marked it stopped (#1026).
+      for (const input of eventInputs) {
+        if (
+          (input.type === "item/backgroundTask/completed" ||
+            input.type === "item/backgroundTask/progress") &&
+          input.itemId !== null &&
+          parseStoredBackgroundTaskItemStatus(input.data) !== "pending"
+        ) {
+          forgetLostBackgroundTask(input.threadId, input.itemId);
+        }
+      }
 
       const followUps = await applyEventEffects(
         deps,

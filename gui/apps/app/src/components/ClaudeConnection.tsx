@@ -49,6 +49,7 @@ const schema = z.object({
   login_id: z.string().nullable(),
   verification_url: signInUrl.nullable(),
   manual_url: signInUrl.nullable().optional(),
+  installing_since: z.number().nullable().optional(),
 });
 type Status = z.infer<typeof schema>;
 const returnsToMac = (url: string) => new URL(url).searchParams.get("redirect_uri")?.startsWith("http://localhost") === true;
@@ -79,12 +80,15 @@ async function request(
     signal,
   });
 }
+/** Sign-ins whose link came after Connect returned (Claude Code was still installing or starting); opened once it arrives. */
+const openWhenReady = new Set<string>();
+
 export function useClaudeConnection(
   target: ClaudeConnectionTarget,
   enabled = true,
 ) {
   const account = useCloudroomAccount();
-  return useQuery({
+  const query = useQuery({
     queryKey: [
       "claude-connection",
       target.target,
@@ -99,56 +103,40 @@ export function useClaudeConnection(
     refetchInterval: (query) =>
       query.state.data?.state === "waiting" ? 1500 : 60_000,
   });
+  const { state, login_id: loginId, verification_url: url } = query.data ?? {};
+  useEffect(() => {
+    if (state === "waiting" && loginId && url && openWhenReady.delete(loginId)) openUrlInExternalBrowser(url);
+  }, [state, loginId, url]);
+  return query;
 }
 
 export function ClaudeConnectionButton({
   target,
   hostId,
   environmentId,
-  presentation = "footer",
   className,
   text,
   onConnected,
 }: ClaudeConnectionTarget & {
-  presentation?: "settings" | "footer" | "inline";
   className?: string;
   text?: string;
   onConnected?: () => void;
 }) {
   const [open, setOpen] = useState(false);
-  const client = useQueryClient();
   const auth = useClaudeConnection({ target, hostId, environmentId });
-  const connected = auth.data?.state === "connected";
-  useEffect(() => {
-    if (!connected) return;
-    void client.invalidateQueries({ queryKey: ["systemExecutionOptions"] });
-    onConnected?.();
-  }, [connected, client, onConnected]);
+  const connected = useRefreshOnClaudeConnect(auth.data?.state === "connected", onConnected);
   if (auth.isPending || connected) return null;
-  const label =
-    auth.isError || auth.data?.state === "unavailable"
-      ? "Check Claude connection"
-      : auth.data?.state === "waiting"
-        ? "Finish connecting Claude"
-        : "Connect Claude";
-  const popover = (
+  return (
     <Popover open={open} onOpenChange={setOpen}>
       <PopoverTrigger asChild>
         <Button
           type="button"
-          variant={presentation === "settings" ? "default" : presentation === "inline" ? "outline" : "ghost"}
-          size={presentation === "settings" ? "default" : "sm"}
-          className={cn(
-            presentation === "footer"
-              ? "h-7 text-xs text-muted-foreground hover:text-foreground"
-              : presentation === "inline"
-                ? "h-7 px-2.5 text-xs"
-                : "shrink-0",
-            className,
-          )}
-          aria-label={`${label} · ${target === "cloud" ? "Cloud" : "Local"}`}
+          variant="outline"
+          size="sm"
+          className={cn("h-7 px-2.5 text-xs", className)}
+          aria-label={`Connect Claude · ${target === "cloud" ? "Cloud" : "Local"}`}
         >
-          {text ?? (presentation === "inline" ? (auth.data?.state === "waiting" ? "Finish" : "Connect") : label)}
+          {text ?? (auth.data?.state === "waiting" ? "Finish" : "Connect")}
         </Button>
       </PopoverTrigger>
       <PopoverContent
@@ -165,22 +153,17 @@ export function ClaudeConnectionButton({
       </PopoverContent>
     </Popover>
   );
-  if (presentation === "settings")
-    return (
-      <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border p-4">
-        <div>
-          <p className="text-sm font-medium">
-            Claude Code ·{" "}
-            {target === "cloud" ? "Cloud" : "Local"}
-          </p>
-          <p className="mt-1 text-xs text-muted-foreground">
-            Use your existing Claude subscription.
-          </p>
-        </div>
-        {popover}
-      </div>
-    );
-  return popover;
+}
+
+/** Once Claude connects, reloads the model lists so Claude's models show up. */
+export function useRefreshOnClaudeConnect(connected: boolean, onConnected?: () => void) {
+  const client = useQueryClient();
+  useEffect(() => {
+    if (!connected) return;
+    void client.invalidateQueries({ queryKey: ["systemExecutionOptions"] });
+    onConnected?.();
+  }, [connected, client, onConnected]);
+  return connected;
 }
 
 export function ClaudeSignIn({
@@ -231,7 +214,7 @@ export function ClaudeSignIn({
   );
 }
 
-function ClaudeConnectionPanel({
+export function ClaudeConnectionPanel({
   target,
   onClose,
   heading,
@@ -254,6 +237,7 @@ function ClaudeConnectionPanel({
       const openSignIn = (result: Status) => {
         if (result.state === "error") throw new Error(result.message ?? "Claude sign-in failed.");
         if (result.state === "waiting" && result.verification_url) openUrlInExternalBrowser(result.verification_url);
+        else if (result.state === "waiting") openWhenReady.add(result.login_id ?? requestId);
         return result;
       };
       // Cloud first tries a one-year token made on this Mac (ADR 0121); the VM code flow is the fallback.
@@ -343,7 +327,20 @@ function ClaudeConnectionPanel({
           {auth.data.message}
         </p>
       )}
-      {state === "waiting" ? (
+      {state === "waiting" && auth.data?.installing_since ? (
+        <>
+          <InstallProgress since={auth.data.installing_since} />
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-7 text-xs text-muted-foreground"
+            disabled={action.isPending}
+            onClick={() => action.mutate("cancel")}
+          >
+            Cancel
+          </Button>
+        </>
+      ) : state === "waiting" ? (
         <>
           <p className="text-muted-foreground">
             {!signInUrl
@@ -452,6 +449,31 @@ function ClaudeConnectionPanel({
           {target.target === "cloud" && <ClaudeApiKeyForm />}
         </>
       )}
+    </div>
+  );
+}
+
+/** Claude Code installs before Cloud sign-in when it's missing (ADR 0193). Installs report no progress, so the bar follows
+ *  time: about half full at 30 s, slowing toward the end. */
+function InstallProgress({ since }: { since: number }) {
+  const [now, setNow] = useState(Date.now);
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, []);
+  const seconds = Math.max(0, Math.floor((now - since) / 1000));
+  return (
+    <div className="space-y-1.5">
+      <p className="flex justify-between text-muted-foreground">
+        <span>Installing Claude Code</span>
+        <span className="tabular-nums">{Math.floor(seconds / 60)}:{String(seconds % 60).padStart(2, "0")}</span>
+      </p>
+      <div role="progressbar" aria-label="Installing Claude Code" className="h-1 overflow-hidden rounded-full bg-muted">
+        <div
+          className="h-full rounded-full bg-primary transition-[width] duration-1000 ease-linear"
+          style={{ width: `${Math.round(95 * (1 - Math.exp(-seconds / 45)))}%` }}
+        />
+      </div>
     </div>
   );
 }

@@ -535,6 +535,104 @@ export function toCodexThreadPermissionSettings(
   }
 }
 
+/** Allowed lists from Codex `configRequirements/read`; null means unrestricted. */
+export interface CodexManagedRequirements {
+  allowedApprovalPolicies?: readonly unknown[] | null;
+  allowedApprovalsReviewers?: readonly unknown[] | null;
+  allowedSandboxModes?: readonly unknown[] | null;
+  autoReview?: { requiredOnModels?: readonly string[] | null } | null;
+}
+
+// Codex settings of Cloudroom's modes, as toCodexThreadPermissionSettings maps them.
+const CLOUDROOM_PERMISSION_MODES = [
+  ["Manual", "on-request", "user", "workspace-write"],
+  ["Auto", "on-request", "auto_review", "workspace-write"],
+  ["Full Access", "never", "user", "danger-full-access"],
+] as const;
+
+/** Codex's rule: one `namespace/` prefix is stripped; other slashes never match. */
+function requiresAutoReview(
+  model: string,
+  requirements: CodexManagedRequirements,
+): boolean {
+  const slug = /^(?:[\w-]+\/)?([^/]+)$/.exec(model)?.[1];
+  return (
+    slug !== undefined &&
+    (requirements.autoReview?.requiredOnModels?.includes(slug) ?? false)
+  );
+}
+
+function managedPolicyConflicts(
+  settings: CodexThreadPermissionSettings,
+  requirements: CodexManagedRequirements,
+  model: string | null,
+): string[] {
+  // Codex 0.136 reports auto_review under its old name, guardian_subagent.
+  const reviewers = requirements.allowedApprovalsReviewers?.map((reviewer) =>
+    reviewer === "guardian_subagent" ? "auto_review" : reviewer,
+  );
+  const autoReviewOnly: readonly unknown[] | null =
+    model !== null && requiresAutoReview(model, requirements)
+      ? ["auto_review"]
+      : null;
+  const checks = [
+    [
+      "approval_policy",
+      settings.approvalPolicy,
+      requirements.allowedApprovalPolicies,
+    ],
+    ["approvals_reviewer", settings.approvalsReviewer, reviewers],
+    [
+      `model "${model}" with approvals_reviewer`,
+      settings.approvalsReviewer,
+      autoReviewOnly,
+    ],
+    ["sandbox_mode", settings.sandbox, requirements.allowedSandboxModes],
+  ] as const;
+  return checks.flatMap(([key, value, allowed]) =>
+    allowed == null || allowed.includes(value)
+      ? []
+      : [
+          `${key} "${value}" (allowed: ${allowed.map((v) => JSON.stringify(v)).join(", ")})`,
+        ],
+  );
+}
+
+/**
+ * Codex starts a thread despite a managed requirements.toml conflict, then
+ * rejects every turn (#1096). Names the conflict and the modes that fit.
+ * `model` is null when Codex picks it (its default, or a resumed thread's
+ * saved model); then only suggestions assume it could require auto review.
+ */
+export function codexManagedPolicyError(
+  policy: RuntimePermissionPolicy,
+  requirements: CodexManagedRequirements | null | undefined,
+  model: string | null,
+): string | null {
+  if (!requirements) return null;
+  const conflicts = managedPolicyConflicts(
+    toCodexThreadPermissionSettings(policy),
+    requirements,
+    model,
+  );
+  if (conflicts.length === 0) return null;
+  const worstModel =
+    model ?? requirements.autoReview?.requiredOnModels?.[0] ?? null;
+  const fits = CLOUDROOM_PERMISSION_MODES.filter(
+    ([, approvalPolicy, approvalsReviewer, sandbox]) =>
+      managedPolicyConflicts(
+        { approvalPolicy, approvalsReviewer, sandbox },
+        requirements,
+        worstModel,
+      ).length === 0,
+  ).map(([label]) => label);
+  return `Your organization's Codex policy (requirements.toml) does not allow ${conflicts.join(" or ")}. ${
+    fits.length > 0
+      ? `Switch this thread's permission mode to ${fits.join(" or ")}.`
+      : "No Cloudroom permission mode fits it; ask your Codex admin."
+  }`;
+}
+
 export function toCodexPermissionSettings(
   args: ToCodexPermissionSettingsArgs,
 ): CodexPermissionSettings {

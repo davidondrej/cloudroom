@@ -38,7 +38,7 @@ export function registerWaitCommand(
     .option("--status <status>", "Wait until the thread reaches this status")
     .option(
       "--event <type>",
-      "Wait until the thread log includes this event type",
+      "Wait until the thread log includes this event type; matches past events too, so an earlier turn's turn/completed returns at once",
     )
     .option(
       "--timeout <seconds>",

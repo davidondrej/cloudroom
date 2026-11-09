@@ -12,6 +12,7 @@ import {
 } from "../command-dispatch-support.js";
 import {
   browseHostDirectory,
+  normalizeWindowsDrivePath,
   readHostFile,
   readHostFileMetadata,
   readHostRelativeFile,
@@ -235,19 +236,29 @@ describe("readHostFile (no ref — disk read)", () => {
     expect(isExpectedCommandDispatchError(thrown)).toBe(true);
   });
 
-  it("rejects rootless directory paths", async () => {
+  it.each([
+    ["directory", "Path is a directory, not a file"],
+    ["FIFO", "Path is a FIFO, not a file"],
+  ])("rejects a rootless %s path before reading", async (kind, message) => {
+    if (kind === "FIFO" && process.platform === "win32") return;
     const repoPath = await initRepo();
+    const target = kind === "FIFO" ? path.join(repoPath, "pipe") : repoPath;
+    if (kind === "FIFO") await execFileAsync("mkfifo", [target]);
 
     await expect(
-      readHostFile({
-        type: "host.read_file",
-        path: repoPath,
-      }),
-    ).rejects.toMatchObject({
-      code: "invalid_path",
-      message: "Path is a directory, not a file",
-    });
+      readHostFile({ type: "host.read_file", path: target }),
+    ).rejects.toMatchObject({ code: "invalid_path", message });
   });
+});
+
+it.each([
+  ["win32", "/C:/Users/A B/x.png", "C:/Users/A B/x.png"],
+  ["win32", "/c:\\Users\\x.png", "c:\\Users\\x.png"],
+  ["win32", "/c/Users/x.png", "/c/Users/x.png"],
+  ["win32", "C:/Users/x.png", "C:/Users/x.png"],
+  ["darwin", "/C:/Users/x.png", "/C:/Users/x.png"],
+] as const)("normalizeWindowsDrivePath on %s: %s", (platform, input, output) => {
+  expect(normalizeWindowsDrivePath(input, platform)).toBe(output);
 });
 
 describe("readHostFileMetadata", () => {

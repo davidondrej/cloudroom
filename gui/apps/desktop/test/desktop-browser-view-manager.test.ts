@@ -33,9 +33,9 @@ function createDesktopBrowserViewManager(
   args: Partial<CreateDesktopBrowserViewManagerArgs> = {},
 ): DesktopBrowserViewManager {
   return createProductionDesktopBrowserViewManager({
-    dispatchAppCommand: () => undefined,
+    dispatchAppShortcut: () => undefined,
+    findShortcutCandidates: () => null,
     focusHostWebContents: () => undefined,
-    resolveAppCommand: () => null,
     ...args,
   });
 }
@@ -2212,20 +2212,15 @@ describe("DesktopBrowserViewManager", () => {
     },
   );
 
-  it("forwards resolved browser shortcuts and suppresses the untrusted page", () => {
-    const dispatchAppCommand = vi.fn();
+  it("forwards candidate shortcuts to the renderer and suppresses the untrusted page", () => {
+    const dispatchAppShortcut = vi.fn();
     const focusHostWebContents = vi.fn();
-    const resolveAppCommand = vi.fn(
-      (input: { key: string; metaKey: boolean }) =>
-        input.key === "l" && input.metaKey
-          ? ("browser.focusLocation" as const)
-          : null,
-    );
     const manager = createDesktopBrowserViewManager({
-      dispatchAppCommand,
+      dispatchAppShortcut,
+      findShortcutCandidates: (input) =>
+        input.key === "1" && input.metaKey ? { input } : null,
       focusHostWebContents,
       partition: "persist:test",
-      resolveAppCommand,
     });
     const hostWindow = new FakeHostWindow({
       contentBounds: { width: 700, height: 450 },
@@ -2240,31 +2235,31 @@ describe("DesktopBrowserViewManager", () => {
     });
     const webContents = requireFakeView(0).webContents;
 
-    expect(webContents.emitBeforeInput({ key: "l", meta: true })).toBe(true);
+    expect(webContents.emitBeforeInput({ key: "1", meta: true })).toBe(true);
     expect(focusHostWebContents).toHaveBeenCalledWith(50);
-    expect(dispatchAppCommand).toHaveBeenCalledWith({
-      command: "browser.focusLocation",
+    expect(dispatchAppShortcut).toHaveBeenCalledWith({
       hostWebContentsId: 50,
+      input: expect.objectContaining({ key: "1", metaKey: true }),
     });
     expect(
       webContents.emitBeforeInput({
         isAutoRepeat: true,
-        key: "l",
+        key: "1",
         meta: true,
       }),
     ).toBe(false);
-    expect(dispatchAppCommand).toHaveBeenCalledTimes(1);
+    expect(webContents.emitBeforeInput({ key: "a", meta: true })).toBe(false);
+    expect(dispatchAppShortcut).toHaveBeenCalledTimes(1);
   });
 
-  it("takes host focus for the find command so the find bar can receive typing", () => {
-    const dispatchAppCommand = vi.fn();
+  it("keeps page focus for reload", () => {
+    const dispatchAppShortcut = vi.fn();
     const focusHostWebContents = vi.fn();
     const manager = createDesktopBrowserViewManager({
-      dispatchAppCommand,
+      dispatchAppShortcut,
+      findShortcutCandidates: () => ({ command: "browser.reload" }),
       focusHostWebContents,
       partition: "persist:test",
-      resolveAppCommand: (input) =>
-        input.key === "f" && input.metaKey ? "browser.find" : null,
     });
     const hostWindow = new FakeHostWindow({
       contentBounds: { width: 700, height: 450 },
@@ -2279,10 +2274,10 @@ describe("DesktopBrowserViewManager", () => {
     });
     const webContents = requireFakeView(0).webContents;
 
-    expect(webContents.emitBeforeInput({ key: "f", meta: true })).toBe(true);
-    expect(focusHostWebContents).toHaveBeenCalledWith(51);
-    expect(dispatchAppCommand).toHaveBeenCalledWith({
-      command: "browser.find",
+    expect(webContents.emitBeforeInput({ key: "r", meta: true })).toBe(true);
+    expect(focusHostWebContents).not.toHaveBeenCalled();
+    expect(dispatchAppShortcut).toHaveBeenCalledWith({
+      command: "browser.reload",
       hostWebContentsId: 51,
     });
   });

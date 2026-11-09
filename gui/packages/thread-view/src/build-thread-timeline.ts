@@ -16,6 +16,7 @@ import type {
   TimelineWorkflowWorkRow,
 } from "@cloudroom/server-contract";
 import {
+  THREAD_ACCOUNT_SWITCH_OPERATION,
   THREAD_HARNESS_SWITCH_OPERATION,
   isBackgroundAgentTaskType,
   readTerminalOutputLines,
@@ -1394,8 +1395,20 @@ function buildTimelineRows(
 type PlanLimitSwitch = NonNullable<
   TimelineNonOperationSystemRow["planLimitSwitch"]
 >;
+type PlanLimitAccountSwitch = NonNullable<
+  TimelineNonOperationSystemRow["planLimitAccountSwitch"]
+>;
 
-/** A plan-limit row right before a harness switch says who took over: the first switch's `from`, the last one's `to`. */
+const isPlanLimitRow = (row: TimelineRow | undefined) =>
+  row?.kind === "system" &&
+  row.systemKind === "error" &&
+  row.planLimit === true;
+
+/**
+ * A plan-limit row right before a harness switch says who took over: the first switch's `from`, the last one's `to`.
+ * One before an account switch says which account continued (ADR 20261107-082837). Its retry may already sit
+ * before that record, so the account switch marks the last plan-limit row before it.
+ */
 function markPlanLimitSwitches(
   rows: TimelineRow[],
   events: readonly ThreadEventWithMeta[],
@@ -1403,7 +1416,8 @@ function markPlanLimitSwitches(
   const switches = events.filter(
     ({ event }) =>
       event.type === "system/operation" &&
-      event.operation === THREAD_HARNESS_SWITCH_OPERATION,
+      (event.operation === THREAD_HARNESS_SWITCH_OPERATION ||
+        event.operation === THREAD_ACCOUNT_SWITCH_OPERATION),
   );
   if (switches.length === 0) return rows;
   const flat: TimelineRow[] = [];
@@ -1415,10 +1429,23 @@ function markPlanLimitSwitches(
   };
   walk(rows);
   const marks = new Map<string, PlanLimitSwitch>();
+  const accountMarks = new Map<string, PlanLimitAccountSwitch>();
   for (const { event, meta } of switches) {
     if (event.type !== "system/operation") continue;
-    const { from, to, resend } = event.metadata ?? {};
+    const { from, to, resend, provider } = event.metadata ?? {};
     if (typeof from !== "string" || typeof to !== "string") continue;
+    if (event.operation === THREAD_ACCOUNT_SWITCH_OPERATION) {
+      if (typeof provider !== "string") continue;
+      const limit = flat
+        .filter((row) => row.sourceSeqEnd < meta.seq && isPlanLimitRow(row))
+        .sort((a, b) => a.sourceSeqEnd - b.sourceSeqEnd)
+        .at(-1);
+      if (limit) {
+        const first = accountMarks.get(limit.id)?.from ?? from;
+        accountMarks.set(limit.id, { provider, from: first, to });
+      }
+      continue;
+    }
     let before: TimelineRow | undefined;
     for (const row of flat) {
       if (row.sourceSeqEnd >= meta.seq) continue;
@@ -1430,13 +1457,7 @@ function markPlanLimitSwitches(
         before = row;
       }
     }
-    if (
-      before?.kind !== "system" ||
-      before.systemKind !== "error" ||
-      !before.planLimit
-    ) {
-      continue;
-    }
+    if (!before || !isPlanLimitRow(before)) continue;
     marks.set(before.id, {
       from: marks.get(before.id)?.from ?? from,
       to,
@@ -1444,18 +1465,86 @@ function markPlanLimitSwitches(
       at: meta.createdAt,
     });
   }
-  if (marks.size === 0) return rows;
+  if (marks.size === 0 && accountMarks.size === 0) return rows;
   const mark = (list: TimelineRow[]): TimelineRow[] =>
     list.map((row) => {
       if (row.kind === "turn") {
         return row.children ? { ...row, children: mark(row.children) } : row;
       }
-      const found = marks.get(row.id);
-      return found && row.kind === "system" && row.systemKind === "error"
-        ? { ...row, planLimitSwitch: found }
-        : row;
+      if (row.kind !== "system" || row.systemKind !== "error") return row;
+      const harness = marks.get(row.id);
+      const account = accountMarks.get(row.id);
+      return {
+        ...row,
+        ...(harness ? { planLimitSwitch: harness } : {}),
+        ...(account ? { planLimitAccountSwitch: account } : {}),
+      };
     });
-  return mark(rows);
+  return dropLimitEchoes(
+    mark(rows),
+    new Set([...marks.keys(), ...accountMarks.keys()]),
+  );
+}
+
+/**
+ * Once a thread moved on from its limit, the agent's own copy of the limit message goes (Claude prints it as a
+ * reply), and so does a turn that did nothing else: the limit row's one line says it all.
+ */
+function dropLimitEchoes(
+  rows: TimelineRow[],
+  switched: ReadonlySet<string>,
+): TimelineRow[] {
+  const gone = new Set<string>();
+  const isEcho = (row: TimelineRow | undefined, limit: TimelineRow) =>
+    row?.kind === "conversation" &&
+    row.role === "assistant" &&
+    row.text.trim() !== "" &&
+    limit.kind === "system" &&
+    (limit.detail ?? "").includes(row.text.trim());
+  const scan = (list: readonly TimelineRow[]) => {
+    list.forEach((row, index) => {
+      if (row.kind === "turn" && row.children) scan(row.children);
+      if (!switched.has(row.id)) return;
+      const before = list[index - 1];
+      if (before && isEcho(before, row)) gone.add(before.id);
+      // Grouped turns keep the reply inside the turn right before the limit row.
+      const nested =
+        before?.kind === "turn" ? before.children?.at(-1) : undefined;
+      if (nested && isEcho(nested, row)) gone.add(nested.id);
+      const turn = list.find(
+        (other) => other.kind === "turn" && other.turnId === row.turnId,
+      );
+      if (
+        turn?.kind === "turn" &&
+        row.turnId &&
+        // Unloaded children count as work unless the turn has none to show.
+        (turn.children === null
+          ? turn.summaryCount === 0
+          : turn.children.every((child) => gone.has(child.id))) &&
+        list.every(
+          (other) =>
+            other.turnId !== row.turnId ||
+            other === turn ||
+            other === row ||
+            gone.has(other.id) ||
+            (other.kind === "conversation" && other.role === "user"),
+        )
+      ) {
+        gone.add(turn.id);
+      }
+    });
+  };
+  scan(rows);
+  if (gone.size === 0) return rows;
+  const drop = (list: TimelineRow[]): TimelineRow[] =>
+    list.flatMap((row): TimelineRow[] => {
+      if (gone.has(row.id)) return [];
+      if (row.kind !== "turn" || !row.children) return [row];
+      const children = drop(row.children);
+      const only = children.length === 1 ? children[0] : undefined;
+      return only && switched.has(only.id) ? [only] : [{ ...row, children }];
+    });
+  return drop(rows);
 }
 
 export function buildThreadTimelineFromEvents(

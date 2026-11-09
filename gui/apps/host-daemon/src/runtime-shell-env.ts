@@ -373,6 +373,12 @@ const NON_PROVIDER_SHELL_ENV_KEYS = new Set([
   "PWD",
   "SHLVL",
   "_",
+  // New on every shell run (starship, atuin, fnm): a change here would
+  // restart idle agents on every thread start. Each thread gets its own fnm
+  // link instead (#1026).
+  "ATUIN_SESSION",
+  "FNM_MULTISHELL_PATH",
+  "STARSHIP_SESSION_KEY",
 ]);
 
 export function providerEnvFromUserShell(

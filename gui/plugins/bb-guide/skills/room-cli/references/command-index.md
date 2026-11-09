@@ -27,6 +27,7 @@ This index lists every command path that the core CLI registers. Read the task-s
 - `room-cli cloud pi key`
 - `room-cli cloud teleport THREAD [--check|--wait [--timeout SECONDS]|--status|--cancel|--to-local]`
 - `room-cli cloud retry-start`
+- `room-cli cloud clear-disk THREAD`
 - `room-cli cloud thread-workspace`
 - `room-cli cloud share THREAD [--status|--stop]`
 - `room-cli cloud env list|set NAME|unset NAME`

@@ -140,14 +140,17 @@ export const appShortcutSchema = z
   .strict();
 export type AppShortcut = z.infer<typeof appShortcutSchema>;
 
-export interface AppShortcutInput {
-  altKey: boolean;
-  code: string;
-  ctrlKey: boolean;
-  key: string;
-  metaKey: boolean;
-  shiftKey: boolean;
-}
+export const appShortcutInputSchema = z
+  .object({
+    altKey: z.boolean(),
+    code: z.string().max(64),
+    ctrlKey: z.boolean(),
+    key: z.string().max(64),
+    metaKey: z.boolean(),
+    shiftKey: z.boolean(),
+  })
+  .strict();
+export type AppShortcutInput = z.infer<typeof appShortcutInputSchema>;
 
 const SHIFTED_KEY_BASES: Readonly<Record<string, string>> = {
   "~": "`",

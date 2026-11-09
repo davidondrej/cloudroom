@@ -4,11 +4,13 @@ import {
   experimental_recordProviderChildIo,
   isClosedPipeError,
   spawnPortableProcess,
+  terminateWindowsProcessTrees,
 } from "@cloudroom/provider-bridge-protocol/bridge-kit";
 import type { z } from "zod";
 import { ACP_PROTOCOL_VERSION, acpInitializeResultSchema } from "../wire.js";
 
 const STDERR_TAIL_MAX_CHUNKS = 40;
+const KILL_ESCALATION_MS = 4_000;
 
 export interface AcpAgentRequestResponder {
   result(value: unknown): void;
@@ -45,7 +47,9 @@ interface AcpAgentRequestArgs<TResult> {
 export interface AcpAgentConnection {
   request<TResult>(args: AcpAgentRequestArgs<TResult>): Promise<TResult>;
   notify(method: string, params: unknown): void;
-  kill(): void;
+  /** Stops the agent; settles once it has exited. */
+  /** `tree` also ends the agent's descendants on Windows, where SIGTERM reaches only the root. */
+  kill(options?: { tree?: boolean }): Promise<void>;
   readonly exited: boolean;
 }
 
@@ -158,6 +162,10 @@ export function createAcpAgentConnection(
   let nextRequestId = 1;
   let exited = false;
   let stopping = false;
+  const exit = new Promise<void>((resolve) => {
+    child.once("exit", () => resolve());
+    child.once("error", () => resolve());
+  });
 
   function rejectAllPending(error: Error): void {
     for (const [, request] of pending) {
@@ -358,9 +366,9 @@ export function createAcpAgentConnection(
       writeLine({ jsonrpc: "2.0", method, params });
     },
 
-    kill() {
+    kill(killOptions) {
       if (stopping || exited) {
-        return;
+        return exit;
       }
       stopping = true;
       rejectAllPending(
@@ -368,7 +376,21 @@ export function createAcpAgentConnection(
           `ACP agent "${options.command}" is not running`,
         ),
       );
-      child.kill("SIGTERM");
+      // An agent slow to exit (omp's teardown) is killed, so stopped threads
+      // leave no agents behind (#607).
+      const escalation = setTimeout(() => {
+        if (child.exitCode === null && child.signalCode === null) {
+          child.kill("SIGKILL");
+        }
+      }, KILL_ESCALATION_MS);
+      escalation.unref();
+      void exit.then(() => clearTimeout(escalation));
+      if (killOptions?.tree && process.platform === "win32" && child.pid) {
+        void terminateWindowsProcessTrees([child.pid]);
+      } else {
+        child.kill("SIGTERM");
+      }
+      return exit;
     },
   };
 }

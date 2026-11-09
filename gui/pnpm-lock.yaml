@@ -19,7 +19,7 @@ patchedDependencies:
     hash: 2390b5c3dc0ef03b121cfbd5fd3623542c1a30de03ace4905d6a96f30842d522
     path: patches/@pierre__diffs@1.2.9.patch
   app-builder-lib@26.15.7:
-    hash: 4688f96749e3d76cf27bc535d874470bf264610a331db13644df7715d699acf1
+    hash: a876bc3ed9a0e8d35ad307d3f9a77e636201eb6dbec7bf5c306938c501a88dec
     path: patches/app-builder-lib@26.15.7.patch
   oniguruma-to-es@4.3.4:
     hash: c894e70dbf504d1ae06fcd4e714310092460e78f6804ab489ed066c151ee2817
@@ -15866,7 +15866,7 @@ snapshots:
   ansis@4.3.1:
     optional: true
 
-  app-builder-lib@26.15.7(patch_hash=4688f96749e3d76cf27bc535d874470bf264610a331db13644df7715d699acf1)(dmg-builder@26.15.7):
+  app-builder-lib@26.15.7(patch_hash=a876bc3ed9a0e8d35ad307d3f9a77e636201eb6dbec7bf5c306938c501a88dec)(dmg-builder@26.15.7):
     dependencies:
       '@electron/asar': 3.4.1
       '@electron/fuses': 1.8.0
@@ -16634,7 +16634,7 @@ snapshots:
 
   dmg-builder@26.15.7:
     dependencies:
-      app-builder-lib: 26.15.7(patch_hash=4688f96749e3d76cf27bc535d874470bf264610a331db13644df7715d699acf1)(dmg-builder@26.15.7)
+      app-builder-lib: 26.15.7(patch_hash=a876bc3ed9a0e8d35ad307d3f9a77e636201eb6dbec7bf5c306938c501a88dec)(dmg-builder@26.15.7)
       builder-util: 26.15.3
       fs-extra: 10.1.0
       js-yaml: 4.3.2
@@ -16715,7 +16715,7 @@ snapshots:
 
   electron-builder@26.15.7:
     dependencies:
-      app-builder-lib: 26.15.7(patch_hash=4688f96749e3d76cf27bc535d874470bf264610a331db13644df7715d699acf1)(dmg-builder@26.15.7)
+      app-builder-lib: 26.15.7(patch_hash=a876bc3ed9a0e8d35ad307d3f9a77e636201eb6dbec7bf5c306938c501a88dec)(dmg-builder@26.15.7)
       builder-util: 26.15.3
       builder-util-runtime: 9.7.0
       chalk: 4.1.2

@@ -706,6 +706,45 @@
     background-color: color-mix(in oklab, var(--foreground) 40%, transparent);
   }
 
+  /*
+   * Mouse users get ThreadScrollThumb (bottom-anchored-scroll-body.tsx)
+   * instead of the native thumb. It shows while scrolling, near the right
+   * edge, or while dragged, and JS grows it as the mouse gets close.
+   */
+  .thread-scrollbar.has-scroll-thumb[data-scrollbar-scrolling="true"] {
+    scrollbar-color: transparent transparent;
+  }
+
+  .thread-scrollbar.has-scroll-thumb[data-scrollbar-scrolling="true"]::-webkit-scrollbar-thumb,
+  .thread-scrollbar.has-scroll-thumb[data-scrollbar-scrolling="true"]::-webkit-scrollbar-thumb:hover {
+    background-color: transparent;
+  }
+
+  .thread-scroll-thumb {
+    position: absolute;
+    z-index: 40;
+    border-radius: 9999px;
+    background-color: color-mix(
+      in oklab,
+      var(--foreground) calc(20% + 25% * var(--grow, 0)),
+      transparent
+    );
+    opacity: 0;
+    touch-action: none;
+    transition: opacity 250ms;
+  }
+
+  .thread-scrollbar[data-scrollbar-scrolling="true"] ~ .thread-scroll-thumb,
+  .thread-scroll-thumb[data-near],
+  .thread-scroll-thumb[data-dragging] {
+    opacity: 1;
+    transition-duration: 80ms;
+  }
+
+  .thread-scroll-thumb[data-dragging] {
+    background-color: color-mix(in oklab, var(--foreground) 62%, transparent);
+  }
+
   [data-vaul-drawer-direction] [data-sidebar="content"] {
     scrollbar-color: transparent transparent;
   }

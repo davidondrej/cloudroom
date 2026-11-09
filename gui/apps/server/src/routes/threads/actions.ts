@@ -61,6 +61,7 @@ import {
   installThreadMoves,
   moveThreadToProject,
 } from "../../services/threads/thread-move.js";
+import { requestThreadWorktreeMove } from "../../services/threads/thread-worktree-move.js";
 import {
   buildExecutionOptions,
   dispatchThreadUnarchiveCommand,
@@ -331,7 +332,7 @@ export function registerThreadActionRoutes(app: Hono, deps: AppDeps): void {
     return context.json({ ok: true });
   });
 
-  post(routes.stop, async (context) => {
+  post(routes.stop, async (context, query) => {
     const thread = requirePublicThread(deps.db, context.req.param("id"));
     const environment = resolveThreadHostCommandEnvironment({
       db: deps.db,
@@ -340,7 +341,12 @@ export function registerThreadActionRoutes(app: Hono, deps: AppDeps): void {
     teleports(deps).abandon(thread.id);
     const cancelledRetries = cancelRetriesForExplicitStop(deps, thread.id);
     cancelInterruptedThreadStartInput(deps.db, thread.id);
-    await stopThreadForCurrentState(deps, thread, environment);
+    await stopThreadForCurrentState(
+      deps,
+      thread,
+      environment,
+      query.endProcesses === "true" ? { endProcesses: true } : undefined,
+    );
     return context.json({ ok: true, cancelledRetries });
   });
 
@@ -518,6 +524,13 @@ export function registerThreadActionRoutes(app: Hono, deps: AppDeps): void {
       ...result,
       thread: toThreadResponseFromThread(deps, { thread: result.thread }),
     });
+  });
+
+  post(routes.worktree, (context, payload) => {
+    const thread = requirePublicThread(deps.db, context.req.param("id"));
+    return context.json(
+      requestThreadWorktreeMove(deps, thread.id, payload.carry ?? []),
+    );
   });
 
   post(routes.pin, (context) => {

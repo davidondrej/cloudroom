@@ -50,7 +50,7 @@ import {
 const ASK_USER_QUESTION_TOOL_NAME = "AskUserQuestion";
 
 const UPDATE_ENVIRONMENT_DIRECTORY_INSTRUCTIONS =
-  "If the user asks you to move this thread to a new worktree, run `room-cli thread worktree` and follow its output; never create a worktree yourself. If they ask to move it to another existing checkout or directory, make sure it exists, then call `update_environment_directory` with its absolute path. After it succeeds, stop work in the current turn; future turns will run in the updated environment. If they ask to move it to another Cloudroom project, run `room-cli thread move --self --project PROJECT` and end your turn.";
+  "If the user asks you to move this thread to a new worktree, run `room-cli thread worktree --carry <the uncommitted files this thread changed>` and follow its output; other agents may share this checkout, so never carry their files. Never create a worktree yourself. If they ask to move it to another existing checkout or directory, make sure it exists, then call `update_environment_directory` with its absolute path. After it succeeds, stop work in the current turn; future turns will run in the updated environment. If they ask to move it to another Cloudroom project, run `room-cli thread move --self --project PROJECT` and end your turn.";
 
 export interface ThreadRuntimeCommandEnvironment {
   hostId: string;

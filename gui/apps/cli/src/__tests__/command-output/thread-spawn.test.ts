@@ -46,6 +46,7 @@ describe("room-cli thread spawn command output", () => {
 
     expect(post).toHaveBeenCalledWith({
       json: {
+        requestId: expect.any(String),
         origin: "cli",
         startedOnBehalfOf: null,
         originKind: null,
@@ -292,6 +293,7 @@ describe("room-cli thread spawn command output", () => {
     expect(resolveLocalHostIdMock).not.toHaveBeenCalled();
     expect(post).toHaveBeenCalledWith({
       json: {
+        requestId: expect.any(String),
         origin: "cli",
         startedOnBehalfOf: null,
         originKind: null,
@@ -340,6 +342,7 @@ describe("room-cli thread spawn command output", () => {
 
     expect(post).toHaveBeenCalledWith({
       json: {
+        requestId: expect.any(String),
         origin: "cli",
         startedOnBehalfOf: null,
         originKind: null,
@@ -575,6 +578,7 @@ describe("room-cli thread spawn command output", () => {
 
     expect(post).toHaveBeenCalledWith({
       json: {
+        requestId: expect.any(String),
         origin: "cli",
         startedOnBehalfOf: null,
         originKind: null,
@@ -588,15 +592,15 @@ describe("room-cli thread spawn command output", () => {
     });
   });
 
-  it("room-cli thread spawn does not default parent thread id from ROOM_THREAD_ID", async () => {
+  it("room-cli thread spawn names ROOM_THREAD_ID as its launcher, not its parent", async () => {
     vi.stubEnv("ROOM_PROJECT_ID", "proj-1");
-    vi.stubEnv("ROOM_THREAD_ID", "thread-context-parent");
+    vi.stubEnv("ROOM_THREAD_ID", "thr_contextparent");
     const thread: domain.Thread = fixtures.makeThread({
       id: "thread-2",
       projectId: "proj-1",
       providerId: "codex",
       status: "starting",
-      parentThreadId: "thread-context-parent",
+      parentThreadId: "thr_contextparent",
       createdAt: 1,
       updatedAt: 1,
     });
@@ -621,8 +625,10 @@ describe("room-cli thread spawn command output", () => {
 
     expect(post).toHaveBeenCalledWith({
       json: {
+        requestId: expect.any(String),
         origin: "cli",
         startedOnBehalfOf: null,
+        launcherThreadId: "thr_contextparent",
         originKind: null,
         projectId: "proj-1",
         providerId: "codex",
@@ -818,6 +824,7 @@ describe("room-cli thread spawn command output", () => {
 
     expect(post).toHaveBeenCalledWith({
       json: {
+        requestId: expect.any(String),
         origin: "cli",
         startedOnBehalfOf: null,
         originKind: null,
@@ -866,6 +873,7 @@ describe("room-cli thread spawn command output", () => {
     expect(resolveLocalHostIdMock).toHaveBeenCalledTimes(1);
     expect(post).toHaveBeenCalledWith({
       json: {
+        requestId: expect.any(String),
         origin: "cli",
         startedOnBehalfOf: null,
         originKind: null,
@@ -947,6 +955,7 @@ describe("room-cli thread spawn command output", () => {
 
     expect(post).toHaveBeenCalledWith({
       json: {
+        requestId: expect.any(String),
         origin: "cli",
         startedOnBehalfOf: null,
         originKind: null,

@@ -88,7 +88,8 @@ describe("ACP provider maintenance", () => {
       ),
     ).toEqual({
       available: false,
-      message: "opencode install is not available on this host.",
+      message:
+        "opencode install is not available on this host: opencode is not installed. Cloudroom has no install or update to run.",
     });
     expect(
       __testing.buildProviderInstallationRun(
@@ -101,7 +102,8 @@ describe("ACP provider maintenance", () => {
       ),
     ).toEqual({
       available: false,
-      message: "opencode install is not available on this host.",
+      message:
+        "opencode install is not available on this host: opencode is not installed. Cloudroom has no install or update to run.",
     });
   });
 

@@ -7,13 +7,14 @@ description: "Request user-supplied credentials securely into a dotenv file with
 
 Use `room-cli secret request` when the user needs to supply a credential. Do not ask the user to paste a secret into chat.
 
-Batch every currently known variable into one request. Inspect documentation or `.env.example` to identify variable names, but do not read or print an existing secret-bearing env file.
+Open a form only after the user says they have the value and are ready. One secret per form. If it times out or is cancelled, never reopen it on your own. Ask once, then wait.
+
+Inspect documentation or `.env.example` to identify variable names, but do not read or print an existing secret-bearing env file.
 
 ```bash
-room-cli secret request OPENAI_API_KEY RESEND_API_KEY \
+room-cli secret request OPENAI_API_KEY \
   --purpose "Configure application credentials" \
   --describe OPENAI_API_KEY "OpenAI API key used by the server" \
-  --describe RESEND_API_KEY "Resend API key used for transactional email" \
   --write-env .env.local
 ```
 

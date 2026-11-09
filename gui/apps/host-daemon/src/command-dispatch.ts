@@ -143,7 +143,12 @@ export {
   getErrorCode,
   type CommandDispatchOptions,
 } from "./command-dispatch-support.js";
-import { stopThreadProcesses } from "./thread-processes.js";
+import {
+  countThreadProcesses,
+  listAgentTree,
+  stopThreadProcesses,
+} from "./thread-processes.js";
+import { providerInstallationGateKey } from "./provider-installation-gate.js";
 
 type CommandHandlerMap = {
   [TType in HostDaemonSettledCommandType]: (
@@ -305,6 +310,7 @@ async function runProviderInstallationOnHost(
       options.streamProviderInstallation ?? streamProviderInstallation;
     const succeeded = (events: ProviderCliInstallEvent[]) =>
       events.some((event) => event.type === "completed" && event.success);
+    let verifiedStatus: ProviderInstallationStatus | undefined;
     const runVerified = async (
       plan: ProviderInstallationCommand,
     ): Promise<ProviderCliInstallEvent[]> => {
@@ -316,13 +322,15 @@ async function runProviderInstallationOnHost(
         await options.refreshShellEnv({ force: true });
         const status =
           await options.providerInstallationStatus(maintenanceArgs);
-        return installationVerificationPassed(run.verification, status)
-          ? events
-          : failProviderInstallationVerification({
-              providerId: command.providerId,
-              events,
-              message: `${command.providerId} ${command.action} exited successfully, but the provider could not verify the installed result.`,
-            });
+        if (installationVerificationPassed(run.verification, status)) {
+          verifiedStatus = status;
+          return events;
+        }
+        return failProviderInstallationVerification({
+          providerId: command.providerId,
+          events,
+          message: `${command.providerId} ${command.action} exited successfully, but the provider could not verify the installed result.`,
+        });
       } catch {
         return failProviderInstallationVerification({
           providerId: command.providerId,
@@ -338,7 +346,17 @@ async function runProviderInstallationOnHost(
       events = [...events, ...(await runVerified(run.fallback))];
     }
     if (succeeded(events)) {
-      await options.runtimeManager.invalidateProviderMaintenanceRuntime();
+      await options.runtimeManager.invalidateProviderMaintenanceRuntime(
+        verifiedStatus === undefined
+          ? undefined
+          : {
+              key: providerInstallationGateKey({
+                providerId: command.providerId,
+                bridgeLaunch: command.bridgeLaunch,
+              }),
+              status: verifiedStatus,
+            },
+      );
     }
     return { events };
   } catch (error) {
@@ -547,6 +565,8 @@ const commandHandlers: CommandHandlerMap = {
     return {};
   },
   "thread.processes.stop": async (command, options) => {
+    const serverUrl = options.runtimeManager.getShellEnv().ROOM_SERVER_URL;
+    const endAgentTree = await listAgentTree(command.threadId, serverUrl);
     await options.runtimeManager
       .reapIdleProviderSessions({
         idleForMs: 0,
@@ -559,14 +579,25 @@ const commandHandlers: CommandHandlerMap = {
           "Freeing an archived thread's agent session failed",
         ),
       );
-    const stopped = await stopThreadProcesses(
-      command.threadId,
-      options.runtimeManager.getShellEnv().ROOM_SERVER_URL,
-    );
+    // A session kept for its background work or a running command still runs,
+    // and so does a message edit's staged rewind until it is discarded.
+    const freed = !options.runtimeManager.holdsThreadAgent(command.threadId);
+    const stopped =
+      (freed ? await endAgentTree() : 0) +
+      (await stopThreadProcesses(command.threadId, serverUrl));
     if (stopped > 0) {
       options.logger.debug(
         { threadId: command.threadId, stopped },
         "Stopped processes an archived thread left running",
+      );
+    }
+    const remaining = freed
+      ? await countThreadProcesses(command.threadId, serverUrl)
+      : 0;
+    if (remaining > 0) {
+      options.logger.warn(
+        { threadId: command.threadId, remaining },
+        "A stopped or archived thread still has processes running",
       );
     }
     return { stopped };

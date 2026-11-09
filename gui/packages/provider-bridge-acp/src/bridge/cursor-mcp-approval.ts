@@ -3,6 +3,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import {
   ACP_BRIDGE_MCP_SERVER_NAME,
   type AcpMcpServerConfig,
@@ -11,6 +12,10 @@ import {
 const CURSOR_MCP_APPROVAL_FILE = "mcp-approvals.json";
 const CURSOR_APPROVAL_LOCK_STALE_MS = 30_000;
 const CURSOR_APPROVAL_LOCK_TIMEOUT_MS = 5_000;
+const WINDOWS_APPROVAL_LOCK_MAX_WAIT_MS = 15_000;
+// Windows may briefly refuse to replace a file another process has open.
+const WINDOWS_RENAME_ATTEMPTS = 8;
+const WINDOWS_SHARING_ERROR_CODES = new Set(["EACCES", "EBUSY", "EPERM"]);
 
 export interface CursorMcpApproval {
   approval: string;
@@ -130,7 +135,9 @@ async function writeApprovals(path: string, approvals: readonly string[]) {
 
 async function acquireApprovalLock(path: string): Promise<() => Promise<void>> {
   const lockPath = `${path}.bb-lock`;
-  const deadline = Date.now() + CURSOR_APPROVAL_LOCK_TIMEOUT_MS;
+  const started = Date.now();
+  let deadline = started + CURSOR_APPROVAL_LOCK_TIMEOUT_MS;
+  let holder = "";
   await mkdir(dirname(path), { recursive: true });
   for (;;) {
     try {
@@ -147,6 +154,16 @@ async function acquireApprovalLock(path: string): Promise<() => Promise<void>> {
       if (Date.now() - lockStat.mtimeMs > CURSOR_APPROVAL_LOCK_STALE_MS) {
         await rm(lockPath, { recursive: true, force: true });
         continue;
+      }
+      // Windows saves can retry while holding the lock, so a new holder
+      // restarts the wait, up to a hard cap.
+      const nextHolder = `${lockStat.ino}:${lockStat.mtimeMs}`;
+      if (process.platform === "win32" && holder !== nextHolder) {
+        holder = nextHolder;
+        deadline = Math.min(
+          Date.now() + CURSOR_APPROVAL_LOCK_TIMEOUT_MS,
+          started + WINDOWS_APPROVAL_LOCK_MAX_WAIT_MS,
+        );
       }
     } catch (error) {
       if (errorCode(error) === "ENOENT") {
@@ -168,13 +185,29 @@ async function mutateApprovals(
 ): Promise<void> {
   const releaseLock = await acquireApprovalLock(path);
   try {
-    const approvals = await readApprovals(path);
-    const nextApprovals = mutate(approvals);
-    if (
-      approvals.length !== nextApprovals.length ||
-      approvals.some((approval, index) => approval !== nextApprovals[index])
-    ) {
-      await writeApprovals(path, nextApprovals);
+    for (let attempt = 1; ; attempt += 1) {
+      // Re-read on every try so edits made between tries are kept.
+      const approvals = await readApprovals(path);
+      const nextApprovals = mutate(approvals);
+      if (
+        approvals.length === nextApprovals.length &&
+        approvals.every((approval, index) => approval === nextApprovals[index])
+      ) {
+        return;
+      }
+      try {
+        await writeApprovals(path, nextApprovals);
+        return;
+      } catch (error) {
+        if (
+          process.platform !== "win32" ||
+          attempt >= WINDOWS_RENAME_ATTEMPTS ||
+          !WINDOWS_SHARING_ERROR_CODES.has(String(errorCode(error)))
+        ) {
+          throw error;
+        }
+      }
+      await delay(Math.min(25 * 2 ** (attempt - 1), 250));
     }
   } finally {
     await releaseLock();
@@ -209,11 +242,8 @@ export async function approveCursorSessionMcpServer(args: {
   });
   let installedByBb = false;
   await mutateApprovals(path, (approvals) => {
-    if (approvals.includes(approval)) {
-      return approvals;
-    }
-    installedByBb = true;
-    return [...approvals, approval];
+    installedByBb = !approvals.includes(approval);
+    return installedByBb ? [...approvals, approval] : approvals;
   });
   return { approval, installedByBb, path };
 }

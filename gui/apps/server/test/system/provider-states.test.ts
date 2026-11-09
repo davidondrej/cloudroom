@@ -38,6 +38,7 @@ const INSTALLED_ONLY_PROVIDER_IDS = new Set([
   "acp-droid",
   "acp-kilo",
   "acp-cline",
+  "acp-kimi",
 ]);
 
 function healthForInstalledOnlyProvider(

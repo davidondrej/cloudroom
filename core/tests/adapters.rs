@@ -297,6 +297,20 @@ async fn pi_native_identity_exists_before_first_prompt_and_resume_never_creates_
 }
 
 #[tokio::test]
+async fn pi_names_a_model_it_does_not_know() {
+    // #952: Pi reshapes an unlisted nested ID (`openrouter/openrouter/pareto-code`), so it can't start.
+    let mut fixture = Fixture::new(Kind::Pi);
+    fixture.config.harnesses.get_mut(&Kind::Pi).unwrap().model = "fixture/nested".into();
+    let (handle, _events) = runtime::Handle::spawn(&fixture.config, Kind::Pi, None).unwrap();
+    let error = handle.start_session().await.unwrap_err().to_string();
+    assert_eq!(
+        error,
+        "This Pi doesn't know the selected model. Pick another model"
+    );
+    handle.request_shutdown();
+}
+
+#[tokio::test]
 async fn both_harnesses_drain_large_native_history_before_exit() {
     use std::io::Write;
     for kind in [Kind::Codex, Kind::Pi] {

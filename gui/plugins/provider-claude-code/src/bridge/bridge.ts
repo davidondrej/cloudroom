@@ -1251,7 +1251,7 @@ function buildSessionTrackingHooks(
             hookEventName: "PreToolUse",
             permissionDecision: "deny",
             permissionDecisionReason:
-              "bb has disabled Claude Code native subagents; use bb delegation instead.",
+              "Cloudroom has disabled Claude Code native subagents; use room-cli thread spawn instead.",
           },
         };
       }
@@ -1265,7 +1265,7 @@ function buildSessionTrackingHooks(
             hookEventName: "PreToolUse",
             permissionDecision: "deny",
             permissionDecisionReason:
-              "bb has disabled the Claude Code Workflow tool.",
+              "Cloudroom has disabled the Claude Code Workflow tool.",
           },
         };
       }
@@ -1607,7 +1607,19 @@ function createOnSdkDone(
       "Claude SDK stream ended before pending work completed",
     );
 
-    if (!error) return;
+    if (!error) {
+      // A clean end with the turn still open would leave the thread active
+      // forever (#1075). A normal result closes the turn first; Stop and
+      // replacement mark the session closing, so it is not current above.
+      if (threadSession.translator.hasOpenTurn(args.threadIdRef.current)) {
+        emitSessionError(
+          threadSession,
+          args.threadIdRef.current,
+          "Claude SDK stream ended before the turn finished",
+        );
+      }
+      return;
+    }
 
     const message = error instanceof Error ? error.message : String(error);
 

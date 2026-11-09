@@ -353,6 +353,10 @@ export async function readFileForTransport(
       "Path is a directory, not a file",
     );
   }
+  // Reading a FIFO blocks until a writer appears.
+  if (stat.isFIFO()) {
+    throw new CommandDispatchError("invalid_path", "Path is a FIFO, not a file");
+  }
 
   const mimeType = mimeTypes.lookup(args.resultPath) || undefined;
   const fileSizeLimitBytes = getFileSizeLimitBytes(mimeType);

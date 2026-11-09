@@ -1,6 +1,8 @@
+import { readlinkSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import path from "node:path";
 import {
+  FNM_SHELL_LINK,
   createAgentRuntime,
   type AgentRuntime,
   type AgentRuntimeOptions,
@@ -261,7 +263,19 @@ function shellEnvEquals(
   if (leftEntries.length !== rightEntries.length) {
     return false;
   }
-  return leftEntries.every(([key, value]) => right[key] === value);
+  // fnm puts a new per-shell link in PATH on every run: compare the Node it
+  // selects, so only a different Node is a change (#1026).
+  const fnmTarget = (value: string | undefined) =>
+    value?.replace(FNM_SHELL_LINK, (link) => {
+      try {
+        return readlinkSync(link);
+      } catch {
+        return link;
+      }
+    });
+  return leftEntries.every(
+    ([key, value]) => fnmTarget(right[key]) === fnmTarget(value),
+  );
 }
 
 function providerProcessEnvFromShellEnv(
@@ -441,6 +455,15 @@ export class RuntimeManager {
   listThreadOwnerEntries(threadId: string): RuntimeEntry[] {
     return [...this.entries.values()].filter((entry) =>
       entry.runtime.hasThread(threadId),
+    );
+  }
+
+  /** Its session, or a message edit's staged copy, still holds the thread's agent (#607). */
+  holdsThreadAgent(threadId: string): boolean {
+    return [...this.entries.values()].some(
+      (entry) =>
+        entry.runtime.hasThread(threadId) ||
+        entry.runtime.hasStagedRewind?.(threadId) === true,
     );
   }
 
@@ -763,8 +786,11 @@ export class RuntimeManager {
     return null;
   }
 
-  async invalidateProviderMaintenanceRuntime(): Promise<void> {
-    this.providerInstallationGate.clear();
+  /** After an install or update: the CLI changed, so saved answers go. */
+  async invalidateProviderMaintenanceRuntime(
+    verified?: Parameters<ProviderInstallationGate["reset"]>[0],
+  ): Promise<void> {
+    this.providerInstallationGate.reset(verified);
     try {
       await this.shutdownProviderMaintenanceRuntime();
     } catch (error) {

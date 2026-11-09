@@ -1,10 +1,15 @@
 import {
+  createEventId,
   deleteQueuedThreadMessage,
   deleteQueuedThreadRetries,
   getLatestThreadSequence,
   hasQueuedRetryOfTurnRequest,
 } from "@cloudroom/db";
-import { permissionModeSchema } from "@cloudroom/domain";
+import {
+  permissionModeSchema,
+  THREAD_ACCOUNT_SWITCH_OPERATION,
+  threadScope,
+} from "@cloudroom/domain";
 import type {
   ClientTurnRequestId,
   PermissionMode,
@@ -20,6 +25,7 @@ import { ApiError } from "../../errors.js";
 import { emitPluginMessageCancelled } from "../plugins/plugin-thread-events.js";
 import type { LoggedPendingInteractionWorkSessionDeps } from "../../types.js";
 import { attemptDispatch } from "./dispatch-attempt.js";
+import { appendThreadEvent } from "./thread-events.js";
 import { toThreadQueuedMessage } from "./thread-queued-messages.js";
 import {
   loadFailedTurn,
@@ -304,6 +310,21 @@ export async function retryFailedTurn(
         emitPluginMessageCancelled(outcome.entry);
       }
       throw cancelled;
+    }
+    if (request.accountSwitch) {
+      appendThreadEvent(deps, {
+        threadId: thread.id,
+        environmentId: thread.environmentId,
+        type: "system/operation",
+        scope: threadScope(),
+        data: {
+          operation: THREAD_ACCOUNT_SWITCH_OPERATION,
+          operationId: createEventId(),
+          status: "completed",
+          message: `Continued on ${request.accountSwitch.to}.`,
+          metadata: request.accountSwitch,
+        },
+      });
     }
     if (outcome.kind === "dispatched") {
       return {

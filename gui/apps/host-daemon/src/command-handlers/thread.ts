@@ -9,6 +9,7 @@ import {
   isStandaloneBuiltinCompactCommand,
 } from "@cloudroom/domain";
 import type { HostDaemonCommandResult } from "@cloudroom/host-daemon-contract";
+import type { ProviderInstallationStatus } from "@cloudroom/provider-bridge-protocol";
 import type { RuntimeEntry } from "../runtime-manager.js";
 import {
   CommandDispatchError,
@@ -22,7 +23,10 @@ import {
   stagePromptAttachmentGroups,
   stagePromptAttachments,
 } from "./prompt-attachments.js";
-import { providerInstallationGateKey } from "../provider-installation-gate.js";
+import {
+  providerInstallationGateKey,
+  untilAborted,
+} from "../provider-installation-gate.js";
 import { requireResolvedWorkspaceForCommand } from "../workspace-resolution.js";
 
 type TurnSubmitCommand = CommandOf<"turn.submit">;
@@ -33,6 +37,10 @@ type ExistingThreadRuntimeCommand =
 
 const TURN_SUBMIT_ACTIVE_TURN_WAIT_MS = 5_000;
 const TURN_SUBMIT_STEER_ATTEMPTS = 2;
+// The check fetches the bridge, creates the runtime, starts the bridge, and
+// asks provider/installation/status (each up to 30 s), maybe twice after a
+// shell env change. A slow first check after an app update still fits.
+const PROVIDER_CLI_CHECK_TIMEOUT_MS = 120_000;
 
 interface ResumeThreadRuntimeIfMissingArgs {
   command: ExistingThreadRuntimeCommand;
@@ -106,25 +114,54 @@ async function requireSupportedProviderCliForThreadStart({
     command.type === "thread.rewind.prepare"
       ? ("thread_rewind" as const)
       : undefined;
-  await options.refreshShellEnv();
-  const status = await options.runtimeManager.providerInstallationGate.run(
-    providerInstallationGateKey({
-      providerId: command.providerId,
-      bridgeLaunch: command.bridgeLaunch,
-      requirement,
-    }),
-    async () => {
-      const bridgeLaunch = await resolveRuntimeBridgeLaunch(
-        command.bridgeLaunch,
-        options,
-      );
-      return options.providerInstallationStatus({
+  // One deadline for the whole check, so a stalled probe can't hold a start
+  // for minutes (#1048). The error names the stage that ran out.
+  const startedAt = Date.now();
+  const signal = AbortSignal.timeout(PROVIDER_CLI_CHECK_TIMEOUT_MS);
+  let stage = "refreshing the shell environment";
+  let status: ProviderInstallationStatus;
+  try {
+    await untilAborted(options.refreshShellEnv(), signal);
+    stage = "checking the installed CLI (provider/installation/status)";
+    status = await options.runtimeManager.providerInstallationGate.run(
+      providerInstallationGateKey({
         providerId: command.providerId,
-        bridgeLaunch,
-        ...(requirement !== undefined ? { requirement } : {}),
-      });
-    },
-  );
+        bridgeLaunch: command.bridgeLaunch,
+        requirement,
+      }),
+      async () => {
+        const bridgeLaunch = await resolveRuntimeBridgeLaunch(
+          command.bridgeLaunch,
+          options,
+        );
+        return options.providerInstallationStatus({
+          providerId: command.providerId,
+          bridgeLaunch,
+          ...(requirement !== undefined ? { requirement } : {}),
+        });
+      },
+      signal,
+      (error) => {
+        options.logger.warn(
+          {
+            providerId: command.providerId,
+            stage,
+            elapsedMs: Date.now() - startedAt,
+            err: error,
+          },
+          "Provider startup check used a saved answer",
+        );
+      },
+    );
+  } catch (error) {
+    throw new CommandDispatchError(
+      "provider_cli_check_failed",
+      signal.aborted
+        ? `Provider "${command.providerId}" startup check did not finish within ${PROVIDER_CLI_CHECK_TIMEOUT_MS / 1000}s while ${stage}.`
+        : `Provider "${command.providerId}" startup check failed while ${stage}: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error },
+    );
+  }
   if (!status.versionUnsupported) {
     return;
   }

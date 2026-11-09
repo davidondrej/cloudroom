@@ -2,7 +2,7 @@ import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { findCliExecutable } from "@cloudroom/process-utils";
-import { macCursorLogin, macOpenclawLogin, macOpencodeLogin, macVariables } from "./sandboxes.js";
+import { macCursorLogin, macKimiLogin, macOpenclawLogin, macOpencodeLogin, macVariables } from "./sandboxes.js";
 
 const read = (path: string) => readFile(path, "utf8").catch(() => "");
 const parse = (text: string | null): unknown => { try { return text ? JSON.parse(text) : null; } catch { return null; } };
@@ -21,6 +21,7 @@ const AGENTS: [id: string, cli: string, signedIn: () => Promise<boolean>][] = [
   ["acp-openclaw", "openclaw", async () => (await macOpenclawLogin()) !== null],
   ["acp-grok", "grok", async () => Boolean(process.env.XAI_API_KEY) || hasSecret(parse(await read(join(dir("GROK_HOME", ".grok"), "auth.json"))))],
   ["acp-devin", "devin", async () => setsSecret(await read(join(dir("XDG_DATA_HOME", ".local/share"), "devin", "credentials.toml")))],
+  ["acp-kimi", "kimi", async () => (await macKimiLogin()) !== null],
   // Droid keeps its sign-in encrypted in ~/.factory (unlocked through the Keychain on macOS); an API key may live only in the login shell.
   ["acp-droid", "droid", async () => Boolean(process.env.FACTORY_API_KEY || (await macVariables()).FACTORY_API_KEY)
     || (await Promise.all(["auth.v2.loginkeychain", "auth.v2.file"].map((file) => read(join(homedir(), ".factory", file))))).some((text) => text.trim() !== "")],

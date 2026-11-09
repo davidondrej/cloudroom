@@ -61,6 +61,15 @@ const RUNTIME_SOURCE_MODULES = {
     "ui",
     "icon.tsx",
   ),
+  "@cloudroom/shared-ui/browser-dimming": path.join(
+    scriptDir,
+    "..",
+    "..",
+    "shared-ui",
+    "src",
+    "hooks",
+    "useBrowserDimmingModal.ts",
+  ),
 };
 
 const IDENTIFIER_RE = /^[A-Za-z_$][A-Za-z0-9_$]*$/;

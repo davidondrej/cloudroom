@@ -90,6 +90,22 @@ type StartOptions = (
     Option<String>,
 );
 
+/// A child start the website drives (ADR 20261104-015709): the request it
+/// repeats until the child's first prompt is in, the child's thread ID once known, and how it ended.
+#[derive(Default, Clone, Serialize, Deserialize)]
+pub struct ChildStart {
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub body: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub child: Option<String>,
+    #[serde(default)]
+    pub done: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub at_ms: u64,
+}
+
 #[derive(Default, Clone, Serialize, Deserialize)]
 pub struct Session {
     pub session_id: String,
@@ -138,6 +154,17 @@ pub struct Session {
     // What this parent last heard of each child in its own sandbox, by thread ID (relay.rs).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub child_states: BTreeMap<String, String>,
+    // The reports an archived child could still send, by thread ID: its turns not reported yet when it took this
+    // parent's archive (relay.rs, #1000).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub late_reports: BTreeMap<String, std::collections::BTreeSet<String>>,
+    // Children this session asked the website to start in sandboxes of their own, by request ID (relay.rs).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub child_starts: BTreeMap<String, ChildStart>,
+    // The children those starts named, by thread ID: their reports and messages come to this session (relay.rs).
+    // Never trimmed, since a child can report long after its start.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
+    pub started: std::collections::BTreeSet<String>,
     pub reasoning: Option<String>,
     pub workspace: Option<crate::workspace::Workspace>,
     #[serde(skip)]
@@ -164,6 +191,10 @@ pub struct Session {
     // The latest turn stopped on a subscription usage limit.
     #[serde(skip)]
     usage_limited: bool,
+    // The user switched accounts while this turn ran on the old login: if the limit stops it, it continues on the
+    // new one at once (ADR 20261107-082836).
+    #[serde(skip)]
+    switched_mid_turn: bool,
     // When that limit resets, if the harness said; a website loop resumes the thread then (accounts.rs).
     #[serde(skip)]
     usage_resets_ms: Option<u64>,
@@ -314,6 +345,8 @@ impl Session {
 pub enum Error {
     NotFound,
     Conflict(&'static str),
+    /// A refused effort, with the levels the model takes (`invalid_reasoning_effort`).
+    Effort(String),
     /// Carries the underlying cause so API clients can see why storage failed.
     Storage(String),
 }
@@ -323,6 +356,7 @@ impl Error {
         match self {
             Self::NotFound => "session not found".into(),
             Self::Conflict(message) => (*message).into(),
+            Self::Effort(message) => format!("invalid reasoning effort: {message}"),
             // A locked journal or a write that found no space: the only way in is `vm run` (#211).
             Self::Storage(detail)
                 if detail == JOURNAL_UNWRITABLE || detail.contains("os error 28") =>
@@ -799,6 +833,7 @@ impl Manager {
             runtime::Kind::Hermes => runtime::HERMES_REASONING_LEVELS.contains(&reasoning),
             runtime::Kind::Devin => runtime::DEVIN_REASONING_LEVELS.contains(&reasoning),
             runtime::Kind::Droid => runtime::DROID_REASONING_LEVELS.contains(&reasoning),
+            runtime::Kind::Kimi => runtime::KIMI_REASONING_LEVELS.contains(&reasoning),
             runtime::Kind::OpenClaw => runtime::OPENCLAW_REASONING_LEVELS.contains(&reasoning),
         };
         if !supported {
@@ -1131,6 +1166,19 @@ impl Manager {
         command: &str,
         input: Value,
     ) -> Result<Receipt> {
+        self.command_held(id, request, command, input, false)
+    }
+
+    /// `held`: a related thread's message, which may join a queue that a landing Stop already paused. It waits there
+    /// for the user, as in Local threads (docs/scopes/queue.md, #982).
+    pub(crate) fn command_held(
+        self: &Arc<Self>,
+        id: &str,
+        request: String,
+        command: &str,
+        input: Value,
+        held: bool,
+    ) -> Result<Receipt> {
         enum Next {
             None,
             Deliver(runtime::Handle, String),
@@ -1171,7 +1219,7 @@ impl Manager {
                 }
             }
             if command == "sleep" {
-                return self.request_sleep(&mut local, id, request);
+                return self.request_sleep(&mut local, id, request, input);
             }
             if local.draining && !matches!(command, "interrupt" | "close" | "stop" | "cancel") {
                 return Err(Error::Conflict("service is draining"));
@@ -1194,8 +1242,9 @@ impl Manager {
             if session.rewind_request.is_some() {
                 return Err(Error::Conflict("wait for the pending rewind"));
             }
+            let held = held && command == "prompt" && session.queue_paused;
             if session.close_request.is_some()
-                || (command != "close" && session.interrupt_pending())
+                || (command != "close" && session.interrupt_pending() && !held)
             {
                 return Err(Error::Conflict("wait for the pending close or interrupt"));
             }
@@ -1410,6 +1459,9 @@ impl Manager {
                 serde_json::to_value(&receipt).map_err(io::Error::other)?,
                 None,
             )?;
+            if command == "resume" {
+                local.drop_pending_sleep(id)?;
+            }
             let next = match command {
                 "prompt" if deliver_now => {
                     self.begin_turn(&mut local, id, &request)?;
@@ -1585,6 +1637,7 @@ impl Manager {
                 let reasoning = prompt::reasoning(&input).or_else(|| session.reasoning.clone());
                 (input, reasoning)
             };
+            let (input, notice) = prompt::with_notice(&self.config.state_dir, input);
             // The stored handle keeps the launch level. This copy is only for the turn being started.
             let handle = handle.with_reasoning(reasoning);
             let result = async {
@@ -1592,6 +1645,9 @@ impl Manager {
                 handle.send_prompt(&request, &input).await
             }
             .await;
+            if let (Err(_), Some(note)) = (&result, &notice) {
+                prompt::put_back_notice(&self.config.state_dir, note);
+            }
             let state = match &result {
                 Ok(_) => "delivered",
                 Err(e) if e.kind() == io::ErrorKind::InvalidInput => "failed",
@@ -1856,6 +1912,10 @@ impl Manager {
             } else {
                 SessionState::Idle
             };
+            // A stopped queue is the user's call: nothing continues on its own after it.
+            if session.queue_paused {
+                local.sessions.get_mut(id).unwrap().switched_mid_turn = false;
+            }
             let _ = local.append(id, "state", json!({"state":state}), None);
             return;
         }
@@ -1885,6 +1945,11 @@ impl Manager {
             return;
         }
         let _ = local.append(id, "state", json!({"state":SessionState::Idle}), None);
+        // Kept through queued turns, which still run on the old login; used once the session settles.
+        let session = local.sessions.get_mut(id).unwrap();
+        if std::mem::take(&mut session.switched_mid_turn) && session.usage_limited {
+            self.continue_sessions(local, vec![id.to_owned()]);
+        }
     }
 
     fn snapshot_usage(self: Arc<Self>, id: String, handle: runtime::Handle) {
@@ -1973,6 +2038,7 @@ impl Manager {
         }
         self.watch_children(&local);
         self.watch_reports(&local);
+        self.watch_child_starts(&local);
         Ok(())
     }
 

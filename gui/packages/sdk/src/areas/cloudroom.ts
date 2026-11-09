@@ -47,9 +47,9 @@ export interface CloudroomStatus {
   cloudQueue?: { position: number; total: number; regionBlocked: boolean } | null;
   /** The account's plan (free, pro, super, ultra) from the website's mode check; null while billing is off or unknown. */
   plan?: string | null;
-  /** The account's Cloud Credits in the rolling 30 days: Free's sidebar card, paid plans' meter from 75%. Null while billing is
-   *  off or in the cloud queue; null credits while metering is stale. */
-  planUsage?: { plan: string; credits: number | null; creditsLimit: number; extraCredits?: number; extraCreditsTotal?: number; og?: { name: string | null; endsAt: string } | null } | null;
+  /** The account's Cloud Credits this credit period and when they refill (`resetsAt`, ADR 20261108-142517): Free's sidebar
+   *  card, paid plans' meter from 75%. Null while billing is off or in the cloud queue; null credits while metering is stale. */
+  planUsage?: { plan: string; credits: number | null; creditsLimit: number; resetsAt?: string | null; extraCredits?: number; extraCreditsTotal?: number; og?: { name: string | null; endsAt: string } | null } | null;
 }
 
 export interface CloudroomCodexAuth {
@@ -60,6 +60,8 @@ export interface CloudroomCodexAuth {
   login_id: string | null;
   verification_url: string | null;
   user_code: string | null;
+  /** Claude: when Cloudroom started installing Claude Code for this sign-in, in ms since 1970. */
+  installing_since?: number | null;
 }
 
 /** This Mac's Cloudroom Connect address and tunnel credential (ADR 0184). */
@@ -186,6 +188,9 @@ export type CloudAutomationRequest =
   | { action: "runs"; id: string }
   // A cloud loop's newest run records (ADR 0298), for `room-cli loop runs ID`.
   | { action: "history"; id: string; limit?: number }
+  // Loops → Review (ADR 0298): the reports of these Local runs and of the Cloud runs that started these threads (this
+  // app sends their requests). Older websites refuse it.
+  | { action: "reports"; runs: string[]; threads: string[] }
   // Webhook loops (ADR 0262): a Local loop's URL, its removal, the events waiting for this Mac's loops, and their ack.
   | { action: "hook" | "unhook"; local: string }
   | { action: "events"; local: string[] }
@@ -194,7 +199,7 @@ export type CloudAutomationRequest =
   | { action: "settings"; stop_at_limit?: boolean; fallback?: boolean }
   // Loop run records (ADR 0298): a Local loop run's `room-cli loop report`, saved with Cloud runs.
   | { action: "report"; local: string; run: string; thread: string; name: string; started_at: string; outcome: string; confidence: string; reason: string; actions: string[] };
-export type CloudAutomationResponse = { automations?: CloudAutomation[]; automation?: CloudAutomation; ok?: boolean; url?: string; batches?: CloudHookBatch[]; recheck_ms?: number; stop_at_limit?: boolean; fallback?: boolean; runs?: string[]; history?: CloudLoopRun[]; reported?: boolean };
+export type CloudAutomationResponse = { automations?: CloudAutomation[]; automation?: CloudAutomation; ok?: boolean; url?: string; batches?: CloudHookBatch[]; recheck_ms?: number; stop_at_limit?: boolean; fallback?: boolean; runs?: string[]; history?: CloudLoopRun[]; reported?: boolean; reports?: { request: string; thread_id: string; outcome: string; reason: string | null }[] };
 /** Weighted tokens the listed threads used since `threadsSince`, and all of the provider's threads since `totalSince`. */
 export type TokenUsageRequest = { providerId: string; threadIds: string[]; threadsSince: number; totalSince: number };
 export type TokenUsageResponse = { total: number; threads: Record<string, number> };
@@ -237,7 +242,10 @@ export type CodexAccountsResult =
   | { sessionId: string; verificationUri: string; userCode: string; expiresAt: number }
   | { status: "pending" | "complete" | "error"; message: string | null };
 
-export interface ClaudeAccountInput { action?: "login" | "cancel" | "complete" | "setup-token" | "key" | "token"; requestId?: string; code?: string; state?: string; apiKey?: string; token?: string; plan?: string; follow?: boolean }
+/** The accounts a Cloud login switch moves between, by name, for the line it leaves in limited threads. */
+export interface CloudAccountSwitch { from: string; to: string }
+
+export interface ClaudeAccountInput { action?: "login" | "cancel" | "complete" | "setup-token" | "key" | "token"; requestId?: string; code?: string; state?: string; apiKey?: string; token?: string; plan?: string; follow?: boolean; switched?: CloudAccountSwitch }
 
 export interface CloudroomArea {
   claudeAuth(input?: ClaudeAccountInput, signal?: AbortSignal): Promise<CloudroomCodexAuth>;
@@ -250,7 +258,7 @@ export interface CloudroomArea {
   cursorApiKey(requestId: string, apiKey: string): Promise<CloudroomCodexAuth>;
   /** The Accounts plugin's Cursor account in use becomes the Cloud login: its API key, or with `null` this computer's own
    *  Cursor login again. */
-  cursorAccount(input: { requestId: string; apiKey: string | null }): Promise<CloudroomCodexAuth>;
+  cursorAccount(input: { requestId: string; apiKey: string | null; switched?: CloudAccountSwitch }): Promise<CloudroomCodexAuth>;
   piApiKey(provider: string, apiKey: string): Promise<{ providers: string[] }>;
   codexAuth(signal?: AbortSignal): Promise<CloudroomCodexAuth>;
   codexLogin(requestId: string): Promise<CloudroomCodexAuth>;
@@ -328,6 +336,8 @@ export interface CloudroomArea {
   /** A Cloud thread's model and current effort, or null when it has no cloud session. */
   threadStatus(threadId: string, signal?: AbortSignal): Promise<{ model: string; reasoning: string } | null>;
   retryStart(threadId: string): Promise<void>;
+  /** Clears package caches and Git-ignored dependency and build folders on a Cloud thread's sandbox, even while a full disk pauses its agent. */
+  clearDisk(threadId: string): Promise<{ freedBytes: number }>;
   /** Copies a Cloud thread's project into its folder again after the copy failed. */
   retryCopy(threadId: string): Promise<void>;
   /** `choice` runs the cloud thread on another model when the cloud cannot offer the local one. */
@@ -403,7 +413,7 @@ export function createCloudroomArea({ transport }: CreateSdkAreaArgs): Cloudroom
     ...(body === undefined ? {} : { headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }),
   });
   return {
-    claudeAuth: (input, signal) => transport.readJson(request(`/claude${input?.action ? `/${input.action}` : ""}`, input?.action ? { requestId: input.requestId, ...(input.action === "complete" ? { code: input.code, state: input.state } : {}), ...(input.action === "key" ? { apiKey: input.apiKey } : {}), ...(input.action === "token" ? { token: input.token, plan: input.plan, ...(input.follow ? { follow: true } : {}) } : {}) } : undefined, signal)) as Promise<CloudroomCodexAuth>,
+    claudeAuth: (input, signal) => transport.readJson(request(`/claude${input?.action ? `/${input.action}` : ""}`, input?.action ? { requestId: input.requestId, ...(input.action === "complete" ? { code: input.code, state: input.state } : {}), ...(input.action === "key" ? { apiKey: input.apiKey } : {}), ...(input.action === "token" ? { token: input.token, plan: input.plan, ...(input.follow ? { follow: true } : {}), ...(input.switched ? { switched: input.switched } : {}) } : {}) } : undefined, signal)) as Promise<CloudroomCodexAuth>,
     codexAccounts: (input, signal) => transport.readJson(request("/codex-accounts", input, signal)) as Promise<CodexAccountsResult>,
     cursorAuth: (signal) => transport.readJson(request("/cursor", undefined, signal)) as Promise<CloudroomCodexAuth>,
     cursorLogin: (requestId) => transport.readJson(request("/cursor/login", { requestId })) as Promise<CloudroomCodexAuth>,
@@ -479,5 +489,6 @@ export function createCloudroomArea({ transport }: CreateSdkAreaArgs): Cloudroom
     connectAccount: () => transport.readJson(transport.fetch(`${transport.baseUrl}/api/v1/cloudroom/connect`)) as Promise<{ accountId: string | null; blocked?: string }>,
     connectRegister: () => transport.readJson(transport.fetch(`${transport.baseUrl}/api/v1/cloudroom/connect`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" })) as Promise<CloudroomConnectRegistration>,
     retryStart: (threadId) => transport.readVoid(transport.fetch(`${transport.baseUrl}/api/v1/cloudroom/threads/${encodeURIComponent(threadId)}/retry-start`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" })),
+    clearDisk: (threadId) => transport.readJson(transport.fetch(`${transport.baseUrl}/api/v1/cloudroom/threads/${encodeURIComponent(threadId)}/clear-disk`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" })) as Promise<{ freedBytes: number }>,
   };
 }

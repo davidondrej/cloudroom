@@ -10,7 +10,7 @@ interface RequireThreadStoragePathArgs {
 }
 
 export async function requireThreadStoragePath(
-  deps: WorkSessionDeps,
+  deps: Pick<WorkSessionDeps, "db">,
   args: RequireThreadStoragePathArgs,
 ): Promise<string> {
   const session = getLatestSessionForHost(deps.db, { hostId: args.hostId });

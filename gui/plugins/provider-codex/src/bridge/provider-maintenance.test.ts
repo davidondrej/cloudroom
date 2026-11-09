@@ -127,7 +127,8 @@ describe("Codex provider maintenance", () => {
       __testing.buildProviderInstallationRun(installationStatus(), "install"),
     ).toEqual({
       available: false,
-      message: "Codex install is no longer available on this host.",
+      message:
+        "Codex install is not available on this host: Codex 1.0.0 is installed. Run update instead.",
     });
   });
 });
@@ -254,6 +255,26 @@ describe("Codex credential health and usage", () => {
         planLabel: null,
         accountEmail: null,
       },
+    });
+
+    // A launcher whose native binary is gone must not look ready (#907)...
+    const codex = path.join(homeDir, "bin", "codex");
+    await fs.writeFile(
+      codex,
+      "#!/bin/sh\necho 'Error: Missing optional dependency @openai/codex-darwin-arm64. Reinstall Codex: pnpm add -g @openai/codex@latest' >&2\nexit 1\n",
+    );
+    await expect(getCodexProviderHealth()).resolves.toMatchObject({
+      health: {
+        status: "unknown",
+        statusMessage: expect.stringContaining(
+          "Reinstall Codex: pnpm add -g @openai/codex@latest",
+        ),
+      },
+    });
+    // ...but an unclear probe failure keeps it ready.
+    await fs.writeFile(codex, "#!/bin/sh\nexit 1\n");
+    await expect(getCodexProviderHealth()).resolves.toMatchObject({
+      health: { status: "ready" },
     });
   });
 

@@ -3,8 +3,9 @@ import { commandGuardBlockReason } from "@get-bb/plugin-sdk/internal/command-gua
 import { cloudroomCommands, cloudroomThreads, deleteThreadEventSuffixInTransaction, events, threadConversationOutlines, threadSearchSegments, getThread, type DbConnection, type DbQueryConnection, type DbTransaction, type AppendStoredThreadEventArgs } from "@cloudroom/db";
 import { and, desc, eq } from "drizzle-orm";
 import { appendThreadEventsInTransaction, appendThreadProvisioningEventInTransaction } from "../threads/thread-events.js";
-import { LEGACY_CODEX_GOAL_EXTENSION_KIND, reasoningLevelSchema, threadEventSchema, threadScope, turnScope, encodeClientTurnRequestIdNumber, type ProvisioningTranscriptEntry, type SystemThreadProvisioningStatus, type ThreadEvent, type ThreadEventTurnStatus } from "@cloudroom/domain";
+import { LEGACY_CODEX_GOAL_EXTENSION_KIND, THREAD_ACCOUNT_SWITCH_OPERATION, cloudDeltaEvent, cloudItemEvent, codexItemEvent, reasoningLevelSchema, threadEventSchema, threadScope, turnScope, encodeClientTurnRequestIdNumber, type ProvisioningTranscriptEntry, type SystemThreadProvisioningStatus, type ThreadEvent, type ThreadEventTurnStatus } from "@cloudroom/domain";
 import { z } from "zod";
+import { cloudAccountSwitch } from "./account-switches.js";
 import { CloudroomError, type SessionRecord } from "./client.js";
 import { codexErrorFields, codexErrorFrameFields } from "./codex-errors.js";
 import { binding, command, coreFailure, queuedPrompts, saveBinding, saveCommandState, saveStatus, effectivePrompt, statusOf, unstartedTurn, type Binding, type Command } from "./store.js";
@@ -12,10 +13,10 @@ import { binding, command, coreFailure, queuedPrompts, saveBinding, saveCommandS
 const object = z.record(z.string(), z.unknown());
 const nativeFrame = z.object({ method: z.string(), params: object.optional() });
 // GUI provider ID → cloud core harness ID.
-export const CLOUD_HARNESSES = { codex: "codex", pi: "pi", "claude-code": "claude-code", "acp-cursor": "cursor", "acp-fx": "fx", "acp-opencode": "opencode", "acp-hermes-agent": "hermes", "acp-devin": "devin", "acp-droid": "droid", "acp-openclaw": "openclaw" } as const;
+export const CLOUD_HARNESSES = { codex: "codex", pi: "pi", "claude-code": "claude-code", "acp-cursor": "cursor", "acp-fx": "fx", "acp-opencode": "opencode", "acp-hermes-agent": "hermes", "acp-devin": "devin", "acp-droid": "droid", "acp-kimi": "kimi", "acp-openclaw": "openclaw" } as const;
 export type CloudProvider = keyof typeof CLOUD_HARNESSES;
 export const isCloudProvider = (id: string | undefined): id is CloudProvider => id !== undefined && Object.hasOwn(CLOUD_HARNESSES, id);
-export const HARNESS_NAMES: Record<CloudProvider, string> = { codex: "Codex", pi: "Pi", "claude-code": "Claude Code", "acp-cursor": "Cursor", "acp-fx": "fx", "acp-opencode": "opencode", "acp-hermes-agent": "Hermes Agent", "acp-devin": "Devin", "acp-droid": "Droid", "acp-openclaw": "OpenClaw" };
+export const HARNESS_NAMES: Record<CloudProvider, string> = { codex: "Codex", pi: "Pi", "claude-code": "Claude Code", "acp-cursor": "Cursor", "acp-fx": "fx", "acp-opencode": "opencode", "acp-hermes-agent": "Hermes Agent", "acp-devin": "Devin", "acp-droid": "Droid", "acp-kimi": "Kimi Code", "acp-openclaw": "OpenClaw" };
 export const isAcpProvider = (id: string | undefined): id is Extract<CloudProvider, `acp-${string}`> => isCloudProvider(id) && id.startsWith("acp-");
 const FINISHED = ["completed", "failed", "interrupted", "unknown", "unknown_after_restart"];
 const turnStatus = (state: string): ThreadEventTurnStatus => state === "completed" ? "completed" : state === "interrupted" ? "interrupted" : "failed";
@@ -74,14 +75,33 @@ function childNotice(db: DbQueryConnection, saved: Binding, request: Command, te
   };
 }
 
-function promptRequestedEvent(db: DbQueryConnection, saved: Binding, request: Command, steeredTurnId?: string): ThreadEvent {
+// Core's plan-limit error (PLAN_LIMIT in core/src/runtime/mod.rs), and the website loop that resumes after one.
+const CORE_PLAN_LIMIT = "plan limit (not Cloudroom's)";
+const LIMIT_RESUME = /^\[Cloudroom automation "Resume after .+ plan limit/;
+
+/** A plan-limit continuation after a Cloud account switch (ADR 0117): the limit row then shows the switch in one line
+ *  (ADR 20261107-082837). Core sends its own "keep working" only after a switch, even for a limit hit later on the old
+ *  login; the website's resume loop counts only when the switch came after the limit. */
+function switchContinuation(db: DbQueryConnection, threadId: string, provider: string | undefined, request: Command) {
+  const text = effectivePrompt(db, threadId, request.id).text;
+  const core = request.id.startsWith("continue_");
+  if (!provider || !(core || (typeof text === "string" && LIMIT_RESUME.test(text)))) return null;
+  const switched = cloudAccountSwitch(provider);
+  const limit = db.select({ data: events.data, createdAt: events.createdAt }).from(events)
+    .where(and(eq(events.threadId, threadId), eq(events.type, "system/error"))).orderBy(desc(events.sequence)).limit(1).get();
+  if (!switched || !limit?.data.includes(CORE_PLAN_LIMIT) || (!core && limit.createdAt > switched.at)) return null;
+  return { provider, from: switched.from, to: switched.to };
+}
+
+function promptRequestedEvent(db: DbQueryConnection, saved: Binding, request: Command, steeredTurnId?: string, hidden = false): ThreadEvent {
   const stored = effectivePrompt(db, saved.threadId, request.id);
+  const input = Array.isArray(stored.content) ? stored.content : [{ type: "text", text: stored.text ?? "", mentions: [] }];
   const initial = request.id === `first_${saved.threadId}`;
   const sender = typeof stored.sender_thread_id === "string" ? stored.sender_thread_id : null;
   return threadEventSchema.parse({
     type: "client/turn/requested", scope: threadScope(), threadId: saved.threadId,
     direction: "outbound", requestId: bbRequestId(request.id), source: initial ? "spawn" : "tell", ...(sender ? { initiator: "agent" } : childNotice(db, saved, request, stored.text)), senderThreadId: sender,
-    input: Array.isArray(stored.content) ? stored.content : [{ type: "text", text: stored.text ?? "", mentions: [] }],
+    input: hidden ? input.map((block: Record<string, unknown>) => ({ ...block, visibility: "agent-only" })) : input,
     target: steeredTurnId ? { kind: "steer", expectedTurnId: steeredTurnId } : { kind: initial ? "thread-start" : "new-turn" },
     request: { method: initial ? "thread/start" : "turn/start", params: {} },
     execution: { source: "client/turn/requested", model: saved.model, reasoningLevel: messageReasoning(JSON.stringify(stored), saved.reasoning), permissionMode: "full", serviceTier: stored.service_tier === "fast" ? "fast" : "default" },
@@ -307,7 +327,10 @@ export function projectRecord(db: DbConnection, threadId: string, record: Sessio
         const request = command(tx, data.request_id);
         saveCommandState(tx, threadId, data.request_id, "running");
         if (request?.command === "prompt" && !JSON.parse(request.input).teleport_handoff && !requestedTurns(tx, threadId).has(bbRequestId(data.request_id))) {
-          emit(promptRequestedEvent(tx, saved, request));
+          const switched = switchContinuation(tx, threadId, harness, request);
+          if (switched) emit({ type: "system/operation", scope: threadScope(), threadId, operation: THREAD_ACCOUNT_SWITCH_OPERATION, operationId: `account-switch:${data.request_id}`,
+            status: "completed", message: `Continued on ${switched.to}.`, metadata: switched });
+          emit(promptRequestedEvent(tx, saved, request, undefined, switched !== null));
         }
         if ((harness === "pi" || isAcpProvider(harness) || harness === "claude-code") && saved.nativeId) {
           const base = { threadId, providerThreadId: saved.nativeId, scope: turnScope(data.request_id) };
@@ -330,16 +353,12 @@ export function projectRecord(db: DbConnection, threadId: string, record: Sessio
     if (harness === "claude-code" && data.harness === "claude-code" && saved.nativeId && typeof data.request_id === "string" && turnStarted(tx, threadId, data.request_id)) {
       const base = { threadId, providerThreadId: saved.nativeId, scope: turnScope(data.request_id) };
       const id = typeof data.item_id === "string" ? `${data.request_id}:${data.item_id}` : null;
-      if (id && (record.kind === "text_delta" || record.kind === "thinking_delta")) {
-        emit({ ...base, type: record.kind === "text_delta" ? "item/agentMessage/delta" : "item/reasoning/textDelta", itemId: id, delta: z.string().parse(data.delta) });
-      } else if (id && ["item_started", "item_completed"].includes(record.kind)) {
-        const type = record.kind === "item_started" ? "item/started" : "item/completed";
-        if (data.item_type === "text") emit({ ...base, type, item: { type: "agentMessage", id, text: typeof data.text === "string" ? data.text : "" } });
-        else if (data.item_type === "thinking") emit({ ...base, type, item: { type: "reasoning", id, summary: [], content: typeof data.text === "string" && data.text ? [data.text] : [] } });
-        else if (data.item_type === "tool_use") emit({ ...base, type, item: {
-          type: "toolCall", id, tool: typeof data.tool_name === "string" ? data.tool_name : "Claude tool", status: record.kind === "item_started" ? "pending" : data.is_error === true ? "failed" : "completed",
-          ...(data.input && typeof data.input === "object" ? { arguments: data.input } : {}), ...(data.result !== undefined ? { result: data.result } : {}),
-        } });
+      if (id && ["text_delta", "thinking_delta", "item_started", "item_completed"].includes(record.kind)) {
+        const event = cloudDeltaEvent(record.kind, data, base, id) ?? cloudItemEvent(record.kind, data, base, id);
+        if (event) emit(event);
+      } else if (data.type === "system" && record.native && object.parse(JSON.parse(record.native)).subtype === "compact_boundary" && command(tx, data.request_id)?.command !== "compact") {
+        // Claude compacts by itself when the context fills, or for a typed "/compact <focus>". The compact command's receipt records its own.
+        emit({ ...base, type: "thread/compacted" });
       }
     }
     const recordTurn = typeof data.request_id === "string" ? data.request_id : saved.turnId;
@@ -394,28 +413,17 @@ export function projectRecord(db: DbConnection, threadId: string, record: Sessio
           type: "toolCall", id, tool: z.string().parse(frame.toolName), status: frame.type === "tool_execution_start" ? "pending" : frame.isError ? "failed" : "completed",
           ...(frame.args ? { arguments: object.parse(frame.args) } : {}), ...(frame.result ? { result: frame.result } : {}),
         } });
+      } else if (frame.type === "compaction_end" && frame.reason !== "manual" && frame.aborted !== true && !frame.errorMessage) {
+        // Pi compacts by itself near or over the context limit. The compact command's receipt records a manual one.
+        emit({ ...base, type: "thread/compacted" });
       }
     }
     if (isAcpProvider(harness) && saved.nativeId && recordTurn && data.harness === CLOUD_HARNESSES[harness] && turnStarted(tx, threadId, recordTurn)) {
       const base = { threadId, providerThreadId: saved.nativeId, scope: turnScope(recordTurn) };
       const itemId = `${recordTurn}:${String(data.item_id)}`;
-      if (record.kind === "text_delta" || record.kind === "thinking_delta") {
-        emit({ ...base, type: record.kind === "text_delta" ? "item/agentMessage/delta" : "item/reasoning/textDelta", itemId, delta: z.string().parse(data.delta) });
-      } else if (["item_started", "item_completed", "tool_snapshot"].includes(record.kind)) {
-        const completed = record.kind === "item_completed";
-        const type = completed ? "item/completed" : "item/started";
-        if (data.item_type === "agentMessage") emit({ ...base, type, item: { type: "agentMessage", id: itemId, text: String(data.text ?? "") } });
-        else if (data.item_type === "reasoning") emit({ ...base, type, item: { type: "reasoning", id: itemId, summary: [], content: data.text ? [String(data.text)] : [] } });
-        else if (data.tool) {
-          const tool = object.parse(data.tool);
-          const argumentsValue = object.safeParse(tool.rawInput);
-          if (record.kind === "tool_snapshot") emit({ ...base, type: "item/toolCall/progress", itemId, message: JSON.stringify(tool.content ?? []) });
-          else emit({ ...base, type, item: { type: "toolCall", id: itemId, tool: String(tool.title ?? tool.kind ?? "Cursor tool"),
-            status: !completed ? "pending" : tool.status === "completed" ? "completed" : "failed",
-            ...(argumentsValue.success ? { arguments: argumentsValue.data } : {}),
-            ...(completed ? { result: tool.rawOutput ?? tool.content ?? null } : {}) } });
-        }
-      } else if (record.kind === "warning") emit({ ...base, type: "provider/warning", category: "general", summary: z.string().parse(data.message) });
+      const event = cloudDeltaEvent(record.kind, data, base, itemId) ?? cloudItemEvent(record.kind, data, base, itemId);
+      if (event) emit(event);
+      else if (record.kind === "warning") emit({ ...base, type: "provider/warning", category: "general", summary: z.string().parse(data.message) });
     }
     if (harness === "codex" && record.native && record.kind !== "native_record") {
       const parsed = nativeFrame.safeParse(JSON.parse(record.native));
@@ -452,20 +460,13 @@ export function projectRecord(db: DbConnection, threadId: string, record: Sessio
                   },
                 });
               }
-            } else if (native.type !== "userMessage") {
-              const item: Record<string, unknown> = { ...native, id: itemId(native.id), status: method === "item/started" ? "pending" : ["failed", "declined"].includes(String(native.status)) ? "failed" : native.status === "interrupted" ? "interrupted" : "completed", approvalStatus: null };
-              for (const key of ["exitCode", "durationMs", "aggregatedOutput"]) if (item[key] === null) delete item[key];
-              if (native.type === "fileChange" && Array.isArray(native.changes)) item.changes = native.changes.map((entry) => {
-                const change = object.parse(entry);
-                const kind = typeof change.kind === "string" ? change.kind : object.parse(change.kind).type;
-                return { ...change, kind };
-              });
-              const event = threadEventSchema.safeParse({ ...base, type: method, item });
-              if (event.success) projected.push(event.data);
-              else emit({ ...base, type: method, item: { type: "toolCall", id: itemId(native.id), tool: String(native.type), status: item.status, result: native } });
+            } else {
+              const event = codexItemEvent(method, params, base, itemId);
+              if (event) emit(event);
             }
-          } else if (/^item\/(agentMessage\/delta|commandExecution\/outputDelta|fileChange\/outputDelta|reasoning\/(summaryTextDelta|textDelta)|plan\/delta)$/.test(method)) {
-            emit({ ...base, type: method, itemId: itemId(params.itemId), delta: z.string().parse(params.delta) });
+          } else if (method.startsWith("item/")) {
+            const event = codexItemEvent(method, params, base, itemId);
+            if (event) emit(event);
           } else if (method === "thread/compacted") {
             emit({ ...base, type: "thread/compacted" });
           } else if (method === "thread/goal/updated" || method === "thread/goal/cleared") {

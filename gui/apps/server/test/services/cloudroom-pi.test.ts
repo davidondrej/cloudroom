@@ -131,7 +131,7 @@ it.each([false, true])("routes Pi through the core and replays messages without 
   } finally { finishStartup(); service.stop(); core.closeAllConnections(); await new Promise<void>(resolve => core.close(() => resolve())); await app.cleanup(); }
 }, 15000);
 
-it.each(["pi", "codex"])("sends selected skills in Cloud %s starts and follow-ups without enabling other mentions", async (providerId) => {
+it.each(["pi", "codex"])("sends selected skills, folder and project tags in Cloud %s, but no other mentions", async (providerId) => {
   const app = await createTestAppHarness();
   const { host } = seedHostSession(app.deps);
   const { project } = seedProjectWithSource(app.deps, { hostId: host.id });
@@ -170,12 +170,19 @@ it.each(["pi", "codex"])("sends selected skills in Cloud %s starts and follow-up
     const follow = await request(`/threads/${thread.id}/send`, { requestId: "skill-follow", mode: "auto", input: [{ type: "text", text: "again", mentions: [] }, { type: "text", text: "/file-tree", mentions: [{ start: 0, end: 10, resource }] }] });
     expect(follow.status, await follow.clone().text()).toBe(200);
     await expect.poll(() => prompts.at(-1)).toBe(providerId === "pi" ? "/skill:file-tree again\n" : "again\n/file-tree");
+    // Folder and project tags reach the agent as plain text, like local threads (#1253).
+    const folder = { kind: "path", source: "workspace", entryKind: "directory", path: "src", label: "src" };
+    const projectTag = { kind: "project", projectId: project.id, label: "Test-Project" };
+    const plain = { type: "text", text: `see @src/ and @project:${project.id}`, mentions: [{ start: 4, end: 9, resource: folder }, { start: 14, end: 23 + project.id.length, resource: projectTag }] };
+    const tags = await request(`/threads/${thread.id}/send`, { requestId: "tag-follow", mode: "auto", input: [plain] });
+    expect(tags.status, await tags.clone().text()).toBe(200);
+    await expect.poll(() => prompts.at(-1)).toBe(plain.text);
     for (const input of [
       [{ ...tagged, mentions: [{ start: 0, end: 10, resource }] }],
       [{ ...tagged, mentions: [{ start: 5, end: 15, resource: { ...resource, source: "command" } }] }],
-      [{ ...tagged, mentions: [{ start: 5, end: 15, resource: { kind: "path", source: "workspace", entryKind: "file", path: "secret.txt", label: "secret.txt" } }] }],
+      [{ ...tagged, mentions: [{ start: 5, end: 15, resource: { kind: "path", source: "thread-storage", entryKind: "file", path: "secret.txt", label: "secret.txt" } }] }],
       [{ type: "localFile", path: "/tmp/secret.txt" }],
     ]) expect((await request(`/threads/${thread.id}/send`, { mode: "auto", input })).status).toBe(400);
-    expect(prompts).toHaveLength(2);
+    expect(prompts).toHaveLength(3);
   } finally { service.stop(); core.closeAllConnections(); await new Promise<void>(resolve => core.close(() => resolve())); await app.cleanup(); }
 });

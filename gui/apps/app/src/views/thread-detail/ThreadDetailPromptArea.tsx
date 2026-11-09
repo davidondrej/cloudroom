@@ -3,6 +3,7 @@ import { TeleportLocalNotice, TeleportNotice } from "@/components/thread/Telepor
 import { TeleportCheckCard } from "@/components/thread/TeleportCheckCard";
 import { TryCloudCard } from "@/components/thread/TryCloudCard";
 import { StarCard } from "@/components/StarPrompt";
+import { DesktopUpdateCard } from "@/components/layout/DesktopUpdateBanner";
 import { ProjectCopyNotice } from "@/components/thread/ProjectCopyNotice";
 import { FixPrompt } from "@/components/ui/fix-prompt";
 import { cloudThreadFixPrompt, plainError } from "@/lib/fix-prompts";
@@ -70,7 +71,6 @@ import {
   ThreadPromptContextBanner,
   type ContextBannerMergeBaseConfig,
   type ThreadPromptContextBannerExpandedSection,
-  type ThreadPromptParentThreadSection,
   type ThreadPromptPullRequestSection,
 } from "@/components/promptbox/banner/ThreadPromptContextBanner";
 import { ThreadGoalCard } from "@/components/promptbox/banner/ThreadGoalCard";
@@ -178,6 +178,9 @@ export interface ThreadDetailSentMessageEdit {
 }
 
 const THREAD_DETAIL_COMPOSER_TEXTAREA_ID = "thread-detail-follow-up-composer";
+// A sandbox going to sleep ends its stream, and network blips drop it too. Real app logs show nearly all of these
+// clear within seconds, so the Reconnecting pill waits 15 s and only shows for a connection that stays lost.
+const CLOUD_RECONNECTING_GRACE_MS = 15_000;
 const EMPTY_QUEUED_MESSAGES: readonly ThreadQueuedMessage[] = [];
 
 interface ThreadDetailPromptAreaProps {
@@ -215,7 +218,6 @@ interface ThreadDetailPromptAreaProps {
   modelFallback: ThreadTimelineModelFallback | null;
   activeWorkflows: TimelineWorkflowWorkRow[];
   activeBackgroundCommands: TimelineWorkflowWorkRow[];
-  parentThreadSection: ThreadPromptParentThreadSection | null;
   childPendingInteractions: readonly ChildThreadPendingAttention[];
   pullRequest: ThreadPullRequest | null;
   sendMessage: SendMessageMutationLike;
@@ -418,7 +420,6 @@ export function ThreadDetailPromptArea({
   modelFallback,
   activeWorkflows,
   activeBackgroundCommands,
-  parentThreadSection,
   childPendingInteractions,
   pullRequest,
   sendMessage,
@@ -2044,7 +2045,6 @@ export function ThreadDetailPromptArea({
               ? null
               : { status: environmentGoneStatus }
           }
-          parentThreadSection={parentThreadSection}
           pullRequestSection={pullRequestSection}
           gitSection={
             workspaceChangedFilesSection
@@ -2136,7 +2136,6 @@ export function ThreadDetailPromptArea({
       activeBackgroundCommands,
       isBackgroundCommandsExpanded,
       modelFallback,
-      parentThreadSection,
       pullRequestSection,
       pendingTodos,
       displayedProcessingQueuedMessage,
@@ -2193,9 +2192,16 @@ export function ThreadDetailPromptArea({
   const cloudFetchFailed = cloudState.error instanceof TypeError;
   const cloudOffline = cloudFetchFailed || (typeof navigator !== "undefined" && !navigator.onLine);
   const cloudError = cloudState.data?.move === "moving" ? undefined : retryCloudStart.error?.message ?? (cloudFetchFailed ? undefined : cloudState.error?.message) ?? cloudState.data?.error;
-  const cloudReconnecting = !cloudError && (cloudOffline || cloudState.data?.reconnecting);
+  const cloudReconnectingNow = Boolean(!cloudError && (cloudOffline || cloudState.data?.reconnecting));
+  const [cloudReconnectingLong, setCloudReconnectingLong] = useState(false);
+  useEffect(() => {
+    if (!cloudReconnectingNow) return;
+    const timer = window.setTimeout(() => setCloudReconnectingLong(true), CLOUD_RECONNECTING_GRACE_MS);
+    return () => { window.clearTimeout(timer); setCloudReconnectingLong(false); };
+  }, [cloudReconnectingNow]);
+  const cloudReconnecting = cloudReconnectingNow && cloudReconnectingLong;
   const vpsNotice = cloudState.data?.vps || cloudState.data?.move ? <VpsThreadNotice threadId={thread.id} move={cloudState.data.move} outOfMemory={cloudState.data.outOfMemory} /> : null;
-  const cloudLimitNotice = isCloud && !shouldHideComposer ? cloudState.data?.usageLimit ? <CloudUsageLimitNotice /> : cloudState.data?.disk ? <><CloudDiskNotice disk={cloudState.data.disk} />{vpsNotice}</> : vpsNotice : null;
+  const cloudLimitNotice = isCloud && !shouldHideComposer ? cloudState.data?.usageLimit ? <CloudUsageLimitNotice /> : cloudState.data?.disk ? <><CloudDiskNotice threadId={thread.id} disk={cloudState.data.disk} />{vpsNotice}</> : vpsNotice : null;
   const cloudFixPrompt = cloudError || cloudState.data?.failedStart ? cloudThreadFixPrompt(thread.id, thread.providerId, cloudError) : null;
   const cloudStatusKey = `${thread.id}|${cloudState.data?.failedStart ? "failed" : ""}|${cloudError ?? ""}`;
   const cloudStatusDismissed = dismissedCloudStatus === cloudStatusKey;
@@ -2238,7 +2244,7 @@ export function ThreadDetailPromptArea({
     <FollowUpPromptBox
       id={THREAD_DETAIL_COMPOSER_TEXTAREA_ID}
       attachments={bottomAttachmentsConfig}
-      stack={<>{!isCloud && !teleporting && <TeleportCheckCard error={teleport.error} models={[...modelOptions, ...moreModelOptions]} reasoning={reasoningLevel} usedTokens={contextWindowUsage?.usedTokens ?? null} levelsFor={(model) => cloudReasoningLevels(cloudConnection.data, thread.providerId, model)} onTeleport={(choice) => teleport.mutate(choice)} onDismiss={teleport.reset} />}{!isCloud && !teleporting && canTeleport && !shouldHideComposer && <TryCloudCard threadId={thread.id} active={thread.status === "active"} attached={queuedMessageCount === 0} onMove={startTeleport} />}{!shouldHideComposer && <StarCard active={thread.status === "active"} attached={queuedMessageCount === 0} />}{thread.teleport && !movingToLocal && <TeleportNotice thread={thread} pendingDelivery={cloudState.data?.pendingDelivery} paused={cloudState.data?.paused} sending={sendMessage.isPending} />}{movingToLocal && <TeleportLocalNotice step={thread.teleportLocalStep} />}{thread.projectCopy && <ProjectCopyNotice thread={thread} />}{cloudNotice}{isCloud && claudeThread && !shouldHideComposer && <CloudMcpSignInNotice />}{!isCloud && !shouldHideComposer && <LocalSignInNotice threadId={thread.id} providerId={thread.providerId} hostId={environmentHostId} environmentId={thread.environmentId} authFailed={providerAuthFailed} started={thread.status !== "pending"} />}{pendingInteractionNode && !pendingInteractionIsModal ? pendingInteractionStack : promptStack}{pendingInteractionIsModal && pendingInteractionNode}</>}
+      stack={<>{!isCloud && !teleporting && <TeleportCheckCard error={teleport.error} models={[...modelOptions, ...moreModelOptions]} reasoning={reasoningLevel} usedTokens={contextWindowUsage?.usedTokens ?? null} levelsFor={(model) => cloudReasoningLevels(cloudConnection.data, thread.providerId, model)} onTeleport={(choice) => teleport.mutate(choice)} onDismiss={teleport.reset} />}{!isCloud && !teleporting && canTeleport && !shouldHideComposer && <TryCloudCard threadId={thread.id} active={thread.status === "active"} attached={queuedMessageCount === 0} onMove={startTeleport} />}{!shouldHideComposer && <StarCard active={thread.status === "active"} attached={queuedMessageCount === 0} />}{!shouldHideComposer && <DesktopUpdateCard attached={queuedMessageCount === 0} />}{thread.teleport && !movingToLocal && <TeleportNotice thread={thread} pendingDelivery={cloudState.data?.pendingDelivery} paused={cloudState.data?.paused} sending={sendMessage.isPending} />}{movingToLocal && <TeleportLocalNotice step={thread.teleportLocalStep} />}{thread.projectCopy && <ProjectCopyNotice thread={thread} />}{cloudNotice}{isCloud && claudeThread && !shouldHideComposer && <CloudMcpSignInNotice />}{!isCloud && !shouldHideComposer && <LocalSignInNotice threadId={thread.id} providerId={thread.providerId} hostId={environmentHostId} environmentId={thread.environmentId} authFailed={providerAuthFailed} started={thread.status !== "pending"} />}{pendingInteractionNode && !pendingInteractionIsModal ? pendingInteractionStack : promptStack}{pendingInteractionIsModal && pendingInteractionNode}</>}
       pendingInteraction={pendingInteractionIsModal ? undefined : pendingInteractionNode}
       activePromptMode={activePromptMode}
       composer={shouldHideComposer || (teleporting && !movingToLocal) || transferredChild ? null : bottomComposerConfig}

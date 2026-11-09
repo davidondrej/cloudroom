@@ -1,34 +1,31 @@
 <p align="center">
-  <img src=".github/readme/hero.png" alt="Cloudroom: cloud agents must be open source. Claude Code, Codex, and Pi, on your Mac or in the cloud." width="100%">
+  <img src=".github/readme/runtime.png" alt="Any harness, in the cloud. Claude Code, Codex, Pi, and OpenCode each run their own CLI in an isolated sandbox, with Cloudroom core next to it. Sessions stream live to the app and teleport between your Mac and the cloud." width="100%">
 </p>
 
 <p align="center">
-  <a href="https://www.cloudroom.dev/download"><b>Download</b></a> ·
-  <a href="https://www.cloudroom.dev">Website</a> ·
-  <a href="https://www.cloudroom.dev/changelog">Changelog</a> ·
+  <a href="#how-the-cloud-works"><b>How it works</b></a> ·
+  <a href="core/docs/harnesses.md">Harness adapters</a> ·
   <a href="core/docs/setup.md">Self-host</a> ·
-  <a href="https://www.cloudroom.dev/security">Security</a>
+  <a href="core/docs/api.md">HTTP API</a> ·
+  <a href="https://www.cloudroom.dev/download">Download</a>
 </p>
 
 <p align="center">
-  <a href="https://github.com/davidondrej/cloudroom/stargazers"><img src="https://img.shields.io/github/stars/davidondrej/cloudroom?style=flat&color=BFFF00&labelColor=0a0a0a" alt="GitHub stars"></a>
   <a href="https://github.com/davidondrej/cloudroom/releases/latest"><img src="https://img.shields.io/github/v/release/davidondrej/cloudroom?style=flat&color=BFFF00&labelColor=0a0a0a&label=app" alt="Latest app release"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-BFFF00?style=flat&labelColor=0a0a0a" alt="Apache 2.0 license"></a>
 </p>
 
-Cloudroom is a desktop app for AI coding agents. Start them on your Mac, or give each one its own computer in the cloud. Close your laptop, and they keep working.
+Cloudroom runs any coding agent harness in the cloud. Claude Code, Codex, Pi, OpenCode, and others run as their own CLIs, each in an isolated sandbox with its own Git branch. A running session can move between your Mac and the cloud.
 
-<p align="center">
-  <img src=".github/readme/works-with.png" alt="Works with Claude Code, Codex, Pi, OpenCode, Hermes, Cursor, and Devin." width="100%">
-</p>
+## Why it exists
 
-## Features
+Coding agents like Claude Code and Codex are command-line programs. They run in one terminal, on one computer, and stop when it sleeps.
 
-- **Local and Cloud, side by side.** Each Cloud thread gets its own sandbox and Git branch.
-- **Your own subscriptions.** Agents use your Claude and ChatGPT logins, with no token markup.
-- **Mac access.** Cloud agents can reach your Mac. You pick Off, Read-only, Ask first, or Full.
-- **Teleport.** Move a running thread to the cloud and back. Same chat, model, and effort.
-- **Your own cloud.** Run the core on your own Linux machine. No Cloudroom account needed.
+Claude Code on the web runs only Claude Code. Codex cloud runs only Codex.
+
+Cloudroom divides the work. The harness keeps its agent loop, tools, and login. Cloudroom core, a Rust service, keeps the sandbox, the process, the queue, the recorded history, and recovery. 7 harnesses run this way today, over 4 native protocols.
+
+Core records each harness's native session, so a running session can move. Teleport freezes it, moves its history, and resumes it on the other side, with the same chat, model, and effort.
 
 For Apple Silicon Macs (macOS 13+), Linux x64, and Windows 11.
 
@@ -53,7 +50,7 @@ curl -fsSL https://cloudroom.dev/install.sh -o install.sh
 sudo bash install.sh
 ```
 
-Then [connect the app](core/docs/setup.md#connect-the-desktop-app) with your server's URL and token. Full guide: [setup](core/docs/setup.md). Don't want to host it? [Get hosted Cloudroom free](https://www.cloudroom.dev).
+Then [connect the app](core/docs/setup.md#connect-the-desktop-app) with your server's URL and token. Full guide: [setup](core/docs/setup.md). [cloudroom.dev](https://www.cloudroom.dev) hosts the same core for you.
 
 **Build from source.** The app: see [gui/README.md](gui/README.md). The core needs Rust 1.89+:
 

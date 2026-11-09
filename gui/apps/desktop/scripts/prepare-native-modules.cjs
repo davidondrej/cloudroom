@@ -1,5 +1,6 @@
 const { execFileSync, spawn } = require("node:child_process");
-const { chmod, cp, readFile, readdir, writeFile } = require("node:fs/promises");
+const { existsSync } = require("node:fs");
+const { chmod, cp, readFile, readdir, rm, writeFile } = require("node:fs/promises");
 const { createRequire } = require("node:module");
 const path = require("node:path");
 const { installLinuxLauncher } = require("./linux-launcher.cjs");
@@ -360,6 +361,69 @@ async function stampBbAppVersion(appOutDir, version) {
   }
 }
 
+// bb-app depends on these only for its SDK's type declarations; the app's code has them bundled.
+const BUNDLED_PACKAGE_NAMES = new Set(["hono", "picocolors", "zod"]);
+
+// Deletes top-level packages that nothing reaches from bb-app's runtime dependencies: ones bundled into dist
+// (the desktop's own, zod, hono) and, on Windows, a second copy of npm's bundled packages. Each file costs the
+// Windows installer time, because Defender scans it on install and on every update.
+async function pruneUnreachablePackages(bbAppDirectory) {
+  const root = path.dirname(bbAppDirectory);
+  const resolvePackage = (from, name) => {
+    for (let directory = from; directory.startsWith(root + path.sep); directory = path.dirname(directory)) {
+      const candidate = path.join(directory, NODE_MODULES_DIRECTORY, name);
+      if (existsSync(path.join(candidate, "package.json"))) return candidate;
+    }
+    const candidate = path.join(root, name);
+    return existsSync(path.join(candidate, "package.json")) ? candidate : undefined;
+  };
+  const reached = new Set();
+  const pending = [bbAppDirectory];
+  while (pending.length > 0) {
+    const directory = pending.pop();
+    if (reached.has(directory)) continue;
+    reached.add(directory);
+    const manifest = JSON.parse(await readFile(path.join(directory, "package.json"), "utf8"));
+    const names = Object.keys({ ...manifest.dependencies, ...manifest.optionalDependencies, ...manifest.peerDependencies });
+    for (const name of names) {
+      if (directory === bbAppDirectory && BUNDLED_PACKAGE_NAMES.has(name)) continue;
+      const found = resolvePackage(directory, name);
+      if (found !== undefined) pending.push(found);
+    }
+  }
+  for (const entry of await readdir(root)) {
+    if (entry.startsWith(".")) continue;
+    const scoped = entry.startsWith("@");
+    const names = scoped ? (await readdir(path.join(root, entry))).map((name) => path.join(entry, name)) : [entry];
+    const unreached = names.filter((name) => !reached.has(path.join(root, name)));
+    if (scoped && unreached.length === names.length) unreached.splice(0, unreached.length, entry);
+    await Promise.all(unreached.map((name) => rm(path.join(root, name), { recursive: true, force: true })));
+  }
+}
+
+// Each file costs the Windows install time (Defender scans it), and Windows ships x64 only. So drop what these
+// packages never load there: other platforms' prebuilt binaries, and the C/C++ sources and headers they ship for
+// building from source (better-sqlite3's sqlite3.c alone is 9 MB).
+const NATIVE_SOURCE_PACKAGE_NAMES = [...PACKAGED_NATIVE_PACKAGE_NAMES, "fs-native-extensions", "node-addon-api"];
+const BUILD_ONLY_DIRECTORIES = new Set(["deps", "include", "src"]);
+const BUILD_ONLY_FILE = /\.(c|cc|cpp|h|hh|hpp|gyp|gypi)$|^CMakeLists\.txt$/;
+
+async function pruneNativeBuildFiles(appOutDir, target) {
+  const packages = await findPackageDirectories(appOutDir, NATIVE_SOURCE_PACKAGE_NAMES);
+  for (const directory of [...packages.values()].flat()) {
+    const doomed = (await readdir(directory)).filter((name) => BUILD_ONLY_DIRECTORIES.has(name) || BUILD_ONLY_FILE.test(name));
+    const prebuilds = path.join(directory, "prebuilds");
+    if (await isDirectory(prebuilds)) {
+      const names = await readdir(prebuilds);
+      if (!names.some((name) => name.replace(/\.node$/, "") === target)) {
+        throw new Error(`${directory} has no ${target} prebuild, so the app couldn't load it`);
+      }
+      doomed.push(...names.filter((name) => name.replace(/\.node$/, "") !== target).map((name) => path.join("prebuilds", name)));
+    }
+    await Promise.all(doomed.map((name) => rm(path.join(directory, name), { recursive: true, force: true })));
+  }
+}
+
 async function afterPack(context) {
   const arch = resolveArchName(context);
   const platform = context.electronPlatformName ?? process.platform;
@@ -367,6 +431,10 @@ async function afterPack(context) {
     throw new Error("Packaged npm verification requires a native target host");
   }
   await stampBbAppVersion(context.appOutDir, context.packager.appInfo.version);
+  for (const directory of (await findPackageDirectories(context.appOutDir, ["bb-app"])).get("bb-app")) {
+    await pruneUnreachablePackages(directory);
+  }
+  if (platform === "win32") await pruneNativeBuildFiles(context.appOutDir, `${platform}-${arch}`);
   await preparePackagedNativeModules(context.appOutDir, {
     arch,
     electronVersion: resolveElectronVersion(),

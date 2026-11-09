@@ -1,4 +1,6 @@
+import { readFileSync, statSync } from "node:fs";
 import { createInterface } from "node:readline/promises";
+import type { Command } from "commander";
 import {
   reasoningLevelSchema,
   reasoningLevelValues,
@@ -22,6 +24,40 @@ export function outputJson(opts: JsonOutputOptions, data: unknown): boolean {
   if (!opts.json) return false;
   console.log(JSON.stringify(data, null, 2));
   return true;
+}
+
+const PROMPT_FILE_MAX_BYTES = 1024 * 1024;
+
+function readPromptFile(path: string): string {
+  const stat = statSync(path);
+  if (!stat.isFile()) throw new Error("not a regular file");
+  if (stat.size > PROMPT_FILE_MAX_BYTES) throw new Error("larger than 1 MB");
+  try {
+    // Strict UTF-8; the decoder also drops a byte order mark (Windows PowerShell 5.1 writes one).
+    return new TextDecoder("utf-8", { fatal: true }).decode(readFileSync(path));
+  } catch {
+    throw new Error("not UTF-8 text; save it as UTF-8");
+  }
+}
+
+// Multiline prompts survive Windows' room-cli.cmd only through a file (#974).
+export function addPromptFileOption(command: Command): Command {
+  const both = "error: choose only one of --prompt and --prompt-file";
+  return command
+    .option("--prompt-file <path>", "Read --prompt from a UTF-8 file (use it for multiline prompts on Windows)")
+    .on("option:prompt", () => {
+      if (command.getOptionValue("promptFile") !== undefined) command.error(both);
+    })
+    .on("option:prompt-file", (path: string) => {
+      if (command.getOptionValue("prompt") !== undefined) command.error(both);
+      let prompt: string;
+      try {
+        prompt = readPromptFile(path);
+      } catch (error) {
+        command.error(`error: --prompt-file ${path}: ${getErrorMessage(error)}`);
+      }
+      command.setOptionValueWithSource("prompt", prompt, "cli");
+    });
 }
 
 export function collectOption(value: string, previous: string[]): string[] {

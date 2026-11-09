@@ -12,10 +12,11 @@ host, and the command resolves the thread's host automatically.
 1. Check status: run `room-cli connect status --json`. If not paired / not
    connected, give the localhost URL. Connect sets itself up once the user is
    signed in to Cloudroom.
-2. From the thread that started the HTTP server, run `cloudroom connect expose
-<port>`. It prints that host's share URL. Use `--host <name-or-id>` only
-   when you intentionally need another enrolled host; outside a thread,
-   sharing defaults to the machine running the Cloudroom server.
+2. From the thread that started the HTTP server, run
+   `room-cli connect expose <port>`. It prints that host's share URL. Use
+   `--host <name-or-id>` only when you intentionally need another enrolled
+   host; outside a thread, sharing defaults to the machine running the
+   Cloudroom server.
 3. Give the returned URL to the user as a markdown link. It opens on the
    user's signed-in phones and browsers; it is not a public internet link.
    To set up a new phone, send the user to cloudroom.dev/m to sign in

@@ -15,6 +15,8 @@ import type {
 import type { ReasoningLevel } from "@cloudroom/domain";
 import { useQueryClient } from "@tanstack/react-query";
 import { useAtomValue } from "jotai";
+import { useInRouterContext, useNavigate } from "react-router-dom";
+import { getSettingsRoutePath } from "@/lib/route-paths";
 import {
   stripModelBrandPrefix,
   type ProviderPickerOption,
@@ -45,6 +47,12 @@ import {
 } from "@cloudroom/shared-ui/popover";
 import { Skeleton } from "@cloudroom/shared-ui/skeleton";
 import { Switch } from "@cloudroom/shared-ui/switch";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@cloudroom/shared-ui/tooltip";
 import { LIST_HOVER_TRANSITION } from "@cloudroom/shared-ui/motion";
 import {
   MENU_ITEM_LAST_HOVERED_CLASS,
@@ -268,6 +276,7 @@ export function ModelReasoningPicker({
     [allReasoningOptions, reasoningValue, showUltraEfforts],
   );
   const isCompactViewport = useIsCompactViewport();
+  const inRouter = useInRouterContext();
   const [open, setOpen] = useState(false);
   const [effortOpen, setEffortOpen] = useState(false);
   const triggerRef = useRef<HTMLButtonElement>(null);
@@ -280,6 +289,12 @@ export function ModelReasoningPicker({
   );
   const reasoningShortcut = commandShortcutsEnabled
     ? registeredReasoningShortcut
+    : null;
+  const registeredReasoningBackwardShortcut = useAppCommandShortcut(
+    "modelPicker.cycleReasoningBackward",
+  );
+  const reasoningBackwardShortcut = commandShortcutsEnabled
+    ? registeredReasoningBackwardShortcut
     : null;
   const [searchQuery, setSearchQuery] = useState("");
   const listRef = useResetPickerScroll<HTMLDivElement>(searchQuery);
@@ -754,6 +769,15 @@ export function ModelReasoningPicker({
     50,
     commandShortcutsEnabled,
   );
+  const reasoningIndex = reasoningOptions.findIndex(
+    (option) => option.value === reasoningValue,
+  );
+  const reasoningStepTarget = (delta: 1 | -1) =>
+    reasoningIndex < 0 ? undefined : reasoningOptions[reasoningIndex + delta];
+  const stepReasoning = (delta: 1 | -1) => {
+    const next = reasoningStepTarget(delta);
+    if (next) handleReasoningSelect(next.value);
+  };
   const handleReasoningArrowKeyDown: KeyboardEventHandler<HTMLElement> = (
     event,
   ) => {
@@ -776,15 +800,10 @@ export function ModelReasoningPicker({
     ) {
       return;
     }
-    const index = reasoningOptions.findIndex(
-      (option) => option.value === reasoningValue,
-    );
-    if (index < 0) return;
+    if (reasoningIndex < 0) return;
     event.preventDefault();
     event.stopPropagation();
-    const next =
-      reasoningOptions[index + (event.key === "ArrowRight" ? 1 : -1)];
-    if (next) handleReasoningSelect(next.value);
+    stepReasoning(event.key === "ArrowRight" ? 1 : -1);
   };
 
   const handleQueryChange = useCallback((value: string) => {
@@ -859,15 +878,22 @@ export function ModelReasoningPicker({
     muted && "font-normal",
     disabled && "cursor-default disabled:opacity-100",
   );
+  const chevronColorClassName = muted
+    ? "text-subtle-foreground/75"
+    : "text-muted-foreground";
   const chevron = disabled ? null : (
     <Icon
       name="ChevronDown"
-      className={cn(
-        "size-3.5 shrink-0",
-        muted ? "text-subtle-foreground/75" : "text-muted-foreground",
-      )}
+      className={cn("size-3.5 shrink-0", chevronColorClassName)}
     />
   );
+  const showReasoningStepper =
+    !disabled && !isPreviewing && reasoningOptions.length > 1;
+  // Every level shares one grid cell so the label keeps the widest level's
+  // width and the step buttons stay put between clicks.
+  const reasoningLabels = showReasoningStepper
+    ? [...new Set([reasoningLabel, ...reasoningOptions.map((o) => o.label)])]
+    : [reasoningLabel];
   const trigger = (
     <Button
       ref={triggerRef}
@@ -951,22 +977,32 @@ export function ModelReasoningPicker({
       aria-keyshortcuts={reasoningShortcut?.ariaKeyshortcuts}
       disabled={disabled}
       onKeyDown={handleReasoningArrowKeyDown}
-      className={cn(halfClassName, "min-w-0 shrink-[0.001]")}
+      className={cn(halfClassName, "min-w-0 shrink-[0.001] rounded-r-lg")}
     >
       <span
-        className="min-w-0 truncate text-subtle-foreground"
+        className="grid min-w-0 text-left text-subtle-foreground"
         title={`Reasoning effort: ${reasoningLabel}`}
       >
-        {reasoningLabel}
+        {reasoningLabels.map((label) => (
+          <span
+            key={label}
+            aria-hidden={label === reasoningLabel ? undefined : true}
+            className={cn(
+              "col-start-1 row-start-1 min-w-0 truncate",
+              label !== reasoningLabel && "invisible pointer-coarse:hidden",
+            )}
+          >
+            {label}
+          </span>
+        ))}
       </span>
-      {chevron}
     </Button>
   );
 
   const renderSplit = (modelPart: ReactNode) => (
     <div
       className={cn(
-        "inline-flex h-8 min-w-0 max-w-full items-center rounded-lg",
+        "group/model-effort inline-flex h-8 min-w-0 max-w-full items-center rounded-lg",
         className,
       )}
     >
@@ -990,6 +1026,16 @@ export function ModelReasoningPicker({
               {effortTrigger}
             </ReasoningEffortMenu>
           )}
+          {showReasoningStepper ? (
+            <ReasoningStepButtons
+              colorClassName={chevronColorClassName}
+              canLower={reasoningStepTarget(-1) !== undefined}
+              canRaise={reasoningStepTarget(1) !== undefined}
+              lowerShortcut={reasoningBackwardShortcut}
+              raiseShortcut={reasoningShortcut}
+              onStep={stepReasoning}
+            />
+          ) : null}
         </>
       ) : null}
     </div>
@@ -1079,6 +1125,12 @@ export function ModelReasoningPicker({
                   </button>
                 );
               })}
+              {inRouter ? (
+                <ConnectHarnessButton
+                  compact={isCompactViewport}
+                  onClose={() => setOpen(false)}
+                />
+              ) : null}
             </div>
           ) : null}
 
@@ -1558,6 +1610,116 @@ function ReasoningEffortMenu({
         ) : null}
       </DropdownMenuContent>
     </DropdownMenu>
+  );
+}
+
+// Hidden until the model picker is hovered; no layout shift because the
+// buttons keep their space. Keyboard uses ←/→, touch uses the effort menu.
+function ReasoningStepButtons({
+  colorClassName,
+  canLower,
+  canRaise,
+  lowerShortcut,
+  raiseShortcut,
+  onStep,
+}: {
+  colorClassName: string;
+  canLower: boolean;
+  canRaise: boolean;
+  lowerShortcut: AppShortcutPresentation | null;
+  raiseShortcut: AppShortcutPresentation | null;
+  onStep: (delta: 1 | -1) => void;
+}) {
+  const steps = [
+    {
+      delta: -1,
+      verb: "Lower",
+      icon: "ChevronDown",
+      enabled: canLower,
+      shortcut: lowerShortcut,
+    },
+    {
+      delta: 1,
+      verb: "Raise",
+      icon: "ChevronUp",
+      enabled: canRaise,
+      shortcut: raiseShortcut,
+    },
+  ] as const;
+  return (
+    <TooltipProvider delayDuration={300}>
+      <span className="flex shrink-0 items-center pr-1 opacity-0 transition-opacity duration-100 group-hover/model-effort:opacity-100 motion-reduce:transition-none pointer-coarse:hidden">
+        {steps.map((step) => (
+          <Tooltip key={step.verb}>
+            <TooltipTrigger asChild>
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                tabIndex={-1}
+                aria-label={`${step.verb} reasoning effort`}
+                aria-keyshortcuts={step.shortcut?.ariaKeyshortcuts}
+                disabled={!step.enabled}
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={() => onStep(step.delta)}
+                className={cn("h-6 w-5.5 px-0", colorClassName)}
+              >
+                <Icon name={step.icon} className="size-3.5" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent side="top">
+              {step.shortcut
+                ? `${step.verb} effort (${step.shortcut.label})`
+                : `${step.verb} effort`}
+            </TooltipContent>
+          </Tooltip>
+        ))}
+      </span>
+    </TooltipProvider>
+  );
+}
+
+// Last tab in the harness row: opens Settings → Harness to connect another agent.
+function ConnectHarnessButton({
+  compact,
+  onClose,
+}: {
+  compact: boolean;
+  onClose: () => void;
+}) {
+  const navigate = useNavigate();
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <button
+          type="button"
+          aria-label="Connect agent"
+          onMouseDown={(event) => event.preventDefault()}
+          onClick={() => {
+            onClose();
+            void navigate(getSettingsRoutePath("providers"));
+          }}
+          className={cn(
+            "group/connect flex items-center justify-center text-subtle-foreground hover:text-foreground focus-visible:text-foreground focus-visible:outline-none",
+            LIST_HOVER_TRANSITION,
+            compact
+              ? "aspect-square min-w-0 max-w-10 flex-1 rounded-full"
+              : "h-8 w-7 max-md:pointer-coarse:h-10 max-md:pointer-coarse:w-9",
+          )}
+        >
+          <span
+            className={cn(
+              "flex items-center justify-center bg-foreground/5 group-hover/connect:bg-foreground/10 group-focus-visible/connect:bg-foreground/10",
+              LIST_HOVER_TRANSITION,
+              compact ? "size-7 rounded-full" : "size-5 rounded-md",
+            )}
+          >
+            <Icon name="Plus" className="size-3" aria-hidden />
+          </span>
+        </button>
+      </TooltipTrigger>
+      <TooltipContent side="top">Connect agent</TooltipContent>
+    </Tooltip>
   );
 }
 

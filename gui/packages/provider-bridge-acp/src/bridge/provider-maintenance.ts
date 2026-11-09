@@ -18,6 +18,7 @@ import {
   clampPercent,
   downloadedInstallerCommand,
   formatCommand,
+  installationRunUnavailable,
   npmGlobalInstallCommand,
   readCliVersion,
   resolveExecutablePath,
@@ -324,10 +325,11 @@ function buildAcpProviderInstallationRun(
     status.installAction?.kind !== args.action ||
     args.installer === undefined
   ) {
-    return {
-      available: false,
-      message: `${args.command ?? "This ACP agent"} ${args.action} is not available on this host.`,
-    };
+    return installationRunUnavailable(
+      args.command ?? "This ACP agent",
+      args.action,
+      status,
+    );
   }
   return {
     available: true,

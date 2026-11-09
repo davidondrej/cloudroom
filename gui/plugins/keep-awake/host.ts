@@ -8,6 +8,8 @@ import { keepAwakeHostContract } from "./contract.js";
 
 const CAFFEINATE_COMMAND = "/usr/bin/caffeinate";
 const SYSTEMD_INHIBIT_COMMAND = "/usr/bin/systemd-inhibit";
+const GNOME_SESSION_INHIBIT_COMMAND = "/usr/bin/gnome-session-inhibit";
+const KEEP_AWAKE_REASON = "Keep Awake is on in Cloudroom";
 const RESTART_DELAY_MS = 1_000;
 const MAX_RESTART_DELAY_MS = 60_000;
 const SETTLED_CHILD_MS = 10_000;
@@ -22,6 +24,7 @@ interface KeepAwakeHostDependencies {
   readonly pid: number;
   readonly platform: NodeJS.Platform;
   readonly hasSystemdInhibit?: boolean;
+  readonly hasGnomeSessionInhibit?: boolean;
   now?(): number;
   spawn(
     command: string,
@@ -37,18 +40,32 @@ function keepAwakeCommand(
   if (deps.platform === "darwin") {
     return [CAFFEINATE_COMMAND, ["-d", "-i", "-s", "-w", pid]];
   }
+  const waitForCloudroom = ["tail", `--pid=${pid}`, "-f", "/dev/null"];
+  if (deps.platform === "linux" && deps.hasGnomeSessionInhibit === true) {
+    // GNOME suspends on its own idle timer and ignores logind idle locks.
+    // An idle inhibit stops that timer and still lets lid close and Suspend work.
+    return [
+      GNOME_SESSION_INHIBIT_COMMAND,
+      [
+        "--app-id",
+        "Cloudroom",
+        "--reason",
+        KEEP_AWAKE_REASON,
+        "--inhibit",
+        "idle",
+        ...waitForCloudroom,
+      ],
+    ];
+  }
   if (deps.platform === "linux" && deps.hasSystemdInhibit === true) {
     return [
       SYSTEMD_INHIBIT_COMMAND,
       [
         "--what=idle:sleep",
         "--who=Cloudroom",
-        "--why=Agents are running",
+        `--why=${KEEP_AWAKE_REASON}`,
         "--mode=block",
-        "tail",
-        `--pid=${pid}`,
-        "-f",
-        "/dev/null",
+        ...waitForCloudroom,
       ],
     ];
   }
@@ -197,6 +214,10 @@ export default createKeepAwakeHostEntry({
   platform: process.platform,
   hasSystemdInhibit:
     process.platform === "linux" && existsSync(SYSTEMD_INHIBIT_COMMAND),
+  hasGnomeSessionInhibit:
+    process.platform === "linux" &&
+    /gnome/i.test(process.env.XDG_CURRENT_DESKTOP ?? "") &&
+    existsSync(GNOME_SESSION_INHIBIT_COMMAND),
   spawn(command, args, options) {
     return spawn(command, [...args], options);
   },

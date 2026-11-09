@@ -98,6 +98,7 @@ import type {
   DeleteThreadSectionRequest,
   DeleteThreadRequest,
   ThreadArchiveAllQuery,
+  ThreadStopQuery,
   ThreadUnarchiveQuery,
   EnvironmentActionApiError,
   EnvironmentActionRequest,
@@ -172,6 +173,8 @@ import type {
   ReorderPinnedThreadRequest,
   MoveThreadRequest,
   MoveThreadResponse,
+  MoveThreadToWorktreeRequest,
+  MoveThreadToWorktreeResponse,
   ReorderProjectRequest,
   ReorderQueuedMessageRequest,
   ResolvePendingInteractionRequest,
@@ -305,6 +308,7 @@ import {
   threadPluginMetadataQuerySchema,
   deleteThreadRequestSchema,
   threadArchiveAllQuerySchema,
+  threadStopQuerySchema,
   threadUnarchiveQuerySchema,
   environmentActionRequestSchema,
   environmentDiffBranchesQuerySchema,
@@ -342,6 +346,7 @@ import {
   promptHistoryQuerySchema,
   reorderPinnedThreadRequestSchema,
   moveThreadRequestSchema,
+  moveThreadToWorktreeRequestSchema,
   reorderProjectRequestSchema,
   reorderQueuedMessageRequestSchema,
   resolvePendingInteractionRequestSchema,
@@ -1337,7 +1342,9 @@ export const publicApiRoutes = {
     stop: defineRoute({
       path: "/threads/:id/stop",
       method: "post",
-      request: noRequest<PathId>(),
+      request: optionalQueryRequest<PathId, ThreadStopQuery>(
+        threadStopQuerySchema,
+      ),
       response: jsonResponse<{ ok: true; cancelledRetries: number }>(),
     }),
     compact: defineRoute({
@@ -1426,6 +1433,14 @@ export const publicApiRoutes = {
       method: "post",
       request: jsonRequest<PathId, MoveThreadRequest>(moveThreadRequestSchema),
       response: jsonResponse<MoveThreadResponse>(),
+    }),
+    worktree: defineRoute({
+      path: "/threads/:id/worktree",
+      method: "post",
+      request: jsonRequest<PathId, MoveThreadToWorktreeRequest>(
+        moveThreadToWorktreeRequestSchema,
+      ),
+      response: jsonResponse<MoveThreadToWorktreeResponse>(),
     }),
     interactions: defineRoute({
       path: "/threads/:id/interactions",

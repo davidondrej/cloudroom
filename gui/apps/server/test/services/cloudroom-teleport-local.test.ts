@@ -8,7 +8,7 @@ import { tarCommand } from "@cloudroom/process-utils";
 import type { CloudroomClient } from "../../src/services/cloudroom/client.js";
 import { checksOutCrlf } from "../../src/services/cloudroom/project-copy.js";
 import { landForkCode, sourceCode } from "../../src/services/cloudroom/fork.js";
-import { applyChanges, cloudChanges, packChangesCommand } from "../../src/services/cloudroom/teleport-local.js";
+import { allowance, applyChanges, cloudChanges, codexLineage, download, packChangesCommand } from "../../src/services/cloudroom/teleport-local.js";
 
 it("Teleport to Local never overwrites Mac work and never writes into .git", async () => {
   const temp = mkdtempSync(join(tmpdir(), "cloudroom-teleport-local-"));
@@ -159,6 +159,21 @@ it.skipIf(process.platform !== "linux")("Teleport to Local stops before switchin
     await chmod(join(home, "project", "secret.txt"), 0o600).catch(() => {});
     await rm(home, { recursive: true, force: true });
   }
+});
+
+it("a replaced Core can't make downloads hold more than their sizes and shared allowance", async () => {
+  // `wc -c` reports `size`, and each piece holds `piece` bytes.
+  const cloud = (size: string, piece: number) => async (command: string) => command.startsWith("[ -f") ? Buffer.from(`${size}\n`) : Buffer.alloc(piece);
+  const client = {} as CloudroomClient;
+  await expect(download(client, "a", undefined, cloud("Infinity", 0))).rejects.toThrow("no valid size");
+  await expect(download(client, "a", undefined, cloud(String(2 ** 40), 0))).rejects.toThrow("a is over the 1024 MB limit.");
+  await expect(download(client, "a", undefined, cloud("10", 11))).rejects.toThrow("more of a than was asked for");
+  const allowed = allowance(1);
+  expect((await download(client, "a", allowed, cloud("700000", 700_000))).length).toBe(700_000);
+  await expect(download(client, "b", allowed, cloud("700000", 700_000))).rejects.toThrow("b is over the 1 MB limit.");
+  const parents = Buffer.from(Array.from({ length: 65 }, (_, i) => `/parent-${i}.jsonl`).join("\n")).toString("hex");
+  const lineage = { runOnVm: async () => ({ code: 0, stdout: parents, stderr: "", truncated: false }) } as unknown as CloudroomClient;
+  await expect(codexLineage(lineage, "/fork.jsonl")).rejects.toThrow("too many parents");
 });
 
 it("CRLF checkouts are found in every spelling Git accepts", async () => {

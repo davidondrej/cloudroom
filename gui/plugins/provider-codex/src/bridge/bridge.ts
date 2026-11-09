@@ -66,6 +66,7 @@ import {
 import { parseModelsResponse } from "../models.js";
 import { macOsPermissionPresentation } from "../presentation.js";
 import {
+  codexManagedPolicyError,
   keepShellEnvironmentSetKeys,
   resolveCodexInstructionOverrides,
   toCodexDynamicTools,
@@ -91,6 +92,7 @@ import {
 } from "./app-server-connection.js";
 import { codexLinuxSandboxError } from "./linux-sandbox.js";
 import {
+  codexBrokenInstallHint,
   getCodexProviderHealth,
   getCodexProviderInstallationRun,
   getCodexProviderInstallationStatus,
@@ -309,6 +311,7 @@ const CODEX_INITIALIZE_PARAMS = {
 };
 
 const CHILD_REQUEST_TIMEOUT_MS = 60_000;
+const MANAGED_REQUIREMENTS_TIMEOUT_MS = 3_000;
 const INTERRUPT_SETTLEMENT_TIMEOUT_MS = 5_000;
 const CODEX_ARCHIVED_SESSION_ERROR_PATTERN =
   /\b(?:session|thread)\s+\S+\s+is archived\b/i;
@@ -438,6 +441,15 @@ function buildAppServerEnv(): NodeJS.ProcessEnv {
 function describeCodexLaunchError(error: unknown): string {
   if (error instanceof CodexAppServerExitedError && error.spawnFailed) {
     return missingCodexCliGuidance();
+  }
+  const brokenHint =
+    error instanceof CodexAppServerExitedError
+      ? codexBrokenInstallHint(error.message)
+      : null;
+  if (brokenHint !== null && error instanceof Error) {
+    // "spawn" and "ENOENT" make the host daemon report missing_executable, so
+    // the server and CLI say "reinstall" instead of "retry" or "sign in" (#907).
+    return `Codex is installed but broken: it could not spawn its native binary (ENOENT). ${brokenHint}\n\n${error.message}`;
   }
   const message = error instanceof Error ? error.message : String(error);
   return CODEX_ACTIVE_WRITER_ERROR_PATTERN.test(message)
@@ -943,6 +955,7 @@ const codexConfigReadResultSchema = z
   .object({
     config: z
       .object({
+        model: z.string().nullish().catch(null),
         features: z.object({ hooks: z.boolean().optional() }).nullish(),
         shell_environment_policy: z
           .object({
@@ -955,6 +968,21 @@ const codexConfigReadResultSchema = z
       .optional(),
   })
   .passthrough();
+const codexConfigRequirementsReadResultSchema = z
+  .object({
+    requirements: z
+      .object({
+        allowedApprovalPolicies: z.array(z.unknown()).nullish(),
+        allowedApprovalsReviewers: z.array(z.unknown()).nullish(),
+        allowedSandboxModes: z.array(z.unknown()).nullish(),
+        autoReview: z
+          .object({ requiredOnModels: z.array(z.string()).nullish() })
+          .nullish(),
+      })
+      .nullish(),
+  })
+  .catch({ requirements: null });
+
 
 type CodexSessionConstructionRequest =
   | { kind: "start" }
@@ -1078,6 +1106,25 @@ async function constructThreadSession(
         "Codex hooks are disabled. Enable them in Codex or disable Cloudroom Command Guard before starting a new session.",
       );
     }
+    const managed = await connection
+      .request({
+        method: "configRequirements/read",
+        params: undefined,
+        resultSchema: codexConfigRequirementsReadResultSchema,
+        // Optional check: stay well under the caller's 30 s resume deadline.
+        timeoutMs: MANAGED_REQUIREMENTS_TIMEOUT_MS,
+      })
+      .catch(() => null);
+    const policyError = codexManagedPolicyError(
+      decoded.sessionOptions,
+      managed?.requirements,
+      // Resume and fork keep the saved thread model, which we do not know.
+      decoded.sessionOptions.model ??
+        (args.request.kind === "start"
+          ? (settings?.config?.model ?? null)
+          : null),
+    );
+    if (policyError !== null) throw new Error(policyError);
     if (
       process.platform === "linux" &&
       decoded.sessionOptions.permissionScope === "workspace"

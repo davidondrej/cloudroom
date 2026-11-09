@@ -170,6 +170,7 @@ const SETTINGS_SEARCH_ENTRIES: readonly SettingsSearchEntry[] = [
     ["Or connect your own Core", "self-hosted core url api token server"],
   ]),
   ...entries("analytics", undefined, [
+    ["Cloud Credits", "analytics usage credits used when hour by hour threads wave busiest day left"],
     ["Skills", "analytics stats usage most used least used skill runs ridgeline"],
   ]),
   ...entries("machines", undefined, [

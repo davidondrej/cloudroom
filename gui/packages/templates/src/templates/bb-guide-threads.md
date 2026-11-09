@@ -40,7 +40,7 @@ Spawning:
                                    none). Required when the provider declares inputs,
                                    refused when it does not
     --machine <id-or-name>         Run on a machine; local selects this computer, cloud selects the Rust core (--host is an alias)
-    --request-id <id>              Stable Cloud creation ID; reuse after an unconfirmed submission
+    --request-id <id>              Stable creation ID; after an unanswered spawn, re-run with it to get that thread, not a duplicate
     --service-tier <tier>          Service tier: fast, default
     --permission-mode <mode>       Permission mode: accept-edits, auto, or full
     --plan                         Send the prompt as the provider's /plan action (plan first, execute after approval)

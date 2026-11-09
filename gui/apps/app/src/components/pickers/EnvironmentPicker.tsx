@@ -87,6 +87,7 @@ export interface EnvironmentPickerUIProps {
     note?: string;
     onSelect: () => void;
     vps?: { selected: boolean; busy: boolean; description: string; onSelect: () => void };
+    onAddMachine?: () => void;
   };
   onRequestMachineSetup?: (host: Host) => void;
   providers?: readonly SystemEnvironmentProvider[];
@@ -626,6 +627,19 @@ export function EnvironmentPickerUI({
                         onSelect={() => {
                           cloud.vps?.onSelect();
                           handleOpenChange(false);
+                        }}
+                      />
+                    ) : null}
+                    {cloud.onAddMachine ? (
+                      <EnvironmentMenuItem
+                        value="cloud:add-machine"
+                        label="Add machine"
+                        icon="Plus"
+                        selected={false}
+                        muted
+                        onSelect={() => {
+                          handleOpenChange(false);
+                          cloud.onAddMachine?.();
                         }}
                       />
                     ) : null}
@@ -1220,6 +1234,8 @@ interface EnvironmentMenuItemProps {
   onSelect: () => void;
   disabled?: boolean;
   alignIconWithMachine?: boolean;
+  /** Grey action row (e.g. "Add machine"); brightens on hover. */
+  muted?: boolean;
 }
 
 function EnvironmentMenuItem({
@@ -1232,6 +1248,7 @@ function EnvironmentMenuItem({
   onSelect,
   disabled,
   alignIconWithMachine = false,
+  muted = false,
 }: EnvironmentMenuItemProps) {
   const menuIcon =
     provider === undefined ? (
@@ -1270,6 +1287,7 @@ function EnvironmentMenuItem({
       className={cn(
         "flex items-start justify-between gap-3 whitespace-normal",
         "py-[0.3125rem] text-xs max-md:py-2",
+        muted && "text-subtle-foreground",
         LIST_HOVER_TRANSITION,
       )}
     >

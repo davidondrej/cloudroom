@@ -14,12 +14,13 @@ import {
   experimental_findCliExecutable as findCliExecutable,
   experimental_formatCommand as formatCommand,
   experimental_npmCommand as npmCommand,
+  experimental_installationRunUnavailable as installationRunUnavailable,
   experimental_installationVerification as installationVerification,
   experimental_npmGlobalInstallCommand as npmGlobalInstallCommand,
   experimental_npmGlobalInstallSource as npmGlobalInstallSource,
   experimental_npmLatestVersion as npmLatestVersion,
+  experimental_probeCliVersion as probeCliVersion,
   experimental_probeNpmGlobalPackage as probeNpmGlobalPackage,
-  experimental_readCliVersion as readCliVersion,
   experimental_versionFrom as versionFrom,
 } from "@get-bb/plugin-sdk/provider-bridge";
 import { z } from "zod";
@@ -223,10 +224,7 @@ function buildCodexProviderInstallationRun(
   npmPrefix: string | null = null,
 ): ProviderInstallationRunResult {
   if (status.installAction?.kind !== action) {
-    return {
-      available: false,
-      message: `Codex ${action} is no longer available on this host.`,
-    };
+    return installationRunUnavailable("Codex", action, status);
   }
   return {
     available: true,
@@ -279,12 +277,30 @@ function healthResult(
   };
 }
 
+// The npm launcher ran, but its native binary is missing or can't run (#907).
+const CODEX_BROKEN_INSTALL_PATTERN =
+  /Missing optional dependency @openai\/codex|execve failed with error code ENOENT|\bspawn \S+ ENOENT\b/u;
+
+/** Reinstall advice when Codex's output shows a broken install, else null. Prefers the launcher's own command. */
+export function codexBrokenInstallHint(output: string): string | null {
+  if (!CODEX_BROKEN_INSTALL_PATTERN.test(output)) return null;
+  const own = /Reinstall Codex: ([^\n]+)/u.exec(output)?.[1]?.trim();
+  return `Reinstall Codex: ${own || npmGlobalInstallCommand(CODEX_NPM_PACKAGE).displayCommand}`;
+}
+
 export async function getCodexProviderHealth(): Promise<ProviderHealthResult> {
   const command = findCliExecutable("codex");
   if (command === null) {
     return healthResult("not_installed");
   }
-  const version = await readCliVersion(command);
+  // A timeout or unclear failure gives no hint, so a slow install still looks ready.
+  const { version, failedOutput } = await probeCliVersion(command);
+  const brokenHint = codexBrokenInstallHint(failedOutput ?? "");
+  if (brokenHint !== null) {
+    return healthResult("unknown", {
+      statusMessage: `\`${command} --version\` failed: this Codex install is broken. ${brokenHint}`,
+    });
+  }
   if (
     version !== null &&
     compareVersions(version, CODEX_MINIMUM_SUPPORTED_VERSION) < 0

@@ -1,6 +1,7 @@
 import {
   THREAD_SEARCH_LIMIT_PER_GROUP_DEFAULT,
   THREAD_SEARCH_LIMIT_PER_GROUP_MAX,
+  countClaimedQueuedThreadMessages,
   countNonDeletedAssignedChildThreads,
   countThreads,
   getEnvironment,
@@ -47,7 +48,7 @@ import { listRunningThreadsWithIntendedHosts } from "../../services/threads/disp
 import { dispatchThreadRenameCommand } from "../../services/threads/thread-commands.js";
 import { deleteThreadOnMac } from "../../services/threads/thread-lifecycle.js";
 import { listThreadWithDescendants } from "../../services/threads/thread-archive.js";
-import { createThreadFromRequest } from "../../services/threads/thread-create.js";
+import { createThreadOnce } from "../../services/threads/thread-create.js";
 import { cancelThreadTitleRetry } from "../../services/threads/thread-metadata-inference.js";
 import { cancelTitleRecheck } from "../../services/threads/title-recheck.js";
 import { createThreadForkFromRequest } from "../../services/threads/thread-fork.js";
@@ -346,7 +347,7 @@ export function registerThreadBaseRoutes(app: Hono, deps: AppDeps): void {
     if (payload.sectionId) {
       requireThreadSection(deps, payload.sectionId);
     }
-    const thread = await createThreadFromRequest(deps, {
+    const thread = await createThreadOnce(deps, {
       ...payload,
       origin: payload.origin,
     });
@@ -360,12 +361,16 @@ export function registerThreadBaseRoutes(app: Hono, deps: AppDeps): void {
 
   get(routes.get, (context, query) => {
     const thread = requirePublicThread(deps.db, context.req.param("id"));
-    return context.json(
-      buildThreadResponse(deps, {
+    return context.json({
+      ...buildThreadResponse(deps, {
         includes: parseThreadIncludes(query),
         thread,
       }),
-    );
+      dispatchingMessageCount: countClaimedQueuedThreadMessages(
+        deps.db,
+        thread.id,
+      ),
+    });
   });
 
   function getThreadChildSummary(thread: Thread): ThreadChildSummaryResponse {

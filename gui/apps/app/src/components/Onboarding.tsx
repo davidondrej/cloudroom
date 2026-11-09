@@ -23,7 +23,7 @@ import { useQuickCreateProjectController } from "@/hooks/useQuickCreateProject";
 import { usePromptBoxProviderPreference } from "@/hooks/thread-creation-options/persisted-selection-fields";
 import { booleanLocalStorage } from "@/lib/browser-storage";
 import { getBbDesktopInfo, MACOS_APP_REGION_NO_DRAG_CLASS, MACOS_WINDOW_DRAG_CLASS } from "@/lib/bb-desktop";
-import { copyTextToClipboard, copyToClipboardWithToast } from "@/lib/clipboard";
+import { copyTextToClipboard, copyToClipboardWithToast, useClipboardCopy } from "@/lib/clipboard";
 import { fetchWithAppSurface } from "@/lib/app-surface";
 import { useSystemConfig, useSystemProviders } from "@/hooks/queries/system-queries";
 import { getProviderIconInfo, getProviderIconTintStyle } from "@/lib/provider-icon";
@@ -41,7 +41,7 @@ export const useOpenSetup = () => useSetAtom(openAtom);
 const STEPS = ["Sign in", "Connect an agent", "Connect GitHub", "Import your work"];
 const STEP_IDS = ["account", "agent", "github", "project"] as const;
 type SetupStepId = (typeof STEP_IDS)[number];
-type SetupDetail = "claude" | "codex" | "both" | "none" | "existing" | "found" | "folder" | "recent_folder" | "bb_import" | "chat_import" | "pi" | "opencode" | "cursor" | "hermes" | "grok" | "devin" | "droid" | "fx" | "openclaw" | "auto" | "manual";
+type SetupDetail = "claude" | "codex" | "both" | "none" | "existing" | "found" | "folder" | "recent_folder" | "bb_import" | "chat_import" | "pi" | "opencode" | "cursor" | "hermes" | "grok" | "devin" | "droid" | "kimi" | "fx" | "openclaw" | "auto" | "manual";
 const agentDetail = (id: string) => id.replace(/^acp-/, "").replace(/-agent$/, "") as SetupDetail;
 function track(step: SetupStepId, action: "viewed" | "started" | "done" | "skipped" | "closed" | "detected", detail: SetupDetail | null = null, agents?: SetupDetail[]) {
   void fetchWithAppSurface("/api/v1/cloudroom/setup-step", {
@@ -356,6 +356,12 @@ const TickStamp = () => (
   </span>
 );
 
+// Keyed by the link, so "Copied" never carries over to a new sign-in attempt.
+function CopyLink({ url }: { url: string }) {
+  const { copied, copy } = useClipboardCopy({ text: url });
+  return <button type="button" className={LINK} onClick={() => void copy()}>{copied ? "Copied" : "Copy link"}</button>;
+}
+
 const SIGN_IN_COUNTDOWN = 3;
 function AccountStep({ email, signingIn, next, fresh }: { email: string | null; signingIn: boolean; next: () => void; fresh: boolean }) {
   const signIn = useCloudroomSignIn();
@@ -384,7 +390,11 @@ function AccountStep({ email, signingIn, next, fresh }: { email: string | null; 
       ) : busy ? (
         <div className="mt-8 flex max-w-[420px] flex-col gap-3">
           <Cta disabled className="w-full"><Icon name="Loading" className="animate-spin" aria-hidden />Waiting for your browser…</Cta>
-          <Note>Finish logging in in your browser. <button type="button" className={LINK} onClick={() => signIn.mutate("cancel")}>Cancel</button></Note>
+          <Note>
+            Finish in your browser.{" "}
+            {signIn.data && <>Wrong browser? <CopyLink key={signIn.data} url={signIn.data} /> · </>}
+            <button type="button" className={LINK} onClick={() => signIn.mutate("cancel")}>Cancel</button>
+          </Note>
         </div>
       ) : left !== null ? (
         <>
@@ -476,7 +486,7 @@ function AgentStep({ progress, next, stamped, left, choices, setChoices }: { pro
       ) : <Heading lead="Connect an" mark="agent" />}
       <div className="mt-8 flex flex-col gap-3">
         <Card on={agents.claude} isDefault={agents.claude && defaultAgent === "claude-code"} logo={<AgentLogo id="claude-code" className="bg-[#f4e4d6]" />} name="Claude Code" detail={claudeLocal.data?.state === "connected" ? `Found on ${here}` : "Uses your Claude plan"}>
-          {action(agents.claude, <span onClickCapture={() => started("claude")}><ClaudeConnectionButton target="cloud" presentation="inline" className={CONNECT} /></span>)}
+          {action(agents.claude, <span onClickCapture={() => started("claude")}><ClaudeConnectionButton target="cloud" className={CONNECT} /></span>)}
         </Card>
         <Card on={agents.codex} isDefault={agents.codex && defaultAgent === "codex"} logo={<AgentLogo id="codex" className="bg-black text-white" />} name="Codex" detail={account.data?.localLogins?.codex ? `Found on ${here}` : "Uses your ChatGPT plan"}>
           {action(agents.codex, codexBrowser ? (

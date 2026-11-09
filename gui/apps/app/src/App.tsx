@@ -12,6 +12,7 @@ import { CloudroomAccountPanels } from "./components/CloudroomAccountPanels";
 import { Onboarding } from "./components/Onboarding";
 import { InviteOffer } from "./components/InviteOffer";
 import { StarPrompt } from "./components/StarPrompt";
+import { MoveToApplicationsPrompt } from "./components/MoveToApplicationsPrompt";
 import { CreditsExplainer } from "./components/CloudQueue";
 import { ActivationChecklist } from "./components/ActivationChecklist";
 import { SharedThreadOpener } from "./components/SharedThreadOpener";
@@ -450,6 +451,7 @@ export function App() {
               <ProviderCliInstallLogDialogHost />
               <ActivationChecklist />
               <Onboarding />
+              <MoveToApplicationsPrompt />
               <InviteOffer />
               <CreditsExplainer />
               <StarPrompt />

@@ -1,4 +1,7 @@
 import {
+  cloudDeltaEvent,
+  cloudItemEvent,
+  codexItemEvent,
   encodeClientTurnRequestIdNumber,
   threadEventSchema,
   threadScope,
@@ -289,61 +292,10 @@ export class CloudThreadEvents {
       this.piReply.text += text(data.delta);
       id = this.piReply.id;
     }
-    if (record.kind === "text_delta" && text(data.delta)) {
-      out.push({
-        ...base,
-        type: "item/agentMessage/delta",
-        itemId: id,
-        delta: text(data.delta),
-      });
-    } else if (
-      record.kind === "item_started" ||
-      record.kind === "item_completed"
-    ) {
-      const type =
-        record.kind === "item_started" ? "item/started" : "item/completed";
-      const itemType = text(data.item_type);
-      if (itemType === "text" || itemType === "agentMessage") {
-        out.push({
-          ...base,
-          type,
-          item: { type: "agentMessage", id, text: text(data.text) },
-        });
-      } else if (itemType === "thinking" || itemType === "reasoning") {
-        out.push({
-          ...base,
-          type,
-          item: {
-            type: "reasoning",
-            id,
-            summary: [],
-            content: text(data.text) ? [text(data.text)] : [],
-          },
-        });
-      } else if (text(data.tool_name)) {
-        out.push({
-          ...base,
-          type,
-          item: {
-            type: "toolCall",
-            id,
-            tool: text(data.tool_name),
-            status:
-              type === "item/started"
-                ? "pending"
-                : data.is_error === true || data.status === "failed"
-                  ? "failed"
-                  : "completed",
-            ...(data.input && typeof data.input === "object"
-              ? { arguments: data.input }
-              : {}),
-            ...(data.result !== undefined && data.result !== null
-              ? { result: data.result }
-              : {}),
-          },
-        });
-      }
-    }
+    const event =
+      cloudDeltaEvent(record.kind, data, base, id) ??
+      cloudItemEvent(record.kind, data, base, id);
+    if (event) out.push(event);
     return out;
   }
 
@@ -356,75 +308,12 @@ export class CloudThreadEvents {
       scope: turnScope(turnId),
     };
     const itemId = (id: unknown) => `${turnId}:${text(id)}`;
-    if (method === "item/started" || method === "item/completed") {
-      const native = object(params.item);
-      if (
-        ["userMessage", "subAgentActivity", "collabAgentToolCall"].includes(
-          text(native.type),
-        )
-      )
-        return [];
-      const status =
-        method === "item/started"
-          ? "pending"
-          : ["failed", "declined"].includes(text(native.status))
-            ? "failed"
-            : native.status === "interrupted"
-              ? "interrupted"
-              : "completed";
-      const item: Data = {
-        ...native,
-        id: itemId(native.id),
-        status,
-        approvalStatus: null,
-      };
-      for (const key of ["exitCode", "durationMs", "aggregatedOutput"])
-        if (item[key] === null) delete item[key];
-      if (native.type === "fileChange" && Array.isArray(native.changes)) {
-        item.changes = native.changes.map((entry) => {
-          const change = object(entry);
-          return {
-            ...change,
-            kind:
-              typeof change.kind === "string"
-                ? change.kind
-                : text(object(change.kind).type),
-          };
-        });
-      }
-      const event = { ...base, type: method, item };
-      return threadEventSchema.safeParse(event).success
-        ? [event]
-        : [
-            {
-              ...base,
-              type: method,
-              item: {
-                type: "toolCall",
-                id: itemId(native.id),
-                tool: text(native.type),
-                status,
-                result: native,
-              },
-            },
-          ];
-    }
-    if (
-      /^item\/(agentMessage\/delta|commandExecution\/outputDelta|fileChange\/outputDelta|reasoning\/(summaryTextDelta|textDelta)|plan\/delta)$/.test(
-        method,
-      )
-    ) {
-      return typeof params.delta === "string"
-        ? [
-            {
-              ...base,
-              type: method,
-              itemId: itemId(params.itemId),
-              delta: params.delta,
-            },
-          ]
-        : [];
-    }
+    // Sub-agent rows link to threads the phone doesn't have.
+    const native = object(params.item);
+    if (["subAgentActivity", "collabAgentToolCall"].includes(text(native.type)))
+      return [];
+    const event = codexItemEvent(method, params, base, itemId);
+    if (event) return [event];
     if (method === "error") {
       return [
         {

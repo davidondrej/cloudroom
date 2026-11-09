@@ -30,6 +30,7 @@ import {
 } from "./queue-waits.js";
 import {
   createAutomaticQueuedMessageEligibility,
+  isQueuedMessageAutoSendCandidate,
   releaseStaleQueuedMessageDispatchClaims,
   sendNextQueuedMessageIfPresent,
   sendQueuedMessage,
@@ -477,6 +478,19 @@ async function attemptAutomaticQueuedMessage(
         queuedMessageId: row.id,
         threadId: row.threadId,
       });
+      return;
+    }
+    const currentThread = getThread(deps.db, row.threadId);
+    if (!isQueuedMessageAutoSendCandidate(currentThread)) {
+      deps.logger.debug(
+        {
+          queuedMessageId: row.id,
+          threadId: row.threadId,
+          threadStatus: currentThread?.status,
+          ...runtimeErrorLogFields(deps.config, error),
+        },
+        "Queued message auto-send interrupted",
+      );
       return;
     }
     if (isCommandTimeoutError(error)) {

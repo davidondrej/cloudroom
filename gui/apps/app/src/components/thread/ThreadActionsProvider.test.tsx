@@ -173,10 +173,10 @@ function SidebarRow({ id, child = false }: { id: string; child?: boolean }) {
 }
 
 describe("ThreadActionsProvider archive navigation", () => {
-  it("lands on the section's last top-level thread, like Cmd+E / Cmd+L", async () => {
-    mocks.viewedThreadId = "thr_child_a";
+  async function archiveAndExpect(archivedId: string, expectedId: string) {
+    mocks.viewedThreadId = archivedId;
     vi.mocked(sdk.threads.archiveAll).mockResolvedValue({
-      archivedThreadIds: ["thr_child_a"],
+      archivedThreadIds: [archivedId],
       ok: true,
     });
     renderProvider(
@@ -186,10 +186,11 @@ describe("ThreadActionsProvider archive navigation", () => {
           <SidebarRow id="thr_child_a" child />
           <SidebarRow id="thr_child_b" child />
           <SidebarRow id="thr_top_b" />
+          <SidebarRow id="thr_top_c" />
           <SidebarRow id="thr_child_c" child />
         </div>
         <ArchiveButton
-          thread={makeThread({ id: "thr_child_a", projectId: "p1" })}
+          thread={makeThread({ id: archivedId, projectId: "p1" })}
         />
       </>,
     );
@@ -197,11 +198,23 @@ describe("ThreadActionsProvider archive navigation", () => {
     fireEvent.click(screen.getByRole("button", { name: "Archive" }));
 
     expect(mocks.navigate).toHaveBeenCalledWith(
-      getThreadRoutePath({ projectId: "p1", threadId: "thr_top_b" }),
+      getThreadRoutePath({ projectId: "p1", threadId: expectedId }),
     );
     await vi.waitFor(() => {
       expect(appToast.success).toHaveBeenCalledTimes(1);
     });
+  }
+
+  it("lands on the next top-level thread right below, not the last one", async () => {
+    await archiveAndExpect("thr_top_a", "thr_top_b");
+  });
+
+  it("skips subagents when it looks below", async () => {
+    await archiveAndExpect("thr_child_a", "thr_top_b");
+  });
+
+  it("goes up to the nearest top-level thread when it was the last one", async () => {
+    await archiveAndExpect("thr_top_c", "thr_top_b");
   });
 });
 
