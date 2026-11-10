@@ -4,10 +4,11 @@ import {
   isStandaloneBuiltinContextCommand,
   isStandaloneBuiltinTeleportCommand,
   type PromptInput,
+  type HostPlatform,
 } from "@cloudroom/domain";
 import { createHash } from "node:crypto";
 import { eq } from "drizzle-orm";
-import { getAppSettings, latestContextResetSequence, threadCustomInstructions as sent, type DbConnection, type DbQueryConnection } from "@cloudroom/db";
+import { getAppSettings, getHost, latestContextResetSequence, threadCustomInstructions as sent, type DbConnection, type DbQueryConnection } from "@cloudroom/db";
 import { renderTemplate } from "@cloudroom/templates";
 import { ApiError } from "../../errors.js";
 import { listPluginInstructionContributions } from "../plugins/plugin-agent-contributions.js";
@@ -18,23 +19,44 @@ export const PLUGIN_INSTRUCTION_MAX_CHARS = 4096;
 const ORG_INSTRUCTION_MAX_CHARS = 8_600;
 export const pluginInstructionMaxChars = (pluginId: string) => (pluginId === "organization" ? ORG_INSTRUCTION_MAX_CHARS : PLUGIN_INSTRUCTION_MAX_CHARS);
 
-type Context = { threadId: string; projectId: string };
+type Context = { threadId: string; projectId: string; hostId?: string };
+
+function osName(platform: string | null | undefined): string {
+  switch (platform) {
+    case "darwin": return "macOS";
+    case "linux": return "Linux";
+    case "wsl": return "Linux (WSL)";
+    case "win32": return "Windows";
+    default: return "unknown";
+  }
+}
+
+/** Core runs on Linux; a Local thread uses its selected host, not necessarily the app server. */
+export function cloudroomMachineContext(db: DbQueryConnection, kind: "local" | "cloud", executionPlatform?: HostPlatform | null): string {
+  if (!getAppSettings(db).systemPromptEnabled) return "";
+  return `[Cloudroom machine context — replaces earlier machine details]\nThread execution: ${kind === "local" ? "Local" : "Cloud"}; execution OS: ${osName(kind === "cloud" ? "linux" : executionPlatform)}; paired computer OS: ${osName(process.platform)}.\nThe room-cli mac command names the paired-computer bridge; it does not identify that computer's OS.`;
+}
+
+function appendMachineContext(input: PromptInput[], text: string): PromptInput[] {
+  return text ? [...input, { type: "text", text: `\n${text}`, mentions: [], visibility: "agent-only" }] : input;
+}
 
 /**
  * The system prompt for a Local or a Cloud thread: the shared lines plus that kind's own.
  * `vps`: the account has its own VPS connected (ADR 0319), so its Cloud threads may run there.
  */
-export function cloudroomSystemPrompt(db: DbConnection, kind: "local" | "cloud", options: { vps?: boolean } = {}): string | undefined {
+export function cloudroomSystemPrompt(db: DbConnection, kind: "local" | "cloud", options: { vps?: boolean; executionPlatform?: HostPlatform | null } = {}): string | undefined {
   const settings = getAppSettings(db);
+  const platform = kind === "local" ? options.executionPlatform : process.platform;
   return settings.systemPromptEnabled
-    ? renderTemplate("standardAgentAppendInstructions", {
+    ? [cloudroomMachineContext(db, kind, options.executionPlatform), renderTemplate("standardAgentAppendInstructions", {
         local: kind === "local" ? "on" : "",
         cloud: kind === "cloud" ? "on" : "",
         bugReports: settings.bugReportsEnabled ? "on" : "",
-        mac: process.platform === "win32" ? "" : "on",
-        windows: process.platform === "win32" ? "on" : "",
+        mac: platform === "win32" ? "" : "on",
+        windows: platform === "win32" ? "on" : "",
         vps: options.vps ? "on" : "",
-      })
+      })].join("\n\n")
     : undefined;
 }
 type Input = { input: PromptInput[]; inputGroups?: PromptInput[][] };
@@ -142,9 +164,13 @@ export function prepareCustomInstructionInput(
   const takes = takesInstructions(original.input);
   // A new session that starts without a message gets them with its first one.
   if (fresh && !takes) markCustomInstructionsLost(db, context.threadId);
-  const input = takes
+  const custom = takes
     ? appendCustomInstructions(original.input, dueCustomInstructions(db, context, fresh))
     : original.input;
+  // Refresh even an existing agent's history before its next turn, including after a move.
+  const input = takes && context.hostId
+    ? appendMachineContext(custom, cloudroomMachineContext(db, "local", getHost(db, context.hostId)?.platform))
+    : custom;
   const groups = original.inputGroups;
   if (input === original.input) {
     return { input, ...(groups === undefined ? {} : { inputGroups: groups }) };
@@ -159,7 +185,7 @@ export function prepareCustomInstructionInput(
               ? [input]
               : [
                   ...groups.slice(0, -1),
-                  [...groups[groups.length - 1]!, input[input.length - 1]!],
+                  [...groups[groups.length - 1]!, ...input.slice(original.input.length)],
                 ],
         }),
   };
@@ -169,12 +195,14 @@ export function prepareCloudInstructionInput(
   prompt: { text: string; content?: unknown },
   instructions: string,
   limit: number,
+  db?: DbQueryConnection,
+  savedMachineContext?: string,
 ): { text: string; content?: unknown } {
   const input: PromptInput[] = [
     { type: "text", text: prompt.text, mentions: [] },
   ];
-  const enriched = appendCustomInstructions(input, instructions);
-  const block = enriched === input ? null : enriched[enriched.length - 1]!;
+  const enriched = appendMachineContext(appendCustomInstructions(input, instructions), savedMachineContext ?? (db && takesInstructions(input) ? cloudroomMachineContext(db, "cloud") : ""));
+  const blocks = enriched.slice(input.length);
   const text = enriched
     .map((part) => (part.type === "text" ? part.text : ""))
     .join("\n");
@@ -192,8 +220,8 @@ export function prepareCloudInstructionInput(
       ? {}
       : {
           content:
-            block && Array.isArray(prompt.content)
-              ? [...prompt.content, block]
+            blocks.length && Array.isArray(prompt.content)
+              ? [...prompt.content, ...blocks.map((part) => part.type === "text" ? { type: "text", text: part.text } : part)]
               : prompt.content,
         }),
   };

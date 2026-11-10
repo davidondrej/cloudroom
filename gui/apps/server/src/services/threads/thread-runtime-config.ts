@@ -233,7 +233,7 @@ export async function resolveThreadRuntimeCommandConfig(
   const dynamicTools = dynamicToolContributions.map(
     (contribution) => contribution.tool,
   );
-  const systemPrompt = cloudroomSystemPrompt(deps.db, "local");
+  const systemPrompt = cloudroomSystemPrompt(deps.db, "local", { executionPlatform: host.platform });
   const instructionSections: string[] = systemPrompt ? [systemPrompt] : [];
   for (const contribution of dynamicToolContributions) {
     if (!contribution.instructions) continue;
