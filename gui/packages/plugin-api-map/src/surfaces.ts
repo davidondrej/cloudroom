@@ -442,6 +442,7 @@ export const SURFACE_GROUPS: SurfaceGroup[] = [
           "ExperimentalPluginProviderEnvEntry",
           "ExperimentalPluginProviderEnvHealthContext",
           "ExperimentalPluginProviderEnvHealth",
+          "experimental_isClaudeNpmPlaceholder",
         ],
         firstParty: [
           "ACP providers",

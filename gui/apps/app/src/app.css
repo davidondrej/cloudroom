@@ -1,6 +1,13 @@
 @import "@fontsource-variable/inter";
 @import "@/components/ui/theme.css";
 
+/* Set per element by watchMacosDesktopZoom; non-inherited so zoom steps restyle only `.bb-zoom` elements. */
+@property --bb-desktop-zoom {
+  syntax: "<number>";
+  inherits: false;
+  initial-value: 1;
+}
+
 @layer base {
   /*
    * Keep the real app shell from becoming a second scroll container. These
@@ -27,7 +34,7 @@
    * variable is the single switch both they and the shell root read.
    */
   :root {
-    --bb-app-chrome-row-height: calc(3rem / var(--bb-desktop-zoom, 1));
+    --bb-app-chrome-row-height: 3rem;
     --bb-shell-height: 100dvh;
     --secondary-panel-width-mobile: min(76vw, 320px);
   }

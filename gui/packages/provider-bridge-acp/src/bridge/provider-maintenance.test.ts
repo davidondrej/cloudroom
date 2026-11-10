@@ -107,6 +107,56 @@ describe("ACP provider maintenance", () => {
     });
   });
 
+  // #1156: legacy Kilo 0.x has no `kilo acp` and exits with a piped-input error.
+  it.skipIf(process.platform === "win32").each([
+    { version: "0.26.1", unsupported: true, health: "unsupported_version" },
+    { version: "7.8.27", unsupported: false, health: "ready" },
+    { version: "unparseable", unsupported: false, health: "ready" },
+  ])(
+    "gates a CLI below its minimum version ($version)",
+    async ({ version, unsupported, health }) => {
+      const dir = await mkdtemp(path.join(tmpdir(), "bb-acp-kilo-"));
+      try {
+        const command = path.join(dir, "kilo");
+        await writeFile(command, `#!/bin/sh\necho "${version}"\n`);
+        await chmod(command, 0o755);
+        const target = {
+          maintenance: undefined,
+          installer: () => ({
+            command: "sh",
+            args: [],
+            displayCommand: "install kilo",
+          }),
+          command,
+          minimumVersion: "1.0.0",
+        };
+        expect(await getAcpProviderHealth(target)).toMatchObject({
+          health: { status: health, minimumSupportedVersion: "1.0.0" },
+        });
+        const status = await getAcpProviderInstallationStatus(target);
+        expect(status).toMatchObject({
+          versionUnsupported: unsupported,
+          installAction: unsupported ? { kind: "update" } : null,
+        });
+        expect(
+          __testing.buildProviderInstallationRun(status, {
+            ...target,
+            action: "update",
+          }),
+        ).toMatchObject(
+          unsupported
+            ? {
+                available: true,
+                verification: { kind: "version_at_least", version: "1.0.0" },
+              }
+            : { available: false },
+        );
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
   it.skipIf(process.platform === "win32")(
     "checks Hermes without running its update-checking --version",
     async () => {

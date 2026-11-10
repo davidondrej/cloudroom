@@ -68,6 +68,7 @@ interface SeedIdleThreadFixtureArgs {
 interface SeedProviderThreadFixtureArgs extends SeedIdleThreadFixtureArgs {
   status?: "active" | "idle" | "starting";
   serviceTier?: ServiceTier;
+  providerId?: string;
 }
 
 afterEach(() => vi.restoreAllMocks());
@@ -92,6 +93,7 @@ function seedProviderThreadFixture(
     projectId: project.id,
     environmentId: environment.id,
     status: args.status ?? "idle",
+    ...(args.providerId === undefined ? {} : { providerId: args.providerId }),
   });
   seedThreadRuntimeState(args.harness.deps, {
     environmentId: environment.id,
@@ -916,12 +918,44 @@ describe("startup queue waits", () => {
 });
 
 describe("turn submit failure settlement", () => {
-  it("records a terminal rejection for the failed client request", async () => {
+  it.each([
+    {
+      errorCode: "provider_rpc_error",
+      errorMessage: "No active turn to steer",
+      message: "No active turn to steer",
+    },
+    // A signed-out Grok's auth failure gains its sign-in hint (#1160).
+    {
+      providerId: "acp-grok",
+      errorCode: "auth_required",
+      errorMessage: "Authentication required: no auth method id provided",
+      message:
+        "Authentication required: no auth method id provided. Run `grok login` on the machine to sign in.",
+    },
+    // Fast mode discovers models first, which fails typed.
+    {
+      providerId: "acp-grok",
+      errorCode: "auth_required",
+      errorMessage: "ACP agent is not authenticated.",
+      message:
+        "ACP agent is not authenticated. Run `grok login` on the machine to sign in.",
+    },
+    // Cursor keeps its own auth text.
+    {
+      providerId: "acp-cursor",
+      errorCode: "auth_required",
+      errorMessage: "Authentication required: run cursor-agent login",
+      message: "Authentication required: run cursor-agent login",
+    },
+  ])("records a terminal rejection for the failed client request ($providerId $errorCode)", async (failure) => {
     await withTestHarness(async (harness) => {
       const { environment, thread } = seedProviderThreadFixture({
         harness,
         status: "active",
         value: 7,
+        ...(failure.providerId === undefined
+          ? {}
+          : { providerId: failure.providerId }),
       });
       seedTurnStarted(harness.deps, {
         environmentId: environment.id,
@@ -956,8 +990,8 @@ describe("turn submit failure settlement", () => {
         throw new Error("Expected a turn.submit command");
       }
       await reportQueuedCommandError(harness, queued, {
-        errorCode: "provider_rpc_error",
-        errorMessage: "No active turn to steer",
+        errorCode: failure.errorCode,
+        errorMessage: failure.errorMessage,
       });
 
       const rejection = listEvents(harness.db, {
@@ -966,8 +1000,8 @@ describe("turn submit failure settlement", () => {
       expect(rejection).toBeDefined();
       expect(JSON.parse(rejection?.data ?? "{}")).toEqual({
         requestId: queued.command.requestId,
-        reason: "provider_rpc_error",
-        message: "No active turn to steer",
+        reason: failure.errorCode,
+        message: failure.message,
       });
     });
   });

@@ -266,10 +266,13 @@ export { sanitizeInheritedChildProcessEnv } from "@cloudroom/process-utils";
  * install folders and app bundles, so an app update that moves the CLI does
  * not break bridges. `experimental_findBrokenCliLink` names a PATH link whose
  * target is gone, for a clearer "not installed" error.
+ * `experimental_isClaudeNpmPlaceholder` spots npm's unfinished Claude Code
+ * stub (directly or behind its Windows `.cmd` shim), which it skips.
  */
 export {
   findBrokenCliLink as experimental_findBrokenCliLink,
   findCliExecutable as experimental_findCliExecutable,
+  isClaudeNpmPlaceholder as experimental_isClaudeNpmPlaceholder,
 } from "@cloudroom/process-utils";
 
 /**

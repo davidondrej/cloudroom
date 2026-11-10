@@ -237,6 +237,7 @@ describe("acpProviderDeclaration", () => {
         "grok-4.6",
         "gpt-5.6-sol",
         "claude-opus-5-5",
+        "claude-fable-5-2",
         "claude-fable-5",
         "composer-2.5",
       ],
@@ -274,6 +275,8 @@ describe("acpProviderDeclaration", () => {
       "high",
     ]);
     expect(grok.experimental_visibility).toBe("installed");
+    expect(grok.strings?.signInCommand).toBe("grok login");
+    expect(grok.experimental_modelDiscoveryRestart).toBe(true);
 
     const cursor = acpProviderDeclaration(
       KNOWN_ACP_AGENTS.find((agent) => agent.id === "acp-cursor")!,
@@ -286,6 +289,8 @@ describe("acpProviderDeclaration", () => {
       "max",
     ]);
     expect(cursor.experimental_visibility).toBeUndefined();
+    expect(cursor.strings?.signInCommand).toBeUndefined();
+    expect(cursor.experimental_modelDiscoveryRestart).toBe(true);
     expect(cursor.maintenance?.usage).toBe(true);
     expect(cursor.maintenance?.installation).toBe(true);
   });

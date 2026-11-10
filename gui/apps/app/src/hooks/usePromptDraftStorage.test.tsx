@@ -44,14 +44,39 @@ describe("usePromptDraftStorage", () => {
       result.current.setTextAndMentions("large pending draft", []);
     });
 
+    // Readable at once; React hears about typing only after the next paint.
+    expect(result.current.getCurrent().text).toBe("large pending draft");
+    expect(result.current.text).toBe("");
+    act(() => vi.advanceTimersByTime(17));
     expect(result.current.text).toBe("large pending draft");
     expect(window.localStorage.getItem(result.current.storageKey)).toBeNull();
-    act(() => vi.advanceTimersByTime(249));
+    act(() => vi.advanceTimersByTime(232));
     expect(window.localStorage.getItem(result.current.storageKey)).toBeNull();
     act(() => vi.advanceTimersByTime(1));
     expect(window.localStorage.getItem(result.current.storageKey)).toBe(
       storedDraft("large pending draft"),
     );
+  });
+
+  it("re-renders when a write lands before pending typing reaches React", () => {
+    vi.useFakeTimers();
+    const scope = uniqueScope();
+    let renders = 0;
+    const { result } = renderHook(() => {
+      renders += 1;
+      return usePromptDraftStorage(scope);
+    });
+    act(() => result.current.clear()); // an already-cleared composer
+    const rendersBefore = renders;
+
+    act(() => {
+      result.current.setTextAndMentions("sent text", []);
+      result.current.clear();
+    });
+
+    // Empty again, but React must render so the editor drops the typed text.
+    expect(renders).toBeGreaterThan(rendersBefore);
+    expect(result.current.text).toBe("");
   });
 
   it("lets an immediate write replace a pending deferred write", () => {

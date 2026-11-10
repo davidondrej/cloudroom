@@ -274,6 +274,7 @@ Messaging:
     --send-at <when>                       Dispatch at an ISO 8601 timestamp or a duration from now (30s, 10m, 2h, 7d)
     --file <path>                          CLI-local absolute path, file: URL, or uploaded file path
     --image <path>                         CLI-local absolute path, file: URL, or uploaded image path
+    --request-id <id>                      Cloud only: resend an unconfirmed message with the request ID it printed, so it isn't added twice
 
   Tell queues Cloud messages automatically. For Local threads it steers into the active
   turn. Use --mode queue for non-urgent follow-ups that can wait until the agent

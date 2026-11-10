@@ -23,6 +23,12 @@ const ACP_SERVICE_TIERS = [
 
 const DEFAULT_FORK = "none" as const;
 
+// Grok reports a signed-out CLI as auth_required (#1160): the picker offers its
+// login, then restarts discovery once the user signed in.
+function offersSignIn(agent: AcpAgentDefinition): boolean {
+  return agent.dialect === "grok" && agent.signInCommand !== undefined;
+}
+
 function acpStrings(agent: AcpAgentDefinition): PluginProviderStrings {
   const signIn = agent.signInCommand;
   return {
@@ -34,6 +40,7 @@ function acpStrings(agent: AcpAgentDefinition): PluginProviderStrings {
       signIn === undefined
         ? `Your ${agent.displayName} session expired. Sign in on the machine, then reload.`
         : `Your ${agent.displayName} session expired. Run \`${signIn}\`, then reload.`,
+    ...(offersSignIn(agent) ? { signInCommand: signIn } : {}),
     installUrl: agent.installUrl ?? "https://agentclientprotocol.com",
     ...(agent.iconTint === undefined ? {} : { iconTint: agent.iconTint }),
   };
@@ -89,10 +96,13 @@ export function acpProviderDeclaration(
                     args: [...(agent.installer.args ?? [])],
                   },
           }),
+      ...(agent.minimumVersion === undefined
+        ? {}
+        : { acpMinimumVersion: agent.minimumVersion }),
       acpLaunchSpec: { ...agent.launch },
     },
     models: { scope: "host" },
-    ...(agent.dialect === "cursor"
+    ...(agent.dialect === "cursor" || offersSignIn(agent)
       ? { experimental_modelDiscoveryRestart: true }
       : {}),
     maintenance: {

@@ -82,6 +82,7 @@ pub async fn serve(mut config: config::Config) -> Result<(), Box<dyn std::error:
     let listener = tokio::net::TcpListener::bind(config.listen).await?;
     let manager = session::Manager::open(config.clone())?;
     manager.check_storage().await;
+    runtime::warm_codex(&config).await;
     // Reconcile previous workloads before the API or storage guard can start work.
     manager.restore_all().await?;
     manager.previews.listen().await?;

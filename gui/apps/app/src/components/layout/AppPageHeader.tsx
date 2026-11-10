@@ -80,7 +80,6 @@ export function AppPageHeader({
           CHROME_ROW_CLASS,
           "relative z-10 gap-1 md:gap-2",
           usesDesktopChrome && MACOS_CHROME_CONTROL_AXIS_CLASS,
-          "transition-[padding] duration-200 ease-linear",
           shouldReserveSidebarTrigger &&
             (reserveMacosTrafficLights
               ? MACOS_COLLAPSED_TOP_LEFT_RESERVE_CLASS

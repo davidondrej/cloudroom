@@ -1986,3 +1986,46 @@ describe("claude error translation", () => {
     ]);
   });
 });
+
+describe("claude network failure classification (delta path)", () => {
+  it("labels a dead network as connection-failed, though Claude says server_error", () => {
+    const harness = createClaudeDeltaHarness();
+    const detail =
+      "API Error: Can't reach the API server — check your internet or DNS (ENOTFOUND)";
+    harness.translate(
+      sdkMessage({
+        type: "assistant",
+        error: "server_error",
+        message: {
+          id: "assistant-1",
+          content: [{ type: "text", text: detail }],
+        },
+      }),
+      { threadId: THREAD_ID },
+    );
+
+    const result = harness.translate(
+      sdkMessage({
+        type: "result",
+        subtype: "success",
+        is_error: true,
+        api_error_status: null,
+        result: detail,
+        usage: {},
+        modelUsage: {},
+      }),
+      { threadId: THREAD_ID },
+    );
+
+    expect(providerErrors(result)).toEqual([
+      expect.objectContaining({
+        detail,
+        errorInfo: {
+          category: "connection-failed",
+          providerCode: "server_error",
+          httpStatusCode: null,
+        },
+      }),
+    ]);
+  });
+});

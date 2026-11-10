@@ -115,6 +115,7 @@ export const SETTINGS_NAV_GROUPS: readonly SettingsNavGroup[] = [
       plugin("provider-acp", "ACP"),
       plugin("provider-usage", "Usage"),
       plugin("provider-retry", "Retry"),
+      plugin("internet-watch", "Internet"),
     ],
   },
   {

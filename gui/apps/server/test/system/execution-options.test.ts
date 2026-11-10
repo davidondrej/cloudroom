@@ -981,6 +981,7 @@ describe("resolveSystemExecutionOptions", () => {
         });
         expect(response.models.map((model) => model.model)).toEqual([
           "claude-opus-5-5[1m]",
+          "claude-fable-5-2",
           "claude-fable-5-1",
           "claude-opus-5[1m]",
           "claude-opus-4-8[1m]",
@@ -1114,6 +1115,7 @@ describe("resolveSystemExecutionOptions", () => {
       });
       expect(response.models.map((model) => model.model)).toEqual([
         "claude-opus-5-5[1m]",
+        "claude-fable-5-2",
         "claude-fable-5-1",
         "claude-opus-5[1m]",
         "claude-opus-4-8[1m]",

@@ -90,6 +90,7 @@ Context breakdowns are optional snapshots on `contextWindow` deltas:
 - `experimental_formatCommand`
 - `experimental_installationRunUnavailable`
 - `experimental_installationVerification`
+- `experimental_isClaudeNpmPlaceholder`
 - `experimental_isProviderBridgeRecording`
 - `experimental_npmCommand`
 - `experimental_npmGlobalInstallCommand`

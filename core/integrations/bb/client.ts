@@ -80,15 +80,15 @@ export type SessionSummary = {
 
 const rejectionMessages: Record<string, string> = {
   cursor_auth_required: "Connect your Cursor account to use Cursor in Cloud. Your prompt is saved.",
-  cursor_auth_unavailable: "Could not verify the cloud Cursor account. Check the connection and try again.",
+  cursor_auth_unavailable: "Cursor in Cloud didn't answer the login check. Cloudroom tries again by itself.",
   cursor_auth_busy: "Close Cursor sessions before changing the cloud login. Existing threads were not changed.",
   teleport_rejected: "Teleport could not validate its saved conversation or files. The source is preserved. Check the transfer details and core logs before retrying.",
   teleport_cancelled: "This transfer was cancelled. Local history is preserved.",
   teleport_running: "Cloud execution already owns this transfer. Use Stop instead of Cancel.",
   codex_auth_required: "Connect your ChatGPT subscription to use Codex in Cloud. Your prompt is saved.",
   claude_auth_required: "Connect your Claude subscription to use Claude Code in Cloud. Your prompt is saved.",
-  claude_auth_unavailable: "Could not verify the cloud Claude account. Check the CLI installation and native login, then retry.",
-  codex_auth_unavailable: "Could not verify the cloud Codex account. Check the connection and try again.",
+  claude_auth_unavailable: "Claude Code in Cloud didn't answer the login check. Cloudroom tries again by itself.",
+  codex_auth_unavailable: "Codex in Cloud didn't answer the login check. Cloudroom tries again by itself.",
   codex_usage_limit: "Your Codex usage limit is reached. Sign in with another ChatGPT account to keep working, or wait for it to reset.",
   codex_auth_busy: "Finish active Codex work before signing in. Running threads were not changed.",
   invalid_provider: "Select a valid inference provider for Pi.",

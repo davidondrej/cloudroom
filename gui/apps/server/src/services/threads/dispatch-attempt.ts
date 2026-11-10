@@ -606,6 +606,18 @@ async function runDispatchAttempt(
       if (claimed !== null) {
         noteDispatchRequeued(thread.id);
       }
+      // No plugin hold may send before the sender's own time (#999). Until
+      // then the row waits on the clock, which no recheck, plugin removal or
+      // recovery releases; the due sweep re-asks the plugin then. A plugin
+      // submission (a draft) keeps its plugin hold: the row can't store it.
+      const sendAt = payload.sendAt ?? null;
+      if (
+        args.pluginSubmission === null &&
+        sendAt !== null &&
+        sendAt > Date.now()
+      ) {
+        return waitOn({ kind: "time" }, sendAt);
+      }
       return waitOn(
         {
           kind: "plugin",

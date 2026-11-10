@@ -11,7 +11,18 @@ interface BuildClaudeProviderErrorInfoArgs {
   code?: ClaudeAssistantMessageError;
   httpStatusCode?: number | null;
   resultSubtype?: string;
+  /** The error text Claude Code showed, e.g. "Can't reach the API server … (ENOTFOUND)". */
+  detail?: string;
 }
+
+/**
+ * Claude Code reports a dead network as `server_error` with no HTTP status, so
+ * the only honest signal is its own wording: "Can't reach the API server",
+ * "Connection refused", "No internet route", "Connection dropped" and the
+ * older "Unable to connect to API", each with a socket code in parentheses.
+ */
+const CLAUDE_NETWORK_ERROR =
+  /Can't reach the API server|No internet route|Unable to connect to API|Connection dropped|Connection refused|\((?:ENOTFOUND|EAI_AGAIN|ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENETUNREACH|EHOSTUNREACH|ENETDOWN)\)/;
 
 function getProviderErrorCategoryFromHttpStatus(
   httpStatusCode: number,
@@ -116,8 +127,13 @@ export function buildClaudeProviderErrorInfo(
 ): ProviderErrorInfo | null {
   const httpStatusCode = args.httpStatusCode ?? null;
   const resultSubtype = parseClaudeResultSubtype(args.resultSubtype);
-  const category =
-    args.code !== undefined
+  const networkFailure =
+    httpStatusCode === null &&
+    args.detail !== undefined &&
+    CLAUDE_NETWORK_ERROR.test(args.detail);
+  const category = networkFailure
+    ? "connection-failed"
+    : args.code !== undefined
       ? getProviderErrorCategoryFromClaudeCode(args.code, httpStatusCode)
       : httpStatusCode !== null
         ? getProviderErrorCategoryFromHttpStatus(httpStatusCode)

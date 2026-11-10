@@ -180,6 +180,13 @@ export function useCloudroomThread(threadId: string, enabled: boolean) {
   return useQuery({ queryKey: ["cloudroom-thread", threadId], enabled, queryFn: async ({ signal }) => threadStatusSchema.parse(await (await fetchWithAppSurface(`/api/v1/cloudroom/threads/${encodeURIComponent(threadId)}`, { signal })).json()), refetchInterval: 1500 });
 }
 
+const cloudLoginsSchema = z.object({ issues: z.array(z.object({ provider: z.enum(["codex", "claude-code", "acp-cursor"]), threads: z.number(), loops: z.number() })) });
+/** Agents Cloud refused for their login, with the threads and loops waiting on each. A local call; the server reads the
+ *  website's loops at most every 15 minutes. */
+export function useCloudLogins(enabled: boolean) {
+  return useQuery({ queryKey: ["cloud-logins"], enabled, queryFn: async ({ signal }) => cloudLoginsSchema.parse(await (await fetchWithAppSurface("/api/v1/cloudroom/cloud-logins", { signal })).json()).issues, refetchInterval: 60_000 });
+}
+
 export function useSetCloudReasoning(threadId: string) {
   const client = useQueryClient();
   return useMutation({

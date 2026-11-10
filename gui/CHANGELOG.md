@@ -2,6 +2,20 @@
 
 Also on [cloudroom.dev/changelog](https://www.cloudroom.dev/changelog).
 
+## 147
+
+Every keystroke shows instantly (2026-11-10)
+
+### Changes
+
+- Typed letters appear right away, and the sidebar only redraws the rows that changed.
+- Local threads wait out an internet drop and continue on their own once you are back online.
+- When Codex signs out in a Cloud thread, a banner with Reconnect fixes it in place.
+- Claude Fable 5.2 is in the model pickers for Claude Code, Cursor, and fx.
+- The sidebar slides open smoothly, and zooming is faster.
+- Side chats show the context window ring.
+- A project you collapse in the sidebar stays collapsed.
+
 ## 146
 
 One click clears a full Cloud disk (2026-11-08)

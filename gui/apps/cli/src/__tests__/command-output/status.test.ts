@@ -92,6 +92,49 @@ describe("room-cli status command output", () => {
     );
   });
 
+  it("room-cli status marks archived threads and children", async () => {
+    vi.stubEnv("ROOM_THREAD_ID", "parent-1");
+    const thread = (id: string, archivedAt: number | null) =>
+      fixtures.makeThread({
+        id,
+        projectId: "proj-1",
+        providerId: "codex",
+        status: "idle",
+        title: id,
+        archivedAt,
+      });
+    stubServerApi({
+      "v1.threads.:id.$get": async () => thread("parent-1", 1_700_000_000_000),
+      "v1.threads.$get": async () => [
+        thread("live-1", null),
+        thread("gone-1", 1_700_000_000_000),
+      ],
+    });
+
+    await runCommand(["status", "--json"], register);
+    await runCommand(["status"], register);
+
+    const [json, ...text] = collectLogPayloads(vi.mocked(console.log));
+    const payload = JSON.parse(json);
+    expect(payload.thread.archivedAt).toBe(1_700_000_000_000);
+    expect(payload.childThreads).toEqual([
+      { id: "live-1", status: "idle", title: "live-1", archivedAt: null },
+      {
+        id: "gone-1",
+        status: "idle",
+        title: "gone-1",
+        archivedAt: 1_700_000_000_000,
+      },
+    ]);
+    expect(text).toEqual(
+      expect.arrayContaining([
+        "  Status: idle (archived)",
+        '  live-1  idle  "live-1"',
+        '  gone-1  idle (archived)  "gone-1"',
+      ]),
+    );
+  });
+
   it("room-cli status prints pinned state for pinned thread context", async () => {
     vi.stubEnv("ROOM_PROJECT_ID", "proj-1");
     vi.stubEnv("ROOM_THREAD_ID", "thread-pinned-1");

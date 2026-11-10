@@ -62,10 +62,11 @@
   on a pending interaction the Stop cancelled. A stopped parent also holds its
   children's notices and `tell`s until the user messages it; a child whose
   `tell` is held must not resend it or `queue send` it.
-  `queue list` shows these rows as `paused by Stop` (`pausedByStop: true` in
-  JSON). Send one with `queue send` or discard it with `queue delete`; do not
-  re-send it with `tell`, because the next turn resumes the queue and the
-  paused copy would send too.
+  Only rows that `queue list` shows as `paused by Stop` (`pausedByStop: true`
+  in JSON) are paused. Send one of those with `queue send` or discard it with
+  `queue delete`; do not re-send it with `tell`, because the next turn resumes
+  the queue and the paused copy would send too. A scheduled row (`time`) is
+  never paused and sends itself at its time; `queue send` would send it now.
 - If `room-cli thread stop` fails with `thread_stop_unconfirmed`, the agent may
   still be running. The thread stays `stopping`, its queue waits, and it
   settles by itself if the agent stops later. Running stop again asks the host
@@ -94,6 +95,12 @@ hostId, providerId, projectId, parentThreadId, groupBy })`.
   agent can finish its current work first. Steer is especially important for a
   wrong direction, hard stop, or critical clarification.
   Example: `room-cli thread tell <thread-id> "Stop and use approach B" --mode steer`.
+- If `tell` says Cloudroom did not confirm the message, it may already be sent:
+  check `room-cli thread show`. For a Cloud thread it prints a request ID (also
+  `requestId` in `--json`); to resend, repeat the same tell with `--request-id ID`
+  so it is not added twice. Local threads have no such ID; never resend blindly.
+  A resend with local `--file`/`--image` uploads them again under new paths, so it
+  can fail with `request_conflict`: the message was already saved; don't resend it.
 - Input sent while a turn is starting stays queued with
   `waitingOn.kind: "turn-starting"`. The `turn/started` event wakes it and
   steers it into that turn. Do not resend it.

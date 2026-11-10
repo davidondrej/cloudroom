@@ -22,6 +22,7 @@
     "bb-plugin-drafts": "workspace:*",
     "bb-plugin-github": "workspace:*",
     "bb-plugin-inline-vis": "workspace:*",
+    "bb-plugin-internet-watch": "workspace:*",
     "bb-plugin-keep-awake": "workspace:*",
     "bb-plugin-machine-ssh": "workspace:*",
     "bb-plugin-memory": "workspace:*",

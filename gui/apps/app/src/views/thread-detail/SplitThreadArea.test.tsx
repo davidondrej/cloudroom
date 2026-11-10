@@ -1724,9 +1724,12 @@ describe("SplitThreadArea", () => {
       target: { value: "note for A" },
     });
 
-    expect(
-      (screen.getByTestId("draft-thr-a") as HTMLTextAreaElement).value,
-    ).toBe("note for A");
+    // Typed text reaches React after the next paint.
+    await waitFor(() =>
+      expect(
+        (screen.getByTestId("draft-thr-a") as HTMLTextAreaElement).value,
+      ).toBe("note for A"),
+    );
     expect(
       (screen.getByTestId("draft-thr-b") as HTMLTextAreaElement).value,
     ).toBe("");

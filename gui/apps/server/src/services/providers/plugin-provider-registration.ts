@@ -122,6 +122,38 @@ function buildProviderLogoUrl(
   return iconHash === null ? path : `${path}?h=${iconHash}`;
 }
 
+/**
+ * A plugin may start its ACP agent with `process.execPath` to run a Node
+ * script. In the desktop app that is the Electron binary, and the ACP bridge
+ * removes ELECTRON_RUN_AS_NODE before it starts the agent: a second Cloudroom
+ * opens and exits with code 0 instead of running the script. The bridge
+ * applies the launch spec's env after that, so the spec puts the flag back.
+ */
+function runOwnBinaryAsNode(
+  bridgeOptions: ProviderRegistration["bridgeOptions"],
+): ProviderRegistration["bridgeOptions"] {
+  const spec = bridgeOptions.acpLaunchSpec;
+  if (
+    process.versions.electron === undefined ||
+    typeof spec !== "object" ||
+    spec === null ||
+    Array.isArray(spec) ||
+    spec.command !== process.execPath
+  ) {
+    return bridgeOptions;
+  }
+  const env =
+    typeof spec.env === "object" &&
+    spec.env !== null &&
+    !Array.isArray(spec.env)
+      ? spec.env
+      : {};
+  return {
+    ...bridgeOptions,
+    acpLaunchSpec: { ...spec, env: { ELECTRON_RUN_AS_NODE: "1", ...env } },
+  };
+}
+
 export function buildPluginProviderRegistration(args: {
   available: boolean;
   pluginId: string;
@@ -225,7 +257,9 @@ export function buildPluginProviderRegistration(args: {
   return {
     info,
     serverCapabilities,
-    bridgeOptions: declaration.experimental_bridgeOptions ?? {},
+    bridgeOptions: runOwnBinaryAsNode(
+      declaration.experimental_bridgeOptions ?? {},
+    ),
     extensionKinds: declaration.extensionKinds ?? {},
     visibility: declaration.experimental_visibility ?? "always",
     fallbackModels: projectFallbackModels(declaration),

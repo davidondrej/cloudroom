@@ -1,5 +1,6 @@
 import {
   experimental_findCliExecutable as findCliExecutable,
+  experimental_isClaudeNpmPlaceholder as isClaudeNpmPlaceholder,
   type InstructionMode,
   type ReasoningLevel,
   type RuntimePermissionScope,
@@ -174,12 +175,18 @@ export function resolveClaudeCodeExecutable(
   if (trimmedExplicitPath && trimmedExplicitPath.length > 0) {
     try {
       accessSync(trimmedExplicitPath, constants.X_OK);
-      return trimmedExplicitPath;
     } catch {
       throw new Error(
         `${CLAUDE_CODE_EXECUTABLE_ENV} must point to an executable Claude CLI path: ${trimmedExplicitPath}`,
       );
     }
+    // npm's unfinished stub can't run Claude (#1148); say so at start.
+    if (isClaudeNpmPlaceholder(trimmedExplicitPath)) {
+      throw new Error(
+        `${CLAUDE_CODE_EXECUTABLE_ENV} points to npm's unfinished Claude Code placeholder, not the Claude CLI: ${trimmedExplicitPath}. Reinstall Claude Code there, or point ${CLAUDE_CODE_EXECUTABLE_ENV} at a working claude.`,
+      );
+    }
+    return trimmedExplicitPath;
   }
 
   return findCliExecutable("claude", args.env);

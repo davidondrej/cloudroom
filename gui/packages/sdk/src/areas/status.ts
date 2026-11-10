@@ -16,6 +16,7 @@ export interface StatusGetArgs {
 }
 
 export interface StatusThreadSummary {
+  archivedAt: number | null;
   environmentId: string | null;
   id: string;
   parentThreadId: string | null;
@@ -54,6 +55,7 @@ async function fetchSilent<TValue>(
 
 function summarizeThread(thread: StatusSourceThread): StatusThreadSummary {
   return {
+    archivedAt: thread.archivedAt ?? null,
     environmentId: thread.environmentId ?? null,
     id: thread.id,
     parentThreadId: thread.parentThreadId ?? null,

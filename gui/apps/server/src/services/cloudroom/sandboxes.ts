@@ -77,6 +77,8 @@ const INSTRUCTION_FILES = [".claude/CLAUDE.md", ".codex/AGENTS.md", ".pi/agent/A
 const CONFIG_LIMIT = 45 * 1024 * 1024;
 const codexAuthPath = () => join(process.env.CODEX_HOME || join(homedir(), ".codex"), "auth.json");
 export const hasMacCodexLogin = () => access(codexAuthPath()).then(() => true, () => false);
+/** A fingerprint of this Mac's Codex login file, or null without one: it changes whenever Codex renews or signs in. */
+export const macCodexDigest = () => readFile(codexAuthPath()).then(file => createHash("sha256").update(file).digest("hex"), () => null);
 /** What `codex logout` does, for a Mac without the Codex CLI. */
 export const removeMacCodexLogin = () => rm(codexAuthPath(), { force: true });
 
@@ -1165,6 +1167,20 @@ export class SandboxDirectory {
     if (!force && Date.now() - this.copiedAt < RECHECK_MS) return Promise.resolve();
     this.copiedAt = Date.now();
     return this.withLogins(() => this.uploadMacLogins());
+  }
+
+  /** Sends this Mac's Codex login again, even unchanged: Cloud's copy may have died while this one still works.
+   *  Answers the digest it sent, or null when there was nothing to send (no login, or Disconnect stopped it). */
+  resendMacCodexLogin(): Promise<string | null> {
+    return this.withLogins(async () => {
+      if ((await this.skipLogins()).has("codex")) return null;
+      const value = await readFile(codexAuthPath(), "utf8").catch(() => null);
+      try { if (!value || !JSON.parse(value)) return null; } catch { return null; }
+      const digest = createHash("sha256").update(value).digest("hex");
+      this.uploaded.delete("codex");
+      await this.putLogin("codex", value);
+      return digest;
+    });
   }
 
   private async uploadMacLogins(): Promise<void> {

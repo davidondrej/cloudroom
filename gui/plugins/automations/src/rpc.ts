@@ -130,7 +130,7 @@ export const automationRpcContract = defineRpcContract({
   },
   // Loops their own failures paused, local and Cloud, for the sidebar's paused label (ADR 20261101-191413).
   paused_loops: {
-    input: z.null(),
+    input: z.object({ fresh: z.literal(true) }).strict().nullable(),
     output: z.object({ loops: z.array(pausedLoopSchema) }).strict(),
   },
   // Usage estimates (docs/scopes/loops.md): each schedule's rough share of the weekly Claude or Codex limit.
@@ -256,7 +256,9 @@ export function createRpcHandlers(
       const { variables } = await sdk.cloudroom.environment();
       return { names: variables.map((variable) => variable.name) };
     },
-    async paused_loops() {
+    async paused_loops(input: { fresh: true } | null) {
+      // Right after a reconnect the website retried its paused loops: read it again, not the 15-minute copy.
+      if (input?.fresh) forgetCloud();
       const now = Date.now();
       const loops = [
         ...(db ? pausedLocal(db, now) : []),

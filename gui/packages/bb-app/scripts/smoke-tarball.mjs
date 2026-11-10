@@ -38,6 +38,7 @@ const EXPECTED_RUNNING_BUILTIN_PLUGINS = [
   "keep-awake",
   "pdf-preview",
   "provider-retry",
+  "internet-watch",
   "scheduled-send",
   "secrets",
 ];

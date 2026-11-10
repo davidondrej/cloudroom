@@ -1840,7 +1840,8 @@ export function NewThreadComposer({
           mentionRanges={promptDraft.mentions}
           onChange={(text, mentions) => {
             // An edit can remove what the last error was about, so the old error must not linger.
-            setComposerError(null);
+            // Guarded: even a same-value setState can re-render the composer on every key.
+            if (composerError !== null) setComposerError(null);
             promptDraft.setTextAndMentions(text, mentions);
           }}
           onSubmit={() => void handleSubmit(options.blockedReason ?? null)}

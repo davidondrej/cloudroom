@@ -537,6 +537,9 @@ const MODEL_LIST_TIMEOUT_MS = 30_000;
 const ACP_NATIVE_REASONING_DISCOVERY_TIMEOUT_MS = 5_000;
 const AUTH_REQUIRED_MODEL_LIST_ERROR_MESSAGE =
   "ACP agent is not authenticated.";
+// `grok models` exits 0 and still lists models when signed out or expired; its
+// ACP side then advertises only the interactive `grok.com` login.
+const SIGNED_OUT_MODEL_LIST_LINE = "You are not authenticated.";
 
 function reasoningSupportFromCli(
   reasoningCli:
@@ -821,6 +824,13 @@ async function loadAgentModelCatalog(
       return null;
     },
   );
+  if (
+    stdout
+      ?.split("\n")
+      .some((line) => line.trim() === SIGNED_OUT_MODEL_LIST_LINE)
+  ) {
+    throw new AcpModelListAuthRequiredError();
+  }
   const key = JSON.stringify(listCommand);
   if (stdout === null) {
     process.stderr.write(
@@ -2770,6 +2780,9 @@ function maintenanceTarget(
         ? () => acpInstallerCommand(installer.data)
         : undefined),
     command: launchSpec?.command ?? null,
+    ...(typeof providerOptions?.["acpMinimumVersion"] === "string"
+      ? { minimumVersion: providerOptions["acpMinimumVersion"] }
+      : {}),
   };
 }
 

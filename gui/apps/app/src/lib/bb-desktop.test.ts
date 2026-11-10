@@ -19,8 +19,10 @@ const desktopInfo: BbDesktopInfo = {
 };
 
 describe("desktop chrome geometry", () => {
-  it("sizes chrome rows from the shared app chrome token", () => {
-    expect(CHROME_ROW_HEIGHT_CLASS).toBe("h-(--bb-app-chrome-row-height)");
+  it("sizes chrome rows from the shared token, zoom-locked in their own scope", () => {
+    expect(CHROME_ROW_HEIGHT_CLASS).toBe(
+      "bb-zoom h-[calc(var(--bb-app-chrome-row-height)/var(--bb-desktop-zoom,1))]",
+    );
   });
 
   it("reserves macOS traffic-light space only when lights are visible", () => {

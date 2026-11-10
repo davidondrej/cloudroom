@@ -190,7 +190,10 @@ export async function commandOutput(
 }
 
 export function versionFrom(value: string | null): string | null {
-  const candidate = value?.match(/\bv?(\d+\.\d+\.\d+[0-9A-Za-z.+-]*)/u)?.[1];
+  // Date versions such as Cursor's 2026.11.05 are only valid without the zero.
+  const candidate = value
+    ?.match(/\bv?(\d+\.\d+\.\d+[0-9A-Za-z.+-]*)/u)?.[1]
+    ?.replace(/^(\d+)\.0*(\d+)\.0*(\d+)/u, "$1.$2.$3");
   return candidate !== undefined && semverValid(candidate) !== null
     ? candidate
     : null;

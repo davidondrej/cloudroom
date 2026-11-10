@@ -155,6 +155,42 @@ pub async fn codex_models(config: &Config) -> (io::Result<Vec<Model>>, Option<Ev
     models(config, Kind::Codex).await
 }
 
+/// Codex app-servers that start together on a new CODEX_HOME race to create its SQLite state, and all but one exit
+/// with code 1 (#819): in a fresh sandbox, the login check and the model list did, failing ~1 in 3 first starts.
+/// So Core starts Codex once before it serves, only while the home has no state yet (~0.2 s).
+pub async fn warm_codex(config: &Config) {
+    let Some(profile) = config.harnesses.get(&Kind::Codex) else {
+        return;
+    };
+    let state = |entry: std::fs::DirEntry| {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        name.starts_with("state_") && name.ends_with(".sqlite")
+    };
+    if std::fs::read_dir(&profile.home).is_ok_and(|entries| entries.flatten().any(state)) {
+        return;
+    }
+    let (handle, mut events) = match Handle::spawn(config, Kind::Codex, None) {
+        Ok(spawned) => spawned,
+        Err(error) => return eprintln!("Codex warm-up could not start: {error}"),
+    };
+    let drain = tokio::spawn(async move {
+        while let Some(event) = events.recv().await {
+            if matches!(event, Event::Exited { .. }) {
+                break;
+            }
+        }
+    });
+    if let Err(error) = tokio::time::timeout(Duration::from_secs(5), codex::initialize(&handle))
+        .await
+        .unwrap_or_else(|_| Err(io::Error::new(io::ErrorKind::TimedOut, "timed out")))
+    {
+        eprintln!("Codex warm-up failed: {error}");
+    }
+    handle.request_shutdown();
+    let _ = drain.await;
+}
+
 /// Prove the harness can answer with this exact model before Teleport moves anything.
 pub async fn probe(
     config: &Config,

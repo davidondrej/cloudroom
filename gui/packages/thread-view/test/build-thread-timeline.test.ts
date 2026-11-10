@@ -2178,6 +2178,70 @@ describe("buildThreadTimelineFromEvents", () => {
     ]);
   });
 
+  it.each([
+    ["collapse", true],
+    ["collapse", false],
+    ["flat", true],
+    ["flat", false],
+  ] as const)(
+    "keeps the limited agent on a plan-limit row after a turn with work (#868, %s, nested %s)",
+    (completedTurnDisplay, includeNestedRows) => {
+      // The thread hits Claude's limit, then moves along `agents`.
+      const limitSwitch = (...agents: string[]) => {
+        const { rows } = buildThreadTimelineFromEvents({
+          acceptedClientRequestContext: EMPTY_ACCEPTED_CLIENT_REQUEST_CONTEXT,
+          contextWindowEvents: [],
+          events: [
+            turnStartedEvent({ seq: 1 }),
+            toolCallItemEvent({ seq: 2, tool: "read", type: "item/completed" }),
+            providerErrorEvent({
+              errorInfo: {
+                category: "rate-limit",
+                providerCode: null,
+                httpStatusCode: null,
+              },
+              seq: 3,
+            }),
+            turnCompletedEvent({ seq: 4, status: "failed" }),
+            ...agents.slice(1).map((to, index) =>
+              systemOperationEvent({
+                message: "Switched",
+                operation: "harness_switch",
+                metadata: { from: agents[index] ?? "", to, resend: true },
+                seq: 5 + index,
+              }),
+            ),
+          ],
+          options: {
+            completedTurnDisplay,
+            includeNestedRows,
+            includeDiagnosticOperations: false,
+            isLatestPage: true,
+            threadStatus: "idle",
+            threadName: "",
+            turnMessageDetail: "full",
+            workspaceRoot: null,
+          },
+        });
+        const [row] = collectSystemRows(rows);
+        return row && "planLimitSwitch" in row
+          ? row.planLimitSwitch
+          : undefined;
+      };
+
+      // A same-agent switch (project move, model change) or a switch back leaves the limited agent on the thread.
+      expect([
+        limitSwitch("claude-code", "codex"),
+        limitSwitch("claude-code", "claude-code"),
+        limitSwitch("claude-code", "codex", "claude-code"),
+      ]).toEqual([
+        { from: "claude-code", to: "codex", resend: true, at: 5 },
+        undefined,
+        undefined,
+      ]);
+    },
+  );
+
   it("keeps error rows in the regular timeline", () => {
     const rows = buildTimelineRows([
       turnStartedEvent({ seq: 1 }),

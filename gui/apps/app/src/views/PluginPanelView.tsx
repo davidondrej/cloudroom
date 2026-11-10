@@ -4,6 +4,9 @@ import { PluginSlotMount } from "@/components/plugin/PluginSlotMount";
 import { usePluginFrontendsSettled } from "@/lib/plugin-frontend-boot-state";
 import { usePluginSlots } from "@/lib/plugin-slots";
 
+const PLUGIN_PANEL_TOP_PADDING_CLASS =
+  "bb-zoom pt-[calc(var(--bb-app-chrome-row-height)/var(--bb-desktop-zoom,1)+1rem)] md:pt-[calc(var(--bb-app-chrome-row-height)/var(--bb-desktop-zoom,1)+1.25rem)]";
+
 interface PluginPanelViewProps {
   pluginId: string;
   panelPath: string;
@@ -26,13 +29,13 @@ export function PluginPanelView({
   if (panel === null) {
     if (!pluginsSettled) {
       return (
-        <PageShell contentClassName="pt-[calc(var(--bb-app-chrome-row-height)+1rem)] md:pt-[calc(var(--bb-app-chrome-row-height)+1.25rem)]">
+        <PageShell contentClassName={PLUGIN_PANEL_TOP_PADDING_CLASS}>
           {null}
         </PageShell>
       );
     }
     return (
-      <PageShell contentClassName="pt-[calc(var(--bb-app-chrome-row-height)+1rem)] md:pt-[calc(var(--bb-app-chrome-row-height)+1.25rem)]">
+      <PageShell contentClassName={PLUGIN_PANEL_TOP_PADDING_CLASS}>
         <EmptyStatePanel className="rounded-lg p-6 text-sm">
           This plugin panel is not available. The plugin may have been disabled
           or removed.

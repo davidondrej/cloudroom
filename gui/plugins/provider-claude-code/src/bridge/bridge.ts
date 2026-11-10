@@ -808,6 +808,15 @@ function emitForSession(
   for (const delta of deltas) {
     if (delta.kind === "provider.error" && delta.willRetry !== true) {
       const category = delta.errorInfo?.category;
+      // A Claude process that lived through a network drop can keep a dead
+      // connection pool after the network is back (anthropics/claude-code#89552),
+      // so the next turn starts a fresh process on the same session.
+      if (category === "connection-failed") {
+        threadSession.restartBeforeNextTurn = {
+          reason: "Thread session replaced after a network failure",
+          showRuntimeNote: false,
+        };
+      }
       const kind =
         category === "unauthorized"
           ? "authRequired"

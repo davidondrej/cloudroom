@@ -168,7 +168,7 @@ export function CreditsWavePlot({ wave, range }: { wave: CreditsWave; range: Ran
 
 export function CreditsUsageSection() {
   const account = useCloudroomAccount().data, accountId = account?.account?.id ?? "";
-  const [range, setRange] = useState<Range>("7d");
+  const [range, setRange] = useState<Range>("30d");
   const query = useQuery({ queryKey: creditsWaveKey(accountId), queryFn: ({ signal }) => loadWave(signal), enabled: accountId !== "", staleTime: 60_000 });
   const wave = query.data;
   if (!accountId || !wave) return null;

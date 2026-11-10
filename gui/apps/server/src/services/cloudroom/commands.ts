@@ -3,13 +3,13 @@ import { readFile, writeFile, mkdir, stat, rename, rm } from "node:fs/promises";
 import { join, win32 } from "node:path";
 import { and, desc, eq, inArray, isNull, max, notInArray } from "drizzle-orm";
 import { createThread, findLastCompletedRootStoredTurn, getAppSettings, getProject, getThread, getThreadExecutionOverride, setThreadExecutionOverride, updateThread, cloudroomThreads, cloudroomCommands, events, threads, type DbConnection, type DbQueryConnection, type DbTransaction } from "@cloudroom/db";
-import { PERSONAL_PROJECT_ID, rawThreadIdSchema, encodeClientTurnRequestIdNumber, isStandaloneBuiltinCompactCommand, promptInputSchema, reasoningLevelSchema, reconcileReasoningLevel, defaultReasoningLevel, threadQueuedMessageSchema, type Thread, type PromptInput, type ThreadEventType, type ThreadEventTurnStatus, type ThreadChangeKind, type ReasoningLevel, COMPUTER, COMPUTER_TITLE } from "@cloudroom/domain";
+import { PERSONAL_PROJECT_ID, cloudLoginName, cloudLoginProvider, type CloudLoginProvider, rawThreadIdSchema, encodeClientTurnRequestIdNumber, isStandaloneBuiltinCompactCommand, promptInputSchema, reasoningLevelSchema, reconcileReasoningLevel, defaultReasoningLevel, threadQueuedMessageSchema, type Thread, type PromptInput, type ThreadEventType, type ThreadEventTurnStatus, type ThreadChangeKind, type ReasoningLevel, COMPUTER, COMPUTER_TITLE } from "@cloudroom/domain";
 import type { CreateThreadRequest, ForkThreadRequest, SendMessageRequest, SendMessageResponse } from "@cloudroom/server-contract";
 import { z } from "zod";
 import { findCliExecutable } from "@cloudroom/process-utils";
 import { ApiError } from "../../errors.js";
 import { CloudroomClient, CloudroomConnectionError, CloudroomError, UPLOAD_PART, authRequiredMessages, type CodexAuthStatus, type SessionRecord, type VmRun, type VmRunResult } from "./client.js";
-import { CLOUD_HARNESSES, HARNESS_NAMES, appendStartProgress, endedTurn, isAcpProvider, isCloudProvider, projectFollowUp, projectInitialPrompt, projectRecord, retractStillQueuedPrompts, startStepRunning, type CloudProvider, type StartStep } from "./events.js";
+import { CLOUD_HARNESSES, HARNESS_NAMES, appendStartProgress, endedTurn, isAcpProvider, isCloudProvider, isStreamDelta, projectFollowUp, projectInitialPrompt, projectRecord, projectRecords, retractStillQueuedPrompts, startStepRunning, type CloudProvider, type StartStep } from "./events.js";
 import { mentionsOpenAISide401 } from "./codex-errors.js";
 import { codexOutage } from "./openai-status.js";
 import { buildThreadStatusChangeMetadata } from "../threads/thread-runtime-display.js";
@@ -35,7 +35,7 @@ import { helperRunning, macAccess, macAccessSupported, noteWake, previewsSetUp, 
 import { GpuApprovals } from "./gpu.js";
 import { CloudSecrets } from "./secrets.js";
 import { CodexAccounts } from "./codex-accounts.js";
-import { BUDGET_LIMIT, cancelMacCodexLogin, hasMacCodexLogin, macCodexLogin, macCodexLoginExpired, cursorKeyRejected, macCursorLogin, revokeDesktopToken, startMacCodexLogin, CLOUD_REGION, SANDBOX_PREFIX, SandboxAsleep, SandboxDirectory, sandboxThread, startRefused, type AutomationRun, type SandboxProject, type SandboxTrigger, type SandboxWakeTrigger } from "./sandboxes.js";
+import { BUDGET_LIMIT, cancelMacCodexLogin, hasMacCodexLogin, macCodexDigest, macCodexLogin, macCodexLoginExpired, cursorKeyRejected, macCursorLogin, revokeDesktopToken, startMacCodexLogin, CLOUD_REGION, SANDBOX_PREFIX, SandboxAsleep, SandboxDirectory, sandboxThread, startRefused, type AutomationRun, type SandboxProject, type SandboxTrigger, type SandboxWakeTrigger } from "./sandboxes.js";
 import type { AppDeps, LoggedWorkSessionDeps } from "../../types.js";
 import { markMinutesSent, unsentMinutes } from "./time-in-app.js";
 import { emitPluginThreadCreated } from "../plugins/plugin-thread-events.js";
@@ -190,6 +190,8 @@ export function cloudExecution(deps: Pick<AppDeps, "db">, threadId: string): "cl
 }
 
 const CHECKOUT_READ_TIMEOUT_MS = 60_000;
+// Streamed tokens wait this long and save in one transaction, like Local threads' event batches (#1248).
+const STREAM_DELTA_BATCH_MS = 100;
 
 export function isCloudThread(thread: Pick<Thread, "executionTarget">): boolean {
   return thread.executionTarget === "cloud";
@@ -1285,7 +1287,7 @@ class CloudroomService {
     const status = await this.claudeAuthStatus(action, requestId, code, state, follow);
     const connected = status.state === "connected";
     // The code sign-in finishes in the background, so a status check that first sees Claude connected also resumes.
-    if (connected && (action || !this.claudeConnected)) this.resumeClaudeStarts();
+    if (connected && (action || !this.claudeConnected)) this.resumeStarts("claude-code");
     this.claudeConnected = connected;
     return status;
   }
@@ -1301,12 +1303,12 @@ class CloudroomService {
     }
   }
 
-  /** Starts that waited for a Claude sign-in continue on their own. Later tries cover a login still reaching an awake sandbox. */
-  private resumeClaudeStarts(): void {
+  /** Starts that waited for this agent's sign-in continue on their own. Later tries cover a login still reaching an awake sandbox. */
+  private resumeStarts(providerId: CloudLoginProvider): void {
     const waiting = (threadId: string) => {
       const saved = binding(this.deps.db, threadId);
       const thread = getThread(this.deps.db, threadId);
-      return Boolean(saved && !saved.sessionId && authRequiredMessages.has(saved.error ?? "") && thread?.providerId === "claude-code" && !thread.archivedAt && !thread.deletedAt);
+      return Boolean(saved && !saved.sessionId && authRequiredMessages.has(saved.error ?? "") && thread?.providerId === providerId && !thread.archivedAt && !thread.deletedAt);
     };
     for (const { threadId } of bindings(this.deps.db)) {
       if (this.resumingStarts.has(threadId) || !waiting(threadId)) continue;
@@ -1315,10 +1317,85 @@ class CloudroomService {
         for (const wait of [0, 3_000, 10_000]) {
           await new Promise(resolve => setTimeout(resolve, wait).unref());
           if (this.stopped || !waiting(threadId)) return;
-          await this.retryStart(threadId).catch(error => this.warn("Cloud start could not continue after Claude sign-in", error, { threadId }));
+          await this.retryStart(threadId).catch(error => this.warn(`Cloud start could not continue after ${cloudLoginName(providerId)} sign-in`, error, { threadId }));
         }
       })().finally(() => this.resumingStarts.delete(threadId));
     }
+  }
+
+  /** The Mac Codex login last resent after a Cloud refusal: each one is tried once, then only a new sign-in helps. */
+  private codexTried: string | null = null;
+  private healingCodex = false;
+  /** A Codex sign-in started here on the cloud VM (not a sandbox), so the status that sees it connected resumes. */
+  private codexSigningIn = false;
+
+  /** Cloud refused Codex, but this Mac's login may still work: send it again, once per Mac login (cheap checks first, so
+   *  the banner's poll costs nothing once tried). Answers whether it was sent. */
+  private async resendMacCodex(): Promise<boolean> {
+    const digest = await macCodexDigest();
+    if (!digest || digest === this.codexTried) return false;
+    if (!await this.newThreadsInSandboxes() || await copyLogins(this.deps) !== true) return false;
+    this.codexTried = digest;
+    if (await macCodexLoginExpired()) return false;
+    const sent = await this.sandboxes.resendMacCodexLogin();
+    if (sent) this.codexTried = sent;
+    return Boolean(sent);
+  }
+
+  /** Self-heal: when Cloud refuses Codex, resend this Mac's working login and continue the waiting starts, with no click.
+   *  Skipped while Cloud uses a website Codex account: only the website renews those (ADR 0195). */
+  private healCodex(): void {
+    if (this.healingCodex) return;
+    this.healingCodex = true;
+    void (async () => {
+      const digest = await macCodexDigest();
+      if (!digest || digest === this.codexTried || await this.codexAccounts.selected()) return;
+      if (await this.resendMacCodex()) this.codexFixed();
+    })().catch(error => this.warn("This Mac's Codex login could not be resent to Cloud", error)).finally(() => { this.healingCodex = false; });
+  }
+
+  /** Codex works in Cloud again: waiting starts continue, and the banner asks the website about paused loops again. */
+  private codexFixed(): void {
+    this.loopLogins = null;
+    this.resumeStarts("codex");
+  }
+
+  private loopLogins: { at: number; counts: Partial<Record<CloudLoginProvider, number>> } | null = null;
+  /** Cloud loops the website paused because an agent's Cloud login was refused. Read at most every 15 minutes. */
+  private async loopLoginIssues(): Promise<Partial<Record<CloudLoginProvider, number>>> {
+    const now = Date.now();
+    if (this.loopLogins && now - this.loopLogins.at < 15 * 60_000) return this.loopLogins.counts;
+    const last = this.loopLogins?.counts ?? {};
+    this.loopLogins = { at: now, counts: last };
+    const listed = z.object({ automations: z.array(z.object({ enabled: z.boolean(), last_error: z.string().nullable().catch(null), last_run_at: z.string().nullable().catch(null), created_at: z.string().catch("") }).passthrough()) })
+      .safeParse(await this.sandboxes.automations({ action: "list" }).catch(() => null));
+    if (!listed.success) return last;
+    const counts: Partial<Record<CloudLoginProvider, number>> = {};
+    for (const loop of listed.data.automations) {
+      const paused = !loop.enabled && /^Paused after \d+ failed runs\./.test(loop.last_error ?? "");
+      // Like the sidebar's paused label: pauses older than a week stay quiet.
+      const recent = now - Date.parse(loop.last_run_at ?? loop.created_at) < 7 * 86_400_000;
+      const provider = paused && recent ? cloudLoginProvider((loop.last_error ?? "").replace(/^Paused after \d+ failed runs\.\s*(?:Last error: |The last run failed: )?/, "")) : null;
+      if (provider) counts[provider] = (counts[provider] ?? 0) + 1;
+    }
+    if (this.loopLogins.at === now) this.loopLogins = { at: now, counts };
+    return counts;
+  }
+
+  /** Agents Cloud refused for a missing or dead login: their threads waiting here and the Cloud loops paused (the banner).
+   *  Seeing Codex refused also tries the self-heal. */
+  async cloudLogins(): Promise<{ provider: CloudLoginProvider; threads: number; loops: number }[]> {
+    const issues = new Map<CloudLoginProvider, { provider: CloudLoginProvider; threads: number; loops: number }>();
+    const issue = (provider: CloudLoginProvider) => issues.get(provider) ?? issues.set(provider, { provider, threads: 0, loops: 0 }).get(provider)!;
+    for (const saved of bindings(this.deps.db)) {
+      if (saved.sessionId || !authRequiredMessages.has(saved.error ?? "")) continue;
+      const thread = getThread(this.deps.db, saved.threadId);
+      const provider = cloudLoginProvider(saved.error);
+      if (thread && provider && !thread.archivedAt && !thread.deletedAt) issue(provider).threads += 1;
+    }
+    for (const [provider, loops] of Object.entries(await this.loopLoginIssues()) as [CloudLoginProvider, number][]) issue(provider).loops += loops;
+    if (issues.has("codex")) this.healCodex();
+    return [...issues.values()];
   }
 
   private async claudeAuthStatus(action?: "login" | "cancel" | "complete" | "token" | "key", requestId?: string, code?: string, state?: string, follow = false) {
@@ -1348,6 +1425,16 @@ class CloudroomService {
   }
 
   async cursorAuth(action?: "login" | "cancel" | "key", requestId?: string, apiKey?: string) {
+    const status = await this.cursorAuthStatus(action, requestId, apiKey);
+    // A new Cursor login: the starts that waited for it continue by themselves.
+    if (status.state === "connected" && (action === "login" || action === "key")) {
+      this.loopLogins = null;
+      this.resumeStarts("acp-cursor");
+    }
+    return status;
+  }
+
+  private async cursorAuthStatus(action?: "login" | "cancel" | "key", requestId?: string, apiKey?: string) {
     const sandbox = await this.sandboxLogin("cursor");
     if (sandbox) {
       // Signing in copies this Mac's Cursor login; clicking is the consent, even when automatic copying is off.
@@ -1413,11 +1500,10 @@ class CloudroomService {
           reportAgentConnect("codex", "failed", { code: "copy_logins_off" });
           throw new ApiError(409, "codex_auth_unsupported", `Cloud sandboxes use this ${COMPUTER}'s Codex login. Turn on "Auth my agents in the cloud automatically" in Settings → Cloud, then try again.`);
         }
-        // Signed out or expired here, or the cloud rejected the saved login: sign in on this Mac first, then the next status check copies the new login.
-        if (sandbox.state !== "connected" && await hasMacCodexLogin() && !await macCodexLoginExpired()) {
-          await this.sandboxes.copyMacLogins(true);
-          copied = true;
-        } else startMacCodexLogin();
+        // Cloud lacks the login or refused it: resend this Mac's working one (once per login). Otherwise sign in on this
+        // Mac first, then the next status check copies the new login.
+        if (await this.resendMacCodex()) copied = true;
+        else startMacCodexLogin();
       }
       const run = macCodexLogin();
       if (run?.done && !run.error) {
@@ -1431,6 +1517,8 @@ class CloudroomService {
         return { ...status, state: "error" as const, message: run.error };
       }
       if (status.state === "connected" && (action === "login" || run?.done)) reportAgentConnect("codex", "ok", { cliPlace: cliPlace(findCliExecutable("codex")) });
+      // A new login reached Cloud: the starts that waited for it continue by themselves, with no "Continue to task".
+      if (copied && status.state === "connected") this.codexFixed();
       return status;
     }
     try {
@@ -1438,7 +1526,13 @@ class CloudroomService {
       const capabilities = await this.capabilities(client);
       if (!capabilities.codex_auth) throw new ApiError(409, "codex_auth_unsupported", "Update the cloud core to connect Codex from this app.");
       if (capabilities.codex_auth_import && action !== "cancel") await importCodexLogin(this.deps);
-      return await client.codexAuth(action, requestId);
+      const status = await client.codexAuth(action, requestId);
+      if (action) this.codexSigningIn = action === "login" && status.state === "waiting";
+      if (status.state === "connected" && (action === "login" || this.codexSigningIn)) {
+        this.codexSigningIn = false;
+        this.codexFixed();
+      }
+      return status;
     } catch (error) {
       if (error instanceof ApiError) throw error;
       throw new ApiError(error instanceof CloudroomError && error.status === 409 ? 409 : 503, error instanceof CloudroomError ? error.code ?? "codex_auth_unavailable" : "codex_auth_unavailable", publicError(error));
@@ -2478,6 +2572,8 @@ class CloudroomService {
   }
 
   private failStart(threadId: string, message: string): void {
+    // Cloud refused Codex's login: resend this Mac's working one before anyone has to click.
+    if (cloudLoginProvider(message) === "codex" && authRequiredMessages.has(message)) this.healCodex();
     this.deps.db.transaction((tx) => {
       saveCommandState(tx, threadId, `first_${threadId}`, "failed");
       saveBinding(tx, threadId, { error: message });
@@ -3241,6 +3337,23 @@ class CloudroomService {
     void (async () => {
       let projecting = false;
       let connected = false;
+      // One commit per token wrote ~55 KB each. Any other record saves the waiting tokens first, so order holds,
+      // and the cursor only moves with them, so a broken stream replays them.
+      const deltas: SessionRecord[] = [];
+      let deltaTimer: ReturnType<typeof setTimeout> | undefined;
+      const saveDeltas = () => {
+        clearTimeout(deltaTimer);
+        deltaTimer = undefined;
+        if (!deltas.length || controller.signal.aborted) return;
+        const eventTypes = projectRecords(
+          this.deps.db,
+          saved.threadId,
+          deltas.splice(0),
+        );
+        this.catchUps.delete(saved.threadId);
+        this.setConnectionIssue(saved.threadId, "replay");
+        this.notify(saved.threadId, [...new Set(eventTypes)], false);
+      };
       try {
         for await (const record of client.stream(saved.sessionId!, {
           after: saved.cursor, signal: controller.signal,
@@ -3259,6 +3372,22 @@ class CloudroomService {
           },
         })) {
           if (controller.signal.aborted) return;
+          if (isStreamDelta(record)) {
+            deltas.push(record);
+            deltaTimer ??= setTimeout(() => {
+              try {
+                saveDeltas();
+              } catch (error) {
+                this.streamBroke(saved.threadId, error);
+                this.setConnectionIssue(saved.threadId, "replay", error);
+                controller.abort();
+              }
+            }, STREAM_DELTA_BATCH_MS);
+            continue;
+          }
+          projecting = true;
+          saveDeltas();
+          projecting = false;
           if ((record.kind === "child" || record.kind === "child_thread") && record.data && typeof record.data === "object" && "id" in record.data && typeof record.data.id === "string") {
             await this.followChild(saved, client, record.data.id).catch((error: unknown) => this.warn("A Cloud child thread could not be shown", error, { threadId: saved.threadId }));
             if (controller.signal.aborted) return;
@@ -3321,6 +3450,8 @@ class CloudroomService {
           if (record.kind === "storage_warning" || record.kind === "storage_pause") this.noteDisk(saved.threadId, client, record.data);
           this.notify(saved.threadId, eventTypes, ["state", "receipt", "native_identity", "storage_warning", "storage_pause", "storage_recovered"].includes(record.kind));
         }
+        projecting = true;
+        saveDeltas();
         if (!controller.signal.aborted) {
           const ended = new CloudroomConnectionError("Cloudroom event stream ended");
           this.streamBroke(saved.threadId, ended);
@@ -3336,7 +3467,11 @@ class CloudroomService {
           const phase = !projecting && (connectionFailure(error) || (error instanceof CloudroomError && error.status !== null)) ? "stream" : "replay";
           this.setConnectionIssue(saved.threadId, phase, error);
         }
-      } finally { if (this.streams.get(saved.threadId) === controller) this.streams.delete(saved.threadId); }
+      } finally {
+        clearTimeout(deltaTimer);
+        if (this.streams.get(saved.threadId) === controller)
+          this.streams.delete(saved.threadId);
+      }
     })();
   }
 

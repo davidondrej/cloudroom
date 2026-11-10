@@ -188,8 +188,29 @@ export function retractStillQueuedPrompts(db: DbConnection, threadId: string, re
   return true;
 }
 
+/** A streamed token: Core sends one record per piece of a reply, reasoning, or command output, and it only adds events. */
+export function isStreamDelta(record: SessionRecord): boolean {
+  if (["text_delta", "thinking_delta", "tool_delta"].includes(record.kind))
+    return true;
+  const method =
+    record.kind === "native_event"
+      ? (record.data as { method?: unknown } | null)?.method
+      : undefined;
+  return typeof method === "string" && /(?:\/delta|Delta)$/.test(method);
+}
+
 export function projectRecord(db: DbConnection, threadId: string, record: SessionRecord, codexOutage = false): ThreadEvent["type"][] {
-  return db.transaction((tx) => {
+  return projectRecords(db, threadId, [record], codexOutage);
+}
+
+/** Saves records in order, in one transaction. */
+export function projectRecords(
+  db: DbConnection,
+  threadId: string,
+  records: readonly SessionRecord[],
+  codexOutage = false,
+): ThreadEvent["type"][] {
+  return db.transaction((tx) => records.flatMap((record) => {
     const saved = binding(tx, threadId);
     if (!saved || record.sequence <= saved.cursor) return [];
     if (record.session_id !== saved.sessionId) throw new Error("Cloudroom session mismatch");
@@ -495,5 +516,5 @@ export function projectRecord(db: DbConnection, threadId: string, record: Sessio
     } as AppendStoredThreadEventArgs)));
     saveBinding(tx, threadId, { cursor: record.sequence, error: null });
     return projected.map((event) => event.type);
-  });
+  }));
 }

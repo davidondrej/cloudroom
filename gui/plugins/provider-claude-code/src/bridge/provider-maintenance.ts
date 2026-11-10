@@ -19,6 +19,7 @@ import {
   experimental_formatCommand as formatCommand,
   experimental_installationRunUnavailable as installationRunUnavailable,
   experimental_installationVerification as installationVerification,
+  experimental_isClaudeNpmPlaceholder as isClaudeNpmPlaceholder,
   experimental_npmCommand as npmCommand,
   experimental_npmGlobalInstallSource as npmGlobalInstallSource,
   experimental_probeNpmGlobalPackage as probeNpmGlobalPackage,
@@ -67,6 +68,15 @@ export function claudeExecutable(): string {
     findCliExecutable("claude") ||
     "claude"
   );
+}
+
+// npm's unfinished stub isn't Claude Code: report it missing, so the
+// installer offers a working copy (#1148).
+async function resolveClaudePath(command: string): Promise<string | null> {
+  const resolved = await resolveExecutablePath(command);
+  return resolved !== null && isClaudeNpmPlaceholder(resolved)
+    ? null
+    : resolved;
 }
 
 function claudeInstallerCommand(): ProviderInstallationCommand {
@@ -192,7 +202,7 @@ async function claudeInstallation(): Promise<{
     doctorOutput,
     nativeTags,
   ] = await Promise.all([
-    resolveExecutablePath(command),
+    resolveClaudePath(command),
     commandOutput(command, ["--version"]),
     commandOutput(npmCommand(), [
       "view",
@@ -426,7 +436,7 @@ function healthResult(
 
 export async function getClaudeProviderHealth(): Promise<ProviderHealthResult> {
   const command = claudeExecutable();
-  if ((await resolveExecutablePath(command)) === null) {
+  if ((await resolveClaudePath(command)) === null) {
     return healthResult(command, "not_installed");
   }
   const version = await readCliVersion(command);
@@ -612,7 +622,7 @@ function normalizeUsage(
 
 export async function getClaudeProviderUsage(): Promise<ProviderUsageResult> {
   const command = claudeExecutable();
-  if ((await resolveExecutablePath(command)) === null) {
+  if ((await resolveClaudePath(command)) === null) {
     return { supported: true, usage: { status: "not_installed" } };
   }
   const [credentials, account] = await Promise.all([

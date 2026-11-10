@@ -555,6 +555,7 @@ vi.mock("@/hooks/useCommandSuggestions", () => ({
 }));
 
 vi.mock("@/hooks/usePromptDraftStorage", () => ({
+  flushPromptDraftNotifies: () => false,
   usePromptDraftStorage: () => mocks.promptDraft,
 }));
 

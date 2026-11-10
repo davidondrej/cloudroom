@@ -172,6 +172,10 @@ if [ -z "$BU_NAME" ] && [ -n "$ROOM_THREAD_ID" ]; then
     rm -f "$idle"
     BU_NAME=$(basename "$idle") "$venv/bin/browser-harness" --reload >/dev/null 2>&1 &
   done
+elif [ "$(printf %s "$BU_NAME" | tr -cd 'A-Za-z0-9_-')" = "$BU_NAME" ] && [ -f "$home/active/$BU_NAME" ]; then
+  # Using a per-thread daemon by its explicit name counts as use too (#1174). Other names, such as the
+  # user's own daemons or "default", never get a marker, so cleanup never stops them.
+  touch "$home/active/$BU_NAME"
 fi
 exec "$venv/bin/browser-harness" "$@"
 `;

@@ -111,6 +111,7 @@ export default async function plugin(bb: BbPluginApi) {
   const profilesDir = path.join(path.dirname(secretsDir), "profiles");
   const profilePath = (profile: string) => path.join(profilesDir, profile);
   const dropProfile = async (profile: string) => {
+    if (stillNamed("profile", profile)) return;
     try {
       await releaseProfile(profilePath(profile));
     } catch (error) {
@@ -122,19 +123,30 @@ export default async function plugin(bb: BbPluginApi) {
     await signOut(profilePath(profile));
     await fs.rm(profilePath(profile), { recursive: true, force: true });
   };
-  let accounts = z
-    .array(storedSchema)
-    .catch([])
-    .parse(await kv.get("accounts:v1"));
+  // A record this build can't read (a newer build's, or damaged) stays stored, and every login stays, instead of all
+  // accounts going at once.
+  // A stored value that isn't a list is kept, unread, as one unreadable record.
+  const raw: unknown = await kv.get("accounts:v1");
+  const records = Array.isArray(raw) ? raw : [];
+  let unreadable =
+    raw === undefined || Array.isArray(raw)
+      ? records.filter((entry) => !storedSchema.safeParse(entry).success)
+      : [raw];
+  let accounts = records.flatMap((entry) => storedSchema.safeParse(entry).data ?? []);
+  // Every secret or profile folder deletion keeps one that a kept record (readable or not, any agent) still names.
+  // Callers take the entry out of `accounts` or `unreadable` first.
+  const stillNamed = (key: "id" | "profile", value: string) =>
+    [...accounts, ...unreadable].some((entry) => Reflect.get(Object(entry), key) === value);
+  const dropSecret = async (id: string) => {
+    if (!stillNamed("id", id)) await fs.rm(secretPath(id), { force: true });
+  };
   // Codex accounts moved to the website, which renews them for Local and Cloud threads (ADR 0195). The ones this Mac
-  // kept sign in again (docs/scopes/multiple-subscriptions.md, decision 14).
+  // kept sign in again (docs/scopes/multiple-subscriptions.md, decision 14). Not while a record is unreadable.
   const moved = accounts.filter((account) => account.provider === "codex");
-  if (moved.length > 0) {
+  if (moved.length > 0 && unreadable.length === 0) {
     accounts = accounts.filter((account) => account.provider !== "codex");
-    await Promise.all(
-      moved.map((account) => fs.rm(secretPath(account.id), { force: true })),
-    );
-    await kv.set("accounts:v1", accounts);
+    await Promise.all(moved.map((account) => dropSecret(account.id)));
+    await kv.set("accounts:v1", [...accounts, ...unreadable]);
   }
   const order = z
     .object({
@@ -178,22 +190,19 @@ export default async function plugin(bb: BbPluginApi) {
     bb.server.experimental_claudeSetupToken?.(),
   );
   const adding = new Map<string, Adding>();
-  void fs.readdir(profilesDir).then(
-    (found) =>
-      Promise.all(
-        found
-          .filter((profile) => !accounts.some((entry) => entry.profile === profile))
-          .map(dropProfile),
-      ),
-    () => {},
-  );
+  // An unreadable record may own any folder, so none is dropped then.
+  if (unreadable.length === 0)
+    void fs.readdir(profilesDir).then(
+      (found) => Promise.all(found.map(dropProfile)),
+      () => {},
+    );
   let codexInUse = LOCAL;
   let codexAccounts = 0;
 
   // `connect` marks the user adding, picking, or moving an account, which connects Claude again (ADR 0327).
   const changed = async (connect = false) => {
     await Promise.all([
-      kv.set("accounts:v1", accounts),
+      kv.set("accounts:v1", [...accounts, ...unreadable]),
       kv.set("order:v1", order),
       kv.set("limits:v1", limits),
     ]);
@@ -717,11 +726,11 @@ export default async function plugin(bb: BbPluginApi) {
       return;
     }
     const removed = accounts.find((account) => account.id === id);
-    if (removed?.profile) void dropProfile(removed.profile);
     accounts = accounts.filter((account) => account.id !== id);
+    if (removed?.profile) void dropProfile(removed.profile);
     order[provider] = order[provider].filter((entry) => entry !== id);
     usage.delete(id);
-    await fs.rm(secretPath(id), { force: true });
+    await dropSecret(id);
     // Cloud can't follow the Mac's login without its approval, so the next added account goes in use.
     if (provider === "claude-code" && current(provider) === LOCAL && macNeedsCloud()) {
       const next = ids(provider).find((entry) => entry !== LOCAL);
@@ -830,12 +839,27 @@ export default async function plugin(bb: BbPluginApi) {
           .filter((view) => view.id !== LOCAL)
           .sort((a, b) => Number(a.inUse) - Number(b.inUse));
         for (const view of added) await remove(provider, view.id);
+        // Disconnect also removes local records kept because startup couldn't read every record.
+        const gone = [...accounts, ...unreadable].filter((entry) => Reflect.get(Object(entry), "provider") === provider);
+        const named = (entry: unknown, key: string) => {
+          const value: unknown = Reflect.get(Object(entry), key);
+          return typeof value === "string" && /^[\w-]+$/.test(value) ? value : null;
+        };
+        accounts = accounts.filter((entry) => entry.provider !== provider);
+        unreadable = unreadable.filter((entry) => !gone.includes(entry));
+        for (const entry of gone) {
+          const profile = named(entry, "profile");
+          const id = named(entry, "id");
+          if (profile) await dropProfile(profile);
+          if (id && id !== LOCAL) await dropSecret(id);
+        }
+        if (gone.length > 0) await changed();
         // Disconnect signs Claude out in Cloud too, so the Mac's Cloud token goes as well.
         if (provider === "claude-code") {
           macCloud = null;
           inCloud = null;
           cloudStale = false;
-          await fs.rm(secretPath(LOCAL), { force: true });
+          await dropSecret(LOCAL);
           await kv.set("mac-cloud:v1", null);
           await kv.set("cloud:v1", null);
           await kv.set("cloud-stale:v1", false);

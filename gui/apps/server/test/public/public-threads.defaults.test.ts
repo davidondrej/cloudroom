@@ -566,14 +566,40 @@ describe("public thread default routes", () => {
         retryable: false,
       },
     },
+    // A signed-out Grok needs its login, not a wait for the host (#1160).
+    {
+      providerId: "acp-grok",
+      errorCode: "auth_required",
+      status: 409,
+      body: {
+        code: "provider_auth_required",
+        message:
+          "Grok Build is not signed in on this host. Run `grok login` on the machine to sign in. Then try again.",
+        details: { providerId: "acp-grok", code: "auth_required" },
+        retryable: false,
+      },
+    },
+    // Cursor keeps base behavior.
+    {
+      providerId: "acp-cursor",
+      errorCode: "auth_required",
+      status: 503,
+      body: {
+        code: "model_catalog_unavailable",
+        message: expect.stringContaining("Unable to load acp-cursor models"),
+        details: { providerId: "acp-cursor", code: "auth_required" },
+        retryable: true,
+      },
+    },
   ])("returns an actionable catalog error ($errorCode)", async (failure) => {
+    const providerId = failure.providerId ?? "codex";
     await withTestHarness(async (harness) => {
       const { host, session } = seedHostSession(harness.deps);
       registerProviderHostRpcResponder(harness, {
         hostId: host.id,
         sessionId: session.id,
         modelErrorsByProviderId: {
-          codex: {
+          [providerId]: {
             errorCode: failure.errorCode,
             errorMessage: "Codex model discovery failed",
           },
@@ -595,7 +621,7 @@ describe("public thread default routes", () => {
         body: JSON.stringify({
           origin: "cli",
           projectId: project.id,
-          providerId: "codex",
+          providerId,
           input: [{ type: "text", text: "Create without defaults" }],
           environment: {
             type: "reuse",

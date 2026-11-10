@@ -24,6 +24,7 @@ interface StatusPayload {
     status: string;
     title: string | null;
     pinnedAt: number | null;
+    archivedAt: number | null;
     parentThreadId: string | null;
     environment: ThreadEnvironmentInfo | null;
   } | null;
@@ -31,6 +32,7 @@ interface StatusPayload {
     id: string;
     status: string;
     title: string | null;
+    archivedAt: number | null;
   }> | null;
   pendingTodos: ThreadTimelinePendingTodos | null;
   pluginsNeedingAttention: Array<{ id: string; status: string }>;
@@ -117,6 +119,7 @@ export function registerStatusCommand(
               status: status.thread.status,
               title: status.thread.title ?? null,
               pinnedAt: status.thread.pinnedAt,
+              archivedAt: status.thread.archivedAt,
               parentThreadId: status.thread.parentThreadId ?? null,
               environment: environmentInfo,
             };
@@ -127,6 +130,7 @@ export function registerStatusCommand(
                 id: thread.id,
                 status: thread.status,
                 title: thread.title ?? null,
+                archivedAt: thread.archivedAt ?? null,
               }));
             }
           }
@@ -151,7 +155,9 @@ export function registerStatusCommand(
 
         if (serverAvailable && payload.thread) {
           console.log(`Thread: ${payload.thread.id}`);
-          console.log(`  Status: ${payload.thread.status}`);
+          console.log(
+            `  Status: ${payload.thread.status}${payload.thread.archivedAt !== null ? " (archived)" : ""}`,
+          );
           if (payload.thread.title) {
             console.log(`  Title: ${payload.thread.title}`);
           }
@@ -172,7 +178,8 @@ export function registerStatusCommand(
             console.log(`Child threads: ${payload.childThreads.length}`);
             for (const mt of payload.childThreads) {
               const title = mt.title ? `"${mt.title}"` : "";
-              console.log(`  ${mt.id}  ${mt.status}  ${title}`);
+              const archived = mt.archivedAt !== null ? " (archived)" : "";
+              console.log(`  ${mt.id}  ${mt.status}${archived}  ${title}`);
             }
           }
 

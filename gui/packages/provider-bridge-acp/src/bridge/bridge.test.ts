@@ -1193,14 +1193,23 @@ describe("acp bridge", () => {
     );
   });
 
-  it("fails model/list when the list command reports ACP auth is required", async () => {
-    const authId = sendModelList({
+  it.each<{ name: string; envVars: Record<string, string>; modelLines: string }>([
+    {
+      name: "Cursor's failing auth error",
       envVars: {
         FAKE_ACP_MODEL_LIST_STDERR:
           "Error: Authentication required. Run 'agent login', pass --api-key/--auth-token, or set CURSOR_API_KEY/CURSOR_AUTH_TOKEN.",
       },
       modelLines: "",
-    });
+    },
+    {
+      name: "Grok's signed-out header on a successful list",
+      envVars: {},
+      modelLines:
+        "You are not authenticated.\n\nDefault model: grok-4.6\n\nAvailable models:\n  * grok-4.6 (default)\n  - grok-4.5",
+    },
+  ])("fails model/list as auth required on $name", async ({ envVars, modelLines }) => {
+    const authId = sendModelList({ envVars, modelLines });
 
     const response = await waitForResponse(authId);
     expect(response.error?.message).toBe("ACP agent is not authenticated.");

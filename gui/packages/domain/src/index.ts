@@ -7,6 +7,7 @@ export * from "./app-settings.js";
 export * from "./ui-preferences.js";
 export * from "./app-keybindings.js";
 export * from "./computer-name.js";
+export * from "./cloud-login.js";
 export * from "./app-theme.js";
 export * from "./background-task.js";
 export * from "./cloud-records.js";

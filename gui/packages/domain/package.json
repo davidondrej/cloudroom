@@ -34,6 +34,11 @@
       "types": "./src/computer-name.ts",
       "default": "./src/computer-name.ts"
     },
+    "./cloud-login": {
+      "source": "./src/cloud-login.ts",
+      "types": "./src/cloud-login.ts",
+      "default": "./src/cloud-login.ts"
+    },
     "./update-state": {
       "source": "./src/update-state.ts",
       "types": "./src/update-state.ts",

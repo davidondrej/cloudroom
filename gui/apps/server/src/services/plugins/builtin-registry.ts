@@ -164,6 +164,11 @@ export const BUILTIN_PLUGINS = [
     defaultEnabled: true,
   },
   {
+    name: "internet-watch",
+    pluginId: "internet-watch",
+    defaultEnabled: true,
+  },
+  {
     name: "push-notifications",
     pluginId: "push-notifications",
     defaultEnabled: true,

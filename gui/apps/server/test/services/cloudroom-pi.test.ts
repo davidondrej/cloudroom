@@ -92,6 +92,8 @@ it.each([false, true])("routes Pi through the core and replays messages without 
     expect(getThread(app.db, thread.id)?.environmentId).toBeNull();
     await expect.poll(() => app.db.select().from(events).all().filter(e => e.type === "turn/completed").length).toBe(1);
     const projected = app.db.select().from(events).all().map(e => JSON.parse(e.data));
+    // Streamed tokens wait to save together, but never after the record that follows them (#1248).
+    expect(projected.filter(e => e.type === "item/started" || e.type === "item/agentMessage/delta").map(e => e.item?.type ?? e.type)).toEqual(["agentMessage", "item/agentMessage/delta", "toolCall"]);
     expect(projected.filter(e => e.type === "turn/started")).toHaveLength(1);
     expect(projected.find(e => e.type === "client/turn/requested").execution).toMatchObject({ model, reasoningLevel: "high" });
     expect(projected.find(e => e.type === "thread/contextWindowUsage/updated").contextWindowUsage).toEqual({ usedTokens: 128, modelContextWindow: 100000, estimated: true });

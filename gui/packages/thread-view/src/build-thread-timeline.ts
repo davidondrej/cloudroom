@@ -1446,9 +1446,24 @@ function markPlanLimitSwitches(
       }
       continue;
     }
+    // Project moves and model changes record a switch to the same agent; no other agent took over.
+    if (from === to) continue;
     let before: TimelineRow | undefined;
     for (const row of flat) {
       if (row.sourceSeqEnd >= meta.seq) continue;
+      // A turn ends with its failed `turn/completed`, after the limit row, so its own rows stand for it (#868).
+      // Finished turns often come without children, so match its rows by turn.
+      if (
+        row.kind === "turn" &&
+        flat.some(
+          (other) =>
+            other.kind !== "turn" &&
+            other.turnId === row.turnId &&
+            other.sourceSeqEnd < meta.seq,
+        )
+      ) {
+        continue;
+      }
       if (
         !before ||
         row.sourceSeqEnd > before.sourceSeqEnd ||
@@ -1458,8 +1473,14 @@ function markPlanLimitSwitches(
       }
     }
     if (!before || !isPlanLimitRow(before)) continue;
+    const first = marks.get(before.id)?.from ?? from;
+    // Away and back again: the limited agent has the thread, so the card stays.
+    if (first === to) {
+      marks.delete(before.id);
+      continue;
+    }
     marks.set(before.id, {
-      from: marks.get(before.id)?.from ?? from,
+      from: first,
       to,
       resend: resend === true,
       at: meta.createdAt,

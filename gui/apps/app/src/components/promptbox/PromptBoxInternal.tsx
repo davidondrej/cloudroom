@@ -23,6 +23,7 @@ import {
   type ReactNode,
   type Ref,
 } from "react";
+import { flushSync } from "react-dom";
 import {
   commandPillDismissedRangeEnd,
   filterCommandSuggestions,
@@ -42,6 +43,7 @@ import {
   useAppCommandShortcut,
 } from "@/components/commands/AppCommandProvider";
 import { canLoadMoreCommandResults } from "@/components/promptbox/mentions/mention-menu-scroll";
+import { flushPromptDraftNotifies } from "@/hooks/usePromptDraftStorage";
 import {
   voiceUnsupportedMessage,
   type VoiceUnsupportedReason,
@@ -148,7 +150,7 @@ import {
 const PROMPTBOX_MIN_HEIGHT = 68;
 const PROMPTBOX_SELECTION_REVEAL_MARGIN = 12;
 const COMPACT_PROMPT_ACTION_BUTTON_CLASS =
-  "size-8 p-0 transition-all [&_[data-icon-root]]:size-4";
+  "size-8 p-0 transition [&_[data-icon-root]]:size-4";
 // Mobile touch: bigger round icon buttons with bolder glyphs.
 const MOBILE_PROMPT_ROUND_BUTTON_CLASS =
   "max-md:pointer-coarse:size-11 max-md:pointer-coarse:rounded-full max-md:pointer-coarse:px-0 max-md:pointer-coarse:[&_[data-icon-root]]:size-5 max-md:pointer-coarse:[&_[data-icon-root]_path]:stroke-[2]";
@@ -220,6 +222,24 @@ const COLLAPSING_GRID_CLASS =
   "grid transition-[grid-template-rows] duration-[180ms] ease-[cubic-bezier(0.16,1,0.3,1)] motion-reduce:transition-none";
 const VOICE_ACTION_TRANSITION_MS = 180;
 type VoiceActionTransition = "entering" | "active" | "exiting";
+const DRAFT_COMMAND_KEYS = new Set([
+  "Enter",
+  "Tab",
+  "Escape",
+  "ArrowUp",
+  "ArrowDown",
+]);
+
+/**
+ * Typing reaches React after paint (see usePromptDraftStorage). Keys that act on
+ * the draft catch React up first, so submit, history, and shortcuts see every letter.
+ */
+function catchUpTypedDraft(event: KeyboardEvent): void {
+  const isShortcut = (event.metaKey || event.ctrlKey) && event.key.length === 1;
+  if (isShortcut || DRAFT_COMMAND_KEYS.has(event.key)) {
+    flushSync(flushPromptDraftNotifies);
+  }
+}
 
 export const DEFAULT_COMPOSER_SCOPE = {
   kind: "new-thread",
@@ -1361,6 +1381,10 @@ export function PromptBoxInternal({
     isPointerCoarse && !allowSoftKeyboardAutoFocus;
   const formRef = useRef<HTMLFormElement>(null);
   const [pendingSubmit, setPendingSubmit] = useState(false);
+  const requestSubmit = useCallback(() => {
+    flushPromptDraftNotifies();
+    setPendingSubmit(true);
+  }, []);
   const typeaheadMenuRef = useRef<HTMLDivElement>(null);
   const reportQueuedEditorTypeaheadLayout = useContext(
     QueuedEditorTypeaheadLayoutContext,
@@ -1397,6 +1421,11 @@ export function PromptBoxInternal({
   const placeholderRef = useRef(placeholder);
   const skipEditorChangeRef = useRef(false);
   const lastSyncedEditorValueRef = useRef<PromptEditorValueKey | null>(null);
+  const appliedValuePropRef = useRef<{
+    editor: Editor;
+    text: string;
+    mentions: readonly PromptTextMention[];
+  } | null>(null);
   const triggerKeyRef = useRef("");
   const handleEditorKeyDownRef = useRef<
     (event: KeyboardEvent, isOriginalIPadHardwareEnter?: boolean) => boolean
@@ -1413,6 +1442,8 @@ export function PromptBoxInternal({
   const [activeTrigger, setActiveTrigger] = useState<ActiveTrigger | null>(
     null,
   );
+  // Last trigger syncTriggerState applied. Other paths only ever clear it.
+  const syncedTriggerRef = useRef<ActiveTrigger | null>(null);
   const [selectedSuggestionKey, setSelectedSuggestionKey] = useState<
     string | null
   >(null);
@@ -1756,6 +1787,10 @@ export function PromptBoxInternal({
         triggerKeyRef.current = nextKey;
         setSelectedSuggestionKey(null);
       }
+      // Plain typing (no @ or / menu) must not set state: even a same-value
+      // setState can re-render the whole composer on every key.
+      if (nextTrigger === null && syncedTriggerRef.current === null) return;
+      syncedTriggerRef.current = nextTrigger;
       setActiveTrigger(nextTrigger);
 
       dispatchTriggerQuery(nextTrigger);
@@ -1851,6 +1886,8 @@ export function PromptBoxInternal({
             return false;
           },
           keydown: (_view, event) => {
+            // Runs before ProseMirror's handleKeyDown, so this covers every key path.
+            catchUpTypedDraft(event);
             if (
               !_view.editable ||
               !isIPadOSWebKitDevice ||
@@ -2077,6 +2114,21 @@ export function PromptBoxInternal({
 
   useLayoutEffect(() => {
     if (!editor) return;
+    // Typing reaches the parent after paint, so this component can re-render
+    // with an older `value`. Only a new prop may overwrite the editor.
+    const applied = appliedValuePropRef.current;
+    if (
+      applied?.editor === editor &&
+      applied.text === value &&
+      applied.mentions === mentionRanges
+    ) {
+      return;
+    }
+    appliedValuePropRef.current = {
+      editor,
+      text: value,
+      mentions: mentionRanges,
+    };
     const nextValue = {
       text: value,
       mentions: mentionRanges,
@@ -2843,7 +2895,7 @@ export function PromptBoxInternal({
       captureHeightForLayoutChange: capturePromptBoxHeight,
       focusEnd,
       insertTextAtCursor,
-      submit: () => setPendingSubmit(true),
+      submit: requestSubmit,
       getTextBeforeCursor,
       playVoiceCompletionTransition,
     }),
@@ -2854,6 +2906,7 @@ export function PromptBoxInternal({
       getTextBeforeCursor,
       insertTextAtCursor,
       playVoiceCompletionTransition,
+      requestSubmit,
     ],
   );
 
@@ -3170,7 +3223,7 @@ export function PromptBoxInternal({
               selected.kind === "command" &&
               selected.origin === "builtin"
             ) {
-              setPendingSubmit(true);
+              requestSubmit();
             }
           }
           return true;
@@ -3330,8 +3383,8 @@ export function PromptBoxInternal({
       onModifierSubmit,
       postCompositionKeyDownEvents,
       resetHistorySession,
+      requestSubmit,
       selectedIndex,
-      setPendingSubmit,
       showTypeaheadMenu,
       submitModifierPrompt,
       submitPrompt,

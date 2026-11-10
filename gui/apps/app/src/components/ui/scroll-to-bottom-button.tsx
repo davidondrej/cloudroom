@@ -17,7 +17,7 @@ export function ScrollToBottomButton({
       <button
         onClick={onClick}
         className={cn(
-          "z-20 -mt-20 flex size-8 cursor-pointer items-center justify-center rounded-full border border-border bg-background transition-all duration-200 hover:bg-accent",
+          "z-20 -mt-20 flex size-8 cursor-pointer items-center justify-center rounded-full border border-border bg-background transition-[translate,opacity,visibility,background-color] duration-200 hover:bg-accent",
           visible
             ? "translate-y-0 opacity-100"
             : "pointer-events-none invisible translate-y-2 opacity-0",

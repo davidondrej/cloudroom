@@ -496,6 +496,8 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: Plugin
     return context.json(await cloudroom(deps).piApiKey(parsed.data.provider, parsed.data.apiKey));
   });
   app.get("/api/v1/cloudroom/account/codex", async context => context.json(await cloudroom(deps).codexAuth()));
+  // Agents Cloud refused for their login, with the threads and loops waiting on each (the "disconnected in Cloud" banner).
+  app.get("/api/v1/cloudroom/cloud-logins", async context => context.json({ issues: await cloudroom(deps).cloudLogins() }));
   // The Accounts plugin's Codex accounts (ADR 0195). Responses never hold tokens.
   app.post("/api/v1/cloudroom/account/codex-accounts", async context => {
     const problem = browserRequestProblem(context, deps, { requireJsonForMutation: true });

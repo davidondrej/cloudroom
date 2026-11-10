@@ -1072,12 +1072,14 @@ export function createClaudeDeltaTranslator(
     const resultFailed = isClaudeResultFailure(message);
     const failed = resultFailed || pendingHardRateLimitRejection !== undefined;
     if (failed) {
+      const resultDetail = getClaudeResultErrorDetail(message);
       const resultErrorInfo = buildClaudeProviderErrorInfo({
         ...(state.assistantError === undefined
           ? {}
           : { code: state.assistantError }),
         httpStatusCode: message.api_error_status,
         resultSubtype: message.subtype,
+        detail: resultDetail,
       });
       const errorInfo =
         pendingHardRateLimitRejection === undefined
@@ -1091,9 +1093,8 @@ export function createClaudeDeltaTranslator(
         kind: "provider.error",
         message: "Provider error",
         detail: resultFailed
-          ? getClaudeResultErrorDetail(message)
-          : (pendingHardRateLimitRejection?.detail ??
-            getClaudeResultErrorDetail(message)),
+          ? resultDetail
+          : (pendingHardRateLimitRejection?.detail ?? resultDetail),
         ...(errorInfo === null ? {} : { errorInfo }),
       });
     }

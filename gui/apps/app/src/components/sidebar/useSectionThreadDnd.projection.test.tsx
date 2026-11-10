@@ -404,7 +404,11 @@ describe("useSectionThreadDnd nest hover delay", () => {
     expect(collide(114, 48)).toEqual([]);
     act(() => vi.advanceTimersByTime(NEST_HOVER_DELAY_MS - 1));
     expect(collide(114, 48)).toEqual([]);
+    const waitingCollisionDetection = props().collisionDetection;
     act(() => vi.advanceTimersByTime(1));
+    // dnd-kit only re-runs collisions when this function changes, so the
+    // timer alone must hand it a new one or nesting waits for the next move.
+    expect(props().collisionDetection).not.toBe(waitingCollisionDetection);
     expect(collide(114, 48)).toEqual([rowDroppableId]);
 
     expect(collide(140)).toEqual([]);

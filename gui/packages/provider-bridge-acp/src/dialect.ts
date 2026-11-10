@@ -71,6 +71,8 @@ export interface AcpDialect {
     params: unknown,
   ): AcpClientRequestOutcome | undefined;
   isNotice?(text: string): boolean;
+  // Exact agent messages that mean the turn failed, mapped to a clearer error.
+  errorMessages?: Readonly<Record<string, string>>;
   stopReasons?: Readonly<Record<string, AcpStopReason>>;
   steerMeta?: string;
   resumeSession?: boolean;
@@ -438,6 +440,11 @@ export const FX_ACP_DIALECT: AcpDialect = {
   isNotice: (text) =>
     text.startsWith("[context] ") ||
     text.startsWith("skill discovery warning: "),
+  // fx reports every model API failure as just "HTTP error" and stop reason "refused".
+  errorMessages: {
+    "HTTP error":
+      "fx's model request failed (HTTP error). On Claude Fable, a known fx bug breaks the session after a turn that read files, and every later message fails. Start a new thread, or use Claude Code for Fable.",
+  },
   stopReasons: {
     refused: "refusal",
     max_output_tokens: "max_tokens",

@@ -79,6 +79,7 @@ import {
   resolveCreateThreadEnvironment,
 } from "./thread-default-policy.js";
 import { assertValidParentThread } from "./thread-parent.js";
+import { GROK_PROVIDER_ID } from "./thread-lifecycle.js";
 import {
   type ThreadCreateServiceRequestInput,
   type ThreadCreateServiceRequest,
@@ -146,6 +147,20 @@ async function loadCatalogDefaultForProvider(
       409,
       "provider_cli_missing",
       `${name} can't start on this host: its CLI, or a file it needs, is missing. Reinstall ${name}${installUrl ? ` (${installUrl})` : ""}, then try again.`,
+      { details: catalog.modelLoadError, retryable: false },
+    );
+  }
+  if (
+    catalog.modelLoadError?.code === "auth_required" &&
+    args.providerId === GROK_PROVIDER_ID
+  ) {
+    // A signed-out Grok needs its login; waiting for the host can't fix it (#1160).
+    const info = deps.providerRegistry.get(args.providerId)?.info;
+    const name = info?.displayName ?? args.providerId;
+    return new ApiError(
+      409,
+      "provider_auth_required",
+      `${name} is not signed in on this host. ${info?.strings?.signInHint ?? `Sign in to ${name} on the machine.`} Then try again.`,
       { details: catalog.modelLoadError, retryable: false },
     );
   }

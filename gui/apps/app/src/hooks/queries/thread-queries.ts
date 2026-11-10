@@ -122,8 +122,10 @@ export function didThreadDetailBootstrapRefreshAfterMount(query: {
   );
 }
 
-interface ThreadTimelineQueryOptions extends QueryOptions {
+interface ThreadTimelineQueryOptions<TData> extends QueryOptions {
   notifyOnChangeProps?: NotifyOnChangeProps;
+  /** Re-render only when this slice changes, not on every streamed row. */
+  select?: (timeline: ThreadTimelineResponse) => TData;
 }
 
 type ThreadConversationOutlineQueryOptions = QueryOptions;
@@ -958,16 +960,16 @@ export function usePrefetchThreadOnHover(threadId: string) {
   );
 }
 
-export function useThreadTimeline(
+export function useThreadTimeline<TData = ThreadTimelineResponse>(
   id: string,
-  options?: ThreadTimelineQueryOptions,
+  options?: ThreadTimelineQueryOptions<TData>,
 ) {
   const queryClient = useQueryClient();
   const enabled = (options?.enabled ?? true) && Boolean(id);
   useThreadDetailRealtimeSubscription(id, { enabled });
   useRememberRecentThread(id, enabled);
 
-  return useQuery<ThreadTimelineResponse>({
+  return useQuery<ThreadTimelineResponse, Error, TData>({
     queryKey: threadTimelineQueryKey(id),
     queryFn: async ({ signal }) => {
       const threadId = requireThreadId(id, "useThreadTimeline");
@@ -986,6 +988,7 @@ export function useThreadTimeline(
     ...(options?.staleTime === undefined
       ? {}
       : { staleTime: options.staleTime }),
+    ...(options?.select === undefined ? {} : { select: options.select }),
     retry: shouldRetryTransientReadQuery,
     retryDelay: TRANSIENT_READ_RETRY_DELAY_MS,
     placeholderData: (previousData, previousQuery) =>

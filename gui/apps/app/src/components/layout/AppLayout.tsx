@@ -31,6 +31,7 @@ import {
 import { AppBreadcrumbs } from "./AppBreadcrumbs";
 import { DesktopUpdateBanner, GitForWindowsBanner } from "./DesktopUpdateBanner";
 import { LowDiskBanner } from "./LowDiskBanner";
+import { CloudLoginBanner } from "./CloudLoginBanner";
 import { LostMacDialog } from "@/components/settings/YourComputers";
 import { resourceRouteLabelAtom } from "./resourceRouteLabelAtom";
 import { AppPageHeader, HEADER_ICON_BUTTON_CLASS } from "./AppPageHeader";
@@ -101,6 +102,7 @@ import {
   shouldShowFaviconAttentionDot,
 } from "./faviconAttentionDot";
 import { AppLayoutSidebar } from "./AppLayoutSidebar";
+import { revealedSelectedThreadKeyAtom } from "@/components/sidebar/sidebarCollapsedAtoms";
 import { CloudroomVersionMark } from "./CloudroomVersionMark";
 import {
   useAppCommandHandler,
@@ -192,10 +194,6 @@ function SidebarStateBridge({ children, minWidth }: SidebarStateBridgeProps) {
       {children}
     </SidebarProvider>
   );
-}
-
-function resetSidebarResizeDocumentState(): void {
-  document.body.classList.remove("sidebar-resizing");
 }
 
 interface SidebarTriggerOverlayProps {
@@ -430,6 +428,9 @@ export function AppLayout({ children }: AppLayoutProps) {
   const [resourceRouteLabel, setResourceRouteLabel] = useAtom(
     resourceRouteLabelAtom,
   );
+  useEffect(() => {
+    if (!threadId) store.set(revealedSelectedThreadKeyAtom, null);
+  }, [store, threadId]);
   useEffect(() => {
     setResourceRouteLabel(null);
     function handleResourceRouteLabel(event: Event) {
@@ -721,7 +722,6 @@ export function AppLayout({ children }: AppLayoutProps) {
       startXRef.current = event.clientX;
       startWidthRef.current = store.get(sidebarWidthAtom);
       liveWidthRef.current = startWidthRef.current;
-      document.body.classList.add("sidebar-resizing");
     },
     [store],
   );
@@ -737,7 +737,6 @@ export function AppLayout({ children }: AppLayoutProps) {
     });
     dispatchBrowserViewBoundsSync();
     setIsSidebarResizing(false);
-    resetSidebarResizeDocumentState();
   }, [store]);
 
   useEffect(() => {
@@ -780,7 +779,6 @@ export function AppLayout({ children }: AppLayoutProps) {
         animationFrameRef.current = null;
       }
       store.set(sidebarLiveWidthAtom, null);
-      resetSidebarResizeDocumentState();
     };
   }, [finishSidebarResize, isSidebarResizing, store]);
 
@@ -850,6 +848,10 @@ export function AppLayout({ children }: AppLayoutProps) {
                   <GitForWindowsBanner />
                   <DesktopUpdateBanner />
                   <LowDiskBanner />
+                  <CloudLoginBanner
+                    threadId={threadId ?? null}
+                    onLoops={pluginPanelMatch?.params.pluginId === "automations"}
+                  />
                   <main className="flex min-h-0 flex-1 flex-col p-4 md:p-5">
                     {children}
                   </main>
