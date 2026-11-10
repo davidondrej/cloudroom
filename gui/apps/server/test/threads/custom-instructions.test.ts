@@ -120,6 +120,7 @@ describe("agent machine context", () => {
     withTestHarness(async (harness) => {
       const { thread } = seedThreadFixture(harness);
       const { host } = seedHostSession(harness.deps, { platform: "linux" });
+      updateHost(harness.db, harness.hub, host.id, { platform: "linux" });
       const context = { threadId: thread.id, projectId: thread.projectId, hostId: host.id };
       const input = [{ type: "text" as const, text: "Continue.", mentions: [] }];
       const prepare = () => prepareCustomInstructionInput(harness.db, context, { input, inputGroups: [input] });
@@ -129,7 +130,8 @@ describe("agent machine context", () => {
       expect(first.inputGroups).toEqual([first.input]);
       updateHost(harness.db, harness.hub, host.id, { platform: "darwin" });
       expect(prepare().input.at(-1)).toMatchObject({ text: expect.stringContaining("execution OS: macOS;") });
-      expect(prepareCustomInstructionInput(harness.db, context, { input: [{ type: "text", text: "/compact", mentions: [] }] }).input).toHaveLength(1);
+      const compact = [{ type: "text" as const, text: "/compact", mentions: [{ start: 0, end: 8, resource: { kind: "command" as const, trigger: "/" as const, name: "compact", source: "command" as const, origin: "builtin" as const, label: "compact", argumentHint: null } }] }];
+      expect(prepareCustomInstructionInput(harness.db, context, { input: compact }).input).toEqual(compact);
       setAppSettings(harness.db, { ...getAppSettings(harness.db), systemPromptEnabled: false });
       expect(prepare().input).toEqual(input);
     }));

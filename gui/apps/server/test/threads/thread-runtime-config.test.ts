@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   markThreadDeleted,
   setExperiments,
+  updateHost,
   setThreadExecutionOverride,
 } from "@cloudroom/db";
 import {
@@ -178,6 +179,7 @@ describe("thread runtime config", () => {
         const { host } = seedHostSession(harness.deps, {
           id: "host-runtime-custom-acp",
         });
+        updateHost(harness.db, harness.hub, host.id, { platform: "linux" });
         const { project } = seedProjectWithSource(harness.deps, {
           hostId: host.id,
         });
@@ -228,6 +230,9 @@ describe("thread runtime config", () => {
           syncGeneratedTitle: false,
           thread,
         });
+        expect(startCommand.instructions).toContain("Thread execution: Local; execution OS: Linux;");
+        expect(startCommand.input.at(-1)).toMatchObject({ text: expect.stringContaining("execution OS: Linux;") });
+        updateHost(harness.db, harness.hub, host.id, { platform: "darwin" });
         expect(startCommand.bridgeLaunch.providerOptions).toMatchObject({
           acpLaunchSpec: expectedSpec,
         });
@@ -251,6 +256,8 @@ describe("thread runtime config", () => {
             thread,
           },
         );
+        expect(submitCommand.resumeContext.instructions).toContain("Thread execution: Local; execution OS: macOS;");
+        expect(submitCommand.input.at(-1)).toMatchObject({ text: expect.stringContaining("execution OS: macOS;") });
         expect(submitCommand.bridgeLaunch.providerOptions).toMatchObject({
           acpLaunchSpec: expectedSpec,
         });
@@ -1039,7 +1046,8 @@ describe("thread runtime config", () => {
         thread,
       });
 
-      expect(command.input).toEqual(input);
+      expect(command.input.slice(0, input.length)).toEqual(input);
+      expect(command.input.at(-1)).toMatchObject({ visibility: "agent-only", text: expect.stringContaining("Thread execution: Local;") });
       expect(command.options.promptMode).toBe("plan");
       expect(command.options.providerOptions).toMatchObject({
         claudeCodePermissionMode: "plan",

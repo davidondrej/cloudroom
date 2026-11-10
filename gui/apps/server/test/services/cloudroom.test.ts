@@ -60,6 +60,7 @@ it("reports storage before models and preserves transiently blocked messages thr
   const service = cloudroom(harness.deps);
   let level = "normal", reason = "disk_capacity", rejectPrompt = false, discoveryCalls = 0, sampleAge = 0;
   const prompts: string[] = [];
+  const promptTexts: string[] = [];
   const core = createServer(async (req, res) => {
     const json = (body: unknown, status = 200) => { res.writeHead(status, { "Content-Type": "application/json" }); res.end(JSON.stringify(body)); };
     if (req.url === "/v1/health") return json({ storage: { enabled: true, level, reason, workspace_available_bytes: level === "blocked" ? 0 : 3e9, history_available_bytes: level === "blocked" ? 0 : 3e9, workspace_total_bytes: 80e9, history_total_bytes: 80e9, sampled_at: Date.now() - sampleAge } });
@@ -69,7 +70,7 @@ it("reports storage before models and preserves transiently blocked messages thr
     if (req.method !== "POST") return json({}, 404);
     let text = ""; for await (const chunk of req) text += chunk;
     const body = JSON.parse(text), command = req.url === "/v1/sessions" ? "start" : "prompt";
-    if (command === "prompt") { prompts.push(body.request_id); if (rejectPrompt) return json({ code: "storage_blocked" }, 409); }
+    if (command === "prompt") { prompts.push(body.request_id); promptTexts.push(body.text); if (rejectPrompt) return json({ code: "storage_blocked" }, 409); }
     json({ session_id: "cr_storage", receipt: { request_id: body.request_id, command, state: "accepted", input: {} }, saving: {} }, 202);
   });
   core.listen(0, "127.0.0.1"); await once(core, "listening");
@@ -98,6 +99,7 @@ it("reports storage before models and preserves transiently blocked messages thr
     expect(response.status).toBe(201);
     const thread = await response.json();
     await expect.poll(() => prompts.length).toBe(1);
+    expect(promptTexts[0]).toContain("Thread execution: Cloud; execution OS: Linux;");
     rejectPrompt = true;
     await request(`/threads/${thread.id}/send`, { requestId: "storage-follow", mode: "auto", input: [{ type: "text", text: "Keep this follow-up", mentions: [] }] });
     await expect.poll(() => prompts.filter(id => id === "storage-follow").length).toBe(1);
@@ -110,6 +112,7 @@ it("reports storage before models and preserves transiently blocked messages thr
     rejectPrompt = false; level = "normal";
     await expect.poll(() => harness.db.select().from(cloudroomCommands).all().find(c => c.id === "storage-follow")?.state, { timeout: 5000 }).toBe("accepted");
     expect(prompts.filter(id => id === "storage-follow").length).toBeGreaterThanOrEqual(2);
+    expect(promptTexts.at(-1)).toContain("Keep this follow-up\n\n[Cloudroom machine context");
     expect(await (await request("/cloudroom")).json()).toMatchObject({ ready: true, error: null, storage: { level: "normal" } });
   } finally {
     service.stop(); core.closeAllConnections(); await new Promise<void>(resolve => core.close(() => resolve())); await harness.cleanup();
@@ -305,7 +308,7 @@ it.each(["invalid_reasoning_effort", "codex_auth_required"])("holds rejected clo
     expect(prompts).toEqual([]);
     expect((await request(`/cloudroom/threads/${saved.threadId}/retry-start`, {})).status).toBe(200);
     expect(attempts["max-start"]).toBe(2);
-    expect(prompts).toEqual([expect.objectContaining({ text: "Keep this exact prompt" })]);
+    expect(prompts).toEqual([expect.objectContaining({ text: expect.stringMatching(/^Keep this exact prompt\n\n\[Cloudroom machine context/u) })]);
     expect((await request("/threads", input)).status).toBe(201);
     expect(attempts["max-start"]).toBe(2);
     expect(prompts).toHaveLength(1);
@@ -448,7 +451,7 @@ it("routes Cloud through the core, projects conversations, pauses queues, and re
     expect(initialMessage).toBeDefined();
     expect(initialMessage?.createdAt).toBe(harness.db.select().from(cloudroomCommands).all().find(row => row.id === `first_${thread.id}`)?.createdAt);
     await expect.poll(() => ({ status: getThread(harness.db, thread.id)?.status, error: service.threadStatus(thread.id)?.error })).toEqual({ status: "active", error: null });
-    expect(records).toContainEqual(expect.objectContaining({ kind: "receipt", data: expect.objectContaining({ command: "prompt", input: { text: "first\n\nRead at least 15 sources." } }) }));
+    expect(records).toContainEqual(expect.objectContaining({ kind: "receipt", data: expect.objectContaining({ command: "prompt", input: { text: expect.stringMatching(/^first\n\nRead at least 15 sources\.\n\n\[Cloudroom machine context/u) } }) }));
     expect((await request("/threads", input)).status).toBe(201);
     expect(starts).toBe(1);
     const followUp = { requestId: "follow", mode: "auto", input: [{ type: "text", text: "follow up", mentions: [] }] };
@@ -904,7 +907,7 @@ it("keeps each queued follow-up's reasoning and rejects locked or conflicting ch
     await expect.poll(() => getThread(harness.db, thread.id)?.status).toBe("idle");
     const text = [{ type: "text", text: "queued", mentions: [] }];
     expect((await send(thread.id, { requestId: "same-launch", mode: "auto", reasoningLevel: "high", input: text })).status).toBe(200);
-    await expect.poll(() => prompts.at(-1)).toEqual({ request_id: "same-launch", text: "queued" });
+    await expect.poll(() => prompts.at(-1)).toEqual({ request_id: "same-launch", text: expect.stringMatching(/^queued\n\n\[Cloudroom machine context/u) });
     expect((await send(thread.id, { requestId: "needs-core", mode: "auto", reasoningLevel: "max", input: text })).status).toBe(409);
     expect(prompts.some((body) => (body as { request_id?: string }).request_id === "needs-core")).toBe(false);
     promptReasoning = true;
@@ -1262,7 +1265,7 @@ it.each(["codex", "pi"])("edits and cancels queued Cloud %s prompts, then steers
       return json({ session_id: sid, receipt: { request_id: body.request_id, command: "start", state: "completed", input: {} }, saving: {} }, 202);
     }
     if (holdPrompts && String(req.url).endsWith("/prompts")) return json({ error: "waking" }, 503);
-    if (String(req.url).endsWith("/edit") && body.text === "rejected edit") return json({ error: "already dispatched" }, 409);
+    if (String(req.url).endsWith("/edit") && body.text.startsWith("rejected edit\n\n[Cloudroom machine context")) return json({ error: "already dispatched" }, 409);
     if (String(req.url).endsWith("/steer") && String(body.text).includes("too late")) return json({ error: "steer target is no longer the active request", code: "request_rejected" }, 409);
     const path = String(req.url ?? "");
     const command = path.endsWith("/prompts") ? "prompt" : path.split("/").pop() ?? "unknown";
