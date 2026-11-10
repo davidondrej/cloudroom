@@ -50,6 +50,7 @@ import {
 } from "./thread-events.js";
 import { attemptDispatch } from "./dispatch-attempt.js";
 import { deliverParentSystemMessage } from "./parent-system-messages.js";
+import { withChildReportAge } from "./child-thread-notifications.js";
 import {
   createQueuedMessageClaimLostError,
   createQueuedMessageNotDeliveredError,
@@ -414,7 +415,12 @@ async function sendClaimedSystemNotice(
   }
   const queuedMessage = toThreadQueuedMessage(claimed);
   const delivered = await deliverParentSystemMessage(deps, {
-    input: queuedMessage.content,
+    childReport: notice.childReport,
+    input: withChildReportAge(
+      deps.db,
+      queuedMessage.content,
+      notice.childReport,
+    ),
     parentThread: args.thread,
     sendNow: args.sendNow,
     systemMessageKind: notice.kind,

@@ -3,6 +3,7 @@ import { useIsCompactViewport } from "@cloudroom/shared-ui/hooks/use-compact-vie
 import { Skeleton } from "@cloudroom/shared-ui/skeleton";
 import { COARSE_POINTER_HEADER_ICON_BUTTON_CLASS } from "@cloudroom/shared-ui/coarse-pointer-sizing";
 import { cn } from "@cloudroom/shared-ui/lib/utils";
+import { TopRowBrandMark } from "@/components/layout/BrandMark";
 import { CompactHeaderVersionMark } from "@/components/layout/CloudroomVersionMark";
 import { PluginHomepageSections } from "@/components/plugin/PluginHomepageSections";
 import { usePluginComposerHost } from "@/components/plugin/plugin-composer-host";
@@ -121,19 +122,25 @@ export function RootComposeSecondaryContent({
           </RootComposeCompactHome>
         </div>
       ) : (
-        <div className="@container/page min-h-0 flex-1 overflow-y-auto">
-          <div
-            className={cn(
-              "mx-auto flex w-full flex-col px-4 pb-4 pt-2",
-              ROOT_COMPOSE_MAX_WIDTH_CLASS,
-              contentClassName,
-            )}
-          >
-            {children}
-            {compactScrollContent}
-            <PluginHomepageSections />
+        <>
+          {/* A bounded pane already shows the name in its own header. */}
+          {isCompactViewport || paneContext?.isBoundedPane === true ? null : (
+            <TopRowBrandMark usesDesktopChrome={usesDesktopChrome} />
+          )}
+          <div className="@container/page min-h-0 flex-1 overflow-y-auto">
+            <div
+              className={cn(
+                "mx-auto flex w-full flex-col px-4 pb-4 pt-2",
+                ROOT_COMPOSE_MAX_WIDTH_CLASS,
+                contentClassName,
+              )}
+            >
+              {children}
+              {compactScrollContent}
+              <PluginHomepageSections />
+            </div>
           </div>
-        </div>
+        </>
       )}
       {footer ? (
         <div className="flex shrink-0 justify-center px-4 pb-[max(0.75rem,env(safe-area-inset-bottom))] pt-2">

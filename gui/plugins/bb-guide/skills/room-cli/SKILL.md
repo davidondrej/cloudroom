@@ -17,7 +17,7 @@ Confirm the server URL and project/thread before acting. Standalone `room-cli` t
 
 Cloudroom supplies `ROOM_SERVER_URL`, `ROOM_HOST_DAEMON_PORT`, `ROOM_CLI`, `ROOM_DATA_DIR`, and thread context to Local agents and thread-scoped terminals automatically. Machine-only and environment-only terminals have no current thread. `room-cli` ignores the corresponding `BB_*` settings. Use `ROOM_*` overrides only for an intentional target change; never reuse thread IDs from another instance. `"$ROOM_CLI"` selects the current runtime's executable directly in a POSIX shell.
 
-Examples here use POSIX shell syntax. On Windows the agent shell is usually PowerShell: run bare `room-cli`, read an environment variable as `$env:NAME` (`"$env:ROOM_THREAD_ID"`), separate commands with `;` instead of `&&`, and continue a line with a backtick instead of a backslash. The Windows `room-cli.cmd` launcher keeps only the first line of a `--prompt` argument. For a multiline prompt to `thread spawn`, `thread fork`, or `loop create|update`, save it as a UTF-8 file and pass `--prompt-file PATH`.
+Examples here use POSIX shell syntax. On Windows the agent shell is usually PowerShell: run bare `room-cli`, read an environment variable as `$env:NAME` (`"$env:ROOM_THREAD_ID"`), separate commands with `;` instead of `&&`, and continue a line with a backtick instead of a backslash. The Windows `room-cli.cmd` launcher keeps only the first line of a `--prompt` argument. For a multiline prompt to `thread spawn`, `thread fork`, or `loop create|update`, save it as a UTF-8 file and pass `--prompt-file PATH`. Long arguments fail (around 8 KB in PowerShell), so send a long `thread tell` message with `--message-file PATH`. On Windows, save the message as a UTF-8 file first: PowerShell 5.1 pipes turn non-ASCII text into `?`. In POSIX shells and Git Bash, `--message-file -` reads stdin.
 
 ## Common commands
 
@@ -77,6 +77,15 @@ room-cli thread spawn --project PROJECT --machine cloud --provider codex \
 `thread wait --status idle` only checks a status. Queued work may still be waiting. Check the queue and correlate the requested task with its actual output; after compaction, verify a follow-up completes, and after an attachment upload, verify the agent can read its content.
 
 Before a Local launch, inspect `room-cli machine provider-cli status MACHINE --json`. A cached model list does not prove the executable is installed or logged in. If Claude is installed but reports `Not logged in`, ask the user to run `claude` and `/login`; do not collect credentials or install another copy.
+
+## Skills the list leaves out
+
+These stay off the skill list to keep it short. Read the file when the task calls for it; each sits next to this skill's folder.
+
+- Build or change a Cloudroom plugin: `../plugin-authoring/SKILL.md`.
+- Create or improve a skill: `../skill-creator/SKILL.md`.
+- Commands that plugins add: `../plugin-commands/SKILL.md`, or `room-cli --help`.
+- Share a local server to the user's phone or another device: `room-cli connect --help`.
 
 ## References
 

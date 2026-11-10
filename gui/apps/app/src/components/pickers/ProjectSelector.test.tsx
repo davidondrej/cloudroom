@@ -44,6 +44,10 @@ describe("ProjectSelector", () => {
     expect(charlie.getAttribute("aria-selected")).toBe("false");
     expect(charlie.getAttribute("aria-current")).toBe("true");
 
+    // The current project is the first row; the rest keep their order.
+    fireEvent.keyDown(search, { key: "ArrowDown" });
+
+    expect(charlie.getAttribute("aria-selected")).toBe("true");
     fireEvent.keyDown(search, { key: "ArrowDown" });
 
     expect(alpha.getAttribute("aria-selected")).toBe("true");
@@ -153,7 +157,7 @@ describe("ProjectSelector", () => {
 
     expect(
       screen
-        .getByRole("option", { name: "Don't work in a project" })
+        .getByRole("option", { name: "No project" })
         .getAttribute("aria-current"),
     ).toBe("true");
     fireEvent.change(
@@ -164,7 +168,7 @@ describe("ProjectSelector", () => {
     expect(screen.getByText("No projects found")).toBeTruthy();
     expect(screen.getByRole("option", { name: "New project" })).toBeTruthy();
     expect(
-      screen.getByRole("option", { name: "Don't work in a project" }),
+      screen.getByRole("option", { name: "No project" }),
     ).toBeTruthy();
 
     fireEvent.click(screen.getByRole("option", { name: "New project" }));
@@ -182,7 +186,7 @@ describe("ProjectSelector", () => {
     expect(screen.queryByRole("option", { selected: true })).toBeNull();
   });
 
-  it("keeps empty-list actions in the project group", () => {
+  it("shows only the actions for an empty list", () => {
     render(
       <ProjectSelector
         projects={[]}
@@ -195,12 +199,8 @@ describe("ProjectSelector", () => {
       />,
     );
 
-    const groups = document.querySelectorAll("[cmdk-group]");
-    expect(groups).toHaveLength(1);
-    expect(groups[0]?.querySelector("[cmdk-group-heading]")?.textContent).toBe(
-      "Project",
-    );
-    expect(groups[0]?.querySelectorAll("[cmdk-item]")).toHaveLength(2);
+    expect(document.querySelectorAll("[cmdk-group]")).toHaveLength(0);
+    expect(document.querySelectorAll("[cmdk-item]")).toHaveLength(2);
     expect(screen.queryByRole("option", { selected: true })).toBeNull();
   });
 

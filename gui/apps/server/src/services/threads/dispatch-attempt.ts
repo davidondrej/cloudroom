@@ -38,6 +38,7 @@ import { z } from "zod";
 import { ApiError } from "../../errors.js";
 import type { LoggedPendingInteractionWorkSessionDeps } from "../../types.js";
 import { requirePublicProject } from "../lib/entity-lookup.js";
+import { isHostUnavailableApiError } from "../hosts/online-rpc.js";
 import {
   goneThreadEnvironmentDetails,
   throwThreadNotWritable,
@@ -300,7 +301,13 @@ export function attemptDispatch(
   args: DispatchAttemptArgs,
 ): Promise<DispatchAttemptOutcome> {
   requireNativeThread(args.thread);
-  return runDispatchAttempt(deps, args, false);
+  return runDispatchAttempt(deps, args, { thread: false, host: false });
+}
+
+/** Re-decisions one attempt has used: one per cause, never more. */
+interface Reattempts {
+  thread: boolean;
+  host: boolean;
 }
 
 import { teleportBlocked } from "../cloudroom/store.js";
@@ -308,7 +315,7 @@ import { teleportBlocked } from "../cloudroom/store.js";
 async function runDispatchAttempt(
   deps: LoggedPendingInteractionWorkSessionDeps,
   args: DispatchAttemptArgs,
-  reattempted: boolean,
+  reattempted: Reattempts,
 ): Promise<DispatchAttemptOutcome> {
   const { payload, thread } = args;
   if (teleportBlocked(deps.db, thread.id) || getThread(deps.db, thread.id)?.executionTarget === "cloud") throw new ApiError(409, "teleport_in_progress", "Local dispatch is blocked during or after Teleport.");
@@ -675,6 +682,7 @@ async function runDispatchAttempt(
   ) {
     return reattemptDispatchForThreadChange(deps, args, afterWait, reattempted);
   }
+  let saving = false;
   try {
     await sendThreadMessage(deps, {
       environment,
@@ -684,6 +692,7 @@ async function runDispatchAttempt(
       onStartSettled: args.onStartSettled,
       ...(args.retryOf !== undefined ? { retryOf: args.retryOf } : {}),
       beforeAppendInTransaction: ({ tx }) => {
+        saving = true;
         args.beforeDispatch?.();
         if (getThread(tx, thread.id)?.status !== thread.status) {
           throw new DispatchThreadStatusChangedError();
@@ -698,6 +707,31 @@ async function runDispatchAttempt(
       },
     });
   } catch (error) {
+    // The host dropped during the send's host reads, before anything was
+    // saved (#1283). Decide once more: a host still away queues the message
+    // for its reconnect, and one already back gets it now.
+    if (!saving && isHostUnavailableApiError(error)) {
+      if (!reattempted.host) {
+        return reattemptDispatchForThreadChange(
+          deps,
+          args,
+          getThread(deps.db, thread.id),
+          reattempted,
+          "host",
+        );
+      }
+      // A drain keeps its row, so only a listening sender hears "not queued".
+      if (args.source.kind !== "inline") throw error;
+      const host =
+        dispatchEnvironmentAndHost(deps, thread.environmentId).host?.name ??
+        "the host";
+      throw new ApiError(
+        502,
+        "host_unavailable",
+        `Cloudroom couldn't reach ${host} before saving this message, so it was not sent or queued. Check that ${host} is connected, then send it again.`,
+        false,
+      );
+    }
     if (!(error instanceof DispatchThreadStatusChangedError)) {
       throw error;
     }
@@ -720,19 +754,24 @@ function reattemptDispatchForThreadChange(
   deps: LoggedPendingInteractionWorkSessionDeps,
   args: DispatchAttemptArgs,
   thread: Thread | null,
-  reattempted: boolean,
+  reattempted: Reattempts,
+  cause: keyof Reattempts = "thread",
 ): Promise<DispatchAttemptOutcome> {
   if (thread === null) {
     throw new ApiError(404, "thread_not_found", "Thread not found");
   }
-  if (reattempted) {
+  if (reattempted[cause]) {
     throw new ApiError(
       500,
       "internal_error",
       `Thread ${thread.id} changed twice under one dispatch attempt`,
     );
   }
-  return runDispatchAttempt(deps, { ...args, thread }, true);
+  return runDispatchAttempt(
+    deps,
+    { ...args, thread },
+    { ...reattempted, [cause]: true },
+  );
 }
 
 /**

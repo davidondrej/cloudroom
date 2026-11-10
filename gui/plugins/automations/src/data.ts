@@ -1109,6 +1109,35 @@ export function listRunningAutomationRunsByThread(
     .all(threadId) as AutomationRunRow[];
 }
 
+/** The run a thread's `loop report` is for (ADR 0298): its running run, else the run that started the thread (its
+ *  spawn or its check script), even settled, while no other run was sent to it: a retried, recovered or continued
+ *  turn there is still that run's work (#1293). A loop's own target thread, or one several runs share, can't tell
+ *  them apart once they end, so it reports only while a run is running there. */
+export function getThreadReportRun(
+  db: Db,
+  threadId: string,
+): AutomationRunRow | null {
+  return optionalRunRow(
+    db
+      .prepare(
+        `SELECT
+           ${AUTOMATION_RUN_COLUMNS}
+         FROM automation_runs r
+         WHERE (r.thread_id = @threadId AND r.status = 'running')
+            OR (r.id IN (
+                  SELECT run_id FROM automation_thread_marks WHERE thread_id = @threadId
+                  UNION ALL
+                  SELECT run_id FROM automation_review_threads WHERE thread_id = @threadId)
+                AND NOT EXISTS (
+                  SELECT 1 FROM automation_runs o WHERE o.thread_id = @threadId AND o.id <> r.id)
+                AND NOT EXISTS (SELECT 1 FROM automations a WHERE a.target_thread_id = @threadId))
+         ORDER BY r.status = 'running' DESC, r.started_at DESC, r.id DESC
+         LIMIT 1`,
+      )
+      .get({ threadId }),
+  );
+}
+
 export function listAutomationRuns(
   db: Db,
   args: {

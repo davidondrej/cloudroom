@@ -14,7 +14,7 @@ import {
   listAllAutomations,
   listAutomationRuns,
   listAutomationsForProject,
-  listRunningAutomationRunsByThread,
+  getThreadReportRun,
   linkRunThread,
   setAutomationEnabled,
   THREAD_ARCHIVED_ERROR,
@@ -54,7 +54,7 @@ import {
   type RunAutomationInput,
   type UpdateAutomationInput,
 } from "./rpc-types.js";
-import { buildReview } from "./review.js";
+import { buildReview, reportsSchema } from "./review.js";
 import {
   computeInitialNextRunAt,
   computeNextScheduledTime,
@@ -1061,16 +1061,31 @@ export function createAutomationService(args: {
     },
 
     async report(input) {
-      const run = listRunningAutomationRunsByThread(db, input.threadId)[0];
+      const run = getThreadReportRun(db, input.threadId);
       const automation = run ? getAutomation(db, run.automationId) : null;
       if (!run || !automation)
         throw new Error(
-          "This thread is not a running loop run, so there is nothing to report.",
+          "Nothing to report: no loop run is running in this thread, and it is not the thread of one finished loop run.",
         );
       if (!bb.sdk.cloudroom || (await signedOut(bb.sdk))) {
         throw new Error(
           "Loop reports need a Cloudroom sign-in; this run's local status is still recorded.",
         );
+      }
+      // A finished run keeps the report it sent from this thread: a later turn there, such as a user's follow-up,
+      // can't flip it. Another thread of its check script can (the newest report wins). One read, only when late.
+      if (run.status !== "running") {
+        const saved = reportsSchema.parse(
+          await bb.sdk.cloudroom.automations({
+            action: "reports",
+            runs: [run.id],
+            threads: [],
+          }),
+        );
+        if (saved.reports.some((row) => row.thread_id === input.threadId))
+          throw new Error(
+            "This loop run already reported from this thread and has finished, so its report stays.",
+          );
       }
       await bb.sdk.cloudroom.automations({
         action: "report",
@@ -1084,6 +1099,13 @@ export function createAutomationService(args: {
         reason: input.reason,
         actions: input.actions,
       });
+      // A running run's idle event reloads Review; one that already settled needs this signal to show the report.
+      if (run.status !== "running")
+        publishAutomationChange(
+          bb,
+          REVIEW_SIGNAL_PROJECT,
+          "automation-runs-changed",
+        );
       return { reported: true };
     },
 

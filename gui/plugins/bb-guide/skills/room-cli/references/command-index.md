@@ -59,11 +59,12 @@ This index lists every command path that the core CLI registers. Read the task-s
 - `room-cli import pi [--days N] [--dry-run] [--json]`
 - `room-cli import hermes [--days N] [--dry-run] [--json]`
 - `room-cli import t3code [--days N] [--dry-run] [--json]`
+- `room-cli import conductor [--days N] [--path EXPORT] [--dry-run] [--json]`
 - `room-cli import share LINK [--json]`
 
 `import bb` copies every open BB thread into an idle Local thread with its full history, title, harness, and model. It forks each native session, so it sends no prompts and never changes BB. Re-running skips threads already imported.
 
-`import claude-code`, `import codex`, `import pi`, `import hermes`, and `import t3code` copy this Mac's chats from the last N days (default 30) into idle Local threads. Each forks the native session on its first new message, so the agent keeps its memory; Hermes chats come over as text instead, as hidden context for a fresh session. T3 Code chats keep T3's titles; its Claude Code and Codex chats fork, and chats from other agents come over as text. The timeline shows user and agent messages. Cloudroom's own sessions, subagents, and already-imported chats are skipped. `--dry-run` lists them without importing. The same picker is in Settings → Import chats.
+`import claude-code`, `import codex`, `import pi`, `import hermes`, `import t3code`, and `import conductor` copy this Mac's chats from the last N days (default 30) into idle Local threads. Each forks the native session on its first new message, so the agent keeps its memory; Hermes chats come over as text instead, as hidden context for a fresh session. T3 Code chats keep T3's titles; its Claude Code and Codex chats fork, and chats from other agents come over as text. `import conductor` reads Conductor's Mac database the same way; `--path` instead imports every chat in a Conductor Cloud export (its unzipped folder or the .zip). Claude Code chats keep their memory even without a transcript on this Mac, because Cloudroom rebuilds the session from Conductor's copy. The timeline shows user and agent messages. Cloudroom's own sessions, subagents, and already-imported chats are skipped. `--dry-run` lists them without importing. The same picker is in Settings → Import chats.
 
 `cloud share` makes a read-only `cloudroom.dev/s/...` link to a thread's messages (no tool output or files, secrets removed), or updates its copy; `--stop` deletes it. `import share` copies a shared thread into a new Local thread whose agent starts by reading it.
 

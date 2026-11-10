@@ -690,6 +690,27 @@ describe("Cloudroom Connect relay", () => {
     expect(seen.some((request) => request.path === "/api/v1/send")).toBe(false);
   });
 
+  it("holds new requests while a Mac's tunnel is briefly gone, then sends them on its next tunnel", async () => {
+    const mac = await register("88888888888888888888888888888888");
+    const dialMac = () => fetchRelay(`${mac.serverUrl}/__tunnel?v=2`, {
+      headers: { upgrade: "websocket", authorization: `Bearer ${mac.credential}` },
+    });
+    const dropped = (await dialMac()).webSocket!;
+    dropped.accept();
+    const cookie = await signInPhone(mac);
+    const origin = `https://${mac.handle}.${BASE}`;
+    dropped.close(1001, "network dropped");
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const read = fetchRelay(`${origin}/api/v1/projects`, { headers: { cookie } });
+    const write = fetchRelay(`${origin}/api/v1/held-send`, { method: "POST", headers: { cookie }, body: "hi" });
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    serveMac((await dialMac()).webSocket!);
+    const [got, sent] = await Promise.all([read, write]);
+    expect(got.status).toBe(200);
+    expect(sent.status).toBe(200);
+    expect(await sent.text()).toBe("mac:app:/api/v1/held-send");
+  });
+
   it("shows a page that retries by itself when a page load's tunnel drops twice", async () => {
     const mac = await register("77777777777777777777777777777777");
     const dialMac = () => fetchRelay(`${mac.serverUrl}/__tunnel?v=1`, {
@@ -710,7 +731,8 @@ describe("Cloudroom Connect relay", () => {
 
   it("shows the offline page when the Mac is not connected", async () => {
     const cookie = await signInPhone();
-    tunnel.close();
+    // A normal close: the relay does not wait for this Mac to come back.
+    tunnel.close(1000, "quit");
     await new Promise((resolve) => setTimeout(resolve, 100));
     const page = await fetchRelay(`https://${handle}.${BASE}/`, {
       headers: { ...HTML, cookie },

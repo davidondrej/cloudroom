@@ -1,13 +1,14 @@
 import Database from "better-sqlite3";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, utimes, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, symlink, utimes, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { zstdCompressSync } from "node:zlib";
-import { applyThreadLifecycleEvent, getEnvironment, getThread } from "@cloudroom/db";
+import { applyThreadLifecycleEvent, createRemoteProject, getEnvironment, getProject, getThread, listProjectSourcesByProjectIds } from "@cloudroom/db";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { importNativeSessions, listNativeSessions } from "../../src/services/cloudroom/session-import.js";
+import { importConductorExport, importNativeSessions, listConductorExport, listNativeSessions } from "../../src/services/cloudroom/session-import.js";
 import { resolveDeferredFirstTurnContext } from "../../src/services/threads/deferred-first-turn-context.js";
+import { getLastExecutionOptions } from "../../src/services/threads/thread-events.js";
 import { pendingImportFork } from "../../src/services/threads/thread-fork-history.js";
 import { sendThreadMessage } from "../../src/services/threads/thread-send.js";
 import { threadMessages } from "../../src/services/threads/thread-transcript.js";
@@ -151,18 +152,132 @@ async function t3Fixtures() {
   return { project, worktree, ids };
 }
 
-async function importAll(harness: TestAppHarness, hostId: string, wanted: Parameters<typeof importNativeSessions>[2]) {
+async function conductorFixtures() {
+  const root = await mkdtemp(join(tmpdir(), "import-conductor-"));
+  const repo = join(root, "repo");
+  const worktree = join(root, "conductor", "workspaces", "repo", "lima");
+  const claudeDir = join(root, "claude", "projects", "-lima");
+  const codexDir = join(root, "codex", "sessions", "2026", "10", "01");
+  const exportDir = join(root, "export", "conductor-export-2026-11-05");
+  for (const dir of [repo, worktree, claudeDir, codexDir, join(root, "app"), join(root, "clone"), join(root, "conductor", "workspaces", "gone", "davis"), join(root, "conductor", "workspaces", "gone", "lagos"), join(exportDir, "Cloud_ab12"), join(exportDir, "Elsewhere_cd34"), join(exportDir, "Clone_ef56")]) await mkdir(dir, { recursive: true });
+  for (const [name, value] of [["CONDUCTOR_APP_DIR", "app"], ["CLAUDE_CONFIG_DIR", "claude"], ["CODEX_HOME", "codex"], ["T3CODE_HOME", "t3"], ["PI_CODING_AGENT_DIR", "pi"], ["HERMES_HOME", "hermes"]]) {
+    vi.stubEnv(name!, join(root, value!));
+  }
+  const ids = { claude: "c0ffee00-0000-4000-8000-000000000001", cloud: "c0ffee00-0000-4000-8000-000000000002", codex: "0199a000-0000-7000-8000-0000000000c1" };
+  const lines = (items: object[]) => items.map((line) => JSON.stringify(line)).join("\n");
+  await writeFile(join(claudeDir, `${ids.claude}.jsonl`), lines([{ type: "user", entrypoint: "sdk-ts", cwd: worktree, timestamp: "2026-10-01T10:00:00.000Z", message: { role: "user", content: "The login page crashes" } }]));
+  await writeFile(join(codexDir, `rollout-2026-10-01T10-00-00-${ids.codex}.jsonl`), lines([
+    { type: "session_meta", payload: { id: ids.codex, cwd: worktree, source: "exec", originator: "codex_sdk_ts" } },
+    { type: "event_msg", payload: { type: "item_completed", item: { type: "UserMessage", content: [{ text: "Speed up the build" }] } } },
+  ]));
+  const db = new Database(join(root, "app", "conductor.db"));
+  db.exec(`CREATE TABLE repos (id TEXT PRIMARY KEY, name TEXT, root_path TEXT, remote_url TEXT);
+    CREATE TABLE workspaces (local_id TEXT PRIMARY KEY, id TEXT, repository_id TEXT, directory_name TEXT, workspace_path TEXT, state TEXT, hosting_server_url TEXT);
+    CREATE TABLE sessions (id TEXT PRIMARY KEY, workspace_id TEXT, agent_type TEXT, claude_session_id TEXT, title TEXT DEFAULT 'Untitled', is_hidden INTEGER DEFAULT 0);
+    CREATE TABLE session_messages (id TEXT PRIMARY KEY, session_id TEXT, role TEXT, content TEXT, full_message TEXT, created_at TEXT, sent_at TEXT, cancelled_at TEXT);
+    CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);`);
+  db.prepare("INSERT INTO settings VALUES ('conductor_root_path', ?)").run(join(root, "conductor"));
+  db.prepare("INSERT INTO repos VALUES ('r1', 'repo', ?, 'git@github.com:acme/repo.git')").run(repo);
+  db.prepare("INSERT INTO repos VALUES ('r2', 'clone', ?, 'https://github.com/acme/clone.git')").run(join(root, "clone"));
+  db.prepare("INSERT INTO repos VALUES ('r3', 'gone', ?, NULL)").run(join(root, "gone"));
+  db.prepare("INSERT INTO workspaces VALUES ('w5', 'w5', 'r3', 'davis', ?, 'ready', NULL)").run(join(root, "conductor", "workspaces", "gone", "davis"));
+  db.prepare("INSERT INTO workspaces VALUES ('w6', 'w6', 'r3', 'lagos', ?, 'ready', NULL)").run(join(root, "conductor", "workspaces", "gone", "lagos"));
+  const workspace = db.prepare("INSERT INTO workspaces VALUES (?, ?, 'r1', ?, ?, ?, ?)");
+  workspace.run("w1", "w1", "lima", worktree, "ready", null);
+  workspace.run("w2", "w2", "oslo", join(root, "conductor", "workspaces", "repo", "oslo"), "archived", "");
+  workspace.run("w3", "w3", "lima", null, "ready", "/");
+  workspace.run("w4", "w4", "cloud", "/home/vercel-sandbox/repo", "ready", "https://conductor.example");
+  const session = db.prepare("INSERT INTO sessions VALUES (?, ?, ?, ?, ?, ?)");
+  const message = db.prepare("INSERT INTO session_messages VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
+  const say = (sessionId: string, role: string, content: object | string | null, at: number, extra: { full?: object; sent?: string | null; cancelled?: string } = {}) => message.run(
+    `${sessionId}-${at}`, sessionId, role, typeof content === "string" || content === null ? content : JSON.stringify(content), extra.full ? JSON.stringify(extra.full) : null,
+    `2026-10-01T10:00:0${at}.000Z`, extra.sent === undefined ? `2026-10-01T10:00:0${at}.000Z` : extra.sent, extra.cancelled ?? null,
+  );
+  const reply = (text: string, model = "claude-opus-5-5") => ({ type: "assistant", parent_tool_use_id: null, message: { model, content: [{ type: "text", text }] } });
+  session.run("s1", "w1", "claude", ids.claude, "Fix login", 0);
+  say("s1", "user", "The login page crashes", 0);
+  say("s1", "assistant", { type: "assistant", message: { content: [{ type: "thinking", thinking: "THINKING_TEXT" }] } }, 1);
+  say("s1", "assistant", reply("Found the crash."), 2);
+  say("s1", "assistant", { type: "user", message: { content: [{ type: "tool_result", content: "TOOL_RESULT_TEXT" }] } }, 3);
+  say("s1", "assistant", { type: "result", result: "Found the crash." }, 4);
+  say("s1", "user", "QUEUED_TEXT", 5, { sent: null });
+  say("s1", "user", "CANCELLED_TEXT", 6, { cancelled: "2026-10-01T10:00:07.000Z" });
+  session.run("s2", "w1", "claude", "c0ffee00-0000-4000-8000-00000000000b", "Untitled", 0);
+  say("s2", "user", { type: "user", message: { role: "user", content: [{ type: "text", text: "Add a regression test" }] } }, 0);
+  say("s2", "assistant", null, 1, { full: reply("Test added.") });
+  session.run("s3", "w1", "claude", null, "Closed tab", 1);
+  say("s3", "user", "Old closed chat", 0);
+  session.run("s4", "w2", "claude", null, "Archived work", 0);
+  say("s4", "user", "Archived question", 0);
+  say("s4", "assistant", reply("Archived answer."), 1);
+  session.run("s5", "w3", "codex", ids.codex, "Faster build", 0);
+  say("s5", "user", "Speed up the build", 0);
+  say("s5", "assistant", { event: { type: "item.completed", item: { id: "i1", type: "agentMessage", text: "Build is faster.", phase: "final_answer" } }, thread_id: ids.codex }, 1);
+  session.run("s11", "w5", "claude", null, "Repo folder gone", 0);
+  say("s11", "user", "Fix the footer", 0);
+  say("s11", "assistant", reply("Fixed it."), 1);
+  session.run("s12", "w6", "claude", null, "Second worktree", 0);
+  say("s12", "user", "Fix the header", 0);
+  say("s12", "assistant", reply("Fixed that too."), 1);
+  session.run("s13", "w3", "gemini", null, "Unknown agent", 0);
+  say("s13", "user", "Tidy the docs", 0);
+  say("s13", "assistant", reply("Tidied them."), 1);
+  session.run("s10", "w3", "cursor", null, "Cursor chat", 0);
+  say("s10", "user", "Rename the app", 0);
+  say("s10", "assistant", reply("Renamed it."), 1);
+  session.run("s9", "w1", "claude", "c0ffee00-0000-4000-8000-00000000000c", "Compacted chat", 0);
+  say("s9", "user", "A very long chat", 0);
+  say("s9", "assistant", { type: "system", subtype: "compact_boundary", compact_metadata: { pre_tokens: 1_000_000 } }, 1);
+  say("s9", "assistant", reply("Still going."), 2);
+  session.run("s8", "w3", "codex", "0199a000-0000-7000-8000-0000000000c2", "No Codex here", 0);
+  say("s8", "user", "Tidy the imports", 0);
+  say("s8", "assistant", { type: "item.completed", item: { id: "i1", type: "agent_message", text: "Imports are tidy." } }, 1);
+  session.run("s6", "w4", "claude", null, "Cloud chat", 0);
+  say("s6", "user", "Cloud only", 0);
+  session.run("s7", "w1", "claude", null, "Untitled", 0);
+  db.close();
+
+  const chat = (title: string | null, messages: object[]) => JSON.stringify({ title, created_at: "2026-10-04T03:00:00.000Z", archived_at: null, agent: "claude", model: "opus-5-5-1m", workspace: "Cloud", messages });
+  const agent = (at: number, content: object) => ({ role: "agent", sender: null, created_at: `2026-10-04T03:00:0${at}.000Z`, content });
+  const user = (at: number, sender: string, text: string, attachments: string[] = []) => ({ role: "user", sender, created_at: `2026-10-04T03:00:0${at}.000Z`, content: { text, attachments } });
+  await writeFile(join(exportDir, "user.json"), JSON.stringify({ name: "Maty", email: "maty@example.com" }));
+  await writeFile(join(exportDir, "Cloud_ab12", "workspace.json"), JSON.stringify({ name: "Cloud", repo_url: "https://github.com/acme/repo", organization: "Acme" }));
+  await writeFile(join(exportDir, "Cloud_ab12", `2026-10-04_Check_the_sandbox_${ids.cloud}.json`), chat("Check the sandbox", [
+    user(0, "Maty", "@⟦shot (1).png⟧(.context%2Fattachments%2Fassets%2Fa1%2Fshot%20(1).png) Check the sandbox", ["Cloud_ab12/attachments/chat/18fc3eb2_shot (1).png", "Cloud_ab12/attachments/chat/c8e843cd_logs.txt"]),
+    agent(1, { type: "system", subtype: "init", cwd: "/home/vercel-sandbox/repo", session_id: ids.cloud }),
+    agent(2, { type: "assistant", message: { model: "claude-opus-5-5", content: [{ type: "thinking", thinking: "THINKING_TEXT", signature: "sig" }, { type: "tool_use", id: "toolu_done", name: "Bash", input: { command: "uname -a" } }] } }),
+    agent(3, { type: "user", message: { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_done", content: "TOOL_RESULT_TEXT" }] } }),
+    agent(4, reply("Sandbox is fine.")),
+    agent(5, { type: "result", subtype: "success", result: "Sandbox is fine." }),
+    user(6, "Teammate", "Also check the logs"),
+    agent(7, reply("Logs are clean.")),
+    agent(8, { type: "assistant", message: { content: [{ type: "tool_use", id: "toolu_cut_off", name: "Bash", input: {} }] } }),
+  ]));
+  await writeFile(join(exportDir, "Cloud_ab12", `2026-10-04_Fix_login_${ids.claude}.json`), chat("Fix login", [user(0, "Maty", "The login page crashes")]));
+  await writeFile(join(exportDir, "Cloud_ab12", "2026-10-04_Untitled_c0ffee00-0000-4000-8000-00000000000e.json"), chat(null, []));
+  await writeFile(join(root, "outside.json"), chat("Outside", [user(0, "Maty", "OUTSIDE_TEXT")]));
+  await symlink(join(root, "outside.json"), join(exportDir, "Cloud_ab12", "2026-10-04_Link_c0ffee00-0000-4000-8000-00000000000f.json"));
+  await writeFile(join(exportDir, "Elsewhere_cd34", "workspace.json"), JSON.stringify({ name: "Elsewhere", repo_url: "https://github.com/acme/elsewhere" }));
+  await writeFile(join(exportDir, "Elsewhere_cd34", "2026-10-05_Untitled_c0ffee00-0000-4000-8000-000000000010.json"), chat(null, [user(0, "Maty", "Plan the launch")]));
+  await writeFile(join(exportDir, "Clone_ef56", "workspace.json"), JSON.stringify({ name: "Clone", repo_url: "https://github.com/acme/clone" }));
+  await writeFile(join(exportDir, "Clone_ef56", "2026-10-06_Use_my_clone_c0ffee00-0000-4000-8000-000000000011.json"), chat("Use my clone", [user(0, "Maty", "Use my clone")]));
+  return { root, repo, worktree, ids, exportDir: dirname(exportDir) };
+}
+
+async function importAll(harness: TestAppHarness, hostId: string, wanted: Parameters<typeof importNativeSessions>[2] | (() => ReturnType<typeof importNativeSessions>), installed: (agent: string) => boolean = () => true) {
   let importing = true;
   const attaching = (async () => {
     while (importing) {
-      const queued = await waitForQueuedCommand(harness, ({ command }) => command.type === "environment.attach" || command.type === "project.inspect", 100).catch(() => null);
+      const queued = await waitForQueuedCommand(harness, ({ command }) => command.type === "environment.attach" || command.type === "project.inspect" || command.type === "provider.installation.status" || command.type === "provider.health", 100).catch(() => null);
+      if (queued?.command.type === "provider.health") await reportQueuedCommandSuccess(harness, queued, { supported: true, health: { status: "ready", statusMessage: null, accountEmail: null, planLabel: null, installedVersion: null, minimumSupportedVersion: null, canInstall: false, canUpdate: false, loginCommand: null } });
       if (queued?.command.type === "project.inspect") await reportQueuedCommandSuccess(harness, queued, { path: queued.command.path, gitRemoteUrl: null });
+      if (queued?.command.type === "provider.installation.status") await reportQueuedCommandSuccess(harness, queued, { executableName: queued.command.providerId, executablePath: null, installed: installed(queued.command.providerId), installSource: installed(queued.command.providerId) ? "external" : "notInstalled", currentVersion: null, latestVersion: null, minimumSupportedVersion: null, npmPackageName: null, npmGlobalPackageVersion: null, installAction: null, needsUpdate: false, versionUnsupported: false });
       if (queued?.command.type === "environment.attach") {
         await reportQueuedCommandSuccess(harness, queued, { path: queued.command.path, isGitRepo: true, isWorktree: false, branchName: "main", defaultBranch: "main", transcript: [] });
       }
     }
   })();
-  const result = await importNativeSessions(harness.deps, hostId, wanted);
+  const result = await (typeof wanted === "function" ? wanted() : importNativeSessions(harness.deps, hostId, wanted));
   importing = false;
   await attaching;
   return result;
@@ -296,6 +411,103 @@ describe("Pi, Hermes, and T3 Code chat import", () => {
       expect(cursor.sent).not.toContain("SYSTEM_TEXT");
 
       expect(await listNativeSessions(harness.deps)).toEqual([]);
+    });
+  }, 60_000);
+
+  it("imports Conductor chats from its database and its Cloud export, each chat once", async () => {
+    const { root, repo, worktree, ids, exportDir } = await conductorFixtures();
+    await withTestHarness(async (harness) => {
+      const { host } = seedHostSession(harness.deps, { id: "host-import-conductor" });
+      expect((await listNativeSessions(harness.deps)).map(({ harness: app, id, title, cwd }) => [app, id, title, cwd]).sort((a, b) => a[1]!.localeCompare(b[1]!))).toEqual([
+        ["conductor", "s1", "Fix login", worktree],
+        ["conductor", "s10", "Cursor chat", worktree],
+        ["conductor", "s11", "Repo folder gone", join(root, "conductor", "workspaces", "gone", "davis")],
+        ["conductor", "s12", "Second worktree", join(root, "conductor", "workspaces", "gone", "lagos")],
+        ["conductor", "s13", "Unknown agent", worktree],
+        ["conductor", "s2", "Add a regression test", worktree],
+        ["conductor", "s3", "Closed tab", worktree],
+        ["conductor", "s4", "Archived work", repo],
+        ["conductor", "s5", "Faster build", worktree],
+        ["conductor", "s8", "No Codex here", worktree],
+        ["conductor", "s9", "Compacted chat", worktree],
+      ]);
+
+      const result = await importAll(harness, host.id, ["s1", "s2", "s3", "s4", "s5"].map((id) => ({ harness: "conductor" as const, id })));
+      expect(result.skipped).toEqual([]);
+      const threadId = (id: string, from = result) => from.imported.find((entry) => entry.id === id)!.threadId;
+      const imported = (id: string, from = result) => {
+        const thread = getThread(harness.deps.db, threadId(id, from))!;
+        return { provider: thread.providerId, fork: pendingImportFork(harness.deps.db, thread.id), path: getEnvironment(harness.deps.db, thread.environmentId!)!.path, project: listProjectSourcesByProjectIds(harness.deps.db, [thread.projectId])[0]!.path };
+      };
+      expect(imported("s1")).toEqual({ provider: "claude-code", fork: { sourceProviderThreadId: ids.claude }, path: worktree, project: repo });
+      expect(threadMessages(harness.deps.db, threadId("s1"))).toEqual([{ role: "user", text: "The login page crashes" }, { role: "agent", text: "Found the crash." }]);
+      const rebuilt = { sourceProviderThreadId: expect.stringMatching(/^[0-9a-f-]{36}$/) };
+      expect(imported("s2")).toEqual({ provider: "claude-code", fork: rebuilt, path: worktree, project: repo });
+      expect(threadMessages(harness.deps.db, threadId("s2"))).toEqual([{ role: "user", text: "Add a regression test" }, { role: "agent", text: "Test added." }]);
+      expect(imported("s3")).toEqual({ provider: "claude-code", fork: null, path: worktree, project: repo });
+      const textOnly = await sendFirstMessage(harness, threadId("s3"));
+      expect(textOnly.sent).toContain("imported from Conductor as text only");
+      expect(textOnly.sent).toContain("Old closed chat");
+      expect(imported("s4")).toEqual({ provider: "claude-code", fork: rebuilt, path: repo, project: repo });
+      expect(imported("s5")).toEqual({ provider: "codex", fork: { sourceProviderThreadId: ids.codex }, path: worktree, project: repo });
+      expect(threadMessages(harness.deps.db, threadId("s5"))).toEqual([{ role: "user", text: "Speed up the build" }, { role: "agent", text: "Build is faster." }]);
+      expect((await listConductorExport(harness.deps, exportDir)).map(({ id, title, cwd }) => [id, title, cwd]).sort()).toEqual([
+        [ids.cloud, "Check the sandbox", repo],
+        ["c0ffee00-0000-4000-8000-000000000010", "Plan the launch", homedir()],
+        ["c0ffee00-0000-4000-8000-000000000011", "Use my clone", join(root, "clone")],
+      ]);
+      const goneRepo = await importAll(harness, host.id, ["s11", "s12"].map((id) => ({ harness: "conductor" as const, id })));
+      const [davis, lagos] = ["s11", "s12"].map((id) => getThread(harness.deps.db, threadId(id, goneRepo))!);
+      expect(getProject(harness.deps.db, davis!.projectId)?.name).toBe("gone");
+      expect(lagos!.projectId).toBe(davis!.projectId);
+      expect(getEnvironment(harness.deps.db, lagos!.environmentId!)?.path).toBe(join(root, "conductor", "workspaces", "gone", "lagos"));
+      const githubOnly = createRemoteProject(harness.deps.db, harness.deps.hub, { name: "Acme clone", gitRemoteUrl: "https://github.com/acme/clone.git" });
+      const cloud = await importAll(harness, host.id, () => importConductorExport(harness.deps, host.id, exportDir));
+      expect(cloud.skipped).toEqual([]);
+      expect(imported(ids.cloud, cloud)).toEqual({ provider: "claude-code", fork: rebuilt, path: repo, project: repo });
+      expect(threadMessages(harness.deps.db, threadId(ids.cloud, cloud))).toEqual([
+        { role: "user", text: "@shot (1).png Check the sandbox\n\n[Attached: logs.txt]" },
+        { role: "agent", text: "Sandbox is fine." },
+        { role: "user", text: "Teammate: Also check the logs" },
+        { role: "agent", text: "Logs are clean." },
+      ]);
+      const first = await sendFirstMessage(harness, threadId(ids.cloud, cloud));
+      expect(first.sent).toBe("What's next?");
+      const sessionId = first.startFork!.sourceProviderThreadId;
+      const folder = (await realpath(repo)).replace(/[^a-zA-Z0-9]/g, "-");
+      const session = (await readFile(join(root, "claude", "projects", folder, `${sessionId}.jsonl`), "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+      expect(session.map(({ type, message }) => [type, typeof message.content === "string" ? message.content : message.content.map((block: { type: string }) => block.type)])).toEqual([
+        ["user", "@shot (1).png Check the sandbox\n\n[Attached: logs.txt]"],
+        ["assistant", ["thinking", "tool_use"]],
+        ["user", ["tool_result"]],
+        ["assistant", ["text"]],
+        ["user", "Teammate: Also check the logs"],
+        ["assistant", ["text"]],
+      ]);
+      expect(session.every((line, index) => line.parentUuid === (session[index - 1]?.uuid ?? null) && line.sessionId === sessionId && line.entrypoint === "sdk-ts")).toBe(true);
+      expect((await importConductorExport(harness.deps, host.id, exportDir)).imported).toEqual([]);
+      const cloneThread = getThread(harness.deps.db, threadId("c0ffee00-0000-4000-8000-000000000011", cloud))!;
+      expect([cloneThread.projectId, getEnvironment(harness.deps.db, cloneThread.environmentId!)!.path]).toEqual([githubOnly.id, join(root, "clone")]);
+    });
+  }, 60_000);
+
+  it.each([
+    ["Codex is missing: a Codex chat moves to Claude Code", "s8", ["codex"], "claude-code", null, "test-provider-default"],
+    ["the agent is unknown: the chat lands on Claude Code with its default model", "s13", [], "claude-code", null, "test-provider-default"],
+    ["a Claude chat was compacted: it comes over as text", "s9", [], "claude-code", null, "claude-opus-5-5"],
+    ["Claude Code is missing: a Claude chat moves to Codex", "s2", ["claude-code"], "codex", null, "test-provider-default"],
+    ["no agent is installed: a Cursor chat stays readable on Claude Code", "s10", ["acp-cursor", "claude-code", "codex"], "claude-code", null, "test-provider-default"],
+    ["no agent is installed: a Claude chat keeps its memory for later", "s2", ["claude-code", "codex"], "claude-code", { sourceProviderThreadId: expect.any(String) }, "claude-opus-5-5"],
+  ])("imports a Conductor chat when %s", async (_name, id, missing, provider, fork, model) => {
+    await conductorFixtures();
+    await withTestHarness(async (harness) => {
+      const { host } = seedHostSession(harness.deps, { id: `host-import-${id}-${missing.length}-${provider}` });
+      const { imported, skipped } = await importAll(harness, host.id, [{ harness: "conductor", id }], (agent) => !missing.includes(agent));
+      expect(skipped).toEqual([]);
+      const threadId = imported[0]!.threadId;
+      expect([getThread(harness.deps.db, threadId)!.providerId, pendingImportFork(harness.deps.db, threadId)]).toEqual([provider, fork]);
+      expect(threadMessages(harness.deps.db, threadId).length).toBe(2);
+      expect(getLastExecutionOptions(harness.deps, threadId)?.model).toBe(model);
     });
   }, 60_000);
 

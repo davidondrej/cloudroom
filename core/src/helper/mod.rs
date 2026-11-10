@@ -629,7 +629,6 @@ async fn run(folder: PathBuf) -> Result<()> {
     let lock = lock_file(&folder, "lock")?;
     claim(&lock, Duration::from_secs(5)).await?; // Before Mac jobs, so a second helper never takes any.
     let shared = Arc::new(Shared::new(folder.clone()));
-    tokio::spawn(jobs::serve(shared.clone()));
     let ports_file = folder.join("ports.json");
     let ports = if ports_file.exists() {
         private_json(&ports_file)?
@@ -658,11 +657,15 @@ async fn run(folder: PathBuf) -> Result<()> {
         previews.troubled = Instant::now().checked_sub(PROBLEM);
     }
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    // After every step that can fail, so the helper never leaves without closing Mac jobs.
+    let jobs = Arc::new(jobs::Jobs::new(previews.shared.clone()));
+    tokio::spawn(jobs::serve(jobs.clone()));
     tokio::select! {
         _ = async { loop { let wait = previews.pass().await; rest(&folder, wait).await; } } => {}
         _ = terminate.recv() => {}
         _ = tokio::signal::ctrl_c() => {}
     }
+    jobs.close().await;
     for tunnel in previews.tunnels.values_mut() {
         tunnel.close().await;
     }

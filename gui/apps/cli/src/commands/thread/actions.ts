@@ -23,6 +23,7 @@ import {
   outputJson,
   parseReasoningLevel,
   prependErrorContext,
+  readTextFileOrStdin,
   requireThreadIdOrSelf,
 } from "../helpers.js";
 import {
@@ -95,6 +96,7 @@ interface ThreadTellCommandOptions {
   image?: string[];
   sendAt?: string;
   requestId?: string;
+  messageFile?: string;
 }
 
 interface ThreadActionOptions {
@@ -529,8 +531,12 @@ export function registerActionsCommands(
     );
 
   parent
-    .command("tell <id> <message>")
+    .command("tell <id> [message]")
     .description("Send a follow-up message to a thread")
+    .option(
+      "--message-file <path>",
+      "Read the message from a UTF-8 file, or - for stdin (use it for long messages)",
+    )
     .option("--json", "Print machine-readable JSON output")
     .option("--model <model>", "Model ID for this message")
     .option("--service-tier <tier>", "Service tier: fast or default")
@@ -563,7 +569,32 @@ export function registerActionsCommands(
     )
     .action(
       action(
-        async (id: string, message: string, opts: ThreadTellCommandOptions) => {
+        async (
+          id: string,
+          argument: string | undefined,
+          opts: ThreadTellCommandOptions,
+        ) => {
+          const { messageFile } = opts;
+          if (argument !== undefined && messageFile !== undefined) {
+            throw new Error(
+              "Choose only one of a message argument and --message-file.",
+            );
+          }
+          const message =
+            messageFile === undefined
+              ? argument
+              : await readTextFileOrStdin(messageFile).catch(
+                  (error: unknown) => {
+                    throw new Error(
+                      `--message-file ${messageFile}: ${getErrorMessage(error)}`,
+                    );
+                  },
+                );
+          if (message === undefined) {
+            throw new Error(
+              "Missing message: pass it as an argument or with --message-file PATH (- reads stdin).",
+            );
+          }
           const response = await postThreadMessage({
             getUrl,
             threadId: id,

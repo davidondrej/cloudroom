@@ -115,6 +115,7 @@ const SETTINGS_SEARCH_ENTRIES: readonly SettingsSearchEntry[] = [
     ["Diffs", "changes renderer"],
     ["Theme", "dark mode light mode system color scheme"],
     ["Corners", "rounded sharp radius"],
+    ["Show Cloudroom name", "logo brand wordmark title top bar video"],
     ["Palette", "colors custom theme"],
     ["Favicon color", "icon dock tab"],
     ["Fade inactive splits", "dim split panes"],
@@ -159,7 +160,7 @@ const SETTINGS_SEARCH_ENTRIES: readonly SettingsSearchEntry[] = [
     ["Projects", "repos folders rename delete"],
     ["Hidden projects", "hide unhide restore sidebar removed"],
   ]),
-  ...entries("import", undefined, [["Import chats", "history migrate"]]),
+  ...entries("import", undefined, [["Import chats", "history migrate conductor export"]]),
   ...entries("export", undefined, [["Export chats", "history backup download markdown json"]]),
   ...entries("archived", undefined, [["Archived threads", "restore unarchive"]]),
   ...entries("account", undefined, [

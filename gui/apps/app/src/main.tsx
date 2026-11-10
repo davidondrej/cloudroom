@@ -12,6 +12,7 @@ import {
   reloadWhenMacGoesOffline,
 } from "./cloud/cloud-mode";
 import { installCloudServer } from "./cloud/cloud-server";
+import { keepOtherMacOnScreen, viewingOtherMac } from "./cloud/other-mac";
 import { AppErrorBoundary } from "./components/AppErrorBoundary";
 import { AppToaster } from "./components/AppToaster";
 import { isFirefoxAndroid } from "./components/layout/useMobileVisualViewportHeight";
@@ -122,7 +123,12 @@ function render() {
   );
 }
 
-if (isPhoneRelay()) {
+if (viewingOtherMac()) {
+  // The desktop app showing another Mac stays on it through a drop. It never reloads into Cloud threads like a phone.
+  keepOfflineCopy();
+  keepOtherMacOnScreen();
+  render();
+} else if (isPhoneRelay()) {
   keepOfflineCopy();
   void macOffline().then((offline) => {
     if (offline) installCloudServer();

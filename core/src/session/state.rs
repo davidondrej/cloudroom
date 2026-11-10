@@ -711,6 +711,9 @@ impl Local {
             }
             "archive" => {
                 session.archived = true;
+                if record.data["self"] == true {
+                    session.archive_turn = session.current_request.clone();
+                }
                 // Its children still starting never start (relay.rs).
                 for start in session.child_starts.values_mut() {
                     if !start.done && start.error.is_none() {

@@ -123,6 +123,38 @@ describe("Codex provider maintenance", () => {
         ],
       },
     });
+    // A broken npm Codex is reinstalled into the prefix that owns it.
+    expect(
+      __testing.buildProviderInstallationRun(
+        {
+          ...installationStatus(),
+          installed: false,
+          installSource: "notInstalled",
+          currentVersion: null,
+          installAction: {
+            kind: "install",
+            label: "Install",
+            command: "npm install -g @openai/codex@latest",
+          },
+          needsUpdate: false,
+        },
+        "install",
+        "/Users/me/.local",
+      ),
+    ).toMatchObject({
+      available: true,
+      command: {
+        command: "npm",
+        args: [
+          "install",
+          "-g",
+          "--prefix",
+          "/Users/me/.local",
+          "@openai/codex@latest",
+        ],
+      },
+      verification: { kind: "installed" },
+    });
     expect(
       __testing.buildProviderInstallationRun(installationStatus(), "install"),
     ).toEqual({
@@ -271,10 +303,22 @@ describe("Codex credential health and usage", () => {
         ),
       },
     });
-    // ...but an unclear probe failure keeps it ready.
+    // Only this fake bin on PATH, so no real npm runs.
+    vi.stubEnv("PATH", path.dirname(codex));
+    // ...and offers a reinstall instead of looking installed.
+    await expect(getCodexProviderInstallationStatus()).resolves.toMatchObject({
+      installed: false,
+      executablePath: codex,
+      installAction: { kind: "install" },
+    });
+    // ...but an unclear probe failure keeps it ready and installed.
     await fs.writeFile(codex, "#!/bin/sh\nexit 1\n");
     await expect(getCodexProviderHealth()).resolves.toMatchObject({
       health: { status: "ready" },
+    });
+    await expect(getCodexProviderInstallationStatus()).resolves.toMatchObject({
+      installed: true,
+      installAction: null,
     });
   });
 

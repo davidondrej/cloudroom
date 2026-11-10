@@ -133,7 +133,7 @@ describe("ConnectTunnelClient", () => {
         label: "sawyer-air",
         baseDomain: "bb.localhost:42745",
       }),
-    ).toBe("ws://sawyer-air.bb.localhost:42745/__tunnel?v=1");
+    ).toBe("ws://sawyer-air.bb.localhost:42745/__tunnel?v=2");
     expect(
       buildMachineSharePublicOrigin(
         { label: "sawyer-air", baseDomain: "bb.localhost:42745" },
@@ -185,7 +185,7 @@ describe("ConnectTunnelClient", () => {
     expect(identities).toEqual([
       { label: "sawyer-air", baseDomain: "getbb.app" },
     ]);
-    expect(requestedUrls).toEqual(["wss://sawyer-air.getbb.app/__tunnel?v=1"]);
+    expect(requestedUrls).toEqual(["wss://sawyer-air.getbb.app/__tunnel?v=2"]);
     expect(credentials).toEqual(["Bearer bbcm_machine-secret"]);
     await waitFor(() => client.status().state === "connected", "connected");
 

@@ -2,6 +2,20 @@
 
 Also on [cloudroom.dev/changelog](https://www.cloudroom.dev/changelog).
 
+## 148
+
+Cloud Credits last 20% longer (2026-11-10)
+
+### Changes
+
+- A CPU-hour on a Cloud sandbox now costs 500 credits instead of 600, with the same plans and prices.
+- The project picker for new threads is one clean list: your projects first, repos you can add below.
+- Agent questions and Settings → Accounts have a simpler, cleaner look. Press a number key to answer.
+- The Cloudroom name shows at the top of the window. Turn it off with "Show Cloudroom name" in Settings.
+- Threads start with a shorter system prompt, and custom instructions are sent once per thread.
+- Import chats now brings over your Conductor chats.
+- Security fixes.
+
 ## 147
 
 Every keystroke shows instantly (2026-11-10)

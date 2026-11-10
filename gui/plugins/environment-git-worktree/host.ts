@@ -1,9 +1,11 @@
 import { experimental_defineHostEntry } from "@get-bb/plugin-sdk/host";
-import { readdir, rm } from "node:fs/promises";
+import { readdir } from "node:fs/promises";
+import { hasRef } from "bb-environment-provider-host/git";
 import { createHostProgress } from "bb-environment-provider-host/progress";
 import { worktreeHostContract, worktreeHostSignals } from "./contract.js";
 import { resolveWorktreeBaseBranch } from "./host/base-branch.js";
 import {
+  deriveRepoDirName,
   resolveWorktreeChildPath,
   resolveWorktreesRoot,
   resolveWorktreeAttemptRoot,
@@ -12,6 +14,7 @@ import {
 import {
   createWorktree,
   hasUncommittedWork,
+  removeCompletionMarker,
   removeWorktree,
 } from "./host/worktree.js";
 
@@ -49,12 +52,30 @@ export function createWorktreeHostEntry() {
     experimental_signals: worktreeHostSignals,
     handlers: {
       async create(input, context) {
-        const targetPath = resolveWorktreeTargetPath({
-          dataDir: context.experimental_paths.dataDir,
-          pathKey: input.pathKey,
-          sourcePath: input.sourcePath,
-        });
+        const targetPath =
+          input.folderName === undefined
+            ? resolveWorktreeTargetPath({
+                dataDir: context.experimental_paths.dataDir,
+                pathKey: input.pathKey,
+                sourcePath: input.sourcePath,
+              })
+            : resolveWorktreeChildPath({
+                dataDir: context.experimental_paths.dataDir,
+                pathKey: input.pathKey,
+                childName: input.folderName,
+              });
         try {
+          // A checkout cloned again under a new name lacks the saved branch: fail, so the thread stays parked (#1213).
+          if (
+            input.folderName !== undefined &&
+            input.folderName !== deriveRepoDirName(input.sourcePath) &&
+            !(await hasRef(input.sourcePath, `refs/heads/${input.branchName}`))
+          ) {
+            return {
+              status: "failed",
+              message: `The saved branch ${input.branchName} isn't in ${input.sourcePath}. This thread's work is still in the checkout it was made from (folder "${input.folderName}"). Fetch that branch into this checkout, then send again.`,
+            } as const;
+          }
           const baseBranch = await resolveWorktreeBaseBranch(
             input.sourcePath,
             input.baseBranch,
@@ -111,7 +132,7 @@ export function createWorktreeHostEntry() {
               (await hasUncommittedWork(path, context.signal))
             )
               continue;
-            await rm(completionPathForWorktree(path), { force: true });
+            await removeCompletionMarker(completionPathForWorktree(path));
             await removeWorktree({
               path,
               onProgress: createHostProgress({

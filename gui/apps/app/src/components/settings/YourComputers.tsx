@@ -2,7 +2,6 @@ import { COMPUTER } from "@cloudroom/domain";
 import { useEffect, useState, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Button } from "@cloudroom/shared-ui/button";
-import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@cloudroom/shared-ui/dialog";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -172,87 +171,6 @@ export function YourMacRow({ mac }: { mac: YourMac }) {
       </Button>
     </div>
   );
-}
-
-// A Mac you were using dropped: keep trying it for 30 seconds, then stay on this Mac (design C, 2026-11-06).
-// Once it's back, a toast offers to switch. The app never switches by itself mid-work.
-export function LostMacDialog() {
-  const { desktopApi, desktopInfo } = useDesktopUpdateInfo();
-  const fallback = desktopInfo?.computers?.fallback ?? null;
-  const retryUntil = fallback?.retryUntil ?? null;
-  const seconds = useSecondsLeft(retryUntil);
-  const back = fallback?.back === true && retryUntil === null ? fallback : null;
-  const backHandle = back?.handle ?? null;
-  const backName = back?.name ?? null;
-  const openComputer = desktopApi?.openComputer;
-
-  useEffect(() => {
-    if (backHandle === null || backName === null || !openComputer) return;
-    const id = `mac-back-${backHandle}`;
-    appToast.message(`${backName} is back`, {
-      id,
-      duration: Infinity,
-      action: { label: "Switch", onClick: () => void openComputer(backHandle) },
-    });
-    return () => {
-      appToast.dismiss(id);
-    };
-  }, [backHandle, backName, openComputer]);
-
-  const reconnect = desktopApi?.reconnectComputer;
-  if (fallback === null || retryUntil === null || !reconnect) return null;
-  const stay = (event: Event) => event.preventDefault();
-  return (
-    <Dialog open>
-      <DialogContent
-        hideCloseButton
-        className="max-w-[500px] justify-items-center gap-0 rounded-xl p-8 text-center"
-        onOpenAutoFocus={stay}
-        onEscapeKeyDown={stay}
-        onPointerDownOutside={stay}
-        onInteractOutside={stay}
-      >
-        <div className="flex items-start">
-          <MacPicture name={fallback.name} lost />
-          <div className="flex h-14 w-28 items-center px-1">
-            <div className="w-full border-t-2 border-dashed border-warning" />
-          </div>
-          <MacPicture name={`This ${COMPUTER}`} />
-        </div>
-        <DialogTitle className="mt-6 text-2xl font-semibold">Lost {fallback.name}</DialogTitle>
-        <DialogDescription className="mt-2 text-[15px] text-muted-foreground">
-          Switching to this {COMPUTER} in {seconds} {seconds === 1 ? "second" : "seconds"}
-        </DialogDescription>
-        <div className="mt-6 flex gap-2.5">
-          <Button variant="ghost" onClick={() => void reconnect(true)}>
-            Keep trying
-          </Button>
-          <Button variant="outline" onClick={() => void reconnect(false)}>
-            Use this {COMPUTER} now
-          </Button>
-        </div>
-      </DialogContent>
-    </Dialog>
-  );
-}
-
-function MacPicture({ name, lost = false }: { name: string; lost?: boolean }) {
-  return (
-    <div className={cn("flex w-32 flex-col items-center gap-2.5", lost && "opacity-45")}>
-      <OsTile os={MAC_OS} className={BIG_TILE} />
-      <span className="max-w-full truncate text-sm text-foreground">{name}</span>
-    </div>
-  );
-}
-
-function useSecondsLeft(until: number | null): number {
-  const [now, setNow] = useState(Date.now);
-  useEffect(() => {
-    if (until === null) return;
-    const timer = setInterval(() => setNow(Date.now()), 1_000);
-    return () => clearInterval(timer);
-  }, [until]);
-  return until === null ? 0 : Math.max(0, Math.floor((until - now) / 1_000));
 }
 
 const MAC_OS = COMPUTER === "Mac" ? "macos" : "linux";

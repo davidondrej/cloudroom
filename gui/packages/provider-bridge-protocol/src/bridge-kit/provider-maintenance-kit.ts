@@ -114,6 +114,13 @@ function runCliProbe(
     // execFile can't run npm `.cmd` shims on Windows.
     return execPortableFile(command, args, { timeoutMs }).then(
       ({ stdout, stderr }) => `${stdout}\n${stderr}`,
+      // Keep a failed exit's output, like the Unix branch: it names a broken install (#1232).
+      (error: unknown) => {
+        const { stdout, stderr } = (error ?? {}) as Record<string, unknown>;
+        throw typeof stdout === "string" && typeof stderr === "string"
+          ? Object.assign(error as Error, { output: `${stdout}\n${stderr}` })
+          : error;
+      },
     );
   }
   endProbesWithProcess();
@@ -199,7 +206,7 @@ export function versionFrom(value: string | null): string | null {
     : null;
 }
 
-/** readCliVersion, plus the output of a `--version` that exited non-zero (Unix only; null on a timeout). */
+/** readCliVersion, plus the output of a `--version` that exited non-zero (null on a timeout). */
 export async function probeCliVersion(
   command: string,
 ): Promise<{ version: string | null; failedOutput: string | null }> {

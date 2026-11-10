@@ -266,7 +266,8 @@ Messaging:
     agent, /exit or Ctrl+C leaves. Inside Herdr (HERDR_ENV=1) it reports
     idle, working, or blocked to the pane and registers itself as the resume command.
 
-  room-cli thread tell <id> <message>            Send a follow-up message
+  room-cli thread tell <id> [message]            Send a follow-up message
+    --message-file <path>                  Read the message from a UTF-8 file, or - for stdin; use it for long messages
     --mode <mode>                          Message mode: steer, queue, or auto; default: Local steer, Cloud queue
     --model <model>                        Model override for this turn
     --reasoning-level <level>              Reasoning level override

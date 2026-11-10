@@ -13,7 +13,7 @@ import { CLOUD_HARNESSES, HARNESS_NAMES, appendStartProgress, endedTurn, isAcpPr
 import { mentionsOpenAISide401 } from "./codex-errors.js";
 import { codexOutage } from "./openai-status.js";
 import { buildThreadStatusChangeMetadata } from "../threads/thread-runtime-display.js";
-import { cloudPluginInstructions, cloudroomSystemPrompt, prepareCloudInstructionInput, resolveCustomInstructions } from "../threads/custom-instructions.js";
+import { cloudPluginInstructions, cloudroomSystemPrompt, dueCustomInstructions, markCustomInstructionsLost, prepareCloudInstructionInput, resolveCustomInstructions } from "../threads/custom-instructions.js";
 import { baseBranch, binding, bindings, command, commands, coreInUse, localTeleports, openBindings, queuedPrompts, saveBinding, saveCommandState, saveStatus, effectivePrompt, projectCopyProgress, stampBindings, teleportBlocked, unstartedTurn, type Binding, type Command, type OpenBinding, isDead, statusOf } from "./store.js";
 import { syncLoopEnv } from "./project-loops.js";
 import { copyProject, copyRunning, githubRepository, localFilesNote, localProjectNote, localProjectPath, planNewProjectCopy, workspaceId, workspaceName, planProjectCopy, planProjectCopyOrThrow, reportProjectCopy, writeFilesState, type ProjectCopyJob } from "./project-copy.js";
@@ -1752,11 +1752,11 @@ class CloudroomService {
       tx.insert(cloudroomThreads).values({ threadId: thread.id, coreUrl: connection ? connection.url : SANDBOX_PREFIX + thread.id, startRequestId, model, reasoning }).run();
       tx.insert(cloudroomCommands).values({
         id: `first_${thread.id}`, threadId: thread.id, command: "prompt",
-        input: JSON.stringify(this.snapshotInstructions(thread, "prompt", {
+        input: JSON.stringify(this.snapshotInstructions(tx, thread, "prompt", {
           ...payload, ...workspace, provider: remoteModel?.provider,
           command_guard_enabled: getAppSettings(this.deps.db).commandGuardEnabled,
           strip_ai_co_authors: getAppSettings(this.deps.db).stripAiCoAuthorsEnabled,
-          system_prompt: [cloudroomSystemPrompt(this.deps.db, { vps: this.sandboxes.vpsConnected }), cloudPluginInstructions({ threadId: thread.id, projectId: thread.projectId }), projectNote].filter(Boolean).join("\n\n") || undefined,
+          system_prompt: [cloudroomSystemPrompt(this.deps.db, "cloud", { vps: this.sandboxes.vpsConnected }), cloudPluginInstructions({ threadId: thread.id, projectId: thread.projectId }), projectNote].filter(Boolean).join("\n\n") || undefined,
           ...(request.serviceTier && request.serviceTier !== "default" ? { service_tier: request.serviceTier } : {}),
           ...(request.baseBranch ? { base_branch: request.baseBranch } : {}),
           ...(codeFrom ? { code_from: codeFrom } : {}), ...keys,
@@ -1845,11 +1845,11 @@ class CloudroomService {
       tx.insert(cloudroomThreads).values({ threadId: thread.id, coreUrl: SANDBOX_PREFIX + thread.id, startRequestId, model, reasoning }).run();
       tx.insert(cloudroomCommands).values({
         id: `first_${thread.id}`, threadId: thread.id, command: "prompt",
-        input: JSON.stringify(this.snapshotInstructions(thread, "prompt", {
+        input: JSON.stringify(this.snapshotInstructions(tx, thread, "prompt", {
           ...payload, ...workspace, fork, ...keys,
           command_guard_enabled: getAppSettings(this.deps.db).commandGuardEnabled,
           strip_ai_co_authors: getAppSettings(this.deps.db).stripAiCoAuthorsEnabled,
-          system_prompt: [cloudroomSystemPrompt(this.deps.db, { vps: this.sandboxes.vpsConnected }), cloudPluginInstructions({ threadId: thread.id, projectId: thread.projectId }), projectNote].filter(Boolean).join("\n\n") || undefined,
+          system_prompt: [cloudroomSystemPrompt(this.deps.db, "cloud", { vps: this.sandboxes.vpsConnected }), cloudPluginInstructions({ threadId: thread.id, projectId: thread.projectId }), projectNote].filter(Boolean).join("\n\n") || undefined,
           ...(request.serviceTier && request.serviceTier !== "default" ? { service_tier: request.serviceTier } : {}),
           ...(this.heldStarts.has(startRequestId) ? { awaiting_core: true } : {}),
         })),
@@ -2032,6 +2032,8 @@ class CloudroomService {
       this.deps.db.transaction((tx) => {
         apply(tx, { sessionId: started.session_id, startRequestId, reasoning });
         record(tx);
+        // The new session's copied chat leaves out agent-only text, so it has no custom instructions yet.
+        markCustomInstructionsLost(tx, thread.id);
       });
       void client.close(oldSession, randomUUID()).catch((error: unknown) => this.warn("The previous Cloud session could not be closed", error, { threadId: thread.id }));
       for (const id of resumeLoops) void this.sandboxes.automations({ action: "delete", id }).catch((error: unknown) => this.warn("The old session's resume loop could not be deleted", error, { threadId: thread.id }));
@@ -2312,15 +2314,16 @@ class CloudroomService {
     if (sandbox) await this.sandboxes.restore(sandbox);
   }
 
-  private snapshotInstructions(thread: Pick<Thread, "id" | "projectId">, action: Command["command"], input: object): object {
+  private snapshotInstructions(db: DbQueryConnection, thread: Pick<Thread, "id" | "projectId">, action: Command["command"], input: object): object {
     if (!["prompt", "edit", "steer", "rewind"].includes(action)) return input;
     const prompt = z.object({ text: z.string(), content: z.unknown().optional() }).parse(
       action === "rewind" && "replacement" in input ? input.replacement : input,
     );
-    const customInstructions = resolveCustomInstructions({ threadId: thread.id, projectId: thread.projectId });
-    // The core's real limit is checked again on send.
-    prepareCloudInstructionInput(prompt, customInstructions, cloudPromptLimit(null));
-    return { ...input, customInstructions };
+    const context = { threadId: thread.id, projectId: thread.projectId };
+    // Checked with the instructions even when this message won't carry them. The core's real limit is checked again on send.
+    prepareCloudInstructionInput(prompt, resolveCustomInstructions(context), cloudPromptLimit(null));
+    // An edit replaces a queued message and a rewind drops later ones, either of which may have carried them.
+    return { ...input, customInstructions: dueCustomInstructions(db, context, action === "edit" || action === "rewind") };
   }
 
   private enqueue(threadId: string, id: string, action: Command["command"], input: object, at?: number): void {
@@ -2333,7 +2336,7 @@ class CloudroomService {
     const thread = getThread(this.deps.db, threadId);
     if (!thread || !binding(this.deps.db, threadId)) throw new ApiError(409, "cloudroom_missing_binding", "Cloud session is unavailable");
     const createdAt = at ?? Math.max(Date.now(), (commands(this.deps.db, threadId).at(-1)?.createdAt ?? 0) + 1);
-    this.deps.db.insert(cloudroomCommands).values({ id, threadId, command: action, input: JSON.stringify(this.snapshotInstructions(thread, action, input)), createdAt }).run();
+    this.deps.db.insert(cloudroomCommands).values({ id, threadId, command: action, input: JSON.stringify(this.snapshotInstructions(this.deps.db, thread, action, input)), createdAt }).run();
     this.notify(threadId);
   }
 
@@ -2479,7 +2482,13 @@ class CloudroomService {
     const saved = binding(this.deps.db, thread.id);
     const queue = this.queue(thread.id);
     const queued = queue.find((item) => item.id === queuedMessageId);
-    if (!saved || !queued) throw new ApiError(404, "invalid_request", "Queued message not found");
+    if (!saved || !queued) {
+      // Core may deliver a queued prompt before its send arrives (#1203). Say so, and never send it again. `running`
+      // only means the turn is starting: preparing it can still fail before the harness gets the prompt.
+      const sent = command(this.deps.db, queuedMessageId);
+      if (saved && sent?.threadId === thread.id && sent.command === "prompt" && ["delivered", "completed", "interrupted"].includes(sent.state)) return { ok: true, delivery: "sent" };
+      throw new ApiError(404, "invalid_request", "Queued message not found");
+    }
     const active = thread.status === "active" && saved.turnId !== null && !unstartedTurn(this.deps.db, thread.id);
     if (active && queued.content.every((part) => part.type === "text")) {
       const capabilities = await this.queueCapabilities(saved);

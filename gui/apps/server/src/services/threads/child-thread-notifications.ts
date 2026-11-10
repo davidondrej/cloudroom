@@ -1,13 +1,17 @@
 import type {
   PromptInput,
+  QueuedMessageSystemNotice,
   SystemMessageSubject,
   ThreadEventTurnStatus,
 } from "@cloudroom/domain";
 import {
   events,
+  getLatestThreadOutputEventRow,
+  getLatestThreadSequence,
   getThread,
   isThreadQueueAutoSendPaused,
   listActiveBackgroundTaskCountsByThreadIds,
+  type DbConnection,
 } from "@cloudroom/db";
 import { and, eq, inArray, sql } from "drizzle-orm";
 import { alias } from "drizzle-orm/sqlite-core";
@@ -42,7 +46,11 @@ export interface ChildThreadTurnNotificationBatchItem {
   turnStatus: ThreadEventTurnStatus;
 }
 
+type ChildReport = NonNullable<QueuedMessageSystemNotice["childReport"]>;
+
 interface ChildThreadTurnNotificationBatch {
+  /** When the first turn ended, and each child's latest event then (#1208). */
+  childReport: ChildReport;
   items: ChildThreadTurnNotificationBatchItem[];
   timer: ReturnType<typeof setTimeout>;
 }
@@ -511,6 +519,7 @@ async function flushChildThreadTurnNotificationBatch(
       }),
       parentThreadId,
       ...childThreadTurnStatusBatchTaxonomy(batch.items),
+      childReport: batch.childReport,
     });
   } catch (error) {
     deps.logger.error(
@@ -557,10 +566,14 @@ function queueChildThreadTurnNotificationBatchItem(
     terminalOutput: getChildThreadCompletionOutput(deps, args),
     turnStatus: args.turnStatus,
   };
+  const sequence = getLatestThreadSequence(deps.db, {
+    threadId: args.childThread.id,
+  });
   const existingBatch = childThreadTurnNotificationBatches.get(
     args.parentThreadId,
   );
   if (existingBatch) {
+    existingBatch.childReport.sequences[args.childThread.id] = sequence;
     const existingIndex = existingBatch.items.findIndex(
       (entry) => entry.childThread.id === args.childThread.id,
     );
@@ -578,6 +591,10 @@ function queueChildThreadTurnNotificationBatchItem(
   }
 
   childThreadTurnNotificationBatches.set(args.parentThreadId, {
+    childReport: {
+      at: Date.now(),
+      sequences: { [args.childThread.id]: sequence },
+    },
     items: [item],
     timer: scheduleChildThreadTurnNotificationBatchFlush(
       deps,
@@ -642,6 +659,55 @@ export async function queueChildThreadNeedsAttentionNotificationBestEffort(
       "Failed to queue parent needs-attention notification",
     );
   }
+}
+
+/** A queued child report this old says when it is from (#1208). */
+const CHILD_THREAD_LATE_NOTICE_MS = 15 * 60_000;
+/** The line {@link withChildReportAge} adds, replaced on each delivery. */
+const CHILD_THREAD_NOTICE_AGE_LINE =
+  /\n\n(?:From [^\n]* \(\d+ (?:min|h) ago\)|(?:This child has|Children with) newer output: room-cli thread output )[^\n]*$/u;
+
+function formatChildNoticeAge(at: number, ageMs: number): string {
+  const date = new Date(at);
+  const minutes = Math.max(1, Math.floor(ageMs / 60_000));
+  const ago =
+    minutes < 60 ? `${minutes} min ago` : `${Math.floor(minutes / 60)} h ago`;
+  return `${date.toLocaleDateString("en-GB", { day: "numeric", month: "short" })} ${date.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" })} (${ago})`;
+}
+
+/**
+ * A child report the queue held says when its turns ended once it is late,
+ * and which children have written output since, so the parent can't take an
+ * old result for the latest (#1208). The line is rebuilt on every delivery,
+ * because a notice re-queued behind a starting turn keeps the text it got.
+ */
+export function withChildReportAge(
+  db: DbConnection,
+  input: PromptInput[],
+  report: ChildReport | undefined,
+): PromptInput[] {
+  const last = input.at(-1);
+  if (report === undefined || last?.type !== "text") return input;
+  const children = Object.entries(report.sequences);
+  const newer = children.flatMap(([threadId, sequence]) =>
+    (getLatestThreadOutputEventRow(db, { threadId })?.sequence ?? 0) > sequence
+      ? [`room-cli thread output ${threadId}`]
+      : [],
+  );
+  const ageMs = Date.now() - report.at;
+  const newerOutput =
+    newer.length === 0
+      ? ""
+      : `${children.length === 1 ? "this child has" : "children with"} newer output: ${newer.join(", ")}`;
+  const line =
+    ageMs >= CHILD_THREAD_LATE_NOTICE_MS
+      ? `From ${formatChildNoticeAge(report.at, ageMs)}${newerOutput ? `; ${newerOutput}` : "."}`
+      : `${newerOutput.charAt(0).toUpperCase()}${newerOutput.slice(1)}`;
+  const text = last.text.replace(CHILD_THREAD_NOTICE_AGE_LINE, "");
+  return [
+    ...input.slice(0, -1),
+    { ...last, text: line ? `${text}\n\n${line}` : text },
+  ];
 }
 
 const CHILD_THREAD_LOST_WORK_GUIDANCE =

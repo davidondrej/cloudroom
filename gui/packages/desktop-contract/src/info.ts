@@ -24,14 +24,12 @@ const bbDesktopComputersSchema = z.object({
   ),
   /** The Mac on screen, or null for this Mac. */
   viewing: z.string().nullable(),
-  /** Set while this Mac stands in for the chosen Mac, which was offline. */
+  /** Set while this Mac stands in for the chosen Mac, which could not be reached. `back`: it is online again. */
   fallback: z
     .object({
       handle: z.string(),
       name: z.string(),
       back: z.boolean(),
-      /** Set while the app keeps trying that Mac and shows the reconnect dialog: when it gives up (ms since epoch). */
-      retryUntil: z.number().nullable().optional(),
     })
     .nullable(),
 });
@@ -119,8 +117,8 @@ export interface BbDesktopApi extends BbDesktopInfo {
   openExternalUrl(url: string): void;
   /** Opens one of your Macs in this window; null means this Mac. */
   openComputer?(handle: string | null): Promise<void>;
-  /** The reconnect dialog: true gives the lost Mac another 30 seconds, false stops trying and stays on this Mac. */
-  reconnectComputer?(keepTrying: boolean): Promise<void>;
+  /** "Use this Mac" while the Mac on screen can't be reached: shows this Mac, and the other Mac stays your pick. */
+  showThisComputer?(): Promise<void>;
   /** Asks for a fresh list of your Macs (at most once a minute). The new list arrives through onChange. */
   refreshComputers?(): void;
   openServerDaemonLogs?(): Promise<void>;

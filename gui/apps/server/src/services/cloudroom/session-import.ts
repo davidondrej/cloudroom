@@ -16,7 +16,7 @@ import { assertUsableHostId } from "../hosts/primary-host.js";
 import { parseStoredEvent } from "../threads/thread-data.js";
 import { createClientTurnRequestId } from "../threads/thread-events.js";
 import { waitForStart } from "./bb-import.js";
-import { createMoreThread, isMoreHarness, moreSessions, moreTurns, t3Claims, type MoreHarness } from "./session-import-more.js";
+import { conductorClaims, conductorExport, createMoreThread, isMoreHarness, linkExportFolder, moreSessions, moreTurns, t3Claims, type MoreHarness } from "./session-import-more.js";
 
 export type SessionHarness = "claude-code" | "codex" | MoreHarness;
 export interface NativeSession { harness: SessionHarness; id: string; title: string; cwd: string; updatedAt: number }
@@ -25,31 +25,54 @@ export interface SessionImportResult {
   skipped: { harness: SessionHarness; id: string; title: string; reason: string }[];
 }
 
-export interface Found extends NativeSession { path: string; native?: { harness: string; id?: string; path?: string; moved?: boolean } }
+export interface Found extends NativeSession { path: string; project?: string; projectName?: string; repo?: string; native?: { harness: string; id?: string; path?: string; moved?: boolean } }
 export interface Turn { at: number; text: string; model: string; replies: { at: number; text: string }[] }
 export type Line = Record<string, any>;
 
-const claudeHome = () => process.env.CLAUDE_CONFIG_DIR || join(homedir(), ".claude");
+export const claudeHome = () => process.env.CLAUDE_CONFIG_DIR || join(homedir(), ".claude");
 const codexHome = () => process.env.CODEX_HOME || join(homedir(), ".codex");
 const OWN_CODEX_ORIGINATORS = /^(bb|cloudroom|cloud_agents|codex_exec|teleport)/;
-let running: Promise<SessionImportResult> | null = null;
+let queue: Promise<unknown> = Promise.resolve();
 
 export async function listNativeSessions(deps: AppDeps): Promise<NativeSession[]> {
-  return (await findSessions(deps)).map(({ path: _path, native: _native, ...session }) => session);
+  return (await findSessions(deps)).map(({ path: _path, native: _native, project: _project, projectName: _projectName, ...session }) => session);
+}
+
+function oneAtATime(task: () => Promise<SessionImportResult>): Promise<SessionImportResult> {
+  const result = queue.then(task, task);
+  queue = result.catch(() => null);
+  return result;
 }
 
 export function importNativeSessions(deps: AppDeps, hostId: string, wanted: { harness: SessionHarness; id: string }[]): Promise<SessionImportResult> {
-  running ??= run(deps, hostId, wanted).finally(() => { running = null; });
-  return running;
+  return oneAtATime(() => run(deps, hostId, wanted, () => findSessions(deps)));
 }
 
-async function run(deps: AppDeps, hostId: string, wanted: { harness: SessionHarness; id: string }[]): Promise<SessionImportResult> {
+export async function listConductorExport(deps: AppDeps, path: string): Promise<NativeSession[]> {
+  const { sessions, cleanup } = await conductorExport(deps, path);
+  await cleanup();
+  return (await unimported(deps, sessions)).map(({ path: _path, native: _native, project: _project, projectName: _projectName, repo: _repo, ...session }) => session);
+}
+
+export function importConductorExport(deps: AppDeps, hostId: string, path: string): Promise<SessionImportResult> {
+  return oneAtATime(async () => {
+    const { sessions, cleanup } = await conductorExport(deps, path);
+    try {
+      const fresh = await unimported(deps, sessions);
+      return await run(deps, hostId, fresh.map(({ harness, id }) => ({ harness, id })), async () => fresh);
+    } finally {
+      await cleanup();
+    }
+  });
+}
+
+async function run(deps: AppDeps, hostId: string, wanted: { harness: SessionHarness; id: string }[], sessions: () => Promise<Found[]>): Promise<SessionImportResult> {
   requireNonDestroyedHostWithStatus(deps, hostId);
   assertUsableHostId(deps, { hostId });
   await deps.providerRegistry.whenRegistrationsSettled();
   const mapPath = join(deps.config.dataDir, "session-imports.json");
   const map: Record<string, string> = existsSync(mapPath) ? JSON.parse(await readFile(mapPath, "utf8")) : {};
-  const found = new Map((await findSessions(deps)).map((session) => [`${session.harness}:${session.id}`, session]));
+  const found = new Map((await sessions()).map((session) => [`${session.harness}:${session.id}`, session]));
   const result: SessionImportResult = { imported: [], skipped: [] };
   for (const { harness, id } of wanted) {
     const key = `${harness}:${id}`;
@@ -74,6 +97,18 @@ async function run(deps: AppDeps, hostId: string, wanted: { harness: SessionHarn
 }
 
 async function findSessions(deps: AppDeps): Promise<Found[]> {
+  const [claude, codex] = await Promise.all([claudeFiles(), codexFiles()]);
+  const files = new Map<string, string>([
+    ...claude.map((path) => [`claude-code:${basename(path, ".jsonl")}`, path] as const),
+    ...codex.map((path) => [`codex:${basename(path.replace(/\.zst$/, ""), ".jsonl").slice(-36)}`, path] as const),
+  ]);
+  const sessions = [...await claudeSessions(claude), ...await codexSessions(codex), ...await moreSessions(deps)];
+  const claimed = new Set([...t3Claims(deps), ...conductorClaims(deps)]);
+  for (const { native } of sessions) if (native?.id) native.path = files.get(`${native.harness}:${native.id}`);
+  return (await unimported(deps, sessions.filter((session) => !claimed.has(`${session.harness}:${session.id}`)))).sort((a, b) => b.updatedAt - a.updatedAt);
+}
+
+async function unimported(deps: AppDeps, sessions: Found[]): Promise<Found[]> {
   const mapPath = join(deps.config.dataDir, "session-imports.json");
   const map: Record<string, string> = existsSync(mapPath) ? JSON.parse(await readFile(mapPath, "utf8")) : {};
   const known = new Set(deps.db.selectDistinct({ id: events.providerThreadId }).from(events).where(isNotNull(events.providerThreadId)).all().map((row) => row.id));
@@ -81,17 +116,7 @@ async function findSessions(deps: AppDeps): Promise<Found[]> {
     const threadId = map[`${harness}:${id}`];
     return threadId !== undefined && getThread(deps.db, threadId)?.deletedAt === null;
   };
-  const [claude, codex] = await Promise.all([claudeFiles(), codexFiles()]);
-  const files = new Map<string, string>([
-    ...claude.map((path) => [`claude-code:${basename(path, ".jsonl")}`, path] as const),
-    ...codex.map((path) => [`codex:${basename(path.replace(/\.zst$/, ""), ".jsonl").slice(-36)}`, path] as const),
-  ]);
-  const sessions = [...await claudeSessions(claude), ...await codexSessions(codex), ...await moreSessions(deps)];
-  const claimed = t3Claims(deps);
-  for (const { native } of sessions) if (native?.id) native.path = files.get(`${native.harness}:${native.id}`);
-  return sessions
-    .filter((session) => !claimed.has(`${session.harness}:${session.id}`) && !known.has(session.id) && !imported(session) && !(session.native?.id && imported(session.native)))
-    .sort((a, b) => b.updatedAt - a.updatedAt);
+  return sessions.filter((session) => !known.has(session.id) && !imported(session) && !(session.native?.id && imported(session.native)));
 }
 
 async function claudeFiles(): Promise<string[]> {
@@ -204,11 +229,13 @@ function codexMessage(line: Line, type: "UserMessage" | "AgentMessage"): string 
 async function createImportedThread(deps: AppDeps, hostId: string, session: Found, turns: Turn[]) {
   const history = historyRows(session, turns);
   history.forEach(parseStoredEvent);
+  const folder = session.project ?? session.cwd;
+  linkExportFolder(deps, hostId, session);
   const { project } = findOrCreateProjectByLocalPathSource(deps.db, deps.hub, {
-    name: basename(session.cwd) || session.cwd,
-    source: { type: "local_path", hostId, path: session.cwd },
+    name: session.projectName ?? (basename(folder) || folder),
+    source: { type: "local_path", hostId, path: folder },
   });
-  await fillProjectGitRemote(deps, project, { hostId, path: session.cwd });
+  await fillProjectGitRemote(deps, project, { hostId, path: folder });
   if (isMoreHarness(session.harness)) return createMoreThread(deps, { hostId, projectId: project.id, session, turns, history });
   const app = session.harness === "codex" ? "Codex" : "Claude Code";
   return createThreadFromRequest(deps, {
@@ -224,7 +251,7 @@ async function createImportedThread(deps: AppDeps, hostId: string, session: Foun
     importedFork: { descriptor: { sourceProviderThreadId: session.id }, history: { kind: "rows", rows: history } },
   });
 }
-function historyRows(session: Found, turns: Turn[]): StoredEventRow[] {
+export function historyRows(session: Found, turns: Turn[]): StoredEventRow[] {
   const rows: StoredEventRow[] = [];
   const prefix = randomUUID().slice(0, 10);
   const providerThreadId = session.id;

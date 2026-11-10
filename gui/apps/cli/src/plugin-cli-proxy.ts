@@ -3,7 +3,7 @@ import {
   resolveContextProjectId,
   resolveContextThreadId,
 } from "./context-env.js";
-import { Agent, type Dispatcher } from "undici";
+import { Agent, setGlobalDispatcher, type Dispatcher } from "undici";
 import { cliFetch } from "./client.js";
 
 export interface PluginCliContributionEntry {
@@ -367,6 +367,10 @@ async function writePluginCliOutput(
 }
 
 export const PLUGIN_CLI_HEADERS_TIMEOUT_MS = 65 * 60 * 1000;
+
+export function allowLongRequests(): void {
+  setGlobalDispatcher(new Agent({ headersTimeout: PLUGIN_CLI_HEADERS_TIMEOUT_MS }));
+}
 let pluginCliDispatcher: Dispatcher | undefined;
 function getPluginCliDispatcher(): Dispatcher {
   pluginCliDispatcher ??= new Agent({

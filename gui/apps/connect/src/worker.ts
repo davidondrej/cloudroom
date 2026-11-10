@@ -101,6 +101,13 @@ function computerName(value: unknown): string | null {
 
 /** The relay object answers within 30 s (its own deadline for a silent Mac). Past that it's stuck. */
 const MAC_CALL_TIMEOUT_MS = 40_000;
+/** A request with no answer by now is logged once as `relay_stuck`, with the step it is waiting on. */
+const STUCK_LOG_MS = 10_000;
+
+/** The step a request is on: "start", "server lookup", "session lookup", or "mac" (waiting for the Mac's answer). */
+interface Trace {
+  stage: string;
+}
 const ONLINE_CHECK_TIMEOUT_MS = 3_000;
 
 /** Calls a Mac's relay object. A stuck call gets an error the app retries, never a hang. */
@@ -480,9 +487,12 @@ async function visitor(
   env: Env,
   ctx: ExecutionContext,
   { handle, target }: Visitor,
+  trace: Trace,
 ): Promise<Response> {
   const isTunnel = url.pathname === "/__tunnel";
+  trace.stage = "server lookup";
   const server = await serverByHandle(env.DB, handle, isTunnel);
+  trace.stage = "mac";
   if (!server) {
     return wantsHtml(request)
       ? messagePage("Not found", "This Cloudroom address does not exist.", 404)
@@ -537,7 +547,9 @@ async function visitor(
   }
 
   const token = sessionToken(request);
+  trace.stage = "session lookup";
   const session: Session | null = token ? await sessionByToken(env.DB, token) : null;
+  trace.stage = "mac";
   const signedIn = session?.serverId === server.id && session.target === target;
 
   // A remote host's address only carries its shared ports. Phones sign in to them through the Mac they belong to.
@@ -774,7 +786,7 @@ function guardFromOtherAddresses(request: Request, response: Response): Response
 }
 
 /** Port shares serve the owner's own dev servers, which set their own rules. */
-function route(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+function route(request: Request, env: Env, ctx: ExecutionContext, trace: Trace): Promise<Response> {
   const url = new URL(request.url);
   const host = url.hostname.toLowerCase();
   const guard = (response: Response) => guardFromOtherAddresses(request, response);
@@ -782,21 +794,30 @@ function route(request: Request, env: Env, ctx: ExecutionContext): Promise<Respo
   if (host === `${APP_HANDLE}.${env.BASE_DOMAIN}`) return phoneApp(request, url, env, ctx).then(guard);
   const parsed = parseVisitorHost(host, env.BASE_DOMAIN);
   if (!parsed) return Promise.resolve(text("Not found\n", 404));
-  const response = visitor(request, url, env, ctx, parsed);
+  const response = visitor(request, url, env, ctx, parsed, trace);
   return parsed.target === null ? response.then(guard) : response;
 }
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+    // The timer belongs to this request, so it fires even when the wait is on something another request started.
+    const trace: Trace = { stage: "start" };
+    const stuck = setTimeout(() => {
+      const url = new URL(request.url);
+      console.log({ event: "relay_stuck", stage: trace.stage, method: request.method, host: url.hostname, path: url.pathname, seconds: STUCK_LOG_MS / 1000 });
+    }, STUCK_LOG_MS);
     try {
-      return await route(request, { ...env, DB: timedDb(env.DB) }, ctx);
+      return await route(request, { ...env, DB: timedDb(env.DB) }, ctx, trace);
     } catch (error) {
       if (!(error instanceof RelayTimeout) && !String((error as Error)?.message).startsWith("D1_ERROR")) throw error;
-      console.log({ event: "db_unavailable", message: (error as Error).message });
+      const url = new URL(request.url);
+      console.log({ event: "db_unavailable", host: url.hostname, path: url.pathname, message: (error as Error).message });
       return new Response("Cloudroom is busy. Try again in a few seconds.\n", {
         status: 503,
         headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store", "retry-after": "5" },
       });
+    } finally {
+      clearTimeout(stuck);
     }
   },
 } satisfies ExportedHandler<Env>;

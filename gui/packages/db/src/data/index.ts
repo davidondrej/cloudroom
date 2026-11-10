@@ -295,6 +295,7 @@ export {
   listContextWindowUsageRows,
   listContextWindowUsageHistory,
   countContextCompactions,
+  latestContextResetSequence,
   listEvents,
   listStoredConversationOutlineEventRows,
   listTimelineSegmentAnchorsDescending,

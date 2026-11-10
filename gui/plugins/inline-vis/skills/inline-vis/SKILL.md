@@ -1,6 +1,6 @@
 ---
 name: inline-vis
-description: "Show a visual inside your Cloudroom reply: an HTML page (fix report, timeline, before/after flow, pipeline, chart, table, status cards, mockup) or a Markdown document, rendered inline with the ::inline-vis directive. Use it when a visual explains a result better than prose."
+description: Show an HTML or Markdown visual (report, timeline, chart, table, mockup) inline in your reply. Use when a visual explains a result better than prose.
 ---
 
 # Inline visuals

@@ -682,6 +682,21 @@ export const threadPluginMetadata = sqliteTable(
   (table) => [primaryKey({ columns: [table.threadId, table.pluginId] })],
 );
 
+/** What a thread's agent last got of the user's custom instructions, so they go out once, not with every message (ADR 20261110-101441). */
+export const threadCustomInstructions = sqliteTable("thread_custom_instructions", {
+  threadId: text("thread_id")
+    .primaryKey()
+    .references(() => threads.id, { onDelete: "cascade" }),
+  /** Hash of the text last sent. Empty once the thread was told they were removed. */
+  hash: text("hash").notNull(),
+  /** The newest compaction or clear when it was sent (an event sequence, 0 for none). */
+  resetAt: integer("reset_at").notNull(),
+  /** Messages since then, counting the one that carried it. */
+  messages: integer("messages").notNull(),
+  /** That copy may be lost: its message was cancelled or failed, or the agent's session was replaced. */
+  resend: integer("resend", { mode: "boolean" }).notNull().default(false),
+});
+
 export const threadTabs = sqliteTable("thread_tabs", {
   threadId: text("thread_id")
     .primaryKey()

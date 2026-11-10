@@ -1,6 +1,6 @@
 ---
 name: computer-use
-description: See and control desktop apps (read the screen, click, type, scroll, menus, screenshots) with Cloudroom's built-in computer use, `room-cli computer-use`. Use when a task needs a native app's GUI, visual QA, a bug repro, or form filling and no API, CLI, or browser tool fits. Local threads. Not OpenAI Codex Computer Use.
+description: See and control desktop apps with `room-cli computer-use`. Use for native GUIs, visual QA, or bug repros when no API, CLI, or browser tool fits.
 ---
 
 # Computer use

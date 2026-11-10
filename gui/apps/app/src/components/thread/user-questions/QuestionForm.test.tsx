@@ -132,7 +132,7 @@ describe("answering a single-select question", () => {
 
     expect(slot.getAllByText("Which database should we use?")).toHaveLength(2);
     fireEvent.click(getButtonByText(slot, "SQLite"));
-    fireEvent.click(getButtonByText(slot, "Submit answer"));
+    fireEvent.click(getButtonByText(slot, "Submit"));
 
     expect(submit).toHaveBeenCalledTimes(1);
     expect(submit.mock.calls[0]?.[0]).toEqual({
@@ -151,7 +151,7 @@ describe("answering a single-select question", () => {
 
   it("blocks submission until something is chosen", () => {
     const slot = render(singleSelect);
-    const submitButton = getButtonByText(slot, "Submit answer");
+    const submitButton = getButtonByText(slot, "Submit");
 
     expect(submitButton.disabled).toBe(true);
     fireEvent.click(getButtonByText(slot, "Postgres"));
@@ -180,7 +180,7 @@ describe("answering a single-select question", () => {
     fireEvent.click(getButtonByText(slot, "Other…"));
     const textarea = slot.getByLabelText("Database answer");
     fireEvent.change(textarea, { target: { value: "DuckDB" } });
-    fireEvent.click(getButtonByText(slot, "Submit answer"));
+    fireEvent.click(getButtonByText(slot, "Submit"));
 
     expect(submit).toHaveBeenCalledTimes(1);
     expect(submit.mock.calls[0]?.[0]).toEqual({
@@ -195,7 +195,7 @@ describe("answering a single-select question", () => {
     const slot = render(singleSelect, { submit });
 
     fireEvent.keyDown(window, { key: "2" });
-    fireEvent.click(getButtonByText(slot, "Submit answer"));
+    fireEvent.click(getButtonByText(slot, "Submit"));
 
     expect(submit).toHaveBeenCalledTimes(1);
     expect(submit.mock.calls[0]?.[0]).toEqual({
@@ -244,20 +244,18 @@ describe("multi-select and multi-question flows", () => {
     ],
   };
 
-  it("keeps several options selected and walks both questions before submitting", () => {
+  it("keeps several options selected, then submits on the last single-select pick", () => {
     const submit = vi.fn<(value: InteractionResponse) => Promise<void>>(
       async () => undefined,
     );
     const slot = render(multi, { submit });
 
-    expect(slot.getByText("1 of 2")).toBeTruthy();
     fireEvent.click(getButtonByText(slot, "Metrics"));
     fireEvent.click(getButtonByText(slot, "Tracing"));
+    expect(submit).not.toHaveBeenCalled();
     fireEvent.click(getButtonByText(slot, "Next"));
 
-    expect(slot.getByText("2 of 2")).toBeTruthy();
     fireEvent.click(getButtonByText(slot, "Postgres"));
-    fireEvent.click(getButtonByText(slot, "Submit answer"));
 
     expect(submit).toHaveBeenCalledTimes(1);
     expect(submit.mock.calls[0]?.[0]).toEqual({

@@ -355,9 +355,12 @@ export interface CloudroomArea {
   /** Copies open BB threads into idle Local threads by forking their native sessions. Sends no prompts. */
   importBb(hostId: string): Promise<BbImportResult>;
   /** Claude Code and Codex chats on this Mac that are not in Cloudroom yet, newest first. */
-  nativeSessions(signal?: AbortSignal): Promise<{ sessions: NativeSession[] }>;
+  nativeSessions(signal?: AbortSignal): Promise<{ sessions: NativeSession[]; conductorApp?: boolean }>;
   /** Copies chosen chats into idle Local threads by forking their native sessions. Sends no prompts. */
   importSessions(hostId: string, sessions: { harness: NativeSession["harness"]; id: string }[]): Promise<SessionImportResult>;
+  /** Lists the chats in a Conductor Cloud export (its unzipped folder, or the .zip). */
+  conductorExport(path: string): Promise<{ sessions: NativeSession[] }>;
+  importConductorExport(hostId: string, path: string): Promise<SessionImportResult>;
   /** Every Local and Cloud thread that can be exported, with when it last changed. */
   exportableChats(signal?: AbortSignal): Promise<{ threads: { target: "local" | "cloud"; updatedAt: number }[] }>;
   /** Writes chats as Markdown or JSON files into a new folder in ~/Downloads and opens it. */
@@ -389,7 +392,7 @@ export interface BbImportResult {
 }
 
 export interface NativeSession {
-  harness: "claude-code" | "codex" | "pi" | "acp-hermes-agent" | "t3code";
+  harness: "claude-code" | "codex" | "pi" | "acp-hermes-agent" | "t3code" | "conductor";
   id: string;
   title: string;
   cwd: string;
@@ -476,8 +479,10 @@ export function createCloudroomArea({ transport }: CreateSdkAreaArgs): Cloudroom
     copyToMac: (threadId) => transport.readJson(transport.fetch(`${transport.baseUrl}/api/v1/cloudroom/threads/${encodeURIComponent(threadId)}/teleport`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "copy" }) })) as Promise<{ branch: string }>,
     openCloudFile: (threadId, path) => transport.readJson(transport.fetch(`${transport.baseUrl}/api/v1/cloudroom/threads/${encodeURIComponent(threadId)}/open-file`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ path }) })) as Promise<{ path: string }>,
     importBb: (hostId) => transport.readJson(transport.fetch(`${transport.baseUrl}/api/v1/cloudroom/import/bb`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ hostId }) })) as Promise<BbImportResult>,
-    nativeSessions: (signal) => transport.readJson(transport.fetch(`${transport.baseUrl}/api/v1/cloudroom/import/sessions`, { signal })) as Promise<{ sessions: NativeSession[] }>,
+    nativeSessions: (signal) => transport.readJson(transport.fetch(`${transport.baseUrl}/api/v1/cloudroom/import/sessions`, { signal })) as Promise<{ sessions: NativeSession[]; conductorApp?: boolean }>,
     importSessions: (hostId, sessions) => transport.readJson(transport.fetch(`${transport.baseUrl}/api/v1/cloudroom/import/sessions`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ hostId, sessions }) })) as Promise<SessionImportResult>,
+    conductorExport: (path) => transport.readJson(transport.fetch(`${transport.baseUrl}/api/v1/cloudroom/import/conductor-export`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ path }) })) as Promise<{ sessions: NativeSession[] }>,
+    importConductorExport: (hostId, path) => transport.readJson(transport.fetch(`${transport.baseUrl}/api/v1/cloudroom/import/conductor-export`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ hostId, path }) })) as Promise<SessionImportResult>,
     exportableChats: (signal) => transport.readJson(transport.fetch(`${transport.baseUrl}/api/v1/cloudroom/export`, { signal })) as Promise<{ threads: { target: "local" | "cloud"; updatedAt: number }[] }>,
     exportChats: (input) => transport.readJson(transport.fetch(`${transport.baseUrl}/api/v1/cloudroom/export`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(input) })) as Promise<{ folder: string; count: number }>,
     reportBug: (input) => transport.readJson(transport.fetch(`${transport.baseUrl}/api/v1/cloudroom/bug-reports`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(input) })) as Promise<{ sent: boolean }>,

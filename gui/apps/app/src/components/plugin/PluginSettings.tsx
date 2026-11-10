@@ -501,6 +501,9 @@ export function PluginSettingsForm({ pluginId }: { pluginId: string }) {
 // Connect renders its whole settings page, its one setting included, in tabs.
 const CONNECT_PLUGIN_ID = "connect";
 
+// Accounts is always on and its tab already names the page, so it shows only its own content.
+const ACCOUNTS_PLUGIN_ID = "accounts";
+
 const PLUGIN_STATUSES_WITH_SETTINGS = [
   "running",
   "needs-configuration",
@@ -581,7 +584,8 @@ export function PluginSettingsPage({
       (entry: PluginListItem) => entry.id === pluginId,
     ) ?? null;
   if (listQuery.data === undefined && !listQuery.isError) {
-    return <PluginSettingsPageSkeleton />;
+    // Accounts has no header, so its skeleton would flash one.
+    return pluginId === ACCOUNTS_PLUGIN_ID ? null : <PluginSettingsPageSkeleton />;
   }
   if (listQuery.data === undefined && listQuery.isError) {
     return (
@@ -634,6 +638,17 @@ function PluginSettingsContent({
   const hasAvailableSettings =
     plugin.hasSettings ||
     settingsSections.some((section) => section.pluginId === plugin.id);
+  if (
+    plugin.id === ACCOUNTS_PLUGIN_ID &&
+    plugin.enabled &&
+    PLUGIN_STATUSES_WITH_SETTINGS.includes(plugin.status)
+  ) {
+    return (
+      <div className="mx-auto w-full max-w-5xl">
+        <PluginSettingsSections pluginId={plugin.id} showHeadings={false} />
+      </div>
+    );
+  }
   return (
     <div className="mx-auto w-full max-w-5xl">
       <header className="flex items-center justify-between gap-4">

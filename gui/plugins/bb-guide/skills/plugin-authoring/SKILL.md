@@ -1,6 +1,7 @@
 ---
 name: plugin-authoring
 description: "Create or change Cloudroom plugins and Plugin SDK extensions, including CLI commands, agent tools, providers, and UI surfaces."
+disable-model-invocation: true
 ---
 
 # Author Cloudroom plugins

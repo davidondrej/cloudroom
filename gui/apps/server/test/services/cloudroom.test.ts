@@ -6,7 +6,7 @@ import { expect, it, vi } from "vitest";
 import * as sync from "../../src/services/cloudroom/sync.js";
 import { listQueuedCommands } from "../helpers/commands.js";
 import { cloudroom } from "../../src/services/cloudroom/commands.js";
-import { command, coreStates, saveBinding, saveTeleportProgress } from "../../src/services/cloudroom/store.js";
+import { command, coreStates, saveBinding, saveCommandState, saveTeleportProgress } from "../../src/services/cloudroom/store.js";
 import { teleports } from "../../src/services/cloudroom/teleport.js";
 import { SandboxDirectory } from "../../src/services/cloudroom/sandboxes.js";
 import { createTestAppHarness } from "../helpers/test-app.js";
@@ -508,6 +508,14 @@ it("routes Cloud through the core, projects conversations, pauses queues, and re
     expect(starts).toBe(1);
     finish();
     await expect.poll(() => getThread(harness.db, thread.id)?.status).toBe("idle");
+    // A queued prompt Core delivered reports sent without reaching Core again; a starting turn or unknown ID still fails (#1203).
+    const sentRecords = records.length;
+    for (const [id, state, status, body] of [["archive-queued", "delivered", 200, { ok: true, delivery: "sent" }], ["archive-queued", "interrupted", 200, { ok: true, delivery: "sent" }], ["archive-queued", "running", 404, { code: "invalid_request" }], ["archive-queued", "completed", 200, { ok: true, delivery: "sent" }], ["missing", null, 404, { code: "invalid_request" }]] as const) {
+      if (state) saveCommandState(harness.db, thread.id, id, state);
+      const sent = await request(`/threads/${thread.id}/queued-messages/${id}/send`, {});
+      expect({ status: sent.status, body: await sent.json() }).toMatchObject({ status, body });
+    }
+    expect(records.length).toBe(sentRecords);
     expect((await request(`/threads/${thread.id}/compact`, {})).status).toBe(409);
     expect((await request("/threads", { ...input, requestId: "bad", environment: { type: "host", hostId: host.id, workspace: { type: "personal" } } })).status).toBe(400);
     expect(starts).toBe(1);

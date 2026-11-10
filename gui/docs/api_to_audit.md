@@ -1113,7 +1113,7 @@ flags exit instead of hitting the timeout; the first version token on stdout
 or stderr, or null if it is invalid SemVer; 5 s),
 `experimental_probeCliVersion` (the same probe, plus the output of a
 `--version` that exited non-zero, so a bridge can tell a broken install
-from a slow one; null on a timeout and on Windows),
+from a slow one; null on a timeout),
 `experimental_commandOutput` (any command's trimmed stdout+stderr or null on
 failure; 15 s), `experimental_versionFrom` (the first version token in a
 banner, or null if it is invalid SemVer), `experimental_npmLatestVersion` (`npm view <package> version`) and

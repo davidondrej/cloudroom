@@ -49,10 +49,13 @@ export const ROOM_CLI_PS1 = [
   "$app = @('Cloudroom.exe', 'Cloudroom Nightly.exe') | ForEach-Object { Join-Path $PSScriptRoot \"..\\..\\..\\..\\..\\..\\$_\" } | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1",
   "$cli = Join-Path $PSScriptRoot 'room-cli'",
   "$saved = $env:ELECTRON_RUN_AS_NODE, $env:ROOM_CLI_ARGV",
+  // Windows PowerShell 5.1 pipes ASCII to programs by default, turning non-ASCII stdin into "?" (#1220).
+  // Constrained Language Mode (AppLocker, WDAC) can't create the encoding, so it keeps the default there.
+  "if ($ExecutionContext.SessionState.LanguageMode -eq 'FullLanguage') { $OutputEncoding = [Text.UTF8Encoding]::new($false) }",
   "try {",
   '  $env:ROOM_CLI_ARGV = ConvertTo-Json -Compress -InputObject @($args | ForEach-Object { "$_" })',
   "  if (-not $app) { $app = 'node' } elseif ($env:ROOM_CLI_ARGV.Length -le 8000) { $app = Join-Path $PSScriptRoot 'room-cli.cmd'; $cli = @() } else {",
-  "    [Console]::Error.WriteLine('room-cli: arguments too long to show output in PowerShell; use --prompt-file')",
+  "    [Console]::Error.WriteLine('room-cli: arguments too long to show output in PowerShell; use --prompt-file or --message-file')",
   "    $env:ELECTRON_RUN_AS_NODE = '1'",
   "  }",
   "  if ($MyInvocation.ExpectingInput) { $input | & $app $cli } else { & $app $cli }",

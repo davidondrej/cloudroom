@@ -2,7 +2,7 @@ import { execFile, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { chmod, constants, copyFile, cp, link, lstat, mkdir, mkdtemp, open, readdir, readlink, realpath, rename, rm, rmdir, stat, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, dirname, join, posix } from "node:path";
+import { basename, dirname, join, posix, resolve } from "node:path";
 import { promisify } from "node:util";
 import { Command } from "commander";
 import type { AutoDeleteDays, CloudEnvironmentChange } from "@cloudroom/sdk";
@@ -203,13 +203,32 @@ export function registerImportCommands(program: Command, getUrl: () => string): 
       for (const thread of result.skipped) console.log(`Skipped   ${thread.title}: ${thread.reason}`);
       if (!result.imported.length && !result.skipped.length) console.log("No open BB threads found.");
     }));
-  for (const [command, harness, app] of [["claude-code", "claude-code", "Claude Code"], ["codex", "codex", "Codex"], ["pi", "pi", "Pi"], ["hermes", "acp-hermes-agent", "Hermes Agent"], ["t3code", "t3code", "T3 Code"]] as const) {
-    group.command(command).description(`Copy recent ${app} chats from this Mac into idle Local threads with their messages.${harness === "acp-hermes-agent" ? " Text only: the agent reads the old messages instead of resuming the session." : harness === "t3code" ? " Claude Code and Codex chats keep their memory; chats from other agents come over as text." : ""} Sends no prompts; ${app} is never changed.`)
+  for (const [command, harness, app] of [["claude-code", "claude-code", "Claude Code"], ["codex", "codex", "Codex"], ["pi", "pi", "Pi"], ["hermes", "acp-hermes-agent", "Hermes Agent"], ["t3code", "t3code", "T3 Code"], ["conductor", "conductor", "Conductor"]] as const) {
+    const sub = group.command(command).description(`Copy recent ${app} chats from this Mac into idle Local threads with their messages.${harness === "acp-hermes-agent" ? " Text only: the agent reads the old messages instead of resuming the session." : harness === "t3code" || harness === "conductor" ? " Claude Code and Codex chats keep their memory; chats from other agents come over as text." : ""}${harness === "conductor" ? " --path imports every chat in a Conductor Cloud export (its unzipped folder or the .zip)." : ""} Sends no prompts; ${app} is never changed.`)
       .option("--days <days>", "Only chats active in the last N days", "30")
       .option("--dry-run", "List the chats without importing them")
-      .option("--json", "Print JSON")
-      .action(action(async (options: JsonOutputOptions & { days: string; dryRun?: boolean }) => {
+      .option("--json", "Print JSON");
+    if (harness === "conductor") sub.option("--path <path>", "A Conductor Cloud export: its unzipped folder or the .zip");
+    sub.action(action(async (options: JsonOutputOptions & { days: string; dryRun?: boolean; path?: string }) => {
+        if (harness === "conductor") {
+          (await import("../plugin-cli-proxy.js")).allowLongRequests();
+        }
         const sdk = createCliBbSdk(getUrl()).cloudroom;
+        if (options.path && options.dryRun) {
+          const { sessions } = await sdk.conductorExport(resolve(options.path));
+          if (outputJson(options, { sessions })) return;
+          for (const session of sessions) console.log(`${session.title}  (${session.cwd})`);
+          if (!sessions.length) console.log("No new chats in this Conductor export.");
+          return;
+        }
+        if (options.path) {
+          const result = await sdk.importConductorExport(await resolveLocalHostId(), resolve(options.path));
+          if (outputJson(options, result)) return;
+          for (const thread of result.imported) console.log(`Imported  ${thread.title} → ${thread.threadId}`);
+          for (const thread of result.skipped) console.log(`Skipped   ${thread.title}: ${thread.reason}`);
+          if (!result.imported.length && !result.skipped.length) console.log("No new chats in this Conductor export.");
+          return;
+        }
         const since = Date.now() - Number(options.days) * 86_400_000;
         const sessions = (await sdk.nativeSessions()).sessions.filter((session) => session.harness === harness && session.updatedAt >= since);
         if (options.dryRun || !sessions.length) {

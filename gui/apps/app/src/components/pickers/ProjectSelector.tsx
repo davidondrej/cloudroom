@@ -1,6 +1,6 @@
 import { useThisComputer } from "@/hooks/useHostDaemon";
-import { COMPUTER_TITLE, getHostPathComparisonKey } from "@cloudroom/domain";
-import { useMemo, useRef, useState, type KeyboardEvent } from "react";
+import { COMPUTER_TITLE, getHostPathComparisonKey, getHostPathDirname } from "@cloudroom/domain";
+import { useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import type { RepoSuggestion } from "@cloudroom/sdk/browser";
 import { Button } from "@cloudroom/shared-ui/button";
 import {
@@ -9,7 +9,6 @@ import {
   CommandInput,
   CommandItem,
   CommandList,
-  CommandSeparator,
 } from "@cloudroom/shared-ui/command";
 import { Icon } from "@cloudroom/shared-ui/icon";
 import { cn } from "@cloudroom/shared-ui/lib/utils";
@@ -23,11 +22,11 @@ import { Popover, PopoverContent, PopoverTrigger } from "@cloudroom/shared-ui/po
 import { formatRelativeTime } from "@/lib/relative-time";
 import { folderValue, tildePath } from "./folder-path";
 import {
-  FolderKeyHints,
   FolderPathGroup,
-  FolderSearchGroup,
   HERE_VALUE,
-  baseName,
+  PICKER_DETAIL_CLASS_NAME,
+  PICKER_ROW_CLASS_NAME,
+  RowAction,
   type PickedFolder,
 } from "./FolderGroups";
 import { searchPickerOptions } from "./picker-search";
@@ -36,16 +35,10 @@ import { useResetPickerScroll } from "./useResetPickerScroll";
 
 const PROJECT_SEARCH_MIN_OPTIONS = 5;
 const NO_HIGHLIGHT_VALUE = "__project-picker-idle__";
-const PROJECT_PICKER_ITEM_CLASS_NAME = "py-[0.3125rem] text-xs max-md:py-2";
 const VISIBLE_REPO_SUGGESTIONS = 5;
 const FOLDER_SEARCH_ROWS = 6;
 const NAVIGATION_KEYS = new Set(["ArrowDown", "ArrowUp", "Home", "End"]);
-const REPO_FILTERS = [
-  { id: "all", label: "All" },
-  { id: "github", label: "GitHub" },
-  { id: "mac", label: COMPUTER_TITLE },
-] as const;
-type RepoFilter = (typeof REPO_FILTERS)[number]["id"];
+const MUTED_LINE_CLASS_NAME = "px-2 py-1.5 text-xs text-muted-foreground/70 max-md:py-2";
 
 export const repoKey = (repo: RepoSuggestion) =>
   repo.source === "mac" ? repo.path : repo.repo;
@@ -53,6 +46,8 @@ export const repoKey = (repo: RepoSuggestion) =>
 export interface ProjectSelectorOption {
   id: string;
   name: string;
+  /** When the project was last used. The list shows the newest first. */
+  updatedAt?: number;
 }
 
 /** Repos on this Mac and GitHub that are not projects yet, newest first. `onAdd` resolves to the new project's id.
@@ -106,7 +101,6 @@ export function ProjectSelector({
   const [searchQuery, setSearchQuery] = useState("");
   // The row the user moved to, for the query they moved on. A new query falls back to the most likely row.
   const [chosen, setChosen] = useState({ query: "", value: NO_HIGHLIGHT_VALUE });
-  const [repoFilter, setRepoFilter] = useState<RepoFilter>("all");
   const commandRef = useRef<HTMLDivElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const listRef = useResetPickerScroll<HTMLDivElement>(searchQuery);
@@ -115,6 +109,7 @@ export function ProjectSelector({
   // With repo suggestions the search box shows from the start, so the menu doesn't jump when repos arrive.
   const showSearch =
     Boolean(suggestions) || projects.length > PROJECT_SEARCH_MIN_OPTIONS;
+  const queried = showSearch && searchQuery.trim() !== "";
   const filteredProjects = useMemo(
     () =>
       showSearch
@@ -132,7 +127,7 @@ export function ProjectSelector({
     open,
   });
   const { pathMode } = folders;
-  // Found folders, minus projects the list above already shows. Exactly these rows render.
+  // Found folders, minus projects the list already shows. Exactly these rows render.
   const folderResults = useMemo(() => {
     const listed = new Set(filteredProjects.map((project) => project.id));
     return folders.results
@@ -143,25 +138,15 @@ export function ProjectSelector({
     // A Mac repo found by the folder search shows once, with the folders.
     const found = new Set(folderResults.map((entry) => getHostPathComparisonKey(entry.path)));
     const repos = (suggestions?.repos ?? []).filter(
-      (repo) =>
-        (repoFilter === "all" || repo.source === repoFilter) &&
-        !(repo.source === "mac" && found.has(getHostPathComparisonKey(repo.path))),
+      (repo) => !(repo.source === "mac" && found.has(getHostPathComparisonKey(repo.path))),
     );
     return searchPickerOptions({
       options: repos,
       query: searchQuery,
       getLabel: (repo) => repo.name,
     }).slice(0, VISIBLE_REPO_SUGGESTIONS);
-  }, [folderResults, repoFilter, searchQuery, suggestions?.repos]);
+  }, [folderResults, searchQuery, suggestions?.repos]);
   const folderRows = pathMode ? folders.matches : folderResults;
-  // While searching, empty project and repo groups only add noise next to found folders.
-  const searching = Boolean(suggestions && searchQuery.trim());
-  const showProjects =
-    !pathMode && projects.length > 0 && !(searching && filteredProjects.length === 0);
-  const showRepos =
-    Boolean(suggestions) &&
-    !pathMode &&
-    !(searching && visibleRepos.length === 0 && folderResults.length > 0);
   const topFolder = pathMode
     ? folders.leaf
       ? folders.matches[0]
@@ -222,6 +207,8 @@ export function ProjectSelector({
       : !pathMode && completion && completion === homeMatch
         ? `${completion.name}/`.slice(searchQuery.trim().length)
         : "";
+  // Tab does something: the hint sits at the end of the search box.
+  const showTab = Boolean(completion) && (pathMode || Boolean(folders.home?.startsWith("/")));
   const selected = value !== null ? projects.find((p) => p.id === value) : null;
   const fallback = !allowNoProject && !selected ? projects[0] : null;
   const triggerLabel = isLoading
@@ -232,12 +219,6 @@ export function ProjectSelector({
     : (selected?.name ?? fallback?.name ?? "No project");
   const triggerIcon =
     isLoading || selected || fallback ? "Folder" : "FolderPlus";
-  const createProjectAction = createProject;
-  const createProjectLabel = createProjectAction?.isCreating
-    ? "Creating..."
-    : "New project";
-  const showActionSeparator =
-    projects.length > 0 && (Boolean(createProjectAction) || allowNoProject);
   const handleOpenChange = (nextOpen: boolean) => {
     setOpen(nextOpen);
     setChosen({ query: "", value: NO_HIGHLIGHT_VALUE });
@@ -287,19 +268,76 @@ export function ProjectSelector({
     event.preventDefault();
     if (fill !== null) setSearchQuery(fill);
   };
-  const here = folders.listing;
-  const enterFolder =
-    highlightedValue === HERE_VALUE && here
-      ? { name: baseName(here.directory), projectId: here.projectId }
-      : highlightedFolder;
-  const enterHint: [string, string][] = enterFolder
-    ? [["enter", `${enterFolder.projectId ? "Select" : "Add"} ${enterFolder.name}`]]
-    : [];
-  const keyHints: [string, string][] = pathMode
-    ? [...(completion ? [["tab", "Complete"] as [string, string]] : []), ...enterHint]
-    : completion && folders.home?.startsWith("/")
-      ? [["tab", `Open ${tildePath(completion.path, folders.home)}/`], ...(highlightedFolder ? enterHint : [])]
-      : [];
+
+  // Rows that are not projects yet are dimmer, unless there is no project to tell them apart from.
+  const dim = projects.length > 0;
+  const addingKey = suggestions?.addingKey ?? null;
+  const projectRows = filteredProjects.map((project) => ({
+    at: project.updatedAt ?? 0,
+    current: project.id === value,
+    node: (
+      <CommandItem
+        key={project.id}
+        value={project.id}
+        keywords={[project.name]}
+        aria-current={project.id === value ? "true" : undefined}
+        onSelect={() => selectProject(project.id)}
+        className={cn(PICKER_ROW_CLASS_NAME, project.id === value && "font-medium")}
+      >
+        <span className="min-w-0 flex-1 truncate">{project.name}</span>
+        {project.id === value ? <CurrentCheck /> : null}
+      </CommandItem>
+    ),
+  }));
+  const foundRows = folderResults.map((entry) => (
+    <AddRow
+      key={entry.path}
+      value={folderValue(entry.path)}
+      name={entry.name}
+      detail={tildePath(getHostPathDirname(entry.path) ?? entry.path, folders.home)}
+      action={entry.projectId ? "Select" : "Add"}
+      dim={dim}
+      adding={addingKey === entry.path}
+      disabled={addingKey !== null && addingKey !== entry.path}
+      onSelect={() => pickFolder(entry)}
+    />
+  ));
+  const repoRows = visibleRepos.map((repo) => (
+    <RepoRow
+      key={`repo:${repoKey(repo)}`}
+      repo={repo}
+      dim={dim}
+      addingKey={addingKey}
+      onAdd={addRepo}
+    />
+  ));
+  // Projects first: the current one, then the most recently used. A search keeps its own ranking.
+  // Below them, what is not a project yet: found folders, then repos.
+  const rows = [
+    ...(queried
+      ? projectRows
+      : [...projectRows].sort((a, b) => Number(b.current) - Number(a.current) || b.at - a.at)
+    ).map((row) => row.node),
+    ...foundRows,
+    ...repoRows,
+  ];
+  const loadingMessage = !suggestions
+    ? null
+    : suggestions.isLoading
+      ? "Looking for repos…"
+      : suggestions.githubLoading
+        ? "Checking GitHub…"
+        : null;
+  const emptyMessage =
+    rows.length > 0
+      ? null
+      : queried
+        ? suggestions
+          ? "Nothing matches. Type ~/ to browse folders."
+          : "No projects found"
+        : suggestions
+          ? "No projects yet."
+          : null;
 
   return (
     <Popover open={open} onOpenChange={handleOpenChange} modal={modal}>
@@ -360,9 +398,10 @@ export function ProjectSelector({
             commandRef.current?.focus();
           }
         }}
+        // Gray lines, not the theme's accent-tinted border, and a slightly lifted surface in dark mode.
         className={cn(
-          "flex max-h-[min(var(--radix-popover-content-available-height),calc(100dvh-0.5rem))] flex-col overflow-hidden p-0 max-md:min-h-0 max-md:flex-1",
-          suggestions ? "w-80" : "w-52",
+          "flex max-h-[min(var(--radix-popover-content-available-height),calc(100dvh-0.5rem))] flex-col overflow-hidden rounded-xl border-muted bg-[var(--picker-surface)] p-0 shadow-xl [--picker-surface:var(--popover)] dark:[--picker-surface:color-mix(in_oklch,var(--ink)_4%,var(--canvas))] max-md:min-h-0 max-md:flex-1",
+          suggestions ? "w-[18.75rem]" : "w-52",
         )}
       >
         <Command
@@ -374,28 +413,29 @@ export function ProjectSelector({
           onKeyDown={(event) => {
             if (NAVIGATION_KEYS.has(event.key) || (event.ctrlKey && "npjk".includes(event.key))) markUserMove();
           }}
-          className="min-h-0"
+          className="relative min-h-0 bg-transparent [&_[cmdk-input-wrapper]]:border-accent"
         >
           {showSearch ? (
             <CommandInput
               ref={searchInputRef}
               aria-label="Search projects"
-              placeholder={
-                suggestions
-                  ? "Search, or type ~/ for a path"
-                  : "Search projects"
-              }
+              placeholder={suggestions ? "Find or add a project" : "Search projects"}
               value={searchQuery}
               onValueChange={setSearchQuery}
               onKeyDown={handleSearchKeyDown}
               ghost={suggestions ? ghost : undefined}
-              className="h-8 text-xs"
+              className="h-9 text-xs caret-primary placeholder:text-muted-foreground/50"
             />
+          ) : null}
+          {suggestions && showTab ? (
+            <kbd className="pointer-events-none absolute right-3 top-2.5 rounded-sm border border-muted px-1 font-sans text-[0.625rem] leading-4 text-muted-foreground">
+              tab
+            </kbd>
           ) : null}
           <CommandList
             ref={listRef}
             onPointerMoveCapture={markUserMove}
-            className="min-h-0 max-h-none flex-1 overscroll-contain"
+            className="min-h-0 max-h-[20.25rem] flex-1 scroll-pb-10 overscroll-contain max-md:max-h-none"
           >
             {pathMode && suggestions ? (
               <FolderPathGroup
@@ -403,262 +443,150 @@ export function ProjectSelector({
                 addingKey={suggestions.addingKey}
                 onPick={pickFolder}
               />
-            ) : null}
-            {showProjects ? (
-              <CommandGroup
-                heading={
-                  suggestions ? (
-                    <>
-                      In Cloudroom{" "}
-                      <span className="font-normal opacity-70">
-                        {projects.length}
-                      </span>
-                    </>
-                  ) : (
-                    "Project"
-                  )
-                }
-              >
-                <div
-                  className={cn(
-                    suggestions && "max-h-[9.5rem] overflow-y-auto",
-                  )}
-                >
-                  {filteredProjects.map((project) => (
-                    <CommandItem
-                      key={project.id}
-                      value={project.id}
-                      keywords={[project.name]}
-                      aria-current={project.id === value ? "true" : undefined}
-                      onSelect={() => selectProject(project.id)}
-                      className={PROJECT_PICKER_ITEM_CLASS_NAME}
-                    >
-                      <Icon
-                        name="Folder"
-                        className="size-4 text-muted-foreground"
-                        aria-hidden
-                      />
-                      <span className="min-w-0 flex-1 truncate">
-                        {project.name}
-                      </span>
-                      <Icon
-                        name="Check"
-                        className={cn(
-                          "ml-auto size-4",
-                          project.id === value ? "opacity-100" : "opacity-0",
-                        )}
-                        aria-hidden
-                      />
-                    </CommandItem>
-                  ))}
-                </div>
-                {showSearch && filteredProjects.length === 0 ? (
-                  <div className="px-2 py-1.5 text-xs text-muted-foreground max-md:py-2">
-                    No projects found
+            ) : rows.length > 0 || loadingMessage || emptyMessage ? (
+              <CommandGroup>
+                {rows}
+                {loadingMessage ? (
+                  <div className={cn(MUTED_LINE_CLASS_NAME, "flex items-center gap-2")}>
+                    <Icon name="Loading" className="size-3.5 animate-spin" aria-hidden />
+                    {loadingMessage}
                   </div>
+                ) : emptyMessage ? (
+                  <div className={MUTED_LINE_CLASS_NAME}>{emptyMessage}</div>
                 ) : null}
               </CommandGroup>
             ) : null}
-            {suggestions && !pathMode && folderResults.length > 0 ? (
-              <>
-                {showProjects ? <CommandSeparator /> : null}
-                <FolderSearchGroup
-                  results={folderResults}
-                  home={folders.home}
-                  addingKey={suggestions.addingKey}
-                  onPick={pickFolder}
+            {createProject || allowNoProject ? (
+              <div className="sticky bottom-0 flex items-center justify-between gap-1 border-t border-accent bg-[var(--picker-surface)] p-1">
+                <div
+                  ref={watchListEnd}
+                  aria-hidden
+                  className="pointer-events-none absolute inset-x-0 bottom-[calc(100%+1px)] h-8 bg-gradient-to-b from-transparent to-[var(--picker-surface)]"
                 />
-              </>
-            ) : null}
-            {suggestions && showRepos ? (
-              <>
-                {showProjects || folderResults.length > 0 ? (
-                  <CommandSeparator />
-                ) : null}
-                <RepoSuggestionsGroup
-                  suggestions={suggestions}
-                  repos={visibleRepos}
-                  filter={repoFilter}
-                  onFilterChange={setRepoFilter}
-                  onAdd={addRepo}
-                />
-              </>
-            ) : null}
-            {!pathMode && (showActionSeparator || suggestions) ? (
-              <CommandSeparator />
-            ) : null}
-            {!pathMode && (createProjectAction || allowNoProject) ? (
-              <CommandGroup
-                heading={
-                  projects.length === 0 && !suggestions ? "Project" : undefined
-                }
-              >
-                {createProjectAction ? (
+                {createProject ? (
                   <CommandItem
-                    disabled={createProjectAction.disabled}
+                    disabled={createProject.disabled}
                     value="new-project"
                     onSelect={() => {
-                      createProjectAction.onCreate();
+                      createProject.onCreate();
                       handleOpenChange(false);
                     }}
-                    className={PROJECT_PICKER_ITEM_CLASS_NAME}
+                    className={cn(PICKER_ROW_CLASS_NAME, "text-muted-foreground/70")}
                   >
-                    <Icon
-                      name="FolderPlus"
-                      className="size-4 text-muted-foreground"
-                      aria-hidden
-                    />
-                    {createProjectLabel}
+                    <Icon name="FolderPlus" className="size-3.5! opacity-70" aria-hidden />
+                    {createProject.isCreating ? "Creating..." : "New project"}
                   </CommandItem>
-                ) : null}
+                ) : (
+                  <span />
+                )}
                 {allowNoProject ? (
                   <CommandItem
                     value="no-project"
                     aria-current={value === null ? "true" : undefined}
                     onSelect={() => selectProject(null)}
-                    className={PROJECT_PICKER_ITEM_CLASS_NAME}
+                    className={cn(
+                      PICKER_ROW_CLASS_NAME,
+                      value === null ? "font-medium" : "text-muted-foreground/70",
+                    )}
                   >
-                    <Icon
-                      name="FolderMinus"
-                      className="size-4 text-muted-foreground"
-                      aria-hidden
-                    />
-                    Don&apos;t work in a project
-                    <Icon
-                      name="Check"
-                      className={cn(
-                        "ml-auto size-4",
-                        value === null ? "opacity-100" : "opacity-0",
-                      )}
-                      aria-hidden
-                    />
+                    No project
+                    {value === null ? <CurrentCheck /> : null}
                   </CommandItem>
                 ) : null}
-              </CommandGroup>
+              </div>
             ) : null}
           </CommandList>
-          {suggestions ? <FolderKeyHints hints={keyHints} /> : null}
         </Command>
       </PopoverContent>
     </Popover>
   );
 }
 
-interface RepoSuggestionsGroupProps {
-  suggestions: ProjectSelectorSuggestions;
-  repos: readonly RepoSuggestion[];
-  filter: RepoFilter;
-  onFilterChange: (filter: RepoFilter) => void;
+/** The fade above the footer says "more below". It hides when the list fits, or is scrolled to its end. */
+function watchListEnd(fade: HTMLDivElement | null) {
+  const list = fade?.closest<HTMLElement>("[cmdk-list]");
+  if (!fade || !list || typeof ResizeObserver === "undefined") return;
+  const update = () => {
+    fade.hidden = list.scrollHeight - list.scrollTop - list.clientHeight < 4;
+  };
+  const observer = new ResizeObserver(update);
+  observer.observe(list);
+  if (list.firstElementChild) observer.observe(list.firstElementChild);
+  list.addEventListener("scroll", update, { passive: true });
+  return () => {
+    observer.disconnect();
+    list.removeEventListener("scroll", update);
+  };
+}
+
+function CurrentCheck() {
+  return <Icon name="Check" className="size-3.5! text-primary-text [&_*]:stroke-2" aria-hidden />;
+}
+
+interface AddRowProps {
+  value: string;
+  name: string;
+  /** Where it lives, on the right. */
+  detail: ReactNode;
+  action?: string;
+  dim: boolean;
+  adding: boolean;
+  disabled: boolean;
+  onSelect: () => void;
+}
+
+/** A repo or folder that is not a project yet. */
+function AddRow({ value, name, detail, action = "Add", dim, adding, disabled, onSelect }: AddRowProps) {
+  return (
+    <CommandItem
+      value={value}
+      keywords={[name]}
+      disabled={disabled}
+      onSelect={onSelect}
+      className={cn(PICKER_ROW_CLASS_NAME, "animate-in fade-in duration-300 motion-reduce:animate-none")}
+    >
+      <span
+        className={cn(
+          "min-w-0 flex-1 truncate",
+          dim && "text-muted-foreground/70 group-data-[selected=true]:text-foreground",
+        )}
+      >
+        {name}
+      </span>
+      {adding ? null : (
+        <span className={cn(PICKER_DETAIL_CLASS_NAME, "flex shrink-0 items-center gap-2 group-data-[selected=true]:hidden")}>
+          {detail}
+          <Icon name="Plus" className="size-3.5!" aria-hidden />
+        </span>
+      )}
+      <RowAction label={action} busy={adding} />
+    </CommandItem>
+  );
+}
+
+interface RepoRowProps {
+  repo: RepoSuggestion;
+  dim: boolean;
+  addingKey: string | null;
   onAdd: (repo: RepoSuggestion) => void;
 }
 
-function RepoSuggestionsGroup({
-  suggestions,
-  repos,
-  filter,
-  onFilterChange,
-  onAdd,
-}: RepoSuggestionsGroupProps) {
-  const now = Date.now();
+function RepoRow({ repo, dim, addingKey, onAdd }: RepoRowProps) {
   const computer = useThisComputer() === "this PC" ? "PC" : COMPUTER_TITLE;
-  const loadingMessage = suggestions.isLoading
-    ? "Looking for repos…"
-    : suggestions.githubLoading && filter !== "mac"
-      ? "Checking GitHub…"
-      : null;
-  const emptyMessage =
-    filter === "github" && !suggestions.githubConnected
-      ? "GitHub isn't connected."
-      : "No other repos found.";
+  const key = repoKey(repo);
+  const age =
+    repo.updatedAt === null
+      ? ""
+      : ` · ${formatRelativeTime({ timestamp: repo.updatedAt, now: Date.now() }).replace(" ago", "")}`;
   return (
-    <CommandGroup>
-      <div className="flex items-center gap-1 px-2 pb-1.5 pt-1 text-xs font-medium text-muted-foreground">
-        <span className="mr-auto whitespace-nowrap">Not in Cloudroom yet</span>
-        {REPO_FILTERS.map(({ id, label }) => (
-          <button
-            key={id}
-            type="button"
-            aria-pressed={filter === id}
-            onClick={() => onFilterChange(id)}
-            className={cn(
-              "flex items-center gap-1 rounded-full border px-1.5 text-[0.6875rem] leading-4",
-              filter === id
-                ? "border-primary bg-primary text-primary-foreground"
-                : "border-border hover:text-foreground",
-            )}
-          >
-            {id === "all" ? null : (
-              <Icon
-                name={
-                  id === "github" && suggestions.githubLoading
-                    ? "Loading"
-                    : id === "github"
-                      ? "Github"
-                      : "Laptop"
-                }
-                className={cn(
-                  "size-2.5",
-                  id === "github" && suggestions.githubLoading && "animate-spin",
-                )}
-                aria-hidden
-              />
-            )}
-            {id === "mac" ? computer : label}
-          </button>
-        ))}
-      </div>
-      {repos.map((repo, index) => {
-        const key = repoKey(repo);
-        const adding = suggestions.addingKey === key;
-        return (
-          <CommandItem
-            key={key}
-            value={`repo:${key}`}
-            keywords={[repo.name]}
-            disabled={suggestions.addingKey !== null && !adding}
-            onSelect={() => onAdd(repo)}
-            className={cn(
-              PROJECT_PICKER_ITEM_CLASS_NAME,
-              "group animate-in fade-in slide-in-from-top-1 fill-mode-both duration-300 motion-reduce:animate-none",
-            )}
-            style={{ animationDelay: `${index * 50}ms` }}
-          >
-            <Icon
-              name={repo.source === "github" ? "Github" : "Laptop"}
-              className="size-4 text-muted-foreground"
-              aria-hidden
-            />
-            <span className="min-w-0 flex-1 truncate">
-              {repo.name}
-              {repo.updatedAt === null ? null : (
-                <span className="ml-1.5 text-muted-foreground">
-                  {formatRelativeTime({ timestamp: repo.updatedAt, now })}
-                </span>
-              )}
-            </span>
-            <span className="flex shrink-0 items-center gap-1 rounded border px-1.5 text-[0.6875rem] leading-4 text-muted-foreground group-data-[selected=true]:border-primary group-data-[selected=true]:bg-primary group-data-[selected=true]:text-primary-foreground">
-              {adding ? (
-                <>
-                  <Icon name="Loading" className="size-3 animate-spin" />
-                  Adding
-                </>
-              ) : (
-                "+ Add"
-              )}
-            </span>
-          </CommandItem>
-        );
-      })}
-      {loadingMessage ? (
-        <div className="flex items-center gap-2 px-2 py-[0.3125rem] text-xs text-muted-foreground max-md:py-2">
-          <Icon name="Loading" className="size-4 animate-spin" aria-hidden />
-          {loadingMessage}
-        </div>
-      ) : repos.length === 0 ? (
-        <div className="px-2 py-1.5 text-xs text-muted-foreground max-md:py-2">
-          {emptyMessage}
-        </div>
-      ) : null}
-    </CommandGroup>
+    <AddRow
+      value={`repo:${key}`}
+      name={repo.name}
+      detail={`${repo.source === "github" ? "GitHub" : computer}${age}`}
+      dim={dim}
+      adding={addingKey === key}
+      disabled={addingKey !== null && addingKey !== key}
+      onSelect={() => onAdd(repo)}
+    />
   );
 }

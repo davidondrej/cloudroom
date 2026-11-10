@@ -55,6 +55,7 @@ import {
 } from "@/hooks/useTheme";
 import { useHostDaemon, useLocalHostDaemonAccess } from "@/hooks/useHostDaemon";
 import { useAppThemePreview } from "@/hooks/useAppThemePreview";
+import { useBrandMark } from "@/hooks/useBrandMark";
 import { useCorners, type Corners } from "@/hooks/useCorners";
 import {
   ProviderTurnDisplaySection,
@@ -447,6 +448,22 @@ function CornersSetting() {
   );
 }
 
+function BrandMarkSetting() {
+  const [showBrandMark, setShowBrandMark] = useBrandMark();
+  return (
+    <SettingsWithControl
+      label="Show Cloudroom name"
+      description="The Cloudroom logo and name at the top of the window."
+    >
+      <Switch
+        checked={showBrandMark}
+        onCheckedChange={setShowBrandMark}
+        aria-label="Show Cloudroom name"
+      />
+    </SettingsWithControl>
+  );
+}
+
 const DIRECTORY_TARGET_PREFERENCE: LocalOpenTargetPreferenceDefinition = {
   capability: "openDirectory",
   emptyDescription: "No local app can open directories.",
@@ -808,6 +825,7 @@ export function AppearanceSettingsSection({
           </DropdownMenu>
         </SettingsWithControl>
         <CornersSetting />
+        <BrandMarkSetting />
 
         <SettingsWithControl
           label="Palette"

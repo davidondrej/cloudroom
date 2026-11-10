@@ -1,6 +1,7 @@
 ---
 name: skill-creator
 description: "Create or improve Cloudroom skills, including their triggers, instructions, and supporting resources."
+disable-model-invocation: true
 ---
 
 # Skill creator

@@ -24,6 +24,15 @@ const TUNNEL_TAG = "tunnel";
 const RESP_HEAD_TIMEOUT_MS = 30_000;
 /** The Mac pings every 10s. A sleeping Mac's socket can still look open for minutes, so a silent one is gone. */
 const HEARTBEAT_STALE_MS = 30_000;
+/** From protocol 2 the Mac pings every 4s, so a dead tunnel is spotted sooner. */
+const FAST_HEARTBEAT_STALE_MS = 12_000;
+/** A dropped Mac is usually back in a second or two. New requests wait for it this long after the drop instead of failing.
+ * With the 30s answer deadline this stays under the Worker's 40s limit. */
+const GAP_HOLD_MS = 8_000;
+const GAP_MAX_WAITERS = 200;
+/** A Mac sending a big download can't get its ping through: the ping waits behind megabytes of data.
+ * So while its data arrives, the relay tells it so this often. Any message from the relay counts as alive on the Mac. */
+const HEARD_EVERY_MS = 2_000;
 
 const WS_READY_STATE_OPEN = 1;
 
@@ -92,6 +101,13 @@ interface PendingHttp {
 export class TunnelDO {
   private readonly pendingHttp = new Map<number, PendingHttp>();
   private nextStreamId: number;
+  /** Requests waiting for the Mac's next tunnel. Each is called with that tunnel, or null when the wait is over. */
+  private readonly gapWaiters = new Set<(tunnel: WebSocket | null) => void>();
+  /** When the Mac's tunnel dropped; 0 while it is connected or was closed on purpose. In memory only: losing it just means no waiting. */
+  private droppedAt = 0;
+  /** When the Mac last sent a frame. A big download can queue pings behind it, so frames count as alive too. */
+  private lastFrameAt = 0;
+  private lastHeardSentAt = 0;
 
   private readonly env: Env;
 
@@ -129,6 +145,7 @@ export class TunnelDO {
     if (url.pathname === "/__control/close") {
       for (const ws of this.state.getWebSockets(TUNNEL_TAG))
         ws.close(1000, "revoked by owner");
+      this.releaseWaiters(null);
       return new Response(null, { status: 204 });
     }
     if (url.pathname === "/__control/status") {
@@ -139,14 +156,37 @@ export class TunnelDO {
       url.pathname === "/__control/revoke-visitors"
     ) {
       this.abandonStreams("phone access revoked", "phone access revoked");
+      this.releaseWaiters(null);
       return new Response(null, { status: 204 });
     }
 
     const tunnel = this.tunnelSocket();
     if (!tunnel) {
-      return this.offlineResponse();
+      return this.waitForTunnel().then((next) => (next ? this.relay(request, url, next) : this.offlineResponse()));
     }
+    return this.relay(request, url, tunnel);
+  }
 
+  /** Resolves with the Mac's next tunnel, or null when it dropped too long ago or does not return in time. */
+  private waitForTunnel(): Promise<WebSocket | null> {
+    const waitMs = this.droppedAt + GAP_HOLD_MS - Date.now();
+    if (waitMs <= 0 || this.gapWaiters.size >= GAP_MAX_WAITERS) return Promise.resolve(null);
+    return new Promise((resolve) => {
+      const waiter = (tunnel: WebSocket | null) => {
+        clearTimeout(timer);
+        this.gapWaiters.delete(waiter);
+        resolve(tunnel);
+      };
+      const timer = setTimeout(() => waiter(null), waitMs);
+      this.gapWaiters.add(waiter);
+    });
+  }
+
+  private releaseWaiters(tunnel: WebSocket | null): void {
+    for (const waiter of [...this.gapWaiters]) waiter(tunnel);
+  }
+
+  private relay(request: Request, url: URL, tunnel: WebSocket): Response | Promise<Response> {
     const target = readTunnelTarget(request.headers);
     if (target !== undefined && (tunnelInfo(tunnel).protocolVersion ?? 0) < 1) {
       return new Response(`cloudroom: ${PORT_SHARE_TOO_OLD}\n`, {
@@ -196,11 +236,14 @@ export class TunnelDO {
     for (let i = sockets.length - 1; i >= 0; i--) {
       const ws = sockets[i];
       if (ws.readyState !== WS_READY_STATE_OPEN) continue;
-      const { connectedAt = 0, mac } = tunnelInfo(ws);
+      const { connectedAt = 0, mac, protocolVersion = 0 } = tunnelInfo(ws);
       const lastPing = this.state.getWebSocketAutoResponseTimestamp(ws)?.getTime() ?? 0;
-      const silentMs = Date.now() - Math.max(connectedAt, lastPing);
-      if (silentMs <= HEARTBEAT_STALE_MS) return ws;
+      const lastHeard = Math.max(connectedAt, lastPing, this.lastFrameAt);
+      const silentMs = Date.now() - lastHeard;
+      if (silentMs <= (protocolVersion >= 2 ? FAST_HEARTBEAT_STALE_MS : HEARTBEAT_STALE_MS)) return ws;
       console.log({ event: "tunnel_silent_dropped", mac, silentSeconds: Math.round(silentMs / 1000) });
+      // Counted from when the Mac was last heard, so a sleeping Mac answers "offline" at once.
+      this.droppedAt ||= lastHeard;
       try {
         ws.close(1011, "heartbeat timed out");
       } catch {}
@@ -261,6 +304,10 @@ export class TunnelDO {
     void this.markPresence(serverId ?? undefined);
     const mac = new URL(request.url).hostname.split(".")[0];
     console.log({ event: "tunnel_connected", mac });
+    if (this.droppedAt) {
+      console.log({ event: "tunnel_gap", mac, gapMs: Date.now() - this.droppedAt, waiting: this.gapWaiters.size });
+      this.droppedAt = 0;
+    }
     const pair = new WebSocketPair();
     pair[1].serializeAttachment({
       connectedAt: Date.now(),
@@ -270,6 +317,7 @@ export class TunnelDO {
     } satisfies TunnelInfo);
     this.state.acceptWebSocket(pair[1], [TUNNEL_TAG]);
     this.resendHeld(pair[1]);
+    this.releaseWaiters(pair[1]);
     return new Response(null, { status: 101, webSocket: pair[0] });
   }
 
@@ -493,7 +541,14 @@ export class TunnelDO {
     if (ws.readyState !== WS_READY_STATE_OPEN) return;
     const tags = this.state.getTags(ws);
     if (tags.includes(TUNNEL_TAG)) {
+      this.lastFrameAt = Date.now();
       if (typeof message === "string") return;
+      if (this.lastFrameAt - this.lastHeardSentAt >= HEARD_EVERY_MS) {
+        this.lastHeardSentAt = this.lastFrameAt;
+        try {
+          ws.send(HEARTBEAT_RESPONSE);
+        } catch {}
+      }
       this.onTunnelFrame(decodeFrame(message));
       return;
     }
@@ -630,6 +685,9 @@ export class TunnelDO {
       const connectedSeconds = connectedAt ? Math.round((Date.now() - connectedAt) / 1000) : null;
       console.log({ event: "tunnel_closed", mac, code, reason, connectedSeconds });
       if (this.tunnelSocket() !== null) return;
+      // A normal close (1000) was on purpose, such as a Mac that signed out. Anything else is a drop.
+      if (code === 1000) this.droppedAt = 0;
+      else this.droppedAt ||= Date.now();
       void this.markPresence(serverId);
       this.abandonStreams(
         "tunnel disconnected mid-request",

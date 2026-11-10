@@ -87,6 +87,10 @@ import {
   type ThreadStartCommandArgs,
   type ThreadStopCommandArgs,
 } from "./thread-commands.js";
+import {
+  carriesCustomInstructions,
+  markCustomInstructionsLost,
+} from "./custom-instructions.js";
 import { ApiError } from "../../errors.js";
 import { ensureHostSessionReadyForWork } from "../hosts/host-lifecycle.js";
 import {
@@ -844,6 +848,10 @@ function settleThreadCommandFailure(
     thread.providerId,
     args.report,
   );
+  // The failed message may never have reached the agent, so the next one carries the custom instructions again.
+  if (carriesCustomInstructions(args.command.input)) {
+    markCustomInstructionsLost(args.deps.db, thread.id);
+  }
   if (
     args.command.type === "turn.submit" &&
     args.report.errorCode === "command_timeout"

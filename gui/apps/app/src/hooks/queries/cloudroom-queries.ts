@@ -362,6 +362,19 @@ export function useImportSessions() {
   });
 }
 
+export function useImportConductorExport() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: async ({ hostId, clientHostId, onPicked }: { hostId: string; clientHostId: string; onPicked?: () => void }) => {
+      const { path } = await sdk.hosts.pickFolder({ hostId, clientHostId });
+      if (!path) return null;
+      onPicked?.();
+      return sdk.cloudroom.importConductorExport(hostId, path);
+    },
+    onSettled: () => client.invalidateQueries(),
+  });
+}
+
 export function useExportableChats() {
   return useQuery({ queryKey: ["cloudroom-exportable-chats"], queryFn: ({ signal }) => sdk.cloudroom.exportableChats(signal), retry: false, staleTime: 30_000 });
 }

@@ -1,4 +1,5 @@
-export const PROTOCOL_VERSION = 1;
+/** 2: the Mac pings every 4 s, so the relay may treat 12 s of silence as a dead tunnel. */
+export const PROTOCOL_VERSION = 2;
 
 export const TUNNEL_PROTOCOL_QUERY_PARAM = "v";
 

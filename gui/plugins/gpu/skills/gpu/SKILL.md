@@ -1,6 +1,6 @@
 ---
 name: gpu
-description: Rent a GPU box with `room-cli gpu` for heavy GPU work, such as training or fine-tuning models, running large models, CUDA code, or 3D rendering. Each session needs the user's approval and uses their Cloud Credits. Beta, paid plans (Pro and up), Local and Cloud threads.
+description: Rent a GPU box with `room-cli gpu` for training, large models, CUDA, or 3D rendering. Needs the user's approval and Cloud Credits. Paid plans.
 ---
 
 # GPUs

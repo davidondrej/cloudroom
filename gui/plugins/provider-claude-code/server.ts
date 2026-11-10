@@ -14,6 +14,8 @@ import { CLAUDE_NATIVE_ROOTS_DECLARATION } from "./src/native-roots.js";
 
 export default function plugin(bb: BbPluginApi) {
   registerUsageSource(bb);
+  // The provider skill is only useful in this provider's own threads.
+  bb.agents.configure(({ provider }) => ({ tools: [], skills: provider.id === "claude-code" ? ["claude-code-provider"] : [] }));
   bb.experimental_aiServices.register({
     id: "claude-code",
     displayName: "Claude Code",

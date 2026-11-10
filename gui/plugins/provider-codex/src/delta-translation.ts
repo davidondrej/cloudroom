@@ -1169,11 +1169,20 @@ function hookProblemWarning(
     return null;
   }
   const entries: unknown[] = Array.isArray(run.entries) ? run.entries : [];
+  // Codex puts failures in error entries and block or stop reasons in
+  // feedback or stop entries. statusMessage is only the progress label, and
+  // context entries are notes for the model, so both come last.
+  const texts = (match: (kind: unknown) => boolean) =>
+    entries.map((entry) =>
+      isRecord(entry) && match(entry.kind)
+        ? getStringProperty(entry, "text")
+        : undefined,
+    );
   const reason = [
+    ...texts((kind) => kind === "error"),
+    ...texts((kind) => kind !== "error" && kind !== "context"),
     getStringProperty(run, "statusMessage"),
-    ...entries.map((entry) =>
-      isRecord(entry) ? getStringProperty(entry, "text") : undefined,
-    ),
+    ...texts((kind) => kind === "context"),
   ]
     .map((text) => text?.trim())
     .find(Boolean);

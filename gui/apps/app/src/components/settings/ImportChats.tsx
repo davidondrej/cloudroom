@@ -4,13 +4,14 @@ import { DropdownMenu, DropdownMenuCheckboxItem, DropdownMenuContent, DropdownMe
 import { Icon } from "@cloudroom/shared-ui/icon";
 import { appToast } from "@/components/ui/app-toast";
 import { SettingsSection } from "@/components/ui/settings-section.js";
-import { useImportSessions, useNativeSessions } from "@/hooks/queries/cloudroom-queries";
+import { useImportConductorExport, useImportSessions, useNativeSessions } from "@/hooks/queries/cloudroom-queries";
 import { useSystemProviders } from "@/hooks/queries/system-queries";
 import { useHostDaemon } from "@/hooks/useHostDaemon";
+import { usePathPickerHost } from "@/hooks/useLocalPathPicker";
 import { getProviderIconInfo, getProviderIconTintStyle } from "@/lib/provider-icon";
 
 export const DAY_MS = 86_400_000;
-const APPS = [["claude-code", "Claude Code"], ["codex", "Codex"], ["pi", "Pi"], ["acp-hermes-agent", "Hermes"], ["t3code", "T3 Code"]] as const;
+const APPS = [["claude-code", "Claude Code"], ["codex", "Codex"], ["pi", "Pi"], ["acp-hermes-agent", "Hermes"], ["t3code", "T3 Code"], ["conductor", "Conductor"]] as const;
 export const RANGES = [["last 7 days", 7], ["last 30 days", 30], ["all time", null]] as const;
 export const PALETTE = {
   "--ic-ink": "var(--ob-ink, var(--foreground))",
@@ -25,8 +26,16 @@ const CHIP = "mx-0.5 my-1 inline-flex items-center gap-2 border-[1.5px] border-(
 
 type Harness = (typeof APPS)[number][0];
 
+// Conductor is not an agent in Cloudroom, so it has no provider icon to look up.
+const ConductorLogo = ({ className }: { className?: string }) => (
+  <svg viewBox="0 0 410 410" fill="currentColor" fillRule="evenodd" className={className} aria-hidden>
+    <path d="M53 25h302a28 28 0 0 1 28 28v302a28 28 0 0 1-28 28H53a28 28 0 0 1-28-28V53a28 28 0 0 1 28-28zM155 88v34h123V88zM131 137v34h50v-34zM228 137v34h50v-34zM131 185v34h50v-34zM131 234v34h50v-34zM228 234v34h50v-34zM155 284v34h98v-34z" />
+  </svg>
+);
+
 function AppLogo({ id }: { id: Harness }) {
   const provider = useSystemProviders().data?.find((entry) => entry.id === id);
+  if (id === "conductor") return <span className="flex shrink-0"><ConductorLogo className="size-5" /></span>;
   const Logo = getProviderIconInfo("agent", id, provider ?? null).icon;
   return <span className="flex shrink-0" style={provider && getProviderIconTintStyle(provider)}><Logo className="size-5" /></span>;
 }
@@ -45,7 +54,27 @@ export function Chip({ children, menu }: { children: ReactNode; menu: ReactNode 
   );
 }
 
-export function ImportChats({ onStart, empty }: { onStart?: () => void; empty?: ReactNode }) {
+function reportImport({ imported, skipped }: { imported: unknown[]; skipped: { reason: string }[] }) {
+  appToast.success(`Imported ${imported.length} chat${imported.length === 1 ? "" : "s"}`);
+  if (skipped.length) appToast.error(`${skipped.length} skipped. First reason: ${skipped[0]!.reason}`);
+}
+
+function ConductorExport({ onStart }: { onStart?: () => void }) {
+  const { canUseNativeFolderPicker, clientHostId, hostId } = usePathPickerHost();
+  const importExport = useImportConductorExport();
+  if (!canUseNativeFolderPicker || !hostId || !clientHostId) return null;
+  const start = () => importExport.mutateAsync({ hostId, clientHostId, onPicked: onStart }).then(
+    (result) => { if (result) reportImport(result); },
+    (error: Error) => appToast.error(error.message),
+  );
+  return (
+    <button type="button" style={PALETTE} disabled={importExport.isPending} onClick={start} className="mt-4 block text-sm text-(--ic-muted) underline-offset-4 hover:underline disabled:opacity-60">
+      {importExport.isPending ? "Importing your Conductor Cloud export… This can take minutes, and it keeps going if you leave this screen." : "Import a Conductor Cloud export (the unzipped folder)"}
+    </button>
+  );
+}
+
+export function ImportChats({ onStart, empty, alwaysOfferExport }: { onStart?: () => void; empty?: ReactNode; alwaysOfferExport?: boolean }) {
   const sessions = useNativeSessions();
   const importSessions = useImportSessions();
   const { localHostId } = useHostDaemon();
@@ -56,8 +85,9 @@ export function ImportChats({ onStart, empty }: { onStart?: () => void; empty?: 
   if (sessions.isPending) return <p className="text-sm text-(--ic-muted)" style={PALETTE}>Looking for chats on this {COMPUTER}…</p>;
   if (sessions.error) return <p role="alert" className="text-sm text-destructive">{sessions.error.message}</p>;
   const list = sessions.data.sessions;
+  const exportLink = (alwaysOfferExport || sessions.data.conductorApp) && <ConductorExport onStart={onStart} />;
   const apps = APPS.filter(([id]) => list.some((session) => session.harness === id));
-  if (!apps.length) return empty ?? <p className="text-sm text-(--ic-muted)" style={PALETTE}>No new agent chats on this {COMPUTER}.</p>;
+  if (!apps.length) return <>{empty ?? <p className="text-sm text-(--ic-muted)" style={PALETTE}>No new agent chats on this {COMPUTER}.</p>}{exportLink}</>;
 
   const recent = list.filter((session) => days === null || Date.now() - session.updatedAt < days * DAY_MS);
   const picked = apps.filter(([id]) => !off.has(id));
@@ -85,10 +115,7 @@ export function ImportChats({ onStart, empty }: { onStart?: () => void; empty?: 
     setProgress({ done: 0, total: chosen.length });
     // mutateAsync, not mutate callbacks: the toasts still show after this screen closes.
     importSessions.mutateAsync({ hostId: localHostId, sessions: chosen.map(({ harness, id }) => ({ harness, id })), onProgress: (done) => setProgress((current) => ({ ...current, done })) }).then(
-      ({ imported, skipped }) => {
-        appToast.success(`Imported ${imported.length} chat${imported.length === 1 ? "" : "s"}`);
-        if (skipped.length) appToast.error(`${skipped.length} skipped. First reason: ${skipped[0]!.reason}`);
-      },
+      reportImport,
       (error: Error) => appToast.error(error.message),
     );
     // Big imports take minutes, so the caller can move on while it runs.
@@ -123,6 +150,7 @@ export function ImportChats({ onStart, empty }: { onStart?: () => void; empty?: 
           {importSessions.isPending ? "This keeps going if you leave this screen." : picked.map(([id, name]) => `${count(id)} ${name}`).join(" · ")}
         </span>
       </div>
+      {exportLink}
     </div>
   );
 }
@@ -131,9 +159,9 @@ export function ImportChatsSettingsSection() {
   return (
     <SettingsSection
       title="Import chats"
-      description="Bring your Claude Code, Codex, Pi, Hermes, and T3 Code chats over as Local threads. The agent keeps its full memory. Hermes chats, and T3 Code chats from agents other than Claude Code and Codex, come over as text. Your originals stay untouched."
+      description="Bring your Claude Code, Codex, Pi, Hermes, T3 Code, and Conductor chats over as Local threads. The agent keeps its full memory. Hermes chats, and T3 Code or Conductor chats from agents other than Claude Code and Codex, come over as text. Your originals stay untouched."
     >
-      <ImportChats />
+      <ImportChats alwaysOfferExport />
     </SettingsSection>
   );
 }

@@ -533,8 +533,14 @@ export function NewThreadComposer({
     [currentProject?.sources],
   );
   const projectOptions = useMemo(
-    () => projects?.map(({ id, name }) => ({ id, name })) ?? [],
-    [projects],
+    () =>
+      sidebarNavigationQuery.data?.projects.map(({ id, name, updatedAt, threads }) => ({
+        id,
+        name,
+        // Its newest thread: the picker lists recently used projects first.
+        updatedAt: Math.max(updatedAt, ...threads.map((thread) => thread.updatedAt)),
+      })) ?? [],
+    [sidebarNavigationQuery.data],
   );
 
   const hostsQuery = useHosts();

@@ -3,6 +3,7 @@ import { commandGuardBlockReason } from "@get-bb/plugin-sdk/internal/command-gua
 import { cloudroomCommands, cloudroomThreads, deleteThreadEventSuffixInTransaction, events, threadConversationOutlines, threadSearchSegments, getThread, type DbConnection, type DbQueryConnection, type DbTransaction, type AppendStoredThreadEventArgs } from "@cloudroom/db";
 import { and, desc, eq } from "drizzle-orm";
 import { appendThreadEventsInTransaction, appendThreadProvisioningEventInTransaction } from "../threads/thread-events.js";
+import { markCustomInstructionsLost } from "../threads/custom-instructions.js";
 import { LEGACY_CODEX_GOAL_EXTENSION_KIND, THREAD_ACCOUNT_SWITCH_OPERATION, cloudDeltaEvent, cloudItemEvent, codexItemEvent, reasoningLevelSchema, threadEventSchema, threadScope, turnScope, encodeClientTurnRequestIdNumber, type ProvisioningTranscriptEntry, type SystemThreadProvisioningStatus, type ThreadEvent, type ThreadEventTurnStatus } from "@cloudroom/domain";
 import { z } from "zod";
 import { cloudAccountSwitch } from "./account-switches.js";
@@ -19,6 +20,10 @@ export const isCloudProvider = (id: string | undefined): id is CloudProvider => 
 export const HARNESS_NAMES: Record<CloudProvider, string> = { codex: "Codex", pi: "Pi", "claude-code": "Claude Code", "acp-cursor": "Cursor", "acp-fx": "fx", "acp-opencode": "opencode", "acp-hermes-agent": "Hermes Agent", "acp-devin": "Devin", "acp-droid": "Droid", "acp-kimi": "Kimi Code", "acp-openclaw": "OpenClaw" };
 export const isAcpProvider = (id: string | undefined): id is Extract<CloudProvider, `acp-${string}`> => isCloudProvider(id) && id.startsWith("acp-");
 const FINISHED = ["completed", "failed", "interrupted", "unknown", "unknown_after_restart"];
+/** A message that failed or was cancelled may never have reached the agent. If it carried the custom instructions, the next one must. */
+function lostInstructions(tx: DbTransaction, threadId: string, message: Command | null): void {
+  if (message && (JSON.parse(message.input) as { customInstructions?: string }).customInstructions) markCustomInstructionsLost(tx, threadId);
+}
 const turnStatus = (state: string): ThreadEventTurnStatus => state === "completed" ? "completed" : state === "interrupted" ? "interrupted" : "failed";
 export function endedTurn(record: SessionRecord): ThreadEventTurnStatus | null {
   const receipt = record.kind === "receipt" ? z.object({ command: z.string(), state: z.string() }).safeParse(record.data) : null;
@@ -246,6 +251,7 @@ export function projectRecords(
         tx.insert(cloudroomCommands).values({ id: receipt.request_id, threadId, command: receipt.command as "prompt" | "edit" | "cancel" | "reorder" | "steer", input: JSON.stringify(data.input), state: receipt.state, createdAt: record.timestamp_ms ?? 0 }).run();
       }
       saveCommandState(tx, threadId, receipt.request_id, receipt.state);
+      if (["failed", "unknown", "unknown_after_restart"].includes(receipt.state)) lostInstructions(tx, threadId, previous);
       if (receipt.command === "start" && receipt.state === "accepted" && object.parse(data.input).workspace) saveStatus(tx, threadId, "pending");
       if ((harness === "pi" || isAcpProvider(harness) || harness === "claude-code") && (receipt.command === "auto" || (previous && receipt.command === "prompt")) && FINISHED.includes(receipt.state) && saved.nativeId && turnStarted(tx, threadId, receipt.request_id)) {
         emit({ threadId, providerThreadId: saved.nativeId, scope: turnScope(receipt.request_id), type: "turn/completed", status: turnStatus(receipt.state) });
@@ -268,7 +274,10 @@ export function projectRecords(
       }
       if (receipt.command === "cancel" && ["accepted", "completed"].includes(receipt.state)) {
         const stored = data.input ? object.parse(data.input) : previous ? JSON.parse(previous.input) as { target_request_id?: string } : {};
-        if (typeof stored.target_request_id === "string") saveCommandState(tx, threadId, stored.target_request_id, "cancelled");
+        if (typeof stored.target_request_id === "string") {
+          saveCommandState(tx, threadId, stored.target_request_id, "cancelled");
+          lostInstructions(tx, threadId, command(tx, stored.target_request_id));
+        }
       }
       if (receipt.command === "steer" && receipt.state === "completed" && previous?.command === "steer" && saved.nativeId && !requestedTurns(tx, threadId).has(bbRequestId(previous.id))) {
         const target = z.object({ target_request_id: z.string() }).parse(JSON.parse(previous.input)).target_request_id;

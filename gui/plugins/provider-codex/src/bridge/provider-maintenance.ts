@@ -148,7 +148,15 @@ export async function getCodexProviderInstallationStatus(
     npmLatestVersion(CODEX_NPM_PACKAGE),
     probeNpmGlobalPackage(CODEX_NPM_PACKAGE),
   ]);
-  const installed = executable !== null;
+  // A launcher that can't find its native binary can't run anything, so it
+  // counts as not installed and gets the install action (a reinstall).
+  const broken =
+    executable !== null &&
+    versionOutput === null &&
+    codexBrokenInstallHint(
+      (await probeCliVersion(executable)).failedOutput ?? "",
+    ) !== null;
+  const installed = executable !== null && !broken;
   const currentVersion = versionFrom(versionOutput);
   const needsUpdate =
     installed &&
@@ -231,7 +239,10 @@ function buildCodexProviderInstallationRun(
     command:
       action === "update" && status.executablePath !== null
         ? codexUpdateCommand(status.executablePath, npmPrefix)
-        : npmGlobalInstallCommand(CODEX_NPM_PACKAGE),
+        : action === "install" && npmPrefix !== null
+          ? // Reinstall a broken npm Codex into the prefix that owns it.
+            codexUpdateCommand("codex", npmPrefix)
+          : npmGlobalInstallCommand(CODEX_NPM_PACKAGE),
     verification: installationVerification(status, action),
     fallback: codexOfficialInstaller(),
   };

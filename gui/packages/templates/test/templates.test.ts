@@ -50,38 +50,44 @@ describe("@cloudroom/templates", () => {
     );
   });
 
-  it("renders standardAgentAppendInstructions without user-question guidance", () => {
-    const rendered = renderTemplate("standardAgentAppendInstructions", {
+  const systemPrompt = (kind: "local" | "cloud", windows = false) =>
+    renderTemplate("standardAgentAppendInstructions", {
+      local: kind === "local" ? "on" : "",
+      cloud: kind === "cloud" ? "on" : "",
       bugReports: "",
-      mac: "on",
+      mac: windows ? "" : "on",
       vps: "",
-      windows: "",
+      windows: windows ? "on" : "",
     });
 
-    expect(rendered).toContain("You are working inside Cloudroom");
-    expect(rendered).toContain("IDE for managing coding agents");
-    expect(rendered).toContain("Mention threads as @thread:thr_abc123");
-    expect(rendered).toContain("Never build thread URLs");
-    expect(rendered).not.toContain(
-      "Ask the user a blocking question only when",
-    );
+  it("renders standardAgentAppendInstructions without user-question guidance", () => {
+    for (const rendered of [systemPrompt("local"), systemPrompt("cloud")]) {
+      expect(rendered).toContain("You are working inside Cloudroom");
+      expect(rendered).toContain("IDE for managing coding agents");
+      expect(rendered).toContain("Mention threads as @thread:thr_abc123");
+      expect(rendered).toContain("Never build thread URLs");
+      expect(rendered).not.toContain(
+        "Ask the user a blocking question only when",
+      );
+      expect(rendered).not.toMatch(/\{\{|\n\n\n/u);
+    }
+    // Each kind of thread gets only its own lines.
+    const local = systemPrompt("local");
+    const cloud = systemPrompt("cloud");
+    expect(local).toContain("run `room-cli status --json` before acting");
+    expect(local).not.toMatch(/## Cloud sandboxes|room-cli files wait|--shared-sandbox/u);
+    expect(cloud).toContain("## Cloud sandboxes");
+    expect(cloud).toContain("room-cli files wait");
+    expect(cloud).not.toMatch(/Local children share|ask before installing/u);
   });
 
   it("offers Mac access and Local computer use only off Windows", () => {
-    const render = (windows: boolean) =>
-      renderTemplate("standardAgentAppendInstructions", {
-        bugReports: "",
-        mac: windows ? "" : "on",
-        vps: "",
-        windows: windows ? "on" : "",
-      });
-
-    expect(render(false)).toContain("room-cli mac pull");
-    expect(render(false)).toContain("read the `computer-use` or `cloud-computer-use` skill");
-    expect(render(false)).not.toMatch(/\bMac\b(?! access)|laptop/u);
-    expect(render(true)).not.toMatch(/room-cli mac (pull|push)|run it on the user's computer/u);
-    expect(render(true)).not.toContain("read the `computer-use` or");
-    expect(render(true)).toContain("Save lasting skills in the repo.");
+    expect(systemPrompt("cloud")).toContain("room-cli mac pull");
+    expect(systemPrompt("local")).toContain("read the `computer-use` skill");
+    expect(systemPrompt("local") + systemPrompt("cloud")).not.toMatch(/\bMac\b(?! access)|laptop/u);
+    expect(systemPrompt("local", true) + systemPrompt("cloud", true)).not.toMatch(/room-cli mac (pull|push)|run it on the user's computer/u);
+    expect(systemPrompt("local", true)).not.toContain("read the `computer-use` skill");
+    expect(systemPrompt("cloud", true)).toContain("Save lasting skills in the repo.");
   });
 
   it("renders child thread needs-attention messages with blocker summaries", () => {

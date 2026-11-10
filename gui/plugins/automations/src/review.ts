@@ -126,7 +126,7 @@ const OUTCOME_STATUS = {
   failed: "failed",
 } as const;
 const LOCAL_RUN = /^arun_[A-Za-z0-9_-]{1,40}$/;
-const reportsSchema = z.object({
+export const reportsSchema = z.object({
   reports: z.array(
     z.object({
       request: z.string(),

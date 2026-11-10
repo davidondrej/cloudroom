@@ -1,6 +1,7 @@
 ---
 name: provider-retry
 description: "Diagnose automatic retries of Cloudroom turns after provider subscription-window limits."
+disable-model-invocation: true
 ---
 
 # Provider retry

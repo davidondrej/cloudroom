@@ -49,6 +49,15 @@ export default async function worktreePlugin(bb: BbPluginApi): Promise<void> {
     async create(context) {
       const hostId = context.host.id;
       const operationId = `create#${context.pathKey}#${context.attempt}`;
+      const previous = context.previous?.environment;
+      // Rebuilding under the same key (a parked worktree) returns to its saved folder (#1213).
+      const folderName =
+        context.rebuild &&
+        previous?.path &&
+        (previous.environmentProviderInstanceKey ?? previous.id) ===
+          context.pathKey
+          ? previous.path.split(/[\\/]/u).filter(Boolean).pop()
+          : undefined;
       reports.set(operationId, context.report);
       try {
         const result = await host.call(
@@ -67,6 +76,7 @@ export default async function worktreePlugin(bb: BbPluginApi): Promise<void> {
               ? { diffBase: context.inputs.diffBase }
               : {}),
             branchMode: context.rebuild ? "reuse-existing" : "reset",
+            ...(folderName === undefined ? {} : { folderName }),
           },
           { hostId, signal: context.signal, timeoutMs: CREATE_TIMEOUT_MS },
         );

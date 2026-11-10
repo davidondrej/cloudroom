@@ -9,6 +9,7 @@ import {
   constants,
   fstatSync,
   openSync,
+  readFileSync,
   readSync,
   type Stats,
   unlinkSync,
@@ -22,6 +23,8 @@ import {
   unlink,
   writeFile,
 } from "node:fs/promises";
+import { isIPv4, isIPv6 } from "node:net";
+import { endianness } from "node:os";
 import { basename, isAbsolute, join } from "node:path";
 import { isLoopbackHostname } from "./loopback.js";
 
@@ -30,6 +33,8 @@ export const CALLER_PROOF_STATUS_HEADER = "x-cloudroom-caller-proof";
 export const CALLER_PROOF_REQUIRED_CODE = "caller_proof_required";
 export const CALLER_PROOF_REQUIRED_MESSAGE =
   "Cloudroom refused this request because the caller could not prove it runs outside a sandbox. If a sandboxed agent sent it, run the command outside the sandbox (the user must approve it), or switch the thread to Full access.";
+export const CALLER_PROOF_TIMED_OUT_MESSAGE =
+  "Cloudroom's caller proof timed out while Cloudroom was busy or reconnecting, so this request was not run. Wait a moment and run it again; if it keeps happening in a sandboxed thread, the sandbox may be the cause.";
 export const CALLER_PROOF_DIRECTORY_NAME = "caller-proofs";
 export const SERVER_CALLER_PROOF_PATH = "/api/v1/caller-proofs";
 export const DAEMON_CALLER_PROOF_PATH = "/caller-proofs";
@@ -60,19 +65,204 @@ const OPEN_READS = [
   /^\/api\/v1\/file-previews\/[^/]+\/.+$/u,
 ];
 
+// The TCP connection a request arrived on (a `net.Socket`).
+export interface CallerPeer {
+  localAddress?: string;
+  localPort?: number;
+  remoteAddress?: string;
+  remotePort?: number;
+}
+
+type TcpTables = readonly [tcp: string | null, tcp6: string | null];
+
+const PROC_NET_TCP = ["/proc/net/tcp", "/proc/net/tcp6"] as const;
+const IPV4_MAPPED_PREFIX = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff];
+
+function addressBytes(text: string): number[] | null {
+  const address = text.split("%")[0] ?? "";
+  if (isIPv4(address)) return address.split(".").map(Number);
+  if (!isIPv6(address)) return null;
+  const words = (part: string | undefined) =>
+    part
+      ? part.split(":").flatMap((group) => {
+          if (!group.includes(".")) return [Number.parseInt(group, 16)];
+          const [a = 0, b = 0, c = 0, d = 0] = group.split(".").map(Number);
+          return [(a << 8) | b, (c << 8) | d];
+        })
+      : [];
+  const [head, tail] = address.split("::");
+  const front = words(head);
+  const back = words(tail);
+  const zeros = new Array<number>(
+    Math.max(0, 8 - front.length - back.length),
+  ).fill(0);
+  return [...front, ...zeros, ...back].flatMap((word) => [
+    word >> 8,
+    word & 0xff,
+  ]);
+}
+
+// /proc writes an address as 32-bit words, each one in host byte order.
+function procEndpoint(bytes: number[], port: number): string {
+  let hex = "";
+  for (let at = 0; at < bytes.length; at += 4) {
+    const word = bytes.slice(at, at + 4);
+    if (endianness() === "LE") word.reverse();
+    hex += word.map((byte) => byte.toString(16).padStart(2, "0")).join("");
+  }
+  return `${hex}:${port.toString(16).padStart(4, "0")}`.toUpperCase();
+}
+
+const tableIndexes = new WeakMap<
+  TcpTables,
+  Map<number, Map<string, number[]>>
+>();
+
+// Each read is parsed once per port we listen on, however many lookups share
+// it, and only rows that mention that port. Rows with inode 0 (TIME_WAIT)
+// have no socket behind them, so they are left out.
+function indexTcpTables(
+  tables: TcpTables,
+  port: number,
+): Map<string, number[]> {
+  let byPort = tableIndexes.get(tables);
+  if (byPort === undefined) {
+    byPort = new Map();
+    tableIndexes.set(tables, byPort);
+  }
+  let index = byPort.get(port);
+  if (index === undefined) {
+    index = new Map();
+    const portText = `${procEndpoint([], port)} `;
+    for (const [table, rows] of tables.entries()) {
+      for (const row of rows?.split("\n") ?? []) {
+        if (!row.includes(portText)) continue;
+        // sl, local, remote, state, queues, timer, retransmits, uid, timeout, inode
+        const fields = row.trim().split(/\s+/u);
+        if (fields.length < 10 || fields[9] === "0") continue;
+        const key = `${table} ${fields[1]} ${fields[2]}`;
+        const owners = index.get(key) ?? [];
+        owners.push(Number(fields[7]));
+        index.set(key, owners);
+      }
+    }
+    byPort.set(port, index);
+  }
+  return index;
+}
+
+// The uid that owns the caller's end of this connection: the one live row in
+// the kernel's TCP tables whose local end is the caller and whose remote end
+// is us. An IPv4 socket is listed in `tcp`, an IPv6 one (also with an
+// IPv4-mapped address) in `tcp6`. Null when no row, or more than one, matches.
+export function tcpConnectionOwner(
+  peer: CallerPeer,
+  tables: TcpTables,
+): number | null {
+  const { localAddress, localPort, remoteAddress, remotePort } = peer;
+  if (
+    localAddress === undefined ||
+    localPort === undefined ||
+    remoteAddress === undefined ||
+    remotePort === undefined
+  ) {
+    return null;
+  }
+  const caller = addressBytes(remoteAddress);
+  const ours = addressBytes(localAddress);
+  if (caller === null || ours === null) return null;
+  const asV6 = (bytes: number[]) =>
+    bytes.length === 4 ? [...IPV4_MAPPED_PREFIX, ...bytes] : bytes;
+  const asV4 = (bytes: number[]) =>
+    bytes.length === 4
+      ? bytes
+      : IPV4_MAPPED_PREFIX.every((byte, at) => bytes[at] === byte)
+        ? bytes.slice(12)
+        : null;
+  const callerV4 = asV4(caller);
+  const oursV4 = asV4(ours);
+  const index = indexTcpTables(tables, localPort);
+  const owners = [
+    ...(callerV4 === null || oursV4 === null
+      ? []
+      : (index.get(
+          `0 ${procEndpoint(callerV4, remotePort)} ${procEndpoint(oursV4, localPort)}`,
+        ) ?? [])),
+    ...(index.get(
+      `1 ${procEndpoint(asV6(caller), remotePort)} ${procEndpoint(asV6(ours), localPort)}`,
+    ) ?? []),
+  ];
+  return owners.length === 1 ? (owners[0] ?? null) : null;
+}
+
+function readTcpTables(): TcpTables {
+  const read = (path: string) => {
+    try {
+      return readFileSync(path, "latin1");
+    } catch {
+      return null;
+    }
+  };
+  return [read(PROC_NET_TCP[0]), read(PROC_NET_TCP[1])];
+}
+
+let tableWaiters: Array<(tables: TcpTables) => void> = [];
+
+// One read of the tables per turn of the event loop, shared by every lookup
+// waiting for it, so new connections can't make us read them more often. A
+// read that started before a connection opened can't vouch for it, so each
+// lookup waits for the next one. Sync, like the proof file: an async read
+// waits behind Node's busy thread pool (#939).
+function nextTcpTables(): Promise<TcpTables> {
+  return new Promise((resolve) => {
+    if (tableWaiters.push(resolve) > 1) return;
+    setImmediate(() => {
+      const waiters = tableWaiters;
+      tableWaiters = [];
+      const tables = readTcpTables();
+      for (const waiter of waiters) waiter(tables);
+    });
+  });
+}
+
+const peerUserChecks = new WeakMap<CallerPeer, Promise<boolean>>();
+
+// Every OS account on a computer can reach its loopback, so the open reads
+// need a caller that runs as this OS user. Linux names each socket's owner.
+// macOS and Windows can't tell cheaply, so there every local caller still
+// gets them (docs/scopes/security.md). One lookup per connection.
+function runsAsThisOsUser(peer: CallerPeer): Promise<boolean> {
+  const uid = process.getuid?.();
+  if (process.platform !== "linux" || uid === undefined) {
+    return Promise.resolve(true);
+  }
+  let check = peerUserChecks.get(peer);
+  if (check === undefined) {
+    check = nextTcpTables().then(
+      (tables) => tcpConnectionOwner(peer, tables) === uid,
+    );
+    peerUserChecks.set(peer, check);
+  }
+  return check;
+}
+
 // The requests a caller without a token may make. The Mac's server and a
-// remote machine's agent proxy both use this list.
-export function isOpenWithoutCallerProof(
+// remote machine's agent proxy both use this list. `peer` is the loopback
+// connection the request came on; null skips the OS user check (no socket,
+// or a request from another computer).
+export async function isOpenWithoutCallerProof(
   method: string,
   path: string,
-): boolean {
+  peer: CallerPeer | null,
+): Promise<boolean> {
   const verb = method.toUpperCase();
   if (verb === "POST") {
     return OPEN_POSTS.some((pattern) => pattern.test(path));
   }
   return (
     (verb === "GET" || verb === "HEAD") &&
-    OPEN_READS.some((pattern) => pattern.test(path))
+    OPEN_READS.some((pattern) => pattern.test(path)) &&
+    (peer === null || (await runsAsThisOsUser(peer)))
   );
 }
 
@@ -342,14 +532,20 @@ export const CALLER_PROOF_WAIT_MS = 50_000;
 const FIRST_PROOF_RETRY_DELAY_MS = 1_000;
 const FAILED_PROOF_RETRY_MS = 2_000;
 
+interface ProofResult {
+  timedOut?: boolean;
+  token: string | null;
+}
+
 async function proveWithRetries(
   baseUrl: string,
   fetchImpl: typeof fetch,
   proofPath: string,
-): Promise<string | null> {
+): Promise<ProofResult> {
   const deadline = Date.now() + CALLER_PROOF_WAIT_MS;
   let warned = false;
   for (let delay = FIRST_PROOF_RETRY_DELAY_MS; ; delay *= 2) {
+    const startedAt = Date.now();
     // No 30 s cap per attempt: time queued on a busy server before it issues
     // the challenge counted against that cap, so every attempt was aborted
     // even when the server would have accepted it (#939). A proof that really
@@ -360,24 +556,31 @@ async function proveWithRetries(
       proofPath,
       signal: AbortSignal.timeout(Math.max(deadline - Date.now(), 1)),
     });
-    if (attempt === null) return null;
+    if (attempt === null) return { token: null };
     if ("token" in attempt) {
       if (warned) console.warn("Cloudroom caller proof succeeded on retry");
-      return attempt.token;
+      return { token: attempt.token };
     }
     warned = true;
     const retrying = Date.now() + delay < deadline;
     console.warn(
       `Cloudroom caller proof ${attempt.retry}; ${retrying ? `retrying in ${delay / 1_000} s` : "giving up"}`,
     );
-    if (!retrying) return null;
+    if (!retrying) {
+      // A refusal counts as a timeout when a busy server used up the budget,
+      // such as a proof that aged past 30 s on its way through (#1285).
+      const timedOut =
+        attempt.retry === "timed out" ||
+        deadline - Date.now() < Date.now() - startedAt;
+      return { timedOut, token: null };
+    }
     await new Promise((resolve) => setTimeout(resolve, delay));
   }
 }
 
 interface CachedCallerToken {
+  proof: Promise<ProofResult>;
   settledAt?: number;
-  token: Promise<string | null>;
   value?: string | null;
 }
 
@@ -404,28 +607,36 @@ function keepsCachedToken(
   return !("rejected" in options) || cached.value !== options.rejected;
 }
 
-function provenToken(
+function provenProof(
+  origin: string,
+  fetchImpl: typeof fetch,
+  options: ProvenTokenOptions = {},
+): Promise<ProofResult> {
+  const cached = callerTokens.get(origin);
+  if (cached !== undefined && keepsCachedToken(cached, options)) {
+    return cached.proof;
+  }
+  const entry: CachedCallerToken = {
+    proof: proveWithRetries(
+      origin,
+      fetchImpl,
+      options.proofPath ?? SERVER_CALLER_PROOF_PATH,
+    ).then((result) => {
+      entry.value = result.token;
+      entry.settledAt = Date.now();
+      return result;
+    }),
+  };
+  callerTokens.set(origin, entry);
+  return entry.proof;
+}
+
+async function provenToken(
   origin: string,
   fetchImpl: typeof fetch,
   options: ProvenTokenOptions = {},
 ): Promise<string | null> {
-  const cached = callerTokens.get(origin);
-  if (cached !== undefined && keepsCachedToken(cached, options)) {
-    return cached.token;
-  }
-  const entry: CachedCallerToken = {
-    token: proveWithRetries(
-      origin,
-      fetchImpl,
-      options.proofPath ?? SERVER_CALLER_PROOF_PATH,
-    ),
-  };
-  void entry.token.then((value) => {
-    entry.value = value;
-    entry.settledAt = Date.now();
-  });
-  callerTokens.set(origin, entry);
-  return entry.token;
+  return (await provenProof(origin, fetchImpl, options)).token;
 }
 
 function requestUrl(input: Parameters<typeof fetch>[0]): URL | null {
@@ -477,6 +688,35 @@ export function isCallerProofRequired(response: Response): boolean {
   );
 }
 
+function callerProofTimedOutResponse(): Response {
+  return new Response(
+    JSON.stringify({
+      code: CALLER_PROOF_REQUIRED_CODE,
+      message: CALLER_PROOF_TIMED_OUT_MESSAGE,
+    }),
+    {
+      headers: {
+        "content-type": "application/json",
+        [CALLER_PROOF_STATUS_HEADER]: "required",
+      },
+      status: 401,
+    },
+  );
+}
+
+// A refusal after this request's own proof timed out says Cloudroom was busy
+// or reconnecting, instead of the sandbox advice (#1285).
+async function explainTimedOutProof(
+  proof: ProofResult | undefined,
+  response: Response,
+): Promise<Response> {
+  if (proof?.timedOut !== true || !isCallerProofRequired(response)) {
+    return response;
+  }
+  await response.body?.cancel().catch(() => {});
+  return callerProofTimedOutResponse();
+}
+
 export function createCallerProofFetch(fetchImpl: typeof fetch): typeof fetch {
   const wrapped = async (
     input: Parameters<typeof fetch>[0],
@@ -496,10 +736,16 @@ export function createCallerProofFetch(fetchImpl: typeof fetch): typeof fetch {
       init?.method ?? (input instanceof Request ? input.method : "GET")
     ).toUpperCase();
     const unsafe = method !== "GET" && method !== "HEAD";
-    const token =
+    const proof =
       unsafe || callerTokens.has(url.origin)
-        ? await provenToken(url.origin, fetchImpl)
+        ? await provenProof(url.origin, fetchImpl)
         : undefined;
+    const token = proof?.token;
+    // Sent without a token, it would only be refused, and a server too busy
+    // to prove may never answer it, leaving the caller hanging (#1285).
+    if (unsafe && proof?.timedOut === true) {
+      return callerProofTimedOutResponse();
+    }
     const response = await fetchImpl(
       input,
       withCallerToken(input, init, token),
@@ -511,14 +757,16 @@ export function createCallerProofFetch(fetchImpl: typeof fetch): typeof fetch {
       !isCallerProofRequired(response) ||
       !canReplay(input, init)
     ) {
-      return response;
+      return explainTimedOutProof(proof, response);
     }
-    const fresh = await provenToken(url.origin, fetchImpl, {
+    const fresh = await provenProof(url.origin, fetchImpl, {
       rejected: token ?? null,
     });
-    if (fresh === null || fresh === token) return response;
+    if (fresh.token === null || fresh.token === token) {
+      return explainTimedOutProof(fresh, response);
+    }
     await response.body?.cancel().catch(() => {});
-    return fetchImpl(input, withCallerToken(input, init, fresh));
+    return fetchImpl(input, withCallerToken(input, init, fresh.token));
   };
   return wrapped as typeof fetch;
 }

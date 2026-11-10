@@ -284,8 +284,10 @@ export async function buildThreadStartCommand(
     bridgeLaunch,
     requestId: args.requestId,
     ...prepareCustomInstructionInput(
+      deps.db,
       { threadId: args.thread.id, projectId: args.projectId },
       args,
+      true,
     ),
     options: toRuntimeExecutionOptions({
       ...args,
@@ -318,6 +320,7 @@ function buildPreparedTurnSubmitCommandPayload(
     threadId: args.threadId,
     bridgeLaunch,
     ...prepareCustomInstructionInput(
+      args.deps.db,
       { threadId: args.threadId, projectId: args.runtimeContext.projectId },
       args,
     ),

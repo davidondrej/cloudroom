@@ -266,7 +266,7 @@ async fn push_places_only_its_named_item() {
         if let Some(refused) = super::jobs::as_copy(&mut job, &home, &[]) {
             return (126, String::new(), refused);
         }
-        let result = jobs.run(&job, false, &root, None).await;
+        let result = jobs.run(&job, None, &root, None).await;
         let text = |key: &str| {
             String::from_utf8(super::unhex(result[key].as_str().unwrap()).unwrap()).unwrap()
         };
@@ -380,7 +380,7 @@ fn read_only_hides_every_cloudroom_folder_with_keys() {
         "<?xml version=\"1.0\"?><plist><dict>",
     )
     .unwrap();
-    let args = jobs::read_only(&data, &home);
+    let args = jobs::read_only(&data, &home, &["helper.read-only", "helper.read-only.job"]);
     let params: Vec<(String, PathBuf)> = args
         .iter()
         .enumerate()
@@ -441,6 +441,10 @@ fn read_only_hides_every_cloudroom_folder_with_keys() {
     .collect();
     assert!(order.windows(2).all(|pair| pair[0] < pair[1]));
     assert!(profile.ends_with(&format!(" {})", jobs::READ_ONLY_OLD_KEYS)));
+    // The marks that let the helper end everything the command starts (jobs::end).
+    assert!(profile.contains(
+        r#"(deny mach-lookup (global-name "helper.read-only") (global-name "helper.read-only.job"))"#
+    ));
     std::fs::remove_dir_all(home).unwrap();
 }
 
@@ -489,6 +493,168 @@ fn each_account_keeps_its_own_key_and_device() {
 }
 
 #[tokio::test]
+#[cfg(target_os = "macos")]
+async fn read_only_command_leaves_nothing_running() {
+    let _alone = FORKS.lock().await;
+    // Security fix: as client.py's test of the same name, with the real macOS sandbox. Nothing a read-only command starts
+    // outlives it, its stop, its sandbox's stream, or its helper, even after setsid and a double fork, or as a chain of
+    // processes that each fork and end at once. Full commands keep theirs (dev servers), and others run on.
+    use std::sync::Arc;
+    let (root, beats) = (folder("read-only-ends"), folder("read-only-beats"));
+    let jobs = Arc::new(jobs::Jobs::new(Arc::new(super::net::Shared::new(
+        root.clone(),
+    ))));
+    let core = ("http://core".to_owned(), "token".to_owned());
+    jobs.wanted.lock().unwrap().insert(core.clone());
+    // Each process rewrites its own file every 0.1 s: one in the command's process group, and one that left it with
+    // setsid after a fork, then forked again. The chain writes every 50th process and stops by itself after 30 s.
+    let each = r#"for ($n = 0;; $n++) { open(F, ">", $ARGV[0]); print F "$$ $n"; close F; select(undef, undef, undef, .1) }"#;
+    let chain = r#"for ($n = 0;; $n++) { exit if fork or time - $^T > 30; next if $n % 50; open(F, ">", $ARGV[0]); print F "0 $n"; close F }"#;
+    let b = beats.display().to_string();
+    let leaves = |name: &str, chained: bool| {
+        let mut files = vec![format!("{b}/{name}-group"), format!("{b}/{name}-left")];
+        let mut command = format!(
+            "perl -e '{each}' {} & perl -MPOSIX -e 'if (fork) {{ exit }} POSIX::setsid(); if (fork) {{ exit }} {each}' {}; ",
+            files[0], files[1]
+        );
+        if chained {
+            files.push(format!("{b}/{name}-chain"));
+            command += &format!("perl -e '{chain}' {} & ", files[2]);
+        }
+        let waits: Vec<String> = files
+            .iter()
+            .map(|file| format!("[ ! -s {file} ]"))
+            .collect();
+        command + &format!("while {}; do sleep .05; done", waits.join(" || "))
+    };
+    let running = async |names: &[&str]| {
+        let read = |name: &&str| std::fs::read_to_string(beats.join(name)).unwrap();
+        let before: Vec<String> = names.iter().map(read).collect();
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        names
+            .iter()
+            .zip(before)
+            .map(|(name, text)| read(name) != text)
+            .collect::<Vec<_>>()
+    };
+    let run = async |command: String, sandbox: Option<&(String, String)>| {
+        jobs.run(
+            &json!({"id": "job", "command": command}),
+            sandbox,
+            &root,
+            None,
+        )
+        .await["code"]
+            .clone()
+    };
+    // A read-only command that keeps running: its task, once it runs.
+    #[allow(clippy::async_yields_async)]
+    let start = async |name: &str| {
+        let (jobs, root, core) = (jobs.clone(), root.clone(), core.clone());
+        let (id, command) = (name.to_owned(), leaves(name, false) + "; sleep 30");
+        let task = tokio::spawn(async move {
+            jobs.run(
+                &json!({"id": id, "command": command}),
+                Some(&core),
+                &root,
+                None,
+            )
+            .await["code"]
+                .clone()
+        });
+        for _ in 0..200 {
+            if beats.join(format!("{name}-left")).exists() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        task
+    };
+    // Others run on: what an earlier run of this helper left (until the first check), another helper's read-only command
+    // (a dev build), and another sandbox.
+    let mark = format!("{}.read-only", super::label(&root));
+    let marks = [
+        vec![mark.clone(), format!("{mark}.0"), format!("{mark}.0.job")],
+        vec!["other.read-only".into(), "other.read-only.job".into()],
+    ];
+    let mut others = Vec::new();
+    for (marks, name) in marks.iter().zip(["old", "other"]) {
+        let marks: Vec<&str> = marks.iter().map(String::as_str).collect();
+        let argv = jobs::read_only(&root, &super::home(), &marks);
+        let loop_ = format!("perl -e '{each}' {b}/{name}");
+        others.push(
+            std::process::Command::new(&argv[0])
+                .args(&argv[1..])
+                .args(["sh", "-c", &loop_])
+                .spawn()
+                .unwrap(),
+        );
+    }
+    others.push(
+        std::process::Command::new("/usr/bin/sandbox-exec")
+            .args([
+                "-p",
+                "(version 1)(allow default)(deny mach-lookup)",
+                "sh",
+                "-c",
+            ])
+            .arg(format!("perl -e '{each}' {b}/denies-all"))
+            .spawn()
+            .unwrap(),
+    );
+    // Full keeps what it leaves running; read-only ends it all with the command.
+    assert_eq!(run(leaves("full", false), None).await, json!(0));
+    assert_eq!(running(&["full-group", "full-left"]).await, [true, true]);
+    assert_eq!(run(leaves("read", true), Some(&core)).await, json!(0));
+    assert_eq!(
+        running(&["read-group", "read-left", "read-chain"]).await,
+        [false; 3]
+    );
+    // A running read-only command survives another one's end and the check that ends what earlier runs left.
+    let first = start("first").await;
+    assert_eq!(run("true".into(), Some(&core)).await, json!(0));
+    jobs.end_unwanted().await;
+    assert_eq!(
+        running(&["first-group", "first-left", "old"]).await,
+        [true, true, false]
+    );
+    // The agent's stop, its sandbox's stream ending (Off here), and the helper's stop each end it all.
+    jobs.cancel("first");
+    assert_eq!(first.await.unwrap(), json!(-15));
+    let second = start("second").await;
+    jobs.wanted.lock().unwrap().clear();
+    jobs.end_unwanted().await;
+    assert_eq!(second.await.unwrap(), json!(-9));
+    jobs.wanted.lock().unwrap().insert(core.clone());
+    let third = start("third").await;
+    jobs.close().await;
+    assert_eq!(third.await.unwrap(), json!(-9));
+    let names =
+        ["first", "second", "third"].map(|name| [format!("{name}-group"), format!("{name}-left")]);
+    let names: Vec<&str> = names.iter().flatten().map(String::as_str).collect();
+    assert_eq!(running(&names).await, [false; 6]);
+    // After the stop nothing new starts, and the others still run.
+    assert_eq!(run("true".into(), None).await, json!(126));
+    assert_eq!(running(&["other", "denies-all"]).await, [true, true]);
+    for process in &mut others {
+        let _ = process.kill();
+        let _ = process.wait();
+    }
+    for beat in std::fs::read_dir(&beats).unwrap().flatten() {
+        let text = std::fs::read_to_string(beat.path()).unwrap_or_default();
+        let pid = text.split(' ').next().unwrap_or_default();
+        if pid.parse::<i32>().is_ok_and(|pid| pid > 0) {
+            // Chains write 0 and stop by themselves.
+            let _ = std::process::Command::new("kill")
+                .args(["-9", pid])
+                .status();
+        }
+    }
+    std::fs::remove_dir_all(root).unwrap();
+    std::fs::remove_dir_all(beats).unwrap();
+}
+
+#[tokio::test]
 async fn background_process_outlives_its_result() {
     let _alone = FORKS.lock().await;
     // A process the command left running kept writing to its output after the result went back; with the pipe closed,
@@ -501,7 +667,7 @@ async fn background_process_outlives_its_result() {
         marker.display()
     );
     let result = jobs
-        .run(&json!({"id": "bg", "command": command}), false, &root, None)
+        .run(&json!({"id": "bg", "command": command}), None, &root, None)
         .await;
     assert_eq!(
         (&result["code"], &result["stdout"]),

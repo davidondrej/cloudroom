@@ -850,3 +850,16 @@ it("Windows MCP paths and %VARIABLES% stay on this PC", async () => {
   for (const portable of ["npx", "-y", "@acme/mcp", "https://mcp.example.com/mcp", "50%"])
     expect(WINDOWS_LOCAL_PATH.test(portable), portable).toBe(false);
 });
+
+it("Mac-only MCP programs like xcrun stay on this Mac (#1244)", async () => {
+  const { macMcpServers } = await import("../../src/services/cloudroom/sandboxes.js");
+  const dir = await mkdtemp(join(tmpdir(), "mac-mcp-"));
+  const stdio = (command: string, args: string[] = []) => ({ type: "stdio", command, args, env: {} });
+  const servers = { xcode: stdio("xcrun", ["mcpbridge"]), build: stdio("xcodebuild"), apple: stdio("osascript", ["-e", "x"]), npx: stdio("npx", ["-y", "@acme/mcp"]), xcrunner: stdio("xcrunner"), remote: { type: "http", url: "https://mcp.example.com/mcp" } };
+  await writeFile(join(dir, ".claude.json"), JSON.stringify({ mcpServers: servers }));
+  vi.stubEnv("CLAUDE_CONFIG_DIR", dir);
+  try {
+    const found = Object.fromEntries((await macMcpServers()).filter(({ name }) => name in servers).map(({ name, server }) => [name, !server]));
+    expect(found).toEqual({ xcode: true, build: true, apple: true, npx: false, xcrunner: false, remote: false });
+  } finally { vi.unstubAllEnvs(); await rm(dir, { recursive: true, force: true }); }
+});

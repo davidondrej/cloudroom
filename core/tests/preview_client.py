@@ -11,6 +11,7 @@ import os
 import plistlib
 import socket
 import socketserver
+import subprocess
 import shutil
 import sys
 import tarfile
@@ -391,7 +392,7 @@ class MacJobTests(unittest.TestCase):
                 plistlib.dumps({'EnvironmentVariables': {'BB_DATA_DIR': str(home / 'old-machine')}}))
             (agents / 'app.getbb.host-daemon.broken.plist').write_text('<?xml version="1.0"?><plist><dict>')
             with mock.patch.dict(os.environ, {'HOME': str(home)}):
-                args = preview.read_only(data)
+                args = preview.read_only(data, 'helper.read-only', 'helper.read-only.job')
         params = dict(args[n + 1].split('=', 1) for n, arg in enumerate(args) if arg == '-D')
         group = lambda name: {Path(path) for key, path in params.items() if key.startswith(name)}
         self.assertEqual(group('FOLDER_'), {data, home / '.gui-cloudroom', home / '.gui-cloudroom-dev'})
@@ -404,6 +405,110 @@ class MacJobTests(unittest.TestCase):
                                                     '(deny file-read* file-write* (subpath (param "MACHINE_0"))')]
         self.assertEqual(order, sorted(order))
         self.assertTrue(profile.endswith(f' {preview.READ_ONLY_OLD_KEYS})'))
+        # The marks that let the helper end everything the command starts (end).
+        self.assertIn('(deny mach-lookup (global-name "helper.read-only") (global-name "helper.read-only.job"))', profile)
+
+    @unittest.skipIf(os.name == 'nt', 'Mac access runs on macOS and Linux')
+    def test_read_only_command_leaves_nothing_running(self):
+        # Security fix: a process a Read-only command started kept running after the command, its thread and sandbox, and
+        # Mac access Off. Now nothing a read-only command starts outlives it, its stop, its sandbox's stream, or its helper,
+        # even after setsid and a double fork, or as a chain of processes that each fork and end at once. Full commands keep
+        # theirs (dev servers), and other sandboxes and other helpers' commands run on. Linux has no macOS sandbox, so
+        # there the marks travel in an environment variable.
+        mac, started = sys.platform == 'darwin', []
+        with tempfile.TemporaryDirectory(dir='/tmp') as folder, tempfile.TemporaryDirectory(dir='/tmp') as beats, contextlib.ExitStack() as stack:
+            folder, beats = Path(os.path.realpath(folder)), Path(os.path.realpath(beats))
+            if not mac:
+                def covered(pid, names):
+                    with contextlib.suppress(OSError):
+                        env = dict(var.split(b'=', 1) for var in Path(f'/proc/{pid}/environ').read_bytes().split(b'\0') if b'=' in var)
+                        marks = env.get(b'CLOUDROOM_TEST_MARKS', b'').split()
+                        return names[0] in marks and names[1] not in marks
+                    return False
+                listing = lambda: [int(entry) for entry in os.listdir('/proc') if entry.isdigit()]
+                stack.enter_context(mock.patch.object(preview, 'sandbox_checks', lambda: (listing, covered)))
+                stack.enter_context(mock.patch.object(preview, 'read_only', lambda data, *marks: ['/usr/bin/env', 'CLOUDROOM_TEST_MARKS=' + ' '.join(marks)]))
+                stack.enter_context(mock.patch.object(preview.MacJobs, 'refusal', lambda *_: None))
+                stack.enter_context(mock.patch.object(preview.MacJobs, 'containable', lambda *_: True))
+            stack.enter_context(mock.patch.object(preview, 'review', lambda *_: None))
+            results, jobs = {}, preview.MacJobs(folder)
+            jobs.wanted = {'core'}
+            core = SimpleNamespace(url='http://core', headers={}, key='core', sandbox=False, connection={},
+                                   config={'connectionFile': str(folder / 'cloudroom.json')},
+                                   fetch=lambda url, body, *_: results.__setitem__(url.rsplit('/', 1)[1], body) if body['state'] == 'done' else None)
+            # Each process rewrites its own file every 0.1 s: one in the command's process group, and one that left it with
+            # setsid after a fork, then forked again. The chain writes every 50th process and stops by itself after 30 s.
+            loop = 'for ($n = 0;; $n++) { open(F, ">", $ARGV[0]); print F "$$ $n"; close F; select(undef, undef, undef, .1) }'
+            chain = 'for ($n = 0;; $n++) { exit if fork or time - $^T > 30; next if $n % 50; open(F, ">", $ARGV[0]); print F "0 $n"; close F }'
+            def leaves(name, *also):
+                files = [f'{beats}/{name}-{kind}' for kind in ('group', 'left', *also)]
+                return (f"perl -e '{loop}' {files[0]} & perl -MPOSIX -e 'if (fork) {{ exit }} POSIX::setsid(); if (fork) {{ exit }} {loop}' {files[1]}; "
+                        + ''.join(f"perl -e '{chain}' {file} & " for file in files[2:])
+                        + 'while ' + ' || '.join(f'[ ! -s {file} ]' for file in files) + '; do sleep .05; done')
+            def running(*names):
+                before = [(beats / name).read_text() for name in names]
+                time.sleep(.5)
+                return [(beats / name).read_text() != text for name, text in zip(names, before)]
+            def run(command, level='read-only'):
+                preview.save(folder / 'config.json', {'macAccess': level})
+                job = uuid.uuid4().hex
+                jobs.execute(core, 'mac', {'id': job, 'command': command})
+                return results[job]['code']
+            def start(name):  # A read-only command that keeps running.
+                preview.save(folder / 'config.json', {'macAccess': 'read-only'})
+                job = uuid.uuid4().hex
+                thread = threading.Thread(target=jobs.execute, args=(core, 'mac', {'id': job, 'command': leaves(name) + '; sleep 30'}))
+                thread.start()
+                for _ in range(200):
+                    if (beats / f'{name}-left').exists():
+                        break
+                    time.sleep(.05)
+                return job, thread
+            def ended(job, thread):
+                thread.join(10)
+                return not thread.is_alive() and results[job]['code']
+            try:
+                # Others run on: what an earlier run of this helper left (until the first check), another helper's read-only
+                # command (a dev build), and on a Mac another sandbox.
+                other = f"perl -e '{loop}' {beats}/"
+                for marks, name in (((jobs.mark, jobs.mark + '.0', jobs.mark + '.0.job'), 'old'), (('other.read-only', 'other.read-only.job'), 'other')):
+                    started.append(subprocess.Popen([*preview.read_only(folder, *marks), 'sh', '-c', other + name]))
+                if mac:
+                    started.append(subprocess.Popen(['/usr/bin/sandbox-exec', '-p', '(version 1)(allow default)(deny mach-lookup)', 'sh', '-c', other + 'denies-all']))
+                # Full keeps what it leaves running; read-only ends it all with the command.
+                self.assertEqual(run(leaves('full'), 'full'), 0)
+                self.assertEqual(running('full-group', 'full-left'), [True, True])
+                self.assertEqual(run(leaves('read', 'chain')), 0)
+                self.assertEqual(running('read-group', 'read-left', 'read-chain'), [False] * 3)
+                # A running read-only command survives another one's end and the check that ends what earlier runs left.
+                first = start('first')
+                self.assertEqual(run('true'), 0)
+                jobs.end_unwanted()
+                self.assertEqual(running('first-group', 'first-left', 'old'), [True, True, False])
+                # The agent's stop, its sandbox's stream ending (Off here), and the helper's stop each end it all.
+                jobs.cancel(first[0])
+                self.assertEqual(ended(*first), -15)
+                second = start('second')
+                preview.save(folder / 'config.json', {'macAccess': 'off'})
+                jobs.wanted = set()
+                jobs.end_unwanted()
+                self.assertEqual(ended(*second), -9)
+                jobs.wanted = {'core'}
+                third = start('third')
+                jobs.close()
+                self.assertEqual(ended(*third), -9)
+                self.assertEqual(running(*(f'{name}-{kind}' for name in ('first', 'second', 'third') for kind in ('group', 'left'))), [False] * 6)
+                # After the stop nothing new starts, and the others still run.
+                self.assertEqual(run('true', 'full'), 126)
+                self.assertEqual(running('other', *(['denies-all'] if mac else [])), [True] * (1 + mac))
+            finally:
+                for process in started:
+                    process.kill(); process.wait()
+                for beat in beats.iterdir():
+                    with contextlib.suppress(OSError, ValueError):
+                        pid = int(beat.read_text().split()[0])
+                        if pid > 0:  # Chains write 0 and stop by themselves.
+                            os.kill(pid, 9)
 
     def test_ask_first_popup_shows_agent_text_as_text(self):
         # Security sweep: line breaks in a folder name could push the command out of view in the Ask first popup.

@@ -398,14 +398,16 @@ fn unreported(s: &super::Session) -> impl Iterator<Item = &super::Receipt> {
     })
 }
 
-/// The first finished turn not yet reported, of a session whose parent runs in another sandbox.
+/// The first finished turn not yet reported, of a session whose parent runs in another sandbox. An archived one
+/// reports only the turn it archived itself in, so its parent hears how its task ended.
 fn next_report(local: &Local) -> Option<(String, String, Value)> {
     local
         .sessions
         .values()
-        .filter(|s| !s.archived && s.parent_thread().is_some())
+        .filter(|s| s.parent_thread().is_some())
         .find_map(|s| {
-            let r = unreported(s).next()?;
+            let r = unreported(s)
+                .find(|r| !s.archived || s.archive_turn.as_ref() == Some(&r.request_id))?;
             let reply = s
                 .replies
                 .iter()
@@ -724,5 +726,43 @@ impl Manager {
                 wait = (wait * 2).min(Duration::from_secs(300));
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A child that archives itself still reports the turn it did that in, and only that one, also after a
+    /// restart. One archived by its parent reports nothing more.
+    #[test]
+    fn an_archived_child_reports_only_the_turn_it_archived_itself_in() {
+        let dir = std::env::temp_dir().join(format!("cloudroom-relay-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut local = Local::open(&dir).unwrap();
+        for id in ["self", "parent"] {
+            for receipt in [
+                json!({"request_id":"s1","command":"start","state":"completed","input":{"parent_thread":"thr_p"}}),
+                json!({"request_id":"p1","command":"prompt","state":"completed","input":{}}),
+                json!({"request_id":"p2","command":"prompt","state":"accepted","input":{}}),
+            ] {
+                local.append(id, "receipt", receipt, None).unwrap();
+            }
+            let running = json!({"state":"running","request_id":"p2"});
+            local.append(id, "state", running, None).unwrap();
+            let archive = json!({"archived":true,"self":id == "self"});
+            local.append(id, "archive", archive, None).unwrap();
+            let p2 = json!({"request_id":"p2","command":"prompt","state":"completed","input":{}});
+            local.append(id, "receipt", p2, None).unwrap();
+        }
+        drop(local);
+        let mut local = Local::open(&dir).unwrap();
+        let (session, turn, _) = next_report(&local).unwrap();
+        assert_eq!((session.as_str(), turn.as_str()), ("self", "p2"));
+        local
+            .append("self", "parent_report", json!({"request_id":"p2"}), None)
+            .unwrap();
+        assert!(next_report(&local).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

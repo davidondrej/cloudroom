@@ -30,7 +30,7 @@ export const markMacOff = () => {
   macOff = true;
 };
 
-const tunnelOffline = (response: Response) =>
+export const tunnelOffline = (response: Response) =>
   response.status === 503 &&
   response.headers.get("x-bb-tunnel-offline") === "1";
 

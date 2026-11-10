@@ -28,7 +28,7 @@ export interface Session {
 }
 
 interface Cached<T> {
-  value: Promise<T>;
+  value: T;
   expires: number;
 }
 
@@ -36,24 +36,33 @@ const servers = new Map<string, Cached<Server | null>>();
 const credentials = new Map<string, Cached<Server | null>>();
 const seenWrites = new Map<string, number>();
 
-function cached<T>(
+/**
+ * Caches finished lookups only, never a pending one. A pending lookup belongs to the request that started it. When that
+ * request is canceled (the app aborts one on every keystroke), Cloudflare drops its lookup and its timers, so every
+ * other request waiting on it hung until the app gave up: up to 30 minutes, sends included (2026-11-10).
+ */
+async function cached<T>(
   map: Map<string, Cached<T>>,
   key: string,
   ttl: number,
   load: () => Promise<T>,
   fresh = false,
 ): Promise<T> {
-  const now = Date.now();
   const hit = map.get(key);
-  if (!fresh && hit && hit.expires > now) return hit.value;
-  const value = load();
-  const entry = { value, expires: now + ttl };
-  map.set(key, entry);
-  // A failed lookup is dropped at once, so the next request starts its own instead of waiting on it.
-  value.catch(() => {
-    if (map.get(key) === entry) map.delete(key);
-  });
+  if (!fresh && hit && hit.expires > Date.now()) return hit.value;
+  const dropsBefore = drops;
+  const value = await load();
+  if (drops === dropsBefore) map.set(key, { value, expires: Date.now() + ttl });
   return value;
+}
+
+/** Counts every `drop`. A lookup that started before one may hold the old row, so it is not saved. */
+let drops = 0;
+
+/** Forgets a Mac or host whose row just changed (revoked, signed out, new key). */
+function drop(map: Map<string, Cached<Server | null>>, key: string): void {
+  drops += 1;
+  map.delete(key);
 }
 
 function randomString(alphabet: string, length: number): string {
@@ -213,8 +222,8 @@ export async function deleteMachine(
     .bind(machineId, ownerId)
     .first<{ handle: string; credential_hash: string }>();
   if (!row) return null;
-  servers.delete(row.handle);
-  credentials.delete(row.credential_hash);
+  drop(servers, row.handle);
+  drop(credentials, row.credential_hash);
   return row.handle;
 }
 
@@ -240,7 +249,7 @@ async function retire(db: D1Database, where: string, ...values: string[]): Promi
     .prepare(`UPDATE server SET credential_hash = ${RETIRED_HASH} WHERE ${where} RETURNING handle`)
     .bind(...values)
     .all<{ handle: string }>();
-  for (const row of results) servers.delete(row.handle);
+  for (const row of results) drop(servers, row.handle);
 }
 
 export function retireServer(db: D1Database, serverId: string): Promise<void> {
@@ -262,7 +271,7 @@ export async function registerServer(
     .bind(credentialHash, userId, installId)
     .first<{ handle: string }>();
   if (existing) {
-    servers.delete(existing.handle);
+    drop(servers, existing.handle);
     return { handle: existing.handle, credential };
   }
   const handle = randomString(HANDLE_ALPHABET, 10);
@@ -283,7 +292,7 @@ export async function registerVps(db: D1Database, userId: string, handle: string
   const installId = `vps-${userId}`;
   const credential = randomToken();
   const old = await db.prepare("DELETE FROM server WHERE user_id = ? AND install_id = ? RETURNING handle").bind(userId, installId).first<{ handle: string }>();
-  if (old) servers.delete(old.handle);
+  if (old) drop(servers, old.handle);
   await db
     .prepare("INSERT INTO server (id, user_id, install_id, handle, credential_hash, name, kind, created_at) VALUES (?, ?, ?, ?, ?, ?, 'vps', ?)")
     .bind(crypto.randomUUID(), userId, installId, handle, await sha256Hex(credential), name, Date.now())

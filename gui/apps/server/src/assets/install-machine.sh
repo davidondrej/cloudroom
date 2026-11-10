@@ -353,6 +353,12 @@ if [ -z "${HOME:-}" ]; then
   export HOME
 fi
 
+# The desktop app runs this installer without XDG_RUNTIME_DIR. systemctl --user
+# needs it; without it the daemon runs detached inside the app and dies with it.
+if [ "$platform" = linux ] && [ -z "${XDG_RUNTIME_DIR:-}" ] && [ -d "/run/user/$(id -u)" ]; then
+  export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+fi
+
 if [ -n "$lifecycle_action" ]; then
   run_lifecycle
   exit 0
@@ -951,7 +957,8 @@ EOF
   ready_row "data" "$data_dir"
   ready_row "service" "$service_file"
   printf '\n'
-  if [ "$systemd_scope" = --system ]; then
+  # Linger starts the user's services at boot and keeps them after logout.
+  if [ "$systemd_scope" = --system ] || loginctl enable-linger "$(id -un)" >/dev/null 2>&1; then
     detail "Starts automatically when this machine boots."
   else
     detail "Starts with your systemd user session."

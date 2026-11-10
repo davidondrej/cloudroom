@@ -5,7 +5,7 @@ export const BB_DESKTOP_APP_COMMAND_CHANNEL = "bb-desktop:app-command";
 export const BB_DESKTOP_ADD_IMAGE_TO_CHAT_CHANNEL =
   "bb-desktop:add-image-to-chat";
 export const BB_DESKTOP_OPEN_COMPUTER_CHANNEL = "bb-desktop:open-computer";
-export const BB_DESKTOP_RECONNECT_COMPUTER_CHANNEL = "bb-desktop:reconnect-computer";
+export const BB_DESKTOP_SHOW_THIS_COMPUTER_CHANNEL = "bb-desktop:show-this-computer";
 export const BB_DESKTOP_REFRESH_COMPUTERS_CHANNEL = "bb-desktop:refresh-computers";
 export const BB_DESKTOP_OPEN_SERVER_DAEMON_LOGS_CHANNEL =
   "bb-desktop:open-server-daemon-logs";

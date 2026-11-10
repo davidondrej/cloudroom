@@ -1536,13 +1536,22 @@ describe("automation service", () => {
       const base = createAutomationServiceBb();
       const thread = { id: "thr_run", archivedAt: null, deletedAt: null, status: "active" };
       const spawn = async (input: { prompt?: string }) => (prompts.push(input.prompt!), thread as never);
-      const cloudroom = { automations: async () => ({}), status: status as never };
+      const cloudroom = { automations: async () => ({ reports: [] }), status: status as never };
       const bb = { ...base, sdk: { ...base.sdk, cloudroom, threads: { ...base.sdk.threads, spawn } } };
       await executeAgentRun(bb, db, { automation, run, execution: automation.execution as never, onFailure: () => {} });
       expect(prompts[0]!.includes("room-cli loop report")).toBe(ask);
-      const report = createAutomationService({ bb, db, pluginDataDir: "/tmp", serverUrl: "" })
-        .report({ threadId: "thr_run", outcome: "done", confidence: "high", reason: "ok", actions: [] });
-      await (ask ? expect(report).resolves.toEqual({ reported: true }) : expect(report).rejects.toThrow("need a Cloudroom sign-in"));
+      const service = createAutomationService({ bb, db, pluginDataDir: "/tmp", serverUrl: "" });
+      const report = () => service.report({ threadId: "thr_run", outcome: "done", confidence: "high", reason: "ok", actions: [] });
+      await (ask ? expect(report()).resolves.toEqual({ reported: true }) : expect(report()).rejects.toThrow("need a Cloudroom sign-in"));
+      if (status !== rows[1]!.status) continue;
+      // A retried or continued turn still reports its run after the thread failed or went idle early (#1293).
+      await closeAutomationRunForSettledThread(bb, db, { threadId: "thr_run", status: "failed" });
+      await expect(report()).resolves.toEqual({ reported: true });
+      // Once another run used the thread, a late report can't tell which run it is for, so it never overwrites one.
+      const { run: next } = createManualRun(db, { automationId: automation.id, runMode: "agent", now: 2 });
+      setAutomationRunThread(db, { runId: next.id, threadId: "thr_run" });
+      closeAutomationRun(db, { runId: next.id, status: "succeeded", now: 3 });
+      await expect(report()).rejects.toThrow("Nothing to report");
     }
   });
 });

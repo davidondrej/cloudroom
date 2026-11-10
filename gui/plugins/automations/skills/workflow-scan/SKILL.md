@@ -1,6 +1,6 @@
 ---
 name: workflow-scan
-description: "Run a Workflow scan: review the user's own past agent chats on this computer, find the work they keep repeating, and suggest their first 1–2 loops with a 10/90 split. Use when the Loops → Scans tab starts a scan, or the user asks to scan their workflow."
+description: Review the user's past agent chats, find repeated work, and suggest 1-2 loops. Use when the Scans tab starts a scan or the user asks for one.
 ---
 
 # Workflow scan

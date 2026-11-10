@@ -283,7 +283,7 @@ async fn archive(
         &m,
         &session,
         "archive",
-        json!({"archived":true,"kept_live":kept}),
+        json!({"archived":true,"kept_live":kept,"self":true}),
     )
 }
 

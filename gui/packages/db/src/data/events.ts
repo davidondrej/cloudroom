@@ -125,6 +125,9 @@ const isNotNestedTurnUsageEvent = sql`NOT EXISTS (
     AND nested_turn_started.parent_tool_call_id IS NOT NULL
 )`;
 
+/** Harnesses report a compaction as an event or, like Codex, as a finished item. */
+const isContextCompaction = sql`(${events.type} = 'thread/compacted' OR (${events.type} = 'item/completed' AND ${events.itemKind} = 'contextCompaction'))`;
+
 const isNotSupersededBackgroundTaskProgress = sql`NOT (
   ${events.type} = 'item/backgroundTask/progress'
   AND EXISTS (
@@ -3293,10 +3296,34 @@ export function countContextCompactions(
           gte(events.sequence, args.sequenceStart),
           sql`${events.parentToolCallId} IS NULL`,
           isNotNestedTurnUsageEvent,
-          sql`(${events.type} = 'thread/compacted' OR (${events.type} = 'item/completed' AND ${events.itemKind} = 'contextCompaction'))`,
+          isContextCompaction,
         ),
       )
       .get()?.count ?? 0
+  );
+}
+
+/** The newest point where the agent lost its earlier messages: a compaction or a clear. 0 when there is none. */
+export function latestContextResetSequence(
+  db: DbQueryConnection,
+  threadId: string,
+): number {
+  const compacted =
+    db
+      .select({ sequence: max(events.sequence) })
+      .from(events)
+      .where(
+        and(
+          eq(events.threadId, threadId),
+          sql`${events.parentToolCallId} IS NULL`,
+          isNotNestedTurnUsageEvent,
+          sql`(${isContextCompaction} OR ${events.type} = 'thread/context/cleared')`,
+        ),
+      )
+      .get()?.sequence ?? 0;
+  return Math.max(
+    compacted,
+    getLatestCompletedThreadContextClearSequence(db, { threadId }) ?? 0,
   );
 }
 

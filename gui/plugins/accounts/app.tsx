@@ -1,5 +1,5 @@
 import { COMPUTER_TITLE } from "@cloudroom/domain/computer-name";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   definePluginApp,
   experimental_ProviderIcon as ProviderIcon,
@@ -50,9 +50,25 @@ function windowLabel(label: string): string {
     .replace("On-demand spend", "Spend");
 }
 
-const tileClass = "flex min-h-32 flex-col rounded-lg border p-3.5 text-sm";
+function Meter({ label, usedPercent }: { label: string; usedPercent: number }) {
+  const hot = usedPercent >= 90;
+  return (
+    <div className="flex w-32 items-center gap-2 text-xs tabular-nums text-subtle-foreground">
+      <span className="min-w-5">{windowLabel(label)}</span>
+      <span className="h-[3px] flex-1 overflow-hidden rounded-full bg-border">
+        <span
+          className={cn("block h-full", hot ? "bg-warning-text" : "bg-muted-foreground")}
+          style={{ width: `${Math.min(100, usedPercent)}%` }}
+        />
+      </span>
+      <span className={cn("w-8 text-right", hot && "text-warning-text")}>
+        {Math.round(usedPercent)}%
+      </span>
+    </div>
+  );
+}
 
-function AccountTile({
+function AccountRow({
   account,
   index,
   onUse,
@@ -69,28 +85,43 @@ function AccountTile({
 }) {
   const [editing, setEditing] = useState(false);
   const local = account.id === LOCAL;
-  const fallback =
-    account.email ?? (local ? `This ${COMPUTER_TITLE}` : `Account ${index + 1}`);
+  const fallback = local
+    ? `This ${COMPUTER_TITLE}`
+    : (account.email ?? `Account ${index + 1}`);
   const name = account.name ?? fallback;
-  const detail = [
-    account.inUse ? "In use" : "Not in use",
-    local && account.email ? `This ${COMPUTER_TITLE}` : null,
-    account.name ? account.email : null,
-    account.plan,
-  ]
+  const detail = [name === account.email ? null : account.email, account.plan]
     .filter(Boolean)
     .join(" · ");
-  const status = account.limitedUntil
-    ? `Limit hit · resets in ${until(account.limitedUntil)}`
-    : account.error;
   return (
     <div
       className={cn(
-        tileClass,
-        account.inUse ? "border-foreground/50" : "border-border",
+        "flex flex-wrap items-center gap-x-3 gap-y-2 py-2.5 pl-3.5 pr-2 text-sm",
+        account.inUse && "bg-surface-recessed",
       )}
     >
-      <div className="flex min-h-7 items-center justify-between gap-2">
+      <button
+        type="button"
+        role="radio"
+        aria-checked={account.inUse}
+        aria-label={`Use ${name}`}
+        onClick={account.inUse ? undefined : onUse}
+        className={cn(
+          "group -m-1.5 grid size-7 shrink-0 place-items-center rounded-full",
+          account.inUse && "cursor-default",
+        )}
+      >
+        <span
+          className={cn(
+            "grid size-4 place-items-center rounded-full border-[1.5px]",
+            account.inUse
+              ? "border-primary"
+              : "border-subtle-foreground/60 group-hover:border-foreground",
+          )}
+        >
+          {account.inUse ? <span className="size-2 rounded-full bg-primary" /> : null}
+        </span>
+      </button>
+      <div className="min-w-0 flex-1">
         {editing ? (
           <input
             autoFocus
@@ -116,87 +147,82 @@ function AccountTile({
             {name}
           </div>
         )}
-        {local ? null : (
-          <DropdownMenu modal={false}>
-            <DropdownMenuTrigger asChild>
-              <Button
-                variant="ghost"
-                size="icon"
-                className="size-7 shrink-0 text-muted-foreground"
-                aria-label="Account actions"
-              >
-                <Icon name="MoreHorizontal" />
-              </Button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent
-              align="end"
-              // Keep focus on the rename field instead of the menu button.
-              onCloseAutoFocus={(event) => event.preventDefault()}
-            >
-              <DropdownMenuItem onSelect={() => setEditing(true)}>
-                <Icon name="Edit" /> Rename
-              </DropdownMenuItem>
-              {onSignInAgain ? (
-                <DropdownMenuItem onSelect={onSignInAgain}>
-                  <Icon name="RotateCcw" /> Sign in again
-                </DropdownMenuItem>
-              ) : null}
-              <DropdownMenuItem
-                onSelect={onRemove}
-                className="text-destructive-text focus:text-destructive-text"
-              >
-                <Icon name="Trash2" /> Remove
-              </DropdownMenuItem>
-            </DropdownMenuContent>
-          </DropdownMenu>
-        )}
-      </div>
-      <div className="truncate text-xs text-subtle-foreground" title={detail}>
-        {detail}
-      </div>
-      {status ? (
-        <div className="truncate text-xs text-warning-text" title={status}>
-          {status}
-        </div>
-      ) : null}
-      {account.limitedLogin && onSignInAgain ? (
-        <button
-          type="button"
-          onClick={onSignInAgain}
-          className="truncate text-left text-xs text-primary-text hover:underline"
-        >
-          Sign in again for claude.ai connectors
-        </button>
-      ) : null}
-      <div className="mt-auto space-y-1.5 pt-4">
-        {account.windows.slice(0, 2).map((window) => (
-          <div
-            key={window.label}
-            className="flex items-center gap-2 text-xs tabular-nums text-subtle-foreground"
-          >
-            <span className="min-w-5">{windowLabel(window.label)}</span>
-            <span className="h-[3px] flex-1 bg-border">
-              <span
-                className="block h-full bg-muted-foreground"
-                style={{ width: `${Math.min(100, window.usedPercent)}%` }}
-              />
-            </span>
-            <span className="w-8 text-right">
-              {Math.round(window.usedPercent)}%
-            </span>
+        {detail ? (
+          <div className="truncate text-xs text-subtle-foreground" title={detail}>
+            {detail}
           </div>
-        ))}
-        {account.inUse && !account.needsSignIn ? null : (
-          <Button
-            variant="outline"
-            size="sm"
-            className="mt-1.5"
-            onClick={onUse}
+        ) : null}
+        {account.error && !account.limitedUntil ? (
+          <div className="truncate text-xs text-warning-text" title={account.error}>
+            {account.error}
+          </div>
+        ) : null}
+        {account.limitedLogin && onSignInAgain ? (
+          <button
+            type="button"
+            onClick={onSignInAgain}
+            className="block max-w-full truncate text-left text-xs text-primary-text hover:underline"
           >
-            {account.inUse ? "Approve for Cloud" : "Use"}
-          </Button>
-        )}
+            Sign in again for claude.ai connectors
+          </button>
+        ) : null}
       </div>
+      {/* On a narrow screen the usage drops to its own line, under the name. */}
+      <div className="order-last flex basis-full flex-wrap items-center gap-x-5 gap-y-1 pl-7 sm:order-none sm:basis-auto sm:justify-end sm:pl-0">
+        {account.limitedUntil ? (
+          <span className="whitespace-nowrap text-xs text-warning-text">
+            Resets in {until(account.limitedUntil)}
+          </span>
+        ) : null}
+        {account.windows.slice(0, 2).map((window) => (
+          <Meter
+            key={window.label}
+            label={window.label}
+            usedPercent={window.usedPercent}
+          />
+        ))}
+        {account.inUse && account.needsSignIn ? (
+          <Button variant="outline" size="sm" onClick={onUse}>
+            Approve for Cloud
+          </Button>
+        ) : null}
+      </div>
+      {local ? (
+        <span className="size-7 shrink-0" />
+      ) : (
+        <DropdownMenu modal={false}>
+          <DropdownMenuTrigger asChild>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="size-7 shrink-0 text-muted-foreground"
+              aria-label="Account actions"
+            >
+              <Icon name="MoreHorizontal" />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent
+            align="end"
+            // Keep focus on the rename field instead of the menu button.
+            onCloseAutoFocus={(event) => event.preventDefault()}
+          >
+            <DropdownMenuItem onSelect={() => setEditing(true)}>
+              <Icon name="Edit" /> Rename
+            </DropdownMenuItem>
+            {onSignInAgain ? (
+              <DropdownMenuItem onSelect={onSignInAgain}>
+                <Icon name="RotateCcw" /> Sign in again
+              </DropdownMenuItem>
+            ) : null}
+            <DropdownMenuItem
+              onSelect={onRemove}
+              className="text-destructive-text focus:text-destructive-text"
+            >
+              <Icon name="Trash2" /> Remove
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      )}
     </div>
   );
 }
@@ -413,14 +439,9 @@ function KeyRow({ rpc, close }: { rpc: Rpc; close: () => void }) {
   );
 }
 
-function AccountsSection({
-  provider,
-  title = "Accounts",
-}: {
-  provider: Provider;
-  title?: string;
-}) {
+function AccountsSection({ provider, name }: { provider: Provider; name: string }) {
   const rpc = useRpc<typeof accountsRpcContract>();
+  const { providers } = useProviders();
   const [accounts, setAccounts] = useState<AccountView[] | null>(null);
   const [adding, setAdding] = useState<{
     mac: boolean;
@@ -445,14 +466,35 @@ function AccountsSection({
     load();
   };
 
+  // The usage box's "+" links here with ?agent=<provider>.
+  const section = useRef<HTMLElement>(null);
+  const loaded = accounts !== null;
+  useEffect(() => {
+    if (
+      loaded &&
+      new URLSearchParams(window.location.search).get("agent") === provider
+    )
+      section.current?.scrollIntoView({ block: "nearest" });
+  }, [loaded, provider]);
+
   const count = accounts?.filter((account) => account.id !== LOCAL).length ?? 0;
   return (
-    <section className="space-y-2.5">
-      <div className="flex items-center justify-between gap-4">
-        <h2 className="text-sm font-semibold text-foreground">{title}</h2>
+    <section ref={section} className="space-y-2">
+      <div className="flex items-center gap-2 pl-0.5">
+        <ProviderIcon
+          providerKind="agent"
+          provider={
+            providers.find((info) => info.id === provider) ?? { id: provider }
+          }
+          fallback="Bot"
+          className="size-4 shrink-0"
+          aria-hidden
+        />
+        <h2 className="flex-1 text-sm font-semibold text-foreground">{name}</h2>
         <Button
           variant="ghost"
           size="sm"
+          aria-label={`Add ${name} account`}
           disabled={adding !== null || count >= MAX_ACCOUNTS}
           onClick={() => setAdding({ mac: false, id: null })}
         >
@@ -461,44 +503,48 @@ function AccountsSection({
       </div>
       {accounts === null ? (
         <p className="py-2.5 text-xs text-muted-foreground">Loading…</p>
-      ) : (
-        <div className="grid grid-cols-[repeat(auto-fill,minmax(13rem,1fr))] gap-3">
+      ) : accounts.length > 0 ? (
+        <div
+          role="radiogroup"
+          aria-label={`${name} accounts`}
+          className="divide-y divide-border overflow-hidden rounded-lg border border-border"
+        >
           {accounts.map((account, index) => (
-                <AccountTile
-                  key={account.id}
-                  account={account}
-                  index={index}
-                  onUse={() =>
-                    // The Mac's own Claude login needs one approval before Cloud can follow it.
-                    account.needsSignIn
-                      ? setAdding({ mac: true, id: null })
-                      : void run(() =>
-                          rpc.call("accounts.use", { provider, id: account.id }),
-                        )
-                  }
-                  onRename={(name) =>
-                    void run(() =>
-                      rpc.call("accounts.rename", {
-                        provider,
-                        id: account.id,
-                        name,
-                      }),
+            <AccountRow
+              key={account.id}
+              account={account}
+              index={index}
+              onUse={() =>
+                // The Mac's own Claude login needs one approval before Cloud can follow it.
+                account.needsSignIn
+                  ? setAdding({ mac: true, id: null })
+                  : void run(() =>
+                      rpc.call("accounts.use", { provider, id: account.id }),
                     )
-                  }
-                  onRemove={() =>
-                    void run(() =>
-                      rpc.call("accounts.remove", { provider, id: account.id }),
-                    )
-                  }
-                  onSignInAgain={
-                    provider === "claude-code" && adding === null
-                      ? () => setAdding({ mac: false, id: account.id })
-                      : undefined
-                  }
-                />
-              ))}
+              }
+              onRename={(name) =>
+                void run(() =>
+                  rpc.call("accounts.rename", {
+                    provider,
+                    id: account.id,
+                    name,
+                  }),
+                )
+              }
+              onRemove={() =>
+                void run(() =>
+                  rpc.call("accounts.remove", { provider, id: account.id }),
+                )
+              }
+              onSignInAgain={
+                provider === "claude-code" && adding === null
+                  ? () => setAdding({ mac: false, id: account.id })
+                  : undefined
+              }
+            />
+          ))}
         </div>
-      )}
+      ) : null}
       {adding ? (
         <div className="rounded-lg border border-dashed border-border px-3.5">
           {provider === "acp-cursor" ? (
@@ -523,9 +569,11 @@ function AccountsSection({
           )}
         </div>
       ) : null}
-      <p className="text-xs text-subtle-foreground">
-        All Local and Cloud threads use the account in use.
-      </p>
+      {provider === "acp-cursor" ? (
+        <p className="text-xs text-subtle-foreground">
+          Grok signs in with your X subscription. One login covers it, so there's nothing to add here.
+        </p>
+      ) : null}
       {error ? <p className="text-xs text-destructive-text">{error}</p> : null}
     </section>
   );
@@ -537,80 +585,13 @@ const AGENTS: readonly { provider: Provider; name: string }[] = [
   { provider: "acp-cursor", name: "Cursor" },
 ];
 
-/** Settings → Agents → Accounts: pick an agent, then manage its accounts. */
+/** Settings → Agents → Accounts: every agent's accounts on one page. All threads use the one picked. */
 function AccountsPage() {
-  const rpc = useRpc<typeof accountsRpcContract>();
-  const { providers } = useProviders();
-  // The usage box's "+" links here with ?agent=<provider>.
-  const [provider, setProvider] = useState<Provider>(() => {
-    const agent = new URLSearchParams(window.location.search).get("agent");
-    return AGENTS.find((item) => item.provider === agent)?.provider ?? "claude-code";
-  });
-  const [counts, setCounts] = useState<Partial<Record<Provider, number>>>({});
-  const loadCounts = useCallback(() => {
-    for (const { provider: id } of AGENTS)
-      rpc.call("accounts.list", { provider: id }).then(
-        (accounts) =>
-          setCounts((current) => ({
-            ...current,
-            [id]: accounts.filter((account) => !account.needsSignIn).length,
-          })),
-        () => undefined,
-      );
-  }, [rpc]);
-  useEffect(loadCounts, [loadCounts]);
-  useRealtime(ACCOUNTS_CHANGED, loadCounts);
-  const name = AGENTS.find((agent) => agent.provider === provider)!.name;
   return (
-    <div className="space-y-5">
-      <div
-        role="group"
-        aria-label="Agent"
-        className="inline-flex flex-wrap gap-1 rounded-lg border border-border p-1"
-      >
-        {AGENTS.map((agent) => (
-          <button
-            key={agent.provider}
-            type="button"
-            aria-pressed={provider === agent.provider}
-            onClick={() => setProvider(agent.provider)}
-            className={cn(
-              "flex items-center gap-2 rounded-md px-3 py-1.5 text-sm",
-              provider === agent.provider
-                ? "bg-accent text-foreground"
-                : "text-muted-foreground hover:text-foreground",
-            )}
-          >
-            <ProviderIcon
-              providerKind="agent"
-              provider={
-                providers.find((info) => info.id === agent.provider) ?? {
-                  id: agent.provider,
-                }
-              }
-              fallback="Bot"
-              className="size-4 shrink-0"
-              aria-hidden
-            />
-            {agent.name}
-            {counts[agent.provider] ? (
-              <span className="text-xs tabular-nums text-subtle-foreground">
-                {counts[agent.provider]}
-              </span>
-            ) : null}
-          </button>
-        ))}
-      </div>
-      <AccountsSection
-        key={provider}
-        provider={provider}
-        title={`${name} accounts`}
-      />
-      {provider === "acp-cursor" ? (
-        <p className="text-xs text-subtle-foreground">
-          Grok signs in with your X subscription. One login covers it, so there's nothing to add here.
-        </p>
-      ) : null}
+    <div className="space-y-6">
+      {AGENTS.map((agent) => (
+        <AccountsSection key={agent.provider} {...agent} />
+      ))}
     </div>
   );
 }
@@ -619,6 +600,7 @@ export default definePluginApp((app) => {
   // Settings → Agents → Accounts, the one place for every agent's accounts.
   app.slots.settingsSection({
     id: "accounts",
+    // Not shown on the page (the tab names it). Settings search finds the page by these.
     title: "Agent accounts",
     description: "Add and switch Claude Code, Codex, and Cursor subscriptions.",
     component: AccountsPage,

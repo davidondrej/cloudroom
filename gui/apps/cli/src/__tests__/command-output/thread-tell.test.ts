@@ -246,6 +246,38 @@ describe("room-cli thread tell command output", () => {
     });
   });
 
+  it("room-cli thread tell --message-file sends a body too long for argv (#1220)", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "room-cli-message-file-"));
+    try {
+      const text = 'Línea ✓ "quotes" $(x)\n'.repeat(10_000);
+      await writeFile(join(dir, "m.txt"), `\uFEFF${text}`);
+      const post = vi.fn(async () => ({ ok: true }));
+      stubTellApi({ "v1.threads.:id.send.$post": post });
+      const args = [
+        "thread",
+        "tell",
+        "t",
+        "--message-file",
+        join(dir, "m.txt"),
+      ];
+
+      await runCommand(args, register);
+      expect(post).toHaveBeenCalledWith(
+        expect.objectContaining({
+          json: expect.objectContaining({
+            input: [{ type: "text", text, mentions: [] }],
+          }),
+        }),
+      );
+      await expect(runCommand([...args, "hi"], register)).rejects.toThrow(
+        "process.exit:1",
+      );
+      expect(post).toHaveBeenCalledTimes(1);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it("room-cli thread tell forwards automatic review mode", async () => {
     const post = vi.fn(async () => ({ ok: true }));
     stubTellApi({ "v1.threads.:id.send.$post": post });

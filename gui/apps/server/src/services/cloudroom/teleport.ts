@@ -977,7 +977,7 @@ class Teleport {
               }
             : {}),
           ...(capability.system_prompt === true
-            ? { system_prompt: cloudroomSystemPrompt(this.deps.db) }
+            ? { system_prompt: cloudroomSystemPrompt(this.deps.db, "cloud") }
             : {}),
           workspace: `bb_${thread.projectId}`,
           workspace_name:

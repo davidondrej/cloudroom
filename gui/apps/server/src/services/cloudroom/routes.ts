@@ -22,7 +22,8 @@ import { macSignedInAgents } from "./mac-agents.js";
 import { disconnectAgent, restoreAgent } from "./agent-logins.js";
 import { autoDeleteDaysSchema, readAutoDelete, saveAutoDelete, startAutoDeleteSync } from "./auto-delete.js";
 import { importBbThreads } from "./bb-import.js";
-import { importNativeSessions, listNativeSessions } from "./session-import.js";
+import { importConductorExport, importNativeSessions, listConductorExport, listNativeSessions } from "./session-import.js";
+import { conductorAppFound } from "./session-import-more.js";
 import { exportableChats, exportChats } from "./chat-export.js";
 import { copyToMac, openOnMac, teleportingToLocal, teleportToLocal } from "./teleport-local.js";
 import { cloudEnvironmentRequestSchema, macCodexLogin, macMcpServers, macSkills, macVariables, sandboxThread, startMacCodexLogin, type CloudEnvironmentRequest } from "./sandboxes.js";
@@ -120,13 +121,24 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: Plugin
     const input = z.object({ hostId: z.string().min(1) }).strict().parse(await context.req.json());
     return context.json(await importBbThreads(deps, input.hostId));
   });
-  app.get("/api/v1/cloudroom/import/sessions", async context => context.json({ sessions: await listNativeSessions(deps) }));
+  app.get("/api/v1/cloudroom/import/sessions", async context => context.json({ sessions: await listNativeSessions(deps), conductorApp: conductorAppFound() }));
   app.post("/api/v1/cloudroom/import/sessions", async context => {
     const input = z.object({
       hostId: z.string().min(1),
-      sessions: z.array(z.object({ harness: z.enum(["claude-code", "codex", "pi", "acp-hermes-agent", "t3code"]), id: z.string().min(1) }).strict()).min(1).max(2000),
+      sessions: z.array(z.object({ harness: z.enum(["claude-code", "codex", "pi", "acp-hermes-agent", "t3code", "conductor"]), id: z.string().min(1) }).strict()).min(1).max(2000),
     }).strict().parse(await context.req.json());
     return context.json(await importNativeSessions(deps, input.hostId, input.sessions));
+  });
+  app.post("/api/v1/cloudroom/import/conductor-export", async context => {
+    const problem = browserRequestProblem(context, deps, { requireJsonForMutation: true });
+    if (problem) return context.json({ message: "Use the local Cloudroom app or CLI." }, problem.status);
+    const input = z.object({ path: z.string().min(1).max(4096), hostId: z.string().min(1).optional() }).strict().parse(await context.req.json());
+    try {
+      return context.json(input.hostId ? await importConductorExport(deps, input.hostId, input.path) : { sessions: await listConductorExport(deps, input.path) });
+    } catch (error) {
+      if (error instanceof ApiError) throw error;
+      throw new ApiError(400, "conductor_export", error instanceof Error ? error.message : String(error));
+    }
   });
   app.get("/api/v1/cloudroom/export", context => context.json({ threads: exportableChats(deps) }));
   app.post("/api/v1/cloudroom/export", async context => {

@@ -148,6 +148,9 @@ pub struct Session {
     // Archived by `room-cli thread archive`; `thread list` hides it unless asked.
     #[serde(default)]
     pub archived: bool,
+    // The turn this thread archived itself in: archived, it still reports that one (relay.rs).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archive_turn: Option<String>,
     // Turns already reported to the parent in another sandbox (relay.rs).
     #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
     pub reported: std::collections::BTreeSet<String>,

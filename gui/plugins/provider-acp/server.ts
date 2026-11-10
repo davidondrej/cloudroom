@@ -45,6 +45,8 @@ export default async function acpProvidersPlugin(
   bb: BbPluginApi,
 ): Promise<void> {
   registerUsageSource(bb);
+  // The ACP skill is only useful in ACP threads: every provider but the three with their own plugin.
+  bb.agents.configure(({ provider }) => ({ tools: [], skills: ["claude-code", "codex", "pi"].includes(provider.id) ? [] : ["acp-provider"] }));
   const host = bb.hosts.experimental_client({ contract: acpHostContract });
   const settings = bb.settings.define({
     customAgents: {

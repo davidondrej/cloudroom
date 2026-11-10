@@ -5,6 +5,8 @@ import { CODEX_NATIVE_ROOTS_DECLARATION } from "./src/native-roots.js";
 
 export default function plugin(bb: BbPluginApi) {
   registerUsageSource(bb);
+  // The provider skill is only useful in this provider's own threads.
+  bb.agents.configure(({ provider }) => ({ tools: [], skills: provider.id === "codex" ? ["codex-provider"] : [] }));
   bb.experimental_aiServices.register({
     id: "codex",
     displayName: "Codex (ChatGPT account or API key)",

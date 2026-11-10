@@ -30,6 +30,11 @@ interface CodexThreadSettingsUpdatedRawEvent {
   kind: "thread-settings-updated";
 }
 
+// Codex 0.167+ marks local threads read or unread; Cloudroom ignores it.
+interface CodexThreadReadStateChangedRawEvent {
+  kind: "thread-read-state-changed";
+}
+
 interface CodexUnknownRawEvent {
   kind: "unknown";
   method: string;
@@ -40,6 +45,7 @@ type CodexRawEvent =
   | CodexMcpStartupStatusRawEvent
   | CodexRemoteControlStatusRawEvent
   | CodexThreadSettingsUpdatedRawEvent
+  | CodexThreadReadStateChangedRawEvent
   | CodexUnknownRawEvent;
 
 const CODEX_SERVER_NOTIFICATION_METHODS = {
@@ -150,7 +156,7 @@ const CODEX_NOTIFICATION_COVERAGE = {
   "item/fileChange/outputDelta": "normalized",
   "item/mcpToolCall/progress": "normalized",
   "item/plan/delta": "normalized",
-  "item/reasoning/summaryPartAdded": "unknown",
+  "item/reasoning/summaryPartAdded": "noise",
   "item/reasoning/summaryTextDelta": "normalized",
   "item/reasoning/textDelta": "normalized",
   "item/started": "normalized",
@@ -231,6 +237,10 @@ function parseCodexRawEvent(event: JsonRpcMessage): CodexRawEvent {
     };
   }
 
+  if (event.method === "thread/readState/changed") {
+    return { kind: "thread-read-state-changed" };
+  }
+
   if (isCodexServerNotificationMethod(event.method)) {
     return {
       kind: "notification",
@@ -257,6 +267,9 @@ function describeParsedCodexRawEvent(
 
     case "thread-settings-updated":
       return { kind: "thread/settings/updated", coverage: "noise" };
+
+    case "thread-read-state-changed":
+      return { kind: "thread/readState/changed", coverage: "noise" };
 
     case "notification":
       if (

@@ -29,6 +29,7 @@ import {
   sendQueuedMessageNow,
 } from "../../src/services/threads/queued-messages.js";
 import { queueParentSystemMessage } from "../../src/services/threads/parent-system-messages.js";
+import { buildChildThreadTurnStatusBatchInput } from "../../src/services/threads/child-thread-notifications.js";
 import { acceptThreadSendRequest } from "../../src/services/threads/thread-send-request.js";
 import { handleUpdateEnvironmentDirectoryToolCall } from "../../src/services/threads/thread-environment-directory.js";
 import { applyLoggedThreadLifecycleEvent } from "../../src/services/threads/lifecycle-outcome.js";
@@ -830,7 +831,7 @@ describe("startup queue waits", () => {
     });
   });
 
-  it("sends every message an answered interaction held, in order, into the running turn (#851)", async () => {
+  it("sends every message an answered interaction held, in order, into the running turn (#851), flagging an outdated report (#1208)", async () => {
     await withTestHarness(async (harness) => {
       const { environment, thread } = seedProviderThreadFixture({
         harness,
@@ -865,8 +866,28 @@ describe("startup queue waits", () => {
           thread,
         });
       }
+      // The child writes newer output after its report, before it queues (#1208).
+      seedStoredEvent(harness.deps, {
+        threadId: child.id,
+        providerThreadId: "provider-child-851",
+        scope: turnScope("turn-child-851"),
+        sequence: 1,
+        type: "item/completed",
+        itemKind: "agentMessage",
+        data: { item: { type: "agentMessage", id: "msg-851", text: "newer" } },
+      });
       await queueParentSystemMessage(harness.deps, {
-        input: textInput("child completed"),
+        childReport: { at: Date.now(), sequences: { [child.id]: 0 } },
+        input: buildChildThreadTurnStatusBatchInput({
+          items: [
+            {
+              activeWorkflowCount: 0,
+              childThread: child,
+              terminalOutput: "child completed",
+              turnStatus: "completed",
+            },
+          ],
+        }),
         parentThreadId: thread.id,
         systemMessageKind: "child-completed",
         systemMessageSubject: null,
@@ -892,6 +913,9 @@ describe("startup queue waits", () => {
       expect(JSON.stringify(sent[0])).toContain("progress 1");
       expect(JSON.stringify(sent[1])).toContain("progress 2");
       expect(JSON.stringify(sent[2])).toContain("child completed");
+      expect(JSON.stringify(sent[2])).toContain(
+        `\\n\\nThis child has newer output: room-cli thread output ${child.id}`,
+      );
     });
   });
 

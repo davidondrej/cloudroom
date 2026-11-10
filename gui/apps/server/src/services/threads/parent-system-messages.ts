@@ -9,6 +9,7 @@ import type {
   PromptInput,
   PromptMentionResource,
   PromptTextMention,
+  QueuedMessageSystemNotice,
   ResolvedThreadExecutionOptions,
   SystemMessageKind,
   SystemMessageSubject,
@@ -64,6 +65,8 @@ const PARENT_SYSTEM_MESSAGE_SOURCE = "tell";
 export interface ParentSystemMessageTaxonomy {
   systemMessageKind: SystemMessageKind;
   systemMessageSubject: SystemMessageSubject | null;
+  /** Kept with the notice wherever it queues, for its late-delivery line (#1208). */
+  childReport?: QueuedMessageSystemNotice["childReport"];
 }
 
 interface QueueParentSystemMessageArgs extends ParentSystemMessageTaxonomy {
@@ -295,6 +298,7 @@ async function queueActiveParentSystemMessage(
         systemNotice: {
           kind: args.systemMessageKind,
           subject: args.systemMessageSubject,
+          childReport: args.childReport,
         },
       },
       threadId: args.thread.id,
@@ -478,6 +482,7 @@ export async function queueParentSystemMessage(
   if (!hasPendingInteraction) {
     try {
       return await deliverParentSystemMessage(deps, {
+        childReport: args.childReport,
         input: args.input,
         parentThread,
         systemMessageKind: args.systemMessageKind,
@@ -524,6 +529,7 @@ export async function queueParentSystemMessage(
     systemNotice: {
       kind: args.systemMessageKind,
       subject: args.systemMessageSubject,
+      childReport: args.childReport,
     },
   });
   if (!hasPendingInteraction && !heldByStop && !failed) {
@@ -604,6 +610,7 @@ async function deliverParentSystemMessageWithContextGuard(
     getEnvironment(deps.db, environment.id) ?? environment,
   );
   return await queueReadyParentSystemMessage(deps, {
+    childReport: args.childReport,
     thread: parentThread,
     input: args.input,
     execution,

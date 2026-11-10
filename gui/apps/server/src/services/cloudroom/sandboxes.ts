@@ -438,8 +438,10 @@ const MAC_PATH = process.platform === "win32"
   ? WINDOWS_LOCAL_PATH
   : /(^|[\s=:'"])(~\/|\/Users\/|\/Volumes\/|\/Applications\/|\/Library\/|\/opt\/homebrew\/|\/private\/)/;
 const LOCAL_URL = /^https?:\/\/(localhost|127\.|0\.0\.0\.0|\[::1\])/i;
+/** Programs only macOS has, such as Xcode's `xcrun mcpbridge` (#1244). */
+const MAC_PROGRAM = /^(xcrun|xcodebuild|osascript)$/i;
 const portable = (server: McpServer) => server.type === "stdio"
-  ? !server.command.includes("/") && !(process.platform === "win32" && (server.command.includes("\\") || MAC_PATH.test(server.command))) && ![...server.args, ...Object.values(server.env)].some(text => MAC_PATH.test(text))
+  ? !server.command.includes("/") && !MAC_PROGRAM.test(server.command) && !(process.platform === "win32" && (server.command.includes("\\") || MAC_PATH.test(server.command))) && ![...server.args, ...Object.values(server.env)].some(text => MAC_PATH.test(text))
   : !LOCAL_URL.test(server.url);
 /** On Windows, Claude Code runs npx through `cmd /c` and Codex may name `npx.cmd`. Sandboxes run the command itself. */
 function windowsCommand(server: McpServer): McpServer {

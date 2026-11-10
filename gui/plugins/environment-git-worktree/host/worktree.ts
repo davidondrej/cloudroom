@@ -174,6 +174,54 @@ export async function hasUncommittedWork(
   }
 }
 
+/**
+ * True when the folder holds files Git doesn't track, ignored ones too, other
+ * than unchanged `.worktreeinclude` copies from the checkout (#1213).
+ */
+async function hasFilesOfItsOwn(
+  folder: string,
+  sourcePath: string,
+  signal: AbortSignal | undefined,
+): Promise<boolean> {
+  try {
+    await fs.access(folder);
+  } catch {
+    return false;
+  }
+  try {
+    const others = await runGit(
+      ["--no-optional-locks", "ls-files", "--others", "-z"],
+      {
+        cwd: folder,
+        ...signalOptions(signal),
+        allowFailure: true,
+      },
+    );
+    if (others.exitCode !== 0) return true;
+    for (const file of others.stdout.split("\0").filter(Boolean)) {
+      const [own, copy] = await Promise.all(
+        [folder, sourcePath].map((root) =>
+          fs.readFile(path.join(root, file)).catch(() => null),
+        ),
+      );
+      if (own === null || copy === null || !own.equals(copy)) return true;
+    }
+    return false;
+  } catch (error) {
+    if (signal?.aborted) throw error;
+    return true;
+  }
+}
+
+/** Removes a completion marker, never a folder that shares its name (#1213). */
+export async function removeCompletionMarker(
+  markerPath: string,
+): Promise<void> {
+  const stat = await fs.lstat(markerPath).catch(() => null);
+  if (stat !== null && !stat.isDirectory())
+    await fs.rm(markerPath, { force: true });
+}
+
 async function realpathOrResolved(target: string): Promise<string> {
   try {
     return await fs.realpath(target);
@@ -194,6 +242,7 @@ async function isPathInside(root: string, target: string): Promise<boolean> {
 
 async function removeAbandonedAttemptWorktree(args: {
   sourcePath: string;
+  targetPath: string;
   ownWorktreesRoot: string;
   branchName: string;
   onProgress: ProgressCallback | undefined;
@@ -204,10 +253,16 @@ async function removeAbandonedAttemptWorktree(args: {
     return;
   }
   throwIfProvisionAborted(args.signal);
-  if (await hasUncommittedWork(holder, args.signal)) {
+  // A sibling in this folder is a failed rebuild from before the checkout was
+  // renamed; the user may have added ignored files there (#1213).
+  if (
+    (await hasUncommittedWork(holder, args.signal)) ||
+    ((await isPathInside(path.dirname(args.targetPath), holder)) &&
+      (await hasFilesOfItsOwn(holder, args.sourcePath, args.signal)))
+  ) {
     throw new WorkspaceError(
       "abandoned_worktree_dirty",
-      `Branch ${args.branchName} is still checked out at ${holder} by an earlier attempt, and that worktree has uncommitted changes, so it was left alone. Remove it to retry.`,
+      `Branch ${args.branchName} is still checked out at ${holder} by an earlier attempt, and that worktree has uncommitted changes or files of its own, so it was left alone. Remove it to retry.`,
     );
   }
   const startedAt = Date.now();
@@ -218,10 +273,25 @@ async function removeAbandonedAttemptWorktree(args: {
     status: "started",
     startedAt,
   });
+  const deletedByHand = await fs.access(holder).then(
+    () => false,
+    () => true,
+  );
+  await removeCompletionMarker(`${holder}.completed`);
   await removeWorktree({
     path: holder,
     ...(args.signal !== undefined ? { signal: args.signal } : {}),
   });
+  // Git still records a folder deleted by hand, and keeps its branch taken.
+  if (deletedByHand)
+    await runGitWithWorktreeMetadataLock(
+      ["worktree", "remove", "--force", holder],
+      {
+        cwd: args.sourcePath,
+        ...signalOptions(args.signal),
+        allowFailure: true,
+      },
+    );
   emitStep({
     onProgress: args.onProgress,
     key: "abandoned-worktree-completed",
@@ -502,7 +572,7 @@ async function finishWorktreeSetup(args: CreateWorktreeArgs): Promise<void> {
 }
 
 async function removeCreateTarget(args: CreateWorktreeArgs): Promise<void> {
-  await fs.rm(args.completionPath, { force: true });
+  await removeCompletionMarker(args.completionPath);
   await removeWorktree({
     path: args.targetPath,
     ...(args.signal !== undefined ? { signal: args.signal } : {}),
@@ -555,6 +625,7 @@ export async function createWorktree(
   throwIfProvisionAborted(args.signal);
   await removeAbandonedAttemptWorktree({
     sourcePath: args.sourcePath,
+    targetPath: args.targetPath,
     ownWorktreesRoot: args.ownWorktreesRoot,
     branchName: args.branchName,
     onProgress: args.onProgress,
