@@ -38,10 +38,8 @@ const tempDir = await createPluginProcessTempDir({
   prefix: "bb-provider-bridge",
 });
 
-let removedTempDir = false;
+// Runs on stdin close and again at exit: async shutdown may still write here.
 function removeTempDir(): void {
-  if (removedTempDir) return;
-  removedTempDir = true;
   try {
     rmSync(tempDir, { recursive: true, force: true });
   } catch {}

@@ -4,6 +4,7 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
+  rmSync,
 } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
@@ -277,6 +278,8 @@ it("start_after_release_selects_fresh_pi_session", async () => {
   expect(released.result).toMatchObject({ ok: true });
   await expectEveryChildGone(1);
   await expectScratchFilesGone();
+  // An OS temp cleaner can delete the long-lived bridge's files (#1202).
+  rmSync(experimental_scratchDirForTests(), { recursive: true, force: true });
 
   const { SessionManager } = await import("@earendil-works/pi-coding-agent");
   const session = SessionManager.open(
