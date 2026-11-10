@@ -40,10 +40,14 @@ export function codexGuardConfig(command) {
   const hook = { async: false, command, timeout: 10, type: "command" };
   const identity = { event_name: "pre_tool_use", hooks: [hook], matcher: "Bash" };
   const hash = "sha256:" + createHash("sha256").update(JSON.stringify(identity)).digest("hex");
+  // Codex uses a fixed synthetic root (C:\ on Windows, / on Unix), regardless of cwd.
+  const path = process.platform === "win32"
+    ? String.raw`C:\<session-flags>\config.toml`
+    : "/<session-flags>/config.toml";
   return {
     "hooks.PreToolUse": [{ matcher: "Bash", hooks: [hook] }],
     "hooks.state": {
-      "/<session-flags>/config.toml:pre_tool_use:0:0": {
+      [`${path}:pre_tool_use:0:0`]: {
         enabled: true,
         trusted_hash: hash,
       },
