@@ -29,7 +29,7 @@ import { requirePrimaryHostId } from "../hosts/primary-host.js";
 import { withThreadContextClearGuard } from "./thread-context-mutation-guard.js";
 import {
   provisionUnmanagedEnvironmentForPath,
-  resolveReadyEnvironment,
+  reuseEnvironmentForPath,
 } from "./thread-environment-directory.js";
 import {
   appendThreadEvent,
@@ -246,7 +246,7 @@ async function moveLocalThread(
     source.path,
   );
   const target = existing
-    ? resolveReadyEnvironment(existing)
+    ? await reuseEnvironmentForPath(deps, existing)
     : await provisionUnmanagedEnvironmentForPath(deps, {
         hostId,
         path: source.path,

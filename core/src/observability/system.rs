@@ -1,8 +1,10 @@
 use crate::config::Config;
+use crate::runtime::linux::{Origin, Origins};
 use crate::workspace::storage::{Disk, disk};
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::{
+    cmp::Reverse,
     collections::{BTreeMap, HashMap},
     fs,
     os::unix::fs::MetadataExt,
@@ -15,6 +17,15 @@ const MS_PER_TICK: u64 = 10;
 /// A minute with no agent working that still used half a CPU is idle burn: a leftover job, or a bug.
 const IDLE_BURN_MS: u64 = 30_000;
 const TOP_PROGRAMS: usize = 5;
+/// Idle-burn minutes in a row before Core stops strays and tells the agent about burning jobs (David, 2026-11-09).
+/// A working agent, a queued message, or a calm minute starts the count again.
+const IDLE_STOP_MINUTES: u32 = 15;
+/// Off: a dry run. Core only names the strays it would stop (`would_stop`). Turn on once that has been read.
+const STOP_STRAYS: bool = false;
+/// A program using this much CPU in an idle-burn minute (a tenth of a CPU) is burning.
+const BURNING_MS: u64 = 6_000;
+/// While a preview was used this recently, nothing stops: Core can't always tell which process serves it.
+pub(super) const PREVIEW_IN_USE_MS: u64 = 2 * 60 * 60 * 1000;
 /// A glance between minutes reads `/proc` only after the container used this much CPU since the last one (a quarter
 /// of a CPU over the 2 s between glances), so an idle sandbox never pays for it.
 const GLANCE_BUSY_US: u64 = 500_000;
@@ -34,7 +45,7 @@ pub(crate) struct Resources {
     pub(super) agents: Option<super::metrics::AgentCounts>,
     /// Once a minute; absent from the other samples.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(super) cpu_minute: Option<CpuMinute>,
+    pub(super) cpu_minute: Option<Box<CpuMinute>>,
     /// Disk the history journal takes, with the CPU minute (#280).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) journal_bytes: Option<u64>,
@@ -48,6 +59,94 @@ pub(crate) struct CpuMinute {
     programs: BTreeMap<String, u64>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     idle_burn: bool,
+    /// Idle-burn minutes in a row, this one included.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    idle_minutes: Option<u32>,
+    /// In idle-burn minutes, the CPU of strays and of background jobs, by program (`runtime::linux::Origin`).
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    strays: BTreeMap<String, u64>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    jobs: BTreeMap<String, u64>,
+    /// From `IDLE_STOP_MINUTES` in a row: the burning stray programs Core stopped, or in the dry run would stop.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    stopped: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    would_stop: Vec<String>,
+    /// In idle-burn minutes, each process's own CPU: pid, start time, program, milliseconds.
+    #[serde(skip)]
+    burning: Vec<(u32, u64, String, u64)>,
+}
+
+impl CpuMinute {
+    /// Returns the idle-burn minutes in a row, given those before this one. In an idle-burn minute it splits the CPU
+    /// into strays and jobs. From `IDLE_STOP_MINUTES` on it stops burning strays (in the dry run only names them),
+    /// and at that minute it tells the agent which jobs burn. Off Linux, or without an agent account, it only counts.
+    pub(super) fn idle(&mut self, before: u32, config: &Config, preview_at: Option<u64>) -> u32 {
+        if !self.idle_burn {
+            return 0;
+        }
+        let minutes = before + 1;
+        self.idle_minutes = Some(minutes);
+        let Some(policy) = &config.storage else {
+            return minutes;
+        };
+        let mut origins = Origins::new(policy);
+        let (mut strays, mut jobs, mut found) = (HashMap::new(), HashMap::new(), Vec::new());
+        for (pid, start, program, ms) in std::mem::take(&mut self.burning) {
+            match origins.of(pid, start) {
+                Origin::Stray => {
+                    *strays.entry(program.clone()).or_default() += ms;
+                    found.push((pid, start, program));
+                }
+                Origin::Job => *jobs.entry(program).or_default() += ms,
+                _ => {}
+            }
+        }
+        let burning = |used: &HashMap<String, u64>| {
+            let mut used: Vec<_> = used.iter().filter(|(_, ms)| **ms >= BURNING_MS).collect();
+            used.sort_by_key(|(program, ms)| (Reverse(**ms), program.to_owned()));
+            used.into_iter()
+                .map(|(program, _)| program.clone())
+                .collect::<Vec<_>>()
+        };
+        // For the agent's next prompt, hidden from the user's view of it like the app's own notes.
+        let notice = |text: String| {
+            let note = format!(
+                "<cloudroom_custom_instructions>\n[Cloud Credits] {text}\n</cloudroom_custom_instructions>"
+            );
+            crate::session::prompt::add_notice(&config.state_dir, &note);
+        };
+        let named = |programs: &[String]| programs[..programs.len().min(TOP_PROGRAMS)].join(", ");
+        let previewed =
+            preview_at.is_some_and(|at| super::now_ms().saturating_sub(at) < PREVIEW_IN_USE_MS);
+        if minutes >= IDLE_STOP_MINUTES && !previewed {
+            let programs = burning(&strays);
+            if STOP_STRAYS && !programs.is_empty() {
+                let targets = found.into_iter().filter(|(_, _, p)| programs.contains(p));
+                tokio::spawn(crate::runtime::linux::stop(
+                    targets.map(|(pid, start, _)| (pid, start)).collect(),
+                ));
+                notice(format!(
+                    "Cloudroom stopped leftover processes that no thread, terminal or preview owned, after they \
+                     used CPU for 15 minutes with no agent working: {}. Start them again if you still need them.",
+                    named(&programs)
+                ));
+                self.stopped = programs;
+            } else {
+                self.would_stop = programs;
+            }
+        }
+        let programs = burning(&jobs);
+        if minutes == IDLE_STOP_MINUTES && !programs.is_empty() {
+            notice(format!(
+                "These background jobs used CPU for 15 minutes with no agent working, which costs Cloud Credits: \
+                 {}. Stop them if they are no longer needed.",
+                named(&programs)
+            ));
+        }
+        (self.strays, self.jobs) = (top(strays), top(jobs));
+        minutes
+    }
 }
 
 /// One process's CPU ticks: its own, and its finished children's (added when it reaps them).
@@ -198,26 +297,48 @@ impl Sampler {
             exited_ms -= ms;
             *by_name.entry(program).or_default() += ms;
         }
-        let mut used: Vec<_> = by_name.into_iter().filter(|(_, ms)| *ms > 0).collect();
-        used.sort_by_key(|(_, ms)| std::cmp::Reverse(*ms));
-        let mut programs = BTreeMap::new();
-        for (i, (program, ms)) in used.into_iter().enumerate() {
-            let name = if i < TOP_PROGRAMS {
-                program
-            } else {
-                "(other)".into()
-            };
-            *programs.entry(name).or_default() += ms;
-        }
+        let mut programs = top(by_name);
         if exited_ms > 0 {
             programs.insert("(exited)".into(), exited_ms);
         }
+        let idle_burn = !busy && total_ms >= IDLE_BURN_MS;
+        let burning = now
+            .iter()
+            .filter(|_| idle_burn)
+            .filter_map(|(&(pid, start), process)| {
+                let old = before.get(&(pid, start)).map_or(0, |old| old.own);
+                let ticks = process.own.saturating_sub(old);
+                (ticks > 0).then(|| (pid, start, process.program.clone(), ticks * MS_PER_TICK))
+            })
+            .collect();
         Some(CpuMinute {
             total_ms,
             programs,
-            idle_burn: !busy && total_ms >= IDLE_BURN_MS,
+            idle_burn,
+            idle_minutes: None,
+            strays: BTreeMap::new(),
+            jobs: BTreeMap::new(),
+            stopped: Vec::new(),
+            would_stop: Vec::new(),
+            burning,
         })
     }
+}
+
+/// The top programs by CPU, and `(other)` for the rest.
+fn top(used: HashMap<String, u64>) -> BTreeMap<String, u64> {
+    let mut used: Vec<_> = used.into_iter().filter(|(_, ms)| *ms > 0).collect();
+    used.sort_by_key(|(_, ms)| Reverse(*ms));
+    let mut programs = BTreeMap::new();
+    for (i, (program, ms)) in used.into_iter().enumerate() {
+        let name = if i < TOP_PROGRAMS {
+            program
+        } else {
+            "(other)".into()
+        };
+        *programs.entry(name).or_default() += ms;
+    }
+    programs
 }
 
 /// Ticks per program between two readings, and the net ticks of finished children: a process that ended moved

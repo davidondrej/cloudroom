@@ -9,7 +9,11 @@ export type ProcessLocalQueuedLockWork<T> = () => Promise<T>;
 
 export type ProcessLocalQueuedLockSpec = {
   key: string;
+  // How long a waiter lets one owner hold the lock before calling it stuck.
   timeoutMs?: number;
+  // The work is one child process that ends or is cancelled on its own, so
+  // waiters keep waiting while it runs, however long it takes.
+  heldByChildProcess?: boolean;
 };
 
 export class ProcessLocalQueuedLockTimeoutError extends Error {
@@ -26,6 +30,10 @@ export class ProcessLocalQueuedLockTimeoutError extends Error {
 
 const heldLocks = new AsyncLocalStorage<Set<string>>();
 const lockQueues = new Map<string, Promise<void>>();
+const lockHolders = new Map<
+  string,
+  { since: number; heldByChildProcess: boolean }
+>();
 
 function normalizeProcessLocalLockSpecs(
   locks: ProcessLocalQueuedLockSpec[],
@@ -93,6 +101,7 @@ function withProcessLocalQueuedLock<T>(args: {
     args.lock.key,
     () => heldLocks.run(new Set([...(held ?? []), args.lock.key]), args.work),
     args.lock.timeoutMs ?? DEFAULT_PROCESS_LOCAL_LOCK_TIMEOUT_MS,
+    args.lock.heldByChildProcess === true,
     args.signal,
   );
 }
@@ -108,6 +117,7 @@ function runInProcessQueue<T>(
   key: string,
   work: ProcessLocalQueuedLockWork<T>,
   timeoutMs: number,
+  heldByChildProcess: boolean,
   signal: AbortSignal | undefined,
 ): Promise<T> {
   if (signal?.aborted) {
@@ -138,7 +148,15 @@ function runInProcessQueue<T>(
         throw new ProcessLocalQueuedLockTimeoutError({ key, timeoutMs });
       }
       started = true;
-      return work();
+      const holder = { since: performance.now(), heldByChildProcess };
+      lockHolders.set(key, holder);
+      try {
+        return await work();
+      } finally {
+        if (lockHolders.get(key) === holder) {
+          lockHolders.delete(key);
+        }
+      }
     });
   const settled = next.then(
     () => undefined,
@@ -155,13 +173,25 @@ function runInProcessQueue<T>(
   }
 
   return new Promise<T>((resolve, reject) => {
-    timeout = setTimeout(() => {
-      if (started) {
-        return;
-      }
-      timedOut = true;
-      reject(new ProcessLocalQueuedLockTimeoutError({ key, timeoutMs }));
-    }, timeoutMs);
+    const armTimeout = (delayMs: number): void => {
+      timeout = setTimeout(() => {
+        if (started || aborted) {
+          return;
+        }
+        const holder = lockHolders.get(key);
+        const stuckMs =
+          holder === undefined || holder.heldByChildProcess
+            ? 0
+            : performance.now() - holder.since;
+        if (stuckMs < timeoutMs) {
+          armTimeout(timeoutMs - stuckMs);
+          return;
+        }
+        timedOut = true;
+        reject(new ProcessLocalQueuedLockTimeoutError({ key, timeoutMs }));
+      }, delayMs);
+    };
+    armTimeout(timeoutMs);
 
     if (signal) {
       const onAbort = () => {

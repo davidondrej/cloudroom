@@ -982,7 +982,7 @@ describe("Workspace", () => {
     expect(worktreeLockEntered).toBe(true);
   });
 
-  it("times out waiters behind a stuck process-local lock", async () => {
+  it("times out waiters behind a stuck process-local lock, not a running child process", async () => {
     const stuck = withProcessLocalQueuedLocks({
       locks: [{ key: "stuck-lock", timeoutMs: 0 }],
       work: () => new Promise(() => undefined),
@@ -995,6 +995,20 @@ describe("Workspace", () => {
         work: async () => "unreachable",
       }),
     ).rejects.toBeInstanceOf(ProcessLocalQueuedLockTimeoutError);
+
+    const release = createDeferredPromise<void>();
+    const childProcess = withProcessLocalQueuedLocks({
+      locks: [{ key: "child-process-lock", heldByChildProcess: true }],
+      work: () => release.promise,
+    });
+    const waiter = withProcessLocalQueuedLocks({
+      locks: [{ key: "child-process-lock", timeoutMs: 10 }],
+      work: async () => "entered",
+    });
+    await waitForLockContention();
+    release.resolve();
+    await childProcess;
+    await expect(waiter).resolves.toBe("entered");
   });
 
   it("skips process-local lock waiters that time out before entry", async () => {

@@ -279,6 +279,7 @@ impl Observability {
         let mut sample_at = Instant::now();
         let mut glance_at = Instant::now();
         let (mut cpu_at, mut cpu_since_ms, mut busy) = (Instant::now(), now_ms(), false);
+        let mut idle_minutes = 0;
         let mut summaries = BTreeMap::new();
         let mut summary_at = Instant::now() + SUMMARY_INTERVAL;
         let mut upload_at = Instant::now() + config.diagnostic_upload;
@@ -311,7 +312,10 @@ impl Observability {
                     || counts.queued > 0
                     || counts.last_activity.is_some_and(|at| at >= cpu_since_ms);
                 if Instant::now() >= cpu_at {
-                    resources.cpu_minute = sampler.minute(busy);
+                    resources.cpu_minute = sampler.minute(busy).map(Box::new);
+                    idle_minutes = resources.cpu_minute.as_mut().map_or(0, |minute| {
+                        minute.idle(idle_minutes, &config, counts.preview_at)
+                    });
                     let directory = config.state_dir.clone();
                     resources.journal_bytes =
                         tokio::task::spawn_blocking(move || system::journal_bytes(&directory))

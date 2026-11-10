@@ -306,6 +306,25 @@ function runTrackedOperation(args: {
   return operation;
 }
 
+/** Registers a setup run started outside the engine, so the provisioning sweep doesn't mark its row abandoned (#1306).
+ *  Null, without running, when a run for that row is already registered. */
+export function trackEnvironmentAttach(
+  deps: Pick<Deps, "db">,
+  environmentId: string,
+  run: () => Promise<unknown>,
+): Promise<void> | null {
+  const map = perDbRegistry(environmentOperations, deps.db);
+  if (map.has(environmentId)) return null;
+  return runTrackedOperation({
+    kind: "attach",
+    map,
+    key: environmentId,
+    run: async () => {
+      await run();
+    },
+  }).done;
+}
+
 const REMOVE_RETRY_MS = 60_000;
 
 const REMOTE_WORKTREE_GRACE_MS = 3 * 24 * 60 * 60_000;

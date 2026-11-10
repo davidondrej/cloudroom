@@ -685,22 +685,26 @@ export async function removeWorktree(args: RemoveWorktreeArgs): Promise<void> {
     await tryWithCheckoutMutationLock(
       workspacePath,
       () =>
-        withWorktreeMetadataLock(commonDir, () =>
-          runGit(
-            [
-              "--git-dir",
-              commonDir,
-              "worktree",
-              "remove",
-              workspacePath,
-              "--force",
-            ],
-            {
-              cwd: path.dirname(workspacePath),
-              ...(args.signal !== undefined ? { signal: args.signal } : {}),
-              allowFailure: true,
-            },
-          ),
+        withWorktreeMetadataLock(
+          commonDir,
+          () =>
+            runGit(
+              [
+                "--git-dir",
+                commonDir,
+                "worktree",
+                "remove",
+                workspacePath,
+                "--force",
+              ],
+              {
+                cwd: path.dirname(workspacePath),
+                ...(args.signal !== undefined ? { signal: args.signal } : {}),
+                allowFailure: true,
+              },
+            ),
+          undefined,
+          true,
         ),
       args.signal,
       signalOptions(args.signal),
