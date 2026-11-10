@@ -13,7 +13,7 @@ import { CLOUD_HARNESSES, HARNESS_NAMES, appendStartProgress, endedTurn, isAcpPr
 import { mentionsOpenAISide401 } from "./codex-errors.js";
 import { codexOutage } from "./openai-status.js";
 import { buildThreadStatusChangeMetadata } from "../threads/thread-runtime-display.js";
-import { cloudPluginInstructions, cloudroomSystemPrompt, dueCustomInstructions, markCustomInstructionsLost, prepareCloudInstructionInput, resolveCustomInstructions } from "../threads/custom-instructions.js";
+import { cloudroomMachineContext, cloudPluginInstructions, cloudroomSystemPrompt, dueCustomInstructions, markCustomInstructionsLost, prepareCloudInstructionInput, resolveCustomInstructions } from "../threads/custom-instructions.js";
 import { baseBranch, binding, bindings, command, commands, coreInUse, localTeleports, openBindings, queuedPrompts, saveBinding, saveCommandState, saveStatus, effectivePrompt, projectCopyProgress, stampBindings, teleportBlocked, unstartedTurn, type Binding, type Command, type OpenBinding, isDead, statusOf } from "./store.js";
 import { syncLoopEnv } from "./project-loops.js";
 import { copyProject, copyRunning, githubRepository, localFilesNote, localProjectNote, localProjectPath, planNewProjectCopy, workspaceId, workspaceName, planProjectCopy, planProjectCopyOrThrow, reportProjectCopy, writeFilesState, type ProjectCopyJob } from "./project-copy.js";
@@ -2321,7 +2321,7 @@ class CloudroomService {
     );
     const context = { threadId: thread.id, projectId: thread.projectId };
     // Checked with the instructions even when this message won't carry them. The core's real limit is checked again on send.
-    prepareCloudInstructionInput(prompt, resolveCustomInstructions(context), cloudPromptLimit(null));
+    prepareCloudInstructionInput(prompt, resolveCustomInstructions(context), cloudPromptLimit(null), db);
     // An edit replaces a queued message and a rewind drops later ones, either of which may have carried them.
     return { ...input, customInstructions: dueCustomInstructions(db, context, action === "edit" || action === "rewind") };
   }
@@ -2329,7 +2329,7 @@ class CloudroomService {
   private enqueue(threadId: string, id: string, action: Command["command"], input: object, at?: number): void {
     const previous = command(this.deps.db, id);
     if (previous) {
-      const { customInstructions: _instructions, workspaceContext: _workspace, ...original } = JSON.parse(previous.input);
+      const { customInstructions: _instructions, machineContext: _machine, workspaceContext: _workspace, ...original } = JSON.parse(previous.input);
       if (previous.threadId !== threadId || previous.command !== action || JSON.stringify(original) !== JSON.stringify(input)) throw new ApiError(409, "request_conflict", "Request ID was already used with different content");
       return;
     }
@@ -2884,6 +2884,14 @@ class CloudroomService {
             saveCommandState(this.deps.db, threadId, pending.id, "completed");
             continue;
           }
+          // Bind context before the first send. Retries must keep identical bytes under the same request ID.
+          const stored = JSON.parse(pending.input);
+          let machine = stored.machineContext;
+          if (["prompt", "edit", "steer", "rewind"].includes(pending.command) && typeof machine !== "string") {
+            machine = cloudroomMachineContext(this.deps.db, "cloud");
+            pending.input = JSON.stringify({ ...stored, machineContext: machine });
+            this.deps.db.update(cloudroomCommands).set({ input: pending.input }).where(eq(cloudroomCommands.id, pending.id)).run();
+          }
           let accepted;
           if (pending.command === "prompt") {
             const parsed = z.object({
@@ -2905,7 +2913,7 @@ class CloudroomService {
             const attachments = capabilities.attachments
               ? await this.uploadAttachments(client, sessionId, pending.id, parsed.attachments ?? [], getThread(this.deps.db, threadId)?.projectId ?? "", capabilities.upload_parts)
               : [];
-            const enriched = prepareCloudInstructionInput({ text: parsed.text, content: cloudTextContent(parsed.content) }, parsed.customInstructions, cloudPromptLimit(capabilities));
+            const enriched = prepareCloudInstructionInput({ text: parsed.text, content: cloudTextContent(parsed.content) }, parsed.customInstructions, cloudPromptLimit(capabilities), this.deps.db, machine);
             // A fork's first message is a native fork of the copied conversation (fork.ts).
             const fork = pending.id === `first_${threadId}` ? cloudForkOf(pending.input) : null;
             const child = pending.id === `first_${threadId}` && Boolean(JSON.parse(pending.input).code_from);
@@ -2934,7 +2942,7 @@ class CloudroomService {
               customInstructions: z.string().default(""),
             }).parse(JSON.parse(pending.input));
             requireClaudeSkillSupport(parsed.content, capabilities, harness);
-            const enriched = prepareCloudInstructionInput({ text: parsed.text, content: cloudTextContent(parsed.content) }, parsed.customInstructions, cloudPromptLimit(capabilities));
+            const enriched = prepareCloudInstructionInput({ text: parsed.text, content: cloudTextContent(parsed.content) }, parsed.customInstructions, cloudPromptLimit(capabilities), this.deps.db, machine);
             const attachments = await this.uploadAttachments(client, sessionId, pending.id, parsed.attachments ?? [], getThread(this.deps.db, threadId)!.projectId, capabilities.upload_parts);
             accepted = await client.edit(sessionId, pending.id, parsed.target_request_id, parsed.expected_revision, enriched.text, {
               ...(enriched.content === undefined ? {} : { content: enriched.content as never }),
@@ -2948,7 +2956,7 @@ class CloudroomService {
             accepted = await client.reorder(sessionId, pending.id, z.object({ order: z.array(z.string()) }).parse(JSON.parse(pending.input)).order);
           } else if (pending.command === "steer") {
             const parsed = z.object({ target_request_id: z.string(), text: z.string(), customInstructions: z.string().default("") }).parse(JSON.parse(pending.input));
-            accepted = await client.steer(sessionId, pending.id, parsed.target_request_id, prepareCloudInstructionInput(parsed, parsed.customInstructions, cloudPromptLimit(capabilities)).text);
+            accepted = await client.steer(sessionId, pending.id, parsed.target_request_id, prepareCloudInstructionInput(parsed, parsed.customInstructions, cloudPromptLimit(capabilities), this.deps.db, machine).text);
           } else if (pending.command === "compact") {
             accepted = await client.compact(sessionId, pending.id);
           } else if (pending.command === "goal") {
@@ -2956,7 +2964,7 @@ class CloudroomService {
           } else if (pending.command === "rewind") {
             const parsed = z.object({ before: z.string(), last_turn_id: z.string().optional(), customInstructions: z.string().default(""), replacement: z.object({ request_id: z.string(), text: z.string(), content: z.unknown().optional(), attachments: z.array(z.object({ name: z.string(), kind: z.enum(["image", "file"]), localPath: z.string().optional(), path: z.string().optional(), id: z.string().optional() })).optional(), reasoning: z.string().optional(), service_tier: z.string().optional() }) }).parse(JSON.parse(pending.input));
             requireClaudeSkillSupport(parsed.replacement.content, capabilities, harness);
-            const enriched = prepareCloudInstructionInput({ text: parsed.replacement.text, content: cloudTextContent(parsed.replacement.content) }, parsed.customInstructions, cloudPromptLimit(capabilities));
+            const enriched = prepareCloudInstructionInput({ text: parsed.replacement.text, content: cloudTextContent(parsed.replacement.content) }, parsed.customInstructions, cloudPromptLimit(capabilities), this.deps.db, machine);
             const attachments = await this.uploadAttachments(client, sessionId, parsed.replacement.request_id, parsed.replacement.attachments ?? [], getThread(this.deps.db, threadId)!.projectId, capabilities.upload_parts);
             accepted = await client.rewind(sessionId, pending.id, parsed.before, parsed.last_turn_id, { ...parsed.replacement, ...enriched, content: enriched.content as never, attachments: attachments as never });
           } else if (pending.command === "resume") {
