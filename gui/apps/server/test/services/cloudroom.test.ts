@@ -14,7 +14,7 @@ import { availableModelFixture } from "../helpers/available-models.js";
 import { registerProviderHostRpcResponder } from "../helpers/host-rpc.js";
 import { seedEnvironment, seedEvent, seedHostSession, seedPrimaryHost, seedProjectWithSource, seedThread, seedThreadRuntimeState, seedTurnStarted } from "../helpers/seed.js";
 import { turnScope } from "@cloudroom/domain";
-import { archiveThread, unarchiveThread, createThread, getThread, setProjectGitRemoteUrlIfMissing, upsertProjectExecutionDefaults, events, cloudroomThreads, cloudroomCommands } from "@cloudroom/db";
+import { getAppSettings, setAppSettings, archiveThread, unarchiveThread, createThread, getThread, setProjectGitRemoteUrlIfMissing, upsertProjectExecutionDefaults, events, cloudroomThreads, cloudroomCommands } from "@cloudroom/db";
 
 it("forwards Cursor login and keys without creating conversation records", async () => {
   const harness = await createTestAppHarness();
@@ -109,9 +109,12 @@ it("reports storage before models and preserves transiently blocked messages thr
     const blockedFollow = await request(`/threads/${thread.id}/send`, { requestId: "blocked-follow", mode: "auto", input: [{ type: "text", text: "Stay in draft", mentions: [] }] });
     expect(blockedFollow.status).toBe(503);
     expect(await blockedFollow.json()).toMatchObject({ code: "storage_blocked", message: expect.stringContaining("cloud disk is almost full") });
+    const rejectedText = promptTexts.at(-1);
+    setAppSettings(harness.db, { ...getAppSettings(harness.db), systemPromptEnabled: false });
     rejectPrompt = false; level = "normal";
     await expect.poll(() => harness.db.select().from(cloudroomCommands).all().find(c => c.id === "storage-follow")?.state, { timeout: 5000 }).toBe("accepted");
     expect(prompts.filter(id => id === "storage-follow").length).toBeGreaterThanOrEqual(2);
+    expect(promptTexts.at(-1)).toBe(rejectedText);
     expect(promptTexts.at(-1)).toContain("Keep this follow-up\n\n[Cloudroom machine context");
     expect(await (await request("/cloudroom")).json()).toMatchObject({ ready: true, error: null, storage: { level: "normal" } });
   } finally {
@@ -329,7 +332,7 @@ it.each(["invalid_reasoning_effort", "codex_auth_required"])("holds rejected clo
     expect(JSON.parse(firstMessages(legacy.id)[0]!.data).input[0].text).toBe("Saved old prompt");
     expect((await request(`/cloudroom/threads/${legacy.id}/retry-start`, {})).status).toBe(200);
     expect(attempts.legacy).toBe(1);
-    expect(prompts).toContainEqual(expect.objectContaining({ text: "Saved old prompt" }));
+    expect(prompts).toContainEqual(expect.objectContaining({ text: expect.stringMatching(/^Saved old prompt\n\n\[Cloudroom machine context/u) }));
     expect(firstMessages(legacy.id)).toHaveLength(1);
   } finally {
     service.stop(); core.closeAllConnections(); await new Promise<void>(resolve => core.close(() => resolve())); await harness.cleanup();
@@ -922,7 +925,7 @@ it("keeps each queued follow-up's reasoning and rejects locked or conflicting ch
     expect((await send(thread.id, { mode: "auto", model: "other-model", reasoningLevel: "max", input: text })).status).toBe(409);
     expect((await send(thread.id, { mode: "auto", reasoningLevel: "low", input: text })).status).toBe(400);
     expect((await send(thread.id, { requestId: "plain", mode: "auto", input: text })).status).toBe(200);
-    await expect.poll(() => prompts.at(-1)).toEqual({ request_id: "plain", text: "queued", reasoning: "xhigh" });
+    await expect.poll(() => prompts.at(-1)).toEqual({ request_id: "plain", text: expect.stringMatching(/^queued\n\n\[Cloudroom machine context/u), reasoning: "xhigh" });
     record("state", { state: "starting_turn", request_id: "same-launch" });
     record("state", { state: "starting_turn", request_id: "max-turn" });
     record("state", { state: "starting_turn", request_id: "xhigh-turn" });
@@ -931,7 +934,7 @@ it("keeps each queued follow-up's reasoning and rejects locked or conflicting ch
     expect(harness.db.select().from(cloudroomThreads).get()?.reasoning).toBe("high");
     harness.deps.db.insert(cloudroomCommands).values({ id: "legacy-launch", threadId: thread.id, command: "prompt", input: JSON.stringify({ text: "queued", reasoning: "high" }), state: "sending", createdAt: Date.now() }).run();
     expect((await send(thread.id, { requestId: "legacy-launch", mode: "auto", reasoningLevel: "high", input: text })).status).toBe(200);
-    await expect.poll(() => prompts.at(-1)).toMatchObject({ request_id: "legacy-launch", text: "queued", reasoning: "high" });
+    await expect.poll(() => prompts.at(-1)).toMatchObject({ request_id: "legacy-launch", text: expect.stringMatching(/^queued\n\n\[Cloudroom machine context/u), reasoning: "high" });
     expect((await send(thread.id, { requestId: "legacy-launch", mode: "auto", reasoningLevel: "max", input: text })).status).toBe(409);
     record("receipt", { request_id: "plain", command: "prompt", state: "failed", error: "Pi model does not support the selected thinking level" });
     await expect.poll(() => harness.db.select().from(events).all().some((event) => event.type === "system/error" && JSON.parse(event.data).message.includes("thinking level"))).toBe(true);
@@ -1343,9 +1346,9 @@ it.each(["codex", "pi"])("edits and cancels queued Cloud %s prompts, then steers
     await expect.poll(() => commands.some((item) => (item as { url?: string }).url?.endsWith("/rewind"))).toBe(true);
     // Editing after Stop must not leave the replacement stuck behind a paused queue.
     expect(commands.map((item) => (item as { url?: string }).url?.split("/").pop()).filter((name) => name === "resume" || name === "rewind")).toEqual(["resume", "rewind"]);
-    expect(commands.some((item) => (item as { url?: string; text?: string }).url?.endsWith("/prompts") && (item as { text?: string }).text === "rewritten")).toBe(false);
+    expect(commands.some((item) => (item as { url?: string; text?: string }).url?.endsWith("/prompts") && (item as { text?: string }).text?.startsWith("rewritten"))).toBe(false);
     const rewind = commands.find((item) => (item as { url?: string }).url?.endsWith("/rewind")) as { request_id: string; before: string; replacement: { request_id: string; text: string; content: unknown } };
-    expect(rewind.replacement.text).toBe("rewritten");
+    expect(rewind.replacement.text).toMatch(/^rewritten\n\n\[Cloudroom machine context/u);
     record("rewind", { id: "corrected-native", request_id: rewind.request_id, before: rewind.before, replacement: { request_id: rewind.replacement.request_id, input: rewind.replacement } });
     record("state", { state: "starting_turn", request_id: rewind.replacement.request_id });
     await expect.poll(() => harness.db.select().from(events).all().filter((event) => event.type === "client/turn/requested").map((event) => JSON.parse(event.data).input[0].text)).toEqual(["rewritten"]);
@@ -1355,7 +1358,7 @@ it.each(["codex", "pi"])("edits and cancels queued Cloud %s prompts, then steers
       const command = sent as { url: string; content?: unknown; attachments?: { kind: string; path: string }[]; replacement?: { content?: unknown; attachments?: { kind: string; path: string }[] } };
       const payload = command.replacement ?? command;
       if (!payload.attachments?.length) continue;
-      expect(payload.content).toEqual([expect.objectContaining({ type: "text" })]);
+      expect(payload.content).toEqual([expect.objectContaining({ type: "text" }), { type: "text", text: expect.stringContaining("Thread execution: Cloud; execution OS: Linux;") }]);
       expect(payload.attachments.map(part => part.kind)).toEqual(["image", "file"]);
       expect(payload.attachments.every(part => part.path.startsWith("/code/test/.cloudroom/attachments/"))).toBe(true);
     }
