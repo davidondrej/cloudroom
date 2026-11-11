@@ -1349,6 +1349,8 @@ export interface PruneTokenUsageEventsBeforeSequenceArgs {
 }
 
 export interface PruneResolvedItemDeltasArgs {
+  /** Rows deleted at most. Defaults to one full batch. */
+  limit?: number;
   threadId: string;
 }
 
@@ -3873,7 +3875,7 @@ export function pruneResolvedItemDeltas(
               AND earlier_delta.parent_tool_call_id IS candidate.parent_tool_call_id
               AND earlier_delta.sequence < candidate.sequence
           )
-          LIMIT ${RESOLVED_ITEM_DELTA_PRUNE_BATCH_SIZE}
+          LIMIT ${args.limit ?? RESOLVED_ITEM_DELTA_PRUNE_BATCH_SIZE}
         )`,
   );
 

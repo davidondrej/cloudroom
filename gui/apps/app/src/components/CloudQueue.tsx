@@ -78,8 +78,9 @@ export function CreditsBar({ plan, limit, extra, extraTotal, className, planClas
 }
 
 /** Free accounts always see their Cloud Credits left (ADR 0307). The chevron shrinks the card to the one-line meter for
- *  72 hours on this Mac, then it opens again. It also opens once credits run low (80% used): a shrink from before then
- *  doesn't count, but one made while low survives a refill. Paid plans see the meter once 75% are used, and while on pack credits. */
+ *  72 hours on this Mac, then it opens again. It also opens once credits run low (80% used, no extra credits): a shrink
+ *  from before then doesn't count, but one made while low survives a refill. Extra credits (ADR 0328) count like
+ *  Settings. Paid plans see the meter once 75% are used, and while on pack credits. */
 const SHRUNK_KEY = "cloudroom.planCard.shrunkUntil", SHRUNK_LOW_KEY = "cloudroom.planCard.shrunkLowUntil";
 const SHRINK_MS = 72 * 3_600_000;
 
@@ -92,8 +93,9 @@ export function PlanCard() {
   useUpgradePromptViewed(hidden ? null : "plan_card");
   if (!usage || used === null || hidden) return null;
   if (!free) return <PlanMeter plan={usage.plan} used={used} limit={limit} extra={usage.extraCredits ?? 0} extraTotal={usage.extraCreditsTotal ?? 0} />;
-  const low = share(used, limit) >= 0.8, shrunk = low ? lowShrink : calmShrink;
-  if (shrunk.hidden) return <PlanMeter plan="free" used={used} limit={limit} extra={0} extraTotal={0} onExpand={shrunk.show} />;
+  const extra = Math.max(0, usage.extraCredits ?? 0), extraTotal = usage.extraCreditsTotal ?? 0, planLeft = Math.max(0, limit - used);
+  const low = extra === 0 && share(used, limit) >= 0.8, shrunk = low ? lowShrink : calmShrink;
+  if (shrunk.hidden) return <PlanMeter plan="free" used={used} limit={limit} extra={extra} extraTotal={extraTotal} onExpand={shrunk.show} />;
   return (
     <section aria-label="Free plan" className="rounded-lg border border-border bg-surface-raised-solid p-3">
       <p className="flex items-center justify-between text-xs text-muted-foreground">
@@ -108,8 +110,10 @@ export function PlanCard() {
         </Tooltip>
       </p>
       <div className="mt-2">
-        <p className="mb-1.5 text-sm text-foreground"><span className={cn("font-semibold", low && "text-warning")}>{Math.max(0, Math.floor(limit - used)).toLocaleString("en-US")}</span> Cloud Credits left</p>
-        <div className="h-1 overflow-hidden rounded-full bg-foreground/10"><div className={cn("h-full rounded-full", low ? "bg-warning" : "bg-primary")} style={{ width: `${share(used, limit) * 100}%` }} /></div>
+        <p className="mb-1.5 text-sm text-foreground"><span className={cn("font-semibold", low && "text-warning")}>{Math.floor(planLeft + extra).toLocaleString("en-US")}</span> Cloud Credits left</p>
+        {extra > 0
+          ? <CreditsBar className="h-1 bg-foreground/10" plan={planLeft} limit={limit} extra={extra} extraTotal={extraTotal} planClassName="bg-primary" edgeClassName="border-surface-raised-solid" />
+          : <div className="h-1 overflow-hidden rounded-full bg-foreground/10"><div className={cn("h-full rounded-full", low ? "bg-warning" : "bg-primary")} style={{ width: `${share(used, limit) * 100}%` }} /></div>}
       </div>
       <div className="mt-3 flex justify-end">
         <Button type="button" size="sm" className="h-7 gap-1 px-2.5 text-xs" onClick={() => openUpgrade("plan_card")}>Upgrade to Pro<Icon name="ArrowRight" aria-hidden /></Button>
@@ -120,11 +124,12 @@ export function PlanCard() {
 
 /** "Pro · 9,000 credits left" over a thin bar: amber from 75%, red at 0. With extra credits (ADR 0317) the number is
  *  plan + extra and the bar is CreditsBar. The white "+ buy more" chip opens /billing: a pack or the next plan.
- *  Free's shrunk card: lime until 80% used, an "Upgrade" chip, and clicking the line opens the card again. */
+ *  Free's shrunk card: lime until 80% used or while it has extra credits, an "Upgrade" chip, and clicking the line
+ *  opens the card again. */
 function PlanMeter({ plan, used, limit, extra, extraTotal, onExpand }: { plan: string; used: number; limit: number; extra: number; extraTotal: number; onExpand?: () => void }) {
   const name = plan.charAt(0).toUpperCase() + plan.slice(1);
   const planLeft = Math.max(0, limit - used), onExtra = planLeft === 0 && extra > 0, out = used >= limit && extra <= 0;
-  const left = planLeft + Math.max(0, extra), calm = plan === "free" && share(used, limit) < 0.8;
+  const left = planLeft + Math.max(0, extra), calm = plan === "free" && (extra > 0 || share(used, limit) < 0.8);
   const label = <>{name} · <span className={cn("font-semibold tabular-nums", extra > 0 || calm ? "text-foreground" : out ? "text-destructive" : "text-warning-text")}>{Math.floor(left).toLocaleString("en-US")}</span> {onExtra ? "extra credits left" : "credits left"}</>;
   return (
     <div className="w-full px-2 pb-1">
@@ -135,7 +140,7 @@ function PlanMeter({ plan, used, limit, extra, extraTotal, onExpand }: { plan: s
         <button type="button" className="shrink-0 border border-foreground/30 px-1.5 leading-5 text-foreground hover:bg-foreground/5" onClick={() => openUpgrade("plan_card")}>{plan === "free" ? "Upgrade" : "+ buy more"}</button>
       </p>
       {extra > 0
-        ? <CreditsBar className="mt-1.5 h-1 bg-foreground/10" plan={planLeft} limit={limit} extra={extra} extraTotal={extraTotal} planClassName="bg-warning" edgeClassName="border-sidebar" />
+        ? <CreditsBar className="mt-1.5 h-1 bg-foreground/10" plan={planLeft} limit={limit} extra={extra} extraTotal={extraTotal} planClassName={calm ? "bg-primary" : "bg-warning"} edgeClassName="border-sidebar" />
         : <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-foreground/10">
           <div className={cn("h-full rounded-full", out ? "bg-destructive" : calm ? "bg-primary" : "bg-warning")} style={{ width: `${share(used, limit) * 100}%` }} />
         </div>}

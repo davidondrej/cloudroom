@@ -55,7 +55,7 @@ describe("room-cli thread tell command output", () => {
     [
       { kind: "interaction" },
       null,
-      "waiting for a pending interaction); it dispatches when that clears unless Stop pauses the queue, then run `room-cli thread queue send thread-q qm_1`",
+      "waiting for a pending interaction); it dispatches once that is resolved. `room-cli thread interactions list thread-q` shows it, and `show` prints how to answer.",
     ],
     [
       {

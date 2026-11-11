@@ -70,6 +70,11 @@ export const threadStopParamsSchema = z
     providerThreadId: z.string().min(1),
     intent: z.enum(["interrupt", "release"]),
     activeTurnId: z.string().min(1).nullable(),
+    /**
+     * The provider may stay alive when nothing of this thread still runs. A
+     * bridge that keeps it answers `sessionKept: true`.
+     */
+    keepSession: z.boolean().optional(),
   })
   .passthrough();
 

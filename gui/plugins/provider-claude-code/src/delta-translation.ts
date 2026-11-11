@@ -1284,12 +1284,39 @@ export function createClaudeDeltaTranslator(
     return withMirror(state, [{ kind: "input.accepted", clientRequestId }]);
   }
 
-  function buildSessionSettlementDeltas(threadId: string): ThreadDelta[] {
+  /** An input the user stopped before Claude took it: one turn, ended as interrupted. */
+  function cancelInput(
+    threadId: string,
+    clientRequestId: ClientTurnRequestId,
+  ): ThreadDelta[] {
+    return withMirror(stateFor({ threadId }), [
+      { kind: "input.accepted", clientRequestId },
+      { kind: "session.ended" },
+    ]);
+  }
+
+  /** Claude's IDs for the commands, agents, and workflows it still runs for this thread. */
+  function runningTaskIds(threadId: string): string[] {
+    return [...stateFor({ threadId }).tasksById]
+      .filter(([, task]) => !task.terminal)
+      .map(([taskId]) => taskId);
+  }
+
+  function buildSessionSettlementDeltas(
+    threadId: string,
+    includeUnopenedTurn = false,
+  ): ThreadDelta[] {
     const state = stateFor({ threadId });
     const deltas: ThreadDelta[] = [];
-    if (state.mirror.turnOpen) {
+    if (
+      state.mirror.turnOpen ||
+      (includeUnopenedTurn && state.mirror.pendingInputs > 0)
+    ) {
       deltas.push(...withMirror(state, [{ kind: "session.ended" }]));
     }
+    // A Stop: what a sub-agent still streams must not open a turn of its own.
+    // The next input lifts this.
+    if (includeUnopenedTurn) state.suppressUnacceptedTurnStart = true;
     deltas.push(
       ...buildInterruptedClaudeTaskDeltas({ tasks: state.tasksById }),
     );
@@ -1311,8 +1338,10 @@ export function createClaudeDeltaTranslator(
   return {
     acceptInput,
     buildSessionSettlementDeltas,
+    cancelInput,
     configureInjectedTools,
     hasOpenTurn,
+    runningTaskIds,
     setClaudeModelContextWindowHint,
     translate,
   };

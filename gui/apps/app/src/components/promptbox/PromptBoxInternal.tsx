@@ -17,6 +17,7 @@ import {
   useRef,
   useState,
   type ChangeEvent,
+  type ComponentType,
   type FormEvent,
   type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent,
@@ -76,7 +77,10 @@ import {
   getMediaQuerySnapshot,
   REDUCED_MOTION_QUERY,
 } from "@cloudroom/shared-ui/hooks/use-media-query";
-import { blurActiveKeyboardInputWithin } from "@cloudroom/shared-ui/overlay-trigger";
+import {
+  blurActiveKeyboardInputWithin,
+  OverlayCloseFocusContext,
+} from "@cloudroom/shared-ui/overlay-trigger";
 import {
   DEFAULT_PLUGIN_MENTION_TRIGGER,
   type PluginMentionTrigger,
@@ -481,6 +485,8 @@ export interface PromptVoiceConfig {
 
 export interface PromptBoxHandle {
   attachFiles: (files: File[]) => void;
+  /** Focuses the editor and keeps the caret where it was. */
+  focus: () => void;
   focusEnd: () => void;
   captureHeightForLayoutChange: () => void;
   insertTextAtCursor: (text: string) => void;
@@ -512,10 +518,18 @@ export function promptFastModeCommand(
 export interface PromptModelShortcut {
   name: string;
   description: string;
+  // The harness logo, so the row shows where the switch lands.
+  icon?: ComponentType<{ className?: string }>;
   onSelect: () => void;
 }
 
 const MODEL_SHORTCUTS = [
+  {
+    name: "fable",
+    providerId: "claude-code",
+    model: "claude-fable-5-2",
+    label: "Fable 5.2 in Claude Code",
+  },
   {
     name: "opus",
     providerId: "claude-code",
@@ -537,13 +551,22 @@ export function promptModelShortcuts({
   | PromptModelShortcut[]
   | undefined {
   if (!selectModel) return undefined;
-  const shortcuts = MODEL_SHORTCUTS.filter(({ providerId }) =>
-    provider.options?.some((option) => option.value === providerId),
-  ).map(({ name, providerId, model, label }) => ({
-    name,
-    description: `Switch to ${label}`,
-    onSelect: () => selectModel({ providerId, model }),
-  }));
+  const shortcuts = MODEL_SHORTCUTS.flatMap(
+    ({ name, providerId, model, label }) => {
+      const option = provider.options?.find(
+        ({ value }) => value === providerId,
+      );
+      if (!option) return [];
+      return [
+        {
+          name,
+          description: `Switch to ${label}`,
+          icon: option.icon,
+          onSelect: () => selectModel({ providerId, model }),
+        },
+      ];
+    },
+  );
   return shortcuts.length > 0 ? shortcuts : undefined;
 }
 
@@ -2316,7 +2339,7 @@ export function PromptBoxInternal({
   const modelShortcutsBySkill = useMemo(
     () =>
       new Map<ProviderCommandSuggestion, ModelShortcutCommandSuggestion>(
-        (modelShortcuts ?? []).map(({ name, description }) => [
+        (modelShortcuts ?? []).map(({ name, description, icon }) => [
           {
             kind: "command",
             name,
@@ -2325,7 +2348,7 @@ export function PromptBoxInternal({
             description,
             argumentHint: null,
           },
-          { kind: "model-shortcut", name, description },
+          { kind: "model-shortcut", name, description, icon },
         ]),
       ),
     [modelShortcuts],
@@ -2718,6 +2741,13 @@ export function PromptBoxInternal({
     scheduleRevealEditorSelection();
   }, [isPointerCoarse, scheduleRevealEditorSelection]);
 
+  const focus = useCallback(() => {
+    if (isPointerCoarse) return;
+    const currentEditor = editorRef.current;
+    if (!currentEditor || currentEditor.isDestroyed) return;
+    currentEditor.commands.focus();
+  }, [isPointerCoarse]);
+
   const insertTextAtCursor = useCallback(
     (rawText: string) => {
       const normalizedText = rawText.replace(/\s+/g, " ").trim();
@@ -2893,6 +2923,7 @@ export function PromptBoxInternal({
     () => ({
       attachFiles: emitAttachmentFiles,
       captureHeightForLayoutChange: capturePromptBoxHeight,
+      focus,
       focusEnd,
       insertTextAtCursor,
       submit: requestSubmit,
@@ -2902,6 +2933,7 @@ export function PromptBoxInternal({
     [
       capturePromptBoxHeight,
       emitAttachmentFiles,
+      focus,
       focusEnd,
       getTextBeforeCursor,
       insertTextAtCursor,
@@ -3408,7 +3440,8 @@ export function PromptBoxInternal({
     return () => window.removeEventListener("keydown", handleKeyDown, true);
   }, [cancelVoiceInput, showVoiceActionGroup, voice]);
 
-  return (
+  // A const, not a nested return, so the wrapper below does not reindent it.
+  const form = (
     <form
       ref={formRef}
       data-promptbox=""
@@ -3844,5 +3877,10 @@ export function PromptBoxInternal({
         </div>
       </div>
     </form>
+  );
+  return (
+    <OverlayCloseFocusContext.Provider value={focus}>
+      {form}
+    </OverlayCloseFocusContext.Provider>
   );
 }

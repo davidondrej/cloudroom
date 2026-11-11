@@ -159,7 +159,6 @@ export async function runServer(serverConfig: ServerConfig): Promise<void> {
   });
 
   const telemetry = await createTelemetryService({
-    apiKey: serverConfig.BB_POSTHOG_API_KEY,
     appSurface: serverConfig.BB_APP_SURFACE,
     appVersion: serverConfig.BB_APP_VERSION,
     dataDir: serverConfig.BB_DATA_DIR,
@@ -342,7 +341,8 @@ export async function runServer(serverConfig: ServerConfig): Promise<void> {
     }
     shutdownPromise = (async () => {
       // The last events get as long as shutdown takes, and at most 1.5 s.
-      const lastEvents = Promise.race([telemetry.flush(), new Promise((resolve) => setTimeout(resolve, 1_500))]);
+      const sendEvents = () => Promise.race([telemetry.flush(), new Promise((resolve) => setTimeout(resolve, 1_500))]);
+      let lastEvents = sendEvents();
       providerModelCatalogPrewarm.stop();
       eventLoopStallMonitor.stop();
       cloud.stop();
@@ -359,6 +359,8 @@ export async function runServer(serverConfig: ServerConfig): Promise<void> {
       await pluginService.stop().catch((error: unknown) => {
         logger.warn({ err: error }, "Plugin shutdown failed");
       });
+      // Plugins send their last usage counts as they stop, after the first send took the queue.
+      lastEvents = lastEvents.then(sendEvents);
       const closeServer = new Promise<void>((resolve, reject) => {
         server.close((error) => {
           if (error) {

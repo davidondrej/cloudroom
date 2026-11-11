@@ -358,6 +358,7 @@ type ExpectedSystemKey =
   | "installCliSkills"
   | "reloadConfig"
   | "skillUsage"
+  | "usageAnalytics"
   | "worktreeStorage"
   | "transcribeVoice"
   | "uiPreferences"

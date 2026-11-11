@@ -60,7 +60,7 @@ it.each([false, true])("routes Pi through the core and replays messages without 
     await startupReady;
     record("state", { state: "starting_turn", request_id: body.request_id });
     record("native_event", { harness: "pi", type: "message_start" }, { type: "message_start", message: { role: "assistant", content: [], timestamp: 10 } });
-    record("text_delta", { harness: "pi" }, { type: "message_update", assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "Cloud Pi result" } });
+    for (const delta of ["Cloud ", "Pi ", "result"]) record("text_delta", { harness: "pi" }, { type: "message_update", assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta } });
     record("item_started", { harness: "pi" }, { type: "tool_execution_start", toolCallId: "tool", toolName: "bash", args: { command: "pwd" } });
     for (const output of ["/code", "/code/test"]) record("tool_snapshot", { harness: "pi" }, { type: "tool_execution_update", toolCallId: "tool", toolName: "bash", partialResult: { content: [{ type: "text", text: output }] } });
     record("item_completed", { harness: "pi" }, { type: "tool_execution_end", toolCallId: "tool", toolName: "bash", result: { content: [{ type: "text", text: "/code/test" }] }, isError: false });
@@ -92,7 +92,7 @@ it.each([false, true])("routes Pi through the core and replays messages without 
     expect(getThread(app.db, thread.id)?.environmentId).toBeNull();
     await expect.poll(() => app.db.select().from(events).all().filter(e => e.type === "turn/completed").length).toBe(1);
     const projected = app.db.select().from(events).all().map(e => JSON.parse(e.data));
-    // Streamed tokens wait to save together, but never after the record that follows them (#1248).
+    // Streamed tokens wait to save together, as one event, but never after the record that follows them (#1248).
     expect(projected.filter(e => e.type === "item/started" || e.type === "item/agentMessage/delta").map(e => e.item?.type ?? e.type)).toEqual(["agentMessage", "item/agentMessage/delta", "toolCall"]);
     expect(projected.filter(e => e.type === "turn/started")).toHaveLength(1);
     expect(projected.find(e => e.type === "client/turn/requested").execution).toMatchObject({ model, reasoningLevel: "high" });
@@ -130,6 +130,17 @@ it.each([false, true])("routes Pi through the core and replays messages without 
     await expect.poll(() => app.db.select().from(events).all().filter(e => e.type === "item/delegation/completed").map(e => JSON.parse(e.data).item)).toEqual([expect.objectContaining({ childRef: childId, status: "completed", summary: "Child result" })]);
     record("usage", { contextUsage: { tokens: null, contextWindow: 100000 } });
     await expect.poll(() => app.db.select().from(events).all().filter(e => e.type === "thread/contextWindowUsage/updated").map(e => JSON.parse(e.data).contextWindowUsage).at(-1)).toEqual({ usedTokens: null, modelContextWindow: 100000, estimated: true });
+    // A record that cannot be saved does not take the records that waited with it: they are saved, and the cursor
+    // stops before the bad one, as if each had come alone (#1248).
+    const deltas = () => app.db.select().from(events).all().filter(e => e.type === "item/agentMessage/delta").map(e => JSON.parse(e.data).delta);
+    const before = deltas().length;
+    record("text_delta", { harness: "pi" }, { type: "message_update", assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "kept " } });
+    record("text_delta", { harness: "pi" }, { type: "message_update", assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "text" } });
+    record("text_delta", { harness: "pi" }, { type: "message_update", assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: 5 } });
+    await expect.poll(() => deltas().slice(before).join("")).toBe("kept text");
+    await expect.poll(() => JSON.stringify(service.threadStatus(thread.id))).toContain("Cloudroom history could not be restored");
+    expect(app.db.select().from(cloudroomThreads).all().find(row => row.threadId === thread.id)?.cursor).toBe(records.length - 1);
+    expect(deltas().slice(before).join("")).toBe("kept text");
   } finally { finishStartup(); service.stop(); core.closeAllConnections(); await new Promise<void>(resolve => core.close(() => resolve())); await app.cleanup(); }
 }, 15000);
 

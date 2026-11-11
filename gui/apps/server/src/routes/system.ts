@@ -5,6 +5,7 @@ import {
 import { getGateAuthKind } from "../request-context.js";
 import { serverAccessStatus } from "../services/machines/server-access.js";
 import { readSkillUsage } from "../services/system/skill-usage.js";
+import { readUsageAnalytics } from "../services/system/usage-analytics.js";
 import {
   getAppSettings,
   getAppKeybindingOverrides,
@@ -371,6 +372,9 @@ export function registerSystemRoutes(
 
   get(routes.skillUsage, (context, query) =>
     context.json(readSkillUsage(deps, query)),
+  );
+  get(routes.usageAnalytics, async (context, query) =>
+    context.json(await readUsageAnalytics(deps, query)),
   );
   get(routes.worktreeStorage, (context) =>
     context.json(worktreeDiskStatus(deps)),

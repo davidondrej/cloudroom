@@ -1145,3 +1145,7 @@
 :root[data-corners="sharp"] *::after {
   border-radius: 0 !important;
 }
+
+::highlight(cloudroom-draft-note) {
+  background-color: color-mix(in oklab, var(--primary) 40%, transparent);
+}

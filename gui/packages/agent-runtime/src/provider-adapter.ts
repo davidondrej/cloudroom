@@ -102,6 +102,7 @@ export type AdapterCommand =
       threadId: string;
       providerThreadId: string;
       activeTurnId: string | null;
+      keepSession?: boolean;
     }
   | {
       type: "thread/discard";

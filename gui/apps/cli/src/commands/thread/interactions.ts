@@ -194,6 +194,9 @@ function printUserQuestionInteraction(
     }
   }
 
+  if (interaction.status === "pending") {
+    console.log(`  Answer: ${formatAnswerCommand(interaction)}`);
+  }
   if (!interaction.resolution) {
     return;
   }
@@ -216,6 +219,19 @@ function printUserQuestionInteraction(
       `  ${question.shortLabel ?? question.prompt}: ${parts.join(", ")}`,
     );
   }
+}
+
+/** The exact command that answers a question, with its question IDs and choice values filled in. */
+function formatAnswerCommand(
+  interaction: UserQuestionPendingInteraction,
+): string {
+  const flags = interaction.payload.questions.map((question) => {
+    const values = (question.options ?? []).map((option) => option.value);
+    return values.length > 0
+      ? `--choice ${question.id}=<${values.join("|")}>`
+      : `--text ${question.id}='<text>'`;
+  });
+  return `room-cli thread interactions answer ${interaction.id} ${interaction.threadId} ${flags.join(" ")}`;
 }
 
 function printApprovalInteraction(
@@ -261,6 +277,15 @@ function printApprovalInteraction(
   console.log(
     `  Decisions: ${interaction.payload.availableDecisions.join(", ")}`,
   );
+  if (interaction.status === "pending") {
+    const target = `${interaction.id} ${interaction.threadId}`;
+    const allow =
+      interaction.payload.subject.kind === "permission_grant"
+        ? `grant ${target} [--scope turn|session]`
+        : `approve ${target}`;
+    console.log(`  Answer: room-cli thread interactions ${allow}`);
+    console.log(`      or: room-cli thread interactions deny ${target}`);
+  }
 
   if (interaction.resolution) {
     console.log("");
@@ -338,7 +363,7 @@ function printPluginRequestInteraction(
   );
   console.log(`  Data: ${JSON.stringify(interaction.payload.data)}`);
   console.log(
-    "  Answer: room-cli thread interactions respond <interactionId> --value '<json>'",
+    `  Answer: room-cli thread interactions respond ${interaction.id} ${interaction.threadId} --value '<json>'`,
   );
 }
 

@@ -112,6 +112,7 @@ async function suggest(
     primaryModel: models.primary,
     fallbackModel: models.fallback,
     prompt: renderTemplate("generatePromptSuggestion", {
+      instructions: readUiPreferences(deps)["promptSuggestions.prompt"].value,
       userMessage,
       agentReply: tail(reply, MAX_REPLY_LENGTH),
       purpose: getThread(deps.db, threadId)?.purpose?.text ?? "",

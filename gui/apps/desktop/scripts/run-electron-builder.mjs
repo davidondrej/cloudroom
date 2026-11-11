@@ -56,6 +56,11 @@ const printConfigFlag = "--print-config";
 // Same as BB_CLOUDROOM_STAMP=1, for package scripts that run in cmd.exe.
 const stampFlag = "--stamp";
 
+// The release workflow only signs here. scripts/notarize-once.sh then sends just the DMG to Apple.
+function notarizeLater(env) {
+  return env.CLOUDROOM_NOTARIZE_LATER === "1";
+}
+
 function envValueIsSet(value) {
   return typeof value === "string" && value.trim().length > 0;
 }
@@ -205,7 +210,7 @@ function resolveElectronBuilderConfig(
     // Our afterSign hook notarizes instead, with retries (scripts/notarize.cjs).
     notarize: false,
   };
-  if (signingPlan.notarizationEnabled) config.afterSign = "scripts/notarize.cjs";
+  if (signingPlan.notarizationEnabled && !notarizeLater(env)) config.afterSign = "scripts/notarize.cjs";
 
   if (signingPlan.mode === "disabled") {
     mac.identity = null;
@@ -336,6 +341,7 @@ async function main() {
   const windows = !electronBuilderArgs.includes("--win")
     ? false
     : electronBuilderArgs.includes("--mac") ? "with-mac" : "only";
+  const prepackaged = electronBuilderArgs.includes("--prepackaged");
   const baseConfig = await readBaseConfig();
   const cloudroomVersion = stampRequested(process.env) || args.includes(stampFlag)
     ? await readCloudroomVersion()
@@ -364,10 +370,12 @@ async function main() {
         ? "Windows code signing enabled with WIN_CSC_LINK."
         : "Windows installer is unsigned; SmartScreen warns before it runs.",
     );
+  } else if (prepackaged) {
+    console.log("Prepackaged app: packaged as it is, with the signature it already has.");
   } else {
     logSigningPlan(signingPlan);
   }
-  if (!electronBuilderArgs.includes("--linux") && !electronBuilderArgs.includes("--prepackaged")) {
+  if (!electronBuilderArgs.includes("--linux") && !prepackaged) {
     await prepareRuntimes();
   }
   await mkdir(dirname(generatedConfigPath), { recursive: true });
@@ -375,9 +383,7 @@ async function main() {
   const buildStartedMs = Date.now();
   try {
     await runElectronBuilder(electronBuilderArgs, signingPlan);
-    // The release workflow notarizes the DMG in its own step, after it saves the approved app.
-    const dmgLater = process.env.CLOUDROOM_NOTARIZE_DMG_LATER === "1";
-    if (process.exitCode === 0 && signingPlan.notarizationEnabled && !dmgLater && !electronBuilderArgs.includes("--dir")) {
+    if (process.exitCode === 0 && signingPlan.notarizationEnabled && !notarizeLater(process.env) && !electronBuilderArgs.includes("--dir")) {
       await notarizeDmgs(resolve(desktopPackageRoot, config.directories.output), buildStartedMs);
     }
     if (process.platform === "darwin") {

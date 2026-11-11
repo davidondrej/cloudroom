@@ -328,6 +328,23 @@ fn legacy_notice_id(child: &str, request: &str) -> String {
     format!("notice_{child}_{request}")
 }
 
+/// A thread as `room-cli thread list`, `show` and `status` print it.
+fn item(c: &Session) -> Value {
+    let busy = c.current_request.is_some() || c.has_work();
+    json!({"id":c.session_id,"title":title(c),"harness":c.harness,"model":c.model,"state":c.state,"status":status(c.state.name(), busy),"busy":busy,"error":c.failure.clone().or_else(|| c.last_prompt_error.clone()),"archived":c.archived,"parent":c.parent_session})
+}
+
+/// The Local CLI's word for a Cloud `state`, so one filter reads both (ADR 20261110-235800).
+pub(super) fn status(state: &str, busy: bool) -> &'static str {
+    match state {
+        "failed" | "process_lost" | "error" => "error",
+        "pending" | "waiting_for_files" | "starting" | "resuming" | "starting_turn" | "running"
+        | "interrupting" | "rewinding" => "active",
+        _ if busy => "active",
+        _ => "idle",
+    }
+}
+
 fn title(session: &Session) -> Option<String> {
     session
         .receipts
@@ -917,6 +934,16 @@ impl Manager {
             .collect()
     }
 
+    /// The calling thread itself, for `room-cli status` and `thread show`.
+    pub(crate) fn thread(&self, id: &str) -> Option<Value> {
+        let mut thread = self.local.lock().unwrap().sessions.get(id).map(item)?;
+        // The app names a top-level thread, so Core often has no title: leave it out instead of saying null.
+        if thread["title"].is_null() {
+            thread.as_object_mut()?.remove("title");
+        }
+        Some(thread)
+    }
+
     /// The caller's children, or one child with its latest reply: live when idle, else its last completed one.
     /// Archived children are listed only on request, but `only` still finds one.
     pub(crate) async fn children(&self, parent: &str, only: Option<&str>, archived: bool) -> Value {
@@ -927,10 +954,7 @@ impl Manager {
                 .values()
                 .filter(|c| may_use(&local, parent, c))
                 .filter(|c| only.map_or(archived || !c.archived, |id| c.session_id == id))
-                .map(|c| {
-                    let busy = c.current_request.is_some() || c.has_work();
-                    json!({"id":c.session_id,"title":title(c),"harness":c.harness,"model":c.model,"state":c.state,"busy":busy,"error":c.failure.clone().or_else(|| c.last_prompt_error.clone()),"archived":c.archived,"parent":c.parent_session})
-                })
+                .map(item)
                 .collect();
             let child = only.and_then(|id| local.sessions.get(id));
             let handle = child

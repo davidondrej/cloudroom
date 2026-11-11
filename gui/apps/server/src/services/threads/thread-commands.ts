@@ -51,6 +51,7 @@ type ExecutionOptionsRequest = ExistingThreadExecutionInputRequest;
 
 export interface ThreadStopCommandArgs {
   immediate?: boolean;
+  keepSession?: boolean;
   environmentId: string;
   hostId: string;
   intent: ThreadStopIntent;
@@ -693,6 +694,7 @@ export function buildThreadStopCommand(
     intent: args.intent,
     threadId: args.threadId,
     ...(args.immediate ? { immediate: true } : {}),
+    ...(args.keepSession && !args.immediate ? { keepSession: true } : {}),
   };
 }
 

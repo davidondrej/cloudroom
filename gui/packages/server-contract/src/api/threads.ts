@@ -856,7 +856,16 @@ export type ThreadArchiveAllResponse = z.infer<
   typeof threadArchiveAllResponseSchema
 >;
 
+/** Newest first, by last update or by creation. Omitted keeps the app's order: project, pinned, created. */
+export const threadListSortSchema = z.enum(["updated", "created"]);
+export type ThreadListSort = z.infer<typeof threadListSortSchema>;
+
 export const threadListQuerySchema = z.object({
+  status: threadStatusSchema.optional(),
+  providerId: z.string().min(1).optional(),
+  executionTarget: z.enum(["local", "cloud"]).optional(),
+  pinned: z.enum(["true", "false"]).optional(),
+  sort: threadListSortSchema.optional(),
   projectId: z.string().min(1).optional(),
   environmentId: z.string().min(1).optional(),
   parentThreadId: z.string().min(1).optional(),

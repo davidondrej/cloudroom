@@ -90,6 +90,7 @@ const THREAD_WAIT_QUEUED_IDLE_GRACE_MS = 5_000;
 export interface ThreadListArgs {
   archived?: boolean;
   environmentId?: string;
+  executionTarget?: ThreadListQuery["executionTarget"];
   sectionId?: string;
   hasParent?: boolean;
   includeHidden?: boolean;
@@ -98,9 +99,14 @@ export interface ThreadListArgs {
   originKind?: ThreadListQuery["originKind"];
   originPluginId?: string;
   parentThreadId?: string;
+  pinned?: boolean;
   projectId?: string;
+  providerId?: string;
   signal?: AbortSignal;
+  /** Newest first, by last update or by creation. Omitted keeps the app's order. */
+  sort?: ThreadListQuery["sort"];
   sourceThreadId?: string;
+  status?: ThreadListQuery["status"];
   unsectioned?: boolean;
 }
 
@@ -654,6 +660,13 @@ export interface ThreadsArea {
 
 function listQuery(args: ThreadListArgs | undefined): ThreadListQuery {
   return {
+    ...(args?.status ? { status: args.status } : {}),
+    ...(args?.providerId ? { providerId: args.providerId } : {}),
+    ...(args?.executionTarget ? { executionTarget: args.executionTarget } : {}),
+    ...(args?.pinned === undefined
+      ? {}
+      : { pinned: args.pinned ? "true" : "false" }),
+    ...(args?.sort ? { sort: args.sort } : {}),
     ...(args?.projectId ? { projectId: args.projectId } : {}),
     ...(args?.environmentId ? { environmentId: args.environmentId } : {}),
     ...(args?.parentThreadId ? { parentThreadId: args.parentThreadId } : {}),

@@ -461,7 +461,7 @@ export {
   useExperimentalFixedTabTarget as experimental_useFixedTabTarget,
 };
 
-function reconcileComposerMentions(
+export function reconcileComposerMentions(
   currentText: string,
   nextText: string,
   mentions: readonly PromptTextMention[],

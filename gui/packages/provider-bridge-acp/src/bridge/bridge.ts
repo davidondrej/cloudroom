@@ -2804,6 +2804,7 @@ async function handleRequest(
           approvalEnforcedBy: "runtime",
           grammarVersions: [THREAD_DELTA_GRAMMAR_V3, THREAD_DELTA_GRAMMAR_V3],
           steerMode: "queue",
+          stopsUnopenedTurns: false,
           skills: { configure: true },
         },
       };

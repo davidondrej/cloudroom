@@ -101,9 +101,11 @@ interface ControlledClaudeQuery {
   fail(error: Error): void;
   finish(): void;
   initializationResult: ReturnType<typeof vi.fn>;
+  interrupt: ReturnType<typeof vi.fn>;
   mcpServerStatus: ReturnType<typeof vi.fn>;
   setModel: ReturnType<typeof vi.fn>;
   setPermissionMode: ReturnType<typeof vi.fn>;
+  stopTask: ReturnType<typeof vi.fn>;
   [Symbol.asyncIterator](): AsyncIterator<SDKMessage>;
 }
 
@@ -311,9 +313,11 @@ function createControlledClaudeQuery(): ControlledClaudeQuery {
     },
     getContextUsage: vi.fn().mockResolvedValue(null),
     initializationResult: vi.fn(),
+    interrupt: vi.fn().mockResolvedValue({ still_queued: [] }),
     mcpServerStatus: vi.fn().mockResolvedValue([]),
     setModel: vi.fn().mockResolvedValue(undefined),
     setPermissionMode: vi.fn().mockResolvedValue(undefined),
+    stopTask: vi.fn().mockResolvedValue(undefined),
     [Symbol.asyncIterator]() {
       return iterator;
     },
@@ -3860,6 +3864,82 @@ describe("bridge", () => {
       }
     },
   );
+
+  it("a keep-session stop interrupts the turn and keeps the same Claude for the next one", async () => {
+    const bridge = createBridgeJsonRpcTestHarness(handleLine);
+    const queries: ControlledClaudeQuery[] = [];
+    queryMock.mockImplementation(() => {
+      const query = createControlledClaudeQuery();
+      queries.push(query);
+      return query;
+    });
+    try {
+      const threadId = "thread-keep-session-stop";
+      const providerThreadId = "session-1";
+      sendResumeThread({ bridge, providerThreadId, requestId: 1, threadId });
+      await bridge.waitForResponse(1);
+      const prompts = getLatestQueryCall().prompt[Symbol.asyncIterator]();
+      const sendTurn = async (requestId: number, text: string) => {
+        bridge.sendRequest(requestId, "turn/start", {
+          threadId,
+          providerThreadId,
+          input: [{ type: "text", text }],
+          clientRequestId: `creq_abcdefghj${requestId}`,
+          options: canonicalOptions({}),
+        });
+        await prompts.next();
+        await bridge.waitForResponse(requestId);
+      };
+      await sendTurn(2, "work");
+      queries[0]?.emit(
+        createAssistantToolUseMessage({
+          parentToolUseId: null,
+          toolInput: { command: "sleep 600" },
+          toolName: "Bash",
+          toolUseId: "tool-open",
+        }),
+      );
+      queries[0]?.emit({
+        type: "system",
+        subtype: "task_started",
+        session_id: providerThreadId,
+        task_id: "task-1",
+        task_type: "local_bash",
+        description: "sleep",
+      } as unknown as SDKMessage);
+      await bridge.flushWork();
+
+      bridge.sendRequest(3, "thread/stop", {
+        threadId,
+        providerThreadId,
+        intent: "interrupt",
+        activeTurnId: null,
+        keepSession: true,
+      });
+      await bridge.flushWork();
+      expect(queries[0]?.interrupt).toHaveBeenCalledTimes(1);
+      // Claude confirms the interrupt with the stopped turn's result.
+      queries[0]?.emit(createSuccessfulResultMessage(providerThreadId));
+      expect((await bridge.waitForResponse(3)).result).toEqual({
+        ok: true,
+        sessionKept: true,
+      });
+      expect(queries[0]?.stopTask).toHaveBeenCalledWith("task-1");
+      expect(queries[0]?.close).not.toHaveBeenCalled();
+
+      await sendTurn(4, "next");
+      queries[0]?.emit(createSuccessfulResultMessage(providerThreadId));
+      await bridge.flushWork();
+      expect(queries).toHaveLength(1);
+      expect(
+        assembleCapturedThreadEvents(bridge.messages, "claude-code").flatMap(
+          (event) => (event.type === "turn/completed" ? [event.status] : []),
+        ),
+      ).toEqual(["interrupted", "completed"]);
+    } finally {
+      bridge.restore();
+    }
+  });
 
   it("resumes the same Claude session on the next turn after a failed stop", async () => {
     const bridge = createBridgeJsonRpcTestHarness(handleLine);

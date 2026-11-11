@@ -14,6 +14,7 @@ import type {
   SystemMachineProvider,
 } from "@cloudroom/server-contract";
 import type { ComposerView } from "@get-bb/plugin-sdk";
+import { OverlayCloseFocusContext } from "@cloudroom/shared-ui/overlay-trigger";
 import type { ComposerTextEffectSource } from "@/lib/composer-text-effects";
 import { ComposerBannersSlot } from "@/components/plugin/PluginComposerBanners";
 import { PROMPT_STACK_TRACK_CLASS } from "@/components/promptbox/banner/PromptStackCard";
@@ -344,6 +345,10 @@ const DefaultNewThreadComposer = memo(function DefaultNewThreadComposer({
   onComposerLayoutChange,
 }: DefaultNewThreadComposerProps) {
   const isProjectlessPrompt = project?.value === null;
+  const focusPrompt = useCallback(
+    () => promptBoxRef.current?.focus(),
+    [promptBoxRef],
+  );
   const placeholder = placeholderOverride ?? NEW_THREAD_PROMPT_PLACEHOLDER;
   const placeholderHint =
     placeholderOverride === undefined && !isProjectlessPrompt
@@ -450,44 +455,46 @@ const DefaultNewThreadComposer = memo(function DefaultNewThreadComposer({
         header={modeConfig.header}
         footerStart={<ExecutionControls {...execution} />}
       />
-      <div className="mt-1 flex select-none items-center justify-between gap-2 px-3.5">
-        <div className="flex min-w-0 flex-1 items-center gap-1">
-          {project ? (
-            <ProjectSelector
-              projects={project.projects}
-              value={project.value}
-              onChange={project.onChange}
-              allowNoProject={project.allowNoProject ?? false}
-              createProject={project.createProject}
-              disabled={project.disabled}
-              isLoading={project.isLoading}
-              showChevronWhenDisabled={project.showChevronWhenDisabled}
-              className="shrink-0"
+      <OverlayCloseFocusContext.Provider value={focusPrompt}>
+        <div className="mt-1 flex select-none items-center justify-between gap-2 px-3.5">
+          <div className="flex min-w-0 flex-1 items-center gap-1">
+            {project ? (
+              <ProjectSelector
+                projects={project.projects}
+                value={project.value}
+                onChange={project.onChange}
+                allowNoProject={project.allowNoProject ?? false}
+                createProject={project.createProject}
+                disabled={project.disabled}
+                isLoading={project.isLoading}
+                showChevronWhenDisabled={project.showChevronWhenDisabled}
+                className="shrink-0"
+              />
+            ) : null}
+            <EnvironmentSlot
+              projectless={project?.value === null}
+              environment={modeConfig.environment}
+              worktree={modeConfig.worktree}
+              environmentProviderInputsSlot={
+                modeConfig.environmentProviderInputsSlot
+              }
+              machineProviderInputsSlot={modeConfig.machineProviderInputsSlot}
+              cloudInputsSlot={modeConfig.cloudInputsSlot}
             />
-          ) : null}
-          <EnvironmentSlot
-            projectless={project?.value === null}
-            environment={modeConfig.environment}
-            worktree={modeConfig.worktree}
-            environmentProviderInputsSlot={
-              modeConfig.environmentProviderInputsSlot
-            }
-            machineProviderInputsSlot={modeConfig.machineProviderInputsSlot}
-            cloudInputsSlot={modeConfig.cloudInputsSlot}
-          />
+          </div>
+          <div className="flex shrink-0 items-center gap-2">
+            <PermissionModePicker
+              value={modeConfig.permission.value}
+              options={modeConfig.permission.options}
+              onChange={modeConfig.permission.onChange}
+              supported={modeConfig.permission.supported}
+              disabled={permissionPickerDisabledByPlanMode}
+              showChevronWhenDisabled={permissionPickerDisabledByPlanMode}
+              displayOverride={permissionDisplayOverride}
+            />
+          </div>
         </div>
-        <div className="flex shrink-0 items-center gap-2">
-          <PermissionModePicker
-            value={modeConfig.permission.value}
-            options={modeConfig.permission.options}
-            onChange={modeConfig.permission.onChange}
-            supported={modeConfig.permission.supported}
-            disabled={permissionPickerDisabledByPlanMode}
-            showChevronWhenDisabled={permissionPickerDisabledByPlanMode}
-            displayOverride={permissionDisplayOverride}
-          />
-        </div>
-      </div>
+      </OverlayCloseFocusContext.Provider>
       {nudgeProject && project ? (
         <ProjectNudgeHint
           name={nudgeProject.name}

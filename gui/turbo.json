@@ -146,7 +146,13 @@
     },
     "prepare:bundled": {
       "dependsOn": ["topo", "^build"],
-      "inputs": ["$TURBO_DEFAULT$", "!dist/**", "!.bundled-runtime/**"],
+      "inputs": [
+        "$TURBO_DEFAULT$",
+        "!dist/**",
+        "!.bundled-runtime/**",
+        "$TURBO_ROOT$/package.json",
+        "$TURBO_ROOT$/apps/server/package.json"
+      ],
       "outputs": [".bundled-runtime/**"]
     },
     "@cloudroom/bundled-plugins#build": {

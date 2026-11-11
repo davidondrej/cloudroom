@@ -923,6 +923,8 @@ export class SandboxDirectory {
 
   /** A broken stream or failed request may mean the sandbox went to sleep; look it up again next time. */
   forget(thread: string): void { this.views.delete(thread); this.awake.delete(thread); }
+  /** What the website says the thread's sandbox is doing. Never wakes it; the answer isn't kept. */
+  async state(thread: string): Promise<View["state"]> { return viewSchema.parse(await this.call({ action: "lookup", thread })).state; }
 
   /** Whether each thread runs on the user's own VPS (ADR 0319), from the website's last answer about it. */
   private placed = new Map<string, boolean>();
@@ -1274,6 +1276,8 @@ export class SandboxDirectory {
     const instructions = (await Promise.all(INSTRUCTION_FILES.map(path => stat(join(home, path)).then(() => path, () => null)))).filter((path): path is string => path !== null);
     const present = [...(await macSkills()).filter(skill => inCloud(skill.name)).flatMap(skill => skill.paths), ...instructions];
     const files = await configFiles(home, present);
+    // A computer with no skills or instructions never replaces the account's bundle on its own (#237); only a Settings change may empty it.
+    if (!files.length && !force) { this.configIssue = null; return; }
     const run = files.length ? promisify(execFile)(tarCommand(), ["-c", "-h", ...(process.platform === "linux" ? ["--hard-dereference"] : []), "--no-recursion", "--format", "ustar", "-C", home, "--null", "-T", "-"],
       { encoding: "buffer", maxBuffer: 4 * CONFIG_LIMIT, timeout: 30_000, env: { ...process.env, COPYFILE_DISABLE: "1" } }) : null;
     run?.child.stdin?.on("error", () => {}).end(files.join("\0") + "\0");

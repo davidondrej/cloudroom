@@ -118,7 +118,7 @@ function compareGroupKeys(left: string | null, right: string | null): number {
   return left.localeCompare(right);
 }
 
-function parseStatus(value: string): ThreadStatus {
+export function parseStatus(value: string): ThreadStatus {
   const parsed = threadStatusSchema.safeParse(value.trim());
   if (parsed.success) return parsed.data;
   throw new Error(

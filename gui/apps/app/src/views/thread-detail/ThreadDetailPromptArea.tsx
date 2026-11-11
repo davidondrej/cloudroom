@@ -1,4 +1,5 @@
 import { ThreadMachineStatus } from "@/components/promptbox/banner/ThreadMachineStatus";
+import { withDraftEdits } from "@/lib/draft-edits";
 import { TeleportLocalNotice, TeleportNotice } from "@/components/thread/TeleportNotice";
 import { TeleportCheckCard } from "@/components/thread/TeleportCheckCard";
 import { TryCloudCard } from "@/components/thread/TryCloudCard";
@@ -1013,7 +1014,8 @@ export function ThreadDetailPromptArea({
 
   const sendCloudDraft = useCallback(async (steer: boolean) => {
     const submittedDraft = currentPromptDraft;
-    const submittedInput = currentPromptDraftInput;
+    const draftEdits = withDraftEdits(thread.id, currentPromptDraftInput);
+    const submittedInput = draftEdits.input;
     if (!cloudState.data || submittedInput.length === 0 || movingToLocal) return;
     const request = {
       id: thread.id,
@@ -1028,6 +1030,7 @@ export function ThreadDetailPromptArea({
     try {
       await sendMessage.mutateAsync({ ...request, requestId: await cloudroomRequestId(thread.id, request) });
       clearCloudroomRequestId(thread.id);
+      draftEdits.commit();
     } catch (error) {
       promptDraft.restoreIfEmpty(submittedDraft);
       showMutationErrorToast({ error, fallbackMessage: "Cloud message was not confirmed", lifecycleOperation: "send_message" });
@@ -1037,11 +1040,12 @@ export function ThreadDetailPromptArea({
   const handleSend = useCallback(async () => {
     if (isExecutionUpdatePending) return;
     const submittedDraft = currentPromptDraft;
-    const submittedInput = currentPromptDraftInput;
     if (isCloud) {
       await sendCloudDraft(false);
       return;
     }
+    const draftEdits = withDraftEdits(thread.id, currentPromptDraftInput);
+    const submittedInput = draftEdits.input;
     const isQueuingMessage = shouldQueueFollowUpMessage(runtimeDisplayStatus);
     if (
       submittedInput.length === 0 ||
@@ -1062,6 +1066,7 @@ export function ThreadDetailPromptArea({
         });
         if (request) {
           await createQueuedMessage.mutateAsync(request);
+          draftEdits.commit();
         }
       } else {
         const request = buildAutoFollowUpRequest({
@@ -1071,6 +1076,7 @@ export function ThreadDetailPromptArea({
         });
         if (request) {
           await sendMessage.mutateAsync(request);
+          draftEdits.commit();
         }
       }
     } catch (nextError) {
@@ -1101,9 +1107,10 @@ export function ThreadDetailPromptArea({
   const handleHardQueue = useCallback(async () => {
     if (isExecutionUpdatePending) return;
     const submittedDraft = currentPromptDraft;
+    const draftEdits = withDraftEdits(thread.id, currentPromptDraftInput);
     const request = buildCreateQueuedFollowUpRequest({
       threadId: thread.id,
-      input: currentPromptDraftInput,
+      input: draftEdits.input,
       execution: followUpExecutionSelection,
     });
     if (!request) return;
@@ -1111,6 +1118,7 @@ export function ThreadDetailPromptArea({
     dismissBottomAttachmentFailures();
     try {
       await createQueuedMessage.mutateAsync({ ...request, hardQueue: true });
+      draftEdits.commit();
     } catch (nextError) {
       promptDraft.restoreIfEmpty(submittedDraft);
       showMutationErrorToast({
@@ -1143,9 +1151,13 @@ export function ThreadDetailPromptArea({
         );
       }
       const submittedDraft = promptDraft.getCurrent();
+      const draftEdits = withDraftEdits(
+        thread.id,
+        promptDraftToInput(submittedDraft),
+      );
       const request = buildAutoFollowUpRequest({
         threadId: thread.id,
-        input: promptDraftToInput(submittedDraft),
+        input: draftEdits.input,
         execution: followUpExecutionSelection,
       });
       if (request === null) {
@@ -1162,6 +1174,7 @@ export function ThreadDetailPromptArea({
             : { sendAt: submitOptions.sendAt }),
           ...(pluginSubmission === undefined ? {} : { pluginSubmission }),
         });
+        draftEdits.commit();
       } catch (scheduleError) {
         if (clearedSubmittedDraft) {
           promptDraft.restoreIfEmpty(submittedDraft);
@@ -1200,7 +1213,8 @@ export function ThreadDetailPromptArea({
     }
 
     const submittedDraft = currentPromptDraft;
-    const submittedInput = currentPromptDraftInput;
+    const draftEdits = withDraftEdits(thread.id, currentPromptDraftInput);
+    const submittedInput = draftEdits.input;
     const shortcutRequest = buildFollowUpShortcutRequest({
       execution: followUpExecutionSelection,
       input: submittedInput,
@@ -1219,6 +1233,7 @@ export function ThreadDetailPromptArea({
         async () => {
           try {
             await sendMessage.mutateAsync(shortcutRequest.request);
+            draftEdits.commit();
           } catch (nextError) {
             promptDraft.restoreIfEmpty(submittedDraft);
             showMutationErrorToast({

@@ -17,6 +17,7 @@ import {
   getOverlayTriggerClassName,
   isLastInputKeyboard,
   preventOverlayTriggerSelection,
+  useOverlayCloseFocus,
 } from "./overlay-trigger.js";
 import {
   MENU_ITEM_LAST_HOVERED_CLASS,
@@ -140,6 +141,7 @@ const DropdownMenuContent = React.forwardRef<
   ) => {
     const { isCompactViewport, open, onOpenChange } = useResponsiveMenu();
     const scopeProps = usePortalScopeProps();
+    const returnFocusOnClose = useOverlayCloseFocus();
 
     if (isCompactViewport) {
       const { style, ...domProps } = stripRadixContentProps(props);
@@ -172,10 +174,13 @@ const DropdownMenuContent = React.forwardRef<
           {...scopeProps}
           sideOffset={sideOffset}
           onCloseAutoFocus={(event) => {
+            // Run before the pointer rule below, which only cancels the
+            // default return to the trigger.
+            onCloseAutoFocus?.(event);
+            returnFocusOnClose(event);
             if (!isLastInputKeyboard()) {
               event.preventDefault();
             }
-            onCloseAutoFocus?.(event);
           }}
           className={cn(
             "z-50 min-w-28 overflow-hidden rounded-md border bg-popover p-1 text-popover-foreground shadow-md data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2",

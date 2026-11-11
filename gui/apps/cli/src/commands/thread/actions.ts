@@ -40,6 +40,7 @@ import {
   uploadClientAttachmentInputs,
 } from "./helpers.js";
 import { SEND_AT_HELP, parseSendAt } from "./send-time.js";
+import { archiveMany } from "./archive-many.js";
 
 interface ThreadUpdateCommandOptions {
   self?: boolean;
@@ -346,15 +347,20 @@ export function registerActionsCommands(
     );
 
   parent
-    .command("archive [id]")
-    .description("Archive a thread")
+    .command("archive [ids...]")
+    .description("Archive a thread, or several at once")
     .option("--self", "Target the current thread (from ROOM_THREAD_ID)")
     .option("--json", "Print machine-readable JSON output")
     .action(
       action(
-        async (id: string | undefined, opts: ThreadArchiveCommandOptions) => {
-          const threadId = requireThreadIdOrSelf(id, opts);
+        // Several IDs take the bulk path; one ID or --self keeps the old output.
+        async (ids: string[], opts: ThreadArchiveCommandOptions) => {
           const sdk = createCliBbSdk(getUrl());
+          if (ids.length > 1) {
+            await archiveMany({ sdk, ids, self: opts.self, json: opts.json });
+            return;
+          }
+          const threadId = requireThreadIdOrSelf(ids[0], opts);
           let archivedThreadIds: string[] = [threadId];
           let keptLiveThreadIds: string[] = [];
           try {
@@ -917,6 +923,10 @@ export function describeThreadTellOutcome(
     // same reason for the row afterwards.
     const queued = `Thread ${threadId} message queued (${describeQueueWait(response.queuedMessage)})`;
     const send = `\`room-cli thread queue send ${threadId} ${response.queuedMessage.id}\``;
+    // A message cannot answer a question: say how to see and answer it (#1400).
+    if (response.queuedMessage.waitingOn?.kind === "interaction") {
+      return `${queued}; it dispatches once that is resolved. \`room-cli thread interactions list ${threadId}\` shows it, and \`show\` prints how to answer.`;
+    }
     // Stop does not pause a scheduled row, and `queue send` skips its schedule (#999).
     return response.queuedMessage.waitingOn?.kind === "time"
       ? `${queued}; it dispatches at that time on its own. Do not run ${send}: it sends the message now.`

@@ -124,13 +124,21 @@ async function stopThreadRuntime(
       await options.eventSink.flush();
       return { providerCheckpointId };
     }
-    if (command.type !== "thread.stop" || (command.intent !== "release" && !command.immediate)) {
+    const keepSession =
+      command.type === "thread.stop" && command.keepSession === true && !command.immediate;
+    // A turn sent just before this Stop may not have opened yet. Most agents
+    // can only interrupt it once it has.
+    if (
+      (command.type !== "thread.stop" || (command.intent !== "release" && !command.immediate)) &&
+      !(keepSession && entry.runtime.stopsUnopenedTurns?.(command.threadId))
+    ) {
       await entry.runtime.waitForActiveTurn(command.threadId, {
         timeoutMs: THREAD_STOP_ACTIVE_TURN_WAIT_MS,
       });
     }
     const result = await entry.runtime.stopThread({
       threadId: command.threadId,
+      ...(keepSession ? { keepSession: true } : {}),
     });
     providerCheckpointId = result.providerCheckpointId ?? providerCheckpointId;
   }

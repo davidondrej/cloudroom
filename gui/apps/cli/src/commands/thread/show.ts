@@ -42,6 +42,7 @@ interface ThreadShowCommandOptions {
   diffSha?: string;
   diffMergeBase?: string;
   json?: boolean;
+  pr?: boolean;
 }
 
 interface ThreadLogCommandOptions {
@@ -81,7 +82,7 @@ interface ThreadShowJsonPayload extends ThreadStatusPayload {
 }
 
 interface ThreadShowPullRequestPayload {
-  status: "available" | "none" | "unavailable";
+  status: "available" | "none" | "unavailable" | "skipped";
   pullRequest: ThreadPullRequest | null;
   message?: string;
 }
@@ -95,6 +96,11 @@ type FetchedGitDiff =
   | { available: false; message: string };
 
 type FetchedPullRequest = ThreadShowPullRequestPayload;
+
+const SKIPPED_PULL_REQUEST: FetchedPullRequest = {
+  status: "skipped",
+  pullRequest: null,
+};
 
 type CliEnvironmentDiffQuery =
   | { target: "uncommitted" }
@@ -215,6 +221,7 @@ export function registerShowCommand(
     .option("--json", "Print machine-readable JSON output")
     .option("--work-status", "Include work status (git state) in output")
     .option("--git-diff", "Include git diff in output")
+    .option("--no-pr", "Skip the GitHub pull request lookup")
     .option(
       "--diff-target <type>",
       "Diff target: uncommitted, branch_committed, all, or commit (used with --git-diff)",
@@ -316,25 +323,18 @@ export function registerShowCommand(
           });
         }
 
-        const fetchedPullRequest = thread.environmentId
-          ? await fetchPullRequest({
-              environmentId: thread.environmentId,
-              sdk,
-            })
-          : null;
-
-        const environmentInfo = thread.environmentId
-          ? await fetchEnvironmentInfo({
-              environmentId: thread.environmentId,
-              sdk,
-            })
-          : null;
-
-        const pendingTodos = await fetchThreadPendingTodos({
-          sdk,
-          threadId,
-        });
-        const execution = await fetchExecution(sdk, thread);
+        const environmentId = thread.environmentId;
+        const [fetchedPullRequest, environmentInfo, pendingTodos, execution] =
+          await Promise.all([
+            !environmentId
+              ? null
+              : opts.pr === false
+                ? SKIPPED_PULL_REQUEST
+                : fetchPullRequest({ environmentId, sdk }),
+            environmentId ? fetchEnvironmentInfo({ environmentId, sdk }) : null,
+            fetchThreadPendingTodos({ sdk, threadId }),
+            fetchExecution(sdk, thread),
+          ]);
         const lastError =
           thread.status === "error"
             ? ((await sdk.threads.output({ threadId })).error ?? null)
@@ -597,7 +597,7 @@ function printThreadStatus(
 function printEnvironmentPullRequest(
   pullRequest: FetchedPullRequest | null,
 ): void {
-  if (!pullRequest) {
+  if (!pullRequest || pullRequest.status === "skipped") {
     return;
   }
 

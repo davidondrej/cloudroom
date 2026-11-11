@@ -1,4 +1,8 @@
-import type { ThreadEvent } from "@cloudroom/domain";
+import {
+  isStreamDeltaEvent,
+  joinStreamDeltas,
+  type ThreadEvent,
+} from "@cloudroom/domain";
 import type {
   HostDaemonEventBatchResponse,
   HostDaemonEventEnvelope,
@@ -9,6 +13,9 @@ import type { HostDaemonLogger } from "./logger.js";
 import { ServerResponseError } from "./server-client.js";
 
 const DEFAULT_DEBOUNCE_MS = 100;
+// Streamed text waits longer: every save costs the same disk write however little it holds (#1248), and the app
+// shows streamed text a whole line at a time. Any other event still goes within DEFAULT_DEBOUNCE_MS, or at once.
+const STREAM_DELTA_DEBOUNCE_MS = 250;
 
 const QUEUE_DEPTH_WARN_THRESHOLD = 512;
 const QUEUE_DEPTH_WARN_MIN_AGE_MS = 5_000;
@@ -107,7 +114,16 @@ export function createEventSink(options: CreateEventSinkOptions): EventSink {
   const now = options.now ?? (() => Date.now());
   const queue: HostDaemonEventEnvelope[] = [];
   let flushTimer: ReturnType<typeof setTimeout> | null = null;
+  let flushTimerDueAtMs = 0;
+  // When the earliest event that no POST has taken wants to go. Infinity when no event waits.
+  let waitingDueAtMs = Infinity;
+  // The first events in the queue that a POST in flight has already taken.
+  let postingCount = 0;
   let flushPromise: Promise<void> | null = null;
+  // A caller of flush() wants every event sent now, not only the ones that are due.
+  let flushAll = false;
+  // The last drain left events that are not due yet for the timer.
+  let leftWaiting = false;
   let disposed = false;
   let backedUpSinceMs: number | null = null;
   let backpressureLogged = false;
@@ -140,25 +156,29 @@ export function createEventSink(options: CreateEventSinkOptions): EventSink {
     flushTimer = null;
   }
 
-  function scheduleFlush(delayMs: number): void {
-    if (disposed || flushPromise !== null) {
+  function scheduleFlush(): void {
+    if (disposed || flushPromise !== null || waitingDueAtMs === Infinity) {
       return;
     }
     if (flushTimer !== null) {
-      if (delayMs > 0) {
+      if (waitingDueAtMs >= flushTimerDueAtMs) {
         return;
       }
       clearScheduledFlush();
     }
-    flushTimer = setTimeout(() => {
-      flushTimer = null;
-      void flush().catch((error) => {
-        options.logger.error(
-          runtimeErrorLogFields(normalizeCaughtError(error)),
-          "Daemon event delivery failed",
-        );
-      });
-    }, delayMs);
+    flushTimerDueAtMs = waitingDueAtMs;
+    flushTimer = setTimeout(
+      () => {
+        flushTimer = null;
+        void deliverDue().catch((error) => {
+          options.logger.error(
+            runtimeErrorLogFields(normalizeCaughtError(error)),
+            "Daemon event delivery failed",
+          );
+        });
+      },
+      Math.max(0, waitingDueAtMs - now()),
+    );
   }
 
   async function deliverBatch(
@@ -212,9 +232,18 @@ export function createEventSink(options: CreateEventSinkOptions): EventSink {
   }
 
   async function drainQueue(): Promise<void> {
+    leftWaiting = false;
+    waitingDueAtMs = Infinity;
     while (queue.length > 0 && !disposed && options.isSessionOpen()) {
       const batch = queue.slice();
-      const delivered = await deliverBatch(batch);
+      postingCount = batch.length;
+      waitingDueAtMs = Infinity;
+      let delivered = 0;
+      try {
+        delivered = await deliverBatch(batch);
+      } finally {
+        postingCount = 0;
+      }
       queue.splice(0, delivered);
       if (queue.length === 0) {
         backedUpSinceMs = null;
@@ -223,10 +252,17 @@ export function createEventSink(options: CreateEventSinkOptions): EventSink {
       if (delivered < batch.length) {
         return;
       }
+      // Events that arrived during the POST wait as long as they would have without it. Sent at once, they made
+      // a busy daemon post back to back, and every POST is one more disk write on the server (#1248).
+      if (queue.length > 0 && !flushAll && waitingDueAtMs > now()) {
+        leftWaiting = true;
+        return;
+      }
     }
   }
 
-  async function flush(): Promise<void> {
+  // Sends the events that are due. Events that arrive meanwhile and are not due get their own timer afterwards.
+  async function deliverDue(): Promise<void> {
     clearScheduledFlush();
     if (flushPromise !== null) {
       await flushPromise;
@@ -238,7 +274,35 @@ export function createEventSink(options: CreateEventSinkOptions): EventSink {
       await flushPromise;
     } finally {
       flushPromise = null;
+      flushAll = false;
+      scheduleFlush();
     }
+  }
+
+  async function flush(): Promise<void> {
+    do {
+      flushAll = true;
+      await deliverDue();
+      // A drain that was already ending when this was called may have left events for the timer.
+    } while (leftWaiting && !disposed);
+  }
+
+  // Joins a streamed piece onto the piece before it, so a burst of tokens is saved as one row, not one each.
+  // Only the thread's newest waiting event qualifies: joining across another event would move text past it.
+  function joinOntoWaitingDelta(input: EventSinkInput): boolean {
+    for (let index = queue.length - 1; index >= postingCount; index -= 1) {
+      const waiting = queue[index];
+      if (waiting === undefined || waiting.threadId !== input.threadId) {
+        continue;
+      }
+      const joined = joinStreamDeltas(waiting.event, input.event);
+      if (joined === null) {
+        return false;
+      }
+      queue[index] = { threadId: waiting.threadId, event: joined };
+      return true;
+    }
+    return false;
   }
 
   return {
@@ -249,16 +313,20 @@ export function createEventSink(options: CreateEventSinkOptions): EventSink {
       if (backedUpSinceMs === null) {
         backedUpSinceMs = now();
       }
-      queue.push({
-        threadId: input.threadId,
-        event: input.event,
-      });
+      if (!joinOntoWaitingDelta(input)) {
+        queue.push({
+          threadId: input.threadId,
+          event: input.event,
+        });
+      }
       maybeLogQueuePressure();
-      scheduleFlush(
-        shouldFlushThreadEventImmediately(input.event)
-          ? 0
-          : DEFAULT_DEBOUNCE_MS,
-      );
+      const delayMs = shouldFlushThreadEventImmediately(input.event)
+        ? 0
+        : isStreamDeltaEvent(input.event)
+          ? STREAM_DELTA_DEBOUNCE_MS
+          : DEFAULT_DEBOUNCE_MS;
+      waitingDueAtMs = Math.min(waitingDueAtMs, now() + delayMs);
+      scheduleFlush();
     },
     flush,
     async dispose(): Promise<void> {

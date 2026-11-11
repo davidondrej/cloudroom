@@ -1,8 +1,22 @@
 # Thread coordination and inspection
 
-## Cloud limits
+## Cloud threads
 
-`room-cli thread tell` automatically queues Cloud messages. Local messages steer by default. Cloud supports follow-ups, inspection, stop, title changes, pinning, and archive/restore. Stop pauses the queue; `room-cli thread queue send THREAD FIRST_MESSAGE_ID` resumes in order. Inspect `room-cli cloud status --json`: steering, attachments, compaction, message editing (`rewind`), and queue editing/cancellation depend on the connected core and harness. Forks, scheduling, and session-model changes remain unavailable. Confirm actual outputs, not just advertised capabilities.
+```sh
+room-cli cloud status --json
+room-cli thread spawn --project PROJECT --machine cloud --provider codex \
+  --model MODEL --request-id UNIQUE_ID --prompt "Task"
+```
+
+- Supports Codex and Pi, inspection, plain-text follow-ups, stop, title changes, pinning, and archive/restore.
+- `tell` queues Cloud messages automatically. Local messages still steer by default. Explicit unsupported modes fail; no fallback to Local.
+- Stop pauses the Cloud queue. To resume, list it with `room-cli thread queue list THREAD`, then send its first message with `room-cli thread queue send THREAD MESSAGE_ID`.
+- Read `room-cli cloud status --json` before optional Cloud operations. Steering, compaction, attachments, message editing (`rewind`), and queue editing/cancellation depend on the connected core and harness capabilities. Forks are not enabled. Cloud automations run on a schedule while this computer is off: `room-cli loop create --cloud --thread THREAD [--new-thread|--same-thread] [--script-file PATH]` (see the `automations` skill). Change effort with `thread update THREAD --reasoning-level LEVEL`; change the model or agent in place with `thread update THREAD [--provider PROVIDER] --model MODEL`; read both with `thread show`. `--parent-thread` with a Cloud parent starts a linked child in its own sandbox, with a copy of the parent's code. A Local parent's Cloud child (`--parent-self --machine cloud --provider PROVIDER --model MODEL`) gets its own sandbox and messages the parent when it finishes; it starts from GitHub, so push first and pass `--base-branch BRANCH`. A capability flag is not proof that an operation completed.
+- Phone: the user opens cloudroom.dev/m, signs in with their Cloudroom account, and adds the app to the Home Screen. With this computer off, the phone still shows and runs Cloud threads, but starting a new thread needs it.
+- Retry an unconfirmed start, Local or Cloud, with the same `--request-id` (an unanswered spawn prints it). For a rejected start, use `room-cli cloud retry-start THREAD`. Do not blindly resend uncertain work.
+- A Cloud thread paused on a full disk: run `room-cli cloud clear-disk THREAD`. It deletes package caches and Git-ignored dependency and build folders; code, `.env` files and chats stay. Its waiting message then sends by itself.
+- To fix or set up the VM or a Cloud thread's sandbox, or move files, configs, and logins to it, use `room-cli vm run|pull|push`, with `--thread ID` for a sandbox (see the command index).
+- Cloud agents get Core's `room-cli`: the same commands and flags, for their own thread, children, and automations. They reach this computer with `room-cli mac run|pull|push`, only while "Let cloud agents access this computer" is on. They can rename, archive, move, or change the effort of their own thread with `room-cli thread update --self --title TITLE`, `room-cli thread archive --self`, `room-cli thread move --self --project PROJECT`, and `room-cli thread update --self --reasoning-level LEVEL`, start children in their own sandbox with `room-cli thread spawn`, and stop or archive them with `room-cli thread stop|archive CHILD_ID`. These commands control Cloud threads through the GUI backend while it is running.
 
 ## Coordinating Work
 
@@ -15,6 +29,11 @@
   Check the queue and correlate the final output with the requested task;
   pass `--status` or `--event` for a different target, and `--timeout
 <seconds>` when you need a shorter or longer budget.
+- After spawning several children, run `room-cli thread wait --children`. It
+  blocks until every child is done, failed, or needs input, and prints one line
+  per child. It times out after 9 minutes; run it again to keep waiting. A child
+  that needs input prints the `thread interactions show` command that says how
+  to answer; a `thread tell` only queues behind the question.
 - Use `room-cli thread tell <thread-id> "..."` when requirements change, a blocker
   needs clarification, or follow-up work is needed.
 - Add `--plan` to `room-cli thread spawn` or `room-cli thread tell` to send the prompt as
@@ -121,8 +140,18 @@ hostId, providerId, projectId, parentThreadId, groupBy })`.
   `room-cli thread queue` group contains the queued-message operations. Queue updates
   use the listed version and accept repeatable `--file` and `--image` options;
   absolute file/image paths and `file:` URLs are uploaded from the CLI machine before the update.
+- Use `room-cli thread list` to find threads, most recently updated first. Filter
+  with `--project`, `--status`, `--provider`, `--machine local|cloud`, and
+  `--pinned`; order with `--sort updated|created`. The table shows 50 threads
+  and says when more exist; `--limit <n>` or `--all` changes that. `--json`
+  prints every match as full records, so pipe it to a script. To read JSON,
+  pick keys with `--fields id,title,status`: one compact row per thread. The
+  SDK equivalent is `threads.list({ status, providerId, executionTarget,
+pinned, sort, limit })`.
 - Use `room-cli thread show <thread-id>` for status, parent, environment, pull request
   status, and result.
+- When polling status, add `--no-pr`: it skips the GitHub pull request lookup, which
+  can take up to 10 s, and JSON reports `pullRequest.status` as `skipped`.
 - Use `room-cli thread show <thread-id> --git-diff` to review file changes.
 - Use `room-cli thread log <thread-id>` to inspect the conversation. The default
   shows only the newest 20 user-message turns and ends with a notice when older
@@ -213,3 +242,21 @@ For review or fix pipelines, get the environment ID from
 `room-cli thread update <id> --parent-thread <parent-id>` makes an existing thread a child; the parent then gets its turn updates. Clearing a thread's parent with `room-cli thread update --clear-parent-thread` inherits the former parent's section unless the update explicitly supplies a section. Unarchiving a child under an archived parent also releases it to top-level, unless `room-cli thread unarchive --keep-parent` keeps the link; under an open parent it stays a child. Children released by environment archiving also inherit their former parent's section.
 
 Archiving a Local thread, 10 seconds later once Undo has passed, frees its idle agent session and stops what it left running outside the app: processes carrying its `ROOM_THREAD_ID`, such as a `nohup` dev server. Apps it opened are left alone. Cloud archive stops the whole sandbox.
+
+## Moving, parents, and worktrees
+
+`thread move` moves a Local or Cloud thread (or `--self`) to another project by ID or name. It keeps its chat; its next turn starts fresh in that project's folder, and the old folder stays. A running thread moves when its turn ends.
+
+Make a thread a child with `room-cli thread update THREAD --parent-thread PARENT` (or `--self` as the child), or top-level with `--clear-parent-thread`. Unarchiving a child under an archived parent makes it top-level, so its parent stops getting its updates; unarchive the parent first. `room-cli thread unarchive THREAD --keep-parent` keeps the link anyway, but an archived parent gets none of its updates. Re-link a top-level child with `--parent-thread`. A Cloud thread sharing another thread's sandbox can only become top-level; one on a cloud VM can't change its parent. Parent changes and `unarchive` run from the desktop app or a Local thread; a Cloud thread's `room-cli` has neither.
+
+To move a Local Claude Code or Codex thread into its own worktree, run `room-cli thread worktree`. The thread keeps its ID and chat and moves into a new Cloudroom-managed worktree from its current commit when its turn ends; Cloudroom deletes the worktree after archive. Other agents may share the checkout, so pass `--carry` with only the uncommitted files this thread changed, and `--allow-dirty` to leave the rest. Then end your turn, and from the next turn work only in the new worktree. To fork into a new thread instead, use `room-cli thread fork --new-environment worktree`. Never run `git worktree add` yourself; Cloudroom never cleans those folders up.
+
+## Chat from a terminal
+
+`room-cli thread chat THREAD` turns any terminal pane (Herdr, tmux, plain shell) into a chat with a Local or Cloud thread: live output, messages, `/approve`, `/deny`, `/stop`, and `/exit`. Start a new agent in the pane with:
+
+```sh
+room-cli thread chat "$(room-cli thread spawn --project PROJECT --prompt "Task" --json | jq -r .id)"
+```
+
+Inside Herdr, `chat` shows the thread as `cloudroom` with its idle, working, or blocked state, and Herdr reopens the chat after a restart. Answer agent questions in the app or with `room-cli thread interactions`.

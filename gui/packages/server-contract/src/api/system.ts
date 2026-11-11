@@ -345,6 +345,43 @@ export interface SystemSkillUsageResponse {
   skills: { name: string; total: number; daily: number[] }[];
 }
 
+export const USAGE_ANALYTICS_METRICS = ["agentHours", "models", "tokens", "prompts"] as const;
+export const USAGE_ANALYTICS_RANGES = ["7", "30", "90", "365"] as const;
+export const systemUsageAnalyticsQuerySchema = z.object({
+  metric: z.enum(USAGE_ANALYTICS_METRICS),
+  days: z.enum(USAGE_ANALYTICS_RANGES).optional(),
+  utcOffsetMinutes: z.string().regex(/^-?\d{1,4}$/).optional(),
+});
+export type SystemUsageAnalyticsQuery = z.infer<typeof systemUsageAnalyticsQuerySchema>;
+
+const dailySchema = z.array(z.number());
+/**
+ * Settings → Analytics. Only the asked metric is filled. Daily lists run
+ * oldest day first, one entry per day from `startDate`.
+ */
+export const systemUsageAnalyticsResponseSchema = z.object({
+  startDate: z.string(),
+  days: z.number(),
+  /** Hours per day: agents working, split Local and Cloud, and you in the app. */
+  agentHours: z.object({ local: dailySchema, cloud: dailySchema, you: dailySchema }).optional(),
+  /** Prompts per model, most used first with the rest as "Other", and how many ran Local and Cloud. */
+  models: z.object({
+    local: z.number(),
+    cloud: z.number(),
+    list: z.array(z.object({ name: z.string(), total: z.number(), daily: dailySchema })),
+  }).optional(),
+  /** Tokens written per day with each day's top threads, and totals read. */
+  tokens: z.object({
+    written: dailySchema,
+    read: z.number(),
+    cached: z.number(),
+    top: z.array(z.array(z.object({ name: z.string(), written: z.number() }))),
+  }).optional(),
+  /** Your prompts per day, and per hour of the week (Monday 12 AM first, 168 entries). */
+  prompts: z.object({ daily: dailySchema, hours: dailySchema }).optional(),
+});
+export type SystemUsageAnalyticsResponse = z.infer<typeof systemUsageAnalyticsResponseSchema>;
+
 export interface SystemWorktreeStorageResponse {
   freeBytes: number | null;
   usedBytes: number | null;

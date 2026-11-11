@@ -16,6 +16,7 @@ import { cn } from "@cloudroom/shared-ui/lib/utils";
 import { Switch } from "@cloudroom/shared-ui/switch";
 import { Textarea } from "@cloudroom/shared-ui/textarea";
 import {
+  DEFAULT_PROMPT_SUGGESTION_PROMPT,
   DEFAULT_THREAD_NAMING_RULES,
   THREAD_PURPOSE_CLAUDE_MODEL,
 } from "@cloudroom/domain";
@@ -352,6 +353,46 @@ export function PromptSuggestionsSetting() {
         onCheckedChange={setEnabled}
       />
     </SettingsWithControl>
+  );
+}
+
+const promptSuggestionsPromptAtom = createSyncedPreferenceAtom(
+  "promptSuggestions.prompt",
+);
+
+/** Settings → Prompts → Feature prompts: the editable prompts behind built-in features. */
+export function FeaturePromptsSettingsSection() {
+  const [prompt, setPrompt] = useAtom(promptSuggestionsPromptAtom);
+  const [draft, setDraft] = useState(prompt);
+
+  useEffect(() => setDraft(prompt), [prompt]);
+
+  const save = () => {
+    const next = draft.trim() || DEFAULT_PROMPT_SUGGESTION_PROMPT;
+    setDraft(next);
+    if (next !== prompt) setPrompt(next);
+  };
+
+  return (
+    <SettingsSection
+      title="Feature prompts"
+      description="The prompts behind Cloudroom's built-in features. Edit them to fit how you work."
+    >
+      <SettingsWithControl
+        label="Prompt suggestions"
+        description="How Cloudroom guesses your next message. Suggestions stay at 12 words or less. Clear the box to restore the default. Saved when you click away."
+        controlPlacement="below"
+      >
+        <Textarea
+          aria-label="Prompt suggestions prompt"
+          className="min-h-[420px] text-sm"
+          maxLength={4_000}
+          value={draft}
+          onChange={(event) => setDraft(event.target.value)}
+          onBlur={save}
+        />
+      </SettingsWithControl>
+    </SettingsSection>
   );
 }
 

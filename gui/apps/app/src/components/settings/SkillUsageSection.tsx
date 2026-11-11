@@ -2,10 +2,7 @@ import { useState } from "react";
 import { PERSONAL_PROJECT_ID } from "@cloudroom/domain";
 import type { SystemSkillUsageResponse } from "@cloudroom/server-contract";
 import { cn } from "@cloudroom/shared-ui/lib/utils";
-import {
-  ToggleGroup,
-  ToggleGroupItem,
-} from "@cloudroom/shared-ui/toggle-group";
+import { RangeToggle, Stat } from "@/components/settings/UsageSection";
 import { SettingsSection } from "@/components/ui/settings-section.js";
 import { useProjectSkills } from "@/hooks/queries/skills-queries";
 import { useSkillUsage } from "@/hooks/queries/system-queries";
@@ -85,49 +82,6 @@ function ridgePaths(
     )
     .join(" ");
   return { line, area: `${line} L${last} 100 L0 100 Z` };
-}
-
-function Stat({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="flex-1 border border-border px-3.5 py-3">
-      <div className="text-[11px] tracking-[0.08em] text-muted-foreground uppercase">
-        {label}
-      </div>
-      <div className="mt-1 font-mono text-xl text-foreground tabular-nums">
-        {value}
-      </div>
-    </div>
-  );
-}
-
-function RangeToggle({
-  value,
-  onChange,
-}: {
-  value: Range;
-  onChange: (next: Range) => void;
-}) {
-  return (
-    <ToggleGroup
-      type="single"
-      aria-label="Time range"
-      value={value}
-      onValueChange={(next) => {
-        if (next !== "") onChange(next as Range);
-      }}
-      className="h-8 gap-0.5 rounded-md border border-input bg-background p-0.5"
-    >
-      {RANGES.map((range) => (
-        <ToggleGroupItem
-          key={range.value}
-          value={range.value}
-          className="h-6 rounded-sm px-2.5 text-xs font-medium text-muted-foreground shadow-none hover:bg-state-hover hover:text-foreground data-[state=on]:bg-state-active data-[state=on]:text-foreground data-[state=on]:hover:bg-state-active"
-        >
-          {range.label}
-        </ToggleGroupItem>
-      ))}
-    </ToggleGroup>
-  );
 }
 
 const ROW_GRID = "grid grid-cols-[11rem_1fr_3.5rem] items-end gap-3";
@@ -248,13 +202,14 @@ export function SkillUsageSection() {
     installed.data?.skills.map((skill) => skill.name) ?? [],
   );
   const total = used.reduce((sum, skill) => sum + skill.total, 0);
-  const rangeLabel = RANGES.find((option) => option.value === range)!.label;
+  // Named after the data on screen: a new range shows the last one until it loads.
+  const rangeLabel = RANGES.find((option) => option.value === String(data?.days ?? range))?.label ?? "";
 
   return (
     <SettingsSection
       title="Skills"
       description="Every skill, most used first. Each ridge is one skill's daily runs. Scroll down for the least used."
-      action={<RangeToggle value={range} onChange={setRange} />}
+      action={<RangeToggle value={range} options={RANGES} onChange={setRange} />}
       plain
     >
       {usage.isError ? (

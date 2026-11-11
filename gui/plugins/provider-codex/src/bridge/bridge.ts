@@ -1375,6 +1375,7 @@ function handleInitialize(id: string | number): void {
       approvalEnforcedBy: "runtime",
       grammarVersions: [THREAD_DELTA_GRAMMAR_V3, THREAD_DELTA_GRAMMAR_V3],
       steerMode: "inject",
+      stopsUnopenedTurns: false,
       skills: { configure: true },
     },
   };
@@ -1758,14 +1759,45 @@ async function handleThreadStop(
       },
     ]);
   }
-  sendThreadDeltas(
-    session,
-    session.translator.clearExitedChildThreadState({
-      providerThreadId: session.codexThreadId,
-    }),
-  );
+  const openSubAgents = session.translator.clearExitedChildThreadState({
+    providerThreadId: session.codexThreadId,
+  });
+  sendThreadDeltas(session, openSubAgents);
+  // Codex stays up for the next turn once nothing of this thread still runs.
+  // Sub-agents only end with Codex itself.
+  if (
+    params.keepSession === true &&
+    settled &&
+    openSubAgents.length === 0 &&
+    (await endBackgroundTerminals(session.connection, session.codexThreadId))
+  ) {
+    session.stopRequested = new AbortController();
+    sendResult(id, { ok: true, sessionKept: true });
+    return;
+  }
   await releaseSession(session);
   sendResult(id, { ok: true });
+}
+
+/**
+ * Ends the commands a stopped turn left running in the background. False when
+ * Codex can't (an older CLI), so the caller ends Codex instead.
+ */
+async function endBackgroundTerminals(
+  connection: CodexAppServerConnection,
+  codexThreadId: string,
+): Promise<boolean> {
+  try {
+    await connection.request({
+      method: "thread/backgroundTerminals/clean",
+      params: { threadId: codexThreadId },
+      resultSchema: ignoredChildResultSchema,
+      timeoutMs: INTERRUPT_SETTLEMENT_TIMEOUT_MS,
+    });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 const goalClearResultSchema = z.object({ cleared: z.boolean() }).passthrough();

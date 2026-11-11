@@ -3110,7 +3110,7 @@ dedicated side-chat create call.
 
 ## `bb.experimental_telemetry.capture`
 
-`capture(name, properties)` sends one PostHog event through the server's own
+`capture(name, properties)` sends one usage event through the server's own
 telemetry service, tagged with `plugin_id`. Only built-in plugins get a working
 call; for others it is a silent no-op. It does nothing when the user turned
 telemetry off. Names must be snake_case (at most 64 characters); at most 32

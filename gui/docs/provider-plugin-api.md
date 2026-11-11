@@ -169,6 +169,7 @@ The runtime never scopes processes per thread and never matches error text.
   fork: "none" | "tip" | "checkpoint",
   approvalEnforcedBy: "runtime" | "provider",
   steerMode: "inject" | "queue", // declared and recorded; nothing acts on it yet
+  stopsUnopenedTurns: boolean,   // a keep-session stop also ends a turn not opened yet
   skills: { configure: boolean }, // the bridge handles skills/configure
 }
 ```

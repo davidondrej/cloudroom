@@ -558,6 +558,9 @@ async function handleRequest(message) {
       respond(id, {});
       return;
     }
+    case "thread/backgroundTerminals/clean":
+      respond(id, {});
+      return;
     case "thread/archive":
       // The real app-server moves the rollout into its archived dir, so a
       // second archive finds no live rollout; the reverse holds for unarchive.

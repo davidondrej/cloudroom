@@ -5,7 +5,6 @@ import { readOrCreateSecretFile } from "@cloudroom/secret-storage";
 import type { AppSurface, RequestAppSurface } from "@cloudroom/config/app-surface";
 import type { ServerLogger } from "../../types.js";
 
-const POSTHOG_INGESTION_URL = "https://us.i.posthog.com/capture/";
 export const TELEMETRY_ID_FILE_NAME = "telemetry-id";
 /** Events wait in memory and reach our own server through the website in batches (ADR 20261102-201050). */
 const BATCH_SIZE = 100, MAX_QUEUED = 1_000, FIRST_FLUSH_MS = 10_000, FLUSH_MS = 60_000;
@@ -148,7 +147,6 @@ export interface TelemetryService {
 }
 
 interface CreateTelemetryServiceArgs {
-  apiKey: string;
   appSurface: AppSurface;
   appVersion: string;
   dataDir: string;
@@ -182,11 +180,7 @@ export function runWithTelemetryAppSurface<T>(
 export async function createTelemetryService(
   args: CreateTelemetryServiceArgs,
 ): Promise<TelemetryService> {
-  if (
-    !args.enabled ||
-    args.apiKey.length === 0 ||
-    args.appVersion === DEFAULTS.appVersion
-  ) {
+  if (!args.enabled || args.appVersion === DEFAULTS.appVersion) {
     return noopTelemetryService;
   }
   const distinctId = await readOrCreateSecretFile({
@@ -245,28 +239,8 @@ export async function createTelemetryService(
     };
     const timestamp = new Date().toISOString();
     if (queue.length >= MAX_QUEUED) queue.shift();
-    const id = randomUUID();
-    queue.push({ id, name, at: timestamp, properties });
+    queue.push({ id: randomUUID(), name, at: timestamp, properties });
     if (queue.length >= BATCH_SIZE) void flush();
-    const body = JSON.stringify({
-      api_key: args.apiKey,
-      distinct_id: distinctId,
-      event: name,
-      properties: { ...properties, dual_written: true },
-      timestamp,
-      // The same ID on both sides, so the import from PostHog can find exactly what never reached our server.
-      uuid: id,
-    });
-    fetch(POSTHOG_INGESTION_URL, {
-      body,
-      headers: { "content-type": "application/json" },
-      method: "POST",
-    }).catch((error: unknown) => {
-      args.logger.debug(
-        { app_surface: appSurface, err: error, event: name },
-        "Telemetry event send failed",
-      );
-    });
   };
   return {
     flush,

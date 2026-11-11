@@ -2,6 +2,20 @@
 
 Also on [cloudroom.dev/changelog](https://www.cloudroom.dev/changelog).
 
+## 149
+
+Rewrite drafts before you send (2026-11-11)
+
+### Changes
+
+- Edit an agent's draft right in the chat, and preview a shorter version with tracked changes before you use it.
+- Stop now interrupts Local Claude Code and Codex almost instantly, instead of ending them.
+- Settings → Analytics has new tabs for agent hours, models, tokens, and prompts.
+- Settings → Instructions is now Prompts, with an editable prompt for chat suggestions.
+- The usage panel shows each added Claude account's weekly model limits.
+- A turn that never starts now fails and can be retried, instead of staying on "starting".
+- Cloud threads write far less to disk while agents type.
+
 ## 148
 
 Cloud Credits last 20% longer (2026-11-10)

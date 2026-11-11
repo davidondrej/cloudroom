@@ -50,6 +50,10 @@ import {
 } from "./markdown-katex-loader.js";
 import { CopyButton } from "./copy-button.js";
 import { useClipboardCopy } from "@/lib/clipboard";
+import {
+  DraftEditor,
+  useDraftMessage,
+} from "@/components/thread/timeline/DraftEditor";
 import { Icon } from "@cloudroom/shared-ui/icon";
 import { usePortalScopeProps } from "@cloudroom/shared-ui/lib/portal-scope";
 import { usePersistentOverlayFocus } from "@cloudroom/shared-ui/responsive-overlay";
@@ -755,17 +759,28 @@ function MarkdownCode({
   const codeText = String(children ?? "").replace(/\n$/, "");
   const language = getMarkdownCodeLanguage({ className: codeClassName });
   const isBlock = isMarkdownCodeBlock({ codeText, language });
+  const draftMessage = useDraftMessage();
+  const isDraft = isBlock && language === "draft" && draftMessage !== null;
   const highlightedHtml = useMemo(
     () =>
-      isBlock && language !== "mermaid"
+      isBlock && !isDraft && language !== "mermaid"
         ? highlightMarkdownCode({ code: codeText, language })
         : null,
-    [isBlock, language, codeText],
+    [isBlock, isDraft, language, codeText],
   );
   const highlightedMarkup = useMemo(
     () => (highlightedHtml === null ? null : { __html: highlightedHtml }),
     [highlightedHtml],
   );
+  if (isDraft) {
+    return (
+      <DraftEditor
+        block={String(_node?.position?.start.offset ?? 0)}
+        code={codeText}
+        message={draftMessage}
+      />
+    );
+  }
   if (isBlock) {
     if (language === "mermaid" && imagePolicy === "render") {
       return (

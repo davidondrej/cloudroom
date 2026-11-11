@@ -8,6 +8,7 @@ pub mod automation;
 mod catalog;
 mod guard;
 pub(crate) mod history;
+pub mod info;
 pub(crate) mod prompt;
 pub(crate) mod relay;
 pub mod report;

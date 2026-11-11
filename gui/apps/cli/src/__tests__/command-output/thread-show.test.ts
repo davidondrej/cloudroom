@@ -463,6 +463,43 @@ describe("room-cli thread show command output", () => {
     });
   });
 
+  it("room-cli thread show --no-pr skips the pull request lookup", async () => {
+    const thread: domain.Thread = fixtures.makeThread({
+      id: "thread-show-no-pr",
+      projectId: "proj-1",
+      providerId: "codex",
+      environmentId: "env-show-no-pr",
+      status: "idle",
+      createdAt: 1,
+      updatedAt: 2,
+    });
+    const environment = fixtures.makeEnvironment({
+      id: "env-show-no-pr",
+      projectId: "proj-1",
+      hostId: "host-1",
+      createdAt: 1,
+      updatedAt: 2,
+    });
+    const pullRequestGet = vi.fn(() => new Promise<never>(() => {}));
+    stubServerApi({
+      "v1.environments.:id.$get": vi.fn(async () => environment),
+      "v1.environments.:id.pull-request.$get": pullRequestGet,
+      "v1.threads.:id.$get": vi.fn(async () => thread),
+      "v1.threads.:id.timeline.$get": fixtures.makeEmptyTimelineGetMock(),
+    });
+
+    await runCommand(
+      ["thread", "show", "thread-show-no-pr", "--json", "--no-pr"],
+      register,
+    );
+
+    expect(pullRequestGet).not.toHaveBeenCalled();
+    expect(
+      JSON.parse(String(vi.mocked(console.log).mock.calls[0]?.[0])).environment
+        .pullRequest,
+    ).toEqual({ status: "skipped", pullRequest: null });
+  });
+
   it("room-cli thread show --json prints the thread in status payload format", async () => {
     const thread: domain.Thread = fixtures.makeThread({
       id: "thread-json-show",

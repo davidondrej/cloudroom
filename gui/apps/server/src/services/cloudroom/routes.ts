@@ -41,6 +41,7 @@ import { connectAccount, registerConnect } from "./connect-relay.js";
 import { getGateAuthKind } from "../../request-context.js";
 import { noteActiveMinute, timeInApp } from "./time-in-app.js";
 import { starPrompt, starRepo } from "./star-prompt.js";
+import { rewriteDraft } from "../ai/draft-rewrite.js";
 import { popupState, recordChecklistHide, recordPopup } from "./popups.js";
 import { activation } from "./activation.js";
 import { disconnectGithub, githubAccount, githubAuth } from "./github-login.js";
@@ -187,6 +188,15 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: Plugin
   app.post("/api/v1/cloudroom/popups", async (context) => {
     const input = z.object({ popup: z.enum(POPUPS), event: z.enum(["shown", "closed"]), detail: z.enum(POPUP_DETAILS).optional() }).strict().parse(await context.req.json());
     return context.json({ ok: await recordPopup(deps, input.popup, input.event, input.detail) });
+  });
+  app.post("/api/v1/cloudroom/draft-rewrite", async (context) => {
+    const input = z.object({
+      mode: z.enum(["options", "shorter"]),
+      draft: z.string().min(1).max(100_000),
+      selected: z.string().min(1).max(20_000),
+      avoid: z.array(z.string().max(20_000)).max(30).default([]),
+    }).strict().parse(await context.req.json());
+    return context.json({ options: await rewriteDraft(deps, input) });
   });
   app.get("/api/v1/cloudroom/star-prompt", async (context) => context.json(await starPrompt(deps)));
   app.post("/api/v1/cloudroom/star-prompt", async (context) => {

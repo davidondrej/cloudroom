@@ -4,11 +4,11 @@ import { cloudroomCommands, cloudroomThreads, deleteThreadEventSuffixInTransacti
 import { and, desc, eq } from "drizzle-orm";
 import { appendThreadEventsInTransaction, appendThreadProvisioningEventInTransaction } from "../threads/thread-events.js";
 import { markCustomInstructionsLost } from "../threads/custom-instructions.js";
-import { LEGACY_CODEX_GOAL_EXTENSION_KIND, THREAD_ACCOUNT_SWITCH_OPERATION, cloudDeltaEvent, cloudItemEvent, codexItemEvent, reasoningLevelSchema, threadEventSchema, threadScope, turnScope, encodeClientTurnRequestIdNumber, type ProvisioningTranscriptEntry, type SystemThreadProvisioningStatus, type ThreadEvent, type ThreadEventTurnStatus } from "@cloudroom/domain";
+import { LEGACY_CODEX_GOAL_EXTENSION_KIND, THREAD_ACCOUNT_SWITCH_OPERATION, cloudDeltaEvent, cloudItemEvent, codexItemEvent, isStreamDeltaEvent, joinStreamDeltas, reasoningLevelSchema, threadEventSchema, threadScope, turnScope, encodeClientTurnRequestIdNumber, type ProvisioningTranscriptEntry, type SystemThreadProvisioningStatus, type ThreadEvent, type ThreadEventTurnStatus } from "@cloudroom/domain";
 import { z } from "zod";
 import { cloudAccountSwitch } from "./account-switches.js";
 import { CloudroomError, type SessionRecord } from "./client.js";
-import { codexErrorFields, codexErrorFrameFields } from "./codex-errors.js";
+import { codexErrorFields, codexErrorFrameFields, mentionsOpenAISide401 } from "./codex-errors.js";
 import { binding, command, coreFailure, queuedPrompts, saveBinding, saveCommandState, saveStatus, effectivePrompt, statusOf, unstartedTurn, type Binding, type Command } from "./store.js";
 
 const object = z.record(z.string(), z.unknown());
@@ -204,18 +204,54 @@ export function isStreamDelta(record: SessionRecord): boolean {
   return typeof method === "string" && /(?:\/delta|Delta)$/.test(method);
 }
 
+// Records that can wait are saved together this often (#1248). Every save costs about the same disk write however
+// little it holds, and the app shows streamed text a whole line at a time. The daemon's sink does the same for
+// Local threads (STREAM_DELTA_DEBOUNCE_MS).
+export const STREAM_BATCH_MS = 250;
+export const STREAM_BATCH_MAX_RECORDS = 500;
+// Records that only add events: the stream loop has no other work before or after them.
+const PLAIN_RECORD_KINDS = ["item_started", "item_completed", "native_event"];
+// Plain records nobody waits to see: a line of the harness's own chat file (no event, only the cursor), token
+// counts, and tool progress.
+const QUIET_RECORD_KINDS = ["native_record", "usage", "tool_snapshot"];
+
+/**
+ * How the stream loop saves a record. Every save is a disk write of about the same size, however little it holds
+ * (#1248), so records share one where they can.
+ * - "wait": saved with the next batch, at most STREAM_BATCH_MS later.
+ * - "now": saved at once, in one transaction with the records that waited.
+ * - "alone": the loop has other work to do around it. The waiting records are saved first.
+ */
+export function recordSaving(record: SessionRecord): "wait" | "now" | "alone" {
+  if (isStreamDelta(record) || QUIET_RECORD_KINDS.includes(record.kind)) return "wait";
+  return PLAIN_RECORD_KINDS.includes(record.kind) && !mentionsOpenAISide401(record) ? "now" : "alone";
+}
+
 export function projectRecord(db: DbConnection, threadId: string, record: SessionRecord, codexOutage = false): ThreadEvent["type"][] {
   return projectRecords(db, threadId, [record], codexOutage);
 }
 
-/** Saves records in order, in one transaction. */
+/**
+ * Saves records in order, in one transaction. Streamed pieces of one item that follow each other become one
+ * event row: a row per token is what made streaming write so much (#1248).
+ */
 export function projectRecords(
   db: DbConnection,
   threadId: string,
   records: readonly SessionRecord[],
   codexOutage = false,
 ): ThreadEvent["type"][] {
-  return db.transaction((tx) => records.flatMap((record) => {
+  return db.transaction((tx) => {
+    // The newest streamed piece, not yet written, so the next piece can join it.
+    const held: { piece: AppendStoredThreadEventArgs | null } = { piece: null };
+    const takeHeld = () => {
+      const piece = held.piece;
+      held.piece = null;
+      return piece ? [piece] : [];
+    };
+    const types = records.flatMap((record) => {
+    // Only a streamed piece may follow a held one unwritten: anything else may read or cut the saved events.
+    if (!isStreamDelta(record)) appendThreadEventsInTransaction(tx, takeHeld());
     const saved = binding(tx, threadId);
     if (!saved || record.sequence <= saved.cursor) return [];
     if (record.session_id !== saved.sessionId) throw new Error("Cloudroom session mismatch");
@@ -519,11 +555,20 @@ export function projectRecords(
         }
       }
     }
-    appendThreadEventsInTransaction(tx, projected.map((event) => ({
-      threadId, environmentId: null, providerThreadId: saved.nativeId, createdAt: record.timestamp_ms,
-      type: event.type, scope: event.scope, data: event,
-    } as AppendStoredThreadEventArgs)));
+    const writes: AppendStoredThreadEventArgs[] = [];
+    for (const event of projected) {
+      const joined = held.piece && joinStreamDeltas(held.piece.data as ThreadEvent, event);
+      if (held.piece && joined) { held.piece = { ...held.piece, data: joined } as AppendStoredThreadEventArgs; continue; }
+      writes.push(...takeHeld());
+      const args = { threadId, environmentId: null, providerThreadId: saved.nativeId, createdAt: record.timestamp_ms, type: event.type, scope: event.scope, data: event } as AppendStoredThreadEventArgs;
+      if (isStreamDeltaEvent(event)) held.piece = args;
+      else writes.push(args);
+    }
+    appendThreadEventsInTransaction(tx, writes);
     saveBinding(tx, threadId, { cursor: record.sequence, error: null });
     return projected.map((event) => event.type);
-  }));
+    });
+    appendThreadEventsInTransaction(tx, takeHeld());
+    return types;
+  });
 }

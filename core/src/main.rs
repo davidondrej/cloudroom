@@ -1,3 +1,24 @@
+/// The same layout as the Local CLI's help (ADR 20261110-235800).
+const HELP: &str = "Usage: room-cli [command]
+
+Cloudroom CLI in a Cloud thread: this thread, its children, and this sandbox
+
+Commands:
+  status        Show this thread and its children
+  thread        Manage this thread and its child threads
+  provider      List the agents and models a child thread can use
+  loop          Schedule work for this thread (alias: automation)
+  mac           Run commands and copy files on the user's computer
+  secret        Ask the user for API keys
+  files         Wait for the project's files
+  preview       Show a web app through the user's browser
+  computer-use  Control this sandbox's screen
+  gpu           Rent a GPU box
+  usage         Show the account's Cloud Credits
+  feedback      Send Cloudroom a bug, friction, or idea
+
+Add --help to any command. Other threads, projects, settings and plugins live in the Cloudroom app on the user's computer: see the room-cli skill.";
+
 #[tokio::main(worker_threads = 2)]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // `std::env::args()` panics on an argument that isn't UTF-8 (#705).
@@ -53,6 +74,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     if args.first().map(String::as_str) == Some("thread") {
         match cloudroom::session::thread::cli(&args[1..]).await {
+            Ok(code) => std::process::exit(code),
+            Err(error) => {
+                eprintln!("{error}");
+                std::process::exit(1);
+            }
+        }
+    }
+    if matches!(
+        args.first().map(String::as_str),
+        Some("status" | "provider")
+    ) {
+        let result = match args[0].as_str() {
+            "status" => cloudroom::session::info::status_cli(&args[1..]).await,
+            _ => cloudroom::session::info::provider_cli(&args[1..]).await,
+        };
+        match result {
             Ok(code) => std::process::exit(code),
             Err(error) => {
                 eprintln!("{error}");
@@ -169,12 +206,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     // The service starts without arguments; anything else is a mistyped agent command.
     if let Some(command) = args.first() {
-        let commands = "Commands: room-cli thread, automation (loop), mac, secret, files, preview, computer-use, gpu, usage, feedback. Add --help to any of them. Other threads, projects, and settings live on the user's Mac: see the room-cli skill.";
         if matches!(command.as_str(), "--help" | "-h" | "help") {
-            println!("{commands}");
+            println!("{HELP}");
             return Ok(());
         }
-        eprintln!("Unknown command {command}. {commands}");
+        if cloudroom::session::info::LOCAL_ONLY.contains(&command.as_str()) {
+            eprintln!("{}", cloudroom::session::info::on_computer(command));
+        } else {
+            eprintln!("Unknown command {command}.\n\n{HELP}");
+        }
         std::process::exit(2);
     }
     cloudroom::serve(cloudroom::config::Config::from_env()?).await

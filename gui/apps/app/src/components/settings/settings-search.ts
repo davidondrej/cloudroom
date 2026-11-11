@@ -172,6 +172,10 @@ const SETTINGS_SEARCH_ENTRIES: readonly SettingsSearchEntry[] = [
   ]),
   ...entries("analytics", undefined, [
     ["Cloud Credits", "analytics usage credits used when hour by hour threads wave busiest day left"],
+    ["Agent hours", "analytics agents working hours time leverage local cloud your hours"],
+    ["Models", "analytics models most used share of prompts top model local cloud"],
+    ["Tokens", "analytics tokens written read cache usage threads wave"],
+    ["Prompts", "analytics prompts hours of the week streak busiest hour punch card"],
     ["Skills", "analytics stats usage most used least used skill runs ridgeline"],
   ]),
   ...entries("machines", undefined, [
@@ -195,6 +199,9 @@ const SETTINGS_SEARCH_ENTRIES: readonly SettingsSearchEntry[] = [
   ]),
   ...entries("system-prompt", undefined, [
     ["Cloudroom system prompt", "instructions agents"],
+  ]),
+  ...entries("feature-prompts", undefined, [
+    ["Prompt suggestions prompt", "feature prompts edit predict next prompt"],
   ]),
   ...entries("experiments", "Experiments", [
     ["Changelog preview", "beta release notes"],

@@ -81,7 +81,7 @@
 
 ## Cloudroom guide instructions and skills
 
-Settings → Instructions → Cloudroom guide controls the Cloudroom introduction and the
+Settings → Prompts → Cloudroom guide controls the Cloudroom introduction and the
 three bundled skills. All settings default to true. Use
 `room-cli plugin config bb-guide set <key> true|false` with `introduction`, `skills`
 (the master skill switch), `bbCli`, `pluginAuthoring`, or `skillCreator`.
@@ -158,3 +158,9 @@ The UI offers Replace binding or Cancel when assigning an occupied shortcut.
 plugin defaults and availability are resolved in each app window, where the
 plugin frontend runs. CLI/SDK callers should clear conflicting explicit
 bindings in the same update; plugin defaults yield to explicit bindings.
+
+## Shell and environment variables
+
+Cloudroom supplies `ROOM_SERVER_URL`, `ROOM_HOST_DAEMON_PORT`, `ROOM_CLI`, `ROOM_DATA_DIR`, and thread context to Local agents and thread-scoped terminals automatically. Machine-only and environment-only terminals have no current thread. `room-cli` ignores the corresponding `BB_*` settings. Use `ROOM_*` overrides only for an intentional target change; never reuse thread IDs from another instance. `"$ROOM_CLI"` selects the current runtime's executable directly in a POSIX shell.
+
+Examples here use POSIX shell syntax. On Windows the agent shell is usually PowerShell: run bare `room-cli`, read an environment variable as `$env:NAME` (`"$env:ROOM_THREAD_ID"`), separate commands with `;` instead of `&&`, and continue a line with a backtick instead of a backslash. The Windows `room-cli.cmd` launcher keeps only the first line of a `--prompt` argument. For a multiline prompt to `thread spawn`, `thread fork`, or `loop create|update`, save it as a UTF-8 file and pass `--prompt-file PATH`. Long arguments fail (around 8 KB in PowerShell), so send a long `thread tell` message with `--message-file PATH`. On Windows, save the message as a UTF-8 file first: PowerShell 5.1 pipes turn non-ASCII text into `?`. In POSIX shells and Git Bash, `--message-file -` reads stdin.

@@ -11,7 +11,8 @@ import { setCopyLogins, setCopyMacGithub } from "../../src/services/cloudroom/sy
 import { createTestAppHarness } from "../helpers/test-app.js";
 import { PERSONAL_PROJECT_ID } from "@cloudroom/domain";
 import { seedHostSession, seedProjectWithSource } from "../helpers/seed.js";
-import { cloudroomCommands, cloudroomThreads, createThread, getThread, setProjectGitRemoteUrlIfMissing } from "@cloudroom/db";
+import { cloudroomCommands, cloudroomThreads, createThread, getThread, setProjectGitRemoteUrlIfMissing, threads } from "@cloudroom/db";
+import { eq } from "drizzle-orm";
 
 // The Cursor key check runs this computer's Cursor CLI, which rejects the tests' fake keys.
 vi.mock("../../src/services/cloudroom/sandboxes.js", async (original) => ({ ...await original<object>(), cursorKeyRejected: async () => false }));
@@ -715,6 +716,45 @@ it("a sleeping thread costs no delivery work until it wakes, opening it connects
     coreServer.closeAllConnections(); coreServer.close(); websiteServer.close();
   }
 }, 25_000);
+
+it("a thread cut off mid-turn is archived when the website archived its sandbox, as after its agent archived it while this computer slept", async () => {
+  const harness = await createTestAppHarness();
+  const { host } = seedHostSession(harness.deps);
+  const { project } = seedProjectWithSource(harness.deps, { hostId: host.id });
+  const service = cloudroom(harness.deps);
+  const lookups: string[] = [];
+  let archived = "";
+  const websiteServer = createServer(async (req, res) => {
+    const input = await body(req);
+    res.writeHead(200, { "Content-Type": "application/json" });
+    if (req.url === "/api/desktop/logins") return res.end(JSON.stringify({ claude: false, codex: false, pi: false, github: false }));
+    if (input.action === "awake") return res.end(JSON.stringify({ sandboxes: [], recheck_ms: 60_000 }));
+    if (input.action === "lookup") lookups.push(input.thread);
+    res.end(JSON.stringify({ thread: input.thread, state: input.thread === archived ? "archived" : "asleep", generation: 1, issue: null }));
+  });
+  const websiteUrl = await listen(websiteServer);
+  try {
+    // Three turns were running when this computer went to sleep. All three sandboxes are gone when it wakes.
+    const [done, slept, old, idle] = ["active", "active", "active", "idle"].map(status => createThread(harness.deps.db, harness.deps.hub, { executionTarget: "cloud", projectId: project.id, providerId: "codex", status: status as "active" | "idle" }));
+    archived = done!.id;
+    harness.deps.db.insert(cloudroomThreads).values([done!, slept!, old!, idle!].map((thread, i) => ({ threadId: thread.id, coreUrl: `sandbox:${thread.id}`, sessionId: `cr_${i}`, startRequestId: `start_${i}`, model: "test-model", reasoning: "medium" }))).run();
+    harness.deps.db.update(threads).set({ updatedAt: Date.now() - 7 * 86_400_000 }).where(eq(threads.id, old!.id)).run();
+    await service.configure(null, { id: "11111111-1111-4111-8111-111111111111", email: "sandbox@example.com" }, undefined, websiteUrl, "a".repeat(64));
+
+    // The one whose sandbox the website archived is archived here too. The one that only sleeps stays, idle.
+    await waitFor(() => Boolean(getThread(harness.deps.db, done!.id)?.archivedAt), "the finished thread to be archived");
+    await waitFor(() => getThread(harness.deps.db, slept!.id)?.status === "idle" && getThread(harness.deps.db, old!.id)?.status === "idle", "the others to go idle");
+    expect(getThread(harness.deps.db, slept!.id)?.archivedAt).toBeNull();
+    // Last heard from a week ago, its sandbox may be archived as an old run: it stays, and nothing is asked.
+    // A thread that was idle already costs no lookup either.
+    await new Promise(resolve => setTimeout(resolve, 3_200));
+    expect(lookups.sort()).toEqual([done!.id, slept!.id].sort());
+    expect([old!, idle!].map(thread => getThread(harness.deps.db, thread.id)?.archivedAt)).toEqual([null, null]);
+  } finally {
+    service.stop();
+    websiteServer.close();
+  }
+}, 20_000);
 
 it("a message to a stopped thread is saved first, then resumes it once its restoring sandbox wakes (#534)", async () => {
   const harness = await createTestAppHarness();

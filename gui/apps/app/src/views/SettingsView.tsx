@@ -84,6 +84,7 @@ import { PluginSettingsSections } from "@/components/plugin/PluginSettingsSectio
 import { FileOpenersSettingsSection } from "@/components/settings/FileOpenersSettingsSection";
 import { VoiceInputSettingsSection } from "@/components/settings/VoiceInputSettingsSection";
 import {
+  FeaturePromptsSettingsSection,
   ProjectNudgeSettingsSection,
   SmartSearchSettingsSection,
   PromptSuggestionsSetting,
@@ -102,8 +103,7 @@ import { ArchivedThreadsSettingsSection } from "@/components/settings/ArchivedTh
 import { ImportChatsSettingsSection } from "@/components/settings/ImportChats";
 import { ExportChatsSettingsSection } from "@/components/settings/ExportChats";
 import { CliSkillsSettingsSection } from "@/components/settings/CliSkillsSettingsSection";
-import { CreditsUsageSection } from "@/components/settings/CreditsUsageSection";
-import { SkillUsageSection } from "@/components/settings/SkillUsageSection";
+import { AnalyticsTabs } from "@/components/settings/AnalyticsTabs";
 import { MarketplacesSettingsSection } from "@/components/settings/MarketplacesSettingsSection";
 import {
   useUpdateGeneralSettings,
@@ -1406,12 +1406,7 @@ export function SettingsView() {
   } else if (activeSection === "account") {
     content = <CloudroomAccountSettings />;
   } else if (activeSection === "analytics") {
-    content = (
-      <>
-        <CreditsUsageSection />
-        <SkillUsageSection />
-      </>
-    );
+    content = <AnalyticsTabs />;
   } else if (activeSection === "machines") {
     content = <MachinesSettingsPage />;
   } else if (activeSection === "updates") {
@@ -1461,6 +1456,8 @@ export function SettingsView() {
         {updateGeneralSettingsMutation.error && <p role="alert">{updateGeneralSettingsMutation.error.message}</p>}
       </SettingsSection>
     );
+  } else if (activeSection === "feature-prompts") {
+    content = <FeaturePromptsSettingsSection />;
   } else if (activeSection === "marketplaces") {
     content = <MarketplacesSettingsSection />;
   } else if (activeSection === "community") {

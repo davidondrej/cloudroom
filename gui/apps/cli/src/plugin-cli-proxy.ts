@@ -3,7 +3,12 @@ import {
   resolveContextProjectId,
   resolveContextThreadId,
 } from "./context-env.js";
-import { Agent, setGlobalDispatcher, type Dispatcher } from "undici";
+import {
+  Agent,
+  getGlobalDispatcher,
+  setGlobalDispatcher,
+  type Dispatcher,
+} from "undici";
 import { cliFetch } from "./client.js";
 
 export interface PluginCliContributionEntry {
@@ -377,6 +382,18 @@ function getPluginCliDispatcher(): Dispatcher {
     headersTimeout: PLUGIN_CLI_HEADERS_TIMEOUT_MS,
   });
   return pluginCliDispatcher;
+}
+
+// process.exit() with fetch sockets still open can abort Node on Windows (libuv
+// UV_HANDLE_CLOSING, #828): close them and let Node exit; the timer only guards a hang.
+export async function exitWhenIdle(code: number): Promise<void> {
+  process.exitCode = code;
+  setTimeout(() => process.exit(code), 5000).unref();
+  const dispatchers = [pluginCliDispatcher, getGlobalDispatcher()];
+  pluginCliDispatcher = undefined;
+  await Promise.all(
+    dispatchers.map((dispatcher) => dispatcher?.close().catch(() => {})),
+  );
 }
 
 export async function runPluginCliCommand(

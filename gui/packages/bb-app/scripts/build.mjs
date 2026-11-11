@@ -1,4 +1,4 @@
-import { access } from "node:fs/promises";
+import { access, readdir, readFile } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -82,6 +82,27 @@ await copyBuildOutput({
   label: "@cloudroom/bundled-plugins dist",
   to: resolve(packageRoot, "server", "dist", "builtin-plugins"),
 });
+// Built-in plugin servers share the server's one zod (zod-runtime.js). A
+// bundle that carries its own copy again costs every user 500 KB and a slower
+// start, and nothing else would notice.
+const builtinPluginsDir = resolve(packageRoot, "server", "dist", "builtin-plugins");
+await assertPathExists(
+  resolve(packageRoot, "server", "dist", "zod-runtime.js"),
+  "shared zod runtime",
+);
+for (const plugin of await readdir(builtinPluginsDir, { withFileTypes: true })) {
+  if (!plugin.isDirectory()) continue;
+  const server = await readFile(
+    resolve(builtinPluginsDir, plugin.name, "dist", "server.js"),
+    "utf8",
+  );
+  if (server.includes("node_modules/zod/")) {
+    throw new Error(
+      `Built-in plugin "${plugin.name}" bundles its own zod instead of importing the shared one (HOST_ZOD_SPECIFIER in @cloudroom/plugin-build).`,
+    );
+  }
+}
+
 await copyBuildOutput({
   from: resolve(workspaceRoot, "apps", "host-daemon", "dist"),
   label: "@cloudroom/host-daemon dist",

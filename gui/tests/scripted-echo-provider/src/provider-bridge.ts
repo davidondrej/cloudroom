@@ -898,6 +898,7 @@ const handlers: Record<string, RequestHandler> = {
         approvalEnforcedBy: processOptions.approvalEnforcedBy ?? "runtime",
         grammarVersions: [THREAD_DELTA_GRAMMAR_V3, THREAD_DELTA_GRAMMAR_V3],
         steerMode: "inject",
+        stopsUnopenedTurns: false,
         skills: { configure: true },
       },
     });

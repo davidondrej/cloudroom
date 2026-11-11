@@ -56,6 +56,7 @@ export * from "./retry.js";
 export * from "./setup-script.js";
 export * from "./shared-types.js";
 export * from "./stored-thread-event.js";
+export * from "./stream-delta-merge.js";
 export * from "./terminal.js";
 export * from "./thread-create-origin.js";
 export * from "./thread-dynamic-context.js";

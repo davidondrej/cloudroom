@@ -110,6 +110,11 @@ function archiveThreadWithLifecycleEffects(
   });
   if (isCloudThread(archivedThread)) {
     cloudroom(deps).archive(archivedThread.id);
+    // The stream stops here, so a turn still running never reaches the prune at its end.
+    pruneThreadEventHistoryBestEffort(deps, {
+      mode: "archived",
+      threadId: archivedThread.id,
+    });
     emitPluginThreadArchived(archivedThread);
     return archivedThread;
   }

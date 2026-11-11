@@ -157,8 +157,16 @@ Editing a sent message:
 
 Listing:
 
-  room-cli thread list                           List open (unarchived) threads
+  room-cli thread list                           List open (unarchived) threads, most recently updated first
     --project <id>                         Filter by project
+    --status <status>                      Filter by status: pending, idle, starting, active, stopping, error
+    --provider <id>                        Filter by provider, such as claude-code
+    --machine <local|cloud>                Filter by where threads run
+    --pinned                               Show only pinned threads
+    --sort <updated|created>               Newest first by last update (default) or creation
+    --limit <count>                        Maximum threads to print
+    --all                                  Print every thread in the table, not just 50
+    --fields <keys>                        Print only these comma-separated JSON keys, one thread per line
     --environment <id>                     Filter by environment
     --parent-thread <id>                   Filter by parent thread
     --archived                             Show only archived threads
@@ -167,11 +175,16 @@ Listing:
     --unsectioned                          Show only threads outside sections
     --include-hidden                       Include hidden threads
 
-  The table prints ID, Title, Project, and Status. Title uses the thread
-  title, then the fallback title from the first prompt, then "-". Long
-  titles are cut at 60 characters. Project shows the project name; the
-  personal project shows "-". Use --json for the full thread records.
+  The table prints ID, Title, Project, Status, and Updated (time since the
+  last change). Title uses the thread title, then the fallback title from
+  the first prompt, then "-". Long titles are cut at 60 characters. Project
+  shows the project name; the personal project shows "-".
   An archived thread is never open, whatever its status says.
+
+  The table shows the first 50 threads and says when more exist. Filter
+  first, then read the table. --json prints every match as full records,
+  about 1.5 KB per thread: pipe it to a script, don't read it. To read JSON,
+  pick keys: `room-cli thread list --status active --fields id,title,status`.
 
   room-cli thread search <query> [--limit <1-50>]
                                              Search threads and messages
@@ -205,6 +218,7 @@ Inspecting:
     --self                                 Target current thread
     --work-status                          Include git working-tree status
     --git-diff                             Include git diff
+    --no-pr                                Skip the GitHub pull request lookup
     --diff-target <type>                   Diff scope: uncommitted, branch_committed, all, commit
     --diff-sha <sha>                       Commit SHA (for --diff-target commit)
     --diff-merge-base <branch>             Override merge-base branch for diff
@@ -232,6 +246,9 @@ Inspecting:
     --event <type>                         Wait for this event type
     --timeout <seconds>                    Timeout in seconds (default: 1200 / 20 min)
     --poll-interval <ms>                   Polling interval in milliseconds
+  room-cli thread wait [id] --children           Wait until every open child of the thread (default: this one)
+                                         is done, failed, or needs input; prints one line per child.
+                                         Times out after 9 minutes (exit 2): run it again to keep waiting
 
 Opening threads and files in the app:
 
@@ -440,7 +457,7 @@ Lifecycle:
   failed or a turn that already has a retry queued. Without --send-at the retry
   is attempted now, and may still queue behind a busy thread or a plugin.
 
-  room-cli thread archive [id]                   Archive a thread (and children/hidden forks)
+  room-cli thread archive [ids...]               Archive a thread (and children/hidden forks), or several at once
     --self                                 Archive current thread
 
   `thread stop` preserves the thread history, metadata, environment, and future

@@ -345,7 +345,9 @@ export function registerThreadActionRoutes(app: Hono, deps: AppDeps): void {
       deps,
       thread,
       environment,
-      query.endProcesses === "true" ? { endProcesses: true } : undefined,
+      query.endProcesses === "true"
+        ? { endProcesses: true }
+        : { keepSession: true },
     );
     return context.json({ ok: true, cancelledRetries });
   });

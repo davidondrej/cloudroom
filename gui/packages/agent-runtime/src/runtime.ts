@@ -8,6 +8,7 @@ import type { DynamicTool, InstructionMode, ThreadEvent } from "@cloudroom/domai
 import type { AdapterCommand } from "./provider-adapter.js";
 import {
   BRIDGE_JSON_RPC_ERRORS,
+  BRIDGE_NOTIFICATION_METHODS,
   providerHealthResultSchema,
   providerInstallationRunResultSchema,
   providerInstallationStatusSchema,
@@ -180,6 +181,7 @@ interface ResolveThreadStoragePathArgs {
 const providerThreadStopResultSchema = z
   .object({
     providerCheckpointId: z.string().min(1).nullable().optional(),
+    sessionKept: z.boolean().optional(),
   })
   .passthrough();
 
@@ -278,17 +280,22 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
   const idleProviderSessionSinceMsByThreadId = new Map<string, number>();
   const pendingTurnStarts = new Map<
     string,
-    { sinceMs: number; watchdogFired: boolean }
+    { sinceMs: number; watchdogFired: boolean; stopping: boolean }
   >();
   const turnStartWatchdogThresholdMs =
     options.turnStartWatchdog?.thresholdMs ?? 120_000;
+  const turnStartStopAfterMs =
+    options.turnStartWatchdog?.stopAfterMs ?? 10 * 60_000;
   const turnStartWatchdogTimer = setInterval(() => {
     const nowMs = Date.now();
     for (const [threadId, entry] of pendingTurnStarts) {
-      if (
-        entry.watchdogFired ||
-        nowMs - entry.sinceMs < turnStartWatchdogThresholdMs
-      ) {
+      const waitedMs = nowMs - entry.sinceMs;
+      if (waitedMs >= turnStartStopAfterMs && !entry.stopping) {
+        entry.stopping = true;
+        void stopStalledTurnStart(threadId);
+        continue;
+      }
+      if (entry.watchdogFired || waitedMs < turnStartWatchdogThresholdMs) {
         continue;
       }
       entry.watchdogFired = true;
@@ -845,6 +852,30 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
     }
   }
 
+  /**
+   * Stops a turn that never started within the long limit, then fails it
+   * (#1364). The stop closes the provider session first, so the turn cannot
+   * start late, and `thread retry` resumes a fresh session.
+   */
+  async function stopStalledTurnStart(threadId: string): Promise<void> {
+    try {
+      await runtime.stopThread({ threadId });
+    } catch (error) {
+      options.onStderr?.(
+        `Could not stop thread "${threadId}" after its turn never started: ${error instanceof Error ? error.message : String(error)}`,
+        threadId,
+      );
+      return;
+    }
+    options.onEvent({
+      type: "system/error",
+      threadId,
+      scope: { kind: "thread" },
+      code: "provider_turn_start_failed",
+      message: `The provider did not start this turn within ${Math.round(turnStartStopAfterMs / 60_000)} minutes, so it was stopped. Retry the thread to send the message again.`,
+    });
+  }
+
   function findReapableIdleProviderSession(
     args: FindReapableIdleProviderSessionArgs,
   ): ReapIdleProviderSessionCandidate | null {
@@ -1303,6 +1334,26 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
       proc: args.proc,
       sourceThreadId,
     });
+    // Bridges send `error` when the provider session dies (e.g. the CLI
+    // exits), so a turn still waiting to start never will (#1364).
+    if (
+      args.parsed.method === BRIDGE_NOTIFICATION_METHODS.error &&
+      sourceThreadId !== undefined &&
+      args.proc.identity.threadIds.has(sourceThreadId) &&
+      pendingTurnStarts.delete(sourceThreadId)
+    ) {
+      markHostedProviderSessionIdle(sourceThreadId);
+      const detail = getJsonRpcStringParam(args.parsed, "message");
+      options.onEvent({
+        type: "system/error",
+        threadId: sourceThreadId,
+        scope: { kind: "thread" },
+        code: "provider_turn_start_failed",
+        message:
+          "The provider failed before starting this turn. Retry the thread to send the message again.",
+        ...(detail === undefined ? {} : { detail }),
+      });
+    }
   }
 
   function handleStdoutLine(line: string, proc: ProviderProcess): void {
@@ -2001,6 +2052,7 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
           pendingTurnStarts.set(threadId, {
             sinceMs: Date.now(),
             watchdogFired: false,
+            stopping: false,
           });
           markProviderSessionNotIdle(threadId);
           try {
@@ -2165,7 +2217,7 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
       });
     },
 
-    async stopThread({ threadId }) {
+    async stopThread({ threadId, keepSession }) {
       toolCalls.cancelThread(threadId);
       return runThreadOperation({
         threadId,
@@ -2179,6 +2231,7 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
             threadId,
             providerThreadId,
             activeTurnId,
+            ...(keepSession ? { keepSession: true } : {}),
           };
           const cmd = proc.adapter.buildCommandPlan(adapterCommand);
 
@@ -2198,6 +2251,15 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
             message: cmd,
             resultSchema: providerThreadStopResultSchema,
           });
+          // The provider stays up for the thread's next turn; the idle reaper ends it later.
+          if (result.sessionKept === true) {
+            pendingTurnStarts.delete(threadId);
+            backgroundWorkState.clearThread(threadId);
+            markHostedProviderSessionIdle(threadId);
+            return {
+              providerCheckpointId: result.providerCheckpointId ?? null,
+            };
+          }
           forgetThreadRuntimeStateForProviderState(proc.identity, threadId);
           await releaseIdleProviderProcess(proc);
           return {
@@ -2554,7 +2616,7 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
       return threadIdentityRegistry.getProviderSession(threadId) !== null;
     },
 
-    notifyThreadStopRequested(threadId) {
+    notifyThreadStopRequested(threadId, stop) {
       let proc: ProviderProcess;
       try {
         proc = requireProviderProcessForThread(threadId);
@@ -2564,8 +2626,17 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
       sendJsonRpc(proc.child, {
         jsonrpc: "2.0",
         method: THREAD_STOP_REQUESTED_METHOD,
-        params: { threadId },
+        params: { threadId, ...(stop ? { stop: true } : {}) },
       });
+    },
+
+    stopsUnopenedTurns(threadId) {
+      try {
+        return requireProviderProcessForThread(threadId).adapter
+          .stopsUnopenedTurns;
+      } catch {
+        return false;
+      }
     },
 
     getLiveThreadIds() {

@@ -278,6 +278,13 @@ export function registerThreadBaseRoutes(app: Hono, deps: AppDeps): void {
       requireThreadSection(deps, query.sectionId);
     }
     const threads = listThreadsWithPendingInteractionState(deps.db, {
+      ...(query.status ? { status: query.status } : {}),
+      ...(query.providerId ? { providerId: query.providerId } : {}),
+      ...(query.executionTarget
+        ? { executionTarget: query.executionTarget }
+        : {}),
+      ...(query.pinned ? { pinned: query.pinned === "true" } : {}),
+      ...(query.sort ? { sort: query.sort } : {}),
       ...(query.projectId ? { projectId: query.projectId } : {}),
       ...(query.environmentId ? { environmentId: query.environmentId } : {}),
       ...(query.parentThreadId ? { parentThreadId: query.parentThreadId } : {}),

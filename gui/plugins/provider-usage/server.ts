@@ -3,7 +3,7 @@ import {
   selectUsageResources,
 } from "./usage-normalization.js";
 import { defineRpcContract, type BbPluginApi } from "@get-bb/plugin-sdk";
-import { z } from "zod/mini";
+import { z } from "zod";
 import {
   usageSnapshotSchema,
   type ProviderUsage,
@@ -201,18 +201,23 @@ export default function providerUsagePlugin(bb: BbPluginApi): void {
                 ? [{ ...local, accountId: "local", inUse: account.inUse }]
                 : [];
             // Accounts that report no usage still show when they hit a limit.
-            const windows =
-              account.windows.length > 0
-                ? account.windows
-                : account.limitedUntil
-                  ? [
-                      {
-                        label: "Limit hit",
-                        usedPercent: 100,
-                        resetsAt: account.limitedUntil,
-                      },
-                    ]
-                  : [];
+            // So does a limit no bar shows as full, like one model's weekly limit.
+            // Rounded as the box shows it: 99.6% reads "100%" and counts as full.
+            const windows = [
+              ...account.windows,
+              ...(account.limitedUntil &&
+              !account.windows.some(
+                (window) => Math.round(window.usedPercent) >= 100,
+              )
+                ? [
+                    {
+                      label: "Limit hit",
+                      usedPercent: 100,
+                      resetsAt: account.limitedUntil,
+                    },
+                  ]
+                : []),
+            ];
             return [
               {
                 ...base,

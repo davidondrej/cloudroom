@@ -90,6 +90,8 @@ export class CommandRouter {
   private readonly threadUnarchiveBarriers = new Map<string, Promise<void>>();
   private readonly threadLaneTails = new Map<string, Promise<void>>();
   private readonly threadTurnLaneTails = new Map<string, Promise<void>>();
+  /** Interrupting stops received and not finished yet, per thread. */
+  private readonly pendingThreadStops = new Map<string, number>();
 
   constructor(private readonly options: CommandRouterOptions) {
     this.logger = options.logger;
@@ -190,17 +192,19 @@ export class CommandRouter {
   private executeLiveDaemonCommand(
     command: HostDaemonCommand,
   ): Promise<HostDaemonCommandResultForCommand> {
-    if (
-      command.type === "thread.archive" ||
-      (command.type === "thread.stop" &&
-        (command.intent === "interrupt" || command.immediate === true))
-    ) {
+    const interruptingStop =
+      command.type === "thread.stop" &&
+      (command.intent === "interrupt" || command.immediate === true);
+    if (command.type === "thread.archive" || interruptingStop) {
       // Stop and Archive queue behind the thread's running command. Tell its
       // bridge now, so a resume still retrying gives up instead (#104).
       for (const entry of this.options.runtimeManager.listThreadOwnerEntries(
         command.threadId,
       )) {
-        entry.runtime.notifyThreadStopRequested?.(command.threadId);
+        entry.runtime.notifyThreadStopRequested?.(
+          command.threadId,
+          interruptingStop,
+        );
       }
     }
     const environmentLaneMode = hostDaemonEnvironmentLaneForCommand(command);
@@ -216,6 +220,17 @@ export class CommandRouter {
       ),
     );
     this.registerThreadUnarchiveBarrier(command, task);
+    if (interruptingStop) {
+      const { threadId } = command;
+      const pending = this.pendingThreadStops;
+      pending.set(threadId, (pending.get(threadId) ?? 0) + 1);
+      const settle = (): void => {
+        const left = (pending.get(threadId) ?? 1) - 1;
+        if (left > 0) pending.set(threadId, left);
+        else pending.delete(threadId);
+      };
+      void task.then(settle, settle);
+    }
     return task;
   }
 
@@ -294,6 +309,7 @@ export class CommandRouter {
       fetchSkillTree: this.options.fetchSkillTree,
       fetchPluginHostArtifact: this.options.fetchPluginHostArtifact,
       runtimeManager: this.options.runtimeManager,
+      isThreadStopPending: (threadId) => this.pendingThreadStops.has(threadId),
       desktopBrowserBroker: this.options.desktopBrowserBroker,
       dataDir: this.options.dataDir,
       eventSink: this.options.eventSink,

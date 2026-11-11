@@ -479,9 +479,16 @@ pub(super) async fn own_children(m: &Manager, caller: &str, archived: bool, answ
         let state = match sandbox {
             "archived" | "deleted" => "archived",
             "new" if recent.iter().any(|c| c == id) => "starting",
+            // A sandbox that sleeps or failed runs nothing, whatever its last report here said.
+            "asleep" | "failed" => sandbox,
             _ => known.get(id).map_or(sandbox, String::as_str),
         };
-        let mut item = json!({"id":id,"title":child["title"],"state":state,"parent":child["parent"],"sandbox":"own"});
+        // The website may still list a child that was archived a moment ago.
+        if state == "archived" && !archived {
+            continue;
+        }
+        let status = super::children::status(state, false);
+        let mut item = json!({"id":id,"title":child["title"],"state":state,"status":status,"parent":child["parent"],"sandbox":"own"});
         // Its sandbox didn't start yet, say after a failed wake, or its start was refused (#1058).
         let refused = start_error(m, caller, id).filter(|_| state == "error");
         if let Some(issue) = refused.as_deref().or(child["issue"].as_str()) {
@@ -493,7 +500,9 @@ pub(super) async fn own_children(m: &Manager, caller: &str, archived: bool, answ
     for id in recent {
         let archived = known.get(&id).is_some_and(|s| s == "archived");
         if !archived && !list.iter().any(|c| c["id"] == id.as_str()) {
-            list.push(json!({"id":id,"title":null,"state":"starting","sandbox":"own"}));
+            list.push(
+                json!({"id":id,"title":null,"state":"starting","status":"active","sandbox":"own"}),
+            );
         }
     }
 }

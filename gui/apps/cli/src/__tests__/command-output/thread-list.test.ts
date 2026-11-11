@@ -15,6 +15,8 @@ describe("room-cli thread list command output", () => {
 
   const register: CommandRegistrar = (program) =>
     registerThreadCommands(program, () => "http://server");
+  // The table asks for the newest 50 threads, plus one to learn whether more exist.
+  const tableQuery = { sort: "updated", limit: "51" };
 
   it("room-cli thread list supports parent-thread filtering", async () => {
     const list = vi.fn(async () => []);
@@ -37,6 +39,7 @@ describe("room-cli thread list command output", () => {
         projectId: "proj-1",
         parentThreadId: "thread-manager-1",
         archived: "false",
+        ...tableQuery,
       },
     });
   });
@@ -48,7 +51,7 @@ describe("room-cli thread list command output", () => {
     await runCommand(["thread", "list", "--include-hidden"], register);
 
     expect(list).toHaveBeenCalledWith({
-      query: { archived: "false", includeHidden: "true" },
+      query: { archived: "false", includeHidden: "true", ...tableQuery },
     });
   });
 
@@ -59,7 +62,7 @@ describe("room-cli thread list command output", () => {
     await runCommand(["thread", "list", "--archived"], register);
 
     expect(list).toHaveBeenCalledWith({
-      query: { archived: "true" },
+      query: { archived: "true", ...tableQuery },
     });
   });
 
@@ -110,7 +113,7 @@ describe("room-cli thread list command output", () => {
         status: "idle",
         archivedAt: 1,
         createdAt: 1,
-        updatedAt: 1,
+        updatedAt: Date.now(),
       }),
     ]);
     stubServerApi({
@@ -121,11 +124,11 @@ describe("room-cli thread list command output", () => {
     await runCommand(["thread", "list", "--include-archived"], register);
 
     expect(list).toHaveBeenCalledWith({
-      query: {},
+      query: tableQuery,
     });
     expect(collectLogPayloads(vi.mocked(console.log))).toEqual([
       "",
-      "ID                         Title  Project  Status         \n-------------------------  -----  -------  ---------------\n@thread:thread-archived-1  -      Alpha    idle (archived)",
+      "ID                         Title  Project  Status           Updated\n-------------------------  -----  -------  ---------------  -------\n@thread:thread-archived-1  -      Alpha    idle (archived)  now    ",
       "",
     ]);
   });
@@ -162,7 +165,7 @@ describe("room-cli thread list command output", () => {
         providerId: "codex",
         status: "idle",
         createdAt: 1,
-        updatedAt: 1,
+        updatedAt: Date.now(),
       }),
     ]);
     stubServerApi({
@@ -174,11 +177,11 @@ describe("room-cli thread list command output", () => {
     await runCommand(["thread", "list"], register);
 
     expect(list).toHaveBeenCalledWith({
-      query: { archived: "false" },
+      query: { archived: "false", ...tableQuery },
     });
     expect(collectLogPayloads(vi.mocked(console.log))).toEqual([
       "",
-      "ID                         Title  Project  Status      \n-------------------------  -----  -------  ------------\n@thread:thread-personal-1  -      -        idle        ",
+      "ID                         Title  Project  Status        Updated\n-------------------------  -----  -------  ------------  -------\n@thread:thread-personal-1  -      -        idle          now    ",
       "",
     ]);
   });
@@ -257,7 +260,7 @@ describe("room-cli thread list command output", () => {
     await runCommand(["thread", "list"], register);
 
     expect(list).toHaveBeenCalledWith({
-      query: { archived: "false" },
+      query: { archived: "false", ...tableQuery },
     });
   });
 
@@ -271,7 +274,7 @@ describe("room-cli thread list command output", () => {
     await runCommand(["thread", "list"], register);
 
     expect(list).toHaveBeenCalledWith({
-      query: { archived: "false" },
+      query: { archived: "false", ...tableQuery },
     });
   });
 });

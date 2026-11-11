@@ -529,6 +529,10 @@ export async function submitTurn(
       entry,
       options,
     });
+    // A Stop that arrived while the agent was still starting had no bridge to tell.
+    if (options.isThreadStopPending?.(command.threadId)) {
+      entry.runtime.notifyThreadStopRequested?.(command.threadId, true);
+    }
     const resolvedTurnId = await resolveSubmittedTurnTarget(
       stagedCommand,
       entry,

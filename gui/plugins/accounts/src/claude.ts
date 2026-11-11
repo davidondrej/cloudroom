@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   accessSync,
   constants,
@@ -261,12 +261,189 @@ export const claudeSecret = (token: string) => ({
   expiresAt: Date.now() + YEAR_MS,
 });
 
+type ClaudeUsage = {
+  windows: UsageWindow[];
+  credits: { detail: string | null } | null;
+};
+
+const usageWindowSchema = z
+  .object({ utilization: z.number().nullish(), resets_at: z.string().nullish() })
+  .nullish();
+const usageSchema = z.object({
+  five_hour: usageWindowSchema,
+  seven_day: usageWindowSchema,
+  limits: z
+    .array(
+      z
+        .object({
+          kind: z.string(),
+          scope: z
+            .object({
+              model: z.object({ display_name: z.string().nullish() }).nullish(),
+              surface: z.null().optional(),
+            })
+            .nullish(),
+          percent: z.number().nullish(),
+          resets_at: z.string().nullish(),
+        })
+        .nullable()
+        .catch(null),
+    )
+    .nullish()
+    .catch([]),
+  extra_usage: z
+    .object({
+      is_enabled: z.boolean().nullish(),
+      monthly_limit: z.number().nullish(),
+      used_credits: z.number().nullish(),
+      currency: z.string().length(3).nullish(),
+    })
+    .nullish()
+    .catch(null),
+});
+
+const loginSchema = z.object({
+  claudeAiOauth: z.object({
+    accessToken: z.string().min(1),
+    expiresAt: z.number().nullish(),
+  }),
+});
+
+// A Keychain read that failed may have shown a macOS popup (a timeout, Deny, a locked Keychain).
+// It is not tried again until the app restarts, so the popup can't come back every few minutes.
+const keychainFailed = new Set<string>();
+
+async function keychainLogin(profile: string): Promise<string> {
+  if (process.platform !== "darwin" || keychainFailed.has(profile)) return "";
+  const folder = createHash("sha256")
+    .update(profile.normalize("NFC"))
+    .digest("hex")
+    .slice(0, 8);
+  const text = await promisify(execFile)(
+    "security",
+    ["find-generic-password", "-s", `Claude Code-credentials-${folder}`, "-w"],
+    { timeout: 10_000 },
+  ).then(
+    ({ stdout }) => stdout.trim(),
+    () => {
+      keychainFailed.add(profile);
+      return "";
+    },
+  );
+  // `security` prints a value with special characters as hex.
+  return /^(?:[0-9a-f]{2})+$/iu.test(text)
+    ? Buffer.from(text, "hex").toString("utf8")
+    : text;
+}
+
+// Claude Code keeps a profile's full login in the Keychain on macOS, in an entry named after the folder.
+// Elsewhere, or when the Keychain has none, it is a file in the folder. Null when it can't be read or has expired.
+async function profileToken(profile: string): Promise<string | null> {
+  const file = () =>
+    fs.readFile(path.join(profile, ".credentials.json"), "utf8").catch(() => "");
+  for (const read of [() => keychainLogin(profile), file]) {
+    const login = loginSchema.safeParse(
+      await read().then(JSON.parse).catch(() => null),
+    ).data?.claudeAiOauth;
+    if (login)
+      return login.expiresAt != null && Date.now() >= login.expiresAt
+        ? null
+        : login.accessToken;
+  }
+  return null;
+}
+
+// A full login reads Claude's usage page data: no reply is used, and each model's weekly limit (Fable) shows too.
+// Null when the login can't be read, has expired, or is rejected; Claude Code renews it on the account's next turn.
+// A short error (429, 5xx, a timeout) throws.
+async function profileUsage(profile: string): Promise<ClaudeUsage | null> {
+  const token = await profileToken(profile);
+  if (!token) return null;
+  const response = await fetch("https://api.anthropic.com/api/oauth/usage", {
+    headers: {
+      authorization: `Bearer ${token}`,
+      accept: "application/json",
+      "anthropic-beta": "oauth-2025-04-20",
+      "user-agent": "claude-code/2.1.0",
+    },
+    signal: AbortSignal.timeout(15_000),
+  });
+  if (!response.ok) {
+    await response.body?.cancel();
+    if (response.status === 401 || response.status === 403) return null;
+    throw new Error(`Claude usage failed (HTTP ${response.status}).`);
+  }
+  const usage = usageSchema.parse(await response.json());
+  const windows: UsageWindow[] = [];
+  const add = (
+    label: string,
+    used: number | null | undefined,
+    resets: string | null | undefined,
+    model?: string,
+  ) => {
+    if (used == null || windows.some((window) => window.label === label)) return;
+    windows.push({
+      label,
+      usedPercent: Math.min(100, Math.max(0, used)),
+      resetsAt: readReset(resets),
+      ...(model ? { model } : {}),
+    });
+  };
+  add("Five-hour limit", usage.five_hour?.utilization, usage.five_hour?.resets_at);
+  add("Weekly limit", usage.seven_day?.utilization, usage.seven_day?.resets_at);
+  for (const limit of usage.limits ?? []) {
+    const model = limit?.scope?.model?.display_name?.trim().toLowerCase();
+    if (!limit || limit.kind !== "weekly_scoped" || !model) continue;
+    // The usage box shows "Weekly · Fable" as "7d fable".
+    add(
+      `Weekly · ${model.charAt(0).toUpperCase()}${model.slice(1)}`,
+      limit.percent,
+      limit.resets_at,
+      model,
+    );
+  }
+  if (windows.length === 0) return null;
+  const extra = usage.extra_usage;
+  const limited = [
+    usage.five_hour?.utilization,
+    usage.seven_day?.utilization,
+    ...(usage.limits ?? []).map((limit) => limit?.percent),
+  ].some((used) => used != null && used >= 100);
+  if (!extra?.is_enabled || !limited) return { windows, credits: null };
+  const money = (cents: number) =>
+    extra.currency
+      ? new Intl.NumberFormat("en-US", {
+          style: "currency",
+          currency: extra.currency,
+        }).format(cents / 100)
+      : (cents / 100).toFixed(2);
+  return {
+    windows,
+    credits: {
+      detail:
+        extra.used_credits == null
+          ? null
+          : extra.monthly_limit == null
+            ? `${money(extra.used_credits)} spent`
+            : `${money(extra.used_credits)} / ${money(extra.monthly_limit)}`,
+    },
+  };
+}
+
 // One-year setup tokens can't read /api/oauth/usage (it needs user:profile),
 // but every Claude reply carries the account's limits in its headers, even a 429.
 // OAuth replies need the Claude Code system prompt, or Anthropic answers 429.
+// An account with a full login (`profile`) reads /api/oauth/usage first.
+// A short error there keeps the last bars (`previous`): this check would drop each model's row.
 export async function claudeUsage(
   secret: Secret,
-): Promise<{ windows: UsageWindow[]; credits: { detail: null } | null }> {
+  profile?: string,
+  previous?: ClaudeUsage,
+): Promise<ClaudeUsage> {
+  const full = profile
+    ? await profileUsage(profile).catch(() => previous ?? null)
+    : null;
+  if (full) return full;
   const response = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: {

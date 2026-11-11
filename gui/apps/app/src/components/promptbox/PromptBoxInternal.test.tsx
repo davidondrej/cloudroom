@@ -4815,7 +4815,7 @@ describe("PromptBoxInternal fast mode command", () => {
       provider: { options: [{ value: "claude-code", label: "Claude Code" }] },
       selectModel,
     });
-    expect(modelShortcuts?.map(({ name }) => name)).toEqual(["opus"]);
+    expect(modelShortcuts?.map(({ name }) => name)).toEqual(["fable", "opus"]);
     const { changes, onSubmit, promptBoxRef } = renderPromptBox(
       "Review this /opus",
       { modelShortcuts },

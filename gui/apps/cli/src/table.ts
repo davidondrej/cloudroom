@@ -27,6 +27,8 @@ const BORDERLESS_TABLE_OPTIONS = {
   style: {
     head: [],
     border: [],
+    // A line under the head only, not after every row: it doubled the output.
+    compact: true,
     ["padding-left"]: 0,
     ["padding-right"]: 0,
   },

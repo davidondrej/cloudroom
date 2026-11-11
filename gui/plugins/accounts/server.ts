@@ -406,7 +406,11 @@ export default async function plugin(bb: BbPluginApi) {
       usage.set(account.id, {
         ...(account.provider === "acp-cursor"
           ? { windows: await cursorUsage(await readCursorKey(account)), credits: null }
-          : await claudeUsage(await readSecret(account.id))),
+          : await claudeUsage(
+              await readSecret(account.id),
+              account.profile ? profilePath(account.profile) : undefined,
+              previous?.windows.length ? previous : undefined,
+            )),
         error: null,
         signInAgain: false,
         at: Date.now(),
@@ -1045,6 +1049,12 @@ export default async function plugin(bb: BbPluginApi) {
       limits[`${provider.data}:${used}`] =
         blockedUntil(event.rateLimits) ?? Date.now() + DEFAULT_REST_MS;
       await changed();
+      // A full login's usage read is free, so its bars show the limit right away instead of minutes later.
+      const account = accounts.find((entry) => entry.id === used);
+      if (account?.profile)
+        void refreshUsage(account, true).then(() =>
+          bb.realtime.publish(ACCOUNTS_CHANGED, {}),
+        );
     }
     // Core continues Cloud threads on a new login (ADR 0117).
     if (thread?.executionTarget === "cloud") return;

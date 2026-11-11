@@ -277,7 +277,10 @@ Cloudroom releases are built, signed, and notarized by GitHub Actions (see the
 `release` skill). The [signing wrapper](scripts/run-electron-builder.mjs)
 signs and notarizes when `CSC_LINK`, `CSC_KEY_PASSWORD`, `APPLE_ID`,
 `APPLE_APP_SPECIFIC_PASSWORD`, and `APPLE_TEAM_ID` are all set, then notarizes
-and staples the DMG too. A partial set fails before packaging. Locally,
+and staples the DMG too. A partial set fails before packaging. Releases set
+`CLOUDROOM_NOTARIZE_LATER=1` instead: the wrapper only signs, and
+[notarize-once.sh](scripts/notarize-once.sh) sends just the DMG to Apple, whose
+ticket covers the app inside it. Locally,
 `APPLE_KEYCHAIN_PROFILE=<notarytool profile>` does the same with the Keychain's
 Developer ID identity. Local builds with neither sign via keychain
 auto-discovery and skip notarization.

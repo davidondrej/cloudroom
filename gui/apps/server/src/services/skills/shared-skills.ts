@@ -63,6 +63,7 @@ function toSharedSkill(
       filePath: skill.filePath,
       manageable: false,
       registrySkillId: null,
+      realDirectoryPath: skill.realDirectoryPath,
     },
   };
 }

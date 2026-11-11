@@ -214,6 +214,14 @@ interface ThreadSession {
   restartBeforeNextTurn: ClaudeSessionRestart | null;
   recoveryHintRaisedThisTurn: "authRequired" | "rateLimited" | null;
   streamEnded: boolean;
+  /** Claude is between a prompt, or a turn it started itself, and that turn's result. */
+  turnRunning: boolean;
+  /** Set while a stopped turn winds down. Called on its result; its other messages are dropped. */
+  interruptedTurn: (() => void) | null;
+  /** Turn setup runs one at a time, so a stopped setup still in flight never overtakes the next turn's. */
+  turnSetup: Promise<void>;
+  /** Set while a new turn is still being set up: a Stop waiting behind it calls this. */
+  cancelTurnSetup: (() => void) | null;
   translator: ClaudeDeltaTranslator;
   pendingInteractiveRequests: Map<string | number, PendingInteractiveRequest>;
   permissionEscalationByAgentId: Map<string, PermissionEscalation | null>;
@@ -298,6 +306,8 @@ interface ReplaceThreadSessionBeforeNextTurnArgs {
 
 interface ClaudeCodeThreadStopResult {
   ok: true;
+  /** Claude is still running, idle, and takes the thread's next turn. */
+  sessionKept?: true;
 }
 
 interface ClaudeCanUseToolDecisionContext {
@@ -379,6 +389,9 @@ function requireSkillPluginsRoot(): string {
 }
 
 const THREAD_STOP_CLOSE_TIMEOUT_MS = 4_000;
+const TURN_INTERRUPT_TIMEOUT_MS = 2_000;
+const THREAD_STOPPED_MESSAGE =
+  "Thread stopped while awaiting permission approval";
 const CLAUDE_CHROME_SETTING_RESTART_REASON = "Claude in Chrome setting changed";
 
 const { send, sendResult, sendError } = createBridgeIo<
@@ -387,6 +400,8 @@ const { send, sendResult, sendError } = createBridgeIo<
 
 const threadAttachments = new Map<string, ThreadAttachment>();
 const closingSessions = new Map<string, Promise<void>>();
+/** Threads with a Stop on its way: the one new turn that gets here first ends at once. */
+const stopRequestedThreadIds = new Set<string>();
 const unconfirmedSessionStops = new Map<string, Set<SdkSession>>();
 const toolCallTracker = createPendingToolCallTracker({ sendToolCall: send });
 const { forwardToolCall, handleToolCallResponse } = toolCallTracker;
@@ -496,6 +511,7 @@ function createForwardToolCall(getThreadId: () => string): ToolCallForwarder {
 
 async function closeThreadSession(args: {
   graceful?: boolean;
+  gracefulTimeoutMs?: number;
   message: string;
   notifyHost?: boolean;
   threadId: string;
@@ -511,6 +527,7 @@ async function closeThreadSession(args: {
   }
 
   attachment.closing = true;
+  stopRequestedThreadIds.delete(args.threadId);
   const threadSession = attachment.residentSession;
   if (threadSession) {
     threadSession.closing = true;
@@ -526,14 +543,11 @@ async function closeThreadSession(args: {
         await closeClaudeThreadSession(
           threadSession,
           args.graceful !== false,
+          args.gracefulTimeoutMs,
         ).catch((error: unknown) => {
           if (process.platform === "win32") {
             holdUnconfirmedSessionStop(args.threadId, threadSession.session);
-            emitSessionError(
-              threadSession,
-              args.threadId,
-              error instanceof Error ? error.message : String(error),
-            );
+            warnSessionStopFailed(args.threadId, error);
           }
           throw error;
         });
@@ -834,6 +848,8 @@ function emitForSession(
     }
     if (delta.kind === "turn.boundary" || delta.kind === "session.reset") {
       threadSession.recoveryHintRaisedThisTurn = null;
+      // Some turns end without a result message.
+      threadSession.turnRunning = false;
     }
   }
 }
@@ -908,6 +924,20 @@ function emitSessionError(
       message,
     },
   });
+}
+
+/**
+ * A closing session's failed stop is only a warning. The bridge `error`
+ * notification would fail the thread's next turn before it starts (#1364).
+ */
+function warnSessionStopFailed(threadId: string, error: unknown): void {
+  sendThreadDeltas(threadId, [
+    {
+      kind: "provider.warning",
+      category: "general",
+      summary: error instanceof Error ? error.message : String(error),
+    },
+  ]);
 }
 
 function emitSessionReplacement(args: {
@@ -1089,6 +1119,10 @@ function createThreadSession(attachment: ThreadAttachment): ThreadSession {
     restartBeforeNextTurn: null,
     recoveryHintRaisedThisTurn: null,
     streamEnded: false,
+    turnRunning: false,
+    interruptedTurn: null,
+    turnSetup: Promise.resolve(),
+    cancelTurnSetup: null,
     translator,
     pendingInteractiveRequests: new Map(),
     permissionEscalationByAgentId: new Map(),
@@ -1388,11 +1422,7 @@ function replaceThreadSession(args: ReplaceThreadSessionArgs): ThreadSession {
   if (process.platform === "win32") {
     holdUnconfirmedSessionStop(args.threadId, args.threadSession.session);
     void args.threadSession.session.stop().catch((error: unknown) => {
-      emitSessionError(
-        args.threadSession,
-        args.threadId,
-        error instanceof Error ? error.message : String(error),
-      );
+      warnSessionStopFailed(args.threadId, error);
     });
   } else {
     void args.threadSession.session.stop();
@@ -1523,6 +1553,22 @@ function createOnSdkMessage(
       threadId: args.threadIdRef.current,
     });
     if (!threadSession) return;
+    if (message.type === "result") {
+      threadSession.turnRunning = false;
+    } else if (
+      (message.type === "assistant" || message.type === "stream_event") &&
+      message.parent_tool_use_id === null
+    ) {
+      threadSession.turnRunning = true;
+    }
+    if (threadSession.interruptedTurn !== null) {
+      // The stopped turn is already settled; only its result still matters.
+      if (message.type === "result") {
+        threadSession.interruptedTurn();
+        threadSession.interruptedTurn = null;
+      }
+      return;
+    }
     if (
       message.type === "assistant" ||
       message.type === "user" ||
@@ -1679,9 +1725,10 @@ function resolvePendingInteractiveRequests(
 async function closeClaudeThreadSession(
   threadSession: ThreadSession,
   graceful: boolean,
+  gracefulTimeoutMs = THREAD_STOP_CLOSE_TIMEOUT_MS,
 ): Promise<void> {
   if (graceful) {
-    await threadSession.session.closeGracefully(THREAD_STOP_CLOSE_TIMEOUT_MS);
+    await threadSession.session.closeGracefully(gracefulTimeoutMs);
   } else {
     await threadSession.session.stop();
   }
@@ -2293,6 +2340,7 @@ async function handleRequest(request: ClaudeCodeJsonRpcRequest): Promise<void> {
           approvalEnforcedBy: "provider",
           grammarVersions: [THREAD_DELTA_GRAMMAR_V3, THREAD_DELTA_GRAMMAR_V3],
           steerMode: "inject",
+          stopsUnopenedTurns: process.platform !== "win32",
           skills: { configure: true },
         },
       };
@@ -2561,8 +2609,27 @@ async function runTurnInput(
     sendError(id, -32000, "Claude SDK input stream is closed");
     return;
   }
-  try {
-    promptText = buildPromptText(await expandClaudeSkillInput(
+  // A Stop can be on its way while this turn is still being set up, which
+  // takes seconds while Claude starts. The turn then ends here, as interrupted,
+  // before Claude ever takes it.
+  let stopped =
+    intent === "new-turn" && stopRequestedThreadIds.delete(params.threadId);
+  const endStoppedTurn = (): void => {
+    sendThreadDeltas(
+      params.threadId,
+      threadSession.translator.cancelInput(
+        params.threadId,
+        acceptance.clientRequestId,
+      ),
+    );
+    sendResult(id, { threadId: params.threadId });
+  };
+  if (stopped) {
+    endStoppedTurn();
+    return;
+  }
+  const setup = threadSession.turnSetup.then(async () => {
+    const text = buildPromptText(await expandClaudeSkillInput(
       params.input,
       threadSession.attachment.sessionOptions,
     ))!;
@@ -2574,19 +2641,39 @@ async function runTurnInput(
         params,
       ),
     );
+    if (stopped) return text;
     await enterPlanModeIfRequested(threadSession, params);
+    if (intent === "new-turn") {
+      await threadSession.session.reconnectFailedMcpServers().catch((error) => {
+        logBridgeError(
+          `Failed to check MCP servers: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      });
+    }
+    return text;
+  });
+  threadSession.turnSetup = setup.then(
+    () => undefined,
+    () => undefined,
+  );
+  const stopRequested = new Promise<void>((resolve) => {
+    if (intent === "new-turn") threadSession.cancelTurnSetup = resolve;
+  }).then(() => {
+    stopped = true;
+  });
+  try {
+    const text = await Promise.race([setup, stopRequested]);
+    if (text === undefined) {
+      endStoppedTurn();
+      return;
+    }
+    promptText = text;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     sendError(id, -32000, message);
     return;
-  }
-
-  if (intent === "new-turn") {
-    await threadSession.session.reconnectFailedMcpServers().catch((error) => {
-      logBridgeError(
-        `Failed to check MCP servers: ${error instanceof Error ? error.message : String(error)}`,
-      );
-    });
+  } finally {
+    threadSession.cancelTurnSetup = null;
   }
 
   try {
@@ -2595,6 +2682,7 @@ async function runTurnInput(
       promptText,
       params.permissionEscalation,
     );
+    threadSession.turnRunning = true;
     emitCanonicalTurnInputAccepted(threadSession, acceptance, params.threadId);
     threadSession.attachment.permissionEscalation = params.permissionEscalation;
     sendResult(id, { threadId: params.threadId });
@@ -2651,10 +2739,12 @@ async function handleTurnSteer(
 
 async function closeThreadForStop(
   threadId: string,
+  gracefulTimeoutMs?: number,
 ): Promise<ClaudeCodeThreadStopResult> {
   await closeThreadSession({
     graceful: true,
-    message: "Thread stopped while awaiting permission approval",
+    ...(gracefulTimeoutMs === undefined ? {} : { gracefulTimeoutMs }),
+    message: THREAD_STOPPED_MESSAGE,
     threadId,
   });
   return { ok: true };
@@ -2664,18 +2754,111 @@ async function handleThreadStop(
   id: string | number,
   params: ThreadStopParams,
 ): Promise<void> {
+  stopRequestedThreadIds.delete(params.threadId);
   const threadSession = threadAttachments.get(params.threadId)?.residentSession;
   if (
-    params.intent === "interrupt" &&
-    threadSession != null &&
-    !threadSession.closing
+    threadSession == null ||
+    threadSession.closing ||
+    (params.intent !== "interrupt" && params.keepSession !== true)
   ) {
+    sendResult(id, await closeThreadForStop(params.threadId));
+    return;
+  }
+  // Read first: the settlement below marks every task stopped.
+  const runningTaskIds = threadSession.translator.runningTaskIds(
+    params.threadId,
+  );
+  // A keep-session stop can arrive before the turn it stops has opened.
+  if (params.intent === "interrupt" || threadSession.turnRunning) {
     sendThreadDeltas(
       params.threadId,
-      threadSession.translator.buildSessionSettlementDeltas(params.threadId),
+      threadSession.translator.buildSessionSettlementDeltas(
+        params.threadId,
+        true,
+      ),
     );
   }
-  sendResult(id, await closeThreadForStop(params.threadId));
+  const startedAt = Date.now();
+  if (
+    params.keepSession === true &&
+    (await interruptRunningTurn(threadSession)) &&
+    (await stopRunningTasks(threadSession, runningTaskIds)) &&
+    !threadSession.streamEnded
+  ) {
+    // Per-turn state a new session would have started without.
+    threadSession.recoveryHintRaisedThisTurn = null;
+    restoreApprovedPlanPermissionMode(threadSession);
+    sendResult(id, { ok: true, sessionKept: true });
+    return;
+  }
+  // Claude could not be kept, or the caller wants it gone: end it, as before.
+  sendResult(
+    id,
+    await closeThreadForStop(
+      params.threadId,
+      Math.max(500, THREAD_STOP_CLOSE_TIMEOUT_MS - (Date.now() - startedAt)),
+    ),
+  );
+}
+
+/**
+ * An interrupt ends the turn's foreground command but leaves background
+ * commands, agents, and workflows running. Stop ends those too, as it did when
+ * it ended Claude. False when Claude does not confirm every one in time.
+ */
+async function stopRunningTasks(
+  threadSession: ThreadSession,
+  taskIds: readonly string[],
+): Promise<boolean> {
+  if (taskIds.length === 0) return true;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      Promise.all(
+        taskIds.map((taskId) => threadSession.session.stopTask(taskId)),
+      ).then(
+        () => true,
+        () => false,
+      ),
+      new Promise<false>((resolve) => {
+        timer = setTimeout(() => resolve(false), TURN_INTERRUPT_TIMEOUT_MS);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Ends Claude's running turn and waits for Claude to confirm it, as Esc does
+ * in Claude Code. False when Claude does not confirm in time or would start
+ * another turn by itself, so the caller ends the session instead.
+ * Windows always ends Claude's whole process tree.
+ */
+async function interruptRunningTurn(
+  threadSession: ThreadSession,
+): Promise<boolean> {
+  if (process.platform === "win32") return false;
+  // Claude stays up, so the host must hear that its pending approvals ended.
+  resolvePendingSessionWork(threadSession, THREAD_STOPPED_MESSAGE, true);
+  if (!threadSession.turnRunning) return true;
+  const result = new Promise<true>((resolve) => {
+    threadSession.interruptedTurn = () => resolve(true);
+  });
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timedOut = new Promise<false>((resolve) => {
+    timer = setTimeout(() => resolve(false), TURN_INTERRUPT_TIMEOUT_MS);
+  });
+  try {
+    // Claude still holding the prompt would run it: don't wait for that turn.
+    const nothingQueued = await Promise.race([
+      threadSession.session.interrupt().catch(() => false),
+      timedOut,
+    ]);
+    return nothingQueued && (await Promise.race([result, timedOut]));
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function localAttachmentMarker(args: {
@@ -2731,7 +2914,27 @@ function buildPromptText(input: unknown): string | undefined {
   return chunks.length > 0 ? chunks.join("\n") : undefined;
 }
 
+// Runtime notification (no id): a Stop or Archive waits behind this thread's
+// command. Mirrors THREAD_STOP_REQUESTED_METHOD in @cloudroom/agent-runtime.
+const threadStopRequestedNotificationSchema = z.object({
+  method: z.literal("thread/stopRequested"),
+  params: z.object({
+    threadId: z.string().min(1),
+    stop: z.boolean().optional(),
+  }),
+});
+
 function handleParsedMessage(parsed: unknown): void {
+  const stopRequested = threadStopRequestedNotificationSchema.safeParse(parsed);
+  if (stopRequested.success) {
+    const { threadId, stop } = stopRequested.data.params;
+    if (stop !== true) return;
+    const cancelTurnSetup =
+      threadAttachments.get(threadId)?.residentSession?.cancelTurnSetup;
+    if (cancelTurnSetup) cancelTurnSetup();
+    else stopRequestedThreadIds.add(threadId);
+    return;
+  }
   const response = decodeBridgeJsonRpcResponse(parsed);
   if (response && handleToolCallResponse(response)) {
     return;

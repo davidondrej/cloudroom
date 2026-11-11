@@ -138,6 +138,36 @@ describe("public thread compaction", () => {
     });
   });
 
+  it("compacts a literal /compact sent without the command chip (#913)", async () => {
+    await withTestHarness(async (harness) => {
+      const { host, session, thread } = seedCompactableThread(harness, {
+        providerId: "codex",
+        providerThreadId: "provider-thread-literal",
+      });
+      const responder = registerSuccessfulTurnResponder(harness, {
+        hostId: host.id,
+        sessionId: session.id,
+      });
+
+      const response = await harness.app.request(
+        `/api/v1/threads/${thread.id}/send`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            mode: "steer-if-active",
+            input: [{ type: "text", text: " /compact\n", mentions: [] }],
+          }),
+        },
+      );
+      expect(response.status).toBe(200);
+      expect(
+        responder.requests.find(({ command }) => command.type === "turn.submit")
+          ?.command,
+      ).toMatchObject({ input: createStandaloneBuiltinCompactCommandInput() });
+    });
+  });
+
   it("routes ACP agent compaction onto the bridge's /compact turn", async () => {
     await withTestHarness(async (harness) => {
       const { host, session, thread } = seedCompactableThread(harness, {

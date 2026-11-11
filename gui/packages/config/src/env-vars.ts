@@ -237,13 +237,6 @@ export const OPENAI_API_KEY_ENV = defineEnvVar<string>({
   parse: parseStringEnvValue,
 });
 
-export const BB_POSTHOG_API_KEY_ENV = defineEnvVar<string>({
-  description:
-    "PostHog project API key for anonymous usage telemetry. Telemetry is disabled when empty.",
-  name: "BB_POSTHOG_API_KEY",
-  parse: parseStringEnvValue,
-});
-
 export const BB_TELEMETRY_ENV = defineEnvVar<boolean>({
   description:
     "Anonymous usage telemetry (app starts, thread creation counts, user message counts, and plugin installs). Set to false to opt out.",
@@ -333,8 +326,6 @@ export const DEFAULT_BB_APP_URL = "";
 export const DEFAULT_BB_SERVER_BIND_HOST: ServerBindHost = BB_LOOPBACK_HOST;
 export const DEFAULT_BB_EXTERNAL_URL = "";
 export const DEFAULT_OPENAI_API_KEY = "";
-export const DEFAULT_BB_POSTHOG_API_KEY =
-  "phc_mEXHssv5WmkQNqEZEsPBmHF7yKJH5whEz6PwUDaMQfy7";
 export const DEFAULT_BB_TELEMETRY = true;
 export const DEFAULT_BB_DEV_APP_HOST = "";
 export const DEFAULT_BB_MARKETPLACE_URL =

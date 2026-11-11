@@ -1649,6 +1649,8 @@ export async function stopThreadForCurrentState(
     releaseMidTurn?: true;
     /** `room-cli thread stop` only: an idle thread's agent tree ends too (#607). */
     endProcesses?: true;
+    /** The user's Stop button: the turn ends, the agent stays up for the next message. */
+    keepSession?: true;
   },
 ): Promise<void> {
   // Work sent after the stop begins keeps its jobs (#607).
@@ -1679,7 +1681,11 @@ export async function stopThreadForCurrentState(
     if (markThreadStopRequested(deps, args)) {
       await runAwaitedThreadStopCommand(deps, {
         requireStopped: options?.requireStopped,
-        command: buildThreadStopCommand({ ...args, intent: "interrupt" }),
+        command: buildThreadStopCommand({
+          ...args,
+          intent: "interrupt",
+          keepSession: options?.keepSession,
+        }),
         hostId: args.hostId,
         threadId: thread.id,
       });

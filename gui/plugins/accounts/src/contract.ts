@@ -11,6 +11,8 @@ export const usageWindowSchema = z.object({
   label: z.string(),
   usedPercent: z.number(),
   resetsAt: z.number().nullable(),
+  // The model family ("fable") a row is for. Missing: the limit covers every model.
+  model: z.string().nullish(),
 });
 export type UsageWindow = z.infer<typeof usageWindowSchema>;
 

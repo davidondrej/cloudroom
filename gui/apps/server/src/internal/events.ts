@@ -101,6 +101,12 @@ interface NotifyInsertedEventThreadsArgs {
   insertedInputIndexes: number[];
 }
 
+/** The provider exited, or a turn it accepted will never start (#1364). */
+const RUN_FAILING_SYSTEM_ERROR_CODES = new Set([
+  "provider_process_exited",
+  "provider_turn_start_failed",
+]);
+
 function preserveTerminalProvisioningStatus(
   deps: Pick<AppDeps, "db">,
   entry: PostableEventBatchEntry,
@@ -479,7 +485,8 @@ async function applyEventEffects(
 
       if (
         event.type === "system/error" &&
-        event.code === "provider_process_exited"
+        event.code !== undefined &&
+        RUN_FAILING_SYSTEM_ERROR_CODES.has(event.code)
       ) {
         const thread = getThread(deps.db, entry.threadId);
         if (!thread) {

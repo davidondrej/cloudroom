@@ -505,7 +505,7 @@ class MacJobTests(unittest.TestCase):
                 for process in started:
                     process.kill(); process.wait()
                 for beat in beats.iterdir():
-                    with contextlib.suppress(OSError, ValueError):
+                    with contextlib.suppress(OSError, ValueError, IndexError):  # A beat file caught mid-write is empty.
                         pid = int(beat.read_text().split()[0])
                         if pid > 0:  # Chains write 0 and stop by themselves.
                             os.kill(pid, 9)

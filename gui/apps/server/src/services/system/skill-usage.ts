@@ -100,14 +100,14 @@ export function skillNameFromUse(
   return files[0]![1]!;
 }
 
-interface BuildSkillUsageArgs {
+export interface BuildSkillUsageArgs {
   days: number;
   now: number;
   utcOffsetMinutes: number;
 }
 
 /** First local day of the range, as UTC ms of local midnight. */
-function rangeStart(args: BuildSkillUsageArgs): number {
+export function rangeStart(args: BuildSkillUsageArgs): number {
   const offset = args.utcOffsetMinutes * 60_000;
   const today = Math.floor((args.now + offset) / DAY_MS) * DAY_MS;
   return today - (args.days - 1) * DAY_MS - offset;

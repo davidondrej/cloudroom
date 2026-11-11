@@ -622,6 +622,22 @@ export class SdkSession {
     this.query = undefined;
   }
 
+  /**
+   * Ends the running turn and keeps Claude alive. False when Claude still
+   * holds a message that would start a turn of its own afterwards, or is too
+   * old to say.
+   */
+  async interrupt(): Promise<boolean> {
+    this.rejectQueuedInputs("Claude turn stopped before input consumed");
+    const receipt = await this.query?.interrupt();
+    return receipt !== undefined && receipt.still_queued.length === 0;
+  }
+
+  /** Ends one command, agent, or workflow Claude runs. Fine if it already ended. */
+  async stopTask(taskId: string): Promise<void> {
+    await this.query?.stopTask(taskId);
+  }
+
   async closeGracefully(timeoutMs: number): Promise<void> {
     if (process.platform === "win32") {
       await this.stop();

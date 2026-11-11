@@ -1,4 +1,5 @@
 import {
+  keepPreviousData,
   queryOptions,
   useQueries,
   useQuery,
@@ -13,9 +14,12 @@ import type {
 import { SYSTEM_EXECUTION_OPTIONS_QUERY_KEY } from "@/hooks/queries/query-keys";
 import { permissionModeValues } from "@cloudroom/domain";
 import { z } from "zod";
+import { systemUsageAnalyticsResponseSchema } from "@cloudroom/server-contract";
 import type {
   SystemCliSkillsStatusResponse,
   SystemSkillUsageResponse,
+  SystemUsageAnalyticsQuery,
+  SystemUsageAnalyticsResponse,
   SystemWorktreeStorageResponse,
   SystemExecutionOptionsResponse,
   SystemProvidersQuery,
@@ -50,6 +54,7 @@ import {
   hostProviderCliStatusQueryKey,
   systemCliSkillsQueryKey,
   systemSkillUsageQueryKey,
+  systemUsageAnalyticsQueryKey,
   systemWorktreeStorageQueryKey,
   systemConfigQueryKey,
   systemExecutionOptionsQueryKey,
@@ -473,6 +478,46 @@ export function useSkillUsage(days: "30" | "90" | "365") {
       return usage;
     },
     initialData: () => skillUsageCache.read(cacheKey) ?? undefined,
+    // A range never opened before keeps the last range on screen until it loads.
+    placeholderData: keepPreviousData,
+    // Saved data counts as stale, so every first visit refetches.
+    initialDataUpdatedAt: 0,
+    staleTime: 60_000,
+  });
+}
+
+// One saved result per metric and range: 4 metrics, 3 ranges each.
+const usageAnalyticsCache = createLastKnownCache<SystemUsageAnalyticsResponse>({
+  prefix: "bb.usage-analytics",
+  version: "1",
+  schema: systemUsageAnalyticsResponseSchema,
+  maxEntries: 12,
+});
+
+/**
+ * One Analytics metric from thread history, in the user's time zone. Shows
+ * the last saved result at once, then refreshes it in the background.
+ */
+export function useUsageAnalytics(
+  metric: SystemUsageAnalyticsQuery["metric"],
+  days: NonNullable<SystemUsageAnalyticsQuery["days"]>,
+) {
+  const cacheKey = usageAnalyticsCache.key(metric, days);
+  return useQuery({
+    queryKey: systemUsageAnalyticsQueryKey(metric, days),
+    queryFn: async ({ signal }) => {
+      const usage = await sdk.system.usageAnalytics({
+        metric,
+        days,
+        utcOffsetMinutes: String(-new Date().getTimezoneOffset()),
+        signal,
+      });
+      usageAnalyticsCache.write(cacheKey, usage);
+      return usage;
+    },
+    initialData: () => usageAnalyticsCache.read(cacheKey) ?? undefined,
+    // A range never opened before keeps the last range on screen until it loads.
+    placeholderData: keepPreviousData,
     // Saved data counts as stale, so every first visit refetches.
     initialDataUpdatedAt: 0,
     staleTime: 60_000,

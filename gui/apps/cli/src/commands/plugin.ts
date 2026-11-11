@@ -38,7 +38,7 @@ import {
   resolvePluginBuildToolchain,
   type PluginBuildToolchain,
 } from "@cloudroom/plugin-build";
-import { runPluginCliCommand } from "../plugin-cli-proxy.js";
+import { exitWhenIdle, runPluginCliCommand } from "../plugin-cli-proxy.js";
 import { resolveBbCliVersion } from "../version.js";
 
 import { outputJson, type JsonOutputOptions } from "./helpers.js";
@@ -1815,7 +1815,7 @@ export function registerPluginCommands(
     .helpOption(false)
     .action(
       action(async (id: string, args: string[]) => {
-        process.exit(await runPluginCliCommand(getUrl(), id, args ?? []));
+        await exitWhenIdle(await runPluginCliCommand(getUrl(), id, args ?? []));
       }),
     );
 

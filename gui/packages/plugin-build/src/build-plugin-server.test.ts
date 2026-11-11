@@ -12,6 +12,7 @@ import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   buildPluginServer,
+  HOST_ZOD_SPECIFIER,
   PLUGIN_SERVER_EXTERNALS,
 } from "./build-plugin-server.js";
 import { resolvePluginBuildToolchain } from "./toolchain.js";
@@ -74,6 +75,48 @@ describe("plugin server build", () => {
 
     const bundle = await readFile(jsPath, "utf8");
     expect(bundle).toContain('from "@bb/plugin-sdk"');
+  });
+
+  it("imports the host's zod instead of bundling it, only when asked to", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "bb-plugin-server-host-zod-"));
+    tempDirs.push(dir);
+    await writeFile(
+      join(dir, "package.json"),
+      JSON.stringify({
+        name: "bb-plugin-host-zod-fixture",
+        version: "0.0.0",
+        bb: {
+          name: "Host zod fixture",
+          description: "Verifies a built-in plugin shares the host's zod.",
+          branding: { icon: "Zap" },
+          server: "./server.ts",
+        },
+      }),
+    );
+    await writeFile(
+      join(dir, "server.ts"),
+      'import { z } from "zod";\nexport default () => z.string();\n',
+    );
+    const domainDir = resolve(import.meta.dirname, "../../domain");
+    await mkdir(join(dir, "node_modules"));
+    await symlink(
+      join(domainDir, "node_modules", "zod"),
+      join(dir, "node_modules", "zod"),
+      "dir",
+    );
+
+    const shared = await buildPluginServer(
+      dir,
+      "0.0.0-test",
+      await testToolchain(),
+      { shareZodWith: domainDir },
+    );
+    const sharedBundle = await readFile(shared.jsPath, "utf8");
+    expect(sharedBundle).toContain(`from "${HOST_ZOD_SPECIFIER}"`);
+    expect(sharedBundle).not.toContain("zod/v4/classic/");
+
+    const own = await buildPluginServer(dir, "0.0.0-test", await testToolchain());
+    expect(await readFile(own.jsPath, "utf8")).toContain("zod/v4/classic/");
   });
 
   describe("SDK subpath imports", () => {

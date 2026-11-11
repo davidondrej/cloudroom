@@ -228,6 +228,7 @@ function rowLabel(label: string): { prefix: string | null; label: string } {
       .replace(/^Five-hour limit$|^5 hours$/u, "5h")
       .replace(/^Weekly limit$|^Weekly/u, "7d")
       .replace(/^Daily limit$/u, "1d")
+      .replace(/^Limit hit$/u, "limit")
       .replace(/^Plan usage$/u, "plan")
       .replace(/^On-demand spend$/u, "spend"),
   };

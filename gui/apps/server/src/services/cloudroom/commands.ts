@@ -9,7 +9,7 @@ import { z } from "zod";
 import { findCliExecutable } from "@cloudroom/process-utils";
 import { ApiError } from "../../errors.js";
 import { CloudroomClient, CloudroomConnectionError, CloudroomError, UPLOAD_PART, authRequiredMessages, type CodexAuthStatus, type SessionRecord, type VmRun, type VmRunResult } from "./client.js";
-import { CLOUD_HARNESSES, HARNESS_NAMES, appendStartProgress, endedTurn, isAcpProvider, isCloudProvider, isStreamDelta, projectFollowUp, projectInitialPrompt, projectRecord, projectRecords, retractStillQueuedPrompts, startStepRunning, type CloudProvider, type StartStep } from "./events.js";
+import { CLOUD_HARNESSES, HARNESS_NAMES, appendStartProgress, endedTurn, isAcpProvider, isCloudProvider, projectFollowUp, projectInitialPrompt, projectRecord, projectRecords, recordSaving, retractStillQueuedPrompts, STREAM_BATCH_MAX_RECORDS, STREAM_BATCH_MS, startStepRunning, type CloudProvider, type StartStep } from "./events.js";
 import { mentionsOpenAISide401 } from "./codex-errors.js";
 import { codexOutage } from "./openai-status.js";
 import { buildThreadStatusChangeMetadata } from "../threads/thread-runtime-display.js";
@@ -27,6 +27,7 @@ import { buildSuggestedBranchName } from "../threads/thread-create-helpers.js";
 import { assertValidParentThread, isParentNotifiableChildThread } from "../threads/thread-parent.js";
 import { inferThreadMetadata, queueThreadTitle } from "../threads/thread-metadata-inference.js";
 import { getLastThreadOutput } from "../threads/thread-data.js";
+import { pruneThreadEventHistory } from "../system/event-pruning.js";
 import { saveCloudImages } from "./teleport-local.js";
 import { cliPlace, reportAgentConnect, reportMacHelperDown, reportMacHelperProblem } from "./setup-telemetry.js";
 import { cloudSkills, copyLogins, copyMacGithub, copyMacLogin, importCodexLogin, importPiLogin, loginMarkers, macPiSetup, markLogin, setCopyMacLogin, setupSync, skillInCloud, stopSync, syncStatus } from "./sync.js";
@@ -190,9 +191,6 @@ export function cloudExecution(deps: Pick<AppDeps, "db">, threadId: string): "cl
 }
 
 const CHECKOUT_READ_TIMEOUT_MS = 60_000;
-// Streamed tokens wait this long and save in one transaction, like Local threads' event batches (#1248).
-const STREAM_DELTA_BATCH_MS = 100;
-
 export function isCloudThread(thread: Pick<Thread, "executionTarget">): boolean {
   return thread.executionTarget === "cloud";
 }
@@ -530,11 +528,28 @@ class CloudroomService {
   private asleep(threadId: string): void {
     this.slept.set(threadId, this.sandboxes.awakeChecks);
     this.detach(threadId);
-    const status = getThread(this.deps.db, threadId)?.status;
-    if (status && status !== "idle" && status !== "error" && !commands(this.deps.db, threadId).some(c => c.state === "sending")) {
+    const thread = getThread(this.deps.db, threadId), status = thread?.status;
+    if (thread && status && status !== "idle" && status !== "error" && !commands(this.deps.db, threadId).some(c => c.state === "sending")) {
+      // Last heard from over 6 days ago: the website may have archived the sandbox as an old run, not as a finished one.
+      if (Date.now() - thread.updatedAt < 6 * 86_400_000) this.cutOff.set(threadId, 0);
       saveStatus(this.deps.db, threadId, "idle");
       this.notify(threadId);
     }
+    if (this.cutOff.has(threadId)) void this.endedElsewhere(threadId);
+  }
+  /** Threads whose running turn this app saw cut off when their sandbox stopped, with the lookups made since. */
+  private readonly cutOff = new Map<string, number>();
+  /** A turn was running here, then its sandbox was gone: this computer slept or was offline while the thread ended, so
+   *  the rest of its stream never came, and with it the agent's own `room-cli thread archive --self`. The website
+   *  archives the sandbox of a Loop run whose agent archived it, so an archived sandbox means the thread is done, here
+   *  or on another device: archive it here too, instead of leaving it open and idle for good. One lookup per cut-off
+   *  turn, and again after each awake-list check while the sandbox is still stopping, 5 at most. */
+  private async endedElsewhere(threadId: string): Promise<void> {
+    const tries = (this.cutOff.get(threadId) ?? 0) + 1;
+    this.cutOff.set(threadId, tries);
+    const state = sandboxThread(binding(this.deps.db, threadId)?.coreUrl ?? "") === threadId ? await this.sandboxes.state(threadId).catch(() => "awake" as const) : null;
+    if (state === "archived") this.archiveRequest?.(threadId);
+    if (state !== "awake" || tries >= 5) this.cutOff.delete(threadId);
   }
   private readonly switching = new Set<string>();
   private readonly sends = new Map<string, number>();
@@ -3346,19 +3361,31 @@ class CloudroomService {
     void (async () => {
       let projecting = false;
       let connected = false;
-      // One commit per token wrote ~55 KB each. Any other record saves the waiting tokens first, so order holds,
-      // and the cursor only moves with them, so a broken stream replays them.
-      const deltas: SessionRecord[] = [];
-      let deltaTimer: ReturnType<typeof setTimeout> | undefined;
-      const saveDeltas = () => {
-        clearTimeout(deltaTimer);
-        deltaTimer = undefined;
-        if (!deltas.length || controller.signal.aborted) return;
-        const eventTypes = projectRecords(
-          this.deps.db,
-          saved.threadId,
-          deltas.splice(0),
-        );
+      // One commit per record wrote ~55 KB each. Records that can wait are saved together, in the order they came,
+      // and the cursor only moves with them, so a broken stream replays them. recordSaving says which can wait.
+      const waiting: SessionRecord[] = [];
+      let saveTimer: ReturnType<typeof setTimeout> | undefined;
+      const saveWaiting = (last?: SessionRecord) => {
+        clearTimeout(saveTimer);
+        saveTimer = undefined;
+        if (controller.signal.aborted) return;
+        const records = [...waiting.splice(0), ...(last ? [last] : [])];
+        if (!records.length) return;
+        let eventTypes: ThreadEventType[];
+        try {
+          eventTypes = projectRecords(this.deps.db, saved.threadId, records);
+        } catch (error) {
+          if (records.length === 1) throw error;
+          // One record cannot be saved. Save the ones before it, as if each had come alone, then fail on it.
+          eventTypes = [];
+          let failure: unknown;
+          for (const record of records) {
+            try { eventTypes.push(...projectRecord(this.deps.db, saved.threadId, record)); }
+            catch (inner) { failure = inner; break; }
+          }
+          if (eventTypes.length) this.notify(saved.threadId, [...new Set(eventTypes)], false);
+          throw failure ?? error;
+        }
         this.catchUps.delete(saved.threadId);
         this.setConnectionIssue(saved.threadId, "replay");
         this.notify(saved.threadId, [...new Set(eventTypes)], false);
@@ -3381,22 +3408,30 @@ class CloudroomService {
           },
         })) {
           if (controller.signal.aborted) return;
-          if (isStreamDelta(record)) {
-            deltas.push(record);
-            deltaTimer ??= setTimeout(() => {
+          const saving = recordSaving(record);
+          if (saving === "wait") {
+            waiting.push(record);
+            saveTimer ??= setTimeout(() => {
               try {
-                saveDeltas();
+                saveWaiting();
               } catch (error) {
                 this.streamBroke(saved.threadId, error);
                 this.setConnectionIssue(saved.threadId, "replay", error);
                 controller.abort();
               }
-            }, STREAM_DELTA_BATCH_MS);
+            }, STREAM_BATCH_MS);
+            // A replay after time offline sends thousands of records at once. One save for all would block too long.
+            if (waiting.length >= STREAM_BATCH_MAX_RECORDS) {
+              projecting = true;
+              saveWaiting();
+              projecting = false;
+            }
             continue;
           }
           projecting = true;
-          saveDeltas();
+          saveWaiting(saving === "now" ? record : undefined);
           projecting = false;
+          if (saving === "now") continue;
           if ((record.kind === "child" || record.kind === "child_thread") && record.data && typeof record.data === "object" && "id" in record.data && typeof record.data.id === "string") {
             await this.followChild(saved, client, record.data.id).catch((error: unknown) => this.warn("A Cloud child thread could not be shown", error, { threadId: saved.threadId }));
             if (controller.signal.aborted) return;
@@ -3435,6 +3470,9 @@ class CloudroomService {
           const eventTypes = projectRecord(this.deps.db, saved.threadId, record, outage);
           projecting = false;
           this.catchUps.delete(saved.threadId);
+          // Like a Local turn's end (turn-completed-events.ts): the finished messages hold their full text, so their
+          // streamed pieces go. Cloud never did this, and its threads kept every piece.
+          if (ended) try { pruneThreadEventHistory(this.deps, { mode: "idle", threadId: saved.threadId }); } catch (error) { this.warn("A finished Cloud turn's streamed pieces could not be cleared", error, { threadId: saved.threadId }); }
           if (held) void this.deliverChildReports();
           else if (ended) this.tellLocalParent(saved.threadId, ended, turn);
           const reply = ended ? getLastThreadOutput(this.deps.db, saved.threadId) : null;
@@ -3460,7 +3498,7 @@ class CloudroomService {
           this.notify(saved.threadId, eventTypes, ["state", "receipt", "native_identity", "storage_warning", "storage_pause", "storage_recovered"].includes(record.kind));
         }
         projecting = true;
-        saveDeltas();
+        saveWaiting();
         if (!controller.signal.aborted) {
           const ended = new CloudroomConnectionError("Cloudroom event stream ended");
           this.streamBroke(saved.threadId, ended);
@@ -3477,7 +3515,7 @@ class CloudroomService {
           this.setConnectionIssue(saved.threadId, phase, error);
         }
       } finally {
-        clearTimeout(deltaTimer);
+        clearTimeout(saveTimer);
         if (this.streams.get(saved.threadId) === controller)
           this.streams.delete(saved.threadId);
       }

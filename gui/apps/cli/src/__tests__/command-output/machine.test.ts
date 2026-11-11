@@ -219,7 +219,7 @@ describe("room-cli machine command output", () => {
 
     expect(collectLogPayloads(vi.mocked(console.log))).toEqual([
       "",
-      "Name         ID            Type        Status        Provider       Last seen\n-----------  ------------  ----------  ------------  -------------  ---------\nworkstation  host-primary  persistent  connected     user-enrolled  2m ago\n-----------  ------------  ----------  ------------  -------------  ---------\nlaptop       host-remote   persistent  disconnected  ssh            never",
+      "Name         ID            Type        Status        Provider       Last seen\n-----------  ------------  ----------  ------------  -------------  ---------\nworkstation  host-primary  persistent  connected     user-enrolled  2m ago\nlaptop       host-remote   persistent  disconnected  ssh            never",
       "",
     ]);
   });

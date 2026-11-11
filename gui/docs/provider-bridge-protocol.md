@@ -90,7 +90,10 @@ the highest common version; today the assembler speaks **v3 only**
 misses 3 — including one that predates the field — is refused at spawn with
 a legible error. `steerMode` says whether `turn/steer` is
 injected into the live model loop (`inject`) or held for the next prompt
-boundary (`queue`, the default and the conservative reading). The runtime never sends a
+boundary (`queue`, the default and the conservative reading).
+`stopsUnopenedTurns` says a `thread/stop { keepSession }` also ends a turn the
+bridge accepted but has not opened yet, so the runtime sends that stop at once
+instead of waiting for `turn/started`. The runtime never sends a
 capability-gated method to a bridge that did not advertise it. A handshake
 fact may only _narrow_ what the provider's declaration advertises (a
 declared fork affordance can turn out unavailable for this agent), never
@@ -439,7 +442,10 @@ it:
    own internal turn labels must never be forwarded as scoping.
 4. The runtime backstops the bridge with a turn-start watchdog: an accepted
    turn with no `turn/started` within a bound becomes a visible
-   `system/provider-turn-watchdog` event, not a silently hung thread.
+   `system/error` warning (`provider_turn_start_timeout`), not a silently
+   hung thread. After a much longer bound the runtime stops the thread, then
+   fails the run (`provider_turn_start_failed`). A bridge `error`
+   notification fails a pending start at once. `thread retry` resends it.
 5. `thread/stop` semantics follow its `intent`: `interrupt` settles the
    active turn as interrupted (the bridge emits the settling deltas —
    `turn.boundary { interrupted }` plus explicit closes for provider-owned
@@ -447,9 +453,14 @@ it:
    interruption (#1584). The bb turn ids these commands carry are
    reverse-mapped to the bridge's provider-native turn ids by the adapter,
    so the bridge compares its own ids.
-6. **After `thread/stop` the bridge holds nothing for the thread.** The
-   runtime detaches the thread the moment the stop is answered, whichever
-   the intent, so everything the bridge still owes for that thread — the
+6. **After `thread/stop` the bridge holds nothing for the thread**, unless
+   it answers `sessionKept: true`. The user's own Stop carries
+   `keepSession: true`: a bridge that can end the turn and everything the
+   turn left running, and still keep its provider process, answers
+   `sessionKept: true`, and the thread's next turn goes to that same process
+   with no restart. The runtime's idle reaper releases it later. Any other
+   answer means the runtime detaches the thread the moment the stop is
+   answered, whichever the intent. Either way, everything the bridge still owes for that thread — the
    interrupted turn's terminal boundary first of all — must be on the wire
    before the response, and any per-thread resource the bridge runs (a
    provider CLI child, an SDK session) is released before or with it. A

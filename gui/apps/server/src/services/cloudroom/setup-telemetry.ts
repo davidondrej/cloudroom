@@ -160,7 +160,7 @@ function updateFailureCode(lines: string[]): string {
   return "installer_failed";
 }
 
-/** Links this install to its Cloudroom account, so its PostHog events map to a person. At startup and after sign-in. */
+/** Links this install to its Cloudroom account, so its usage events map to an account. At startup and after sign-in. */
 export const linkInstall = () => { void save("install_linked", {}); };
 
 const helperProblems = new Map<string, number>();
@@ -186,11 +186,11 @@ export function reportMacHelperDown(message: string): void {
   }).catch(() => {});
 }
 
-/** Telemetry must never break setup, so building or sending an event can't throw. `postHogOnly` never reaches our database. */
-function capture(name: "setup_snapshot" | "agent_connect" | "cli_install" | "account_sign_in_failed" | "update_install" | "update_ready" | "app_crash" | "windows_install", properties: () => Record<string, TelemetryValue>, postHogOnly: Record<string, TelemetryValue> = {}): void {
+/** Telemetry must never break setup, so building or sending an event can't throw. `eventOnly` never reaches our database. */
+function capture(name: "setup_snapshot" | "agent_connect" | "cli_install" | "account_sign_in_failed" | "update_install" | "update_ready" | "app_crash" | "windows_install", properties: () => Record<string, TelemetryValue>, eventOnly: Record<string, TelemetryValue> = {}): void {
   try {
     const event: Record<string, TelemetryValue> = { ...properties(), seconds_since_first_launch: secondsSinceFirstLaunch() };
-    deps?.telemetry.capture({ name, properties: { ...event, ...postHogOnly } });
+    deps?.telemetry.capture({ name, properties: { ...event, ...eventOnly } });
     if (event.outcome === "failed" || event.reason === "connect_failed") void save(name, event);
   } catch (error) { deps?.logger.debug({ err: error, event: name }, "Setup telemetry failed"); }
 }
