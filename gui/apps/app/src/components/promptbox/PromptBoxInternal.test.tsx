@@ -982,6 +982,55 @@ describe("PromptBoxInternal controlled value sync", () => {
     }
   });
 
+  it("offers a tappable suggestion chip on coarse pointers", async () => {
+    const restoreMatchMedia = mockPointerCoarse(true);
+    try {
+      const onGhostText = vi.fn();
+      render(
+        <PromptBoxInternal
+          {...createPromptBoxProps({
+            ghostText: "Run the tests",
+            onGhostText,
+          })}
+        />,
+      );
+
+      await waitFor(() =>
+        expect(getPromptEditorElement()).toBeInstanceOf(HTMLElement),
+      );
+      expect(screen.queryByText("Tab to accept")).toBeNull();
+      fireEvent.click(screen.getByRole("button", { name: "Tap to use" }));
+
+      await waitFor(() =>
+        expect(getPromptEditorElement().textContent).toBe("Run the tests"),
+      );
+      expect(onGhostText).toHaveBeenCalledWith("accepted");
+    } finally {
+      restoreMatchMedia();
+    }
+  });
+
+  it("keeps the Tab hint passive on fine pointers", async () => {
+    const restoreMatchMedia = mockPointerCoarse(false);
+    try {
+      render(
+        <PromptBoxInternal
+          {...createPromptBoxProps({ ghostText: "Run the tests" })}
+        />,
+      );
+
+      await waitFor(() =>
+        expect(screen.getByText("Tab to accept")).toBeInstanceOf(HTMLElement),
+      );
+      expect(
+        screen.queryByRole("button", { name: "Tab to accept" }),
+      ).toBeNull();
+      expect(screen.queryByText("Tap to use")).toBeNull();
+    } finally {
+      restoreMatchMedia();
+    }
+  });
+
   it("skips passive autofocus on coarse pointers", async () => {
     const restoreMatchMedia = mockPointerCoarse(true);
     try {

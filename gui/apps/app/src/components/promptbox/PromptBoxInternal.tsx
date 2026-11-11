@@ -3158,6 +3158,13 @@ export function PromptBoxInternal({
     [scheduleRevealEditorSelection],
   );
 
+  const acceptGhostText = useCallback(() => {
+    const currentEditor = editorRef.current;
+    if (!activeGhostText || !currentEditor || currentEditor.isDestroyed) return;
+    currentEditor.chain().focus().insertContent(activeGhostText).run();
+    onGhostText?.("accepted");
+  }, [activeGhostText, onGhostText]);
+
   const handleEditorKeyDown = useCallback(
     (event: KeyboardEvent, isOriginalIPadHardwareEnter = false): boolean => {
       if (
@@ -3274,8 +3281,7 @@ export function PromptBoxInternal({
         currentEditor?.isEmpty
       ) {
         event.preventDefault();
-        currentEditor.chain().focus().insertContent(activeGhostText).run();
-        onGhostText?.("accepted");
+        acceptGhostText();
         return true;
       }
 
@@ -3396,7 +3402,7 @@ export function PromptBoxInternal({
     [
       onEnterKey,
       activeGhostText,
-      onGhostText,
+      acceptGhostText,
       activeHistoryIndex,
       activeSuggestions,
       activeTriggerKind,
@@ -3599,8 +3605,13 @@ export function PromptBoxInternal({
                 showCompactLayout
                   ? undefined
                   : activeGhostText
-                    ? "Tab to accept"
+                    ? isPointerCoarse
+                      ? "Tap to use"
+                      : "Tab to accept"
                     : placeholderHint
+              }
+              onPlaceholderHintClick={
+                activeGhostText && isPointerCoarse ? acceptGhostText : undefined
               }
               minHeight={minHeight}
               layout={editorLayout}
