@@ -48,6 +48,19 @@ export function githubRepository(remote: string | null): string | null {
   return repository ? `https://github.com/${repository}` : null;
 }
 
+/** A remote a cloud sandbox can try to clone: GitHub as above, or any other URL-form remote (for example `https://` on
+ *  another host or `entire://` through a git remote helper the user's cloud setup installed). Its credentials are the
+ *  sandbox's own, never the Mac's GitHub login. Local paths, `file://`, scp-style SSH remotes and
+ *  URLs carrying credentials never qualify. */
+export function cloneableRepository(remote: string | null): string | null {
+  const github = githubRepository(remote);
+  if (github) return github;
+  const url = remote?.trim() ?? "";
+  // No `user@` or `user:password@` part: a credential in the remote must never reach the sandbox or its logs.
+  if (!/^[a-z][a-z0-9+.-]*:\/\/[^/\s@]+\/\S+$/i.test(url) || /^file:/i.test(url)) return null;
+  return url;
+}
+
 export function localProjectPath(deps: Deps, projectId: string): string | undefined {
   const sources = listProjectSourcesByProjectIds(deps.db, [projectId]).filter((source) => existsSync(source.path));
   return (sources.find((source) => source.isDefault) ?? sources[0])?.path;
@@ -72,7 +85,7 @@ export async function localProjectNote(deps: Deps, projectId: string): Promise<s
   const path = project ? localProjectPath(deps, project.id) : undefined;
   if (!project || !path) return undefined;
   const remote = await projectRemote(deps, project, path);
-  if (githubRepository(remote) || (await smallProject(path))) return undefined;
+  if (cloneableRepository(remote) || (await smallProject(path))) return undefined;
   // A project with another remote (GitLab, Azure) keeps it, so pushing to GitHub wouldn't help; Teleport uploads it.
   const rest = macAccessSupported
     ? `The rest is on the user's ${COMPUTER} at \`${path}\`. Pull only what the task needs with \`room-cli mac pull\`.`
@@ -113,7 +126,7 @@ export async function planProjectCopyOrThrow(deps: Deps, client: CloudroomClient
   if (!project) return null;
   if (copying.has(key)) throw new Error("Another copy is filling this project folder.");
   const path = localPath ?? localProjectPath(deps, project.id) ?? null;
-  const repository = githubRepository(await projectRemote(deps, project, path));
+  const repository = cloneableRepository(await projectRemote(deps, project, path));
   if (!path && !repository) return null;
   const existing = await client.workspace(workspace, signal);
   // Exit 1 means files are there; any other end of the check (a signal, a missing shell) says nothing about the folder.
@@ -191,7 +204,7 @@ async function run(deps: Deps, client: CloudroomClient, job: ProjectCopyJob, rep
   if (job.clone && job.repository) {
     const branch = job.teleport && job.localPath ? (await git(job.localPath, ["rev-parse", "--abbrev-ref", "HEAD"]))?.trim() : job.branch;
     cloneError = await clone(deps, client, target, job.repository, branch);
-    // A short pause first, since an immediate retry often hits the same GitHub timeout (#555).
+    // A short pause first, since an immediate retry often hits the same host timeout (#555).
     if (cloneError) cloneError = await new Promise((resolve) => setTimeout(resolve, 10_000)).then(() => clone(deps, client, target, job.repository!, branch));
   }
   const cloned = job.clone && !cloneError;
@@ -213,7 +226,7 @@ async function run(deps: Deps, client: CloudroomClient, job: ProjectCopyJob, rep
       await rm(folder, { recursive: true, force: true });
     }
   }
-  if (cloneError) throw new Error(`The GitHub clone failed${scope === "all" && !partial ? ", so your files were copied without Git history" : ""}. ${cloneError}`);
+  if (cloneError) throw new Error(`The ${githubRepository(job.repository) ? "GitHub clone" : "clone"} failed${scope === "all" && !partial ? ", so your files were copied without Git history" : ""}. ${cloneError}`);
   return partial;
 }
 
@@ -266,7 +279,10 @@ async function git(cwd: string, args: string[]): Promise<string | null> {
 /** Returns null once the clone is in place, or why it failed. gc.auto=0: auto-packing during `git log -S` in a blobless
  * clone fills the sandbox disk with deleted packs the search still holds open. */
 async function clone(deps: Deps, client: CloudroomClient, target: string, repository: string, branch?: string): Promise<string | null> {
-  const token = (await copyMacGithub(deps))
+  // Other hosts use the sandbox's own Git setup (a remote helper and credentials from the user's cloud setup), so
+  // the Mac's GitHub login is neither sent nor configured for them.
+  const github = githubRepository(repository) !== null;
+  const token = github && (await copyMacGithub(deps))
     ? await exec("gh", ["auth", "token", "--hostname", "github.com"], {
         timeout: 15_000,
       }).then(
@@ -278,9 +294,10 @@ async function clone(deps: Deps, client: CloudroomClient, target: string, reposi
   const result = await client.runOnVm({
     command: [
       "export GIT_TERMINAL_PROMPT=0",
+      github ? "" : 'export PATH="$HOME/.local/bin:$PATH"',
       token ? "{ { gh auth status --hostname github.com || gh auth login --hostname github.com --with-token; } && gh auth setup-git --hostname github.com; } >/dev/null 2>&1 || true" : "",
       `rm -rf -- ${temporary}`,
-      `git clone --quiet --filter=blob:none -c gc.auto=0 -- ${quote(repository)} ${temporary} || { printf '\\035'; timeout 10 gh api user --jq .login 2>/dev/null; exit 1; }`,
+      `git clone --quiet --filter=blob:none -c gc.auto=0 -- ${quote(repository)} ${temporary} || { ${github ? "printf '\\035'; timeout 10 gh api user --jq .login 2>/dev/null; " : ""}exit 1; }`,
       branch && branch !== "HEAD" ? `git -C ${temporary} checkout --quiet ${quote(branch)} 2>/dev/null || true` : "",
       `mkdir -p -- ${quote(target)} && (shopt -s dotglob && mv -n -- ${temporary}/* ${quote(target)}/) || true`,
       `rm -rf -- ${temporary}`,
@@ -293,6 +310,7 @@ async function clone(deps: Deps, client: CloudroomClient, target: string, reposi
   const stdout = Buffer.from(result.stdout, "hex");
   const mark = stdout.indexOf(0x1d);
   const login = mark < 0 ? "" : stdout.subarray(mark + 1).toString().trim();
+  if (!github) return `Check that the cloud setup installs any Git remote helper and credentials this remote needs (\`${repository.split("://")[0]}://\`). Git said: ${error}`;
   return `${cloneHint(error, /^[A-Za-z0-9-]{1,39}$/.test(login) ? login : "")} Git said: ${error}`;
 }
 
