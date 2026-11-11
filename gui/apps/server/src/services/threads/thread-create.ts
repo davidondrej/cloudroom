@@ -1,4 +1,8 @@
-import { COMPUTER, reasoningLevelSchema } from "@cloudroom/domain";
+import {
+  COMPUTER,
+  personalProjectAllowsEnvironment,
+  reasoningLevelSchema,
+} from "@cloudroom/domain";
 import { cloudExecution, cloudroom, isCloudThread } from "../cloudroom/commands.js";
 import { prepareLocalFork, prepareLocalForkCode } from "../cloudroom/teleport-local.js";
 import { FORK_HARNESSES, forkModel, forkTurn, prepareLocalForkWorktree } from "../cloudroom/fork.js";
@@ -135,7 +139,9 @@ interface ResolveCatalogExecutionDefaultsArgs {
 async function loadCatalogDefaultForProvider(
   deps: ThreadCreateDeps,
   args: { cwd?: string; hostId: string; model?: string; providerId: string },
-): Promise<ProjectExecutionDefaults | ApiError> {
+): Promise<
+  { defaults: ProjectExecutionDefaults; fallback: boolean } | ApiError
+> {
   const catalog = await resolveSystemProviderModels(deps, {
     ...(args.cwd !== undefined ? { cwd: args.cwd } : {}),
     hostId: args.hostId,
@@ -149,13 +155,17 @@ async function loadCatalogDefaultForProvider(
       ? providerSetupError(deps, loadError)
       : null;
   if (setup !== null) return setup;
-  if (catalog.modelLoadError !== null) {
+  // A failed or slow listing starts on the fallback or last listed models (#1399), as a switch does (#1291).
+  const fallback =
+    (loadError?.code === "timeout" || loadError?.code === "failed") &&
+    catalog.models.length > 0;
+  if (loadError !== null && !fallback) {
     return new ApiError(
       503,
       "model_catalog_unavailable",
       `Unable to load ${args.providerId} models to resolve the default. Try again once the host is connected and the provider is ready.`,
       {
-        details: catalog.modelLoadError,
+        details: loadError,
         retryable: true,
       },
     );
@@ -174,10 +184,13 @@ async function loadCatalogDefaultForProvider(
       true,
     );
   }
-  return buildProviderThreadExecutionDefaults(deps.providerRegistry, {
-    providerId: args.providerId,
-    model: defaultModel,
-  });
+  return {
+    defaults: buildProviderThreadExecutionDefaults(deps.providerRegistry, {
+      providerId: args.providerId,
+      model: defaultModel,
+    }),
+    fallback,
+  };
 }
 
 async function resolveCatalogExecutionDefaults(
@@ -196,7 +209,9 @@ async function resolveCatalogExecutionDefaults(
       model: args.requestedModel,
       providerId: args.providerId,
     }).catch(() => null);
-    return result instanceof ApiError ? null : result;
+    return result instanceof ApiError || result?.fallback
+      ? null
+      : (result?.defaults ?? null);
   }
 
   if (args.hostId === null) {
@@ -209,17 +224,23 @@ async function resolveCatalogExecutionDefaults(
 
   const candidates = [args.providerId, ...args.providerFallbackCandidates];
   let lastError: ApiError | null = null;
+  let fallback: ProjectExecutionDefaults | null = null;
   for (const providerId of candidates) {
     const result = await loadCatalogDefaultForProvider(deps, {
       ...(args.cwd !== undefined ? { cwd: args.cwd } : {}),
       hostId: args.hostId,
       providerId,
     });
-    if (!(result instanceof ApiError)) {
-      return result;
+    if (result instanceof ApiError) {
+      lastError = result;
+    } else if (!result.fallback) {
+      return result.defaults;
+    } else {
+      // A provider that lists its models beats another one's fallback.
+      fallback ??= result.defaults;
     }
-    lastError = result;
   }
+  if (fallback !== null) return fallback;
   throw lastError;
 }
 
@@ -263,8 +284,8 @@ async function withCloudDefaultReasoningLevel(
         )
         .catch(() => null)
     : null;
-  return defaults && !(defaults instanceof ApiError)
-    ? { ...request, reasoningLevel: defaults.reasoningLevel }
+  return defaults && !(defaults instanceof ApiError) && !defaults.fallback
+    ? { ...request, reasoningLevel: defaults.defaults.reasoningLevel }
     : request;
 }
 
@@ -383,17 +404,7 @@ function assertProjectWorkspaceCompatibility(
 ): void {
   const personalWorkspace = requestUsesPersonalWorkspace(request);
   if (project.kind === "personal") {
-    if (
-      request.environment.type !== "reuse" &&
-      request.environment.type !== "provider" &&
-      request.environment.type !== "project-default" &&
-      !(
-        request.environment.type === "host" &&
-        request.environment.workspace.type === "unmanaged" &&
-        request.environment.workspace.path === null
-      ) &&
-      !personalWorkspace
-    ) {
+    if (!personalProjectAllowsEnvironment(request.environment)) {
       throw new ApiError(
         400,
         "invalid_request",

@@ -29,7 +29,10 @@ export const experimental_providerBridge = experimental_defineProviderBridge({
 it content-addressed and hands hosts `{pluginId, digest}`; the daemon
 downloads, verifies, caches and runs it — through a bootstrap that owns
 everything outside the protocol: argv, the plugin-scoped `dataDir`/`tempDir`
-above, the bounded stdin framing, and the signals. A bridge that started
+above, the bounded stdin framing, and the signals. No other OS account can
+write to `tempDir`: it is in the OS temp folder only when that folder is
+private to the account (macOS, Windows), and otherwise in
+`<dataDir>/.cloudroom-tmp`, because Linux's `/tmp` is shared. A bridge that started
 itself could not be imported by a test, and could not share an artifact with a
 host RPC entry. First-party bridges use exactly this path —
 `plugins/provider-codex/src/bridge/bridge.ts` is the largest worked example,

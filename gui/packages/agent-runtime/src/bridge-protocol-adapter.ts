@@ -61,6 +61,7 @@ export interface BridgeProtocolAdapter {
   parseModelListResult(result: unknown): {
     models: AvailableModel[];
     selectedOnlyModels: AvailableModel[];
+    warnings: string[];
   };
   translateEvent(event: ProviderRuntimeEvent): ThreadEvent[];
   decodeRecoveryHint(event: ProviderRuntimeEvent): ProviderRecoveryHint | null;

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useSetAtom } from "jotai";
 import { cn } from "@cloudroom/shared-ui/lib/utils";
 import { THREAD_JUMP_APP_COMMAND_IDS } from "@cloudroom/domain";
 import { useNavigate } from "react-router-dom";
@@ -48,6 +49,7 @@ import {
 } from "@/components/commands/AppCommandProvider";
 import { useRouteState } from "@/hooks/useRouteState";
 import { SidebarNavigationRegion } from "./SidebarNavigationRegion";
+import { closeSidebarPurposeCardAtom } from "@/components/thread/ThreadPurposeHoverCard";
 
 const NEW_THREAD_PANE_CONTENT = { kind: "new-thread" } as const;
 
@@ -75,6 +77,7 @@ export function AppSidebar({
     label: "New thread",
   });
   const closeOnMobile = useCloseMobileSidebar();
+  const closePurposeCard = useSetAtom(closeSidebarPurposeCardAtom);
   const { isCompactViewport, openMobile } = useSidebar();
   const [compactCustomizeMode, setCompactCustomizeMode] = useState(false);
   const [threadShortcutKeysById, setThreadShortcutKeysById] = useState<
@@ -277,6 +280,8 @@ export function AppSidebar({
         className={cn(isCompactCustomizeModeActive && "hidden")}
         aria-hidden={isCompactCustomizeModeActive ? true : undefined}
         inert={isCompactCustomizeModeActive ? true : undefined}
+        onPointerLeave={closePurposeCard}
+        onScroll={closePurposeCard}
       >
         <PluginThreadList
           replacement={threadListReplacement}

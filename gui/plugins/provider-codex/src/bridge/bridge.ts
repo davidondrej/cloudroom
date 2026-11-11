@@ -1,6 +1,9 @@
 #!/usr/bin/env node
 
 import { createHash } from "node:crypto";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { prepareCodexGuard } from "@get-bb/plugin-sdk/internal/command-guard";
 import {
@@ -488,6 +491,14 @@ const sessionsByBbThreadId = new Map<string, CodexBridgeSession>();
 const maintenanceConnections = new Set<CodexAppServerConnection>();
 let sessionSerialCounter = 0;
 let configuredSkillExtraRoots: string[] | null = null;
+let bridgeTempDir: string | null = null;
+
+// The worker entry's start() supplies a temp folder no other account can
+// write to. Tests that import this module directly get their own folder.
+function commandGuardDir(): string {
+  bridgeTempDir ??= mkdtempSync(join(tmpdir(), "bb-codex-bridge-"));
+  return join(bridgeTempDir, "command-guard");
+}
 
 const LEGACY_BRIDGE_MINTED_ID_PATTERN = /^bt[0-9a-f]{8}-\d+-/;
 
@@ -1163,7 +1174,7 @@ async function constructThreadSession(
           preparedGitRoots.config ?? {},
           settings?.config?.shell_environment_policy,
         ),
-        ...(commandGuardEnabled ? prepareCodexGuard() : {}),
+        ...(commandGuardEnabled ? prepareCodexGuard(commandGuardDir()) : {}),
       },
       ...(dynamicTools && dynamicTools.length > 0 ? { dynamicTools } : {}),
     };
@@ -2194,6 +2205,9 @@ export const experimental_killAllChildrenForTests = killAllChildren;
 
 export const experimental_providerBridge = experimental_defineProviderBridge({
   handleLine,
+  start: (context) => {
+    bridgeTempDir = context.tempDir;
+  },
   onClose: () => {
     killAllChildren();
     process.exit(0);

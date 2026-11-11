@@ -109,9 +109,9 @@ recorded and retries on the core one-minute interval until it succeeds.
 Machine registration does not contribute environment-picker entries. Register
 an environment composition with required `id`, `displayName`, `icon`,
 `machineProviderId` and `environmentProviderId`
-to offer a new machine plus a concrete environment. Modal combines its machine
+to offer a new machine plus a concrete environment. A composition can combine its machine
 with `project-checkout`; core prepares the missing checkout. CLI users select
-`--environment-provider modal-sandbox` without machine selectors and may pass
+`--environment-provider <composition-id>` without machine selectors and may pass
 `--machine-inputs <json>` for the composition's machine inputs. Explicit
 `--new-machine <id>` always requires `--environment-provider <id>`.
 
@@ -198,7 +198,7 @@ creation failure. Reading does not renew a command; regenerate expired setup exp
 
 Own idle timing with plugin storage and background schedules. Subscribe to
 `experimental_thread.events` and `experimental_terminal.input` to extend your deadline.
-Modal extends its deadline for starting threads before environment attachment by
+For example, extend the deadline for starting threads before environment attachment by
 matching the thread to its machine launch key, and for starting and active threads
 after attachment through the environment host.
 

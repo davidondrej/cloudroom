@@ -28,7 +28,7 @@ For Cloud, use `room-cli thread spawn --project PROJECT --machine cloud --provid
 - List machine providers with `room-cli machine providers`. Create a
   new provider machine with
   `room-cli thread spawn --new-machine <provider-id> --environment-provider <id>`.
-  For Modal's composed environment, use `--environment-provider modal-sandbox`
+  For a composed environment, use `--environment-provider <composition-id>`
   without machine selectors; `--machine-inputs <json>` configures that composed
   machine with optional configured names such as
   `{"preset":"Large","image":"Node 22"}`. These inputs are persisted and

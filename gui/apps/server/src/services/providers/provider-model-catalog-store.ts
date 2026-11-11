@@ -72,6 +72,11 @@ export interface ProviderModelCatalogStore {
     deps: WorkSessionDeps,
     args: { hostId: string; provider: ProviderInfo },
   ): Promise<void>;
+  /** Models this host last listed, even under an older fingerprint (#1399). */
+  lastListedModels(
+    deps: WorkSessionDeps,
+    args: { hostId: string; provider: ProviderInfo; cwd: string | null },
+  ): AvailableModel[];
   markProviderStale(hostId: string, providerId: string): void;
   markAllStale(): void;
   forgetHost(deps: WorkSessionDeps, hostId: string): void;
@@ -161,6 +166,24 @@ function parseStoredModels(json: string): AvailableModel[] | null {
   } catch {
     return null;
   }
+}
+
+function catalogKey(args: {
+  hostId: string;
+  provider: ProviderInfo;
+  cwd: string | null;
+}): ProviderModelCatalogRowKey {
+  return {
+    hostId: args.hostId,
+    providerId: args.provider.id,
+    scopeKey:
+      args.cwd !== null &&
+      providerModelCatalogDependsOnWorkspace(
+        args.provider.capabilities.modelCatalogScope,
+      )
+        ? args.cwd
+        : "",
+  };
 }
 
 function currentState(entry: CatalogEntry, fingerprint: string) {
@@ -529,17 +552,7 @@ export function createProviderModelCatalogStore(options: {
         args.provider.id,
       );
       const fingerprint = catalogFingerprint(args.provider.id, bridgeLaunch);
-      const entry = loadEntry(deps, {
-        hostId: args.hostId,
-        providerId: args.provider.id,
-        scopeKey:
-          args.cwd !== null &&
-          providerModelCatalogDependsOnWorkspace(
-            args.provider.capabilities.modelCatalogScope,
-          )
-            ? args.cwd
-            : "",
-      });
+      const entry = loadEntry(deps, catalogKey(args));
       if (args.access.kind === "restart") {
         const previousGood = entry.good;
         await (entry.refresh?.restart &&
@@ -613,6 +626,10 @@ export function createProviderModelCatalogStore(options: {
         return;
       }
       await startRefresh(deps, entry, fingerprint, bridgeLaunch);
+    },
+
+    lastListedModels(deps, args) {
+      return loadEntry(deps, catalogKey(args)).good?.models ?? [];
     },
 
     markProviderStale(hostId, providerId) {

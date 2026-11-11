@@ -515,6 +515,10 @@ export type ThreadSearchResponse = z.infer<typeof threadSearchResponseSchema>;
 
 export const threadResponseSchema = threadWithRuntimeSchema.extend({
   activeBackgroundAgentCount: z.number().int().nonnegative(),
+  // Background commands and workflows still running; an idle Claude thread
+  // wakes itself when they finish, so its turn's text isn't final (#1371).
+  activeBackgroundCommandCount: z.number().int().nonnegative().optional(),
+  activeWorkflowCount: z.number().int().nonnegative().optional(),
   canSpawnChild: z.boolean(),
   // How many messages are waiting on this thread's queue right now — waiting on
   // the clock, on the running turn, on provisioning, on an interaction, or on

@@ -40,6 +40,7 @@ import {
   signalRequestArgs,
   type CreateSdkAreaArgs,
 } from "./common.js";
+import type { SdkRequestInit } from "../response.js";
 
 export interface SystemAttentionArgs {
   signal?: AbortSignal;
@@ -61,6 +62,9 @@ export interface SystemVersionArgs {
   force?: boolean;
   signal?: AbortSignal;
 }
+
+// The server's worst case: two attempts of up to 3 minutes each, then the 110 s website backup (#1338).
+const VOICE_TRANSCRIPTION_TIMEOUT_MS = 8 * 60_000;
 
 export interface SystemVoiceTranscriptionArgs {
   file: Blob;
@@ -293,12 +297,14 @@ export function createSystemArea(args: CreateSdkAreaArgs): SystemArea {
       form.set("file", input.file);
       if (input.prompt !== undefined) form.set("prompt", input.prompt);
       const baseUrl = transport.baseUrl.replace(/\/$/u, "");
+      const init: SdkRequestInit = {
+        method: "POST",
+        body: form,
+        signal: input.signal,
+        timeoutMs: VOICE_TRANSCRIPTION_TIMEOUT_MS,
+      };
       const response = await transport.resolve(
-        transport.fetch(`${baseUrl}/api/v1/system/voice-transcription`, {
-          method: "POST",
-          body: form,
-          signal: input.signal,
-        }),
+        transport.fetch(`${baseUrl}/api/v1/system/voice-transcription`, init),
       );
       return systemVoiceTranscriptionResponseSchema.parse(
         await response.json(),

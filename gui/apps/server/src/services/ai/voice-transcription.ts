@@ -20,6 +20,8 @@ import { Type } from "@earendil-works/pi-ai";
 interface TranscribeVoiceInputArgs {
   file: File;
   prompt?: string;
+  /** Came through the Connect relay (phone), which gives the Mac only 30 s to answer. */
+  relayed?: boolean;
 }
 
 type OptionalJsonValue = JsonValue | null | undefined;
@@ -28,7 +30,18 @@ const OPENAI_TRANSCRIPTION_PROVIDER = "openai";
 const VOICE_TRANSCRIPTION_MAX_BYTES = 25 * 1024 * 1024;
 const AI_SERVICE_VOICE_MAX_BYTES = 5 * 1024 * 1024;
 const BACKUP_VOICE_MAX_BYTES = 4 * 1024 * 1024;
+// Per attempt: 10 s plus 30 s per MB, at most 3 minutes. A 7-minute (3.7 MB) recording gets about 2 minutes (#1338).
+// Relayed requests keep 10 s per attempt, as before, so a fast backup still answers inside the relay's 30 s.
+const VOICE_TIMEOUT_MS_PER_MB = 30_000;
+const VOICE_MAX_TIMEOUT_MS = 180_000;
 const voiceTranscriptionSchema = Type.Object({ text: Type.String() });
+
+function voiceTimeoutMs(args: TranscribeVoiceInputArgs): number {
+  const baseMs = INFERENCE_POLICY.voiceTranscription.timeoutMs;
+  if (args.relayed === true) return baseMs;
+  const perMb = (VOICE_TIMEOUT_MS_PER_MB * args.file.size) / (1024 * 1024);
+  return Math.min(VOICE_MAX_TIMEOUT_MS, Math.round(baseMs + perMb));
+}
 
 function parseTranscriptionModel(model: string): ProviderModelInfo {
   return parseProviderModelConfig({
@@ -145,6 +158,7 @@ async function transcribeWithAiService(
   const transcriptionModel = `${modelInfo.provider}/${modelInfo.modelId}`;
   const transcription = await inferenceCompleteWithFallback(deps, {
     ...INFERENCE_POLICY.voiceTranscription,
+    timeoutMs: voiceTimeoutMs(args),
     complete: async (model, attemptPrompt, timeoutMs) => {
       const attemptModel = parseTranscriptionModel(model);
       const result = await service.transcribeVoice(
@@ -220,7 +234,7 @@ async function transcribeWithOpenAi(
   const timer = setTimeout(() => {
     timedOut = true;
     abortController.abort();
-  }, INFERENCE_POLICY.voiceTranscription.timeoutMs);
+  }, voiceTimeoutMs(args));
   timer.unref();
 
   let response: Response;

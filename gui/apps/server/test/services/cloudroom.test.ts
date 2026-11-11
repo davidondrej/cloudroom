@@ -1321,6 +1321,11 @@ it.each(["codex", "pi"])("edits and cancels queued Cloud %s prompts, then steers
     await expect.poll(() => service.queue(thread.id)).toEqual([]);
     expect((await request(`/threads/${thread.id}/send`, { requestId: "steer-1", mode: "steer", input: [{ type: "text", text: "course correct", mentions: [] }] })).status).toBe(200);
     await expect.poll(() => commands.some((item) => (item as { url?: string }).url?.endsWith("/steer"))).toBe(true);
+    // Core steers text only, so a steer's files are uploaded first and named by their sandbox paths.
+    expect((await request(`/threads/${thread.id}/send`, { requestId: "steer-files", mode: "steer", input: input("see files") })).status).toBe(200);
+    await expect.poll(() => commands.find((item) => (item as { request_id?: string }).request_id === "steer-files")).toMatchObject({
+      text: expect.stringMatching(/see files[\s\S]*\[Attached image: \/code\/test\/\.cloudroom\/attachments\/steer-filesa0\/image\.png\]\n\[Attached file: \/code\/test\/\.cloudroom\/attachments\/steer-filesa1\/note\.txt\]$/),
+    });
     // A refused steer, here because its turn just ended, is queued instead of blocking every command behind it.
     expect((await request(`/threads/${thread.id}/send`, { requestId: "steer-late", mode: "steer", input: [{ type: "text", text: "too late", mentions: [] }] })).status).toBe(200);
     await expect.poll(() => commands.some((item) => { const sent = item as { url?: string; text?: string }; return Boolean(sent.url?.endsWith("/prompts") && sent.text?.includes("too late")); })).toBe(true);

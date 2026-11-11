@@ -36,7 +36,7 @@ import { archiveThreadAndChildren } from "../threads/thread-archive.js";
 import { assertValidParentThread } from "../threads/thread-parent.js";
 import { queueChildThreadTurnNotificationBestEffort } from "../threads/child-thread-notifications.js";
 import { reportBug } from "./bug-reports.js";
-import { continueShare, shareThread, stopSharing, threadShare } from "./shares.js";
+import { continueShare, shareClicked, shareThread, stopSharing, threadShare } from "./shares.js";
 import { connectAccount, registerConnect } from "./connect-relay.js";
 import { getGateAuthKind } from "../../request-context.js";
 import { noteActiveMinute, timeInApp } from "./time-in-app.js";
@@ -50,7 +50,7 @@ import { projectSuggestion } from "./project-nudge.js";
 import { promptSuggestion, promptSuggestionEvent } from "../threads/prompt-suggestion.js";
 import { readUiPreferences } from "../system/ui-preferences.js";
 import { forgetCloudAccountSwitch, noteCloudAccountSwitch } from "./account-switches.js";
-import { ACTIVATION_STEPS, CLOUD_CHOICE_ACTIONS, CLOUD_CHOICE_REASONS, POPUP_DETAILS, POPUPS, SETUP_ACTIONS, SETUP_AGENTS, SETUP_DETAILS, SETUP_STEPS, STARTER_PROMPTS, UPGRADE_PROMPTS } from "../system/telemetry.js";
+import { ACTIVATION_STEPS, CLOUD_CHOICE_ACTIONS, CLOUD_CHOICE_REASONS, POPUP_DETAILS, POPUPS, SETUP_ACTIONS, SETUP_AGENTS, SETUP_DETAILS, SETUP_STEPS, SHARE_CLICKS, STARTER_PROMPTS, UPGRADE_PROMPTS } from "../system/telemetry.js";
 
 const SAFE_SETTINGS_SEARCH = /^(?=.{2,40}$)\p{L}+(?: \p{L}+){0,3}$/u;
 // A Cloud loop run's request (auto_<loop>_<due>), the website's name for the run that starts its thread.
@@ -97,10 +97,11 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: Plugin
   });
   app.get("/api/v1/cloudroom/threads/:id/share", async context => context.json(await threadShare(deps, context.req.param("id"))));
   app.post("/api/v1/cloudroom/threads/:id/share", async context => {
-    const { action } = z.object({ action: z.enum(["save", "stop"]) }).strict().parse(await context.req.json());
+    const { action } = z.object({ action: z.enum(["save", "stop", ...SHARE_CLICKS]) }).strict().parse(await context.req.json());
     const id = context.req.param("id");
     if (action === "save") return context.json(await shareThread(deps, id));
-    await stopSharing(deps, id);
+    if (action === "stop") await stopSharing(deps, id);
+    else await shareClicked(deps, id, action);
     return context.json(null);
   });
   app.get("/api/v1/cloudroom/connect", async context => context.json(await connectAccount(deps)));

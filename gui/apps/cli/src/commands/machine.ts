@@ -82,6 +82,24 @@ async function waitForMachineLifecycle(args: {
   return host;
 }
 
+// Removal can stop at a failed cleanup, e.g. while the machine is offline (#1307).
+async function reportMachineCleanup(
+  sdk: ReturnType<typeof createCliBbSdk>,
+  hostId: string,
+  done: string,
+): Promise<void> {
+  const host = await sdk.hosts.get({ hostId }).catch(() => null);
+  if (
+    host?.lifecycle.phase === "removing" &&
+    host.lifecycle.teardown?.status === "failed"
+  ) {
+    throw new Error(
+      `Machine ${hostId} cleanup failed: ${host.lifecycle.message ?? "unknown error"}\nRetry with: room-cli machine retry-cleanup ${hostId}`,
+    );
+  }
+  console.log(done);
+}
+
 function parseProviderCliKey(value: string): string {
   const providerId = value.trim();
   if (providerId.length === 0)
@@ -482,7 +500,7 @@ export function registerMachineCommands(
           return;
         const result = await sdk.hosts.delete({ hostId });
         if (outputJson(opts, result)) return;
-        console.log(`Machine ${hostId} removed`);
+        await reportMachineCleanup(sdk, hostId, `Machine ${hostId} removed`);
       }),
     );
 
@@ -585,7 +603,11 @@ export function registerMachineCommands(
         });
         const result = await sdk.hosts.experimental_retryCleanup({ hostId });
         if (outputJson(opts, result)) return;
-        console.log(`Machine ${hostId} cleanup retried`);
+        await reportMachineCleanup(
+          sdk,
+          hostId,
+          `Machine ${hostId} cleanup retried`,
+        );
       }),
     );
 

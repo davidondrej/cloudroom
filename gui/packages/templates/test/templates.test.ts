@@ -88,6 +88,9 @@ describe("@cloudroom/templates", () => {
     expect(systemPrompt("local", true) + systemPrompt("cloud", true)).not.toMatch(/room-cli mac (pull|push)|run it on the user's computer/u);
     expect(systemPrompt("local", true)).not.toContain("read the `computer-use` skill");
     expect(systemPrompt("cloud", true)).toContain("Save lasting skills in the repo.");
+    // #1334: Windows Cloud threads ask the user instead of trying `mac run`.
+    expect(systemPrompt("cloud", true)).toContain("Cloud threads can't reach the user's Windows computer.");
+    expect(systemPrompt("local", true) + systemPrompt("cloud")).not.toContain("Windows computer");
   });
 
   it("renders child thread needs-attention messages with blocker summaries", () => {

@@ -326,6 +326,26 @@ async function waitForProvisionRetry(
   }
 }
 
+async function listRemotes(
+  sourcePath: string,
+  signal: AbortSignal | undefined,
+): Promise<string[]> {
+  return (
+    await runGit(["remote"], { cwd: sourcePath, ...signalOptions(signal) })
+  ).stdout
+    .split("\n")
+    .map((remote) => remote.trim())
+    .filter(Boolean);
+}
+
+function isMissingRemoteRef(error: unknown): boolean {
+  return (
+    error instanceof WorkspaceError &&
+    error.code === "git_command_failed" &&
+    error.message.includes("couldn't find remote ref")
+  );
+}
+
 async function resolveRemoteBaseBranch(
   sourcePath: string,
   baseBranch: string,
@@ -335,16 +355,7 @@ async function resolveRemoteBaseBranch(
     return null;
   }
 
-  const remotes = (
-    await runGit(["remote"], {
-      cwd: sourcePath,
-      ...(signal !== undefined ? { signal } : {}),
-    })
-  ).stdout
-    .split("\n")
-    .map((remote) => remote.trim())
-    .filter(Boolean);
-  const matchingRemotes = remotes
+  const matchingRemotes = (await listRemotes(sourcePath, signal))
     .filter(
       (remote) =>
         baseBranch.startsWith(`${remote}/`) &&
@@ -463,6 +474,22 @@ export async function fetchRemoteBaseBranch(args: {
       metadata: { durationMs: Date.now() - startedAt },
     });
   } catch (error) {
+    // An alias from a custom fetch refspec (a pull request ref) has no
+    // refs/heads twin on the remote, so use the local copy (#985).
+    if (
+      isMissingRemoteRef(error) &&
+      (await hasRef(args.sourcePath, remoteRef))
+    ) {
+      emitStep({
+        onProgress: args.onProgress,
+        key: "git-fetch-completed",
+        text: `Using local ${args.baseBranch}`,
+        status: "completed",
+        startedAt,
+        metadata: { durationMs: Date.now() - startedAt },
+      });
+      return;
+    }
     emitStep({
       onProgress: args.onProgress,
       key: "git-fetch-failed",
@@ -473,6 +500,43 @@ export async function fetchRemoteBaseBranch(args: {
     });
     throw error;
   }
+}
+
+/**
+ * `git worktree add -B` never falls back to `origin/<base>`, so a branch that
+ * only exists on the remote is found or fetched here (#985).
+ */
+async function resolveStartPoint(args: {
+  sourcePath: string;
+  baseBranch: string;
+  onProgress: ProgressCallback | undefined;
+  signal: AbortSignal | undefined;
+}): Promise<string> {
+  const found = await runGit(
+    ["rev-parse", "--verify", "--quiet", `${args.baseBranch}^{commit}`],
+    { cwd: args.sourcePath, ...signalOptions(args.signal), allowFailure: true },
+  );
+  if (found.exitCode === 0) return args.baseBranch;
+  const remotes = await listRemotes(args.sourcePath, args.signal);
+  const remote = remotes.includes("origin")
+    ? "origin"
+    : remotes.length === 1
+      ? remotes[0]
+      : undefined;
+  const notFound = new WorkspaceError(
+    "base_branch_not_found",
+    `Base branch ${args.baseBranch} was not found locally${remote === undefined ? "" : ` or on ${remote}`}. Push it or pick another base.`,
+  );
+  if (remote === undefined) throw notFound;
+  const remoteBase = `${remote}/${args.baseBranch}`;
+  if (!(await hasRef(args.sourcePath, `refs/remotes/${remoteBase}`))) {
+    try {
+      await fetchRemoteBaseBranch({ ...args, baseBranch: remoteBase });
+    } catch (error) {
+      throw isMissingRemoteRef(error) ? notFound : error;
+    }
+  }
+  return remoteBase;
 }
 
 function summarizePaths(paths: readonly string[]): string {
@@ -665,7 +729,12 @@ export async function createWorktree(
       "-B",
       args.branchName,
       args.targetPath,
-      baseBranch,
+      await resolveStartPoint({
+        sourcePath: args.sourcePath,
+        baseBranch,
+        onProgress: args.onProgress,
+        signal: args.signal,
+      }),
     ];
   }
 

@@ -96,6 +96,9 @@ export type TelemetryEvent =
     }
   | { name: "settings_search_no_results"; properties: { query: string } }
   | { name: "bug_report_clicked" }
+  /** Thread share links (docs/scopes/thread-share-links.md#tracking). `share_id` is a hash of the link's token, never
+   *  the token, and null while the thread has no link. */
+  | { name: "share"; properties: { action: ShareAction; share_id: string | null; provider?: string; execution?: TelemetryExecution } }
   | {
       name: "plugin_installed";
       properties: {
@@ -119,6 +122,9 @@ export type TelemetryEvent =
   | { name: "prompt_suggestion"; properties: { action: "shown" | "accepted"; provider: string } }
   | { name: "cloud_choice"; properties: { action: (typeof CLOUD_CHOICE_ACTIONS)[number]; reason: (typeof CLOUD_CHOICE_REASONS)[number] | null } };
 
+/** `opened` is a click on the Share button and `copied` one on Copy. The website adds what viewers do. */
+export const SHARE_CLICKS = ["opened", "copied"] as const;
+export type ShareAction = (typeof SHARE_CLICKS)[number] | "created" | "updated" | "stopped" | "continued";
 export const CLOUD_CHOICE_ACTIONS = ["picked_local", "cloud_blocked", "forced_local"] as const;
 export const CLOUD_CHOICE_REASONS = ["signed_out", "agent_unsupported", "agent_not_in_cloud", "queue", "region"] as const;
 export const UPGRADE_PROMPTS = ["limit_notice", "queue", "queue_badge", "plan_card", "free_tip", "auto_delete", "try_cloud", "new_thread_cloud", "og_letter", "limit_notice_pack", "mac_battery", "mac_load", "mac_disk", "mac_network"] as const;

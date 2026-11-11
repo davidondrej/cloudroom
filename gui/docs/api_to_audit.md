@@ -84,7 +84,7 @@ environment variables to that provider. The resolver receives an
 
 **What it does.** Registers one resolver per provider per plugin. The server
 calls it for each matching session and turn with the thread, project, and host
-ids, validates at most 32 environment entries, resolves registration conflicts
+ids, and with only the host id for helper inference (thread naming, purposes), validates at most 32 environment entries, resolves registration conflicts
 in plugin load order, and sends the winning values to the host. A value may be
 a literal string or a server-relative path that the host expands against its
 authenticated `BB_SERVER_URL`. Contributions override the shell environment and
@@ -2334,7 +2334,7 @@ one toast.
 
 **What it does.** Lets a plugin serve bb's own AI services — server-side
 helper inference (thread titles, thread purposes, commit messages: prompt + JSON Schema in,
-structured value out; `reasoningEffort` is `none`, `low`, `medium`, or `high`, widened from `none` on 2026-10-13 for thread purposes) and voice transcription — from its `bb.host` entry.
+structured value out; `reasoningEffort` is `none`, `low`, `medium`, or `high`, widened from `none` on 2026-10-13 for thread purposes; an optional `env` carries the login of the provider with the same id, added 2026-11-11) and voice transcription — from its `bb.host` entry.
 `bb.experimental_aiServices.register({ id, displayName, kinds })` stages the
 service during the factory and lands it when the load commits; the host entry
 implements `experimental_aiServicesHostContract` (`ai.inference.complete`,

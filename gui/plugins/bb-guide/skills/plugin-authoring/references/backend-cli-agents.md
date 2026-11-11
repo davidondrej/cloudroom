@@ -81,8 +81,7 @@ resolve the invoking host (`ctx.threadId` → `bb.sdk.threads.get` →
 `--machine`-style flag as the no-thread escape hatch) and do all such file I/O
 through `bb.sdk.files` with that `hostId`. An omitted SDK `hostId` targets the
 primary host, which can be an enrolled remote machine. Reference
-implementations: the docs plugin's pull/push sync and the
-tasks plugin's attachment commands. `node:fs` remains correct for genuinely
+implementation: the tasks plugin's attachment commands. `node:fs` remains correct for genuinely
 server-local data such as files under the plugin's own data directory.
 
 ### bb.ui.requestInput — replace the composer with a blocking plugin form
@@ -259,7 +258,9 @@ entry; without one the plugin fails to load. A host artifact may export a provid
 time.
 
 Inference input includes `serviceId`, `model`, `reasoningEffort: "none"`,
-`prompt`, `outputSchema`, and `timeoutMs`. Plugin-served voice input has a
+`prompt`, `outputSchema`, and `timeoutMs`. An optional `env` holds the login
+that the provider with the service's id runs its threads on; pass it to the
+CLI you start. Plugin-served voice input has a
 5 MiB limit. The server rejects a larger file before a host call. Voice input
 includes `serviceId`, `model`, `audioBase64`, `mimeType`, `filename`, `prompt`,
 and `timeoutMs`. The inference success value must be a JSON object. Voice

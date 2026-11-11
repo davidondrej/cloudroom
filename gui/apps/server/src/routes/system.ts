@@ -627,6 +627,7 @@ export function registerSystemRoutes(
           typeof formData.get("prompt") === "string"
             ? String(formData.get("prompt"))
             : undefined,
+        relayed: getGateAuthKind(context) !== null,
       }),
     });
   });

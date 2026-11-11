@@ -1013,9 +1013,17 @@ describe("automation data access", () => {
     ["active past the cap", "active", RECOVERY_WAIT_MS, ["thr_1", "thr_2"]],
     ["idle", "idle", 0, ["thr_1", "thr_2"]],
     ["error", "error", 0, ["thr_1", "thr_2"]],
+    // A finished run's thread can work on too: a child reports back or a person continues it (#1279).
+    ["active after a finished run", "active", 0, ["thr_1"], "idle"],
   ] as const)(
-    "a loop retry when its failed thread is %s (#887)",
-    async (_name, status, wait, atRetry) => {
+    "a loop's next run when its last run's thread is %s (#887, #1279)",
+    async (
+      _name,
+      status,
+      wait,
+      atRetry,
+      ended: "idle" | "failed" = "failed",
+    ) => {
       const db = createTestDb();
       const automation = createScheduledAutomation(db, 1000);
       const spawned: string[] = [];
@@ -1049,7 +1057,7 @@ describe("automation data access", () => {
       await sweep(1000);
       await closeAutomationRunForSettledThread(bb, db, {
         threadId: "thr_1",
-        status: "failed",
+        status: ended,
         error: "host daemon restarted",
       });
       threadStatus = status;
@@ -1302,6 +1310,50 @@ describe("automation service", () => {
       }),
     ).rejects.toThrow("Project proj_missing is not available");
     expect(listAutomationsForProject(db, "proj_missing")).toHaveLength(0);
+  });
+
+  it("rejects a Personal project loop in a folder thread creation would reject", async () => {
+    const db = createTestDb();
+    const bb = createAutomationServiceBb();
+    const getProject = bb.sdk.projects.get;
+    bb.sdk.projects.get = async (args) => ({
+      ...(await getProject(args)),
+      kind: "personal" as never,
+    });
+    const service = createAutomationService({
+      bb,
+      db,
+      pluginDataDir: "/tmp",
+      serverUrl: "http://127.0.0.1:38886",
+    });
+    const create = (environment: never) =>
+      service.create({
+        projectId: "proj_personal",
+        name: "Personal",
+        enabled: true,
+        trigger: oneShotTrigger(),
+        execution: {
+          mode: "agent",
+          prompt: "hello",
+          providerId: "codex",
+          model: "gpt-5",
+          reasoningLevel: "medium",
+          permissionMode: "accept-edits",
+          environment,
+        },
+        origin: "agent",
+      });
+
+    await expect(
+      create({
+        type: "host",
+        hostId: "host_1",
+        workspace: { type: "unmanaged", path: "/Users/me/app" },
+      } as never),
+    ).rejects.toThrow("Personal project loops must use the personal workspace");
+    expect(listAutomationsForProject(db, "proj_personal")).toHaveLength(0);
+    await create({ type: "project-default" } as never);
+    expect(listAutomationsForProject(db, "proj_personal")).toHaveLength(1);
   });
 
   it("removes a stored script directory after switching to agent execution", async () => {

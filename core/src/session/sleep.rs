@@ -304,7 +304,7 @@ impl Manager {
         });
     }
 
-    fn release(&self, local: &mut Local, id: &str) {
+    pub(super) fn release(&self, local: &mut Local, id: &str) {
         let session = local.sessions.get_mut(id).unwrap();
         session.ready = false;
         session.releasing = true;

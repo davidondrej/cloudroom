@@ -8,6 +8,11 @@ export interface RequestTimeoutFetchOptions {
   timeoutMs: number;
 }
 
+/** A call that may take longer than the transport's deadline sets its own `timeoutMs`. */
+export interface SdkRequestInit extends RequestInit {
+  timeoutMs?: number;
+}
+
 interface RequestTimeoutContext {
   requestSignal: AbortSignal;
   timeoutSignal: AbortSignal;
@@ -98,15 +103,16 @@ export function createRequestTimeoutFetch(
 ): FetchImplementation {
   validateRequestTimeoutMs(options.timeoutMs);
 
-  return async (input, init) => {
-    const timeoutSignal = AbortSignal.timeout(options.timeoutMs);
+  return async (input, init?: SdkRequestInit) => {
+    const timeoutMs = Math.max(options.timeoutMs, init?.timeoutMs ?? 0);
+    const timeoutSignal = AbortSignal.timeout(timeoutMs);
     const requestSignal = init?.signal
       ? AbortSignal.any([init.signal, timeoutSignal])
       : timeoutSignal;
     const context: RequestTimeoutContext = {
       requestSignal,
       timeoutSignal,
-      timeoutMs: options.timeoutMs,
+      timeoutMs,
     };
 
     try {
@@ -114,7 +120,7 @@ export function createRequestTimeoutFetch(
       return wrapRequestTimeoutResponse({ context, response });
     } catch (error) {
       if (isRequestTimeoutError(context, error)) {
-        throw new BbRequestTimeoutError(options.timeoutMs);
+        throw new BbRequestTimeoutError(timeoutMs);
       }
       throw error;
     }

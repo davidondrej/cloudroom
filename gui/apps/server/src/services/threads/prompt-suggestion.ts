@@ -102,7 +102,7 @@ async function suggest(
   const userMessage = lastUserMessage(deps.db, threadId);
   const reply = getLastThreadOutput(deps.db, threadId, turnId);
   if (!userMessage || !reply) return null;
-  const models = await purposeModels(null);
+  const models = await purposeModels(deps, null);
   if (!models) return null;
   const result = await inferenceCompleteWithFallback(deps, {
     fallbackOnAnyError: true,

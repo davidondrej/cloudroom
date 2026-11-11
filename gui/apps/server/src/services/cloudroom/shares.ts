@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "zod";
@@ -6,10 +7,11 @@ import { PERSONAL_PROJECT_ID } from "@cloudroom/domain";
 import type { AppDeps } from "../../types.js";
 import { ApiError } from "../../errors.js";
 import { requireConnectedPrimaryHostId } from "../hosts/primary-host.js";
+import type { ShareAction } from "../system/telemetry.js";
 import { createThreadFromRequest } from "../threads/thread-create.js";
 import { threadMessages } from "../threads/thread-transcript.js";
 import { CloudroomError } from "./client.js";
-import { cloudroom } from "./commands.js";
+import { cloudExecution, cloudroom } from "./commands.js";
 import { macVariables } from "./sandboxes.js";
 
 const TEXT_LIMIT = 1_000_000;
@@ -75,6 +77,22 @@ export function redactSecrets(text: string, known: readonly string[]): string {
     .replace(URL_PASSWORD, `$1${REMOVED}@`);
 }
 
+const TOKEN = /(?:^|\/)([A-Za-z0-9_-]{22})\/?$/;
+/** One usage event per share action (docs/scopes/thread-share-links.md#tracking). It carries a hash of the link's token,
+ *  never the token: the website hashes it the same way, so the sharer's events and the viewers' line up. */
+function track(deps: AppDeps, action: ShareAction, link: string | undefined, threadId?: string) {
+  const token = link?.match(TOKEN)?.[1], thread = threadId ? getThread(deps.db, threadId) : null;
+  deps.telemetry.capture({ name: "share", properties: {
+    action, share_id: token ? createHash("sha256").update(token).digest("hex").slice(0, 16) : null,
+    ...(thread ? { provider: thread.providerId, execution: thread.executionTarget === "cloud" ? cloudExecution(deps, thread.id) : "local" } : {}),
+  } });
+}
+
+/** A click on the thread's Share button, or on Copy in its panel. */
+export async function shareClicked(deps: AppDeps, threadId: string, action: "opened" | "copied"): Promise<void> {
+  track(deps, action, (await readStore(deps))[threadId]?.url, threadId);
+}
+
 const threadTitle = (thread: { title: string | null; titleFallback: string | null }) => (thread.title || thread.titleFallback || "Untitled thread").slice(0, 200);
 
 export async function threadShare(deps: AppDeps, threadId: string): Promise<ThreadShare | null> {
@@ -98,17 +116,21 @@ export async function shareThread(deps: AppDeps, threadId: string): Promise<Thre
     messages: messages.slice(start), truncated: start > 0,
   });
   const share = shareSchema.parse((value as { share?: unknown }).share);
+  const shared = Boolean((await readStore(deps))[threadId]);
   await updateStore(deps, (store) => { store[threadId] = share; });
+  track(deps, shared ? "updated" : "created", share.url, threadId);
   return share;
 }
 
 export async function stopSharing(deps: AppDeps, threadId: string): Promise<void> {
+  const link = (await readStore(deps))[threadId]?.url;
   await website(deps, { action: "stop", thread: threadId });
   await updateStore(deps, (store) => { delete store[threadId]; });
+  track(deps, "stopped", link, threadId);
 }
 
 export async function continueShare(deps: AppDeps, link: string): Promise<{ threadId: string; projectId: string }> {
-  const token = link.trim().match(/(?:^|\/)([A-Za-z0-9_-]{22})\/?$/)?.[1];
+  const token = link.trim().match(TOKEN)?.[1];
   if (!token) throw new ApiError(400, "invalid_share_link", "This is not a Cloudroom share link.");
   const shared = sharedSchema.parse(await website(deps, { action: "open", token }));
   const folder = join(deps.config.dataDir, "shared-threads");
@@ -132,5 +154,6 @@ export async function continueShare(deps: AppDeps, link: string): Promise<{ thre
     origin: "sdk",
     startedOnBehalfOf: null,
   });
+  track(deps, "continued", token);
   return { threadId: thread.id, projectId: thread.projectId };
 }

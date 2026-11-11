@@ -244,7 +244,8 @@ function requireExtensionPath(): string {
   const dir = requireScratchDir();
   const path = join(dir, "bb-pi-extension.mjs");
   if (!existsSync(path)) {
-    // 0700: this may recreate the worker's private mkdtemp root.
+    // This may recreate the worker's temp root. That is safe because the root
+    // sits in a folder no other account can write to (createPluginProcessTempDir).
     mkdirSync(dir, { recursive: true, mode: 0o700 });
     writeFileSync(path, BB_PI_EXTENSION_SOURCE, "utf8");
   }

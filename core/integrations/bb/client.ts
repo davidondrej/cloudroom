@@ -191,7 +191,7 @@ async function uncompressed(response: Response): Promise<void> {
 
 /** JSON values in `text`, counted without parsing it as in web/lib/history.ts, and only until the count passes `limit`.
  *  Parsing tiny values (`[{},{},...]`) takes about 30 times their bytes in memory, so a byte limit alone doesn't bound it. */
-function values(text: string, limit: number): number {
+export function values(text: string, limit: number): number {
   let count = 1;
   for (let i = 0; i < text.length && count <= limit; i++) {
     const char = text.charCodeAt(i);
@@ -309,7 +309,7 @@ const REPLAY_VALUES = 1024 * 1024;
 /** JSON values per answer. At 16 bytes a value, the byte limits bind first for any real answer. */
 const ANSWER_VALUES = 1024 * 1024;
 /** JSON values per record, as in saved history and the phone's stream (web/lib/history.ts). */
-const RECORD_VALUES = 256 * 1024;
+export const RECORD_VALUES = 256 * 1024;
 const STREAM_SILENCE_MS = 45_000;
 /** The most one upload request may carry: some sandbox proxies drop requests over about 8 MB. */
 export const UPLOAD_PART = 4 * 1024 * 1024;

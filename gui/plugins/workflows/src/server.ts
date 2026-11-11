@@ -231,7 +231,7 @@ export default async function plugin(bb: BbPluginApi) {
   });
 
   bb.events.on("thread.idle", ({ thread, lastAssistantText }) => {
-    service.onThreadIdle(thread.id, lastAssistantText);
+    service.onThreadIdle(thread.id, lastAssistantText, thread);
   });
   bb.events.on("thread.failed", ({ thread, error }) => {
     service.onThreadFailed(thread.id, error);

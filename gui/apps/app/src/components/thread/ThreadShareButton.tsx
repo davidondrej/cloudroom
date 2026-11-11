@@ -5,9 +5,15 @@ import { Icon } from "@cloudroom/shared-ui/icon";
 import { cn } from "@cloudroom/shared-ui/lib/utils";
 import { Popover, PopoverContent, PopoverTrigger } from "@cloudroom/shared-ui/popover";
 import { useCloudroomAccount } from "@/hooks/queries/cloudroom-queries";
+import { fetchWithAppSurface } from "@/lib/app-surface";
 import { copyToClipboardWithToast } from "@/lib/clipboard";
 import { formatRelativeTime } from "@/lib/relative-time";
 import { sdk } from "@/lib/sdk";
+
+/** Counts a click for our usage events (docs/scopes/thread-share-links.md#tracking). Never blocks or fails the click. */
+const clicked = (threadId: string, action: "opened" | "copied") => void fetchWithAppSurface(`/api/v1/cloudroom/threads/${encodeURIComponent(threadId)}/share`, {
+  method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action }),
+}).catch(() => {});
 
 const PROMISES = ["Messages only. No tool output or files.", "Secrets and API keys removed.", "Hidden from search engines."];
 
@@ -34,7 +40,7 @@ export function ThreadShareButton({ threadId }: { threadId: string }) {
   const error = save.error ?? stop.error;
   const busy = save.isPending || stop.isPending;
   return (
-    <Popover open={open} onOpenChange={(next) => { setOpen(next); if (!next) { save.reset(); stop.reset(); } }}>
+    <Popover open={open} onOpenChange={(next) => { setOpen(next); if (next) clicked(threadId, "opened"); else { save.reset(); stop.reset(); } }}>
       <PopoverTrigger asChild>
         <Button
           type="button"
@@ -62,7 +68,7 @@ export function ThreadShareButton({ threadId }: { threadId: string }) {
                 onFocus={(event) => event.currentTarget.select()}
                 className="h-8 min-w-0 flex-1 rounded-md border border-input bg-transparent px-2 text-xs text-foreground outline-none"
               />
-              <Button type="button" size="sm" className="h-8 gap-1.5" onClick={() => copy(link.url)}><Icon name="Copy" className="size-3.5" />Copy</Button>
+              <Button type="button" size="sm" className="h-8 gap-1.5" onClick={() => { copy(link.url); clicked(threadId, "copied"); }}><Icon name="Copy" className="size-3.5" />Copy</Button>
             </div>
           ) : null}
           <ul className="grid gap-1.5">

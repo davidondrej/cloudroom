@@ -2,6 +2,20 @@
 
 Also on [cloudroom.dev/changelog](https://www.cloudroom.dev/changelog).
 
+## 150
+
+Attach files while agents work (2026-11-11)
+
+### Changes
+
+- Files and images you send to a busy Cloud agent now reach it right away, instead of waiting or getting lost.
+- After you switch Claude accounts, a thread that hit a limit carries on with the new account.
+- The "Limit hit" mark clears as soon as that account works again.
+- A message sent while a Cloud sandbox sleeps or wakes shows a calm reconnecting state, not a red error.
+- Long voice recordings no longer cut off after 10 seconds.
+- Cursor has an Auto-update switch in Settings, off by default.
+- Security fixes.
+
 ## 149
 
 Rewrite drafts before you send (2026-11-11)

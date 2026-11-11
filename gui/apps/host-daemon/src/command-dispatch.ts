@@ -63,6 +63,7 @@ import { pickHostFolder } from "./command-handlers/native-folder-picker.js";
 import {
   ProviderInstallationInProgressError,
   streamProviderInstallation,
+  withWindowsGitShell,
 } from "./provider-installation.js";
 import type {
   ProviderInstallationCommand,
@@ -323,7 +324,10 @@ async function runProviderInstallationOnHost(
       plan: ProviderInstallationCommand,
     ): Promise<ProviderCliInstallEvent[]> => {
       const events = await readProviderCliInstallEvents(
-        stream({ providerId: command.providerId, plan, env }),
+        stream({
+          providerId: command.providerId,
+          ...(await withWindowsGitShell({ plan, env })),
+        }),
       );
       if (!succeeded(events)) return events;
       try {

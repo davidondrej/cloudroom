@@ -2442,7 +2442,11 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
         message: command,
         resultSchema: ignoredJsonRpcResultSchema,
       });
-      return proc.adapter.parseModelListResult(result);
+      const { warnings, ...models } = proc.adapter.parseModelListResult(result);
+      for (const warning of warnings) {
+        options.onStderr?.(`Provider "${providerId}" model/list: ${warning}`);
+      }
+      return models;
     },
 
     async providerHealth({ providerId, bridgeLaunch, cwd }) {

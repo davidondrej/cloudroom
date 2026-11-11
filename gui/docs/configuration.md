@@ -309,6 +309,8 @@ Connect when missing), its CLI version, the Auto-update switch
 With Auto-update on, Cloudroom checks every 10 minutes and updates at once,
 even while threads run; a failed update retries after an hour. Native Claude
 Code installs compare against Claude's own release channel, not npm.
+The switch is off by default and shows for agents whose newest version
+Cloudroom can read: npm CLIs and Cursor (from its install script).
 Agents that can be installed but are not appear under "Not installed" with an
 Install button. Settings → Updates covers Cloudroom itself and other machines'
 CLIs; it links here for this Mac's agents.
@@ -789,7 +791,8 @@ window size.
 
 ### Thread naming
 
-Settings → Thread naming chooses the primary model, fallback model, and naming rules.
+Settings → General → Thread naming chooses the model. The naming rules are in Settings → Prompts → Feature prompts.
+A Claude model names threads on the account in use (Settings → Agents → Accounts), or on this machine's own Claude login when no account is added.
 Local and Cloud threads retry failed naming automatically. Each model gets 30 seconds.
 Retries wait 10 seconds, 30 seconds, 1 minute, 2 minutes, then 5 minutes between attempts.
 Pending names survive app restarts. Setting a name manually cancels automatic naming.
@@ -866,7 +869,8 @@ the CLI and Cloudroom never refresh the same token.
 
 Every Local and Cloud thread, old and new, uses the selected account from its
 next turn (ADR 0197). **Use** selects another; nothing switches automatically. A
-turn that hits a subscription limit marks the account "Limit hit". The sidebar
+turn that hits a subscription limit marks the account "Limit hit". The mark goes
+at the reset time, or as soon as a new turn on that account ends fine. The sidebar
 usage box shows each provider's in-use account in a chip; with several accounts,
 the chip's dropdown switches between them.
 
@@ -1418,7 +1422,7 @@ rewrites for github.com, and author/committer identity. The helper expands
 store is installed. Private email uses `<id>+<login>@users.noreply.github.com`.
 A user `GH_TOKEN` overrides the built-in token, and the row shows overridden.
 Tokens obtained from gh are never persisted by the server. Image construction
-and Modal filesystem snapshot settings do not receive these contributions.
+does not receive these contributions.
 
 Use `bb machine env list --json`, `bb machine env set NAME [--note
 text] --json`, and `bb machine env unset NAME --json`. Set reads its value from
@@ -1438,38 +1442,6 @@ server gh credentials to machines; `true` enables them again. In Machines →
 Advanced settings, the automatic GH_TOKEN switch controls the same setting.
 This does not log the server out or suppress an explicit custom GH_TOKEN.
 Changes apply to new turns, setup commands and terminals.
-
-## Modal machines
-
-The optional Modal sandbox plugin builds/reuses named tools images for new
-machines. Its plugin page keeps the bundled Standard Dockerfile as the first
-image and can add named Dockerfiles, existing Modal image IDs, and named CPU/memory
-presets. CLI: `bb modal image show`, `bb modal image set --file PATH`, and
-`bb modal image reset` (append `--json`). Typed plugin RPCs `image.definition`,
-`image.set({dockerfile})`, and `image.reset` expose the same persistent definition.
-Supported instructions are one FROM followed by RUN, ENV, WORKDIR, and USER; no
-build context or multi-stage builds. Saving does not build or modify existing
-machines. The next new machine uses the saved definition. BB installs the daemon
-on demand, then clones the project and runs its setup hook.
-
-Configure `tokenId` and `tokenSecret` in secret plugin settings; `appName` defaults
-to `bb-sandboxes`. With no size preset, Modal's CPU and memory defaults apply.
-`idleMinutes` defaults to 15 (0 disables idle suspension), and `timeoutMinutes`
-defaults to 1440 with an allowed range of 1–1440. Existing machines use current idle
-policy; running compute keeps its vendor deadline and restored compute uses the
-current lifetime. Resource reservations stay pinned across restore.
-
-There is no automatic retention removal. Use `bb machine remove MACHINE --yes`
-for explicit cleanup. Manual and idle pauses save a filesystem snapshot before
-terminating compute. There is no pre-expiry scheduler: a sandbox that stays active
-until its configured timeout can lose changes since its last successful pause.
-Provider details expose expiry and saved-image status; missing compute never
-silently restores stale state. Open terminals prevent idle suspension.
-
-`bb modal account inspect --json` tests credentials without allocating resources.
-Create with `bb machine create --provider modal-sandbox --project PROJECT --json`.
-See [modal-sandboxes](../plugins/environment-modal-sandbox/skills/modal-sandboxes/SKILL.md)
-for prerequisites and lifecycle commands.
 
 ## Repository build caches
 

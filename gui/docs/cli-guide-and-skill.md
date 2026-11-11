@@ -29,10 +29,6 @@ index aligned with this surface.
 Local installed-daemon start, stop, and uninstall operations are flags on
 `install-machine.sh`, not `room-cli machine` subcommands.
 
-Modal connection and machine commands are documented in [modal-sandboxes](../plugins/environment-modal-sandbox/skills/modal-sandboxes/SKILL.md). `room-cli modal image show [--json]` reads the Dockerfile shown in settings; `room-cli modal image set --file PATH [--json]` saves a validated plugin-wide override and `room-cli modal image reset [--json]` restores the bundled default for future machines; `room-cli modal account inspect --json` checks credentials; `room-cli machine create --provider modal-sandbox --json` automatically prepares the bundled image and installs the daemon. `room-cli machine remove MACHINE --yes` explicitly removes compute and private snapshots.
-
 `room-cli thread spawn --machine-inputs <json>` configures either an explicit
 `--new-machine` or the machine provider owned by a composed
 `--environment-provider`; a composition rejects separate machine selectors.
-
-Modal image debugging uses `room-cli modal image build`, `room-cli modal sandbox run`, `room-cli modal sandbox exec ID [--json] -- COMMAND...`, and `room-cli modal sandbox stop ID`. Debug compute expires after 30 minutes and skips BB enrollment and project setup. See the plugin skill for output limits and typed RPC equivalents.

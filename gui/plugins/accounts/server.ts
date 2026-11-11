@@ -186,6 +186,13 @@ export default async function plugin(bb: BbPluginApi) {
   let cursorInCloud = z.string().catch(LOCAL).parse(await kv.get("cursor-cloud:v1"));
   const usage = new Map<string, Usage>();
   const threadAccount = new Map<string, string>();
+  // A helper call, such as thread naming, uses the account in use but has no thread to note.
+  const noteThreadAccount = (threadId: string | undefined, account: string) => {
+    if (threadId !== undefined) threadAccount.set(threadId, account);
+  };
+  // When each limit was noted and each running turn began, since this start. They tell a limit that has lifted.
+  const limitedAt = new Map<string, number>();
+  const turnBegan = new Map<string, number>();
   const claudeLogin = new ClaudeLogin(() =>
     bb.server.experimental_claudeSetupToken?.(),
   );
@@ -984,10 +991,10 @@ export default async function plugin(bb: BbPluginApi) {
 
   bb.providers.experimental_contributeEnv(
     "claude-code",
-    async (context: { threadId: string }) => {
+    async (context: { threadId?: string }) => {
       await refreshMac();
       const id = current("claude-code");
-      threadAccount.set(context.threadId, id);
+      noteThreadAccount(context.threadId, id);
       const account = accounts.find((entry) => entry.id === id);
       if (!account) return [];
       const reason = `Cloudroom account ${account.email ?? account.id}`;
@@ -1017,9 +1024,9 @@ export default async function plugin(bb: BbPluginApi) {
 
   bb.providers.experimental_contributeEnv(
     "acp-cursor",
-    async (context: { threadId: string }) => {
+    async (context: { threadId?: string }) => {
       const id = current("acp-cursor");
-      threadAccount.set(context.threadId, id);
+      noteThreadAccount(context.threadId, id);
       const account = accounts.find((entry) => entry.id === id);
       const key = account ? await readCursorKey(account).catch(() => null) : null;
       if (!account || !key) return [];
@@ -1048,6 +1055,7 @@ export default async function plugin(bb: BbPluginApi) {
     if (used !== LOCAL || several) {
       limits[`${provider.data}:${used}`] =
         blockedUntil(event.rateLimits) ?? Date.now() + DEFAULT_REST_MS;
+      limitedAt.set(`${provider.data}:${used}`, Date.now());
       await changed();
       // A full login's usage read is free, so its bars show the limit right away instead of minutes later.
       const account = accounts.find((entry) => entry.id === used);
@@ -1079,11 +1087,32 @@ export default async function plugin(bb: BbPluginApi) {
   ] as const)
     bb.events.on(name, ({ thread }) => limited.forget(thread.id));
 
+  // A turn that began after the limit and ended fine: the account works again, as after a limit reset from Claude.
+  // A turn already running when the limit hit proves nothing, so it never clears it.
+  bb.events.on("thread.active", ({ thread }) => {
+    turnBegan.set(thread.id, Date.now());
+  });
+  bb.events.on("thread.failed", ({ thread }) => {
+    turnBegan.delete(thread.id);
+  });
+  bb.events.on("thread.idle", async ({ thread }) => {
+    const began = turnBegan.get(thread.id);
+    turnBegan.delete(thread.id);
+    const provider = providerSchema.safeParse(thread.providerId);
+    if (began === undefined || !provider.success) return;
+    const key = `${provider.data}:${threadAccount.get(thread.id) ?? current(provider.data)}`;
+    if (!(key in limits) || began <= (limitedAt.get(key) ?? 0)) return;
+    delete limits[key];
+    limitedAt.delete(key);
+    await kv.set("limits:v1", limits);
+    bb.realtime.publish(ACCOUNTS_CHANGED, {});
+  });
+
   // Codex signs in from the app (codex-accounts.ts); this only notes which account each thread starts on.
   bb.providers.experimental_contributeEnv(
     "codex",
-    async (context: { threadId: string }) => {
-      threadAccount.set(context.threadId, codexInUse);
+    async (context: { threadId?: string }) => {
+      noteThreadAccount(context.threadId, codexInUse);
       return [];
     },
   );

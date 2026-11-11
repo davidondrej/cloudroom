@@ -52,7 +52,22 @@ function withWindowsExtensions(
   );
 }
 
-// Claude's native installer and npm's global bin, neither always on PATH.
+// Agents whose own installers use their own folder, not always on PATH.
+const PROVIDER_INSTALL_DIRS = new Map([
+  ["opencode", join(".opencode", "bin")],
+  ["claude", join(".claude", "local")],
+  ["grok", join(".grok", "bin")],
+  ["kilo", join(".kilo", "bin")],
+  ["kimi", join(".kimi-code", "bin")],
+]);
+
+function providerInstallPaths(cli: string, home: string): string[] {
+  const dir = PROVIDER_INSTALL_DIRS.get(cli);
+  return dir === undefined ? [] : [join(home, dir, cli)];
+}
+
+// Claude's native installer, npm's global bin and agents' own folders (Grok's
+// %USERPROFILE%\.grok\bin, #1256), none always on PATH.
 function windowsFallbackCandidates(
   cli: string,
   env: NodeJS.ProcessEnv,
@@ -62,6 +77,7 @@ function windowsFallbackCandidates(
   return [
     join(home, ".local", "bin", cli),
     ...(appData ? [join(appData, "npm", cli)] : []),
+    ...providerInstallPaths(cli, home),
   ];
 }
 
@@ -142,19 +158,10 @@ function fallbackCandidates(cli: string, env: NodeJS.ProcessEnv): string[] {
     join(home, ".npm-global", "bin"),
     join(home, ".volta", "bin"),
   ];
-  const providerPaths =
-    cli === "opencode"
-      ? [join(home, ".opencode", "bin", "opencode")]
-      : cli === "claude"
-        ? [join(home, ".claude", "local", "claude")]
-        : cli === "grok"
-          ? [join(home, ".grok", "bin", "grok")]
-          : cli === "kilo"
-            ? [join(home, ".kilo", "bin", "kilo")]
-            : cli === "kimi"
-              ? [join(home, ".kimi-code", "bin", "kimi")]
-              : [];
-  return [...binDirs.map((dir) => join(dir, cli)), ...providerPaths];
+  return [
+    ...binDirs.map((dir) => join(dir, cli)),
+    ...providerInstallPaths(cli, home),
+  ];
 }
 
 export function findCliExecutable(

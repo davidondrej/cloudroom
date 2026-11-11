@@ -32,6 +32,7 @@ import {
   ResourceRow,
 } from "@cloudroom/shared-ui/resource-list";
 import {
+  canAutoUpdateProviderCli,
   hasProviderCliAction,
   isProviderCliUpdateIssue,
   providerCliEntries,
@@ -1207,12 +1208,12 @@ export function MachineUpdatesRows({
         trailingMeta={null}
         actions={
           <span className="flex items-center gap-3">
-            {status.npmPackageName === null ? null : (
+            {canAutoUpdateProviderCli(status) ? (
               <ProviderAutoUpdateSwitch
                 providerId={providerId}
                 displayName={status.displayName}
               />
-            )}
+            ) : null}
             {running ? (
               <RowStateControl live state="in-progress" />
             ) : queued ? (

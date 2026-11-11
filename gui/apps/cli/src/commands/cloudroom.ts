@@ -116,7 +116,9 @@ export async function placePull(archive: Buffer, source: string, target: string,
     const copy = join(staging, entry);
     const kind = await lstat(copy);
     if (!inside) {
-      const placed = kind.isDirectory() ? mkdir(target).then(() => rename(copy, target).catch(async (error) => { await rmdir(target).catch(() => {}); throw error; }))
+      // mkdir claims the name. Windows can't rename a folder onto it, even empty (#1396), so it moves the contents in.
+      const fill = async () => { if (process.platform !== "win32") return rename(copy, target); for (const kid of await readdir(copy)) await rename(join(copy, kid), join(target, kid)); };
+      const placed = kind.isDirectory() ? mkdir(target).then(() => fill().catch(async (error) => { await rmdir(target).catch(() => {}); throw error; }))
         : kind.isSymbolicLink() ? readlink(copy).then((path) => symlink(path, target))
         : link(copy, target).catch((error: NodeJS.ErrnoException) => { if (error.code === "EEXIST") throw error; return copyFile(copy, target, constants.COPYFILE_EXCL); });
       await placed.catch((error: NodeJS.ErrnoException) => { throw error.code === "EEXIST" ? taken(target) : error; });

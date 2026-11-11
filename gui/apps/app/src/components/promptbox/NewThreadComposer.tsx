@@ -1638,6 +1638,10 @@ export function NewThreadComposer({
     executionTarget === "cloud"
       ? (cloudBlockedReason
           ?? (cloudQueue ? (cloudQueue.regionBlocked ? "Cloud isn't available in your region yet" : "You're in the cloud queue")
+          // Until the project list loads, the pick may be a removed project, even one the saved copy of the list
+          // still shows: it would fail as "Project not found", then quietly turn into no project (#1347).
+          : !isProjectless && (!sidebarNavigationSettled || sidebarNavigationQuery.isPlaceholderData)
+            ? "Loading projects…"
           : !selectedThreadModel || isLoadingModels
             ? "Select a model"
             : cloudFiltered && !cloudLevels.includes(reasoningLevel)

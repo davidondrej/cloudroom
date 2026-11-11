@@ -1,6 +1,6 @@
 {
   "_comment": "Provider-literal ratchet (G1). Per-file occurrence count of provider-ID references in core. May only go DOWN. Regenerate: node scripts/check-provider-literal-ratchet.mjs --write. Every counted file must have an `allowlist` entry (count, reason, owner, diesAt); the entries are authored by hand and survive --write. Delete this file and the guard when empty.",
-  "total": 91,
+  "total": 86,
   "files": {
     "apps/app/src/components/CodexConnectionPanel.tsx": 2,
     "apps/app/src/components/promptbox/NewThreadComposer.tsx": 1,
@@ -14,8 +14,6 @@
     "apps/server/src/services/cloudroom/events.ts": 12,
     "apps/server/src/services/cloudroom/teleport.ts": 13,
     "packages/host-daemon-contract/src/commands.ts": 2,
-    "apps/demo-server/src/fixtures/providers.ts": 3,
-    "apps/demo-server/src/fixtures/world.ts": 2,
     "apps/server/src/services/threads/thread-edit-message.ts": 1,
     "packages/config/src/bb-app-managed-config.ts": 4,
     "packages/scripts/src/commands/archive-codex-tmp-bb-sessions.ts": 1,
@@ -93,18 +91,6 @@
       "reason": "Translate the core's Codex, Pi, Claude Code, and Cursor event payloads into the existing GUI timeline.",
       "owner": "Cloudroom GUI",
       "diesAt": "when core events no longer require harness-specific timeline translation"
-    },
-    "apps/demo-server/src/fixtures/providers.ts": {
-      "count": 3,
-      "reason": "demo fixtures: the demo server's static provider roster.",
-      "owner": "owner-accepted (demo fixture)",
-      "diesAt": "never (demo fixture)"
-    },
-    "apps/demo-server/src/fixtures/world.ts": {
-      "count": 2,
-      "reason": "demo fixtures: the demo world's default provider.",
-      "owner": "owner-accepted (demo fixture)",
-      "diesAt": "never (demo fixture)"
     },
     "apps/server/src/services/threads/thread-edit-message.ts": {
       "count": 1,

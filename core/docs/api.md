@@ -57,7 +57,7 @@ Commands, all `POST /v1/sessions/{id}/...` with a `request_id`:
 
 Each record is `{sequence, session_id, kind, data, native?, timestamp_ms?}`. `native` holds the harness's original output line. The database copy leaves it out of `native_record` and Claude records (ADR 0203).
 
-- **Lifecycle:** `receipt`, `state`, `harness`, `workspace`, `native_identity`, `launch_reasoning`, `checkpoint`, `usage`, `usage_limited`, `child`, `child_result`, `child_thread`, `rewind`, `rewind_ready`, `rewind_failed`, `teleport`, `secret_request`, `interaction_cancelled`, `native_history_unavailable`, `prompt_warning` (a selected skill could not load; the prompt still runs).
+- **Lifecycle:** `receipt`, `state`, `harness`, `workspace`, `native_identity`, `launch_reasoning`, `checkpoint`, `usage`, `usage_limited`, `child`, `child_result`, `child_thread`, `rewind`, `rewind_ready`, `rewind_failed`, `teleport`, `secret_request`, `interaction_cancelled`, `native_history_unavailable`, `prompt_warning` (a selected skill could not load; the prompt still runs), `model_fallback` (Claude's safeguards switched the model that answers).
 - **Disk safety:** `storage_warning`, `storage_warning_delivery`, `storage_pause`, `storage_recovered`.
 - **Harness output:** `text_delta`, `thinking_delta`, `item_started`, `item_completed`, `tool_delta`, `tool_snapshot`, `native_event` and `native_record`.
 

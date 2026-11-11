@@ -7,6 +7,7 @@ import {
   createProjectSource,
   getProjectExecutionDefaults,
   listThreadsWithPendingInteractionState,
+  replaceStoredProviderModelCatalog,
   setExperiments,
   upsertProjectExecutionDefaults,
 } from "@cloudroom/db";
@@ -639,6 +640,78 @@ describe("public thread default routes", () => {
       ).toHaveLength(0);
     });
   });
+
+  // Codex works, but the first listing after an app update failed or timed out (#1399).
+  it.each(["command_failed", "command_timeout"])(
+    "starts Codex on the default this host listed last when listing fails (%s)",
+    async (errorCode) => {
+      await withTestHarness(async (harness) => {
+        const { host, session } = seedHostSession(harness.deps);
+        replaceStoredProviderModelCatalog(harness.db, {
+          row: {
+            hostId: host.id,
+            providerId: "codex",
+            scopeKey: "",
+            fingerprint: "previous-app-version",
+            modelsJson: JSON.stringify([
+              availableModelFixture({ model: "gpt-older" }),
+              availableModelFixture({
+                model: "gpt-listed-default",
+                reasoningLevels: ["low", "high"],
+                defaultReasoningLevel: "high",
+                isDefault: true,
+              }),
+            ]),
+            selectedOnlyModelsJson: "[]",
+            fetchedAt: 1,
+          },
+          pruneWorkspaceRowsFetchedBefore: null,
+        });
+        registerProviderHostRpcResponder(harness, {
+          hostId: host.id,
+          sessionId: session.id,
+          restoreCommandCaptureAfterResponse: true,
+          modelErrorsByProviderId: {
+            codex: { errorCode, errorMessage: "Codex model discovery failed" },
+          },
+        });
+        const { project } = seedProjectWithSource(harness.deps, {
+          hostId: host.id,
+          path: "/tmp/thread-defaults-codex-last-listed",
+        });
+        const environment = seedEnvironment(harness.deps, {
+          hostId: host.id,
+          projectId: project.id,
+          path: "/tmp/thread-defaults-codex-last-listed",
+        });
+
+        const response = await harness.app.request("/api/v1/threads", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            origin: "cli",
+            projectId: project.id,
+            providerId: "codex",
+            input: [{ type: "text", text: "Spawn without a model" }],
+            environment: { type: "reuse", environmentId: environment.id },
+          }),
+        });
+
+        expect(response.status).toBe(201);
+        const createdThread = threadSchema.parse(await readJson(response));
+        const queuedStart = await waitForQueuedCommand(
+          harness,
+          ({ command }) =>
+            command.type === "thread.start" &&
+            command.threadId === createdThread.id,
+        );
+        expect(queuedStart.command).toMatchObject({
+          providerId: "codex",
+          options: { model: "gpt-listed-default", reasoningLevel: "high" },
+        });
+      });
+    },
+  );
 
   it.each(["failed", "empty"])(
     "falls back to another available provider when the product default's model catalog is %s",

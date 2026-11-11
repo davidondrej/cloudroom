@@ -1925,6 +1925,23 @@ impl Manager {
             let _ = local.append(id, "state", json!({"state":state}), None);
             return;
         }
+        // A plan limit stopped this turn on a login the user has since replaced: a switch mid-turn, or one a
+        // background job kept the agent awake through. It restarts on the new login now, ending that job, before
+        // queued work fails on the old login too. Queued work then runs first, in place of "keep working".
+        let replaced = session.switched_mid_turn
+            || (turn_ended
+                && (session.handle.as_ref()).is_some_and(|h| h.login_changed(&self.config)));
+        if replaced && session.usage_limited && session.can_resume() {
+            let queued = session.has_work();
+            local.sessions.get_mut(id).unwrap().switched_mid_turn = false;
+            let _ = local.append(id, "state", json!({"state":SessionState::Idle}), None);
+            if queued {
+                self.release(local, id);
+            } else {
+                self.continue_sessions(local, vec![id.to_owned()]);
+            }
+            return;
+        }
         // A queued `plan_only` loop run is checked again right before it starts (ADR 0292).
         if let Some(next) = session.queue.first().cloned()
             && session
@@ -1951,11 +1968,8 @@ impl Manager {
             return;
         }
         let _ = local.append(id, "state", json!({"state":SessionState::Idle}), None);
-        // Kept through queued turns, which still run on the old login; used once the session settles.
-        let session = local.sessions.get_mut(id).unwrap();
-        if std::mem::take(&mut session.switched_mid_turn) && session.usage_limited {
-            self.continue_sessions(local, vec![id.to_owned()]);
-        }
+        // Kept through queued turns that still worked on the old login; dropped once the session settles.
+        local.sessions.get_mut(id).unwrap().switched_mid_turn = false;
     }
 
     fn snapshot_usage(self: Arc<Self>, id: String, handle: runtime::Handle) {
@@ -2311,9 +2325,14 @@ impl Manager {
                 native,
             } => {
                 let usage = data.get("usage").cloned().filter(|value| !value.is_null());
+                // An agent still on a login the user has replaced reports that old account, not the saved one.
+                let old_login = || {
+                    (local.sessions[id].handle.as_ref())
+                        .is_some_and(|h| h.login_changed(&self.config))
+                };
                 // Plan limits and credits (ADR 0292). `plan_ok` only ends holds; it is not history.
                 if kind == "plan_ok" {
-                    if let Some(harness) = data["harness"].as_str() {
+                    if let Some(harness) = data["harness"].as_str().filter(|_| !old_login()) {
                         self.clear_plan(harness, false);
                     }
                     return Ok(());
@@ -2324,7 +2343,10 @@ impl Manager {
                 if kind == "usage_limited" && plan_only {
                     data["plan_only"] = json!(true);
                 }
-                if matches!(kind, "usage_limited" | "plan_credits") && data["model_only"] != true {
+                if matches!(kind, "usage_limited" | "plan_credits")
+                    && data["model_only"] != true
+                    && !old_login()
+                {
                     self.report_limit(&data, kind == "plan_credits");
                 }
                 // A loop run that must not spend extra credits stops at their first sign (ADR 0292).

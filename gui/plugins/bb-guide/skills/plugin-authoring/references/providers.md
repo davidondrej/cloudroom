@@ -171,6 +171,8 @@ bb.providers.experimental_contributeEnv("claude-code", async (context) => [
 The server calls the resolver for every matching start, resume, fork, and turn
 command. Its `ExperimentalPluginProviderEnvContext` has `threadId`, `projectId`,
 and `hostId`; return at most 32 `ExperimentalPluginProviderEnvEntry` values.
+It also calls the resolver with only `hostId` for helper calls, such as thread
+naming, so they run on the same login as the provider's threads.
 Names must match `[A-Z_][A-Z0-9_]*`; `reason` is required. A
 literal `value` is forwarded as-is. `{ serverPath: "/..." }` is expanded by
 the selected host against its authenticated `ROOM_SERVER_URL`, which is the

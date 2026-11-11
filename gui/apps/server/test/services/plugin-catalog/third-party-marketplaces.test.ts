@@ -316,7 +316,7 @@ describe("third-party marketplaces", () => {
           schemaVersion: 2,
           name: "acme-bundled",
           displayName: "Acme Bundled",
-          plugins: [entry({ source: { bundled: { plugin: "docs" } } })],
+          plugins: [entry({ source: { bundled: { plugin: "tasks" } } })],
         },
       }),
     });
@@ -437,10 +437,10 @@ describe("third-party marketplaces", () => {
     });
 
     await expect(
-      catalog.install({ entryId: "docs", marketplace: "bb-official" }),
+      catalog.install({ entryId: "tasks", marketplace: "bb-official" }),
     ).rejects.toThrow(/bundled installation stopped by test/u);
     await expect(
-      catalog.install({ entryId: "docs", marketplace: "acme-plugins" }),
+      catalog.install({ entryId: "tasks", marketplace: "acme-plugins" }),
     ).rejects.toThrow('unknown marketplace "acme-plugins"');
   });
 

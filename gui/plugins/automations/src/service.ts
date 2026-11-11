@@ -1,4 +1,5 @@
 import { join } from "node:path";
+import { personalProjectAllowsEnvironment } from "@cloudroom/domain";
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import {
@@ -509,17 +510,38 @@ async function projectNameById(
   }
 }
 
-const projectAvailableSchema = z.object({ id: z.string() }).passthrough();
+const projectAvailableSchema = z
+  .object({ id: z.string(), kind: z.string().optional() })
+  .passthrough();
 
 async function requireProjectAvailable(
   bb: Pick<ServiceApi, "sdk">,
   projectId: string,
-): Promise<void> {
+): Promise<{ kind?: string }> {
   try {
-    projectAvailableSchema.parse(await bb.sdk.projects.get({ projectId }));
+    return projectAvailableSchema.parse(
+      await bb.sdk.projects.get({ projectId }),
+    );
   } catch (error) {
     throw new Error(
       `Project ${projectId} is not available: ${errorMessage(error)}`,
+    );
+  }
+}
+
+/** A fresh-thread loop in the Personal project must pass thread creation's workspace rule, or every run fails. */
+function assertLoopWorkspace(
+  project: { kind?: string },
+  execution: AutomationExecution,
+): void {
+  if (
+    project.kind === "personal" &&
+    execution.mode === "agent" &&
+    execution.targetThreadId === undefined &&
+    !personalProjectAllowsEnvironment(execution.environment)
+  ) {
+    throw new Error(
+      "Personal project loops must use the personal workspace. Leave out --environment and --new-environment, or create the loop in the project that owns this folder.",
     );
   }
 }
@@ -666,7 +688,8 @@ export function createAutomationService(args: {
     },
 
     async create(payload) {
-      await requireProjectAvailable(bb, payload.projectId);
+      const project = await requireProjectAvailable(bb, payload.projectId);
+      assertLoopWorkspace(project, payload.execution);
       const now = Date.now();
       validateTrigger(payload.trigger, now);
       assertNotRecursiveCreation(db, payload.createdByThreadId);
@@ -744,7 +767,7 @@ export function createAutomationService(args: {
     },
 
     async update(input) {
-      await requireProjectAvailable(bb, input.projectId);
+      const project = await requireProjectAvailable(bb, input.projectId);
       const current = requireProjectAutomation(db, input);
       const currentAutomation = decodeAutomationRow(current).automation;
       if (
@@ -839,6 +862,8 @@ export function createAutomationService(args: {
         }
         patch.execution = updatedExecution;
       }
+      if (patch.execution !== undefined)
+        assertLoopWorkspace(project, patch.execution);
       if (
         "problem" in currentAutomation &&
         currentAutomation.problem === "missing-agent-prompt" &&

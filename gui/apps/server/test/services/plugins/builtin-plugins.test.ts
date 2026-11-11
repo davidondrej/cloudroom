@@ -257,10 +257,7 @@ describe("builtin plugin reconciliation", () => {
   it("keeps official plugins bundled but out of the auto-install builtins", () => {
     const optionalNames = OFFICIAL_PLUGINS.map((plugin) => plugin.name);
     expect(optionalNames).toEqual([
-      "environment-modal-sandbox",
       "github",
-      "docs",
-      "memory",
       "tasks",
       "theme-preview",
     ]);
@@ -354,10 +351,11 @@ describe("builtin plugin reconciliation", () => {
     );
   });
 
-  it("marks a persisted builtin as orphaned after it leaves the registry", async () => {
+  it("stops loading and listing a builtin after it leaves the registry", async () => {
     service = createService({ db, dataDir: join(workDir, "data") });
     await service.start();
-    expect(service.list()[0]?.isOrphanedBuiltin).toBe(false);
+    expect(service.list()).toHaveLength(1);
+    expect(loadCount()).toBe(1);
     await service.stop();
 
     service = createService({
@@ -367,9 +365,11 @@ describe("builtin plugin reconciliation", () => {
     });
     await service.start();
 
-    expect(service.list()).toMatchObject([
-      { id: "builtin-fixture", isOrphanedBuiltin: true },
-    ]);
+    expect(service.list()).toEqual([]);
+    expect(loadCount()).toBe(1);
+    expect(getInstalledPluginRegistration(db, "builtin-fixture")).toMatchObject(
+      { enabled: true },
+    );
   });
 
   it("backfills every legacy source form once while preserving registration state", async () => {
@@ -1139,6 +1139,6 @@ describe("builtin plugin packaging", () => {
     await expect(stat(join(connectRoot, "src"))).rejects.toThrow();
     await expect(stat(join(connectRoot, "node_modules"))).rejects.toThrow();
 
-    await expect(stat(join(targetRoot, "memory"))).rejects.toThrow();
+    await expect(stat(join(targetRoot, "tasks"))).rejects.toThrow();
   });
 });

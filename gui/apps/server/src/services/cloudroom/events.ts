@@ -271,6 +271,11 @@ export function projectRecords(
       emit({ type: "provider/warning", scope: threadScope(), threadId, providerThreadId: saved.nativeId, category: "general",
         summary: z.string().parse(data.message), ...(typeof data.detail === "string" ? { details: data.detail } : {}) });
     }
+    // Claude's safeguards flagged a message and it switched models: the same notice as a Local thread's (#1313).
+    if (record.kind === "model_fallback" && saved.nativeId && typeof data.original_model === "string" && data.original_model && typeof data.fallback_model === "string" && data.fallback_model) {
+      emit({ type: "provider/modelFallback", scope: threadScope(), threadId, providerThreadId: saved.nativeId, reason: "refusal",
+        originalModel: data.original_model, fallbackModel: data.fallback_model, message: String(data.message ?? "") });
+    }
     if (record.kind === "teleport") {
       const imported = z.array(z.object({ request_id: z.string(), input: object, state: z.string() })).parse(data.prompts);
       for (const [index, prompt] of imported.entries()) {

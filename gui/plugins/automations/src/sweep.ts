@@ -28,7 +28,7 @@ export const SWEEP_INTERVAL_MS = 10_000;
 export const OVERDUE_MS = 2 * 60_000;
 export const OVERDUE_SPACING_MS = 60_000;
 const lastOverdueStart = new WeakMap<Db, number>();
-export const RECOVERY_WAIT_MS = 30 * 60_000;
+export const RECOVERY_WAIT_MS = 6 * 60 * 60_000;
 const busyThreadSchema = z
   .object({ status: z.enum(["starting", "active"]), archivedAt: z.null(), deletedAt: z.null() })
   .passthrough();
@@ -85,11 +85,18 @@ function buildScheduleFailureHandler(
   };
 }
 
-/** provider-retry can bring a failed run's thread back (an app restart cut its turn). Until it settles, for 30 minutes
- *  at most, the loop's next run waits instead of starting a second thread beside it (#887). Any doubt runs, as before. */
-async function failedThreadBusy(bb: SweepApi, db: Db, automationId: string, now: number): Promise<boolean> {
+/** A run closes on its thread's first idle or failure, but the thread can work on: provider-retry (#887), a child
+ *  reporting back, or a person continuing it. Until it settles, for 6 hours at most, the loop's next run waits instead
+ *  of starting a second thread beside it (#1279). Any doubt runs, as before. */
+async function lastThreadBusy(
+  bb: SweepApi,
+  db: Db,
+  automationId: string,
+  now: number,
+): Promise<boolean> {
   const [last] = listAutomationRuns(db, { automationId, limit: 1 });
-  if (last?.status !== "failed" || !last.threadId || now - (last.finishedAt ?? 0) > RECOVERY_WAIT_MS) return false;
+  if (!last?.threadId || now - (last.finishedAt ?? 0) > RECOVERY_WAIT_MS)
+    return false;
   const thread = await bb.sdk.threads.get({ threadId: last.threadId }).catch(() => null);
   return busyThreadSchema.safeParse(thread).success;
 }
@@ -133,7 +140,7 @@ async function processDueAutomation(
   if (
     execution.mode === "agent" &&
     args.automation.targetThreadId === null &&
-    (await failedThreadBusy(bb, db, args.automation.id, args.now))
+    (await lastThreadBusy(bb, db, args.automation.id, args.now))
   )
     return false;
 

@@ -273,6 +273,19 @@ describe("worktree host entry", () => {
     });
     if (result.status !== "created") throw new Error(result.message);
     expect(existsSync(join(result.path, "README.md"))).toBe(true);
+    // A branch only on the remote, and a pull request alias, work too (#985).
+    await git(sourcePath, "fetch", "origin", "main:refs/remotes/origin/pr/1");
+    for (const name of ["main", "origin/pr/1"]) {
+      const remote = await harness.experimental_call("create", {
+        operationId: name,
+        sourcePath,
+        pathKey: `thr_${name.length}`,
+        branchName: `bb/remote-${name.length}`,
+        baseBranch: { kind: "named", name },
+        branchMode: "reset",
+      });
+      expect(remote).toMatchObject({ status: "created" });
+    }
     await harness.experimental_dispose();
   });
 

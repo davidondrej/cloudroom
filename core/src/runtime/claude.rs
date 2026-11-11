@@ -68,8 +68,8 @@ pub(super) fn command(
             "--include-partial-messages",
             "--replay-user-messages",
             "--dangerously-skip-permissions",
-            "--permission-prompts",
-            "none",
+            "--permission-prompt-tool",
+            "stdio",
             "--no-chrome",
         ])
         .args([
@@ -806,6 +806,12 @@ impl Adapter for Protocol {
                     .push(Self::reply_control(id, json!({"continue":true})));
                 return Ok(events);
             }
+            // Full access, like a Local thread: allow what a Claude ask rule would prompt for. The Command Guard's hook denies first.
+            if value["request"]["subtype"] == "can_use_tool" {
+                let allow = json!({"behavior":"allow","updatedInput":value["request"]["input"]});
+                self.pending_frames.push(Self::reply_control(id, allow));
+                return Ok(events);
+            }
             let response = if value["request"]["subtype"] == "hook_callback" {
                 json!({"continue":false,"stopReason":"Native Claude subagents are disabled. Start a managed child thread with `room-cli thread spawn`."})
             } else {
@@ -926,6 +932,24 @@ impl Adapter for Protocol {
             events.extend(state.started());
         }
         let request = self.active.as_ref().map(|(_, id)| id.clone());
+        // Claude's safeguards flagged a message and Claude retried on another model, kept for the rest of this run
+        // (`local`: this reply only). The thread's chosen model stays for its next run; this says which model answered.
+        if kind == "system"
+            && value["subtype"] == "model_refusal_fallback"
+            && let Some(model) = value["fallback_model"].as_str()
+        {
+            let span = if value["scope"] == "local" {
+                "this reply"
+            } else {
+                "the rest of this run"
+            };
+            events.push(Event::Record {
+                kind: "model_fallback",
+                data: json!({"harness":"claude-code","request_id":request,"original_model":value["original_model"],
+                    "fallback_model":model,"message":format!("Claude switched to {model} for {span}.")}),
+                native: None,
+            });
+        }
         let mut data = json!({"harness":"claude-code","type":kind,"request_id":request});
         let mut keep = true;
         let event_kind = if kind == "stream_event" {
@@ -1480,5 +1504,51 @@ mod tests {
         assert!(feed(child("other")).is_err());
         feed(json!({"type":"user","session_id":"s","parent_tool_use_id":null,"message":{"content":[{"type":"tool_result","tool_use_id":"skill","content":"done"}]}})).unwrap();
         assert!(feed(child("skill")).is_err());
+        // A project ask rule must not stall a Cloud thread: nobody can answer the prompt (#1077).
+        let ask =
+            json!({"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"git push"}});
+        feed(json!({"type":"control_request","request_id":"ask","request":ask})).unwrap();
+        assert_eq!(
+            claude.pending_frames[0]["response"]["response"],
+            json!({"behavior":"allow","updatedInput":{"command":"git push"}})
+        );
+    }
+
+    #[test]
+    fn a_refusal_fallback_records_the_model_that_answered() {
+        let profile = HarnessConfig {
+            binary: "claude".into(),
+            home: "/nonexistent".into(),
+            model: "claude-opus-5-5".into(),
+            provider: None,
+        };
+        let mut claude = Protocol::new(&profile, "s".into(), None, None).unwrap();
+        let mut state = Progress::default();
+        let fallback = |scope| json!({"type":"system","subtype":"model_refusal_fallback","scope":scope,"original_model":"claude-opus-5-5","fallback_model":"claude-opus-4-8"});
+        for (frame, expected) in [
+            (fallback("session"), Some("for the rest of this run.")),
+            (fallback("local"), Some("for this reply.")),
+            (json!({"type":"system","subtype":"status"}), None),
+        ] {
+            let events = claude.receive(&frame, frame.to_string(), &mut state);
+            let notice = events.unwrap().into_iter().find_map(|event| match event {
+                Event::Record {
+                    kind: "model_fallback",
+                    data,
+                    ..
+                } => Some(data),
+                _ => None,
+            });
+            let expected = expected.map(|span| {
+                json!([
+                    "claude-opus-4-8",
+                    format!("Claude switched to claude-opus-4-8 {span}")
+                ])
+            });
+            assert_eq!(
+                notice.map(|d| json!([d["fallback_model"], d["message"]])),
+                expected
+            );
+        }
     }
 }

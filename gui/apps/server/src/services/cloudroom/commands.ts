@@ -425,6 +425,13 @@ function connectionFailure(error: unknown): boolean {
     || (error instanceof CloudroomError && error.status !== null && (error.status >= 500 || error.status === 408 || error.status === 429));
 }
 
+/** Core refuses work for a few seconds while its sandbox goes to sleep, restarts, or wakes. The next try gets through,
+ *  so the thread shows "Reconnecting…" after the usual wait, never a red error (a Metal sandbox sleeps a minute after
+ *  work stops, so a message often lands mid-sleep). */
+function sandboxTransition(error: unknown): boolean {
+  return error instanceof CloudroomError && ["service_stopping", "service_draining", "session_waking"].includes(error.code ?? "");
+}
+
 /** Whether a command can never succeed. Such a command fails at once, so it cannot block every command behind it.
  *  Retry only a lost connection, a busy or restarting core, or an answer that never arrived (the core ignores a
  *  repeated request ID). Errors from the app's own checks and code fail. A command aimed at another message (steer,
@@ -2126,7 +2133,7 @@ class CloudroomService {
       await this.compact(thread);
       return { ok: true, delivery: "sent" };
     }
-    if (payload.model && payload.model !== saved.model) throw new ApiError(409, "cloudroom_launch_settings", "This thread's model just changed. Send your message again.");
+    if (payload.model && payload.model !== saved.model) throw new ApiError(409, "cloudroom_launch_settings", `This Cloud thread now runs ${saved.model}. Send again with that model, or to use ${payload.model}, switch first in the model picker or with \`room-cli thread update ${thread.id} --model ${payload.model}\`.`);
     const id = payload.requestId ?? randomUUID();
     const steer = (payload.mode === "steer" || payload.mode === "steer-if-active") && thread.status === "active" && saved.turnId && !unstartedTurn(this.deps.db, thread.id);
     const previous = command(this.deps.db, id);
@@ -2160,7 +2167,7 @@ class CloudroomService {
       parsed = followUpPayload(thread.providerId, saved, payload, validated, capabilities = await live());
     }
     if (steer) {
-      this.enqueue(thread.id, id, "steer", { target_request_id: saved.turnId, text: parsed.text, content: parsed.content });
+      this.enqueue(thread.id, id, "steer", { target_request_id: saved.turnId, text: parsed.text, content: parsed.content, attachments: parsed.attachments });
       await this.deliver(thread.id);
       return { ok: true, delivery: "sent" };
     }
@@ -2505,7 +2512,7 @@ class CloudroomService {
       throw new ApiError(404, "invalid_request", "Queued message not found");
     }
     const active = thread.status === "active" && saved.turnId !== null && !unstartedTurn(this.deps.db, thread.id);
-    if (active && queued.content.every((part) => part.type === "text")) {
+    if (active) {
       const capabilities = await this.queueCapabilities(saved);
       if (feature(capabilities, "steer") && feature(capabilities, "queue_cancel") && harnessProfile(capabilities, thread.providerId)?.steer !== false) {
         await this.send(thread, { mode: "steer", input: queued.content });
@@ -2962,8 +2969,12 @@ class CloudroomService {
           } else if (pending.command === "reorder") {
             accepted = await client.reorder(sessionId, pending.id, z.object({ order: z.array(z.string()) }).parse(JSON.parse(pending.input)).order);
           } else if (pending.command === "steer") {
-            const parsed = z.object({ target_request_id: z.string(), text: z.string(), customInstructions: z.string().default("") }).parse(JSON.parse(pending.input));
-            accepted = await client.steer(sessionId, pending.id, parsed.target_request_id, prepareCloudInstructionInput(parsed, parsed.customInstructions, cloudPromptLimit(capabilities)).text);
+            const parsed = z.object({ target_request_id: z.string(), text: z.string(), customInstructions: z.string().default(""), attachments: z.array(z.object({ name: z.string(), kind: z.enum(["image", "file"]), localPath: z.string().optional(), path: z.string().optional(), id: z.string().optional() })).default([]) }).parse(JSON.parse(pending.input));
+            if (parsed.attachments.length && !capabilities.attachments) throw new ApiError(400, "cloudroom_unsupported", "Update the cloud core to use attachments. Your message is saved.");
+            // Core steers text only, so files go up first and the agent gets their paths, as Core does for prompt files.
+            const uploaded = await this.uploadAttachments(client, sessionId, pending.id, parsed.attachments, getThread(this.deps.db, threadId)?.projectId ?? "", capabilities.upload_parts);
+            const text = [prepareCloudInstructionInput(parsed, parsed.customInstructions, cloudPromptLimit(capabilities)).text, ...uploaded.map((file) => `[Attached ${file.kind}: ${file.path}]`)].join("\n");
+            accepted = await client.steer(sessionId, pending.id, parsed.target_request_id, text);
           } else if (pending.command === "compact") {
             accepted = await client.compact(sessionId, pending.id);
           } else if (pending.command === "goal") {
@@ -2992,9 +3003,9 @@ class CloudroomService {
           if (!stale && refused(error, ["steer", "edit", "cancel", "reorder"].includes(pending.command))) {
             if (pending.command === "steer") {
               // Usually its turn just ended. It queues ahead of anything sent after it; the same ID makes a repeat harmless.
-              const { text, content } = z.object({ text: z.string(), content: z.unknown().optional() }).parse(JSON.parse(pending.input));
+              const { text, content, attachments } = z.object({ text: z.string(), content: z.unknown().optional(), attachments: z.array(z.unknown()).optional() }).parse(JSON.parse(pending.input));
               const id = `queued-${createHash("sha256").update(pending.id).digest("hex").slice(0, 32)}`;
-              this.enqueue(threadId, id, "prompt", { text, ...(content === undefined ? {} : { content }) }, pending.createdAt);
+              this.enqueue(threadId, id, "prompt", { text, ...(content === undefined ? {} : { content }), ...(attachments?.length ? { attachments } : {}) }, pending.createdAt);
               saveCommandState(this.deps.db, threadId, pending.id, "failed");
               if (this.deps.db.transaction(tx => projectFollowUp(tx, threadId, id))) this.notify(threadId, ["client/turn/requested"]);
               void this.deliver(threadId).catch(() => {});
@@ -3025,7 +3036,7 @@ class CloudroomService {
       const message = publicError(error);
       const permanent = error instanceof CloudroomError ? !error.retryable : error instanceof ApiError && error.status === 400;
       if (!binding(this.deps.db, threadId)?.sessionId && permanent) this.failStart(threadId, message);
-      else if ((connectionFailure(error) && !rejectedCommand) || !deliveringCommand) this.setConnectionIssue(threadId, "delivery", error);
+      else if (((connectionFailure(error) || sandboxTransition(error)) && !rejectedCommand) || !deliveringCommand) this.setConnectionIssue(threadId, "delivery", error);
       else {
         saveBinding(this.deps.db, threadId, { error: message });
         this.setConnectionIssue(threadId, "delivery");
@@ -3675,7 +3686,7 @@ class CloudroomService {
     const vmShutDown = (error instanceof CloudroomConnectionError && error.message.includes("unexpected redirect") || error instanceof ApiError && error.body.code === "cloudroom_sandbox_only") && !sandboxThread(binding(this.deps.db, threadId)?.coreUrl ?? "");
     const issue = error === undefined ? undefined : vmShutDown ? { message: retiredVmMessage, reconnecting: false } : {
       message: phase === "replay" && !(error instanceof CloudroomError) ? `Cloudroom history could not be restored: ${error instanceof Error ? error.message : String(error)}` : publicError(error),
-      reconnecting: phase !== "replay" && connectionFailure(error),
+      reconnecting: phase !== "replay" && (connectionFailure(error) || sandboxTransition(error)),
     };
     if (previous && !previous.reconnecting && issue?.reconnecting) return;
     if (previous?.message === issue?.message && previous?.reconnecting === issue?.reconnecting) return;

@@ -1,5 +1,5 @@
 import { createFakePluginHost } from "@get-bb/plugin-sdk/testing";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   type Db,
   deleteTerminalRuns,
@@ -62,6 +62,7 @@ interface WorkerState {
   status: "active" | "idle" | "error";
   output: string | null;
   deleted: boolean;
+  background?: number;
 }
 
 function setup(
@@ -104,6 +105,8 @@ function setup(
             environmentId: "environment-1",
             providerId: "codex",
             status: worker?.status ?? "active",
+            activeBackgroundAgentCount: 0,
+            activeBackgroundCommandCount: worker?.background ?? 0,
           } as never;
         },
         output: async ({ threadId }) => ({
@@ -1176,6 +1179,50 @@ describe("workflow service policy integration", () => {
     });
     errorController.abort();
     await errorWorker;
+
+    // Idle on background work isn't a result, even once the work ends: Claude
+    // wakes itself. Its next idle event, or the 30 min cap, settles (#1371).
+    vi.useFakeTimers({ toFake: ["Date"], shouldAdvanceTime: true });
+    try {
+      const waiting = setup();
+      harnesses.push(waiting.harness);
+      const waitingRun = await waiting.start(
+        source(`return [await agent("wake"), await agent("serve")];`),
+      );
+      const waitController = new AbortController();
+      const waitWorker = waiting.service.runWorker(waitController.signal);
+      await eventually(() => expect(waiting.childCount()).toBe(1));
+      waiting.workers.set("child-1", {
+        status: "idle",
+        output: "waiting",
+        deleted: false,
+        background: 1,
+      });
+      await new Promise((resolve) => setTimeout(resolve, 1_200));
+      waiting.workers.get("child-1")!.background = 0;
+      await new Promise((resolve) => setTimeout(resolve, 1_200));
+      expect(getCall(waiting.db, waitingRun.id, 0)?.status).toBe("running");
+      waiting.service.onThreadIdle("child-1", "woke", {});
+      await eventually(() => expect(waiting.childCount()).toBe(2));
+      waiting.workers.set("child-2", {
+        status: "idle",
+        output: "served",
+        deleted: false,
+        background: 1,
+      });
+      await new Promise((resolve) => setTimeout(resolve, 1_200));
+      vi.setSystemTime(Date.now() + 31 * 60_000);
+      await eventually(() =>
+        expect(getRunRequired(waiting.db, waitingRun.id)).toMatchObject({
+          status: "succeeded",
+          resultJson: '["woke","served"]',
+        }),
+      );
+      waitController.abort();
+      await waitWorker;
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("keeps quiet workers alive until the total run timeout", async () => {

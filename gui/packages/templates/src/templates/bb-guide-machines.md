@@ -343,8 +343,8 @@ After expiry, Add a machine offers Generate new command: it cancels the old
 attempt and creates a fresh one. Manual owns the command and expiry in memory;
 polling does not renew it. Restart machine setup if the plugin or server restarts.
 
-For a new thread on a new Modal sandbox, select the environment composition:
-`room-cli thread spawn --project <id> --environment-provider modal-sandbox --prompt "..."`.
+For a new thread on a new machine from a composed option, select the environment composition:
+`room-cli thread spawn --project <id> --environment-provider <composition-id> --prompt "..."`.
 It creates the machine, prepares the project checkout, and runs environment setup.
 Progress and failures appear in the thread's provisioning details. If cloning
 fails, the machine remains available for retry or explicit removal.

@@ -326,11 +326,20 @@ export async function resolveSystemProviderModels(
     provider,
     access: { kind: "validation", requiredModel: null },
   });
+  // No built-in fallback (Codex): a failed or slow listing reuses what this host listed last,
+  // even before an app update changed the catalog's fingerprint (#1399).
+  const code = result.modelLoadError?.code;
   const { models, selectedOnlyModels } = appendCustomModels(
     deps.providerRegistry,
     {
       customModels: deps.config.customModels,
-      models: result.models,
+      models:
+        result.models.length === 0 && (code === "timeout" || code === "failed")
+          ? deps.lifecycleDedupers.providerModelCatalogs.lastListedModels(
+              deps,
+              { cwd: args.cwd ?? null, hostId: args.hostId, provider },
+            )
+          : result.models,
       providerId: provider.id,
       selectedOnlyModels: result.selectedOnlyModels,
     },

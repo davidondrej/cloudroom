@@ -68,7 +68,6 @@ const SETTINGS_SEARCH_ENTRIES: readonly SettingsSearchEntry[] = [
   ...entries("general", "Thread naming", [
     ["Thread naming", "title rename name"],
     ["Model", "thread naming llm harness provider fallback"],
-    ["Rules", "thread naming title"],
     ["Rename vague titles", "thread naming"],
   ]),
   ...entries("general", "Thread purpose", [
@@ -201,6 +200,7 @@ const SETTINGS_SEARCH_ENTRIES: readonly SettingsSearchEntry[] = [
     ["Cloudroom system prompt", "instructions agents"],
   ]),
   ...entries("feature-prompts", undefined, [
+    ["Thread naming", "feature prompts edit rules title rename name"],
     ["Prompt suggestions prompt", "feature prompts edit predict next prompt"],
   ]),
   ...entries("experiments", "Experiments", [

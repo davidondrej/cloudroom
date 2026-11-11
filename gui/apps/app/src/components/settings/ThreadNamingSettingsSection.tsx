@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { useAtom } from "jotai";
+import { useAtom, type WritableAtom } from "jotai";
 import { Button } from "@cloudroom/shared-ui/button";
 import { COARSE_POINTER_ICON_SIZE_CLASS } from "@cloudroom/shared-ui/coarse-pointer-sizing";
 import {
@@ -68,24 +68,14 @@ const RENAME_SENSITIVITY_OFF = 1;
 
 export function ThreadNamingSettingsSection() {
   const [model, setModel] = useAtom(threadNamingModelAtom);
-  const [rules, setRules] = useAtom(threadNamingRulesAtom);
   const [renameSensitivity, setRenameSensitivity] = useAtom(
     renameSensitivityAtom,
   );
-  const [draftRules, setDraftRules] = useState(rules);
-
-  useEffect(() => setDraftRules(rules), [rules]);
-
-  const saveRules = () => {
-    const next = draftRules.trim() || DEFAULT_THREAD_NAMING_RULES;
-    setDraftRules(next);
-    if (next !== rules) setRules(next);
-  };
 
   return (
     <SettingsSection
       title="Thread naming"
-      description="Names new threads after your first message."
+      description="Names new threads after your first message. Edit the naming rules in Prompts → Feature prompts."
     >
       <div className="space-y-4">
         <SettingsWithControl
@@ -93,20 +83,6 @@ export function ThreadNamingSettingsSection() {
           description="Falls back to your other harness if it fails."
         >
           <NamingModelDropdown value={model} onChange={setModel} />
-        </SettingsWithControl>
-        <SettingsWithControl
-          label="Rules"
-          description="How titles should look. It also sees your other thread names, so new names stand out. Saved when you click away."
-          controlPlacement="below"
-        >
-          <Textarea
-            aria-label="Thread naming rules"
-            className="min-h-[80px] text-sm"
-            maxLength={4_000}
-            value={draftRules}
-            onChange={(event) => setDraftRules(event.target.value)}
-            onBlur={saveRules}
-          />
         </SettingsWithControl>
         <SettingsWithControl
           label="Rename vague titles"
@@ -360,38 +336,71 @@ const promptSuggestionsPromptAtom = createSyncedPreferenceAtom(
   "promptSuggestions.prompt",
 );
 
-/** Settings → Prompts → Feature prompts: the editable prompts behind built-in features. */
-export function FeaturePromptsSettingsSection() {
-  const [prompt, setPrompt] = useAtom(promptSuggestionsPromptAtom);
-  const [draft, setDraft] = useState(prompt);
+interface FeaturePromptProps {
+  ariaLabel: string;
+  className: string;
+  defaultValue: string;
+  description: string;
+  label: string;
+  preference: WritableAtom<string, [string], void>;
+}
 
-  useEffect(() => setDraft(prompt), [prompt]);
+/** One editable prompt. Saves on blur; an empty box restores the default. */
+function FeaturePrompt(props: FeaturePromptProps) {
+  const [value, setValue] = useAtom(props.preference);
+  const [draft, setDraft] = useState(value);
+
+  useEffect(() => setDraft(value), [value]);
 
   const save = () => {
-    const next = draft.trim() || DEFAULT_PROMPT_SUGGESTION_PROMPT;
+    const next = draft.trim() || props.defaultValue;
     setDraft(next);
-    if (next !== prompt) setPrompt(next);
+    if (next !== value) setValue(next);
   };
 
+  return (
+    <SettingsWithControl
+      label={props.label}
+      description={props.description}
+      controlPlacement="below"
+    >
+      <Textarea
+        aria-label={props.ariaLabel}
+        className={props.className}
+        maxLength={4_000}
+        value={draft}
+        onChange={(event) => setDraft(event.target.value)}
+        onBlur={save}
+      />
+    </SettingsWithControl>
+  );
+}
+
+/** Settings → Prompts → Feature prompts: the editable prompts behind built-in features. */
+export function FeaturePromptsSettingsSection() {
   return (
     <SettingsSection
       title="Feature prompts"
       description="The prompts behind Cloudroom's built-in features. Edit them to fit how you work."
     >
-      <SettingsWithControl
-        label="Prompt suggestions"
-        description="How Cloudroom guesses your next message. Suggestions stay at 12 words or less. Clear the box to restore the default. Saved when you click away."
-        controlPlacement="below"
-      >
-        <Textarea
-          aria-label="Prompt suggestions prompt"
-          className="min-h-[420px] text-sm"
-          maxLength={4_000}
-          value={draft}
-          onChange={(event) => setDraft(event.target.value)}
-          onBlur={save}
+      <div className="space-y-4">
+        <FeaturePrompt
+          label="Thread naming"
+          description="How new thread titles should look. Cloudroom also sees your other thread names, so new names stand out. Clear the box to restore the default. Saved when you click away."
+          ariaLabel="Thread naming rules"
+          className="min-h-[190px] text-sm"
+          defaultValue={DEFAULT_THREAD_NAMING_RULES}
+          preference={threadNamingRulesAtom}
         />
-      </SettingsWithControl>
+        <FeaturePrompt
+          label="Prompt suggestions"
+          description="How Cloudroom guesses your next message. Suggestions stay at 12 words or less. Clear the box to restore the default. Saved when you click away."
+          ariaLabel="Prompt suggestions prompt"
+          className="min-h-[420px] text-sm"
+          defaultValue={DEFAULT_PROMPT_SUGGESTION_PROMPT}
+          preference={promptSuggestionsPromptAtom}
+        />
+      </div>
     </SettingsSection>
   );
 }

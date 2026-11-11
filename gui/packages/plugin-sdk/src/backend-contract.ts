@@ -1445,9 +1445,9 @@ export interface PluginProviderFallbackModel {
   displayName: string;
   description: string;
   /** Reasoning levels this model supports, lowest to highest. Non-empty.
-   * `reasoningEffort` is a standard ladder entry or any provider-specific id
-   * the bridge accepts back as `reasoningLevel`; `label` names a
-   * provider-specific id in the picker. */
+   * Only standard ladder entries ({@link PluginProviderReasoningLevel}) are
+   * kept today: the host drops any other id, here and in the live
+   * `model/list`, and keeps the model. Map provider options onto the ladder. */
   supportedReasoningEfforts: readonly {
     reasoningEffort: PluginProviderReasoningLevel | (string & {});
     label?: string;
@@ -1782,8 +1782,9 @@ export interface PluginProviders {
 }
 
 export interface ExperimentalPluginProviderEnvContext {
-  threadId: string;
-  projectId: string;
+  /** The thread starting a turn. Absent for a helper call, such as thread naming, that runs the provider outside a thread. */
+  threadId?: string;
+  projectId?: string;
   hostId: string;
 }
 

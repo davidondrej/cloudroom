@@ -6,9 +6,18 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   ProviderInstallationInProgressError,
   streamProviderInstallation,
+  withWindowsGitShell,
   type ProviderInstallationProcess,
   type ProviderInstallationProcessSpawner,
 } from "./provider-installation.js";
+
+vi.mock("@cloudroom/process-utils", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@cloudroom/process-utils")>()),
+  gitShell: async () => ({
+    command: "C:\\Git\\usr\\bin\\sh.exe",
+    env: { PATH: "C:\\Git\\usr\\bin" },
+  }),
+}));
 
 function fakeProcess(): Omit<
   ProviderInstallationProcess,
@@ -117,6 +126,27 @@ describe("streamProviderInstallation", () => {
     secondProcess.close(0);
     await readEvents(second);
   });
+});
+
+// A default Git for Windows install puts only git\cmd on PATH (#1251).
+it("runs sh installers with Git's shell when Windows has no sh on PATH", async () => {
+  const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
+  Object.defineProperty(process, "platform", { ...platform, value: "win32" });
+  try {
+    const plan = {
+      command: "sh",
+      args: ["-c", "true"],
+      displayCommand: "true",
+    };
+    await expect(
+      withWindowsGitShell({ plan, env: { PATH: "/no-sh-here" } }),
+    ).resolves.toEqual({
+      plan: { ...plan, command: "C:\\Git\\usr\\bin\\sh.exe" },
+      env: { PATH: "C:\\Git\\usr\\bin" },
+    });
+  } finally {
+    Object.defineProperty(process, "platform", platform);
+  }
 });
 
 describe("streamProviderInstallation with node-pty", () => {

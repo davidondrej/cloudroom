@@ -5,6 +5,7 @@ import type {
   ExperimentalAiInferenceCompleteOutput,
   ExperimentalAiServiceErrorCode,
 } from "@get-bb/plugin-sdk/ai-services";
+import { withoutBlankAccountEnv } from "./bridge/bridge.js";
 import { claudeExecutable } from "./bridge/provider-maintenance.js";
 import { withoutBridgeRuntimeEnv } from "@get-bb/plugin-sdk/provider-bridge";
 
@@ -70,7 +71,11 @@ export function completeClaudeInference(
   input: ExperimentalAiInferenceCompleteInput,
 ): Promise<ExperimentalAiInferenceCompleteOutput> {
   return new Promise((resolve) => {
-    const env = withoutBridgeRuntimeEnv(process.env);
+    // `input.env` is the login the user's Claude threads run on; without it, this is the machine's own login.
+    const env = withoutBlankAccountEnv({
+      ...withoutBridgeRuntimeEnv(process.env),
+      ...input.env,
+    });
     delete env.CLAUDECODE;
     delete env.CLAUDE_AGENT_SDK_CLIENT_APP;
     const child = spawn(

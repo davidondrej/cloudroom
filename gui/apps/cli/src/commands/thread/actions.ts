@@ -544,7 +544,10 @@ export function registerActionsCommands(
       "Read the message from a UTF-8 file, or - for stdin (use it for long messages)",
     )
     .option("--json", "Print machine-readable JSON output")
-    .option("--model <model>", "Model ID for this message")
+    .option(
+      "--model <model>",
+      "Model ID for this message. Cloud threads keep their model: switch with thread update --model first",
+    )
     .option("--service-tier <tier>", "Service tier: fast or default")
     .option(
       "--reasoning-level <level>",

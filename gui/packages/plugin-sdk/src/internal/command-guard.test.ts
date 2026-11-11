@@ -1,26 +1,16 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import {
-  mkdtempSync,
-  readFileSync,
-  readdirSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { codexGuardConfig } from "../../../../../core/src/runtime/command-guard.mjs";
 import { commandGuardBlockReason, prepareCodexGuard } from "./command-guard.js";
 
-const fixture = vi.hoisted(() => ({ directory: "" }));
-vi.mock("node:os", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("node:os")>()),
-  tmpdir: () => fixture.directory,
-}));
+const fixture = { directory: "" };
 
-beforeAll(async () => {
-  const { tmpdir } = await vi.importActual<typeof import("node:os")>("node:os");
-  // Exercise quoting for spaces, apostrophes and shell metacharacters in TEMP.
+beforeAll(() => {
+  // Exercise quoting for spaces, apostrophes and shell metacharacters in the path.
   fixture.directory = mkdtempSync(join(tmpdir(), "cloudroom guard ' & $ "));
 });
 
@@ -30,7 +20,7 @@ afterAll(() => {
 
 describe("Codex Command Guard", () => {
   it("trusts the hook at Codex's platform-specific session config path", () => {
-    const config = prepareCodexGuard();
+    const config = prepareCodexGuard(fixture.directory);
     const group = config["hooks.PreToolUse"][0]!;
     expect(group.matcher).toBe("Bash");
     const identity = {
@@ -79,8 +69,9 @@ describe("Codex Command Guard", () => {
   it.each(shells)(
     "runs the hook and denies a guarded command through %s",
     (shell) => {
-      const command =
-        prepareCodexGuard()["hooks.PreToolUse"][0]!.hooks[0]!.command;
+      const command = prepareCodexGuard(fixture.directory)[
+        "hooks.PreToolUse"
+      ][0]!.hooks[0]!.command;
       const args =
         process.platform === "win32"
           ? [
@@ -113,8 +104,8 @@ describe("Codex Command Guard", () => {
   );
 
   it.each(shells)("allows a safe command through %s", (shell) => {
-    const command =
-      prepareCodexGuard()["hooks.PreToolUse"][0]!.hooks[0]!.command;
+    const command = prepareCodexGuard(fixture.directory)["hooks.PreToolUse"][0]!
+      .hooks[0]!.command;
     const args =
       process.platform === "win32"
         ? [
@@ -138,16 +129,25 @@ describe("Codex Command Guard", () => {
     expect(result.stderr).toBe("");
   });
 
+  it("writes the guard again after the OS removed its folder", () => {
+    const config = prepareCodexGuard(fixture.directory);
+    rmSync(fixture.directory, { recursive: true, force: true });
+    expect(prepareCodexGuard(fixture.directory)).toBe(config);
+    expect(
+      readFileSync(
+        join(fixture.directory, "cloudroom-command-guard.mjs"),
+        "utf8",
+      ),
+    ).toContain("inspectCloudroomCommand");
+  });
+
   it.skipIf(process.platform !== "win32").each(shells)(
     "leaves guard crashes visible through %s without emitting a deny",
     (shell) => {
-      const command =
-        prepareCodexGuard()["hooks.PreToolUse"][0]!.hooks[0]!.command;
-      const path = join(
-        fixture.directory,
-        readdirSync(fixture.directory)[0]!,
-        "cloudroom-command-guard.mjs",
-      );
+      const command = prepareCodexGuard(fixture.directory)[
+        "hooks.PreToolUse"
+      ][0]!.hooks[0]!.command;
+      const path = join(fixture.directory, "cloudroom-command-guard.mjs");
       const source = readFileSync(path, "utf8");
       try {
         for (const crash of [

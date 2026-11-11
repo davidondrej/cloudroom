@@ -106,7 +106,7 @@ cannot delay or interrupt the thread's turn.
 coalesces appends per thread into one notification per second, with the latest sequence
 and current thread DTO. Continuous output produces periodic updates and a final pending
 update. Reading history does not notify. The payload contains no event contents; use the
-existing thread-events SDK if your policy needs them. Modal v1 simply checks whether
+existing thread-events SDK if your policy needs them. A simple idle policy checks whether
 the delivered thread is active before extending its idle deadline.
 
 `experimental_terminal.input` fires after nonempty real user input is forwarded to a

@@ -16,6 +16,22 @@ export const projectSchema = z.object({
 });
 export type Project = z.infer<typeof projectSchema>;
 
+/** Personal project threads use the personal workspace: never a project folder or worktree. Thread creation and
+ *  Local loops both apply it. */
+export function personalProjectAllowsEnvironment(environment: {
+  type: string;
+  workspace?: { type: string; path?: string | null };
+}): boolean {
+  if (["reuse", "provider", "project-default"].includes(environment.type))
+    return true;
+  const workspace = environment.workspace;
+  return (
+    environment.type === "host" &&
+    (workspace?.type === "personal" ||
+      (workspace?.type === "unmanaged" && workspace.path === null))
+  );
+}
+
 const projectSourceTypeValues = ["local_path"] as const;
 const projectSourceTypeSchema = z.enum(projectSourceTypeValues);
 export type ProjectSourceType = z.infer<typeof projectSourceTypeSchema>;

@@ -89,13 +89,23 @@ starterFiles.sort((a, b) => {
   if (a.target > b.target) return 1;
   return 0;
 });
-function versionedDeps(names) {
+function versionedDeps(names, { exact = false } = {}) {
   return Object.fromEntries(
     [...names].sort().map((name) => {
-      const version = appPackageJson.dependencies?.[name];
-      if (!version) {
+      const range = appPackageJson.dependencies?.[name];
+      if (!range) {
         throw new Error(
           `starter dep "${name}" missing from apps/app dependencies`,
+        );
+      }
+      if (!exact) return [name, range];
+      // A scaffold has no lockfile, so a range lets npm pick a newer release
+      // than the host runs, including a broken one (#906: @pierre/diffs 1.6.3
+      // shipped `catalog:` deps). Pin the host's own version instead.
+      const version = range.replace(/^[\^~]/, "");
+      if (!/^\d+\.\d+\.\d+$/.test(version)) {
+        throw new Error(
+          `shimmed dep "${name}" needs a plain ^x.y.z, ~x.y.z, or x.y.z range in apps/app, got "${range}"`,
         );
       }
       return [name, version];
@@ -128,7 +138,7 @@ export const PLUGIN_STARTER_DEPENDENCIES: Readonly<Record<string, string>> = ${J
  * Every package \`bb plugin build\` shims to the host runtime, at the host's
  * version — installed for editor/tsc types only, never bundled.
  */
-export const PLUGIN_SHIMMED_TYPE_DEPENDENCIES: Readonly<Record<string, string>> = ${JSON.stringify(versionedDeps(shimmedTypeDeps), null, 2)};
+export const PLUGIN_SHIMMED_TYPE_DEPENDENCIES: Readonly<Record<string, string>> = ${JSON.stringify(versionedDeps(shimmedTypeDeps, { exact: true }), null, 2)};
 `;
 
 await writeGeneratedFile(starterOutputPath, starterOutput);

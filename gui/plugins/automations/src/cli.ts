@@ -1037,7 +1037,7 @@ A --script/--script-file runs first (60 s), in the loop's own sandbox with fresh
 no output skips the run (exit 0 or 1; other exit codes fail it, 3 in a row pause it), output is added to the prompt.
 A --webhook loop, Local or Cloud, runs when its secret URL gets a POST: create prints the URL once, and each run gets
 the requests that arrived as data. Cloud runs start within seconds; this Mac checks for Local ones about once a minute,
-and they wait while it is off. A Local webhook loop an agent creates starts paused: a person turns it on in Loops.
+and they wait while it is off. A Local webhook loop made here starts paused: a person turns it on in Loops.
 room-cli loop create --cloud --project <id> --name <name> --prompt <text> (--cron <expr> --timezone <tz> | --at <datetime> | --in <duration> | --webhook) [--new-thread | --same-thread] [--script <inline> | --script-file <path>] [--provider <id>] [--model <model>] [--reasoning <level>] [--priority 1-4] [--secrets <KEY,.env|none|all>]
 --secrets picks the only API keys (Settings → Cloud environment) a fresh-thread Cloud loop's runs and script get, plus
 .env for the project's .env files: pick just what it needs, like --secrets SENTRY_TOKEN,.env, or none. Without it, all.
@@ -1447,11 +1447,15 @@ export function registerAutomationCli(args: {
             parsed,
             ctx,
           );
+          const trigger = buildTrigger(parsed);
+          // A missing ROOM_THREAD_ID doesn't prove a person ran this, so every Local webhook loop the CLI makes starts
+          // paused, and a person turns it on in the Loops panel (ADR 0262).
+          const webhook = trigger.triggerType === "webhook";
           const request: ResolvedCreateAutomationInput = {
             projectId,
             name: requireFlag(parsed, "name"),
-            enabled: !boolFlag(parsed, "disabled"),
-            trigger: buildTrigger(parsed),
+            enabled: !boolFlag(parsed, "disabled") && !webhook,
+            trigger,
             execution,
             origin: ctx.threadId ? "agent" : "human",
             ...(ctx.threadId ? { createdByThreadId: ctx.threadId } : {}),
@@ -1460,10 +1464,8 @@ export function registerAutomationCli(args: {
           const created = await service.create(request);
           const json = optionalJson(parsed, created);
           const paused =
-            created.trigger.triggerType === "webhook" &&
-            !created.enabled &&
-            request.enabled
-              ? "  It starts paused, because an agent made it: a person turns it on in the Loops panel.\n"
+            webhook && !boolFlag(parsed, "disabled")
+              ? "  It starts paused: a person turns it on in the Loops panel.\n"
               : "";
           return {
             exitCode: 0,
@@ -1513,7 +1515,7 @@ export function registerAutomationCli(args: {
             automationId,
           };
           // Anyone with a Local webhook loop's URL can prompt an agent on this Mac, so a person turns it on (ADR 0260).
-          if (command === "resume" && ctx.threadId) {
+          if (command === "resume") {
             const found = await service.get(input);
             if ("trigger" in found && found.trigger.triggerType === "webhook") {
               throw new Error(

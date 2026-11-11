@@ -91,7 +91,7 @@ const selectedExecutionSchema = z.object({
 type ResolvedSelection = z.infer<typeof selectedExecutionSchema>;
 
 const MAX_REPAIR_ATTEMPTS = 2;
-const WORKER_PROMPT_VERSION = "workflow-worker-prompt-v1";
+const WORKER_PROMPT_VERSION = "workflow-worker-prompt-v2";
 const RESULT_PROTOCOL_VERSION = "workflow-result-protocol-v1";
 const SCHEMA_LIMITS = { bytes: 64 * 1024, nodes: 4_096, depth: 64 };
 const VALUE_LIMITS = { bytes: 1024 * 1024, nodes: 100_000, depth: 128 };
@@ -102,6 +102,26 @@ const RETENTION_SWEEP_RUNS = 20;
 
 function message(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/** A Claude wake-up turn opens on its first output, so the poll waits this long. */
+const BACKGROUND_QUIET_MS = 60_000;
+/** A server or watcher a worker left running can't hold its call longer. */
+const BACKGROUND_WAIT_MAX_MS = 30 * 60_000;
+
+interface BackgroundWorkCounts {
+  activeBackgroundAgentCount?: number;
+  activeBackgroundCommandCount?: number;
+  activeWorkflowCount?: number;
+}
+
+function hasBackgroundWork(thread: BackgroundWorkCounts): boolean {
+  return (
+    (thread.activeBackgroundAgentCount ?? 0) +
+      (thread.activeBackgroundCommandCount ?? 0) +
+      (thread.activeWorkflowCount ?? 0) >
+    0
+  );
 }
 
 export function isRetryableProviderFailure(error: unknown): boolean {
@@ -352,7 +372,11 @@ export interface WorkflowService {
   stop(runId: string): Promise<boolean>;
   updateSettings(settings: WorkflowSettings): void;
   runWorker(signal: AbortSignal): Promise<void>;
-  onThreadIdle(threadId: string, output: string | null): void;
+  onThreadIdle(
+    threadId: string,
+    output: string | null,
+    thread?: BackgroundWorkCounts,
+  ): void;
   onThreadFailed(threadId: string, error: string | null): void;
   onThreadDeleted(threadId: string): void;
   submitStructuredResult(
@@ -403,6 +427,41 @@ export function createWorkflowService(
     string,
     { resolve: (value: JsonValue) => void; reject: (error: Error) => void }
   >();
+  // Workers seen idle while their background work ran, by thread (#1371).
+  const backgroundWaits = new Map<
+    string,
+    { since: number; quietSince: number | null }
+  >();
+
+  /**
+   * Whether a worker's idle is its result. A Claude worker can end its turn
+   * while background work runs, then wake itself when it ends. A later idle
+   * event is that wake turn ending. The poll can't see the wake turn before
+   * its first output, so it waits for a quiet minute (#1371).
+   */
+  function idleIsResult(
+    threadId: string,
+    thread: BackgroundWorkCounts,
+    event: boolean,
+  ): boolean {
+    const now = Date.now();
+    const busy = hasBackgroundWork(thread);
+    let wait = backgroundWaits.get(threadId);
+    if (wait === undefined) {
+      if (!busy) return true;
+      wait = { since: now, quietSince: null };
+      backgroundWaits.set(threadId, wait);
+    }
+    let done = now - wait.since >= BACKGROUND_WAIT_MAX_MS;
+    if (busy) wait.quietSince = null;
+    else if (event) done = true;
+    else {
+      wait.quietSince ??= now;
+      done ||= now - wait.quietSince >= BACKGROUND_QUIET_MS;
+    }
+    if (done) backgroundWaits.delete(threadId);
+    return done;
+  }
 
   function throwIfCancelled(signal: AbortSignal): void {
     if (signal.aborted) throw new Error("Workflow cancelled");
@@ -660,11 +719,11 @@ export function createWorkflowService(
     prompt: string,
     options: WorkflowAgentOptions,
   ) {
-    const header = `[cloudroom workflow ${run.name} · run ${run.id}]`;
+    const intro = `[cloudroom workflow ${run.name} · run ${run.id}]\n\n${prompt}\n\nWait for background work inside your turn, and stop any servers or watchers you started before your final answer.`;
     if (options.outputSchema === null) {
-      return `${header}\n\n${prompt}\n\nYour final text IS the return value (not a human-facing message), so return raw data.`;
+      return `${intro}\n\nYour final text IS the return value (not a human-facing message), so return raw data.`;
     }
-    return `${header}\n\n${prompt}\n\nUse bb_workflow_result to return your final response in the requested structured format. You MUST call this tool exactly once at the end of your response with {"value": ...} to provide the structured output. The value must satisfy this JSON Schema:\n${JSON.stringify(options.outputSchema, null, 2)}\nIf the tool is unavailable during startup, return only the JSON value in your final response as a fallback. If the tool reports validation errors, correct the value and retry. You have at most ${MAX_REPAIR_ATTEMPTS} corrective retries.`;
+    return `${intro}\n\nUse bb_workflow_result to return your final response in the requested structured format. You MUST call this tool exactly once at the end of your response with {"value": ...} to provide the structured output. The value must satisfy this JSON Schema:\n${JSON.stringify(options.outputSchema, null, 2)}\nIf the tool is unavailable during startup, return only the JSON value in your final response as a fallback. If the tool reports validation errors, correct the value and retry. You have at most ${MAX_REPAIR_ATTEMPTS} corrective retries.`;
   }
 
   function canReplayCall(run: WorkflowRunRow): boolean {
@@ -825,7 +884,10 @@ export function createWorkflowService(
         try {
           const current = await bb.sdk.threads.get({ threadId: child.id });
           throwIfCancelled(signal);
-          if (current.status === "idle") {
+          if (
+            current.status === "idle" &&
+            idleIsResult(child.id, current, false)
+          ) {
             const output = await bb.sdk.threads.output({ threadId: child.id });
             throwIfCancelled(signal);
             onThreadIdle(child.id, output.output);
@@ -869,6 +931,7 @@ export function createWorkflowService(
   }
 
   function wakeCall(call: WorkflowCallRow): void {
+    if (call.childThreadId !== null) backgroundWaits.delete(call.childThreadId);
     const waiter = waiters.get(call.id);
     if (waiter === undefined) return;
     waiters.delete(call.id);
@@ -998,9 +1061,20 @@ export function createWorkflowService(
     wakeCall(call);
   }
 
-  function onThreadIdle(threadId: string, output: string | null): void {
+  function onThreadIdle(
+    threadId: string,
+    output: string | null,
+    thread?: BackgroundWorkCounts,
+  ): void {
     const call = getCallByChildThread(db, threadId);
     if (call === null || idleHandlers.has(call.id)) return;
+    if (
+      thread !== undefined &&
+      call.status === "running" &&
+      !idleIsResult(threadId, thread, true)
+    ) {
+      return;
+    }
     idleHandlers.add(call.id);
     const task = handleThreadIdle(threadId, output)
       .catch((error) => {
@@ -1376,7 +1450,7 @@ export function createWorkflowService(
       const threadId = call.childThreadId!;
       try {
         const thread = await bb.sdk.threads.get({ threadId });
-        if (thread.status === "idle") {
+        if (thread.status === "idle" && idleIsResult(threadId, thread, false)) {
           const output = await bb.sdk.threads.output({ threadId });
           onThreadIdle(threadId, output.output);
           await idleHandlerTasks.get(call.id);

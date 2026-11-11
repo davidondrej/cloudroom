@@ -11,6 +11,7 @@ import type { Static, TSchema, Tool, ToolCall } from "@earendil-works/pi-ai";
 import { builtinModels } from "@earendil-works/pi-ai/providers/all";
 import type { AppDeps, LoggedWorkSessionDeps } from "../../types.js";
 import { ApiError } from "../../errors.js";
+import { providerLoginEnvironment } from "../hosts/host-environment.js";
 import { requireConnectedPrimaryHostId } from "../hosts/primary-host.js";
 import { runtimeErrorLogFields } from "../lib/error-log-fields.js";
 import {
@@ -62,6 +63,7 @@ export const INFERENCE_POLICY = {
   threadMetadata: { maxAttempts: 3, retryDelayMs: 250, timeoutMs: 30_000 },
   threadPurpose: { maxAttempts: 2, retryDelayMs: 250, timeoutMs: 90_000 },
   promptSuggestion: { maxAttempts: 1, retryDelayMs: 0, timeoutMs: 60_000 },
+  // Voice: the base timeout; voice-transcription.ts adds time per MB of audio.
   voiceTranscription: { maxAttempts: 2, retryDelayMs: 250, timeoutMs: 10_000 },
 } as const;
 
@@ -229,6 +231,7 @@ export async function inferenceCompleteWithFallback<T extends TSchema>(
                 : err instanceof AiServiceCallError
                   ? AI_SERVICE_ERROR_CODES[err.code]
                   : "timeout",
+            errorMessage: err.message.slice(0, 300),
             fallbackModel,
             maxAttempts,
             model,
@@ -289,6 +292,16 @@ async function completeWithAiService<T extends TSchema>(
   }
   const hostId = requireConnectedPrimaryHostId(deps);
   const timeoutMs = args.timeoutMs ?? DEFAULT_INFERENCE_TIMEOUT_MS;
+  // An AI service shares its provider's id, so helper calls run on the login that provider's threads use.
+  const login = await providerLoginEnvironment(deps, {
+    hostId,
+    providerId: service.id,
+  });
+  const env = Object.fromEntries(
+    login.flatMap((entry) =>
+      typeof entry.value === "string" ? [[entry.name, entry.value]] : [],
+    ),
+  );
   const result = await service.completeInference(
     {
       serviceId: service.id,
@@ -301,6 +314,7 @@ async function completeWithAiService<T extends TSchema>(
       ),
       timeoutMs,
       ...(args.folder ? { folder: args.folder } : {}),
+      ...(Object.keys(env).length > 0 ? { env } : {}),
     },
     { hostId, timeoutMs: timeoutMs + INFERENCE_POLICY.hostRpcGraceMs },
   );

@@ -550,6 +550,11 @@ export function createPluginService(deps: PluginServiceDeps): PluginService {
   }
   const bundledPlugins =
     deps.bundledPlugins ?? listBundledPluginRegistrations();
+  // A bundled plugin the app no longer ships, such as Docs (removed 2026-11-11).
+  // It is never loaded or listed. Its row and its data stay on disk.
+  const isOrphanedBuiltin = (row: InstalledPluginRow) =>
+    row.sourceKind === "builtin" &&
+    !bundledPlugins.some((bundled) => bundled.name === row.sourceBuiltinName);
   const mentionSearchTimeoutMs =
     deps.mentionSearchTimeoutMs ?? DEFAULT_MENTION_SEARCH_TIMEOUT_MS;
   const mentionResolveTimeoutMs =
@@ -625,6 +630,7 @@ export function createPluginService(deps: PluginServiceDeps): PluginService {
     withPluginOperationLock,
   } = createPluginRuntime({
     deps,
+    isOrphanedBuiltin,
     includedBuiltinNames: new Set(
       bundledPlugins
         .filter((plugin) => plugin.autoInstall)
@@ -981,7 +987,9 @@ export function createPluginService(deps: PluginServiceDeps): PluginService {
 
   function list(): InstalledPlugin[] {
     const scheduleRows = listPluginSchedules(deps.db);
-    const rows = listInstalledPlugins(deps.db);
+    const rows = listInstalledPlugins(deps.db).filter(
+      (row) => !isOrphanedBuiltin(row),
+    );
     const catalogData = installedCatalogData(rows);
     return rows
       .sort((a, b) => a.id.localeCompare(b.id))
@@ -1015,11 +1023,7 @@ export function createPluginService(deps: PluginServiceDeps): PluginService {
             catalogMarketplaceName: row.catalogMarketplaceName,
             labels: catalogData.publisherLabels,
           }),
-          isOrphanedBuiltin:
-            row.sourceKind === "builtin" &&
-            !bundledPlugins.some(
-              (bundled) => bundled.name === row.sourceBuiltinName,
-            ),
+          isOrphanedBuiltin: false,
           sourceDisplay: sourceDisplayForRow(row),
           updateState: updateStateForRow(row),
           enabled: row.enabled,

@@ -122,14 +122,6 @@
     "category": "code-and-reviews",
     "screenshots": []
   },
-  "docs": {
-    "category": "file-viewers-and-editors",
-    "screenshots": []
-  },
-  "memory": {
-    "category": "memory-and-context",
-    "screenshots": []
-  },
   "tasks": {
     "category": "tasks-and-workflows",
     "screenshots": []
@@ -156,10 +148,6 @@
   },
   "bb-guide": {
     "category": "memory-and-context",
-    "screenshots": []
-  },
-  "environment-modal-sandbox": {
-    "category": "environments",
     "screenshots": []
   }
 }

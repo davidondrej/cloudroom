@@ -205,23 +205,8 @@ export const BUILTIN_PLUGINS = [
 
 export const OFFICIAL_PLUGINS = [
   {
-    name: "environment-modal-sandbox",
-    pluginId: "environment-modal-sandbox",
-    defaultEnabled: true,
-  },
-  {
     name: "github",
     pluginId: "github",
-    defaultEnabled: true,
-  },
-  {
-    name: "docs",
-    pluginId: "simple-notes",
-    defaultEnabled: true,
-  },
-  {
-    name: "memory",
-    pluginId: "memory",
     defaultEnabled: true,
   },
   {

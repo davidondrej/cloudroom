@@ -194,8 +194,7 @@ patterns, settingsSection optional title, navPanel path,
 fileOpener extensions, and content-script ids/mount functions) and returns
 them typed with defaults filled. `mountPluginContentScripts` mirrors ordered
 mount, abort-before-cleanup, reverse rollback, exact-once disposal, and
-per-window instances. Working example: `plugins/docs/app.test.tsx` (nav
-panel list over rpc + create/open navigation assertions).
+per-window instances. Working example: `plugins/theme-preview/app.test.tsx`.
 
 Fidelity boundaries: HTTP auth is recorded but not enforced; services and
 schedules run only when driven (no restart timers or cron sweep); storage is
@@ -230,14 +229,6 @@ Cloudroom Official plugins in `plugins/` (a cloudroom checkout):
   plugins import `@cloudroom/shared-ui`; out-of-repo authors vendor the same
   components from the registry), background sync service, rpc + realtime,
   project setting, a `room-cli github` CLI command, and agent-spawn buttons.
-- `docs` (stable plugin id `simple-notes`) — multi-host Docs vaults over
-  `bb.sdk.files`, with a Tiptap
-  markdown WYSIWYG, nested navigation, images and sandboxed HTML, CLI/HTTP
-  operations, autosave with CAS conflicts, native local-vault watching with
-  remote polling fallback, a markdown `fileOpener`, message directives, and
-  side-panel-only `useComposer()` quote/mention actions.
-- `memory` — provider-independent durable agent memory with global/project
-  scopes, progressive disclosure, CLI commands, and a Settings editor.
 
 Remaining reference examples in `examples/plugins/`:
 

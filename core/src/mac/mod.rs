@@ -203,6 +203,14 @@ impl Mac {
             .as_ref()
             .is_some_and(|h| h.generation == generation)
     }
+    /// The app runs on Windows, so no helper will ever connect: refuse at once instead of waiting (#1334).
+    fn unsupported(&self) -> bool {
+        self.report
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|(r, at)| r.unsupported && at.elapsed() < REPORTED)
+    }
     /// Why agents can't reach the Mac: the newest thing Core or the Mac app knows (#109).
     fn unavailable(&self) -> String {
         self.why_unavailable().1
@@ -332,6 +340,8 @@ async fn app_report(
         return Err(conflict("Invalid Mac access report"));
     }
     *m.mac.report.lock().unwrap() = Some((input, Instant::now()));
+    // A `mac run` waiting for the helper rechecks, so a Windows report ends its wait.
+    m.mac.touch();
     Ok((StatusCode::ACCEPTED, Json(json!({"accepted":true}))))
 }
 
@@ -508,7 +518,7 @@ async fn local_run(
                 h.events.clone(),
             );
         }
-        if Instant::now() >= wait {
+        if Instant::now() >= wait || mac.unsupported() {
             return Err(refused(&m, started));
         }
         tokio::select! {
@@ -972,6 +982,11 @@ mod tests {
             let now = std::time::Instant::now();
             *mac.report.lock().unwrap() = Some((serde_json::from_str(&report).unwrap(), now));
             assert_eq!(mac.why_unavailable().0, reason, "{report}");
+            // #1334: only Windows skips the wait for the helper; an old report may predate a reinstall.
+            assert_eq!(mac.unsupported(), !extra.is_empty(), "{report}");
+            let old = now.checked_sub(super::REPORTED).unwrap();
+            mac.report.lock().unwrap().as_mut().unwrap().1 = old;
+            assert!(!mac.unsupported(), "{report}");
         }
     }
 

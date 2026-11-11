@@ -11,9 +11,11 @@ import {
   getThread,
   isThreadQueueAutoSendPaused,
   listActiveBackgroundTaskCountsByThreadIds,
+  queuedThreadMessages,
+  threads,
   type DbConnection,
 } from "@cloudroom/db";
-import { and, eq, inArray, sql } from "drizzle-orm";
+import { and, eq, inArray, isNull, sql } from "drizzle-orm";
 import { alias } from "drizzle-orm/sqlite-core";
 import { renderTemplate } from "@cloudroom/templates";
 import type { LoggedPendingInteractionWorkSessionDeps } from "../../types.js";
@@ -42,6 +44,8 @@ export interface ChildThreadTurnNotificationBatchItem {
   activeWorkflowCount: number;
   childThread: ChildThreadNotificationSource;
   failureReason?: string | null;
+  /** The automatic retry already queued for a failed child (#1365). */
+  queuedRetry?: { sendAt: number | null };
   terminalOutput: string | null;
   turnStatus: ThreadEventTurnStatus;
 }
@@ -200,6 +204,21 @@ function formatChildThreadRunningWorkClause(
     : `, with ${running.join(" and ")} still running`;
 }
 
+/**
+ * Tells the parent a retry is coming, so it doesn't start a second builder
+ * (#1365). It always follows every mention, so {@link withChildReportAge} can
+ * swap it for the generic line at delivery without moving mention offsets.
+ */
+function formatChildThreadQueuedRetry(
+  item: ChildThreadTurnNotificationBatchItem,
+  subject: string,
+): string | null {
+  if (item.queuedRetry === undefined) return null;
+  const { sendAt } = item.queuedRetry;
+  const when = sendAt === null ? "soon" : `at ${formatChildNoticeTime(sendAt)}`;
+  return `Cloudroom will retry ${subject} automatically ${when}. Don't start a replacement. To cancel the retry: room-cli provider-retry cancel ${item.childThread.id}`;
+}
+
 function buildSingleChildThreadTurnStatusSegments(
   args: FormatChildThreadTurnStatusLineArgs,
 ): ParentSystemInputSegment[] {
@@ -229,7 +248,7 @@ function buildSingleChildThreadTurnStatusSegments(
         { kind: "mention", mention: line.mention },
         {
           kind: "text",
-          text: ` failed.${formatChildThreadFailureReason(line.item.failureReason, CHILD_THREAD_FAILURE_REASON_CHAR_LIMIT, "\n\nError: ")}\n\n${CHILD_THREAD_INSPECTION_GUIDANCE}`,
+          text: ` failed.${formatChildThreadFailureReason(line.item.failureReason, CHILD_THREAD_FAILURE_REASON_CHAR_LIMIT, "\n\nError: ")}\n\n${formatChildThreadQueuedRetry(line.item, "this turn") ?? CHILD_THREAD_INSPECTION_GUIDANCE}`,
         },
       ];
     case "interrupted":
@@ -389,6 +408,10 @@ function buildChildThreadTurnStatusBatchSegments(
     segments.push({ kind: "text", text: index === 0 ? "\n\n- " : "\n- " });
     segments.push(...buildChildThreadBatchStatusLineSegments({ line }));
   });
+  for (const { item } of args.lines) {
+    const retry = formatChildThreadQueuedRetry(item, item.childThread.id);
+    if (retry !== null) segments.push({ kind: "text", text: `\n\n${retry}` });
+  }
   if (args.lines.some((line) => line.item.turnStatus === "interrupted")) {
     segments.push({
       kind: "text",
@@ -515,7 +538,7 @@ async function flushChildThreadTurnNotificationBatch(
     await waitForHeldMessageDrain(parentThreadId);
     await queueParentSystemMessage(deps, {
       input: buildChildThreadTurnStatusBatchInput({
-        items: batch.items,
+        items: batch.items.map((item) => withQueuedRetry(deps.db, item)),
       }),
       parentThreadId,
       ...childThreadTurnStatusBatchTaxonomy(batch.items),
@@ -534,6 +557,42 @@ async function flushChildThreadTurnNotificationBatch(
       "Failed to queue batched parent turn notifications",
     );
   }
+}
+
+/**
+ * A queued retry that still runs on its own, like provider-retry's
+ * `findQueuedRetry`: not one that failed to send, nor on an archived child.
+ */
+function findRunnableQueuedRetry(db: DbConnection, threadId: string) {
+  return db
+    .select({ sendAt: queuedThreadMessages.sendAt })
+    .from(queuedThreadMessages)
+    .innerJoin(threads, eq(threads.id, queuedThreadMessages.threadId))
+    .where(
+      and(
+        eq(queuedThreadMessages.threadId, threadId),
+        eq(queuedThreadMessages.payloadKind, "retry"),
+        isNull(queuedThreadMessages.failureReason),
+        isNull(queuedThreadMessages.claimedAt),
+        isNull(threads.archivedAt),
+        isNull(threads.deletedAt),
+      ),
+    )
+    .limit(1)
+    .get();
+}
+
+/**
+ * The provider-retry plugin queues its retry on `turn.failed`, so it is read
+ * at flush, after the batch delay (#1365).
+ */
+function withQueuedRetry(
+  db: DbConnection,
+  item: ChildThreadTurnNotificationBatchItem,
+): ChildThreadTurnNotificationBatchItem {
+  if (item.turnStatus !== "failed") return item;
+  const retry = findRunnableQueuedRetry(db, item.childThread.id);
+  return retry ? { ...item, queuedRetry: { sendAt: retry.sendAt } } : item;
 }
 
 function scheduleChildThreadTurnNotificationBatchFlush(
@@ -666,13 +725,20 @@ const CHILD_THREAD_LATE_NOTICE_MS = 15 * 60_000;
 /** The line {@link withChildReportAge} adds, replaced on each delivery. */
 const CHILD_THREAD_NOTICE_AGE_LINE =
   /\n\n(?:From [^\n]* \(\d+ (?:min|h) ago\)|(?:This child has|Children with) newer output: room-cli thread output )[^\n]*$/u;
+/** The line {@link formatChildThreadQueuedRetry} writes, rechecked on delivery. */
+const CHILD_THREAD_QUEUED_RETRY_LINE =
+  /\n\nCloudroom will retry (this turn|\S+) automatically [^\n]* room-cli provider-retry cancel (\S+)$/gmu;
+
+function formatChildNoticeTime(at: number): string {
+  const date = new Date(at);
+  return `${date.toLocaleDateString("en-GB", { day: "numeric", month: "short" })} ${date.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" })}`;
+}
 
 function formatChildNoticeAge(at: number, ageMs: number): string {
-  const date = new Date(at);
   const minutes = Math.max(1, Math.floor(ageMs / 60_000));
   const ago =
     minutes < 60 ? `${minutes} min ago` : `${Math.floor(minutes / 60)} h ago`;
-  return `${date.toLocaleDateString("en-GB", { day: "numeric", month: "short" })} ${date.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" })} (${ago})`;
+  return `${formatChildNoticeTime(at)} (${ago})`;
 }
 
 /**
@@ -680,6 +746,8 @@ function formatChildNoticeAge(at: number, ageMs: number): string {
  * and which children have written output since, so the parent can't take an
  * old result for the latest (#1208). The line is rebuilt on every delivery,
  * because a notice re-queued behind a starting turn keeps the text it got.
+ * A retry promise whose retry was cancelled, failed, or archived meanwhile
+ * goes back to the generic line, so the parent doesn't wait forever (#1365).
  */
 export function withChildReportAge(
   db: DbConnection,
@@ -703,7 +771,15 @@ export function withChildReportAge(
     ageMs >= CHILD_THREAD_LATE_NOTICE_MS
       ? `From ${formatChildNoticeAge(report.at, ageMs)}${newerOutput ? `; ${newerOutput}` : "."}`
       : `${newerOutput.charAt(0).toUpperCase()}${newerOutput.slice(1)}`;
-  const text = last.text.replace(CHILD_THREAD_NOTICE_AGE_LINE, "");
+  const text = last.text
+    .replace(CHILD_THREAD_NOTICE_AGE_LINE, "")
+    .replace(CHILD_THREAD_QUEUED_RETRY_LINE, (retryLine, subject, threadId) =>
+      findRunnableQueuedRetry(db, threadId)
+        ? retryLine
+        : subject === "this turn"
+          ? `\n\n${CHILD_THREAD_INSPECTION_GUIDANCE}`
+          : "",
+    );
   return [
     ...input.slice(0, -1),
     { ...last, text: line ? `${text}\n\n${line}` : text },

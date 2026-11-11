@@ -26,7 +26,7 @@ import { CloudroomError, UPLOAD_PART, type CloudroomClient, type Harness, type T
 import { cloudroom } from "./commands.js";
 import { PIECE_TIMEOUT, retry, SKIPPED } from "./project-copy.js";
 import { binding, isDead } from "./store.js";
-import { allowance, codexLineage, download, findNative, vm } from "./teleport-local.js";
+import { allowance, codexLineage, conversationParser, download, findNative, vm } from "./teleport-local.js";
 
 /** A Cloud fork: a new Cloud thread, in its own sandbox, that continues another Cloud thread's conversation
  *  from a chosen turn, with that thread's code (docs/scopes/sandboxes.md). Saved in the fork's first message. */
@@ -253,7 +253,7 @@ function localForkSource(deps: Parameters<typeof cloudroom>[0], sourceId: string
   };
 }
 
-const lines = (native: Buffer) => native.toString("utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line) as { type?: string; uuid?: string; parentUuid?: string | null; isMeta?: boolean });
+const lines = (native: Buffer, parse = conversationParser()) => native.toString("utf8").split("\n").filter(Boolean).map((line) => parse(line) as { type?: string; uuid?: string; parentUuid?: string | null; isMeta?: boolean });
 const prompt = (entry: ReturnType<typeof lines>[number]) => entry.type === "user" && entry.isMeta !== true;
 
 export function corePoint(harness: string, native: Buffer, checkpoint: string | undefined): Pick<CloudFork, "before" | "last_turn_id"> {

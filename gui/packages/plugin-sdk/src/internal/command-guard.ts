@@ -1,16 +1,22 @@
-import { mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { codexGuardConfig, codexHookSource, shellQuote } from "../../../../../core/src/runtime/command-guard.mjs";
 export { checkCommand, commandGuardBlockReason } from "../../../../../core/src/runtime/command-guard.mjs";
 
-let config: ReturnType<typeof codexGuardConfig> | undefined;
+let cached: { path: string; config: ReturnType<typeof codexGuardConfig> } | undefined;
 
-export function prepareCodexGuard(): ReturnType<typeof codexGuardConfig> {
-  if (config) return config;
-  const directory = mkdtempSync(join(tmpdir(), "cloudroom-command-guard-"));
+// Codex runs whatever file is at this path before every shell command, so
+// `directory` must be one no other account can write to: the bridge's temp
+// folder (see createPluginProcessTempDir).
+export function prepareCodexGuard(directory: string): ReturnType<typeof codexGuardConfig> {
   const path = join(directory, "cloudroom-command-guard.mjs");
-  writeFileSync(path, codexHookSource(), { mode: 0o600 });
+  // The OS can delete idle temp files, and a missing guard lets every command
+  // through (`|| true` below), so each new session writes it again if needed.
+  if (!existsSync(path)) {
+    mkdirSync(directory, { recursive: true, mode: 0o700 });
+    writeFileSync(path, codexHookSource(), { mode: 0o600 });
+  }
+  if (cached?.path === path) return cached.config;
   // Codex runs without ELECTRON_RUN_AS_NODE, so without it the packaged app would
   // launch the full GUI (a Dock icon flash) and never run the guard.
   // Codex uses PowerShell for Windows hooks, including when the tool matches Bash.
@@ -19,6 +25,6 @@ export function prepareCodexGuard(): ReturnType<typeof codexGuardConfig> {
   const command = process.platform === "win32"
     ? `$env:ELECTRON_RUN_AS_NODE='1'; & ${powershellQuote(process.execPath)} ${powershellQuote(path)}`
     : `ELECTRON_RUN_AS_NODE=1 ${shellQuote(process.execPath)} ${shellQuote(path)} || true`;
-  config = codexGuardConfig(command);
-  return config;
+  cached = { path, config: codexGuardConfig(command) };
+  return cached.config;
 }

@@ -1,5 +1,6 @@
 import { PassThrough, type Readable } from "node:stream";
 import {
+  gitShell,
   normalizeWindowsEnv,
   preparePortablePtyCommand,
   resolvePortableCommand,
@@ -59,9 +60,34 @@ function windowsPtyLaunch(
   const env = normalizeWindowsEnv(inheritedEnv);
   const resolved = resolvePortableCommand(command, { cwd, env });
   if (resolved === undefined) {
-    throw new Error(`Command not found: ${command}`);
+    throw new Error(
+      command === "sh"
+        ? "This installer needs Git for Windows (Git Bash). Install it from https://git-scm.com/download/win, then try again."
+        : `Command not found: ${command}`,
+    );
   }
   return { ...preparePortablePtyCommand({ command: resolved, args, cwd, env }), env };
+}
+
+/**
+ * Script installers run `sh -c`, but a default Git for Windows install puts
+ * only `git\cmd` on PATH. Run them with Git's own shell instead (#1251).
+ */
+export async function withWindowsGitShell(args: {
+  plan: ProviderInstallationCommand;
+  env: NodeJS.ProcessEnv;
+}): Promise<{ plan: ProviderInstallationCommand; env: NodeJS.ProcessEnv }> {
+  if (
+    process.platform !== "win32" ||
+    args.plan.command !== "sh" ||
+    resolvePortableCommand("sh", { env: args.env }) !== undefined
+  ) {
+    return args;
+  }
+  const shell = await gitShell(args.env).catch(() => null);
+  return shell === null
+    ? args
+    : { plan: { ...args.plan, command: shell.command }, env: shell.env };
 }
 
 function createPtyProviderInstallationProcessSpawner(): ProviderInstallationProcessSpawner {

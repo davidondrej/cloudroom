@@ -1743,8 +1743,13 @@ function buildSessionEnv(
     CLAUDE_CODE_ENTRYPOINT: "cli",
   };
   delete sessionEnv.CLAUDE_AGENT_SDK_CLIENT_APP;
-  for (const key of ACCOUNT_ENV_KEYS) if (sessionEnv[key] === "") delete sessionEnv[key];
-  return sessionEnv;
+  return withoutBlankAccountEnv(sessionEnv);
+}
+
+/** A blank account variable means "unset": it clears one the machine's own shell sets. */
+export function withoutBlankAccountEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  for (const key of ACCOUNT_ENV_KEYS) if (env[key] === "") delete env[key];
+  return env;
 }
 
 const ACCOUNT_ENV_KEYS = new Set([
