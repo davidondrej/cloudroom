@@ -15,8 +15,10 @@ import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   createConnection,
+  getInstalledPlugin,
   getInstalledPluginRegistration,
   migrate,
+  upsertInstalledPlugin,
   type DbConnection,
 } from "@cloudroom/db";
 import { PLUGIN_SDK_MAJOR, PLUGIN_SDK_VERSION } from "@cloudroom/domain";
@@ -269,7 +271,7 @@ describe("builtin plugin reconciliation", () => {
 
   it("gives every builtin plugin a deliberate settings icon", async () => {
     const expectedIcons = new Map([
-      ["bb-guide", "Explore"],
+      ["cloudroom-guide", "Explore"],
       ["accounts", "Layers"],
       ["ask-user-question", "MessageQuestion"],
       ["automations", "Repeat"],
@@ -300,6 +302,7 @@ describe("builtin plugin reconciliation", () => {
       ["side-chat", "SideChat"],
       ["organization", "UserRound"],
       ["time-in-cloudroom", "Clock"],
+      ["wallpaper", "Image"],
       ["workflows", "Workflow"],
       ["environment-git-worktree", "FolderGit"],
     ]);
@@ -351,12 +354,29 @@ describe("builtin plugin reconciliation", () => {
     );
   });
 
-  it("stops loading and listing a builtin after it leaves the registry", async () => {
+  it("marks a persisted builtin as orphaned after it leaves the registry, and removes a retired one", async () => {
     service = createService({ db, dataDir: join(workDir, "data") });
     await service.start();
-    expect(service.list()).toHaveLength(1);
-    expect(loadCount()).toBe(1);
+    expect(service.list()[0]?.isOrphanedBuiltin).toBe(false);
     await service.stop();
+    // Docs shipped with the app until 2026-11-11.
+    upsertInstalledPlugin(db, {
+      id: "simple-notes",
+      source: "builtin:docs",
+      provenance: { kind: "catalog", marketplace: "bb-official", entryId: "docs" },
+      sourceIntent: { kind: "builtin", name: "docs" },
+      exactResolution: { kind: "builtin" },
+      updateState: {
+        lastCheckAt: null,
+        availableCompatibleVersion: null,
+        newestIncompatibleVersion: null,
+        statusDetail: null,
+      },
+      activeArtifactId: null,
+      rootDir: join(workDir, "gone"),
+      version: "0.2.2",
+      enabled: true,
+    });
 
     service = createService({
       db,
@@ -365,11 +385,13 @@ describe("builtin plugin reconciliation", () => {
     });
     await service.start();
 
-    expect(service.list()).toEqual([]);
-    expect(loadCount()).toBe(1);
-    expect(getInstalledPluginRegistration(db, "builtin-fixture")).toMatchObject(
-      { enabled: true },
-    );
+    expect(service.list()).toMatchObject([
+      { id: "builtin-fixture", isOrphanedBuiltin: true },
+    ]);
+    expect(getInstalledPlugin(db, "simple-notes")).toBeUndefined();
+    expect(
+      getInstalledPluginRegistration(db, "simple-notes")?.removedAt,
+    ).toEqual(expect.any(Number));
   });
 
   it("backfills every legacy source form once while preserving registration state", async () => {

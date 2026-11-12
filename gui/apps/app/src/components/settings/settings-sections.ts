@@ -127,7 +127,7 @@ export const SETTINGS_NAV_GROUPS: readonly SettingsNavGroup[] = [
       plugin("custom-instructions", "Custom instructions"),
       section("system-prompt"),
       section("feature-prompts"),
-      plugin("bb-guide", "Cloudroom guide"),
+      plugin("cloudroom-guide", "Cloudroom guide"),
     ],
   },
   {

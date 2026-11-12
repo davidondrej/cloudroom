@@ -135,54 +135,93 @@ function prompts(rows: readonly PromptRow[], range: Range) {
 
 interface TokenRow {
   thread: string;
+  type: string;
   at: number;
   provider: string;
   name: string | null;
+  model: string | null;
   output: number | null;
   input: number | null;
   cacheRead: number | null;
   cacheWrite: number | null;
 }
 
+const TOKEN_KINDS = ["written", "read", "cached"] as const;
+type TokenUse = Record<(typeof TOKEN_KINDS)[number], number>;
+const TOKEN_MODELS_SHOWN = 4;
+const noTokens = (): TokenUse => ({ written: 0, read: 0, cached: 0 });
+const allTokens = (use: TokenUse) => use.written + use.read + use.cached;
+
 /**
  * Tokens per day, from each thread's running totals. Old token events are pruned (event-pruning.ts), so per-turn
  * numbers are gone, but a thread's total only grows: use between two saved events is the difference, dated by the
  * later one. A drop means the provider restarted its count. Rough: a restart inside a pruned gap loses tokens.
+ * Each difference counts for the model of the prompt before it, so a thread that switched models is split right.
  */
 function tokens(db: DbQueryConnection, range: Range) {
+  // One range early, so this range can be compared with the one before.
+  const from = range.start - range.days * DAY_MS, span = range.days * 2;
   const rows = db.all<TokenRow>(sql`
-    SELECT e.thread_id AS thread, e.created_at AS at, t.provider_id AS provider,
+    SELECT e.thread_id AS thread, e.type AS type, e.created_at AS at, t.provider_id AS provider,
       coalesce(t.title, t.title_fallback) AS name,
+      json_extract(e.data, '$.execution.model') AS model,
       json_extract(e.data, '$.tokenUsage.total.outputTokens') AS output,
       json_extract(e.data, '$.tokenUsage.total.inputTokens') AS input,
       coalesce(json_extract(e.data, '$.tokenUsage.total.cacheReadInputTokens'),
         json_extract(e.data, '$.tokenUsage.total.cachedInputTokens')) AS cacheRead,
       json_extract(e.data, '$.tokenUsage.total.cacheWriteInputTokens') AS cacheWrite
     FROM threads AS t
-      CROSS JOIN events AS e ON e.thread_id = t.id AND e.type = 'thread/tokenUsage/updated'
-    WHERE t.updated_at >= ${range.start}
+      CROSS JOIN events AS e ON e.thread_id = t.id AND e.type IN ('thread/tokenUsage/updated', 'client/turn/requested')
+    WHERE t.updated_at >= ${from}
     ORDER BY e.thread_id, e.sequence
   `);
-  const written = zeros(range.days), top = written.map(() => new Map<string, { name: string; written: number }>());
-  const none = { written: 0, read: 0, cached: 0 };
-  let read = 0, cached = 0, thread = "", last = none;
+  const lists = () => ({ written: zeros(range.days), read: zeros(range.days), cached: zeros(range.days) });
+  const daily = { written: zeros(span), read: zeros(span), cached: zeros(span) };
+  const models = new Map<string, ReturnType<typeof lists>>();
+  const threads = zeros(range.days).map(() => new Map<string, TokenUse & { name: string }>());
+  let thread = "", last = noTokens(), model = modelName(null);
   for (const row of rows) {
-    if (row.thread !== thread) { thread = row.thread; last = none; }
+    if (row.thread !== thread) { thread = row.thread; last = noTokens(); model = modelName(null); }
+    if (row.type === "client/turn/requested") {
+      if (row.model) model = modelName(row.model);
+      continue;
+    }
     const cacheRead = row.cacheRead ?? 0, input = row.input ?? 0;
     // Codex counts cache reads inside its input; Claude Code counts them apart, and cache writes too.
     const total = { written: row.output ?? 0, read: row.provider === "codex" ? input - cacheRead : input + (row.cacheWrite ?? 0), cached: cacheRead };
-    const base = total.written >= last.written ? last : none;
+    const base = total.written >= last.written ? last : noTokens();
     last = total;
     // Forks don't copy token events (thread-fork-history.ts), so each thread counts only its own.
-    const day = dayOf(range, row.at);
-    if (day < 0) continue;
-    const wrote = total.written - base.written;
-    written[day]! += wrote;
-    read += Math.max(0, total.read - base.read);
-    cached += Math.max(0, total.cached - base.cached);
-    if (wrote > 0) top[day]!.set(thread, { name: row.name ?? "Untitled", written: (top[day]!.get(thread)?.written ?? 0) + wrote });
+    const at = Math.floor((row.at - from) / DAY_MS), day = at - range.days;
+    if (at < 0 || at >= span) continue;
+    const use = { written: total.written - base.written, read: Math.max(0, total.read - base.read), cached: Math.max(0, total.cached - base.cached) };
+    for (const kind of TOKEN_KINDS) daily[kind][at]! += use[kind];
+    if (day < 0 || allTokens(use) === 0) continue;
+    const byModel = models.get(model) ?? lists(), byThread = threads[day]!.get(thread) ?? { name: row.name ?? "Untitled", ...noTokens() };
+    for (const kind of TOKEN_KINDS) { byModel[kind][day]! += use[kind]; byThread[kind] += use[kind]; }
+    models.set(model, byModel);
+    threads[day]!.set(thread, byThread);
   }
-  return { written, read, cached, top: top.map((threads) => [...threads.values()].sort((a, b) => b.written - a.written).slice(0, 3)) };
+  const sum = (values: number[]) => values.reduce((total, value) => total + value, 0);
+  const list = [...models].map(([name, use]) => ({ name, ...use, total: sum(use.written) + sum(use.read) + sum(use.cached) }))
+    .sort((a, b) => b.total - a.total || a.name.localeCompare(b.name));
+  // The long tail of rarely used models shares one last row.
+  const rest = list.splice(TOKEN_MODELS_SHOWN);
+  if (rest.length === 1) list.push(rest[0]!);
+  else if (rest.length > 1) {
+    const other = { name: "Other", ...lists(), total: 0 };
+    for (const one of rest) for (const kind of TOKEN_KINDS) one[kind].forEach((value, day) => { other[kind][day]! += value; });
+    list.push(other);
+  }
+  // Each day's three heaviest threads of every kind, so the app can rank them by what is on screen.
+  const top = threads.map((day) => {
+    const all = [...day.values()], keep = new Set<TokenUse & { name: string }>();
+    for (const size of [allTokens, ...TOKEN_KINDS.map((kind) => (use: TokenUse) => use[kind])]) {
+      for (const one of [...all].sort((a, b) => size(b) - size(a)).slice(0, 3)) if (size(one) > 0) keep.add(one);
+    }
+    return [...keep];
+  });
+  return { ...daily, models: list.map(({ total: _total, ...one }) => one), top };
 }
 
 export async function readUsageAnalytics(

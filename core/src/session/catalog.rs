@@ -56,6 +56,7 @@ impl Manager {
             .map(|s| {
                 json!({"session_id":s.session_id,"harness":s.harness,"model":s.model,"provider":s.provider,
                 "state":s.state,"workspace":s.workspace,"parent_session":s.parent_session,
+                "title":s.title,"archived":s.archived,"parent_thread":s.parent_thread(),"last_app_prompt":s.last_app_prompt,
                 "current_request":s.current_request,"queued":s.queue.len(),
                 "last_sequence":s.last_sequence,"last_activity_ms":s.last_activity})
             })

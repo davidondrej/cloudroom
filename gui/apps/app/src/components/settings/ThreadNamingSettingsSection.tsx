@@ -345,10 +345,11 @@ interface FeaturePromptProps {
   preference: WritableAtom<string, [string], void>;
 }
 
-/** One editable prompt. Saves on blur; an empty box restores the default. */
+/** One editable prompt with a Save button; an empty box restores the default. */
 function FeaturePrompt(props: FeaturePromptProps) {
   const [value, setValue] = useAtom(props.preference);
   const [draft, setDraft] = useState(value);
+  const dirty = draft !== value;
 
   useEffect(() => setDraft(value), [value]);
 
@@ -370,8 +371,19 @@ function FeaturePrompt(props: FeaturePromptProps) {
         maxLength={4_000}
         value={draft}
         onChange={(event) => setDraft(event.target.value)}
-        onBlur={save}
       />
+      <div className="mt-2 flex h-8 justify-end">
+        {dirty ? (
+          <Button variant="outline" size="sm" onClick={save}>
+            Save
+          </Button>
+        ) : (
+          <span className="flex items-center gap-1.5 px-1 text-sm text-success">
+            <Icon name="Check" className="size-3.5" />
+            Saved
+          </span>
+        )}
+      </div>
     </SettingsWithControl>
   );
 }
@@ -386,7 +398,7 @@ export function FeaturePromptsSettingsSection() {
       <div className="space-y-4">
         <FeaturePrompt
           label="Thread naming"
-          description="How new thread titles should look. Cloudroom also sees your other thread names, so new names stand out. Clear the box to restore the default. Saved when you click away."
+          description="How new thread titles should look. Cloudroom also sees your other thread names, so new names stand out. Clear the box to restore the default."
           ariaLabel="Thread naming rules"
           className="min-h-[190px] text-sm"
           defaultValue={DEFAULT_THREAD_NAMING_RULES}
@@ -394,7 +406,7 @@ export function FeaturePromptsSettingsSection() {
         />
         <FeaturePrompt
           label="Prompt suggestions"
-          description="How Cloudroom guesses your next message. Suggestions stay at 12 words or less. Clear the box to restore the default. Saved when you click away."
+          description="How Cloudroom guesses your next message. Suggestions stay at 12 words or less. Clear the box to restore the default."
           ariaLabel="Prompt suggestions prompt"
           className="min-h-[420px] text-sm"
           defaultValue={DEFAULT_PROMPT_SUGGESTION_PROMPT}

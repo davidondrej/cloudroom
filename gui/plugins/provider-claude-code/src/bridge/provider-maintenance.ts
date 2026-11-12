@@ -40,11 +40,24 @@ const CLAUDE_POWERSHELL_INSTALL_SCRIPT_URL = "https://claude.ai/install.ps1";
 const CLAUDE_NATIVE_RELEASES_URL =
   "https://downloads.claude.ai/claude-code-releases";
 const CLAUDE_MINIMUM_SUPPORTED_VERSION = "2.1.280";
+const CLAUDE_RENEWS_MESSAGE =
+  "Claude renews its sign-in on its next reply. Usage shows after that.";
+// bin/claude.exe is Claude Code's own 500-byte placeholder until its
+// postinstall (install.cjs) puts the native binary there. npm 12 skips install
+// scripts it wasn't told to allow, so `npm install -g` can leave it (#1074).
+const CLAUDE_PLACEHOLDER = path.join(CLAUDE_NPM_PACKAGE, "bin", "claude.exe");
+const CLAUDE_PLACEHOLDER_MAX_BYTES = 4096;
+// The repair plus the probes after it (15 s) fit the bridge's 30 s request.
+const CLAUDE_REPAIR_TIMEOUT_MS = 10_000;
 
 const claudeCredentialsSchema = z.object({
   claudeAiOauth: z.object({
     accessToken: z.string().min(1),
+    /** When the short-lived access token ends, not the login. */
     expiresAt: z.number().nullish(),
+    // A malformed value must not hide a working login, so it reads as missing.
+    refreshToken: z.string().nullish().catch(null),
+    refreshTokenExpiresAt: z.number().nullish().catch(null),
     subscriptionType: z.string().nullish(),
     rateLimitTier: z.string().nullish(),
   }),
@@ -52,6 +65,9 @@ const claudeCredentialsSchema = z.object({
 type ClaudeCredentials = z.infer<
   typeof claudeCredentialsSchema
 >["claudeAiOauth"];
+const endedLoginSchema = z.object({
+  claudeAiOauth: z.object({ accessToken: z.literal("") }),
+});
 
 const claudeAccountSchema = z.object({
   oauthAccount: z
@@ -189,11 +205,36 @@ async function homebrewUpgradeCommand(
   return { command: brew, args, displayCommand: formatCommand("brew", args) };
 }
 
+/** The npm package folder while `command` is still the placeholder, else null. */
+async function claudePlaceholder(command: string): Promise<string | null> {
+  if (!path.isAbsolute(command)) return null;
+  const real = await fs.realpath(command).catch(() => null);
+  if (real === null || !real.endsWith(CLAUDE_PLACEHOLDER)) return null;
+  const size = (await fs.stat(real).catch(() => null))?.size ?? 0;
+  return size < CLAUDE_PLACEHOLDER_MAX_BYTES
+    ? path.dirname(path.dirname(real))
+    : null;
+}
+
+/** Runs the package's postinstall, as npm would have. True if still a placeholder. */
+async function repairClaudePlaceholder(command: string): Promise<boolean> {
+  const packageDir = await claudePlaceholder(command);
+  if (packageDir === null) return false;
+  // The bridge's own Node: Cloudroom's Electron when packaged.
+  await execFileAsync(process.execPath, ["install.cjs"], {
+    cwd: packageDir,
+    env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
+    timeout: CLAUDE_REPAIR_TIMEOUT_MS,
+  }).catch(() => {});
+  return (await claudePlaceholder(command)) !== null;
+}
+
 async function claudeInstallation(): Promise<{
   status: ProviderInstallationStatus;
   update: ProviderInstallationCommand | null;
 }> {
   const command = claudeExecutable();
+  const placeholder = await repairClaudePlaceholder(command);
   const [
     resolvedExecutable,
     versionOutput,
@@ -214,7 +255,8 @@ async function claudeInstallation(): Promise<{
     commandOutput(command, ["doctor"]),
     claudeNativeTags(),
   ]);
-  const installed = resolvedExecutable !== null || versionOutput !== null;
+  const installed =
+    !placeholder && (resolvedExecutable !== null || versionOutput !== null);
   const currentVersion = versionFrom(versionOutput);
   const doctor = claudeDoctor(doctorOutput);
   const homebrew = await homebrewUpgradeCommand(resolvedExecutable);
@@ -349,7 +391,8 @@ async function readKeychainCredentials(): Promise<string | null> {
   return null;
 }
 
-function parseCredentials(raw: string): ClaudeCredentials | null {
+/** The saved login, null when Claude Code ended it, or undefined when `raw` holds no Claude login. */
+function parseCredentials(raw: string): ClaudeCredentials | null | undefined {
   const trimmed = raw.trim();
   const candidates = [trimmed];
   if (/^(?:[0-9a-f]{2})+$/iu.test(trimmed)) {
@@ -357,25 +400,35 @@ function parseCredentials(raw: string): ClaudeCredentials | null {
   }
   for (const candidate of candidates) {
     try {
-      const parsed = claudeCredentialsSchema.safeParse(JSON.parse(candidate));
-      if (parsed.success) return parsed.data.claudeAiOauth;
+      const value: unknown = JSON.parse(candidate);
+      const parsed = claudeCredentialsSchema.safeParse(value);
+      // A login Claude Code can't renew keeps its tokens as "" (2.1.318).
+      if (parsed.success)
+        return parsed.data.claudeAiOauth.refreshToken === ""
+          ? null
+          : parsed.data.claudeAiOauth;
+      if (endedLoginSchema.safeParse(value).success) return null;
     } catch {}
   }
-  return null;
+  return undefined;
 }
 
 async function readCredentials(): Promise<ClaudeCredentials | null> {
   const keychainCredentials = await readKeychainCredentials();
-  if (keychainCredentials !== null) {
-    const parsed = parseCredentials(keychainCredentials);
-    if (parsed !== null) return parsed;
-  }
+  // Claude Code reads its Keychain item first, so a login it ended there must not come back from an old file.
+  const saved =
+    keychainCredentials === null
+      ? undefined
+      : parseCredentials(keychainCredentials);
+  if (saved !== undefined) return saved;
   try {
-    return parseCredentials(
-      await fs.readFile(
-        path.join(os.homedir(), ".claude", ".credentials.json"),
-        "utf8",
-      ),
+    return (
+      parseCredentials(
+        await fs.readFile(
+          path.join(os.homedir(), ".claude", ".credentials.json"),
+          "utf8",
+        ),
+      ) ?? null
     );
   } catch {
     return null;
@@ -399,13 +452,36 @@ async function readAccountEmail(): Promise<string | null> {
   return (await readAccount())?.emailAddress ?? null;
 }
 
+// Anthropic renamed Max 5x to Max and Max 20x to Ultra on 2026-10-30.
 function planLabel(credentials: ClaudeCredentials): string | null {
-  const maxMatch = (credentials.rateLimitTier ?? "").match(/max_(\d+)x/u);
-  if (maxMatch) return `Max (${maxMatch[1]}x)`;
+  if (credentials.rateLimitTier?.endsWith("max_20x")) return "Ultra";
+  if (credentials.rateLimitTier?.endsWith("max_5x")) return "Max";
   const subscription = credentials.subscriptionType;
   return subscription
     ? subscription.charAt(0).toUpperCase() + subscription.slice(1)
     : null;
+}
+
+/** Claude Code renews an expired access token itself while the refresh token lasts. Older versions store no end for it. */
+function canRenew(credentials: ClaudeCredentials, now = Date.now()): boolean {
+  return (
+    Boolean(credentials.refreshToken) &&
+    (credentials.refreshTokenExpiresAt == null ||
+      now < credentials.refreshTokenExpiresAt)
+  );
+}
+
+/**
+ * Claude Code's own sign-in check (2.1.318): a login is expired only when Claude Code can't renew it. Claude Code
+ * renews 5 minutes early, but the access token works until `expiresAt`. Cloudroom never renews or writes Claude's tokens.
+ */
+function loginState(
+  credentials: ClaudeCredentials,
+  now = Date.now(),
+): "valid" | "renewable" | "expired" {
+  if (credentials.expiresAt == null || now < credentials.expiresAt)
+    return "valid";
+  return canRenew(credentials, now) ? "renewable" : "expired";
 }
 
 function healthResult(
@@ -455,7 +531,7 @@ export async function getClaudeProviderHealth(): Promise<ProviderHealthResult> {
       planLabel: planLabel(credentials),
       installedVersion: version,
     };
-    return credentials.expiresAt != null && Date.now() >= credentials.expiresAt
+    return loginState(credentials) === "expired"
       ? healthResult(command, "expired", known)
       : healthResult(command, "ready", known);
   } catch (error) {
@@ -633,10 +709,19 @@ export async function getClaudeProviderUsage(): Promise<ProviderUsageResult> {
   if (!credentials) {
     return { supported: true, usage: { status: "unauthenticated" } };
   }
-  if (credentials.expiresAt != null && Date.now() >= credentials.expiresAt) {
-    return { supported: true, usage: { status: "expired" } };
-  }
+  const expired: ProviderUsageResult = {
+    supported: true,
+    usage: { status: "expired" },
+  };
+  const login = loginState(credentials);
+  if (login === "expired") return expired;
   const known = { planLabel: planLabel(credentials), accountEmail: email };
+  // Until Claude Code renews it, the saved access token gets 401.
+  const renewing: ProviderUsageResult = {
+    supported: true,
+    usage: { status: "error", message: CLAUDE_RENEWS_MESSAGE, ...known },
+  };
+  if (login === "renewable") return renewing;
   try {
     const response = await fetchWithProxyFallback((init) =>
       fetch(CLAUDE_USAGE_URL, {
@@ -651,9 +736,9 @@ export async function getClaudeProviderUsage(): Promise<ProviderUsageResult> {
         signal: AbortSignal.timeout(USAGE_FETCH_TIMEOUT_MS),
       }),
     );
-    if (response.status === 401) {
-      return { supported: true, usage: { status: "expired" } };
-    }
+    // Claude Code answers a 401 by renewing, so only a login it can't renew is expired.
+    if (response.status === 401)
+      return canRenew(credentials) ? renewing : expired;
     if (!response.ok) {
       return {
         supported: true,

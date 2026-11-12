@@ -13,6 +13,7 @@ import { threadMessages } from "../threads/thread-transcript.js";
 import { CloudroomError } from "./client.js";
 import { cloudExecution, cloudroom } from "./commands.js";
 import { macVariables } from "./sandboxes.js";
+import { binding, command, commands } from "./store.js";
 
 const TEXT_LIMIT = 1_000_000;
 const MESSAGE_LIMIT = 100_000;
@@ -95,13 +96,30 @@ export async function shareClicked(deps: AppDeps, threadId: string, action: "ope
 
 const threadTitle = (thread: { title: string | null; titleFallback: string | null }) => (thread.title || thread.titleFallback || "Untitled thread").slice(0, 200);
 
-export async function threadShare(deps: AppDeps, threadId: string): Promise<ThreadShare | null> {
-  return (await readStore(deps))[threadId] ?? null;
+/** A Cloud thread's share lives on the website, so every computer shows, copies and can stop it (#237). */
+async function cloudShare(deps: AppDeps, threadId: string): Promise<boolean> {
+  return getThread(deps.db, threadId)?.executionTarget === "cloud" && await cloudroom(deps).sandboxes.followsThreads().catch(() => false) === true;
+}
+
+/** The local copy, as on main; `fresh` (the share menu opened) reads a Cloud thread's share from the website, one
+ *  keyed read, and keeps the copy in line with it. Nothing reads the website when a thread opens. */
+export async function threadShare(deps: AppDeps, threadId: string, fresh = false): Promise<ThreadShare | null> {
+  if (!fresh || !await cloudShare(deps, threadId)) return (await readStore(deps))[threadId] ?? null;
+  const share = shareSchema.nullable().catch(null).parse((await website(deps, { action: "get", thread: threadId }) as { share?: unknown }).share ?? null);
+  await updateStore(deps, (store) => { if (share) store[threadId] = share; else delete store[threadId]; });
+  return share;
 }
 
 export async function shareThread(deps: AppDeps, threadId: string): Promise<ThreadShare> {
   const thread = getThread(deps.db, threadId);
   if (!thread || thread.deletedAt) throw new ApiError(404, "thread_not_found", "Thread not found.");
+  // Only the computer that started it scrubs with the variables the thread may hold (#237). One no app started (a loop
+  // run, a website child, a launch) is shared from its home, as it was from the computer that showed it on main.
+  const startedHere = Boolean(command(deps.db, `first_${threadId}`)) || commands(deps.db, threadId).some((item) => item.command === "teleport");
+  const noAppStarted = /^(auto_|sub_|launch_)/.test(binding(deps.db, threadId)?.startRequestId ?? "");
+  if (await cloudShare(deps, threadId) && !startedHere && !(noAppStarted && cloudroom(deps).isHome(threadId))) {
+    throw new ApiError(409, "share_elsewhere", "Share it from the computer that started this thread.");
+  }
   const known = Object.values(await macVariables()).filter((value) => value.length >= 8).sort((a, b) => b.length - a.length);
   const clean = (text: string) => {
     const safe = redactSecrets(text, known);

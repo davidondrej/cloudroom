@@ -310,8 +310,9 @@ Messaging:
   A follow-up carries a thread's first prompt only if setup failed before the
   workspace was ready and the thread wasn't stopped. `room-cli thread retry`
   re-sends the most recent failed message (the original only if it never
-  reached the agent). After Stop, or when unsure, re-send the task yourself; a
-  carried first prompt is labeled for the agent, so a duplicate is harmless.
+  reached the agent); it is for Local threads only. After Stop, or when
+  unsure, re-send the task yourself; a carried first prompt is labeled for the
+  agent, so a duplicate is harmless.
 
   --plan sends the same structured /plan command the composer's plan action
   sends, so the agent proposes a plan for approval before executing (Claude
@@ -439,7 +440,7 @@ Persisted panel tabs:
 
 Lifecycle:
 
-  room-cli thread retry [id]                     Retry the thread's failed turn
+  room-cli thread retry [id]                     Retry a Local thread's failed turn
     --self                                 Target current thread
     --turn <requestId>                     Retry this turn request id specifically; fails when it is not the thread's failed turn
     --send-at <when>                       Dispatch at an ISO 8601 timestamp or a duration from now (30s, 10m, 2h, 7d)
@@ -456,6 +457,9 @@ Lifecycle:
   (until the server restarts), as does retrying a thread that has not
   failed or a turn that already has a retry queued. Without --send-at the retry
   is attempted now, and may still queue behind a busy thread or a plugin.
+  Local threads only. On a Cloud thread, retry a rejected start with
+  `room-cli cloud retry-start <id>`; otherwise check `thread show` and
+  `thread output` first, and send a follow-up only if work is really unfinished.
 
   room-cli thread archive [ids...]               Archive a thread (and children/hidden forks), or several at once
     --self                                 Archive current thread

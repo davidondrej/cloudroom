@@ -94,9 +94,15 @@ export async function teleportToLocal(deps: AppDeps, threadId: string): Promise<
   try {
     return await run(deps, threadId, step);
   } finally {
+    // A Teleport that didn't land lets go of Core's freeze at once, instead of after its 5 minutes (#237).
+    const frozen = freezes.get(threadId);
+    freezes.delete(threadId);
+    frozen?.end(getThread(deps.db, threadId)?.executionTarget === "cloud");
     step();
   }
 }
+
+const freezes = new Map<string, NonNullable<Awaited<ReturnType<ReturnType<typeof cloudroom>["freezeForTeleport"]>>>>();
 
 async function run(deps: AppDeps, threadId: string, step: (value: TeleportLocalStep) => void): Promise<{ conflicts: number }> {
   const thread = getThread(deps.db, threadId);
@@ -111,6 +117,10 @@ async function run(deps: AppDeps, threadId: string, step: (value: TeleportLocalS
     throw new ApiError(409, "teleport_unavailable", "This cloud thread has no saved conversation yet.");
   const environment = await localEnvironment(deps, thread);
   const client = await cloudroom(deps).teleportClient(threadId, "teleport_local");
+  // Other computers' sends wait until this lands (Core's freeze, #237); every message Core queued must be here first.
+  const frozen = await cloudroom(deps).freezeForTeleport(threadId, client, saved.sessionId);
+  if (frozen) freezes.set(threadId, frozen);
+  await frozen?.check();
 
   await cloudroom(deps).control(threadId, "stop");
   await waitUntilStopped(client, saved.sessionId);
@@ -136,6 +146,8 @@ async function run(deps: AppDeps, threadId: string, step: (value: TeleportLocalS
   if (harness === "acp-opencode") await importOpenCode(deps, threadId, environment, nativeId, session);
   else await installNative(harness, nativeId, vmPath, session, environment.path);
   const conflicts = await applyChanges(environment.path, changes.archive, randomUUID(), changes.base);
+  // The freeze still holds and nothing new was queued, so nothing sent meanwhile is lost.
+  await frozen?.check();
   step("switching");
 
   const queued = cloudroom(deps).queue(threadId);
@@ -152,11 +164,12 @@ async function run(deps: AppDeps, threadId: string, step: (value: TeleportLocalS
     tx.update(threads).set({ executionTarget: "local", environmentId: environment.id, status: "idle", updatedAt: Date.now() }).where(eq(threads.id, threadId)).run();
   });
   cloudroom(deps).detach(threadId);
+  cloudroom(deps).threadStates.set(threadId, null);
   deps.hub.notifyThread(threadId, ["status-changed", "queue-changed"]);
   deps.hub.notifyProject(thread.projectId, ["threads-changed"]);
   requestQueuedMessageDispatch(deps, { kind: "thread-ready", threadId });
   void markLocal(deps, threadId, saved.sessionId);
-  await client.close(saved.sessionId, randomUUID()).catch((error: unknown) =>
+  await client.close(saved.sessionId, randomUUID(), frozen?.id).catch((error: unknown) =>
     deps.logger.warn({ threadId, error }, "Cloud session did not close after Teleport to Local"));
   return { conflicts };
 }

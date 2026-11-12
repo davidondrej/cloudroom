@@ -1,7 +1,7 @@
 import { and, eq, getTableColumns, inArray, isNull, sql } from "drizzle-orm";
 import { cloudroomCommands, cloudroomThreads, threads, threadPluginMetadata, type DbQueryConnection } from "@cloudroom/db";
 import type { ProjectCopyProgress, TeleportLocalStep } from "@cloudroom/domain";
-import { emitPluginThreadStatusEntered } from "../plugins/plugin-thread-events.js";
+import { cloudTurnsElsewhere, emitPluginThreadStatusEntered } from "../plugins/plugin-thread-events.js";
 import { noteTurnFailed, type CloudFailure } from "../system/auth-failure-telemetry.js";
 
 export type TeleportProgress = {
@@ -190,8 +190,12 @@ export function effectivePrompt(db: DbQueryConnection, threadId: string, id: str
   return { ...input, revision };
 }
 
+/** Threads whose earlier sessions' history is being shown (#237, `projectEarlier`): their old turns tell no plugin. */
+export const showingEarlier = new Set<string>();
+
 export function saveStatus(db: DbQueryConnection, threadId: string, status: typeof threads.$inferSelect["status"], cloud?: CloudFailure): void {
   const thread = db.update(threads).set({ status, updatedAt: Date.now(), latestAttentionAt: Date.now() }).where(and(eq(threads.id, threadId), sql`${threads.status} != ${status}`)).returning().get();
-  if (thread) emitPluginThreadStatusEntered(thread);
-  if (thread?.status === "error") noteTurnFailed(thread.id, cloud);
+  if (!thread || showingEarlier.has(thread.id)) return;
+  emitPluginThreadStatusEntered(thread);
+  if (thread.status === "error" && !cloudTurnsElsewhere.has(thread.id)) noteTurnFailed(thread.id, cloud);
 }

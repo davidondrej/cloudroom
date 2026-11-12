@@ -14,7 +14,7 @@ import { CLOUD_LOCKED_REASON, showCloudSignIn, useCloudLocked } from "@/hooks/us
 import { fetchWithAppSurface } from "@/lib/app-surface";
 import { useIsCompactViewport } from "@cloudroom/shared-ui/hooks/use-compact-viewport";
 import { ProviderRequirementBanner } from "./banner/ProviderRequirementBanner";
-import { CloudQueueCard, FreePlanTip, OgLetter } from "@/components/CloudQueue";
+import { CloudQueueCard, FreePlanTip } from "@/components/CloudQueue";
 import { StarterPrompts } from "@/components/ActivationChecklist";
 import { TryCloudHint } from "@/components/promptbox/TryCloudHint";
 import { CloudBranchPicker } from "./CloudBranchPicker";
@@ -1989,7 +1989,7 @@ export function NewThreadComposer({
                 <Icon name="AlertTriangle" className="size-3.5 shrink-0 text-warning-text" aria-hidden />
                 {vps.data.health ? `Your VPS is busy (${vps.data.busy}), so this thread starts in Cloud.` : "Your VPS is offline, so this thread starts in Cloud."}
               </p>
-            ) : null}<StarterPrompts onPick={pickStarter} fallback={<FreePlanTip />} /><OgLetter /></>,
+            ) : null}<StarterPrompts onPick={pickStarter} fallback={<FreePlanTip />} /></>,
             banner:
               executionTarget === "cloud" ? (
                 cloudBlockedReason === null ? null : (

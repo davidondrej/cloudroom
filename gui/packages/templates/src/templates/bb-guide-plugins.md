@@ -770,7 +770,7 @@ tw-animate-css utilities compile in plugin builds).
 For the complete authoring reference — exact signatures, working snippets
 for every surface, the reload lifecycle, testing tips, and gotchas — use
 the built-in `plugin-authoring` skill (agents: it loads on demand;
-humans: plugins/bb-guide/skills/plugin-authoring/
+humans: plugins/cloudroom-guide/skills/plugin-authoring/
 in a checkout). The builtin `inline-vis` plugin renders
 `::inline-vis{file="demo.html" height="480"}` through the sidebar's
 path-shaped, sandboxed worktree HTML iframe preview; `height` is optional.

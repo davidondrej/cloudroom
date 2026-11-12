@@ -643,7 +643,7 @@ export function registerActionsCommands(
 
   parent
     .command("retry [id]")
-    .description("Retry the failed turn on a thread")
+    .description("Retry the failed turn on a Local thread")
     .option("--self", "Target the current thread (from ROOM_THREAD_ID)")
     .option(
       "--turn <requestId>",

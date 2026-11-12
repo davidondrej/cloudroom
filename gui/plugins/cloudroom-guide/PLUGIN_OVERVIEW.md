@@ -5,12 +5,12 @@ guide. The plugin and all four settings default to enabled. The Cloudroom system
 prompt has its own switch in Settings → Prompts → System prompt.
 
 - `skills`: make the selected bundled skills available.
-- `bbCli`: include `room-cli`.
+- `roomCli`: include `room-cli`.
 - `pluginAuthoring`: include `plugin-authoring`.
 - `skillCreator`: include `skill-creator`.
 
-Use `room-cli plugin config bb-guide set <key> true|false` from the CLI, or
-`bb.sdk.plugins.updateSettings({ pluginId: "bb-guide", values: { ... } })`
+Use `room-cli plugin config cloudroom-guide set <key> true|false` from the CLI, or
+`bb.sdk.plugins.updateSettings({ pluginId: "cloudroom-guide", values: { ... } })`
 through the SDK. Changes apply when agent configuration is next assembled;
 they do not erase instructions from an existing conversation.
 

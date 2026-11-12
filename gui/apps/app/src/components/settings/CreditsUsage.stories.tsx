@@ -49,14 +49,26 @@ function skillUsage() {
 const DAYS = 30, START = new Date(Date.now() - (DAYS - 1) * 86_400_000).toISOString().slice(0, 10);
 const days = (at: (day: number) => number) => Array.from({ length: DAYS }, (_, day) => at(day));
 const MODELS: [string, number][] = [["Opus 5.5", 1840], ["GPT-6.1 Sol", 420], ["Sonnet 5.5", 180], ["Kimi K3.1 Pro", 64]];
+const sum = (values: number[]) => values.reduce((a, b) => a + b, 0);
+/** One model's tokens on one day, in proportion to how much it is used. */
+function tokenDay(model: number, day: number) {
+  const written = Math.round((MODELS[model]![1] / 1840) * 2_400_000 * rand(day + model * 40) * (day === 12 ? 2.2 : 1) * (model === 3 && day < 20 ? 0 : 1));
+  return { written, read: written * 9, cached: written * 260 };
+}
 /** The four stats worked out from thread history, as the server sends them. */
 function usageAnalytics() {
   const base = { startDate: START, days: DAYS };
   return {
     agentHours: { ...base, agentHours: { local: days((d) => 9 * rand(d)), cloud: days((d) => (d === 22 ? 26 : 7 * rand(d + 50))), you: days((d) => (d === 22 ? 1.2 : 5 * rand(d + 90))) } },
     models: { ...base, models: { local: 1502, cloud: 1002, list: MODELS.map(([name, total], m) => ({ name, total, daily: days((d) => Math.round((total / DAYS) * rand(d + m * 40) * (m === 3 && d < 20 ? 0 : 1))) })) } },
-    tokens: { ...base, tokens: { written: days((d) => Math.round(2_400_000 * rand(d) * (d === 12 ? 2.2 : 1))), read: 61_000_000, cached: 1_900_000_000,
-      top: days((d) => d).map((d) => THREADS.slice(0, 3).map(([name], k) => ({ name, written: Math.round((d === 12 && k === 0 ? 3_100_000 : 700_000 / (k + 1)) * rand(d + k)) }))) } },
+    tokens: { ...base, tokens: {
+      // Two ranges of days: the one before, then this one.
+      written: [...days((d) => Math.round(1_600_000 * rand(d + 30))), ...days((d) => sum(MODELS.map((_, m) => tokenDay(m, d).written)))],
+      read: [...days((d) => Math.round(9_000_000 * rand(d + 60))), ...days((d) => sum(MODELS.map((_, m) => tokenDay(m, d).read)))],
+      cached: [...days((d) => Math.round(260_000_000 * rand(d + 90))), ...days((d) => sum(MODELS.map((_, m) => tokenDay(m, d).cached)))],
+      models: MODELS.map(([name], m) => ({ name, written: days((d) => tokenDay(m, d).written), read: days((d) => tokenDay(m, d).read), cached: days((d) => tokenDay(m, d).cached) })),
+      top: Array.from({ length: DAYS }, (_, d) => THREADS.slice(0, 3).map(([name], k) => { const written = Math.round((d === 12 && k === 0 ? 3_100_000 : 700_000 / (k + 1)) * rand(d + k)); return { name, written, read: written * 8, cached: written * 240 }; })),
+    } },
     prompts: { ...base, prompts: { daily: days((d) => Math.round(70 * rand(d))), hours: Array.from({ length: 168 }, (_, i) => Math.round(18 * work(i % 24) * rand(i) * (i >= 120 ? 0.3 : 1))) } },
   };
 }
@@ -68,7 +80,7 @@ export function Analytics() {
     if (tab) navigate(`?tab=${tab}`, { replace: true });
   }, [navigate]);
   useState(() => {
-    client.setQueryData(["cloudroom-account"], { account: { id: "demo", email: "demo@example.invalid" }, planUsage: { plan: "pro", credits: 31_240, creditsLimit: 50_000, resetsAt: null, extraCredits: 0, extraCreditsTotal: 0, og: null } });
+    client.setQueryData(["cloudroom-account"], { account: { id: "demo", email: "demo@example.invalid" }, planUsage: { plan: "pro", credits: 31_240, creditsLimit: 50_000, resetsAt: null, extraCredits: 0, extraCreditsTotal: 0 } });
     client.setQueryData(creditsWaveKey("demo"), sampleWave());
     client.setQueryData(systemSkillUsageQueryKey("90"), skillUsage());
     client.setQueryData(projectSkillsQueryKey(PERSONAL_PROJECT_ID), { skills: SKILLS.map(([name]) => ({ name })) });

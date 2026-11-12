@@ -695,6 +695,11 @@ vi.mock("@/hooks/mutations/thread-state-mutations", () => ({
 
 vi.mock("@/hooks/queries/sidebar-navigation-query", () => ({
   useProjectDisplayName: () => "CEO",
+  // The update card above the composer asks whether any thread is busy.
+  useSidebarNavigationThreadSelection: () => ({
+    data: undefined,
+    isBootstrapPending: false,
+  }),
 }));
 
 vi.mock("@/hooks/queries/thread-default-execution-options-query", () => ({

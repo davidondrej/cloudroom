@@ -19,9 +19,12 @@ import {
   useResourceRouteLabel,
 } from "@cloudroom/shared-ui/resource-list";
 import {
+  FEATURED_SKILLS,
+  FEATURED_SKILLS_REPOSITORY,
   RegistrySkillDetailView,
   RegistrySkillsBrowsePage,
 } from "@/components/tools/SkillsBrowse";
+import { RangeToggle } from "@/components/settings/UsageSection";
 import { getToolsOwnedCollectionRoutePath } from "@/components/tools/tools-navigation";
 import {
   SkillDetailDialogView,
@@ -197,6 +200,45 @@ export function SkillsLibrary() {
     refetchOnWindowFocus: false,
     staleTime: REGISTRY_LIST_STALE_TIME_MS,
   });
+  const featuredQuery = useQuery({
+    queryKey: [
+      "skills-registry-entries",
+      FEATURED_SKILLS.map((featured) => featured.id),
+    ],
+    queryFn: ({ signal }) =>
+      fetchRegistrySkillEntries(
+        FEATURED_SKILLS.map((featured) => featured.id),
+        signal,
+      ),
+    enabled: isRegistryBrowseRoute,
+    staleTime: REGISTRY_LIST_STALE_TIME_MS,
+    retry: false,
+    refetchOnWindowFocus: false,
+  });
+  const featuredStarsQuery = useQuery({
+    queryKey: [
+      "skills-registry-repository-stars",
+      registryRepositoryKey(FEATURED_SKILLS_REPOSITORY),
+    ],
+    queryFn: ({ signal }) =>
+      fetchRegistryRepositoryStars(FEATURED_SKILLS_REPOSITORY, signal),
+    enabled: isRegistryBrowseRoute,
+    staleTime: 6 * 60 * 60_000,
+    retry: false,
+    refetchOnWindowFocus: false,
+  });
+  const featuredStars = featuredStarsQuery.data ?? null;
+  // The shelf header shows the repository's stars once, so cards skip them.
+  const featuredSkills = useMemo(
+    () =>
+      FEATURED_SKILLS.flatMap(({ id, icon }) => {
+        const skill = featuredQuery.data?.find((entry) => entry.id === id);
+        return skill === undefined
+          ? []
+          : [{ skill: { ...skill, stars: null }, icon }];
+      }),
+    [featuredQuery.data],
+  );
   const trimmedRegistrySearch = registrySearch.trim();
   const [loadedRegistry, setLoadedRegistry] = useState<{
     ranking: RegistryRanking;
@@ -491,6 +533,35 @@ export function SkillsLibrary() {
     },
     [navigate],
   );
+  const modeToggle = (
+    <RangeToggle
+      label="Skills view"
+      value={isRegistryBrowseRoute ? "browse" : "library"}
+      options={[
+        { value: "browse", label: "Browse" },
+        {
+          value: "library",
+          label: (
+            <span className="inline-flex items-center gap-1.5">
+              My skills
+              {skillsQuery.data === undefined ? null : (
+                <span className="text-2xs text-subtle-foreground">
+                  {skills.length}
+                </span>
+              )}
+            </span>
+          ),
+        },
+      ]}
+      onChange={(mode) =>
+        navigate(
+          mode === "library"
+            ? getToolsOwnedCollectionRoutePath("skills")
+            : getSkillsRoutePath(),
+        )
+      }
+    />
+  );
   const registryDetail = registryDetailQuery.data ?? null;
   const selectedLocalRegistrySkill = selectedRegistrySkill
     ? findLocalRegistrySkill(selectedRegistrySkill)
@@ -567,13 +638,17 @@ export function SkillsLibrary() {
           hasError={hasError}
           query={libraryQuery}
           activeMode={isRegistryBrowseRoute ? "browse" : "library"}
+          toolbarLeading={modeToggle}
           browseContent={
             <RegistrySkillsBrowsePage
               skills={registrySkills}
+              featuredSkills={featuredSkills}
+              featuredStars={featuredStars}
+              leading={modeToggle}
               action={
                 <CreateWithTemplatesButton
                   kind="skill"
-                  label="New Cloudroom skill"
+                  label="New skill"
                   onCreate={handleCreateSkill}
                 />
               }

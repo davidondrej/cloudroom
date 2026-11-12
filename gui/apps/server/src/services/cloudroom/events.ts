@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { commandGuardBlockReason } from "@get-bb/plugin-sdk/internal/command-guard";
-import { cloudroomCommands, cloudroomThreads, deleteThreadEventSuffixInTransaction, events, threadConversationOutlines, threadSearchSegments, getThread, type DbConnection, type DbQueryConnection, type DbTransaction, type AppendStoredThreadEventArgs } from "@cloudroom/db";
+import { cloudroomCommands, cloudroomThreads, deleteThreadEventSuffixInTransaction, events, threads, threadConversationOutlines, threadSearchSegments, getThread, type DbConnection, type DbQueryConnection, type DbTransaction, type AppendStoredThreadEventArgs } from "@cloudroom/db";
 import { and, desc, eq } from "drizzle-orm";
 import { appendThreadEventsInTransaction, appendThreadProvisioningEventInTransaction } from "../threads/thread-events.js";
 import { markCustomInstructionsLost } from "../threads/custom-instructions.js";
@@ -9,7 +9,7 @@ import { z } from "zod";
 import { cloudAccountSwitch } from "./account-switches.js";
 import { CloudroomError, type SessionRecord } from "./client.js";
 import { codexErrorFields, codexErrorFrameFields, mentionsOpenAISide401 } from "./codex-errors.js";
-import { binding, command, coreFailure, queuedPrompts, saveBinding, saveCommandState, saveStatus, effectivePrompt, statusOf, unstartedTurn, type Binding, type Command } from "./store.js";
+import { binding, command, coreFailure, queuedPrompts, saveBinding, saveCommandState, saveStatus, showingEarlier, effectivePrompt, statusOf, unstartedTurn, type Binding, type Command } from "./store.js";
 
 const object = z.record(z.string(), z.unknown());
 const nativeFrame = z.object({ method: z.string(), params: object.optional() });
@@ -225,6 +225,39 @@ const QUIET_RECORD_KINDS = ["native_record", "usage", "tool_snapshot"];
 export function recordSaving(record: SessionRecord): "wait" | "now" | "alone" {
   if (isStreamDelta(record) || QUIET_RECORD_KINDS.includes(record.kind)) return "wait";
   return PLAIN_RECORD_KINDS.includes(record.kind) && !mentionsOpenAISide401(record) ? "now" : "alone";
+}
+
+/** Where showing an earlier session's history left off, carried from one page to the next. */
+export type EarlierSession = { session: string; after: number; nativeId: string | null; turnId: string | null; harness: string | null };
+/** The app's agent for a session, from its start receipt (Core names its own harness). */
+export function sessionHarness(records: readonly SessionRecord[]): string | null {
+  const start = records.find((record) => record.kind === "receipt" && (record.data as { command?: unknown }).command === "start")?.data as { input?: { harness?: unknown } } | undefined;
+  return (Object.keys(CLOUD_HARNESSES) as CloudProvider[]).find((id) => CLOUD_HARNESSES[id] === start?.input?.harness) ?? null;
+}
+
+/** Saved history shown here (#237, App 4): never acted on, and its turns change no status or date and tell no plugin.
+ *  For a session before the thread's current one (`earlier`), the thread points at that session inside one
+ *  transaction, with its own agent and where its last page left off, then back, so no send or stream sees it. */
+export function projectShown(db: DbConnection, threadId: string, records: readonly SessionRecord[], earlier?: EarlierSession): { types: ThreadEvent["type"][]; earlier?: EarlierSession } {
+  return db.transaction((tx) => {
+    const current = binding(tx, threadId), thread = tx.select().from(threads).where(eq(threads.id, threadId)).get();
+    if (!current || !thread || !records.length) return { types: [], ...(earlier ? { earlier } : {}) };
+    showingEarlier.add(threadId);
+    try {
+      if (earlier) {
+        saveBinding(tx, threadId, { sessionId: earlier.session, cursor: earlier.after, nativeId: earlier.nativeId, turnId: earlier.turnId });
+        if (earlier.harness) tx.update(threads).set({ providerId: earlier.harness }).where(eq(threads.id, threadId)).run();
+      }
+      const types = projectRecords(tx as unknown as DbConnection, threadId, records);
+      const reached = earlier ? binding(tx, threadId)! : null;
+      if (earlier) {
+        const { threadId: _same, ...restore } = current;
+        saveBinding(tx, threadId, restore);
+      }
+      tx.update(threads).set({ status: thread.status, updatedAt: thread.updatedAt, latestAttentionAt: thread.latestAttentionAt, providerId: thread.providerId }).where(eq(threads.id, threadId)).run();
+      return { types, ...(earlier && reached ? { earlier: { ...earlier, after: reached.cursor, nativeId: reached.nativeId, turnId: reached.turnId } } : {}) };
+    } finally { showingEarlier.delete(threadId); }
+  });
 }
 
 export function projectRecord(db: DbConnection, threadId: string, record: SessionRecord, codexOutage = false): ThreadEvent["type"][] {

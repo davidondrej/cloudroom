@@ -223,23 +223,6 @@ function skillMutationDisabledReason(
   return `Bundled with ${providerLabel(skill.provider, providerRoster)}`;
 }
 
-const SKILLS_BROWSE_DESCRIPTION = (
-  <>
-    Trending agent skills from{" "}
-    <a
-      href="https://skills.sh"
-      target="_blank"
-      rel="noreferrer"
-      className="rounded-sm underline underline-offset-2 hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-    >
-      skills.sh
-    </a>
-    . Install one and every agent you use in Cloudroom can run it.
-  </>
-);
-const SKILLS_LIBRARY_DESCRIPTION =
-  "The skills on this Cloudroom host — yours, your providers', and those bundled with plugins. They work with every agent you use in Cloudroom.";
-
 const PREFETCH_HOVER_INTENT_MS = 150;
 
 function SkillRow({
@@ -316,6 +299,7 @@ interface SkillsOverviewProps {
   query?: string;
   activeMode?: SkillsCollectionMode;
   browseContent?: ReactNode;
+  toolbarLeading?: ReactNode;
   onCreateSkill: (prompt?: string) => void;
   onSelectSkill: (skill: SkillSummary) => void;
   onPrefetchSkill?: (skill: SkillSummary) => void;
@@ -333,6 +317,7 @@ export function SkillsOverview({
   query = "",
   activeMode = "library",
   browseContent,
+  toolbarLeading,
   onCreateSkill,
   onSelectSkill,
   onPrefetchSkill,
@@ -518,11 +503,6 @@ export function SkillsOverview({
   return (
     <ResourceCollectionPage
       id="skills-collection"
-      description={
-        activeMode === "browse"
-          ? SKILLS_BROWSE_DESCRIPTION
-          : SKILLS_LIBRARY_DESCRIPTION
-      }
       bandClassName={TOOLS_PAGE_BAND_CLASSES}
     >
       {activeMode === "browse" ? (
@@ -537,10 +517,11 @@ export function SkillsOverview({
               searchValue={query}
               searchPlaceholder="Search skills"
               onSearchChange={onQueryChange}
+              leading={toolbarLeading}
               action={
                 <CreateWithTemplatesButton
                   kind="skill"
-                  label="New Cloudroom skill"
+                  label="New skill"
                   onCreate={onCreateSkill}
                 />
               }

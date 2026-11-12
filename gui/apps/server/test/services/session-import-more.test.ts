@@ -1,5 +1,6 @@
 import Database from "better-sqlite3";
 import { existsSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { mkdir, mkdtemp, readFile, realpath, symlink, utimes, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -58,10 +59,14 @@ async function fixtures() {
   const codexItem = (type: string, text: string) => ({ timestamp: "2026-09-02T10:00:00.000Z", type: "event_msg", payload: { type: "item_completed", item: { type, content: [{ text }] } } });
   const codexDir = join(root, "codex", "sessions", "2026", "09", "01");
   await mkdir(codexDir, { recursive: true });
-  const codexRollout = (id: string, question: string) => [
+  const codexResponse = (role: string, text: string) => ({ type: "response_item", payload: { type: "message", role, content: [{ type: "input_text", text }] } });
+  const codexRollout = (id: string, question: string, items = true) => [
     { type: "session_meta", payload: { id, cwd: project, source: "cli", originator: "codex_cli_rs" } },
-    codexItem("UserMessage", question),
-    codexItem("AgentMessage", "Compressed Codex answer"),
+    codexResponse("user", "<environment_context>\n  <cwd>/project</cwd>\n</environment_context>"),
+    codexResponse("user", question),
+    codexResponse("assistant", "Compressed Codex answer"),
+    codexItem("Plan", "1. Answer the question"),
+    ...items ? [codexItem("UserMessage", question), codexItem("AgentMessage", "Compressed Codex answer")] : [],
     { timestamp: "2026-10-02T10:00:00.000Z", type: "event_msg", payload: { type: "thread_goal_updated" } },
   ].map((line) => JSON.stringify(line)).join("\n");
   const rollout = (id: string) => join(codexDir, `rollout-2026-09-01T10-00-00-${id}.jsonl`);
@@ -69,6 +74,9 @@ async function fixtures() {
   await writeFile(`${rollout("0199a000-0000-7000-8000-00000000000d")}.zst`, zstdCompressSync(codexRollout("0199a000-0000-7000-8000-00000000000d", "Stale compressed copy")));
   await writeFile(rollout("0199a000-0000-7000-8000-00000000000d"), codexRollout("0199a000-0000-7000-8000-00000000000d", "Plain Codex question"));
   await utimes(rollout("0199a000-0000-7000-8000-00000000000d"), new Date("2026-09-01"), new Date("2026-09-01"));
+  const resumed = [{ type: "event_msg", payload: { type: "task_started" } }, codexResponse("user", "Resumed question"), codexItem("UserMessage", "Resumed question"), codexItem("AgentMessage", "Resumed answer"),
+    { type: "session_meta", payload: { id: "0199a000-0000-7000-8000-00000000000e", cwd: project, source: "cli" } }, codexResponse("user", "Resumed again"), codexResponse("assistant", "Again answer")];
+  await writeFile(rollout("0199a000-0000-7000-8000-00000000000e"), [codexRollout("0199a000-0000-7000-8000-00000000000e", "Response-only Codex question", false), ...resumed.map((line) => JSON.stringify(line))].join("\n"));
   const db = new Database(join(root, "hermes", "state.db"));
   db.exec(`CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT NOT NULL, model TEXT, started_at REAL NOT NULL, title TEXT, cwd TEXT, archived INTEGER NOT NULL DEFAULT 0);
     CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL, role TEXT NOT NULL, content TEXT, timestamp REAL NOT NULL);`);
@@ -308,6 +316,7 @@ describe("Pi, Hermes, and T3 Code chat import", () => {
       expect(sessions.map(({ harness: app, id, title, cwd }) => [app, id, title, cwd]).sort((a, b) => a[1]!.localeCompare(b[1]!))).toEqual([
         ["codex", "0199a000-0000-7000-8000-00000000000c", "Compressed Codex question", project],
         ["codex", "0199a000-0000-7000-8000-00000000000d", "Plain Codex question", project],
+        ["codex", "0199a000-0000-7000-8000-00000000000e", "Response-only Codex question", project],
         ["claude-code", "claude-1", "Refactor the API", join(root, "claude-project")],
         ["acp-hermes-agent", "h-cli", "Deploy plan", join(root, "hermes-project")],
         ["acp-hermes-agent", "h-telegram", "Hi from Telegram", homedir()],
@@ -319,6 +328,7 @@ describe("Pi, Hermes, and T3 Code chat import", () => {
         { harness: "claude-code", id: "claude-1" },
         { harness: "codex", id: "0199a000-0000-7000-8000-00000000000c" },
         { harness: "codex", id: "0199a000-0000-7000-8000-00000000000d" },
+        { harness: "codex", id: "0199a000-0000-7000-8000-00000000000e" },
         { harness: "pi", id: "pi-1" },
         { harness: "pi", id: "pi-old" },
         { harness: "acp-hermes-agent", id: "h-cli" },
@@ -339,6 +349,14 @@ describe("Pi, Hermes, and T3 Code chat import", () => {
       expect(threadMessages(harness.deps.db, threadId("0199a000-0000-7000-8000-00000000000d"))).toEqual([
         { role: "user", text: "Plain Codex question" },
         { role: "agent", text: "Compressed Codex answer" },
+      ]);
+      expect(threadMessages(harness.deps.db, threadId("0199a000-0000-7000-8000-00000000000e"))).toEqual([
+        { role: "user", text: "Response-only Codex question" },
+        { role: "agent", text: "Compressed Codex answer" },
+        { role: "user", text: "Resumed question" },
+        { role: "agent", text: "Resumed answer" },
+        { role: "user", text: "Resumed again" },
+        { role: "agent", text: "Again answer" },
       ]);
       expect(threadMessages(harness.deps.db, threadId("pi-1"))).toEqual([
         { role: "user", text: "Fix the login bug" },
@@ -514,18 +532,72 @@ describe("Pi, Hermes, and T3 Code chat import", () => {
   it("dates imported chats by the original chat, and a later turn still moves one to the top", async () => {
     const root = await mkdtemp(join(tmpdir(), "import-dates-"));
     await mkdir(join(root, "claude", "projects", "p"), { recursive: true });
+    await mkdir(join(root, "claude", "projects", "p-alias"), { recursive: true });
     for (const name of ["PI_CODING_AGENT_DIR", "BB_PI_BRIDGE_SESSION_DIR", "HERMES_HOME", "CLAUDE_CONFIG_DIR", "CODEX_HOME", "T3CODE_HOME"]) vi.stubEnv(name, join(root, name === "CLAUDE_CONFIG_DIR" ? "claude" : name));
     const at = (month: number, minute: number) => `2026-0${month}-01T10:0${minute}:00.000Z`;
     for (const month of [1, 2, 3]) {
       await writeFile(join(root, "claude", "projects", "p", `chat-${month}.jsonl`), [{ type: "user", cwd: root, timestamp: at(month, 0), message: { role: "user", content: `Chat ${month}` } },
         { type: "assistant", timestamp: at(month, 5), message: { content: [{ type: "text", text: "Done." }] } }].map((line) => JSON.stringify(line)).join("\n"));
     }
+    // Claude keeps one session under a folder alias and its real path: it imports once, even when asked for twice.
+    await writeFile(join(root, "claude", "projects", "p-alias", "chat-1.jsonl"), await readFile(join(root, "claude", "projects", "p", "chat-1.jsonl")));
     await withTestHarness(async (harness) => {
-      const result = await importAll(harness, seedHostSession(harness.deps, { id: "host-import-dates" }).host.id, [3, 2, 1].map((month) => ({ harness: "claude-code", id: `chat-${month}` })));
+      const hostId = seedHostSession(harness.deps, { id: "host-import-dates" }).host.id;
+      expect((await listNativeSessions(harness.deps)).map(({ id }) => id)).toEqual(["chat-3", "chat-2", "chat-1"]);
+      const result = await importAll(harness, hostId, [3, 2, 1, 1].map((month) => ({ harness: "claude-code", id: `chat-${month}` })));
       const threads = () => result.imported.map(({ threadId }) => getThread(harness.deps.db, threadId)!);
       expect(threads().map((thread) => [thread.title, thread.createdAt, thread.latestAttentionAt])).toEqual([3, 2, 1].map((month) => [`Chat ${month}`, Date.parse(at(month, 0)), Date.parse(at(month, 5))]));
       for (const type of ["run.preparing", "run.started", "run.succeeded"] as const) applyThreadLifecycleEvent(harness.deps.db, { threadId: result.imported[2]!.threadId, event: { type } });
       expect(threads()[2]!.latestAttentionAt).toBeGreaterThan(Date.now() - 60_000);
+    });
+  }, 60_000);
+});
+
+describe("Claude Code and Codex chat import", () => {
+  it("puts chats from a repo, its subfolder, and its worktrees in one project", async () => {
+    const root = await realpath(await mkdtemp(join(tmpdir(), "import-group-")));
+    const repo = join(root, "app"), sub = join(repo, "web"), worktree = join(root, "codex-worktrees", "a1", "app"), claudeTree = join(repo, ".claude", "worktrees", "fix");
+    const git = (...args: string[]) => execFileSync("git", ["-C", repo, "-c", "user.name=t", "-c", "user.email=t@t", ...args]);
+    await mkdir(sub, { recursive: true });
+    await writeFile(join(sub, "a.txt"), "a");
+    git("init", "-q", "-b", "main");
+    git("add", ".");
+    git("commit", "-qm", "init");
+    git("worktree", "add", "-q", worktree);
+    git("worktree", "add", "-q", claudeTree);
+    vi.stubEnv("CLAUDE_CONFIG_DIR", join(root, "claude"));
+    vi.stubEnv("CODEX_HOME", join(root, "codex"));
+    const claude = async (id: string, cwd: string) => {
+      const dir = join(root, "claude", "projects", id);
+      await mkdir(dir, { recursive: true });
+      await writeFile(join(dir, `${id}.jsonl`), [
+        { type: "user", cwd, timestamp: "2026-10-01T10:00:00.000Z", message: { role: "user", content: `Question ${id}` } },
+        { type: "assistant", timestamp: "2026-10-01T10:00:01.000Z", message: { model: "claude-x", content: [{ type: "text", text: "Answer" }] } },
+      ].map((line) => JSON.stringify(line)).join("\n"));
+    };
+    const codex = async (id: string, cwd: string) => {
+      const dir = join(root, "codex", "sessions", "2026", "10", "01");
+      await mkdir(dir, { recursive: true });
+      const item = (type: string, text: string) => ({ timestamp: "2026-10-01T10:00:00.000Z", type: "event_msg", payload: { type: "item_completed", item: { type, content: [{ text }] } } });
+      await writeFile(join(dir, `rollout-2026-10-01T10-00-00-${id}.jsonl`), [
+        { type: "session_meta", payload: { id, cwd, source: "vscode", originator: "codex_desktop" } }, item("UserMessage", `Question ${id}`), item("AgentMessage", "Answer"),
+      ].map((line) => JSON.stringify(line)).join("\n"));
+    };
+    const ids = { root: "0199b000-0000-7000-8000-000000000001", tree: "0199b000-0000-7000-8000-000000000002" };
+    await claude("claude-sub", sub);
+    await claude("claude-tree", claudeTree);
+    await codex(ids.root, repo);
+    await codex(ids.tree, worktree);
+    await withTestHarness(async (harness) => {
+      const { host } = seedHostSession(harness.deps, { id: "host-import-group" });
+      const result = await importAll(harness, host.id, [
+        { harness: "claude-code", id: "claude-sub" }, { harness: "claude-code", id: "claude-tree" }, { harness: "codex", id: ids.root }, { harness: "codex", id: ids.tree },
+      ]);
+      expect(result.skipped).toEqual([]);
+      const threads = result.imported.map(({ threadId }) => getThread(harness.deps.db, threadId)!);
+      expect(new Set(threads.map((thread) => thread.projectId)).size).toBe(1);
+      expect(listProjectSourcesByProjectIds(harness.deps.db, [threads[0]!.projectId]).map((source) => source.path)).toEqual([repo]);
+      expect(threads.map((thread) => getEnvironment(harness.deps.db, thread.environmentId!)!.path)).toEqual([sub, claudeTree, repo, worktree]);
     });
   }, 60_000);
 });

@@ -36,9 +36,10 @@ function renderStaticFooter(
 ) {
   if (!footer) return null;
   return (
-    <div className="relative shrink-0 bg-background">
+    <div data-wallpaper-clear="" className="relative shrink-0 bg-background">
       <OverflowFade placement="above" tone="background" />
       <div
+        data-wallpaper-column=""
         className={cn(
           "mx-auto w-full px-4 pb-4",
           maxWidthClassName,

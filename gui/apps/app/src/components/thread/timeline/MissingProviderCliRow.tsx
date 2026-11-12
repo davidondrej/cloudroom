@@ -57,7 +57,7 @@ export function MissingProviderCliRow({
   });
   const { mutate: retryNow } = retry;
   const retryAfterInstall = useRef(false);
-  // Install silently, then retry (ADR 0193). The button is only a fallback when that fails.
+  // Install by itself, then retry; the row says it's installing (ADR 20261111-123959). The button is only a fallback when that fails.
   useEffect(() => {
     if (!hostId || !issue || status?.installed || !hasProviderCliAction(issue)) return;
     retryAfterInstall.current = true;

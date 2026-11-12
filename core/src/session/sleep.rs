@@ -313,16 +313,16 @@ impl Manager {
         }
     }
 
-    /// Claude reads its login only at start, so after a new sign-in an idle agent sleeps
-    /// before its next prompt; the queued prompt wakes it with the new login.
+    /// Claude reads its login and connects MCP servers only at start, so after a new sign-in
+    /// (or cloud MCP sign-in) an idle agent sleeps before its next prompt; the queued prompt
+    /// wakes it with the new login.
     pub(super) fn sleep_for_login(&self, local: &mut Local, id: &str) -> bool {
         let session = &local.sessions[id];
         let changed = session.can_resume()
             && local.can_sleep(id)
-            && session
-                .handle
-                .as_ref()
-                .is_some_and(|h| h.login_changed(&self.config));
+            && session.handle.as_ref().is_some_and(|h| {
+                h.login_changed(&self.config) || h.mcp_login_changed(&self.config)
+            });
         if changed {
             self.release(local, id);
         }

@@ -18,7 +18,10 @@ import {
   BUNDLED_MARKETPLACE_GENERATED_DIRECTORY,
   BUNDLED_MARKETPLACE_NAME,
 } from "../src/services/plugin-catalog/bundled-marketplace-paths.js";
-import { BUNDLED_PLUGINS } from "../src/services/plugins/builtin-registry.js";
+import {
+  BUNDLED_PLUGINS,
+  WINDOWS_HIDDEN_PLUGIN_NAMES,
+} from "../src/services/plugins/builtin-registry.js";
 
 const run = promisify(execFile);
 
@@ -84,7 +87,10 @@ export function parseBbOfficialCatalogFields(
   const missing = plugins
     .map((plugin) => plugin.name)
     .filter((name) => fields[name] === undefined);
-  const extra = Object.keys(fields).filter((name) => !expected.has(name));
+  // Windows leaves some plugins out of BUNDLED_PLUGINS; their blocks stay.
+  const extra = Object.keys(fields).filter(
+    (name) => !expected.has(name) && !WINDOWS_HIDDEN_PLUGIN_NAMES.includes(name),
+  );
   if (missing.length > 0 || extra.length > 0) {
     const problems = [
       ...(missing.length === 0

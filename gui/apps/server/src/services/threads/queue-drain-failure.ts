@@ -1,4 +1,6 @@
 import {
+  getQueuedThreadMessage,
+  getThread,
   setQueuedThreadMessageFailureReason,
   setQueuedThreadMessageWaitingOn,
 } from "@cloudroom/db";
@@ -8,9 +10,63 @@ import {
 } from "@cloudroom/domain";
 import { ApiError } from "../../errors.js";
 import type { AppDeps } from "../../types.js";
+import { scrub } from "../cloudroom/setup-telemetry.js";
 import { dispatchEnvironmentAndHost } from "./dispatch-hooks.js";
+import { parseStoredQueuedThreadMessageWaitingOn } from "./thread-queued-messages.js";
 
-type QueueDrainFailureDeps = Pick<AppDeps, "db" | "hub">;
+type QueueDrainFailureDeps = Pick<AppDeps, "db" | "hub" | "telemetry">;
+
+/**
+ * Tells us a queued message failed or a system notice was dropped, so the
+ * cause is one query away instead of in a log on the user's machine (#1341).
+ * Categories and the error only: no message text and no IDs.
+ */
+export function captureQueueDeliveryProblem(
+  deps: Pick<AppDeps, "db" | "telemetry">,
+  args: {
+    outcome: "failed" | "dropped";
+    error: unknown;
+    /** A system notice's kind, when there is no queued row to read it from. */
+    notice?: string;
+    queuedMessageId?: string;
+    threadId: string;
+  },
+): void {
+  // Reporting must never turn one failure into two.
+  try {
+    const row =
+      args.queuedMessageId === undefined
+        ? null
+        : getQueuedThreadMessage(deps.db, args.queuedMessageId);
+    const notice =
+      args.notice ??
+      (row?.systemNotice
+        ? (JSON.parse(row.systemNotice) as { kind: string }).kind
+        : null);
+    const { error } = args;
+    deps.telemetry.capture({
+      name: "queue_delivery",
+      properties: {
+        outcome: args.outcome,
+        message: notice ?? (row?.senderThreadId ? "agent" : "user"),
+        waiting_on:
+          row === null
+            ? null
+            : (parseStoredQueuedThreadMessageWaitingOn(row)?.kind ?? null),
+        thread_status: getThread(deps.db, args.threadId)?.status ?? null,
+        error:
+          error instanceof ApiError
+            ? error.body.code
+            : error instanceof Error
+              ? error.name
+              : null,
+        detail: error instanceof Error ? scrub(error.message) : null,
+      },
+    });
+  } catch {
+    return;
+  }
+}
 
 /**
  * What a failed dispatch says to the person whose message did not go.
@@ -71,5 +127,11 @@ export function recordQueuedMessageDrainFailure(
     id: args.row.id,
     threadId: args.row.threadId,
     failureReason: describeDispatchFailure(args.error),
+  });
+  captureQueueDeliveryProblem(deps, {
+    outcome: "failed",
+    error: args.error,
+    queuedMessageId: args.row.id,
+    threadId: args.row.threadId,
   });
 }

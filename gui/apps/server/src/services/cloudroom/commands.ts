@@ -9,14 +9,14 @@ import { z } from "zod";
 import { findCliExecutable } from "@cloudroom/process-utils";
 import { ApiError } from "../../errors.js";
 import { CloudroomClient, CloudroomConnectionError, CloudroomError, UPLOAD_PART, authRequiredMessages, type CodexAuthStatus, type SessionRecord, type VmRun, type VmRunResult } from "./client.js";
-import { CLOUD_HARNESSES, HARNESS_NAMES, appendStartProgress, endedTurn, isAcpProvider, isCloudProvider, projectFollowUp, projectInitialPrompt, projectRecord, projectRecords, recordSaving, retractStillQueuedPrompts, STREAM_BATCH_MAX_RECORDS, STREAM_BATCH_MS, startStepRunning, type CloudProvider, type StartStep } from "./events.js";
+import { CLOUD_HARNESSES, HARNESS_NAMES, appendStartProgress, endedTurn, projectShown, sessionHarness, type EarlierSession, isAcpProvider, isCloudProvider, projectFollowUp, projectInitialPrompt, projectRecord, projectRecords, recordSaving, retractStillQueuedPrompts, STREAM_BATCH_MAX_RECORDS, STREAM_BATCH_MS, startStepRunning, type CloudProvider, type StartStep } from "./events.js";
 import { mentionsOpenAISide401 } from "./codex-errors.js";
 import { codexOutage } from "./openai-status.js";
 import { buildThreadStatusChangeMetadata } from "../threads/thread-runtime-display.js";
 import { cloudPluginInstructions, cloudroomSystemPrompt, dueCustomInstructions, markCustomInstructionsLost, prepareCloudInstructionInput, resolveCustomInstructions } from "../threads/custom-instructions.js";
-import { baseBranch, binding, bindings, command, commands, coreInUse, localTeleports, openBindings, queuedPrompts, saveBinding, saveCommandState, saveStatus, effectivePrompt, projectCopyProgress, stampBindings, teleportBlocked, unstartedTurn, type Binding, type Command, type OpenBinding, isDead, statusOf } from "./store.js";
+import { TIMED_OUT, baseBranch, binding, bindings, command, commands, coreInUse, localTeleports, openBindings, queuedPrompts, saveBinding, saveCommandState, saveStatus, effectivePrompt, projectCopyProgress, stampBindings, teleportBlocked, unstartedTurn, type Binding, type Command, type OpenBinding, isDead, statusOf } from "./store.js";
 import { syncLoopEnv } from "./project-loops.js";
-import { copyProject, copyRunning, githubRepository, localFilesNote, localProjectNote, localProjectPath, planNewProjectCopy, workspaceId, workspaceName, planProjectCopy, planProjectCopyOrThrow, reportProjectCopy, writeFilesState, type ProjectCopyJob } from "./project-copy.js";
+import { copyProject, copyRunning, keyCopying, githubRepository, localFilesNote, localProjectNote, localProjectPath, planNewProjectCopy, workspaceId, workspaceName, planProjectCopy, planProjectCopyOrThrow, reportProjectCopy, writeFilesState, type ProjectCopyJob } from "./project-copy.js";
 import { CHILD_HINT, cloudForkOf, cloudForkPoint, codeFromOf, FORK_HARNESSES, FORK_HINT, landForkCode, localForkPoint, startCloudFork, threadCode, uploadInParts } from "./fork.js";
 import { copyForkSourceHistory } from "../threads/thread-fork-history.js";
 import { CloudGitError, savedWorkspacePath } from "./git.js";
@@ -39,7 +39,9 @@ import { CodexAccounts } from "./codex-accounts.js";
 import { BUDGET_LIMIT, cancelMacCodexLogin, hasMacCodexLogin, macCodexDigest, macCodexLogin, macCodexLoginExpired, cursorKeyRejected, macCursorLogin, revokeDesktopToken, startMacCodexLogin, CLOUD_REGION, SANDBOX_PREFIX, SandboxAsleep, SandboxDirectory, sandboxThread, startRefused, type AutomationRun, type SandboxProject, type SandboxTrigger, type SandboxWakeTrigger } from "./sandboxes.js";
 import type { AppDeps, LoggedWorkSessionDeps } from "../../types.js";
 import { markMinutesSent, unsentMinutes } from "./time-in-app.js";
-import { emitPluginThreadCreated } from "../plugins/plugin-thread-events.js";
+import { cloudTurnsElsewhere, emitPluginThreadCreated } from "../plugins/plugin-thread-events.js";
+import { appRequestId, CloudThreadStates, installTag, sharedChildId, tagOf, type CloudThreadState } from "./cloud-threads.js";
+import { CloudSync } from "./cloud-sync.js";
 import type { EditMessageRequest, EditMessageResponse } from "@cloudroom/server-contract";
 
 const accountSchema = z.object({ id: z.string().uuid(), email: z.string().email() }).strict();
@@ -107,6 +109,7 @@ const capabilitiesSchema = z.object({
   credits_usage: z.boolean().default(false),
   subagents: z.boolean().default(false),
   long_prompts: z.boolean().default(false),
+  cloud_threads: z.boolean().default(false),
   harnesses: z.array(z.object({
     id: z.string(),
     model: z.string(),
@@ -203,6 +206,8 @@ type PromptAttachment = { name: string; kind: "image" | "file"; localPath: strin
 /** Runs when a project copy ends, with the client that ran it: a sandbox that slept mid-copy has a new address.
  *  `partial` says why only `.env` files arrived. It resolves once everything after the copy is done. */
 type Landed = (error?: string, client?: CloudroomClient, partial?: string) => Promise<void>;
+// A request its sandbox did not answer in time, or turned away for now.
+const slowSandbox = (error: unknown) => error instanceof Error && error.message === TIMED_OUT || error instanceof CloudroomError && error.retryable;
 const CUT_SHORT = "The project copy was cut short, so some files may be missing.";
 const COPY_DEADLINE = 9 * 60_000;
 const STALLED = `The project copy did not finish in ${COPY_DEADLINE / 60_000} minutes, so some files may be missing.`;
@@ -418,6 +423,10 @@ function publicError(error: unknown): string {
 function staleSandboxAddress(error: unknown): boolean {
   return error instanceof CloudroomError && (error.status === 404 || error.status === 410) && !error.code;
 }
+/** How often a stale address is forgotten and its sandbox woken again before the command fails (#596, #1076). */
+const STALE_REWAKES = 3;
+/** Plain words for a sandbox that stayed stale: never the vendor's own 404 text (#317, ADR 0146). */
+const unreachableSandbox = "Its cloud sandbox could not be reached, even after waking it again.";
 
 function connectionFailure(error: unknown): boolean {
   return error instanceof CloudroomConnectionError
@@ -453,6 +462,22 @@ const CHILD_REPORTS = "cloudroom-child-reports.json";
 const WEBSITE_CHILD = "sub_";
 const childReportSchema = z.object({ child: z.string(), status: z.string(), turn: z.string() });
 const AGENT_FORK_WAIT = 90_000;
+/** A record Core made within the last 90 s: an agent waits that long for its fork's or child's answer. */
+/** Prompts Core or a loop queues for itself, which a Teleport may leave behind: loop runs, Core's child notices and
+ *  tasks, its own continue after a usage limit, and Teleport's handoff (core/src/session, web/lib/automations.ts). */
+const CORE_OWN = /^(auto_|notice_|task_|continue_|teleport_)/;
+/** Core session states that mean an agent is working or about to (core/src/session/state.rs). */
+const WORKING = ["pending", "waiting_for_files", "starting", "resuming", "starting_turn", "running", "interrupting", "rewinding"];
+/** The session a session continues (Core's `continued` record, an agent switch or move elsewhere). */
+const continuedFrom = (records: SessionRecord[]) => z.object({ from: z.string().regex(/^cr_[A-Za-z0-9_-]{1,80}$/) }).safeParse(records.find((record) => record.kind === "continued")?.data).data?.from;
+const young = (record: SessionRecord) => record.timestamp_ms === undefined || Date.now() - record.timestamp_ms <= AGENT_FORK_WAIT;
+/** What a label sends to a website that follows threads (#237): only the change made here. A new session's first
+ *  stream sends all of it once, and every later run only fills the session. `switch` is an older Core's switch. */
+type LabelChange = "start" | "backfill" | "title" | "model" | "parent" | "project" | "switch";
+const LABEL_FIELDS: Record<LabelChange, string[]> = {
+  start: ["title", "project_name", "project", "session", "harness", "model", "parent"], backfill: ["session"], title: ["title"],
+  model: ["harness", "model"], parent: ["parent"], project: ["project", "project_name"], switch: [],
+};
 
 /** The sandbox whose API keys a new Cloud child or fork gets, saved with its first message (keyFields). */
 const keySourceOf = (input: string | undefined) => input ? z.object({ key_source: z.string().optional() }).safeParse(JSON.parse(input)).data?.key_source : undefined;
@@ -470,7 +495,8 @@ const unsentWork = (db: DbQueryConnection, threadId: string) => {
 
 class CloudroomService {
   teleportRecovery?: () => void;
-  archiveRequest?: (threadId: string, liveThreadIds?: string[]) => void;
+  /** Main's archive of a thread and its idle children; `websiteHasIt`: the website already has this thread archived. */
+  archiveRequest?: (threadId: string, liveThreadIds?: string[], websiteHasIt?: boolean) => void;
   private readonly heldStarts = new Set<string>();
   childTurnEnded?: (child: Thread & { parentThreadId: string }, status: ThreadEventTurnStatus) => void;
   moveRequest?: (threadId: string, project: string) => void;
@@ -525,11 +551,93 @@ class CloudroomService {
   private needsDelivery(row: OpenBinding): boolean {
     if (!row.sessionId || row.sending || this.connectionIssues.get(row.threadId)?.delivery) return true;
     const live = this.streams.has(row.threadId);
+    // A Cloud thread streams here only while it's open on a screen here, a turn this computer sent runs, or this
+    // computer acts for it (home). A computer is home for every thread only it prompts (docs/scopes/cloud-threads.md App 4).
+    // A thread shown running streams until its turn ends, so no computer is left showing it running for good.
+    if (!this.deps.hub.watching(row.threadId) && !this.isHome(row.threadId) && !["pending", "starting", "active", "stopping"].includes(row.status)) {
+      if (live) this.detach(row.threadId);
+      return false;
+    }
     if (!live && ["pending", "starting", "active", "stopping"].includes(row.status)) return true;
     const sandbox = sandboxThread(row.coreUrl);
-    if (!live && sandbox && this.slept.get(row.threadId) === this.sandboxes.awakeChecks && !this.sandboxes.isAwake(sandbox)) return false;
+    if (!live && sandbox && this.slept.get(row.threadId) === this.sandboxes.awakeChecks && !this.sandboxes.isAwake(sandbox)) {
+      if (sandbox === row.threadId && this.deps.hub.watching(row.threadId)) this.readHistory(row.threadId);
+      return false;
+    }
     if (sandbox && sandbox !== row.threadId && !row.parentThreadId && this.leftParent.get(row.threadId) !== row.sessionId) return true;
     return !live;
+  }
+  /** Session and cursor each opened thread's history was last read to, "reading" while one read runs, or when a
+   *  failed read may be tried again. */
+  private readonly histories = new Map<string, string>();
+  /** An opened thread whose sandbox sleeps reads its history from the website, never waking it (#237). It's shown only:
+   *  the thread's state notes where its jobs stood, and the stream that follows starts there and acts on it. */
+  private readHistory(threadId: string): void {
+    const saved = binding(this.deps.db, threadId), session = saved?.sessionId, at = `${session}:${saved?.cursor}`, last = this.histories.get(threadId);
+    if (!saved || !session || last === at || last === "reading" || (last?.startsWith("retry:") && Date.now() < Number(last.slice(6)))) return;
+    this.histories.set(threadId, "reading");
+    void (async () => {
+      let reached = at;
+      try {
+        if (!await this.sandboxes.followsThreads().catch(() => false)) return;
+        for (let page = await this.sandboxes.records(threadId, session, saved.cursor), first = true; ; first = false) {
+          if (first && saved.cursor === 0 && !this.shown(threadId)) await this.earlierSessions(threadId, continuedFrom(page.records));
+          const current = binding(this.deps.db, threadId);
+          if (!current || current.sessionId !== session || this.streams.has(threadId)) return;
+          const state: CloudThreadState = this.threadStates.get(threadId) ?? { ...this.firstState(threadId), session, actFrom: 0 };
+          // The last shown record a job may act on (deltas, usage and items have none): the stream owes up to it.
+          const until = Math.max(-1, ...page.records.filter((record) => recordSaving(record) === "alone").map((record) => record.sequence));
+          const history = state.history?.session === session ? state.history : until >= 0 ? { session, from: current.cursor } : undefined;
+          if (history && until >= (history.until ?? -1)) this.threadStates.set(threadId, { ...state, history: { ...history, until } });
+          const eventTypes = page.records.length ? projectShown(this.deps.db, threadId, page.records).types : [];
+          if (eventTypes.length) this.notify(threadId, [...new Set(eventTypes)], false);
+          reached = `${session}:${binding(this.deps.db, threadId)?.cursor}`;
+          if (!page.more || !page.records.length) break;
+          page = await this.sandboxes.records(threadId, session, binding(this.deps.db, threadId)!.cursor);
+        }
+      } catch (error) {
+        this.warn("A Cloud thread's history could not be read", error, { threadId });
+        reached = `retry:${Date.now() + 10_000}`;
+      } finally { this.histories.set(threadId, reached); }
+    })();
+  }
+  /** Whether any of the thread's history is shown here yet. */
+  private shown(threadId: string): boolean {
+    return Boolean(this.deps.db.select({ id: events.id }).from(events).where(eq(events.threadId, threadId)).limit(1).get());
+  }
+  /** One load of earlier sessions per thread at a time: a wake while it reads joins it instead of adding them twice. */
+  private readonly earlier = new Map<string, Promise<void>>();
+  /** A thread nothing is shown of here yet, whose session continues earlier ones (a switch or move made elsewhere),
+   *  shows their history first: up to 5 sessions, oldest first, from the website's saved records (#237, App 4). */
+  private earlierSessions(threadId: string, from: string | undefined): Promise<void> {
+    if (!from) return Promise.resolve();
+    let load = this.earlier.get(threadId);
+    if (!load) {
+      load = this.loadEarlier(threadId, from).finally(() => this.earlier.delete(threadId));
+      this.earlier.set(threadId, load);
+    }
+    return load;
+  }
+  private async loadEarlier(threadId: string, from: string): Promise<void> {
+    if (this.shown(threadId)) return;
+    const chain: { session: string; first: { records: SessionRecord[]; more: boolean } }[] = [];
+    for (let session: string | undefined = from; session && chain.length < 5 && !chain.some((item) => item.session === session);) {
+      const first = await this.sandboxes.records(threadId, session, 0);
+      chain.unshift({ session, first });
+      session = continuedFrom(first.records);
+    }
+    if (this.shown(threadId)) return;
+    for (const { session, first } of chain) {
+      // Each session with its own agent, and where its last page left off.
+      let earlier: EarlierSession = { session, after: 0, nativeId: null, turnId: null, harness: sessionHarness(first.records) };
+      for (let page = first; page.records.length;) {
+        const shown = projectShown(this.deps.db, threadId, page.records.filter((record) => record.session_id === session && record.sequence > earlier.after), earlier);
+        if (shown.types.length) this.notify(threadId, [...new Set(shown.types)], false);
+        earlier = { ...shown.earlier ?? earlier, after: Math.max(shown.earlier?.after ?? 0, page.records.at(-1)!.sequence) };
+        if (!page.more) break;
+        page = await this.sandboxes.records(threadId, session, earlier.after);
+      }
+    }
   }
   private readonly slept = new Map<string, number>();
   private asleep(threadId: string): void {
@@ -594,8 +702,9 @@ class CloudroomService {
   /** When Core began refusing a thread's start with a retryable 409, until another outcome (#865). */
   private readonly refusedSince = new Map<string, number>();
   private readonly catchUps = new Map<string, number>();
-  /** Threads whose sandbox address just answered as stale (404 or 410) and is being woken again (feedback #596). */
-  private readonly rewoken = new Set<string>();
+  /** How often each thread's sandbox address answered as stale (404 or 410) and was woken again since its last
+   *  delivery went through (feedback #596, #1076). */
+  private readonly rewoken = new Map<string, number>();
   /** The Cloud Credits level (80 or 95 %) each Cloud thread's agent was last told, so each note comes once (#610). */
   private readonly creditsTold = new Map<string, number>();
   /** What sandboxes run, kept apart from a VM's: an account with both starts new threads in sandboxes. */
@@ -604,8 +713,13 @@ class CloudroomService {
   readonly gpuApprovals: GpuApprovals;
   readonly sandboxes: SandboxDirectory;
   readonly codexAccounts: CodexAccounts;
+  readonly threadStates: CloudThreadStates;
+  readonly sync: CloudSync;
   constructor(private readonly deps: Deps) {
-    this.secrets = new CloudSecrets(deps);
+    // One computer answers a form left open until it times out: the turn's owner, or home (#237).
+    this.secrets = new CloudSecrets(deps, (threadId) => this.ownsTurn(threadId, binding(deps.db, threadId)?.turnId ?? ""));
+    this.threadStates = new CloudThreadStates(join(deps.config.dataDir, "cloudroom-thread-state.json"));
+    this.sync = new CloudSync(deps, this);
     this.sandboxes = new SandboxDirectory(async () => {
       const saved = await this.savedConnection();
       return saved?.sandboxToken && saved.account ? { website: saved.websiteUrl ?? HOSTED_WEBSITE, userId: saved.account.id, token: saved.sandboxToken } : null;
@@ -613,7 +727,19 @@ class CloudroomService {
       void noteWake(deps, thread).catch(() => {});
       this.macReportDue = 0;
     });
-    this.sandboxes.onRuns = runs => { for (const run of runs) void this.adoptRun(run).catch((error: unknown) => this.warn("A Cloud thread could not be shown", error, { threadId: run.thread })); };
+    // A website that lists threads brings runs through the one adoption path (cloud-sync.ts); an older one, as before.
+    // The minute's awake answer repeats the last week's runs, so only a run new here, once per app run, asks for a list.
+    this.sandboxes.onRuns = runs => void this.sandboxes.followsThreads().catch(() => null).then(follows => {
+      if (follows === null) return;
+      if (!follows) {
+        for (const run of runs) void this.adoptRun(run).catch((error: unknown) => this.warn("A Cloud thread could not be shown", error, { threadId: run.thread }));
+        return;
+      }
+      const fresh = runs.filter((run) => !this.runsSeen.has(run.thread) && !getThread(this.deps.db, run.thread));
+      for (const run of runs) this.runsSeen.add(run.thread);
+      if (fresh.length) this.sync.changed();
+    });
+    this.sandboxes.onSignedOut = token => void this.disconnect(token).catch((error: unknown) => this.warn("The sign-out the website asked for was not saved", error));
     this.sandboxes.keySource = thread => keySourceOf(command(deps.db, `first_${thread}`)?.input);
     this.sandboxes.skipLogins = async () => {
       const markers = await loginMarkers(deps);
@@ -634,8 +760,76 @@ class CloudroomService {
     this.codexAccounts = new CodexAccounts(body => this.sandboxes.codexAccounts(body), async () => (await this.sandboxes.account())?.userId ?? null,
       join(deps.config.dataDir, "cloudroom-codex-accounts.json"), () => this.restartAwake("codex"));
     // Renames, generated titles, agent renames, and new parents (a promoted subagent loses its parent's access) all
-    // reach the website. Read after the change's transaction ends.
-    deps.hub.onThreadChanged((threadId, changes) => { if (changes.includes("title-changed") || changes.includes("execution-options-changed") || changes.includes("parent-changed")) setImmediate(() => this.syncLabel(threadId)); });
+    // reach the website. Read after the change's transaction ends. A change that came from Core or the website goes nowhere.
+    deps.hub.onThreadChanged((threadId, changes) => {
+      if (this.quiet.has(threadId) || this.quiet.has("*")) return;
+      if (changes.includes("title-changed")) setImmediate(() => { this.syncLabel(threadId, "title"); void this.renameShared(threadId); });
+      if (changes.includes("execution-options-changed")) setImmediate(() => this.syncLabel(threadId, "model"));
+      if (changes.includes("parent-changed")) setImmediate(() => this.syncLabel(threadId, "parent"));
+    });
+  }
+
+  /** Runs an awake answer named, so each asks for a list once (#237). */
+  private readonly runsSeen = new Set<string>();
+  private tag = "";
+  /** This install's tag, on every prompt, steer, edit and rewind it sends (#237, cloud-threads.ts). */
+  async me(): Promise<string> { return this.tag ||= await installTag(this.deps.config.dataDir); }
+  /** A send's request ID, tagged; a retry of one an older app version saved keeps its own. */
+  private async requestId(threadId: string, raw: string = randomUUID()): Promise<string> {
+    return command(this.deps.db, raw)?.threadId === threadId ? raw : appRequestId(await this.me(), raw);
+  }
+  /** Threads whose change being applied came from Core or the website, so it isn't sent back. */
+  private readonly quiet = new Set<string>();
+  quietly<T>(threadId: string | null, apply: () => T): T {
+    const key = threadId ?? "*", held = this.quiet.has(key);
+    this.quiet.add(key);
+    try { return apply(); } finally { if (!held) this.quiet.delete(key); }
+  }
+  /** A thread the website's list brought here (cloud-sync.ts): an asleep one waits for its sandbox's wake. */
+  adopted(threadId: string, awake: boolean): void {
+    if (!awake) this.slept.set(threadId, this.sandboxes.awakeChecks);
+    void this.sync.arrived(threadId).catch(() => {});
+  }
+  resendLabel(threadId: string, change: string): void { this.syncLabel(threadId, change as LabelChange, 0, true); }
+  /** The computer that acts for a thread (docs/scopes/cloud-threads.md "Who acts"): the one whose tag is on its latest
+   *  app prompt. Until there is one, the starter (saved as home when its state is made, so it survives a restart); for
+   *  a website child or a shared session, the home of its parent; for a loop run or launch, each computer with its
+   *  project ID. A computer that adopted another's start has `ELSEWHERE`, which is never home. */
+  isHome(threadId: string, depth = 0): boolean {
+    const state = this.threadStates.get(threadId) ?? this.firstState(threadId);
+    if (state.home) return state.home === this.tag;
+    return Boolean(state.from) && depth < 8 && this.isHome(state.from!, depth + 1);
+  }
+  /** Who acts for a thread with no state yet: one started here or brought here by an older path, which on main acted. */
+  private firstState(threadId: string): Pick<CloudThreadState, "home" | "from"> {
+    const remembered = this.firstStates.get(threadId);
+    if (remembered && this.tag) return remembered;
+    const found = this.readFirstState(threadId);
+    if (this.tag) this.firstStates.set(threadId, found);
+    return found;
+  }
+  /** Read once per thread and run (the 1.5 s tick asks for every open binding without state). */
+  private readonly firstStates = new Map<string, Pick<CloudThreadState, "home" | "from">>();
+  private readFirstState(threadId: string): Pick<CloudThreadState, "home" | "from"> {
+    const saved = binding(this.deps.db, threadId);
+    const sandbox = saved ? sandboxThread(saved.coreUrl) : null;
+    const child = Boolean(saved && ((sandbox && sandbox !== threadId) || saved.startRequestId?.startsWith(WEBSITE_CHILD)));
+    return child ? { home: null, from: getThread(this.deps.db, threadId)?.parentThreadId ?? null } : { home: this.tag || null, from: null };
+  }
+  /** A turn belongs to the install whose tag is on its prompt; an untagged one (loop, phone, `tell`, Core's) to home. */
+  private ownsTurn(threadId: string, requestId: string): boolean {
+    const tag = tagOf(requestId);
+    return tag ? tag === this.tag : this.isHome(threadId);
+  }
+
+  /** A shared child's name lives in Core, which keeps it for every computer (#237). */
+  private async renameShared(threadId: string): Promise<void> {
+    const saved = binding(this.deps.db, threadId), title = getThread(this.deps.db, threadId)?.title;
+    if (!saved?.sessionId || !title || !sandboxThread(saved.coreUrl) || sandboxThread(saved.coreUrl) === threadId) return;
+    try {
+      const client = await this.client(saved, false);
+      if (feature(await this.capabilities(client), "cloud_threads")) await client.renameSession(saved.sessionId, randomUUID(), title);
+    } catch (error) { if (!(error instanceof SandboxAsleep)) this.warn("A shared child's name could not be saved in Cloud", error, { threadId }); }
   }
 
   private readonly labels = new Map<string, string>();
@@ -647,12 +841,19 @@ class CloudroomService {
    *  parent's tell, stop and archive, by the label's parent (ADR 0259), so `changeParent` saves a new parent there
    *  first, then runs `apply` (the Mac's change), then saves the parent the Mac ended up with: a no-op unless the
    *  change failed. Nothing changes if the first save fails. */
-  private syncLabel(threadId: string, tries = 0): void {
-    void this.oneLabelSave(threadId, () => this.saveLabel(threadId)).catch((error: unknown) => {
+  /** `resend`: a change kept from earlier; failing again doesn't restart its hour. */
+  private syncLabel(threadId: string, change: LabelChange, tries = 0, resend = false): void {
+    void this.oneLabelSave(threadId, () => this.saveLabel(threadId, change)).then((stored) => {
+      if (stored !== null) void this.sync.unsentLabel(threadId, change, true);
+    }, (error: unknown) => {
       this.warn("Cloud thread label not saved", error, { threadId });
+      // Refused for good (not sign-in, a timeout or a busy website): it's dropped, never sent again.
+      if (error instanceof CloudroomError && error.status !== null && error.status < 500 && ![401, 403, 408, 409, 429].includes(error.status)) return void this.sync.unsentLabel(threadId, change, true);
+      // Kept for an hour from the change and sent again on each list (#237).
+      if (change !== "start" && change !== "backfill") void this.sync.unsentLabel(threadId, change, false, resend);
       // A missed label keeps the website on the old session after an agent switch, so its children's reports retry
       // until it lands. A few spaced tries, then the next change or app start sends it.
-      if (tries < 3 && !this.stopped) setTimeout(() => this.syncLabel(threadId, tries + 1), 60_000 * (tries + 1)).unref();
+      if (tries < 3 && !this.stopped) setTimeout(() => this.syncLabel(threadId, change, tries + 1, resend), 60_000 * (tries + 1)).unref();
     });
   }
 
@@ -664,12 +865,18 @@ class CloudroomService {
     return result;
   }
 
-  private async saveLabel(threadId: string, parent?: string | null): Promise<boolean | null> {
+  private async saveLabel(threadId: string, change: LabelChange, parent?: string | null): Promise<boolean | null> {
     const saved = binding(this.deps.db, threadId), thread = getThread(this.deps.db, threadId);
     if (!saved?.sessionId || !thread || sandboxThread(saved.coreUrl) !== threadId) return null;
-    const label = { title: thread.title ?? thread.titleFallback ?? null, project_name: getProject(this.deps.db, thread.projectId)?.name ?? null, project: thread.projectId, session: saved.sessionId, harness: thread.providerId, model: thread.modelOverride ?? saved.model,
+    const full = { title: thread.title ?? thread.titleFallback ?? null, project_name: getProject(this.deps.db, thread.projectId)?.name ?? null, project: thread.projectId, session: saved.sessionId, harness: thread.providerId, model: thread.modelOverride ?? saved.model,
       // The website's link is the truth for a child it started: only a move changes it (ADR 20261104-015709).
       ...(parent === undefined && saved.startRequestId?.startsWith(WEBSITE_CHILD) ? {} : { parent: this.linkParent(saved, parent === undefined ? thread.parentThreadId ?? null : parent) }) };
+    // Unknown (a website blip) never means an older website: a whole label would undo newer changes made elsewhere.
+    const lists = change === "switch" ? false : await this.sandboxes.followsThreads();
+    if (lists === null) throw new CloudroomError("Cloudroom didn't answer. The change is sent again later.");
+    const v2 = lists;
+    const label = v2 ? { v: 2 as const, ...Object.fromEntries(Object.entries(full).filter(([field]) => LABEL_FIELDS[change].includes(field))) } : full;
+    if (Object.keys(label).length === 1) return null;
     const key = JSON.stringify(label);
     if (this.labels.get(threadId) === key) return null;
     this.labels.delete(threadId);
@@ -691,7 +898,7 @@ class CloudroomService {
       const saved = binding(this.deps.db, threadId);
       if (saved && sandboxThread(saved.coreUrl) === threadId && !saved.sessionId) throw new ApiError(503, "cloudroom_parent_unsaved", "This Cloud thread is still starting. Change its parent once it has started.");
       try {
-        if (await this.saveLabel(threadId, parent) === false) {
+        if (await this.saveLabel(threadId, "parent", parent) === false) {
           this.labels.delete(threadId);
           throw new CloudroomError("Cloud has no record of this thread's sandbox yet");
         }
@@ -702,7 +909,7 @@ class CloudroomService {
         throw new ApiError(503, "cloudroom_parent_unsaved", `Couldn't save the new parent to Cloud: ${(signIn ? "Sign in to Cloudroom to use cloud sandboxes" : publicError(error)).replace(/\.?$/, ".")} Try again.`);
       }
       try { await apply(); }
-      finally { await this.saveLabel(threadId).catch((error: unknown) => this.warn("Cloud thread label not saved", error, { threadId })); }
+      finally { await this.saveLabel(threadId, "parent").catch((error: unknown) => this.warn("Cloud thread label not saved", error, { threadId })); }
     });
   }
 
@@ -1004,16 +1211,24 @@ class CloudroomService {
     });
   }
 
-  disconnect(): Promise<void> {
-    this.stop();
+  /** Signs out. `refused` is a token the website just refused as signed out (a password reset, say): the app then
+   *  signs out only if that is still the saved token, so a late answer never ends a newer sign-in. */
+  disconnect(refused?: string): Promise<void> {
+    if (!refused) this.stop();
     return this.changeConnection(async () => {
-      this.stop();
       const saved = await this.savedConnection();
-      await stopPreviews(this.deps);
+      if (refused && saved?.sandboxToken !== refused) return;
+      this.stop();
+      // The website already ended a refused sign-in: a failed preview stop is logged, never left half signed out.
+      await stopPreviews(this.deps).catch((error: unknown) => {
+        if (!refused) throw error;
+        this.warn("Previews could not be stopped after the website ended the sign-in", error);
+      });
       if (saved) {
         const { token: _token, gateToken: _gateToken, sandboxToken, ...binding } = saved;
         await this.saveConnection(binding);
-        if (sandboxToken && saved.account) revokeDesktopToken({ website: saved.websiteUrl ?? HOSTED_WEBSITE, userId: saved.account.id, token: sandboxToken });
+        // A refused token is already gone from the website.
+        if (!refused && sandboxToken && saved.account) revokeDesktopToken({ website: saved.websiteUrl ?? HOSTED_WEBSITE, userId: saved.account.id, token: sandboxToken });
       }
       this.sandboxes.reset();
       await stopSync(this.deps);
@@ -1525,7 +1740,7 @@ class CloudroomService {
         // Cloud lacks the login or refused it: resend this Mac's working one (once per login). Otherwise sign in on this
         // Mac first, then the next status check copies the new login.
         if (await this.resendMacCodex()) copied = true;
-        else startMacCodexLogin();
+        else startMacCodexLogin(this.deps as LoggedWorkSessionDeps);
       }
       const run = macCodexLogin();
       if (run?.done && !run.error) {
@@ -1533,6 +1748,7 @@ class CloudroomService {
         copied = true;
       }
       const status = copied ? (await this.sandboxLogin("codex"))! : sandbox;
+      if (run?.installingSince) return { ...status, state: "waiting" as const, login_id: "mac", verification_url: null, message: null, installing_since: run.installingSince };
       if (run && !run.done) return { ...status, state: "waiting" as const, login_id: "mac", verification_url: run.url, message: "Finish signing in to ChatGPT in your browser." };
       if (run?.error) {
         reportAgentConnect("codex", "failed", { code: "login_failed", message: run.error, cliPlace: cliPlace(findCliExecutable("codex")) });
@@ -1973,7 +2189,7 @@ class CloudroomService {
   }
 
   /** ADR 0211: a new Core session in the old session's folder. `prepare` runs once the old session is idle and caught up. */
-  async switchHarness(thread: Thread, target: { providerId: string; model: string; reasoningLevel: ReasoningLevel | null }, prepare: () => Promise<(tx: DbTransaction) => void>): Promise<void> {
+  async switchHarness(thread: Thread, target: { providerId: string; model: string; reasoningLevel: ReasoningLevel | null }, prepare: (seed: boolean) => Promise<(tx: DbTransaction) => void>): Promise<void> {
     await this.restartSession(thread, { ...target, refusal: "Agents started by another agent keep their agent." }, prepare, (tx, started) => {
       updateThread(tx, this.deps.hub, thread.id, { providerId: target.providerId });
       saveBinding(tx, thread.id, { ...started, model: target.model, cursor: 0, nativeId: null, turnId: null, error: null });
@@ -1982,19 +2198,21 @@ class CloudroomService {
   }
 
   /** ADR 0281: a new Core session in the new project's folder, in the same sandbox. The old folder stays as it is. */
-  async moveProject(thread: Thread, projectId: string, prepare: () => Promise<(tx: DbTransaction) => void>): Promise<string | null> {
+  async moveProject(thread: Thread, projectId: string, prepare: (seed: boolean) => Promise<(tx: DbTransaction) => void>): Promise<string | null> {
     const saved = binding(this.deps.db, thread.id);
     const project = getProject(this.deps.db, projectId);
     if (!saved || !project) throw new ApiError(404, "project_not_found", "Project not found");
     const workspace = project.id === PERSONAL_PROJECT_ID ? { workspace: ROOT_WORKSPACE } : { workspace: workspaceId(project.id), workspace_name: workspaceName(project.name) };
     const client = await this.client(saved);
     const previousPath = saved.sessionId ? await client.sessionWorkspace(saved.sessionId).then(({ path }) => path, () => null) : null;
-    await this.restartSession(thread, { providerId: thread.providerId, model: saved.model, reasoningLevel: null, workspace, refusal: "Agents started by another agent stay in its project." }, prepare, (tx, started) => {
+    const continued = await this.restartSession(thread, { providerId: thread.providerId, model: saved.model, reasoningLevel: null, workspace, refusal: "Agents started by another agent stay in its project." }, prepare, (tx, started) => {
       updateThread(tx, this.deps.hub, thread.id, { projectId: project.id });
       saveBinding(tx, thread.id, { ...started, cursor: 0, nativeId: null, turnId: null, error: null });
       const first = command(tx, `first_${thread.id}`);
       if (first) tx.update(cloudroomCommands).set({ input: JSON.stringify({ ...JSON.parse(first.input), ...workspace, base_branch: undefined }) }).where(eq(cloudroomCommands.id, first.id)).run();
     });
+    // Core's switch moved the row's session and agent; the project is this computer's change.
+    if (continued) this.syncLabel(thread.id, "project");
     if (workspace.workspace === ROOT_WORKSPACE) return previousPath;
     const moved = binding(this.deps.db, thread.id)!;
     const sandbox = sandboxThread(moved.coreUrl);
@@ -2004,7 +2222,10 @@ class CloudroomService {
     return previousPath;
   }
 
-  private async restartSession(thread: Thread, target: { providerId: string; model: string; reasoningLevel: ReasoningLevel | null; workspace?: { workspace: string; workspace_name?: string }; refusal: string }, prepare: () => Promise<(tx: DbTransaction) => void>, apply: (tx: DbTransaction, started: { sessionId: string; startRequestId: string; reasoning: string }) => void): Promise<void> {
+  /** True when Core switched the conversation itself (`continue_from`, #237): it builds the history, moves the row and
+   *  its loops, and closes the old session. Older Cores start a new session here, and the app sends its own history. */
+  private async restartSession(thread: Thread, target: { providerId: string; model: string; reasoningLevel: ReasoningLevel | null; workspace?: { workspace: string; workspace_name?: string }; refusal: string }, prepare: (seed: boolean) => Promise<(tx: DbTransaction) => void>, apply: (tx: DbTransaction, started: { sessionId: string; startRequestId: string; reasoning: string }) => void): Promise<boolean> {
+    const continues = { value: false, done: false };
     if (this.switching.has(thread.id) || this.sends.has(thread.id)) throw new ApiError(409, "thread_busy", "Wait until the message is sent, then switch.");
     this.switching.add(thread.id);
     try {
@@ -2031,8 +2252,31 @@ class CloudroomService {
       const workspace = target.workspace ?? (start.workspace.id !== "legacy" ? { workspace: start.workspace.id } : start.workspace.path === capabilities.repository ? {} : { workspace: ROOT_WORKSPACE });
       if (target.providerId === "codex" && capabilities.codex_auth_import && !sandboxThread(saved.coreUrl)) await importCodexLogin(this.deps);
       if (target.providerId === "pi") await this.copyPiSetup(client, Boolean(sandboxThread(saved.coreUrl)));
-      const record = await prepare();
+      continues.value = feature(capabilities, "cloud_threads");
+      const record = await prepare(!continues.value);
       const startRequestId = randomUUID();
+      const saveSwitch = (session: string) => {
+        this.detach(thread.id);
+        this.deps.db.transaction((tx) => {
+          apply(tx, { sessionId: session, startRequestId, reasoning });
+          record(tx);
+          // The new session's copied chat leaves out agent-only text, so it has no custom instructions yet.
+          markCustomInstructionsLost(tx, thread.id);
+        });
+        // Switched here: the new session's records are this computer's to act on, and the list never takes it back.
+        const known = this.threadStates.get(thread.id);
+        this.threadStates.set(thread.id, { home: null, from: null, ...known, session, actFrom: 0, before: [oldSession, ...known?.before ?? []].slice(0, 5) });
+      };
+      if (continues.value) {
+        const started = await client.continueSession(startRequestId, CLOUD_HARNESSES[target.providerId], oldSession, { model, reasoning, ...(provider ? { provider } : {}), ...workspace }).catch((error: unknown) => {
+          throw new ApiError(error instanceof CloudroomError && error.status === 409 ? 409 : 503, "cloudroom_switch", `${HARNESS_NAMES[target.providerId as CloudProvider]} couldn't take over in Cloud, so this thread wasn't changed. ${publicError(error)}`);
+        });
+        if (started.pending) throw new ApiError(409, "cloudroom_switch_pending", "The switch is still finishing in Cloud. This thread shows the new agent once it's done.");
+        // Core saved the new agent on the website, so the change goes nowhere from here.
+        this.quietly(thread.id, () => saveSwitch(started.session_id));
+        continues.done = true;
+        return true;
+      }
       const started = await client.start(startRequestId, CLOUD_HARNESSES[target.providerId], {
         model, reasoning, ...(provider ? { provider } : {}), ...workspace,
         ...(capabilities.command_guard && typeof startInput.command_guard_enabled === "boolean" ? { command_guard_enabled: startInput.command_guard_enabled } : {}),
@@ -2050,20 +2294,21 @@ class CloudroomService {
         void client.close(started.session_id, randomUUID()).catch(() => {});
         throw new ApiError(409, "thread_busy", "The agent got a new message while switching. Try again.");
       }
-      this.detach(thread.id);
-      this.deps.db.transaction((tx) => {
-        apply(tx, { sessionId: started.session_id, startRequestId, reasoning });
-        record(tx);
-        // The new session's copied chat leaves out agent-only text, so it has no custom instructions yet.
-        markCustomInstructionsLost(tx, thread.id);
-      });
+      saveSwitch(started.session_id);
+      // A website that follows threads takes a new session only from Core, or from this older label after Core's list.
+      this.syncLabel(thread.id, "switch");
       void client.close(oldSession, randomUUID()).catch((error: unknown) => this.warn("The previous Cloud session could not be closed", error, { threadId: thread.id }));
       for (const id of resumeLoops) void this.sandboxes.automations({ action: "delete", id }).catch((error: unknown) => this.warn("The old session's resume loop could not be deleted", error, { threadId: thread.id }));
     } finally {
       this.switching.delete(thread.id);
+      if (continues.done) {
+        this.notify(thread.id);
+        void this.deliver(thread.id).catch(() => {});
+      }
     }
     this.notify(thread.id);
     void this.deliver(thread.id).catch(() => {});
+    return false;
   }
 
   private async startFailure(client: CloudroomClient, sessionId: string): Promise<string | null> {
@@ -2134,7 +2379,7 @@ class CloudroomService {
       return { ok: true, delivery: "sent" };
     }
     if (payload.model && payload.model !== saved.model) throw new ApiError(409, "cloudroom_launch_settings", `This Cloud thread now runs ${saved.model}. Send again with that model, or to use ${payload.model}, switch first in the model picker or with \`room-cli thread update ${thread.id} --model ${payload.model}\`.`);
-    const id = payload.requestId ?? randomUUID();
+    const id = await this.requestId(thread.id, payload.requestId);
     const steer = (payload.mode === "steer" || payload.mode === "steer-if-active") && thread.status === "active" && saved.turnId && !unstartedTurn(this.deps.db, thread.id);
     const previous = command(this.deps.db, id);
     // A side chat's first message carries its quoted message, as on Local; a retry repeats what was sent.
@@ -2223,7 +2468,8 @@ class CloudroomService {
           saveBinding(tx, threadId, { queuePaused: true });
           saveStatus(tx, threadId, "idle");
         });
-        this.enqueue(threadId, randomUUID(), "stop", {});
+        // Held for the next wake, it stops only the turn it was clicked for: another computer may start one meanwhile.
+        this.enqueue(threadId, randomUUID(), "stop", saved.turnId ? { after: saved.turnId } : {});
         this.notify(threadId);
         return this.asleep(threadId);
       }
@@ -2243,9 +2489,11 @@ class CloudroomService {
       // Archive always wins (ADR 0112): the website stops the sandbox even mid-task, once no other thread runs in it.
       this.detach(threadId);
       if (["active", "stopping"].includes(getThread(this.deps.db, threadId)?.status ?? "")) saveStatus(this.deps.db, threadId, "idle");
-      if (!coreInUse(this.deps.db, saved.coreUrl)) void this.sandboxes.archive(sandbox).catch(error => this.warn("The thread's sandbox could not be archived; it sleeps on its own", error, { threadId }));
+      // Only an archive the website took can later be undone through it (cloud-sync.ts).
+      if (!coreInUse(this.deps.db, saved.coreUrl)) void this.sandboxes.archive(sandbox).then(() => this.sync.archivedOnWebsite(sandbox, true), error => this.warn("The thread's sandbox could not be archived; it sleeps on its own", error, { threadId }));
       // Its other threads keep the sandbox open, so stop this thread's own agent: a stop, then a sleep, as on a VM.
       else if (saved.sessionId) {
+        if (sandbox !== threadId) void this.archiveShared(saved, true);
         const stop = randomUUID(), sleep = randomUUID();
         this.enqueue(threadId, stop, "stop", {});
         this.enqueue(threadId, sleep, "sleep", {});
@@ -2259,6 +2507,71 @@ class CloudroomService {
     this.enqueue(threadId, randomUUID(), "sleep", {});
     void this.deliver(threadId).catch(() => {});
   }
+
+  /** Which of these Cloud threads Core says are working now (#237, App 8): one cached idle here may run on another
+   *  computer. One session list per awake sandbox, which holds its own session and the ones sharing it; an asleep
+   *  sandbox runs nothing and is never woken for this. */
+  async runningInCloud(threadIds: string[]): Promise<string[]> {
+    const bySandbox = new Map<string, Binding[]>();
+    for (const id of threadIds) {
+      const saved = binding(this.deps.db, id);
+      if (saved?.sessionId && sandboxThread(saved.coreUrl)) bySandbox.set(saved.coreUrl, [...bySandbox.get(saved.coreUrl) ?? [], saved]);
+    }
+    const running: string[] = [];
+    let fresh = true;
+    for (const saved of bySandbox.values()) {
+      try {
+        const client = await this.client(saved[0], false, undefined, fresh);
+        fresh = false;
+        const sessions = new Map((await client.listSessions()).sessions.map((session) => [session.session_id, session]));
+        for (const item of saved) {
+          const session = sessions.get(item.sessionId!);
+          if (session && (session.current_request || WORKING.includes(session.state))) running.push(item.threadId);
+        }
+      } catch (error) { fresh = false; if (!(error instanceof SandboxAsleep)) this.warn("A Cloud thread's state could not be read", error, { threadId: saved[0]!.threadId }); }
+    }
+    return running;
+  }
+
+  /** Teleport to Local holds Core's freeze (#237), renewed every 2 minutes: other computers' sends get 409 `moving`
+   *  until it lands or lets go. `check` renews it and fails when Core queued a message this computer hasn't seen, which
+   *  the move would lose. Older Cores have no freeze: null. */
+  async freezeForTeleport(threadId: string, client: CloudroomClient, session: string): Promise<{ id: string; check: () => Promise<void>; end: (release: boolean) => void } | null> {
+    if (!feature(await this.capabilities(client), "cloud_threads")) return null;
+    const id = randomUUID();
+    await client.freeze(session, id);
+    const renew = setInterval(() => void client.freeze(session, id).catch((error: unknown) => this.warn("Teleport's freeze could not be renewed", error, { threadId })), 120_000);
+    renew.unref();
+    const check = async () => {
+      await client.freeze(session, id);
+      // Only another computer's message would be lost; a loop's or Core's own prompt queued there is Core's.
+      const queued = (await client.session(session)).queue, here = new Set(commands(this.deps.db, threadId).map((item) => item.id));
+      if (queued.some((request) => !here.has(request) && !CORE_OWN.test(request))) throw new ApiError(409, "teleport_unavailable", `A message for this thread is still waiting in Cloud (sent from another computer, the phone or another agent). Teleport again once it has run. The thread stays in Cloud.`);
+    };
+    return { id, check, end: (release) => {
+      clearInterval(renew);
+      if (release) void client.freeze(session, id, true).catch(() => {});
+    } };
+  }
+
+  /** Archives a deleted project's Cloud threads on the website one after another, a second apart, not in one burst.
+   *  Their sandboxes and sessions are read now: the delete removes the threads' records here meanwhile. */
+  archiveInTurn(threadIds: string[]): void {
+    const own = threadIds.flatMap((id) => {
+      const saved = binding(this.deps.db, id);
+      return saved && sandboxThread(saved.coreUrl) === id ? [{ id, session: saved.sessionId }] : [];
+    });
+    for (const id of threadIds) if (!own.some((item) => item.id === id)) this.archive(id);
+    for (const { id } of own) this.detach(id);
+    this.archiving = this.archiving.then(async () => {
+      for (const { id, session } of own) {
+        await this.sandboxes.archive(id).catch((error: unknown) => this.warn("A deleted project's Cloud thread could not be archived", error, { threadId: id }));
+        if (session) await this.sandboxes.automations({ action: "archived", thread: id, session }).catch((error: unknown) => this.warn("The thread's cloud automations could not be paused", error, { threadId: id }));
+        await new Promise((resolve) => setTimeout(resolve, 1_000));
+      }
+    });
+  }
+  private archiving: Promise<void> = Promise.resolve();
 
   /** Sends an archived thread's saved stop and sleep straight to its Core, without following its stream. An asleep
    *  sandbox runs nothing, so it is never woken for this. Unsent ones are dropped, so an unarchived thread never gets them. */
@@ -2293,14 +2606,16 @@ class CloudroomService {
     const saved = binding(this.deps.db, threadId);
     if (!saved) return;
     this.detach(threadId);
+    this.threadStates.set(threadId, null);
+    void this.sync.deletedHere(threadId);
     const sandbox = sandboxThread(saved.coreUrl);
     if (sandbox === threadId) void this.sandboxes.remove(sandbox).catch(error => this.warn("The thread's sandbox could not be deleted; it sleeps on its own", error, { threadId }));
   }
 
   /** Each sandbox works on its own branch, named after the thread: room/<name>-<id> (docs/scopes/sandboxes.md).
    *  `create` switches a fresh checkout to it, and says why if it could not; later calls only rename it to match a new
-   *  title, before its first push. */
-  private async ensureBranch(threadId: string, create: boolean): Promise<string | null> {
+   *  title, before its first push. `onKept` hears of a branch the agent made, which `create` leaves as it is. */
+  private async ensureBranch(threadId: string, create: boolean, onKept?: (branch: string) => void): Promise<string | null> {
     const saved = binding(this.deps.db, threadId);
     const thread = getThread(this.deps.db, threadId);
     if (!saved?.sessionId || !thread || sandboxThread(saved.coreUrl) !== threadId) return null;
@@ -2314,12 +2629,17 @@ class CloudroomService {
       // A warm project snapshot skips the clone, so switch to the chosen base branch here.
       const base = baseBranch(command(this.deps.db, `first_${threadId}`)?.input);
       const switchBase = base ? `[ "$current" = '${base}' ] || { git fetch -q origin '${base}' && git checkout -q -B '${base}' 'origin/${base}'; } 2>/dev/null; ` : "";
+      // Only the branch Cloudroom's clone or snapshot checked out moves. One the agent made or checked out itself stays,
+      // with its commits and any merge in progress (#1370, #1377). With no known default branch, it moves as before.
+      const kept = 3;
+      const own = `default=$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null); [ -z "$default" ] || [ "$current" = "\${default#origin/}" ]${base ? ` || [ "$current" = '${base}' ]` : ""} || { printf '%s\\n' "$current"; exit ${kept}; }; `;
       const script = create
-        ? `current=$(git symbolic-ref --quiet --short HEAD) || exit 0; case "$current" in room/*|cloudroom/*) ;; *) ${switchBase}git pull -q --ff-only 2>/dev/null; git checkout -q -b ${quoted} ;; esac`
+        ? `current=$(git symbolic-ref --quiet --short HEAD) || exit 0; case "$current" in room/*|cloudroom/*) ;; *) ${own}${switchBase}git pull -q --ff-only 2>/dev/null; git checkout -q -b ${quoted} ;; esac`
         : `current=$(git symbolic-ref --quiet --short HEAD) || exit 0; case "$current" in room/*|cloudroom/*) [ "$current" = ${quoted} ] || git rev-parse -q --verify "$current@{upstream}" >/dev/null || git branch -m ${quoted} ;; esac`;
       const result = await client.runOnVm({ command: `${script}\ngit symbolic-ref --quiet --short HEAD`, cwd: workspace.path });
       const branch = Buffer.from(result.stdout, "hex").toString().trim().split("\n").at(-1);
       if (branch) this.progress(threadId, [{ key: "branch", text: `Using branch: ${branch}`, status: "completed" }]);
+      if (create && result.code === kept && branch) { onKept?.(branch); return null; }
       // A detached checkout exits 0 with no branch to switch. A failed or killed command, or any other branch, means the
       // switch failed (#816).
       if (!create || result.code === 0 && (!branch || /^(room|cloudroom)\//.test(branch))) return null;
@@ -2332,8 +2652,22 @@ class CloudroomService {
 
   /** Restores the sandbox the thread runs in, which may be another thread's: an unarchived child keeps its parent's. */
   async restore(threadId: string): Promise<void> {
-    const sandbox = sandboxThread(binding(this.deps.db, threadId)?.coreUrl ?? "");
-    if (sandbox) await this.sandboxes.restore(sandbox);
+    const saved = binding(this.deps.db, threadId), sandbox = sandboxThread(saved?.coreUrl ?? "");
+    if (!saved || !sandbox) return;
+    // Naming the session resumes only the loops its archive paused (#237); older websites take no session.
+    const session = sandbox === threadId && saved.sessionId && await this.sandboxes.followsThreads().catch(() => false) ? saved.sessionId : undefined;
+    await this.sandboxes.restore(sandbox, session);
+    await this.sync.archivedOnWebsite(sandbox, false);
+    if (sandbox !== threadId) void this.archiveShared(saved, false);
+  }
+
+  /** A shared child's archive lives in Core, so every computer sees it (#237). An asleep sandbox isn't woken for it. */
+  private async archiveShared(saved: Binding, archived: boolean): Promise<void> {
+    if (!saved.sessionId) return;
+    try {
+      const client = await this.client(saved, false);
+      if (feature(await this.capabilities(client), "cloud_threads")) await client.archiveSession(saved.sessionId, randomUUID(), archived);
+    } catch (error) { if (!(error instanceof SandboxAsleep)) this.warn("A shared child's archive could not be saved in Cloud", error, { threadId: saved.threadId }); }
   }
 
   private snapshotInstructions(db: DbQueryConnection, thread: Pick<Thread, "id" | "projectId">, action: Command["command"], input: object): object {
@@ -2400,7 +2734,7 @@ class CloudroomService {
 
   async queueMessage(thread: Thread, payload: SendMessageRequest) {
     if (teleportBlocked(this.deps.db, thread.id)) throw new ApiError(409, "teleport_in_progress", "Messages are disabled until Teleport finishes.");
-    const id = payload.requestId ?? randomUUID();
+    const id = await this.requestId(thread.id, payload.requestId);
     await this.send(thread, { ...payload, requestId: id });
     return this.queuedMessage(binding(this.deps.db, thread.id)!, command(this.deps.db, id)!);
   }
@@ -2446,7 +2780,7 @@ class CloudroomService {
     const parsed = promptPayload(payload.input, thread.providerId, capabilities.attachments && (harnessProfile(capabilities, thread.providerId)?.attachments ?? true), cloudPromptLimit(capabilities));
     const input = { target_request_id: queuedMessageId, expected_revision: expectedRevision, ...parsed,
       reasoning: stored.reasoning ?? saved.reasoning, service_tier: stored.service_tier ?? "default" };
-    const id = `qe_${createHash("sha256").update(JSON.stringify([thread.id, input])).digest("hex").slice(0, 60)}`;
+    const id = appRequestId(await this.me(), `qe_${createHash("sha256").update(JSON.stringify([thread.id, input])).digest("hex").slice(0, 60)}`);
     const previous = command(this.deps.db, id);
     if (expectedRevision !== revision && !previous) throw new ApiError(409, "invalid_request", "Queued message changed since editing began");
     this.enqueue(thread.id, id, "edit", input);
@@ -2550,13 +2884,15 @@ class CloudroomService {
   }
 
   async editMessage(thread: Thread, payload: EditMessageRequest): Promise<EditMessageResponse> {
-    const saved = binding(this.deps.db, thread.id);
+    let saved = binding(this.deps.db, thread.id);
     if (!saved?.sessionId) throw new ApiError(409, "cloudroom_missing_binding", "Cloud session is unavailable");
-    const capabilities = await this.capabilities(await this.client(saved));
-    if (!feature(capabilities, "rewind") || harnessProfile(capabilities, thread.providerId)?.rewind === false) throw new ApiError(409, "cloudroom_unsupported", "Cloud message editing is not enabled for this harness.");
+    const editable = (capabilities: Capabilities) => feature(capabilities, "rewind") && harnessProfile(capabilities, thread.providerId)?.rewind !== false;
+    const known = sandboxThread(saved.coreUrl) ? await this.savedCapabilities() : this.lastCapabilities;
+    const capabilities = known && harnessProfile(known, thread.providerId) && editable(known) ? known : await this.liveCapabilities(saved);
+    if (!editable(capabilities)) throw new ApiError(409, "cloudroom_unsupported", "Cloud message editing is not enabled for this harness.");
     const parsed = promptPayload(payload.input, thread.providerId, capabilities.attachments && (harnessProfile(capabilities, thread.providerId)?.attachments ?? true), cloudPromptLimit(capabilities));
-    const rewindId = `rewind_${payload.operationId}`;
-    const promptId = `edit_${payload.operationId}`;
+    const tag = await this.me(), rewindId = appRequestId(tag, `rewind_${payload.operationId}`);
+    const promptId = appRequestId(tag, `edit_${payload.operationId}`);
     const replacement = { request_id: promptId, ...parsed, reasoning: payload.reasoningLevel ?? saved.reasoning, service_tier: payload.serviceTier ?? "default" };
     const previous = command(this.deps.db, rewindId);
     if (previous) {
@@ -2564,15 +2900,40 @@ class CloudroomService {
       if (previous.threadId !== thread.id || original.expected_request_sequence !== payload.expectedRequestSequence || JSON.stringify(original.replacement) !== JSON.stringify(replacement)) throw new ApiError(409, "request_conflict", "This edit operation ID belongs to another edit");
     } else {
       if (this.queue(thread.id).length) throw new ApiError(409, "invalid_request", "Send or remove queued messages before editing a message");
-      if (thread.status !== "idle" && thread.status !== "error") throw new ApiError(409, "invalid_request", "Wait for the active turn to finish before editing a sent message");
+      const status = () => getThread(this.deps.db, thread.id)?.status;
+      const quiet = () => status() === "idle" || status() === "error";
+      if (status() === "active" || status() === "stopping") {
+        await this.control(thread.id, "stop");
+        if (!await this.until(thread.id, quiet, 60_000)) throw new ApiError(409, "invalid_request", "The thread did not stop before the message edit timed out");
+        saved = binding(this.deps.db, thread.id) ?? saved;
+      }
+      if (!quiet()) throw new ApiError(409, "invalid_request", "Wait for the active turn to finish before editing a sent message");
       const before = nativeRewindBefore(this.deps.db, thread.id, payload.expectedRequestSequence);
       // An edit is an explicit send, so it lifts the pause left by Stop. Core rejects resume mid-rewind, so it goes first.
       if (saved.queuePaused) this.enqueue(thread.id, `resume_${payload.operationId}`, "resume", {});
       this.enqueue(thread.id, rewindId, "rewind", { before, expected_request_sequence: payload.expectedRequestSequence, replacement });
     }
-    await this.deliverWhenAwake(thread.id);
-    if (["failed", "unknown", "unknown_after_restart"].includes(command(this.deps.db, rewindId)?.state ?? "")) throw new ApiError(409, "cloudroom_command_failed", "The rewind failed or its outcome is uncertain. Your original history is preserved.");
+    try { await this.deliverWhenAwake(thread.id); }
+    catch (error) {
+      for (const id of [`resume_${payload.operationId}`, rewindId]) {
+        if (command(this.deps.db, id)?.state === "sending") saveCommandState(this.deps.db, thread.id, id, "failed");
+      }
+      throw error;
+    }
+    const state = () => command(this.deps.db, rewindId)?.state ?? "";
+    await this.until(thread.id, () => !["sending", "accepted", "running"].includes(state()), 30_000);
+    if (["failed", "unknown", "unknown_after_restart"].includes(state())) throw new ApiError(409, "cloudroom_command_failed", "The rewind failed or its outcome is uncertain. Your original history is preserved.");
     return { ok: true, operationId: payload.operationId, requestSequence: payload.expectedRequestSequence ?? 0 };
+  }
+
+  private async until(threadId: string, done: () => boolean, ms: number): Promise<boolean> {
+    for (const deadline = Date.now() + ms; !done();) {
+      if (deadline <= Date.now()) return false;
+      const waiter = this.deps.hub.registerThreadEventWaiter(threadId, deadline - Date.now());
+      if (done()) waiter.cancel();
+      else await waiter.promise;
+    }
+    return true;
   }
 
   async retryStart(threadId: string): Promise<void> {
@@ -2602,7 +2963,9 @@ class CloudroomService {
     await this.deliver(threadId);
   }
 
-  private failStart(threadId: string, message: string): void {
+  private failStart(threadId: string, message: string, cause?: unknown): void {
+    // The raw cause (say, a vendor's 404 text) and how long after its creation the start failed, for late notices (#1076).
+    this.warn("A cloud start failed", cause ?? message, { threadId, ageMs: Date.now() - (getThread(this.deps.db, threadId)?.createdAt ?? Date.now()) });
     // Cloud refused Codex's login: resend this Mac's working one before anyone has to click.
     if (cloudLoginProvider(message) === "codex" && authRequiredMessages.has(message)) this.healCodex();
     this.deps.db.transaction((tx) => {
@@ -2644,6 +3007,8 @@ class CloudroomService {
   start(): void {
     if (this.timer) return;
     this.stopped = false;
+    void this.me().catch(() => {});
+    this.sync.start();
     void this.deliverChildReports();
     for (const saved of bindings(this.deps.db)) {
       this.holdRejectedStart(saved.threadId);
@@ -2686,6 +3051,7 @@ class CloudroomService {
     this.previewIssue = null;
     this.claudeConnected = null;
     this.stopped = true;
+    this.sync.stop();
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
     for (const controller of this.streams.values()) controller.abort();
@@ -2833,10 +3199,11 @@ class CloudroomService {
         const macPath = planned instanceof Error ? localProjectPath(this.deps, getThread(this.deps.db, threadId)?.projectId ?? "") : undefined;
         const unplanned = planned instanceof Error ? `The copy could not start: ${planned.message}`.slice(0, 500)
           + (macPath ? ` ${localFilesNote(macPath)}` : "") : undefined;
-        if (unplanned) {
-          this.warn("Cloud project copy could not be planned", planned, { threadId });
-          if (!macPath) reportProjectCopy(this.deps, threadId, { phase: "error", completed: 0, total: 0, error: unplanned });
-        }
+        // A sandbox too slow to answer in time gets one more try when the thread's stream connects, like a copy the app
+        // cut off (#1040). The error is kept, so that try fails as this one would have. A fork's code can't wait for it.
+        const replan = planned instanceof Error && !started.code && slowSandbox(planned);
+        if (unplanned) this.warn("Cloud project copy could not be planned", planned, { threadId });
+        if (unplanned && !replan && !macPath) reportProjectCopy(this.deps, threadId, { phase: "error", completed: 0, total: 0, error: unplanned });
         const copying = copy?.clone && copy.repository ? `Cloning ${copy.repository.replace("https://github.com/", "")}` : copy?.copyAll ? `Copying project from your ${COMPUTER}` : null;
         const files: StartStep[] = copying ? [{ key: "files", text: copying, status: "started" }] : [];
         const forkCode: StartStep[] = started.code ? [{ key: "fork", text: "Copying the source thread's code", status: "started" }] : [];
@@ -2873,6 +3240,7 @@ class CloudroomService {
         const marked = workspace ? Promise.resolve() : null;
         const landed = this.landing(threadId, client, started, files.length > 0, workspace, marked);
         if (copy) this.copy(client, copy, landed, firstSent);
+        else if (replan && workspace) reportProjectCopy(this.deps, threadId, { phase: "waiting", completed: 0, total: 0, error: unplanned });
         else if (workspace || started.code) void landed(unplanned);
         else if (sandbox) void this.ensureBranch(threadId, true);
       }
@@ -2991,20 +3359,21 @@ class CloudroomService {
             if (keepPaused && !feature(await this.capabilities(client), "resume_keep_paused")) throw new ApiError(503, "cloudroom_update", "Update the cloud core to restart this stopped agent safely. Your message is saved.");
             accepted = await client.resume(sessionId, pending.id, keepPaused);
           } else if (pending.command === "stop" || pending.command === "sleep") {
-            accepted = await client[pending.command](sessionId, pending.id);
+            const after = pending.command === "stop" ? z.object({ after: z.string().optional() }).catch({}).parse(JSON.parse(pending.input)).after : undefined;
+            accepted = after && feature(await this.capabilities(client), "cloud_threads") ? await client.stop(sessionId, pending.id, after) : await client[pending.command](sessionId, pending.id);
           } else {
             throw new CloudroomError(`Unsupported cloud command ${pending.command}`, 400);
           }
           if (command(this.deps.db, pending.id)?.state === "sending") saveCommandState(this.deps.db, threadId, pending.id, accepted.receipt.state);
           if (pending.command === "prompt") void this.rememberCloudMessage(sessionId, pending.id, epoch).catch(() => {});
         } catch (error) {
-          // A stale sandbox address: the catch below wakes it once, so keep the command unsent.
-          const stale = sandboxThread(saved.coreUrl) && staleSandboxAddress(error) && !this.rewoken.has(threadId);
+          // A stale sandbox address: the catch below wakes it again, so keep the command unsent.
+          const stale = sandboxThread(saved.coreUrl) && staleSandboxAddress(error) && (this.rewoken.get(threadId) ?? 0) < STALE_REWAKES;
           if (!stale && refused(error, ["steer", "edit", "cancel", "reorder"].includes(pending.command))) {
             if (pending.command === "steer") {
               // Usually its turn just ended. It queues ahead of anything sent after it; the same ID makes a repeat harmless.
               const { text, content, attachments } = z.object({ text: z.string(), content: z.unknown().optional(), attachments: z.array(z.unknown()).optional() }).parse(JSON.parse(pending.input));
-              const id = `queued-${createHash("sha256").update(pending.id).digest("hex").slice(0, 32)}`;
+              const id = appRequestId(await this.me(), `queued-${createHash("sha256").update(pending.id).digest("hex").slice(0, 32)}`);
               this.enqueue(threadId, id, "prompt", { text, ...(content === undefined ? {} : { content }), ...(attachments?.length ? { attachments } : {}) }, pending.createdAt);
               saveCommandState(this.deps.db, threadId, pending.id, "failed");
               if (this.deps.db.transaction(tx => projectFollowUp(tx, threadId, id))) this.notify(threadId, ["client/turn/requested"]);
@@ -3024,18 +3393,20 @@ class CloudroomService {
       if (pendingCommands.length > 0) this.notify(threadId);
     } catch (error) {
       if (epoch !== this.epoch) return;
-      // A stale sandbox address: forget it and wake it again, once, instead of failing the thread's start (feedback #596).
-      const sandbox = sandboxThread(saved.coreUrl);
-      if (sandbox && staleSandboxAddress(error) && !this.rewoken.has(threadId)) {
-        this.rewoken.add(threadId);
+      // A stale sandbox address: forget it and wake it again, a few times, before failing the thread's start
+      // (feedback #596, #1076). The 1.5 s delivery timer makes the next try.
+      const sandbox = sandboxThread(saved.coreUrl), stale = Boolean(sandbox) && staleSandboxAddress(error), rewakes = this.rewoken.get(threadId) ?? 0;
+      if (sandbox && stale && rewakes < STALE_REWAKES) {
+        this.rewoken.set(threadId, rewakes + 1);
         this.sandboxes.forget(sandbox);
         return;
       }
       if (error instanceof SandboxAsleep) return this.asleep(threadId);
       if (delivering && error instanceof CloudroomError && error.code === "storage_blocked") this.measureDisk(threadId, delivering);
-      const message = publicError(error);
+      // Core's own 404 (a codeless "session not found") keeps its words; only a stale address gets the plain ones.
+      const message = stale && !(error as Error).message.endsWith("session not found") ? unreachableSandbox : publicError(error);
       const permanent = error instanceof CloudroomError ? !error.retryable : error instanceof ApiError && error.status === 400;
-      if (!binding(this.deps.db, threadId)?.sessionId && permanent) this.failStart(threadId, message);
+      if (!binding(this.deps.db, threadId)?.sessionId && permanent) this.failStart(threadId, message, error);
       else if (((connectionFailure(error) || sandboxTransition(error)) && !rejectedCommand) || !deliveringCommand) this.setConnectionIssue(threadId, "delivery", error);
       else {
         saveBinding(this.deps.db, threadId, { error: message });
@@ -3055,30 +3426,44 @@ class CloudroomService {
     } finally { releaseCopy?.(); }
   }
 
-  private async followChild(parent: Binding, client: CloudroomClient, childId: string): Promise<void> {
+  /** A session sharing this thread's sandbox, from the parent's `child` record or Core's session list (#237). Every
+   *  computer gives it the same thread ID; home names it. `live`: its records so far are this computer's to act on. */
+  private async followChild(parent: Binding, client: CloudroomClient, childId: string, live: boolean, parentSessions = [parent.sessionId!]): Promise<void> {
     const parentThread = getThread(this.deps.db, parent.threadId);
     if (!parentThread) return;
     const existing = this.deps.db.select().from(cloudroomThreads).where(and(eq(cloudroomThreads.coreUrl, parent.coreUrl), eq(cloudroomThreads.sessionId, childId))).get();
     if (existing) { this.follow(existing, client); return; }
     const session = await client.session(childId);
     const start = Object.values(session.receipts).find(receipt => receipt.command === "start");
-    const input = z.object({ parent_session: z.literal(parent.sessionId!), reasoning: z.string().nullable().optional(), title: z.string().optional(), prompt: z.string().optional() }).parse(start?.input);
+    const input = z.object({ parent_session: z.string().refine(id => parentSessions.includes(id)), reasoning: z.string().nullable().optional(), title: z.string().optional(), prompt: z.string().optional() }).parse(start?.input);
     const providerId = (Object.keys(CLOUD_HARNESSES) as CloudProvider[]).find(id => CLOUD_HARNESSES[id] === session.harness);
     if (!providerId || !start) throw new CloudroomError("Invalid Cloudroom child session");
+    const id = sharedChildId(parent.coreUrl, childId), title = session.title ?? input.title ?? null;
     const child = this.deps.db.transaction(tx => {
       const saved = tx.select().from(cloudroomThreads).where(and(eq(cloudroomThreads.coreUrl, parent.coreUrl), eq(cloudroomThreads.sessionId, childId))).get();
-      if (saved) return saved;
+      if (saved || getThread(tx, id)) return saved ?? null;
       const prompt: PromptInput[] = [{ type: "text", text: input.prompt ?? "", mentions: [] }];
-      const thread = createThread(tx, this.deps.hub, { executionTarget: "cloud", projectId: parentThread.projectId, providerId, parentThreadId: parent.threadId, title: input.title ?? null, titleFallback: deriveTitleFallback(prompt) ?? `${HARNESS_NAMES[providerId]} child`, status: "pending" });
-      if (!input.title) queueThreadTitle(tx, thread.id, prompt);
+      const thread = createThread(tx, this.deps.hub, { id, executionTarget: "cloud", projectId: parentThread.projectId, providerId, parentThreadId: parent.threadId, title, titleFallback: deriveTitleFallback(prompt) ?? `${HARNESS_NAMES[providerId]} child`, status: "pending" });
+      if (!title && this.isHome(parent.threadId)) queueThreadTitle(tx, thread.id, prompt);
       tx.insert(cloudroomThreads).values({ threadId: thread.id, coreUrl: parent.coreUrl, sessionId: childId, startRequestId: start.request_id, model: start.model ?? parent.model, reasoning: input.reasoning ?? parent.reasoning }).run();
       for (const receipt of Object.values(session.receipts).filter(receipt => receipt.command === "prompt")) {
         tx.insert(cloudroomCommands).values({ id: receipt.request_id, threadId: thread.id, command: "prompt", input: JSON.stringify(receipt.input), state: "accepted", createdAt: Date.now() }).run();
       }
       return binding(tx, thread.id)!;
     });
+    if (!child) return;
+    if (!this.threadStates.get(child.threadId)) this.threadStates.set(child.threadId, { session: childId, actFrom: live ? 0 : null, home: null, from: parent.threadId });
     this.follow(child, client);
     this.notify(child.threadId);
+  }
+
+  /** A session this computer never streamed shows the shared children Core lists under it, and under the session it
+   *  continues: their `child` records may be older than the stream it reads (#237). */
+  private async listChildren(parent: Binding, client: CloudroomClient, from: string | undefined): Promise<void> {
+    const parents = [parent.sessionId!, ...(from ? [from] : [])];
+    for (const summary of (await client.listSessions()).sessions) {
+      if (summary.parent_session && parents.includes(summary.parent_session) && !summary.archived && summary.state !== "closed") await this.followChild(parent, client, summary.session_id, false, parents).catch((error: unknown) => this.warn("A Cloud child thread could not be shown", error, { threadId: parent.threadId }));
+    }
   }
 
   /** The parent the app reports this child's turns to: a Local parent, or a Cloud parent whose child runs in a
@@ -3358,19 +3743,35 @@ class CloudroomService {
     const thread = getThread(this.deps.db, saved.threadId);
     const busy = thread !== null && ["pending", "starting", "active", "stopping"].includes(thread.status);
     const tries = this.catchUps.get(saved.threadId) ?? 0;
-    if (!busy || tries >= 5 || this.streams.has(saved.threadId) || !this.reportedParent(thread)) return false;
+    if (!busy || tries >= 5 || this.streams.has(saved.threadId) || !this.reportedParent(thread) || !this.isHome(saved.threadId)) return false;
     if (!this.sandboxes.coolingDown(sandboxThread(saved.coreUrl))) this.catchUps.set(saved.threadId, tries + 1);
     return true;
   }
 
   private follow(saved: Binding, client: CloudroomClient): void {
     if (this.streams.has(saved.threadId) || !saved.sessionId || this.stopped) return;
-    // Once per app run and thread: backfills older threads and saves a new thread's session.
-    this.syncLabel(saved.threadId);
     const controller = new AbortController();
     this.streams.set(saved.threadId, controller);
     void (async () => {
       let projecting = false;
+      await Promise.all([this.me(), this.threadStates.ready]);
+      const known = this.threadStates.get(saved.threadId);
+      // A session this computer never streamed (another computer's switch): what it holds is shown, never acted on.
+      if (!known || known.session !== saved.sessionId) this.threadStates.set(saved.threadId, { ...this.firstState(saved.threadId), ...known, session: saved.sessionId!, actFrom: known ? null : 0, history: undefined });
+      const state = () => this.threadStates.get(saved.threadId)!;
+      const acts = (record: SessionRecord) => record.sequence > (state().actFrom ?? Infinity);
+      // Once per app run and thread: a new session's label, then only its session for a session started here.
+      // A thread Teleported to Cloud may come back to a row on its old session (marked moved to a computer). Only an
+      // older app's label replaces a session (web `labelSandbox`, when Core lists it running), clearing that mark.
+      const teleported = !known && Boolean(saved.startRequestId?.startsWith("teleport_"));
+      if (!known || (known.actFrom === 0 && !known.adopted)) this.syncLabel(saved.threadId, teleported ? "switch" : known ? "backfill" : "start");
+      const shared = sandboxThread(saved.coreUrl) !== saved.threadId, listing = !shared && await this.sandboxes.followsThreads().catch(() => false) === true;
+      // Core reports a record of its own thread that names its wake (Core 1): that Core and website take it from here.
+      const owed = (record: SessionRecord) => listing && typeof (record.data as { wake?: unknown } | null)?.wake === "string" && (record.data as { user?: unknown }).user !== true;
+      // History read from the website while the sandbox slept is shown up to `saved.cursor`; jobs start where they were.
+      const marker = state().history?.session === saved.sessionId ? state().history!.from : null;
+      const shownTo = marker !== null ? state().history!.until ?? saved.cursor : saved.cursor;
+      let handled = marker ?? saved.cursor;
       let connected = false;
       // One commit per record wrote ~55 KB each. Records that can wait are saved together, in the order they came,
       // and the cursor only moves with them, so a broken stream replays them. recordSaving says which can wait.
@@ -3403,10 +3804,21 @@ class CloudroomService {
       };
       try {
         for await (const record of client.stream(saved.sessionId!, {
-          after: saved.cursor, signal: controller.signal,
+          after: handled, signal: controller.signal,
           onConnected: async () => {
             connected = true;
             if (controller.signal.aborted) return;
+            // Earlier sessions come from a website that lists threads (its saved records); a Core without `continued` has none.
+            const empty = !shared && saved.cursor === 0 && !this.shown(saved.threadId) && await this.sandboxes.followsThreads().catch(() => false);
+            if (state().actFrom === null || empty) {
+              const snapshot = await client.session(saved.sessionId!, controller.signal);
+              if (state().actFrom === null) {
+                this.threadStates.set(saved.threadId, { ...state(), actFrom: snapshot.last_sequence, home: tagOf(snapshot.last_app_prompt?.request_id) ?? state().home });
+                if (!shared) void this.listChildren(saved, client, snapshot.continued?.from).catch((error: unknown) => this.warn("Cloud child threads could not be listed", error, { threadId: saved.threadId }));
+              }
+              // Before this session's records, which the stream holds until this returns.
+              if (empty) await this.earlierSessions(saved.threadId, snapshot.continued?.from ?? undefined).catch((error: unknown) => this.warn("A Cloud thread's earlier history could not be read", error, { threadId: saved.threadId }));
+            }
             this.resumeCopy(saved.threadId, client);
             this.setConnectionIssue(saved.threadId, "stream");
             if (saved.error?.startsWith(connectionOrReplayFailed) && !commands(this.deps.db, saved.threadId).some(item => item.state === "sending")) {
@@ -3444,58 +3856,92 @@ class CloudroomService {
           projecting = false;
           if (saving === "now") continue;
           if ((record.kind === "child" || record.kind === "child_thread") && record.data && typeof record.data === "object" && "id" in record.data && typeof record.data.id === "string") {
-            await this.followChild(saved, client, record.data.id).catch((error: unknown) => this.warn("A Cloud child thread could not be shown", error, { threadId: saved.threadId }));
+            await this.followChild(saved, client, record.data.id, acts(record)).catch((error: unknown) => this.warn("A Cloud child thread could not be shown", error, { threadId: saved.threadId }));
             if (controller.signal.aborted) return;
           }
-          if ((record.kind === "child_request" || record.kind === "child_command") && record.sequence > (binding(this.deps.db, saved.threadId)?.cursor ?? 0)) {
+          // Records past what this computer's jobs handled; ones the website's history only showed count too.
+          const fresh = record.sequence > handled;
+          if ((record.kind === "child_request" || record.kind === "child_command") && fresh && acts(record) && young(record) && this.isHome(saved.threadId)) {
             await this.ownSandboxChild(saved, client, record).catch((error: unknown) => this.warn("A Cloud child request failed", error, { threadId: saved.threadId }));
             if (controller.signal.aborted) return;
           }
-          if (record.kind === "own_child") {
+          // Core wrote its thread's change to the website: list it now, signal or not.
+          if (record.kind === "thread_report" && listing && acts(record)) this.sync.changed();
+          const lists = record.kind === "own_child" ? await this.sandboxes.followsThreads().catch(() => null) : null;
+          if (lists) this.sync.changed();
+          else if (lists === false) {
             await this.adoptChild(saved, record.data).catch((error: unknown) => this.warn("A Cloud child thread could not be shown", error, { threadId: saved.threadId }));
           }
-          if (record.kind === "fork_request" && record.sequence > (binding(this.deps.db, saved.threadId)?.cursor ?? 0)) {
+          if (record.kind === "fork_request" && fresh && acts(record) && this.isHome(saved.threadId)) {
             await this.agentFork(saved, client, record).catch((error: unknown) => this.warn("A Cloud fork request failed", error, { threadId: saved.threadId }));
             if (controller.signal.aborted) return;
           }
           const outage = mentionsOpenAISide401(record) && await codexOutage();
           if (controller.signal.aborted) return;
           projecting = true;
-          // The stream replays from the saved cursor, so renames made while the app was offline apply on reconnect.
-          if (record.kind === "title") updateThread(this.deps.db, this.deps.hub, saved.threadId, { title: z.object({ title: z.string().min(1) }).parse(record.data).title });
-          const effort = (record.kind === "reasoning" || record.kind === "launch_reasoning") && z.object({ reasoning: reasoningLevelSchema }).safeParse(record.data);
-          if (effort && effort.success) {
+          // The stream replays from the saved cursor, so renames made while the app was offline apply on reconnect. With
+          // a Core and website that follow threads, Core reports its thread's own rename, effort and archive, and the
+          // website's list brings them (#237). Otherwise home applies and labels them; other computers only show them.
+          const labels = !shared && !owed(record) && acts(record) && this.isHome(saved.threadId);
+          const show = (apply: () => void) => labels ? apply() : this.quietly(saved.threadId, apply);
+          if (record.kind === "title" && !owed(record)) show(() => updateThread(this.deps.db, this.deps.hub, saved.threadId, { title: z.object({ title: z.string().min(1) }).parse(record.data).title }));
+          const effort = (record.kind === "launch_reasoning" || (record.kind === "reasoning" && !owed(record))) && z.object({ reasoning: reasoningLevelSchema }).safeParse(record.data);
+          if (effort && effort.success) show(() => {
             saveBinding(this.deps.db, saved.threadId, { reasoning: effort.data.reasoning });
             if (record.kind === "reasoning") setThreadExecutionOverride(this.deps.db, { threadId: saved.threadId, reasoningLevelOverride: effort.data.reasoning });
-          }
-          const fresh = record.sequence > (binding(this.deps.db, saved.threadId)?.cursor ?? 0);
-          const move = fresh && record.kind === "move" && z.object({ project: z.string().min(1) }).safeParse(record.data);
+          });
+          // Home runs an agent's move it missed while asleep, as on main: the agent was told it would happen.
+          const move = fresh && acts(record) && record.kind === "move" && this.isHome(saved.threadId) && z.object({ project: z.string().min(1) }).safeParse(record.data);
           const ended = fresh ? endedTurn(record) : null;
           const turn = ended ? z.object({ request_id: z.string() }).catch({ request_id: String(record.sequence) }).parse(record.data).request_id : "";
-          if (ended) await this.noticeCloudParent(saved.threadId, ended, turn);
-          const held = ended && this.teleportingParent(saved.threadId) ? ended : null;
+          // The computer that owns a turn reports it to a Cloud parent; one that only shows it doesn't.
+          const owned = ended && acts(record) && this.ownsTurn(saved.threadId, turn) ? ended : null;
+          if (owned) await this.noticeCloudParent(saved.threadId, owned, turn);
+          const held = owned && this.teleportingParent(saved.threadId) ? owned : null;
           if (held) await this.holdChildReport(saved.threadId, held, turn);
           const receipt = fresh && record.kind === "receipt" ? record.data as { command?: string; state?: string; input?: { keep_paused?: boolean } } : null;
           if (receipt?.state === "accepted" && receipt.command === "stop") this.stops.set(saved.threadId, { session: record.session_id, at: Date.now() });
           if (receipt?.state === "accepted" && receipt.command === "resume" && !receipt.input?.keep_paused) this.stops.delete(saved.threadId);
+          const turnReceipt = record.kind === "receipt" ? z.object({ request_id: z.string(), command: z.string(), state: z.string() }).safeParse(record.data) : null;
+          if (turnReceipt?.success) {
+            // Home is the computer whose tag is on the latest app prompt; the turn's own tag says who notifies for it.
+            const { request_id: request, command: kind, state: step } = turnReceipt.data, tag = tagOf(request);
+            if (tag && step === "accepted" && ["prompt", "steer", "edit", "rewind"].includes(kind) && tag !== state().home) this.threadStates.set(saved.threadId, { ...state(), home: tag });
+            if (["prompt", "auto", "rewind", "compact"].includes(kind) && !["accepted", "cancelled"].includes(step)) {
+              if (this.ownsTurn(saved.threadId, request)) cloudTurnsElsewhere.delete(saved.threadId);
+              else cloudTurnsElsewhere.add(saved.threadId);
+            }
+          }
           const eventTypes = projectRecord(this.deps.db, saved.threadId, record, outage);
+          // Past history the website only showed, progress is saved as each record is handled (projectRecord saves the
+          // cursor otherwise), so a detach right after an action (an archive) never repeats it on the next connect.
+          handled = Math.max(handled, record.sequence);
+          if (marker !== null && state().history) this.threadStates.set(saved.threadId, { ...state(), history: handled >= shownTo ? undefined : { ...state().history!, from: handled } });
           projecting = false;
           this.catchUps.delete(saved.threadId);
           // Like a Local turn's end (turn-completed-events.ts): the finished messages hold their full text, so their
           // streamed pieces go. Cloud never did this, and its threads kept every piece.
           if (ended) try { pruneThreadEventHistory(this.deps, { mode: "idle", threadId: saved.threadId }); } catch (error) { this.warn("A finished Cloud turn's streamed pieces could not be cleared", error, { threadId: saved.threadId }); }
           if (held) void this.deliverChildReports();
-          else if (ended) this.tellLocalParent(saved.threadId, ended, turn);
+          else if (owned) this.tellLocalParent(saved.threadId, owned, turn);
           const reply = ended ? getLastThreadOutput(this.deps.db, saved.threadId) : null;
           if (reply) void saveCloudImages(this.deps, saved.threadId, reply).catch((error: unknown) => this.warn("Chat images could not be saved", error, { threadId: saved.threadId }));
-          // Agents archive their own thread with `room-cli thread archive --self`; like renames, this applies on reconnect.
-          if (record.kind === "archive") {
+          // Agents archive their own thread with `room-cli thread archive --self`; like renames, this applies on reconnect,
+          // on home. With Core reporting it, the website archives the thread, and home archives its children once the
+          // website's list shows that (cascade). One that kept live sessions never reaches the website: home shows it.
+          // Core holds the report while any other session in the sandbox is open (a side chat, a kept child), so then
+          // home shows it here at once, as on main.
+          if (record.kind === "archive" && fresh && acts(record) && this.isHome(saved.threadId)) {
             const kept = z.object({ kept_live: z.array(z.string()) }).catch({ kept_live: [] }).parse(record.data).kept_live;
-            this.archiveRequest?.(saved.threadId, bindings(this.deps.db).filter((b) => b.coreUrl === saved.coreUrl && b.sessionId !== null && kept.includes(b.sessionId)).map((b) => b.threadId));
+            const live = bindings(this.deps.db).filter((b) => b.coreUrl === saved.coreUrl && b.sessionId !== null && kept.includes(b.sessionId)).map((b) => b.threadId);
+            const others = bindings(this.deps.db).some((b) => b.coreUrl === saved.coreUrl && b.threadId !== saved.threadId && !getThread(this.deps.db, b.threadId)?.archivedAt && !getThread(this.deps.db, b.threadId)?.deletedAt);
+            if (owed(record) && !kept.length && !others) this.threadStates.set(saved.threadId, { ...state(), cascade: live });
+            else this.archiveRequest?.(saved.threadId, live);
           }
           if (move && move.success) this.moveRequest?.(saved.threadId, move.data.project);
           if (record.kind === "secret_request") this.secrets.follow(client, saved.threadId, record);
-          if (record.kind === "gpu_request" && fresh) this.gpuApprovals.follow(saved.threadId, record);
+          if (record.kind === "gpu_request" && fresh && acts(record)) this.gpuApprovals.follow(saved.threadId, record);
+
           this.setConnectionIssue(saved.threadId, "replay");
           if (record.kind === "rewind") this.deps.hub.notifyThread(saved.threadId, ["history-rewritten"]);
           if (record.kind === "storage_recovered") this.disk.delete(saved.threadId);
@@ -3546,7 +3992,12 @@ class CloudroomService {
   private landing(threadId: string, client: CloudroomClient, started: Parameters<typeof landForkCode>[1] | null, files: boolean, workspace: string | null, marked: Promise<void> | null): Landed {
     // A status that could not be written is written again here, so the agent never waits on a stale `copying`.
     let final: string | undefined, last = client;
-    const deadline = marked && workspace ? setTimeout(() => void marked.then(() => this.filesState(last, threadId, workspace, final ?? `failed: ${STALLED}`, true)), COPY_DEADLINE).unref() : undefined;
+    const deadline = marked && workspace ? setTimeout(() => void marked.then(() => {
+      // A copy still paused because its plan never ran (#1040) fails with its own error, card included.
+      const parked = projectCopyProgress(this.deps.db, threadId);
+      if (final === undefined && parked?.phase === "waiting" && parked.error) return this.unplannedFailed(last, threadId, workspace, parked.error);
+      return this.filesState(last, threadId, workspace, final ?? `failed: ${STALLED}`, true);
+    }), COPY_DEADLINE).unref() : undefined;
     const land = async (error?: string, current = client, partial?: string) => {
       if (files) this.progress(threadId, [{ key: "files", status: error ? "failed" : "completed" }]);
       const finish = async (failure?: string | null) => {
@@ -3563,8 +4014,10 @@ class CloudroomService {
         return;
       }
       // A fork's branch then moves to its source's code, so the agent sees what the source saw.
-      const branch = await this.ensureBranch(threadId, true);
-      const failure = await landForkCode(current, started);
+      let own: string | undefined;
+      const branch = await this.ensureBranch(threadId, true, kept => { own = kept; });
+      // Its hard reset would drop the commits on a branch the agent made itself, so that branch keeps its work (#1377).
+      const failure = own ? `The folder was already on the agent's own branch ${own}, so it was kept and the source thread's code was not copied in.` : await landForkCode(current, started);
       // A child folder with no Git gets its repository only now, on a cloudroom/ branch: rename it to its room/ one
       // before the agent goes on.
       if (!failure) await this.ensureBranch(threadId, false);
@@ -3621,10 +4074,21 @@ class CloudroomService {
       reportProjectCopy(this.deps, threadId, { phase: "complete", completed: 0, total: 0 });
       return;
     }
+    // Set for a new thread's copy that was never planned (#1040): it fails instead, as it would have at once.
+    const unplanned = projectCopyProgress(this.deps.db, threadId)?.error;
+    // Stopping the service, or archiving or deleting the thread, while the plan runs leaves its folder alone.
+    const epoch = this.epoch;
+    const ended = () => { const thread = getThread(this.deps.db, threadId); return epoch !== this.epoch || !thread || Boolean(thread.archivedAt || thread.deletedAt); };
     this.retrying.add(threadId);
     try {
       // A sandbox that can't be reached, or a folder another copy is filling, throws, so the copy waits for the next connection.
-      const job = await planProjectCopyOrThrow(this.deps, client, threadId, workspace, { key: copyKey(sandboxThread(saved.coreUrl), workspace), branch: baseBranch(input) });
+      const key = copyKey(sandboxThread(saved.coreUrl), workspace);
+      const job = await planProjectCopyOrThrow(this.deps, client, threadId, workspace, { key, branch: baseBranch(input), ...(unplanned ? { signal: AbortSignal.timeout(30_000) } : {}) }).catch((error: unknown) => {
+        if (!unplanned || keyCopying(key) || this.copyBusy(threadId) || ended()) throw error;
+        this.unplannedFailed(client, threadId, workspace, unplanned);
+        return undefined;
+      });
+      if (job === undefined || ended()) return;
       // A move, or another copy, that started meanwhile brings its own.
       if (this.copyBusy(threadId) || copyWorkspace(command(this.deps.db, `first_${threadId}`)?.input) !== workspace) return;
       if (job && (job.clone || job.copyAll)) {
@@ -3638,8 +4102,16 @@ class CloudroomService {
       reportProjectCopy(this.deps, threadId, { phase: "complete", completed: 0, total: 0 });
       this.progress(threadId, [], "failed");
       if (job) this.copyInto(client, job);
-      else void this.filesState(client, threadId, workspace, `failed: ${CUT_SHORT}`, true);
+      else void this.filesState(client, threadId, workspace, `failed: ${unplanned ?? CUT_SHORT}`, true);
     } finally { this.retrying.delete(threadId); }
+  }
+
+  /** A new thread's copy that could not be planned (#1040) fails like any failed copy: the card shows only for a project
+   *  with no folder on the Mac, and `room-cli files wait` stops waiting. */
+  private unplannedFailed(client: CloudroomClient, threadId: string, workspace: string, error: string): Promise<void> {
+    const local = localProjectPath(this.deps, getThread(this.deps.db, threadId)?.projectId ?? "");
+    reportProjectCopy(this.deps, threadId, local ? { phase: "complete", completed: 0, total: 0 } : { phase: "error", completed: 0, total: 0, error });
+    return this.filesState(client, threadId, workspace, `failed: ${error}`, true);
   }
 
   /** A copy runs, or a move or Teleport brings its own, so no other may start. */

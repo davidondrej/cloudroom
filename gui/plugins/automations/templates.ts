@@ -289,7 +289,7 @@ Find this project's production URL and health endpoints in the README, config, o
     reasoningLevel: "medium",
     localOnly: true,
     prompt: `Thread cleanup for this project. List its open threads with \`room-cli thread list --project "$ROOM_PROJECT_ID" --json\`.
-Archive a thread only when it is clearly finished: the work shipped or was abandoned, its last message is a final report, and nothing waits on the user. Never archive pinned threads, threads that are running, or threads with a question for the user. When unsure, keep it.
+Archive a thread only when it is clearly finished: the work shipped or was abandoned, its last message is a final report, and nothing waits on the user. Never archive pinned threads, threads that are running, or threads with a question for the user. A Cloud thread ("executionTarget": "cloud") may be in use on another computer: archive one only when its "asleepSince" is 24 hours or more ago. When unsure, keep it.
 Then write a short list of what you archived and why, and archive this thread with \`room-cli thread archive --self\`.`,
   },
   {

@@ -45,6 +45,7 @@ export default async function plugin(bb: BbPluginApi) {
     currentSettings = next;
   });
   let relay!: ConnectTunnel;
+  let tunnelUp = false;
   let phone!: PhoneRelay;
   const credential = () => relay.getCredential();
   const hostResolver = new ShareHostResolver(() => bb.sdk);
@@ -81,6 +82,17 @@ export default async function plugin(bb: BbPluginApi) {
     onStatusChange: (relayStatus) => {
       publish();
       recheckServerAccess(relayStatus);
+      // Signals sent while the tunnel was down are lost, so the app lists its Cloud threads again (#237).
+      const up = relayStatus.state === "connected";
+      if (up !== tunnelUp) {
+        tunnelUp = up;
+        // Before the server listens, its address throws; the app lists at its own start anyway.
+        void Promise.resolve().then(() => fetch(`${bb.server.loopbackBaseUrl}/api/v1/cloudroom/threads-changed`, {
+          method: "POST",
+          headers: { ...bb.server.experimental_loopbackHeaders, "content-type": "application/json", "x-cloudroom-relay": "threads" },
+          body: JSON.stringify({ tunnel: up }),
+        })).catch(() => {});
+      }
     },
     onCredentialRejected: () => void phone.check(true),
   });

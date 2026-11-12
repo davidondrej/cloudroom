@@ -50,6 +50,12 @@ py="$venv/lib/python3.12/site-packages/browser_harness/daemon.py"
 if [ "$(uname -s)" = Linux ] && ! grep -qs '".config/BraveSoftware/Brave-Browser"' "$py"; then
   sed -i 's|".config/google-chrome",|".config/google-chrome", ".config/BraveSoftware/Brave-Browser", ".config/BraveSoftware/Brave-Origin",|' "$py" 2>/dev/null || true
 fi
+# 0.1.13 attaches to the first live browser in a fixed list, Chrome first, so a default Brave lost to an
+# open Chrome (#981). Check the profile folder in BH_CLOUDROOM_PREFER_PROFILE first; the order is
+# unchanged without it. Swapped in by rename like run.py; skips itself once a release changes the line.
+if grep -qs '^PROFILES = profile_dirs()$' "$py"; then
+  sed 's|^PROFILES = profile_dirs()$|PROFILES = sorted(profile_dirs(), key=lambda p, pref=os.environ.get("BH_CLOUDROOM_PREFER_PROFILE"): not (pref and p.as_posix().endswith("/" + pref)))|' "$py" > "$py.$$" 2>/dev/null && mv -f "$py.$$" "$py" 2>/dev/null || rm -f "$py.$$"
+fi
 # 0.1.13 reads each request with asyncio's 64 KiB line limit, so bigger ones failed with a broken pipe
 # (upstream PR 377). Raise it to 64 MiB. Skips itself once a release changes the line.
 ipc="$venv/lib/python3.12/site-packages/browser_harness/_ipc.py"
@@ -149,17 +155,22 @@ if all(lines.count(a) == 1 for a in anchors):
 PY
 fi
 
-# Use the user's default browser: when it is Chromium-based and closed, open it in the background so
-# browser-harness attaches to it. Safari and Firefox have no DevTools protocol.
+# Use the user's default browser: tell the daemon its profile folder, so it wins over other open
+# browsers, and when it is Chromium-based and closed, open it in the background. Prints
+# "profile|bundle id to open". Safari and Firefox have no DevTools protocol.
 if [ "$(uname -s)" = Darwin ] && { [ $# -eq 0 ] || [ "$1" = -c ]; } && [ -z "$BU_CDP_WS$BU_CDP_URL$BU_NAME" ]; then
-  app=$(osascript -l JavaScript -e '
+  browser=$(osascript -l JavaScript -e '
     ObjC.import("AppKit");
     const url = $.NSWorkspace.sharedWorkspace.URLForApplicationToOpenURL($.NSURL.URLWithString("https://example.com"));
     const id = url.isNil() ? "" : ($.NSBundle.bundleWithURL(url).bundleIdentifier.js || "");
     const chromium = /^(com[.]google[.]chrome|com[.]brave[.]browser|com[.]microsoft[.]edgemac|company[.]thebrowser[.](browser|dia)|org[.]chromium[.]chromium|ai[.]perplexity[.]comet)/i;
-    chromium.test(id) && $.NSRunningApplication.runningApplicationsWithBundleIdentifier(id).count === 0 ? id : "";
+    const profile = {"com.google.chrome": "Google/Chrome", "com.brave.browser": "BraveSoftware/Brave-Browser", "com.microsoft.edgemac": "Microsoft Edge", "company.thebrowser.browser": "Arc/User Data", "company.thebrowser.dia": "Dia/User Data", "ai.perplexity.comet": "Comet"}[id.toLowerCase()] || "";
+    profile + "|" + (chromium.test(id) && $.NSRunningApplication.runningApplicationsWithBundleIdentifier(id).count === 0 ? id : "");
   ' 2>/dev/null || true)
+  app=$(printf %s "$browser" | cut -s -d'|' -f2)
   [ -z "$app" ] || open -g -b "$app" 2>/dev/null || true
+  BH_CLOUDROOM_PREFER_PROFILE=$(printf %s "$browser" | cut -s -d'|' -f1)
+  export BH_CLOUDROOM_PREFER_PROFILE
 fi
 # One daemon per thread, so parallel agents never act in each other's tab. Daemons never exit on
 # their own: stop the ones whose thread hasn't used the browser for 2 hours. They restart on next use.

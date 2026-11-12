@@ -21,7 +21,8 @@ type Deps = Partial<Pick<AppDeps, "pendingInteractions" | "logger">>;
 
 export class CloudSecrets {
   private readonly open = new Map<string, { id: string; controller: AbortController }>();
-  constructor(private readonly deps: Deps) {}
+  /** `answers`: this computer declines a form that timed out, as on main (its turn, or home's); others leave it. */
+  constructor(private readonly deps: Deps, private readonly answers: (threadId: string) => boolean = () => true) {}
 
   follow(client: CloudroomClient, threadId: string, record: SessionRecord): void {
     const parsed = requestSchema.safeParse(record.data);
@@ -36,6 +37,7 @@ export class CloudSecrets {
     void (async () => {
       let values: Record<string, string> | null = null;
       let reason = "the app could not show the form";
+      let unanswered = false;
       try {
         if (!this.deps.pendingInteractions) throw new Error("Interactions are unavailable");
         const result = await this.deps.pendingInteractions.requestPluginInteraction({
@@ -44,6 +46,9 @@ export class CloudSecrets {
           timeoutMs: FORM_TIMEOUT_MS, signal: controller.signal,
         });
         if (result.outcome === "submitted") values = answerSchema.parse(result.value).values;
+        // Every computer streaming the thread shows the form (#237). Core has no deadline of its own, so on a timeout
+        // one computer still declines, as on main: the one whose turn it is, else home. The others leave it.
+        else if (result.reason === "timeout" && !this.answers(threadId)) unanswered = true;
         else reason = result.reason === "request-aborted" ? "replaced by a newer request" : result.reason;
       } catch (error) {
         if (error instanceof Error) reason = `${reason}: ${error.message}`;
@@ -52,7 +57,7 @@ export class CloudSecrets {
         if (this.open.get(threadId)?.controller === controller) this.open.delete(threadId);
       }
       // Answer even after an abort: a replaced request still waits in the core. Closed ones are already gone.
-      await client.answerSecret(record.session_id, request.id, values, reason).catch(() => {});
+      if (!unanswered) await client.answerSecret(record.session_id, request.id, values, reason).catch(() => {});
     })();
   }
 }

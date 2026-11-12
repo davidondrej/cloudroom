@@ -24,10 +24,23 @@ export const BUILTIN_PLUGINS_DIRECTORY_NAME = "builtin-plugins";
 
 const REPO_PLUGINS_DIRECTORY_NAME = "plugins";
 
+/**
+ * Built-in plugins that changed id. On start, an install that still has the old
+ * id is moved to the new one, with its on/off state and settings.
+ */
+export const RENAMED_BUILTIN_PLUGINS = [
+  // No BB naming in the app (ADR 20261111-160828).
+  { from: "bb-guide", to: "cloudroom-guide", settingKeys: { bbCli: "roomCli" } },
+];
+
+// Computer use has no Windows driver, so Windows hides it (docs/scopes/windows.md).
+export const WINDOWS_HIDDEN_PLUGIN_NAMES: readonly string[] =
+  process.platform === "win32" ? ["computer-use"] : [];
+
 export const BUILTIN_PLUGINS = [
   {
-    name: "bb-guide",
-    pluginId: "bb-guide",
+    name: "cloudroom-guide",
+    pluginId: "cloudroom-guide",
     defaultEnabled: true,
   },
   {
@@ -129,6 +142,11 @@ export const BUILTIN_PLUGINS = [
     defaultEnabled: true,
   },
   {
+    name: "wallpaper",
+    pluginId: "wallpaper",
+    defaultEnabled: true,
+  },
+  {
     name: "provider-acp",
     pluginId: "provider-acp",
     defaultEnabled: true,
@@ -136,7 +154,7 @@ export const BUILTIN_PLUGINS = [
   {
     name: "computer-use",
     pluginId: "computer-use",
-    defaultEnabled: process.platform !== "win32",
+    defaultEnabled: true,
   },
   {
     name: "gpu",
@@ -198,10 +216,12 @@ export const BUILTIN_PLUGINS = [
     pluginId: "workflows",
     defaultEnabled: false,
   },
-].map((plugin): BundledPluginDefinition => ({
-  ...plugin,
-  autoInstall: true,
-}));
+]
+  .filter((plugin) => !WINDOWS_HIDDEN_PLUGIN_NAMES.includes(plugin.name))
+  .map((plugin): BundledPluginDefinition => ({
+    ...plugin,
+    autoInstall: true,
+  }));
 
 export const OFFICIAL_PLUGINS = [
   {
@@ -228,6 +248,22 @@ export const BUNDLED_PLUGINS: readonly BundledPluginDefinition[] = [
   ...BUILTIN_PLUGINS,
   ...OFFICIAL_PLUGINS,
 ];
+
+/**
+ * Bundled plugins the app used to ship. On start, an installed copy is marked
+ * removed, so nothing loads or lists it. Its settings and data stay on disk.
+ * Add a name here whenever a bundled plugin is deleted. Windows also removes
+ * the plugins it hides.
+ */
+export const RETIRED_BUNDLED_PLUGIN_NAMES: ReadonlySet<string> = new Set([
+  ...WINDOWS_HIDDEN_PLUGIN_NAMES,
+  "account-pool",
+  "browser-automation",
+  "concurrency-limit",
+  "docs",
+  "environment-modal-sandbox",
+  "memory",
+]);
 
 const builtinPluginsModuleDir = path.dirname(fileURLToPath(import.meta.url));
 

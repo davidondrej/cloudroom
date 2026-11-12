@@ -138,6 +138,7 @@ export {
   listInstalledPlugins,
   listInstalledPluginsFromMarketplace,
   listUnnormalizedPluginRegistrations,
+  renameBuiltinPlugin,
   markInstalledPluginRemoved,
   normalizeInstalledPluginRegistration,
   setInstalledPluginDirectProvenance,

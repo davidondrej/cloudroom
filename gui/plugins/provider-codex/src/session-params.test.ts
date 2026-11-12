@@ -807,6 +807,21 @@ describe("resolveCodexInstructionOverrides", () => {
       developerInstructions: PLAIN_CHAT,
     });
   });
+
+  it("warns only workspace threads about read-only .agents and .codex (#1294)", () => {
+    for (const instructionMode of ["append", "replace"] as const) {
+      const developerInstructions = (permissionScope: "workspace" | "full") =>
+        resolveCodexInstructionOverrides({
+          instructionMode,
+          options: { instructions: "Base.", permissionScope },
+        }).developerInstructions;
+      expect(developerInstructions("workspace")).toContain(PLAIN_CHAT);
+      expect(developerInstructions("workspace")).toContain(
+        "git status --porcelain",
+      );
+      expect(developerInstructions("full")).not.toContain("git status");
+    }
+  });
 });
 
 describe("toCodexReasoningEffort", () => {

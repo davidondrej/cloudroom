@@ -15,10 +15,10 @@ const telemetryAppSurfaceStorage = new AsyncLocalStorage<RequestAppSurface>();
 export type TelemetryExecution = "local" | "cloud_sandbox" | "cloud_vm";
 
 /** The desktop app's first-run setup funnel: which step people see, act on, finish, skip, or leave. */
-export const SETUP_STEPS = ["account", "agent", "github", "project"] as const;
+export const SETUP_STEPS = ["account", "agent", "github", "project", "first_agent"] as const;
 export const SETUP_ACTIONS = ["viewed", "started", "done", "skipped", "closed", "detected", "waitlist"] as const;
 export const SETUP_AGENTS = ["pi", "opencode", "cursor", "hermes", "grok", "devin", "droid", "kimi", "fx", "openclaw"] as const;
-export const SETUP_DETAILS = ["github", "google", "email", "claude", "codex", "both", "none", "existing", "found", "folder", "recent_folder", "bb_import", "chat_import", "auto", "manual", ...SETUP_AGENTS] as const;
+export const SETUP_DETAILS = ["github", "google", "email", "claude", "codex", "both", "none", "existing", "found", "folder", "recent_folder", "bb_import", "chat_import", "auto", "manual", "cloud", "local", "blocked", "failed", ...SETUP_AGENTS] as const;
 
 export type TelemetryValue = string | number | boolean | null;
 
@@ -53,11 +53,15 @@ export type TelemetryEvent =
         is_child_thread: boolean;
         message_source: "queued_message" | "thread_create" | "thread_send";
         provider: string;
+        /** A message the user typed in the first agent's thread (services/system/first-agent.ts). */
+        first_agent?: true;
       };
     }
   | {
       name: "first_response";
       properties: {
+        /** The first agent's reply. */
+        first_agent?: true;
         execution: TelemetryExecution;
         is_child_thread: boolean;
         message_source: "queued_message" | "thread_create" | "thread_send";
@@ -113,21 +117,23 @@ export type TelemetryEvent =
   | { name: "plugins_snapshot"; properties: { enabled: string; disabled: string } }
   | {
       name: "turn_failed";
-      properties: { execution: TelemetryExecution; is_child_thread: boolean; provider: string; error_category: string; error_message?: string | null };
+      properties: { execution: TelemetryExecution; is_child_thread: boolean; provider: string; error_category: string; error_message?: string | null; first_agent?: true };
     }
   | { name: "upgrade_prompt"; properties: { where: (typeof UPGRADE_PROMPTS)[number]; action: "viewed" | "clicked" } }
   | { name: "activation_step"; properties: { step: ActivationStep; action: "clicked" | "done" | "hidden" } }
   | { name: "starter_prompt"; properties: { starter: StarterPrompt } }
   | { name: "popup"; properties: { popup: Popup; action: "viewed" | "closed" | PopupDetail } }
   | { name: "prompt_suggestion"; properties: { action: "shown" | "accepted"; provider: string } }
-  | { name: "cloud_choice"; properties: { action: (typeof CLOUD_CHOICE_ACTIONS)[number]; reason: (typeof CLOUD_CHOICE_REASONS)[number] | null } };
+  | { name: "cloud_choice"; properties: { action: (typeof CLOUD_CHOICE_ACTIONS)[number]; reason: (typeof CLOUD_CHOICE_REASONS)[number] | null } }
+  /** A Local message the queue failed or dropped (services/threads/queue-drain-failure.ts). */
+  | { name: "queue_delivery"; properties: { outcome: "failed" | "dropped"; message: string; waiting_on: string | null; thread_status: string | null; error: string | null; detail: string | null } };
 
 /** `opened` is a click on the Share button and `copied` one on Copy. The website adds what viewers do. */
 export const SHARE_CLICKS = ["opened", "copied"] as const;
 export type ShareAction = (typeof SHARE_CLICKS)[number] | "created" | "updated" | "stopped" | "continued";
 export const CLOUD_CHOICE_ACTIONS = ["picked_local", "cloud_blocked", "forced_local"] as const;
 export const CLOUD_CHOICE_REASONS = ["signed_out", "agent_unsupported", "agent_not_in_cloud", "queue", "region"] as const;
-export const UPGRADE_PROMPTS = ["limit_notice", "queue", "queue_badge", "plan_card", "free_tip", "auto_delete", "try_cloud", "new_thread_cloud", "og_letter", "limit_notice_pack", "mac_battery", "mac_load", "mac_disk", "mac_network"] as const;
+export const UPGRADE_PROMPTS = ["limit_notice", "queue", "queue_badge", "plan_card", "free_tip", "auto_delete", "try_cloud", "new_thread_cloud", "limit_notice_pack", "mac_battery", "mac_load", "mac_disk", "mac_network"] as const;
 export const ACTIVATION_STEPS = ["cloud", "subagents", "second", "phone", "loop"] as const;
 export type ActivationStep = (typeof ACTIVATION_STEPS)[number];
 export const STARTER_PROMPTS = ["security", "keys", "packages", "mac"] as const;

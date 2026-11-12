@@ -79,6 +79,9 @@ describe("@cloudroom/templates", () => {
     expect(cloud).toContain("## Cloud sandboxes");
     expect(cloud).toContain("room-cli files wait");
     expect(cloud).not.toMatch(/Local children share|ask before installing/u);
+    // #1281: Cloud agents explain that a GH_TOKEN API key overrides the GitHub login.
+    expect(cloud).toContain("a Cloud API key may be overriding the GitHub login.");
+    expect(local).not.toContain("GH_TOKEN");
   });
 
   it("offers Mac access and Local computer use only off Windows", () => {
@@ -104,7 +107,7 @@ describe("@cloudroom/templates", () => {
 
     expect(rendered).toBe(
       [
-        "[bb system]",
+        "[system]",
         "",
         "@thread:thr_child needs help.",
         "Blocked on command approval:",
@@ -122,7 +125,7 @@ describe("@cloudroom/templates", () => {
       }),
     ).toBe(
       [
-        "[bb system]",
+        "[system]",
         "",
         "@thread:thr_child is now a child of this thread.",
       ].join("\n"),
@@ -133,7 +136,7 @@ describe("@cloudroom/templates", () => {
       }),
     ).toBe(
       [
-        "[bb system]",
+        "[system]",
         "",
         "@thread:thr_child is no longer a child of this thread.",
       ].join("\n"),

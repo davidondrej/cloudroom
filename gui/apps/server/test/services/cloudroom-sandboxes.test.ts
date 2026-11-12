@@ -125,7 +125,8 @@ it("gives each cloud thread its own sandbox, wakes it only for work, and archive
     refusal = "sandbox_repairing";
     service.sandboxes.forget(thread.id);
     await waitFor(() => getThread(harness.deps.db, thread.id)?.status === "idle", "asleep");
-    const commandState = (id: string) => harness.deps.db.select().from(cloudroomCommands).all().find(item => item.id === id)?.state;
+    // The app tags each prompt with its install (#237); these name them by the rest.
+    const commandState = (id: string) => harness.deps.db.select().from(cloudroomCommands).all().find(item => item.id.replace(/^app_[a-f0-9]{12}_/, "") === id)?.state;
     const skipBackoff = () => (service.sandboxes as unknown as { backoff: Map<string, unknown> }).backoff.clear();
     let refusedAt = wakes();
     expect((await request(`/threads/${thread.id}/send`, { requestId: "over-limit", mode: "auto", input: [{ type: "text", text: "Not now", mentions: [] }] })).status).toBe(200);
@@ -138,7 +139,7 @@ it("gives each cloud thread its own sandbox, wakes it only for work, and archive
     refusedAt = wakes();
     skipBackoff();
     await waitFor(() => wakes() > refusedAt, "refused for the budget");
-    harness.deps.db.insert(cloudroomCommands).values({ id: "edit-queued", threadId: thread.id, command: "edit", input: JSON.stringify({ target_request_id: "over-limit", expected_revision: 1, text: "Not now, edited" }), createdAt: Date.now() + 1 }).run();
+    harness.deps.db.insert(cloudroomCommands).values({ id: "edit-queued", threadId: thread.id, command: "edit", input: JSON.stringify({ target_request_id: harness.deps.db.select().from(cloudroomCommands).all().find(item => item.id.endsWith("_over-limit"))!.id, expected_revision: 1, text: "Not now, edited" }), createdAt: Date.now() + 1 }).run();
     // A delivery is preparing to wake the sandbox for the message, copying logins first, when Stop lands. Every login is
     // skipped, so no real one is read.
     const allLogins = new Set(["codex", "pi", "opencode", "hermes", "devin", "kimi", "openclaw", "cursor", "github"]);
@@ -175,11 +176,11 @@ it("gives each cloud thread its own sandbox, wakes it only for work, and archive
     skipBackoff();
     const resumed = await request(`/threads/${thread.id}/send`, { requestId: "after-limit", mode: "auto", input: [{ type: "text", text: "Go on", mentions: [] }] });
     expect(resumed.status, await resumed.clone().text()).toBeLessThan(300);
-    await waitFor(() => prompts.includes("after-limit"), "prompt after the limit");
+    await waitFor(() => prompts.some(id => id.endsWith("_after-limit")), "prompt after the limit");
     const paths = core.map(call => call.path);
     expect(paths.indexOf("/v1/sessions/cr_one/stop")).toBeGreaterThan(-1);
     expect(paths.indexOf("/v1/sessions/cr_one/stop")).toBeLessThan(paths.lastIndexOf("/v1/sessions/cr_one/prompts"));
-    expect(prompts).not.toContain("over-limit");
+    expect(prompts.some(id => id.endsWith("_over-limit"))).toBe(false);
     expect(paths.filter(path => /\/(rewind|goal)$/.test(path))).toEqual([]);
 
     // Archive goes to the website, which stops the sandbox even mid-task, so the thread stops showing as running.
@@ -469,6 +470,7 @@ it("sends a new thread's first message before its project copy starts, so a slow
 it.each([
   ["existing checkout", null], ["fresh clone", null], ["existing checkout", "index.lock"], ["existing checkout", "terminated"],
   ["existing checkout", "checkout probe"], ["personal child", "checkout probe"], ["existing checkout", "status write"], ["existing checkout", "status write x3"],
+  ["existing checkout", "agent branch"], ["child", null], ["child", "agent branch"],
 ] as const)("`room-cli files wait` reads a new thread's %s as copying until its branch and files are ready (#816, fault: %s)", async (kind, fault) => {
   const root = await mkdtemp(join(tmpdir(), "cloudroom-files-ready-"));
   const folder = join(root, "project"), origin = join(root, "origin.git"), mac = join(root, "mac");
@@ -479,14 +481,17 @@ it.each([
   git(join(root, "seed"), "add", "-A"); git(join(root, "seed"), "commit", "-q", "-m", "Base");
   git(root, "clone", "-q", "--bare", "seed", origin);
   if (kind !== "fresh clone") git(root, "clone", "-q", origin, folder);
+  // A Cloud child in a sandbox of its own gets its parent's code, committed here, once its copy lands.
+  const source = join(root, "parent");
+  if (kind === "child") { git(root, "clone", "-q", origin, source); await writeFile(join(source, "file0.txt"), "parent\n"); git(source, "commit", "-qam", "Parent work"); }
   if (fault === "index.lock") await writeFile(join(folder, ".git", "index.lock"), "");
   let faults = fault === "status write x3" ? 99 : fault === "checkout probe" || fault === "status write" ? 1 : 0;
   const harness = await createTestAppHarness();
   const { host } = seedHostSession(harness.deps);
   const { project: own } = seedProjectWithSource(harness.deps, { hostId: host.id, path: mac });
   const project = kind === "personal child" ? { id: PERSONAL_PROJECT_ID } : own;
-  const parent = kind === "personal child" ? createThread(harness.deps.db, harness.deps.hub, { executionTarget: "cloud", projectId: PERSONAL_PROJECT_ID, providerId: "codex", status: "idle" }) : null;
-  if (parent) harness.deps.db.insert(cloudroomThreads).values({ threadId: parent.id, coreUrl: `sandbox:${parent.id}`, startRequestId: "parent", model: "test-model", reasoning: "medium" }).run();
+  const parent = kind.endsWith("child") ? createThread(harness.deps.db, harness.deps.hub, { executionTarget: "cloud", projectId: project.id, providerId: "codex", status: "idle" }) : null;
+  if (parent) harness.deps.db.insert(cloudroomThreads).values({ threadId: parent.id, coreUrl: `sandbox:${parent.id}`, sessionId: kind === "child" ? "cr_parent" : null, startRequestId: "parent", model: "test-model", reasoning: "medium" }).run();
   setProjectGitRemoteUrlIfMissing(harness.db, harness.deps.hub, project.id, "https://github.com/example/project");
   await setCopyMacGithub(harness.deps, false);
   const service = cloudroom(harness.deps);
@@ -498,12 +503,21 @@ it.each([
     if (req.url === "/v1/capabilities") return json({ version: 1, repository: "/code", stop: true, resume: true, launch_settings: true, workspaces: true, direct_workspaces: true, root_workspace: true, command_guard: true, harnesses: [{ id: "codex", model: "test-model" }] });
     if (req.url?.includes("/stream?")) { res.writeHead(200, { "Content-Type": "text/event-stream" }); res.end(); return; }
     if (req.url?.startsWith("/v1/workspaces/")) return json({ id: decodeURIComponent(req.url.split("/")[3]!), path: folder });
+    if (req.url === "/v1/sessions/cr_parent/workspace") return json({ path: source, branch: "main", head: "head" });
+    // A child's code is uploaded raw, in pieces.
+    if (req.url?.startsWith("/v1/vm/run/raw?")) {
+      const chunks: Buffer[] = []; for await (const chunk of req) chunks.push(chunk);
+      const result = spawnSync("/bin/bash", ["-c", new URL(req.url, "http://core").searchParams.get("command")!], { input: Buffer.concat(chunks) });
+      return json({ code: result.status, stdout: result.stdout.toString("hex"), stderr: result.stderr.toString("hex"), truncated: false });
+    }
     if (req.url === "/v1/sessions/cr_one/workspace") return fault === "checkout probe" && faults-- > 0 ? json({ error: "busy" }, 500) : json({ path: folder, branch: null, head: checkout().branch ? "head" : null });
     const input = await body(req);
     if (req.url === "/v1/vm/run") {
       // Core runs it in bash; the "GitHub" clone comes from a local repository. The thread's branch setup is slow.
       const command = String(input.command).replaceAll("https://github.com/example/project", origin);
       if (fault?.startsWith("status write") && command.includes(".cloudroom-files") && faults-- > 0) return json({ code: 1, stdout: "", stderr: Buffer.from("disk full").toString("hex"), truncated: false });
+      // The agent made its own branch before the thread's branch setup ran: it must stay there (#1377).
+      if (fault === "agent branch" && command.includes("git checkout -q -b")) { git(folder, "checkout", "-q", "-b", "feature"); await writeFile(join(folder, "agent.txt"), "agent\n"); git(folder, "add", "-A"); git(folder, "commit", "-qm", "Agent work"); }
       if (command.includes("git checkout -q -b")) await new Promise(resolve => setTimeout(resolve, 800));
       // Killed mid-setup (say, SIGTERM): no exit code, no output.
       if (fault === "terminated" && command.includes("git checkout -q -b")) return json({ code: null, stdout: "", stderr: "", truncated: false });
@@ -545,7 +559,10 @@ it.each([
     await waitFor(() => atDone !== undefined, "ready or failed", 15_000);
     if (fault === "index.lock" || fault === "terminated") expect(atDone).toMatchObject({ marker: expect.stringMatching(fault === "index.lock" ? /^failed: Cloudroom could not switch the folder to the thread's branch room\/.*, so it is still on main\. Git said: .*index\.lock/s : /^failed: .*Git said: exit code null$/), branch: "main" });
     // The child's parent has no folder, so its code (none) ends as failed, after the branch.
+    // The agent's own branch keeps its commit; a child's code lands only on the thread's branch (#1377).
+    else if (fault === "agent branch") expect({ ...atDone, log: git(folder, "log", "--format=%s", "feature") }).toEqual({ marker: kind === "child" ? expect.stringMatching(/^failed: The folder was already on the agent's own branch feature/) : "ready", branch: "feature", status: "", log: "Agent work\nBase" });
     else expect(atDone).toEqual({ marker: kind === "personal child" ? expect.stringMatching(/^failed: The source thread's code was not copied/) : "ready", branch: expect.stringMatching(/^room\//), status: "" });
+    if (kind === "child" && !fault) expect(git(folder, "log", "-1", "--format=%s")).toBe("Parent work");
     expect(await readdir(folder)).toContain("file19.txt");
   } finally {
     service.stop();
@@ -564,7 +581,8 @@ it("tells the user to remove forced API login when Codex refuses ChatGPT sign-in
     process.env.PATH = `${dir}:${path}`;
     process.env.CODEX_HOME = dir;
     const { macCodexLogin, startMacCodexLogin } = await import("../../src/services/cloudroom/sandboxes.js");
-    const run = startMacCodexLogin();
+    // Codex is found, so the install deps go unused.
+    const run = startMacCodexLogin({} as never);
     await waitFor(() => run.done, "codex login exit");
     expect(run.error).toContain('Remove `forced_login_method = "api"`');
     expect(run.error).toContain(join(dir, "config.toml"));
@@ -847,7 +865,7 @@ it("a saved message that meets a sandbox already gone (404) wakes it again inste
     const json = (value: unknown, status = 200) => { res.writeHead(status, { "Content-Type": "application/json" }); res.end(JSON.stringify(value)); };
     if (req.url?.includes("/stream?")) { res.writeHead(200, { "Content-Type": "text/event-stream" }); res.end(); return; }
     const input = await body(req);
-    // An unarchive right after an archive: the first wake gets the old box's address, which is gone by the time the prompt lands.
+    // An unarchive right after an archive: the first wakes get the old box's address, which is gone by the time the prompt lands (twice: #1076).
     if (gone) return json({ error: "preview not found" }, 404);
     core.push(req.url!);
     const command = req.url?.match(/^\/v1\/sessions\/cr_0\/(prompts|resume)/)?.[1];
@@ -860,7 +878,7 @@ it("a saved message that meets a sandbox already gone (404) wakes it again inste
     if (req.url === "/api/desktop/logins") return json({ claude: false, codex: false, pi: false, github: false });
     if (input.action === "awake") return json({ sandboxes: [], recheck_ms: 60_000 });
     if (input.action === "wake") {
-      if (++wakes > 1) gone = false;
+      if (++wakes > 2) gone = false;
       return json({ thread: input.thread, state: "awake", generation: wakes, issue: null, origin: coreUrl, token: "t".repeat(64) });
     }
     json({ thread: input.thread, state: "asleep", generation: 1, issue: null });
@@ -876,7 +894,7 @@ it("a saved message that meets a sandbox already gone (404) wakes it again inste
     expect(sent.status, await sent.clone().text()).toBeLessThan(300);
     await waitFor(() => core.some(path => path.startsWith("/v1/sessions/cr_0/resume")), "prompt and resume on the woken sandbox");
     expect(core.map(path => path.split("/").at(-1)!.split("?")[0])).toEqual(["prompts", "resume"]);
-    expect(harness.deps.db.select().from(cloudroomCommands).all().find(row => row.id === "after-unarchive")?.state).toBe("accepted");
+    expect(harness.deps.db.select().from(cloudroomCommands).all().find(row => row.id.endsWith("_after-unarchive"))?.state).toBe("accepted");
   } finally {
     service.stop();
     coreServer.close(); websiteServer.close();

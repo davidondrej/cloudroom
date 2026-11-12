@@ -63,6 +63,10 @@ export type Session = {
   last_sequence: number;
   queue: string[];
   receipts: { [id: string]: Receipt };
+  /** Cores with `cloud_threads` (#237): the newest app prompt, and the session this one continues. */
+  last_app_prompt?: { request_id: string; sequence: number } | null;
+  continued?: { from?: string; history?: string | null } | null;
+  title?: string | null;
 };
 export type SessionSummary = {
   session_id: string;
@@ -76,6 +80,11 @@ export type SessionSummary = {
   queued: number;
   last_sequence: number;
   last_activity_ms: number | null;
+  /** Cores with `cloud_threads` (#237). */
+  title?: string | null;
+  archived?: boolean;
+  parent_thread?: string | null;
+  last_app_prompt?: { request_id: string; sequence: number } | null;
 };
 
 const rejectionMessages: Record<string, string> = {
@@ -106,6 +115,9 @@ const rejectionMessages: Record<string, string> = {
   invalid_attachment: "The attachment could not be stored on Cloud.",
   attachment_permission_denied: "Cloud folder permission denied",
   attachment_too_large: "The attachment exceeds the Cloud size limit (10 MiB per image, 100 MiB per file).",
+  // Another computer holds the thread (#237): the send fails, so it isn't sent later into a session that's gone.
+  moving: "This thread is moving to a computer. Send it again when that's done.",
+  switching: "This thread is switching agents. Send it again in a moment.",
 };
 // Thread errors with these messages ask the user to connect an account, not retry blindly.
 export const authRequiredMessages = new Set([rejectionMessages.codex_auth_required, rejectionMessages.cursor_auth_required, rejectionMessages.claude_auth_required]);
@@ -625,10 +637,21 @@ export class CloudroomClient {
     }
   }
 
-  start(id: string, harness: Harness = "codex", options: { model?: string; reasoning?: string; workspace?: string; workspace_name?: string; provider?: string; command_guard_enabled?: boolean; strip_ai_co_authors?: boolean; system_prompt?: string; parent_session?: string; parent_thread?: string; prompt?: string; title?: string; fork?: { session: string; fresh?: boolean; before?: string; last_turn_id?: string } } = {}) {
+  start(id: string, harness: Harness = "codex", options: { model?: string; reasoning?: string; workspace?: string; workspace_name?: string; provider?: string; command_guard_enabled?: boolean; strip_ai_co_authors?: boolean; system_prompt?: string; parent_session?: string; parent_thread?: string; prompt?: string; title?: string; fork?: { session: string; fresh?: boolean; before?: string; last_turn_id?: string }; continue_from?: string } = {}) {
     if (harness !== "codex" && harness !== "pi" && harness !== "cursor" && harness !== "claude-code" && harness !== "fx" && harness !== "opencode" && harness !== "hermes" && harness !== "devin" && harness !== "droid" && harness !== "kimi" && harness !== "openclaw")
       throw new CloudroomError("Unsupported Cloudroom harness");
     return this.#command("/v1/sessions", "start", { request_id: id, harness, ...options });
+  }
+
+  /** An agent switch or project move through Core (`cloud_threads`, #237): a new session that continues `from` with Core's
+   *  own history. `pending`: the website hasn't confirmed it yet; Core keeps trying. */
+  async continueSession(id: string, harness: Harness, from: string, options: { model?: string; reasoning?: string; workspace?: string; workspace_name?: string; provider?: string } = {}): Promise<Acceptance & { pending: boolean }> {
+    requestId(id);
+    // Core answers within about 2 minutes: up to 60 s for the new agent to start, then 60 s for the website.
+    const value = await this.#json("/v1/sessions", { request_id: id, harness, continue_from: from, ...options }, undefined, undefined, 150_000);
+    const accepted = { session_id: text(value.session_id), receipt: receipt(value.receipt), saving: json(value.saving), pending: value.pending === true };
+    if (accepted.receipt.request_id !== id || accepted.receipt.command !== "start") throw new CloudroomError("Cloudroom acceptance does not match the command");
+    return accepted;
   }
 
   prompt(
@@ -789,8 +812,27 @@ export class CloudroomClient {
     );
   }
 
-  stop(sessionId: string, id: string) {
-    return this.#command(`${sessionPath(sessionId)}/stop`, "stop", { request_id: id }, sessionId);
+  /** `after`: a Stop held while the sandbox slept stops only that turn (Cores with `cloud_threads`, #237). Its receipt
+   *  says `ignored` when another turn runs. */
+  stop(sessionId: string, id: string, after?: string) {
+    return this.#command(`${sessionPath(sessionId)}/stop`, "stop", { request_id: id, ...(after ? { after } : {}) }, sessionId);
+  }
+
+  /** Holds the session for Teleport to Local (#237): until `release`, a close, or 5 minutes without renewal, Core refuses
+   *  every other client's change with code `moving`. */
+  async freeze(sessionId: string, id: string, release = false): Promise<void> {
+    requestId(id);
+    await this.#json(`${sessionPath(sessionId)}/freeze`, { request_id: id, ...(release ? { release: true } : {}) });
+  }
+
+  /** The user's rename and archive or restore of a session Core keeps them for: one sharing another thread's sandbox (#237). */
+  async renameSession(sessionId: string, id: string, title: string): Promise<void> {
+    requestId(id);
+    await this.#json(`${sessionPath(sessionId)}/title`, { request_id: id, title });
+  }
+  async archiveSession(sessionId: string, id: string, archived: boolean): Promise<void> {
+    requestId(id);
+    await this.#json(`${sessionPath(sessionId)}/archive`, { request_id: id, archived });
   }
 
   resume(sessionId: string, id: string, keepPaused = false) {
@@ -825,11 +867,12 @@ export class CloudroomClient {
     await this.#json(`${sessionPath(sessionId)}/children/${encodeURIComponent(id)}`, answer);
   }
 
-  close(sessionId: string, id: string) {
+  /** `freeze`: Teleport to Local's, so the close happens only while it still holds (#237). */
+  close(sessionId: string, id: string, freeze?: string) {
     return this.#command(
       `${sessionPath(sessionId)}/close`,
       "close",
-      { request_id: id },
+      { request_id: id, ...(freeze ? { freeze } : {}) },
       sessionId,
     );
   }
@@ -872,6 +915,9 @@ export class CloudroomClient {
           receipt(item),
         ]),
       ),
+      ...(value.last_app_prompt && typeof value.last_app_prompt === "object" ? { last_app_prompt: value.last_app_prompt as Session["last_app_prompt"] } : {}),
+      ...(value.continued && typeof value.continued === "object" ? { continued: value.continued as Session["continued"] } : {}),
+      ...(typeof value.title === "string" ? { title: value.title } : {}),
     };
   }
 

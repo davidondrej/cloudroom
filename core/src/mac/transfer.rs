@@ -52,11 +52,18 @@ pub(super) async fn pull(socket: &str, source: &str, target: &str) -> io::Result
     fs::File::open("/dev/urandom")?.read_exact(&mut random)?;
     let mark = format!("cloudroom-copy-{}", hex(&random));
     let dir = format!("/tmp/{mark}");
+    // macOS tar packs a file at the size it had when tar started and still succeeds, so a file that grows or shrinks
+    // meanwhile arrives cut short or padded: its size before and after must match (#1104). tar stores a link as itself,
+    // so only a regular file is measured; anything else passes, since a login profile may set errexit.
+    let size = "$([ ! -f \"$n\" ] || [ -L \"$n\" ] || wc -c < \"$n\")";
     let pack = format!(
         "p={}; {RESOLVE} t={dir}; mkdir -m 700 \"$t\" || exit 1; cd -- \"$(dirname -- \"$p\")\" || {{ rm -rf \"$t\"; exit 1; }}; \
+         b={size} || {{ rm -rf \"$t\"; exit 1; }}; \
          {{ COPYFILE_DISABLE=1 tar --no-xattrs -czf - -- \"$n\" || touch \"$t/failed\"; }} \
          | head -c {} > \"$t/a.tgz\"; s=$(wc -c < \"$t/a.tgz\" | tr -d ' '); \
          if [ \"$s\" -gt {MAX} ]; then rm -rf \"$t\"; echo 'The packed files are over the 2 GiB limit' >&2; exit 1; fi; \
+         [ \"{size}\" = \"$b\" ] || {{ touch \"$t/failed\"; \
+         echo 'The file changed while it was packed, so nothing was copied; try again when it is complete' >&2; }}; \
          if [ -e \"$t/failed\" ]; then rm -rf \"$t\"; exit 1; fi; printf '%s\\n' \"$n\" >&2; \
          if [ \"$s\" -le {SMALL} ]; then printf '\\n%s\\n%s\\n' {mark} \"$s\"; cat \"$t/a.tgz\"; rm -rf \"$t\"; exit 0; fi; \
          printf '\\n%s\\n%s %s\\n' {mark} \"$s\" \"$(cat \"$t/a.tgz\" | {SHA})\"; exit {STAGED}",

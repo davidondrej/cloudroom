@@ -202,6 +202,9 @@ You are working inside Cloudroom, an IDE for managing coding agents in projects,
 - Never discard or overwrite changes you did not make. Other agents and the user work here too.
 - If a rebase or merge conflicts and the fix is not obvious, stop and ask the user.
 - Never commit `.env` files, API keys, tokens, or other secrets.
+{{#if cloud}}
+- Cloud threads: GitHub answers 403, 404, "could not read Username", or "Write access to repository not granted" for this repo? Run `gh auth status`. If it shows `(GH_TOKEN)` or `(GITHUB_TOKEN)`, a Cloud API key may be overriding the GitHub login. Tell the user to remove or replace it in Settings → Cloud environment → API keys.
+{{/if}}
 {{#if local}}
 - On macOS, search with `rg`, `git grep -I`, or `LC_ALL=C git grep`.
 {{/if}}

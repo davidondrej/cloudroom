@@ -27,6 +27,7 @@ import {
   useUpdateThread,
 } from "@/hooks/mutations/thread-state-mutations";
 import { sdk } from "@/lib/sdk";
+import { fetchWithAppSurface } from "@/lib/app-surface";
 import { useRouteState } from "@/hooks/useRouteState";
 import { useDialogState } from "@/hooks/useDialogState";
 import { showMutationErrorToast } from "@/lib/mutation-errors";
@@ -66,6 +67,16 @@ function getSidebarSectionTargets(
       .querySelector(`a[data-sidebar-thread-id="${threadId}"]`)
       ?.closest<HTMLElement>("[data-sidebar-sticky-section]") ?? null,
   );
+}
+
+/** The Cloud threads in this family that Core says are working; none if it can't say. */
+async function cloudRunning(threadId: string): Promise<string[]> {
+  try {
+    const response = await fetchWithAppSurface(`/api/v1/cloudroom/threads/${encodeURIComponent(threadId)}/running`, { signal: AbortSignal.timeout(7_000) });
+    return response.ok ? ((await response.json()) as { running?: string[] }).running ?? [] : [];
+  } catch {
+    return [];
+  }
 }
 
 // The next top-level thread below the archived one, else the nearest above. Never a subagent.
@@ -445,15 +456,25 @@ export function ThreadActionsProvider({
 
   const archiveThreadAndChildrenAction = useCallback(
     (thread: Thread) => {
-      const runningThreadCount = [
+      const family = [
         thread,
         ...getCachedLiveThreadDescendants(queryClient, thread.id),
-      ].filter(isThreadRunning).length;
-      if (runningThreadCount > 0) {
-        openArchiveConfirm({ thread, runningThreadCount });
-        return;
-      }
-      performArchive(thread);
+      ];
+      const decide = (elsewhere: string[]) => {
+        const running = new Set([
+          ...family.filter(isThreadRunning).map((item) => item.id),
+          ...elsewhere,
+        ]);
+        if (running.size > 0) {
+          openArchiveConfirm({ thread, runningThreadCount: running.size });
+          return;
+        }
+        performArchive(thread);
+      };
+      // A Cloud child shown idle here may be working on another computer (#237): Core says, without a wake.
+      if (family.some((item) => item.executionTarget === "cloud"))
+        void cloudRunning(thread.id).then(decide);
+      else decide([]);
     },
     [openArchiveConfirm, performArchive, queryClient],
   );

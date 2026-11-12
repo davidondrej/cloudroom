@@ -530,7 +530,16 @@ export function createApp(
     });
   });
   app.get("/install/bb-app.tgz", async (context) => {
-    const artifact = await bbAppArtifactService.getArtifact();
+    const artifact = await bbAppArtifactService
+      .getArtifact()
+      .catch((error: unknown) => {
+        deps.logger.error({ err: error }, "Couldn't build the host package");
+        throw new ApiError(
+          503,
+          "host_package_unavailable",
+          "This Cloudroom server couldn't build its host package. Check the server log for the cause.",
+        );
+      });
     const etag = `"sha256-${artifact.digest}"`;
     const headers = {
       "cache-control": "public, max-age=300",

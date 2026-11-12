@@ -1,6 +1,7 @@
 import {
   archiveThread,
   createPendingInteraction,
+  createQueuedThreadMessage,
   getQueuedThreadMessage,
   getThread,
   listEvents,
@@ -34,6 +35,7 @@ import { acceptThreadSendRequest } from "../../src/services/threads/thread-send-
 import { handleUpdateEnvironmentDirectoryToolCall } from "../../src/services/threads/thread-environment-directory.js";
 import { applyLoggedThreadLifecycleEvent } from "../../src/services/threads/lifecycle-outcome.js";
 import { buildExecutionOptions } from "../../src/services/threads/thread-commands.js";
+import * as threadCommands from "../../src/services/threads/thread-commands.js";
 import { sendThreadMessage } from "../../src/services/threads/thread-send.js";
 import {
   internalAuthHeaders,
@@ -129,6 +131,27 @@ function seedColdIdleThreadFixture(
   });
 
   return { environment, sessionId: session.id, thread };
+}
+
+/** Holds the first host preparation open, as a busy machine does, until `release`. */
+function holdFirstPreparation() {
+  const real = threadCommands.prepareTurnSubmitCommandPayload;
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => (release = resolve));
+  let reach!: () => void;
+  const reached = new Promise<void>((resolve) => (reach = resolve));
+  let first = true;
+  vi.spyOn(threadCommands, "prepareTurnSubmitCommandPayload").mockImplementation(
+    async (...args) => {
+      if (first) {
+        first = false;
+        reach();
+        await held;
+      }
+      return real(...args);
+    },
+  );
+  return { reached, release };
 }
 
 function installTelemetryCaptureSpy(harness: TestAppHarness) {
@@ -937,6 +960,97 @@ describe("startup queue waits", () => {
 
       await expect(delivered).resolves.toBe(false);
       expect(listQueuedThreadMessages(harness.db, thread.id)).toEqual([]);
+    });
+  });
+
+  it("a queued child report joins the turn another message started while it prepared, instead of failing (#1341)", async () => {
+    await withTestHarness(async (harness) => {
+      const capture = installTelemetryCaptureSpy(harness);
+      const { thread } = seedProviderThreadFixture({ harness, value: 1341 });
+      createQueuedThreadMessage(harness.db, harness.deps.hub, {
+        threadId: thread.id,
+        content: textInput("child A completed"),
+        model: "gpt-5",
+        reasoningLevel: "medium",
+        permissionMode: "auto",
+        serviceTier: "default",
+        senderThreadId: null,
+        waitingOn: { kind: "thread-busy" },
+        sendAt: null,
+        payload: { kind: "inline" },
+        systemNotice: { kind: "child-completed", subject: null },
+      });
+
+      const preparation = holdFirstPreparation();
+      const drain = runQueuedMessageDispatch(harness.deps, {
+        kind: "thread-ready",
+        threadId: thread.id,
+      });
+      await preparation.reached;
+      await queueParentSystemMessage(harness.deps, {
+        input: textInput("child B completed"),
+        parentThreadId: thread.id,
+        systemMessageKind: "child-completed",
+        systemMessageSubject: null,
+      });
+      preparation.release();
+      await drain;
+
+      // Child B started the turn. Child A waits for it to start, then joins it.
+      expect(getThread(harness.db, thread.id)?.status).toBe("active");
+      expect(
+        listQueuedThreadMessages(harness.db, thread.id).map((row) => ({
+          content: JSON.parse(row.content),
+          failureReason: row.failureReason,
+          waitingOn: JSON.parse(row.waitingOn!),
+        })),
+      ).toEqual([
+        {
+          content: textInput("child A completed"),
+          failureReason: null,
+          waitingOn: { kind: "turn-starting" },
+        },
+      ]);
+      expect(capture).not.toHaveBeenCalledWith(
+        expect.objectContaining({ name: "queue_delivery" }),
+      );
+    });
+  });
+
+  it("keeps a child report when the parent's turn ends while it prepares (#1341)", async () => {
+    await withTestHarness(async (harness) => {
+      const { environment, thread } = seedProviderThreadFixture({
+        harness,
+        status: "active",
+        value: 1342,
+      });
+      seedTurnStarted(harness.deps, {
+        environmentId: environment.id,
+        providerThreadId: "provider-send-dispatch-1342",
+        threadId: thread.id,
+        turnId: "turn-1342",
+      });
+
+      const preparation = holdFirstPreparation();
+      const delivered = queueParentSystemMessage(harness.deps, {
+        input: textInput("child finished as the turn ended"),
+        parentThreadId: thread.id,
+        systemMessageKind: "child-completed",
+        systemMessageSubject: null,
+      });
+      await preparation.reached;
+      applyLoggedThreadLifecycleEvent(harness.deps, {
+        threadId: thread.id,
+        event: { type: "run.succeeded" },
+      });
+      preparation.release();
+
+      // The report starts the next turn. Before, it was dropped without a trace.
+      await expect(delivered).resolves.toBe(true);
+      expect(getThread(harness.db, thread.id)?.status).toBe("active");
+      expect(
+        listQueuedThreadCommands(harness, "turn.submit", thread.id),
+      ).toEqual([expect.objectContaining({ target: { mode: "start" } })]);
     });
   });
 });

@@ -178,6 +178,7 @@ import type {
   PluginResolvedProviderEnvHealth,
 } from "./plugin-service-internal.js";
 import type { PluginMachineProviderBridge } from "./plugin-machine-provider-registry.js";
+import { cloudTurnsElsewhere } from "./plugin-thread-events.js";
 export type {
   PluginAgentToolContribution,
   PluginMentionResolveResult,
@@ -550,11 +551,6 @@ export function createPluginService(deps: PluginServiceDeps): PluginService {
   }
   const bundledPlugins =
     deps.bundledPlugins ?? listBundledPluginRegistrations();
-  // A bundled plugin the app no longer ships, such as Docs (removed 2026-11-11).
-  // It is never loaded or listed. Its row and its data stay on disk.
-  const isOrphanedBuiltin = (row: InstalledPluginRow) =>
-    row.sourceKind === "builtin" &&
-    !bundledPlugins.some((bundled) => bundled.name === row.sourceBuiltinName);
   const mentionSearchTimeoutMs =
     deps.mentionSearchTimeoutMs ?? DEFAULT_MENTION_SEARCH_TIMEOUT_MS;
   const mentionResolveTimeoutMs =
@@ -630,7 +626,6 @@ export function createPluginService(deps: PluginServiceDeps): PluginService {
     withPluginOperationLock,
   } = createPluginRuntime({
     deps,
-    isOrphanedBuiltin,
     includedBuiltinNames: new Set(
       bundledPlugins
         .filter((plugin) => plugin.autoInstall)
@@ -987,9 +982,7 @@ export function createPluginService(deps: PluginServiceDeps): PluginService {
 
   function list(): InstalledPlugin[] {
     const scheduleRows = listPluginSchedules(deps.db);
-    const rows = listInstalledPlugins(deps.db).filter(
-      (row) => !isOrphanedBuiltin(row),
-    );
+    const rows = listInstalledPlugins(deps.db);
     const catalogData = installedCatalogData(rows);
     return rows
       .sort((a, b) => a.id.localeCompare(b.id))
@@ -1023,7 +1016,11 @@ export function createPluginService(deps: PluginServiceDeps): PluginService {
             catalogMarketplaceName: row.catalogMarketplaceName,
             labels: catalogData.publisherLabels,
           }),
-          isOrphanedBuiltin: false,
+          isOrphanedBuiltin:
+            row.sourceKind === "builtin" &&
+            !bundledPlugins.some(
+              (bundled) => bundled.name === row.sourceBuiltinName,
+            ),
           sourceDisplay: sourceDisplayForRow(row),
           updateState: updateStateForRow(row),
           enabled: row.enabled,
@@ -1263,6 +1260,7 @@ export function createPluginService(deps: PluginServiceDeps): PluginService {
         emitThreadEvent("thread.idle", () => ({
           thread: buildThreadDto(thread),
           lastAssistantText: getLastThreadOutput(deps.db, thread.id),
+          ...(cloudTurnsElsewhere.has(thread.id) ? { notify: false as const } : {}),
         }));
       },
       emitThreadFailed(thread) {
@@ -1274,6 +1272,7 @@ export function createPluginService(deps: PluginServiceDeps): PluginService {
             error:
               failure.message ?? getLastThreadErrorMessage(deps.db, thread.id),
             errorInfo: failure.errorInfo,
+            ...(cloudTurnsElsewhere.has(thread.id) ? { notify: false as const } : {}),
           };
         });
       },

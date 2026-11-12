@@ -58,6 +58,8 @@ export const usageMachineSchema = z.strictObject({
   status: z.enum(["connected", "disconnected"]),
   providers: z.array(usageProviderSchema),
   error: z.nullable(nonemptyStringSchema),
+  /** The computer running Cloudroom, where its sign-in buttons act. */
+  primary: z.optional(z.literal(true)),
 });
 
 export const usageSnapshotSchema = z.strictObject({

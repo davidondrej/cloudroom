@@ -493,6 +493,10 @@ fn configure(folder: &Path, connection_file: &Path, setup: Setup) -> Result<()> 
         .ok()
         .filter(|path| !path.is_empty())
         .or_else(|| text(&old, "shellPath").map(str::to_owned));
+    // The app's own loopback server, so a nested room-cli in a Mac job reaches this app (#1243, #1290).
+    let server_url = std::env::var("CLOUDROOM_SERVER_URL")
+        .ok()
+        .filter(|url| !url.is_empty());
     let program_text = program.to_string_lossy().into_owned();
     let unchanged = old["binding"] == binding
         && text(&old, "connectionFile") == connection_file.to_str()
@@ -503,6 +507,7 @@ fn configure(folder: &Path, connection_file: &Path, setup: Setup) -> Result<()> 
         && old["ownThreads"].as_bool().unwrap_or(false) == setup.own
         && old["website"].as_str() == website.as_deref()
         && old["shellPath"].as_str() == shell_path.as_deref()
+        && old["serverUrl"].as_str() == server_url.as_deref()
         && old["program"].as_str() == Some(program_text.as_str());
     if setup.activate
         && !setup.restart
@@ -543,6 +548,9 @@ fn configure(folder: &Path, connection_file: &Path, setup: Setup) -> Result<()> 
     }
     if let Some(website) = website {
         config.insert("website".into(), json!(website));
+    }
+    if let Some(url) = server_url {
+        config.insert("serverUrl".into(), json!(url));
     }
     save(&folder.join("config.json"), &Value::Object(config))?;
     net::identity(folder)?;

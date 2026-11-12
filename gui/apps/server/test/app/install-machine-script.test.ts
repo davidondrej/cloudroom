@@ -152,6 +152,7 @@ function writeServerInstallTools(
   writeExecutable(
     join(fixture.binDir, "curl"),
     `#!/bin/sh
+case "$*" in *internal/hosts/enroll*) printf '%s' 400; exit 0 ;; esac
 printf '%s\n' "$*" >>"${curlLog}"
 case "$*" in
   *)
@@ -258,6 +259,7 @@ function writeCurlArtifactMock(
   fixture: ReturnType<typeof createFixture>,
   artifactStatus: number,
   relayKey?: string,
+  enrollStatus = 400,
 ): void {
   const capture =
     relayKey === undefined
@@ -268,6 +270,7 @@ grep -rl -- '${relayKey}' "$TMPDIR" >"${join(fixture.dataDir, "curl-key-files")}
   writeExecutable(
     join(fixture.binDir, "curl"),
     `#!/bin/sh
+case "$*" in *internal/hosts/enroll*) printf '%s' '${enrollStatus}'; exit 0 ;; esac
 ${capture}output=
 while [ "$#" -gt 0 ]; do
   if [ "$1" = --output ]; then output=$2; shift 2; else shift; fi
@@ -385,6 +388,7 @@ exec '${process.execPath}' "$@"
 
   it("rejects an invalid explicit host-daemon port", () => {
     const fixture = createFixture();
+    writeCurlArtifactMock(fixture, 404);
     const result = runScript(
       [...JOIN_ARGS, "--host-daemon-port", "0"],
       fixture,
@@ -816,6 +820,19 @@ fs.writeFileSync(path.join(process.env.ROOM_DATA_DIR, "config.json"), JSON.strin
     expect(existsSync(join(fixture.dataDir, "host-artifact.sha256"))).toBe(
       false,
     );
+  });
+
+  it("refuses a join code before installing when the address hides enrollment", () => {
+    const fixture = createFixture();
+    writeCurlArtifactMock(fixture, 200, undefined, 404);
+    const result = runScript(JOIN_ARGS, fixture);
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(
+      "room-cli machine create --provider manual",
+    );
+    expect(readdirSync(fixture.dataDir)).toEqual([]);
+    expect(existsSync(join(fixture.homeDir, ".local"))).toBe(false);
   });
 
   it("never falls back to other software when the server has no package", () => {

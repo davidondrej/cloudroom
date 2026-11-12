@@ -675,6 +675,40 @@ describe("TerminalManager", () => {
     );
   });
 
+  it("reports a stuck shell lookup before the server's open limit", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    let resolveShellCalls = 0;
+    const harness = createHarnessWithShell({
+      resolveShell: () => {
+        resolveShellCalls += 1;
+        return new Promise<string>(() => undefined);
+      },
+    });
+
+    const openPromise = harness.manager.handleMessage({
+      type: "terminal.open",
+      contributedEnv: [],
+      requestId: "open-1",
+      terminalId: "term-1",
+      target: { kind: "host_path", cwd: null },
+      cols: 100,
+      rows: 30,
+      start: DEFAULT_TERMINAL_START,
+    });
+    await vi.waitFor(() => expect(resolveShellCalls).toBe(1));
+    await vi.advanceTimersByTimeAsync(8_000);
+    await openPromise;
+
+    expect(harness.adapter.spawned).toHaveLength(0);
+    expect(harness.messages).toContainEqual(
+      expect.objectContaining({
+        type: "terminal.error",
+        code: "terminal_open_step_timeout",
+        message: expect.stringContaining("Finding the shell"),
+      }),
+    );
+  });
+
   it("shuts down terminals after in-progress opens finish", async () => {
     const shell = createDeferredPromise<string>();
     let resolveShellCalls = 0;

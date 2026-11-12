@@ -60,7 +60,7 @@ describe("Claude Code provider maintenance", () => {
     ).toMatchObject({
       status: "ok",
       accountEmail: "claude@example.com",
-      planLabel: "Max (5x)",
+      planLabel: "Max",
       windows: [
         { label: "Current session", usedPercent: 12 },
         { label: "Weekly limit", usedPercent: 55 },

@@ -123,8 +123,9 @@ async function switchThenResend(
     if (run.late) throw switchTimeout();
     const thread = requireSwitchableThread(deps, threadId);
     run.cloud = isCloudThread(thread);
-    const prepare = async () => {
-      const seed = await historySeed(
+    // A Core that switches the conversation itself builds the history (#237): no seed then.
+    const prepare = async (seeded = true) => {
+      const seed = !seeded ? [] : await historySeed(
         deps,
         thread,
         `[Cloudroom] This conversation started with another agent (${thread.providerId}). You are now continuing it as ${target.providerId}.`,

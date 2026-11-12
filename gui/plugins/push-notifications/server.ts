@@ -180,11 +180,12 @@ export function createPushNotificationsPlugin(options: PluginOptions = {}) {
     bb.events.on("interaction.pending", ({ thread, interaction }) => {
       queue(thread.id, "question", describeInteraction(interaction));
     });
-    bb.events.on("thread.failed", ({ thread, error }) => {
+    bb.events.on("thread.failed", ({ thread, error, notify }) => {
+      if (notify === false) return;
       queue(thread.id, "error", firstLine(error) || "The thread hit an error");
     });
-    bb.events.on("thread.idle", ({ thread, lastAssistantText }) => {
-      if (thread.parentThreadId !== null || thread.visibility !== "visible") {
+    bb.events.on("thread.idle", ({ thread, lastAssistantText, notify }) => {
+      if (notify === false || thread.parentThreadId !== null || thread.visibility !== "visible") {
         return;
       }
       queue(

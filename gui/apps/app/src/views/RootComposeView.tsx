@@ -150,7 +150,10 @@ import {
   ROOT_COMPOSE_PINNED_PANEL_TOGGLE_POSITION_CLASS,
   RootComposeSecondaryContent,
 } from "./RootComposeSecondaryContent";
+import { prefetchThreadTimeline } from "@/hooks/queries/thread-queries";
+import { useCommittedRef } from "@/hooks/useLatestRef";
 import { RootComposeMobileRecents } from "./RootComposeMobileRecents";
+import { StartingThread, type StartingThreadMessage } from "./StartingThread";
 import {
   shouldLoadThreadStorageFileList,
   useThreadStorageViewer,
@@ -197,6 +200,8 @@ import {
 } from "./RootComposePanelTabContent";
 
 const ROOT_COMPOSE_SIDEBAR_ACTION_ALIGNED_TOP_PADDING_CLASS = "pt-14";
+// How long a new thread waits for its messages before it opens without them.
+const STARTING_THREAD_MESSAGES_WAIT_MS = 1500;
 
 const EMPTY_TERMINAL_SESSIONS: readonly TerminalSession[] = [];
 
@@ -545,6 +550,13 @@ export function RootComposeView() {
   );
   const [navigateToThreadAfterCreate] =
     useNavigateToThreadAfterCreatePreference();
+  const isCompactViewport = useIsCompactViewport();
+  // The starting screen belongs to the visit that sent the message. Going
+  // anywhere else, even "New thread" at this same address, puts it away.
+  const [startingThread, setStartingThread] = useState<
+    (StartingThreadMessage & { visit: string }) | null
+  >(null);
+  const latestVisit = useCommittedRef(location.key);
   const [forkSeed, setForkSeed] = useState<ForkThreadCreateSeed | null>(() =>
     readForkThreadCreateSeedFromLocationState(location.state),
   );
@@ -596,30 +608,69 @@ export function RootComposeView() {
             });
       if (createRequest === null)
         throw new Error(`This agent can't fork on this ${COMPUTER}. Pick Cloud instead.`);
-      const thread = await createThread.mutateAsync(
-        sendAt === undefined
-          ? createRequest
-          : {
-              ...createRequest,
-              ...(sendAt === undefined ? {} : { sendAt }),
-            },
-      );
-      pinIfRequested(thread.id);
-      setLastCreatedThreadId(thread.id);
-      setForkSeed(null);
-      setRootComposeSectionId(null);
-      if (shouldNavigateToCreatedThread) {
-        navigate(
-          getThreadRoutePath({
-            projectId: thread.projectId,
-            threadId: thread.id,
-          }),
+      // A phone shows the message in a thread at once, instead of a spinner on Send.
+      // Forks, scheduled sends, and plugin sends open on something else, so they wait as before.
+      const showsStartingThread =
+        shouldNavigateToCreatedThread &&
+        isCompactViewport &&
+        forkSeed === null &&
+        sendAt === undefined &&
+        request.pluginSubmission === undefined;
+      const visit = location.key;
+      if (showsStartingThread) {
+        setStartingThread({
+          input: request.input,
+          projectId: request.projectId,
+          sentAt: Date.now(),
+          visit,
+        });
+      }
+      try {
+        const thread = await createThread.mutateAsync(
+          sendAt === undefined
+            ? createRequest
+            : {
+                ...createRequest,
+                ...(sendAt === undefined ? {} : { sendAt }),
+              },
         );
+        pinIfRequested(thread.id);
+        setLastCreatedThreadId(thread.id);
+        setForkSeed(null);
+        setRootComposeSectionId(null);
+        // Whoever left the starting screen stays where they went; the thread is in Recent.
+        const leftStartingThread =
+          showsStartingThread && latestVisit.current !== visit;
+        if (shouldNavigateToCreatedThread && !leftStartingThread) {
+          // The thread opens with its messages loaded, so the message never blinks out.
+          if (showsStartingThread) {
+            await Promise.race([
+              prefetchThreadTimeline(queryClient, thread.id),
+              new Promise((resolve) =>
+                setTimeout(resolve, STARTING_THREAD_MESSAGES_WAIT_MS),
+              ),
+            ]);
+          }
+          navigate(
+            getThreadRoutePath({
+              projectId: thread.projectId,
+              threadId: thread.id,
+            }),
+          );
+        }
+      } catch (error) {
+        // The composer comes back, with the prompt still in it. A thread that
+        // was made keeps this screen up until its own replaces it.
+        setStartingThread(null);
+        throw error;
       }
     },
     [
       createThread,
       forkSeed,
+      isCompactViewport,
+      latestVisit,
+      location.key,
       queryClient,
       navigate,
       navigateToThreadAfterCreate,
@@ -663,19 +714,27 @@ export function RootComposeView() {
       preferReadyProviderWhenUnset={forkSeed === null}
       onSubmit={handleSubmit}
     >
-      {(composer) => (
-        <RootComposeSurface
-          composer={composer}
-          forkSeed={forkSeed}
-          lastCreatedThreadId={lastCreatedThreadId}
-          rootComposeProjectId={rootComposeProjectId}
-          setForkSeed={setForkSeed}
-          setRootComposeProjectId={setRootComposeProjectId}
-          setRootComposeSectionId={setRootComposeSectionId}
-          setStartedComposing={setStartedComposing}
-          startedComposing={startedComposing}
-        />
-      )}
+      {(composer) =>
+        startingThread?.visit === location.key ? (
+          <StartingThread
+            input={startingThread.input}
+            projectId={startingThread.projectId}
+            sentAt={startingThread.sentAt}
+          />
+        ) : (
+          <RootComposeSurface
+            composer={composer}
+            forkSeed={forkSeed}
+            lastCreatedThreadId={lastCreatedThreadId}
+            rootComposeProjectId={rootComposeProjectId}
+            setForkSeed={setForkSeed}
+            setRootComposeProjectId={setRootComposeProjectId}
+            setRootComposeSectionId={setRootComposeSectionId}
+            setStartedComposing={setStartedComposing}
+            startedComposing={startedComposing}
+          />
+        )
+      }
     </NewThreadComposer>
   );
 }
@@ -852,9 +911,14 @@ function RootComposeSurface({
     } else {
       restorePromptDraftIfEmpty(nextDraft);
     }
+    // Carry a section target along, or the next pass reads focusPrompt alone as "clear the section".
+    const state = location.state as { sectionId?: unknown };
     navigate(getRootComposeRoutePath() + location.search, {
       replace: true,
-      state: { focusPrompt: true },
+      state: {
+        focusPrompt: true,
+        ...("sectionId" in state ? { sectionId: state.sectionId } : {}),
+      },
     });
   }, [
     location.search,

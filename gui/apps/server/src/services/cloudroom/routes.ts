@@ -14,7 +14,7 @@ import { checkPreviewsNow, macAccess, macAccessLevels, setMacAccess } from "./pr
 import { cloudSkills, copyLogins, markLogin, setCloudSkills, setCopyLogins, skillInCloud } from "./sync.js";
 import { secondsSinceFirstLaunch } from "./setup-telemetry.js";
 import { teleports } from "./teleport.js";
-import { binding, teleportBlocked, teleportProgress } from "./store.js";
+import { binding, command, teleportBlocked, teleportProgress } from "./store.js";
 import { browserRequestProblem } from "../../browser-request-guard.js";
 import { cancelClaudeToken, claudePlan, connectClaude, isClaudeApiKey, withClaudeTokenRun } from "./claude-token.js";
 import { startClaudeVersionSync } from "./harness-versions.js";
@@ -32,7 +32,10 @@ import { projectLoopSettings } from "./project-loops.js";
 import { tokenUsageSince } from "./loop-usage.js";
 import { macClis } from "./clis.js";
 import { finishMcpSignIn, isRemoteMcp, startMcpSignIn } from "./mcp-login.js";
-import { archiveThreadAndChildren } from "../threads/thread-archive.js";
+import { archiveFromWebsite, archiveThreadAndChildren, listThreadWithDescendants } from "../threads/thread-archive.js";
+import { unarchiveThreadKeepingOpenParent } from "../threads/thread-ownership.js";
+import { deleteThreadOnMac } from "../threads/thread-lifecycle.js";
+import { emitPluginThreadUnarchived } from "../plugins/plugin-thread-events.js";
 import { assertValidParentThread } from "../threads/thread-parent.js";
 import { queueChildThreadTurnNotificationBestEffort } from "../threads/child-thread-notifications.js";
 import { reportBug } from "./bug-reports.js";
@@ -58,11 +61,17 @@ const CLOUD_RUN = /^auto_[a-f0-9]{32}_[0-9]{1,16}$/;
 
 export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: PluginService): void {
   cloudroom(deps).teleportRecovery = () => teleports(deps).recover();
-  cloudroom(deps).archiveRequest = (threadId, liveThreadIds) => {
+  cloudroom(deps).archiveRequest = (threadId, liveThreadIds, websiteHasIt) => {
     const thread = getThread(deps.db, threadId);
     if (!thread || thread.archivedAt || thread.deletedAt) return;
-    try { archiveThreadAndChildren(deps, { parentThread: thread, liveThreadIds }); }
+    try { archiveThreadAndChildren(deps, { parentThread: thread, liveThreadIds, websiteHasRoot: websiteHasIt }); }
     catch (error) { deps.logger.warn({ error, threadId }, "Cloud self-archive failed"); }
+  };
+  // The website's list applies through the same local parts as a click, without their website calls (#237).
+  cloudroom(deps).sync.local = {
+    archive: (thread) => archiveFromWebsite(deps, thread),
+    unarchive: (thread) => { const restored = unarchiveThreadKeepingOpenParent(deps, thread.id, true); if (restored) emitPluginThreadUnarchived(restored); },
+    remove: (thread) => deleteThreadOnMac(deps, thread),
   };
   cloudroom(deps).childTurnEnded = (child, turnStatus) => void queueChildThreadTurnNotificationBestEffort(deps, { childThread: child, parentThreadId: child.parentThreadId, turnStatus });
   startClaudeVersionSync(deps, () => cloudroom(deps).teleportClient());
@@ -95,7 +104,8 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: Plugin
     if (body.action === "check") return context.json(await teleports(deps).check(id, choice));
     return context.json(await teleports(deps).begin(id, choice), 202);
   });
-  app.get("/api/v1/cloudroom/threads/:id/share", async context => context.json(await threadShare(deps, context.req.param("id"))));
+  // `fresh`: the share menu opened, so a Cloud thread's share is read from the website; otherwise the local copy.
+  app.get("/api/v1/cloudroom/threads/:id/share", async context => context.json(await threadShare(deps, context.req.param("id"), context.req.query("fresh") === "1")));
   app.post("/api/v1/cloudroom/threads/:id/share", async context => {
     const { action } = z.object({ action: z.enum(["save", "stop", ...SHARE_CLICKS]) }).strict().parse(await context.req.json());
     const id = context.req.param("id");
@@ -103,6 +113,23 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: Plugin
     if (action === "stop") await stopSharing(deps, id);
     else await shareClicked(deps, id, action);
     return context.json(null);
+  });
+  // The relay's signal that the account's Cloud threads changed, or the connect plugin after its tunnel came up or went
+  // down (#237). The relay strips this header from visitors' requests; a forged one only makes the app list, every 5 s.
+  app.post("/api/v1/cloudroom/threads-changed", async context => {
+    if (context.req.header("x-cloudroom-relay") !== "threads") return context.json({ message: "Not found" }, 404);
+    const { tunnel } = z.object({ tunnel: z.boolean().optional() }).catch({}).parse(await context.req.json().catch(() => ({})));
+    cloudroom(deps).sync.changed(tunnel);
+    return context.json(null, 202);
+  });
+  // The Archive dialog asks before it stops working children (#237, App 8): their real state, read once.
+  app.get("/api/v1/cloudroom/threads/:id/running", async context => {
+    const thread = getThread(deps.db, context.req.param("id"));
+    if (!thread) return context.json({ message: "Thread not found" }, 404);
+    const cloud = listThreadWithDescendants(deps, thread).filter((item) => item.executionTarget === "cloud" && !item.archivedAt && !item.deletedAt);
+    // A few seconds at most: past that the dialog uses what it has, as when the read fails.
+    const limit = new Promise<string[]>((resolve) => setTimeout(() => resolve([]), 5_000).unref());
+    return context.json({ running: await Promise.race([cloudroom(deps).runningInCloud(cloud.map((item) => item.id)), limit]) });
   });
   app.get("/api/v1/cloudroom/connect", async context => context.json(await connectAccount(deps)));
   app.post("/api/v1/cloudroom/connect", async context => {
@@ -429,7 +456,7 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: Plugin
       const sandboxes = cloudroom(deps).sandboxes;
       const { name, server, signIn, account } = await finishMcpSignIn(new URL(context.req.url).searchParams, await sandboxes.account());
       await sandboxes.saveMcpSignIn(name, server, signIn, account);
-      return page(`Signed in to ${name}`, "Every cloud thread can use it now. You can close this tab.");
+      return page(`Signed in to ${name}`, "Claude Code cloud threads can use it from their next message. You can close this tab.");
     } catch (error) {
       deps.logger.warn({ error: error instanceof Error ? error.message : String(error) }, "Cloud MCP sign-in failed");
       return page("Sign-in didn't finish", `${error instanceof Error ? error.message : String(error)} Try again in Cloudroom.`);
@@ -547,10 +574,10 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: Plugin
     });
   }
   const macCodexStatus = (run: ReturnType<typeof macCodexLogin>) =>
-    !run ? { state: "idle" as const } : !run.done ? { state: "waiting" as const } : run.error ? { state: "error" as const, message: run.error } : { state: "done" as const };
+    !run ? { state: "idle" as const } : !run.done ? { state: "waiting" as const, installing_since: run.installingSince } : run.error ? { state: "error" as const, message: run.error } : { state: "done" as const };
   app.post("/api/v1/cloudroom/mac/codex-login", async context => {
     await markLogin(deps, "codex", null);
-    return context.json(macCodexStatus(startMacCodexLogin()));
+    return context.json(macCodexStatus(startMacCodexLogin(deps)));
   });
   app.get("/api/v1/cloudroom/mac/codex-login", context => context.json(macCodexStatus(macCodexLogin())));
   app.get("/api/v1/cloudroom/mac/agents", async context => context.json({ agents: await macSignedInAgents() }));
@@ -720,6 +747,16 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: Plugin
     }
     if (context.req.method === "POST" && /^\/queued-messages\/[^/]+\/send$/.test(path)) {
       return context.json(await cloudroom(deps).sendQueued(thread, path.split("/")[2]!));
+    }
+    // `thread retry` is a Local action; name the Cloud recovery instead of the generic refusal (#1325).
+    if (context.req.method === "POST" && path === "/retry") {
+      // A rejected start, prompt or side chat alike, is the one retryStart() accepts.
+      const recovery = thread.deletedAt ? "This Cloud thread has been deleted and cannot be retried."
+        : thread.archivedAt ? `Restore it first with \`room-cli thread unarchive ${thread.id}\`.`
+        : !binding(deps.db, thread.id)?.sessionId && command(deps.db, `first_${thread.id}`)?.state === "failed"
+          ? `This Cloud start was rejected; retry it with \`room-cli cloud retry-start ${thread.id}\`.`
+          : `Check \`room-cli thread show ${thread.id}\` and \`room-cli thread output ${thread.id}\` first, and send a follow-up only if work is really unfinished.`;
+      return context.json({ message: `thread retry is for Local threads. ${recovery}`, code: "cloudroom_unsupported" }, 409);
     }
     return context.json({ message: "This action is not enabled for Cloud threads. Native execution is blocked.", code: "cloudroom_unsupported" }, 409);
   };

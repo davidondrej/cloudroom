@@ -5,6 +5,7 @@ import type { NotificationHub } from "../../ws/hub.js";
 import type { TelemetryEvent, TelemetryExecution, TelemetryService } from "./telemetry.js";
 import type { SandboxDirectory } from "../cloudroom/sandboxes.js";
 import { secondsSinceFirstLaunch } from "../cloudroom/setup-telemetry.js";
+import { firstAgentTag } from "./first-agent.js";
 
 const OUTPUT_TYPES: ThreadEventType[] = [
   "item/started",
@@ -72,6 +73,7 @@ export function installFirstResponseTelemetry(
           service_tier: sent.serviceTier ?? null,
           harness_version: sent.provider === "codex" ? startup?.versions?.codex ?? null : sent.provider === "claude-code" ? startup?.versions?.claude ?? null : null,
           seconds_since_first_launch: secondsSinceFirstLaunch(),
+          ...firstAgentTag(current.db, message.id),
         },
       });
       return;

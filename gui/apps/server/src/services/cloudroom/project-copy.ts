@@ -94,12 +94,17 @@ export function planProjectCopy(...args: Parameters<typeof planProjectCopyOrThro
 
 /** A new thread's copy (#337): a request its just-claimed sandbox drops is tried once more a second later, and an error
  *  that remains throws, so the thread is told instead of starting with an empty folder. Its sandbox gets 10 seconds in
- *  all, so the first message never waits long (ADR 0160); Try again covers the rest. A folder another copy fills needs nothing more. */
+ *  all, so the first message never waits long (ADR 0160); the caller plans again later (#1040). Each try gets its own
+ *  deadline, so the second never starts already timed out. A folder another copy fills needs nothing more. */
 export function planNewProjectCopy(deps: Deps, client: CloudroomClient, threadId: string, workspace: string, options: { key: string; branch?: string }): Promise<ProjectCopyJob | null> {
-  const signal = AbortSignal.timeout(10_000);
-  const plan = () => planProjectCopyOrThrow(deps, client, threadId, workspace, { ...options, signal });
-  return plan()
-    .catch(() => new Promise(resolve => setTimeout(resolve, 1_000)).then(plan))
+  const end = Date.now() + 10_000;
+  const plan = (ms: number) => planProjectCopyOrThrow(deps, client, threadId, workspace, { ...options, signal: AbortSignal.timeout(ms) });
+  return plan(6_000)
+    .catch(async (error: unknown) => {
+      await new Promise(resolve => setTimeout(resolve, 1_000));
+      if (end - Date.now() < 3_000) throw error;
+      return plan(end - Date.now());
+    })
     .catch((error: unknown) => {
       if (copying.has(options.key)) return null;
       throw error;
@@ -130,6 +135,9 @@ export async function planProjectCopyOrThrow(deps: Deps, client: CloudroomClient
   // A Mac folder that can't be read has no `.env` files to send, so it reads as nothing left, never as a reason to wait.
   return clone || copyAll || teleport || (path !== null && !noEnv && (await localFiles(path, "env").catch(() => [])).length) ? job : null;
 }
+
+/** Whether a copy fills this folder (copy key) in this app. */
+export const keyCopying = (key: string) => copying.has(key);
 
 /** Whether a copy for this thread runs in this app: an app restart ends every copy, but leaves its saved progress. */
 export const copyRunning = (threadId: string) => [...copying.values()].includes(threadId);
@@ -278,7 +286,8 @@ async function clone(deps: Deps, client: CloudroomClient, target: string, reposi
   const result = await client.runOnVm({
     command: [
       "export GIT_TERMINAL_PROMPT=0",
-      token ? "{ { gh auth status --hostname github.com || gh auth login --hostname github.com --with-token; } && gh auth setup-git --hostname github.com; } >/dev/null 2>&1 || true" : "",
+      // `gh auth status` asks GitHub's API, so a used-up quota reads as a bad token (#1182). Log in only when gh has no token.
+      token ? "{ gh auth token --hostname github.com || gh auth login --hostname github.com --with-token; gh auth setup-git --hostname github.com; } >/dev/null 2>&1 || true" : "",
       `rm -rf -- ${temporary}`,
       `git clone --quiet --filter=blob:none -c gc.auto=0 -- ${quote(repository)} ${temporary} || { printf '\\035'; timeout 10 gh api user --jq .login 2>/dev/null; exit 1; }`,
       branch && branch !== "HEAD" ? `git -C ${temporary} checkout --quiet ${quote(branch)} 2>/dev/null || true` : "",

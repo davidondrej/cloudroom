@@ -6,6 +6,7 @@ import { z } from "zod";
 import { COMPUTER_TITLE } from "@cloudroom/domain/computer-name";
 import {
   ClaudeLogin,
+  claudePlanName,
   claudeSecret,
   claudeUsage,
   localClaudeAccount,
@@ -53,6 +54,8 @@ const storedSchema = z.object({
   name: z.string().nullish(),
   email: z.string().nullable(),
   plan: z.string().nullable(),
+  // Claude's plan tier, such as `max_20x`: it names Max and Ultra apart. Missing: saved before tiers were read.
+  tier: z.string().nullish(),
   accountKey: z.string().nullable(),
   // The account's own Claude folder with its full login (claude.ai connectors); older accounts have only the one-year token.
   profile: z.string().nullish(),
@@ -97,6 +100,12 @@ function blockedUntil(
   );
   return resets.length === 0 ? null : Math.max(...resets);
 }
+
+// What the usage bars show: each one's name and whole percent.
+const bars = (windows: UsageWindow[] = []) =>
+  windows
+    .map((window) => `${window.label}:${Math.round(window.usedPercent)}`)
+    .join();
 
 export default async function plugin(bb: BbPluginApi) {
   const kv = bb.storage.kv;
@@ -437,6 +446,9 @@ export default async function plugin(bb: BbPluginApi) {
       !measured?.credits !== !previous?.credits
     )
       await changed();
+    // Open pages read again when a bar moved.
+    else if (bars(measured?.windows) !== bars(previous?.windows))
+      bb.realtime.publish(ACCOUNTS_CHANGED, {});
   };
   // A Claude check is a real 1-token reply that can open a 5-hour window,
   // so only the account in use is checked in the background. Cursor's usage is a plain read.
@@ -459,11 +471,22 @@ export default async function plugin(bb: BbPluginApi) {
   timer.unref();
   bb.onDispose(() => clearInterval(timer));
   void refreshAll();
+  // Accounts saved before plan tiers were read learn theirs once, so Ultra shows as Ultra.
+  void Promise.all(
+    accounts
+      .filter((entry) => entry.provider === "claude-code" && entry.profile && entry.tier === undefined)
+      .map(async (entry) => {
+        const found = await profileAccount(profilePath(entry.profile!)).catch(() => null);
+        if (!found) return false;
+        entry.tier = found.tier;
+        return true;
+      }),
+  ).then((read) => (read.includes(true) ? changed() : undefined));
 
   // Adding never switches accounts: the one in use stays in use.
   const add = async (
     signedIn: SignedIn,
-    login: Pick<Stored, "profile" | "org">,
+    login: Pick<Stored, "profile" | "org" | "tier">,
   ) => {
     if (
       accounts.filter((account) => account.provider === "claude-code").length >=
@@ -491,16 +514,26 @@ export default async function plugin(bb: BbPluginApi) {
     void refreshUsage(account, true);
   };
 
+  // Listed in the order they were added, the machine's own login first, so picking an account never moves a row.
+  // The saved order only says which account is in use: its first entry.
+  const shown = (provider: Ordered): string[] => {
+    const added = (id: string) =>
+      accounts.find((entry) => entry.id === id)?.createdAt ?? 0;
+    return [...ids(provider)].sort((a, b) => added(a) - added(b));
+  };
   const rows = (provider: Ordered, localEmail: string | null): AccountView[] => {
     const using = current(provider);
-    return ids(provider).map((id) => {
+    return shown(provider).map((id) => {
       const account = accounts.find((entry) => entry.id === id);
       const measured = usage.get(id);
       return {
         id,
         name: account?.name ?? null,
         email: id === LOCAL ? localEmail : (account?.email ?? null),
-        plan: account?.plan ?? null,
+        plan:
+          provider === "claude-code"
+            ? (claudePlanName(account?.plan ?? null, account?.tier) ?? null)
+            : (account?.plan ?? null),
         inUse: id === using,
         limitedUntil: limitedUntil(provider, id),
         error: measured?.error ?? null,
@@ -640,7 +673,7 @@ export default async function plugin(bb: BbPluginApi) {
     if (!existing)
       return add(
         { email: account.email, plan: account.plan, accountKey: null, secret },
-        { profile: state.profile, org: account.orgId },
+        { profile: state.profile, org: account.orgId, tier: account.tier },
       );
     // A revoked token can't name its account; anything else unconfirmed keeps the saved login.
     const before =
@@ -663,6 +696,7 @@ export default async function plugin(bb: BbPluginApi) {
     await writeSecret(existing.id, secret);
     existing.email = account.email;
     existing.plan = account.plan ?? existing.plan;
+    existing.tier = account.tier ?? existing.tier;
     existing.profile = state.profile;
     existing.org = account.orgId;
     if (old) void dropProfile(old);
@@ -1046,13 +1080,18 @@ export default async function plugin(bb: BbPluginApi) {
       .catch(() => null);
     const provider = providerSchema.safeParse(thread?.providerId);
     if (!provider.success) return;
-    // Cloud threads and Codex use the selected account, so they have no entry here.
-    const used = threadAccount.get(event.threadId) ?? current(provider.data);
+    // Cloud threads use the selected account, so they have no entry here. A Local thread without one started its turn
+    // before this plugin did (a restart): the account it ran on is unknown, so no account is marked limited.
+    const ran = threadAccount.get(event.threadId);
+    const used = ran ?? current(provider.data);
     const several =
       provider.data === "codex"
         ? codexAccounts > 0
         : ids(provider.data).length > 1;
-    if (used !== LOCAL || several) {
+    if (
+      (ran !== undefined || thread?.executionTarget === "cloud") &&
+      (used !== LOCAL || several)
+    ) {
       limits[`${provider.data}:${used}`] =
         blockedUntil(event.rateLimits) ?? Date.now() + DEFAULT_REST_MS;
       limitedAt.set(`${provider.data}:${used}`, Date.now());
@@ -1100,12 +1139,19 @@ export default async function plugin(bb: BbPluginApi) {
     turnBegan.delete(thread.id);
     const provider = providerSchema.safeParse(thread.providerId);
     if (began === undefined || !provider.success) return;
-    const key = `${provider.data}:${threadAccount.get(thread.id) ?? current(provider.data)}`;
+    const used = threadAccount.get(thread.id) ?? current(provider.data);
+    const key = `${provider.data}:${used}`;
     if (!(key in limits) || began <= (limitedAt.get(key) ?? 0)) return;
     delete limits[key];
     limitedAt.delete(key);
     await kv.set("limits:v1", limits);
     bb.realtime.publish(ACCOUNTS_CHANGED, {});
+    // The bars read when the limit hit still say 100%, so a full login's are read again at once.
+    const account = accounts.find((entry) => entry.id === used);
+    if (account?.profile)
+      void refreshUsage(account, true).then(() =>
+        bb.realtime.publish(ACCOUNTS_CHANGED, {}),
+      );
   });
 
   // Codex signs in from the app (codex-accounts.ts); this only notes which account each thread starts on.

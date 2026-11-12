@@ -123,6 +123,17 @@ pub(super) fn login(config: &Config) -> u64 {
     hasher.finish()
 }
 
+/// Fingerprint of the cloud MCP sign-ins the website wrote. Claude connects MCP servers only at start, so a new
+/// sign-in restarts an idle agent before its next prompt (#1175). Token refreshes never change it.
+pub(super) fn mcp_login(config: &Config) -> u64 {
+    use std::hash::{DefaultHasher, Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    fs::read(config.state_dir.join("claude-mcp-signins"))
+        .ok()
+        .hash(&mut hasher);
+    hasher.finish()
+}
+
 pub(super) fn profile_env(command: &mut Command, config: &Config, profile: &HarnessConfig) {
     // Setting this even to ~/.claude relocates ~/.claude.json and hides native user settings.
     if profile.home != config.account_home.join(".claude") {

@@ -151,11 +151,11 @@ function PlanMeter({ plan, used, limit, extra, extraTotal, onExpand }: { plan: s
 const FREE_WITHOUT_CREDITS = ["starting new cloud threads", "idle cloud threads", "sleeping sandboxes", "waiting for your reply", "your ai tokens", "local threads", "chat history and files"];
 
 /** Once per account, ever (ADR 0307, 0321): what changed, the one thing that uses credits, and the one-time reset
- *  (ADR 0308). Only accounts that paid before Cloud Credits see it; new users, new payers, and OGs on the free Pro never do. */
+ *  (ADR 0308). Only accounts that paid before Cloud Credits see it; new users and new payers never do. */
 export function CreditsExplainer() {
   const usage = useCloudroomAccount().data?.planUsage ?? null;
   const cohort = useCreditsCohort();
-  const popup = usePopup("credits", cohort === false ? false : cohort && usage ? usage.plan !== "free" && !usage.og : null);
+  const popup = usePopup("credits", cohort === false ? false : cohort && usage ? usage.plan !== "free" : null);
   if (!usage || !popup.open) return null;
   const close = () => popup.close();
   const used = usage.credits ?? 0, mono = "font-mono text-[11px] leading-[1.9]";
@@ -212,42 +212,6 @@ export function FreePlanTip() {
   const [reason] = useState(nextReason);
   if (usage?.plan !== "free") return null;
   return <UpgradeTip where="free_tip" className="mt-3 px-3.5">{reason}</UpgradeTip>;
-}
-
-const OG_HIDDEN_KEY = "cloudroom.ogLetterHiddenUntil";
-const HAND = { fontFamily: '"Bradley Hand", "Noteworthy", "Segoe Print", cursive' };
-
-/** David's letter to OG beta testers under the new-thread composer (ADR 0218). The website sends `og` only to OGs still
- *  on the free Pro it gave them, never to Free, paying, or team accounts. "Not now" hides it for 3 days. */
-export function OgLetter() {
-  const og = useCloudroomAccount().data?.planUsage?.og ?? null;
-  const [hidden, setHidden] = useState(() => Number(localStorage.getItem(OG_HIDDEN_KEY)) > Date.now());
-  const show = Boolean(og) && !hidden;
-  useUpgradePromptViewed(show ? "og_letter" : null);
-  if (!og || !show) return null;
-  const ends = new Date(og.endsAt).toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" });
-  const notNow = () => {
-    localStorage.setItem(OG_HIDDEN_KEY, String(Date.now() + 3 * 86_400_000));
-    setHidden(true);
-  };
-  return (
-    <section aria-label="A note from David" className="mt-3 rounded-sm bg-[#f3eee2] px-6 pb-3.5 pt-3 text-[#2a2a28] shadow-lg [background-image:repeating-linear-gradient(180deg,transparent_0_29px,rgba(70,110,160,0.16)_29px_30px)] [background-position:0_13px]">
-      <p className="text-lg leading-[30px]" style={HAND}>
-        {og.name ? `Hey ${og.name},` : "Hey,"}<br />
-        thanks for testing Cloudroom so early.<br />
-        Free Pro ends {ends}, but you keep 50% off forever.
-      </p>
-      <p className="mb-2.5 text-2xl" style={{ fontFamily: '"Snell Roundhand", "Bradley Hand", cursive' }}>David</p>
-      <div className="flex flex-wrap items-center gap-3 border-t border-black/10 pt-3">
-        <span className="border-[1.5px] border-dashed border-[#2a2a28] px-2 py-0.5 font-mono text-xs font-bold tracking-widest">OG50</span>
-        <span className="text-xs text-[#6b665b]">Only 39 people have this code</span>
-        <button type="button" className="ml-auto text-xs text-[#6b665b] hover:text-[#2a2a28]" onClick={notNow}>Not now</button>
-        <Button type="button" size="sm" className="border-[#1a1a1a] bg-[#1a1a1a] text-[#f3eee2] hover:bg-black" onClick={() => openUpgrade("og_letter", "https://www.cloudroom.dev/billing?keep=pro")}>
-          Keep Pro for $25/mo
-        </Button>
-      </div>
-    </section>
-  );
 }
 
 /** Sidebar footer badge while the account waits. Says so once when the account gets in. */

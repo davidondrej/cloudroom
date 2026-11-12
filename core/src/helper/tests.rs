@@ -266,7 +266,7 @@ async fn push_places_only_its_named_item() {
         if let Some(refused) = super::jobs::as_copy(&mut job, &home, &[]) {
             return (126, String::new(), refused);
         }
-        let result = jobs.run(&job, None, &root, None).await;
+        let result = jobs.run(&job, None, &root, None, None).await;
         let text = |key: &str| {
             String::from_utf8(super::unhex(result[key].as_str().unwrap()).unwrap()).unwrap()
         };
@@ -543,6 +543,7 @@ async fn read_only_command_leaves_nothing_running() {
             sandbox,
             &root,
             None,
+            None,
         )
         .await["code"]
             .clone()
@@ -557,6 +558,7 @@ async fn read_only_command_leaves_nothing_running() {
                 &json!({"id": id, "command": command}),
                 Some(&core),
                 &root,
+                None,
                 None,
             )
             .await["code"]
@@ -667,7 +669,13 @@ async fn background_process_outlives_its_result() {
         marker.display()
     );
     let result = jobs
-        .run(&json!({"id": "bg", "command": command}), None, &root, None)
+        .run(
+            &json!({"id": "bg", "command": command}),
+            None,
+            &root,
+            None,
+            None,
+        )
         .await;
     assert_eq!(
         (&result["code"], &result["stdout"]),
@@ -682,6 +690,24 @@ async fn background_process_outlives_its_result() {
     assert!(
         marker.exists(),
         "the background process died writing its output"
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn nested_room_cli_reaches_the_app_that_owns_the_helper() {
+    let _alone = FORKS.lock().await;
+    // #1243, #1290: a stale ROOM_SERVER_URL from the helper's or the login shell's environment, or none, sent the
+    // Mac's room-cli to a dead port or another app. The app's own server comes last, after the login setup.
+    let root = folder("server");
+    let jobs = jobs::Jobs::new(std::sync::Arc::new(super::net::Shared::new(root.clone())));
+    let job = json!({"id": "url", "command": "printf %s \"$ROOM_SERVER_URL\""});
+    let result = jobs
+        .run(&job, None, &root, None, Some("http://127.0.0.1:41000"))
+        .await;
+    assert_eq!(
+        result["stdout"],
+        json!(super::hex(b"http://127.0.0.1:41000"))
     );
     std::fs::remove_dir_all(root).unwrap();
 }

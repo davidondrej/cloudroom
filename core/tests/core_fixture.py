@@ -646,6 +646,113 @@ class RecoveryTests(unittest.TestCase):
         self.wait(lambda: self.status()["state"] == "idle", "resumed idle session")
         self.assertEqual(self.status()["native_id"], self.native)
 
+    def test_a_switch_continues_the_conversation_once_and_a_move_freezes_the_thread(self):
+        # #237: any computer switches through Core, which hands the website the new session before closing the old one.
+        from fake_api import FakeApi
+        api = FakeApi(self.env["CLOUDROOM_TOKEN"], self.env["CLOUDROOM_STORE"])
+        try:
+            self.env.pop("CLOUDROOM_LOCAL_HISTORY", None); self.env.update(api.env())
+            api.row_session = "cr_seed"
+            self.seed(); self.start(); self.ready()
+            self.prompt("app_0123456789ab_first", "hello")
+            self.wait(lambda: self.status()["receipts"]["app_0123456789ab_first"]["state"] == "completed", "first turn")
+            # Queued while a turn runs: one edited, one cancelled. The new agent gets the conversation as it stands.
+            self.prompt("app_0123456789ab_slow", "delay")
+            self.wait(lambda: self.status()["current_request"] == "app_0123456789ab_slow", "slow turn running")
+            self.prompt("app_0123456789ab_edited", "original words")
+            self.prompt("app_0123456789ab_dropped", "cancelled words")
+            self.prompt("app_0123456789ab_follow", "follow words")
+            self.service.request("POST", "/v1/sessions/cr_seed/edit", {"request_id": "e1", "target_request_id": "app_0123456789ab_edited", "expected_revision": 1, "text": "edited words"}, 202)
+            self.service.request("POST", "/v1/sessions/cr_seed/cancel", {"request_id": "c0", "target_request_id": "app_0123456789ab_dropped"}, 202)
+            (self.repo / "release").touch()
+            self.wait(lambda: self.status()["state"] == "idle" and not self.status()["queue"], "queue done")
+            (self.repo / "release").unlink()
+            # The user's rename stays in Core, and is never sent to the website as the agent's.
+            self.service.request("POST", "/v1/sessions/cr_seed/title", {"request_id": "t1", "title": "Renamed 🚀"})
+            self.assertEqual(self.status()["title"], "Renamed 🚀")
+            # A Teleport's freeze holds every other client's change; a close needs the freeze that is still held.
+            self.service.request("POST", "/v1/sessions/cr_seed/freeze", {"request_id": "move1"})
+            self.assertEqual(self.service.request("POST", "/v1/sessions/cr_seed/prompts", {"request_id": "other", "text": "hi"}, 409)["code"], "moving")
+            self.service.request("POST", "/v1/sessions/cr_seed/freeze", {"request_id": "move2"}, 409)
+            self.service.request("POST", "/v1/sessions/cr_seed/close", {"request_id": "c1", "freeze": "move2"}, 409)
+            self.service.request("POST", "/v1/sessions/cr_seed/freeze", {"request_id": "move1", "release": True})
+            # The switch: the website takes it, the old session closes, the new one has the history and its note.
+            answer = self.service.request("POST", "/v1/sessions", {"request_id": "next", "continue_from": "cr_seed", "harness": "codex"}, 202)
+            self.assertEqual((answer["session_id"], answer["pending"]), ("cr_next", False))
+            self.assertEqual([t["continue"]["session"] for t in api.threads if "continue" in t], ["cr_next"])
+            self.wait(lambda: self.status()["state"] == "closed", "old session closed")
+            new = self.service.session("cr_next")
+            self.assertEqual(new["last_app_prompt"]["request_id"], "app_0123456789ab_follow")
+            # In the order it ran, each reply after its own prompt; the edit in its latest words, the cancelled one gone.
+            history = Path(new["continued"]["history"]).read_text()
+            turns = [block.strip() for block in history.split("## ")[1:]]
+            self.assertEqual(turns, ["You\n\nhello", "Agent\n\nhello", "You\n\ndelay", "Agent\n\nhello", "You\n\nedited words", "Agent\n\nhello",
+                                     "You\n\nfollow words", "Agent\n\nhello"])
+            self.assertEqual([t for t in api.threads if "title" in t], [])
+            # The same switch again (its answer lost) is the same success; another from the closed session is refused.
+            self.assertFalse(self.service.request("POST", "/v1/sessions", {"request_id": "next", "continue_from": "cr_seed", "harness": "codex"}, 202)["pending"])
+            self.service.request("POST", "/v1/sessions/cr_next/prompts", {"request_id": "app_0123456789ab_two", "text": "go on"}, 202)
+            self.wait(lambda: self.service.session("cr_next")["receipts"]["app_0123456789ab_two"]["state"] == "completed", "second turn")
+            native = Path(self.service.session("cr_next")["native_path"]).read_text()
+            self.assertIn("<cloudroom_custom_instructions>", native); self.assertIn("conversation-history.md", native)
+            # A Stop held for an earlier turn leaves a newer one running.
+            self.service.request("POST", "/v1/sessions/cr_next/prompts", {"request_id": "app_0123456789ab_three", "text": "delay"}, 202)
+            self.wait(lambda: self.service.session("cr_next")["current_request"] == "app_0123456789ab_three", "third turn running")
+            held = self.service.request("POST", "/v1/sessions/cr_next/stop", {"request_id": "held", "after": "app_0123456789ab_two"}, 202)
+            self.assertEqual(held["receipt"]["state"], "ignored")
+            (self.repo / "release").touch()
+            self.wait(lambda: self.service.session("cr_next")["state"] == "idle", "third turn done")
+            # A history that can't be copied stops the switch, and the new session is closed once it can be.
+            (self.repo / ".cloudroom" / "attachments").mkdir(parents=True, exist_ok=True)
+            (self.repo / ".cloudroom" / "attachments" / "copyfail").write_text("in the way")
+            self.service.request("POST", "/v1/sessions", {"request_id": "copyfail", "continue_from": "cr_next", "harness": "codex"}, 409)
+            self.wait(lambda: self.service.session("cr_copyfail")["state"] == "closed", "candidate closed after a failed copy")
+            self.assertIsNone(self.service.session("cr_next").get("continuing"))
+            # Two switches in a row: the note's inline tail stays within its 8 KB, the file keeps the long message.
+            self.service.request("POST", "/v1/sessions/cr_next/prompts", {"request_id": "app_0123456789ab_long", "text": "y" * 12000}, 202)
+            self.wait(lambda: self.service.session("cr_next")["receipts"]["app_0123456789ab_long"]["state"] == "completed", "long turn")
+            for source, target in [("cr_next", "tail1"), ("cr_tail1", "tail2")]:
+                api.row_session = source
+                self.service.request("POST", "/v1/sessions", {"request_id": target, "continue_from": source, "harness": "codex"}, 202)
+            note = (self.state / "notes" / "cr_tail2").read_text()
+            self.assertLess(len(note), 8000 + 1000)
+            self.assertIn("y" * 12000, Path(self.service.session("cr_tail2")["continued"]["history"]).read_text())
+            # A website that refuses (the thread moved to a third session meanwhile) keeps the old session.
+            api.row_session = "cr_elsewhere"
+            self.service.request("POST", "/v1/sessions", {"request_id": "third", "continue_from": "cr_tail2", "harness": "codex"}, 409)
+            self.wait(lambda: self.service.session("cr_third")["state"] == "closed", "refused candidate closed")
+            # A relayed archive (a parent archiving this thread through the website) reaches the website, with this wake.
+            api.row_session = "cr_tail2"
+            self.service.request("POST", "/v1/sessions/cr_tail2/relay", {"request_id": "parentarchive", "action": "archive"})
+            wake = __import__("hashlib").sha256(self.env["CLOUDROOM_TOKEN"].encode()).hexdigest()[:16]
+            self.wait(lambda: any(t.get("archived") and t["session"] == "cr_tail2" and t["wake"] == wake for t in api.threads), "relayed archive reported")
+        finally:
+            api.close()
+
+    def test_a_switch_the_website_took_survives_a_restart_before_its_answer(self):
+        # #237: the website took the new session but Core never heard; after a restart Core asks again and keeps it.
+        from fake_api import FakeApi
+        api = FakeApi(self.env["CLOUDROOM_TOKEN"], self.env["CLOUDROOM_STORE"])
+        try:
+            self.env.pop("CLOUDROOM_LOCAL_HISTORY", None); self.env.update(api.env())
+            api.row_session, api.lose_continue = "cr_seed", True
+            self.seed(); self.start(); self.ready()
+            threading.Thread(target=lambda: self.service.request("POST", "/v1/sessions", {"request_id": "next", "continue_from": "cr_seed", "harness": "codex"}, None), daemon=True).start()
+            self.wait(lambda: api.row_session == "cr_next", "website took the switch")
+            self.service.stop(crash=True)
+            api.lose_continue = False
+            self.start()
+            self.wait(lambda: self.status()["state"] == "closed", "old session closed after the restart")
+            self.assertNotIn(self.service.session("cr_next")["state"], ("closed", "closing"))
+            self.assertIsNone(self.status().get("continuing"))
+            # A user's restore of a session is its own record kind: apps before #237 archive on any `archive` record.
+            self.service.request("POST", "/v1/sessions/cr_next/archive", {"request_id": "ua", "archived": False})
+            records = self.service.records("cr_next")
+            self.assertEqual(records[-1]["kind"], "unarchive")
+            self.assertFalse(any(r["kind"] == "archive" for r in records))
+        finally:
+            api.close()
+
     def test_settings_leave_out_the_growing_history(self):
         self.seed(extra=[("receipt", {"request_id": f"p{n}", "command": "prompt", "input": {"text": "x" * 1000}, "state": "completed"}) for n in range(50)])
         self.start(); self.ready()

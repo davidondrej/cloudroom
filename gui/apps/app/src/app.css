@@ -641,6 +641,11 @@
     .ProseMirror
     p.is-editor-empty:first-child::before {
     content: var(--promptbox-container-compact-placeholder);
+    height: auto;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   [data-follow-up-composer]:not([data-follow-up-composer-expanded])

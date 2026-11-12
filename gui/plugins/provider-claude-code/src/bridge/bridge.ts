@@ -3,7 +3,6 @@ import { ClaudeContextUsageCollector } from "./context-usage.js";
 import { expandClaudeSkillInput } from "./skill-input.js";
 
 import {
-  type PendingInteractionGrantedPermissionProfile,
   type PendingInteractionPayload,
   type PermissionEscalation,
   type ReasoningLevel,
@@ -30,7 +29,7 @@ import {
 } from "@get-bb/plugin-sdk/provider-bridge";
 import { randomUUID } from "node:crypto";
 import { checkCommand } from "@get-bb/plugin-sdk/internal/command-guard";
-import { join as joinPath, resolve as resolvePath } from "node:path";
+import { join as joinPath } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import {
   forkSession,
@@ -109,11 +108,11 @@ import {
   type ClaudeUserQuestionInput,
   type ClaudeUserQuestionRequestParams,
   CLAUDE_EXIT_PLAN_MODE_TOOL_NAME,
+  CLAUDE_SANDBOX_NETWORK_TOOL_NAME,
   CLAUDE_USER_QUESTION_TOOL_NAME,
   claudeExitPlanModeInputSchema,
   claudeSuggestedPermissionUpdateSchema,
   claudeUserQuestionInputSchema,
-  shouldRequestClaudePermissionApproval,
   toPendingInteractionPermissionProfile,
 } from "../interactive-contract.js";
 
@@ -171,7 +170,6 @@ interface PendingInteractiveRequestBase {
 interface PendingPermissionRequest extends PendingInteractiveRequestBase {
   kind: "permission_request";
   originalInput: Record<string, unknown>;
-  permissions: PendingInteractionGrantedPermissionProfile;
   toolName: string;
 }
 
@@ -182,23 +180,6 @@ interface PendingUserQuestionRequest extends PendingInteractiveRequestBase {
 type PendingInteractiveRequest =
   | PendingPermissionRequest
   | PendingUserQuestionRequest;
-
-interface ClaudeSessionPermissionGrant {
-  permissions: PendingInteractionGrantedPermissionProfile;
-  toolName: string | null;
-}
-
-interface ClaudeSessionPermissionCoverageArgs {
-  grants: ClaudeSessionPermissionGrant[];
-  permissions: PendingInteractionGrantedPermissionProfile;
-  toolName: string;
-}
-
-interface ClaudeSessionPermissionGrantCoverageArgs {
-  grant: ClaudeSessionPermissionGrant;
-  permissions: PendingInteractionGrantedPermissionProfile;
-  toolName: string;
-}
 
 interface ClaudeSessionRestart {
   reason: string;
@@ -211,6 +192,8 @@ interface ThreadSession {
   attachment: ThreadAttachment;
   sessionSerial: number;
   closing: boolean;
+  /** Why Cloudroom is ending this session: its remaining tool calls are denied with it. */
+  closeReason?: string;
   restartBeforeNextTurn: ClaudeSessionRestart | null;
   recoveryHintRaisedThisTurn: "authRequired" | "rateLimited" | null;
   streamEnded: boolean;
@@ -244,7 +227,8 @@ interface ThreadAttachment {
   liveSettings: ClaudeLiveSessionSettings;
   approvedPlanPermissionMode: ClaudePermissionMode;
   providerThreadId?: string;
-  sessionPermissionGrants: ClaudeSessionPermissionGrant[];
+  /** The user picked "Allow for session" on a sandbox network ask. */
+  sandboxNetworkAllowed: boolean;
   threadIdRef: ThreadIdRef;
 }
 
@@ -308,13 +292,6 @@ interface ClaudeCodeThreadStopResult {
   ok: true;
   /** Claude is still running, idle, and takes the thread's next turn. */
   sessionKept?: true;
-}
-
-interface ClaudeCanUseToolDecisionContext {
-  blockedPath: string | undefined;
-  decisionReason: string | undefined;
-  suggestions: ClaudeSuggestedPermissionUpdate[] | undefined;
-  toolName: string;
 }
 
 interface BuildInteractiveRequestParamsArgs {
@@ -393,6 +370,11 @@ const TURN_INTERRUPT_TIMEOUT_MS = 2_000;
 const THREAD_STOPPED_MESSAGE =
   "Thread stopped while awaiting permission approval";
 const CLAUDE_CHROME_SETTING_RESTART_REASON = "Claude in Chrome setting changed";
+
+/** Claude reads this as the tool's result: it must never pass for the user's rejection (#878). */
+function buildCloudroomCancelMessage(reason: string): string {
+  return `Cloudroom cancelled this tool call; the user did not reject it. Do not retry it; wait for the user's next message. Reason: ${reason}`;
+}
 
 const { send, sendResult, sendError } = createBridgeIo<
   BridgeEventNotification | BridgeToolCallRequest
@@ -531,6 +513,7 @@ async function closeThreadSession(args: {
   const threadSession = attachment.residentSession;
   if (threadSession) {
     threadSession.closing = true;
+    threadSession.closeReason = args.message;
     resolvePendingSessionWork(
       threadSession,
       args.message,
@@ -632,86 +615,6 @@ async function closeReplacedThreadSession(threadId: string): Promise<void> {
   if (threadAttachments.get(threadId) === attachment) {
     threadAttachments.delete(threadId);
   }
-}
-
-function permissionPathCovers(
-  grantPath: string,
-  requestedPath: string,
-): boolean {
-  const normalizedGrantPath = resolvePath(grantPath);
-  const normalizedRequestedPath = resolvePath(requestedPath);
-  if (normalizedGrantPath === normalizedRequestedPath) {
-    return true;
-  }
-  const grantPrefix = normalizedGrantPath.endsWith("/")
-    ? normalizedGrantPath
-    : `${normalizedGrantPath}/`;
-  return normalizedRequestedPath.startsWith(grantPrefix);
-}
-
-function permissionPathListCovers(
-  grantedPaths: string[],
-  requestedPaths: string[],
-): boolean {
-  return requestedPaths.every((requestedPath) =>
-    grantedPaths.some((grantedPath) =>
-      permissionPathCovers(grantedPath, requestedPath),
-    ),
-  );
-}
-
-function fileSystemPermissionsCover(
-  granted: PendingInteractionGrantedPermissionProfile["fileSystem"],
-  requested: PendingInteractionGrantedPermissionProfile["fileSystem"],
-): boolean {
-  if (requested === null) {
-    return true;
-  }
-  if (granted === null) {
-    return false;
-  }
-  const grantedReadPaths = [...granted.read, ...granted.write];
-  return (
-    permissionPathListCovers(grantedReadPaths, requested.read) &&
-    permissionPathListCovers(granted.write, requested.write)
-  );
-}
-
-function networkPermissionsCover(
-  granted: PendingInteractionGrantedPermissionProfile["network"],
-  requested: PendingInteractionGrantedPermissionProfile["network"],
-): boolean {
-  return requested?.enabled === true ? granted?.enabled === true : true;
-}
-
-function sessionPermissionGrantCovers(
-  args: ClaudeSessionPermissionGrantCoverageArgs,
-): boolean {
-  if (args.grant.toolName !== null && args.grant.toolName !== args.toolName) {
-    return false;
-  }
-  return (
-    networkPermissionsCover(
-      args.grant.permissions.network,
-      args.permissions.network,
-    ) &&
-    fileSystemPermissionsCover(
-      args.grant.permissions.fileSystem,
-      args.permissions.fileSystem,
-    )
-  );
-}
-
-function hasClaudeSessionPermissionGrant(
-  args: ClaudeSessionPermissionCoverageArgs,
-): boolean {
-  return args.grants.some((grant) =>
-    sessionPermissionGrantCovers({
-      grant,
-      permissions: args.permissions,
-      toolName: args.toolName,
-    }),
-  );
 }
 
 function shouldCacheClaudeSessionPermission(
@@ -1073,7 +976,7 @@ function createThreadAttachment(
     ...(args.providerThreadId
       ? { providerThreadId: args.providerThreadId }
       : {}),
-    sessionPermissionGrants: [],
+    sandboxNetworkAllowed: false,
     threadIdRef: args.threadIdRef,
   };
   attachment.residentSession = createThreadSession(attachment);
@@ -1096,6 +999,24 @@ function createThreadSession(attachment: ThreadAttachment): ThreadSession {
       sessionSerial,
       threadIdRef: attachment.threadIdRef,
     }),
+    // Its pending approval's deny doesn't interrupt (#878), so Claude goes on
+    // with its queued tool calls: this session denies each one while closing.
+    {
+      hooks: [
+        async () =>
+          threadSession.closing
+            ? {
+                hookSpecificOutput: {
+                  hookEventName: "PreToolUse",
+                  permissionDecision: "deny",
+                  permissionDecisionReason: buildCloudroomCancelMessage(
+                    threadSession.closeReason ?? "Claude session closed",
+                  ),
+                },
+              }
+            : {},
+      ],
+    },
   );
 
   const translator = createClaudeDeltaTranslator({
@@ -1411,6 +1332,7 @@ function buildTrackedSessionOptions(
 
 function replaceThreadSession(args: ReplaceThreadSessionArgs): ThreadSession {
   args.threadSession.closing = true;
+  args.threadSession.closeReason = args.restart.reason;
   resolvePendingSessionWork(args.threadSession, args.restart.reason);
   emitSessionReplacement({
     providerThreadId: args.providerThreadId,
@@ -1708,6 +1630,10 @@ function resolvePendingInteractiveRequests(
   message: string,
   notifyHost: boolean,
 ): void {
+  // An interrupting deny makes Claude drop its message and record this and
+  // every other unfinished tool call as "The user doesn't want to ..." (#878).
+  // An ending session stops anyway, so only a kept one interrupts its turn.
+  const interrupt = !threadSession.closing;
   for (const [requestId, pending] of threadSession.pendingInteractiveRequests) {
     threadSession.pendingInteractiveRequests.delete(requestId);
     if (notifyHost) {
@@ -1715,8 +1641,8 @@ function resolvePendingInteractiveRequests(
     }
     pending.resolve({
       behavior: "deny",
-      interrupt: true,
-      message,
+      ...(interrupt ? { interrupt: true } : {}),
+      message: buildCloudroomCancelMessage(message),
       toolUseID: pending.itemId,
     });
   }
@@ -1994,7 +1920,6 @@ function createForwardInteractiveRequest(
         kind: "permission_request",
         payload,
         originalInput: args.input,
-        permissions: params.permissions,
         resolve: finish,
         toolName: args.toolName,
       });
@@ -2117,6 +2042,15 @@ function restoreApprovedPlanPermissionMode(threadSession: ThreadSession): void {
     });
 }
 
+// A rule-forced ask has no reason, and Claude's own reason for a sandbox exit
+// is the raw flag name. The card always says the command leaves the sandbox.
+function describeUnsandboxedAsk(reason: string | undefined): string {
+  const note = "Run this command outside the sandbox?";
+  return reason === undefined || reason === "dangerouslyDisableSandbox"
+    ? note
+    : `${note} ${reason}`;
+}
+
 function createCanUseTool(threadIdRef: ThreadIdRef): CanUseTool {
   const forwardInteractiveRequest =
     createForwardInteractiveRequest(threadIdRef);
@@ -2133,6 +2067,16 @@ function createCanUseTool(threadIdRef: ThreadIdRef): CanUseTool {
       return {
         behavior: "deny",
         message: "Thread session not found",
+        toolUseID: options.toolUseID,
+      };
+    }
+    // An ending session asks the user nothing more; its turn ends with it.
+    if (threadSession.closing) {
+      return {
+        behavior: "deny",
+        message: buildCloudroomCancelMessage(
+          threadSession.closeReason ?? "Claude session closed",
+        ),
         toolUseID: options.toolUseID,
       };
     }
@@ -2188,22 +2132,11 @@ function createCanUseTool(threadIdRef: ThreadIdRef): CanUseTool {
     const suggestions = parseClaudeSuggestedPermissionUpdates(
       options.suggestions,
     );
-
-    const requestContext: ClaudeCanUseToolDecisionContext = {
-      toolName,
-      blockedPath: options.blockedPath,
-      decisionReason: options.decisionReason,
-      suggestions,
-    };
-    const requestedPermissions =
-      toPendingInteractionPermissionProfile(requestContext);
+    const runsOutsideSandbox =
+      toolName === "Bash" && input.dangerouslyDisableSandbox === true;
     if (
-      toolName === "Bash" &&
-      shouldAutoDenyInteractiveRequest(interactiveRequestPolicy) &&
-      typeof input === "object" &&
-      input !== null &&
-      (input as { dangerouslyDisableSandbox?: unknown })
-        .dangerouslyDisableSandbox === true
+      runsOutsideSandbox &&
+      shouldAutoDenyInteractiveRequest(interactiveRequestPolicy)
     ) {
       return {
         behavior: "deny",
@@ -2211,30 +2144,20 @@ function createCanUseTool(threadIdRef: ThreadIdRef): CanUseTool {
         toolUseID: options.toolUseID,
       };
     }
+    // Claude calls this only for a call it would ask the user about, so
+    // outside Full access every ask reaches the user. "Allow for session"
+    // reaches Claude as a session rule, and Claude still asks when an ask
+    // rule, a safety check or a sandbox exit needs a person. Claude keeps no
+    // such rule for sandbox network asks, so the bridge remembers that one.
     if (
-      hasClaudeSessionPermissionGrant({
-        grants: threadSession.attachment.sessionPermissionGrants,
-        permissions: requestedPermissions,
-        toolName,
-      })
+      toolName === CLAUDE_SANDBOX_NETWORK_TOOL_NAME &&
+      threadSession.attachment.sandboxNetworkAllowed
     ) {
       return {
         behavior: "allow",
         updatedInput: input,
         toolUseID: options.toolUseID,
         decisionClassification: "user_permanent",
-      };
-    }
-
-    const shouldRequestApproval =
-      shouldRequestClaudePermissionApproval(requestContext) ||
-      (options.suggestions?.length ?? 0) > 0;
-
-    if (!shouldRequestApproval) {
-      return {
-        behavior: "allow",
-        updatedInput: input,
-        toolUseID: options.toolUseID,
       };
     }
 
@@ -2266,7 +2189,9 @@ function createCanUseTool(threadIdRef: ThreadIdRef): CanUseTool {
       toolName,
       toolUseId: options.toolUseID,
       input,
-      decisionReason: options.decisionReason,
+      decisionReason: runsOutsideSandbox
+        ? describeUnsandboxedAsk(options.decisionReason)
+        : options.decisionReason,
       promptText: options.title ?? options.description,
       blockedPath: options.blockedPath,
       suggestions,
@@ -2974,12 +2899,10 @@ function handleParsedMessage(parsed: unknown): void {
     }
     if (
       pending.kind === "permission_request" &&
+      pending.toolName === CLAUDE_SANDBOX_NETWORK_TOOL_NAME &&
       shouldCacheClaudeSessionPermission(interactiveResponse)
     ) {
-      threadSession.attachment.sessionPermissionGrants.push({
-        permissions: pending.permissions,
-        toolName: pending.toolName,
-      });
+      threadSession.attachment.sandboxNetworkAllowed = true;
     }
 
     if (

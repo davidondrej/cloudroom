@@ -3,7 +3,7 @@ import { defineWorkspaceTestConfig } from "../../vitest.shared.js";
 export default defineWorkspaceTestConfig({
   test: {
     silent: "passed-only",
-    name: "bb-plugin-bb-guide",
+    name: "bb-plugin-cloudroom-guide",
     include: ["**/*.test.ts"],
     exclude: ["node_modules/**"],
   },

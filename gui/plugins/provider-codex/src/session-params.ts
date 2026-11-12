@@ -133,7 +133,10 @@ type GitHeadState =
 
 interface CodexInstructionSource {
   instructionMode: "append" | "replace";
-  options: { instructions?: string };
+  options: {
+    instructions?: string;
+    permissionScope?: CodexSessionOptions["permissionScope"];
+  };
 }
 
 interface CodexInstructionOverrides {
@@ -146,20 +149,24 @@ interface CodexInstructionOverrides {
 const CODEX_PLAIN_CHAT =
   "request_user_input and request_user_input_async don't reach the user; ask in plain chat instead.";
 
+// #1294. The workspace sandbox keeps .agents and .codex read-only, so in a linked
+// worktree git can half finish a branch change and still exit 0.
+const CODEX_READ_ONLY_GIT =
+  "Your sandbox keeps .agents and .codex read-only. git switch, checkout, reset, merge, pull or stash can leave old files there even with exit 0, so run them with escalation. Record git status --porcelain first. After a sandboxed command, preserve pre-existing edits and staged changes, inspect .agents and .codex against that command's intended result, and fix only verified stale files before committing. For merge, pull or stash recovery, do not restore from HEAD or clean; that can discard intended changes. If the intended state is unclear, stop and tell the user.";
+
 export function resolveCodexInstructionOverrides(
   command: CodexInstructionSource,
 ): CodexInstructionOverrides {
+  const notes =
+    command.options.permissionScope === "workspace"
+      ? `${CODEX_PLAIN_CHAT}\n\n${CODEX_READ_ONLY_GIT}`
+      : CODEX_PLAIN_CHAT;
   const instructions = command.options.instructions?.trim();
   if (instructions && command.instructionMode === "replace") {
-    return {
-      baseInstructions: instructions,
-      developerInstructions: CODEX_PLAIN_CHAT,
-    };
+    return { baseInstructions: instructions, developerInstructions: notes };
   }
   return {
-    developerInstructions: instructions
-      ? `${CODEX_PLAIN_CHAT}\n\n${instructions}`
-      : CODEX_PLAIN_CHAT,
+    developerInstructions: instructions ? `${notes}\n\n${instructions}` : notes,
   };
 }
 

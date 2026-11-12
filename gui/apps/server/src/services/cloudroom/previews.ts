@@ -81,11 +81,13 @@ export const previewsSetUp = (deps: Deps) => readFile(join(folder(deps), "config
 // The helper outlives the app, so restart it once per launch: macOS only applies a newly granted Full Disk Access to new processes.
 let restartedThisLaunch = false;
 
+// Mac jobs point a nested room-cli at this server, the one that owns the helper, not whichever the CLI finds (#1243, #1290).
+// An environment variable, as for CLOUDROOM_SHELL_PATH, so an older helper ignores it instead of failing on a new flag.
 export async function setupPreviews(deps: Deps): Promise<void> {
   const launcher = process.platform === "darwin" && process.versions.electron ? ["--launcher", process.execPath] : [];
   const restart = restartedThisLaunch ? [] : ["--restart"];
   try {
-    await promisify(execFile)(...helper(deps, ["configure", folder(deps), "--connection", join(deps.config.dataDir, "cloudroom.json"), "--mac-access", await macAccess(deps) ?? "off", ...launcher, ...restart, ...(devBuild(deps) ? ["--own-threads"] : [])]), { timeout: 30_000, maxBuffer: 64 * 1024 });
+    await promisify(execFile)(...helper(deps, ["configure", folder(deps), "--connection", join(deps.config.dataDir, "cloudroom.json"), "--mac-access", await macAccess(deps) ?? "off", ...launcher, ...restart, ...(devBuild(deps) ? ["--own-threads"] : [])]), { timeout: 30_000, maxBuffer: 64 * 1024, env: { ...process.env, CLOUDROOM_SERVER_URL: `http://127.0.0.1:${deps.config.serverPort}` } });
     restartedThisLaunch = true;
   } catch (error) {
     // The helper's own reason, such as launchctl's, so Settings and the API say why (#109).

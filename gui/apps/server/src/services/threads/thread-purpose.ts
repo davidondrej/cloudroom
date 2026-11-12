@@ -23,6 +23,7 @@ import { readPrimaryHostIdFromDataDir } from "../hosts/primary-host.js";
 import { runtimeErrorLogFields } from "../lib/error-log-fields.js";
 import { readUiPreferences } from "../system/ui-preferences.js";
 import { getLastThreadOutput } from "./thread-data.js";
+import { cloudTurnsElsewhere } from "../plugins/plugin-thread-events.js";
 
 const MAX_MESSAGE_LENGTH = 600;
 const MAX_REPLY_LENGTH = 2_000;
@@ -105,7 +106,8 @@ export function installThreadPurpose(
   const unsubscribe = deps.hub.onChangedMessage((message) => {
     if (
       message.entity === "thread" &&
-      message.changes.includes("status-changed")
+      message.changes.includes("status-changed") &&
+      !cloudTurnsElsewhere.has(message.id)
     ) {
       refresh(current, message.id);
     }

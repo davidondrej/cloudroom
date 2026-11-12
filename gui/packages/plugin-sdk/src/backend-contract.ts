@@ -312,8 +312,9 @@ export interface PluginThreadEventPayloads {
   /** Fired when a thread transitions into `active`. */
   "thread.active": { thread: ThreadResponse };
   /** Fired when a thread transitions into `idle`. `lastAssistantText` is
-   * assembled the same way GET /threads/:id/output is. */
-  "thread.idle": { thread: ThreadResponse; lastAssistantText: string | null };
+   * assembled the same way GET /threads/:id/output is. `notify: false`: another
+   * computer sent this Cloud turn and notifies for it. */
+  "thread.idle": { thread: ThreadResponse; lastAssistantText: string | null; notify?: false };
   /** Fired when a thread transitions into `error`. `error` is the failed
    * turn's provider error, else the latest system/error message. `errorInfo`
    * classifies it the same way `turn.failed` does (a rate limit, an auth
@@ -322,6 +323,7 @@ export interface PluginThreadEventPayloads {
     thread: ThreadResponse;
     error: string | null;
     errorInfo?: ProviderErrorInfo | null;
+    notify?: false;
   };
   /** Fired after a thread is archived (including cascade archives). */
   "thread.archived": { thread: ThreadResponse };

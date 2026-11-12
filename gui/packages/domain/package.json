@@ -34,6 +34,11 @@
       "types": "./src/computer-name.ts",
       "default": "./src/computer-name.ts"
     },
+    "./install-progress": {
+      "source": "./src/install-progress.ts",
+      "types": "./src/install-progress.ts",
+      "default": "./src/install-progress.ts"
+    },
     "./cloud-login": {
       "source": "./src/cloud-login.ts",
       "types": "./src/cloud-login.ts",

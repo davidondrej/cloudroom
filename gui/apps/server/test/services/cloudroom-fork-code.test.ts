@@ -5,9 +5,9 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { cloudroomThreads, createThread } from "@cloudroom/db";
-import type { CloudroomClient } from "../../src/services/cloudroom/client.js";
+import { CloudroomConnectionError, UPLOAD_PART, type CloudroomClient } from "../../src/services/cloudroom/client.js";
 import { cloudroom } from "../../src/services/cloudroom/commands.js";
-import { GATHER_MS, landForkCode, sourceCode, threadCode } from "../../src/services/cloudroom/fork.js";
+import { GATHER_MS, landForkCode, sourceCode, threadCode, uploadInParts } from "../../src/services/cloudroom/fork.js";
 import { seedHostSession, seedProjectWithSource } from "../helpers/seed.js";
 import { createTestAppHarness } from "../helpers/test-app.js";
 
@@ -166,4 +166,28 @@ linux("children started together share one pack, later ones share the next, whic
     vi.restoreAllMocks();
     await harness.cleanup();
   }
+});
+
+linux("a dropped upload part is resent, and its late original rewrites the same bytes (#1314)", async () => {
+  const home = join(root, "home"), data = randomBytes(2 * UPLOAD_PART + 1000);
+  const real = sandbox(home, root);
+  let late = async () => {}, sends = 0;
+  const client = { runOnVm: async (input: { command: string }, signal?: AbortSignal, bytes?: Uint8Array) => {
+    const result = await real.runOnVm(input, signal, bytes as Uint8Array<ArrayBuffer>);
+    // The second part lands, then its answer is lost: the retry sends it again, and the original runs once more at the end.
+    if (++sends === 2) { late = async () => { await real.runOnVm(input, signal, bytes as Uint8Array<ArrayBuffer>); }; throw new CloudroomConnectionError("Cloudroom is unreachable: socket hang up"); }
+    return result;
+  } } as unknown as CloudroomClient;
+  vi.useFakeTimers({ toFake: ["setTimeout"] });
+  try {
+    const done = uploadInParts(client, "up", data, new AbortController().signal);
+    await vi.waitFor(() => { if (vi.getTimerCount() === 0) throw new Error("no retry waiting yet"); });
+    await vi.advanceTimersByTimeAsync(2_000);
+    await done;
+  } finally {
+    vi.useRealTimers();
+  }
+  await late();
+  expect(sends).toBe(4);
+  expect(readFileSync(join(home, "up")).equals(data)).toBe(true);
 });

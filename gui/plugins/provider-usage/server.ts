@@ -411,6 +411,7 @@ export default function providerUsagePlugin(bb: BbPluginApi): void {
       status: host.status,
       providers: [],
       error: null,
+      ...(host.id === config?.primaryHostId ? { primary: true as const } : {}),
     }));
     const candidates: Array<{
       source: SourceResult;

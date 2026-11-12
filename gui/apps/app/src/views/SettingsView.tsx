@@ -930,6 +930,7 @@ export function AppearanceSettingsSection({
           />
         </SettingsWithControl>
         <StarterPromptsSetting />
+        <PluginSettingsSections pluginId="wallpaper" />
       </div>
     </SettingsSection>
   );
@@ -1273,6 +1274,8 @@ export function SettingsView() {
   }
   const groupTabs = (
     <SettingsGroupTabs
+      // Analytics draws its own row of pages right under these, and that row carries the line.
+      nested={activeSection === "analytics"}
       links={getSettingsGroupLinks(
         findSettingsNavGroup(activeSection, activePluginId),
         navigation,
@@ -1596,12 +1599,12 @@ export function MachinesSettingsPage() {
   );
 }
 
-function SettingsGroupTabs({ links }: { links: readonly SettingsNavLink[] }) {
+function SettingsGroupTabs({ links, nested = false }: { links: readonly SettingsNavLink[]; nested?: boolean }) {
   if (links.length < 2) return null;
   return (
     <nav
       aria-label="Settings pages"
-      className="mb-6 flex flex-wrap gap-1 border-b border-border pb-2"
+      className={cn("flex flex-wrap gap-1", nested ? "mb-4" : "mb-6 border-b border-border pb-2")}
     >
       {links.map((link) => (
         <Link

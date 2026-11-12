@@ -345,6 +345,7 @@ function toThreadResponseWithHost(
 }
 
 import { listThreadTransferProgress, localTeleports, projectCopyProgress, queuedPrompts as cloudQueuedPrompts, teleportProgress } from "../cloudroom/store.js";
+import { asleepSince } from "../cloudroom/cloud-sync.js";
 
 export function toThreadResponseFromThread(
   deps: ThreadRuntimeDisplayDeps,
@@ -362,6 +363,7 @@ export function toThreadResponseFromThread(
     ...(teleportProgress(deps.db, args.thread.id) ? { teleport: teleportProgress(deps.db, args.thread.id)! } : {}),
     ...(localTeleports.has(args.thread.id) ? { teleportLocalStep: localTeleports.get(args.thread.id)! } : {}),
     ...(projectCopyProgress(deps.db, args.thread.id) ? { projectCopy: projectCopyProgress(deps.db, args.thread.id)! } : {}),
+    ...(asleepSince.has(args.thread.id) ? { asleepSince: asleepSince.get(args.thread.id)! } : {}),
     activeBackgroundAgentCount: background?.activeBackgroundAgentCount ?? 0,
     activeBackgroundCommandCount: background?.activeBackgroundCommandCount ?? 0,
     activeWorkflowCount: background?.activeWorkflowCount ?? 0,

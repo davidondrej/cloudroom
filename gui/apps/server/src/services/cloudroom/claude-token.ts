@@ -229,7 +229,7 @@ let installWait: InstallWait | null = null;
 
 /**
  * Starts Claude sign-in. Connecting Claude means the user wants Claude Code in Cloudroom, so a missing CLI is installed
- * silently (ADR 0193). With the Claude desktop app's copy, sign-in goes ahead and the install runs in the background.
+ * first, and the status shows it (ADR 20261111-123959). With the Claude desktop app's copy, sign-in goes ahead and the install runs in the background.
  * With no Claude Code at all, this returns at once: the status shows the install, and sign-in starts once it's done.
  */
 export async function connectClaude(id: string, save: (token: string) => Promise<unknown>, deps: AppDeps): Promise<void> {

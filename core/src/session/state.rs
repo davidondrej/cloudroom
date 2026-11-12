@@ -416,6 +416,9 @@ impl Local {
                     | "child_state"
                     | "child_start_state"
                     | "own_child"
+                    | "thread_report"
+                    | "continuing"
+                    | "continued"
             )
         {
             session.last_activity = record.timestamp_ms.or(session.last_activity);
@@ -490,6 +493,27 @@ impl Local {
                 }
                 if receipt.command == "close" {
                     session.close_request = Some(receipt.request_id.clone());
+                }
+                if receipt.command == "start" && session.title.is_none() {
+                    session.title = receipt.input["title"].as_str().map(str::to_owned);
+                }
+                // Which computer last used the thread, and a user's prompt cancelling an archive the agent made (#237).
+                if matches!(
+                    receipt.command.as_str(),
+                    "prompt" | "steer" | "edit" | "rewind"
+                ) && receipt.state == "accepted"
+                    && !session.receipts.contains_key(&receipt.request_id)
+                {
+                    if receipt.request_id.starts_with("app_") {
+                        session.last_app_prompt = Some(
+                            json!({"request_id":receipt.request_id,"sequence":record.sequence}),
+                        );
+                    }
+                    if super::user_request(&receipt.request_id) {
+                        session
+                            .thread_reports
+                            .retain(|report| report["kind"] != "archived");
+                    }
                 }
                 if receipt.command == "prompt" {
                     // Acceptance is also queue insertion: one fsynced record, including
@@ -671,6 +695,7 @@ impl Local {
                 if let Some(level) = record.data["reasoning"].as_str() {
                     session.reasoning = Some(level.into());
                 }
+                session.owe("reasoning", &record.data, record.sequence);
             }
             "launch_reasoning" => {
                 if session.reasoning.is_none() {
@@ -711,6 +736,9 @@ impl Local {
             }
             "archive" => {
                 session.archived = true;
+                // The thread's own archive by its agent reaches the website, once no other visible thread is left in
+                // the sandbox (relay.rs). A user's archive went there from the app.
+                session.owe("archived", &record.data, record.sequence);
                 if record.data["self"] == true {
                     session.archive_turn = session.current_request.clone();
                 }
@@ -723,6 +751,27 @@ impl Local {
                 }
             }
             "detach" => session.parent_session = None,
+            "title" => {
+                session.title = record.data["title"].as_str().map(str::to_owned);
+                session.owe("title", &record.data, record.sequence);
+            }
+            "thread_report" => session
+                .thread_reports
+                .retain(|report| report["seq"] != record.data["seq"]),
+            // A user's restore (#237): its own kind, which apps before it ignore. An archive still owed is dropped.
+            "unarchive" => {
+                session.archived = false;
+                session
+                    .thread_reports
+                    .retain(|report| report["kind"] != "archived");
+            }
+            "continuing" => session.continuing = record.data["session"].as_str().map(str::to_owned),
+            "continued" => {
+                session.continued = Some(record.data.clone());
+                if session.last_app_prompt.is_none() && !record.data["last_app_prompt"].is_null() {
+                    session.last_app_prompt = Some(record.data["last_app_prompt"].clone());
+                }
+            }
             "child_state" => {
                 if let (Some(child), Some(state)) =
                     (record.data["child"].as_str(), record.data["state"].as_str())

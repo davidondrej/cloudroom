@@ -87,7 +87,10 @@ export function RootComposeSecondaryContent({
     isCompactViewport && compactScrollContent !== null;
 
   const mainContent = (
-    <div className="relative flex h-full min-h-0 flex-1 flex-col overflow-hidden">
+    <div
+      data-wallpaper="new-thread"
+      className="relative flex h-full min-h-0 flex-1 flex-col overflow-hidden"
+    >
       {rendersWindowDragStrip ? (
         <div
           data-testid="root-compose-main-window-drag-strip"

@@ -1,3 +1,4 @@
+import { MessageEditBlockedContext } from "./MessageActionBar.js";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import type {
   ActiveThinking,
@@ -51,6 +52,7 @@ export interface ThreadTimelineSurfaceProps {
   leadingContent?: ReactNode;
   onForkMessage?: ThreadTimelineForkMessageHandler;
   onEditMessage?: ThreadTimelineEditMessageHandler;
+  editMessageBlockedReason?: string;
   inlineMessageEditor?: ThreadTimelineInlineMessageEditor;
   onMessageAddToChat?: ThreadTimelineAddToChatHandler;
   onSendToMainMessage?: ThreadTimelineSendToMainMessageHandler;
@@ -154,6 +156,7 @@ export function ThreadTimelineSurface({
   leadingContent,
   onForkMessage,
   onEditMessage,
+  editMessageBlockedReason,
   inlineMessageEditor,
   onMessageAddToChat,
   onSendToMainMessage,
@@ -227,36 +230,40 @@ export function ThreadTimelineSurface({
             className={timelineErrorClassName}
           />
         ) : timelineRowsWithPendingStop.length > 0 ? (
-          <ThreadTimelineRows
-            canSpawnChild={canSpawnChild}
-            threadOriginKind={threadOriginKind}
-            onForkMessage={onForkMessage}
-            onEditMessage={onEditMessage}
-            inlineMessageEditor={inlineMessageEditor}
-            onMessageAddToChat={onMessageAddToChat}
-            onSendToMainMessage={onSendToMainMessage}
-            onSelectionAddToChat={onSelectionAddToChat}
-            consumerMessageActions={consumerMessageActions}
-            includePluginMessageActions={includePluginMessageActions}
-            onOpenLink={onOpenLink}
-            onOpenLocalFileLink={onOpenLocalFileLink}
-            onOpenPluginPanel={onOpenPluginPanel}
-            onTitleAction={onTitleAction}
-            projectId={projectId}
-            resolveMentionLink={resolveMentionLink}
-            resolveUserAttachmentImageSrc={toUserAttachmentImageSrc}
-            hasOlderTimelineRows={hasOlderTimelineRows}
-            isLoadingOlderTimelineRows={isLoadingOlderTimelineRows}
-            onLoadOlderRows={onLoadOlderRows}
-            timelineRows={timelineRowsWithPendingStop}
-            timelineNavigationTargetRowId={timelineNavigationTargetRowId}
-            timelineWindowingEnabled={timelineWindowingEnabled}
-            threadId={threadId}
-            threadRuntimeDisplayStatus={threadRuntimeDisplayStatus}
-            unreadDividerAutoScroll={unreadDividerAutoScroll}
-            unreadDividerPlacement={unreadDividerPlacement}
-            workspaceRootPath={workspaceRootPath}
-          />
+          <MessageEditBlockedContext.Provider
+            value={editMessageBlockedReason ?? null}
+          >
+            <ThreadTimelineRows
+              canSpawnChild={canSpawnChild}
+              threadOriginKind={threadOriginKind}
+              onForkMessage={onForkMessage}
+              onEditMessage={onEditMessage}
+              inlineMessageEditor={inlineMessageEditor}
+              onMessageAddToChat={onMessageAddToChat}
+              onSendToMainMessage={onSendToMainMessage}
+              onSelectionAddToChat={onSelectionAddToChat}
+              consumerMessageActions={consumerMessageActions}
+              includePluginMessageActions={includePluginMessageActions}
+              onOpenLink={onOpenLink}
+              onOpenLocalFileLink={onOpenLocalFileLink}
+              onOpenPluginPanel={onOpenPluginPanel}
+              onTitleAction={onTitleAction}
+              projectId={projectId}
+              resolveMentionLink={resolveMentionLink}
+              resolveUserAttachmentImageSrc={toUserAttachmentImageSrc}
+              hasOlderTimelineRows={hasOlderTimelineRows}
+              isLoadingOlderTimelineRows={isLoadingOlderTimelineRows}
+              onLoadOlderRows={onLoadOlderRows}
+              timelineRows={timelineRowsWithPendingStop}
+              timelineNavigationTargetRowId={timelineNavigationTargetRowId}
+              timelineWindowingEnabled={timelineWindowingEnabled}
+              threadId={threadId}
+              threadRuntimeDisplayStatus={threadRuntimeDisplayStatus}
+              unreadDividerAutoScroll={unreadDividerAutoScroll}
+              unreadDividerPlacement={unreadDividerPlacement}
+              workspaceRootPath={workspaceRootPath}
+            />
+          </MessageEditBlockedContext.Provider>
         ) : null}
         {hostConnectionNotice ? (
           <TimelineStatusIndicator

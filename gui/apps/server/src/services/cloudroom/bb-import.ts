@@ -10,7 +10,7 @@ import { ApiError } from "../../errors.js";
 import { createThreadFromRequest } from "../threads/thread-create.js";
 import { fillProjectGitRemote } from "../projects/project-source-setup.js";
 import { requireNonDestroyedHostWithStatus } from "../lib/entity-lookup.js";
-import { assertUsableHostId } from "../hosts/primary-host.js";
+import { assertUsableHostId, resolvePrimaryHostId } from "../hosts/primary-host.js";
 import { INHERITED_EVENT_TYPES, selectInheritedHistoryRows } from "../threads/thread-fork-history.js";
 import { parseStoredEvent } from "../threads/thread-data.js";
 import { parseStoredTurnRequestEvent } from "../threads/thread-events.js";
@@ -34,6 +34,7 @@ async function run(deps: AppDeps, hostId: string): Promise<BbImportResult> {
   if (!existsSync(BB_DB)) throw new ApiError(404, "bb_not_installed", `BB is not installed on this ${COMPUTER}.`);
   requireNonDestroyedHostWithStatus(deps, hostId);
   assertUsableHostId(deps, { hostId });
+  requireThisComputer(deps, hostId);
   await deps.providerRegistry.whenRegistrationsSettled();
   const mapPath = join(deps.config.dataDir, "bb-imports.json");
   const map: Record<string, string> = existsSync(mapPath) ? JSON.parse(await readFile(mapPath, "utf8")) : {};
@@ -61,6 +62,11 @@ async function run(deps: AppDeps, hostId: string): Promise<BbImportResult> {
     bb.close();
   }
   return result;
+}
+
+/** Imports read this computer's disk, so their threads must run on its own host, never on another Mac whose disk lacks the folders. */
+export function requireThisComputer(deps: AppDeps, hostId: string): void {
+  if (hostId !== resolvePrimaryHostId(deps)) throw new ApiError(409, "import_other_computer", `Run this import on the ${COMPUTER} that runs the Cloudroom app. These chats are stored there.`);
 }
 
 export async function waitForStart(deps: AppDeps, threadId: string): Promise<string | undefined> {

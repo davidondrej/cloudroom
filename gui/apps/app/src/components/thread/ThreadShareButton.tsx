@@ -22,6 +22,18 @@ export function ThreadShareButton({ threadId }: { threadId: string }) {
   const client = useQueryClient();
   const queryKey = ["cloudroom-thread-share", threadId];
   const share = useQuery({ queryKey, queryFn: ({ signal }) => sdk.cloudroom.threadShare(threadId, signal) });
+  // A Cloud thread's share lives on the website (#237): read once each time the menu opens, never on thread open.
+  useQuery({
+    queryKey: [...queryKey, "website"],
+    enabled: open,
+    staleTime: 0,
+    gcTime: 0,
+    queryFn: async ({ signal }) => {
+      const value = await sdk.cloudroom.threadShare(threadId, signal, true);
+      client.setQueryData(queryKey, value);
+      return value;
+    },
+  });
   const signedIn = Boolean(useCloudroomAccount().data?.account);
   const copy = (url: string) => void copyToClipboardWithToast(url, { successMessage: "Link copied" });
   const save = useMutation({

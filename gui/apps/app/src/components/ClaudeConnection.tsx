@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { z } from "zod";
+import { installPercent } from "@cloudroom/domain/install-progress";
 import { Button } from "@cloudroom/shared-ui/button";
 import { cn } from "@cloudroom/shared-ui/lib/utils";
 import { Icon } from "@cloudroom/shared-ui/icon";
@@ -453,14 +454,28 @@ export function ClaudeConnectionPanel({
   );
 }
 
-/** Claude Code installs before Cloud sign-in when it's missing (ADR 0193). Installs report no progress, so the bar follows
- *  time: about half full at 30 s, slowing toward the end. */
-function InstallProgress({ since }: { since: number }) {
+/** The time, ticking every second while `since` is set. */
+function useTicking(since: number | null | undefined): number {
   const [now, setNow] = useState(Date.now);
   useEffect(() => {
+    if (!since) return;
+    setNow(Date.now());
     const timer = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(timer);
-  }, []);
+  }, [since]);
+  return now;
+}
+
+/** A rough install percent that ticks every second while `since` is set, else null (ADR 20261111-123959). */
+export function useInstallPercent(since: number | null | undefined): number | null {
+  const now = useTicking(since);
+  return since ? installPercent(since, now) : null;
+}
+
+/** Claude Code installs before Cloud sign-in when it's missing, and shows it (ADR 20261111-123959). */
+function InstallProgress({ since }: { since: number }) {
+  const now = useTicking(since);
+  const percent = installPercent(since, now);
   const seconds = Math.max(0, Math.floor((now - since) / 1000));
   return (
     <div className="space-y-1.5">
@@ -471,7 +486,7 @@ function InstallProgress({ since }: { since: number }) {
       <div role="progressbar" aria-label="Installing Claude Code" className="h-1 overflow-hidden rounded-full bg-muted">
         <div
           className="h-full rounded-full bg-primary transition-[width] duration-1000 ease-linear"
-          style={{ width: `${Math.round(95 * (1 - Math.exp(-seconds / 45)))}%` }}
+          style={{ width: `${percent}%` }}
         />
       </div>
     </div>

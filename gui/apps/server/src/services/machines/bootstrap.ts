@@ -61,6 +61,18 @@ function createOutputReporter(report: PluginMachineProviderProgress) {
   };
 }
 
+// Executor errors can echo their input: keep one bounded line with the
+// enrollment credential and access header values removed.
+function safeReason(error: unknown, secrets: readonly string[]): string {
+  let text = error instanceof Error ? error.message : String(error);
+  for (const secret of secrets) {
+    if (secret.length > 0) text = text.replaceAll(secret, "[redacted]");
+  }
+  return (
+    (text.trim().split(/\r?\n/u)[0] ?? "").slice(0, 300) || "unknown error"
+  );
+}
+
 async function installerStartCommand(hostId: string) {
   return {
     command: ["sh", "-s", "--", "--start", "--host-id", hostId],
@@ -74,14 +86,19 @@ export function createMachineBootstrapApi(
   return {
     async bootstrap(request) {
       request.signal.throwIfAborted();
-      request.report.step("Preparing machine enrollment");
+      let stage = "Preparing machine enrollment";
+      const step = (text: string) => {
+        stage = text;
+        request.report.step(text);
+      };
+      step(stage);
       try {
         const enrollment = await enrollments.prepare({
           key: request.key,
           signal: request.signal,
         });
         request.signal.throwIfAborted();
-        request.report.step(
+        step(
           enrollment.state === "enrolled"
             ? "Starting enrolled machine"
             : "Bootstrapping machine",
@@ -98,14 +115,23 @@ export function createMachineBootstrapApi(
             signal: request.signal,
             onOutput: output.onOutput,
           });
-        } catch {
+        } catch (error) {
           request.signal.throwIfAborted();
-          throw new Error("Machine bootstrap command failed");
+          const secrets =
+            enrollment.state === "enrolled"
+              ? []
+              : [
+                  enrollment.bootstrap.credential,
+                  ...Object.values(enrollment.bootstrap.headers ?? {}),
+                ];
+          throw new Error(
+            `Machine bootstrap command failed: ${safeReason(error, secrets)}`,
+          );
         }
         output.finish();
         if (result.exitCode !== 0) throw new Error(output.failureMessage());
         request.signal.throwIfAborted();
-        request.report.step("Waiting for machine connection");
+        step("Waiting for machine connection");
         await enrollments.waitForConnection({
           enrollmentId: enrollment.id,
           timeoutMs: 120_000,
@@ -114,7 +140,8 @@ export function createMachineBootstrapApi(
         return { hostId: enrollment.hostId };
       } catch (error) {
         enrollments.clearPending(request.key);
-        throw error;
+        if (request.signal.aborted || !(error instanceof Error)) throw error;
+        throw new Error(`${stage}: ${error.message}`, { cause: error });
       }
     },
   };

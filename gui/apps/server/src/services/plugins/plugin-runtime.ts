@@ -323,8 +323,6 @@ interface PluginRuntimeContext {
   deps: PluginServiceDeps;
   /** Bundled plugins that ship with the app; safe mode keeps them running. */
   includedBuiltinNames: ReadonlySet<string>;
-  /** A bundled plugin the app no longer ships. Its files are gone, so it never loads. */
-  isOrphanedBuiltin?: (row: InstalledPluginRow) => boolean;
   settingsChanged?: () => void;
   loadRetried?: () => void;
 }
@@ -1427,10 +1425,6 @@ export function createPluginRuntime(context: PluginRuntimeContext) {
   }
 
   async function loadOne(row: InstalledPluginRow): Promise<string | null> {
-    if (context.isOrphanedBuiltin?.(row)) {
-      await disposeOne(row.id);
-      return null;
-    }
     if (isSuppressedBySafeMode(row)) {
       await disposeOne(row.id);
       await populateIdentity(row);

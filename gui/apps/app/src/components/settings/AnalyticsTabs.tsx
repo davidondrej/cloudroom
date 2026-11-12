@@ -15,12 +15,12 @@ import { systemSkillUsageQueryKey, systemUsageAnalyticsQueryKey } from "@/hooks/
 // Settings → Analytics: one sub tab per stat, so the page stays short (docs/scopes/settings-analytics.md).
 // Every tab draws its last saved result at once and refreshes behind it; the spinner shows that refresh.
 const TABS: { id: string; label: string; content: () => ReactNode }[] = [
-  { id: "credits", label: "Cloud Credits", content: () => <CreditsUsageSection /> },
-  { id: "agent-hours", label: "Agent hours", content: () => <AgentHoursSection /> },
-  { id: "models", label: "Models", content: () => <ModelsSection /> },
   { id: "tokens", label: "Tokens", content: () => <TokensSection /> },
-  { id: "prompts", label: "Prompts", content: () => <PromptsSection /> },
   { id: "skills", label: "Skills", content: () => <SkillUsageSection /> },
+  { id: "credits", label: "Cloud Credits", content: () => <CreditsUsageSection /> },
+  { id: "models", label: "Models", content: () => <ModelsSection /> },
+  { id: "agent-hours", label: "Agent hours", content: () => <AgentHoursSection /> },
+  { id: "prompts", label: "Prompts", content: () => <PromptsSection /> },
 ];
 const QUERY_KEYS: unknown[] = [creditsWaveKey("")[0], systemSkillUsageQueryKey("")[0], systemUsageAnalyticsQueryKey("", "")[0]];
 
@@ -36,22 +36,23 @@ export function AnalyticsTabs() {
   const updating = useIsFetching({ predicate: (query) => QUERY_KEYS.includes(query.queryKey[0]) }) > 0;
   return (
     <div>
-      <div className="mb-6 flex items-center gap-1">
-        <nav aria-label="Analytics" className="flex flex-wrap gap-1">
+      {/* Underlined, unlike the pills above, so these read as pages inside Analytics. */}
+      <div className="mb-7 flex items-center border-b border-border">
+        <nav aria-label="Analytics" className="flex flex-wrap gap-x-6">
           {tabs.map((tab) => (
             <button
               key={tab.id}
               type="button"
               aria-current={tab === active ? "page" : undefined}
               onClick={() => setParams({ tab: tab.id }, { replace: true })}
-              className={cn("rounded-md px-2.5 py-1 text-sm text-muted-foreground hover:bg-accent hover:text-foreground", tab === active && "bg-accent text-foreground")}
+              className={cn("-mb-px border-b-2 border-transparent pb-2.5 text-[13px] text-muted-foreground hover:text-foreground", tab === active && "border-primary text-foreground")}
             >
               {tab.label}
             </button>
           ))}
         </nav>
         {updating ? (
-          <span role="status" aria-label="Updating" className="ml-auto shrink-0">
+          <span role="status" aria-label="Updating" className="mb-2 ml-auto shrink-0">
             <Icon name="Spinner" className="size-4 animate-spin text-muted-foreground" />
           </span>
         ) : null}

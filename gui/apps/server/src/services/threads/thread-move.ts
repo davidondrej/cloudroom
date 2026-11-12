@@ -118,8 +118,8 @@ export async function moveThreadToProject(
   const previousPath = await withThreadContextClearGuard(thread.id, () =>
     local
       ? moveLocalThread(deps, thread, project, local)
-      : cloudroom(deps).moveProject(thread, project.id, () =>
-          moveRecord(deps, thread, project, null, thread.environmentId),
+      : cloudroom(deps).moveProject(thread, project.id, (seeded) =>
+          moveRecord(deps, thread, project, null, thread.environmentId, seeded),
         ),
   );
   return {
@@ -322,12 +322,13 @@ async function moveRecord(
   project: ProjectRow,
   path: string | null,
   environmentId: string | null,
+  seeded = true,
 ): Promise<(tx: DbTransaction) => void> {
   const from = getProject(deps.db, thread.projectId)?.name ?? "previous";
   const folder = path
     ? `Your working folder is now ${path}.`
     : "Your working folder is now this project's folder. Run `room-cli files wait` before you rely on its files.";
-  const seed = await historySeed(
+  const seed = !seeded ? [] : await historySeed(
     deps,
     thread,
     `[Cloudroom] This thread moved from the ${from} project to the ${project.name} project. ${folder} The old project's folder is unchanged.`,

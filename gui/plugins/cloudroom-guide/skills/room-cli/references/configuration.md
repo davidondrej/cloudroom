@@ -81,11 +81,11 @@
 
 ## Cloudroom guide instructions and skills
 
-Settings → Prompts → Cloudroom guide controls the Cloudroom introduction and the
-three bundled skills. All settings default to true. Use
-`room-cli plugin config bb-guide set <key> true|false` with `introduction`, `skills`
-(the master skill switch), `bbCli`, `pluginAuthoring`, or `skillCreator`.
-Disabling the plugin removes its introduction and skills. Changes apply when
+Settings → Prompts → Cloudroom guide controls the three bundled skills. All
+settings default to true. Use
+`room-cli plugin config cloudroom-guide set <key> true|false` with `skills`
+(the master skill switch), `roomCli`, `pluginAuthoring`, or `skillCreator`.
+Disabling the plugin removes its skills. Changes apply when
 agent configuration is next assembled; independently installed copies remain
 available through their own sources.
 

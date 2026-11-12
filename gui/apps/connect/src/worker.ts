@@ -5,6 +5,7 @@ import {
   GATE_MACHINE_ID_HEADER,
   MACHINE_CREDENTIAL_HEADER,
   PHONE_SESSION_HEADER,
+  RELAY_SIGNAL_HEADER,
   SESSION_COOKIE,
   TUNNEL_MACHINE_HEADER,
   TUNNEL_SESSION_HEADER,
@@ -13,14 +14,15 @@ import {
 } from "./protocol-headers.js";
 import {
   DESKTOP_SESSION_TTL_MS,
-  PHONE_CODE_TTL_MS,
+  MACS_PER_ACCOUNT,
   SESSION_TTL_MS,
   accountHandles,
   accountServers,
   codeHandle,
-  createCode,
+  createMacSession,
   createMachine,
-  createSession,
+  createPhoneCode,
+  createPhoneSession,
   createShareCode,
   deleteMachine,
   formatCode,
@@ -69,6 +71,8 @@ const APP_HANDLE = "app";
 const LOGIN_TOKEN = /^[\w-]+\.[\w-]+\.[\w-]+$/;
 const MAC_HEADER = "x-cloudroom-mac";
 const NEXT_COOKIE = "__Host-cloudroom-next";
+/** The Mac a phone picked, kept while the relay shows it another Mac because that one is offline. */
+const HOME_COOKIE = "__Host-cloudroom-home";
 
 interface Visitor {
   handle: string;
@@ -158,13 +162,14 @@ async function computers(request: Request, env: Env, self: Server): Promise<Resp
 async function openComputer(request: Request, env: Env, self: Server): Promise<Response> {
   const handle = (await readJson(request)).handle;
   const target = typeof handle === "string" && HANDLE.test(handle) ? await serverByHandle(env.DB, handle, true) : null;
-  if (!target || target.userId !== self.userId || target.id === self.id) {
+  // Only Macs: a remote host's or VPS's address serves no app, so a sign-in there would only add a row.
+  if (!target || target.userId !== self.userId || target.id === self.id || target.ownerServerId !== null || target.vps) {
     return json({ error: "That Mac is not on your account." }, 404);
   }
   if (!(await isOnline(env, target.handle))) return json({ error: "That Mac is offline.", offline: true }, 409);
   const origin = `https://${target.handle}.${env.BASE_DOMAIN}`;
   const expiresAt = Date.now() + DESKTOP_SESSION_TTL_MS;
-  const value = await createSession(env.DB, target.id, null, DESKTOP_SESSION_TTL_MS);
+  const value = await createMacSession(env.DB, target.id);
   return json({ url: origin, cookie: { name: SESSION_COOKIE, value, expiresAt } });
 }
 
@@ -216,13 +221,14 @@ export function requestForTunnelDo(
     GATE_AUTH_HEADER,
     GATE_MACHINE_ID_HEADER,
     TUNNEL_VPS_HEADER,
+    RELAY_SIGNAL_HEADER,
   ]) {
     headers.delete(name);
   }
   const cookie = (headers.get("cookie") ?? "")
     .split(";")
     .map((part) => part.trim())
-    .filter((part) => part && !part.startsWith(`${SESSION_COOKIE}=`))
+    .filter((part) => part && !part.startsWith(`${SESSION_COOKIE}=`) && !part.startsWith(`${HOME_COOKIE}=`))
     .join("; ");
   if (cookie) headers.set("cookie", cookie);
   else headers.delete("cookie");
@@ -271,6 +277,10 @@ function sessionCookie(token: string): string {
   return `${SESSION_COOKIE}=${token}; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=${SESSION_TTL_MS / 1000}`;
 }
 
+function homeCookie(handle: string | null): string {
+  return `${HOME_COOKIE}=${handle ?? ""}; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=${handle === null ? 0 : SESSION_TTL_MS / 1000}`;
+}
+
 async function register(request: Request, env: Env): Promise<Response> {
   const authorization = request.headers.get("authorization") ?? "";
   if (!/^Basic [A-Za-z0-9+/=]{1,2048}$/.test(authorization)) {
@@ -295,7 +305,11 @@ async function register(request: Request, env: Env): Promise<Response> {
   if (typeof userId !== "string" || !userId) {
     return json({ error: "Cloudroom could not verify this Mac. Try again soon." }, 503);
   }
-  const { handle, credential } = await registerServer(env.DB, userId, installId);
+  const registered = await registerServer(env.DB, userId, installId);
+  if (!registered) {
+    return json({ error: `This account has the most Macs Cloudroom allows (${MACS_PER_ACCOUNT}). Contact support to remove old ones.` }, 409);
+  }
+  const { handle, credential } = registered;
   return json({ handle, credential, serverUrl: `https://${handle}.${env.BASE_DOMAIN}` });
 }
 
@@ -365,7 +379,7 @@ async function vpsRegister(request: Request, env: Env): Promise<Response> {
  *  only carries the bytes: no phone session, cookie, or cache, since cached responses would skip those tokens. */
 function vpsForward(request: Request, env: Env, server: Server, target: string): Promise<Response> {
   const headers = new Headers(request.headers);
-  for (const name of [TUNNEL_SESSION_HEADER, TUNNEL_MACHINE_HEADER, MACHINE_CREDENTIAL_HEADER, GATE_AUTH_HEADER, GATE_MACHINE_ID_HEADER, "cookie"]) {
+  for (const name of [TUNNEL_SESSION_HEADER, TUNNEL_MACHINE_HEADER, MACHINE_CREDENTIAL_HEADER, GATE_AUTH_HEADER, GATE_MACHINE_ID_HEADER, RELAY_SIGNAL_HEADER, "cookie"]) {
     headers.delete(name);
   }
   headers.set(TUNNEL_TARGET_HEADER, target);
@@ -382,7 +396,30 @@ async function machineLabel(request: Request, env: Env): Promise<Response> {
   return json({ label: machine.handle });
 }
 
-async function apex(request: Request, url: URL, env: Env): Promise<Response> {
+/** Apps seen in this window get "threads changed"; older installs that never come back don't. */
+const SIGNAL_SEEN_MS = 30 * 86_400_000;
+/** The website says an account's Cloud threads changed (#237): each of its app computers online fetches them. Only
+ *  the website may send it, with the shared secret; VPS hosts, remote hosts and phones never get it. */
+async function threadsChanged(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+  const secret = env.CONNECT_SIGNAL_SECRET ?? "";
+  const [given, wanted] = await Promise.all([sha256Hex(bearer(request)), sha256Hex(secret)]);
+  if (!secret || given !== wanted) return json({ error: "Not allowed." }, 401);
+  const body = (await request.json().catch(() => null)) as { user_id?: unknown } | null;
+  const userId = typeof body?.user_id === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(body.user_id) ? body.user_id : null;
+  if (!userId) return json({ error: "Invalid account." }, 400);
+  ctx.waitUntil((async () => {
+    const seen = Date.now() - SIGNAL_SEEN_MS;
+    for (const server of await accountServers(env.DB, userId)) {
+      if ((server.lastSeenAt ?? 0) < seen) continue;
+      await env.TUNNEL_DO.get(env.TUNNEL_DO.idFromName(server.handle))
+        .fetch(new Request(`https://${server.handle}.${env.BASE_DOMAIN}/__control/threads-changed`, { method: "POST" })).catch(() => {});
+    }
+  })().catch(() => {}));
+  return json({ ok: true }, 202);
+}
+
+async function apex(request: Request, url: URL, env: Env, ctx: ExecutionContext): Promise<Response> {
+  if (request.method === "POST" && url.pathname === "/api/threads-changed") return threadsChanged(request, env, ctx);
   if (request.method === "POST" && url.pathname === "/api/register") {
     return register(request, env);
   }
@@ -410,7 +447,7 @@ async function apex(request: Request, url: URL, env: Env): Promise<Response> {
       return json({ ok: true });
     }
     if (url.pathname === "/api/phone-code") {
-      const { code, expiresAt } = await createCode(env.DB, server.id, null, PHONE_CODE_TTL_MS);
+      const { code, expiresAt } = await createPhoneCode(env.DB, server);
       const formatted = formatCode(code);
       return json({
         code: formatted,
@@ -537,7 +574,7 @@ async function visitor(
 
   if (url.pathname === "/__pair") {
     const code = normalizeCode(url.searchParams.get("code") ?? "");
-    const token = code === null ? null : await redeemCode(env.DB, code, server.id, target);
+    const token = code === null ? null : await redeemCode(env.DB, code, server, target);
     if (token === null) {
       return target === null
         ? codePage("/__pair", WRONG_CODE)
@@ -681,10 +718,11 @@ async function signIn(request: Request, env: Env): Promise<Response> {
       409,
     );
   }
-  const token = await createSession(env.DB, mac.id, null, SESSION_TTL_MS, userId);
+  const token = await createPhoneSession(env.DB, mac.id, userId);
   return redirect(
     shareReturn(readCookie(request.headers.get("cookie"), NEXT_COOKIE)),
     sessionCookie(token),
+    homeCookie(null),
     `${NEXT_COOKIE}=; Path=/; Secure; HttpOnly; SameSite=None; Max-Age=0`,
   );
 }
@@ -711,7 +749,9 @@ async function switchMac(request: Request, url: URL, env: Env, token: string, us
   if (!mac || mac.userId !== userId || mac.ownerServerId !== null || !(await pickServer(env.DB, token, mac))) {
     return json({ error: "That Mac is not on your account." }, 404);
   }
-  return json({ ok: true });
+  const switched = json({ ok: true });
+  switched.headers.append("set-cookie", homeCookie(null));
+  return switched;
 }
 
 async function onlineMac(env: Env, picked: Server): Promise<Server | null> {
@@ -719,6 +759,22 @@ async function onlineMac(env: Env, picked: Server): Promise<Server | null> {
     if (mac.id !== picked.id && (await isOnline(env, mac.handle))) return mac;
   }
   return null;
+}
+
+/**
+ * The Mac a page load shows. While the picked Mac is offline the phone moves to an online one, and the cookie keeps
+ * the pick so the phone goes back when that Mac returns. Without it the move was for good (2026-11-11).
+ * `home` is the cookie's new value: null clears it, undefined leaves it.
+ */
+async function pageMac(request: Request, env: Env, token: string, picked: Server): Promise<{ server: Server; home?: string | null }> {
+  const kept = readCookie(request.headers.get("cookie"), HOME_COOKIE);
+  const home = kept === null ? null : ((await accountServers(env.DB, picked.userId)).find((mac) => mac.handle === kept && mac.id !== picked.id) ?? null);
+  if (home && (await isOnline(env, home.handle)) && (await pickServer(env.DB, token, home))) return { server: home, home: null };
+  if (!(await isOnline(env, picked.handle))) {
+    const other = await onlineMac(env, picked);
+    if (other && (await pickServer(env.DB, token, other))) return { server: other, ...(home ? {} : { home: picked.handle }) };
+  }
+  return { server: picked, ...(kept !== null && !home ? { home: null } : {}) };
 }
 
 async function phoneApp(request: Request, url: URL, env: Env, ctx: ExecutionContext): Promise<Response> {
@@ -755,17 +811,14 @@ async function phoneApp(request: Request, url: URL, env: Env, ctx: ExecutionCont
   const cloudPath = CLOUD_PATH.exec(url.pathname)?.[1];
   if (cloudPath !== undefined) return cloud(request, cloudPath, url, env, token);
   if (url.pathname.startsWith("/__")) return text("Not found\n", 404);
-  let server = picked;
-  if (request.method === "GET" && wantsHtml(request) && !(await isOnline(env, server.handle))) {
-    const other = await onlineMac(env, server);
-    if (other && (await pickServer(env.DB, token, other))) server = other;
-  }
+  const { server, home } = request.method === "GET" && wantsHtml(request) ? await pageMac(request, env, token, picked) : { server: picked };
   const proxied =
     request.headers.get("origin") === url.origin ? withOrigin(request, serverOrigin(server, null, env)) : request;
   const response = await forward(proxied, env, ctx, server, null);
   if (response.webSocket) return response;
   const scoped = new Response(response.body, response);
   scoped.headers.set(MAC_HEADER, server.handle);
+  if (home !== undefined) scoped.headers.append("set-cookie", homeCookie(home));
   return scoped;
 }
 
@@ -790,7 +843,7 @@ function route(request: Request, env: Env, ctx: ExecutionContext, trace: Trace):
   const url = new URL(request.url);
   const host = url.hostname.toLowerCase();
   const guard = (response: Response) => guardFromOtherAddresses(request, response);
-  if (host === env.BASE_DOMAIN) return apex(request, url, env).then(guard);
+  if (host === env.BASE_DOMAIN) return apex(request, url, env, ctx).then(guard);
   if (host === `${APP_HANDLE}.${env.BASE_DOMAIN}`) return phoneApp(request, url, env, ctx).then(guard);
   const parsed = parseVisitorHost(host, env.BASE_DOMAIN);
   if (!parsed) return Promise.resolve(text("Not found\n", 404));

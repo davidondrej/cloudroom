@@ -706,8 +706,9 @@ and strong ETag. That package contains the daemon, its workers and native
 dependencies, and the bundled `bb` CLI; it omits the server and web app. The
 installer verifies the digest and skips the download and npm install when its
 recorded installed digest receives `304 Not Modified`. If the package route
-fails, installation stops with an error; it never falls back to npm or a
-`bb-app` on PATH. It installs the package under
+fails, installation stops with an error and prints the server's reason (`503
+host_package_unavailable` when the server can't build the package); it never
+falls back to npm or a `bb-app` on PATH. It installs the package under
 the machine's bb data directory rather than npm's system-wide prefix, so
 enrollment needs neither `sudo` nor a global npm configuration.
 Installed services enable `--auto-update`; remove that flag from the launchd
@@ -1326,12 +1327,11 @@ For isolated development smoke tests only, `DEV_BROWSER_SMOKE_BINARY` selects th
 
 ## Agent guidance plugin settings
 
-BB guide is installed and enabled by default. In Settings → Plugins
-→ BB guide, `introduction` controls the BB introduction, `skills` controls all
-three bundled skills, and `bbCli`, `pluginAuthoring`, and `skillCreator` control
-individual skills. All default to true. Disabling BB guide removes its
-introduction and skills; other plugins and independently installed skill
-copies retain their own configuration.
+Cloudroom guide (`cloudroom-guide`) is installed and enabled by default. In
+Settings → Prompts → Cloudroom guide, `skills` controls all three bundled
+skills, and `roomCli`, `pluginAuthoring`, and `skillCreator` control individual
+skills. All default to true. Disabling Cloudroom guide removes its skills; other
+plugins and independently installed skill copies retain their own configuration.
 
 Connect's `sendRemoteInstructions` setting ("Tell agents about remote access")
 defaults to true. When false it suppresses Connect's active/recent remote-use

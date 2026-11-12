@@ -49,7 +49,7 @@ export interface CloudroomStatus {
   plan?: string | null;
   /** The account's Cloud Credits this credit period and when they refill (`resetsAt`, ADR 20261108-142517): Free's sidebar
    *  card, paid plans' meter from 75%. Null while billing is off or in the cloud queue; null credits while metering is stale. */
-  planUsage?: { plan: string; credits: number | null; creditsLimit: number; resetsAt?: string | null; extraCredits?: number; extraCreditsTotal?: number; og?: { name: string | null; endsAt: string } | null } | null;
+  planUsage?: { plan: string; credits: number | null; creditsLimit: number; resetsAt?: string | null; extraCredits?: number; extraCreditsTotal?: number } | null;
 }
 
 export interface CloudroomCodexAuth {
@@ -60,7 +60,7 @@ export interface CloudroomCodexAuth {
   login_id: string | null;
   verification_url: string | null;
   user_code: string | null;
-  /** Claude: when Cloudroom started installing Claude Code for this sign-in, in ms since 1970. */
+  /** Claude and Codex: when Cloudroom started installing the missing CLI for this sign-in, in ms since 1970. */
   installing_since?: number | null;
 }
 
@@ -368,7 +368,8 @@ export interface CloudroomArea {
   /** Sends a Local agent's Cloudroom bug report. `sent` is false while bug reports are off in Settings. */
   reportBug(input: { message: string; threadId?: string }): Promise<{ sent: boolean }>;
   /** The thread's read-only share link, or null when it is not shared. */
-  threadShare(threadId: string, signal?: AbortSignal): Promise<ThreadShare | null>;
+  /** `fresh`: read a Cloud thread's share from the website (when the share menu opens); otherwise the local copy. */
+  threadShare(threadId: string, signal?: AbortSignal, fresh?: boolean): Promise<ThreadShare | null>;
   /** Shares the thread's messages (no tool output or files, secrets removed), or updates its shared copy. */
   shareThread(threadId: string): Promise<ThreadShare>;
   /** Turns the thread's share link off and deletes its shared copy. */
@@ -487,7 +488,7 @@ export function createCloudroomArea({ transport }: CreateSdkAreaArgs): Cloudroom
     exportChats: (input) => transport.readJson(transport.fetch(`${transport.baseUrl}/api/v1/cloudroom/export`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(input) })) as Promise<{ folder: string; count: number }>,
     reportBug: (input) => transport.readJson(transport.fetch(`${transport.baseUrl}/api/v1/cloudroom/bug-reports`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(input) })) as Promise<{ sent: boolean }>,
     retryCopy: (threadId) => transport.readVoid(transport.fetch(`${transport.baseUrl}/api/v1/cloudroom/threads/${encodeURIComponent(threadId)}/retry-copy`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" })),
-    threadShare: (threadId, signal) => transport.readJson(transport.fetch(`${transport.baseUrl}/api/v1/cloudroom/threads/${encodeURIComponent(threadId)}/share`, { signal })) as Promise<ThreadShare | null>,
+    threadShare: (threadId, signal, fresh) => transport.readJson(transport.fetch(`${transport.baseUrl}/api/v1/cloudroom/threads/${encodeURIComponent(threadId)}/share${fresh ? "?fresh=1" : ""}`, { signal })) as Promise<ThreadShare | null>,
     shareThread: (threadId) => transport.readJson(transport.fetch(`${transport.baseUrl}/api/v1/cloudroom/threads/${encodeURIComponent(threadId)}/share`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "save" }) })) as Promise<ThreadShare>,
     stopSharingThread: (threadId) => transport.readVoid(transport.fetch(`${transport.baseUrl}/api/v1/cloudroom/threads/${encodeURIComponent(threadId)}/share`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "stop" }) })),
     continueShare: (link) => transport.readJson(transport.fetch(`${transport.baseUrl}/api/v1/cloudroom/shares/continue`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ link }) })) as Promise<{ threadId: string; projectId: string }>,

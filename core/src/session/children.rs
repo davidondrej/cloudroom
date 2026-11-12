@@ -135,7 +135,7 @@ impl Manager {
     }
 }
 
-/// Harnesses a cloud agent may start as a child thread; the app has no Cloud thread type for the others.
+/// Harnesses a child sharing its parent's sandbox may run. Cursor and fx children run in sandboxes of their own.
 const CHILD_HARNESSES: [runtime::Kind; 9] = [
     runtime::Kind::Codex,
     runtime::Kind::Claude,
@@ -451,7 +451,7 @@ impl Manager {
             let kind = spawn.harness.unwrap_or(p.harness);
             if !CHILD_HARNESSES.contains(&kind) {
                 return Err(Error::Conflict(
-                    "child threads support codex, claude-code, pi, opencode, hermes, devin, droid, kimi and openclaw",
+                    "Only codex, claude-code, pi, opencode, hermes, devin, droid, kimi and openclaw children can share this sandbox. Omit --shared-sandbox to start it in a sandbox of its own.",
                 ));
             }
             let same = kind == p.harness;

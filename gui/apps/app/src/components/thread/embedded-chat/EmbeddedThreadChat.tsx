@@ -203,6 +203,7 @@ function EmbeddedThreadChatHostedFooter({
   return (
     <div
       data-thread-window=""
+      data-wallpaper="thread"
       className="flex h-full min-h-0 min-w-0 flex-col overflow-clip"
     >
       <PageShell

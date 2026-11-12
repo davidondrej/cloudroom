@@ -8,6 +8,7 @@ import {
   createClaudeDeltaHarness,
   loadFixture,
   spawningToolUseFor,
+  spawningToolUseMessage,
 } from "./delta-test-harness.js";
 
 const THREAD_ID = "thr_claude_rate_limits";
@@ -1858,6 +1859,55 @@ describe("claude error translation", () => {
           httpStatusCode: 529,
         },
       }),
+    );
+  });
+
+  it("fails a turn a hook stopped before Claude replied (#1036)", () => {
+    const hookStop = sdkMessage({
+      type: "result",
+      subtype: "success",
+      is_error: false,
+      result: "",
+      terminal_reason: "hook_stopped",
+    });
+    const context = { threadId: THREAD_ID };
+    const silent = createClaudeDeltaHarness();
+    silent.translate(
+      sdkMessage(spawningToolUseMessage({ toolUseId: "t1", toolName: "Bash" })),
+      context,
+    );
+    const silentEvents = silent.translate(hookStop, context);
+    expect(silentEvents).toContainEqual(
+      expect.objectContaining({
+        type: "provider/error",
+        detail:
+          "A Claude Code hook stopped Claude before it replied. Check your Claude Code hooks.",
+      }),
+    );
+    expect(silentEvents).toContainEqual(
+      expect.objectContaining({ type: "turn/completed", status: "failed" }),
+    );
+
+    // Claude replied before the stopped tool call: the turn stays completed.
+    const replied = createClaudeDeltaHarness();
+    replied.translate(
+      sdkMessage({
+        type: "assistant",
+        message: { content: [{ type: "text", text: "Diagnosis: …" }] },
+      }),
+      context,
+    );
+    replied.translate(
+      sdkMessage(spawningToolUseMessage({ toolUseId: "t2", toolName: "Bash" })),
+      context,
+    );
+    const repliedEvents = replied.translate(hookStop, context);
+    expect(repliedEvents.map((event) => event.type)).toEqual([
+      "provider/warning",
+      "turn/completed",
+    ]);
+    expect(repliedEvents).toContainEqual(
+      expect.objectContaining({ type: "turn/completed", status: "completed" }),
     );
   });
 

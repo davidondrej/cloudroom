@@ -385,6 +385,21 @@ legacy_service_slug=$(printf '%s' "$server_host" | tr '.' '-')
 # Each server gets its own data dir and daemon instance, so one machine can
 # serve several bb servers and a full local bb install keeps ~/.bb to itself.
 data_dir=${BB_DATA_DIR:-"$HOME/.bb-machines/$server_host"}
+# A join code enrolls at /internal/hosts/enroll. A Cloudroom Connect address
+# answers 404 there unless the caller has a machine relay key, which a join
+# code never carries. Check before installing anything (#1057).
+if [ -z "$bootstrap_env" ] && [ ! -f "$data_dir/auth.json" ]; then
+  enroll_status=$(curl --silent --output /dev/null --write-out '%{http_code}' \
+    --connect-timeout "$CURL_CONNECT_TIMEOUT_SECONDS" --max-time 30 \
+    -X POST -H 'content-type: application/json' --data '{}' \
+    "${server_url%/}/internal/hosts/enroll" </dev/null) || enroll_status=000
+  if [ "$enroll_status" = 404 ]; then
+    fail_step "$server_url does not accept join codes, so nothing was installed."
+    detail "Cloudroom Connect addresses only let in machines that have their own relay key." >&2
+    detail "On your Cloudroom computer, run room-cli machine create --provider manual (or Settings → Machines → Add a machine), then run the command it prints here." >&2
+    exit 1
+  fi
+fi
 mkdir -p "$HOME/.local/bin"
 if [ ! -e "$HOME/.local/bin/room-cli" ] && [ ! -L "$HOME/.local/bin/room-cli" ]; then
   shim_file=$(mktemp "$HOME/.local/bin/.bb-machine.XXXXXX")
@@ -640,8 +655,15 @@ elif [ "$package_status" -ge 200 ] && [ "$package_status" -lt 300 ]; then
   bb_app_npm_prefix=$machine_npm_prefix
   complete_step "Installed the server's bb-app build"
 else
+  server_message=$(node -e '
+    try {
+      const message = JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8")).message;
+      if (typeof message === "string") process.stdout.write(message.split("\n")[0].slice(0, 300));
+    } catch {}
+  ' "$package_file" 2>/dev/null) || server_message=
   rm -rf "$package_dir"
   fail_step "Could not download the server's bb-app package from $package_url (HTTP $package_status). Check that the server is running and up to date, then rerun this command."
+  [ -z "$server_message" ] || detail "Server: $server_message" >&2
   exit 1
 fi
 rm -rf "$package_dir"

@@ -29,7 +29,7 @@ room-cli thread update --self [--title TITLE] [--reasoning-level LEVEL]
 room-cli thread archive --self
 room-cli thread move --self --project PROJECT
 room-cli thread stop --self
-room-cli thread spawn --provider codex|claude-code|pi|opencode|hermes|devin|droid|kimi|fx|openclaw [--model MODEL] [--reasoning-level LEVEL] [--service-tier default|fast] [--title TITLE] [--shared-sandbox|--top-level] --prompt TEXT|--prompt-file PATH
+room-cli thread spawn --provider codex|claude-code|pi|cursor|opencode|hermes|devin|droid|kimi|fx|openclaw [--model MODEL] [--reasoning-level LEVEL] [--service-tier default|fast] [--title TITLE] [--shared-sandbox|--top-level] --prompt TEXT|--prompt-file PATH
 room-cli thread fork [--provider codex|claude-code|pi|opencode|hermes|devin|droid|kimi|fx|openclaw] [--model MODEL] [--reasoning-level LEVEL] [--title TITLE] --prompt TEXT|--prompt-file PATH
 room-cli thread list [--include-archived]
 room-cli thread wait --children
@@ -291,7 +291,13 @@ async fn rename(
             "Use a title of 1-200 characters",
         ));
     }
-    record(&m, &session, "title", json!({"title":title}))
+    // `wake`: the website drops a report from an earlier wake, so a late one never undoes a newer change (#237).
+    record(
+        &m,
+        &session,
+        "title",
+        json!({"title":title,"wake":m.wake_id()}),
+    )
 }
 
 /// The new effort applies from this session's next turn; the app shows it as the thread's effort.
@@ -308,7 +314,7 @@ async fn set_reasoning(
         &m,
         &session,
         "reasoning",
-        json!({"reasoning":input.reasoning}),
+        json!({"reasoning":input.reasoning,"wake":m.wake_id()}),
     )
 }
 
@@ -323,7 +329,7 @@ async fn archive(
         &m,
         &session,
         "archive",
-        json!({"archived":true,"kept_live":kept,"self":true}),
+        json!({"archived":true,"kept_live":kept,"self":true,"wake":m.wake_id()}),
     )
 }
 
@@ -655,7 +661,15 @@ fn check_start(
     provider
         .map(|p| {
             serde_json::from_value(json!(p)).map_err(|_| {
-                bad("Use --provider codex, claude-code, pi, opencode, hermes, devin, droid, kimi, fx or openclaw")
+                // The Local CLI's names, such as `acp-cursor`, are a common mistake here.
+                let hint = if p.starts_with("acp-") {
+                    ". Cloud names have no acp- prefix: acp-cursor is cursor"
+                } else {
+                    ""
+                };
+                bad(&format!(
+                    "Use --provider codex, claude-code, pi, cursor, opencode, hermes, devin, droid, kimi, fx or openclaw{hint}"
+                ))
             })
         })
         .transpose()

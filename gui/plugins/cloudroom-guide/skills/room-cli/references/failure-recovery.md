@@ -18,6 +18,7 @@
   a busy thread or a plugin's dispatch hook. `--reason <text>` labels the queued
   row. The SDK equivalent is `sdk.threads.retry({ threadId, turnRequestId?,
 sendAt?, reason? })`.
+- Cloud threads have no `thread retry`: retry a rejected start with `room-cli cloud retry-start <id>`; otherwise check `thread show` and `thread output` first, and send a follow-up only if work is really unfinished.
 - A follow-up carries a thread's first prompt only if setup failed before the
   workspace was ready and the thread wasn't stopped. `room-cli thread retry`
   re-sends the most recent failed message (the original only if it never

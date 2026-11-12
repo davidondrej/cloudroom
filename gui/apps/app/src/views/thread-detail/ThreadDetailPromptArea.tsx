@@ -1481,7 +1481,7 @@ export function ThreadDetailPromptArea({
     sentMessageEdit !== undefined &&
     sentMessageExecutionSelection !== null &&
     sentMessageEditInput.length > 0 &&
-    submitMode.kind === "ready" &&
+    submitMode.kind !== "blocked" &&
     !shouldHideComposer &&
     !isDefaultExecutionOptionsLoading &&
     !isAttachingSentMessageFiles &&

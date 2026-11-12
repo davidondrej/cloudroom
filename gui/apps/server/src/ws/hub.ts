@@ -515,6 +515,11 @@ export class NotificationHub implements DbNotifier {
     this.clientSocketsByKey.set(key, sockets);
   }
 
+  /** Whether a thread is open on a screen here, so its Cloud stream runs (#237). */
+  watching(threadId: string): boolean {
+    return this.clientSocketsByKey.has(subscriptionKey({ kind: "thread-detail", threadId }));
+  }
+
   unsubscribe(socket: HubSocket, target: RealtimeSubscriptionTarget): void {
     const key = subscriptionKey(target);
     this.clientKeysBySocket.get(socket)?.delete(key);

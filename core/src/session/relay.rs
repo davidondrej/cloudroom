@@ -3,7 +3,7 @@
 //! own records, wakes the other sandbox and calls its `/relay`. This Core keeps each turn report until the website
 //! takes it, and stays awake for it.
 use super::{
-    Local, Manager,
+    Local, Manager, Session, SessionState,
     children::{FINISHED, NOTICE_REPLY_CHARS, notice, notice_ids},
     history::ApiError,
     thread::{
@@ -27,6 +27,8 @@ use std::{
 
 /// Since when reports have failed. After `GIVE_UP_AWAKE`, the sandbox may sleep; the next wake retries them.
 static FAILING_SINCE: Mutex<Option<Instant>> = Mutex::new(None);
+/// The same for a thread's own reports to the website (#237).
+static THREAD_FAILING_SINCE: Mutex<Option<Instant>> = Mutex::new(None);
 const GIVE_UP_AWAKE: Duration = Duration::from_secs(30 * 60);
 /// The child starts a task drives right now, by session and request ID, so each has one.
 static DRIVING: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(Mutex::default);
@@ -270,10 +272,7 @@ async fn receive(
     // messages go to the session that started it.
     let from = match input.action.as_str() {
         "report" => input.child.clone(),
-        "tell" => input.text.as_deref().and_then(|t| {
-            let rest = t.strip_prefix("[bb message from thread:")?;
-            Some(rest[..rest.find(']')?].to_owned())
-        }),
+        "tell" => input.text.as_deref().and_then(tell_sender),
         _ => None,
     };
     let owner = from.as_deref().and_then(|child| starter(&m, child));
@@ -338,7 +337,7 @@ async fn receive(
                     &m,
                     &id,
                     "archive",
-                    json!({"archived":true,"kept_live":kept}),
+                    json!({"archived":true,"kept_live":kept,"wake":m.wake_id()}),
                 )?;
             }
             // Archived, it sends no new reports, but one may be in flight, and an earlier session of this thread (say,
@@ -366,6 +365,15 @@ async fn receive(
         ));
     }
     Ok(answer)
+}
+
+/// The thread a relayed message names as its sender. `[bb message ...]` is what every sender writes today; the plain
+/// tag is read too, so senders can drop the "bb" once every Core reads both.
+fn tell_sender(text: &str) -> Option<String> {
+    let rest = text
+        .strip_prefix("[bb message from thread:")
+        .or_else(|| text.strip_prefix("[message from thread:"))?;
+    Some(rest[..rest.find(']')?].to_owned())
 }
 
 /// The session sharing this sandbox that started `child` through the website. The thread's own sessions take what
@@ -519,8 +527,48 @@ fn failed(now: bool) {
 
 /// A report still waits for the website, so the sandbox must not sleep yet, unless it has failed for a long time.
 pub(super) fn report_pending(local: &Local) -> bool {
-    let failing = FAILING_SINCE.lock().unwrap();
-    next_report(local).is_some() && failing.is_none_or(|since| since.elapsed() < GIVE_UP_AWAKE)
+    let fresh = |failing: &Mutex<Option<Instant>>| {
+        failing
+            .lock()
+            .unwrap()
+            .is_none_or(|since| since.elapsed() < GIVE_UP_AWAKE)
+    };
+    (next_report(local).is_some() && fresh(&FAILING_SINCE))
+        || (next_thread_report(local).is_some() && fresh(&THREAD_FAILING_SINCE))
+}
+
+/// The next change a thread owes the website (#237), oldest first. A switch's new session waits until its `continue`
+/// landed. An archive waits for the end of its turn and for every other visible thread in the sandbox (a child, a
+/// side chat) to be archived too, since the website row is the whole sandbox (docs/scopes/sandboxes.md).
+fn next_thread_report(local: &Local) -> Option<(String, Value)> {
+    let visible = |s: &Session| {
+        !s.archived
+            && s.close_request.is_none()
+            && !matches!(
+                s.state,
+                SessionState::Closing
+                    | SessionState::Closed
+                    | SessionState::Failed
+                    | SessionState::ProcessLost
+                    | SessionState::SavedHistoryOnly
+            )
+    };
+    local.sessions.values().find_map(|s| {
+        let report = s.thread_reports.first()?;
+        let waiting = local
+            .sessions
+            .values()
+            .any(|o| o.continuing.as_deref() == Some(&s.session_id));
+        let archive = report["kind"] == "archived";
+        let others = || {
+            local
+                .sessions
+                .values()
+                .any(|o| o.session_id != s.session_id && visible(o))
+        };
+        (!waiting && s.parent_session.is_none() && !(archive && (s.busy() || others())))
+            .then(|| (s.session_id.clone(), report.clone()))
+    })
 }
 
 /// Child starts the website hasn't finished, by session, request ID and the request to repeat. An archived thread's
@@ -668,6 +716,30 @@ async fn drive_start(
         .remove(&format!("{session}/{request}"));
 }
 
+impl super::Session {
+    /// The agent's own rename or effort, owed to the website (#237). Only the latest of each, and never a session
+    /// sharing another's sandbox: the website row belongs to the sandbox's thread.
+    /// Only a record that names its wake is owed: older Cores' records, replayed after an upgrade, and the user's own
+    /// changes (which the app sent) never are. The website drops a report from an earlier wake.
+    pub(super) fn owe(&mut self, kind: &str, data: &Value, sequence: u64) {
+        let value = if kind == "archived" {
+            Value::Bool(true)
+        } else {
+            data[kind].clone()
+        };
+        self.thread_reports.retain(|report| report["kind"] != kind);
+        if self.parent_session.is_some()
+            || !data["wake"].is_string()
+            || data["user"] == true
+            || value.is_null()
+        {
+            return;
+        }
+        self.thread_reports
+            .push(json!({"kind":kind,"value":value,"seq":sequence,"wake":data["wake"]}));
+    }
+}
+
 impl Manager {
     /// Drives each child start the website hasn't finished, saved or new, one task per start.
     pub(super) fn watch_child_starts(self: &Arc<Self>, local: &Local) {
@@ -697,6 +769,58 @@ impl Manager {
                 if changed.changed().await.is_err() {
                     return;
                 }
+            }
+        });
+    }
+
+    /// Reports this thread's own changes to the website, which every computer follows (#237): its agent's rename and
+    /// effort, and its archive. Kept until the website takes or refuses it; one task for this Core's life.
+    pub(super) fn watch_thread_reports(self: &Arc<Self>, local: &Local) {
+        let Some(api) = self.history.api.clone() else {
+            return;
+        };
+        let manager = self.clone();
+        let mut changed = local.changed.subscribe();
+        tokio::spawn(async move {
+            let mut wait = Duration::from_secs(5);
+            while !manager.is_stopping() {
+                let due = next_thread_report(&manager.local.lock().unwrap());
+                let Some((session, report)) = due else {
+                    if changed.changed().await.is_err() {
+                        return;
+                    }
+                    continue;
+                };
+                let (seq, kind) = (
+                    report["seq"].clone(),
+                    report["kind"].as_str().unwrap_or_default().to_owned(),
+                );
+                // The wake the change was made in: one from an earlier wake (the thread may have been archived
+                // and restored meanwhile) is dropped by the website.
+                let mut body = json!({"request_id":format!("report_{seq}"),"session":session,"wake":report["wake"]});
+                body[kind.as_str()] = report["value"].clone();
+                // Taken, or refused for good (409: not the thread's session now): never sent again.
+                let done = match api.post("thread", &body).await {
+                    Ok(_) | Err(ApiError::Status(400 | 403 | 404 | 409 | 410, _)) => manager
+                        .note(&session, "thread_report", json!({"seq":seq}))
+                        .is_ok(),
+                    Err(_) => false,
+                };
+                // Its own give-up clock, apart from the turn reports' (`failed`).
+                {
+                    let mut failing = THREAD_FAILING_SINCE.lock().unwrap();
+                    *failing = if done {
+                        None
+                    } else {
+                        Some(failing.unwrap_or_else(Instant::now))
+                    };
+                }
+                if done {
+                    wait = Duration::from_secs(5);
+                    continue;
+                }
+                tokio::time::sleep(wait).await;
+                wait = (wait * 2).min(Duration::from_secs(300));
             }
         });
     }
@@ -741,6 +865,126 @@ impl Manager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_relayed_message_names_its_sender_with_or_without_bb() {
+        for tag in ["[bb message from thread:", "[message from thread:"] {
+            let text = format!("{tag}thr_child]\n\nDone.");
+            assert_eq!(tell_sender(&text).as_deref(), Some("thr_child"));
+        }
+        assert_eq!(tell_sender("Done."), None);
+    }
+
+    /// A thread's own rename and archive reach the website once each (#237); a thread sharing its sandbox never
+    /// reports, the archive waits for that thread to be archived too, and a user's later prompt cancels it.
+    #[test]
+    fn a_thread_reports_its_own_changes_once_and_never_for_a_session_sharing_its_sandbox() {
+        let dir =
+            std::env::temp_dir().join(format!("cloudroom-thread-reports-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut local = Local::open(&dir).unwrap();
+        let start = |parent: Option<&str>| json!({"request_id":"s","command":"start","state":"completed","input":{"parent_session":parent}});
+        local.append("main", "receipt", start(None), None).unwrap();
+        local
+            .append("kid", "receipt", start(Some("main")), None)
+            .unwrap();
+        for id in ["main", "kid"] {
+            local
+                .append(id, "state", json!({"state":"idle"}), None)
+                .unwrap();
+            local
+                .append(
+                    id,
+                    "title",
+                    json!({"title":format!("{id} title"),"wake":"w1"}),
+                    None,
+                )
+                .unwrap();
+        }
+        // An older Core's record (no wake, replayed after an upgrade) and a user's own rename are never owed.
+        local
+            .append("main", "title", json!({"title":"old"}), None)
+            .unwrap();
+        assert!(next_thread_report(&local).is_none());
+        local
+            .append(
+                "main",
+                "title",
+                json!({"title":"main title","wake":"w1"}),
+                None,
+            )
+            .unwrap();
+        let (session, report) = next_thread_report(&local).unwrap();
+        assert_eq!(
+            (
+                session.as_str(),
+                report["kind"].as_str(),
+                report["value"].as_str(),
+                report["wake"].as_str()
+            ),
+            ("main", Some("title"), Some("main title"), Some("w1"))
+        );
+        local
+            .append("main", "thread_report", json!({"seq":report["seq"]}), None)
+            .unwrap();
+        assert!(next_thread_report(&local).is_none());
+        // Archived while the child still shows, the thread waits; once the child is archived, it reports.
+        local
+            .append(
+                "main",
+                "archive",
+                json!({"archived":true,"self":true,"wake":"w1"}),
+                None,
+            )
+            .unwrap();
+        assert!(next_thread_report(&local).is_none());
+        local
+            .append("kid", "archive", json!({"archived":true,"user":true}), None)
+            .unwrap();
+        // Sent with the wake it was made in, also after a restart: a later wake's report would undo an Undo.
+        drop(local);
+        let mut local = Local::open(&dir).unwrap();
+        let (_, archive) = next_thread_report(&local).unwrap();
+        // A user's restore (the website tells a running Core on Undo) drops it; archived again, it's owed again.
+        local
+            .append("main", "unarchive", json!({"user":true}), None)
+            .unwrap();
+        assert!(next_thread_report(&local).is_none() && !local.sessions["main"].archived);
+        local
+            .append(
+                "main",
+                "archive",
+                json!({"archived":true,"self":true,"wake":"w1"}),
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            (archive["kind"].as_str(), archive["wake"].as_str()),
+            (Some("archived"), Some("w1"))
+        );
+        // A loop's prompt leaves it owed; the user's own (restored and used again) cancels it, also after a restart.
+        let prompt = |id: &str| json!({"request_id":id,"command":"prompt","state":"accepted","input":{"text":"hi"}});
+        local
+            .append("main", "receipt", prompt("auto_0123_1"), None)
+            .unwrap();
+        assert!(
+            local.sessions["main"]
+                .thread_reports
+                .iter()
+                .any(|r| r["kind"] == "archived")
+        );
+        local
+            .append("main", "receipt", prompt("app_0123456789ab_x"), None)
+            .unwrap();
+        drop(local);
+        let local = Local::open(&dir).unwrap();
+        assert!(local.sessions["main"].thread_reports.is_empty());
+        assert_eq!(
+            local.sessions["main"].last_app_prompt.as_ref().unwrap()["request_id"],
+            "app_0123456789ab_x"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// A child that archives itself still reports the turn it did that in, and only that one, also after a
     /// restart. One archived by its parent reports nothing more.

@@ -87,7 +87,10 @@ export function ImportChats({ onStart, empty, alwaysOfferExport }: { onStart?: (
   const list = sessions.data.sessions;
   const exportLink = (alwaysOfferExport || sessions.data.conductorApp) && <ConductorExport onStart={onStart} />;
   const apps = APPS.filter(([id]) => list.some((session) => session.harness === id));
-  if (!apps.length) return <>{empty ?? <p className="text-sm text-(--ic-muted)" style={PALETTE}>No new agent chats on this {COMPUTER}.</p>}{exportLink}</>;
+  // The list refetches after an import and drops what came over, so keep the outcome instead of "Import 0 chats" or "No new agent chats".
+  const last = importSessions.isPending ? undefined : importSessions.data;
+  const outcome = last && <p role="status" className="text-sm text-(--ic-muted) not-first:mt-3">Last import: imported {last.imported.length} chat{last.imported.length === 1 ? "" : "s"}{last.skipped.length > 0 && `, ${last.skipped.length} skipped. First reason: ${last.skipped[0]!.reason}`}</p>;
+  if (!apps.length) return <>{outcome ? <div style={PALETTE} className={CARD}>{outcome}</div> : empty ?? <p className="text-sm text-(--ic-muted)" style={PALETTE}>No new agent chats on this {COMPUTER}.</p>}{exportLink}</>;
 
   const recent = list.filter((session) => days === null || Date.now() - session.updatedAt < days * DAY_MS);
   const picked = apps.filter(([id]) => !off.has(id));
@@ -150,6 +153,7 @@ export function ImportChats({ onStart, empty, alwaysOfferExport }: { onStart?: (
           {importSessions.isPending ? "This keeps going if you leave this screen." : picked.map(([id, name]) => `${count(id)} ${name}`).join(" · ")}
         </span>
       </div>
+      {outcome}
       {exportLink}
     </div>
   );

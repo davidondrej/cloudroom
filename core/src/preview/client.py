@@ -1336,6 +1336,12 @@ class MacJobs:
         if saved and (sys.platform != 'darwin' or login.endswith('/zsh')):
             tools += (' ' if login.endswith('/fish') else ':') + shlex.quote(saved)
         path = f'set -gx PATH {tools} $PATH; ' if login.endswith('/fish') else f'PATH={tools}:"$PATH"; '
+        # A nested room-cli reaches the app that owns this helper, not a ROOM_SERVER_URL left in the helper's or the
+        # login shell's environment, nor the default port of another app such as a Dev build (#1243, #1290).
+        server = core.config.get('serverUrl')
+        if server:
+            path += (f'set -gx ROOM_SERVER_URL {shlex.quote(server)}; ' if login.endswith('/fish') else
+                     f'export ROOM_SERVER_URL={shlex.quote(server)}; ')
         # Agents and Core's copy scripts write sh, which fish can't parse (#204), so fish loads its login setup, then
         # hands the unchanged command to sh. Inside fish's '…' only \ and ' are special.
         command = ("exec /bin/sh -c '" + job['command'].replace('\\', '\\\\').replace("'", "\\'") + "'"
@@ -1806,10 +1812,12 @@ def configure(folder, connection_file, activate, allow_private, mac_access=None,
     # bundled git. launchd starts the helper with a bare PATH, so Mac jobs add this one. A failed lookup (unset) keeps the
     # last good one, so a slow launch neither loses it nor restarts the helper (#338).
     shell_path = os.environ.get('CLOUDROOM_SHELL_PATH') or (old or {}).get('shellPath')
+    # The app's own loopback server, so a nested room-cli in a Mac job reaches this app (#1243, #1290).
+    server_url = os.environ.get('CLOUDROOM_SERVER_URL') or None
     if (activate and not restart and old and old['binding'] == binding and old.get('connectionFile') == str(connection_file)
             and old.get('allowPrivateSsh', False) == allow_private and old.get('macAccess') == mac_access
             and old.get('launcher') == launcher and old.get('binary') == binary and old.get('ownThreads', False) == own
-            and old.get('website') == trusted and old.get('shellPath') == shell_path and target.is_file() and target.read_bytes() == source.read_bytes()):
+            and old.get('website') == trusted and old.get('shellPath') == shell_path and old.get('serverUrl') == server_url and target.is_file() and target.read_bytes() == source.read_bytes()):
         if WINDOWS:
             if running(folder):
                 return {'enabled': True}
@@ -1824,7 +1832,8 @@ def configure(folder, connection_file, activate, allow_private, mac_access=None,
         temporary.write_bytes(source.read_bytes()); temporary.chmod(0o600); temporary.replace(target)
     config = {'device': old['device'] if old else uuid.uuid4().hex, 'binding': binding, 'connectionFile': str(connection_file),
               'allowPrivateSsh': allow_private, 'macAccess': mac_access, 'launcher': launcher, 'binary': binary, **({'ownThreads': True} if own else {}),
-              **({'shellPath': shell_path} if shell_path else {}), **({'website': trusted} if trusted else {})}
+              **({'shellPath': shell_path} if shell_path else {}), **({'website': trusted} if trusted else {}),
+              **({'serverUrl': server_url} if server_url else {})}
     save(folder / 'config.json', config)
     identity(folder)
     if activate:

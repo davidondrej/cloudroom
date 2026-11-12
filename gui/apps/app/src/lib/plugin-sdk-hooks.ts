@@ -63,6 +63,10 @@ import {
   getThreadRoutePath,
   AUTOMATION_EDIT_ROUTE_PATH,
 } from "@/lib/route-paths";
+import {
+  pluginComposeRouteState,
+  useSetRootComposeProjectId,
+} from "@/lib/root-compose-selection";
 import { useRouteState } from "@/hooks/useRouteState";
 import { useServerConnectionState } from "@/hooks/useServerConnectionState";
 import { wsManager } from "@/lib/ws";
@@ -303,6 +307,7 @@ export function useBbNavigate(): BbNavigate {
   const openThreadPanelHandler = usePluginThreadPanelOpenHandler();
   const navigate = useNavigate();
   const appNavigation = useAppNavigationHost();
+  const setRootComposeProjectId = useSetRootComposeProjectId();
   const toThread = useCallback(
     (threadId: string) => {
       void sdk.threads
@@ -333,23 +338,32 @@ export function useBbNavigate(): BbNavigate {
     },
     [navigate, pluginId],
   );
-  const toCompose = useCallback(
-    (options?: { initialPrompt?: string; focusPrompt?: boolean }) => {
+  const toCompose = useCallback<BbNavigate["toCompose"]>(
+    (options) => {
       const replacesAutomationEditRoute =
         pluginId === AUTOMATIONS_PLUGIN_ID &&
         isAutomationEditRoutePath(location.pathname);
+      if (options?.projectId !== undefined) {
+        setRootComposeProjectId(options.projectId);
+      }
       void navigate(getRootComposeRoutePath(), {
         ...(replacesAutomationEditRoute ? { replace: true } : {}),
         state: {
           focusPrompt: options?.focusPrompt ?? false,
           initialPrompt: options?.initialPrompt ?? "",
+          ...pluginComposeRouteState(pluginId, "toCompose", {
+            sectionId: options?.placement?.sectionId,
+            pinned: options?.placement?.pinned,
+            environmentId: options?.environmentId,
+            hostId: options?.hostId,
+          }),
           ...(replacesAutomationEditRoute
             ? { replaceInitialPrompt: true }
             : {}),
         },
       });
     },
-    [location.pathname, navigate, pluginId],
+    [location.pathname, navigate, pluginId, setRootComposeProjectId],
   );
   const openThreadPanel = useCallback<BbNavigate["openThreadPanel"]>(
     (options) => openThreadPanelHandler?.({ ...options, pluginId }) ?? false,

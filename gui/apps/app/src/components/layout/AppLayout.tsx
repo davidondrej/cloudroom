@@ -89,7 +89,6 @@ import {
   getRootComposeRoutePath,
   getThreadRoutePath,
   isProjectlessProjectId,
-  isSkillsRoutePath,
   PLUGIN_PANEL_ROUTE_PATH,
   SETTINGS_ROUTE_PATH,
 } from "@/lib/route-paths";
@@ -458,8 +457,7 @@ export function AppLayout({ children }: AppLayoutProps) {
     };
   }, [location.pathname, setResourceRouteLabel]);
   const navigate = useNavigate();
-  const { appRoutePath, settingsRoutePath, toolsBackRoutePath } =
-    useAppSettingsRouteMemory();
+  const { appRoutePath, settingsRoutePath } = useAppSettingsRouteMemory();
   const setRootComposeProjectId = useSetRootComposeProjectId();
   useEffect(
     () =>
@@ -513,12 +511,7 @@ export function AppLayout({ children }: AppLayoutProps) {
   const navPanelChrome = usePluginNavPanelChrome();
   const isGlobalSettingsView =
     matchPath(`${SETTINGS_ROUTE_PATH}/*`, location.pathname) !== null;
-  const isSkillsWorkspace = isSkillsRoutePath(location.pathname);
-  const backToAppRoutePath = isGlobalSettingsView
-    ? appRoutePath
-    : isSkillsWorkspace
-      ? toolsBackRoutePath
-      : null;
+  const backToAppRoutePath = isGlobalSettingsView ? appRoutePath : null;
   const pluginPanelMatch = matchPath(
     PLUGIN_PANEL_ROUTE_PATH,
     location.pathname,
@@ -813,18 +806,11 @@ export function AppLayout({ children }: AppLayoutProps) {
                 <BackToAppCommandHandler routePath={backToAppRoutePath} />
               ) : null}
               <AppLayoutSidebar
-                mode={
-                  isGlobalSettingsView
-                    ? "settings"
-                    : isSkillsWorkspace
-                      ? "skills"
-                      : "app"
-                }
+                mode={isGlobalSettingsView ? "settings" : "app"}
                 onResizeMouseDown={handleResizeMouseDown}
                 isResizing={isSidebarResizing}
                 appRoutePath={appRoutePath}
                 settingsRoutePath={settingsRoutePath}
-                toolsBackRoutePath={toolsBackRoutePath}
               />
               <SidebarInset>
                 <div

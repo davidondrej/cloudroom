@@ -266,13 +266,16 @@ describe("user message parsing", () => {
     });
   });
 
-  it("recovers agent attribution from a legacy cross-thread envelope", () => {
+  it.each([
+    "[bb message from thread:thr_legacy; reply later]\n\nLegacy handoff",
+    "[message from thread:thr_legacy]\n\nLegacy handoff",
+  ])("recovers agent attribution from a cross-thread envelope: %s", (text) => {
     const factory = createTimelineEventFactory({ threadId: "thread-1" });
     const row = factory.clientTurnRequested({
       initiator: "user",
       senderThreadId: null,
       target: { kind: "new-turn" },
-      text: "[bb message from thread:thr_legacy; reply later]\n\nLegacy handoff",
+      text,
     });
     const { event, meta } = decodeThreadEventRow(row);
 
@@ -287,7 +290,7 @@ describe("user message parsing", () => {
       kind: "user",
       initiator: "agent",
       senderThreadId: "thr_legacy",
-      text: "[bb message from thread:thr_legacy; reply later]\n\nLegacy handoff",
+      text,
     });
   });
 

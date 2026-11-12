@@ -920,15 +920,17 @@ async function fetchThreadTimeline({
 
 const THREAD_HOVER_PREFETCH_DELAY_MS = 100;
 
-function prefetchThreadTimeline(
+/** Loads a thread's messages into the cache, so opening it shows them at once.
+ *  Resolves when they are there; a failed load resolves too. */
+export async function prefetchThreadTimeline(
   queryClient: QueryClient,
   threadId: string,
-): void {
+): Promise<void> {
   const queryKey = threadTimelineQueryKey(threadId);
   if (queryClient.getQueryData(queryKey) !== undefined) {
     return;
   }
-  void queryClient.prefetchQuery({
+  await queryClient.prefetchQuery({
     queryKey,
     queryFn: ({ signal }) =>
       fetchThreadTimeline({ queryClient, signal, threadId }),
@@ -951,7 +953,7 @@ export function usePrefetchThreadOnHover(threadId: string) {
         cancel();
         timerRef.current = window.setTimeout(() => {
           timerRef.current = null;
-          prefetchThreadTimeline(queryClient, threadId);
+          void prefetchThreadTimeline(queryClient, threadId);
         }, THREAD_HOVER_PREFETCH_DELAY_MS);
       },
       onPointerLeave: cancel,

@@ -54,7 +54,7 @@ export function reportAgentConnect(agent: "claude" | "codex", outcome: "ok" | "f
   }
 }
 
-export function reportCliInstall(cli: KnownCli, trigger: "claude_connect" | "local_thread" | "repair", outcome: "ok" | "failed", ms: number, message?: string | null): void {
+export function reportCliInstall(cli: KnownCli, trigger: "claude_connect" | "codex_connect" | "local_thread" | "repair", outcome: "ok" | "failed", ms: number, message?: string | null): void {
   capture("cli_install", () => ({ cli, trigger, outcome, ms, message: scrub(message) }));
 }
 

@@ -1,9 +1,10 @@
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { and, eq, isNotNull, isNull, notInArray, sql } from "drizzle-orm";
+import { and, eq, isNotNull, isNull, ne, notInArray, sql } from "drizzle-orm";
 import { threads } from "@cloudroom/db";
 import type { AppDeps } from "../../types.js";
 import type { PluginService } from "../plugins/plugin-service.js";
+import { firstAgentThreadId } from "../system/first-agent.js";
 import { ACTIVATION_STEPS, type ActivationStep } from "../system/telemetry.js";
 import { cloudroom } from "./commands.js";
 
@@ -50,16 +51,22 @@ async function signedInPhone(plugins: PluginService): Promise<boolean> {
 const readImported = (deps: AppDeps, name: string) =>
   readFile(join(deps.config.dataDir, name), "utf8").then((text) => Object.values(JSON.parse(text) as Record<string, string>), () => []);
 
+/** The first agent (ADR 20261111-220912) is a thread Cloudroom started, not the user: no step and no count includes it. */
+const notFirstAgent = (deps: AppDeps) => {
+  const id = firstAgentThreadId(deps.db);
+  return id ? ne(threads.id, id) : undefined;
+};
+
 async function startedThreads(deps: AppDeps): Promise<number> {
   const imported = [...new Set((await Promise.all([readImported(deps, "session-imports.json"), readImported(deps, "bb-imports.json")])).flat())];
   const [row] = deps.db.select({ n: sql<number>`count(*)` }).from(threads)
-    .where(and(isNull(threads.parentThreadId), isNull(threads.originPluginId), imported.length ? notInArray(threads.id, imported) : undefined)).all();
+    .where(and(isNull(threads.parentThreadId), isNull(threads.originPluginId), notFirstAgent(deps), imported.length ? notInArray(threads.id, imported) : undefined)).all();
   return row?.n ?? 0;
 }
 
 export async function activation(deps: AppDeps, plugins: PluginService): Promise<{ steps: Record<ActivationStep, boolean>; second: "codex" | "claude-code"; started: number }> {
   const state = await load(deps);
-  const cloud = eq(threads.executionTarget, "cloud");
+  const cloud = and(eq(threads.executionTarget, "cloud"), notFirstAgent(deps));
   const providers = deps.db.selectDistinct({ id: threads.providerId }).from(threads).where(cloud).limit(3).all().map((row) => row.id);
   const found: ActivationStep[] = [];
   if (providers.length) found.push("cloud");

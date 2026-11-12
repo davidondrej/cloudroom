@@ -1,4 +1,4 @@
-import { useIsMutating, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useIsMutating, useMutation, useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
 import { z } from "zod";
 import { COMPUTER_TITLE, deriveProjectNameFromPath, reasoningLevelSchema, serviceTierSchema, type ReasoningLevel, type Thread } from "@cloudroom/domain";
 import type { MacAccessLevel, NativeSession, RepoSuggestion, SessionImportResult } from "@cloudroom/sdk/browser";
@@ -123,9 +123,13 @@ export function useCloudroomSignIn() {
   });
 }
 
+const cloudroomConnectionQuery = { queryKey: ["cloudroom-connection"], queryFn: async ({ signal }: { signal: AbortSignal }) => cloudroomStatusSchema.parse(await (await fetchWithAppSurface("/api/v1/cloudroom", { signal })).json()) };
 export function useCloudroomConnection() {
-  return useQuery({ queryKey: ["cloudroom-connection"], queryFn: async ({ signal }) => cloudroomStatusSchema.parse(await (await fetchWithAppSurface("/api/v1/cloudroom", { signal })).json()), refetchInterval: 10000 });
+  return useQuery({ ...cloudroomConnectionQuery, refetchInterval: 10000 });
 }
+/** The Cloud status right now, for code that asks at one moment instead of watching. Always fresh: a copy up to 10
+ *  seconds old could miss a region block or the cloud queue. */
+export const fetchCloudroomConnection = (queryClient: QueryClient) => queryClient.fetchQuery({ ...cloudroomConnectionQuery, staleTime: 0 });
 
 export function useMacAgents(enabled = true) {
   return useQuery({

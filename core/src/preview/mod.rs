@@ -360,11 +360,23 @@ impl Previews {
             "Preview is not registered".into(),
         ))?;
         let reports = self.reports.lock().unwrap();
-        let active = reports.values().filter(|(at, r)| {
-            r.port == port
-                && r.generation == entry.generation
-                && now().saturating_sub(*at) <= FRESH_SECONDS
-        });
+        let mine = reports
+            .values()
+            .filter(|(_, r)| r.port == port && r.generation == entry.generation);
+        let last = mine.clone().map(|(at, _)| now().saturating_sub(*at)).min();
+        let active = mine.filter(|(at, _)| now().saturating_sub(*at) <= FRESH_SECONDS);
+        // Say which wait it is (#1060). Reports for an older generation are refused, so none are stored.
+        let pending = match last {
+            None if saved.devices.is_empty() => {
+                "No Mac is paired with this sandbox yet (room-cli mac status says why)".into()
+            }
+            None => "The paired Mac has not reported this preview yet (it checks every 10 seconds)"
+                .into(),
+            Some(age) if age > FRESH_SECONDS => format!(
+                "The paired Mac stopped reporting this preview {age} seconds ago, so it may be asleep or offline"
+            ),
+            Some(_) => "The paired Mac is still opening its tunnel to this preview".into(),
+        } + "; check again with room-cli preview status";
         let ready = active.clone().find(|(_, r)| r.local_port.is_some());
         let error = active.filter_map(|(_, r)| r.error.as_ref()).next();
         let url = ready.map(|(_, r)| {
@@ -376,7 +388,7 @@ impl Previews {
         });
         Ok(
             json!({"port":port,"generation":entry.generation,"state":if ready.is_some() {"ready"} else if error.is_some() {"error"} else {"pending"},
-            "url":url,"message":error.map(String::as_str).unwrap_or(if ready.is_some() {"Preview connected"} else {"Waiting for the paired Mac; check again with room-cli preview status"})}),
+            "url":url,"message":error.map(String::as_str).unwrap_or(if ready.is_some() {"Preview connected"} else {&pending})}),
         )
     }
     pub fn list(&self) -> Result<Value> {

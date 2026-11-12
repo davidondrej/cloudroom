@@ -1486,6 +1486,237 @@ describe("bridge", () => {
     }
   });
 
+  // Claude sends an ask rule's ask, and a Plan mode write, with no reason,
+  // suggestions or blocked path. They must still reach the user, and the card
+  // for a command that leaves the sandbox must say so.
+  it.each([
+    {
+      name: "Manual: an ask rule's command run outside the sandbox",
+      options: canonicalOptions(),
+      toolName: "Bash",
+      input: {
+        command: "git push --dry-run; touch /tmp/x",
+        dangerouslyDisableSandbox: true,
+      },
+      reason: "Run this command outside the sandbox?",
+    },
+    {
+      name: "Manual: an unsandboxed command with Claude's own reason",
+      options: canonicalOptions(),
+      toolName: "Bash",
+      input: { command: "echo x > ~/.zshrc", dangerouslyDisableSandbox: true },
+      decisionReason: "Writes a shell startup file.",
+      reason: "Run this command outside the sandbox? Writes a shell startup file.",
+    },
+    {
+      name: "Auto: an ask rule's file read",
+      options: {
+        ...canonicalOptions(),
+        permissionMode: "auto",
+        approvalReviewer: "automatic",
+      },
+      toolName: "Read",
+      input: { file_path: "/tmp/worktree/.env" },
+      reason: null,
+    },
+    {
+      name: "Plan: a file write",
+      options: canonicalOptions({
+        providerOptions: { claudeCodePermissionMode: "plan" },
+      }),
+      toolName: "Write",
+      input: { file_path: "/tmp/worktree/notes.md", content: "hi" },
+      reason: null,
+    },
+  ])("asks the user about a bare ask ($name)", async (testCase) => {
+    const bridge = createBridgeJsonRpcTestHarness(handleLine);
+    const queries: ControlledClaudeQuery[] = [];
+    queryMock.mockImplementation(() => {
+      const query = createControlledClaudeQuery();
+      queries.push(query);
+      return query;
+    });
+
+    try {
+      const threadId = "thread-bare-ask";
+      const toolUseID = "tool-bare-ask";
+      bridge.sendRequest(1, "thread/start", {
+        threadId,
+        cwd: "/tmp/worktree",
+        instructionMode: "append",
+        options: testCase.options,
+      });
+      await bridge.waitForResponse(1);
+
+      const resultPromise = getLastCanUseTool()(
+        testCase.toolName,
+        testCase.input,
+        {
+          requestId: "control-request",
+          signal: new AbortController().signal,
+          toolUseID,
+          ...(testCase.decisionReason !== undefined
+            ? { decisionReason: testCase.decisionReason }
+            : {}),
+        },
+      );
+      await bridge.flushWork();
+
+      const approval = bridge.messages.find(isApprovalInteraction);
+      if (approval?.id === undefined) {
+        throw new Error("Expected the ask to reach the user");
+      }
+      expect(approval.params).toMatchObject({
+        payload: {
+          kind: "approval",
+          reason: testCase.reason,
+          subject: expect.objectContaining({ itemId: toolUseID }),
+        },
+      });
+
+      handleLine(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: approval.id,
+          result: { decision: "deny", grantedPermissions: null },
+        }),
+      );
+      await expect(resultPromise).resolves.toMatchObject({
+        behavior: "deny",
+        toolUseID,
+      });
+
+      await stopBridgeThread({ bridge, queries, threadId });
+    } finally {
+      bridge.restore();
+    }
+  });
+
+  it("answers a later ask from Allow for session only for sandbox network", async () => {
+    const bridge = createBridgeJsonRpcTestHarness(handleLine);
+    const queries: ControlledClaudeQuery[] = [];
+    queryMock.mockImplementation(() => {
+      const query = createControlledClaudeQuery();
+      queries.push(query);
+      return query;
+    });
+    const allowRule = (toolName: string, ruleContent: string) => [
+      {
+        type: "addRules" as const,
+        rules: [{ toolName, ruleContent }],
+        behavior: "allow" as const,
+        destination: "localSettings" as const,
+      },
+    ];
+    const ask = (
+      toolName: string,
+      input: Record<string, unknown>,
+      toolUseID: string,
+      suggestions?: ReturnType<typeof allowRule>,
+    ) =>
+      getLastCanUseTool()(toolName, input, {
+        requestId: "control-request",
+        signal: new AbortController().signal,
+        toolUseID,
+        ...(suggestions ? { suggestions } : {}),
+      });
+    const approvals = () => bridge.messages.filter(isApprovalInteraction);
+    const answer = (id: unknown, decision: "allow_for_session" | "deny") =>
+      handleLine(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id,
+          result:
+            decision === "deny"
+              ? { decision, grantedPermissions: null }
+              : {
+                  decision,
+                  grantedPermissions: {
+                    network: { enabled: true },
+                    fileSystem: null,
+                  },
+                },
+        }),
+      );
+    const allowForSession = async (
+      ...args: Parameters<typeof ask>
+    ): Promise<void> => {
+      const result = ask(...args);
+      await bridge.flushWork();
+      answer(approvals().at(-1)?.id, "allow_for_session");
+      await expect(result).resolves.toMatchObject({ behavior: "allow" });
+    };
+
+    try {
+      const threadId = "thread-allow-for-session";
+      await startBridgeThread({ bridge, threadId });
+      await allowForSession(
+        "SandboxNetworkAccess",
+        { host: "registry.npmjs.org" },
+        "tool-network",
+        allowRule("WebFetch", "domain:registry.npmjs.org"),
+      );
+      await allowForSession(
+        "Bash",
+        { command: "curl -s https://example.com" },
+        "tool-bash",
+        allowRule("Bash", "curl -s https://example.com"),
+      );
+      await allowForSession(
+        "WebFetch",
+        { url: "https://example.com" },
+        "tool-fetch",
+        allowRule("WebFetch", "domain:example.com"),
+      );
+      expect(approvals()).toHaveLength(3);
+
+      // Claude keeps no session rule for sandbox hosts, so the bridge does.
+      await expect(
+        ask("SandboxNetworkAccess", { host: "github.com" }, "tool-network-2"),
+      ).resolves.toMatchObject({
+        behavior: "allow",
+        decisionClassification: "user_permanent",
+      });
+      expect(approvals()).toHaveLength(3);
+
+      // Claude's session rules already allow plain repeats, so these asks are
+      // ones Claude still wants a person for: an ask rule matched part of the
+      // command or the fetch.
+      const command = ask(
+        "Bash",
+        {
+          command: "git push --dry-run; curl -s https://example.net",
+          dangerouslyDisableSandbox: true,
+        },
+        "tool-bash-2",
+        allowRule("Bash", "curl -s https://example.net"),
+      );
+      const fetch = ask(
+        "WebFetch",
+        { url: "https://example.com/admin" },
+        "tool-fetch-2",
+      );
+      await bridge.flushWork();
+      const pending = approvals().slice(3);
+      expect(pending.map((message) => interactionPayload(message))).toEqual([
+        expect.objectContaining({
+          reason: "Run this command outside the sandbox?",
+          subject: expect.objectContaining({ itemId: "tool-bash-2" }),
+        }),
+        expect.objectContaining({
+          subject: expect.objectContaining({ itemId: "tool-fetch-2" }),
+        }),
+      ]);
+      for (const message of pending) answer(message.id, "deny");
+      await expect(command).resolves.toMatchObject({ behavior: "deny" });
+      await expect(fetch).resolves.toMatchObject({ behavior: "deny" });
+
+      await stopBridgeThread({ bridge, queries, threadId });
+    } finally {
+      bridge.restore();
+    }
+  });
+
   it("forwards a sandbox network ask with a grantable network permission", async () => {
     const bridge = createBridgeJsonRpcTestHarness(handleLine);
     const queries: ControlledClaudeQuery[] = [];
@@ -1630,7 +1861,58 @@ describe("bridge", () => {
         params: { requestId: permissionRequest.id },
       });
 
-      await stopBridgeThread({ bridge, queries, threadId });
+      // Claude drops an interrupting deny's message and records the user's
+      // rejection instead (#878): a stop that ends Claude keeps its reason.
+      const pendingAtStop = askForNetwork(
+        new AbortController().signal,
+        "tool-at-stop",
+      );
+      await bridge.flushWork();
+      bridge.sendRequest(2, "thread/stop", {
+        threadId,
+        providerThreadId: threadId,
+        intent: "interrupt",
+        activeTurnId: null,
+      });
+      await bridge.flushWork();
+      const cancelled = await pendingAtStop;
+      expect(cancelled).toMatchObject({
+        behavior: "deny",
+        message: expect.stringContaining("the user did not reject it"),
+      });
+      expect(cancelled).not.toHaveProperty("interrupt");
+      const prompts = bridge.messages.filter(isApprovalInteraction).length;
+      await expect(
+        askForNetwork(new AbortController().signal, "tool-after-stop"),
+      ).resolves.toMatchObject({
+        message: expect.stringContaining("Reason: Thread stopped"),
+      });
+      expect(bridge.messages.filter(isApprovalInteraction)).toHaveLength(
+        prompts,
+      );
+      // Without the interrupt Claude goes on: a queued auto-allowed tool is denied too.
+      const [queuedWrite] = await invokeBridgeHooks(
+        getLatestQueryCall().options.hooks?.PreToolUse,
+        {
+          hook_event_name: "PreToolUse",
+          tool_name: "Write",
+          tool_input: {},
+          tool_use_id: "tool-queued-write",
+          session_id: "session-1",
+          transcript_path: "/tmp/transcript.jsonl",
+          cwd: "/tmp/worktree",
+        },
+      );
+      expect(queuedWrite).toMatchObject({
+        hookSpecificOutput: {
+          permissionDecision: "deny",
+          permissionDecisionReason: expect.stringContaining(
+            "Reason: Thread stopped",
+          ),
+        },
+      });
+      queries[0]?.finish();
+      await bridge.waitForResponse(2);
     } finally {
       bridge.restore();
     }

@@ -1,4 +1,5 @@
 import { COMPUTER_TITLE } from "@cloudroom/domain/computer-name";
+import { installPercent } from "@cloudroom/domain/install-progress";
 import {
   type CSSProperties,
   useCallback,
@@ -448,36 +449,41 @@ function UsageNote({ children }: { children: string }) {
   );
 }
 
-async function signInMacCodex(): Promise<void> {
+/** Signs in on this Mac; a missing Codex installs first, and `onInstall` gets when that began (ADR 20261111-123959). */
+async function signInMacCodex(onInstall: (since: number | null) => void): Promise<void> {
   const call = async (method: "GET" | "POST") => {
     const response = await fetch("/api/v1/cloudroom/mac/codex-login", method === "POST" ? { method, headers: { "content-type": "application/json" }, body: "{}" } : {});
     if (!response.ok) throw new Error("Codex sign-in could not start.");
-    return (await response.json()) as { state: string; message?: string };
+    return (await response.json()) as { state: string; message?: string; installing_since?: number | null };
   };
   let status = await call("POST");
   while (status.state === "waiting") {
+    onInstall(status.installing_since ?? null);
     await new Promise((resolve) => setTimeout(resolve, 2000));
     status = await call("GET");
   }
   if (status.state === "error") throw new Error(status.message ?? "Codex sign-in failed.");
 }
 
-function CodexSignIn({ onSignedIn }: { onSignedIn: () => void }) {
+/** Sign in instead of "run `codex` in a terminal" (ADR 20261111-123959). */
+function CodexSignIn({ label, onSignedIn }: { label: string; onSignedIn: () => void }) {
   const [state, setState] = useState<"idle" | "waiting" | "error">("idle");
+  // Each 2 s poll refreshes the percent.
+  const [installing, setInstalling] = useState<number | null>(null);
   const [error, setError] = useState("");
   const signIn = () => {
     setState("waiting");
-    signInMacCodex().then(
-      () => { setState("idle"); onSignedIn(); },
-      (cause: unknown) => { setState("error"); setError(cause instanceof Error ? cause.message : String(cause)); },
+    signInMacCodex((since) => setInstalling(since === null ? null : installPercent(since))).then(
+      () => { setState("idle"); setInstalling(null); onSignedIn(); },
+      (cause: unknown) => { setState("error"); setInstalling(null); setError(cause instanceof Error ? cause.message : String(cause)); },
     );
   };
   return (
     <div>
       <div className="flex items-center justify-between gap-2">
-        <UsageNote>{state === "waiting" ? "finish in your browser" : "session expired"}</UsageNote>
-        <Button type="button" size="sm" className="h-6 px-2.5 text-xs" disabled={state === "waiting"} onClick={signIn}>
-          {state === "waiting" ? "Waiting…" : "Sign in"}
+        <UsageNote>{installing !== null ? "installing codex" : state === "waiting" ? "finish in your browser" : label}</UsageNote>
+        <Button type="button" size="sm" className="h-6 px-2.5 text-xs tabular-nums" disabled={state === "waiting"} onClick={signIn}>
+          {installing !== null ? `Installing ${installing}%` : state === "waiting" ? "Waiting…" : "Sign in"}
         </Button>
       </div>
       {state === "error" ? <p role="alert" className="text-destructive">{error}</p> : null}
@@ -511,13 +517,12 @@ function ProviderUsageBody({ provider, onCodexSignedIn }: { provider: UsageProvi
     case "not_installed":
       return <UsageNote>Not installed on this machine.</UsageNote>;
     case "unauthenticated":
-      return <UsageNote>{provider.signInHint}</UsageNote>;
-    case "expired":
-      return provider.providerId === "codex" && onCodexSignedIn ? (
-        <CodexSignIn onSignedIn={onCodexSignedIn} />
-      ) : (
-        <UsageNote>{provider.expiredHint}</UsageNote>
-      );
+    case "expired": {
+      const label = usage.status === "expired" ? "session expired" : "signed out";
+      if (provider.providerId === "codex" && onCodexSignedIn)
+        return <CodexSignIn label={label} onSignedIn={onCodexSignedIn} />;
+      return <UsageNote>{usage.status === "expired" ? provider.expiredHint : provider.signInHint}</UsageNote>;
+    }
     case "error":
       return <UsageNote>{usage.message}</UsageNote>;
   }
@@ -1026,7 +1031,8 @@ export function ProviderUsageStatusContent({
                       <ProviderUsageBody
                         provider={account}
                         onCodexSignedIn={
-                          activeMachine?.id.startsWith("source:") ||
+                          // Sign in runs on the computer running Cloudroom, so another machine keeps its hint.
+                          !activeMachine?.primary ||
                           (account.accountId && account.accountId !== "local")
                             ? undefined
                             : () =>

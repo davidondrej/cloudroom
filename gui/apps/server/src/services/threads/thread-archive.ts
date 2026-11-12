@@ -49,6 +49,8 @@ interface ArchiveThreadEnvironment {
 interface ArchiveThreadWithLifecycleEffectsArgs {
   environment: ArchiveThreadEnvironment | null;
   thread: Pick<Thread, "environmentId" | "id" | "status" | "executionTarget">;
+  /** The website already has it archived (#237): only this computer's copy changes. */
+  fromWebsite?: boolean;
 }
 
 interface ResolveArchiveThreadEnvironmentArgs {
@@ -63,6 +65,8 @@ interface ArchiveThreadAndChildrenArgs {
   parentThread: Thread;
   includeLive?: boolean;
   liveThreadIds?: readonly string[];
+  /** The website already has the parent archived (an agent's own archive, #237): only its children go out. */
+  websiteHasRoot?: boolean;
 }
 
 interface ArchiveThreadAndChildrenResult {
@@ -109,7 +113,8 @@ function archiveThreadWithLifecycleEffects(
     threadId: archivedThread.id,
   });
   if (isCloudThread(archivedThread)) {
-    cloudroom(deps).archive(archivedThread.id);
+    if (args.fromWebsite) cloudroom(deps).detach(archivedThread.id);
+    else cloudroom(deps).archive(archivedThread.id);
     // The stream stops here, so a turn still running never reaches the prune at its end.
     pruneThreadEventHistoryBestEffort(deps, {
       mode: "archived",
@@ -233,6 +238,11 @@ export function listThreadWithDescendants<T extends Pick<Thread, "id">>(
   return threads;
 }
 
+/** A Cloud thread another computer or Core archived: this thread only, no cascade, and nothing goes back (#237). */
+export function archiveFromWebsite(deps: AppDeps, thread: Thread): void {
+  archiveThreadWithLifecycleEffects(deps, { environment: null, thread, fromWebsite: true });
+}
+
 export function archiveThreadAndChildren(
   deps: AppDeps,
   args: ArchiveThreadAndChildrenArgs,
@@ -249,6 +259,7 @@ export function archiveThreadAndChildren(
     const result = archiveThreadWithLifecycleEffects(deps, {
       environment,
       thread,
+      fromWebsite: args.websiteHasRoot === true && thread.id === args.parentThread.id,
     });
     if (!result) {
       continue;

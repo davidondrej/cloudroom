@@ -28,7 +28,6 @@ import { useQuickCreateProjectController } from "@/hooks/useQuickCreateProject";
 import { useSidebarPreload } from "@/hooks/useCloudThreadWake";
 import { getRootComposeRoutePath, getThreadRoutePath } from "@/lib/route-paths";
 import { usePaneContentSplitDrag } from "./usePaneContentSplitDrag";
-import { CloudroomSignInButton } from "./CloudroomSignInButton";
 import { MacAccessChip } from "./MacAccessChip";
 import { CloudQueueChip, PlanCard } from "@/components/CloudQueue";
 import {
@@ -179,9 +178,15 @@ export function AppSidebar({
       activeProjectId ??
       targets.find((target) => target.threadId === activeThreadId)?.projectId;
     if (!projectId) return false;
+    // Skip the open thread: after a send it stays last until the list re-sorts.
     return openNavigationTarget(
       targets
-        .filter((target) => target.projectId === projectId && !target.isChild)
+        .filter(
+          (target) =>
+            target.projectId === projectId &&
+            !target.isChild &&
+            target.threadId !== activeThreadId,
+        )
         .at(-1),
     );
   }, [activeProjectId, activeThreadId, openNavigationTarget]);
@@ -194,10 +199,12 @@ export function AppSidebar({
             '[data-sidebar-section-id="pinned"]',
           ) ?? null,
         )
-          .filter((target) => !target.isChild)
+          .filter(
+            (target) => !target.isChild && target.threadId !== activeThreadId,
+          )
           .at(-1),
       ),
-    [openNavigationTarget],
+    [activeThreadId, openNavigationTarget],
   );
 
   const isHiddenHostedBody = mobileHosted?.hidden === true;
@@ -317,7 +324,6 @@ export function AppSidebar({
               },
             ]}
           />
-          <CloudroomSignInButton />
           <li aria-hidden="true" className="min-w-0 flex-1" />
           <SidebarPluginAttentionGlyph
             className={SIDEBAR_FOOTER_ACTION_CLASS}

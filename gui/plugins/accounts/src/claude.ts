@@ -547,13 +547,23 @@ export async function profileAccount(profile?: string) {
       email: z.string().nullish(),
       orgId: z.string().nullish(),
       subscriptionType: z.string().nullish(),
+      planTier: z.string().nullish(),
     })
     .parse(JSON.parse(stdout));
   return {
     email: status.email ?? null,
     orgId: status.orgId ?? null,
     plan: status.subscriptionType ?? null,
+    tier: status.planTier ?? null,
   };
+}
+
+// Anthropic renamed Max 5x to Max and Max 20x to Ultra on 2026-10-30. Claude Code still calls both "max";
+// only its plan tier (`max_5x`, `max_20x`) tells them apart.
+export function claudePlanName(plan: string | null, tier?: string | null) {
+  if (tier === "max_20x") return "Ultra";
+  if (tier === "max_5x") return "Max";
+  return plan && plan.charAt(0).toUpperCase() + plan.slice(1);
 }
 
 export async function signOut(profile: string): Promise<void> {

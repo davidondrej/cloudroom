@@ -14,7 +14,7 @@ const bundledSkills = readdirSync(new URL("./skills", import.meta.url), {
 
 it("keeps the skill switches across reloads", async () => {
   const { bb, harness } = createFakePluginHost({
-    pluginId: "bb-guide",
+    pluginId: "cloudroom-guide",
     agentSkillIds: bundledSkills,
   });
   try {
@@ -41,12 +41,12 @@ it("keeps the skill switches across reloads", async () => {
 
 describe("individual skill selection", () => {
   it.each([
-    ["bbCli", ["plugin-authoring", "skill-creator"]],
+    ["roomCli", ["plugin-authoring", "skill-creator"]],
     ["pluginAuthoring", ["room-cli", "skill-creator"]],
     ["skillCreator", ["room-cli", "plugin-authoring"]],
   ])("disables %s", async (key, expected) => {
     const { bb, harness } = createFakePluginHost({
-      pluginId: "bb-guide",
+      pluginId: "cloudroom-guide",
       agentSkillIds: bundledSkills,
     });
     try {

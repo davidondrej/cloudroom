@@ -1448,8 +1448,14 @@ impl Jobs {
             }
             None => {
                 let sandbox = sandboxed.then_some(&core.key);
-                self.run(&job, sandbox, &data, text(&core.config, "shellPath"))
-                    .await
+                self.run(
+                    &job,
+                    sandbox,
+                    &data,
+                    text(&core.config, "shellPath"),
+                    text(&core.config, "serverUrl"),
+                )
+                .await
             }
         };
         // The result survives disconnects: retry until Core accepts it, forgets the job, or an hour passes.
@@ -1470,6 +1476,7 @@ impl Jobs {
         sandbox: Option<&Key>,
         data: &Path,
         saved_path: Option<&str>,
+        server: Option<&str>,
     ) -> Value {
         let id = job["id"].as_str().unwrap_or_default().to_owned();
         let sandboxed = sandbox.is_some();
@@ -1492,11 +1499,20 @@ impl Jobs {
             tools += if fish { " " } else { ":" };
             tools += &quote(saved);
         }
-        let path = if fish {
+        let mut path = if fish {
             format!("set -gx PATH {tools} $PATH; ")
         } else {
             format!("PATH={tools}:\"$PATH\"; ")
         };
+        // A nested room-cli reaches the app that owns this helper, not a ROOM_SERVER_URL left in the helper's or the
+        // login shell's environment, nor the default port of another app such as a Dev build (#1243, #1290).
+        if let Some(server) = server {
+            path += &if fish {
+                format!("set -gx ROOM_SERVER_URL {}; ", quote(server))
+            } else {
+                format!("export ROOM_SERVER_URL={}; ", quote(server))
+            };
+        }
         let raw = job["command"].as_str().unwrap_or_default();
         // Agents and Core's copy scripts write sh, which fish can't parse (#204), so fish loads its login setup, then
         // hands the unchanged command to sh.

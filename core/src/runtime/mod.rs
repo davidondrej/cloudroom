@@ -393,7 +393,7 @@ fn strip_ai_co_authors_env(command: &mut Command, session: Option<&Path>) {
         )
     });
     let hook = format!(
-        r#"cloudroom_strip_ai_co_authors() {{ grep -qiE {PATTERN} "$1" || return 0; {scope}t=$(mktemp) || return 0; grep -viE {PATTERN} "$1" > "$t"; [ $? -le 1 ] && cat "$t" > "$1" && echo 'Cloudroom removed AI Co-authored-by lines (turn off: room-cli settings general stripAiCoAuthorsEnabled false)' >&2; rm -f "$t"; return 0; }}; cloudroom_strip_ai_co_authors"#
+        r#"cloudroom_strip_ai_co_authors() {{ grep -qiE {PATTERN} "$1" || return 0; {scope}t=$(mktemp) || return 0; grep -viE {PATTERN} "$1" > "$t"; [ $? -le 1 ] && cat "$t" > "$1" && echo 'Cloudroom removed AI Co-authored-by lines (turn off for new threads in the Cloudroom app: Settings > Defaults > Remove AI co-authors, or room-cli mac run --write "~/.local/bin/room-cli settings general stripAiCoAuthorsEnabled false")' >&2; rm -f "$t"; return 0; }}; cloudroom_strip_ai_co_authors"#
     );
     command.envs([
         ("GIT_CONFIG_COUNT", "3"),
@@ -438,6 +438,8 @@ pub struct Handle {
     controls: Arc<tokio::sync::Mutex<()>>,
     /// Claude's login when it started; it reads the login only then.
     login: Option<u64>,
+    /// Claude's cloud MCP sign-ins when it started; it connects MCP servers only then.
+    mcp_login: Option<u64>,
 }
 impl Handle {
     pub fn spawn(
@@ -531,6 +533,7 @@ impl Handle {
         let file_identity = config.storage.as_ref().map(|p| (p.agent_uid, p.agent_gid));
         // Read before the command does, so a login saved in between causes a restart, never a miss.
         let login = matches!(kind, Kind::Claude).then(|| claude::login(config));
+        let mcp_login = matches!(kind, Kind::Claude).then(|| claude::mcp_login(config));
         let (command, adapter, session_file, context_file): (_, Box<dyn Adapter>, _, _) = match kind
         {
             Kind::Claude => {
@@ -680,6 +683,7 @@ impl Handle {
                 system_prompt,
                 controls: Arc::new(tokio::sync::Mutex::new(())),
                 login,
+                mcp_login,
                 resume,
                 session_file,
                 context_file,
@@ -705,6 +709,11 @@ impl Handle {
     pub fn login_changed(&self, config: &Config) -> bool {
         self.login
             .is_some_and(|login| login != claude::login(config))
+    }
+    /// A new cloud MCP sign-in was saved after this agent started.
+    pub fn mcp_login_changed(&self, config: &Config) -> bool {
+        self.mcp_login
+            .is_some_and(|login| login != claude::mcp_login(config))
     }
     pub fn process_count(&self) -> Option<usize> {
         self.process.process_count()
@@ -1381,7 +1390,7 @@ mod tests {
 Co-authored-by: Ada <ada@example.com>'; git log -1 --format=%B"), Some(session));
             let result = (
                 !body.contains("Claude"),
-                notice.contains("stripAiCoAuthorsEnabled false"),
+                notice.contains("room-cli mac run --write"),
                 body.contains("Ada"),
             );
             assert_eq!(

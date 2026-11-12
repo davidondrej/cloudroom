@@ -1,5 +1,12 @@
 import { COMPUTER_TITLE } from "@cloudroom/domain/computer-name";
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type MouseEvent,
+} from "react";
 import {
   definePluginApp,
   experimental_ProviderIcon as ProviderIcon,
@@ -68,9 +75,17 @@ function Meter({ label, usedPercent }: { label: string; usedPercent: number }) {
   );
 }
 
+function fallbackName(account: AccountView, index: number): string {
+  return account.id === LOCAL
+    ? `This ${COMPUTER_TITLE}`
+    : (account.email ?? `Account ${index + 1}`);
+}
+
 function AccountRow({
-  account,
+  account: loaded,
   index,
+  picking,
+  locked,
   onUse,
   onRename,
   onRemove,
@@ -78,48 +93,88 @@ function AccountRow({
 }: {
   account: AccountView;
   index: number;
+  // This row is being switched to.
+  picking: boolean;
+  // A switch is running: no row can be picked.
+  locked: boolean;
   onUse: () => void;
   onRename: (name: string) => void;
   onRemove: () => void;
   onSignInAgain?: () => void;
 }) {
+  // The page can stay open past a reset, so a limit or a bar whose reset has passed clears here.
+  const now = Date.now();
+  const account = {
+    ...loaded,
+    limitedUntil:
+      loaded.limitedUntil !== null && loaded.limitedUntil > now
+        ? loaded.limitedUntil
+        : null,
+    windows: loaded.windows.map((window) =>
+      window.resetsAt !== null && window.resetsAt <= now
+        ? { ...window, usedPercent: 0 }
+        : window,
+    ),
+  };
   const [editing, setEditing] = useState(false);
   const local = account.id === LOCAL;
-  const fallback = local
-    ? `This ${COMPUTER_TITLE}`
-    : (account.email ?? `Account ${index + 1}`);
+  const fallback = fallbackName(account, index);
   const name = account.name ?? fallback;
   const detail = [name === account.email ? null : account.email, account.plan]
     .filter(Boolean)
     .join(" · ");
+  const pickable = !account.inUse && !locked && !editing;
+  // During a switch the highlight is already on the picked row, so the old row drops its mark.
+  const marked = account.inUse && !locked;
+  // The whole row picks the account. The name field, links, buttons, and the ⋯ menu keep their own clicks.
+  // A click that only closes the name field must not switch accounts too.
+  const closing = useRef(false);
+  const pick = (event: MouseEvent) => {
+    const control = (event.target as Element).closest("button, input, [role=menu]");
+    const closed = closing.current;
+    closing.current = false;
+    if (
+      pickable &&
+      !closed &&
+      (control === null || control.getAttribute("role") === "radio")
+    )
+      onUse();
+  };
   return (
     <div
+      onMouseDown={() => {
+        closing.current = editing;
+      }}
+      onClick={pick}
       className={cn(
-        "flex flex-wrap items-center gap-x-3 gap-y-2 py-2.5 pl-3.5 pr-2 text-sm",
-        account.inUse && "bg-surface-recessed",
+        "group/account flex flex-wrap items-center gap-x-3 gap-y-2 py-2.5 pl-3.5 pr-2 text-sm transition-colors",
+        pickable && "cursor-pointer hover:bg-surface-recessed",
       )}
     >
       <button
         type="button"
         role="radio"
         aria-checked={account.inUse}
+        aria-busy={picking}
         aria-label={`Use ${name}`}
-        onClick={account.inUse ? undefined : onUse}
         className={cn(
-          "group -m-1.5 grid size-7 shrink-0 place-items-center rounded-full",
-          account.inUse && "cursor-default",
+          "-m-1.5 grid size-7 shrink-0 place-items-center rounded-full",
+          !pickable && "cursor-default",
         )}
       >
-        <span
-          className={cn(
-            "grid size-4 place-items-center rounded-full border-[1.5px]",
-            account.inUse
-              ? "border-primary"
-              : "border-subtle-foreground/60 group-hover:border-foreground",
-          )}
-        >
-          {account.inUse ? <span className="size-2 rounded-full bg-primary" /> : null}
-        </span>
+        {picking ? (
+          <Icon name="Spinner" className="size-4 animate-spin text-foreground" />
+        ) : (
+          <span
+            className={cn(
+              "grid size-4 place-items-center rounded-full border-[1.5px] transition-colors",
+              marked ? "border-foreground" : "border-subtle-foreground/60",
+              pickable && "group-hover/account:border-foreground",
+            )}
+          >
+            {marked ? <span className="size-2 rounded-full bg-foreground" /> : null}
+          </span>
+        )}
       </button>
       <div className="min-w-0 flex-1">
         {editing ? (
@@ -143,8 +198,15 @@ function AccountRow({
             }}
           />
         ) : (
-          <div className="truncate font-medium text-foreground" title={name}>
-            {name}
+          <div className="flex items-center gap-2 font-medium text-foreground">
+            <span className="truncate" title={name}>
+              {name}
+            </span>
+            {marked ? (
+              <span className="shrink-0 rounded bg-foreground/10 px-1.5 text-xs font-semibold leading-4">
+                In use
+              </span>
+            ) : null}
           </div>
         )}
         {detail ? (
@@ -170,7 +232,7 @@ function AccountRow({
       {/* On a narrow screen the usage drops to its own line, under the name. */}
       <div className="order-last flex basis-full flex-wrap items-center gap-x-5 gap-y-1 pl-7 sm:order-none sm:basis-auto sm:justify-end sm:pl-0">
         {account.limitedUntil ? (
-          <span className="whitespace-nowrap text-xs text-warning-text">
+          <span className="whitespace-nowrap text-xs text-subtle-foreground">
             Resets in {until(account.limitedUntil)}
           </span>
         ) : null}
@@ -448,6 +510,9 @@ function AccountsSection({ provider, name }: { provider: Provider; name: string 
     id: string | null;
   } | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // The account being switched to, and the one a finished switch names for a few seconds.
+  const [picking, setPicking] = useState<string | null>(null);
+  const [switched, setSwitched] = useState<string | null>(null);
   const load = useCallback(() => {
     rpc
       .call("accounts.list", { provider })
@@ -455,6 +520,51 @@ function AccountsSection({ provider, name }: { provider: Provider; name: string 
   }, [provider, rpc]);
   useEffect(load, [load]);
   useRealtime(ACCOUNTS_CHANGED, load);
+  useEffect(() => {
+    if (switched === null) return;
+    const timer = window.setTimeout(() => setSwitched(null), 3_000);
+    return () => window.clearTimeout(timer);
+  }, [switched]);
+
+  // The highlight moves to the picked row at once, and back if the switch fails. Rows never move.
+  const use = async (id: string, name: string) => {
+    setPicking(id);
+    setSwitched(null);
+    setError(null);
+    try {
+      await rpc.call("accounts.use", { provider, id });
+      setAccounts(await rpc.call("accounts.list", { provider }));
+      setSwitched(name);
+    } catch (cause) {
+      setError(errorText(cause));
+      load();
+    }
+    setPicking(null);
+  };
+  // One highlight per list, placed over the row in use: it slides instead of jumping.
+  const rows = useRef<HTMLDivElement>(null);
+  const [highlight, setHighlight] = useState<{ top: number; height: number } | null>(null);
+  const marked = accounts?.findIndex((account) =>
+    picking === null ? account.inUse : account.id === picking,
+  );
+  useLayoutEffect(() => {
+    const list = rows.current;
+    if (!list) return;
+    const place = () => {
+      const row = list.children[marked ?? -1];
+      const next =
+        row instanceof HTMLElement
+          ? { top: row.offsetTop, height: row.offsetHeight }
+          : null;
+      setHighlight((before) =>
+        before?.top === next?.top && before?.height === next?.height ? before : next,
+      );
+    };
+    place();
+    const observer = new ResizeObserver(place);
+    observer.observe(list);
+    return () => observer.disconnect();
+  }, [marked, accounts]);
 
   const run = async (work: () => Promise<unknown>) => {
     setError(null);
@@ -491,6 +601,18 @@ function AccountsSection({ provider, name }: { provider: Provider; name: string 
           aria-hidden
         />
         <h2 className="flex-1 text-sm font-semibold text-foreground">{name}</h2>
+        <p
+          role="status"
+          className="hidden min-w-0 items-center gap-1.5 truncate text-xs text-muted-foreground sm:flex"
+        >
+          {switched ? (
+            <>
+              <Icon name="Check" className="size-3.5 shrink-0" />
+              All threads now use
+              <span className="truncate font-medium text-foreground">{switched}</span>
+            </>
+          ) : null}
+        </p>
         <Button
           variant="ghost"
           size="sm"
@@ -507,42 +629,57 @@ function AccountsSection({ provider, name }: { provider: Provider; name: string 
         <div
           role="radiogroup"
           aria-label={`${name} accounts`}
-          className="divide-y divide-border overflow-hidden rounded-lg border border-border"
+          className="relative overflow-hidden rounded-lg border border-border"
         >
-          {accounts.map((account, index) => (
-            <AccountRow
-              key={account.id}
-              account={account}
-              index={index}
-              onUse={() =>
-                // The Mac's own Claude login needs one approval before Cloud can follow it.
-                account.needsSignIn
-                  ? setAdding({ mac: true, id: null })
-                  : void run(() =>
-                      rpc.call("accounts.use", { provider, id: account.id }),
-                    )
-              }
-              onRename={(name) =>
-                void run(() =>
-                  rpc.call("accounts.rename", {
-                    provider,
-                    id: account.id,
-                    name,
-                  }),
-                )
-              }
-              onRemove={() =>
-                void run(() =>
-                  rpc.call("accounts.remove", { provider, id: account.id }),
-                )
-              }
-              onSignInAgain={
-                provider === "claude-code" && adding === null
-                  ? () => setAdding({ mac: false, id: account.id })
-                  : undefined
-              }
+          {highlight ? (
+            <div
+              aria-hidden
+              className="pointer-events-none absolute inset-x-0 top-0 border-l-[3px] border-foreground bg-accent transition-[transform,height] duration-300 ease-out motion-reduce:transition-none"
+              style={{
+                transform: `translateY(${highlight.top}px)`,
+                height: highlight.height,
+              }}
             />
-          ))}
+          ) : null}
+          <div ref={rows} className="relative divide-y divide-border">
+            {accounts.map((account, index) => (
+              <AccountRow
+                key={account.id}
+                account={account}
+                index={index}
+                picking={account.id === picking}
+                locked={picking !== null}
+                onUse={() =>
+                  // The Mac's own Claude login needs one approval before Cloud can follow it.
+                  account.needsSignIn
+                    ? setAdding({ mac: true, id: null })
+                    : void use(
+                        account.id,
+                        account.name ?? fallbackName(account, index),
+                      )
+                }
+                onRename={(name) =>
+                  void run(() =>
+                    rpc.call("accounts.rename", {
+                      provider,
+                      id: account.id,
+                      name,
+                    }),
+                  )
+                }
+                onRemove={() =>
+                  void run(() =>
+                    rpc.call("accounts.remove", { provider, id: account.id }),
+                  )
+                }
+                onSignInAgain={
+                  provider === "claude-code" && adding === null
+                    ? () => setAdding({ mac: false, id: account.id })
+                    : undefined
+                }
+              />
+            ))}
+          </div>
         </div>
       ) : null}
       {adding ? (
@@ -587,6 +724,12 @@ const AGENTS: readonly { provider: Provider; name: string }[] = [
 
 /** Settings → Agents → Accounts: every agent's accounts on one page. All threads use the one picked. */
 function AccountsPage() {
+  // Draws the page again every minute, so the countdowns move and passed resets clear. It loads nothing.
+  const [, tick] = useState(0);
+  useEffect(() => {
+    const timer = window.setInterval(() => tick((count) => count + 1), 60_000);
+    return () => window.clearInterval(timer);
+  }, []);
   return (
     <div className="space-y-6">
       {AGENTS.map((agent) => (

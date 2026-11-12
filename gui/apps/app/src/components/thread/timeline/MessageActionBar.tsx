@@ -79,6 +79,7 @@ interface MessageOverflowAction {
   label: string;
   onSelect: () => void;
   disabled?: boolean;
+  blocked?: boolean;
   copyText?: string;
   copyImageUrl?: string;
   kind?: "copy";
@@ -207,6 +208,8 @@ export interface SharedMessageColumnWidth {
 export const MessageColumnWidthContext =
   createContext<SharedMessageColumnWidth | null>(null);
 
+export const MessageEditBlockedContext = createContext<string | null>(null);
+
 const resolveMessageColumn = (node: HTMLElement): Element | null =>
   node.closest("[data-message-column]");
 
@@ -264,7 +267,7 @@ function MobileMessageOverflowPopover({
               key={action.key ?? action.label}
               type="button"
               className={MOBILE_OVERFLOW_ITEM_CLASS}
-              disabled={action.disabled}
+              disabled={action.disabled || action.blocked}
               onClick={() => {
                 if (action.kind === "copy") {
                   void copyToClipboardWithToast(action.copyText ?? "", {
@@ -294,7 +297,7 @@ function MobileMessageOverflowPopover({
 }
 
 const ACTION_BUTTON_CLASS =
-  "inline-flex size-5 cursor-pointer items-center justify-center text-muted-foreground hover:text-foreground disabled:pointer-events-none disabled:opacity-40";
+  "inline-flex size-5 cursor-pointer items-center justify-center text-muted-foreground hover:text-foreground disabled:pointer-events-none disabled:opacity-40 aria-disabled:cursor-default aria-disabled:opacity-40 aria-disabled:hover:text-muted-foreground";
 const HOVER_REVEAL_CLASS =
   "opacity-0 transition-opacity group-hover/message:opacity-100 group-focus-within/message:opacity-100";
 const MOBILE_INLINE_ACTION_CLASS =
@@ -395,8 +398,9 @@ function DesktopMessageAction({
           <button
             type="button"
             className={cn(ACTION_BUTTON_CLASS, className)}
-            onClick={action.onSelect}
+            onClick={action.blocked ? undefined : action.onSelect}
             disabled={action.disabled}
+            aria-disabled={action.blocked || undefined}
             aria-label={action.label}
           >
             <MessageActionIcon action={action} className="size-3" />
@@ -421,7 +425,7 @@ function MessageActionMenuItems({
   return actions.map((action) => (
     <DropdownMenuItem
       key={action.key ?? action.label}
-      disabled={action.disabled}
+      disabled={action.disabled || action.blocked}
       onSelect={action.onSelect}
       textValue={action.label}
     >
@@ -458,6 +462,7 @@ export function MessageActionBar({
     enabled: !(useMobileOverflowPopover && mobileActionDisplay === "overflow"),
   });
   const sharedColumnWidth = useContext(MessageColumnWidthContext);
+  const editBlockedReason = useContext(MessageEditBlockedContext);
   const { measureRef: measureColumnRef, width: ownColumnWidth } =
     useMeasuredWidth({
       enabled: sharedColumnWidth === null,
@@ -540,8 +545,9 @@ export function MessageActionBar({
       ? [
           {
             icon: "Edit" as const,
-            label: "Edit message",
+            label: editBlockedReason ?? "Edit message",
             onSelect: onEdit,
+            blocked: editBlockedReason !== null,
           },
         ]
       : []),

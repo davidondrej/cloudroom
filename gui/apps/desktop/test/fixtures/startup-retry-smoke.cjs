@@ -2,7 +2,7 @@ const assert = require("node:assert/strict");
 const { createServer } = require("node:http");
 const { writeFile } = require("node:fs/promises");
 const { join } = require("node:path");
-const { app, ipcMain } = require("electron");
+const { app, BrowserWindow, ipcMain } = require("electron");
 
 const desktopRoot = process.env.BB_STARTUP_SMOKE_APP_PATH;
 const scenario = process.env.BB_STARTUP_SMOKE_SCENARIO ?? "custom";
@@ -18,6 +18,14 @@ async function until(check) {
     assert.ok(Date.now() < deadline, "Timed out waiting for startup recovery");
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
+}
+
+// Tests run on developers' Macs. A visible window takes over their screen.
+function assertWindowsHidden() {
+  assert.ok(
+    BrowserWindow.getAllWindows().every((window) => !window.isVisible()),
+    "Test windows must stay hidden",
+  );
 }
 
 async function run() {
@@ -125,6 +133,7 @@ async function run() {
     });
     await new Promise((resolve) => setTimeout(resolve, 100));
     assert.equal(loads.length, before, "A fatal startup error cannot retry");
+    assertWindowsHidden();
     server.close();
     console.log("STARTUP_RETRY_SMOKE_OK");
     app.exit(0);
@@ -223,6 +232,7 @@ async function run() {
   ipcMain.emit(channel, { sender: contents, senderFrame: contents.mainFrame });
   await new Promise((resolve) => setTimeout(resolve, 100));
   assert.equal(loads.length, after, "Loaded remote pages cannot retry startup");
+  assertWindowsHidden();
   server.close();
   console.log("STARTUP_RETRY_SMOKE_OK");
   app.exit(0);

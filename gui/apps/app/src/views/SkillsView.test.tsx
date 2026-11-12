@@ -305,7 +305,7 @@ describe("SkillsOverview", () => {
     expect(markup).toContain("Sort");
     expect(markup).not.toContain('role="tab"');
     expect(markup).toContain("Cloudroom Official");
-    expect(markup).toContain("New Cloudroom skill");
+    expect(markup).toContain("New skill");
     expect(markup).not.toContain('aria-label="Open zz-official-skill"');
   });
 
@@ -827,7 +827,7 @@ describe("SkillsLibrary library detail routing", () => {
     renderLibrarySkillRoute();
 
     expect(screen.getByText("Loading skill")).toBeTruthy();
-    expect(screen.queryByText("New Cloudroom skill")).toBeNull();
+    expect(screen.queryByText("New skill")).toBeNull();
   });
 
   it("shows a retryable detail error when the skill library fails to load", async () => {
@@ -839,7 +839,7 @@ describe("SkillsLibrary library detail routing", () => {
 
     expect(await screen.findByText("Couldn't load skill.")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Retry" })).toBeTruthy();
-    expect(screen.queryByText("New Cloudroom skill")).toBeNull();
+    expect(screen.queryByText("New skill")).toBeNull();
   });
 
   it("shows not found on an unknown library skill detail route", async () => {
@@ -849,7 +849,7 @@ describe("SkillsLibrary library detail routing", () => {
 
     const notFound = await screen.findByText("Skill not found.");
     expect(notFound.closest("[data-resource-detail-state]")).not.toBeNull();
-    expect(screen.queryByText("New Cloudroom skill")).toBeNull();
+    expect(screen.queryByText("New skill")).toBeNull();
     expect(fetchMock).not.toHaveBeenCalled();
   });
 });
@@ -1126,7 +1126,9 @@ describe("SkillsLibrary registry detail lifecycle", () => {
       resolveEntries = resolve;
     });
     vi.spyOn(sdk.skills, "list").mockResolvedValue({ skills: [] });
-    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+    const isFeaturedRequest = (init?: RequestInit) =>
+      String(init?.body ?? "").includes("davidondrej/skills");
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const url = requestPath(input);
       if (url.startsWith("/api/v1/skills-registry?")) {
         return Promise.resolve(
@@ -1143,7 +1145,9 @@ describe("SkillsLibrary registry detail lifecycle", () => {
         );
       }
       if (url === "/api/v1/skills-registry/entries") {
-        return entriesResponse;
+        return isFeaturedRequest(init)
+          ? Promise.resolve(Response.json({ entries: [] }))
+          : entriesResponse;
       }
       return Promise.resolve(new Response(null, { status: 404 }));
     });
@@ -1162,7 +1166,9 @@ describe("SkillsLibrary registry detail lifecycle", () => {
     await waitFor(() => {
       expect(
         fetchMock.mock.calls.filter(
-          ([input]) => requestPath(input) === "/api/v1/skills-registry/entries",
+          ([input, init]) =>
+            requestPath(input) === "/api/v1/skills-registry/entries" &&
+            !isFeaturedRequest(init),
         ),
       ).toHaveLength(1);
     });
@@ -1237,12 +1243,12 @@ describe("RegistrySkillsBrowsePage", () => {
     expect(onSelect).toHaveBeenCalledWith(alpha);
     expect(screen.getByRole("textbox", { name: "Search skills" })).toBeTruthy();
     expect(screen.getByLabelText("10 installs")).toBeTruthy();
-    expect(screen.getAllByText("by owner/repo").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("owner/repo").length).toBeGreaterThan(0);
     expect(
       screen.getByRole("button", {
         name: "Fork Alpha into a new Cloudroom skill",
       }).textContent,
-    ).toBe("");
+    ).toBe("Fork");
     const zuluCreate = screen.getByRole("button", {
       name: "Fork Zulu into a new Cloudroom skill",
     });

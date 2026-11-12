@@ -169,6 +169,22 @@ pub struct Session {
     // Never trimmed, since a child can report long after its start.
     #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
     pub started: std::collections::BTreeSet<String>,
+    /// The session's latest title, its start's or a `title` record's, for `GET /v1/sessions` (#237).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// The newest prompt, steer or edit an app sent (`app_<install>_…` request IDs) and its record's sequence: the
+    /// computer where the user last used the thread (#237).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_app_prompt: Option<Value>,
+    /// This session's own changes still owed to the website, oldest first (relay.rs `watch_thread_reports`, #237).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub thread_reports: Vec<Value>,
+    /// The session an agent switch is starting from this one. Until it lands, this one takes no new work (#237).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continuing: Option<String>,
+    /// For a session that continues another (agent switch, project move): `from`, and the `history` file it got (#237).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continued: Option<Value>,
     pub reasoning: Option<String>,
     pub workspace: Option<crate::workspace::Workspace>,
     #[serde(skip)]
@@ -234,6 +250,10 @@ pub struct Session {
     // A child's latest completed replies by request, so a queued turn cannot hide them from its parent.
     #[serde(skip)]
     replies: Vec<(String, String)>,
+    // Teleport to Local holds the session (its request ID, until when in ms), so no other client changes it (#237).
+    // Memory only: a restart lifts it, and the teleporting app renews it every 2 minutes.
+    #[serde(skip)]
+    frozen: Option<(String, u64)>,
 }
 
 impl Session {
@@ -626,6 +646,73 @@ impl Manager {
                 _ => None,
             },
         }
+    }
+
+    /// Teleport to Local holds session `id` for `request` (#237): until `release`, a close, or FREEZE_MS without a
+    /// renewal, every other client's change gets MOVING. The same request renews it; another is refused.
+    pub fn freeze(&self, id: &str, request: &str, release: bool) -> Result<Value> {
+        let mut local = self.local.lock().unwrap();
+        let session = local.sessions.get_mut(id).ok_or(Error::NotFound)?;
+        let now = now_ms();
+        if session
+            .frozen
+            .as_ref()
+            .is_some_and(|(held, until)| *until > now && held != request)
+        {
+            return Err(Error::Conflict(MOVING));
+        }
+        if release {
+            session.frozen = None;
+            return Ok(json!({"frozen":false}));
+        }
+        if session.continuing.is_some() {
+            return Err(Error::Conflict(SWITCHING));
+        }
+        session.frozen = Some((request.to_owned(), now + FREEZE_MS));
+        Ok(json!({"frozen":true,"until_ms":now + FREEZE_MS}))
+    }
+
+    /// Whether `request` still holds the session: Teleport's close checks it, so a lapsed freeze never ends a turn
+    /// another client started meanwhile.
+    pub fn holds(&self, id: &str, request: &str) -> bool {
+        let local = self.local.lock().unwrap();
+        local
+            .sessions
+            .get(id)
+            .and_then(|s| s.frozen.as_ref())
+            .is_some_and(|(held, until)| held == request && *until > now_ms())
+    }
+
+    /// The user renames session `id` in an app (#237). Never reported: the app sends a thread's own rename to the website.
+    pub fn set_title(&self, id: &str, title: &str) -> Result<()> {
+        if !self.local.lock().unwrap().sessions.contains_key(id) {
+            return Err(Error::NotFound);
+        }
+        Ok(self.note(id, "title", json!({"title":title,"user":true}))?)
+    }
+
+    /// The user archives or restores session `id` in an app (#237): a thread sharing another's sandbox, which has no
+    /// website row, or a thread its agent archived while a child kept the sandbox, restored before the website heard.
+    pub fn set_archived(&self, id: &str, archived: bool) -> Result<()> {
+        if !self.local.lock().unwrap().sessions.contains_key(id) {
+            return Err(Error::NotFound);
+        }
+        // A restore gets its own record kind: apps before #237 archive the thread on any `archive` record.
+        let (kind, data) = if archived {
+            ("archive", json!({"archived":true,"user":true}))
+        } else {
+            ("unarchive", json!({"user":true}))
+        };
+        Ok(self.note(id, kind, data)?)
+    }
+
+    /// Names this Core's start for the website: every wake starts Core with a new token (#237, web `coreThread`).
+    pub(crate) fn wake_id(&self) -> String {
+        let digest = ring::digest::digest(&ring::digest::SHA256, self.config.token.as_bytes());
+        digest.as_ref()[..8]
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect()
     }
 
     /// Appends a record that no harness produced, such as a secret request.
@@ -1023,6 +1110,571 @@ impl Manager {
         Ok((id, receipt))
     }
 
+    /// Starts `cr_<request>` as the continuation of session `from`: an agent switch or a project move, from any of the
+    /// user's computers (#237). One exclusive transition: `from` is held (SWITCHING) before its history is copied, the
+    /// new session gets that history and the old start's settings, and `from` closes only once the website took the
+    /// new one. True while the website hasn't answered yet: Core keeps trying, and the thread's list shows the outcome.
+    pub async fn continue_session(
+        self: &Arc<Self>,
+        request: String,
+        from: String,
+        (harness, model, reasoning, provider): (
+            Option<runtime::Kind>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        ),
+        (workspace, workspace_name): (Option<String>, Option<String>),
+    ) -> Result<(String, Receipt, bool)> {
+        let id = format!("cr_{request}");
+        let existing = self
+            .local
+            .lock()
+            .unwrap()
+            .sessions
+            .get(&id)
+            .and_then(|s| s.receipts.get(&request).cloned());
+        if let Some(receipt) = existing {
+            return self.continue_again(from, id, receipt).await;
+        }
+        let (old, options) = {
+            let mut local = self.local.lock().unwrap();
+            let s = local.sessions.get(&from).ok_or(Error::NotFound)?;
+            if s.parent_session.is_some() {
+                return Err(Error::Conflict(
+                    "a thread sharing its parent's sandbox keeps its agent",
+                ));
+            }
+            if s.continuing.is_some() {
+                return Err(Error::Conflict(SWITCHING));
+            }
+            if s.frozen
+                .as_ref()
+                .is_some_and(|(_, until)| *until > now_ms())
+            {
+                return Err(Error::Conflict(MOVING));
+            }
+            if s.busy() || !s.queue.is_empty() || s.close_request.is_some() {
+                return Err(Error::Conflict(
+                    "wait until the agent and its queued messages finish, then switch",
+                ));
+            }
+            if local
+                .sessions
+                .values()
+                .any(|c| c.parent_session.as_deref() == Some(&from) && c.busy())
+            {
+                return Err(Error::Conflict(
+                    "wait until this thread's child agents finish, then switch",
+                ));
+            }
+            let options = (
+                provider,
+                Some(s.command_guard_enabled()),
+                Some(s.strip_ai_co_authors()),
+                s.system_prompt(),
+                s.parent_thread().map(str::to_owned),
+            );
+            let old = (
+                s.harness,
+                s.model.clone(),
+                s.reasoning.clone(),
+                s.workspace.clone(),
+                s.last_app_prompt.clone(),
+                s.continued.clone(),
+            );
+            local.append(&from, "continuing", json!({"session":id}), None)?;
+            (old, options)
+        };
+        let (old_harness, old_model, old_reasoning, old_workspace, last_app_prompt, earlier) = old;
+        let harness = harness.unwrap_or(old_harness);
+        let model = model.or_else(|| (harness == old_harness).then_some(old_model).flatten());
+        // Same folder as before, unless a project move names another (the app's rule before #237).
+        let workspace = workspace.or_else(|| match &old_workspace {
+            Some(w) if w.id != "legacy" => Some(w.id.clone()),
+            Some(w) if w.path != self.config.repository => Some(crate::workspace::ROOT.to_owned()),
+            _ => None,
+        });
+        let release = |manager: &Self| {
+            let _ = manager.note(&from, "continuing", json!({"session":null}));
+        };
+        let history = self.history_markdown(&from, earlier.as_ref()).await;
+        let started = self
+            .start(
+                request.clone(),
+                Some(harness),
+                model,
+                reasoning.or(old_reasoning),
+                (workspace, workspace_name),
+                options,
+            )
+            .await;
+        let (id, receipt) = match started {
+            Ok(started) => started,
+            Err(error) => {
+                release(self);
+                return Err(error);
+            }
+        };
+        // Its history goes into its own folder, where its agent reads it; a note on its first prompt points there.
+        // Without it the new agent would start blank, so the switch stops instead.
+        let path = match (&receipt.workspace, history.as_ref()) {
+            (Some(folder), Some((full, _))) => {
+                let written = self
+                    .workspaces
+                    .attach(
+                        folder,
+                        &request,
+                        HISTORY_FILE,
+                        "file",
+                        axum::body::Body::from(full.clone()),
+                        &self.storage,
+                    )
+                    .await
+                    .ok()
+                    .and_then(|written| written["path"].as_str().map(str::to_owned));
+                if written.is_none() {
+                    self.settle_continue(&from, &id, false);
+                    return Err(Error::Conflict(
+                        "the conversation couldn't be copied to the new agent, so this thread wasn't changed",
+                    ));
+                }
+                written
+            }
+            _ => None,
+        };
+        // Core keeps its own copy for this session's next switch: the file above is the agent's to change.
+        if let Some((full, _)) = &history {
+            prompt::save_history(&self.config.state_dir, &id, full);
+        }
+        let continued = json!({"from":from,"history":path,"last_app_prompt":last_app_prompt});
+        self.note(&id, "continued", continued)?;
+        if let (Some(path), Some((_, tail))) = (&path, &history) {
+            let what = if harness == old_harness {
+                "This conversation moved to another project folder, in a new session.".to_owned()
+            } else {
+                format!(
+                    "This conversation started with another agent ({}). You are now continuing it as {}.",
+                    json!(old_harness),
+                    json!(harness)
+                )
+            };
+            prompt::add_session_note(
+                &self.config.state_dir,
+                &id,
+                &format!(
+                    "<cloudroom_custom_instructions>\n[Cloudroom] {what} The full conversation so far is in {path}: user messages and agent replies, without tool output. Read it before you reply, treat it as your own history, check the workspace for the current state, and don't redo finished work.\n\nThe latest messages:\n\n{tail}\n</cloudroom_custom_instructions>"
+                ),
+            );
+        }
+        let pending = self.land_continue(from, id.clone()).await?;
+        Ok((id, receipt, pending))
+    }
+
+    /// The same switch asked for again, say after a lost answer (#237). One still being set up is waited for, then
+    /// finished; a finished one says how it ended.
+    async fn continue_again(
+        self: &Arc<Self>,
+        from: String,
+        id: String,
+        receipt: Receipt,
+    ) -> Result<(String, Receipt, bool)> {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        loop {
+            let (holding, continued, state) = {
+                let local = self.local.lock().unwrap();
+                let s = local.sessions.get(&id);
+                (
+                    local
+                        .sessions
+                        .get(&from)
+                        .is_some_and(|s| s.continuing.as_deref() == Some(&id)),
+                    s.and_then(|s| s.continued.clone()),
+                    s.map(|s| s.state.clone()),
+                )
+            };
+            match continued {
+                Some(c) if c["from"].as_str() != Some(from.as_str()) => {
+                    return Err(Error::Conflict("request_id already has different content"));
+                }
+                Some(_) if holding => {
+                    return Ok((id.clone(), receipt, self.land_continue(from, id).await?));
+                }
+                Some(_) if matches!(state, Some(SessionState::Closing | SessionState::Closed)) => {
+                    return Err(Error::Conflict(
+                        "this switch didn't happen, so this thread wasn't changed",
+                    ));
+                }
+                Some(_) => return Ok((id, receipt, false)),
+                None if !holding => {
+                    return Err(Error::Conflict("request_id already has different content"));
+                }
+                None if Instant::now() > deadline => return Err(Error::Conflict(SWITCHING)),
+                None => tokio::time::sleep(Duration::from_millis(250)).await,
+            }
+        }
+    }
+
+    /// Waits until the new agent started, then hands the website the new session (#237). An agent that doesn't start
+    /// ends the switch, and the old session takes work again. True while the website hasn't answered yet.
+    async fn land_continue(self: &Arc<Self>, from: String, id: String) -> Result<bool> {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        loop {
+            let state = self
+                .local
+                .lock()
+                .unwrap()
+                .sessions
+                .get(&id)
+                .map(|s| s.state.clone());
+            let failure = match state {
+                Some(SessionState::Idle) => break,
+                Some(SessionState::Failed | SessionState::ProcessLost | SessionState::Closed)
+                | None => "the new agent couldn't start in Cloud, so this thread wasn't changed",
+                _ if Instant::now() > deadline => {
+                    "the new agent didn't start within a minute, so this thread wasn't changed"
+                }
+                _ => {
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                    continue;
+                }
+            };
+            self.settle_continue(&from, &id, false);
+            return Err(Error::Conflict(failure));
+        }
+        let pending = self
+            .finish_continue(from.clone(), id.clone(), CONTINUE_WAIT)
+            .await?;
+        if pending {
+            self.keep_finishing(from, id);
+        }
+        Ok(pending)
+    }
+
+    /// Hands the website the new session, then closes the old one (#237). The website applies it once, and a retry
+    /// whose answer got lost is a success too. Core closes the new session only when the website certainly didn't
+    /// take it (409: the thread is on a third session). Without an answer it keeps trying after `wait`: true then.
+    async fn finish_continue(
+        self: &Arc<Self>,
+        from: String,
+        id: String,
+        wait: Duration,
+    ) -> Result<bool> {
+        let Some(api) = self.history.api.clone() else {
+            self.settle_continue(&from, &id, true);
+            return Ok(false);
+        };
+        let body = {
+            let local = self.local.lock().unwrap();
+            let s = local.sessions.get(&id).ok_or(Error::NotFound)?;
+            let request: String = format!("continue_{}", id.trim_start_matches("cr_"))
+                .chars()
+                .take(64)
+                .collect();
+            // Followers get the new agent's settings from the row: Pi's model with its provider, and the effort.
+            let model = match (&s.provider, &s.model) {
+                (Some(provider), Some(model)) if s.harness == runtime::Kind::Pi => {
+                    Some(format!("{provider}/{model}"))
+                }
+                _ => s.model.clone(),
+            };
+            json!({"request_id":request,"session":from,"wake":self.wake_id(),"continue":{"session":id,"harness":s.harness,"model":model,"reasoning":s.reasoning}})
+        };
+        let started = Instant::now();
+        let mut pause = Duration::from_secs(2);
+        loop {
+            match api.post("thread", &body).await {
+                Ok(_) => {
+                    self.settle_continue(&from, &id, true);
+                    return Ok(false);
+                }
+                Err(history::ApiError::Status(400 | 403 | 404 | 409 | 410, _)) => {
+                    self.settle_continue(&from, &id, false);
+                    return Err(Error::Conflict(
+                        "this thread moved to another session meanwhile, so it wasn't switched",
+                    ));
+                }
+                Err(_) if started.elapsed() < wait && !self.is_stopping() => {
+                    tokio::time::sleep(pause).await;
+                    pause = (pause * 2).min(Duration::from_secs(60));
+                }
+                Err(_) => return Ok(true),
+            }
+        }
+    }
+
+    /// Keeps handing the website a switch it hasn't answered yet, until it does (#237).
+    fn keep_finishing(self: &Arc<Self>, from: String, id: String) {
+        let manager = self.clone();
+        tokio::spawn(async move {
+            while !manager.is_stopping()
+                && manager
+                    .finish_continue(from.clone(), id.clone(), Duration::from_secs(600))
+                    .await
+                    .unwrap_or(false)
+            {}
+        });
+    }
+
+    /// Ends a switch: the website `taken` the new session (the old one closes and its plan-limit resume loop goes),
+    /// or not (the new one closes). Either way the old session takes work again.
+    fn settle_continue(self: &Arc<Self>, from: &str, id: &str, taken: bool) {
+        {
+            let mut local = self.local.lock().unwrap();
+            if !local
+                .sessions
+                .get(from)
+                .is_some_and(|s| s.continuing.as_deref() == Some(id))
+            {
+                return;
+            }
+            let _ = local.append(from, "continuing", json!({"session":null}), None);
+            if taken && let Some(s) = local.sessions.get_mut(from) {
+                s.resume_spent.extend(s.resume_loop.take());
+            }
+        }
+        if taken {
+            let _ = self.command(from, random_request(), "close", json!({}));
+        } else {
+            self.close_when_started(id.to_owned());
+        }
+    }
+
+    /// Closes a new session a switch gave up on, once it can be: Core refuses a close while a session starts (#237).
+    fn close_when_started(self: &Arc<Self>, id: String) {
+        let manager = self.clone();
+        tokio::spawn(async move {
+            let deadline = Instant::now() + Duration::from_secs(120);
+            while Instant::now() < deadline && !manager.is_stopping() {
+                // Read first: the lock must be free again before the close takes it.
+                let state = manager
+                    .local
+                    .lock()
+                    .unwrap()
+                    .sessions
+                    .get(&id)
+                    .map(|s| s.state.clone());
+                let closed = match state {
+                    None
+                    | Some(
+                        SessionState::Closing
+                        | SessionState::Closed
+                        | SessionState::Failed
+                        | SessionState::ProcessLost,
+                    ) => true,
+                    Some(
+                        SessionState::Pending | SessionState::Starting | SessionState::Resuming,
+                    ) => false,
+                    Some(_) => manager
+                        .command(&id, random_request(), "close", json!({}))
+                        .is_ok(),
+                };
+                if closed {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
+        });
+    }
+
+    /// Switches a restart cut off go on (#237): one whose new session never started is released.
+    fn resume_continues(self: &Arc<Self>, local: &Local) {
+        for s in local.sessions.values() {
+            let Some(id) = s.continuing.clone() else {
+                continue;
+            };
+            let (manager, from) = (self.clone(), s.session_id.clone());
+            // Core hands the website a switch only once its new agent started, so one whose new session started (its
+            // start receipt completed) and was set up may be the website's already: only the website's answer decides.
+            // Any other never reached the website, and the switch didn't happen.
+            let ready = local.sessions.get(&id).is_some_and(|c| {
+                c.continued.is_some()
+                    && c.receipts
+                        .values()
+                        .any(|r| r.command == "start" && r.state == "completed")
+            });
+            if ready {
+                manager.keep_finishing(from, id);
+            } else {
+                tokio::spawn(async move { manager.settle_continue(&from, &id, false) });
+            }
+        }
+    }
+
+    /// The conversation so far as Markdown, from Core's own records, in the order it ran (#237): each turn's prompt in
+    /// its latest edit, then its reply text (Codex's reply pieces name no request, so they go to the turn running when
+    /// they came), steers where they landed, no tool output, and nothing a rewind replaced. Cancelled or failed prompts
+    /// never ran, so they never show. The history an earlier switch handed `from` comes first. Newest kept within
+    /// HISTORY_CHARS, plus the latest few within TAIL_CHARS for the note. None for a session that never had a message.
+    async fn history_markdown(
+        &self,
+        from: &str,
+        earlier: Option<&Value>,
+    ) -> Option<(String, String)> {
+        let (prompts, receipts) = {
+            let local = self.local.lock().unwrap();
+            let s = local.sessions.get(from)?;
+            (s.prompts.clone(), s.receipts.clone())
+        };
+        let text_of = |request: &str| {
+            let input = prompts
+                .get(request)
+                .map(|p| &p.input)
+                .or_else(|| receipts.get(request).map(|r| &r.input));
+            visible_text(input.and_then(|i| i["text"].as_str()).unwrap_or_default())
+        };
+        // (who, turn, text): a turn is the request whose turn it was, so a rewind cuts whole turns.
+        let mut entries: Vec<(&str, String, String)> = Vec::new();
+        let (mut after, mut active, mut item) = (0, String::new(), String::new());
+        let (mut started, mut checkpoints) = (
+            std::collections::HashSet::new(),
+            std::collections::HashMap::new(),
+        );
+        while let Ok(records) = self.records(from, after).await {
+            let Some(last) = records.last() else { break };
+            after = last.sequence;
+            for r in &records {
+                let request = r.data["request_id"].as_str().unwrap_or_default();
+                match r.kind.as_str() {
+                    "state"
+                        if !request.is_empty()
+                            && matches!(
+                                r.data["state"].as_str(),
+                                Some("starting_turn" | "running")
+                            ) =>
+                    {
+                        active = request.to_owned();
+                        let text = text_of(request);
+                        if started.insert(active.clone())
+                            && prompts.contains_key(request)
+                            && !text.is_empty()
+                        {
+                            entries.push(("You", active.clone(), text));
+                        }
+                    }
+                    "receipt"
+                        if r.data["command"] == "steer"
+                            && r.data["state"] == "accepted"
+                            && started.insert(request.to_owned()) =>
+                    {
+                        let text =
+                            visible_text(r.data["input"]["text"].as_str().unwrap_or_default());
+                        if !text.is_empty() {
+                            entries.push(("You", active.clone(), text));
+                        }
+                    }
+                    "checkpoint" => {
+                        if let Some(id) = r.data["id"].as_str() {
+                            checkpoints.insert(id.to_owned(), request.to_owned());
+                        }
+                    }
+                    "rewind" => {
+                        // `before`: that turn and every later one were replaced; `last_turn_id`: the ones after it.
+                        let Some(rewind) = receipts.get(request) else {
+                            continue;
+                        };
+                        let (turn, keep) = match rewind.input["before"].as_str() {
+                            Some(turn) => (turn, false),
+                            None => (
+                                rewind.input["last_turn_id"].as_str().unwrap_or_default(),
+                                true,
+                            ),
+                        };
+                        if let Some(cut) = checkpoints.get(turn) {
+                            let at = if keep {
+                                entries
+                                    .iter()
+                                    .rposition(|(_, turn, _)| turn == cut)
+                                    .map(|i| i + 1)
+                            } else {
+                                entries.iter().position(|(_, turn, _)| turn == cut)
+                            };
+                            entries.truncate(at.unwrap_or(entries.len()));
+                        }
+                    }
+                    "text_delta" => {
+                        let Some(delta) = r.data["delta"].as_str() else {
+                            continue;
+                        };
+                        let turn = if request.is_empty() {
+                            active.clone()
+                        } else {
+                            request.to_owned()
+                        };
+                        let id = r.data["item_id"].as_str().unwrap_or_default();
+                        match entries.last_mut() {
+                            Some(("Agent", last, text)) if *last == turn => {
+                                if id != item {
+                                    text.push_str("\n\n");
+                                }
+                                text.push_str(delta);
+                            }
+                            _ => entries.push(("Agent", turn, delta.to_owned())),
+                        }
+                        item = id.to_owned();
+                    }
+                    _ => {}
+                }
+            }
+        }
+        // The earlier history's own messages, so the bounds below apply to each, not to the whole file.
+        // From Core's own copy (prompt::save_history), never the file in the agent's folder.
+        let before: Vec<String> = earlier
+            .and_then(|_| prompt::saved_history(&self.config.state_dir, from))
+            .map(|text| {
+                text.trim_start_matches("# Conversation so far")
+                    .trim()
+                    .split("\n\n## ")
+                    .filter(|b| !b.trim().is_empty())
+                    .map(|b| {
+                        if b.starts_with("## ") {
+                            b.to_owned()
+                        } else {
+                            format!("## {b}")
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        if entries.is_empty() && before.is_empty() {
+            return None;
+        }
+        let blocks: Vec<String> = before
+            .into_iter()
+            .chain(
+                entries
+                    .iter()
+                    .map(|(who, _, text)| format!("## {who}\n\n{}", text.trim())),
+            )
+            .collect();
+        // Newest first until the limit; a single block longer than what's left keeps its end.
+        let fit = |limit: usize| {
+            let (mut kept, mut size) = (Vec::new(), 0);
+            for block in blocks.iter().rev() {
+                if size + block.len() <= limit {
+                    size += block.len() + 2;
+                    kept.push(block.clone());
+                    continue;
+                }
+                if kept.is_empty() {
+                    let room = limit.saturating_sub(5);
+                    let mut cut = block.len() - room.min(block.len());
+                    while !block.is_char_boundary(cut) {
+                        cut += 1;
+                    }
+                    kept.push(format!("…{}", &block[cut..]));
+                }
+                break;
+            }
+            kept.reverse();
+            kept.join("\n\n")
+        };
+        Some((
+            format!("# Conversation so far\n\n{}\n", fit(HISTORY_CHARS)),
+            fit(TAIL_CHARS),
+        ))
+    }
+
     async fn launch(self: Arc<Self>, id: String, request: String) {
         let started = Instant::now();
         let Ok(_startup) = self.startups.acquire().await else {
@@ -1207,6 +1859,20 @@ impl Manager {
             }
             if self.is_stopping() {
                 return Err(Error::Conflict("service is stopping"));
+            }
+            // An agent switch holds the old session, and Teleport to Local freezes it: no client changes it meanwhile
+            // (#237). Stopping, sleeping and closing still work.
+            if !matches!(command, "stop" | "sleep" | "close" | "interrupt") {
+                if session.continuing.is_some() {
+                    return Err(Error::Conflict(SWITCHING));
+                }
+                if session
+                    .frozen
+                    .as_ref()
+                    .is_some_and(|(_, until)| *until > now_ms())
+                {
+                    return Err(Error::Conflict(MOVING));
+                }
             }
             // A resume prompt runs only from the current limit's own loop, while that limit still stops the thread:
             // a retired loop's run, or one sent after the user moved on or stopped it, is refused (accounts.rs).
@@ -1644,6 +2310,8 @@ impl Manager {
                 (input, reasoning)
             };
             let (input, notice) = prompt::with_notice(&self.config.state_dir, input);
+            // A switched session's first prompt carries the note on its history, whoever sends it (#237).
+            let (input, handed) = prompt::with_session_note(&self.config.state_dir, &id, input);
             // The stored handle keeps the launch level. This copy is only for the turn being started.
             let handle = handle.with_reasoning(reasoning);
             let result = async {
@@ -1653,6 +2321,9 @@ impl Manager {
             .await;
             if let (Err(_), Some(note)) = (&result, &notice) {
                 prompt::put_back_notice(&self.config.state_dir, note);
+            }
+            if let (Err(_), Some(note)) = (&result, &handed) {
+                prompt::add_session_note(&self.config.state_dir, &id, note);
             }
             let state = match &result {
                 Ok(_) => "delivered",
@@ -2058,6 +2729,8 @@ impl Manager {
         }
         self.watch_children(&local);
         self.watch_reports(&local);
+        self.watch_thread_reports(&local);
+        self.resume_continues(&local);
         self.watch_child_starts(&local);
         Ok(())
     }
@@ -2675,6 +3348,48 @@ impl Manager {
 }
 
 /// Last lines of harness stderr, shown under unexpected exits so the cause is visible in chat (ADR 0123).
+/// What other clients get while Teleport to Local or an agent switch holds a session (#237).
+pub const MOVING: &str = "This thread is moving to a computer. Send it again when that's done.";
+pub const SWITCHING: &str = "This thread is switching agents. Send it again in a moment.";
+/// A switch waits this long for the website before it answers "pending" and keeps trying (#237).
+const CONTINUE_WAIT: Duration = Duration::from_secs(60);
+/// How long a Teleport's freeze holds without a renewal (#237).
+const FREEZE_MS: u64 = 5 * 60_000;
+const HISTORY_FILE: &str = "conversation-history.md";
+const HISTORY_CHARS: usize = 4_000_000;
+const TAIL_CHARS: usize = 8_000;
+
+/// A prompt's text as the user wrote it: Cloudroom's own instructions in it are left out.
+fn visible_text(text: &str) -> String {
+    let (mut out, mut rest) = (String::new(), text);
+    while let Some(start) = rest.find("<cloudroom_custom_instructions>") {
+        out.push_str(&rest[..start]);
+        rest = rest[start..]
+            .find("</cloudroom_custom_instructions>")
+            .map_or("", |end| {
+                &rest[start + end + "</cloudroom_custom_instructions>".len()..]
+            });
+    }
+    out.push_str(rest);
+    out.trim().to_owned()
+}
+
+fn random_request() -> String {
+    format!(
+        "core_{}",
+        thread::random_key().unwrap_or_else(|_| now_ms().to_string())
+    )
+}
+
+/// A prompt the user sent from an app (`app_…`, or an older app's UUID) or the phone, not Core's own (notices,
+/// teleports, children's tasks) or a loop's (#237).
+pub(crate) fn user_request(id: &str) -> bool {
+    id.starts_with("app_")
+        || (id.len() == 36
+            && id.as_bytes()[8] == b'-'
+            && id.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-'))
+}
+
 fn stderr_tail(bytes: &[u8]) -> String {
     let text = String::from_utf8_lossy(&bytes[bytes.len().saturating_sub(2000)..]);
     let lines: Vec<&str> = text

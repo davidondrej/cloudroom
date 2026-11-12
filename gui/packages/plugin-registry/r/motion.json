@@ -7,7 +7,7 @@
   "files": [
     {
       "path": "registry/components/ui/motion.ts",
-      "content": "export const CONTROL_HOVER_TRANSITION =\n  \"transition-colors duration-150 hover:duration-0\";\n\nexport const LIST_HOVER_TRANSITION = \"transition-none\";\n",
+      "content": "export const CONTROL_HOVER_TRANSITION =\n  \"transition-colors duration-150 hover:duration-0\";\n\nexport const LIST_HOVER_TRANSITION = \"transition-none\";\n\n/** Touch press feedback for buttons: shrink on touch-down, spring back on release.\n *  Styled in the app's theme.css; a no-op where that stylesheet is not loaded. */\nexport const CONTROL_PRESS_FEEDBACK = \"press-feedback\";\n\n/** Touch press feedback for list rows: a tint instead of a shrink. */\nexport const LIST_PRESS_FEEDBACK = \"press-highlight\";\n",
       "type": "registry:ui",
       "target": "components/ui/motion.ts"
     }

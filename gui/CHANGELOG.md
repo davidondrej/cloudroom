@@ -2,6 +2,20 @@
 
 Also on [cloudroom.dev/changelog](https://www.cloudroom.dev/changelog).
 
+## 151
+
+Edit messages with no delay (2026-11-12)
+
+### Changes
+
+- Editing a sent message now applies at once, and Cloud edits are seconds faster.
+- Sign in to Codex with one button. Cloudroom installs Codex first if it is missing.
+- The Skills page has a new look, with a Featured shelf and a 3-column grid.
+- Wallpaper: put your own image or GIF behind New thread and your chats.
+- On phones, buttons and suggestions respond to every tap, and new threads open right away.
+- Import chats keeps more of your Codex history and groups a repo's worktrees into one project.
+- Security fixes.
+
 ## 150
 
 Attach files while agents work (2026-11-11)

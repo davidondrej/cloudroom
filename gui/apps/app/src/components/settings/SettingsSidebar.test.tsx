@@ -13,7 +13,7 @@ import {
 import { SettingsSidebarContent } from "./SettingsSidebar";
 
 const pluginEntries = [
-  "bb-guide",
+  "cloudroom-guide",
   "connect",
   "custom-instructions",
   "keep-awake",

@@ -529,6 +529,9 @@ export const threadResponseSchema = threadWithRuntimeSchema.extend({
   // Queued messages a drain has claimed but not yet sent; only GET /threads/:id
   // sets it, so `thread wait` can tell a turn's end from its follow-up (#1111).
   dispatchingMessageCount: z.number().int().nonnegative().optional(),
+  // A Cloud thread's sandbox has slept since then, as this computer first saw it (#237). Thread cleanup archives Cloud
+  // threads only after a day of it: another computer may be using one.
+  asleepSince: z.string().optional(),
 });
 export type ThreadResponse = z.infer<typeof threadResponseSchema>;
 

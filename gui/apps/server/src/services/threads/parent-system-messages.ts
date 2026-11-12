@@ -55,6 +55,7 @@ import {
 } from "./thread-context-mutation-guard.js";
 import { requestQueuedMessageDispatch } from "./queued-message-dispatch.js";
 import { dispatchEnvironmentAndHost } from "./dispatch-hooks.js";
+import { captureQueueDeliveryProblem } from "./queue-drain-failure.js";
 import {
   createQueuedMessageAutoSendPausedError,
   isQueuedMessageAutoSendPausedError,
@@ -306,26 +307,11 @@ async function queueActiveParentSystemMessage(
     if (outcome.kind === "queued") return true;
     if (outcome.kind === "dispatched") return false;
     if (outcome.kind === "retry") {
-      const currentThread = outcome.thread;
-      if (
-        currentThread === null ||
-        currentThread.archivedAt !== null ||
-        currentThread.deletedAt !== null
-      ) {
-        return false;
-      }
-      // A Stop that landed meanwhile holds the notice (#917).
-      if (
-        !args.sendNow &&
-        isThreadQueueAutoSendPaused(deps.db, currentThread.id)
-      ) {
-        throw createQueuedMessageAutoSendPausedError();
-      }
-      if (currentThread.status === "stopping") return false;
-      return queueReadyParentSystemMessage(deps, {
-        ...args,
-        thread: currentThread,
-      });
+      return queueParentSystemMessageForChangedThread(
+        deps,
+        args,
+        outcome.thread,
+      );
     }
   }
   await ensureHostSessionReadyForWork(deps, {
@@ -357,7 +343,11 @@ async function queueActiveParentSystemMessage(
     { behavior: "immediate" },
   );
   if (command === null) {
-    return false;
+    return queueParentSystemMessageForChangedThread(
+      deps,
+      args,
+      getThread(deps.db, args.thread.id),
+    );
   }
 
   deps.hub.notifyThread(args.thread.id, ["events-appended"], {
@@ -375,6 +365,47 @@ async function queueActiveParentSystemMessage(
     },
   });
   return true;
+}
+
+/**
+ * The thread changed status while the notice was being prepared, so the notice
+ * is decided again against the thread as it is now: a turn another sender
+ * started gets it as a steer, and a turn that ended gets it as a new turn.
+ * False only when the thread is gone or moved to another environment.
+ */
+async function queueParentSystemMessageForChangedThread(
+  deps: LoggedPendingInteractionWorkSessionDeps,
+  args: QueueReadyParentSystemMessageArgs,
+  currentThread: Thread | null,
+): Promise<boolean> {
+  if (
+    currentThread === null ||
+    currentThread.archivedAt !== null ||
+    currentThread.deletedAt !== null ||
+    currentThread.environmentId !== args.environment.id
+  ) {
+    return false;
+  }
+  // A Stop that landed meanwhile holds the notice (#917).
+  if (
+    currentThread.status === "stopping" ||
+    (!args.sendNow && isThreadQueueAutoSendPaused(deps.db, currentThread.id))
+  ) {
+    throw createQueuedMessageAutoSendPausedError();
+  }
+  deps.logger.info(
+    {
+      threadId: currentThread.id,
+      from: args.thread.status,
+      to: currentThread.status,
+      systemMessageKind: args.systemMessageKind,
+    },
+    "Parent system message decided again after its thread changed",
+  );
+  return queueReadyParentSystemMessage(deps, {
+    ...args,
+    thread: currentThread,
+  });
 }
 
 async function queueReadyParentSystemMessage(
@@ -404,9 +435,16 @@ async function queueReadyParentSystemMessage(
     providerId: args.thread.providerId,
     syncGeneratedTitle: false,
   });
-  const activeThread: Thread | null = deps.db.transaction(
-    (tx) => {
-      throwIfStopHoldsNotice(tx, args, getThread(tx, args.thread.id));
+  // Preparing the command reads from the host, which is slow on a busy
+  // machine. Another sender can start a turn meanwhile, and `run.started` has
+  // no transition from `active` (#1341).
+  const outcome = deps.db.transaction(
+    (tx): { changedTo: Thread | null } | { activeThread: Thread | null } => {
+      const current = getThread(tx, args.thread.id);
+      throwIfStopHoldsNotice(tx, args, current);
+      if (current === null || current.status !== args.thread.status) {
+        return { changedTo: current };
+      }
       ensureThreadCanStartRequest(args.thread);
       appendPreparedClientTurnRequestedEventWithNotificationInTransaction(tx, {
         ...parentSystemTurnRequestFields(args),
@@ -415,17 +453,27 @@ async function queueReadyParentSystemMessage(
       });
       const dispatchKind = command.mode;
       if (dispatchKind !== "turn.submit") {
-        return null;
+        return { activeThread: null };
       }
-      return requireThreadLifecycleEventApplied(
-        applyLoggedThreadLifecycleEventInTransaction(
-          { db: tx, logger: deps.logger },
-          { event: { type: "run.started" }, threadId: args.thread.id },
+      return {
+        activeThread: requireThreadLifecycleEventApplied(
+          applyLoggedThreadLifecycleEventInTransaction(
+            { db: tx, logger: deps.logger },
+            { event: { type: "run.started" }, threadId: args.thread.id },
+          ),
         ),
-      );
+      };
     },
     { behavior: "immediate" },
   );
+  if ("changedTo" in outcome) {
+    return queueParentSystemMessageForChangedThread(
+      deps,
+      args,
+      outcome.changedTo,
+    );
+  }
+  const { activeThread } = outcome;
   deps.hub.notifyThread(args.thread.id, ["events-appended"], {
     eventTypes: ["client/turn/requested"],
   });
@@ -481,13 +529,32 @@ export async function queueParentSystemMessage(
   let failed = false;
   if (!hasPendingInteraction) {
     try {
-      return await deliverParentSystemMessage(deps, {
+      const delivered = await deliverParentSystemMessage(deps, {
         childReport: args.childReport,
         input: args.input,
         parentThread,
         systemMessageKind: args.systemMessageKind,
         systemMessageSubject: args.systemMessageSubject,
       });
+      const current = delivered ? null : getThread(deps.db, parentThread.id);
+      // Dropping is right for a thread that is gone. For one still here, it
+      // means a report was lost, and we want to hear about it.
+      if (current && current.archivedAt === null && current.deletedAt === null) {
+        deps.logger.warn(
+          {
+            parentThreadId: parentThread.id,
+            systemMessageKind: args.systemMessageKind,
+          },
+          "Parent system message dropped for a thread that still exists",
+        );
+        captureQueueDeliveryProblem(deps, {
+          outcome: "dropped",
+          error: null,
+          notice: args.systemMessageKind,
+          threadId: parentThread.id,
+        });
+      }
+      return delivered;
     } catch (error) {
       heldByStop = isQueuedMessageAutoSendPausedError(error);
       failed =

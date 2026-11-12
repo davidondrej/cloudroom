@@ -8,7 +8,7 @@ import {
   type HeaderPair,
 } from "@cloudroom/tunnel-contract";
 import { relayedResponse } from "./response-encoding.js";
-import { TUNNEL_MACHINE_HEADER, TUNNEL_SESSION_HEADER, TUNNEL_TARGET_HEADER, TUNNEL_VPS_HEADER } from "./protocol-headers.js";
+import { RELAY_SIGNAL_HEADER, TUNNEL_MACHINE_HEADER, TUNNEL_SESSION_HEADER, TUNNEL_TARGET_HEADER, TUNNEL_VPS_HEADER } from "./protocol-headers.js";
 import { machineOwner, markServerSeen, sessionByToken } from "./store.js";
 import { timedDb } from "./timeout.js";
 
@@ -18,6 +18,8 @@ export interface Env {
   BASE_DOMAIN: string;
   WEBSITE_URL: string;
   ASSETS?: Fetcher;
+  /** Shared with the website (Vercel), which alone tells the relay an account's Cloud threads changed (#237). */
+  CONNECT_SIGNAL_SECRET?: string;
 }
 
 const TUNNEL_TAG = "tunnel";
@@ -35,6 +37,9 @@ const GAP_MAX_WAITERS = 200;
 const HEARD_EVERY_MS = 2_000;
 
 const WS_READY_STATE_OPEN = 1;
+/** The Mac's app fetches the account's changed Cloud threads when it gets this (#237). Older apps answer 404. */
+export const SIGNAL_PATH = "/api/v1/cloudroom/threads-changed";
+const SIGNAL_EVERY_MS = 1_000;
 
 /** Saved on the Mac's tunnel socket, never in Durable Object storage: a storage hiccup resets the object and drops the Mac. */
 type TunnelInfo = { connectedAt?: number; mac?: string; serverId?: string; protocolVersion?: number };
@@ -147,6 +152,10 @@ export class TunnelDO {
         ws.close(1000, "revoked by owner");
       this.releaseWaiters(null);
       return new Response(null, { status: 204 });
+    }
+    if (request.method === "POST" && url.pathname === "/__control/threads-changed") {
+      this.signalThreads();
+      return new Response(null, { status: 202 });
     }
     if (url.pathname === "/__control/status") {
       return Response.json({ online: this.tunnelSocket() !== null });
@@ -318,7 +327,29 @@ export class TunnelDO {
     this.state.acceptWebSocket(pair[1], [TUNNEL_TAG]);
     this.resendHeld(pair[1]);
     this.releaseWaiters(pair[1]);
+    if (this.signalPending) this.signalThreads();
     return new Response(null, { status: 101, webSocket: pair[0] });
+  }
+
+  /** In memory only: an evicted object forgets a signal, and the app also fetches after every reconnect. */
+  private signalPending = false;
+  private signalAt = 0;
+  private signalTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Tells the Mac its account's Cloud threads changed (#237): at most once a second, and a burst always ends with one,
+   *  so its last change is never left for the hourly check. With no tunnel, the next tunnel gets it. */
+  private signalThreads(): void {
+    const tunnel = this.tunnelSocket();
+    if (!tunnel) { this.signalPending = true; return; }
+    const wait = this.signalAt + SIGNAL_EVERY_MS - Date.now();
+    if (wait > 0) {
+      this.signalTimer ??= setTimeout(() => { this.signalTimer = null; this.signalThreads(); }, wait);
+      return;
+    }
+    this.signalPending = false;
+    this.signalAt = Date.now();
+    const url = new URL(`https://${tunnelInfo(tunnel).mac ?? "mac"}.${this.env.BASE_DOMAIN}${SIGNAL_PATH}`);
+    void Promise.resolve(this.relay(new Request(url, { method: "POST", headers: { [RELAY_SIGNAL_HEADER]: "threads" } }), url, tunnel))
+      .then((response) => response.body?.cancel(), () => {});
   }
 
   private openVisitorWebSocket(

@@ -16,6 +16,7 @@ import {
   type DbQueryConnection,
 } from "@cloudroom/db";
 import type { Thread, ThreadStatus } from "@cloudroom/domain";
+import { cloudroom } from "../cloudroom/commands.js";
 import type {
   AppDeps,
   LoggedPendingInteractionWorkSessionDeps,
@@ -93,6 +94,10 @@ function tombstoneProjectThreadsForDeletion(
     emitPluginThreadDeleted(thread);
     cancelAbandonedProviderCreations(deps, thread.id);
   }
+  // Every computer follows a Cloud thread (#237): each is archived there, one at a time, and its running work stops.
+  cloudroom(deps).archiveInTurn(result.deletedThreads.filter((thread) => thread.executionTarget === "cloud" && !thread.archivedAt).map((thread) => thread.id));
+  // Its rows are never adopted back, even if those archives don't all land (cloudDeletedProjects).
+  void cloudroom(deps).sync.projectDeleted(args.projectId);
   return result;
 }
 

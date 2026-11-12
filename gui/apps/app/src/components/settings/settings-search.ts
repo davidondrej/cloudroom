@@ -79,6 +79,7 @@ const SETTINGS_SEARCH_ENTRIES: readonly SettingsSearchEntry[] = [
     ["Wrong-project hint", "project nudge suggest switch jev"],
     ["Confidence", "wrong project hint nudge sensitivity percent"],
   ]),
+  ...entries("general", "Smart search", [["Smart search", "cmd k jev find thread search"]]),
   ...entries("general", "Voice Input", [
     ["Voice Input", "dictation speech talk"],
     ["Microphone", "mic audio dictation voice"],
@@ -120,6 +121,7 @@ const SETTINGS_SEARCH_ENTRIES: readonly SettingsSearchEntry[] = [
     ["Fade inactive splits", "dim split panes"],
     ["Sidebar footer", "buttons reorder"],
     ["Question cards", "agent questions ask"],
+    ["Wallpaper", "background image photo picture gif"],
     ["Always show one-click prompts", "starter prompts new thread security pills"],
   ]),
   ...entries("keyboard", undefined, [
@@ -145,6 +147,7 @@ const SETTINGS_SEARCH_ENTRIES: readonly SettingsSearchEntry[] = [
     ["Show Ultra effort levels", "ultracode ultra reasoning effort thinking parallel agents codex claude"],
   ]),
   ...entries("cloud-environment", "Cloud environment", [
+    ["Auth my agents in the cloud automatically", "copy logins claude codex auth credentials mac"],
     ["GitHub", "account token gh push pr"],
     ["API keys", "secrets environment variables env tokens"],
     ["Skills", "cloud skills"],
@@ -153,7 +156,7 @@ const SETTINGS_SEARCH_ENTRIES: readonly SettingsSearchEntry[] = [
     ["Setup script", "install sandbox startup cli clis tools"],
   ]),
   ...entries("auto-delete", "Auto-delete", [
-    ["Delete unused cloud threads", "retention delete old cloud threads sessions history days year never"],
+    ["Delete unused cloud threads after", "retention delete old cloud threads sessions history days year never"],
   ]),
   ...entries("projects", undefined, [
     ["Projects", "repos folders rename delete"],

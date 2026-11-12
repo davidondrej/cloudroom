@@ -265,6 +265,25 @@ class MacJobTests(unittest.TestCase):
             self.assertFalse((folder / 'ran').exists())
             self.assertEqual(posted, ['running'])
 
+    def test_nested_room_cli_reaches_the_app_that_owns_the_helper(self):
+        # #1243, #1290: a stale ROOM_SERVER_URL in the helper's or the login shell's environment, or none (the CLI's default
+        # port, maybe another app's), sent the Mac's room-cli to a dead port or to another app's empty list.
+        with tempfile.TemporaryDirectory() as root:
+            root = Path(root)
+            connection, folder, results = root / 'cloudroom.json', root / 'cloudroom-preview', []
+            connection.write_text('{}'); connection.chmod(0o600)
+            for profile in ('.profile', '.zprofile'):
+                (root / profile).write_text('export ROOM_SERVER_URL=http://127.0.0.1:2\n')
+            with mock.patch.dict(os.environ, {'HOME': str(root), 'ROOM_SERVER_URL': 'http://127.0.0.1:1',
+                                              'CLOUDROOM_SERVER_URL': 'http://127.0.0.1:41000'}), \
+                    mock.patch.object(preview, 'review', lambda *_: None):
+                preview.configure(folder, connection, False, None, 'full')
+                core = SimpleNamespace(url='http://core', headers={}, key='vm', sandbox=False, connection={},
+                                       config=preview.private_json(folder / 'config.json'),
+                                       fetch=lambda url, body, *_: results.append(body) if body['state'] == 'done' else None)
+                preview.MacJobs(folder).execute(core, 'mac', {'id': 'job', 'command': 'printf %s "$ROOM_SERVER_URL"', 'write': True})
+            self.assertEqual(bytes.fromhex(results[-1]['stdout']).decode(), 'http://127.0.0.1:41000')
+
     def test_sandbox_with_a_key_list_gets_no_mac_jobs(self):
         # Security fix: a Cloud loop's run with only its picked keys (ADR 0342) could read any file on the Mac.
         with tempfile.TemporaryDirectory() as folder:

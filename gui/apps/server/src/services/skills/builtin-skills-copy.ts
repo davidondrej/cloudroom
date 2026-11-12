@@ -44,10 +44,10 @@ export function resolveBuiltinSkillsRootPath(): string {
     moduleDir: existsSync(
       path.resolve(
         builtinSkillsModuleDir,
-        "../../../../../plugins/bb-guide/skills",
+        "../../../../../plugins/cloudroom-guide/skills",
       ),
     )
-      ? path.resolve(builtinSkillsModuleDir, "../../../../../plugins/bb-guide")
+      ? path.resolve(builtinSkillsModuleDir, "../../../../../plugins/cloudroom-guide")
       : builtinSkillsModuleDir,
   });
 }

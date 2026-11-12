@@ -212,7 +212,7 @@ export function registerImportCommands(program: Command, getUrl: () => string): 
       .option("--json", "Print JSON");
     if (harness === "conductor") sub.option("--path <path>", "A Conductor Cloud export: its unzipped folder or the .zip");
     sub.action(action(async (options: JsonOutputOptions & { days: string; dryRun?: boolean; path?: string }) => {
-        if (harness === "conductor") {
+        if (harness === "conductor" || !options.dryRun) {
           (await import("../plugin-cli-proxy.js")).allowLongRequests();
         }
         const sdk = createCliBbSdk(getUrl()).cloudroom;
@@ -239,10 +239,18 @@ export function registerImportCommands(program: Command, getUrl: () => string): 
           if (!sessions.length) console.log(`No new ${app} chats from the last ${options.days} days.`);
           return;
         }
-        const result = await sdk.importSessions(await resolveLocalHostId(), sessions.map(({ harness, id }) => ({ harness, id })));
-        if (outputJson(options, result)) return;
-        for (const thread of result.imported) console.log(`Imported  ${thread.title} → ${thread.threadId}`);
-        for (const thread of result.skipped) console.log(`Skipped   ${thread.title}: ${thread.reason}`);
+        // Batches of 20 like the app, so each request stays short and progress prints as it goes.
+        const hostId = await resolveLocalHostId();
+        const result: Awaited<ReturnType<typeof sdk.importSessions>> = { imported: [], skipped: [] };
+        for (let index = 0; index < sessions.length; index += 20) {
+          const batch = await sdk.importSessions(hostId, sessions.slice(index, index + 20).map(({ harness, id }) => ({ harness, id })));
+          result.imported.push(...batch.imported);
+          result.skipped.push(...batch.skipped);
+          if (options.json) continue;
+          for (const thread of batch.imported) console.log(`Imported  ${thread.title} → ${thread.threadId}`);
+          for (const thread of batch.skipped) console.log(`Skipped   ${thread.title}: ${thread.reason}`);
+        }
+        outputJson(options, result);
       }));
   }
   group.command("share <link>").description("Copy a thread someone shared with you (a cloudroom.dev/s/... link) into a new Local thread. Its agent starts by reading it and summing up.")

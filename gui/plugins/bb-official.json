@@ -98,6 +98,10 @@
     "category": "utilities",
     "screenshots": []
   },
+  "wallpaper": {
+    "category": "themes-and-appearance",
+    "screenshots": []
+  },
   "secrets": {
     "category": "security",
     "screenshots": []
@@ -146,7 +150,7 @@
     "category": "environments",
     "screenshots": []
   },
-  "bb-guide": {
+  "cloudroom-guide": {
     "category": "memory-and-context",
     "screenshots": []
   }

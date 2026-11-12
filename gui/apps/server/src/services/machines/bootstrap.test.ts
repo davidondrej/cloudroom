@@ -138,9 +138,16 @@ describe("machine bootstrap", () => {
     expect(error.message).not.toContain("line 5\n");
   });
 
-  it("redacts transport failures and clears pending enrollment", async () => {
-    const h = harness();
-    h.exec.mockRejectedValue(new Error(bootstrap.credential));
+  it("keeps a redacted transport failure reason and clears pending enrollment", async () => {
+    const h = harness({
+      ...bootstrap,
+      headers: { relay: "private-relay-key" },
+    });
+    h.exec.mockRejectedValue(
+      new Error(
+        `spawn ssh ENOENT ${bootstrap.credential} private-relay-key\nmore`,
+      ),
+    );
     await expect(
       h.api.bootstrap({
         key: "key",
@@ -148,7 +155,9 @@ describe("machine bootstrap", () => {
         report: h.report,
         signal: new AbortController().signal,
       }),
-    ).rejects.toThrow(/^Machine bootstrap command failed$/);
+    ).rejects.toThrow(
+      /^Bootstrapping machine: Machine bootstrap command failed: spawn ssh ENOENT \[redacted\] \[redacted\]$/,
+    );
     expect(h.enrollments.waitForConnection).not.toHaveBeenCalled();
     expect(h.enrollments.clearPending).toHaveBeenCalledWith("key");
   });

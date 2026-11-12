@@ -25,6 +25,7 @@ export function ResourceToolbar({
   searchPlaceholder,
   searchLabel,
   onSearchChange,
+  leading,
   controls,
   action,
 }: {
@@ -32,11 +33,15 @@ export function ResourceToolbar({
   searchPlaceholder: string;
   searchLabel?: string;
   onSearchChange: (value: string) => void;
+  leading?: ReactNode;
   controls?: ReactNode;
   action?: ReactNode;
 }) {
   return (
     <div className="flex flex-wrap items-center gap-2">
+      {leading ? (
+        <div className="flex shrink-0 items-center">{leading}</div>
+      ) : null}
       <div className="relative w-full min-w-0 sm:w-auto sm:flex-1">
         <Icon
           name="Search"

@@ -370,12 +370,17 @@ export const systemUsageAnalyticsResponseSchema = z.object({
     cloud: z.number(),
     list: z.array(z.object({ name: z.string(), total: z.number(), daily: dailySchema })),
   }).optional(),
-  /** Tokens written per day with each day's top threads, and totals read. */
+  /**
+   * Tokens by kind. The three daily lists start one range early (`days` × 2 entries), so this range can be
+   * compared with the one before. `models` and `top` cover this range only: models that used the most first with
+   * the rest as "Other", and each day's heaviest threads.
+   */
   tokens: z.object({
     written: dailySchema,
-    read: z.number(),
-    cached: z.number(),
-    top: z.array(z.array(z.object({ name: z.string(), written: z.number() }))),
+    read: dailySchema,
+    cached: dailySchema,
+    models: z.array(z.object({ name: z.string(), written: dailySchema, read: dailySchema, cached: dailySchema })),
+    top: z.array(z.array(z.object({ name: z.string(), written: z.number(), read: z.number(), cached: z.number() }))),
   }).optional(),
   /** Your prompts per day, and per hour of the week (Monday 12 AM first, 168 entries). */
   prompts: z.object({ daily: dailySchema, hours: dailySchema }).optional(),

@@ -16,9 +16,9 @@ export function Stat({ label, value, sub }: { label: string; value: string; sub?
   );
 }
 
-export function RangeToggle<T extends string>({ value, options, onChange }: { value: T; options: readonly { value: T; label: string }[]; onChange: (next: T) => void }) {
+export function RangeToggle<T extends string>({ value, options, onChange, label = "Time range" }: { value: T; options: readonly { value: T; label: ReactNode }[]; onChange: (next: T) => void; label?: string }) {
   return (
-    <ToggleGroup type="single" aria-label="Time range" value={value} onValueChange={(next) => { if (next !== "") onChange(next as T); }} className="h-8 gap-0.5 rounded-md border border-input bg-background p-0.5">
+    <ToggleGroup type="single" aria-label={label} value={value} onValueChange={(next) => { if (next !== "") onChange(next as T); }} className="h-8 gap-0.5 rounded-md border border-input bg-background p-0.5">
       {options.map((option) => (
         <ToggleGroupItem key={option.value} value={option.value} className="h-6 rounded-sm px-2.5 text-xs font-medium text-muted-foreground shadow-none hover:bg-state-hover hover:text-foreground data-[state=on]:bg-state-active data-[state=on]:text-foreground data-[state=on]:hover:bg-state-active">
           {option.label}

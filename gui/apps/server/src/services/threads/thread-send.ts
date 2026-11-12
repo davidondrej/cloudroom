@@ -75,6 +75,7 @@ import {
   type GroupedPrompt,
   type PromptWithGroups,
 } from "./deferred-first-turn-context.js";
+import { firstAgentTag } from "../system/first-agent.js";
 import { noteMessageSent } from "../system/first-response-telemetry.js";
 import type { TelemetryEvent } from "../system/telemetry.js";
 
@@ -405,6 +406,7 @@ export function captureUserMessageSentTelemetry(
       is_child_thread: args.isChildThread,
       message_source: args.messageSource,
       provider: args.providerId,
+      ...firstAgentTag(deps.db, args.threadId),
     },
   });
 }

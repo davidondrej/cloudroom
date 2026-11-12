@@ -40,3 +40,38 @@ export function useSetRootComposeProjectId() {
 export function useRootComposeReuseEnvironment() {
   return useAtom(rootComposeReuseEnvironmentAtom);
 }
+
+const warnedPluginComposeOptions = new Set<string>();
+
+/** Route state RootComposeView reads for a plugin's section and environment; warns once for options it can't apply yet. */
+export function pluginComposeRouteState(
+  pluginId: string | null,
+  method: string,
+  options: {
+    sectionId?: string | null;
+    pinned?: boolean;
+    environmentId?: string;
+    hostId?: string;
+  },
+): { sectionId?: string | null; reuseEnvironmentId?: string } {
+  const ignored = [
+    ...(options.pinned ? ["pinned"] : []),
+    ...(options.hostId && !options.environmentId ? ["hostId"] : []),
+  ];
+  for (const option of ignored) {
+    const key = `${pluginId}:${method}:${option}`;
+    if (warnedPluginComposeOptions.has(key)) continue;
+    warnedPluginComposeOptions.add(key);
+    console.warn(
+      `plugin ${pluginId}: ${method} option "${option}" ignored — not supported in Cloudroom yet`,
+    );
+  }
+  return {
+    ...(options.sectionId !== undefined
+      ? { sectionId: options.sectionId }
+      : {}),
+    ...(options.environmentId
+      ? { reuseEnvironmentId: options.environmentId }
+      : {}),
+  };
+}

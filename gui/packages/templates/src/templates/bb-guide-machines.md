@@ -21,6 +21,12 @@ manage the API keys, repos, and setup script every new cloud sandbox gets; value
 come from stdin. `room-cli cloud auto-delete [days|never]` shows or sets how long
 unused cloud threads are kept.
 Existing cloud threads keep their account, core URL, and project bindings.
+Every computer signed in to the same Cloudroom account shows its Cloud threads: they
+follow the website's list, open in a project with the same ID, GitHub repo, or name,
+and stream only while open, while a turn sent from that computer runs, or on the
+computer that last prompted them, which also runs their agent's moves, forks and
+child requests. Renames, archives and deletes reach every computer. A Local thread
+stays on its computer.
 A rejected cloud start keeps its prompt but stops retrying automatically. Use
 `room-cli cloud retry-start THREAD` or `sdk.cloudroom.retryStart(threadId)` to retry
 with the same request ID. The app offers **Retry start** on the failed thread.
@@ -269,6 +275,10 @@ inputs: {}`. Enrolled boxes appear as machine sections in the composer picker;
 DigitalOcean contributes no new-machine/project-checkout shortcut row.
 
 Existing machines
+
+`room-cli machine join-code` codes work only with a direct server URL. A Cloudroom
+Connect address refuses them, and the installer stops before installing anything.
+Use `room-cli machine create --provider manual` there.
 
 `room-cli machine create --provider manual` waits for a private enrollment command,
 prints it once, and follows the host until the daemon connects. Run that command on the target

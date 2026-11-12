@@ -46,7 +46,7 @@ Node runtime:
 pnpm exec turbo run start --filter=@cloudroom/desktop
 ```
 
-Electron is pinned to `44.10.0`. macOS builds require macOS 13 (Ventura) or
+Electron is pinned to `44.11.1`. macOS builds require macOS 13 (Ventura) or
 newer. The bundled `bb-app` runtime uses `better-sqlite3@13.0.3`, whose N-API
 binaries work with Electron without an ABI-specific rebuild. The packaging
 hook opens an in-memory database with Electron before accepting the packaged
