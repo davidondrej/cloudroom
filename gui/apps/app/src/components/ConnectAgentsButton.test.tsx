@@ -37,11 +37,11 @@ const claude = (state: string) => ({ state, message: null, login_id: null, verif
 const cursorMissing = { providerId: "acp-cursor", displayName: "Cursor", status: "unauthenticated", loginCommand: "cursor-agent login" };
 afterEach(() => { cleanup(); localStorage.clear(); vi.resetAllMocks(); localStates = []; });
 
-function mount(props: { target: "local" | "cloud"; selected: string; environmentId?: string }) {
+function mount(props: { target: "local" | "cloud"; selected: string; environmentId?: string; providerIds?: string[] }) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const ui = () => (
     <QueryClientProvider client={client}>
-      <ConnectAgentsButton target={props.target} environmentId={props.environmentId} primaryHostId="host_primary" providerIds={["claude-code", "codex", "acp-cursor", "pi"]} selectedProviderId={props.selected} />
+      <ConnectAgentsButton target={props.target} environmentId={props.environmentId} primaryHostId="host_primary" providerIds={props.providerIds ?? ["claude-code", "codex", "acp-cursor", "pi"]} selectedProviderId={props.selected} />
     </QueryClientProvider>
   );
   const view = render(ui());
@@ -149,4 +149,37 @@ it("Claude on another machine than this browser's signs in with a one-time code 
   expect(openUrlInExternalBrowser).toHaveBeenCalledExactlyOnceWith(
     waiting.manual_url,
   );
+});
+
+it("Local: Antigravity signs in with Google in its own panel and takes the pasted code", async () => {
+  const link = "https://accounts.google.com/o/oauth2/auth?redirect_uri=https%3A%2F%2Fantigravity.google%2Foauth-callback&state=s";
+  let google = { state: "missing", message: null as string | null, login_id: null as string | null, verification_url: null as string | null };
+  const actions: { action: string; code?: string }[] = [];
+  vi.mocked(sdk.plugins.callRpc).mockImplementation((async ({ pluginId, input }: { pluginId: string; input: { action: string; requestId?: string; code?: string } }) => {
+    if (pluginId !== "provider-antigravity") return claude("connected");
+    if (input.action !== "status") actions.push({ action: input.action, ...(input.code ? { code: input.code } : {}) });
+    if (input.action === "login") google = { state: "waiting", message: null, login_id: input.requestId ?? null, verification_url: link };
+    if (input.action === "complete") google = { state: "connected", message: null, login_id: null, verification_url: null };
+    return google;
+  }) as never);
+  mount({ target: "local", selected: "antigravity", providerIds: ["claude-code", "codex", "antigravity", "pi"] });
+  fireEvent.click(await button());
+  fireEvent.click(screen.getByRole("button", { name: /Antigravity/ }));
+  fireEvent.click(await screen.findByRole("button", { name: "Sign in with Google" }));
+  // Cloudroom opens Google's page; the CLI only printed the link.
+  await waitFor(() => expect(openUrlInExternalBrowser).toHaveBeenCalledWith(link));
+  fireEvent.change(await screen.findByLabelText("Google sign-in code"), { target: { value: " 4/one-time-code " } });
+  fireEvent.click(screen.getByRole("button", { name: "Connect" }));
+  await waitFor(() => expect(actions).toEqual([{ action: "login" }, { action: "complete", code: "4/one-time-code" }]));
+  // Signed in: the button goes away and Antigravity's models reload.
+  await waitFor(() => expect(screen.queryByRole("button", { name: /Connect agents/ })).toBeNull());
+  expect(sdk.providers.restartModelDiscovery).toHaveBeenCalled();
+});
+
+it("leaves Antigravity out while its CLI is not installed", async () => {
+  vi.mocked(sdk.plugins.callRpc).mockImplementation((async ({ pluginId }: { pluginId: string }) =>
+    pluginId === "provider-antigravity" ? { state: "unavailable", message: "Antigravity is not installed on this machine.", login_id: null, verification_url: null } : claude("missing")) as never);
+  mount({ target: "local", selected: "claude-code", providerIds: ["claude-code", "antigravity"] });
+  const logos = [...(await button()).querySelectorAll("[data-logo]")].map((logo) => logo.getAttribute("data-logo"));
+  expect(logos).toEqual(["claude-code"]);
 });

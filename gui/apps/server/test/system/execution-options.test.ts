@@ -47,7 +47,6 @@ const INSTALLED_ONLY_PROVIDER_IDS = [
   "acp-kilo",
   "acp-cline",
   "acp-kimi",
-  "acp-antigravity",
   "acp-agent-zero",
 ] as const;
 
@@ -617,6 +616,7 @@ describe("resolveSystemExecutionOptions", () => {
       expect(response.providers.map((provider) => provider.id)).toEqual([
         "codex",
         "claude-code",
+        "antigravity",
         "pi",
         "acp-cursor",
       ]);
@@ -1320,7 +1320,7 @@ describe("resolveSystemExecutionOptions", () => {
         registry.markRegistrationsSettled();
 
         expect((await providersPromise).map((provider) => provider.id)).toEqual(
-          ["codex", "claude-code", "pi", "acp-cursor"],
+          ["codex", "claude-code", "antigravity", "pi", "acp-cursor"],
         );
       },
     );
@@ -1349,6 +1349,7 @@ describe("resolveSystemExecutionOptions", () => {
         await registerFirstPartyProviders(registry, {
           excludePluginIds: [
             "provider-acp",
+            "provider-antigravity",
             "provider-claude-code",
             "provider-codex",
           ],

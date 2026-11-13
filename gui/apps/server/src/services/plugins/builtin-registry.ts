@@ -129,6 +129,11 @@ const builtinDefinitions: Omit<BundledPluginDefinition, "autoInstall">[] = [
     defaultEnabled: true,
   },
   {
+    name: "provider-antigravity",
+    pluginId: "provider-antigravity",
+    defaultEnabled: true,
+  },
+  {
     name: "provider-pi",
     pluginId: "provider-pi",
     defaultEnabled: true,

@@ -25,5 +25,5 @@
       ]
     }
   },
-  "include": ["server.ts", "server.test.ts", "src/**/*.ts", "app.tsx"]
+  "include": ["server.ts", "server.test.ts", "src/**/*.ts", "app.tsx", "app.test.tsx"]
 }
