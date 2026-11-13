@@ -3,6 +3,7 @@ import type { DeltaItemShape } from "@cloudroom/provider-bridge-protocol";
 import { basename } from "node:path";
 import { z } from "zod";
 import type { AcpContextEstimateTuning } from "./context-estimate.js";
+import { ANTIGRAVITY_ACP_MAINTENANCE } from "./bridge/antigravity-maintenance.js";
 import {
   CURSOR_ACP_MAINTENANCE,
   type AcpMaintenanceDialect,
@@ -80,6 +81,8 @@ export interface AcpDialect {
   resumeSession?: boolean;
   systemPromptLimit?: number;
   isBusySession?(message: string): boolean;
+  // A signed-out agent fails ACP-native model discovery as auth required, so the picker offers its login instead of a placeholder model.
+  modelDiscoveryRequiresLogin?: boolean;
   maintenance?: AcpMaintenanceDialect;
   contextEstimate?: AcpContextEstimateTuning;
 }
@@ -470,6 +473,55 @@ export const FX_ACP_DIALECT: AcpDialect = {
   isBusySession: (message) => message.includes("Session is busy"),
 };
 
+const antigravityCommandRawOutputSchema = z
+  .object({
+    output: z.string(),
+    exit_code: z.number().int().nullish(),
+  })
+  .passthrough();
+
+// Antigravity reports a finished command as its own header ("Created At: …",
+// "Completed At: …", "Command exited with code N.") followed by this marker and
+// the command's real output, with terminal line endings.
+const ANTIGRAVITY_COMMAND_HEADER = "Created At: ";
+const ANTIGRAVITY_COMMAND_OUTPUT_MARKER = "\nCommand output:\n";
+
+function antigravityCommandResult(
+  event: AcpToolCallUpdateEvent,
+): AcpCommandResult | undefined {
+  if (event.kind !== "execute") {
+    return undefined;
+  }
+  const parsed = antigravityCommandRawOutputSchema.safeParse(event.rawOutput);
+  if (!parsed.success) {
+    return undefined;
+  }
+  const report = parsed.data.output;
+  const marker = report.indexOf(ANTIGRAVITY_COMMAND_OUTPUT_MARKER);
+  if (!report.startsWith(ANTIGRAVITY_COMMAND_HEADER) || marker < 0) {
+    return undefined;
+  }
+  const output = report
+    .slice(marker + ANTIGRAVITY_COMMAND_OUTPUT_MARKER.length)
+    .replace(/\r\n/gu, "\n")
+    .trimEnd();
+  const exitCode = parsed.data.exit_code ?? undefined;
+  return {
+    ...(exitCode === undefined ? {} : { exitCode }),
+    ...(output.length === 0 ? {} : { output }),
+  };
+}
+
+// Google's Antigravity CLI (`agy acp`). Its plan usage and Google login are read through the CLI itself.
+export const ANTIGRAVITY_ACP_DIALECT: AcpDialect = {
+  id: "antigravity",
+  commandResult: antigravityCommandResult,
+  // `session/resume` restores a session without replaying a history Cloudroom already has.
+  resumeSession: true,
+  modelDiscoveryRequiresLogin: true,
+  maintenance: ANTIGRAVITY_ACP_MAINTENANCE,
+};
+
 const DIALECTS_BY_ID: ReadonlyMap<string, AcpDialect> = new Map([
   [CURSOR_ACP_DIALECT.id, CURSOR_ACP_DIALECT],
   [GROK_ACP_DIALECT.id, GROK_ACP_DIALECT],
@@ -477,6 +529,7 @@ const DIALECTS_BY_ID: ReadonlyMap<string, AcpDialect> = new Map([
   [OMP_ACP_DIALECT.id, OMP_ACP_DIALECT],
   [OPENCODE_ACP_DIALECT.id, OPENCODE_ACP_DIALECT],
   [OPENCLAW_ACP_DIALECT.id, OPENCLAW_ACP_DIALECT],
+  [ANTIGRAVITY_ACP_DIALECT.id, ANTIGRAVITY_ACP_DIALECT],
 ]);
 
 const DIALECT_IDS_BY_COMMAND: Readonly<Record<string, string>> = {
@@ -486,6 +539,7 @@ const DIALECT_IDS_BY_COMMAND: Readonly<Record<string, string>> = {
   omp: OMP_ACP_DIALECT.id,
   opencode: OPENCODE_ACP_DIALECT.id,
   openclaw: OPENCLAW_ACP_DIALECT.id,
+  agy: ANTIGRAVITY_ACP_DIALECT.id,
 };
 
 export function resolveAcpDialect(launch: {

@@ -111,6 +111,7 @@ describe("resolveCreateThreadExecutionDefaults", () => {
         "acp-kilo",
         "acp-cline",
         "acp-kimi",
+        "acp-antigravity",
       ],
     });
   });
@@ -141,6 +142,7 @@ describe("resolveCreateThreadExecutionDefaults", () => {
       "acp-kilo",
       "acp-cline",
       "acp-kimi",
+      "acp-antigravity",
     ]);
     expect(
       resolveCreateThreadExecutionDefaults(userRegistry, {
@@ -191,6 +193,7 @@ describe("resolveCreateThreadExecutionDefaults", () => {
       "acp-kilo",
       "acp-cline",
       "acp-kimi",
+      "acp-antigravity",
     ]);
   });
 
@@ -271,6 +274,7 @@ describe("resolveCreateThreadExecutionDefaults", () => {
         "acp-kilo",
         "acp-cline",
         "acp-kimi",
+        "acp-antigravity",
       ],
     });
   });

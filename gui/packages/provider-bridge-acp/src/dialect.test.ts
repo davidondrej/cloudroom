@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  ANTIGRAVITY_ACP_DIALECT,
   CURSOR_ACP_DIALECT,
   GENERIC_ACP_DIALECT,
   GROK_ACP_DIALECT,
@@ -32,6 +33,9 @@ describe("resolveAcpDialect", () => {
     );
     expect(resolveAcpDialect({ command: "/opt/homebrew/bin/omp" })).toBe(
       OMP_ACP_DIALECT,
+    );
+    expect(resolveAcpDialect({ command: "/Users/me/.local/bin/agy" })).toBe(
+      ANTIGRAVITY_ACP_DIALECT,
     );
     expect(resolveAcpDialect({ command: "/usr/local/bin/opencode" })).toBe(
       OPENCODE_ACP_DIALECT,
@@ -169,6 +173,60 @@ describe("omp command results", () => {
       expect(result(fields)).toBeUndefined();
     },
   );
+});
+
+describe("Antigravity command results", () => {
+  // The completed `run_command` update of Antigravity CLI 1.5.8.
+  const finished = (output: string, exitCode: number): AcpToolCallUpdateEvent =>
+    ({
+      sessionUpdate: "tool_call_update",
+      toolCallId: "call_5944071674309224544",
+      status: "completed",
+      kind: "execute",
+      title: 'printf "a\\nb\\n"; ls /nonexistent-dir-xyz',
+      rawInput: { CommandLine: 'printf "a\\nb\\n"; ls /nonexistent-dir-xyz' },
+      rawOutput: { output, exit_code: exitCode },
+      content: [{ type: "content", content: { type: "text", text: output } }],
+    }) as AcpToolCallUpdateEvent;
+  const header =
+    "Created At: 2026-11-13T11:44:51-08:00\nCompleted At: 2026-11-13T11:44:51-08:00\n";
+
+  it("drops the CLI's report header and keeps the command's own output and exit code", () => {
+    expect(
+      ANTIGRAVITY_ACP_DIALECT.commandResult?.(
+        finished(
+          `${header}Command exited with code 1.\n\nCommand output:\na\r\nb\r\nls: /nonexistent-dir-xyz: No such file or directory\r\n`,
+          1,
+        ),
+      ),
+    ).toEqual({
+      exitCode: 1,
+      output: "a\nb\nls: /nonexistent-dir-xyz: No such file or directory",
+    });
+  });
+
+  it("reports a silent command without inventing output", () => {
+    expect(
+      ANTIGRAVITY_ACP_DIALECT.commandResult?.(
+        finished(
+          `${header}Command exited with code 0.\n\nCommand output:\n`,
+          0,
+        ),
+      ),
+    ).toEqual({ exitCode: 0 });
+  });
+
+  it("leaves a report it does not recognize to the shared reader", () => {
+    expect(
+      ANTIGRAVITY_ACP_DIALECT.commandResult?.(finished("plain output\n", 0)),
+    ).toBeUndefined();
+    expect(
+      ANTIGRAVITY_ACP_DIALECT.commandResult?.({
+        ...finished(`${header}Command output:\nx`, 0),
+        kind: "read",
+      }),
+    ).toBeUndefined();
+  });
 });
 
 describe("OpenCode command results", () => {

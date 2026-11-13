@@ -383,6 +383,35 @@ export const KNOWN_ACP_AGENTS: readonly AcpAgentDefinition[] = [
       },
     },
   },
+  {
+    id: "acp-antigravity",
+    displayName: "Antigravity",
+    icon: declaredIcon("antigravity"),
+    // Google sign-in for a Google AI plan; the picker offers it when the CLI is signed out.
+    signInCommand: "agy acp --login",
+    installUrl: "https://antigravity.google/docs/install",
+    visibility: "installed",
+    dialect: "antigravity",
+    providerUsage: true,
+    providerInstallation: true,
+    fork: "none",
+    reasoningLevels: ["low", "medium", "high", "xhigh"],
+    launch: {
+      displayName: "Antigravity",
+      command: "agy",
+      args: ["acp"],
+      env: {},
+      // Antigravity reads ~/.gemini/config/skills (and two CLI-only folders); projects add .agents/skills up to the repository root.
+      nativeSkillRoots: {
+        user: plainRoots([
+          ".gemini/config/skills",
+          ".gemini/antigravity-cli/skills",
+          ".gemini/skills",
+        ]),
+        project: ancestorRoots([".agents/skills", ".agent/skills"]),
+      },
+    },
+  },
 ];
 
 export const RESERVED_ACP_PROVIDER_IDS: ReadonlySet<string> = new Set(

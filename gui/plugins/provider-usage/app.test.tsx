@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { UsageProvider } from "./usage-schema.js";
 import type { PluginSidebarThread } from "@get-bb/plugin-sdk/app";
@@ -167,6 +167,49 @@ describe("provider usage footer disclosure", () => {
                         ],
                       },
                     },
+                    {
+                      id: "acp-antigravity",
+                      providerId: "acp-antigravity",
+                      accountLabel: null,
+                      displayName: "Antigravity",
+                      logoUrl:
+                        "/api/v1/system/providers/acp-antigravity/logo?h=agy",
+                      icon: null,
+                      strings: { iconTint: null },
+                      signInHint: "Run `agy acp --login` on the machine to sign in.",
+                      expiredHint: "Run `agy acp --login`, then reload.",
+                      usage: {
+                        status: "ok",
+                        accountEmail: null,
+                        planLabel: null,
+                        windows: [
+                          {
+                            label: "Five-hour limit · Gemini",
+                            usedPercent: 11,
+                            resetsAt: null,
+                            cost: null,
+                          },
+                          {
+                            label: "Weekly · Gemini",
+                            usedPercent: 3,
+                            resetsAt: null,
+                            cost: null,
+                          },
+                          {
+                            label: "Five-hour limit · Claude/gpt",
+                            usedPercent: 21,
+                            resetsAt: null,
+                            cost: null,
+                          },
+                          {
+                            label: "Weekly · Claude/gpt",
+                            usedPercent: 9,
+                            resetsAt: null,
+                            cost: null,
+                          },
+                        ],
+                      },
+                    },
                   ],
                 },
                 {
@@ -301,6 +344,21 @@ describe("provider usage footer disclosure", () => {
       "calc(8ch + 1px)",
     );
     expect(codexSection.style.getPropertyValue("--usage-label")).toBe("");
+    // Antigravity has a five-hour and a weekly limit per model group; each row names its window, then its group.
+    const antigravitySection = slot.getByRole("region", { name: "Antigravity" });
+    expect(
+      within(antigravitySection)
+        .getAllByRole("button")
+        .map((row) => row.textContent),
+    ).toEqual([
+      "├5h Gemini11%—",
+      "├7d Gemini3%—",
+      "├5h Claude/gpt21%—",
+      "└7d Claude/gpt9%—",
+    ]);
+    expect(antigravitySection.style.getPropertyValue("--usage-label")).toBe(
+      "calc(13ch + 1px)",
+    );
 
     fireEvent.pointerDown(
       slot.getByRole("button", { name: "Usage machine: M4" }),

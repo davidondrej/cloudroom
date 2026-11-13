@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
-import { findCliExecutable } from "@cloudroom/process-utils";
+import { findCliExecutable, killPortableProcess, spawnPortableProcess } from "@cloudroom/process-utils";
 import { macCursorLogin, macKimiLogin, macOpenclawLogin, macOpencodeLogin, macVariables } from "./sandboxes.js";
 
 const read = (path: string) => readFile(path, "utf8").catch(() => "");
@@ -13,6 +13,32 @@ const hasSecret = (value: unknown): boolean =>
       typeof entry === "string" ? /(key|token|access|refresh|secret)$/i.test(name) && entry.trim() !== "" : hasSecret(entry));
 const setsSecret = (text: string) => /^[ \t]*(export[ \t]+)?[\w.-]*(key|token|secret)[ \t]*=[ \t]*["']?[^\s"'#]/im.test(text);
 
+/** Antigravity keeps its Google login in the system keyring, so only the CLI knows whether it is signed in. A signed-out
+ *  `agy acp` rejects `session/list` at once; a signed-in one lists sessions. Nothing is created and no browser opens. */
+function antigravitySignedIn(): Promise<boolean> {
+  const agy = findCliExecutable("agy");
+  if (!agy) return Promise.resolve(false);
+  return new Promise(resolve => {
+    const child = spawnPortableProcess({ command: agy, args: ["acp"], cwd: tmpdir(), stdio: ["pipe", "pipe", "ignore"], timeout: 15_000 });
+    const end = (signedIn: boolean) => { resolve(signedIn); killPortableProcess(child, "SIGTERM"); };
+    const send = (message: object) => child.stdin?.write(`${JSON.stringify({ jsonrpc: "2.0", ...message })}\n`);
+    child.stdin?.on("error", () => end(false));
+    child.on("error", () => end(false));
+    child.on("exit", () => end(false));
+    let buffer = "";
+    child.stdout?.on("data", (chunk: Buffer) => {
+      buffer += chunk.toString();
+      for (let at; (at = buffer.indexOf("\n")) >= 0; buffer = buffer.slice(at + 1)) {
+        let message: { id?: unknown; result?: unknown };
+        try { message = JSON.parse(buffer.slice(0, at)); } catch { continue; }
+        if (message.id === 1) send({ id: 2, method: "session/list", params: {} });
+        if (message.id === 2) end(message.result !== undefined);
+      }
+    });
+    send({ id: 1, method: "initialize", params: { protocolVersion: 1, clientCapabilities: {} } });
+  });
+}
+
 const AGENTS: [id: string, cli: string, signedIn: () => Promise<boolean>][] = [
   ["pi", "pi", async () => hasSecret(parse(await read(join(dir("PI_CODING_AGENT_DIR", ".pi/agent"), "auth.json"))))],
   ["acp-opencode", "opencode", async () => hasSecret(parse(await macOpencodeLogin()))],
@@ -22,6 +48,7 @@ const AGENTS: [id: string, cli: string, signedIn: () => Promise<boolean>][] = [
   ["acp-grok", "grok", async () => Boolean(process.env.XAI_API_KEY) || hasSecret(parse(await read(join(dir("GROK_HOME", ".grok"), "auth.json"))))],
   ["acp-devin", "devin", async () => setsSecret(await read(join(dir("XDG_DATA_HOME", ".local/share"), "devin", "credentials.toml")))],
   ["acp-kimi", "kimi", async () => (await macKimiLogin()) !== null],
+  ["acp-antigravity", "agy", antigravitySignedIn],
   // Droid keeps its sign-in encrypted in ~/.factory (unlocked through the Keychain on macOS); an API key may live only in the login shell.
   ["acp-droid", "droid", async () => Boolean(process.env.FACTORY_API_KEY || (await macVariables()).FACTORY_API_KEY)
     || (await Promise.all(["auth.v2.loginkeychain", "auth.v2.file"].map((file) => read(join(homedir(), ".factory", file))))).some((text) => text.trim() !== "")],

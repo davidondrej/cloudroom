@@ -201,6 +201,19 @@ const FIRST_PARTY_PROVIDER_DECLARATIONS = [
     visibility: "installed",
     hasLogo: true,
   },
+  {
+    builtinName: "provider-acp",
+    pluginId: "provider-acp",
+    providerId: "acp-antigravity",
+    displayName: "Antigravity",
+    supportsThreadArchive: false,
+    supportsThreadRename: false,
+    fork: "none",
+    supportsManualCompaction: false,
+    supportsUsage: true,
+    visibility: "installed",
+    hasLogo: true,
+  },
 ] as const;
 
 const PROVIDER_IDS = FIRST_PARTY_PROVIDER_DECLARATIONS.map(
@@ -472,6 +485,7 @@ describe("first-party provider plugins", () => {
           "acp-kilo",
           "acp-cline",
           "acp-kimi",
+          "acp-antigravity",
         ]);
         const infos = await listSystemProviderInfos(harness.deps, {});
         expect(infos.find((info) => info.id === "pi")).toBeUndefined();

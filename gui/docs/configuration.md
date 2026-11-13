@@ -416,7 +416,8 @@ CLI is on PATH and can be launched as `grok agent stdio`, and
 Devin's `devin` CLI is on PATH, `acp-droid` when Factory's `droid` CLI is on PATH
 (launched as `droid exec --output-format acp`), `acp-kilo` when Kilo Code's `kilo` CLI is on PATH
 (launched as `kilo acp`), `acp-cline` when the `cline` CLI is on PATH (launched as
-`cline --acp`), and `acp-kimi` when Kimi Code's `kimi` CLI is on PATH (launched as `kimi acp`). `acp-cursor` is always listed.
+`cline --acp`), `acp-kimi` when Kimi Code's `kimi` CLI is on PATH (launched as `kimi acp`), and `acp-antigravity` when
+Google Antigravity's `agy` CLI is on PATH (launched as `agy acp`). `acp-cursor` is always listed.
 
 Add your own agent through the ACP providers plugin's `customAgents` setting,
 which holds a JSON array. In the app it is the multi-line editor on the
@@ -432,7 +433,7 @@ Each entry needs `id` (lowercase letters, digits and dashes), `displayName`,
 and `command`. bb derives the provider id `acp-<id>`; it never changes once a
 thread has used it. An id bb always lists (`cursor`) is reserved; an id bb
 lists only where the agent is installed (`opencode`, `omp`, `grok`,
-`hermes-agent`, `devin`, `droid`, `kilo`, `cline`, `kimi`) is not, so an entry with that id REPLACES the shipped agent.
+`hermes-agent`, `devin`, `droid`, `kilo`, `cline`, `kimi`, `antigravity`) is not, so an entry with that id REPLACES the shipped agent.
 A replacing entry keeps the shipped agent's `nativeSkillRoots` unless it sets
 its own, and bb still lists the roots that agent's host config names (its
 config directory, compat trees, configured paths, plugins) either way.

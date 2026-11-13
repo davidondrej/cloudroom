@@ -295,6 +295,32 @@ describe("acpProviderDeclaration", () => {
     expect(cursor.maintenance?.installation).toBe(true);
   });
 
+  it("registers Antigravity with Google sign-in, plan usage and its installer", () => {
+    const antigravity = acpProviderDeclaration(
+      KNOWN_ACP_AGENTS.find((agent) => agent.id === "acp-antigravity")!,
+    );
+    expect(antigravity.displayName).toBe("Antigravity");
+    expect(antigravity.experimental_visibility).toBe("installed");
+    expect(antigravity.experimental_bridgeOptions).toMatchObject({
+      acpDialect: "antigravity",
+      acpLaunchSpec: { command: "agy", args: ["acp"] },
+    });
+    // The picker's Sign in button runs this, then reloads the models.
+    expect(antigravity.strings?.signInCommand).toBe("agy acp --login");
+    expect(antigravity.experimental_modelDiscoveryRestart).toBe(true);
+    expect(antigravity.maintenance).toEqual({
+      health: true,
+      usage: true,
+      installation: true,
+    });
+    expect(antigravity.capabilities.reasoningLevels).toEqual([
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+    ]);
+  });
+
   it("gives a configured agent honest copy when it names no sign-in command", () => {
     const declaration = acpProviderDeclaration(
       customAcpAgentDefinition({

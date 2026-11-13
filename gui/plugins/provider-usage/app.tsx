@@ -220,10 +220,16 @@ function UsageBlocks({ usedPercent }: { usedPercent: number }) {
   );
 }
 
-/** A row's short label. A model's weekly row ("Weekly · Fable") reads "7d fable"; narrow cards drop its "7d". */
+const MODEL_ROW_PREFIXES: Record<string, string> = {
+  Weekly: "7d",
+  "Five-hour limit": "5h",
+  "Daily limit": "1d",
+};
+
+/** A row's short label. A model's row ("Weekly · Fable", "Five-hour limit · Gemini") reads "7d fable" or "5h gemini"; narrow cards drop the "7d". */
 function rowLabel(label: string): { prefix: string | null; label: string } {
-  const model = /^Weekly · (.+)$/u.exec(label)?.[1];
-  if (model) return { prefix: "7d", label: model };
+  const model = /^(Weekly|Five-hour limit|Daily limit) · (.+)$/u.exec(label);
+  if (model) return { prefix: MODEL_ROW_PREFIXES[model[1]!]!, label: model[2]! };
   return {
     prefix: null,
     label: label
