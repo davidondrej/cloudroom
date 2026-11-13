@@ -8,7 +8,7 @@ import {
 import ReactMarkdown, { type Components } from "react-markdown";
 import { useNavigate } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import type { BbDesktopInfo } from "@cloudroom/desktop-contract";
+import type { RoomDesktopInfo } from "@cloudroom/desktop-contract";
 import type { SystemVersionResponse } from "@cloudroom/server-contract";
 import {
   RETRY_ACTION_ICON,
@@ -32,6 +32,7 @@ import {
   ResourceRow,
 } from "@cloudroom/shared-ui/resource-list";
 import {
+  canAutoUpdateProviderCli,
   hasProviderCliAction,
   isProviderCliUpdateIssue,
   providerCliEntries,
@@ -60,7 +61,7 @@ import {
 } from "@/components/settings/changelog-preview";
 import { useAppCommandHandler } from "@/components/commands/AppCommandProvider";
 import { appToast } from "@/components/ui/app-toast";
-import { BbLogo } from "@/components/ui/bb-logo";
+import { RoomLogo } from "@/components/ui/cloudroom-logo";
 import { OverflowFade } from "@/components/ui/overflow-fade";
 import {
   SettingsBadge,
@@ -748,9 +749,9 @@ export function ChangelogPreviewCard() {
   );
 }
 
-interface BbAppUpdateRowsProps {
+interface RoomAppUpdateRowsProps {
   systemVersion: SystemVersionResponse | undefined;
-  desktopInfo: BbDesktopInfo | null;
+  desktopInfo: RoomDesktopInfo | null;
   hostUpdate?: HostDesktopUpdate | null;
   isDesktop: boolean;
   onRelaunchDesktop: (() => void) | null;
@@ -759,7 +760,7 @@ interface BbAppUpdateRowsProps {
   isRelaunching?: boolean;
 }
 
-export function BbAppUpdateRows({
+export function RoomAppUpdateRows({
   systemVersion,
   desktopInfo,
   hostUpdate = null,
@@ -768,7 +769,7 @@ export function BbAppUpdateRows({
   onRetryDesktop,
   isChecking = false,
   isRelaunching = false,
-}: BbAppUpdateRowsProps) {
+}: RoomAppUpdateRowsProps) {
   const settledStatus = isChecking ? (
     <RowStateControl live state="in-progress" />
   ) : (
@@ -778,7 +779,7 @@ export function BbAppUpdateRows({
     <UpdatesRow
       leading={
         <span data-bb-update-role="app" aria-hidden>
-          <BbLogo className="size-4" />
+          <RoomLogo className="size-4" />
         </span>
       }
     >
@@ -812,7 +813,7 @@ export function BbAppUpdateRows({
         name,
         <RowStateControl
           state="restart-required"
-          buttonLeading={<BbLogo className="size-3" />}
+          buttonLeading={<RoomLogo className="size-3" />}
           buttonLabel="Relaunch"
           actionLabel="Relaunch Cloudroom to finish updating"
           loading={isRelaunching}
@@ -863,7 +864,7 @@ export function BbAppUpdateRows({
       <RowName name="Cloudroom app" current={current} latest={hostUpdate.version} />,
       <RowStateControl
         state="restart-required"
-        buttonLeading={<BbLogo className="size-3" />}
+        buttonLeading={<RoomLogo className="size-3" />}
         buttonLabel="Relaunch"
         actionLabel="Relaunch Cloudroom to finish updating"
         loading={hostUpdate.restarting}
@@ -968,7 +969,7 @@ function visibleInstalledProviderEntries(
   );
 }
 
-export function BbDaemonUpdateRow({
+export function RoomDaemonUpdateRow({
   machine,
   now,
   retryUpdatePending,
@@ -1004,7 +1005,7 @@ export function BbDaemonUpdateRow({
       onOpen={() => onOpenMachine(host.id)}
       leading={
         <span data-bb-update-role="daemon" aria-hidden>
-          <BbLogo className="size-4" />
+          <RoomLogo className="size-4" />
         </span>
       }
       title="Cloudroom daemon"
@@ -1207,12 +1208,12 @@ export function MachineUpdatesRows({
         trailingMeta={null}
         actions={
           <span className="flex items-center gap-3">
-            {status.npmPackageName === null ? null : (
+            {canAutoUpdateProviderCli(status) ? (
               <ProviderAutoUpdateSwitch
                 providerId={providerId}
                 displayName={status.displayName}
               />
-            )}
+            ) : null}
             {running ? (
               <RowStateControl live state="in-progress" />
             ) : queued ? (
@@ -1473,7 +1474,7 @@ export function UpdatesSettingsSection({
     visibleProviderIssues.length > 0 ||
     stalledMachines.length > 0;
   const fleetIsHealthy = relevantFleetMachines.length === 0;
-  const showFallbackBbStatus =
+  const showFallbackRoomStatus =
     !hasUpdateWork && !fleetIsHealthy && isDesktop && desktopInfo === null;
 
   function retryDaemonUpdate(hostId: string): void {
@@ -1560,7 +1561,7 @@ export function UpdatesSettingsSection({
                 }
               >
                 {ownsApp ? (
-                  <BbAppUpdateRows
+                  <RoomAppUpdateRows
                     systemVersion={inventory.systemVersion}
                     desktopInfo={desktopInfo}
                     hostUpdate={hostUpdate}
@@ -1568,7 +1569,7 @@ export function UpdatesSettingsSection({
                     isChecking={isChecking}
                     isRelaunching={isRelaunching}
                     onRelaunchDesktop={
-                      desktopApi === null || showFallbackBbStatus
+                      desktopApi === null || showFallbackRoomStatus
                         ? null
                         : () => {
                             setIsRelaunching(true);
@@ -1584,7 +1585,7 @@ export function UpdatesSettingsSection({
                           }
                     }
                     onRetryDesktop={
-                      desktopApi === null || showFallbackBbStatus
+                      desktopApi === null || showFallbackRoomStatus
                         ? null
                         : () => {
                             void desktopApi.checkForUpdates().catch((error) => {
@@ -1597,7 +1598,7 @@ export function UpdatesSettingsSection({
                   />
                 ) : null}
                 {showDaemon ? (
-                  <BbDaemonUpdateRow
+                  <RoomDaemonUpdateRow
                     machine={machine}
                     now={now}
                     retryUpdatePending={

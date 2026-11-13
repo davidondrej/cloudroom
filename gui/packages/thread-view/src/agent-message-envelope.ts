@@ -1,5 +1,6 @@
+// `[bb message ...]` is what senders write today; the plain tag is read too, so they can drop "bb" later.
 const AGENT_MESSAGE_ENVELOPE_PATTERN =
-  /^\[bb message from thread:([^;\]\s]+)(?:;[^\]]*)?\]\s*/;
+  /^\[(?:bb )?message from thread:([^;\]\s]+)(?:;[^\]]*)?\]\s*/;
 
 export interface AgentMessageEnvelope {
   bodyStart: number;

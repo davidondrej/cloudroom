@@ -307,6 +307,29 @@ export function applyThreadReasoningResult({
   );
 }
 
+const repeatedSidebarFirstFetches = new WeakSet<Promise<unknown>>();
+
+/** Only a loaded sidebar list has anything to patch. Cancelling its first fetch would leave the saved copy up,
+ *  and the composer waits for the fresh list before a Cloud send (#1347). That fetch may answer from before
+ *  this change, so it runs once more after it lands. */
+function cancelSidebarNavigation(queryClient: QueryClient): Promise<void> {
+  const queryKey = sidebarNavigationQueryKey();
+  const query = queryClient.getQueryCache().find({ queryKey, exact: true });
+  const firstFetch =
+    query?.state.data === undefined && query?.state.fetchStatus !== "idle"
+      ? query?.promise
+      : undefined;
+  if (!firstFetch) return queryClient.cancelQueries({ queryKey });
+  if (!repeatedSidebarFirstFetches.has(firstFetch)) {
+    repeatedSidebarFirstFetches.add(firstFetch);
+    firstFetch.then(
+      () => queryClient.invalidateQueries({ queryKey }),
+      () => undefined,
+    );
+  }
+  return Promise.resolve();
+}
+
 interface OptimisticThreadFieldTransactionArgs extends ThreadIdCacheArgs {
   patch?: Partial<ThreadWithRuntime>;
   patchThread?: (thread: ThreadWithRuntime) => ThreadWithRuntime;
@@ -322,7 +345,7 @@ async function runOptimisticThreadFieldTransaction({
 }: OptimisticThreadFieldTransactionArgs): Promise<ThreadListMutationTransaction> {
   await queryClient.cancelQueries({ queryKey: threadQueryKey(threadId) });
   await queryClient.cancelQueries({ queryKey: threadsQueryKey() });
-  await queryClient.cancelQueries({ queryKey: sidebarNavigationQueryKey() });
+  await cancelSidebarNavigation(queryClient);
 
   const previousThread = queryClient.getQueryData<ThreadWithRuntime>(
     threadQueryKey(threadId),
@@ -622,7 +645,7 @@ export async function beginReorderPinnedThreadTransaction({
   request,
 }: ReorderPinnedThreadTransactionArgs): Promise<PinnedThreadOrderTransaction> {
   await queryClient.cancelQueries({ queryKey: threadsQueryKey() });
-  await queryClient.cancelQueries({ queryKey: sidebarNavigationQueryKey() });
+  await cancelSidebarNavigation(queryClient);
   const previousThreadLists = getCachedThreadLists(queryClient, {
     queryKey: threadsQueryKey(),
   });
@@ -711,7 +734,7 @@ export async function beginArchiveThreadAndChildrenTransaction({
   threadId,
 }: ArchiveThreadAndChildrenTransactionArgs): Promise<ArchiveThreadsTransaction> {
   await queryClient.cancelQueries({ queryKey: threadsQueryKey() });
-  await queryClient.cancelQueries({ queryKey: sidebarNavigationQueryKey() });
+  await cancelSidebarNavigation(queryClient);
   const threadIds = new Set([
     threadId,
     ...getCachedLiveThreadDescendants(queryClient, threadId).map(
@@ -763,7 +786,7 @@ export async function beginDeleteThreadTransaction({
 }: ThreadIdCacheArgs): Promise<DeleteThreadTransaction> {
   await queryClient.cancelQueries({ queryKey: threadQueryKey(threadId) });
   await queryClient.cancelQueries({ queryKey: threadsQueryKey() });
-  await queryClient.cancelQueries({ queryKey: sidebarNavigationQueryKey() });
+  await cancelSidebarNavigation(queryClient);
   await queryClient.cancelQueries({ queryKey: projectsQueryKey() });
 
   const previousThread = queryClient.getQueryData<ThreadWithRuntime>(

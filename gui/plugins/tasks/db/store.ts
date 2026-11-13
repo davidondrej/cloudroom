@@ -303,7 +303,7 @@ function validateDueDate(dueDate: string | null): string | null {
   return dueDate;
 }
 
-function validateLinkedBbProjectId(id: string | null): string | null {
+function validateLinkedRoomProjectId(id: string | null): string | null {
   if (id !== null && !id.startsWith("proj_")) {
     throw new Error("linkedBbProjectId must be a Cloudroom proj_* id");
   }
@@ -648,7 +648,7 @@ export function createTasksStore(db: PluginDatabase) {
       validatePrefix(input.prefix),
       requireNonEmpty(input.color, "Project color"),
       folderId,
-      validateLinkedBbProjectId(input.linkedBbProjectId ?? null),
+      validateLinkedRoomProjectId(input.linkedBbProjectId ?? null),
       nowIso(),
     );
     return requireProject(id);
@@ -702,7 +702,7 @@ export function createTasksStore(db: PluginDatabase) {
       folderId,
       input.linkedBbProjectId === undefined
         ? current.linkedBbProjectId
-        : validateLinkedBbProjectId(input.linkedBbProjectId),
+        : validateLinkedRoomProjectId(input.linkedBbProjectId),
       id,
     );
     return requireProject(id);

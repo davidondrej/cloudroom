@@ -14,15 +14,16 @@ import { checkPreviewsNow, macAccess, macAccessLevels, setMacAccess } from "./pr
 import { cloudSkills, copyLogins, markLogin, setCloudSkills, setCopyLogins, skillInCloud } from "./sync.js";
 import { secondsSinceFirstLaunch } from "./setup-telemetry.js";
 import { teleports } from "./teleport.js";
-import { binding, teleportBlocked, teleportProgress } from "./store.js";
+import { binding, command, teleportBlocked, teleportProgress } from "./store.js";
 import { browserRequestProblem } from "../../browser-request-guard.js";
 import { cancelClaudeToken, claudePlan, connectClaude, isClaudeApiKey, withClaudeTokenRun } from "./claude-token.js";
 import { startClaudeVersionSync } from "./harness-versions.js";
 import { macSignedInAgents } from "./mac-agents.js";
 import { disconnectAgent, restoreAgent } from "./agent-logins.js";
 import { autoDeleteDaysSchema, readAutoDelete, saveAutoDelete, startAutoDeleteSync } from "./auto-delete.js";
-import { importBbThreads } from "./bb-import.js";
-import { importNativeSessions, listNativeSessions } from "./session-import.js";
+import { importRoomThreads } from "./bb-import.js";
+import { importConductorExport, importNativeSessions, listConductorExport, listNativeSessions } from "./session-import.js";
+import { conductorAppFound } from "./session-import-more.js";
 import { exportableChats, exportChats } from "./chat-export.js";
 import { copyToMac, openOnMac, teleportingToLocal, teleportToLocal } from "./teleport-local.js";
 import { cloudEnvironmentRequestSchema, macCodexLogin, macMcpServers, macSkills, macVariables, sandboxThread, startMacCodexLogin, type CloudEnvironmentRequest } from "./sandboxes.js";
@@ -30,35 +31,49 @@ import { CloudroomError } from "./client.js";
 import { projectLoopSettings } from "./project-loops.js";
 import { tokenUsageSince } from "./loop-usage.js";
 import { macClis } from "./clis.js";
+import { deepSearch } from "./deep-search.js";
 import { finishMcpSignIn, isRemoteMcp, startMcpSignIn } from "./mcp-login.js";
-import { archiveThreadAndChildren } from "../threads/thread-archive.js";
+import { archiveFromWebsite, archiveThreadAndChildren, listThreadWithDescendants } from "../threads/thread-archive.js";
+import { unarchiveThreadKeepingOpenParent } from "../threads/thread-ownership.js";
+import { deleteThreadOnMac } from "../threads/thread-lifecycle.js";
+import { emitPluginThreadUnarchived } from "../plugins/plugin-thread-events.js";
 import { assertValidParentThread } from "../threads/thread-parent.js";
 import { queueChildThreadTurnNotificationBestEffort } from "../threads/child-thread-notifications.js";
 import { reportBug } from "./bug-reports.js";
-import { continueShare, shareThread, stopSharing, threadShare } from "./shares.js";
+import { continueShare, shareClicked, shareThread, stopSharing, threadShare } from "./shares.js";
 import { connectAccount, registerConnect } from "./connect-relay.js";
 import { getGateAuthKind } from "../../request-context.js";
 import { noteActiveMinute, timeInApp } from "./time-in-app.js";
 import { starPrompt, starRepo } from "./star-prompt.js";
-import { popupState, recordChecklistHide, recordPopup } from "./popups.js";
+import { rewriteDraft } from "../ai/draft-rewrite.js";
+import { cardsLeft, popupState, recordChecklistHide, recordPopup } from "./popups.js";
 import { activation } from "./activation.js";
 import { disconnectGithub, githubAccount, githubAuth } from "./github-login.js";
 import { addGithubRepo, githubBranches, macRepoSuggestions, repoSuggestions } from "./repo-suggestions.js";
 import { projectSuggestion } from "./project-nudge.js";
 import { promptSuggestion, promptSuggestionEvent } from "../threads/prompt-suggestion.js";
 import { readUiPreferences } from "../system/ui-preferences.js";
+import { readWrapped } from "../system/wrapped.js";
 import { forgetCloudAccountSwitch, noteCloudAccountSwitch } from "./account-switches.js";
-import { ACTIVATION_STEPS, CLOUD_CHOICE_ACTIONS, CLOUD_CHOICE_REASONS, POPUP_DETAILS, POPUPS, SETUP_ACTIONS, SETUP_AGENTS, SETUP_DETAILS, SETUP_STEPS, STARTER_PROMPTS, UPGRADE_PROMPTS } from "../system/telemetry.js";
+import { ACTIVATION_STEPS, CLOUD_CHOICE_ACTIONS, CLOUD_CHOICE_REASONS, POPUP_DETAILS, POPUPS, SETUP_ACTIONS, SETUP_AGENTS, SETUP_DETAILS, SETUP_STEPS, SHARE_CLICKS, STARTER_PROMPTS, UPGRADE_PROMPTS, WRAPPED_ACTIONS } from "../system/telemetry.js";
 
 const SAFE_SETTINGS_SEARCH = /^(?=.{2,40}$)\p{L}+(?: \p{L}+){0,3}$/u;
+// A Cloud loop run's request (auto_<loop>_<due>), the website's name for the run that starts its thread.
+const CLOUD_RUN = /^auto_[a-f0-9]{32}_[0-9]{1,16}$/;
 
 export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: PluginService): void {
   cloudroom(deps).teleportRecovery = () => teleports(deps).recover();
-  cloudroom(deps).archiveRequest = (threadId, liveThreadIds) => {
+  cloudroom(deps).archiveRequest = (threadId, liveThreadIds, websiteHasIt) => {
     const thread = getThread(deps.db, threadId);
     if (!thread || thread.archivedAt || thread.deletedAt) return;
-    try { archiveThreadAndChildren(deps, { parentThread: thread, liveThreadIds }); }
+    try { archiveThreadAndChildren(deps, { parentThread: thread, liveThreadIds, websiteHasRoot: websiteHasIt }); }
     catch (error) { deps.logger.warn({ error, threadId }, "Cloud self-archive failed"); }
+  };
+  // The website's list applies through the same local parts as a click, without their website calls (#237).
+  cloudroom(deps).sync.local = {
+    archive: (thread) => archiveFromWebsite(deps, thread),
+    unarchive: (thread) => { const restored = unarchiveThreadKeepingOpenParent(deps, thread.id, true); if (restored) emitPluginThreadUnarchived(restored); },
+    remove: (thread) => deleteThreadOnMac(deps, thread),
   };
   cloudroom(deps).childTurnEnded = (child, turnStatus) => void queueChildThreadTurnNotificationBestEffort(deps, { childThread: child, parentThreadId: child.parentThreadId, turnStatus });
   startClaudeVersionSync(deps, () => cloudroom(deps).teleportClient());
@@ -91,13 +106,32 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: Plugin
     if (body.action === "check") return context.json(await teleports(deps).check(id, choice));
     return context.json(await teleports(deps).begin(id, choice), 202);
   });
-  app.get("/api/v1/cloudroom/threads/:id/share", async context => context.json(await threadShare(deps, context.req.param("id"))));
+  // `fresh`: the share menu opened, so a Cloud thread's share is read from the website; otherwise the local copy.
+  app.get("/api/v1/cloudroom/threads/:id/share", async context => context.json(await threadShare(deps, context.req.param("id"), context.req.query("fresh") === "1")));
   app.post("/api/v1/cloudroom/threads/:id/share", async context => {
-    const { action } = z.object({ action: z.enum(["save", "stop"]) }).strict().parse(await context.req.json());
+    const { action } = z.object({ action: z.enum(["save", "stop", ...SHARE_CLICKS]) }).strict().parse(await context.req.json());
     const id = context.req.param("id");
     if (action === "save") return context.json(await shareThread(deps, id));
-    await stopSharing(deps, id);
+    if (action === "stop") await stopSharing(deps, id);
+    else await shareClicked(deps, id, action);
     return context.json(null);
+  });
+  // The relay's signal that the account's Cloud threads changed, or the connect plugin after its tunnel came up or went
+  // down (#237). The relay strips this header from visitors' requests; a forged one only makes the app list, every 5 s.
+  app.post("/api/v1/cloudroom/threads-changed", async context => {
+    if (context.req.header("x-cloudroom-relay") !== "threads") return context.json({ message: "Not found" }, 404);
+    const { tunnel } = z.object({ tunnel: z.boolean().optional() }).catch({}).parse(await context.req.json().catch(() => ({})));
+    cloudroom(deps).sync.changed(tunnel);
+    return context.json(null, 202);
+  });
+  // The Archive dialog asks before it stops working children (#237, App 8): their real state, read once.
+  app.get("/api/v1/cloudroom/threads/:id/running", async context => {
+    const thread = getThread(deps.db, context.req.param("id"));
+    if (!thread) return context.json({ message: "Thread not found" }, 404);
+    const cloud = listThreadWithDescendants(deps, thread).filter((item) => item.executionTarget === "cloud" && !item.archivedAt && !item.deletedAt);
+    // A few seconds at most: past that the dialog uses what it has, as when the read fails.
+    const limit = new Promise<string[]>((resolve) => setTimeout(() => resolve([]), 5_000).unref());
+    return context.json({ running: await Promise.race([cloudroom(deps).runningInCloud(cloud.map((item) => item.id)), limit]) });
   });
   app.get("/api/v1/cloudroom/connect", async context => context.json(await connectAccount(deps)));
   app.post("/api/v1/cloudroom/connect", async context => {
@@ -116,15 +150,26 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: Plugin
     const problem = browserRequestProblem(context, deps, { requireJsonForMutation: true });
     if (problem) return context.json({ message: "Use the local Cloudroom app or CLI." }, problem.status);
     const input = z.object({ hostId: z.string().min(1) }).strict().parse(await context.req.json());
-    return context.json(await importBbThreads(deps, input.hostId));
+    return context.json(await importRoomThreads(deps, input.hostId));
   });
-  app.get("/api/v1/cloudroom/import/sessions", async context => context.json({ sessions: await listNativeSessions(deps) }));
+  app.get("/api/v1/cloudroom/import/sessions", async context => context.json({ sessions: await listNativeSessions(deps), conductorApp: conductorAppFound() }));
   app.post("/api/v1/cloudroom/import/sessions", async context => {
     const input = z.object({
       hostId: z.string().min(1),
-      sessions: z.array(z.object({ harness: z.enum(["claude-code", "codex", "pi", "acp-hermes-agent", "t3code"]), id: z.string().min(1) }).strict()).min(1).max(2000),
+      sessions: z.array(z.object({ harness: z.enum(["claude-code", "codex", "pi", "acp-hermes-agent", "t3code", "conductor"]), id: z.string().min(1) }).strict()).min(1).max(2000),
     }).strict().parse(await context.req.json());
     return context.json(await importNativeSessions(deps, input.hostId, input.sessions));
+  });
+  app.post("/api/v1/cloudroom/import/conductor-export", async context => {
+    const problem = browserRequestProblem(context, deps, { requireJsonForMutation: true });
+    if (problem) return context.json({ message: "Use the local Cloudroom app or CLI." }, problem.status);
+    const input = z.object({ path: z.string().min(1).max(4096), hostId: z.string().min(1).optional() }).strict().parse(await context.req.json());
+    try {
+      return context.json(input.hostId ? await importConductorExport(deps, input.hostId, input.path) : { sessions: await listConductorExport(deps, input.path) });
+    } catch (error) {
+      if (error instanceof ApiError) throw error;
+      throw new ApiError(400, "conductor_export", error instanceof Error ? error.message : String(error));
+    }
   });
   app.get("/api/v1/cloudroom/export", context => context.json({ threads: exportableChats(deps) }));
   app.post("/api/v1/cloudroom/export", async context => {
@@ -169,10 +214,33 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: Plugin
     await noteActiveMinute(deps);
     return context.json({ ok: true });
   });
-  app.get("/api/v1/cloudroom/popups", async (context) => context.json(await popupState(deps)));
+  // Monthly Wrapped (docs/scopes/wrapped.md): GET works out one month's numbers, POST counts a click.
+  const wrappedMonth = z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/);
+  app.get("/api/v1/cloudroom/wrapped", async (context) => {
+    const query = z.object({ month: wrappedMonth, utcOffsetMinutes: z.coerce.number().int().min(-840).max(840) }).parse(context.req.query());
+    return context.json(await readWrapped(deps, query));
+  });
+  app.post("/api/v1/cloudroom/wrapped", async (context) => {
+    const input = z.object({ month: wrappedMonth, action: z.enum(WRAPPED_ACTIONS) }).strict().parse(await context.req.json());
+    deps.telemetry.capture({ name: "wrapped", properties: input });
+    return context.json({ ok: true });
+  });
+  app.get("/api/v1/cloudroom/popups", async (context) => {
+    const state = await popupState(deps);
+    return context.json(state && { ...state, cardsLeft: cardsLeft(state) });
+  });
   app.post("/api/v1/cloudroom/popups", async (context) => {
     const input = z.object({ popup: z.enum(POPUPS), event: z.enum(["shown", "closed"]), detail: z.enum(POPUP_DETAILS).optional() }).strict().parse(await context.req.json());
     return context.json({ ok: await recordPopup(deps, input.popup, input.event, input.detail) });
+  });
+  app.post("/api/v1/cloudroom/draft-rewrite", async (context) => {
+    const input = z.object({
+      mode: z.enum(["options", "shorter"]),
+      draft: z.string().min(1).max(100_000),
+      selected: z.string().min(1).max(20_000),
+      avoid: z.array(z.string().max(20_000)).max(30).default([]),
+    }).strict().parse(await context.req.json());
+    return context.json({ options: await rewriteDraft(deps, input) });
   });
   app.get("/api/v1/cloudroom/star-prompt", async (context) => context.json(await starPrompt(deps)));
   app.post("/api/v1/cloudroom/star-prompt", async (context) => {
@@ -241,6 +309,7 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: Plugin
     return context.json(await reportBug(deps, input));
   });
   app.get("/api/v1/cloudroom/account/invites", async (context) => context.json(await cloudroom(deps).sandboxes.invites("list")));
+  app.get("/api/v1/cloudroom/account/usage-wave", async (context) => context.json({ wave: await cloudroom(deps).sandboxes.usageWave() }));
   app.post("/api/v1/cloudroom/account/invites", async (context) => {
     z.object({}).strict().parse(await context.req.json());
     return context.json(await cloudroom(deps).sandboxes.invites("create"));
@@ -284,7 +353,7 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: Plugin
   // Cloud automations (ADR 0212): the website stores and runs them, so they keep running while this Mac is off.
   // A child Cloud thread shares its parent's sandbox, so the website gets the parent and the child's own session.
   app.post("/api/v1/cloudroom/account/automations", async (context) => {
-    const input = z.object({ action: z.enum(["list", "create", "update", "run", "runs", "history", "delete", "hook", "unhook", "events", "ack", "settings", "report"]), thread: z.string().min(1).max(64).optional(), project: z.string().min(1).max(64).optional() }).passthrough().parse(await context.req.json());
+    const input = z.object({ action: z.enum(["list", "create", "update", "run", "runs", "history", "delete", "hook", "unhook", "events", "ack", "settings", "report", "reports"]), thread: z.string().min(1).max(64).optional(), project: z.string().min(1).max(64).optional() }).passthrough().parse(await context.req.json());
     let body: Record<string, unknown> = input;
     // A fresh-thread loop made from a project needs no thread: this Mac sends the project's settings (ADR 20261101-004659).
     // From a Local thread, with no Cloud thread to re-prompt, it is made from that thread's project.
@@ -293,6 +362,11 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: Plugin
     if (input.action === "create" && project && (!input.thread || !input.project && local && !isCloudThread(local))) {
       const { thread: _thread, ...rest } = input;
       body = { ...rest, project, settings: await projectLoopSettings(deps, project, cloudroom(deps).sandboxes.vpsConnected) };
+    } else if (input.action === "reports") {
+      // Loops → Review (ADR 0298): a Cloud loop run's report is found by the run's request, which started its thread's session.
+      const ids = z.object({ runs: z.array(z.string()).max(300), threads: z.array(z.string()).max(300) }).parse(input);
+      const requests = ids.threads.flatMap((id) => binding(deps.db, id)?.startRequestId ?? []).filter((request) => CLOUD_RUN.test(request));
+      body = { action: "reports", runs: [...ids.runs, ...requests] };
     } else if (input.action === "create") {
       const thread = input.thread ? getThread(deps.db, input.thread) : null;
       if (!thread || !isCloudThread(thread) || thread.archivedAt || thread.deletedAt) throw new ApiError(400, "cloud_automation", "Cloud automations need an open Cloud thread.");
@@ -398,7 +472,7 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: Plugin
       const sandboxes = cloudroom(deps).sandboxes;
       const { name, server, signIn, account } = await finishMcpSignIn(new URL(context.req.url).searchParams, await sandboxes.account());
       await sandboxes.saveMcpSignIn(name, server, signIn, account);
-      return page(`Signed in to ${name}`, "Every cloud thread can use it now. You can close this tab.");
+      return page(`Signed in to ${name}`, "Claude Code cloud threads can use it from their next message. You can close this tab.");
     } catch (error) {
       deps.logger.warn({ error: error instanceof Error ? error.message : String(error) }, "Cloud MCP sign-in failed");
       return page("Sign-in didn't finish", `${error instanceof Error ? error.message : String(error)} Try again in Cloudroom.`);
@@ -488,6 +562,8 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: Plugin
     return context.json(await cloudroom(deps).piApiKey(parsed.data.provider, parsed.data.apiKey));
   });
   app.get("/api/v1/cloudroom/account/codex", async context => context.json(await cloudroom(deps).codexAuth()));
+  // Agents Cloud refused for their login, with the threads and loops waiting on each (the "disconnected in Cloud" banner).
+  app.get("/api/v1/cloudroom/cloud-logins", async context => context.json({ issues: await cloudroom(deps).cloudLogins() }));
   // The Accounts plugin's Codex accounts (ADR 0195). Responses never hold tokens.
   app.post("/api/v1/cloudroom/account/codex-accounts", async context => {
     const problem = browserRequestProblem(context, deps, { requireJsonForMutation: true });
@@ -514,10 +590,10 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: Plugin
     });
   }
   const macCodexStatus = (run: ReturnType<typeof macCodexLogin>) =>
-    !run ? { state: "idle" as const } : !run.done ? { state: "waiting" as const } : run.error ? { state: "error" as const, message: run.error } : { state: "done" as const };
+    !run ? { state: "idle" as const } : !run.done ? { state: "waiting" as const, installing_since: run.installingSince } : run.error ? { state: "error" as const, message: run.error } : { state: "done" as const };
   app.post("/api/v1/cloudroom/mac/codex-login", async context => {
     await markLogin(deps, "codex", null);
-    return context.json(macCodexStatus(startMacCodexLogin()));
+    return context.json(macCodexStatus(startMacCodexLogin(deps)));
   });
   app.get("/api/v1/cloudroom/mac/codex-login", context => context.json(macCodexStatus(macCodexLogin())));
   app.get("/api/v1/cloudroom/mac/agents", async context => context.json({ agents: await macSignedInAgents() }));
@@ -567,6 +643,10 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: Plugin
     });
     return context.json(rank);
   });
+  app.post("/api/v1/cloudroom/account/deep-search", async context => {
+    const { query } = z.object({ query: z.string().trim().min(1).max(500) }).strict().parse(await context.req.json());
+    return context.json({ threads: await deepSearch(deps, query, context.req.raw.signal) });
+  });
   app.get("/api/v1/cloudroom/account/github-branches", async context => {
     const projectId = z.string().min(1).parse(context.req.query("project"));
     return context.json(await githubBranches(projectId, deps));
@@ -604,6 +684,11 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: Plugin
     if (problem) return context.json({ message: "Use the local Cloudroom app or CLI." }, problem.status);
     await cloudroom(deps).retryStart(context.req.param("id"));
     return context.json({ ok: true });
+  });
+  app.post("/api/v1/cloudroom/threads/:id/clear-disk", async (context) => {
+    const problem = browserRequestProblem(context, deps, { requireJsonForMutation: true });
+    if (problem) return context.json({ message: "Use the local Cloudroom app or CLI." }, problem.status);
+    return context.json(await cloudroom(deps).clearDisk(context.req.param("id")));
   });
   app.post("/api/v1/cloudroom/threads/:id/move", async (context) => {
     const problem = browserRequestProblem(context, deps, { requireJsonForMutation: true });
@@ -682,6 +767,16 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: Plugin
     }
     if (context.req.method === "POST" && /^\/queued-messages\/[^/]+\/send$/.test(path)) {
       return context.json(await cloudroom(deps).sendQueued(thread, path.split("/")[2]!));
+    }
+    // `thread retry` is a Local action; name the Cloud recovery instead of the generic refusal (#1325).
+    if (context.req.method === "POST" && path === "/retry") {
+      // A rejected start, prompt or side chat alike, is the one retryStart() accepts.
+      const recovery = thread.deletedAt ? "This Cloud thread has been deleted and cannot be retried."
+        : thread.archivedAt ? `Restore it first with \`room-cli thread unarchive ${thread.id}\`.`
+        : !binding(deps.db, thread.id)?.sessionId && command(deps.db, `first_${thread.id}`)?.state === "failed"
+          ? `This Cloud start was rejected; retry it with \`room-cli cloud retry-start ${thread.id}\`.`
+          : `Check \`room-cli thread show ${thread.id}\` and \`room-cli thread output ${thread.id}\` first, and send a follow-up only if work is really unfinished.`;
+      return context.json({ message: `thread retry is for Local threads. ${recovery}`, code: "cloudroom_unsupported" }, 409);
     }
     return context.json({ message: "This action is not enabled for Cloud threads. Native execution is blocked.", code: "cloudroom_unsupported" }, 409);
   };

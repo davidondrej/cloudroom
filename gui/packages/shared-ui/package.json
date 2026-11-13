@@ -244,6 +244,11 @@
       "types": "./src/lib/utils.ts",
       "default": "./src/lib/utils.ts"
     },
+    "./lib/privacy-mode": {
+      "source": "./src/lib/privacy-mode.ts",
+      "types": "./src/lib/privacy-mode.ts",
+      "default": "./src/lib/privacy-mode.ts"
+    },
     "./lib/usage-format": {
       "source": "./src/lib/usage-format.ts",
       "types": "./src/lib/usage-format.ts",

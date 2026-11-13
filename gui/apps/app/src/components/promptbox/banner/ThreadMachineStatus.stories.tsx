@@ -1,5 +1,4 @@
 import type { SystemMachineProvider } from "@cloudroom/server-contract";
-import modalLogoUrl from "../../../../../../plugins/environment-modal-sandbox/modal-logo.svg?url";
 import { StoryCard, StoryRow } from "../../../../.ladle/story-card";
 import { ResponsiveStage } from "./banner-story-stages";
 import { ThreadMachineStatusBanner } from "./ThreadMachineStatus";
@@ -14,8 +13,8 @@ const modalProvider: SystemMachineProvider = {
   id: "modal-sandbox",
   displayName: "Modal Sandbox",
   description: "Run a machine for development.",
-  icon: "./modal-logo.svg",
-  logoUrl: modalLogoUrl,
+  icon: "Box",
+  logoUrl: null,
   pluginId: "environment-modal-sandbox",
   inputs: null,
   acceptsEmptyInputs: true,

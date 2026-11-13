@@ -93,7 +93,10 @@ bb keeps each machine's last successful `model/list` answer per
 immediately, and refreshes it in the background once it is 10 minutes old. A
 stored answer is discarded when the bridge fingerprint changes (plugin bundle
 digest, bridge options, env passthrough). A list that depends on login state,
-CLI version, or environment values is corrected only by the next refresh.
+CLI version, or environment values is corrected only by the next refresh. When
+listing fails or times out, a new thread with no model starts on the `fallback`
+default, or, with no `fallback`, on the default from the machine's last stored
+answer, even one an app update discarded.
 
 Still experimental on the declaration (see api_to_audit.md):
 `experimental_visibility` (`"installed"` hides the row until the bridge's
@@ -169,6 +172,7 @@ The runtime never scopes processes per thread and never matches error text.
   fork: "none" | "tip" | "checkpoint",
   approvalEnforcedBy: "runtime" | "provider",
   steerMode: "inject" | "queue", // declared and recorded; nothing acts on it yet
+  stopsUnopenedTurns: boolean,   // a keep-session stop also ends a turn not opened yet
   skills: { configure: boolean }, // the bridge handles skills/configure
 }
 ```

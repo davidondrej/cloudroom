@@ -6,7 +6,6 @@ use crate::{
 };
 use serde::Serialize;
 use std::{
-    io,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -91,7 +90,12 @@ impl ClaudeAuth {
         }));
     }
 
-    pub async fn ready(&self, config: &Config, diagnostics: &Observability) -> io::Result<bool> {
+    /// Logged in or out, or the reason word the check failed with.
+    pub async fn ready(
+        &self,
+        config: &Config,
+        diagnostics: &Observability,
+    ) -> Result<bool, &'static str> {
         let started = Instant::now();
         let mut check = self.check.lock().await;
         // Concurrent starts share the check they waited for, not a stale readiness cache.
@@ -102,11 +106,11 @@ impl ClaudeAuth {
         } else {
             let mut stop = self.stop.subscribe();
             if *stop.borrow() {
-                return Err(io::Error::other("Claude login monitor stopped"));
+                return Err("monitor_stopped");
             }
             let result = tokio::select! {
                 biased;
-                _ = stop.changed() => return Err(io::Error::other("Claude login monitor stopped")),
+                _ = stop.changed() => return Err("monitor_stopped"),
                 result = claude::auth_ready(config) => result,
             };
             let probe = match result {
@@ -118,13 +122,9 @@ impl ClaudeAuth {
                     credentials: Credentials::Missing,
                     reason: "credentials_missing",
                 },
-                Err(error) => Probe {
+                Err(reason) => Probe {
                     credentials: Credentials::CheckFailed,
-                    reason: if error.kind() == io::ErrorKind::TimedOut {
-                        "check_timeout"
-                    } else {
-                        "check_failed"
-                    },
+                    reason,
                 },
             };
             let changed = check.is_none_or(|(_, previous)| previous != probe);
@@ -137,7 +137,7 @@ impl ClaudeAuth {
         match probe.credentials {
             Credentials::Present => Ok(true),
             Credentials::Missing => Ok(false),
-            _ => Err(io::Error::other("Claude account could not be checked")),
+            _ => Err(probe.reason),
         }
     }
 

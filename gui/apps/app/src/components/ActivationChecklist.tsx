@@ -1,6 +1,6 @@
-import type { ReactNode } from "react";
+import { useEffect, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { useAtom, useAtomValue } from "jotai";
+import { atom, useAtom, useAtomValue, useSetAtom } from "jotai";
 import { matchPath, useLocation, useNavigate } from "react-router-dom";
 import { HoverCard, HoverCardContent, HoverCardTrigger } from "@cloudroom/shared-ui/hover-card";
 import { Icon } from "@cloudroom/shared-ui/icon";
@@ -121,14 +121,28 @@ export function StarterPrompts({ onPick, fallback }: { onPick: (prompt: string) 
   );
 }
 
+/** True while the checklist is on screen, so the Wrapped card, which uses the same corner, waits its turn. */
+export const checklistShownAtom = atom(false);
+function Shown() {
+  const set = useSetAtom(checklistShownAtom);
+  useEffect(() => { set(true); return () => set(false); }, [set]);
+  return null;
+}
+
+/** Where a card in the top right corner starts: under the header, or below the new-thread composer so it never covers it. */
+export function useCornerTop(): string {
+  const { pathname } = useLocation();
+  const composing = pathname === getRootComposeRoutePath() || matchPath(LEGACY_PROJECT_COMPOSE_ROUTE_PATH, pathname) !== null;
+  const startersShown = useStartersShown(useActivation());
+  return !composing ? "top-[52px]" : startersShown ? "top-[350px]" : "top-[260px]";
+}
+
 export function ActivationChecklist() {
   const navigate = useNavigate();
   const hidden = useHiddenUntil(HIDDEN_KEY);
   const nativeBrowserShown = useIsNativeBrowserViewShown();
-  const { pathname } = useLocation();
-  const composing = pathname === getRootComposeRoutePath() || matchPath(LEGACY_PROJECT_COMPOSE_ROUTE_PATH, pathname) !== null;
+  const top = useCornerTop();
   const data = useActivation();
-  const startersShown = useStartersShown(data);
   const plan = useCloudroomAccount().data?.plan;
   const paid = Boolean(plan && plan !== "free");
   const [hides, saveHides] = useChecklistHides();
@@ -152,7 +166,8 @@ export function ActivationChecklist() {
     });
   };
   return (
-    <section aria-label="Get started" className={cn("fixed right-5 z-40", !composing ? "top-[52px]" : startersShown ? "top-[350px]" : "top-[260px]", "w-[320px] overflow-hidden rounded-[14px] border border-foreground/10 bg-surface-raised-solid shadow-[0_24px_60px_rgba(0,0,0,.45),0_4px_14px_rgba(0,0,0,.25)] max-md:hidden")}>
+    <section aria-label="Get started" className={cn("fixed right-5 z-40", top, "w-[320px] overflow-hidden rounded-[14px] border border-foreground/10 bg-surface-raised-solid shadow-[0_24px_60px_rgba(0,0,0,.45),0_4px_14px_rgba(0,0,0,.25)] max-md:hidden")}>
+      <Shown />
       <div className="px-4 pt-4 pb-3">
         <div className="flex items-baseline">
           <p className="text-sm font-semibold text-foreground">Get started</p>

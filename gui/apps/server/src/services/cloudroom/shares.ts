@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "zod";
@@ -6,11 +7,13 @@ import { PERSONAL_PROJECT_ID } from "@cloudroom/domain";
 import type { AppDeps } from "../../types.js";
 import { ApiError } from "../../errors.js";
 import { requireConnectedPrimaryHostId } from "../hosts/primary-host.js";
+import type { ShareAction } from "../system/telemetry.js";
 import { createThreadFromRequest } from "../threads/thread-create.js";
 import { threadMessages } from "../threads/thread-transcript.js";
 import { CloudroomError } from "./client.js";
-import { cloudroom } from "./commands.js";
+import { cloudExecution, cloudroom } from "./commands.js";
 import { macVariables } from "./sandboxes.js";
+import { binding, command, commands } from "./store.js";
 
 const TEXT_LIMIT = 1_000_000;
 const MESSAGE_LIMIT = 100_000;
@@ -75,15 +78,48 @@ export function redactSecrets(text: string, known: readonly string[]): string {
     .replace(URL_PASSWORD, `$1${REMOVED}@`);
 }
 
+const TOKEN = /(?:^|\/)([A-Za-z0-9_-]{22})\/?$/;
+/** One usage event per share action (docs/scopes/thread-share-links.md#tracking). It carries a hash of the link's token,
+ *  never the token: the website hashes it the same way, so the sharer's events and the viewers' line up. */
+function track(deps: AppDeps, action: ShareAction, link: string | undefined, threadId?: string) {
+  const token = link?.match(TOKEN)?.[1], thread = threadId ? getThread(deps.db, threadId) : null;
+  deps.telemetry.capture({ name: "share", properties: {
+    action, share_id: token ? createHash("sha256").update(token).digest("hex").slice(0, 16) : null,
+    ...(thread ? { provider: thread.providerId, execution: thread.executionTarget === "cloud" ? cloudExecution(deps, thread.id) : "local" } : {}),
+  } });
+}
+
+/** A click on the thread's Share button, or on Copy in its panel. */
+export async function shareClicked(deps: AppDeps, threadId: string, action: "opened" | "copied"): Promise<void> {
+  track(deps, action, (await readStore(deps))[threadId]?.url, threadId);
+}
+
 const threadTitle = (thread: { title: string | null; titleFallback: string | null }) => (thread.title || thread.titleFallback || "Untitled thread").slice(0, 200);
 
-export async function threadShare(deps: AppDeps, threadId: string): Promise<ThreadShare | null> {
-  return (await readStore(deps))[threadId] ?? null;
+/** A Cloud thread's share lives on the website, so every computer shows, copies and can stop it (#237). */
+async function cloudShare(deps: AppDeps, threadId: string): Promise<boolean> {
+  return getThread(deps.db, threadId)?.executionTarget === "cloud" && await cloudroom(deps).sandboxes.followsThreads().catch(() => false) === true;
+}
+
+/** The local copy, as on main; `fresh` (the share menu opened) reads a Cloud thread's share from the website, one
+ *  keyed read, and keeps the copy in line with it. Nothing reads the website when a thread opens. */
+export async function threadShare(deps: AppDeps, threadId: string, fresh = false): Promise<ThreadShare | null> {
+  if (!fresh || !await cloudShare(deps, threadId)) return (await readStore(deps))[threadId] ?? null;
+  const share = shareSchema.nullable().catch(null).parse((await website(deps, { action: "get", thread: threadId }) as { share?: unknown }).share ?? null);
+  await updateStore(deps, (store) => { if (share) store[threadId] = share; else delete store[threadId]; });
+  return share;
 }
 
 export async function shareThread(deps: AppDeps, threadId: string): Promise<ThreadShare> {
   const thread = getThread(deps.db, threadId);
   if (!thread || thread.deletedAt) throw new ApiError(404, "thread_not_found", "Thread not found.");
+  // Only the computer that started it scrubs with the variables the thread may hold (#237). One no app started (a loop
+  // run, a website child, a launch) is shared from its home, as it was from the computer that showed it on main.
+  const startedHere = Boolean(command(deps.db, `first_${threadId}`)) || commands(deps.db, threadId).some((item) => item.command === "teleport");
+  const noAppStarted = /^(auto_|sub_|launch_)/.test(binding(deps.db, threadId)?.startRequestId ?? "");
+  if (await cloudShare(deps, threadId) && !startedHere && !(noAppStarted && cloudroom(deps).isHome(threadId))) {
+    throw new ApiError(409, "share_elsewhere", "Share it from the computer that started this thread.");
+  }
   const known = Object.values(await macVariables()).filter((value) => value.length >= 8).sort((a, b) => b.length - a.length);
   const clean = (text: string) => {
     const safe = redactSecrets(text, known);
@@ -98,17 +134,21 @@ export async function shareThread(deps: AppDeps, threadId: string): Promise<Thre
     messages: messages.slice(start), truncated: start > 0,
   });
   const share = shareSchema.parse((value as { share?: unknown }).share);
+  const shared = Boolean((await readStore(deps))[threadId]);
   await updateStore(deps, (store) => { store[threadId] = share; });
+  track(deps, shared ? "updated" : "created", share.url, threadId);
   return share;
 }
 
 export async function stopSharing(deps: AppDeps, threadId: string): Promise<void> {
+  const link = (await readStore(deps))[threadId]?.url;
   await website(deps, { action: "stop", thread: threadId });
   await updateStore(deps, (store) => { delete store[threadId]; });
+  track(deps, "stopped", link, threadId);
 }
 
 export async function continueShare(deps: AppDeps, link: string): Promise<{ threadId: string; projectId: string }> {
-  const token = link.trim().match(/(?:^|\/)([A-Za-z0-9_-]{22})\/?$/)?.[1];
+  const token = link.trim().match(TOKEN)?.[1];
   if (!token) throw new ApiError(400, "invalid_share_link", "This is not a Cloudroom share link.");
   const shared = sharedSchema.parse(await website(deps, { action: "open", token }));
   const folder = join(deps.config.dataDir, "shared-threads");
@@ -132,5 +172,6 @@ export async function continueShare(deps: AppDeps, link: string): Promise<{ thre
     origin: "sdk",
     startedOnBehalfOf: null,
   });
+  track(deps, "continued", token);
   return { threadId: thread.id, projectId: thread.projectId };
 }

@@ -7,20 +7,20 @@ import {
   render,
   screen,
 } from "@testing-library/react";
-import { BB_DESKTOP_BROWSER_MAX_FIND_TEXT_LENGTH } from "@cloudroom/desktop-contract";
+import { ROOM_DESKTOP_BROWSER_MAX_FIND_TEXT_LENGTH } from "@cloudroom/desktop-contract";
 import type {
-  BbDesktopBrowserApi,
-  BbDesktopBrowserFindInPageRequest,
-  BbDesktopBrowserFindResult,
-  BbDesktopBrowserState,
-  BbDesktopBrowserStopFindInPageRequest,
+  RoomDesktopBrowserApi,
+  RoomDesktopBrowserFindInPageRequest,
+  RoomDesktopBrowserFindResult,
+  RoomDesktopBrowserState,
+  RoomDesktopBrowserStopFindInPageRequest,
 } from "@cloudroom/desktop-contract";
 import { defaultAppSettings } from "@cloudroom/domain";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
-  createBbDesktopApi,
+  createRoomDesktopApi,
   createNoopDesktopBrowserApi,
-} from "@/test/bb-desktop-test-utils";
+} from "@/test/room-desktop-test-utils";
 import { AppCommandProvider } from "@/components/commands/AppCommandProvider";
 import { BrowserTabContent } from "./BrowserTabContent";
 
@@ -61,24 +61,24 @@ const desktopInfo = {
 };
 
 interface FindHarness {
-  api: BbDesktopBrowserApi;
-  emitFindResult: (result: BbDesktopBrowserFindResult) => void;
-  emitState: (state: BbDesktopBrowserState) => void;
+  api: RoomDesktopBrowserApi;
+  emitFindResult: (result: RoomDesktopBrowserFindResult) => void;
+  emitState: (state: RoomDesktopBrowserState) => void;
   findInPage: ReturnType<
-    typeof vi.fn<(r: BbDesktopBrowserFindInPageRequest) => void>
+    typeof vi.fn<(r: RoomDesktopBrowserFindInPageRequest) => void>
   >;
   stopFindInPage: ReturnType<
-    typeof vi.fn<(r: BbDesktopBrowserStopFindInPageRequest) => void>
+    typeof vi.fn<(r: RoomDesktopBrowserStopFindInPageRequest) => void>
   >;
 }
 
 function createFindHarness(): FindHarness {
-  const stateListeners = new Set<(state: BbDesktopBrowserState) => void>();
-  const findListeners = new Set<(result: BbDesktopBrowserFindResult) => void>();
-  const findInPage = vi.fn<(r: BbDesktopBrowserFindInPageRequest) => void>();
+  const stateListeners = new Set<(state: RoomDesktopBrowserState) => void>();
+  const findListeners = new Set<(result: RoomDesktopBrowserFindResult) => void>();
+  const findInPage = vi.fn<(r: RoomDesktopBrowserFindInPageRequest) => void>();
   const stopFindInPage =
-    vi.fn<(r: BbDesktopBrowserStopFindInPageRequest) => void>();
-  const api: BbDesktopBrowserApi = {
+    vi.fn<(r: RoomDesktopBrowserStopFindInPageRequest) => void>();
+  const api: RoomDesktopBrowserApi = {
     ...createNoopDesktopBrowserApi(),
     onState(listener) {
       stateListeners.add(listener);
@@ -105,8 +105,8 @@ function createFindHarness(): FindHarness {
 }
 
 function findResult(
-  overrides: Partial<BbDesktopBrowserFindResult> = {},
-): BbDesktopBrowserFindResult {
+  overrides: Partial<RoomDesktopBrowserFindResult> = {},
+): RoomDesktopBrowserFindResult {
   return {
     tabId: "browser:test",
     requestId: 1,
@@ -118,8 +118,8 @@ function findResult(
 }
 
 function browserState(
-  overrides: Partial<BbDesktopBrowserState> = {},
-): BbDesktopBrowserState {
+  overrides: Partial<RoomDesktopBrowserState> = {},
+): RoomDesktopBrowserState {
   return {
     tabId: "browser:test",
     url: "https://example.com/docs",
@@ -133,7 +133,7 @@ function browserState(
 }
 
 function renderBrowser(harness: FindHarness, initialUrl: string) {
-  window.bbDesktop = createBbDesktopApi(desktopInfo, harness.api);
+  window.bbDesktop = createRoomDesktopApi(desktopInfo, harness.api);
   return render(
     <AppCommandProvider>
       <BrowserTabContent
@@ -299,14 +299,14 @@ describe("BrowserTabContent find in page", () => {
     const harness = createFindHarness();
     renderBrowser(harness, "https://example.com/docs");
     pressFindChord(screen.getByLabelText(/Address and search bar/));
-    expect(findInput().maxLength).toBe(BB_DESKTOP_BROWSER_MAX_FIND_TEXT_LENGTH);
+    expect(findInput().maxLength).toBe(ROOM_DESKTOP_BROWSER_MAX_FIND_TEXT_LENGTH);
 
-    const oversized = "a".repeat(BB_DESKTOP_BROWSER_MAX_FIND_TEXT_LENGTH + 10);
+    const oversized = "a".repeat(ROOM_DESKTOP_BROWSER_MAX_FIND_TEXT_LENGTH + 10);
     fireEvent.change(findInput(), { target: { value: oversized } });
     const sent = harness.findInPage.mock.lastCall?.[0];
-    expect(sent?.text).toHaveLength(BB_DESKTOP_BROWSER_MAX_FIND_TEXT_LENGTH);
+    expect(sent?.text).toHaveLength(ROOM_DESKTOP_BROWSER_MAX_FIND_TEXT_LENGTH);
     expect(findInput().value).toHaveLength(
-      BB_DESKTOP_BROWSER_MAX_FIND_TEXT_LENGTH,
+      ROOM_DESKTOP_BROWSER_MAX_FIND_TEXT_LENGTH,
     );
   });
 

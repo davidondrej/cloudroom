@@ -24,18 +24,53 @@ use std::{
 };
 use tokio::sync::oneshot;
 
-const USAGE: &str = "room-cli thread update --self --title TITLE
-room-cli thread update --self --reasoning-level LEVEL
+const USAGE: &str = "room-cli thread show [CHILD_ID]
+room-cli thread update --self [--title TITLE] [--reasoning-level LEVEL]
 room-cli thread archive --self
 room-cli thread move --self --project PROJECT
 room-cli thread stop --self
-room-cli thread spawn --provider codex|claude-code|pi|opencode|hermes|devin|droid|kimi|fx|openclaw [--model MODEL] [--reasoning-level LEVEL] [--service-tier default|fast] [--title TITLE] [--shared-sandbox|--top-level] --prompt TEXT|--prompt-file PATH
-room-cli thread fork [--provider codex|claude-code|pi|opencode|hermes|devin|droid|kimi|fx|openclaw] [--model MODEL] [--reasoning-level LEVEL] [--title TITLE] --prompt TEXT|--prompt-file PATH
+room-cli thread spawn --provider codex|claude-code|cursor|pi|opencode|hermes|devin|droid|kimi|fx|openclaw [--model MODEL] [--reasoning-level LEVEL] [--service-tier default|fast] [--title TITLE] [--shared-sandbox|--top-level] --prompt TEXT|--prompt-file PATH
+room-cli thread fork [--provider codex|claude-code|cursor|pi|opencode|hermes|devin|droid|kimi|fx|openclaw] [--model MODEL] [--reasoning-level LEVEL] [--title TITLE] --prompt TEXT|--prompt-file PATH
 room-cli thread list [--include-archived]
+room-cli thread wait --children
 room-cli thread output CHILD_ID [--all]
-room-cli thread tell THREAD_ID|--parent TEXT
+room-cli thread log CHILD_ID
+room-cli thread tell THREAD_ID|--parent [--mode queue|steer|auto] TEXT|--message-file PATH
 room-cli thread stop CHILD_ID
-room-cli thread archive CHILD_ID";
+room-cli thread archive CHILD_ID...
+Flags go in any order.";
+const ABOUT: &str = "Shows, renames, archives, moves or changes the effort of this cloud thread, or starts, checks, stops and archives its child threads. --top-level starts a top-level thread instead of a child, only when the user asks for one.";
+/// `room-cli thread` commands only the app on the user's computer has.
+const LOCAL_ONLY: [&str; 28] = [
+    "count",
+    "context",
+    "open",
+    "pane",
+    "section",
+    "search",
+    "history",
+    "read",
+    "unread",
+    "reorder-pinned",
+    "queue",
+    "tabs",
+    "unarchive",
+    "pin",
+    "unpin",
+    "delete",
+    "edit-message",
+    "retry",
+    "compact",
+    "clear",
+    "cancel-plan",
+    "clear-goal",
+    "pause-goal",
+    "resume-goal",
+    "set-goal",
+    "chat",
+    "interactions",
+    "worktree",
+];
 const SPAWN_NOTE: &str = "Started in this sandbox and folder. Keep working: Cloudroom sends you a message each time it finishes a turn.";
 const OWN_NOTE: &str = "Started in its own sandbox with a copy of your code (commits and uncommitted changes, without gitignored files or dependencies; nested Git repos arrive empty or without history), on its own branch. It doesn't see your later edits; share work through Git. Use this ID with tell, stop and archive. Keep working: Cloudroom sends you a message each time it finishes a turn.";
 /// What `thread tell` answers once its message is steered, unconfirmed or queued: for a subagent, which reports back,
@@ -61,29 +96,32 @@ const SPAWN_WAIT: Duration = Duration::from_secs(75);
 /// How long a fork waits for the app. It stays under Claude Code's 2-minute command limit, so the agent always
 /// sees the outcome instead of a killed command it might retry. The app ignores older requests (AGENT_FORK_WAIT).
 const FORK_WAIT: Duration = Duration::from_secs(90);
+/// How long `thread wait` blocks before the agent must run it again. It stays under Claude Code's 2-minute command
+/// limit, so the agent always sees the outcome instead of a killed command.
+const CHILD_WAIT: Duration = Duration::from_secs(100);
 /// How long a child request's outcome is remembered, so a retried spawn or a repeated app answer gets the same one.
 const OUTCOME_KEPT: Duration = Duration::from_secs(3600);
 /// Each fork request's outcome, by session and request ID. It is decided once, under this lock, so a late answer
 /// never makes a fork the agent was told failed.
 static CHILDREN: LazyLock<Mutex<HashMap<String, Outcome>>> = LazyLock::new(Mutex::default);
 
-/// The calling session's children in sandboxes of their own whose start the website hasn't finished yet, in its first
-/// 10 minutes. After that `tell`, `stop` and `output` stop asking to retry and pass on the website's answer (#1058).
-pub(super) fn starting(m: &Manager, parent: &str) -> Vec<String> {
+/// The calling session's children in sandboxes of their own whose start the website hasn't finished yet. `fresh`: only
+/// those in their first 10 minutes, for which `tell`, `stop` and `output` still ask to retry (#1058).
+pub(super) fn starting(m: &Manager, parent: &str, fresh: bool) -> Vec<String> {
     let local = m.local.lock().unwrap();
     let Some(session) = local.sessions.get(parent) else {
         return Vec::new();
     };
     let since = crate::observability::now_ms().saturating_sub(10 * 60_000);
-    let fresh = session.child_starts.values().filter(|s| s.at_ms > since);
-    fresh
-        .filter_map(|s| s.child.clone())
-        .filter(|child| {
-            session
-                .child_states
-                .get(child)
-                .is_some_and(|s| s == "starting")
-        })
+    let recent = |child: &String| {
+        let mut starts = session.child_starts.values();
+        starts.any(|s| s.child.as_ref() == Some(child) && s.at_ms > since)
+    };
+    session
+        .child_states
+        .iter()
+        .filter(|(child, state)| *state == "starting" && (!fresh || recent(child)))
+        .map(|(child, _)| child.clone())
         .collect()
 }
 
@@ -172,6 +210,9 @@ pub struct Effort {
 #[serde(deny_unknown_fields)]
 pub struct Tell {
     text: String,
+    /// `--mode queue`: wait for a running turn to end instead of joining it.
+    #[serde(default)]
+    mode: Option<String>,
 }
 
 fn valid(title: &str) -> bool {
@@ -190,11 +231,13 @@ pub(crate) fn agent_routes() -> Router<Arc<Manager>> {
         .route("/archive", post(archive))
         .route("/move", post(move_project))
         .route("/children", get(list).post(spawn))
+        .route("/working", get(working))
         .route("/fork", post(fork))
         .route("/children/{id}", get(output))
         .route("/children/{id}/messages", post(tell))
         .route("/children/{id}/stop", post(stop_child))
         .route("/children/{id}/archive", post(archive_child))
+        .merge(super::info::agent_routes())
 }
 
 /// The session whose harness process sent this `cloudroom <command>` request.
@@ -204,7 +247,7 @@ pub(crate) fn caller(m: &Manager, peer: Peer, command: &str) -> Result<String, F
         .and_then(|pid| m.harness_session(&crate::secrets::ancestors(pid)))
         .ok_or(fail(
             StatusCode::CONFLICT,
-            &format!("Run cloudroom {command} from a Cloudroom cloud thread"),
+            &format!("Run room-cli {command} from a Cloudroom cloud thread"),
         ))
 }
 
@@ -251,7 +294,13 @@ async fn rename(
             "Use a title of 1-200 characters",
         ));
     }
-    record(&m, &session, "title", json!({"title":title}))
+    // `wake`: the website drops a report from an earlier wake, so a late one never undoes a newer change (#237).
+    record(
+        &m,
+        &session,
+        "title",
+        json!({"title":title,"wake":m.wake_id()}),
+    )
 }
 
 /// The new effort applies from this session's next turn; the app shows it as the thread's effort.
@@ -268,7 +317,7 @@ async fn set_reasoning(
         &m,
         &session,
         "reasoning",
-        json!({"reasoning":input.reasoning}),
+        json!({"reasoning":input.reasoning,"wake":m.wake_id()}),
     )
 }
 
@@ -283,7 +332,7 @@ async fn archive(
         &m,
         &session,
         "archive",
-        json!({"archived":true,"kept_live":kept}),
+        json!({"archived":true,"kept_live":kept,"self":true,"wake":m.wake_id()}),
     )
 }
 
@@ -359,7 +408,7 @@ pub(super) fn random_key() -> io::Result<String> {
 async fn spawn(
     State(m): State<Arc<Manager>>,
     ConnectInfo(peer): ConnectInfo<Peer>,
-    Json(input): Json<SpawnBody>,
+    Json(mut input): Json<SpawnBody>,
 ) -> Result<Json<Value>, Failure> {
     let parent = caller(&m, peer, "thread spawn")?;
     let bad = |message: &str| fail(StatusCode::CONFLICT, message);
@@ -370,6 +419,8 @@ async fn spawn(
         input.reasoning.as_deref(),
         input.provider.as_deref(),
     )?;
+    // The website and the app read Core's name: `acp-cursor` goes on as `cursor`.
+    input.provider = harness.and_then(|k| json!(k).as_str().map(str::to_owned));
     if input
         .service_tier
         .as_deref()
@@ -614,8 +665,8 @@ fn check_start(
     }
     provider
         .map(|p| {
-            serde_json::from_value(json!(p)).map_err(|_| {
-                bad("Use --provider codex, claude-code, pi, opencode, hermes, devin, droid, kimi, fx or openclaw")
+            crate::runtime::Kind::named(p).ok_or_else(|| {
+                bad("Use --provider codex, claude-code, cursor, pi, opencode, hermes, devin, droid, kimi, fx or openclaw")
             })
         })
         .transpose()
@@ -713,7 +764,7 @@ async fn ask_app(
 async fn fork(
     State(m): State<Arc<Manager>>,
     ConnectInfo(peer): ConnectInfo<Peer>,
-    Json(input): Json<ForkBody>,
+    Json(mut input): Json<ForkBody>,
 ) -> Result<Json<Value>, Failure> {
     let parent = caller(&m, peer, "thread fork")?;
     let harness = check_start(
@@ -723,6 +774,8 @@ async fn fork(
         input.reasoning.as_deref(),
         input.provider.as_deref(),
     )?;
+    // The website and the app read Core's name: `acp-cursor` goes on as `cursor`.
+    input.provider = harness.and_then(|k| json!(k).as_str().map(str::to_owned));
     pi_model(&m, &parent, harness, input.model.as_deref())?;
     let key = request_key(input.request_id)?;
     let mut data = json!({"id":format!("fork_{key}"),"prompt":input.prompt});
@@ -807,6 +860,30 @@ async fn list(
     Ok(Json(answer))
 }
 
+/// `thread wait`: the caller's open children still at work, from what this Core already knows, so each check costs
+/// the website nothing. A child in a sandbox of its own counts from its start or a `tell` until its next turn report.
+async fn working(
+    State(m): State<Arc<Manager>>,
+    ConnectInfo(peer): ConnectInfo<Peer>,
+) -> Result<Json<Value>, Failure> {
+    let parent = caller(&m, peer, "thread wait")?;
+    let here = m.children(&parent, None, false).await;
+    let here = here["children"].as_array().into_iter().flatten();
+    let mut working: Vec<String> = here
+        .filter(|child| child["busy"] == true)
+        .filter_map(|child| Some(child["id"].as_str()?.to_owned()))
+        .collect();
+    let local = m.local.lock().unwrap();
+    let own = local.sessions.get(&parent).map(|s| s.child_states.iter());
+    working.extend(
+        own.into_iter()
+            .flatten()
+            .filter(|(_, state)| matches!(state.as_str(), "starting" | "running"))
+            .map(|(child, _)| child.clone()),
+    );
+    Ok(Json(json!({"working":working})))
+}
+
 #[derive(Deserialize)]
 struct OutputQuery {
     #[serde(default)]
@@ -832,7 +909,7 @@ async fn output(
         return match api.get("chat", &[("thread", &id), ("all", all)]).await {
             // The website may not know a child that just started yet, or has no chat of it yet (#317).
             Err(super::history::ApiError::Status(404, _))
-                if starting(&m, &parent).contains(&id) =>
+                if starting(&m, &parent, true).contains(&id) =>
             {
                 Ok(
                     json!({"id":id,"state":"starting","note":"Its sandbox is still starting. Its replies arrive as messages when its turns end."}),
@@ -861,9 +938,13 @@ async fn output(
         .map_err(|error| website_failure(error, "read the child's chat"));
     }
     m.own_child(&parent, &id).map_err(session_failure)?;
-    Ok(Json(
-        m.children(&parent, Some(&id), true).await["children"][0].clone(),
-    ))
+    let mut answer = m.children(&parent, Some(&id), true).await["children"][0].clone();
+    // Core keeps only the latest reply of a child in this sandbox, so `thread log` and `--all` say so.
+    if query.all && answer.is_object() {
+        answer["note"] =
+            json!("A child in this sandbox keeps only its latest reply, not its whole chat.");
+    }
+    Ok(Json(answer))
 }
 
 async fn tell(
@@ -880,6 +961,7 @@ async fn tell(
         ));
     }
     let to_parent = id == "parent";
+    let queue = input.mode.as_deref() == Some("queue");
     let id = if to_parent {
         // `thread tell --parent`: the thread that started this one, in this sandbox or another. A sandbox's thread
         // that started without one (the user moved it, or its start left it out) asks the website for its saved
@@ -900,7 +982,8 @@ async fn tell(
         id
     };
     if relay::thread_id(&id) || id == "parent" {
-        return relay::command(&m, &sender, &id, "tell", Some(&input.text), to_parent).await;
+        let text = Some(input.text.as_str());
+        return relay::command(&m, &sender, &id, "tell", text, to_parent, queue).await;
     }
     let under = m.tell_target(&sender, &id).map_err(session_failure)?;
     let text = if under {
@@ -908,9 +991,10 @@ async fn tell(
     } else {
         from_thread(&sender, &input.text)
     };
+    let prompt = json!({"text":text});
     let request =
         random_key().map_err(|e| fail(StatusCode::SERVICE_UNAVAILABLE, &e.to_string()))?;
-    deliver(&m, &id, &request, &text, under).await
+    deliver(&m, &id, &request, prompt, under, Some(&sender), queue).await
 }
 
 pub(super) const NO_PARENT: &str = "This thread has no parent that `thread tell --parent` can reach. If another thread started it, Cloudroom passes it your reply when this turn ends.";
@@ -918,17 +1002,19 @@ pub(super) const NO_PARENT: &str = "This thread has no parent that `thread tell 
 /// A message to a thread that isn't the sender's subagent says who sent it, as in Local threads, where the app shows
 /// it as an agent's message.
 fn from_thread(sender: &str, text: &str) -> String {
-    format!("[bb message from thread:{sender}]\n\n{text}")
+    format!("[message from thread:{sender}]\n\n{text}")
 }
 
-/// Sends a message into the session's running turn, or else queues it. A request already delivered stays as it is,
-/// so a retried relay never sends it twice.
+/// Sends a message (`input`, a prompt's) into the session's running turn, or else queues it; `queue` (`tell --mode
+/// queue`) always queues it. A request already delivered stays as it is, so a retried relay never sends it twice.
 pub(super) async fn deliver(
     m: &Arc<Manager>,
     id: &str,
     request: &str,
-    text: &str,
+    input: Value,
     child: bool,
+    sender: Option<&str>,
+    queue: bool,
 ) -> Result<Json<Value>, Failure> {
     let notes = if child { CHILD_NOTES } else { OTHER_NOTES };
     let steer_id = format!("{request}_steer");
@@ -939,7 +1025,8 @@ pub(super) async fn deliver(
     let steered = match m.receipt(id, &steer_id) {
         Some(s) if s.state != "failed" => return Ok(Json(json!({"id":id,"state":s.state}))),
         Some(_) => None,
-        None => steer(m, id, &steer_id, text).await,
+        None if queue => None,
+        None => steer(m, id, &steer_id, input.clone(), sender).await,
     };
     match steered.as_deref() {
         Some("completed") => {
@@ -951,7 +1038,7 @@ pub(super) async fn deliver(
         None => {}
     }
     let receipt = m
-        .command_held(id, request.to_owned(), "prompt", json!({"text":text}), true)
+        .command_from(id, request.to_owned(), "prompt", input, true, sender)
         .map_err(session_failure)?;
     let local = m.local.lock().unwrap();
     if local.sessions.get(id).is_some_and(|s| s.queue_paused) {
@@ -978,7 +1065,13 @@ pub(super) fn website_failure(error: super::history::ApiError, what: &str) -> Fa
 
 /// Sends a busy child the message in its running turn, as in Local threads, so it never waits
 /// behind older messages. None means it was not delivered, so it can safely queue instead.
-async fn steer(m: &Arc<Manager>, id: &str, request: &str, text: &str) -> Option<String> {
+async fn steer(
+    m: &Arc<Manager>,
+    id: &str,
+    request: &str,
+    mut input: Value,
+    sender: Option<&str>,
+) -> Option<String> {
     let target = m
         .local
         .lock()
@@ -988,8 +1081,9 @@ async fn steer(m: &Arc<Manager>, id: &str, request: &str, text: &str) -> Option<
         .current_request
         .clone()?;
     let mut changed = m.subscribe();
-    let input = json!({"text":text,"target_request_id":target});
-    m.command(id, request.to_owned(), "steer", input).ok()?;
+    input["target_request_id"] = json!(target);
+    m.command_from(id, request.to_owned(), "steer", input, false, sender)
+        .ok()?;
     let settled = async {
         loop {
             let state = m.receipt(id, request).map(|r| r.state).unwrap_or_default();
@@ -1013,7 +1107,7 @@ async fn stop_child(
 ) -> Result<Json<Value>, Failure> {
     let parent = caller(&m, peer, "thread stop")?;
     if relay::thread_id(&id) {
-        return relay::command(&m, &parent, &id, "stop", None, false).await;
+        return relay::command(&m, &parent, &id, "stop", None, false, false).await;
     }
     m.own_child(&parent, &id).map_err(session_failure)?;
     let key = || random_key().map_err(|e| fail(StatusCode::SERVICE_UNAVAILABLE, &e.to_string()));
@@ -1034,7 +1128,7 @@ async fn archive_child(
 ) -> Result<Json<Value>, Failure> {
     let parent = caller(&m, peer, "thread archive")?;
     if relay::thread_id(&id) {
-        return relay::command(&m, &parent, &id, "archive", None, false).await;
+        return relay::command(&m, &parent, &id, "archive", None, false, false).await;
     }
     m.own_child(&parent, &id).map_err(session_failure)?;
     // A child that already ended has nothing to stop. Stop it first, so it starts no new children.
@@ -1084,6 +1178,29 @@ const FORK_VALUES: [&str; 8] = [
     "--prompt",
     "--prompt-file",
 ];
+
+/// A flag that needs a value and has none, or has another option right after it: `--title --self`.
+fn missing_value<'a>(words: &[&'a str]) -> Option<&'a str> {
+    let option = |word: &str| word.starts_with("--") && !word.contains(' ');
+    let takes_value =
+        |word: &str| SPAWN_VALUES.contains(&word) || matches!(word, "--message-file" | "--mode");
+    (0..words.len())
+        .find(|&i| takes_value(words[i]) && words.get(i + 1).is_none_or(|next| option(next)))
+        .map(|i| words[i])
+}
+
+/// A thread ID without the `@thread:` prefix agents write in chat. The Local CLI accepts both too.
+fn mention(word: &str) -> &str {
+    let id = |b: u8| b.is_ascii_alphanumeric() || b == b'_' || b == b'-';
+    match word.strip_prefix("@thread:") {
+        Some(rest)
+            if (rest.starts_with("thr_") || rest.starts_with("cr_")) && rest.bytes().all(id) =>
+        {
+            rest
+        }
+        _ => word,
+    }
+}
 
 /// The first word a command would otherwise ignore, so nothing the agent asked for is silently dropped.
 fn unknown_word<'a>(words: &[&'a str], values: &[&str], switches: &[&str]) -> Option<&'a str> {
@@ -1213,23 +1330,72 @@ async fn fork_cli(words: &[&str]) -> io::Result<i32> {
     Ok(0)
 }
 
-/// The same `room-cli thread ... --self` forms local threads use. `--json` is accepted and
-/// ignored because the answer is always JSON.
+/// A command's plain words, in order, with its flags taken out: flags go in any order, as in Local threads
+/// (ADR 20261110-235800). Err: an option the command doesn't take, so nothing the agent asked for is silently
+/// dropped. Text with a space in it is never an option.
+fn plain<'a>(
+    words: &[&'a str],
+    values: &[&str],
+    switches: &[&str],
+) -> Result<Vec<&'a str>, &'a str> {
+    let mut plain = Vec::new();
+    let mut rest = words.iter();
+    while let Some(word) = rest.next() {
+        if values.contains(word) {
+            rest.next();
+        } else if word.starts_with("--") && !word.contains(' ') {
+            if !switches.contains(word) {
+                return Err(word);
+            }
+        } else {
+            plain.push(*word);
+        }
+    }
+    Ok(plain)
+}
+
+async fn call(method: &str, path: &str, body: Option<Value>) -> io::Result<Value> {
+    crate::mac::request(crate::mac::SOCKET, method, path, body).await
+}
+
+/// The same `room-cli thread` commands Local threads use, with flags in any order (ADR 20261110-235800). `--json`
+/// is accepted and ignored because the answer is always JSON.
 pub async fn cli(args: &[String]) -> io::Result<i32> {
     let words: Vec<&str> = args
         .iter()
         .map(String::as_str)
         .filter(|word| *word != "--json")
+        .map(mention)
         .collect();
-    let help = words.iter().any(|word| matches!(*word, "--help" | "-h"));
-    let (path, body) = match words.as_slice() {
-        _ if help => {
-            println!("{USAGE}");
-            return Ok(0);
-        }
-        ["spawn", rest @ ..] => return spawn_cli(rest).await,
-        ["fork", rest @ ..] => return fork_cli(rest).await,
-        ["list", rest @ ..] => {
+    if words.iter().any(|word| matches!(*word, "--help" | "-h")) {
+        println!("{USAGE}");
+        return Ok(0);
+    }
+    if let Some(flag) = missing_value(&words) {
+        eprintln!("{flag} needs a value.");
+        return Ok(2);
+    }
+    let Some((command, rest)) = words.split_first() else {
+        println!("{USAGE}\n{ABOUT}");
+        return Ok(0);
+    };
+    let usage = || {
+        println!("{USAGE}\n{ABOUT}");
+        Ok(2)
+    };
+    // The command's own words, or the option it doesn't take here.
+    let own = |values: &[&str], switches: &[&str]| {
+        plain(rest, values, switches).map_err(|word| {
+            eprintln!(
+                "Unknown option {word}. Cloud threads take only the options in `room-cli thread --help`."
+            );
+            2
+        })
+    };
+    let answer = match *command {
+        "spawn" => return spawn_cli(rest).await,
+        "fork" => return fork_cli(rest).await,
+        "list" => {
             // It lists only this thread's children, so a filter like --project is refused: an ignored one made an
             // empty list read as "the project has no open threads".
             if let Some(word) = unknown_word(rest, &[], &["--include-archived"]) {
@@ -1243,76 +1409,242 @@ pub async fn cli(args: &[String]) -> io::Result<i32> {
             } else {
                 "/children"
             };
-            let answer = crate::mac::request(crate::mac::SOCKET, "GET", path, None).await?;
-            println!("{answer}");
-            return Ok(0);
+            call("GET", path, None).await?
         }
-        ["output", id] | ["output", id, "--all"] | ["output", "--all", id] => {
-            let all = if words.contains(&"--all") {
-                "?all=true"
-            } else {
-                ""
+        // One blocking call instead of a wake-up per child. It prints the same list as `thread list`.
+        "wait" => {
+            if !matches!(own(&[], &["--children"]).as_deref(), Ok([])) {
+                eprintln!(
+                    "Cloud `thread wait` waits for this thread's own children: room-cli thread wait --children"
+                );
+                return Ok(2);
+            }
+            let end = Instant::now() + CHILD_WAIT;
+            // Children in sandboxes of their own that stopped without telling Core: it would count them forever.
+            let mut gone: Vec<String> = Vec::new();
+            let mut tick = 0;
+            let working = loop {
+                let answer = call("GET", "/working", None).await?;
+                let ids = answer["working"].as_array().into_iter().flatten();
+                let mut ids: Vec<&str> = ids.filter_map(Value::as_str).collect();
+                ids.retain(|id| !gone.iter().any(|g| g == id));
+                tick += 1;
+                // Every 20 seconds the website has the last word: its sandbox died, sleeps, or the user archived it.
+                if tick % 10 == 0 && ids.iter().any(|id| id.starts_with("thr_")) {
+                    let list = call("GET", "/children?include_archived=true", None).await?;
+                    let active = |id: &str| {
+                        let mut children = list["children"].as_array().into_iter().flatten();
+                        children.any(|c| c["id"] == id && c["status"] == "active")
+                    };
+                    // A list without the website's part says nothing about them.
+                    if !list["note"].is_string() {
+                        ids.retain(|id| {
+                            let stopped = id.starts_with("thr_") && !active(id);
+                            if stopped {
+                                gone.push(id.to_string());
+                            }
+                            !stopped
+                        });
+                    }
+                }
+                if ids.is_empty() || Instant::now() >= end {
+                    break ids.len();
+                }
+                tokio::time::sleep(Duration::from_secs(2)).await;
             };
-            let answer = crate::mac::request(
-                crate::mac::SOCKET,
-                "GET",
-                &format!("/children/{id}{all}"),
-                None,
-            )
-            .await?;
+            let mut answer = call("GET", "/children", None).await?;
+            if working > 0 {
+                answer["wait"] = json!(format!(
+                    "{working} child threads are still working. Run the command again to keep waiting."
+                ));
+            }
             println!("{answer}");
-            return Ok(0);
+            return Ok(if working > 0 { 2 } else { 0 });
         }
-        ["tell", id, text] | ["tell", id, "--prompt", text] => {
+        // This thread, or one child as `thread list` shows it.
+        "show" => match own(&[], &["--self"]) {
+            Ok(ids) if ids.is_empty() => call("GET", "/thread", None).await?["thread"].take(),
+            Ok(ids) if ids.len() == 1 && !rest.contains(&"--self") => {
+                let mut list = call("GET", "/children?include_archived=true", None).await?;
+                let children = list["children"].as_array_mut();
+                let child = children
+                    .into_iter()
+                    .flatten()
+                    .find(|child| child["id"] == ids[0]);
+                let Some(child) = child else {
+                    eprintln!(
+                        "{} is not a child thread of this thread. See room-cli thread list.",
+                        ids[0]
+                    );
+                    return Ok(1);
+                };
+                child.take()
+            }
+            Ok(_) => return usage(),
+            Err(code) => return Ok(code),
+        },
+        // `log` is the child's whole chat: `output --all`.
+        "output" | "log" => match own(&[], &["--all", "--self"]) {
+            Ok(ids) if ids.len() == 1 && !rest.contains(&"--self") => {
+                let all = if *command == "log" || rest.contains(&"--all") {
+                    "?all=true"
+                } else {
+                    ""
+                };
+                call("GET", &format!("/children/{}{all}", ids[0]), None).await?
+            }
+            Ok(_) => {
+                eprintln!(
+                    "Name a child: room-cli thread {command} CHILD_ID. Your own chat is already in your context."
+                );
+                return Ok(2);
+            }
+            Err(code) => return Ok(code),
+        },
+        "tell" => {
+            let Ok(ids) = own(&["--prompt", "--message-file", "--mode"], &["--parent"]) else {
+                return Ok(2);
+            };
+            // The Local CLI's modes and their long names (#1517). Steer and auto are what Core always did, so only
+            // queue is sent: a plain tell still works while an older Core runs.
+            let given = flag(rest, "--mode");
+            let queue = match given.map(|m| m.trim().to_ascii_lowercase()).as_deref() {
+                None | Some("auto" | "steer" | "steer-if-active") => false,
+                Some("queue" | "queue-if-active") => true,
+                Some(_) => {
+                    let given = given.unwrap_or_default();
+                    eprintln!(
+                        "Invalid message mode '{given}'. Expected 'queue', 'steer', or 'auto'."
+                    );
+                    return Ok(2);
+                }
+            };
             // `--parent` names the thread that started this one.
-            let id = if *id == "--parent" { "parent" } else { id };
-            let answer = crate::mac::request(
-                crate::mac::SOCKET,
-                "POST",
-                &format!("/children/{id}/messages"),
-                Some(json!({"text":text})),
-            )
-            .await?;
-            println!("{answer}");
-            return Ok(0);
+            let (id, said) = match (rest.contains(&"--parent"), ids.as_slice()) {
+                (true, said) if said.len() <= 1 => ("parent", said.first().copied()),
+                (false, [id, said @ ..]) if said.len() <= 1 => (*id, said.first().copied()),
+                _ => return usage(),
+            };
+            let file = flag(rest, "--message-file");
+            let text = match (said, flag(rest, "--prompt"), file) {
+                (Some(text), None, None) | (None, Some(text), None) => text.to_owned(),
+                (None, None, Some("-")) => io::read_to_string(io::stdin())?.trim_end().to_owned(),
+                (None, None, Some(path)) => std::fs::read_to_string(path)?.trim_end().to_owned(),
+                _ => return usage(),
+            };
+            let path = format!("/children/{id}/messages");
+            let body = if queue {
+                json!({"text":text,"mode":"queue"})
+            } else {
+                json!({"text":text})
+            };
+            call("POST", &path, Some(body)).await?
         }
-        ["update", "--self", "--title", title] | ["update", "--title", title, "--self"] => {
-            ("/title", Some(json!({"title":title})))
+        "update" => {
+            let ids = match own(&["--title", "--reasoning-level"], &["--self"]) {
+                Ok(ids) => ids,
+                Err(code) => return Ok(code),
+            };
+            if let Some(id) = ids.first() {
+                eprintln!(
+                    "A Cloud thread updates only itself; {id} is not needed. Omit it (or use --self)."
+                );
+                return Ok(2);
+            }
+            let changes = [
+                ("/title", "title", flag(rest, "--title")),
+                ("/reasoning", "reasoning", flag(rest, "--reasoning-level")),
+            ];
+            if changes.iter().all(|(_, _, value)| value.is_none()) {
+                return usage();
+            }
+            let mut answer = json!({});
+            for (path, key, value) in changes {
+                if let Some(value) = value {
+                    let changed = call("POST", path, Some(json!({key:value}))).await?;
+                    answer[key] = changed[key].clone();
+                }
+            }
+            answer
         }
-        ["update", "--self", "--reasoning-level", level]
-        | ["update", "--reasoning-level", level, "--self"] => {
-            ("/reasoning", Some(json!({"reasoning":level})))
-        }
-        ["archive", "--self"] => ("/archive", None),
-        ["move", "--self", "--project", project] | ["move", "--project", project, "--self"] => {
-            ("/move", Some(json!({"project":project})))
-        }
-        ["stop", "--self"] => {
-            println!(
-                "{}",
+        "archive" => match (rest.contains(&"--self"), own(&[], &["--self"])) {
+            (_, Err(code)) => return Ok(code),
+            (true, Ok(ids)) if ids.is_empty() => call("POST", "/archive", None).await?,
+            (false, Ok(ids)) if ids.len() == 1 => {
+                call("POST", &format!("/children/{}/archive", ids[0]), None).await?
+            }
+            // Several children: one failure does not stop the rest.
+            (false, Ok(ids)) if ids.len() > 1 => {
+                let (mut archived, mut failed) = (Vec::new(), Vec::new());
+                for id in ids {
+                    match call("POST", &format!("/children/{id}/archive"), None).await {
+                        Ok(answer) => archived.push(answer),
+                        Err(error) => failed.push(json!({"id":id,"error":error.to_string()})),
+                    }
+                }
+                let code = if failed.is_empty() { 0 } else { 1 };
+                println!("{}", json!({"archived":archived,"failed":failed}));
+                return Ok(code);
+            }
+            _ => return usage(),
+        },
+        "move" => match (flag(rest, "--project"), own(&["--project"], &["--self"])) {
+            (_, Err(code)) => return Ok(code),
+            (Some(project), Ok(ids)) if ids.is_empty() => {
+                call("POST", "/move", Some(json!({"project":project}))).await?
+            }
+            _ => return usage(),
+        },
+        "stop" => match (rest.contains(&"--self"), own(&[], &["--self"])) {
+            (_, Err(code)) => return Ok(code),
+            (true, Ok(ids)) if ids.is_empty() => {
                 json!({"stopped":true,"note":"Archiving a cloud thread stops it; nothing else to do."})
-            );
-            return Ok(0);
+            }
+            (false, Ok(ids)) if ids.len() == 1 => {
+                call("POST", &format!("/children/{}/stop", ids[0]), None).await?
+            }
+            _ => return usage(),
+        },
+        other if LOCAL_ONLY.contains(&other) => {
+            eprintln!("{}", super::info::on_computer(&format!("thread {other}")));
+            return Ok(2);
         }
-        [action @ ("stop" | "archive"), id] if !id.starts_with('-') => {
-            let answer = crate::mac::request(
-                crate::mac::SOCKET,
-                "POST",
-                &format!("/children/{id}/{action}"),
-                None,
-            )
-            .await?;
-            println!("{answer}");
-            return Ok(0);
-        }
-        _ => {
-            println!(
-                "{USAGE}\nRenames, archives, moves or changes the effort of this cloud thread, or starts, checks, stops and archives its child threads. --top-level starts a top-level thread instead of a child, only when the user asks for one."
-            );
-            return Ok(if words.is_empty() { 0 } else { 2 });
-        }
+        _ => return usage(),
     };
-    let answer = crate::mac::request(crate::mac::SOCKET, "POST", path, body).await?;
     println!("{answer}");
     Ok(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{mention, missing_value, plain};
+
+    #[test]
+    fn flags_go_in_any_order_and_need_their_values() {
+        // Words that are not options stay, in order, wherever the flags sit.
+        let words = ["--self", "a", "--title", "New name", "b"];
+        assert_eq!(plain(&words, &["--title"], &["--self"]), Ok(vec!["a", "b"]));
+        // An option the command does not take is named, not dropped.
+        assert_eq!(plain(&["a", "--bogus"], &[], &["--self"]), Err("--bogus"));
+        // A value with a space is text, even when it starts with dashes.
+        assert_eq!(plain(&["--not a flag"], &[], &[]), Ok(vec!["--not a flag"]));
+        // `--title --self` must not rename the thread to "--self".
+        assert_eq!(
+            missing_value(&["update", "--title", "--self"]),
+            Some("--title")
+        );
+        assert_eq!(
+            missing_value(&["tell", "thr_a", "--message-file"]),
+            Some("--message-file")
+        );
+        assert_eq!(
+            missing_value(&["tell", "thr_a", "--message-file", "-"]),
+            None
+        );
+        // Thread IDs as agents write them in chat.
+        assert_eq!(mention("@thread:thr_ab-1"), "thr_ab-1");
+        assert_eq!(mention("@thread:cr_child_9"), "cr_child_9");
+        assert_eq!(mention("@thread:thr_a b"), "@thread:thr_a b");
+        assert_eq!(mention("thr_ab"), "thr_ab");
+    }
 }

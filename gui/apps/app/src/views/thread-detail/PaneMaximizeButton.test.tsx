@@ -8,9 +8,9 @@ import {
   waitFor,
 } from "@testing-library/react";
 import { TooltipProvider } from "@cloudroom/shared-ui/tooltip";
-import type { BbDesktopInfo } from "@cloudroom/desktop-contract";
+import type { RoomDesktopInfo } from "@cloudroom/desktop-contract";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createBbDesktopApi } from "@/test/bb-desktop-test-utils";
+import { createRoomDesktopApi } from "@/test/room-desktop-test-utils";
 import { focusWithKeyboard } from "@/test/keyboard-focus";
 import { useIsBrowserDimmingModalOpen } from "@/hooks/useBrowserDimmingModal";
 import { PaneContext, type PaneContextValue } from "./PaneContext";
@@ -180,7 +180,7 @@ describe("PaneMaximizeButton", () => {
   });
 
   it("preserves full-screen copy in every desktop app context", async () => {
-    const desktopInfo: BbDesktopInfo = {
+    const desktopInfo: RoomDesktopInfo = {
       lastCheckedAt: null,
       latestVersion: null,
       pendingVersion: null,
@@ -189,7 +189,7 @@ describe("PaneMaximizeButton", () => {
       updateDownloaded: false,
       version: "0.0.0-test",
     };
-    window.bbDesktop = createBbDesktopApi(desktopInfo);
+    window.bbDesktop = createRoomDesktopApi(desktopInfo);
     renderButton(false);
 
     const button = screen.getByRole("button", {
@@ -204,7 +204,7 @@ describe("PaneMaximizeButton", () => {
   });
 
   it("hides the native desktop browser while the arrangement menu can cover it", async () => {
-    const desktopInfo: BbDesktopInfo = {
+    const desktopInfo: RoomDesktopInfo = {
       lastCheckedAt: null,
       latestVersion: null,
       pendingVersion: null,
@@ -213,7 +213,7 @@ describe("PaneMaximizeButton", () => {
       updateDownloaded: false,
       version: "0.0.0-test",
     };
-    window.bbDesktop = createBbDesktopApi(desktopInfo);
+    window.bbDesktop = createRoomDesktopApi(desktopInfo);
     renderButton(false);
     expect(screen.getByTestId("browser-overlay-state").textContent).toBe(
       "visible",

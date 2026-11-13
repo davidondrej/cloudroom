@@ -9,7 +9,7 @@ import {
 } from "@cloudroom/domain";
 import { formatThreadTimelineText } from "@cloudroom/thread-view";
 import { action } from "../../action.js";
-import { createCliBbSdk } from "../../client.js";
+import { createCliRoomSdk } from "../../client.js";
 import { createHerdrReporter } from "../../herdr.js";
 import { getErrorMessage } from "../helpers.js";
 import { describeThreadTellOutcome, postThreadMessage } from "./actions.js";
@@ -65,7 +65,7 @@ function canApproveOrDeny(interaction: PendingInteraction): boolean {
 }
 
 async function runChat(threadId: string, getUrl: () => string): Promise<void> {
-  const sdk = createCliBbSdk(getUrl());
+  const sdk = createCliRoomSdk(getUrl());
   const color = process.stdout.isTTY === true && !process.env.NO_COLOR;
   const herdr = createHerdrReporter({
     sessionId: threadId,

@@ -1,12 +1,6 @@
 // @vitest-environment jsdom
 
-import {
-  act,
-  cleanup,
-  fireEvent,
-  render,
-  screen,
-} from "@testing-library/react";
+import { act, cleanup, render, screen } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -35,8 +29,8 @@ vi.mock("@/hooks/queries/system-queries", () => ({
   }),
 }));
 
-vi.mock("@/lib/bb-desktop", () => ({
-  getBbDesktopInfo: () => null,
+vi.mock("@/lib/room-desktop", () => ({
+  getRoomDesktopInfo: () => null,
 }));
 
 vi.mock("@/hooks/mutations/thread-runtime-mutations", () => ({
@@ -47,9 +41,10 @@ vi.mock("@/hooks/mutations/thread-runtime-mutations", () => ({
   }),
 }));
 
+const resolveMutateAsync = vi.hoisted(() => vi.fn(async () => ({})));
 vi.mock("@/hooks/mutations/thread-interaction-mutations", () => ({
   useResolveThreadPendingInteraction: () => ({
-    mutateAsync: vi.fn(async () => ({})),
+    mutateAsync: resolveMutateAsync,
     isPending: false,
     error: null,
   }),
@@ -104,7 +99,7 @@ afterEach(() => {
 });
 
 describe("ThreadPendingInteractionBanner question shortcuts", () => {
-  it("ignores numeric answer shortcuts while collapsed and honours them again once expanded", () => {
+  it("answers a single-select question with one numeric shortcut", () => {
     render(
       <QueryClientProvider client={new QueryClient()}>
         <MemoryRouter>
@@ -117,18 +112,16 @@ describe("ThreadPendingInteractionBanner question shortcuts", () => {
         </MemoryRouter>
       </QueryClientProvider>,
     );
-    pressDigit("1");
-    expect(pressedState("AOption A")).toBe("true");
-    expect(pressedState("BOption B")).toBe("false");
-
-    fireEvent.click(screen.getByRole("button", { name: "Hide details" }));
-    pressDigit("2");
-    expect(pressedState("AOption A")).toBe("true");
-    expect(pressedState("BOption B")).toBe("false");
-
-    fireEvent.click(screen.getByRole("button", { name: "Show details" }));
     pressDigit("2");
     expect(pressedState("AOption A")).toBe("false");
     expect(pressedState("BOption B")).toBe("true");
+    expect(resolveMutateAsync).toHaveBeenCalledWith({
+      threadId: "thr_1",
+      interactionId: "pint_question",
+      resolution: {
+        kind: "user_answer",
+        answers: { path: { selected: ["b"] } },
+      },
+    });
   });
 });

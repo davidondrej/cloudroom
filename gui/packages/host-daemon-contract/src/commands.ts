@@ -354,6 +354,8 @@ export const threadStopCommandSchema = hostDaemonThreadTargetSchema
     type: z.literal("thread.stop"),
     intent: threadStopIntentSchema,
     immediate: z.boolean().optional(),
+    /** The user's own Stop: the agent may stay alive once its turn has ended. */
+    keepSession: z.boolean().optional(),
   })
   .strict();
 
@@ -770,6 +772,8 @@ const discoveredSkillSchema = z.object({
   filePath: z.string(),
   rootKind: skillRootKindSchema,
   linked: z.boolean(),
+  /** Linked skills: the skill folder with symlinks resolved. */
+  realDirectoryPath: z.string().optional(),
 });
 export type DiscoveredSkill = z.infer<typeof discoveredSkillSchema>;
 
@@ -806,16 +810,16 @@ const hostDeleteSkillCommandSchema = z
         message: "cwd is required to delete a bb-project skill",
       });
     }
-    const isBbScope =
+    const isRoomScope =
       command.scope === "bb-user" || command.scope === "bb-project";
-    if (isBbScope && command.rootPath !== null) {
+    if (isRoomScope && command.rootPath !== null) {
       context.addIssue({
         code: "custom",
         path: ["rootPath"],
         message: "rootPath must be null for a bb skill",
       });
     }
-    if (!isBbScope && command.rootPath === null) {
+    if (!isRoomScope && command.rootPath === null) {
       context.addIssue({
         code: "custom",
         path: ["rootPath"],
@@ -824,12 +828,12 @@ const hostDeleteSkillCommandSchema = z
     }
   });
 
-const writableBbSkillScopeSchema = z.enum(["bb-user", "bb-project"]);
+const writableRoomSkillScopeSchema = z.enum(["bb-user", "bb-project"]);
 
 const hostWriteSkillCommandSchema = z
   .object({
     type: z.literal("host.write_skill"),
-    scope: writableBbSkillScopeSchema,
+    scope: writableRoomSkillScopeSchema,
     name: z.string().min(1),
     cwd: z.string().min(1).nullable(),
     content: z.string().min(1).max(1_000_000),

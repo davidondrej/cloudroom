@@ -6,9 +6,9 @@ import { Miniflare, Response as MiniflareResponse } from "miniflare";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { decodeFrame, encodeFrame, type Frame } from "@cloudroom/tunnel-contract";
 import { OFFLINE_HEADER } from "./pages";
-import { GATE_AUTH_HEADER, GATE_MACHINE_ID_HEADER, MACHINE_CREDENTIAL_HEADER, PHONE_SESSION_HEADER, SESSION_COOKIE, TUNNEL_SESSION_HEADER, TUNNEL_TARGET_HEADER } from "./protocol-headers";
+import { GATE_AUTH_HEADER, GATE_MACHINE_ID_HEADER, MACHINE_CREDENTIAL_HEADER, PHONE_SESSION_HEADER, RELAY_SIGNAL_HEADER, SESSION_COOKIE, TUNNEL_SESSION_HEADER, TUNNEL_TARGET_HEADER } from "./protocol-headers";
 import { parseVisitorHost, requestForTunnelDo, returnUrl } from "./worker";
-import { createShareCode, sha256Hex } from "./store";
+import { DESKTOP_SESSION_TTL_MS, KEEP, MACS_PER_ACCOUNT, SESSION_TTL_MS, createShareCode, sha256Hex } from "./store";
 
 type ClientWebSocket = NonNullable<
   Awaited<ReturnType<Miniflare["dispatchFetch"]>>["webSocket"]
@@ -138,7 +138,7 @@ beforeAll(async () => {
     compatibilityFlags: ["nodejs_compat"],
     durableObjects: { TUNNEL_DO: "TunnelDO" },
     d1Databases: { DB: "relay-test" },
-    bindings: { BASE_DOMAIN: BASE, WEBSITE_URL: "https://website.test" },
+    bindings: { BASE_DOMAIN: BASE, WEBSITE_URL: "https://website.test", CONNECT_SIGNAL_SECRET: "signal-secret" },
     serviceBindings: { ASSETS: (request: { url: string }) => new MiniflareResponse(`asset:${new URL(request.url).pathname}`) },
     outboundService: (request: unknown) => website(request as Request),
   });
@@ -670,6 +670,200 @@ describe("Cloudroom Connect relay", () => {
     expect(computers.map((computer) => computer.handle)).not.toContain(handle);
   });
 
+  it("keeps the newest sign-ins of each kind, and one kind never signs out another", async () => {
+    website = () => MiniflareResponse.json({ userId: "user-limits" });
+    try {
+      const a = await register("a".repeat(32));
+      const b = await register("b".repeat(32));
+      const bTunnel = (await fetchRelay(`${b.serverUrl}/__tunnel?v=1`, {
+        headers: { upgrade: "websocket", authorization: `Bearer ${b.credential}` },
+      })).webSocket!;
+      serveMac(bTunnel);
+      const db = await mf.getD1Database("DB");
+      const idOf = async (mac: { handle: string }) =>
+        (await db.prepare("SELECT id FROM server WHERE handle = ?").bind(mac.handle).first<{ id: string }>())!.id;
+      const [aId, bId] = [await idOf(a), await idOf(b)];
+      const app = `https://app.${BASE}`;
+      const signIn = async () => cookieFrom(await fetchRelay(`${app}/__signin`, {
+        method: "POST",
+        headers: { origin: "https://website.test", "content-type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({ token: "a.b.c" }).toString(),
+      }));
+      const openB = async () => {
+        const opened = await fetchRelay(`https://${BASE}/api/computers/open`, {
+          method: "POST",
+          headers: { authorization: `Bearer ${a.credential}`, "content-type": "application/json" },
+          body: JSON.stringify({ handle: b.handle }),
+        });
+        expect(opened.status).toBe(200);
+        const { cookie } = (await opened.json()) as { cookie: { name: string; value: string } };
+        return `${cookie.name}=${cookie.value}`;
+      };
+      const share = async (phone: string) => {
+        const ticket = await fetchRelay(`${app}/__share?mac=${a.handle}&port=3000&return=%2F`, { headers: { cookie: phone } });
+        return cookieFrom(await fetchRelay(ticket.headers.get("location")!));
+      };
+      const hashOf = (cookie: string) => sha256Hex(cookie.slice(cookie.indexOf("=") + 1));
+      const live = async (...cookies: string[]) => Promise.all(cookies.map(async (cookie) =>
+        (await db.prepare("SELECT 1 FROM session WHERE token_hash = ?").bind(await hashOf(cookie)).first()) !== null));
+      const count = async (where: string, owner: string) =>
+        (await db.prepare(`SELECT COUNT(*) AS n FROM session WHERE ${where}`).bind(owner).first<{ n: number }>())!.n;
+      // Rows of one kind, newer than the next real one, as if its request reached the database late.
+      const fill = async (n: number, serverId: string, target: string | null, userId: string | null, ttl: number) => {
+        const start = Date.now() + 60 * 60_000;
+        await db.batch(Array.from({ length: n }, (_, i) => db
+          .prepare("INSERT INTO session (token_hash, server_id, target, expires_at, created_at, user_id) VALUES (?, ?, ?, ?, ?, ?)")
+          .bind(crypto.randomUUID().replaceAll("-", "").repeat(2), serverId, target, start + i + ttl, start + i, userId)));
+      };
+
+      // Only Macs can be opened: a remote host's or VPS's address serves no app.
+      const asA = { authorization: `Bearer ${a.credential}`, "content-type": "application/json" };
+      expect((await fetchRelay(`https://${BASE}/api/machines`, { method: "POST", headers: asA, body: "{}" })).status).toBe(200);
+      await db.prepare("INSERT INTO server (id, user_id, install_id, handle, credential_hash, kind, created_at) VALUES ('limits-vps', 'user-limits', 'vps-user-limits', 'limitsvps', 'hash-limits-vps', 'vps', ?)")
+        .bind(Date.now()).run();
+      const hostHandle = (await db.prepare("SELECT handle FROM server WHERE owner_server_id = ?").bind(aId).first<{ handle: string }>())!.handle;
+      for (const target of [hostHandle, "limitsvps"]) {
+        const opened = await fetchRelay(`https://${BASE}/api/computers/open`, { method: "POST", headers: asA, body: JSON.stringify({ handle: target }) });
+        expect(opened.status).toBe(404);
+      }
+      const others = async () =>
+        (await db.prepare("SELECT COUNT(*) AS n FROM session WHERE server_id NOT IN (?, ?) AND user_id IS NOT 'user-limits'").bind(aId, bId).first<{ n: number }>())!.n;
+      const othersBefore = await others();
+
+      // One sign-in of each kind, a day older than everything else, so each is the oldest of its kind.
+      const phone = await signIn();
+      const desktop = await openB();
+      const paired = await signInPhone(a);
+      const shared = await share(phone);
+      for (const cookie of [phone, desktop, paired, shared]) {
+        await db.prepare("UPDATE session SET created_at = created_at - 86400000, expires_at = expires_at - 86400000 WHERE token_hash = ?")
+          .bind(await hashOf(cookie)).run();
+      }
+
+      await fill(KEEP.macToMac.newest, bId, null, null, DESKTOP_SESSION_TTL_MS);
+      const desktop2 = await openB();
+      expect(await count(`server_id = ? AND target IS NULL AND user_id IS NULL AND expires_at - created_at = ${DESKTOP_SESSION_TTL_MS}`, bId))
+        .toBe(KEEP.macToMac.newest);
+      expect((await fetchRelay(`${b.serverUrl}/x`, { headers: { cookie: desktop } })).status).toBe(401);
+      expect(await (await fetchRelay(`${b.serverUrl}/x`, { headers: { cookie: desktop2 } })).text()).toBe("mac:app:/x");
+      expect(await live(phone, paired, shared)).toEqual([true, true, true]);
+
+      // Too many already (as before this limit): a wrong code ends none of them, the next pairing trims them.
+      const pairedOnA = () => count(`server_id = ? AND target IS NULL AND user_id IS NULL AND expires_at - created_at = ${SESSION_TTL_MS}`, aId);
+      await fill(KEEP.pairedPhones.newest + 5, aId, null, null, SESSION_TTL_MS);
+      expect((await fetchRelay(`https://${a.handle}.${BASE}/__pair?code=ZZZZ-ZZZZ`)).status).toBe(400);
+      expect(await pairedOnA()).toBe(KEEP.pairedPhones.newest + 6);
+      const paired2 = await signInPhone(a);
+      expect(await pairedOnA()).toBe(KEEP.pairedPhones.newest);
+      expect(await live(paired, paired2)).toEqual([false, true]);
+      expect(await live(phone, shared, desktop2)).toEqual([true, true, true]);
+
+      await fill(KEEP.shares.newest, aId, "3000", "user-limits", SESSION_TTL_MS);
+      const shared2 = await share(phone);
+      expect(await count("user_id = ? AND target IS NOT NULL", "user-limits")).toBe(KEEP.shares.newest);
+      expect(await live(shared, shared2)).toEqual([false, true]);
+      expect(await live(phone, paired2, desktop2)).toEqual([true, true, true]);
+
+      await fill(KEEP.phones.newest, bId, null, "user-limits", SESSION_TTL_MS);
+      const phone2 = await signIn();
+      expect(await count("user_id = ? AND target IS NULL", "user-limits")).toBe(KEEP.phones.newest);
+      expect(await live(phone, phone2)).toEqual([false, true]);
+      expect(await live(shared2, paired2, desktop2)).toEqual([true, true, true]);
+      expect(await others()).toBe(othersBefore);
+      bTunnel.close();
+    } finally {
+      website = () => MiniflareResponse.json({ userId: "user-1" });
+    }
+  });
+
+  it("keeps the newest unused codes of each kind", async () => {
+    website = () => MiniflareResponse.json({ userId: "user-codes" });
+    try {
+      const mac = await register("c".repeat(32));
+      const otherMac = await register("2".repeat(32));
+      const db = await mf.getD1Database("DB");
+      const idOf = async (server: { handle: string }) =>
+        (await db.prepare("SELECT id FROM server WHERE handle = ?").bind(server.handle).first<{ id: string }>())!.id;
+      const [macId, otherMacId, strangerMacId] = [await idOf(mac), await idOf(otherMac), await idOf({ handle })];
+      // Phone codes count per account: the oldest ones are on the account's other Mac.
+      const alphabet = "ABCDEFGHJKMNPQRSTVWXYZ23456789";
+      const old = Array.from({ length: KEEP.phoneCodes.newest }, (_, i) => `TEST${alphabet[i]}AAA`);
+      await db.batch(await Promise.all(old.map(async (code, i) => db
+        .prepare("INSERT INTO code (code_hash, server_id, target, expires_at) VALUES (?, ?, NULL, ?)")
+        .bind(await sha256Hex(code), i < 10 ? otherMacId : macId, Date.now() + 20 * 60_000 + i))));
+      const stranger = "STRANGE2";
+      await db.prepare("INSERT INTO code (code_hash, server_id, target, expires_at) VALUES (?, ?, NULL, ?)")
+        .bind(await sha256Hex(stranger), strangerMacId, Date.now() + 5 * 60_000).run();
+      const code = await phoneCode(mac.credential);
+      const codes = async (where: string, owner: string) =>
+        (await db.prepare(`SELECT COUNT(*) AS n FROM code WHERE ${where}`).bind(owner).first<{ n: number }>())!.n;
+      expect(await codes("server_id IN (SELECT id FROM server WHERE user_id = ?) AND target IS NULL", "user-codes"))
+        .toBe(KEEP.phoneCodes.newest);
+      expect((await fetchRelay(`https://${BASE}/pair?code=${stranger}`)).status).toBe(302);
+      expect((await fetchRelay(`https://${BASE}/pair?code=${old[0]}`)).status).toBe(400);
+      expect((await fetchRelay(`https://${BASE}/pair?code=${old[1]}`)).status).toBe(302);
+      expect((await fetchRelay(`https://${BASE}/pair?code=${code}`)).status).toBe(302);
+
+      const phone = cookieFrom(await fetchRelay(`https://app.${BASE}/__signin`, {
+        method: "POST",
+        headers: { origin: "https://website.test", "content-type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({ token: "a.b.c" }).toString(),
+      }));
+      await db.batch(Array.from({ length: KEEP.shareCodes.newest }, (_, i) => db
+        .prepare("INSERT INTO code (code_hash, server_id, target, expires_at, user_id) VALUES (?, ?, '3000', ?, 'user-codes')")
+        .bind(`ticket-${i}`, macId, Date.now() + 2 * 60_000 + i)));
+      expect(await createShareCode(db, macId, "3000", "user-codes", "f".repeat(64))).toBeNull();
+      expect(await codes("user_id = ? AND target IS NOT NULL", "user-codes")).toBe(KEEP.shareCodes.newest);
+      const ticket = await fetchRelay(`https://app.${BASE}/__share?mac=${mac.handle}&port=3000&return=%2F`, { headers: { cookie: phone } });
+      expect(await codes("user_id = ? AND target IS NOT NULL", "user-codes")).toBe(KEEP.shareCodes.newest);
+      expect(await codes("code_hash = ?", "ticket-0")).toBe(0);
+      expect((await fetchRelay(ticket.headers.get("location")!)).status).toBe(302);
+    } finally {
+      website = () => MiniflareResponse.json({ userId: "user-1" });
+    }
+  });
+
+  it("refuses a new Mac past the account's limit, but always takes back a Mac it knows", async () => {
+    website = () => MiniflareResponse.json({ userId: "user-macs" });
+    try {
+      const db = await mf.getD1Database("DB");
+      const now = Date.now();
+      await db.batch(Array.from({ length: MACS_PER_ACCOUNT - 3 }, (_, i) => db
+        .prepare("INSERT INTO server (id, user_id, install_id, handle, credential_hash, created_at) VALUES (?, 'user-macs', ?, ?, ?, ?)")
+        .bind(`macs-${i}`, String(i).padStart(32, "0"), `macs${i}`, `hash-macs-${i}`, now)));
+      // A VPS is not a Mac, so it doesn't count.
+      await db.prepare("INSERT INTO server (id, user_id, install_id, handle, credential_hash, kind, created_at) VALUES ('macs-vps', 'user-macs', 'vps-user-macs', 'macsvps', 'hash-macs-vps', 'vps', ?)")
+        .bind(now).run();
+      // Five new installs at once, with room for three.
+      const installs = ["d", "e", "8", "9", "1"].map((digit) => digit.repeat(32));
+      const tries = await Promise.all(installs.map((installId) => fetchRelay(`https://${BASE}/api/register`, {
+        method: "POST",
+        headers: { authorization: DESKTOP_AUTH, "content-type": "application/json" },
+        body: JSON.stringify({ installId }),
+      })));
+      expect(tries.map((response) => response.status).sort()).toEqual([200, 200, 200, 409, 409]);
+      const refused = tries.find((response) => response.status === 409)!;
+      expect(((await refused.json()) as { error: string }).error).toContain(`(${MACS_PER_ACCOUNT})`);
+      expect((await register("0".repeat(32))).handle).toBe("macs0");
+      const joined = installs[tries.findIndex((response) => response.status === 200)]!;
+      const first = (await tries.find((response) => response.status === 200)!.json()) as { handle: string };
+      expect((await register(joined)).handle).toBe(first.handle);
+    } finally {
+      website = () => MiniflareResponse.json({ userId: "user-1" });
+    }
+  });
+
+  it("never lets requests at the same time pass a Mac's remote-host limit", async () => {
+    const mac = await register("f".repeat(32));
+    const added = await Promise.all(Array.from({ length: 25 }, () => fetchRelay(`https://${BASE}/api/machines`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${mac.credential}`, "content-type": "application/json" },
+      body: "{}",
+    })));
+    expect(added.filter((response) => response.status === 200)).toHaveLength(20);
+    expect(added.filter((response) => response.status === 409)).toHaveLength(5);
+  });
+
   it("sends an unanswered read again on the Mac's next tunnel, but never a write", async () => {
     const mac = await register("66666666666666666666666666666666");
     const dialMac = () => fetchRelay(`${mac.serverUrl}/__tunnel?v=1`, {
@@ -688,6 +882,48 @@ describe("Cloudroom Connect relay", () => {
     expect(post.status).toBe(502);
     expect(await post.text()).toContain("tunnel reconnected mid-request");
     expect(seen.some((request) => request.path === "/api/v1/send")).toBe(false);
+  });
+
+  it("tells the account's Macs their Cloud threads changed, only for the website, and sends a burst's last one", async () => {
+    const signal = (secret: string) => fetchRelay(`https://${BASE}/api/threads-changed`, {
+      method: "POST", headers: { authorization: `Bearer ${secret}`, "content-type": "application/json" }, body: JSON.stringify({ user_id: "user-1" }),
+    });
+    expect((await signal("wrong")).status).toBe(401);
+    const signals = () => seen.filter((asked) => asked.path === "/api/v1/cloudroom/threads-changed" && asked.headers[RELAY_SIGNAL_HEADER] === "threads").length;
+    const wait = () => new Promise((resolve) => setTimeout(resolve, 1_300));
+    let before = signals();
+    expect((await signal("signal-secret")).status).toBe(202);
+    await wait();
+    const macs = signals() - before;
+    expect(macs).toBeGreaterThan(0);
+    // Three at once reach each online Mac twice: at once, then once more at the end of the second.
+    before = signals();
+    for (let i = 0; i < 3; i++) await signal("signal-secret");
+    await wait();
+    expect(signals() - before).toBe(2 * macs);
+    // A visitor can't send one: the relay drops its header.
+    expect(requestForTunnelDo(new Request(`https://${handle}.${BASE}/`, { headers: { [RELAY_SIGNAL_HEADER]: "threads" } }), null).headers.get(RELAY_SIGNAL_HEADER)).toBeNull();
+  });
+
+  it("holds new requests while a Mac's tunnel is briefly gone, then sends them on its next tunnel", async () => {
+    const mac = await register("88888888888888888888888888888888");
+    const dialMac = () => fetchRelay(`${mac.serverUrl}/__tunnel?v=2`, {
+      headers: { upgrade: "websocket", authorization: `Bearer ${mac.credential}` },
+    });
+    const dropped = (await dialMac()).webSocket!;
+    dropped.accept();
+    const cookie = await signInPhone(mac);
+    const origin = `https://${mac.handle}.${BASE}`;
+    dropped.close(1001, "network dropped");
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const read = fetchRelay(`${origin}/api/v1/projects`, { headers: { cookie } });
+    const write = fetchRelay(`${origin}/api/v1/held-send`, { method: "POST", headers: { cookie }, body: "hi" });
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    serveMac((await dialMac()).webSocket!);
+    const [got, sent] = await Promise.all([read, write]);
+    expect(got.status).toBe(200);
+    expect(sent.status).toBe(200);
+    expect(await sent.text()).toBe("mac:app:/api/v1/held-send");
   });
 
   it("shows a page that retries by itself when a page load's tunnel drops twice", async () => {
@@ -710,7 +946,8 @@ describe("Cloudroom Connect relay", () => {
 
   it("shows the offline page when the Mac is not connected", async () => {
     const cookie = await signInPhone();
-    tunnel.close();
+    // A normal close: the relay does not wait for this Mac to come back.
+    tunnel.close(1000, "quit");
     await new Promise((resolve) => setTimeout(resolve, 100));
     const page = await fetchRelay(`https://${handle}.${BASE}/`, {
       headers: { ...HTML, cookie },

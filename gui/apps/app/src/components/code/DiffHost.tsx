@@ -13,7 +13,7 @@ import {
 
 const DIFF_RENDERER_SLOT_KIND = "diffRenderer";
 
-const BbDiff = lazy(() => import("./BbDiff"));
+const RoomDiff = lazy(() => import("./RoomDiff"));
 
 interface DiffHostProps extends Partial<DiffPresentation> {
   file: ParsedGitDiffFile;
@@ -44,7 +44,7 @@ export function DiffHost({
 
   const original = (
     <Suspense fallback={fallback}>
-      <BbDiff
+      <RoomDiff
         file={file}
         patchText={patchText}
         fullFileContents={fullFileContents}

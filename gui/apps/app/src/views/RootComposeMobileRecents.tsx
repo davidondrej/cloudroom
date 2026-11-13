@@ -12,6 +12,7 @@ import {
   COARSE_POINTER_TEXT_SM_CLASS,
 } from "@cloudroom/shared-ui/coarse-pointer-sizing";
 import { Icon } from "@cloudroom/shared-ui/icon";
+import { LIST_PRESS_FEEDBACK } from "@cloudroom/shared-ui/motion";
 import { OverflowFade } from "@/components/ui/overflow-fade";
 import { getThreadRoutePath, isProjectlessProjectId } from "@/lib/route-paths";
 import {
@@ -323,6 +324,7 @@ function MobileRecentThreadRow({
         style={{ paddingLeft: getSidebarThreadRowPaddingLeft(depth) }}
         className={cn(
           "flex min-w-0 flex-1 items-center gap-2.5 rounded-md text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring",
+          LIST_PRESS_FEEDBACK,
           MOBILE_RECENT_ROW_HEIGHT_CLASS,
         )}
       >
@@ -425,7 +427,10 @@ export function RootComposeMobileRecents({
       aria-labelledby="root-compose-mobile-recents"
       className="md:hidden"
     >
-      <div className="sticky top-0 z-10 mb-1 bg-background px-2">
+      <div
+        data-wallpaper-clear=""
+        className="sticky top-0 z-10 mb-1 bg-background px-2"
+      >
         <h2
           id="root-compose-mobile-recents"
           className={CHROME_SECTION_LABEL_CLASS}

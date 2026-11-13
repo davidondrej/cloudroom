@@ -7,7 +7,7 @@ import { getLocalStorage } from "@/lib/browser-storage";
 const ORDER = ["credits", "star", "install"] as const;
 export type Popup = (typeof ORDER)[number];
 type Detail = "starred" | "opened" | "already" | "migrated";
-type State = { closed: Popup[]; shownAt: number | null; credits: boolean; checklistHides: number };
+type State = { closed: Popup[]; shownAt: number | null; credits: boolean; checklistHides: number; cardsLeft?: number };
 type Unsaved = { popup: Popup | "star_card"; detail?: Detail };
 const PATH = "/api/v1/cloudroom/popups";
 const KEY = ["cloudroom-popups"];
@@ -17,7 +17,7 @@ const LEGACY_KEYS: Partial<Record<Popup, string>> = { credits: "cloudroom.credit
 const statusAtom = atom<Partial<Record<Popup, boolean | null>>>({});
 const openAtom = atom<Popup | "claiming" | null>(null);
 
-const send = async (body: { popup: Popup | "star_card"; event: "shown" | "closed"; detail?: Detail }) => {
+const send = async (body: { popup: Popup | "star_card" | "cloud_card"; event: "shown" | "closed"; detail?: Detail }) => {
   const response = await fetchWithAppSurface(PATH, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
   if (!response.ok) throw new Error("The pop-up could not be saved.");
   return (await response.json() as { ok?: boolean }).ok === true;
@@ -46,7 +46,6 @@ async function saveClosed(item: Unsaved) {
   if (saved) writeUnsaved(readUnsaved().filter((other) => other.popup !== item.popup));
 }
 
-export const claimStarCard = () => send({ popup: "star_card", event: "shown" }).catch(() => false);
 export const closeStarCard = (detail?: "starred" | "opened") => void saveClosed({ popup: "star_card", ...(detail ? { detail } : {}) });
 
 function usePopupState() {
@@ -62,6 +61,45 @@ function usePopupState() {
       return { ...state, closed: [...new Set([...state.closed, ...unsaved.flatMap((item) => item.popup === "star_card" ? [] : [item.popup])])] };
     },
   });
+}
+
+// The cards above the chat input, most important first. Only the first one that wants to show does (ADR 20261111-222457).
+// The update card is a notice. The others spend the account's weekly budget when they show.
+const CARDS = ["update", "cloud", "star"] as const;
+type Card = (typeof CARDS)[number];
+const cardWantsAtom = atom<Record<Card, number>>({ update: 0, cloud: 0, star: 0 });
+const REFUSED_WAIT_MS = 10 * 60_000;
+const cardRefusedAtom = atom(false);
+
+/** True when this card may show: nothing more important wants the space above the chat input.
+ *  Pass null while this card is still loading what it needs to decide, so a less important card waits for it. */
+export function useCard(card: Card, wants: boolean | null): boolean {
+  const [all, setAll] = useAtom(cardWantsAtom);
+  const holds = wants !== false;
+  useEffect(() => {
+    if (!holds) return;
+    setAll((current) => ({ ...current, [card]: current[card] + 1 }));
+    return () => setAll((current) => ({ ...current, [card]: current[card] - 1 }));
+  }, [card, holds, setAll]);
+  return wants === true && CARDS.find((other) => all[other] > 0) === card;
+}
+
+/** The account's weekly budget for those cards. `left` is null while loading. `claim` spends one card:
+ *  false means none are left or another device just showed one, and nothing asks again for 10 minutes. */
+export function useCardBudget() {
+  const { data, isPending } = usePopupState();
+  const client = useQueryClient();
+  const [refused, setRefused] = useAtom(cardRefusedAtom);
+  const claim = async (popup: "star_card" | "cloud_card") => {
+    const claimed = await send({ popup, event: "shown" }).catch(() => false);
+    if (!claimed) {
+      setRefused(true);
+      setTimeout(() => setRefused(false), REFUSED_WAIT_MS);
+    }
+    void client.invalidateQueries({ queryKey: KEY });
+    return claimed;
+  };
+  return { left: isPending ? null : !refused && (data?.cardsLeft ?? 0) > 0, claim };
 }
 
 export const useCreditsCohort = () => {

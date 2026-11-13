@@ -1,5 +1,7 @@
 import { COMPUTER, PERSONAL_PROJECT_ID } from "@cloudroom/domain";
 import { appToast } from "@/components/ui/app-toast";
+import { sidebarNavigationQueryKey } from "@/hooks/queries/query-keys";
+import { appQueryClient } from "@/lib/app-query-client";
 import { wsManager } from "@/lib/ws";
 import {
   cloudApi,
@@ -34,6 +36,8 @@ const UI_PREFERENCE = /^\/api\/v1\/preferences\/ui\/([^/]+)$/;
 const PLUGIN_ASSET = /^\/api\/v1\/plugins\/[^/]+\/assets\//;
 const CLOUD_THREAD = /^\/api\/v1\/cloudroom\/threads\/(thr_[a-z0-9]+)(\/.*)?$/;
 const LIST_TTL_MS = 30_000;
+// No socket tells a Mac-off phone about new or archived threads, so its sidebar reloads the list this often.
+const SIDEBAR_REFRESH_MS = 60_000;
 const WAKE_MS = 90_000;
 const FIRST_ROWS_MS = 1500;
 const SAVED_TIMEOUT_MS = 700;
@@ -75,6 +79,7 @@ const newProject = (id: string | null, name: string | null): Project => ({
 const cloudEntry = (
   thread: CloudThreadSummary,
   projectId: string,
+  parentThreadId: string | null,
 ): ThreadEntry => {
   const at = thread.woke_at ? Date.parse(thread.woke_at) : 0;
   return {
@@ -87,7 +92,7 @@ const cloudEntry = (
     titleFallback: null,
     sectionId: null,
     status: "idle",
-    parentThreadId: null,
+    parentThreadId,
     sourceThreadId: null,
     originKind: null,
     originPluginId: null,
@@ -471,6 +476,10 @@ class CloudServer {
         checkMac(Math.min(delay * 2, MAC_CHECK_MAX_MS));
       }, delay);
     checkMac(MAC_CHECK_MS);
+    // A tick keeps the 30 s list cache, so one firing just after a resume reads nothing new.
+    setInterval(() => {
+      if (document.visibilityState === "visible") this.refreshSidebar();
+    }, SIDEBAR_REFRESH_MS);
     document.addEventListener("visibilitychange", () => {
       if (document.visibilityState !== "visible") {
         for (const thread of this.threads.values()) thread.pause();
@@ -478,7 +487,14 @@ class CloudServer {
       }
       reloadIfMacBack();
       this.list = null;
+      this.refreshSidebar();
       for (const thread of this.threads.values()) thread.refresh();
+    });
+  }
+
+  private refreshSidebar() {
+    void appQueryClient.invalidateQueries({
+      queryKey: sidebarNavigationQueryKey(),
     });
   }
 
@@ -629,7 +645,7 @@ class CloudServer {
         activeBackgroundAgentCount: 0,
         canSpawnChild: false,
         projectCopy: null,
-        ...cloudEntry(thread, body.projectId),
+        ...cloudEntry(thread, body.projectId, null),
         providerId: optional(body.providerId) ?? "claude-code",
         queuedMessageCount: 0,
       }),
@@ -821,7 +837,17 @@ class CloudServer {
         project = newProject(projectId, thread.project_name);
         projects.set(projectId!, project);
       }
-      project.threads.push(this.live(cloudEntry(thread, project.id)));
+      // A subagent sits under its parent, as on the desktop, when the parent is listed too.
+      const parent = thread.parent_thread_id ?? null;
+      project.threads.push(
+        this.live(
+          cloudEntry(
+            thread,
+            project.id,
+            parent && ids.has(parent) ? parent : null,
+          ),
+        ),
+      );
     }
     return {
       ...sidebar,

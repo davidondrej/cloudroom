@@ -298,7 +298,7 @@ describe("provider usage footer disclosure", () => {
       slot.getByTitle("Weekly · Fable · Reset time not reported").textContent,
     ).toBe("└7d Fable6%—");
     expect(claudeSection.style.getPropertyValue("--usage-label")).toBe(
-      "max(2.75rem, calc(8ch + 1px))",
+      "calc(8ch + 1px)",
     );
     expect(codexSection.style.getPropertyValue("--usage-label")).toBe("");
 

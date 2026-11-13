@@ -3127,7 +3127,7 @@ export interface PluginComposerApi {
  * composer, the embedded composer and `bb.sdk.threads.spawn` alike.
  */
 export interface ComposerSelection {
-  /** New-thread composers only. BB's personal-project id means "Don't work in a project". */
+  /** New-thread composers only. BB's personal-project id means "No project". */
   projectId?: string;
   /**
    * New-thread composers only. `{ type: "project-default" }` and a `host`
@@ -3389,7 +3389,7 @@ export interface NewThreadRequest {
   /** Cloud only: the GitHub branch the sandbox starts from. Omitted means the default branch. */
   baseBranch?: string;
   /**
-   * The selected project id. Choosing "Don't work in a project" submits BB's
+   * The selected project id. Choosing "No project" submits BB's
    * personal-project id (not `null`) together with a `personal` workspace
    * environment. Forward those fields unchanged to `threads.spawn`; if the
    * plugin needs project metadata, request it from the plugin backend with
@@ -3439,7 +3439,7 @@ export interface NewThreadRequest {
 export interface NewThreadComposerProps {
   /**
    * Seeds the project picker. The user can change it, including choosing
-   * "Don't work in a project"; see {@link NewThreadRequest.projectId} for the
+   * "No project"; see {@link NewThreadRequest.projectId} for the
    * submitted projectless shape.
    */
   defaultProjectId?: string;

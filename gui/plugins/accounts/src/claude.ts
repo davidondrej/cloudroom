@@ -1,13 +1,6 @@
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import {
-  accessSync,
-  constants,
-  mkdtempSync,
-  readFileSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
+import { accessSync, constants, readFileSync, rmSync } from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -21,13 +14,14 @@ import {
   spawnPortableProcess,
 } from "@cloudroom/process-utils";
 import {
+  createBrowserOpener,
   NO_TERMINAL,
   readClaudeToken,
   readOpenedUrl,
   spawnInTerminal,
-  writeBrowserOpener,
 } from "@cloudroom/process-utils/claude-token";
 import type { UsageWindow } from "./contract.js";
+import { readLogin } from "./profile.js";
 import { readReset, SignInAgainError, type Secret } from "./tokens.js";
 
 const YEAR_MS = 365 * 24 * 60 * 60_000;
@@ -77,9 +71,8 @@ interface Run {
   stop: () => void;
 }
 
-function windowsLogin(binary: string, profile: string): Run {
-  const dir = mkdtempSync(path.join(os.tmpdir(), "cloudroom-claude-"));
-  const browser = writeBrowserOpener(dir);
+function windowsLogin(binary: string, profile: string, dataDir: string): Run {
+  const { dir, browser } = createBrowserOpener(dataDir);
   const child = spawnPortableProcess({
     command: binary,
     args: ["auth", "login", "--claudeai"],
@@ -123,7 +116,9 @@ function windowsLogin(binary: string, profile: string): Run {
 export class ClaudeLogin {
   private readonly runs = new Map<string, Run>();
 
+  /** `dataDir` holds the sign-in opener: Claude runs it outside any sandbox, so it never goes in the OS temp folder. */
   constructor(
+    private readonly dataDir: string,
     private readonly setupToken: () =>
       | PluginClaudeSetupTokenRun
       | undefined = () => undefined,
@@ -150,7 +145,9 @@ export class ClaudeLogin {
     binary: string,
     profile?: string,
   ): Promise<{ sessionId: string; authorizeUrl: string }> {
-    const run = profile ? windowsLogin(binary, profile) : this.windowsToken();
+    const run = profile
+      ? windowsLogin(binary, profile, this.dataDir)
+      : this.windowsToken();
     const sessionId = randomUUID();
     this.runs.set(sessionId, run);
     for (
@@ -173,11 +170,7 @@ export class ClaudeLogin {
     if (!binary)
       throw new Error("Install Claude Code on this computer, then try again.");
     if (windows) return this.startWindows(binary, profile);
-    const dir = mkdtempSync(path.join(os.tmpdir(), "cloudroom-claude-"));
-    const browser = path.join(dir, "open");
-    writeFileSync(browser, `#!/bin/sh\nprintf '%s' "$1" > "$0.url"\n`, {
-      mode: 0o700,
-    });
+    const { dir, browser } = createBrowserOpener(this.dataDir);
     const command = `stty cols 1000; exec "$CLAUDE_BIN" ${profile ? "auth login --claudeai" : "setup-token"}`;
     const child = spawnInTerminal(command, {
       ...(profile ? profileEnv(profile) : process.env),
@@ -261,12 +254,153 @@ export const claudeSecret = (token: string) => ({
   expiresAt: Date.now() + YEAR_MS,
 });
 
+type ClaudeUsage = {
+  windows: UsageWindow[];
+  credits: { detail: string | null } | null;
+};
+
+const usageWindowSchema = z
+  .object({ utilization: z.number().nullish(), resets_at: z.string().nullish() })
+  .nullish();
+const usageSchema = z.object({
+  five_hour: usageWindowSchema,
+  seven_day: usageWindowSchema,
+  limits: z
+    .array(
+      z
+        .object({
+          kind: z.string(),
+          scope: z
+            .object({
+              model: z.object({ display_name: z.string().nullish() }).nullish(),
+              surface: z.null().optional(),
+            })
+            .nullish(),
+          percent: z.number().nullish(),
+          resets_at: z.string().nullish(),
+        })
+        .nullable()
+        .catch(null),
+    )
+    .nullish()
+    .catch([]),
+  extra_usage: z
+    .object({
+      is_enabled: z.boolean().nullish(),
+      monthly_limit: z.number().nullish(),
+      used_credits: z.number().nullish(),
+      currency: z.string().length(3).nullish(),
+    })
+    .nullish()
+    .catch(null),
+});
+
+const loginSchema = z.object({
+  claudeAiOauth: z.object({
+    accessToken: z.string().min(1),
+    expiresAt: z.number().nullish(),
+  }),
+});
+
+// A profile's full login, as Claude Code saved it (`readLogin`). Null when it can't be read or has expired.
+async function profileToken(profile: string): Promise<string | null> {
+  const login = loginSchema.safeParse(await readLogin(profile)).data?.claudeAiOauth;
+  return !login || (login.expiresAt != null && Date.now() >= login.expiresAt)
+    ? null
+    : login.accessToken;
+}
+
+// A full login reads Claude's usage page data: no reply is used, and each model's weekly limit (Fable) shows too.
+// Null when the login can't be read, has expired, or is rejected; Claude Code renews it on the account's next turn.
+// A short error (429, 5xx, a timeout) throws.
+export async function profileUsage(profile: string): Promise<ClaudeUsage | null> {
+  const token = await profileToken(profile);
+  if (!token) return null;
+  const response = await fetch("https://api.anthropic.com/api/oauth/usage", {
+    headers: {
+      authorization: `Bearer ${token}`,
+      accept: "application/json",
+      "anthropic-beta": "oauth-2025-04-20",
+      "user-agent": "claude-code/2.1.0",
+    },
+    signal: AbortSignal.timeout(15_000),
+  });
+  if (!response.ok) {
+    await response.body?.cancel();
+    if (response.status === 401 || response.status === 403) return null;
+    throw new Error(`Claude usage failed (HTTP ${response.status}).`);
+  }
+  const usage = usageSchema.parse(await response.json());
+  const windows: UsageWindow[] = [];
+  const add = (
+    label: string,
+    used: number | null | undefined,
+    resets: string | null | undefined,
+    model?: string,
+  ) => {
+    if (used == null || windows.some((window) => window.label === label)) return;
+    windows.push({
+      label,
+      usedPercent: Math.min(100, Math.max(0, used)),
+      resetsAt: readReset(resets),
+      ...(model ? { model } : {}),
+    });
+  };
+  add("Five-hour limit", usage.five_hour?.utilization, usage.five_hour?.resets_at);
+  add("Weekly limit", usage.seven_day?.utilization, usage.seven_day?.resets_at);
+  for (const limit of usage.limits ?? []) {
+    const model = limit?.scope?.model?.display_name?.trim().toLowerCase();
+    if (!limit || limit.kind !== "weekly_scoped" || !model) continue;
+    // The usage box shows "Weekly · Fable" as "7d fable".
+    add(
+      `Weekly · ${model.charAt(0).toUpperCase()}${model.slice(1)}`,
+      limit.percent,
+      limit.resets_at,
+      model,
+    );
+  }
+  if (windows.length === 0) return null;
+  const extra = usage.extra_usage;
+  const limited = [
+    usage.five_hour?.utilization,
+    usage.seven_day?.utilization,
+    ...(usage.limits ?? []).map((limit) => limit?.percent),
+  ].some((used) => used != null && used >= 100);
+  if (!extra?.is_enabled || !limited) return { windows, credits: null };
+  const money = (cents: number) =>
+    extra.currency
+      ? new Intl.NumberFormat("en-US", {
+          style: "currency",
+          currency: extra.currency,
+        }).format(cents / 100)
+      : (cents / 100).toFixed(2);
+  return {
+    windows,
+    credits: {
+      detail:
+        extra.used_credits == null
+          ? null
+          : extra.monthly_limit == null
+            ? `${money(extra.used_credits)} spent`
+            : `${money(extra.used_credits)} / ${money(extra.monthly_limit)}`,
+    },
+  };
+}
+
 // One-year setup tokens can't read /api/oauth/usage (it needs user:profile),
 // but every Claude reply carries the account's limits in its headers, even a 429.
 // OAuth replies need the Claude Code system prompt, or Anthropic answers 429.
+// An account with a full login (`profile`) reads /api/oauth/usage first.
+// A short error there keeps the last bars (`previous`): this check would drop each model's row.
 export async function claudeUsage(
   secret: Secret,
-): Promise<{ windows: UsageWindow[]; credits: { detail: null } | null }> {
+  profile?: string,
+  previous?: ClaudeUsage,
+): Promise<ClaudeUsage> {
+  const full = profile
+    ? await profileUsage(profile).catch(() => previous ?? null)
+    : null;
+  if (full) return full;
   const response = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: {
@@ -370,13 +504,23 @@ export async function profileAccount(profile?: string) {
       email: z.string().nullish(),
       orgId: z.string().nullish(),
       subscriptionType: z.string().nullish(),
+      planTier: z.string().nullish(),
     })
     .parse(JSON.parse(stdout));
   return {
     email: status.email ?? null,
     orgId: status.orgId ?? null,
     plan: status.subscriptionType ?? null,
+    tier: status.planTier ?? null,
   };
+}
+
+// Anthropic renamed Max 5x to Max and Max 20x to Ultra on 2026-10-30. Claude Code still calls both "max";
+// only its plan tier (`max_5x`, `max_20x`) tells them apart.
+export function claudePlanName(plan: string | null, tier?: string | null) {
+  if (tier === "max_20x") return "Ultra";
+  if (tier === "max_5x") return "Max";
+  return plan && plan.charAt(0).toUpperCase() + plan.slice(1);
 }
 
 export async function signOut(profile: string): Promise<void> {

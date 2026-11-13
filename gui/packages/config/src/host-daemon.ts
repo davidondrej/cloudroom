@@ -10,9 +10,9 @@ import {
   type LoadCommonConfigArgs,
 } from "./common.js";
 import {
-  BB_APP_URL_ENV,
-  BB_DEV_APP_PORT_ENV,
-  DEFAULT_BB_APP_URL,
+  ROOM_APP_URL_ENV,
+  ROOM_DEV_APP_PORT_ENV,
+  DEFAULT_ROOM_APP_URL,
 } from "./env-vars.js";
 import { assignIfDefined } from "./objects.js";
 import { loadHostDaemonPortValue } from "./ports.js";
@@ -69,8 +69,8 @@ export function loadHostDaemonConnectionConfig(
       "BB_APP_URL",
       readEnvVarWithDefault({
         context: loader.context,
-        defaultValue: DEFAULT_BB_APP_URL,
-        definition: BB_APP_URL_ENV,
+        defaultValue: DEFAULT_ROOM_APP_URL,
+        definition: ROOM_APP_URL_ENV,
         env: loader.env,
       }),
     ),
@@ -89,7 +89,7 @@ export function loadHostDaemonConnectionConfig(
   };
   const devAppPort = readOptionalEnvVar({
     context: loader.context,
-    definition: BB_DEV_APP_PORT_ENV,
+    definition: ROOM_DEV_APP_PORT_ENV,
     env: loader.env,
   });
 

@@ -1,8 +1,8 @@
 import semver from "semver";
 import {
-  bbDesktopVersionFeedSchema,
-  type BbDesktopInfo,
-  type BbDesktopVersionFeed,
+  roomDesktopVersionFeedSchema,
+  type RoomDesktopInfo,
+  type RoomDesktopVersionFeed,
 } from "@cloudroom/desktop-contract";
 import {
   createDesktopUpdateScheduler,
@@ -16,16 +16,16 @@ interface DesktopUpdateLogger {
 }
 
 interface ParseDesktopVersionFeedArgs {
-  channel: BbDesktopVersionFeed["channel"];
+  channel: RoomDesktopVersionFeed["channel"];
   checkedAt: string;
   currentVersion: string;
   payloadText: string;
-  platform: BbDesktopInfo["platform"];
+  platform: RoomDesktopInfo["platform"];
 }
 
 interface ValidDesktopVersionFeedParseResult {
-  feed: BbDesktopVersionFeed;
-  info: BbDesktopInfo;
+  feed: RoomDesktopVersionFeed;
+  info: RoomDesktopInfo;
   kind: "valid";
 }
 
@@ -39,14 +39,14 @@ type DesktopVersionFeedParseResult =
   | ValidDesktopVersionFeedParseResult;
 
 interface CreateDesktopUpdateServiceArgs {
-  channel: BbDesktopVersionFeed["channel"];
+  channel: RoomDesktopVersionFeed["channel"];
   currentVersion: string;
   enabled: boolean;
   feedUrl: string;
   fetchImpl?: typeof fetch;
   logger: DesktopUpdateLogger;
   now?: () => number;
-  platform: BbDesktopInfo["platform"];
+  platform: RoomDesktopInfo["platform"];
 }
 
 interface FetchDesktopVersionFeedArgs {
@@ -61,8 +61,8 @@ interface ApplyFailureArgs {
 
 function createBaseInfo(
   currentVersion: string,
-  platform: BbDesktopInfo["platform"],
-): BbDesktopInfo {
+  platform: RoomDesktopInfo["platform"],
+): RoomDesktopInfo {
   return {
     lastCheckedAt: null,
     latestVersion: null,
@@ -93,7 +93,7 @@ export function parseDesktopVersionFeed(
     };
   }
 
-  const parsedFeed = bbDesktopVersionFeedSchema.safeParse(payload);
+  const parsedFeed = roomDesktopVersionFeedSchema.safeParse(payload);
   if (!parsedFeed.success) {
     return {
       kind: "malformed",

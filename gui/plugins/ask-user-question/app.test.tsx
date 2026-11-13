@@ -88,7 +88,7 @@ describe("question interaction adapter", () => {
 
     expect(slot.getAllByText("Which database should we use?")).toHaveLength(2);
     fireEvent.click(getButtonByText(slot, "SQLite"));
-    fireEvent.click(getButtonByText(slot, "Submit answer"));
+    fireEvent.click(getButtonByText(slot, "Submit"));
 
     expect(submit).toHaveBeenCalledTimes(1);
     expect(submit.mock.calls[0]?.[0]).toEqual({

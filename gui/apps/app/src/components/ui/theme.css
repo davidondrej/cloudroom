@@ -335,8 +335,8 @@
     --bb-sidebar-sticky-tier-top: var(--bb-sidebar-sticky-label-top);
     --bb-sidebar-sticky-tier-height: var(--bb-sidebar-sticky-label-height);
     --bb-sidebar-sticky-tier-z-index: 60;
-    --bb-sidebar-sticky-tier-shield-top-height: var(
-      --bb-sidebar-sticky-stack-padding
+    --bb-sidebar-sticky-tier-shield-top-height: calc(
+      var(--bb-sidebar-sticky-stack-padding) + 2px
     );
     --bb-sidebar-sticky-tier-shield-bottom-height: var(
       --bb-sidebar-sticky-label-gap
@@ -904,11 +904,6 @@
   initial-value: 256px;
 }
 
-body.sidebar-resizing [data-sidebar="gap"],
-body.sidebar-resizing [data-sidebar="panel"] {
-  transition-duration: 0ms !important;
-}
-
 /*
  * Radix portals paint outside the pane tree, but Electron resolves native
  * window-drag regions separately from ordinary CSS stacking. Explicitly carve
@@ -1006,6 +1001,48 @@ body.sidebar-resizing [data-sidebar="panel"] {
    */
   .animate-indeterminate-progress {
     animation: indeterminate-progress 1.5s ease-in-out infinite;
+  }
+
+  /*
+   * Touch press feedback. The browser applies `:active` at touch-down, before
+   * any click handler runs, so a slow handler can never delay it. Both classes
+   * replace the system's grey tap flash, and neither changes layout.
+   * `.press-feedback` (buttons) shrinks, then springs back with a slight
+   * overshoot; `--press-scale` sets the depth. `.press-highlight` (rows) tints
+   * instead, after a short delay so a scroll doesn't flash each row it touches.
+   */
+  @media (pointer: coarse) {
+    .press-feedback,
+    .press-highlight {
+      -webkit-tap-highlight-color: transparent;
+    }
+
+    .press-feedback {
+      transition:
+        scale 220ms cubic-bezier(0.34, 1.56, 0.64, 1),
+        color 150ms,
+        background-color 150ms,
+        border-color 150ms,
+        opacity 150ms;
+    }
+
+    .press-feedback:active {
+      scale: var(--press-scale, 0.96);
+      transition-duration: 70ms, 150ms, 150ms, 150ms, 150ms;
+      transition-timing-function: ease-out;
+    }
+
+    .press-highlight:active {
+      background-color: var(--state-active);
+      transition: background-color 0s 60ms;
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .press-feedback:active {
+        scale: none;
+        opacity: 0.7;
+      }
+    }
   }
 
   /* Reduced motion: drop the shimmer sweep and render the active cue as plain

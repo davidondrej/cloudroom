@@ -14,6 +14,7 @@ import {
   cancelRun,
   claimQueuedRun,
   countCallsForRun,
+  countRunsAhead,
   createRun,
   deleteTerminalRuns,
   getCall,
@@ -91,7 +92,7 @@ const selectedExecutionSchema = z.object({
 type ResolvedSelection = z.infer<typeof selectedExecutionSchema>;
 
 const MAX_REPAIR_ATTEMPTS = 2;
-const WORKER_PROMPT_VERSION = "workflow-worker-prompt-v1";
+const WORKER_PROMPT_VERSION = "workflow-worker-prompt-v2";
 const RESULT_PROTOCOL_VERSION = "workflow-result-protocol-v1";
 const SCHEMA_LIMITS = { bytes: 64 * 1024, nodes: 4_096, depth: 64 };
 const VALUE_LIMITS = { bytes: 1024 * 1024, nodes: 100_000, depth: 128 };
@@ -99,9 +100,33 @@ const NOTIFICATION_RETRY_BASE_MS = 1_000;
 const NOTIFICATION_RETRY_MAX_MS = 60 * 60 * 1_000;
 const PROVIDER_RETRY_DELAYS_MS = [1_000, 4_000] as const;
 const RETENTION_SWEEP_RUNS = 20;
+const DISPATCHER_BUSY_MS = 60_000;
+const DISPATCHER_STUCK_MS = 15 * 60_000;
+const RESTART_EFFECT =
+  "This cancels in-progress workflow calls in every project. Their runs restart, reuse successful calls only up to the first unfinished one, and rerun the rest.";
 
 function message(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/** A Claude wake-up turn opens on its first output, so the poll waits this long. */
+const BACKGROUND_QUIET_MS = 60_000;
+/** A server or watcher a worker left running can't hold its call longer. */
+const BACKGROUND_WAIT_MAX_MS = 30 * 60_000;
+
+interface BackgroundWorkCounts {
+  activeBackgroundAgentCount?: number;
+  activeBackgroundCommandCount?: number;
+  activeWorkflowCount?: number;
+}
+
+function hasBackgroundWork(thread: BackgroundWorkCounts): boolean {
+  return (
+    (thread.activeBackgroundAgentCount ?? 0) +
+      (thread.activeBackgroundCommandCount ?? 0) +
+      (thread.activeWorkflowCount ?? 0) >
+    0
+  );
 }
 
 export function isRetryableProviderFailure(error: unknown): boolean {
@@ -349,10 +374,15 @@ export interface WorkflowService {
   inspectLatestForThread(threadId: string): WorkflowRunInspection | null;
   inspectActiveForThread(threadId: string): WorkflowRunInspection[];
   list(projectId: string, limit: number): WorkflowRunRow[];
+  queueStatus(run: WorkflowRunRow): WorkflowQueueStatus | null;
   stop(runId: string): Promise<boolean>;
   updateSettings(settings: WorkflowSettings): void;
   runWorker(signal: AbortSignal): Promise<void>;
-  onThreadIdle(threadId: string, output: string | null): void;
+  onThreadIdle(
+    threadId: string,
+    output: string | null,
+    thread?: BackgroundWorkCounts,
+  ): void;
   onThreadFailed(threadId: string, error: string | null): void;
   onThreadDeleted(threadId: string): void;
   submitStructuredResult(
@@ -381,6 +411,21 @@ export interface WorkflowRunInspection extends WorkflowRunRow {
   calls: WorkflowCallInspection[];
 }
 
+export interface WorkflowQueueStatus {
+  reason:
+    | "dispatcher-stopped"
+    | "dispatcher-busy"
+    | "dispatcher-stuck"
+    | "waiting-for-active-runs"
+    | "starting";
+  recovery: string;
+  maxActiveRuns: number;
+  running: number;
+  runningInOtherProjects: number;
+  queuedAhead: number;
+  dispatcherSeenAt: number | null;
+}
+
 export interface WorkflowRunInspectionPage {
   run: WorkflowRunRow;
   calls: WorkflowCallInspection[];
@@ -388,12 +433,15 @@ export interface WorkflowRunInspectionPage {
 }
 
 export function createWorkflowService(
-  bb: BbPluginApi,
+  room: BbPluginApi,
   db: Db,
   initialSettings: WorkflowSettings = DEFAULT_WORKFLOW_SETTINGS,
 ): WorkflowService {
   let shuttingDown = false;
   let currentSettings = initialSettings;
+  // When the dispatcher started or began its latest pass; null when it is not
+  // running. One pass can wait minutes on slow thread stops or messages.
+  let dispatcherSeenAt: number | null = null;
   const controllers = new Map<string, AbortController>();
   const idleHandlers = new Set<string>();
   const handlerTasks = new Set<Promise<void>>();
@@ -403,13 +451,48 @@ export function createWorkflowService(
     string,
     { resolve: (value: JsonValue) => void; reject: (error: Error) => void }
   >();
+  // Workers seen idle while their background work ran, by thread (#1371).
+  const backgroundWaits = new Map<
+    string,
+    { since: number; quietSince: number | null }
+  >();
+
+  /**
+   * Whether a worker's idle is its result. A Claude worker can end its turn
+   * while background work runs, then wake itself when it ends. A later idle
+   * event is that wake turn ending. The poll can't see the wake turn before
+   * its first output, so it waits for a quiet minute (#1371).
+   */
+  function idleIsResult(
+    threadId: string,
+    thread: BackgroundWorkCounts,
+    event: boolean,
+  ): boolean {
+    const now = Date.now();
+    const busy = hasBackgroundWork(thread);
+    let wait = backgroundWaits.get(threadId);
+    if (wait === undefined) {
+      if (!busy) return true;
+      wait = { since: now, quietSince: null };
+      backgroundWaits.set(threadId, wait);
+    }
+    let done = now - wait.since >= BACKGROUND_WAIT_MAX_MS;
+    if (busy) wait.quietSince = null;
+    else if (event) done = true;
+    else {
+      wait.quietSince ??= now;
+      done ||= now - wait.quietSince >= BACKGROUND_QUIET_MS;
+    }
+    if (done) backgroundWaits.delete(threadId);
+    return done;
+  }
 
   function throwIfCancelled(signal: AbortSignal): void {
     if (signal.aborted) throw new Error("Workflow cancelled");
   }
 
   function publishRunsChanged(originThreadId: string): void {
-    bb.realtime.publish(WORKFLOW_RUNS_REALTIME_CHANNEL, {
+    room.realtime.publish(WORKFLOW_RUNS_REALTIME_CHANNEL, {
       threadId: originThreadId,
     });
   }
@@ -417,12 +500,12 @@ export function createWorkflowService(
   async function stopChild(threadId: string): Promise<void> {
     const pending = childStops.get(threadId);
     if (pending !== undefined) return pending;
-    const stopping = bb.sdk.threads
+    const stopping = room.sdk.threads
       .stop({ threadId })
       .then(() => undefined)
       .catch((error) => {
         if (!isMissingThread(error)) {
-          bb.log.warn(
+          room.log.warn(
             `Could not stop workflow worker ${threadId}: ${message(error)}`,
           );
         }
@@ -437,12 +520,12 @@ export function createWorkflowService(
   }
 
   async function resolveOrigin(input: StartWorkflowInput) {
-    const thread = await bb.sdk.threads.get({ threadId: input.originThreadId });
+    const thread = await room.sdk.threads.get({ threadId: input.originThreadId });
     if (thread.environmentId === null) {
       throw new Error("Workflow origin thread has no environment");
     }
     const defaults = executionValuesSchema.parse(
-      await bb.sdk.threads.defaultExecutionOptions({
+      await room.sdk.threads.defaultExecutionOptions({
         threadId: input.originThreadId,
       }),
     );
@@ -596,7 +679,7 @@ export function createWorkflowService(
       model: run.originModel,
       reasoningLevel: run.originReasoningLevel,
     };
-    const providers = await bb.sdk.providers.list({
+    const providers = await room.sdk.providers.list({
       environmentId: run.environmentId,
     });
     throwIfCancelled(signal);
@@ -608,7 +691,7 @@ export function createWorkflowService(
         `Provider ${JSON.stringify(requested.provider)} is not available on this workflow host`,
       );
     }
-    const catalog = await bb.sdk.providers.models({
+    const catalog = await room.sdk.providers.models({
       environmentId: run.environmentId,
       providerId: requested.provider,
     });
@@ -660,11 +743,11 @@ export function createWorkflowService(
     prompt: string,
     options: WorkflowAgentOptions,
   ) {
-    const header = `[cloudroom workflow ${run.name} · run ${run.id}]`;
+    const intro = `[cloudroom workflow ${run.name} · run ${run.id}]\n\n${prompt}\n\nWait for background work inside your turn, and stop any servers or watchers you started before your final answer.`;
     if (options.outputSchema === null) {
-      return `${header}\n\n${prompt}\n\nYour final text IS the return value (not a human-facing message), so return raw data.`;
+      return `${intro}\n\nYour final text IS the return value (not a human-facing message), so return raw data.`;
     }
-    return `${header}\n\n${prompt}\n\nUse bb_workflow_result to return your final response in the requested structured format. You MUST call this tool exactly once at the end of your response with {"value": ...} to provide the structured output. The value must satisfy this JSON Schema:\n${JSON.stringify(options.outputSchema, null, 2)}\nIf the tool is unavailable during startup, return only the JSON value in your final response as a fallback. If the tool reports validation errors, correct the value and retry. You have at most ${MAX_REPAIR_ATTEMPTS} corrective retries.`;
+    return `${intro}\n\nUse bb_workflow_result to return your final response in the requested structured format. You MUST call this tool exactly once at the end of your response with {"value": ...} to provide the structured output. The value must satisfy this JSON Schema:\n${JSON.stringify(options.outputSchema, null, 2)}\nIf the tool is unavailable during startup, return only the JSON value in your final response as a fallback. If the tool reports validation errors, correct the value and retry. You have at most ${MAX_REPAIR_ATTEMPTS} corrective retries.`;
   }
 
   function canReplayCall(run: WorkflowRunRow): boolean {
@@ -800,7 +883,7 @@ export function createWorkflowService(
     while (true) {
       try {
         throwIfCancelled(signal);
-        const child = await bb.sdk.threads.spawn({
+        const child = await room.sdk.threads.spawn({
           projectId: run.projectId,
           environment: { type: "reuse", environmentId: run.environmentId },
           prompt: childPrompt(run, prompt, options),
@@ -823,10 +906,13 @@ export function createWorkflowService(
         const stopOnAbort = () => void stopChild(child.id);
         signal.addEventListener("abort", stopOnAbort, { once: true });
         try {
-          const current = await bb.sdk.threads.get({ threadId: child.id });
+          const current = await room.sdk.threads.get({ threadId: child.id });
           throwIfCancelled(signal);
-          if (current.status === "idle") {
-            const output = await bb.sdk.threads.output({ threadId: child.id });
+          if (
+            current.status === "idle" &&
+            idleIsResult(child.id, current, false)
+          ) {
+            const output = await room.sdk.threads.output({ threadId: child.id });
             throwIfCancelled(signal);
             onThreadIdle(child.id, output.output);
           } else if (current.status === "error") {
@@ -840,7 +926,7 @@ export function createWorkflowService(
             await stopChild(child.id);
             throw error;
           }
-          bb.log.warn(
+          room.log.warn(
             `Could not reconcile new workflow worker ${child.id}: ${message(error)}`,
           );
         }
@@ -859,7 +945,7 @@ export function createWorkflowService(
         const queued = queueCallProviderRetry(db, call.id, detail);
         if (queued === null) throw error;
         call = queued;
-        bb.log.warn(
+        room.log.warn(
           `[${run.id}] Retrying agent call ${callIndex + 1} after transient provider failure ` +
             `(${call.providerRetryAttempts}/${PROVIDER_RETRY_DELAYS_MS.length}) in ${delay} ms: ${detail}`,
         );
@@ -869,6 +955,7 @@ export function createWorkflowService(
   }
 
   function wakeCall(call: WorkflowCallRow): void {
+    if (call.childThreadId !== null) backgroundWaits.delete(call.childThreadId);
     const waiter = waiters.get(call.id);
     if (waiter === undefined) return;
     waiters.delete(call.id);
@@ -964,7 +1051,7 @@ export function createWorkflowService(
       }
 
       try {
-        await bb.sdk.threads.send({
+        await room.sdk.threads.send({
           threadId,
           mode: "auto",
           input: [
@@ -998,13 +1085,24 @@ export function createWorkflowService(
     wakeCall(call);
   }
 
-  function onThreadIdle(threadId: string, output: string | null): void {
+  function onThreadIdle(
+    threadId: string,
+    output: string | null,
+    thread?: BackgroundWorkCounts,
+  ): void {
     const call = getCallByChildThread(db, threadId);
     if (call === null || idleHandlers.has(call.id)) return;
+    if (
+      thread !== undefined &&
+      call.status === "running" &&
+      !idleIsResult(threadId, thread, true)
+    ) {
+      return;
+    }
     idleHandlers.add(call.id);
     const task = handleThreadIdle(threadId, output)
       .catch((error) => {
-        bb.log.error(
+        room.log.error(
           `Could not handle idle workflow worker ${threadId}: ${message(error)}`,
         );
         failThreadCall(
@@ -1131,7 +1229,7 @@ export function createWorkflowService(
     const settings = settingsForRun(latest);
     if (!beginNotificationAttempt(db, run.id)) return;
     try {
-      await bb.sdk.threads.send({
+      await room.sdk.threads.send({
         threadId: latest.originThreadId,
         mode: "steer-if-active",
         input: [
@@ -1155,7 +1253,7 @@ export function createWorkflowService(
           run.id,
           `Origin thread is unavailable: ${detail}`,
         );
-        bb.log.warn(
+        room.log.warn(
           `Settled workflow notification ${run.id} without delivery because its origin thread is unavailable`,
         );
         return;
@@ -1170,7 +1268,7 @@ export function createWorkflowService(
         error: detail,
         nextAttemptAt: Date.now() + delay,
       });
-      bb.log.error(
+      room.log.error(
         `Could not notify workflow origin for ${run.id}; retrying in ${delay} ms: ${detail}`,
       );
     }
@@ -1265,7 +1363,7 @@ export function createWorkflowService(
       ) {
         const prepareAndLaunch = async () => {
           const prepared = await prepareWorkflowSource(
-            bb,
+            room,
             { projectId: run.projectId, environmentId: run.environmentId },
             workflowReferenceToSourceInput(reference),
           );
@@ -1316,7 +1414,7 @@ export function createWorkflowService(
         return result;
       },
       log(text) {
-        bb.log.info(`[${run.id}] ${text}`);
+        room.log.info(`[${run.id}] ${text}`);
       },
       phase(title) {
         updateRunPhase(db, run.id, title);
@@ -1375,9 +1473,9 @@ export function createWorkflowService(
     for (const call of listRunningCalls(db, 100)) {
       const threadId = call.childThreadId!;
       try {
-        const thread = await bb.sdk.threads.get({ threadId });
-        if (thread.status === "idle") {
-          const output = await bb.sdk.threads.output({ threadId });
+        const thread = await room.sdk.threads.get({ threadId });
+        if (thread.status === "idle" && idleIsResult(threadId, thread, false)) {
+          const output = await room.sdk.threads.output({ threadId });
           onThreadIdle(threadId, output.output);
           await idleHandlerTasks.get(call.id);
         } else if (thread.status === "error") {
@@ -1387,7 +1485,7 @@ export function createWorkflowService(
         if (isMissingThread(error)) {
           failThreadCall(threadId, "Workflow worker was deleted");
         } else {
-          bb.log.warn(
+          room.log.warn(
             `Could not reconcile workflow worker ${threadId}: ${message(error)}`,
           );
         }
@@ -1410,11 +1508,11 @@ export function createWorkflowService(
 
   async function archiveRetiredWorker(threadId: string): Promise<boolean> {
     try {
-      await bb.sdk.threads.archive({ threadId });
+      await room.sdk.threads.archive({ threadId });
       return true;
     } catch (error) {
       if (isMissingThread(error)) return true;
-      bb.log.warn(
+      room.log.warn(
         `Could not archive retired workflow worker ${threadId}: ${message(error)}`,
       );
       return false;
@@ -1426,7 +1524,7 @@ export function createWorkflowService(
     if (expired.runIds.length === 0) return;
     for (const threadId of expired.childThreadIds) {
       if (await archiveRetiredWorker(threadId)) continue;
-      bb.log.warn(
+      room.log.warn(
         `Retention kept ${expired.runIds.length} expired workflow runs until their workers archive`,
       );
       return;
@@ -1443,7 +1541,7 @@ export function createWorkflowService(
       try {
         await operation();
       } catch (error) {
-        bb.log.error(
+        room.log.error(
           `Workflow maintenance step ${name} failed: ${message(error)}`,
         );
       }
@@ -1454,6 +1552,15 @@ export function createWorkflowService(
   }
 
   async function runWorker(signal: AbortSignal): Promise<void> {
+    dispatcherSeenAt = Date.now();
+    try {
+      await dispatch(signal);
+    } finally {
+      dispatcherSeenAt = null;
+    }
+  }
+
+  async function dispatch(signal: AbortSignal): Promise<void> {
     signal.addEventListener(
       "abort",
       () => {
@@ -1466,6 +1573,7 @@ export function createWorkflowService(
     const active = new Set<Promise<void>>();
     let nextMaintenanceAt = 0;
     while (!signal.aborted) {
+      dispatcherSeenAt = Date.now();
       while (active.size < currentSettings.maxActiveRuns) {
         const run = claimQueuedRun(db, currentSettings.maxActiveRuns);
         if (run === null) break;
@@ -1488,19 +1596,66 @@ export function createWorkflowService(
         try {
           await notify(pending);
         } catch (error) {
-          bb.log.error(
+          room.log.error(
             `Workflow notification maintenance failed for ${pending.id}: ${message(error)}`,
           );
         }
       }
       await sleep(active.size === 0 ? 250 : 50, signal);
     }
+    dispatcherSeenAt = null;
     shuttingDown = true;
     for (const controller of controllers.values()) controller.abort();
     await Promise.allSettled(active);
     await Promise.allSettled(handlerTasks);
     await stopChildren(recoverInterruptedRuns(db));
     await Promise.allSettled(childStops.values());
+  }
+
+  // Why a queued run waits, and what unblocks it (#1511).
+  function queueStatus(run: WorkflowRunRow): WorkflowQueueStatus | null {
+    if (run.status !== "queued") return null;
+    const counts = countRunsAhead(db, run);
+    const { maxActiveRuns } = currentSettings;
+    const status = { maxActiveRuns, ...counts, dispatcherSeenAt };
+    if (dispatcherSeenAt === null) {
+      return {
+        reason: "dispatcher-stopped",
+        recovery: `The workflow dispatcher is not running, so no queued run can start. Cloudroom usually restarts a crashed dispatcher within a minute. If it stays stopped, run \`room-cli plugin reload workflows\` or restart Cloudroom. ${RESTART_EFFECT}`,
+        ...status,
+      };
+    }
+    const waitedMs = Date.now() - dispatcherSeenAt;
+    if (waitedMs > DISPATCHER_STUCK_MS) {
+      return {
+        reason: "dispatcher-stuck",
+        recovery: `The workflow dispatcher has made no progress for ${Math.floor(waitedMs / 60_000)} minutes, so no queued run can start. Restart Cloudroom. ${RESTART_EFFECT}`,
+        ...status,
+      };
+    }
+    if (waitedMs > DISPATCHER_BUSY_MS) {
+      return {
+        reason: "dispatcher-busy",
+        recovery: `The workflow dispatcher has spent ${Math.floor(waitedMs / 1_000)} seconds on a slow step, such as stopping, archiving, or messaging threads. Queued runs start when it finishes. Wait; do not reload the plugin.`,
+        ...status,
+      };
+    }
+    if (counts.running >= maxActiveRuns) {
+      const slots =
+        maxActiveRuns === 1
+          ? "The only active-run slot is"
+          : `All ${maxActiveRuns} active-run slots are`;
+      return {
+        reason: "waiting-for-active-runs",
+        recovery: `${slots} in use. Slots (maxActiveRuns) are shared by all projects: runs in other projects hold ${counts.runningInOtherProjects}, and \`list\` does not show them. Older queued runs ahead of this one: ${counts.queuedAhead}. This run starts when a slot frees. To start it sooner, raise maxActiveRuns in the Workflows plugin settings or stop a run.`,
+        ...status,
+      };
+    }
+    return {
+      reason: "starting",
+      recovery: `A slot is free, so this run should start within seconds. If it stays queued for minutes, restart Cloudroom. ${RESTART_EFFECT}`,
+      ...status,
+    };
   }
 
   async function stop(runId: string): Promise<boolean> {
@@ -1523,6 +1678,7 @@ export function createWorkflowService(
     inspectLatestForThread,
     inspectActiveForThread,
     list: (projectId, limit) => listRuns(db, { projectId, limit }),
+    queueStatus,
     stop,
     updateSettings(settings) {
       currentSettings = settings;

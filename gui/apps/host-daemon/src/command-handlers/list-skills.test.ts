@@ -297,6 +297,9 @@ describe("resolveSkillScanRoots + discoverSkills", () => {
     const skills = await listSkills(fixture, fixture.cwd, AGENT_SKILL_ROOTS);
 
     expect(byName(skills, "linked-directory")?.linked).toBe(true);
+    expect(byName(skills, "linked-directory")?.realDirectoryPath).toBe(
+      await realpath(linkedDirectoryTarget),
+    );
     expect(byName(skills, "linked-file")?.linked).toBe(true);
   });
 

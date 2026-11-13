@@ -1164,6 +1164,7 @@ export function BottomAnchoredScrollBody({
             >
               {}
               <div
+                data-wallpaper-column=""
                 className={cn(
                   "mx-auto flex w-full min-w-0 flex-1 flex-col px-4 pb-4 pt-2",
                   maxWidthClassName,

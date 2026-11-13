@@ -9,6 +9,22 @@ but keep terms like "PR" or "AGI" as they are... no need to rewrite that as "pul
 
 the name should contain unique things about that thread, like a specific name of a user, or feature name, or clear description of the bug -- so it's obvious how that thread is unique at a first glance`;
 
+export const DEFAULT_PROMPT_SUGGESTION_PROMPT = `Predict the next message this user will type to their coding agent: what they would type, not what they should do. The test: would they think "I was just about to type that"?
+
+Return:
+- suggestion: 2 to 12 words in this user's style, or an empty string.
+
+Examples:
+- Bug fixed, tests not run yet: "run the tests"
+- Code was written: "try it out"
+- The agent offered options: the one this user would pick
+- The agent asks whether to continue: "yes" or "go ahead"
+- Task done, next step obvious: "commit and push"
+
+Never repeat the user's latest message. Never suggest praise, questions, the agent's voice ("Let me...", "I'll..."), new ideas, or more than one sentence.
+Return an empty string after an error, when the next step isn't obvious, or for anything sensitive (credentials, security, private data, harm).
+Copy the user's length, tone, capitalization, and wording.`;
+
 export const THREAD_PURPOSE_CLAUDE_MODEL = "claude-code/claude-haiku-5-5";
 export const THREAD_PURPOSE_CODEX_MODEL = "codex/gpt-6-luna";
 
@@ -80,6 +96,7 @@ export const UI_PREFERENCE_KEYS = [
   "threadPurpose.model",
   "threadPurpose.reasoningEffort",
   "promptSuggestions.enabled",
+  "promptSuggestions.prompt",
   "projectNudge.enabled",
   "projectNudge.confidence",
   "search.smart",
@@ -250,6 +267,11 @@ export const uiPreferenceDefinitions = {
     z.boolean(),
     true,
     "After each reply, show the user's likely next prompt as faint text in the open thread's empty composer; Tab inserts it. Uses Haiku 5.5 on Claude Code, else GPT-6 Luna on Codex, at low effort.",
+  ),
+  "promptSuggestions.prompt": defineUiPreference(
+    z.string().trim().min(1).max(THREAD_NAMING_RULES_MAX_LENGTH),
+    DEFAULT_PROMPT_SUGGESTION_PROMPT,
+    "The instructions the small model follows when predicting the user's next prompt.",
   ),
   "threadPurpose.showInSidebar": defineUiPreference(
     z.boolean(),

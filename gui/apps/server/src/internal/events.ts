@@ -51,6 +51,7 @@ import {
 } from "../services/lib/error-log-fields.js";
 import { applyLoggedThreadLifecycleEvent } from "../services/threads/lifecycle-outcome.js";
 import { applyTurnCompletedEvent } from "./turn-completed-events.js";
+import { forgetLostBackgroundTask } from "./session-owner-side-effects.js";
 import {
   getInactiveSessionLogFields,
   requireAuthenticatedDaemonSession,
@@ -99,6 +100,12 @@ interface NotifyInsertedEventThreadsArgs {
   eventInputs: AppendDaemonEventInput[];
   insertedInputIndexes: number[];
 }
+
+/** The provider exited, or a turn it accepted will never start (#1364). */
+const RUN_FAILING_SYSTEM_ERROR_CODES = new Set([
+  "provider_process_exited",
+  "provider_turn_start_failed",
+]);
 
 function preserveTerminalProvisioningStatus(
   deps: Pick<AppDeps, "db">,
@@ -464,10 +471,7 @@ async function applyEventEffects(
             });
           }
         }
-        if (
-          event.status === "completed" &&
-          turnCompleted.nextStatus === "idle"
-        ) {
+        if (turnCompleted.nextStatus === "idle") {
           followUps.push({
             kind: "queued-message-dispatch",
             wake: { kind: "thread-ready", threadId: entry.threadId },
@@ -478,7 +482,8 @@ async function applyEventEffects(
 
       if (
         event.type === "system/error" &&
-        event.code === "provider_process_exited"
+        event.code !== undefined &&
+        RUN_FAILING_SYSTEM_ERROR_CODES.has(event.code)
       ) {
         const thread = getThread(deps.db, entry.threadId);
         if (!thread) {
@@ -1035,6 +1040,18 @@ export function registerInternalEventRoutes(app: Hono, deps: AppDeps): void {
         eventInputs,
         insertedInputIndexes: appendResult.insertedInputIndexes,
       });
+      // The daemon says a job finished, by completion or progress, so it was
+      // never lost, even if the server already marked it stopped (#1026).
+      for (const input of eventInputs) {
+        if (
+          (input.type === "item/backgroundTask/completed" ||
+            input.type === "item/backgroundTask/progress") &&
+          input.itemId !== null &&
+          parseStoredBackgroundTaskItemStatus(input.data) !== "pending"
+        ) {
+          forgetLostBackgroundTask(input.threadId, input.itemId);
+        }
+      }
 
       const followUps = await applyEventEffects(
         deps,

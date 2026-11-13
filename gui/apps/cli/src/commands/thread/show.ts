@@ -21,7 +21,7 @@ import type {
 } from "@cloudroom/server-contract";
 import { THREAD_EVENT_LIST_PAGE_SIZE } from "@cloudroom/server-contract";
 import { action } from "../../action.js";
-import { CLI_READ_TIMEOUT_MS, createCliBbSdk } from "../../client.js";
+import { CLI_READ_TIMEOUT_MS, createCliRoomSdk } from "../../client.js";
 import {
   getErrorMessage,
   outputJson,
@@ -33,6 +33,7 @@ import {
   printEnvironmentInfo,
 } from "../environment-helpers.js";
 import { fetchThreadPendingTodos, printPendingTodos } from "./pending-todos.js";
+import { cloudIssue, cloudIssueText, type CloudIssue } from "./helpers.js";
 
 interface ThreadShowCommandOptions {
   self?: boolean;
@@ -42,6 +43,7 @@ interface ThreadShowCommandOptions {
   diffSha?: string;
   diffMergeBase?: string;
   json?: boolean;
+  pr?: boolean;
 }
 
 interface ThreadLogCommandOptions {
@@ -73,6 +75,8 @@ type ThreadExecution = { model: string; reasoningLevel: string } | null;
 
 interface ThreadShowJsonPayload extends ThreadStatusPayload {
   execution: ThreadExecution;
+  /** Why a Cloud thread's start or messages aren't going through; absent when nothing is wrong and for Local threads. */
+  cloud?: CloudIssue;
   environment: ThreadShowEnvironmentJsonPayload | null;
   pendingTodos: ThreadTimelinePendingTodos | null;
   workStatus?: WorkspaceStatus | null;
@@ -81,7 +85,7 @@ interface ThreadShowJsonPayload extends ThreadStatusPayload {
 }
 
 interface ThreadShowPullRequestPayload {
-  status: "available" | "none" | "unavailable";
+  status: "available" | "none" | "unavailable" | "skipped";
   pullRequest: ThreadPullRequest | null;
   message?: string;
 }
@@ -96,23 +100,28 @@ type FetchedGitDiff =
 
 type FetchedPullRequest = ThreadShowPullRequestPayload;
 
+const SKIPPED_PULL_REQUEST: FetchedPullRequest = {
+  status: "skipped",
+  pullRequest: null,
+};
+
 type CliEnvironmentDiffQuery =
   | { target: "uncommitted" }
   | { mergeBaseBranch?: string; target: "branch_committed" }
   | { mergeBaseBranch?: string; target: "all" }
   | { sha: string; target: "commit" };
 
-async function fetchExecution(sdk: BbSdk, thread: Thread): Promise<ThreadExecution> {
+async function fetchExecution(sdk: BbSdk, thread: Thread): Promise<{ execution: ThreadExecution; cloud: CloudIssue | null }> {
   try {
     if (thread.executionTarget === "cloud") {
       const status = await sdk.cloudroom.threadStatus(thread.id);
-      return status && { model: status.model, reasoningLevel: status.reasoning };
+      return { execution: status && { model: status.model, reasoningLevel: status.reasoning }, cloud: cloudIssue(status) };
     }
     const options = await sdk.threads.defaultExecutionOptions({ threadId: thread.id });
-    return options && { model: options.model, reasoningLevel: options.reasoningLevel };
+    return { execution: options && { model: options.model, reasoningLevel: options.reasoningLevel }, cloud: null };
   } catch (error) {
     if (error instanceof BbRequestTimeoutError) throw error;
-    return null;
+    return { execution: null, cloud: null };
   }
 }
 
@@ -215,6 +224,7 @@ export function registerShowCommand(
     .option("--json", "Print machine-readable JSON output")
     .option("--work-status", "Include work status (git state) in output")
     .option("--git-diff", "Include git diff in output")
+    .option("--no-pr", "Skip the GitHub pull request lookup")
     .option(
       "--diff-target <type>",
       "Diff target: uncommitted, branch_committed, all, or commit (used with --git-diff)",
@@ -228,7 +238,7 @@ export function registerShowCommand(
     .action(
       action(async (id: string | undefined, opts: ThreadShowCommandOptions) => {
         const threadId = requireThreadIdOrSelf(id, opts);
-        const sdk = createCliBbSdk(getUrl(), CLI_READ_TIMEOUT_MS);
+        const sdk = createCliRoomSdk(getUrl(), CLI_READ_TIMEOUT_MS);
         const thread = await sdk.threads.get({ threadId });
 
         const statusPayload: ThreadStatusPayload = { thread };
@@ -316,25 +326,18 @@ export function registerShowCommand(
           });
         }
 
-        const fetchedPullRequest = thread.environmentId
-          ? await fetchPullRequest({
-              environmentId: thread.environmentId,
-              sdk,
-            })
-          : null;
-
-        const environmentInfo = thread.environmentId
-          ? await fetchEnvironmentInfo({
-              environmentId: thread.environmentId,
-              sdk,
-            })
-          : null;
-
-        const pendingTodos = await fetchThreadPendingTodos({
-          sdk,
-          threadId,
-        });
-        const execution = await fetchExecution(sdk, thread);
+        const environmentId = thread.environmentId;
+        const [fetchedPullRequest, environmentInfo, pendingTodos, { execution, cloud }] =
+          await Promise.all([
+            !environmentId
+              ? null
+              : opts.pr === false
+                ? SKIPPED_PULL_REQUEST
+                : fetchPullRequest({ environmentId, sdk }),
+            environmentId ? fetchEnvironmentInfo({ environmentId, sdk }) : null,
+            fetchThreadPendingTodos({ sdk, threadId }),
+            fetchExecution(sdk, thread),
+          ]);
         const lastError =
           thread.status === "error"
             ? ((await sdk.threads.output({ threadId })).error ?? null)
@@ -345,6 +348,7 @@ export function registerShowCommand(
           const jsonPayload: ThreadShowJsonPayload = {
             ...statusPayload,
             execution,
+            ...(cloud ? { cloud } : {}),
             environment: threadShowEnvironmentJson(
               environment,
               fetchedPullRequest,
@@ -366,7 +370,9 @@ export function registerShowCommand(
           return;
         }
 
-        printThreadStatus(statusPayload, execution, environmentInfo, fetchedPullRequest);
+        // An errored thread prints its own error below.
+        const cloudNote = cloudIssueText(cloud && thread.status === "error" ? { ...cloud, error: null } : cloud);
+        printThreadStatus(statusPayload, execution, environmentInfo, fetchedPullRequest, cloudNote);
         if (lastError) console.log(`  Error: ${lastError}`);
 
         printPendingTodos(pendingTodos);
@@ -452,7 +458,7 @@ export function registerShowCommand(
     .action(
       action(async (id: string | undefined, opts: ThreadLogCommandOptions) => {
         const threadId = requireThreadIdOrSelf(id, opts);
-        const sdk = createCliBbSdk(getUrl(), CLI_READ_TIMEOUT_MS);
+        const sdk = createCliRoomSdk(getUrl(), CLI_READ_TIMEOUT_MS);
         const format = resolveThreadTimelineTextFormat(opts);
 
         if (opts.all && opts.limit !== undefined) {
@@ -542,7 +548,7 @@ export function registerShowCommand(
       action(
         async (id: string | undefined, opts: ThreadOutputCommandOptions) => {
           const threadId = requireThreadIdOrSelf(id, opts);
-          const sdk = createCliBbSdk(getUrl(), CLI_READ_TIMEOUT_MS);
+          const sdk = createCliRoomSdk(getUrl(), CLI_READ_TIMEOUT_MS);
           const result = await sdk.threads.output({ threadId });
           if (outputJson(opts, result)) return;
           if (result.output) {
@@ -560,10 +566,12 @@ function printThreadStatus(
   execution: ThreadExecution,
   environmentInfo: ThreadEnvironmentInfo | null,
   pullRequest: FetchedPullRequest | null,
+  cloudNote: string | null,
 ): void {
   const { thread } = payload;
   console.log(`Thread: @thread:${thread.id}`);
   console.log(`  Status: ${thread.status}`);
+  if (cloudNote) console.log(`  Cloud: ${cloudNote}`);
   if (thread.title) {
     console.log(`  Title: ${thread.title}`);
   }
@@ -597,7 +605,7 @@ function printThreadStatus(
 function printEnvironmentPullRequest(
   pullRequest: FetchedPullRequest | null,
 ): void {
-  if (!pullRequest) {
+  if (!pullRequest || pullRequest.status === "skipped") {
     return;
   }
 

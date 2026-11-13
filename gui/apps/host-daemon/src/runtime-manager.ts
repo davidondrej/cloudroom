@@ -1,6 +1,8 @@
+import { readlinkSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import path from "node:path";
 import {
+  FNM_SHELL_LINK,
   createAgentRuntime,
   type AgentRuntime,
   type AgentRuntimeOptions,
@@ -261,7 +263,19 @@ function shellEnvEquals(
   if (leftEntries.length !== rightEntries.length) {
     return false;
   }
-  return leftEntries.every(([key, value]) => right[key] === value);
+  // fnm puts a new per-shell link in PATH on every run: compare the Node it
+  // selects, so only a different Node is a change (#1026).
+  const fnmTarget = (value: string | undefined) =>
+    value?.replace(FNM_SHELL_LINK, (link) => {
+      try {
+        return readlinkSync(link);
+      } catch {
+        return link;
+      }
+    });
+  return leftEntries.every(
+    ([key, value]) => fnmTarget(right[key]) === fnmTarget(value),
+  );
 }
 
 function providerProcessEnvFromShellEnv(

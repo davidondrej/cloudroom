@@ -772,16 +772,16 @@ function pluginNameOf(packageName: string): string {
     .join(" ");
 }
 
-function enginesRange(bbVersion: string): string {
-  const match = /^(\d+)\.(\d+)/.exec(bbVersion);
+function enginesRange(roomVersion: string): string {
+  const match = /^(\d+)\.(\d+)/.exec(roomVersion);
   return match ? `>=${match[1]}.${match[2]}` : ">=0.0";
 }
 
-function registryRef(bbVersion: string): string {
-  return bbVersion === "0.0.0" ? "main" : `desktop-v${bbVersion}`;
+function registryRef(roomVersion: string): string {
+  return roomVersion === "0.0.0" ? "main" : `desktop-v${roomVersion}`;
 }
 
-function componentsJsonSource(bbVersion: string): string {
+function componentsJsonSource(roomVersion: string): string {
   return `${JSON.stringify(
     {
       $schema: "https://ui.shadcn.com/schema.json",
@@ -801,7 +801,7 @@ function componentsJsonSource(bbVersion: string): string {
         hooks: "@/hooks",
       },
       registries: {
-        "@bb": `https://raw.githubusercontent.com/get-bb/bb/${registryRef(bbVersion)}/packages/plugin-registry/r/{name}.json`,
+        "@bb": `https://raw.githubusercontent.com/get-bb/bb/${registryRef(roomVersion)}/packages/plugin-registry/r/{name}.json`,
       },
     },
     null,

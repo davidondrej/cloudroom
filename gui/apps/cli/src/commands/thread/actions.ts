@@ -9,7 +9,7 @@ import {
 } from "@cloudroom/domain";
 import { CALLER_PROOF_REQUIRED_CODE } from "@cloudroom/config/caller-proof";
 import { action } from "../../action.js";
-import { createCliBbSdk } from "../../client.js";
+import { CLI_READ_TIMEOUT_MS, createCliRoomSdk } from "../../client.js";
 import {
   BbHttpError,
   type ThreadRetryResult,
@@ -23,6 +23,7 @@ import {
   outputJson,
   parseReasoningLevel,
   prependErrorContext,
+  readTextFileOrStdin,
   requireThreadIdOrSelf,
 } from "../helpers.js";
 import {
@@ -39,6 +40,7 @@ import {
   uploadClientAttachmentInputs,
 } from "./helpers.js";
 import { SEND_AT_HELP, parseSendAt } from "./send-time.js";
+import { archiveMany } from "./archive-many.js";
 
 interface ThreadUpdateCommandOptions {
   self?: boolean;
@@ -94,6 +96,8 @@ interface ThreadTellCommandOptions {
   file?: string[];
   image?: string[];
   sendAt?: string;
+  requestId?: string;
+  messageFile?: string;
 }
 
 interface ThreadActionOptions {
@@ -132,6 +136,17 @@ interface PostThreadMessageArgs {
   files?: readonly string[];
   images?: readonly string[];
   sendAt?: number;
+  requestId?: string;
+}
+
+/** The send may have landed. `requestId` is set only where resending with it can't duplicate the turn (Cloud). */
+class UnconfirmedSendError extends Error {
+  constructor(
+    message: string,
+    readonly requestId: string | undefined,
+  ) {
+    super(message);
+  }
 }
 
 // The server's own answer plus the mode we asked for. `sendAt` used to be
@@ -259,7 +274,7 @@ export function registerActionsCommands(
             body.resend = true;
           }
 
-          const sdk = createCliBbSdk(getUrl());
+          const sdk = createCliRoomSdk(getUrl());
           const thread = await sdk.threads.update({ threadId, ...body });
           if (outputJson(opts, thread)) return;
           console.log(`Thread ${thread.id} updated`);
@@ -314,7 +329,7 @@ export function registerActionsCommands(
     .action(
       action(async (id: string | undefined, opts: ThreadMoveCommandOptions) => {
         const threadId = requireThreadIdOrSelf(id, opts);
-        const sdk = createCliBbSdk(getUrl());
+        const sdk = createCliRoomSdk(getUrl());
         const result = await sdk.threads.move({
           threadId,
           projectId: opts.project,
@@ -332,15 +347,20 @@ export function registerActionsCommands(
     );
 
   parent
-    .command("archive [id]")
-    .description("Archive a thread")
+    .command("archive [ids...]")
+    .description("Archive a thread, or several at once")
     .option("--self", "Target the current thread (from ROOM_THREAD_ID)")
     .option("--json", "Print machine-readable JSON output")
     .action(
       action(
-        async (id: string | undefined, opts: ThreadArchiveCommandOptions) => {
-          const threadId = requireThreadIdOrSelf(id, opts);
-          const sdk = createCliBbSdk(getUrl());
+        // Several IDs take the bulk path; one ID or --self keeps the old output.
+        async (ids: string[], opts: ThreadArchiveCommandOptions) => {
+          const sdk = createCliRoomSdk(getUrl());
+          if (ids.length > 1) {
+            await archiveMany({ sdk, ids, self: opts.self, json: opts.json });
+            return;
+          }
+          const threadId = requireThreadIdOrSelf(ids[0], opts);
           let archivedThreadIds: string[] = [threadId];
           let keptLiveThreadIds: string[] = [];
           try {
@@ -395,7 +415,7 @@ export function registerActionsCommands(
       action(
         async (id: string | undefined, opts: ThreadUnarchiveCommandOptions) => {
           const threadId = requireThreadIdOrSelf(id, opts);
-          const sdk = createCliBbSdk(getUrl());
+          const sdk = createCliRoomSdk(getUrl());
           await sdk.threads.unarchive({
             threadId,
             keepParent: opts.keepParent,
@@ -419,7 +439,7 @@ export function registerActionsCommands(
         action(
           async (id: string | undefined, opts: ThreadPinCommandOptions) => {
             const threadId = requireThreadIdOrSelf(id, opts);
-            const sdk = createCliBbSdk(getUrl());
+            const sdk = createCliRoomSdk(getUrl());
             const thread = await sdk.threads[name]({ threadId });
             if (outputJson(opts, thread)) return;
             console.log(`Thread ${thread.id} ${done}`);
@@ -439,7 +459,7 @@ export function registerActionsCommands(
     .option("--json", "Print machine-readable JSON output")
     .action(
       action(async (id: string, opts: ThreadDeleteCommandOptions) => {
-        const sdk = createCliBbSdk(getUrl());
+        const sdk = createCliRoomSdk(getUrl());
         try {
           const thread = await sdk.threads.get({ threadId: id });
 
@@ -482,7 +502,7 @@ export function registerActionsCommands(
           opts: ThreadEditMessageCommandOptions,
         ) => {
           const threadId = requireThreadIdOrSelf(id, opts);
-          const sdk = createCliBbSdk(getUrl());
+          const sdk = createCliRoomSdk(getUrl());
           const expectedRequestSequence =
             opts.expectedRequestSequence === undefined
               ? undefined
@@ -517,10 +537,17 @@ export function registerActionsCommands(
     );
 
   parent
-    .command("tell <id> <message>")
+    .command("tell <id> [message]")
     .description("Send a follow-up message to a thread")
+    .option(
+      "--message-file <path>",
+      "Read the message from a UTF-8 file, or - for stdin (use it for long messages)",
+    )
     .option("--json", "Print machine-readable JSON output")
-    .option("--model <model>", "Model ID for this message")
+    .option(
+      "--model <model>",
+      "Model ID for this message. Cloud threads keep their model: switch with thread update --model first",
+    )
     .option("--service-tier <tier>", "Service tier: fast or default")
     .option(
       "--reasoning-level <level>",
@@ -545,9 +572,38 @@ export function registerActionsCommands(
       collectOption,
       [],
     )
+    .option(
+      "--request-id <id>",
+      "Cloud only: resend an unconfirmed message with the request ID it printed, so it isn't added twice",
+    )
     .action(
       action(
-        async (id: string, message: string, opts: ThreadTellCommandOptions) => {
+        async (
+          id: string,
+          argument: string | undefined,
+          opts: ThreadTellCommandOptions,
+        ) => {
+          const { messageFile } = opts;
+          if (argument !== undefined && messageFile !== undefined) {
+            throw new Error(
+              "Choose only one of a message argument and --message-file.",
+            );
+          }
+          const message =
+            messageFile === undefined
+              ? argument
+              : await readTextFileOrStdin(messageFile).catch(
+                  (error: unknown) => {
+                    throw new Error(
+                      `--message-file ${messageFile}: ${getErrorMessage(error)}`,
+                    );
+                  },
+                );
+          if (message === undefined) {
+            throw new Error(
+              "Missing message: pass it as an argument or with --message-file PATH (- reads stdin).",
+            );
+          }
           const response = await postThreadMessage({
             getUrl,
             threadId: id,
@@ -564,6 +620,20 @@ export function registerActionsCommands(
             ...(opts.sendAt === undefined
               ? {}
               : { sendAt: parseSendAt(opts.sendAt) }),
+            ...(opts.requestId === undefined
+              ? {}
+              : { requestId: opts.requestId }),
+          }).catch((error: unknown) => {
+            if (error instanceof UnconfirmedSendError) {
+              outputJson(opts, {
+                ok: false,
+                unconfirmed: true,
+                threadId: id,
+                ...(error.requestId ? { requestId: error.requestId } : {}),
+                error: error.message,
+              });
+            }
+            throw error;
           });
           if (outputJson(opts, { threadId: id, ...response })) return;
           console.log(describeThreadTellOutcome(id, response));
@@ -573,7 +643,7 @@ export function registerActionsCommands(
 
   parent
     .command("retry [id]")
-    .description("Retry the failed turn on a thread")
+    .description("Retry the failed turn on a Local thread")
     .option("--self", "Target the current thread (from ROOM_THREAD_ID)")
     .option(
       "--turn <requestId>",
@@ -589,7 +659,7 @@ export function registerActionsCommands(
       action(
         async (id: string | undefined, opts: ThreadRetryCommandOptions) => {
           const threadId = requireThreadIdOrSelf(id, opts);
-          const sdk = createCliBbSdk(getUrl());
+          const sdk = createCliRoomSdk(getUrl());
           const response = await sdk.threads.retry({
             threadId,
             ...(opts.turn === undefined ? {} : { turnRequestId: opts.turn }),
@@ -631,7 +701,8 @@ export function registerActionsCommands(
     },
     {
       name: "clear-goal",
-      description: "Ask the provider to clear the active Goal",
+      description:
+        "Ask the provider to clear the active Goal (Codex threads only)",
       method: "clearGoal",
       done: "cleared its Goal",
     },
@@ -644,7 +715,7 @@ export function registerActionsCommands(
       .action(
         action(async (id: string | undefined, opts: ThreadActionOptions) => {
           const threadId = requireThreadIdOrSelf(id, opts);
-          const sdk = createCliBbSdk(getUrl());
+          const sdk = createCliRoomSdk(getUrl());
           const result: { ok: true; cancelledRetries?: number } =
             await sdk.threads[method]({
               threadId,
@@ -672,8 +743,18 @@ export function registerActionsCommands(
   }
   // Only the user (or their CLI) may resume a Goal; the agent can only pause or finish it.
   for (const [name, description, status, done] of [
-    ["pause-goal", "Pause the active Goal", "paused", "paused its Goal"],
-    ["resume-goal", "Resume a paused or blocked Goal", "active", "resumed its Goal"],
+    [
+      "pause-goal",
+      "Pause the active Goal (Codex threads only)",
+      "paused",
+      "paused its Goal",
+    ],
+    [
+      "resume-goal",
+      "Resume a paused or blocked Goal (Codex threads only)",
+      "active",
+      "resumed its Goal",
+    ],
   ] as const) {
     parent
       .command(`${name} [id]`)
@@ -683,7 +764,7 @@ export function registerActionsCommands(
       .action(
         action(async (id: string | undefined, opts: ThreadActionOptions) => {
           const threadId = requireThreadIdOrSelf(id, opts);
-          await createCliBbSdk(getUrl()).threads.setGoal({ threadId, status });
+          await createCliRoomSdk(getUrl()).threads.setGoal({ threadId, status });
           if (outputJson(opts, { ok: true, threadId })) return;
           console.log(`Thread ${threadId} ${done}`);
         }),
@@ -691,14 +772,16 @@ export function registerActionsCommands(
   }
   parent
     .command("set-goal <objective> [id]")
-    .description("Start a Goal, or replace the current Goal's objective")
+    .description(
+      "Start a Goal, or replace the current Goal's objective (Codex threads only)",
+    )
     .option("--self", "Target the current thread (from ROOM_THREAD_ID)")
     .option("--json", "Print machine-readable JSON output")
     .action(
       action(
         async (objective: string, id: string | undefined, opts: ThreadActionOptions) => {
           const threadId = requireThreadIdOrSelf(id, opts);
-          await createCliBbSdk(getUrl()).threads.setGoal({ threadId, objective });
+          await createCliRoomSdk(getUrl()).threads.setGoal({ threadId, objective });
           if (outputJson(opts, { ok: true, threadId })) return;
           console.log(`Thread ${threadId} set its Goal`);
         },
@@ -710,11 +793,24 @@ export async function postThreadMessage(
   args: PostThreadMessageArgs,
 ): Promise<PostThreadMessageResult> {
   requirePromptContent(args);
-  const sdk = createCliBbSdk(args.getUrl());
+  const sdk = createCliRoomSdk(args.getUrl());
+  // A retry's lookup decides whether it may send, so a hung server can't hang it.
   const thread =
-    args.mode === undefined
-      ? await sdk.threads.get({ threadId: args.threadId })
+    args.mode === undefined || args.requestId !== undefined
+      ? await (
+          args.requestId === undefined
+            ? sdk
+            : createCliRoomSdk(args.getUrl(), CLI_READ_TIMEOUT_MS)
+        ).threads.get({ threadId: args.threadId })
       : undefined;
+  // Local starts a new turn for every send, so a reused ID wouldn't stop a duplicate there.
+  if (args.requestId !== undefined && thread?.executionTarget !== "cloud") {
+    throw new Error(
+      `--request-id works only for Cloud threads. Check \`room-cli thread log ${args.threadId}\` and \`room-cli thread queue list ${args.threadId}\` before sending again.`,
+    );
+  }
+  // Chosen before sending, so a lost answer still leaves an ID to retry with.
+  const requestId = args.requestId ?? randomUUID();
   const mode =
     args.mode ?? (thread?.executionTarget === "cloud" ? "queue" : "steer");
   const input = await uploadClientAttachmentInputs({
@@ -731,6 +827,7 @@ export async function postThreadMessage(
   });
   const sending = sdk.threads.send({
     threadId: args.threadId,
+    requestId,
     input,
     mode:
       mode === "steer"
@@ -745,8 +842,26 @@ export async function postThreadMessage(
     ...(args.senderThreadId ? { senderThreadId: args.senderThreadId } : {}),
     ...(args.sendAt === undefined ? {} : { sendAt: args.sendAt }),
   });
-  const response = await sending.catch((error: unknown) => {
-    throw describeFailedSend(args.threadId, error);
+  const response = await sending.catch(async (error: unknown) => {
+    // A reused ID that the server already holds: the message is saved, so resending would only conflict again.
+    if (
+      args.requestId !== undefined &&
+      error instanceof BbHttpError &&
+      error.code === "request_conflict"
+    ) {
+      throw new Error(
+        `Request ID ${args.requestId} was already used, so this message was not added again. If you are resending an unconfirmed message, it is already saved: check \`room-cli thread show ${args.threadId}\` and don't send it again.`,
+      );
+    }
+    throw await describeFailedSend(args.threadId, error, async () => {
+      // Only picks the hint, so 5 s: a server that lost the reply may not answer this either; then no ID (the safe side).
+      const target =
+        thread ??
+        (await createCliRoomSdk(args.getUrl(), 5_000)
+          .threads.get({ threadId: args.threadId })
+          .catch(() => null));
+      return target?.executionTarget === "cloud" ? requestId : undefined;
+    });
   });
   return { ...response, mode };
 }
@@ -758,8 +873,15 @@ const CONNECT_FAILURE_CODES = new Set([
   "UND_ERR_CONNECT_TIMEOUT",
 ]);
 
-/** Say whether a failed send reached the thread, so nobody resends blindly. */
-function describeFailedSend(threadId: string, error: unknown): unknown {
+/**
+ * Say whether a failed send reached the thread, so nobody resends blindly.
+ * `retryId` gives the request ID only for a Cloud target, the one that dedupes it.
+ */
+async function describeFailedSend(
+  threadId: string,
+  error: unknown,
+  retryId: () => Promise<string | undefined>,
+): Promise<unknown> {
   // A caller-proof refusal or a failed connect happens before the server
   // looks at the message.
   const notSent =
@@ -771,9 +893,17 @@ function describeFailedSend(threadId: string, error: unknown): unknown {
       `The message was not sent; sending it again is safe. ${getErrorMessage(error)}`,
     );
   }
-  if (error instanceof BbHttpError) return error;
-  return new Error(
-    `Cloudroom did not confirm the message, so it may already have been sent (${getErrorMessage(error)}). Check \`room-cli thread show ${threadId}\` before sending it again.`,
+  // A 4xx is the server refusing the message; anything else (a tunnel 504 too) may follow acceptance.
+  if (error instanceof BbHttpError && error.status < 500) return error;
+  const requestId = await retryId();
+  const retry =
+    requestId === undefined
+      ? ""
+      : ` To resend it, run \`room-cli thread tell ${threadId}\` with the same message, options, and \`--request-id ${requestId}\`; Cloudroom won't add it twice.`;
+  // A sent message shows in the log, a queued one in the queue; `thread show` lists neither.
+  return new UnconfirmedSendError(
+    `Cloudroom did not confirm the message, so it may already have been sent (${getErrorMessage(error)}). Check \`room-cli thread log ${threadId}\` and \`room-cli thread queue list ${threadId}\` before sending it again.${retry}`,
+    requestId,
   );
 }
 
@@ -800,7 +930,16 @@ export function describeThreadTellOutcome(
     // The server says WHY it is waiting, so the CLI does not have to guess
     // from the flags it happened to send. `room-cli thread queue list` shows the
     // same reason for the row afterwards.
-    return `Thread ${threadId} message queued (${describeQueueWait(response.queuedMessage)}); it dispatches when that clears unless Stop pauses the queue, then run \`room-cli thread queue send ${threadId} ${response.queuedMessage.id}\``;
+    const queued = `Thread ${threadId} message queued (${describeQueueWait(response.queuedMessage)})`;
+    const send = `\`room-cli thread queue send ${threadId} ${response.queuedMessage.id}\``;
+    // A message cannot answer a question: say how to see and answer it (#1400).
+    if (response.queuedMessage.waitingOn?.kind === "interaction") {
+      return `${queued}; it dispatches once that is resolved. \`room-cli thread interactions list ${threadId}\` shows it, and \`show\` prints how to answer.`;
+    }
+    // Stop does not pause a scheduled row, and `queue send` skips its schedule (#999).
+    return response.queuedMessage.waitingOn?.kind === "time"
+      ? `${queued}; it dispatches at that time on its own. Do not run ${send}: it sends the message now.`
+      : `${queued}; it dispatches when that clears unless Stop pauses the queue, then run ${send}`;
   }
   return response.mode === "steer"
     ? `Thread ${threadId} steered`
@@ -824,11 +963,15 @@ function describeThreadRetryOutcome(
 
 /** One short phrase for a queued row's wait, shared by `tell` and `queue`. */
 export function describeQueueWait(row: {
+  failureReason?: string | null;
   hardQueue?: boolean;
   pausedByStop?: boolean;
   sendAt: number | null;
   waitingOn: QueuedMessageWaitingOn | null;
 }): string {
+  if (typeof row.failureReason === "string") {
+    return `failed, \`queue send\` retries: ${row.failureReason}`;
+  }
   if (row.pausedByStop === true) {
     return "paused by Stop; a new message or `queue send` releases it";
   }

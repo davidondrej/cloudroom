@@ -1,5 +1,12 @@
-import { COMPUTER, reasoningLevelSchema } from "@cloudroom/domain";
+import {
+  COMPUTER,
+  personalProjectAllowsEnvironment,
+  reasoningLevelSchema,
+} from "@cloudroom/domain";
 import { cloudExecution, cloudroom, isCloudThread } from "../cloudroom/commands.js";
+import { rememberFirstAgent } from "../system/first-agent.js";
+import { noteMessageSent } from "../system/first-response-telemetry.js";
+import type { TelemetryExecution } from "../system/telemetry.js";
 import { prepareLocalFork, prepareLocalForkCode } from "../cloudroom/teleport-local.js";
 import { FORK_HARNESSES, forkModel, forkTurn, prepareLocalForkWorktree } from "../cloudroom/fork.js";
 import { messagesSeed } from "./thread-harness-switch.js";
@@ -79,13 +86,17 @@ import {
   resolveCreateThreadEnvironment,
 } from "./thread-default-policy.js";
 import { assertValidParentThread } from "./thread-parent.js";
+import { GROK_PROVIDER_ID } from "./thread-lifecycle.js";
 import {
   type ThreadCreateServiceRequestInput,
   type ThreadCreateServiceRequest,
 } from "./thread-create-request.js";
 import { deriveTitleFallback } from "./title-generation.js";
 import type { ThreadProvisionEnvironmentIntent } from "./thread-startup-store.js";
-import { resolveSystemProviderModels } from "../system/execution-options.js";
+import {
+  providerSetupError,
+  resolveSystemProviderModels,
+} from "../system/execution-options.js";
 import { requireConnectedPrimaryHostId } from "../hosts/primary-host.js";
 import {
   getEnvironmentProvider,
@@ -131,31 +142,33 @@ interface ResolveCatalogExecutionDefaultsArgs {
 async function loadCatalogDefaultForProvider(
   deps: ThreadCreateDeps,
   args: { cwd?: string; hostId: string; model?: string; providerId: string },
-): Promise<ProjectExecutionDefaults | ApiError> {
+): Promise<
+  { defaults: ProjectExecutionDefaults; fallback: boolean } | ApiError
+> {
   const catalog = await resolveSystemProviderModels(deps, {
     ...(args.cwd !== undefined ? { cwd: args.cwd } : {}),
     hostId: args.hostId,
     providerId: args.providerId,
   });
-  if (catalog.modelLoadError?.code === "missing_executable") {
-    // A missing or broken CLI needs a reinstall; retrying can't fix it (#907).
-    const info = deps.providerRegistry.get(args.providerId)?.info;
-    const name = info?.displayName ?? args.providerId;
-    const installUrl = info?.strings?.installUrl;
-    return new ApiError(
-      409,
-      "provider_cli_missing",
-      `${name} can't start on this host: its CLI, or a file it needs, is missing. Reinstall ${name}${installUrl ? ` (${installUrl})` : ""}, then try again.`,
-      { details: catalog.modelLoadError, retryable: false },
-    );
-  }
-  if (catalog.modelLoadError !== null) {
+  const loadError = catalog.modelLoadError;
+  // A missing CLI needs a reinstall (#907); a signed-out Grok needs its login (#1160).
+  const setup =
+    loadError !== null &&
+    (loadError.code !== "auth_required" || args.providerId === GROK_PROVIDER_ID)
+      ? providerSetupError(deps, loadError)
+      : null;
+  if (setup !== null) return setup;
+  // A failed or slow listing starts on the fallback or last listed models (#1399), as a switch does (#1291).
+  const fallback =
+    (loadError?.code === "timeout" || loadError?.code === "failed") &&
+    catalog.models.length > 0;
+  if (loadError !== null && !fallback) {
     return new ApiError(
       503,
       "model_catalog_unavailable",
       `Unable to load ${args.providerId} models to resolve the default. Try again once the host is connected and the provider is ready.`,
       {
-        details: catalog.modelLoadError,
+        details: loadError,
         retryable: true,
       },
     );
@@ -174,10 +187,13 @@ async function loadCatalogDefaultForProvider(
       true,
     );
   }
-  return buildProviderThreadExecutionDefaults(deps.providerRegistry, {
-    providerId: args.providerId,
-    model: defaultModel,
-  });
+  return {
+    defaults: buildProviderThreadExecutionDefaults(deps.providerRegistry, {
+      providerId: args.providerId,
+      model: defaultModel,
+    }),
+    fallback,
+  };
 }
 
 async function resolveCatalogExecutionDefaults(
@@ -196,7 +212,9 @@ async function resolveCatalogExecutionDefaults(
       model: args.requestedModel,
       providerId: args.providerId,
     }).catch(() => null);
-    return result instanceof ApiError ? null : result;
+    return result instanceof ApiError || result?.fallback
+      ? null
+      : (result?.defaults ?? null);
   }
 
   if (args.hostId === null) {
@@ -209,17 +227,23 @@ async function resolveCatalogExecutionDefaults(
 
   const candidates = [args.providerId, ...args.providerFallbackCandidates];
   let lastError: ApiError | null = null;
+  let fallback: ProjectExecutionDefaults | null = null;
   for (const providerId of candidates) {
     const result = await loadCatalogDefaultForProvider(deps, {
       ...(args.cwd !== undefined ? { cwd: args.cwd } : {}),
       hostId: args.hostId,
       providerId,
     });
-    if (!(result instanceof ApiError)) {
-      return result;
+    if (result instanceof ApiError) {
+      lastError = result;
+    } else if (!result.fallback) {
+      return result.defaults;
+    } else {
+      // A provider that lists its models beats another one's fallback.
+      fallback ??= result.defaults;
     }
-    lastError = result;
   }
+  if (fallback !== null) return fallback;
   throw lastError;
 }
 
@@ -263,8 +287,8 @@ async function withCloudDefaultReasoningLevel(
         )
         .catch(() => null)
     : null;
-  return defaults && !(defaults instanceof ApiError)
-    ? { ...request, reasoningLevel: defaults.reasoningLevel }
+  return defaults && !(defaults instanceof ApiError) && !defaults.fallback
+    ? { ...request, reasoningLevel: defaults.defaults.reasoningLevel }
     : request;
 }
 
@@ -383,17 +407,7 @@ function assertProjectWorkspaceCompatibility(
 ): void {
   const personalWorkspace = requestUsesPersonalWorkspace(request);
   if (project.kind === "personal") {
-    if (
-      request.environment.type !== "reuse" &&
-      request.environment.type !== "provider" &&
-      request.environment.type !== "project-default" &&
-      !(
-        request.environment.type === "host" &&
-        request.environment.workspace.type === "unmanaged" &&
-        request.environment.workspace.path === null
-      ) &&
-      !personalWorkspace
-    ) {
+    if (!personalProjectAllowsEnvironment(request.environment)) {
       throw new ApiError(
         400,
         "invalid_request",
@@ -616,6 +630,14 @@ const createsInFlight = new Map<
 
 /** A retry sent while the first request with its request ID still runs waits
  *  for that request instead of racing it (#860). */
+/** The first agent is no thread or prompt of the user's, but its reply still gets timed (`first_response`), and its
+ *  ID is remembered so that reply, a failure, and the user's follow-ups carry `first_agent`. */
+function trackFirstAgent(deps: ThreadCreateDeps, thread: Thread, execution: TelemetryExecution): Thread {
+  rememberFirstAgent(deps.db, thread.id);
+  noteMessageSent(thread.id, { execution, isChildThread: false, messageSource: "thread_create", provider: thread.providerId });
+  return thread;
+}
+
 export async function createThreadOnce(
   deps: ThreadCreateDeps,
   request: ThreadCreateServiceRequestInput,
@@ -758,6 +780,7 @@ export async function createThreadFromRequest(
   }
   if (rawRequestInput.executionTarget === "cloud" || cloudChild || cloudFork) {
     const thread = await cloudroom(deps).create({ ...(await withCloudDefaultReasoningLevel(deps, rawRequestInput)), origin: rawRequestInput.origin ?? "sdk", originKind: rawRequestInput.originKind ?? null });
+    if (rawRequestInput.origin === "setup") return trackFirstAgent(deps, thread, cloudExecution(deps, thread.id)); // Not counted, like the Local one below.
     // Cloud threads count in the same anonymous usage events as local ones, tagged with where they run.
     const execution = cloudExecution(deps, thread.id);
     const isChildThread = thread.parentThreadId !== null;
@@ -1066,6 +1089,9 @@ export async function createThreadFromRequest(
   });
   // Imported chats are old work, not new agents: they would inflate the site's agent counter.
   if (createArgs.deferFork) return thread;
+  // The first agent (ADR 20261111-220912) is started by Cloudroom, not the user: no thread, prompt, or active day is
+  // counted, so "sent a first prompt" keeps meaning a prompt the user typed. Setup reports it as a `setup_step`.
+  if (request.origin === "setup") return trackFirstAgent(deps, thread, "local");
   deps.telemetry.capture({
     name: "thread_created",
     properties: {

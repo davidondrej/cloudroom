@@ -1,11 +1,11 @@
 import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import type { BbDesktopApi, BbDesktopInfo } from "@cloudroom/desktop-contract";
-import { getBbDesktopInfo } from "@/lib/bb-desktop";
+import type { BbDesktopApi, RoomDesktopInfo } from "@cloudroom/desktop-contract";
+import { getRoomDesktopInfo } from "@/lib/room-desktop";
 
 interface DesktopUpdateInfo {
   desktopApi: BbDesktopApi | null;
-  desktopInfo: BbDesktopInfo | null;
+  desktopInfo: RoomDesktopInfo | null;
   isDesktop: boolean;
 }
 
@@ -20,9 +20,9 @@ function releaseNumber(version: string | null | undefined): number {
 }
 
 export function applyWebsiteRelease(
-  info: BbDesktopInfo | null,
+  info: RoomDesktopInfo | null,
   latestVersion: string | null | undefined,
-): BbDesktopInfo | null {
+): RoomDesktopInfo | null {
   if (info === null || info.platform === "windows") return info;
   const latest = releaseNumber(latestVersion);
   return latest > releaseNumber(info.version)
@@ -42,8 +42,8 @@ async function fetchLatestDesktopVersion(
 }
 
 export function useDesktopUpdateInfo(): DesktopUpdateInfo {
-  const [desktopApi] = useState<BbDesktopApi | null>(() => getBbDesktopInfo());
-  const [desktopInfo, setDesktopInfo] = useState<BbDesktopInfo | null>(null);
+  const [desktopApi] = useState<BbDesktopApi | null>(() => getRoomDesktopInfo());
+  const [desktopInfo, setDesktopInfo] = useState<RoomDesktopInfo | null>(null);
   const latestQuery = useQuery({
     queryKey: LATEST_DESKTOP_RELEASE_QUERY_KEY,
     queryFn: ({ signal }) => fetchLatestDesktopVersion(signal),
@@ -54,7 +54,7 @@ export function useDesktopUpdateInfo(): DesktopUpdateInfo {
   });
 
   useEffect(() => {
-    const api = getBbDesktopInfo();
+    const api = getRoomDesktopInfo();
     if (api === null) {
       return;
     }

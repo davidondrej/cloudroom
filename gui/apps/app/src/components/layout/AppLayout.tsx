@@ -31,7 +31,8 @@ import {
 import { AppBreadcrumbs } from "./AppBreadcrumbs";
 import { DesktopUpdateBanner, GitForWindowsBanner } from "./DesktopUpdateBanner";
 import { LowDiskBanner } from "./LowDiskBanner";
-import { LostMacDialog } from "@/components/settings/YourComputers";
+import { CloudLoginBanner } from "./CloudLoginBanner";
+import { OtherMacStatus } from "./OtherMacStatus";
 import { resourceRouteLabelAtom } from "./resourceRouteLabelAtom";
 import { AppPageHeader, HEADER_ICON_BUTTON_CLASS } from "./AppPageHeader";
 import { stripProjectThreads } from "@/hooks/queries/project-queries";
@@ -68,7 +69,7 @@ import {
 import {
   BROWSER_SIDEBAR_TRIGGER_INSET_CLASS,
   CHROME_ROW_CLASS,
-  getBbDesktopInfo,
+  getRoomDesktopInfo,
   MACOS_CHROME_CONTROL_AXIS_CLASS,
   MACOS_CHROME_CONTROL_NO_DRAG_CLASS,
   MACOS_SIDEBAR_MIN_WIDTH,
@@ -77,7 +78,7 @@ import {
   MACOS_WINDOW_NO_DRAG_CLASS,
   shouldReserveMacosTrafficLights,
   shouldUseMacosDesktopChrome,
-} from "@/lib/bb-desktop";
+} from "@/lib/room-desktop";
 import { useDesktopWindowState } from "@/hooks/useDesktopWindowState";
 import { useServerDaemonLogsCommand } from "@/hooks/useServerDaemonLogsCommand";
 import { useServerUpdateReload } from "@/hooks/useServerUpdateReload";
@@ -88,7 +89,6 @@ import {
   getRootComposeRoutePath,
   getThreadRoutePath,
   isProjectlessProjectId,
-  isSkillsRoutePath,
   PLUGIN_PANEL_ROUTE_PATH,
   SETTINGS_ROUTE_PATH,
 } from "@/lib/route-paths";
@@ -101,6 +101,7 @@ import {
   shouldShowFaviconAttentionDot,
 } from "./faviconAttentionDot";
 import { AppLayoutSidebar } from "./AppLayoutSidebar";
+import { revealedSelectedThreadKeyAtom } from "@/components/sidebar/sidebarCollapsedAtoms";
 import { CloudroomVersionMark } from "./CloudroomVersionMark";
 import {
   useAppCommandHandler,
@@ -192,10 +193,6 @@ function SidebarStateBridge({ children, minWidth }: SidebarStateBridgeProps) {
       {children}
     </SidebarProvider>
   );
-}
-
-function resetSidebarResizeDocumentState(): void {
-  document.body.classList.remove("sidebar-resizing");
 }
 
 interface SidebarTriggerOverlayProps {
@@ -431,6 +428,9 @@ export function AppLayout({ children }: AppLayoutProps) {
     resourceRouteLabelAtom,
   );
   useEffect(() => {
+    if (!threadId) store.set(revealedSelectedThreadKeyAtom, null);
+  }, [store, threadId]);
+  useEffect(() => {
     setResourceRouteLabel(null);
     function handleResourceRouteLabel(event: Event) {
       if (!(event instanceof CustomEvent)) return;
@@ -457,8 +457,7 @@ export function AppLayout({ children }: AppLayoutProps) {
     };
   }, [location.pathname, setResourceRouteLabel]);
   const navigate = useNavigate();
-  const { appRoutePath, settingsRoutePath, toolsBackRoutePath } =
-    useAppSettingsRouteMemory();
+  const { appRoutePath, settingsRoutePath } = useAppSettingsRouteMemory();
   const setRootComposeProjectId = useSetRootComposeProjectId();
   useEffect(
     () =>
@@ -512,12 +511,7 @@ export function AppLayout({ children }: AppLayoutProps) {
   const navPanelChrome = usePluginNavPanelChrome();
   const isGlobalSettingsView =
     matchPath(`${SETTINGS_ROUTE_PATH}/*`, location.pathname) !== null;
-  const isSkillsWorkspace = isSkillsRoutePath(location.pathname);
-  const backToAppRoutePath = isGlobalSettingsView
-    ? appRoutePath
-    : isSkillsWorkspace
-      ? toolsBackRoutePath
-      : null;
+  const backToAppRoutePath = isGlobalSettingsView ? appRoutePath : null;
   const pluginPanelMatch = matchPath(
     PLUGIN_PANEL_ROUTE_PATH,
     location.pathname,
@@ -562,7 +556,7 @@ export function AppLayout({ children }: AppLayoutProps) {
   const liveWidthRef = useRef(0);
   const animationFrameRef = useRef<number | null>(null);
   const showHeader = !isThreadView && !isRootView && pluginPanelMatch === null;
-  const [desktopInfo] = useState(getBbDesktopInfo);
+  const [desktopInfo] = useState(getRoomDesktopInfo);
   const desktopWindowState = useDesktopWindowState();
   const usesDesktopChrome = shouldUseMacosDesktopChrome(desktopInfo);
   const reserveMacosTrafficLights = shouldReserveMacosTrafficLights({
@@ -721,7 +715,6 @@ export function AppLayout({ children }: AppLayoutProps) {
       startXRef.current = event.clientX;
       startWidthRef.current = store.get(sidebarWidthAtom);
       liveWidthRef.current = startWidthRef.current;
-      document.body.classList.add("sidebar-resizing");
     },
     [store],
   );
@@ -737,7 +730,6 @@ export function AppLayout({ children }: AppLayoutProps) {
     });
     dispatchBrowserViewBoundsSync();
     setIsSidebarResizing(false);
-    resetSidebarResizeDocumentState();
   }, [store]);
 
   useEffect(() => {
@@ -780,7 +772,6 @@ export function AppLayout({ children }: AppLayoutProps) {
         animationFrameRef.current = null;
       }
       store.set(sidebarLiveWidthAtom, null);
-      resetSidebarResizeDocumentState();
     };
   }, [finishSidebarResize, isSidebarResizing, store]);
 
@@ -815,18 +806,11 @@ export function AppLayout({ children }: AppLayoutProps) {
                 <BackToAppCommandHandler routePath={backToAppRoutePath} />
               ) : null}
               <AppLayoutSidebar
-                mode={
-                  isGlobalSettingsView
-                    ? "settings"
-                    : isSkillsWorkspace
-                      ? "skills"
-                      : "app"
-                }
+                mode={isGlobalSettingsView ? "settings" : "app"}
                 onResizeMouseDown={handleResizeMouseDown}
                 isResizing={isSidebarResizing}
                 appRoutePath={appRoutePath}
                 settingsRoutePath={settingsRoutePath}
-                toolsBackRoutePath={toolsBackRoutePath}
               />
               <SidebarInset>
                 <div
@@ -846,10 +830,14 @@ export function AppLayout({ children }: AppLayoutProps) {
                       meta={meta}
                     />
                   ) : null}
-                  <LostMacDialog />
+                  <OtherMacStatus />
                   <GitForWindowsBanner />
                   <DesktopUpdateBanner />
                   <LowDiskBanner />
+                  <CloudLoginBanner
+                    threadId={threadId ?? null}
+                    onLoops={pluginPanelMatch?.params.pluginId === "automations"}
+                  />
                   <main className="flex min-h-0 flex-1 flex-col p-4 md:p-5">
                     {children}
                   </main>

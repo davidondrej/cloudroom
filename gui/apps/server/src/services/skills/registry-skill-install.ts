@@ -1,9 +1,8 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
-import os from "node:os";
 import path from "node:path";
-import { execPortableFile } from "@cloudroom/process-utils";
+import { ensureDataTempDir, execPortableFile } from "@cloudroom/process-utils";
 import { ApiError } from "../../errors.js";
 import {
   hasSupportedFrontmatterDelimiter,
@@ -66,6 +65,8 @@ function registrySkillsCliInvocation(args: {
     const value = process.env[key];
     if (value !== undefined) env[key] = value;
   }
+  // The CLI clones the skill into TMPDIR before it copies it here, so that stays private too (Windows keeps its TEMP).
+  if (process.platform !== "win32") env.TMPDIR = args.cwd;
   return {
     command: process.platform === "win32" ? "npx.cmd" : "npx",
     args: [
@@ -313,6 +314,7 @@ function installConflict(skillId: string): ApiError {
 }
 
 export async function installServerRegistrySkill(args: {
+  dataDir: string;
   userSkillsRootPath: string;
   packageRef: string;
   registrySkillId: string;
@@ -325,8 +327,10 @@ export async function installServerRegistrySkill(args: {
       "Registry skill id is invalid",
     );
   }
+  // In the data folder, never the OS temp folder, where Read-only Mac commands and sandboxed agents could plant an
+  // `.npmrc` that npx obeys outside any sandbox, or change the skill before it is copied.
   const extractionRoot = await fs.mkdtemp(
-    path.join(os.tmpdir(), "bb-registry-skill-"),
+    path.join(ensureDataTempDir(args.dataDir), "bb-registry-skill-"),
   );
   const skillsRootPath = args.userSkillsRootPath;
   await fs.mkdir(skillsRootPath, { recursive: true });

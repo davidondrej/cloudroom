@@ -54,12 +54,14 @@ export interface BridgeProtocolAdapter {
   id: string;
   capabilities: BridgeEnforcedCapabilities;
   readonly approvalEnforcedBy: "runtime" | "provider";
+  readonly stopsUnopenedTurns: boolean;
   process: { command: string; args: string[]; env?: Record<string, string> };
   buildCommandPlan(command: AdapterCommand): ProviderCommandPlan;
   buildPostInitializeRequests(): readonly ProviderPostInitializeRequest[];
   parseModelListResult(result: unknown): {
     models: AvailableModel[];
     selectedOnlyModels: AvailableModel[];
+    warnings: string[];
   };
   translateEvent(event: ProviderRuntimeEvent): ThreadEvent[];
   decodeRecoveryHint(event: ProviderRuntimeEvent): ProviderRecoveryHint | null;
@@ -198,6 +200,9 @@ export function createBridgeProtocolAdapter(
     capabilities,
     get approvalEnforcedBy() {
       return handshake.approvalEnforcedBy;
+    },
+    get stopsUnopenedTurns() {
+      return handshake.stopsUnopenedTurns;
     },
     process: options.process,
 
@@ -361,6 +366,7 @@ export function createBridgeProtocolAdapter(
                       command.threadId,
                       command.activeTurnId,
                     ) ?? command.activeTurnId),
+              ...(command.keepSession ? { keepSession: true } : {}),
             },
           };
         case "thread/discard":

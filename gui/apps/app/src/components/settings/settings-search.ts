@@ -68,7 +68,6 @@ const SETTINGS_SEARCH_ENTRIES: readonly SettingsSearchEntry[] = [
   ...entries("general", "Thread naming", [
     ["Thread naming", "title rename name"],
     ["Model", "thread naming llm harness provider fallback"],
-    ["Rules", "thread naming title"],
     ["Rename vague titles", "thread naming"],
   ]),
   ...entries("general", "Thread purpose", [
@@ -80,6 +79,7 @@ const SETTINGS_SEARCH_ENTRIES: readonly SettingsSearchEntry[] = [
     ["Wrong-project hint", "project nudge suggest switch jev"],
     ["Confidence", "wrong project hint nudge sensitivity percent"],
   ]),
+  ...entries("general", "Smart search", [["Smart search", "cmd k jev find thread search"]]),
   ...entries("general", "Voice Input", [
     ["Voice Input", "dictation speech talk"],
     ["Microphone", "mic audio dictation voice"],
@@ -115,11 +115,13 @@ const SETTINGS_SEARCH_ENTRIES: readonly SettingsSearchEntry[] = [
     ["Diffs", "changes renderer"],
     ["Theme", "dark mode light mode system color scheme"],
     ["Corners", "rounded sharp radius"],
+    ["Show Cloudroom name", "logo brand wordmark title top bar video"],
     ["Palette", "colors custom theme"],
     ["Favicon color", "icon dock tab"],
     ["Fade inactive splits", "dim split panes"],
     ["Sidebar footer", "buttons reorder"],
     ["Question cards", "agent questions ask"],
+    ["Wallpaper", "background image photo picture gif"],
     ["Always show one-click prompts", "starter prompts new thread security pills"],
   ]),
   ...entries("keyboard", undefined, [
@@ -145,6 +147,7 @@ const SETTINGS_SEARCH_ENTRIES: readonly SettingsSearchEntry[] = [
     ["Show Ultra effort levels", "ultracode ultra reasoning effort thinking parallel agents codex claude"],
   ]),
   ...entries("cloud-environment", "Cloud environment", [
+    ["Auth my agents in the cloud automatically", "copy logins claude codex auth credentials mac"],
     ["GitHub", "account token gh push pr"],
     ["API keys", "secrets environment variables env tokens"],
     ["Skills", "cloud skills"],
@@ -153,13 +156,13 @@ const SETTINGS_SEARCH_ENTRIES: readonly SettingsSearchEntry[] = [
     ["Setup script", "install sandbox startup cli clis tools"],
   ]),
   ...entries("auto-delete", "Auto-delete", [
-    ["Delete unused cloud threads", "retention delete old cloud threads sessions history days year never"],
+    ["Delete unused cloud threads after", "retention delete old cloud threads sessions history days year never"],
   ]),
   ...entries("projects", undefined, [
     ["Projects", "repos folders rename delete"],
     ["Hidden projects", "hide unhide restore sidebar removed"],
   ]),
-  ...entries("import", undefined, [["Import chats", "history migrate"]]),
+  ...entries("import", undefined, [["Import chats", "history migrate conductor export"]]),
   ...entries("export", undefined, [["Export chats", "history backup download markdown json"]]),
   ...entries("archived", undefined, [["Archived threads", "restore unarchive"]]),
   ...entries("account", undefined, [
@@ -170,6 +173,11 @@ const SETTINGS_SEARCH_ENTRIES: readonly SettingsSearchEntry[] = [
     ["Or connect your own Core", "self-hosted core url api token server"],
   ]),
   ...entries("analytics", undefined, [
+    ["Cloud Credits", "analytics usage credits used when hour by hour threads wave busiest day left"],
+    ["Agent hours", "analytics agents working hours time leverage local cloud your hours"],
+    ["Models", "analytics models most used share of prompts top model local cloud"],
+    ["Tokens", "analytics tokens written read cache usage threads wave"],
+    ["Prompts", "analytics prompts hours of the week streak busiest hour punch card"],
     ["Skills", "analytics stats usage most used least used skill runs ridgeline"],
   ]),
   ...entries("machines", undefined, [
@@ -193,6 +201,10 @@ const SETTINGS_SEARCH_ENTRIES: readonly SettingsSearchEntry[] = [
   ]),
   ...entries("system-prompt", undefined, [
     ["Cloudroom system prompt", "instructions agents"],
+  ]),
+  ...entries("feature-prompts", undefined, [
+    ["Thread naming", "feature prompts edit rules title rename name"],
+    ["Prompt suggestions prompt", "feature prompts edit predict next prompt"],
   ]),
   ...entries("experiments", "Experiments", [
     ["Changelog preview", "beta release notes"],

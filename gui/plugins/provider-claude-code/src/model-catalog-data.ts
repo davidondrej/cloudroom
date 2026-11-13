@@ -50,6 +50,12 @@ export const CLAUDE_CODE_ACTIVE_CATALOG_DATA: readonly ClaudeCodeCatalogEntryDat
       defaultReasoningEffort: "high",
     },
     {
+      model: "claude-fable-5-2",
+      description:
+        "Fable 5.2 for demanding reasoning; requires Claude Code v2.1.321+",
+      defaultReasoningEffort: "high",
+    },
+    {
       model: "claude-fable-5-1",
       description:
         "Fable 5.1 for demanding reasoning; requires Claude Code v2.1.257+",

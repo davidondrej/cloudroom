@@ -63,6 +63,8 @@ import { pickHostFolder } from "./command-handlers/native-folder-picker.js";
 import {
   ProviderInstallationInProgressError,
   streamProviderInstallation,
+  withPrivateInstallTemp,
+  withWindowsGitShell,
 } from "./provider-installation.js";
 import type {
   ProviderInstallationCommand,
@@ -124,13 +126,21 @@ async function stopThreadRuntime(
       await options.eventSink.flush();
       return { providerCheckpointId };
     }
-    if (command.type !== "thread.stop" || (command.intent !== "release" && !command.immediate)) {
+    const keepSession =
+      command.type === "thread.stop" && command.keepSession === true && !command.immediate;
+    // A turn sent just before this Stop may not have opened yet. Most agents
+    // can only interrupt it once it has.
+    if (
+      (command.type !== "thread.stop" || (command.intent !== "release" && !command.immediate)) &&
+      !(keepSession && entry.runtime.stopsUnopenedTurns?.(command.threadId))
+    ) {
       await entry.runtime.waitForActiveTurn(command.threadId, {
         timeoutMs: THREAD_STOP_ACTIVE_TURN_WAIT_MS,
       });
     }
     const result = await entry.runtime.stopThread({
       threadId: command.threadId,
+      ...(keepSession ? { keepSession: true } : {}),
     });
     providerCheckpointId = result.providerCheckpointId ?? providerCheckpointId;
   }
@@ -296,6 +306,40 @@ async function runProviderInstallationOnHost(
       action: command.action,
     });
     if (!run.available) {
+      // Another update (auto-update, a second click) may have just finished:
+      // a current CLI means the update is done, not failed.
+      if (command.action === "update") {
+        let status: ProviderInstallationStatus | null = null;
+        try {
+          status = await options.providerInstallationStatus(maintenanceArgs);
+        } catch {
+          // Unreadable status: report the refusal below.
+        }
+        if (
+          status?.installed &&
+          status.currentVersion !== null &&
+          !status.needsUpdate &&
+          !status.versionUnsupported
+        ) {
+          return {
+            events: [
+              {
+                type: "output",
+                provider: command.providerId,
+                stream: "stdout",
+                text: `Already up to date (${status.currentVersion}).\n`,
+              },
+              {
+                type: "completed",
+                provider: command.providerId,
+                exitCode: 0,
+                signal: null,
+                success: true,
+              },
+            ],
+          };
+        }
+      }
       return {
         events: [
           {
@@ -314,8 +358,16 @@ async function runProviderInstallationOnHost(
     const runVerified = async (
       plan: ProviderInstallationCommand,
     ): Promise<ProviderCliInstallEvent[]> => {
-      const events = await readProviderCliInstallEvents(
-        stream({ providerId: command.providerId, plan, env }),
+      const events = await withPrivateInstallTemp(
+        options.dataDir,
+        env,
+        async (installEnv) =>
+          readProviderCliInstallEvents(
+            stream({
+              providerId: command.providerId,
+              ...(await withWindowsGitShell({ plan, env: installEnv })),
+            }),
+          ),
       );
       if (!succeeded(events)) return events;
       try {

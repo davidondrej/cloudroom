@@ -6,15 +6,18 @@ and each spawn and wait saves progress for the scan's progress card (room-cli lo
   readers.py spawn DIR PROVIDER MODEL  -> starts a reader per DIR/slices/slice-NN.txt, saving DIR/readers.json after each;
                                           run it again after a failure to start only the missing readers
   readers.py wait DIR [--max 540]      -> blocks until every reader is done or --max seconds pass; restarts a failed
-                                          or archived reader once; prints "done" (and writes DIR/lines.txt) or "running N/M"
+                                          or archived reader once; prints "done" (and writes DIR/lines.txt, without chat IDs
+                                          that are not in a reader's slice) or "running N/M"
   readers.py archive DIR               -> archives every reader thread
 """
-import glob, hashlib, json, os, shutil, subprocess, sys, time
+import glob, hashlib, json, os, re, shutil, subprocess, sys, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PROJECT = os.environ.get("ROOM_PROJECT_ID") or "proj_personal"
 WIN = sys.platform == "win32"
 CLI = (shutil.which("room-cli") if WIN else None) or "room-cli"
+ID = re.compile(r"(?<![A-Za-z0-9-])([a-z]-[0-9a-f]{8})(?![A-Za-z0-9])(?:, *| +)?")  # a chat ID as extract.py writes it, plus the separator after it
+LEAD = re.compile(r"[\s#|*_`>\[(\d.)+-]*")  # markup before a chat line's own ID: headings, tables, lists, bold, code
 
 
 def cli(*args, check=False):
@@ -84,6 +87,36 @@ def spawn(d, provider, model):
     print(f"{len(state['readers'])} readers started")
 
 
+def slice_ids(d, n):
+    try:
+        return set(re.findall(r"^### ([a-z]-[0-9a-f]{8}) ", open(os.path.join(d, "slices", f"slice-{n}.txt"), encoding="utf-8").read(), re.M))
+    except (OSError, ValueError):
+        return set()
+
+
+def drop_invented(output, ids):
+    """Removes chat IDs that are not in the reader's slice, and lines about such a chat (the IDs it starts with, after
+    markup only, are all invented); changes nothing else."""
+    if not ids:
+        return output, 0
+    kept, invented = [], set()
+    for line in output.split("\n"):
+        found = list(ID.finditer(line))
+        bad = {m[1] for m in found if m[1] not in ids}
+        invented |= bad
+        if not bad:
+            kept.append(line)
+            continue
+        own = found[:1]  # the IDs the line starts with: a real chat among them keeps the line
+        for m in found[1:]:
+            if m.start() != own[-1].end():
+                break
+            own.append(m)
+        if not (LEAD.fullmatch(line, 0, found[0].start()) and all(m[1] in bad for m in own)):
+            kept.append(ID.sub(lambda m: m[0] if m[1] in ids else "", line).rstrip(", "))
+    return "\n".join(kept).strip(), len(invented)
+
+
 def wait(d, limit=540):
     state, end = load(d), time.time() + limit
     while True:
@@ -94,7 +127,7 @@ def wait(d, limit=540):
                 continue
             output = (room("thread", "output", r["id"]).get("output") or "").strip() if now == "idle" else ""
             if " | " in output or r["tries"] >= 2:
-                r["output"] = output
+                r["output"], r["invented"] = drop_invented(output, slice_ids(d, n))
             else:
                 cli("thread", "archive", r["id"])
                 start(d, state, n)
@@ -105,7 +138,9 @@ def wait(d, limit=540):
             with open(os.path.join(d, "lines.txt"), "w", encoding="utf-8") as f:
                 f.write("\n\n".join(r["output"] for r in state["readers"].values() if r["output"]))
             failed = [n for n, r in state["readers"].items() if not r["output"]]
-            return print("done" + (f", no output from readers {', '.join(failed)}" if failed else ""))
+            invented = [f"{n} ({r['invented']})" for n, r in state["readers"].items() if r.get("invented")]
+            return print("done" + (f", no output from readers {', '.join(failed)}" if failed else "")
+                         + (f", dropped invented chat IDs from readers {', '.join(invented)}" if invented else ""))
         if time.time() > end:
             return print(f"running {done}/{len(state['readers'])}")
         time.sleep(20)

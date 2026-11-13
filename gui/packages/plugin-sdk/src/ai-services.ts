@@ -61,6 +61,8 @@ export const experimental_aiInferenceCompleteInputSchema = z
     timeoutMs: z.number().int().positive(),
     /** A folder the model may explore with read-only file tools first. Services without file tools ignore it. */
     folder: z.string().min(1).optional(),
+    /** Variables for the service's CLI: the login its provider's threads run on. Sent only when Cloudroom has one. */
+    env: z.record(z.string(), z.string()).optional(),
   })
   .strict();
 export type ExperimentalAiInferenceCompleteInput = z.infer<

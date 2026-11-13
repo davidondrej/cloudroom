@@ -46,7 +46,7 @@ function nextPrefix(base: string, used: Set<string>): string {
 
 export async function seedDemo(
   domain: TasksDomain,
-  linkedBbProjectId: string | undefined,
+  linkedRoomProjectId: string | undefined,
 ): Promise<SeedDemoResult> {
   const existing = tasksRpcContract.listProjects.output.parse(
     await domain.listProjects(tasksRpcContract.listProjects.input.parse({})),
@@ -71,7 +71,7 @@ export async function seedDemo(
       prefix: nextPrefix("TASKS", prefixes),
       color: "blue",
       folderId: productFolder.id,
-      linkedBbProjectId: linkedBbProjectId ?? null,
+      linkedBbProjectId: linkedRoomProjectId ?? null,
     },
     {
       name: "Operations",
@@ -260,7 +260,7 @@ export async function seedDemo(
     labelsCreated: labels.length,
     tasksCreated: tasks.length,
     commentsCreated: comments.length,
-    linkedBbProjectId: linkedBbProjectId ?? null,
+    linkedBbProjectId: linkedRoomProjectId ?? null,
     projects: projects.map((project) => ({
       id: project.id,
       keyPrefix: project.prefix,

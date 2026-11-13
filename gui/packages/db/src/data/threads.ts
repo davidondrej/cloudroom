@@ -226,7 +226,18 @@ export function upsertThreadSearchSegments(
   args: UpsertThreadSearchSegmentsArgs,
 ): void {
   const updatedAt = args.updatedAt ?? Date.now();
+  // Hidden threads are plugin workers nobody searches. Indexing their large prompts filled bb.db with GBs.
+  const visible = new Map<string, boolean>();
   for (const segment of args.segments) {
+    if (!visible.has(segment.threadId)) {
+      const row = db
+        .select({ visibility: threads.visibility })
+        .from(threads)
+        .where(eq(threads.id, segment.threadId))
+        .get();
+      visible.set(segment.threadId, row?.visibility !== "hidden");
+    }
+    if (!visible.get(segment.threadId)) continue;
     upsertThreadSearchSegment(db, {
       ...segment,
       id: buildThreadSearchSegmentId(segment),
@@ -389,6 +400,12 @@ export function listThreadMentionRowsByIds(
 }
 
 export interface ListThreadsOptions {
+  status?: ThreadStatus;
+  providerId?: string;
+  executionTarget?: "local" | "cloud";
+  pinned?: boolean;
+  /** Newest first, by last update or by creation. Omitted keeps the app's order. */
+  sort?: "updated" | "created";
   projectId?: string;
   environmentId?: string;
   archived?: boolean;
@@ -656,6 +673,16 @@ function statusTransitionNeedsAttention(args: StatusTransition): boolean {
 
 function buildListThreadsFilters(options: ListThreadsOptions) {
   return [
+    options.status ? eq(threads.status, options.status) : undefined,
+    options.providerId ? eq(threads.providerId, options.providerId) : undefined,
+    options.executionTarget
+      ? eq(threads.executionTarget, options.executionTarget)
+      : undefined,
+    options.pinned === true
+      ? isNotNull(threads.pinnedAt)
+      : options.pinned === false
+        ? isNull(threads.pinnedAt)
+        : undefined,
     options.projectId ? eq(threads.projectId, options.projectId) : undefined,
     options.environmentId
       ? eq(threads.environmentId, options.environmentId)
@@ -722,6 +749,12 @@ function buildPinnedThreadOrderBy() {
 }
 
 function buildListThreadsOrderBy(options: ListThreadsOptions) {
+  if (options.sort === "updated") {
+    return [desc(threads.updatedAt), desc(threads.id)];
+  }
+  if (options.sort === "created") {
+    return [desc(threads.createdAt), desc(threads.id)];
+  }
   if (options.archived === true) {
     return [desc(threads.archivedAt), desc(threads.id)];
   }

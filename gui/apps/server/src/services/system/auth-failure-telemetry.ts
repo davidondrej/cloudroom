@@ -1,3 +1,4 @@
+import { firstAgentTag } from "./first-agent.js";
 import { countThreads, getLatestStoredThreadEventOfTypes, getThread, type DbConnection } from "@cloudroom/db";
 import type { ServerLogger } from "../../types.js";
 import { scrub } from "../cloudroom/setup-telemetry.js";
@@ -41,6 +42,7 @@ export function noteTurnFailed(threadId: string, cloud?: CloudFailure): void {
         provider: thread.providerId,
         error_category: failed?.errorInfo?.category ?? cloud?.category ?? "unknown",
         ...(process.platform === "win32" ? { error_message: failureText(current.db, threadId, failed?.interruptionReason, cloud?.message) } : {}),
+        ...firstAgentTag(current.db, threadId),
       },
     });
     if (failed?.errorInfo?.category !== "unauthorized") return;

@@ -14,7 +14,7 @@ describe("desktop app paths", () => {
     };
 
     expect(resolveDesktopBridgePath({ paths })).toBe(
-      "/Applications/bb.app/Contents/Resources/app.asar.unpacked/dist/bb-app-bridge.mjs",
+      "/Applications/bb.app/Contents/Resources/app.asar.unpacked/dist/launcher-bridge.mjs",
     );
   });
 
@@ -26,7 +26,7 @@ describe("desktop app paths", () => {
     };
 
     expect(resolveDesktopBridgePath({ paths })).toBe(
-      "/Applications/bb.app/Contents/Resources/app-arm64.asar.unpacked/dist/bb-app-bridge.mjs",
+      "/Applications/bb.app/Contents/Resources/app-arm64.asar.unpacked/dist/launcher-bridge.mjs",
     );
   });
 

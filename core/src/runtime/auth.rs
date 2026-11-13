@@ -133,7 +133,7 @@ impl Adapter for Protocol {
                 } else {
                     io::ErrorKind::Other
                 },
-                "Codex account check failed",
+                format!("Codex account check failed: {}", redacted(&message)),
             ))
         } else {
             Ok(value["result"].clone())
@@ -313,12 +313,27 @@ impl Default for CodexAuth {
         }
     }
 }
+/// Codex's error text for the local Core log: one line, at most 200 characters, with long token-like words hidden.
+fn redacted(message: &str) -> String {
+    let words: Vec<&str> = message
+        .split_whitespace()
+        .map(|word| if word.len() >= 32 { "[hidden]" } else { word })
+        .collect();
+    words.join(" ").chars().take(200).collect()
+}
+/// Codex refused the saved login (401 or similar), as opposed to having none.
+pub const LOGIN_REJECTED: &str = "Your Codex login is missing or expired. Sign in again.";
+/// A failed check goes to Core's local log with Codex's own words, so we can see why Cloud refused a login.
+/// Only a new error is logged, so a long outage's retries don't fill the log.
 fn failure(error: io::Error) -> Status {
+    static LAST: Mutex<String> = Mutex::new(String::new());
+    let line = format!("Codex login check failed ({:?}): {error}", error.kind());
+    if *LAST.lock().unwrap() != line {
+        eprintln!("{line}");
+        *LAST.lock().unwrap() = line;
+    }
     if error.kind() == io::ErrorKind::PermissionDenied {
-        Status::new(
-            "missing",
-            Some("Your Codex login is missing or expired. Sign in again."),
-        )
+        Status::new("missing", Some(LOGIN_REJECTED))
     } else {
         Status::new(
             "unavailable",
@@ -327,6 +342,15 @@ fn failure(error: io::Error) -> Status {
     }
 }
 impl CodexAuth {
+    /// How long a check answers again. A working login is kept 15 s; a failed one only 2 s, so the next start asks
+    /// Codex again: an unclear first error once kept a dead login "unverified" for 15 s of retries (2026-11-07).
+    fn keep(status: &Status) -> Duration {
+        Duration::from_secs(if matches!(status.state, "connected" | "limited") {
+            15
+        } else {
+            2
+        })
+    }
     async fn inspect(state: &mut State, config: &Config, refresh: bool) -> Status {
         if let Some(login) = &state.login {
             let completed = login.rpc.completed.borrow().clone();
@@ -356,7 +380,7 @@ impl CodexAuth {
         } else if refresh
             || state
                 .checked
-                .is_none_or(|at| at.elapsed() > Duration::from_secs(15))
+                .is_none_or(|at| at.elapsed() > Self::keep(&state.status))
         {
             state.status = match Rpc::open(config).await {
                 Ok(rpc) => {

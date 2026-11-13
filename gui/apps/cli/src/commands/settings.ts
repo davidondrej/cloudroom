@@ -20,7 +20,7 @@ import {
 import { BbHttpError } from "@cloudroom/sdk";
 import type { SystemProviderInfo } from "@cloudroom/server-contract";
 import { action } from "../action.js";
-import { createCliBbSdk } from "../client.js";
+import { createCliRoomSdk } from "../client.js";
 import { columnWidths, printBorderlessTable } from "../table.js";
 import { outputJson } from "./helpers.js";
 import { resolveMachineHostId, resolveMachineTargetOption } from "./machine.js";
@@ -250,7 +250,7 @@ export function registerSettingsCommands(
     .option("--json", "Print machine-readable JSON output")
     .action(
       action(async (opts: JsonOptions) => {
-        const result = await createCliBbSdk(getUrl()).system.config();
+        const result = await createCliRoomSdk(getUrl()).system.config();
         if (outputJson(opts, result)) return;
         console.log(JSON.stringify(result, null, 2));
       }),
@@ -264,7 +264,7 @@ export function registerSettingsCommands(
     .option("--json", "Print machine-readable JSON output")
     .action(
       action(async (opts: JsonOptions) => {
-        const { aiServices } = await createCliBbSdk(getUrl()).system.config();
+        const { aiServices } = await createCliRoomSdk(getUrl()).system.config();
         if (outputJson(opts, aiServices)) return;
         console.log(`BB_INFERENCE          ${aiServices.inference}`);
         console.log(`BB_INFERENCE_FALLBACK ${aiServices.inferenceFallback}`);
@@ -291,7 +291,7 @@ export function registerSettingsCommands(
     .option("--json", "Print machine-readable JSON output")
     .action(
       action(async (key: string, value: string, opts: JsonOptions) => {
-        const sdk = createCliBbSdk(getUrl());
+        const sdk = createCliRoomSdk(getUrl());
         const config = await sdk.system.config();
         const result = await sdk.system.updateGeneralSettings(
           updateGeneralSetting(config.generalSettings, key, value),
@@ -314,7 +314,7 @@ export function registerSettingsCommands(
           display: string | undefined,
           opts: JsonOptions,
         ) => {
-          const sdk = createCliBbSdk(getUrl());
+          const sdk = createCliRoomSdk(getUrl());
           const [config, providers] = await Promise.all([
             sdk.system.config(),
             sdk.providers.list(),
@@ -373,7 +373,7 @@ export function registerSettingsCommands(
     .action(
       action(async (opts: JsonOptions) => {
         const result =
-          await createCliBbSdk(getUrl()).system.uiPreferences.list();
+          await createCliRoomSdk(getUrl()).system.uiPreferences.list();
         if (outputJson(opts, result)) return;
         for (const key of UI_PREFERENCE_KEYS) {
           const entry = result.preferences[key];
@@ -391,7 +391,7 @@ export function registerSettingsCommands(
       action(async (keyInput: string, opts: JsonOptions) => {
         const key = requireUiPreferenceKey(keyInput);
         const { preferences } =
-          await createCliBbSdk(getUrl()).system.uiPreferences.list();
+          await createCliRoomSdk(getUrl()).system.uiPreferences.list();
         const entry = preferences[key];
         if (outputJson(opts, { key, ...entry })) return;
         console.log(JSON.stringify(entry.value));
@@ -404,7 +404,7 @@ export function registerSettingsCommands(
       action(async (keyInput: string, value: string, opts: JsonOptions) => {
         const key = requireUiPreferenceKey(keyInput);
         const parsedValue = parseUiPreferenceInput(key, value);
-        const sdk = createCliBbSdk(getUrl());
+        const sdk = createCliRoomSdk(getUrl());
         const write = async () => {
           const { preferences } = await sdk.system.uiPreferences.list();
           return sdk.system.uiPreferences.set({
@@ -430,7 +430,7 @@ export function registerSettingsCommands(
     .action(
       action(async (keyInput: string, opts: JsonOptions) => {
         const key = requireUiPreferenceKey(keyInput);
-        const result = await createCliBbSdk(
+        const result = await createCliRoomSdk(
           getUrl(),
         ).system.uiPreferences.reset({ key });
         if (outputJson(opts, result)) return;
@@ -444,7 +444,7 @@ export function registerSettingsCommands(
     .option("--json", "Print machine-readable JSON output")
     .action(
       action(async (key: string, value: string, opts: JsonOptions) => {
-        const sdk = createCliBbSdk(getUrl());
+        const sdk = createCliRoomSdk(getUrl());
         const config = await sdk.system.config();
         const result = await sdk.system.updateExperiments(
           updateExperiment(config.experiments, key, value),
@@ -463,7 +463,7 @@ export function registerSettingsCommands(
     .option("--json", "Print machine-readable JSON output")
     .action(
       action(async (value: string, opts: JsonOptions) => {
-        const sdk = createCliBbSdk(getUrl());
+        const sdk = createCliRoomSdk(getUrl());
         const config = await sdk.system.config();
         const result = await sdk.system.updateGeneralSettings(
           updateGeneralSetting(
@@ -482,7 +482,7 @@ export function registerSettingsCommands(
     .option("--json", "Print machine-readable JSON output")
     .action(
       action(async (opts: JsonOptions) => {
-        const config = await createCliBbSdk(getUrl()).system.config();
+        const config = await createCliRoomSdk(getUrl()).system.config();
         const result = {
           bindings: config.keybindings,
           overrides: config.keybindingOverrides,
@@ -499,7 +499,7 @@ export function registerSettingsCommands(
       action(
         async (commandInput: string, shortcut: string, opts: JsonOptions) => {
           const command = keyboardCommandIdSchema.parse(commandInput);
-          const sdk = createCliBbSdk(getUrl());
+          const sdk = createCliRoomSdk(getUrl());
           const config = await sdk.system.config();
           const next = config.keybindingOverrides.filter(
             (item) => item.command !== command,
@@ -520,7 +520,7 @@ export function registerSettingsCommands(
     .option("--json", "Print machine-readable JSON output")
     .action(
       action(async (commandInput: string | undefined, opts: JsonOptions) => {
-        const sdk = createCliBbSdk(getUrl());
+        const sdk = createCliRoomSdk(getUrl());
         const config = await sdk.system.config();
         const next =
           commandInput === undefined
@@ -558,7 +558,7 @@ export function registerSettingsCommands(
                 serverUrl: getUrl(),
                 target,
               });
-        const result = await createCliBbSdk(getUrl()).system.usageLimits(
+        const result = await createCliRoomSdk(getUrl()).system.usageLimits(
           hostId === undefined ? {} : { hostId },
         );
         if (outputJson(opts, result)) return;
@@ -573,7 +573,7 @@ export function registerSettingsCommands(
     .option("--json", "Print machine-readable JSON output")
     .action(
       action(async (opts: JsonOptions & { force?: boolean }) => {
-        const result = await createCliBbSdk(getUrl()).system.version({
+        const result = await createCliRoomSdk(getUrl()).system.version({
           force: opts.force,
         });
         if (outputJson(opts, result)) return;
@@ -587,7 +587,7 @@ export function registerSettingsCommands(
     .option("--json", "Print machine-readable JSON output")
     .action(
       action(async (opts: JsonOptions) => {
-        const result = await createCliBbSdk(getUrl()).system.reloadConfig();
+        const result = await createCliRoomSdk(getUrl()).system.reloadConfig();
         if (outputJson(opts, result)) return;
         console.log("Configuration reloaded");
       }),

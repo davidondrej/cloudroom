@@ -6,7 +6,11 @@ import type {
 import { resolveEnvironmentDisplayProvider } from "@cloudroom/core-ui";
 import type { SystemEnvironmentProvider } from "@cloudroom/server-contract";
 import type { IconName } from "@cloudroom/shared-ui/icon";
-import { cloudroomEnvironmentPresentation } from "@/lib/cloudroom-environment-label";
+import {
+  CLOUDROOM_LOCAL_PRIMARY,
+  CLOUDROOM_LOCAL_WORKTREE,
+  cloudroomEnvironmentPresentation,
+} from "@/lib/cloudroom-environment-label";
 import { pluginIconName } from "@/components/plugin/PluginIcon";
 import { PersistentHostIconName } from "@/lib/host-display";
 import type { MachineLabelHost } from "@/components/machines/MachineLabel";
@@ -42,6 +46,7 @@ interface EnvironmentWorkspaceSummaryDisplayArgs extends EnvironmentWorkspaceLab
   hostType: Host["type"] | null;
   hasMultipleMachines: boolean;
   hostName: string | null;
+  isWorktree?: boolean;
 }
 
 interface EnvironmentWorkspaceSummaryDisplay {
@@ -123,6 +128,7 @@ export function getEnvironmentWorkspaceSummaryDisplay({
   hasMultipleMachines,
   hostType,
   hostName,
+  isWorktree = false,
 }: EnvironmentWorkspaceSummaryDisplayArgs): EnvironmentWorkspaceSummaryDisplay | null {
   if (display.lifecycle === "provisioning") {
     return {
@@ -161,15 +167,20 @@ export function getEnvironmentWorkspaceSummaryDisplay({
   }
   const providerDisplayName = getEnvironmentProviderDisplayName(providerLookup);
   const canonical = localCloudroomPresentation(providerLookup);
-  const label = canonical?.label ?? providerDisplayName;
-  return label === null
-    ? null
-    : {
-        label,
-        compactLabel: label,
-        icon: canonical?.icon ?? getEnvironmentLabelIconName(providerLookup),
-        providerName: label,
-      };
+  // Folders an agent moved the thread into (directory switch, thread move,
+  // Teleport to Local) have no provider; still show "Local" so the chip never vanishes.
+  const label =
+    canonical?.label ??
+    providerDisplayName ??
+    (isWorktree && display.compactModeLabel === CLOUDROOM_LOCAL_PRIMARY
+      ? CLOUDROOM_LOCAL_WORKTREE
+      : display.compactModeLabel);
+  return {
+    label,
+    compactLabel: label,
+    icon: canonical?.icon ?? getEnvironmentLabelIconName(providerLookup),
+    providerName: label,
+  };
 }
 
 export function getEnvironmentWorkspaceInfoDisplay({
@@ -209,6 +220,7 @@ export function getEnvironmentLabelIconName(
 interface EnvironmentSummaryChromeArgs extends EnvironmentWorkspaceLabelArgs {
   hasMultipleMachines: boolean;
   host: EnvironmentSummaryChromeHost | null;
+  isWorktree?: boolean;
   machineProviders: readonly MachineProviderPresentation[] | undefined;
 }
 
@@ -228,12 +240,14 @@ export function getEnvironmentSummaryChrome({
   hasMultipleMachines,
   host,
   machineProviders,
+  isWorktree,
 }: EnvironmentSummaryChromeArgs): EnvironmentSummaryChrome {
   const summary = getEnvironmentWorkspaceSummaryDisplay({
     display,
     providerLookup,
     environmentName,
     hasMultipleMachines,
+    isWorktree,
     hostName: host?.name ?? null,
     hostType: host?.type ?? null,
   });

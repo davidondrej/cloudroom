@@ -1,6 +1,6 @@
 import { and, eq, isNull } from "drizzle-orm";
 import type { DbConnection, DbQueryConnection } from "../connection.js";
-import { installedPlugins, pluginArtifacts } from "../schema.js";
+import { installedPlugins, pluginArtifacts, pluginSettings } from "../schema.js";
 
 export type PluginProvenance =
   | { kind: "builtin" }
@@ -417,6 +417,47 @@ export function setInstalledPluginSourceClassification(
     )
     .run();
   return result.changes > 0;
+}
+
+/**
+ * Move a built-in plugin to a new id, keeping whether it is on, whether it was
+ * removed, and its settings. Does nothing when there is no old row or the new
+ * id is already installed, so it is safe to run on every start.
+ */
+export function renameBuiltinPlugin(
+  db: DbConnection,
+  args: { from: string; to: string; settingKeys?: Record<string, string> },
+): boolean {
+  const { from, to } = args;
+  return db.transaction((tx) => {
+    const rowWithId = (id: string) =>
+      tx
+        .select({ source: installedPlugins.source })
+        .from(installedPlugins)
+        .where(eq(installedPlugins.id, id))
+        .get();
+    if (rowWithId(from)?.source !== `builtin:${from}` || rowWithId(to)) {
+      return false;
+    }
+    tx.update(installedPlugins)
+      .set({ id: to, source: `builtin:${to}`, sourceBuiltinName: to })
+      .where(eq(installedPlugins.id, from))
+      .run();
+    tx.delete(pluginSettings).where(eq(pluginSettings.pluginId, to)).run();
+    tx.update(pluginSettings)
+      .set({ pluginId: to })
+      .where(eq(pluginSettings.pluginId, from))
+      .run();
+    for (const [oldKey, newKey] of Object.entries(args.settingKeys ?? {})) {
+      tx.update(pluginSettings)
+        .set({ key: newKey })
+        .where(
+          and(eq(pluginSettings.pluginId, to), eq(pluginSettings.key, oldKey)),
+        )
+        .run();
+    }
+    return true;
+  });
 }
 
 export function deleteInstalledPlugin(db: DbConnection, id: string): boolean {

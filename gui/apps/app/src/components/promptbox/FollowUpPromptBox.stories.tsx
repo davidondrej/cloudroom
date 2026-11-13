@@ -444,7 +444,6 @@ const contextBannerElement: ReactNode = dirtyContextBannerSection ? (
       onPromptBannerFileClick: noop,
     }}
     gitSectionPending={false}
-    parentThreadSection={null}
     pullRequestSection={null}
     expandedSection={null}
     onToggleSection={noop}
@@ -457,7 +456,6 @@ const archivedContextBannerElement: ReactNode = (
     environmentGoneSection={null}
     gitSection={null}
     gitSectionPending={false}
-    parentThreadSection={null}
     pullRequestSection={null}
     expandedSection={null}
     onToggleSection={noop}
@@ -470,7 +468,6 @@ const environmentGoneContextBannerElement: ReactNode = (
     environmentGoneSection={{ status: "destroyed" }}
     gitSection={null}
     gitSectionPending={false}
-    parentThreadSection={null}
     pullRequestSection={null}
     expandedSection={null}
     onToggleSection={noop}
@@ -523,6 +520,7 @@ interface RowConfig {
     typeof FollowUpPromptBox
   >[0]["activePromptMode"];
   readOnly?: boolean;
+  ghostText?: string;
 }
 
 type FollowUpComposerRuntimeStatus = NonNullable<
@@ -561,6 +559,7 @@ function Row({
   permission = basePermission,
   activePromptMode = null,
   readOnly = false,
+  ghostText,
 }: RowConfig) {
   const [message, setMessage] = useState(initialMessage);
   const [mentionRanges, setMentionRanges] =
@@ -755,6 +754,7 @@ function Row({
                 compactPromptPlaceholder: resolvedCompactPlaceholder,
                 promptPlaceholder: resolvedPlaceholder,
                 promptPlaceholderHint: resolvedPlaceholderHint,
+                ghostText,
                 canModifierSubmit: submitMode.kind === "queue",
                 steerActiveThreadOnEnter: false,
                 submitMode,
@@ -913,6 +913,14 @@ export function Overview() {
       </StoryRow>
     </StoryCard>
   );
+}
+
+// A finished turn with a suggested next prompt. Try ?ghost=<text> at phone width.
+export function Suggestion() {
+  const ghost =
+    new URLSearchParams(window.location.search).get("ghost") ??
+    "Commit it and open the PR";
+  return <Row submitMode={{ kind: "ready" }} ghostText={ghost} />;
 }
 
 export function EnvironmentSummary() {

@@ -142,6 +142,11 @@ export const PinnedThreadTree = memo(function PinnedThreadTree({
   onReorderPinnedRoot,
 }: PinnedThreadTreeProps) {
   const chronologicalDnd = useChronologicalSectionThreadDnd();
+  const chronologicalPinnedIds = chronologicalDnd?.pinnedItemIds;
+  const chronologicalPinnedItems = useMemo(
+    () => [...(chronologicalPinnedIds ?? [])],
+    [chronologicalPinnedIds],
+  );
   const handleReorderPinnedRoot = useCallback<
     UseNeighborReorderSortableArgs<ProjectThreadNode>["onReorder"]
   >(
@@ -203,7 +208,7 @@ export const PinnedThreadTree = memo(function PinnedThreadTree({
         onClickCapture={chronologicalDnd.onClickCapture}
       >
         <SortableContext
-          items={[...chronologicalDnd.pinnedItemIds]}
+          items={chronologicalPinnedItems}
           strategy={verticalListSortingStrategy}
         >
           {chronologicalRootNodes.map((node) => (

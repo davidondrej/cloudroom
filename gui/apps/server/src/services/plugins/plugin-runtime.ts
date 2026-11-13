@@ -32,11 +32,12 @@ import {
 import {
   buildPluginApp,
   buildPluginHost,
+  HOST_ZOD_SPECIFIER,
   isIgnoredPluginDevPath,
 } from "@cloudroom/plugin-build";
 import { PluginHostArtifactRegistry } from "./plugin-host-artifact-registry.js";
 import { getPluginBuildToolchain } from "./build-toolchain.js";
-import { createNodeBbSdk, type BbSdk } from "@cloudroom/sdk";
+import { createNodeRoomSdk, type BbSdk } from "@cloudroom/sdk";
 import { experimental_aiServicesHostContract } from "@get-bb/plugin-sdk/ai-services";
 import {
   getInstalledPlugin,
@@ -139,6 +140,16 @@ const pluginSdkAlias: Record<string, string> | undefined = existsSync(
 const pluginSdkRuntimeUrl =
   pluginSdkAlias === undefined ? null : pathToFileURL(pluginSdkRuntimePath).href;
 
+// Built-in plugins import zod as HOST_ZOD_SPECIFIER; all of them get this one
+// copy. A server run from source has no built file and uses its own zod.
+const hostZodRuntimePath = join(
+  dirname(fileURLToPath(import.meta.url)),
+  "zod-runtime.js",
+);
+const hostZodRuntimeUrl = existsSync(hostZodRuntimePath)
+  ? pathToFileURL(hostZodRuntimePath).href
+  : null;
+
 interface MutableRoot {
   id: number;
   epoch: number;
@@ -165,6 +176,11 @@ function registerMutableRootHooks(): void {
   if (mutableRootHooks !== null) return;
   mutableRootHooks = registerHooks({
     resolve(specifier, context, nextResolve) {
+      if (specifier === HOST_ZOD_SPECIFIER) {
+        return hostZodRuntimeUrl !== null
+          ? { url: hostZodRuntimeUrl, shortCircuit: true }
+          : nextResolve("zod", { ...context, parentURL: import.meta.url });
+      }
       if (
         pluginSdkRuntimeUrl !== null &&
         (specifier === PLUGIN_SDK_SPECIFIER ||
@@ -1929,7 +1945,7 @@ export function createPluginRuntime(context: PluginRuntimeContext) {
   }
 
   function bindSdk(args: { baseUrl: string; callerToken?: string }): void {
-    boundSdk = createNodeBbSdk({
+    boundSdk = createNodeRoomSdk({
       baseUrl: args.baseUrl,
       callerToken: args.callerToken,
     });

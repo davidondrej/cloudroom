@@ -2,41 +2,41 @@
 
 import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import type {
-  BbDesktopBrowserApi,
-  BbDesktopBrowserAttachRequest,
-  BbDesktopBrowserSetBoundsRequest,
-  BbDesktopBrowserSetVisibleRequest,
-  BbDesktopBrowserState,
+  RoomDesktopBrowserApi,
+  RoomDesktopBrowserAttachRequest,
+  RoomDesktopBrowserSetBoundsRequest,
+  RoomDesktopBrowserSetVisibleRequest,
+  RoomDesktopBrowserState,
 } from "@cloudroom/desktop-contract";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { BrowserFixedPanelTab } from "@/lib/fixed-panel-tabs-state";
 import {
-  createBbDesktopApi,
+  createRoomDesktopApi,
   createNoopDesktopBrowserApi,
-} from "@/test/bb-desktop-test-utils";
+} from "@/test/room-desktop-test-utils";
 import { POINTER_COARSE_QUERY } from "@cloudroom/shared-ui/hooks/use-pointer-coarse";
 import { BrowserTabDeck, BrowserTabLifecycleObserver } from "./BrowserTabDeck";
 import { resetBrowserViewPersistence } from "./browserViewVisibilityCoordinator";
 
 type BrowserCall =
-  | { type: "attach"; request: BbDesktopBrowserAttachRequest }
+  | { type: "attach"; request: RoomDesktopBrowserAttachRequest }
   | { type: "detach"; tabId: string }
-  | { type: "setBounds"; request: BbDesktopBrowserSetBoundsRequest }
-  | { type: "setVisible"; request: BbDesktopBrowserSetVisibleRequest }
+  | { type: "setBounds"; request: RoomDesktopBrowserSetBoundsRequest }
+  | { type: "setVisible"; request: RoomDesktopBrowserSetVisibleRequest }
   | {
       type: "setVisibleWithoutFocus";
-      request: BbDesktopBrowserSetVisibleRequest;
+      request: RoomDesktopBrowserSetVisibleRequest;
     };
 
 interface RecordingBrowserApi {
-  api: BbDesktopBrowserApi;
+  api: RoomDesktopBrowserApi;
   calls: BrowserCall[];
   detachments: string[];
-  attachments: BbDesktopBrowserAttachRequest[];
-  bounds: BbDesktopBrowserSetBoundsRequest[];
-  emitState: (state: BbDesktopBrowserState) => void;
-  visibility: BbDesktopBrowserSetVisibleRequest[];
-  visibilityWithoutFocus: BbDesktopBrowserSetVisibleRequest[];
+  attachments: RoomDesktopBrowserAttachRequest[];
+  bounds: RoomDesktopBrowserSetBoundsRequest[];
+  emitState: (state: RoomDesktopBrowserState) => void;
+  visibility: RoomDesktopBrowserSetVisibleRequest[];
+  visibilityWithoutFocus: RoomDesktopBrowserSetVisibleRequest[];
 }
 
 const BROWSER_PANEL_RECT = new DOMRect(12, 24, 420, 260);
@@ -63,13 +63,13 @@ function makeBrowserTab(id: string, url: string): BrowserFixedPanelTab {
 
 function createRecordingBrowserApi(): RecordingBrowserApi {
   const calls: BrowserCall[] = [];
-  const attachments: BbDesktopBrowserAttachRequest[] = [];
-  const bounds: BbDesktopBrowserSetBoundsRequest[] = [];
+  const attachments: RoomDesktopBrowserAttachRequest[] = [];
+  const bounds: RoomDesktopBrowserSetBoundsRequest[] = [];
   const detachments: string[] = [];
-  const stateListeners: Array<(state: BbDesktopBrowserState) => void> = [];
-  const visibility: BbDesktopBrowserSetVisibleRequest[] = [];
-  const visibilityWithoutFocus: BbDesktopBrowserSetVisibleRequest[] = [];
-  const api: BbDesktopBrowserApi = {
+  const stateListeners: Array<(state: RoomDesktopBrowserState) => void> = [];
+  const visibility: RoomDesktopBrowserSetVisibleRequest[] = [];
+  const visibilityWithoutFocus: RoomDesktopBrowserSetVisibleRequest[] = [];
+  const api: RoomDesktopBrowserApi = {
     ...createNoopDesktopBrowserApi(),
     attach(request) {
       attachments.push(request);
@@ -117,8 +117,8 @@ function createRecordingBrowserApi(): RecordingBrowserApi {
   };
 }
 
-function installDesktopBrowser(api: BbDesktopBrowserApi): void {
-  window.bbDesktop = createBbDesktopApi(desktopInfo, api);
+function installDesktopBrowser(api: RoomDesktopBrowserApi): void {
+  window.bbDesktop = createRoomDesktopApi(desktopInfo, api);
 }
 
 function createMatchMedia(

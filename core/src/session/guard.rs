@@ -47,6 +47,13 @@ impl Manager {
                         .record(Signal::StorageStale { gap_ms });
                 }
                 measured = Instant::now();
+                let reading = if snapshot.level == Level::Normal {
+                    String::new()
+                } else {
+                    manager
+                        .storage
+                        .measured(&snapshot, manager.workspaces.root())
+                };
                 if snapshot.level != Level::Normal {
                     let warnings = {
                         let mut local = manager.local.lock().unwrap();
@@ -67,6 +74,7 @@ impl Manager {
                             } else {
                                 "Cloudroom: disk space is running low. Work and sync continue. Delete files you no longer need; if the disk fills, Cloudroom pauses work and stops the command filling it."
                             };
+                            let text = format!("{text}{reading}");
                             // Persist before delivery. A timed-out native notification is not blindly repeated.
                             if local
                                 .append(
@@ -90,7 +98,7 @@ impl Manager {
                                 id,
                                 tokio::time::timeout(
                                     Duration::from_secs(2),
-                                    handle.system_message(text),
+                                    handle.system_message(&text),
                                 )
                                 .await
                                 .is_ok_and(|r| r.is_ok()),
@@ -123,11 +131,11 @@ impl Manager {
                                 let _ = local.append(
                                         &id,
                                         "storage_pause",
-                                        json!({"paused":true,"reason":snapshot.reason,"text":if snapshot.reason == "measurement_unavailable" {
+                                        json!({"paused":true,"reason":snapshot.reason,"text":format!("{}{reading}", if snapshot.reason == "measurement_unavailable" {
                                             "Cloudroom: disk space could not be measured. Work is paused until storage can be verified."
                                         } else {
                                             "Cloudroom: work paused because the disk is almost full. If space does not recover within 30 seconds, Cloudroom stops the command filling it."
-                                        }}),
+                                        })}),
                                         None,
                                     );
                             }
@@ -144,7 +152,7 @@ impl Manager {
                         && snapshot.reason == "disk_capacity"
                         && since.elapsed() >= RESCUE_AFTER
                     {
-                        manager.rescue().await;
+                        manager.rescue(&snapshot).await;
                         blocked_since = None;
                     }
                     was_blocked = true;
@@ -187,10 +195,12 @@ impl Manager {
     /// wrote the most, and tells every agent to clean up. The lowered threshold (`Guard::rescue`) then lets the
     /// guard loop thaw everything; a writer that keeps filling the disk is stopped on the next rescue. At the
     /// lowest pause line there is no rescue: work stays paused so history can still be saved.
-    async fn rescue(&self) {
+    async fn rescue(&self, snapshot: &Snapshot) {
         if !self.storage.rescue() {
             return;
         }
+        // After `Guard::rescue`, so it names the lowered pause line.
+        let reading = self.storage.measured(snapshot, self.workspaces.root());
         let handles: Vec<_> = self
             .local
             .lock()
@@ -215,10 +225,12 @@ impl Manager {
                 Some((owner, command)) if *owner == id => {
                     let command: String = command.replace('`', "'").chars().take(160).collect();
                     format!(
-                        "Cloudroom: the disk is full, so Cloudroom stopped `{command}`, which was filling it. Free space before continuing: delete files you no longer need, like build output, caches, or node_modules, and check with `df -h`. Do not rerun that command as is."
+                        "Cloudroom: the disk is full, so Cloudroom stopped `{command}`, which was filling it. Free space before continuing: delete files you no longer need, like build output, caches, or node_modules, and check with `df -h`. Do not rerun that command as is.{reading}"
                     )
                 }
-                _ => "Cloudroom: the disk is full. Work resumes so you can free space: delete files you no longer need, like build output, caches, or node_modules, and check with `df -h`.".into(),
+                _ => format!(
+                    "Cloudroom: the disk is full. Work resumes so you can free space: delete files you no longer need, like build output, caches, or node_modules, and check with `df -h`.{reading}"
+                ),
             };
             // Recorded now for the user; the agent reads it once the guard loop thaws it.
             if self
@@ -269,11 +281,17 @@ impl Manager {
                 {
                     compact_at = Instant::now() + Duration::from_secs(60);
                 }
-                let (pending, idle, seen) = {
-                    let local = manager.local.lock().unwrap();
+                let (pending, idle, seen, report_waits) = {
+                    let mut local = manager.local.lock().unwrap();
                     let idle = local.sessions.values().all(|s| !s.busy());
                     let seen: usize = local.sessions.values().map(|s| s.receipts.len()).sum();
-                    (local.journal.last() - local.journal.saved(), idle, seen)
+                    let saved = local.journal.saved();
+                    let pending = if local.loud > saved {
+                        local.journal.last() - saved
+                    } else {
+                        0
+                    };
+                    (pending, idle, seen, std::mem::take(&mut local.report_waits))
                 };
                 settled &= idle && seen == commands;
                 commands = seen;
@@ -283,6 +301,7 @@ impl Manager {
                 }
                 let waited = since.get_or_insert_with(Instant::now).elapsed();
                 let due = asked
+                    || report_waits
                     || pending >= UPLOAD_RECORDS
                     || waited >= UPLOAD_AFTER
                     || (idle && !settled && waited >= Duration::from_secs(2));
@@ -396,20 +415,39 @@ impl Manager {
         matches!(result, Ok(Ok(())))
     }
 
-    /// Uploads now and waits up to `wait` for every record to be saved. Returns how many are still pending.
-    pub async fn flush_history(&self, wait: Duration) -> u64 {
-        let deadline = Instant::now() + wait;
+    /// Waits up to `wait` for every record written so far that needs an upload to be saved, not for ones written
+    /// meanwhile, which a chatty thread never stops making. Returns how many are still pending. A `patient` flush lets
+    /// the uploader's own upload come first, asking only after 3 s and never past its backoff, and leaves it alone
+    /// once an upload fails.
+    pub async fn flush_history(&self, wait: Duration, patient: bool) -> u64 {
+        let start = Instant::now();
+        let ask_after = Duration::from_secs(if patient { 3 } else { 0 });
+        let target = self.local.lock().unwrap().loud;
         let mut asked_at = None::<Instant>;
         loop {
-            let pending = {
+            let (saved, last, failing) = {
                 let local = self.local.lock().unwrap();
-                local.journal.last() - local.journal.saved()
+                (
+                    local.journal.saved(),
+                    local.journal.last(),
+                    !local.database_available,
+                )
             };
-            if pending == 0 || !self.history.saves_externally() || Instant::now() >= deadline {
-                return pending;
+            if saved >= target
+                || !self.history.saves_externally()
+                || start.elapsed() >= wait
+                || (patient && failing)
+            {
+                return last - saved;
             }
-            if asked_at.is_none_or(|at| at.elapsed() >= Duration::from_secs(2)) {
-                self.uploads.notify_one();
+            if start.elapsed() >= ask_after
+                && asked_at.is_none_or(|at| at.elapsed() >= Duration::from_secs(2))
+            {
+                if patient {
+                    self.local.lock().unwrap().report_waits = true;
+                } else {
+                    self.uploads.notify_one();
+                }
                 asked_at = Some(Instant::now());
             }
             tokio::time::sleep(Duration::from_millis(100)).await;

@@ -86,7 +86,7 @@ export function SidebarUpdatesBadge({ onNavigate }: SidebarUpdatesBadgeProps) {
   const stuckDaemonCount = inventory.machines.filter(
     (machine) => machine.canRetryDaemonUpdate,
   ).length;
-  const bbUpdateCount =
+  const roomUpdateCount =
     (inventory.appUpdateAvailable ? 1 : 0) +
     (inventory.desktopUpdateReady || inventory.desktopInfo?.updateAvailable
       ? 1
@@ -120,13 +120,13 @@ export function SidebarUpdatesBadge({ onNavigate }: SidebarUpdatesBadgeProps) {
   );
   const showHostNames = new Set(entries.map((entry) => entry.hostId)).size > 1;
 
-  if (bbUpdateCount === 0 && staleProviders.length === 0) {
+  if (roomUpdateCount === 0 && staleProviders.length === 0) {
     return null;
   }
 
   const updatesRoutePath = getSettingsRoutePath("updates");
-  const bbLabel =
-    bbUpdateCount === 1 ? "Cloudroom update available" : "Cloudroom updates available";
+  const roomLabel =
+    roomUpdateCount === 1 ? "Cloudroom update available" : "Cloudroom updates available";
   const providerLabel = `${joinNames(
     staleProviders.map((stale) => stale.displayName),
   )} ${staleProviders.length === 1 ? "update" : "updates"} available`;
@@ -145,13 +145,13 @@ export function SidebarUpdatesBadge({ onNavigate }: SidebarUpdatesBadgeProps) {
 
   return (
     <SidebarMenuItem className="flex min-w-0 items-center gap-1">
-      {bbUpdateCount > 0 ? (
+      {roomUpdateCount > 0 ? (
         <Tooltip>
           <TooltipTrigger asChild>
             <Link
               to={updatesRoutePath}
               onClick={onNavigate}
-              aria-label={bbLabel}
+              aria-label={roomLabel}
               data-testid="sidebar-updates-badge-bb"
               className={CHIP_CLASS}
             >
@@ -159,7 +159,7 @@ export function SidebarUpdatesBadge({ onNavigate }: SidebarUpdatesBadgeProps) {
               Cloudroom
             </Link>
           </TooltipTrigger>
-          <TooltipContent side="top">{bbLabel}</TooltipContent>
+          <TooltipContent side="top">{roomLabel}</TooltipContent>
         </Tooltip>
       ) : null}
       {staleProviders.length > 0 ? (

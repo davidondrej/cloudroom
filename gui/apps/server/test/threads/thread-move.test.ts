@@ -211,6 +211,28 @@ describe("thread move", () => {
     });
   });
 
+  it("refuses a busy Local thread's move to Personal at once", async () => {
+    await withTestHarness(async (harness) => {
+      const { thread, oldEnvironment } = seedTwoProjects(harness, "active");
+
+      const response = await move(harness, thread.id, "Personal");
+
+      expect(response.status).toBe(409);
+      expect(await response.json()).toMatchObject({
+        message:
+          "Local threads can't be moved to Personal yet. Start a new thread there.",
+      });
+      // A user's own project named Personal wins over the built-in one.
+      seedProjectWithSource(harness.deps, {
+        hostId: oldEnvironment.hostId!,
+        name: "Personal",
+        path: "/tmp/move-own-personal",
+      });
+      const own = await move(harness, thread.id, "personal");
+      expect(await own.json()).toMatchObject({ moved: false });
+    });
+  });
+
   it("runs a Cloud agent's own move only while Mac access is Full", async () => {
     await withTestHarness(async (harness) => {
       const { thread, from, to, moveProject } = seedCloudThread(

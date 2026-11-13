@@ -2,7 +2,6 @@ import { useEffect, useRef } from "react";
 import { matchPath, useLocation } from "react-router-dom";
 import {
   getRootComposeRoutePath,
-  isToolsRoutePath,
   SETTINGS_ROUTE_PATH,
   LEGACY_PROJECT_SETTINGS_ROUTE_PATH,
 } from "@/lib/route-paths";
@@ -10,7 +9,6 @@ import {
 interface AppSettingsRouteMemory {
   appRoutePath: string;
   settingsRoutePath: string;
-  toolsBackRoutePath: string;
 }
 
 function getLocationRoutePath(location: {
@@ -32,14 +30,8 @@ export function useAppSettingsRouteMemory(): AppSettingsRouteMemory {
   const location = useLocation();
   const currentRoutePath = getLocationRoutePath(location);
   const isSettingsRoute = isSettingsRoutePath(location.pathname);
-  const isCurrentToolsRoute = isToolsRoutePath(location.pathname);
   const lastAppRoutePathRef = useRef(
     isSettingsRoute ? getRootComposeRoutePath() : currentRoutePath,
-  );
-  const lastCoreAppRoutePathRef = useRef(
-    isSettingsRoute || isCurrentToolsRoute
-      ? getRootComposeRoutePath()
-      : currentRoutePath,
   );
   const lastSettingsRoutePathRef = useRef(
     isSettingsRoute ? currentRoutePath : SETTINGS_ROUTE_PATH,
@@ -51,11 +43,7 @@ export function useAppSettingsRouteMemory(): AppSettingsRouteMemory {
       return;
     }
     lastAppRoutePathRef.current = currentRoutePath;
-    if (isCurrentToolsRoute) {
-      return;
-    }
-    lastCoreAppRoutePathRef.current = currentRoutePath;
-  }, [currentRoutePath, isCurrentToolsRoute, isSettingsRoute]);
+  }, [currentRoutePath, isSettingsRoute]);
 
   return {
     appRoutePath: isSettingsRoute
@@ -64,8 +52,5 @@ export function useAppSettingsRouteMemory(): AppSettingsRouteMemory {
     settingsRoutePath: isSettingsRoute
       ? currentRoutePath
       : lastSettingsRoutePathRef.current,
-    toolsBackRoutePath: isCurrentToolsRoute
-      ? lastCoreAppRoutePathRef.current
-      : currentRoutePath,
   };
 }

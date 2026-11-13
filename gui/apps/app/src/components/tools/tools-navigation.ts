@@ -218,42 +218,6 @@ export function resolveToolsBreadcrumbs(
   return null;
 }
 
-interface ResourcePageDefinition {
-  id: "skills-browse" | "skills-library";
-  label: string;
-  to: string;
-}
-
-export const SKILL_PAGES: readonly ResourcePageDefinition[] = [
-  {
-    id: "skills-browse",
-    label: "Browse skills",
-    to: TOOLS_SECTIONS.skills.to,
-  },
-  {
-    id: "skills-library",
-    label: TOOLS_OWNED_COLLECTION_LABEL.skills,
-    to: getToolsOwnedCollectionRoutePath("skills"),
-  },
-];
-
-export function resolveToolsActivePage(
-  pathname: string,
-  search = "",
-): ResourcePageDefinition["id"] {
-  const view = new URLSearchParams(search).get("view");
-  for (const detail of DETAIL_ROUTES) {
-    if (detail.section !== "skills") continue;
-    if (matchPath(detail.pattern, pathname) === null) continue;
-    return detail.collection.label === TOOLS_OWNED_COLLECTION_LABEL.skills
-      ? "skills-library"
-      : "skills-browse";
-  }
-  return view === TOOLS_OWNED_COLLECTION_VIEW.skills
-    ? "skills-library"
-    : "skills-browse";
-}
-
 type ResourceWorkspaceHeaderMeta =
   | { kind: "section-title"; title: string }
   | { kind: "breadcrumbs"; breadcrumbs: ToolsBreadcrumbSegment[] };

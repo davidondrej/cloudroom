@@ -52,7 +52,7 @@ import {
   buildPiTurnOptions,
   type PiSessionParams,
 } from "../session-params.js";
-import { BB_PI_EXTENSION_SOURCE } from "./bb-pi-extension.js";
+import { ROOM_PI_EXTENSION_SOURCE } from "./bb-pi-extension.js";
 import {
   createExtensionUiCoordinator,
   type ExtensionUiCoordinator,
@@ -224,7 +224,6 @@ let configuredSkillPaths: string[] | null = null;
 
 let scratchDir: string | null = null;
 let scratchDirIsPrivate = false;
-let extensionPath: string | null = null;
 
 function requireScratchDir(): string {
   if (scratchDir === null) {
@@ -238,13 +237,20 @@ function requireScratchDir(): string {
   return scratchDir;
 }
 
+// Checked before every pi spawn: a missing extension would fail the next
+// session start or respawn.
 function requireExtensionPath(): string {
-  if (extensionPath === null) {
-    const path = join(requireScratchDir(), "bb-pi-extension.mjs");
-    writeFileSync(path, BB_PI_EXTENSION_SOURCE, "utf8");
-    extensionPath = path;
+  const dir = requireScratchDir();
+  const path = join(dir, "bb-pi-extension.mjs");
+  if (!existsSync(path)) {
+    // This may recreate the worker's temp root. That is safe because the root
+    // sits in a folder that nothing less trusted can write: not another
+    // account, a Read-only Mac command, or an agent sandbox
+    // (createPluginProcessTempDir).
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    writeFileSync(path, ROOM_PI_EXTENSION_SOURCE, "utf8");
   }
-  return extensionPath;
+  return path;
 }
 
 const contextWindows = createLiveContextWindowResolver();
@@ -527,6 +533,7 @@ async function handleRequest(
           approvalEnforcedBy: "runtime",
           grammarVersions: [THREAD_DELTA_GRAMMAR_V3, THREAD_DELTA_GRAMMAR_V3],
           steerMode: "inject",
+          stopsUnopenedTurns: false,
           skills: { configure: true },
         },
       };
@@ -696,6 +703,8 @@ async function resolvePiModel(
   modelStr: string,
   cwd: string,
 ): Promise<{ provider: string; id: string }> {
+  // Before the warm catalog: it may respawn its pi child with this path.
+  const extensionPath = requireExtensionPath();
   const slashIdx = modelStr.indexOf("/");
   if (slashIdx > 0) {
     const provider = modelStr.slice(0, slashIdx);
@@ -714,7 +723,7 @@ async function resolvePiModel(
     }
     return { provider, id };
   }
-  const catalog = await getPiCatalog(cwd, requireExtensionPath());
+  const catalog = await getPiCatalog(cwd, extensionPath);
   const served = (await catalog.rawModels()).filter((m) => m.id === modelStr);
   if (served.length > 1) {
     throw new Error(
@@ -1263,7 +1272,6 @@ export async function experimental_closeAllForTests(): Promise<void> {
     rmSync(scratchDir, { recursive: true, force: true });
     scratchDir = null;
     scratchDirIsPrivate = false;
-    extensionPath = null;
   }
 }
 

@@ -1,3 +1,4 @@
+import os from "node:os";
 import { eq } from "drizzle-orm";
 import {
   closeSession,
@@ -20,7 +21,11 @@ import {
   reconcileDaemonReportedThreads,
 } from "../services/threads/thread-lifecycle.js";
 import { buildThreadStatusChangeMetadataByThreadId } from "../services/threads/thread-runtime-display.js";
-import { settleDanglingBackgroundTasks } from "../services/threads/background-task-reconciliation.js";
+import {
+  settleDanglingBackgroundTasks,
+  type LostBackgroundTasks,
+} from "../services/threads/background-task-reconciliation.js";
+import { queueChildThreadLostBackgroundWorkNotifications } from "../services/threads/child-thread-notifications.js";
 import { interruptEnvironmentProvisioningForHost } from "../services/environments/environment-engine.js";
 
 const DAEMON_RESTARTED_PENDING_INTERACTION_REASON =
@@ -52,6 +57,40 @@ type DaemonDisconnectGraceDeps = Pick<
   | "providerRegistry"
   | "terminalSessions"
 >;
+
+/**
+ * Background tasks settled while a host's daemon was away. A temporary
+ * disconnect keeps them running, so only a new daemon proves them lost.
+ * Kept in memory: a server restart forgets them (#1026).
+ */
+const lostBackgroundTasksByHostId = new Map<string, LostBackgroundTasks>();
+
+function rememberLostBackgroundTasks(
+  hostId: string,
+  lost: LostBackgroundTasks,
+  interrupted?: { threads: { threadId: string }[] },
+): LostBackgroundTasks {
+  const kept = lostBackgroundTasksByHostId.get(hostId) ?? new Map();
+  for (const [threadId, tasks] of lost) {
+    kept.set(threadId, [...(kept.get(threadId) ?? []), ...tasks]);
+  }
+  // An interrupted turn resumes by itself, and Claude tells it what ended.
+  for (const { threadId } of interrupted?.threads ?? []) kept.delete(threadId);
+  lostBackgroundTasksByHostId.set(hostId, kept);
+  return kept;
+}
+
+/** A job settled while its daemon was away finished after all. */
+export function forgetLostBackgroundTask(threadId: string, itemId: string) {
+  for (const lost of lostBackgroundTasksByHostId.values()) {
+    const tasks = lost.get(threadId);
+    if (!tasks) continue;
+    lost.set(
+      threadId,
+      tasks.filter((task) => task.itemId !== itemId),
+    );
+  }
+}
 
 interface HandleHostSessionOpenedArgs {
   activeThreads: HostDaemonActiveThread[];
@@ -92,6 +131,7 @@ export async function handleHostSessionOpened(
 
   const sameDaemonInstance =
     args.previousSession?.instanceId === args.openedSession.instanceId;
+  let lost: LostBackgroundTasks | undefined;
   if (
     args.previousSession &&
     args.previousSession.id !== args.openedSession.id
@@ -118,11 +158,20 @@ export async function handleHostSessionOpened(
         hostId: args.hostId,
         reason: DAEMON_RESTARTED_PENDING_INTERACTION_REASON,
       });
-      interruptActiveThreadsForHost(deps, {
+      const interrupted = interruptActiveThreadsForHost(deps, {
         hostId: args.hostId,
         reason: "host-daemon-restarted",
       });
-      settleDanglingBackgroundTasks(deps, { hostId: args.hostId });
+      lost = rememberLostBackgroundTasks(
+        args.hostId,
+        settleDanglingBackgroundTasks(deps, { hostId: args.hostId }),
+        interrupted,
+      );
+      lostBackgroundTasksByHostId.delete(args.hostId);
+      // Work from before a reboot wakes nothing (ADR 20261103-233411).
+      if (args.previousSession.updatedAt < Date.now() - os.uptime() * 1_000) {
+        lost = undefined;
+      }
     }
   }
 
@@ -131,6 +180,11 @@ export async function handleHostSessionOpened(
     hostId: args.hostId,
     sameDaemonInstance,
   });
+  if (lost) {
+    void queueChildThreadLostBackgroundWorkNotifications(deps, lost).catch(
+      () => undefined,
+    );
+  }
 }
 
 export function handleDaemonSocketClosed(
@@ -209,6 +263,7 @@ export function handleHostRemoved(
     reason: "host-daemon-restarted",
   });
   settleDanglingBackgroundTasks(deps, { hostId: args.hostId });
+  lostBackgroundTasksByHostId.delete(args.hostId);
   notifyHostThreadRuntimeStatusChanged(deps, args.hostId);
 }
 
@@ -224,7 +279,10 @@ function completeDaemonDisconnectGrace(
     hostId: args.hostId,
     reason: DAEMON_DISCONNECTED_PENDING_INTERACTION_REASON,
   });
-  settleDanglingBackgroundTasks(deps, { hostId: args.hostId });
+  rememberLostBackgroundTasks(
+    args.hostId,
+    settleDanglingBackgroundTasks(deps, args),
+  );
   notifyHostThreadRuntimeStatusChanged(deps, args.hostId);
 }
 
@@ -239,11 +297,12 @@ function completeDaemonActiveWorkDisconnectGrace(
     return;
   }
 
-  interruptActiveThreadsForHost(deps, {
+  const interrupted = interruptActiveThreadsForHost(deps, {
     hostId: args.hostId,
     reason: "host-daemon-restarted",
     cause: "host-connection-lost",
   });
+  rememberLostBackgroundTasks(args.hostId, new Map(), interrupted);
   interruptEnvironmentProvisioningForHost(deps, {
     hostId: args.hostId,
     reason: DAEMON_DISCONNECTED_ENVIRONMENT_PROVISIONING_REASON,

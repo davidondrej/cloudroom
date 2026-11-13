@@ -22,7 +22,7 @@ import {
 } from "@cloudroom/domain";
 import { usePluginCommandBindings } from "@/hooks/usePluginCommandBindings";
 import { useSystemConfig } from "@/hooks/queries/system-queries";
-import { getBbDesktopInfo } from "@/lib/bb-desktop";
+import { getRoomDesktopInfo } from "@/lib/room-desktop";
 import {
   browserPlatform,
   isEditableKeyboardTarget,
@@ -99,7 +99,7 @@ export function AppCommandProvider({ children }: { children: ReactNode }) {
   const showKeyboardHints =
     systemConfig.data?.generalSettings?.showKeyboardHints ??
     defaultAppSettings.showKeyboardHints;
-  const isDesktop = getBbDesktopInfo() !== null;
+  const isDesktop = getRoomDesktopInfo() !== null;
   const [isShortcutHintModifierHeld, setIsShortcutHintModifierHeld] =
     useState(false);
   const modifierHoldTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
@@ -355,7 +355,7 @@ export function AppCommandProvider({ children }: { children: ReactNode }) {
   }, [handleKeyboardEvent]);
 
   useEffect(() => {
-    const desktop = getBbDesktopInfo();
+    const desktop = getRoomDesktopInfo();
     if (!desktop?.onAppCommand) return;
     return desktop.onAppCommand((payload) => {
       if (typeof payload === "string") {

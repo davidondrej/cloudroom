@@ -28,16 +28,36 @@ export function outputJson(opts: JsonOutputOptions, data: unknown): boolean {
 
 const PROMPT_FILE_MAX_BYTES = 1024 * 1024;
 
+function decodeUtf8(bytes: Uint8Array): string {
+  try {
+    // Strict UTF-8; the decoder also drops a byte order mark (Windows PowerShell 5.1 writes one).
+    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    throw new Error("not UTF-8 text; save it as UTF-8");
+  }
+}
+
 function readPromptFile(path: string): string {
   const stat = statSync(path);
   if (!stat.isFile()) throw new Error("not a regular file");
   if (stat.size > PROMPT_FILE_MAX_BYTES) throw new Error("larger than 1 MB");
-  try {
-    // Strict UTF-8; the decoder also drops a byte order mark (Windows PowerShell 5.1 writes one).
-    return new TextDecoder("utf-8", { fatal: true }).decode(readFileSync(path));
-  } catch {
-    throw new Error("not UTF-8 text; save it as UTF-8");
+  return decodeUtf8(readFileSync(path));
+}
+
+// Long text skips shell and Windows launcher argument limits through a file or stdin ("-") (#1220).
+export async function readTextFileOrStdin(path: string): Promise<string> {
+  if (path !== "-") return readPromptFile(path);
+  if (process.stdin.isTTY) throw new Error("pipe the text to stdin");
+  const chunks: Buffer[] = [];
+  let bytes = 0;
+  for await (const chunk of process.stdin) {
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    bytes += buffer.byteLength;
+    if (bytes > PROMPT_FILE_MAX_BYTES) throw new Error("larger than 1 MB");
+    chunks.push(buffer);
   }
+  // Drop the newline that echo and PowerShell pipes add.
+  return decodeUtf8(Buffer.concat(chunks)).replace(/\r?\n$/u, "");
 }
 
 // Multiline prompts survive Windows' room-cli.cmd only through a file (#974).

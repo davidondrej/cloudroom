@@ -1,6 +1,9 @@
 #!/usr/bin/env node
 
 import { createHash } from "node:crypto";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { prepareCodexGuard } from "@get-bb/plugin-sdk/internal/command-guard";
 import {
@@ -66,6 +69,7 @@ import {
 import { parseModelsResponse } from "../models.js";
 import { macOsPermissionPresentation } from "../presentation.js";
 import {
+  codexManagedPolicyError,
   keepShellEnvironmentSetKeys,
   resolveCodexInstructionOverrides,
   toCodexDynamicTools,
@@ -73,8 +77,8 @@ import {
   toCodexServiceTier,
   toCodexThreadPermissionSettings,
   toCodexUserInput,
-  type BbThreadForkParams,
-  type BbThreadStartParams,
+  type RoomThreadForkParams,
+  type RoomThreadStartParams,
   type CodexSessionOptions,
 } from "../session-params.js";
 import type { ThreadResumeParams } from "../generated/codex-app-server/schema/v2/ThreadResumeParams.js";
@@ -98,7 +102,7 @@ import {
   getCodexProviderUsage,
 } from "./provider-maintenance.js";
 
-type BbThreadResumeParams = ThreadResumeParams & { excludeTurns: boolean };
+type RoomThreadResumeParams = ThreadResumeParams & { excludeTurns: boolean };
 
 const codexBridgeCommandSchema = z.discriminatedUnion("method", [
   z.object({
@@ -310,6 +314,7 @@ const CODEX_INITIALIZE_PARAMS = {
 };
 
 const CHILD_REQUEST_TIMEOUT_MS = 60_000;
+const MANAGED_REQUIREMENTS_TIMEOUT_MS = 3_000;
 const INTERRUPT_SETTLEMENT_TIMEOUT_MS = 5_000;
 const CODEX_ARCHIVED_SESSION_ERROR_PATTERN =
   /\b(?:session|thread)\s+\S+\s+is archived\b/i;
@@ -482,10 +487,19 @@ interface CodexBridgeSession {
   stopRequested: AbortController;
 }
 
-const sessionsByBbThreadId = new Map<string, CodexBridgeSession>();
+const sessionsByRoomThreadId = new Map<string, CodexBridgeSession>();
 const maintenanceConnections = new Set<CodexAppServerConnection>();
 let sessionSerialCounter = 0;
 let configuredSkillExtraRoots: string[] | null = null;
+let bridgeTempDir: string | null = null;
+
+// The worker entry's start() supplies a temp folder that nothing less trusted
+// can write (createPluginProcessTempDir). Tests that import this module
+// directly get their own folder.
+function commandGuardDir(): string {
+  bridgeTempDir ??= mkdtempSync(join(tmpdir(), "bb-codex-bridge-"));
+  return join(bridgeTempDir, "command-guard");
+}
 
 const LEGACY_BRIDGE_MINTED_ID_PATTERN = /^bt[0-9a-f]{8}-\d+-/;
 
@@ -495,10 +509,10 @@ function stripLegacyBridgeIdPrefix(id: string): string {
 }
 
 function currentSession(
-  bbThreadId: string,
+  roomThreadId: string,
   serial: number,
 ): CodexBridgeSession | undefined {
-  const session = sessionsByBbThreadId.get(bbThreadId);
+  const session = sessionsByRoomThreadId.get(roomThreadId);
   if (!session || session.serial !== serial || session.closing) {
     return undefined;
   }
@@ -511,8 +525,8 @@ function releaseSession(session: CodexBridgeSession): Promise<void> {
   }
   session.closing = true;
   session.stopRequested.abort();
-  if (sessionsByBbThreadId.get(session.bbThreadId) === session) {
-    sessionsByBbThreadId.delete(session.bbThreadId);
+  if (sessionsByRoomThreadId.get(session.bbThreadId) === session) {
+    sessionsByRoomThreadId.delete(session.bbThreadId);
   }
   const previousChildExit = session.previousChildExit;
   session.previousChildExit = null;
@@ -666,12 +680,12 @@ function toProviderRuntimeEvent(
 }
 
 function handleChildNotification(
-  bbThreadId: string,
+  roomThreadId: string,
   serial: number,
   method: string,
   params: unknown,
 ): void {
-  const session = currentSession(bbThreadId, serial);
+  const session = currentSession(roomThreadId, serial);
   if (!session) {
     return;
   }
@@ -722,13 +736,13 @@ const codexChildToolCallParamsSchema = z.object({
 });
 
 function handleChildRequest(
-  bbThreadId: string,
+  roomThreadId: string,
   serial: number,
   method: string,
   params: unknown,
   responder: CodexAppServerRequestResponder,
 ): void {
-  const session = currentSession(bbThreadId, serial);
+  const session = currentSession(roomThreadId, serial);
   if (!session) {
     responder.error(
       BRIDGE_JSON_RPC_ERRORS.BRIDGE_ERROR,
@@ -847,11 +861,11 @@ function buildMacOsPermissionItemDelta(
 }
 
 function handleChildExit(
-  bbThreadId: string,
+  roomThreadId: string,
   serial: number,
   info: CodexAppServerExitInfo,
 ): void {
-  const session = currentSession(bbThreadId, serial);
+  const session = currentSession(roomThreadId, serial);
   if (!session) {
     return;
   }
@@ -953,6 +967,7 @@ const codexConfigReadResultSchema = z
   .object({
     config: z
       .object({
+        model: z.string().nullish().catch(null),
         features: z.object({ hooks: z.boolean().optional() }).nullish(),
         shell_environment_policy: z
           .object({
@@ -965,6 +980,21 @@ const codexConfigReadResultSchema = z
       .optional(),
   })
   .passthrough();
+const codexConfigRequirementsReadResultSchema = z
+  .object({
+    requirements: z
+      .object({
+        allowedApprovalPolicies: z.array(z.unknown()).nullish(),
+        allowedApprovalsReviewers: z.array(z.unknown()).nullish(),
+        allowedSandboxModes: z.array(z.unknown()).nullish(),
+        autoReview: z
+          .object({ requiredOnModels: z.array(z.string()).nullish() })
+          .nullish(),
+      })
+      .nullish(),
+  })
+  .catch({ requirements: null });
+
 
 type CodexSessionConstructionRequest =
   | { kind: "start" }
@@ -992,7 +1022,7 @@ interface ConstructedCodexSession {
 async function constructThreadSession(
   args: ConstructThreadSessionArgs,
 ): Promise<ConstructedCodexSession> {
-  const existing = sessionsByBbThreadId.get(args.threadId);
+  const existing = sessionsByRoomThreadId.get(args.threadId);
   const decoded = decodeCodexOptions(args.options);
   sessionSerialCounter += 1;
   const serial = sessionSerialCounter;
@@ -1034,7 +1064,7 @@ async function constructThreadSession(
     releasePromise: null,
     stopRequested: new AbortController(),
   };
-  sessionsByBbThreadId.set(args.threadId, session);
+  sessionsByRoomThreadId.set(args.threadId, session);
   if (existing) {
     const previousChildExit = releaseSession(existing);
     session.previousChildExit = previousChildExit;
@@ -1088,6 +1118,25 @@ async function constructThreadSession(
         "Codex hooks are disabled. Enable them in Codex or disable Cloudroom Command Guard before starting a new session.",
       );
     }
+    const managed = await connection
+      .request({
+        method: "configRequirements/read",
+        params: undefined,
+        resultSchema: codexConfigRequirementsReadResultSchema,
+        // Optional check: stay well under the caller's 30 s resume deadline.
+        timeoutMs: MANAGED_REQUIREMENTS_TIMEOUT_MS,
+      })
+      .catch(() => null);
+    const policyError = codexManagedPolicyError(
+      decoded.sessionOptions,
+      managed?.requirements,
+      // Resume and fork keep the saved thread model, which we do not know.
+      decoded.sessionOptions.model ??
+        (args.request.kind === "start"
+          ? (settings?.config?.model ?? null)
+          : null),
+    );
+    if (policyError !== null) throw new Error(policyError);
     if (
       process.platform === "linux" &&
       decoded.sessionOptions.permissionScope === "workspace"
@@ -1109,6 +1158,7 @@ async function constructThreadSession(
     });
     const dynamicTools = toCodexDynamicTools(args.dynamicTools);
     const instructionOverrides = resolveCodexInstructionOverrides({
+      approvalPolicy: preparedGitRoots.permissionSettings.approvalPolicy,
       instructionMode: args.instructionMode,
       options: decoded.sessionOptions,
     });
@@ -1126,17 +1176,17 @@ async function constructThreadSession(
           preparedGitRoots.config ?? {},
           settings?.config?.shell_environment_policy,
         ),
-        ...(commandGuardEnabled ? prepareCodexGuard() : {}),
+        ...(commandGuardEnabled ? prepareCodexGuard(commandGuardDir()) : {}),
       },
       ...(dynamicTools && dynamicTools.length > 0 ? { dynamicTools } : {}),
     };
 
     let method: string;
-    let params: BbThreadStartParams | BbThreadResumeParams | BbThreadForkParams;
+    let params: RoomThreadStartParams | RoomThreadResumeParams | RoomThreadForkParams;
     switch (args.request.kind) {
       case "start": {
         method = "thread/start";
-        const startParams: BbThreadStartParams = {
+        const startParams: RoomThreadStartParams = {
           ...sharedConstructionParams,
           ephemeral: false,
           experimentalRawEvents: true,
@@ -1146,7 +1196,7 @@ async function constructThreadSession(
       }
       case "resume": {
         method = "thread/resume";
-        const resumeParams: BbThreadResumeParams = {
+        const resumeParams: RoomThreadResumeParams = {
           threadId: args.request.providerThreadId,
           excludeTurns: true,
           ...sharedConstructionParams,
@@ -1156,7 +1206,7 @@ async function constructThreadSession(
       }
       case "fork": {
         method = "thread/fork";
-        const forkParams: BbThreadForkParams = {
+        const forkParams: RoomThreadForkParams = {
           threadId: args.request.sourceProviderThreadId,
           excludeTurns: true,
           ...(args.request.sourceProviderCheckpointId !== undefined
@@ -1197,8 +1247,8 @@ async function constructThreadSession(
     return { session, codexThreadId };
   } catch (error) {
     const released = session.closing;
-    if (sessionsByBbThreadId.get(args.threadId) === session) {
-      sessionsByBbThreadId.delete(args.threadId);
+    if (sessionsByRoomThreadId.get(args.threadId) === session) {
+      sessionsByRoomThreadId.delete(args.threadId);
     }
     session.closing = true;
     await spawned?.kill();
@@ -1216,12 +1266,12 @@ class CodexSessionReleasedError extends Error {
 function registerResumableSession(session: CodexBridgeSession): void {
   if (
     session.codexThreadId === null ||
-    sessionsByBbThreadId.has(session.bbThreadId)
+    sessionsByRoomThreadId.has(session.bbThreadId)
   ) {
     return;
   }
   sessionSerialCounter += 1;
-  sessionsByBbThreadId.set(session.bbThreadId, {
+  sessionsByRoomThreadId.set(session.bbThreadId, {
     bbThreadId: session.bbThreadId,
     codexThreadId: session.codexThreadId,
     serial: sessionSerialCounter,
@@ -1305,10 +1355,10 @@ async function withMaintenanceChild<T>(
 }
 
 async function withChildForThread<T>(
-  bbThreadId: string,
+  roomThreadId: string,
   fn: (connection: CodexAppServerConnection) => Promise<T>,
 ): Promise<T> {
-  const session = sessionsByBbThreadId.get(bbThreadId);
+  const session = sessionsByRoomThreadId.get(roomThreadId);
   if (
     session &&
     !session.closing &&
@@ -1338,6 +1388,7 @@ function handleInitialize(id: string | number): void {
       approvalEnforcedBy: "runtime",
       grammarVersions: [THREAD_DELTA_GRAMMAR_V3, THREAD_DELTA_GRAMMAR_V3],
       steerMode: "inject",
+      stopsUnopenedTurns: false,
       skills: { configure: true },
     },
   };
@@ -1417,7 +1468,7 @@ interface LiveSessionForTurn {
 async function requireLiveSessionForTurn(
   params: TurnStartParamsShape,
 ): Promise<LiveSessionForTurn> {
-  let session = sessionsByBbThreadId.get(params.threadId);
+  let session = sessionsByRoomThreadId.get(params.threadId);
   if (!session || session.closing) {
     throw new Error(`No active codex session for thread "${params.threadId}"`);
   }
@@ -1574,7 +1625,7 @@ async function handleTurnSteer(
   id: string | number,
   params: TurnSteerParamsShape,
 ): Promise<void> {
-  const session = sessionsByBbThreadId.get(params.threadId);
+  const session = sessionsByRoomThreadId.get(params.threadId);
   if (
     !session ||
     session.closing ||
@@ -1666,7 +1717,7 @@ async function handleThreadStop(
   id: string | number,
   params: ThreadStopParamsShape,
 ): Promise<void> {
-  const session = sessionsByBbThreadId.get(params.threadId);
+  const session = sessionsByRoomThreadId.get(params.threadId);
 
   if (params.intent === "release") {
     if (session) {
@@ -1721,14 +1772,45 @@ async function handleThreadStop(
       },
     ]);
   }
-  sendThreadDeltas(
-    session,
-    session.translator.clearExitedChildThreadState({
-      providerThreadId: session.codexThreadId,
-    }),
-  );
+  const openSubAgents = session.translator.clearExitedChildThreadState({
+    providerThreadId: session.codexThreadId,
+  });
+  sendThreadDeltas(session, openSubAgents);
+  // Codex stays up for the next turn once nothing of this thread still runs.
+  // Sub-agents only end with Codex itself.
+  if (
+    params.keepSession === true &&
+    settled &&
+    openSubAgents.length === 0 &&
+    (await endBackgroundTerminals(session.connection, session.codexThreadId))
+  ) {
+    session.stopRequested = new AbortController();
+    sendResult(id, { ok: true, sessionKept: true });
+    return;
+  }
   await releaseSession(session);
   sendResult(id, { ok: true });
+}
+
+/**
+ * Ends the commands a stopped turn left running in the background. False when
+ * Codex can't (an older CLI), so the caller ends Codex instead.
+ */
+async function endBackgroundTerminals(
+  connection: CodexAppServerConnection,
+  codexThreadId: string,
+): Promise<boolean> {
+  try {
+    await connection.request({
+      method: "thread/backgroundTerminals/clean",
+      params: { threadId: codexThreadId },
+      resultSchema: ignoredChildResultSchema,
+      timeoutMs: INTERRUPT_SETTLEMENT_TIMEOUT_MS,
+    });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 const goalClearResultSchema = z.object({ cleared: z.boolean() }).passthrough();
@@ -1855,7 +1937,7 @@ async function handleThreadMaintenance(
 ): Promise<void> {
   const settle = async (): Promise<void> => {
     if (options?.releaseAfter) {
-      const session = sessionsByBbThreadId.get(params.threadId);
+      const session = sessionsByRoomThreadId.get(params.threadId);
       if (session) {
         await releaseSession(session);
       }
@@ -1918,7 +2000,7 @@ async function handleSkillsConfigure(
 ): Promise<void> {
   configuredSkillExtraRoots = params.roots.map((root) => root.path);
   try {
-    for (const session of sessionsByBbThreadId.values()) {
+    for (const session of sessionsByRoomThreadId.values()) {
       if (
         session.closing ||
         session.connection === null ||
@@ -2069,7 +2151,7 @@ function handleParsedMessage(parsed: unknown): void {
   const stopRequested = threadStopRequestedNotificationSchema.safeParse(parsed);
   if (stopRequested.success) {
     const { threadId } = stopRequested.data.params;
-    sessionsByBbThreadId.get(threadId)?.stopRequested.abort();
+    sessionsByRoomThreadId.get(threadId)?.stopRequested.abort();
     return;
   }
   const response = decodeBridgeJsonRpcResponse(parsed);
@@ -2108,12 +2190,12 @@ function handleParsedMessage(parsed: unknown): void {
 export const handleLine = createBridgeLineHandler({ handleParsedMessage });
 
 function killAllChildren(): void {
-  for (const session of sessionsByBbThreadId.values()) {
+  for (const session of sessionsByRoomThreadId.values()) {
     session.closing = true;
     session.connection?.kill();
     session.connection = null;
   }
-  sessionsByBbThreadId.clear();
+  sessionsByRoomThreadId.clear();
   for (const connection of maintenanceConnections) {
     connection.kill();
   }
@@ -2125,6 +2207,9 @@ export const experimental_killAllChildrenForTests = killAllChildren;
 
 export const experimental_providerBridge = experimental_defineProviderBridge({
   handleLine,
+  start: (context) => {
+    bridgeTempDir = context.tempDir;
+  },
   onClose: () => {
     killAllChildren();
     process.exit(0);

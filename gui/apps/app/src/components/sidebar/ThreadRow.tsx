@@ -769,7 +769,8 @@ function ThreadRowComponent({
             openInSplit();
             return;
           }
-          if (consumeSidebarTitleDoubleClick(thread.id)) {
+          // Shortcut clicks (detail 0) never count as a double-click.
+          if (event.detail > 0 && consumeSidebarTitleDoubleClick(thread.id)) {
             event.preventDefault();
             event.stopPropagation();
             startEditing();

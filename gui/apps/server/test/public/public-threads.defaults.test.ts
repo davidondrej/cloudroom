@@ -7,6 +7,7 @@ import {
   createProjectSource,
   getProjectExecutionDefaults,
   listThreadsWithPendingInteractionState,
+  replaceStoredProviderModelCatalog,
   setExperiments,
   upsertProjectExecutionDefaults,
 } from "@cloudroom/db";
@@ -566,14 +567,40 @@ describe("public thread default routes", () => {
         retryable: false,
       },
     },
+    // A signed-out Grok needs its login, not a wait for the host (#1160).
+    {
+      providerId: "acp-grok",
+      errorCode: "auth_required",
+      status: 409,
+      body: {
+        code: "provider_auth_required",
+        message:
+          "Grok Build is not signed in on this host. Run `grok login` on the machine to sign in. Then try again.",
+        details: { providerId: "acp-grok", code: "auth_required" },
+        retryable: false,
+      },
+    },
+    // Cursor keeps base behavior.
+    {
+      providerId: "acp-cursor",
+      errorCode: "auth_required",
+      status: 503,
+      body: {
+        code: "model_catalog_unavailable",
+        message: expect.stringContaining("Unable to load acp-cursor models"),
+        details: { providerId: "acp-cursor", code: "auth_required" },
+        retryable: true,
+      },
+    },
   ])("returns an actionable catalog error ($errorCode)", async (failure) => {
+    const providerId = failure.providerId ?? "codex";
     await withTestHarness(async (harness) => {
       const { host, session } = seedHostSession(harness.deps);
       registerProviderHostRpcResponder(harness, {
         hostId: host.id,
         sessionId: session.id,
         modelErrorsByProviderId: {
-          codex: {
+          [providerId]: {
             errorCode: failure.errorCode,
             errorMessage: "Codex model discovery failed",
           },
@@ -595,7 +622,7 @@ describe("public thread default routes", () => {
         body: JSON.stringify({
           origin: "cli",
           projectId: project.id,
-          providerId: "codex",
+          providerId,
           input: [{ type: "text", text: "Create without defaults" }],
           environment: {
             type: "reuse",
@@ -613,6 +640,78 @@ describe("public thread default routes", () => {
       ).toHaveLength(0);
     });
   });
+
+  // Codex works, but the first listing after an app update failed or timed out (#1399).
+  it.each(["command_failed", "command_timeout"])(
+    "starts Codex on the default this host listed last when listing fails (%s)",
+    async (errorCode) => {
+      await withTestHarness(async (harness) => {
+        const { host, session } = seedHostSession(harness.deps);
+        replaceStoredProviderModelCatalog(harness.db, {
+          row: {
+            hostId: host.id,
+            providerId: "codex",
+            scopeKey: "",
+            fingerprint: "previous-app-version",
+            modelsJson: JSON.stringify([
+              availableModelFixture({ model: "gpt-older" }),
+              availableModelFixture({
+                model: "gpt-listed-default",
+                reasoningLevels: ["low", "high"],
+                defaultReasoningLevel: "high",
+                isDefault: true,
+              }),
+            ]),
+            selectedOnlyModelsJson: "[]",
+            fetchedAt: 1,
+          },
+          pruneWorkspaceRowsFetchedBefore: null,
+        });
+        registerProviderHostRpcResponder(harness, {
+          hostId: host.id,
+          sessionId: session.id,
+          restoreCommandCaptureAfterResponse: true,
+          modelErrorsByProviderId: {
+            codex: { errorCode, errorMessage: "Codex model discovery failed" },
+          },
+        });
+        const { project } = seedProjectWithSource(harness.deps, {
+          hostId: host.id,
+          path: "/tmp/thread-defaults-codex-last-listed",
+        });
+        const environment = seedEnvironment(harness.deps, {
+          hostId: host.id,
+          projectId: project.id,
+          path: "/tmp/thread-defaults-codex-last-listed",
+        });
+
+        const response = await harness.app.request("/api/v1/threads", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            origin: "cli",
+            projectId: project.id,
+            providerId: "codex",
+            input: [{ type: "text", text: "Spawn without a model" }],
+            environment: { type: "reuse", environmentId: environment.id },
+          }),
+        });
+
+        expect(response.status).toBe(201);
+        const createdThread = threadSchema.parse(await readJson(response));
+        const queuedStart = await waitForQueuedCommand(
+          harness,
+          ({ command }) =>
+            command.type === "thread.start" &&
+            command.threadId === createdThread.id,
+        );
+        expect(queuedStart.command).toMatchObject({
+          providerId: "codex",
+          options: { model: "gpt-listed-default", reasoningLevel: "high" },
+        });
+      });
+    },
+  );
 
   it.each(["failed", "empty"])(
     "falls back to another available provider when the product default's model catalog is %s",

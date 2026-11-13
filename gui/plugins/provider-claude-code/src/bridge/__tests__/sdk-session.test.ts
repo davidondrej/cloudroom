@@ -9,6 +9,8 @@ const mockQueryInstance = {
   applyFlagSettings: vi.fn(),
   close: vi.fn(),
   interrupt: vi.fn(),
+  mcpServerStatus: vi.fn(),
+  reconnectMcpServer: vi.fn(),
   setModel: vi.fn(),
   setPermissionMode: vi.fn(),
   [Symbol.asyncIterator]: vi.fn(),
@@ -250,6 +252,33 @@ describe("SdkSession", () => {
     await closePromise;
 
     expect(mockQueryInstance.close).not.toHaveBeenCalled();
+  });
+
+  it("reconnects failed and needs-auth MCP servers, backing off after a failed retry", async () => {
+    keepSdkStreamOpen();
+    mockQueryInstance.mcpServerStatus.mockResolvedValue([
+      { name: "linear", status: "needs-auth" },
+      { name: "figma", status: "failed" },
+      { name: "doop", status: "connected" },
+      { name: "slow", status: "pending" },
+    ]);
+    mockQueryInstance.reconnectMcpServer.mockRejectedValue(
+      new Error("Server status: needs-auth"),
+    );
+    const session = new SdkSession(defaultOptions, vi.fn(), vi.fn());
+    session.start();
+
+    await session.reconnectMcpServers();
+    await waitForAsyncWork();
+    expect(mockQueryInstance.reconnectMcpServer.mock.calls).toEqual([
+      ["linear"],
+      ["figma"],
+    ]);
+
+    await session.reconnectMcpServers();
+    await waitForAsyncWork();
+    expect(mockQueryInstance.reconnectMcpServer).toHaveBeenCalledTimes(2);
+    session.stop();
   });
 
   it("forwards local plugins to the SDK without a skills allowlist", () => {

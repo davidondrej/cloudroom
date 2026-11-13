@@ -172,6 +172,8 @@ export async function copyToClipboardWithToast(
 
 export interface ClipboardCopyOptions extends CopyToClipboardOptions {
   text: string;
+  /** How long `copied` stays true. */
+  resetMs?: number;
 }
 
 export function useClipboardCopy({
@@ -179,14 +181,15 @@ export function useClipboardCopy({
   successMessage = null,
   errorMessage = "Failed to copy",
   imageUrl,
+  resetMs = 2000,
 }: ClipboardCopyOptions) {
   const [copied, setCopied] = useState(false);
 
   useEffect(() => {
     if (!copied) return;
-    const timeoutId = window.setTimeout(() => setCopied(false), 2000);
+    const timeoutId = window.setTimeout(() => setCopied(false), resetMs);
     return () => window.clearTimeout(timeoutId);
-  }, [copied]);
+  }, [copied, resetMs]);
 
   const copy = useCallback(async () => {
     if ((!text && !imageUrl) || copied) return;

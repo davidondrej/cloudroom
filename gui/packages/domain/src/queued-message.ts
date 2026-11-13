@@ -211,6 +211,14 @@ export type QueuedMessagePayload = z.infer<typeof queuedMessagePayloadSchema>;
 export const queuedMessageSystemNoticeSchema = z.object({
   kind: systemMessageKindSchema,
   subject: systemMessageSubjectSchema.nullable(),
+  /**
+   * A child turn report's own facts (#1208): when its turns ended, and each
+   * child's latest event sequence then, so a late delivery can say its age
+   * and which children wrote newer output. Absent on every other notice.
+   */
+  childReport: z
+    .object({ at: z.number(), sequences: z.record(z.string(), z.number()) })
+    .optional(),
 });
 export type QueuedMessageSystemNotice = z.infer<
   typeof queuedMessageSystemNoticeSchema

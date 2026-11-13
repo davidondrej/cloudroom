@@ -72,6 +72,8 @@ interface State {
   cancelRequested?: boolean;
   stopped?: boolean;
   activationRequested?: boolean;
+  /** Every moved session looked idle when Teleport took it: a hint only, so the handoff warns against redoing work (#1394). */
+  idle?: boolean;
 }
 // GUI provider ID → cloud core harness ID.
 const HARNESSES = {
@@ -511,6 +513,8 @@ class Teleport {
       queued,
       ...execution,
       ...(execution.model !== last.model ? { sourceModel: last.model } : {}),
+      // Read with no await before the transaction below blocks local sends.
+      idle: sessions.every((source) => getThread(this.deps.db, source.threadId)?.status === "idle"),
     };
     this.deps.db.transaction((tx) => {
       tx.insert(cloudroomThreads)
@@ -982,7 +986,7 @@ class Teleport {
               }
             : {}),
           ...(capability.system_prompt === true
-            ? { system_prompt: cloudroomSystemPrompt(this.deps.db) }
+            ? { system_prompt: cloudroomSystemPrompt(this.deps.db, "cloud") }
             : {}),
           workspace: `bb_${thread.projectId}`,
           workspace_name:
@@ -992,7 +996,7 @@ class Teleport {
               .slice(0, 80) || "project",
           files: capture.files,
           queued: state.queued,
-          handoff: `Continue unfinished work in this same conversation; if the task is already complete, confirm that instead of redoing it. Before working, read the preserved user and project instructions in gui-history.json and the instruction files in the index. If this project is new on the VM, Cloudroom is copying it into this folder now (a GitHub clone or an upload from the laptop, plus uncommitted edits and .env files); wait for missing files instead of recreating them. Otherwise, use Git to match the local branch and commit in git-state.txt, which also lists uncommitted tracked edits that stayed on the laptop. Untracked files mentioned in the conversation were also copied. Other GUI history and child traces are reference context; read them as needed. Queued follow-ups will run separately after this continuation; do not execute them from the history file. Existing goals remain instructions, not automatic loops.\nActive goals: ${goals.join("\n") || "none"}.\nOld local workspace: ${state.workspacePath}.\nChildren: ${[...state.sessions.slice(1).map((s) => s.threadId), ...nativeChildren.keys()].join(", ") || "none"}.\nChildren's own worktrees, which stayed on the laptop with their commits and uncommitted edits (only this thread's code came to the cloud): ${childWorktrees.join("; ") || "none"}. To use that work, read or push it from the laptop with room-cli mac run if Mac access is on, or ask the user to push those branches; don't redo it.\nKnown unavailable local paths: ${(capture.omitted ?? []).join(", ") || "none"}.`,
+          handoff: `${state.idle && !state.queued.length ? "This thread was idle when it moved to Cloud, so its last request may already be finished. Read the conversation first and don't repeat work that already succeeded, including laptop-side effects you can't see from here (threads, pushes, messages). If something is still unfinished (a child result, a queued message, a background job), continue only that. If nothing is left, say so in one line." : "Continue unfinished work in this same conversation; if the task is already complete, confirm that instead of redoing it."} Before working, read the preserved user and project instructions in gui-history.json and the instruction files in the index. If this project is new on the VM, Cloudroom is copying it into this folder now (a GitHub clone or an upload from the laptop, plus uncommitted edits and .env files); wait for missing files instead of recreating them. Otherwise, use Git to match the local branch and commit in git-state.txt, which also lists uncommitted tracked edits that stayed on the laptop. Untracked files mentioned in the conversation were also copied. Other GUI history and child traces are reference context; read them as needed. Queued follow-ups will run separately after this continuation; do not execute them from the history file. Existing goals remain instructions, not automatic loops.\nActive goals: ${goals.join("\n") || "none"}.\nOld local workspace: ${state.workspacePath}.\nChildren: ${[...state.sessions.slice(1).map((s) => s.threadId), ...nativeChildren.keys()].join(", ") || "none"}.\nChildren's own worktrees, which stayed on the laptop with their commits and uncommitted edits (only this thread's code came to the cloud): ${childWorktrees.join("; ") || "none"}. To use that work, read or push it from the laptop with room-cli mac run if Mac access is on, or ask the user to push those branches; don't redo it.\nKnown unavailable local paths: ${(capture.omitted ?? []).join(", ") || "none"}.`,
         },
       };
       this.save(state);

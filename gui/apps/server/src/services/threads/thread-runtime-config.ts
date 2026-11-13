@@ -1,5 +1,5 @@
 import {
-  cloudClaudeLoginEnvironment,
+  providerLoginEnvironment,
   resolveHostEnvironment,
   mergeHostAndProviderEnvironment,
 } from "../hosts/host-environment.js";
@@ -24,7 +24,6 @@ import {
   listPluginInstructionContributions,
   getPluginSkillRootContributions,
   resolvePluginAgentConfiguration,
-  resolvePluginProviderEnv,
 } from "../plugins/plugin-agent-contributions.js";
 import { resolveSkillCatalog } from "../skills/skill-catalog.js";
 import { discoverPluginSkillIds } from "../skills/injected-skills.js";
@@ -195,21 +194,15 @@ export async function resolveThreadRuntimeCommandConfig(
         hostId: host.id,
         projectId: project.id,
       })),
-      ...cloudClaudeLoginEnvironment(deps, {
-        hostId: host.id,
-        providerId: args.thread.providerId,
-      }),
       ...(args.thread.providerId === "codex"
         ? await cloudroom(deps).codexAccounts.environment()
         : []),
     ],
-    await resolvePluginProviderEnv({
+    await providerLoginEnvironment(deps, {
+      hostId: host.id,
       providerId: args.thread.providerId,
-      context: {
-        threadId: args.thread.id,
-        projectId: project.id,
-        hostId: host.id,
-      },
+      threadId: args.thread.id,
+      projectId: project.id,
     }),
   );
   const injectedSkillSources = resolveSkillCatalog(deps, {
@@ -233,7 +226,7 @@ export async function resolveThreadRuntimeCommandConfig(
   const dynamicTools = dynamicToolContributions.map(
     (contribution) => contribution.tool,
   );
-  const systemPrompt = cloudroomSystemPrompt(deps.db);
+  const systemPrompt = cloudroomSystemPrompt(deps.db, "local");
   const instructionSections: string[] = systemPrompt ? [systemPrompt] : [];
   for (const contribution of dynamicToolContributions) {
     if (!contribution.instructions) continue;

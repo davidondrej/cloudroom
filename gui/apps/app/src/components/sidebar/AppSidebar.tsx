@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useSetAtom } from "jotai";
 import { cn } from "@cloudroom/shared-ui/lib/utils";
 import { THREAD_JUMP_APP_COMMAND_IDS } from "@cloudroom/domain";
 import { useNavigate } from "react-router-dom";
@@ -27,7 +28,6 @@ import { useQuickCreateProjectController } from "@/hooks/useQuickCreateProject";
 import { useSidebarPreload } from "@/hooks/useCloudThreadWake";
 import { getRootComposeRoutePath, getThreadRoutePath } from "@/lib/route-paths";
 import { usePaneContentSplitDrag } from "./usePaneContentSplitDrag";
-import { CloudroomSignInButton } from "./CloudroomSignInButton";
 import { MacAccessChip } from "./MacAccessChip";
 import { CloudQueueChip, PlanCard } from "@/components/CloudQueue";
 import {
@@ -48,6 +48,7 @@ import {
 } from "@/components/commands/AppCommandProvider";
 import { useRouteState } from "@/hooks/useRouteState";
 import { SidebarNavigationRegion } from "./SidebarNavigationRegion";
+import { closeSidebarPurposeCardAtom } from "@/components/thread/ThreadPurposeHoverCard";
 
 const NEW_THREAD_PANE_CONTENT = { kind: "new-thread" } as const;
 
@@ -75,6 +76,7 @@ export function AppSidebar({
     label: "New thread",
   });
   const closeOnMobile = useCloseMobileSidebar();
+  const closePurposeCard = useSetAtom(closeSidebarPurposeCardAtom);
   const { isCompactViewport, openMobile } = useSidebar();
   const [compactCustomizeMode, setCompactCustomizeMode] = useState(false);
   const [threadShortcutKeysById, setThreadShortcutKeysById] = useState<
@@ -176,9 +178,15 @@ export function AppSidebar({
       activeProjectId ??
       targets.find((target) => target.threadId === activeThreadId)?.projectId;
     if (!projectId) return false;
+    // Skip the open thread: after a send it stays last until the list re-sorts.
     return openNavigationTarget(
       targets
-        .filter((target) => target.projectId === projectId && !target.isChild)
+        .filter(
+          (target) =>
+            target.projectId === projectId &&
+            !target.isChild &&
+            target.threadId !== activeThreadId,
+        )
         .at(-1),
     );
   }, [activeProjectId, activeThreadId, openNavigationTarget]);
@@ -191,10 +199,12 @@ export function AppSidebar({
             '[data-sidebar-section-id="pinned"]',
           ) ?? null,
         )
-          .filter((target) => !target.isChild)
+          .filter(
+            (target) => !target.isChild && target.threadId !== activeThreadId,
+          )
           .at(-1),
       ),
-    [openNavigationTarget],
+    [activeThreadId, openNavigationTarget],
   );
 
   const isHiddenHostedBody = mobileHosted?.hidden === true;
@@ -277,6 +287,8 @@ export function AppSidebar({
         className={cn(isCompactCustomizeModeActive && "hidden")}
         aria-hidden={isCompactCustomizeModeActive ? true : undefined}
         inert={isCompactCustomizeModeActive ? true : undefined}
+        onPointerLeave={closePurposeCard}
+        onScroll={closePurposeCard}
       >
         <PluginThreadList
           replacement={threadListReplacement}
@@ -312,7 +324,6 @@ export function AppSidebar({
               },
             ]}
           />
-          <CloudroomSignInButton />
           <li aria-hidden="true" className="min-w-0 flex-1" />
           <SidebarPluginAttentionGlyph
             className={SIDEBAR_FOOTER_ACTION_CLASS}

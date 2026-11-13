@@ -26,6 +26,7 @@ import { ThreadTitleMentionResourcesProvider } from "@/components/thread/ThreadT
 import {
   EMPTY_ORDERED_MENTION_SUGGESTIONS,
   emptyPromptDraftState,
+  type PromptDraftState,
 } from "@cloudroom/client-core";
 import {
   getComposerInputLock,
@@ -977,6 +978,55 @@ describe("PromptBoxInternal controlled value sync", () => {
       render(<PromptBoxFocusOnMountHarness />);
 
       await waitForPromptFocus();
+    } finally {
+      restoreMatchMedia();
+    }
+  });
+
+  it("offers a tappable suggestion chip on coarse pointers", async () => {
+    const restoreMatchMedia = mockPointerCoarse(true);
+    try {
+      const onGhostText = vi.fn();
+      render(
+        <PromptBoxInternal
+          {...createPromptBoxProps({
+            ghostText: "Run the tests",
+            onGhostText,
+          })}
+        />,
+      );
+
+      await waitFor(() =>
+        expect(getPromptEditorElement()).toBeInstanceOf(HTMLElement),
+      );
+      expect(screen.queryByText("Tab to accept")).toBeNull();
+      fireEvent.click(screen.getByRole("button", { name: "Tap to use" }));
+
+      await waitFor(() =>
+        expect(getPromptEditorElement().textContent).toBe("Run the tests"),
+      );
+      expect(onGhostText).toHaveBeenCalledWith("accepted");
+    } finally {
+      restoreMatchMedia();
+    }
+  });
+
+  it("keeps the Tab hint passive on fine pointers", async () => {
+    const restoreMatchMedia = mockPointerCoarse(false);
+    try {
+      render(
+        <PromptBoxInternal
+          {...createPromptBoxProps({ ghostText: "Run the tests" })}
+        />,
+      );
+
+      await waitFor(() =>
+        expect(screen.getByText("Tab to accept")).toBeInstanceOf(HTMLElement),
+      );
+      expect(
+        screen.queryByRole("button", { name: "Tab to accept" }),
+      ).toBeNull();
+      expect(screen.queryByText("Tap to use")).toBeNull();
     } finally {
       restoreMatchMedia();
     }
@@ -2765,40 +2815,43 @@ describe("PromptBoxInternal compact layout", () => {
     expect(onSubmit).toHaveBeenCalledTimes(3);
   });
 
-  it.each(["cancel", "drag", "outside"])(
-    "does not send after a touch %s",
-    (gesture) => {
-      const onSubmit = vi.fn();
-      render(
-        <PromptBoxInternal
-          {...createPromptBoxProps({ value: "Keep this draft", onSubmit })}
-        />,
-      );
-      const submit = screen.getByRole("button", { name: "Submit (Enter)" });
-      vi.spyOn(submit, "getBoundingClientRect").mockReturnValue(
-        new DOMRect(0, 0, 40, 40),
-      );
-      const touch = {
-        button: 0,
-        pointerType: "touch",
-        pointerId: 1,
-        isPrimary: true,
-        clientX: 38,
-        clientY: 20,
-      };
-      fireEvent.pointerDown(submit, touch);
-      if (gesture === "cancel") fireEvent.pointerCancel(submit, touch);
-      if (gesture === "drag") {
-        fireEvent.pointerMove(submit, { ...touch, clientX: 60 });
-      }
-      fireEvent.pointerUp(submit, {
-        ...touch,
-        clientX: gesture === "outside" ? 42 : touch.clientX,
-      });
-      fireEvent.click(submit, { detail: 1 });
-      expect(onSubmit).not.toHaveBeenCalled();
-    },
-  );
+  // A finger that stayed put is a tap even when it lifts outside the button,
+  // which shrinks while pressed and moves while the composer grows.
+  it.each([
+    ["cancel", false],
+    ["drag", false],
+    ["outside", true],
+  ] as const)("after a touch %s, sends: %s", (gesture, sends) => {
+    const onSubmit = vi.fn();
+    render(
+      <PromptBoxInternal
+        {...createPromptBoxProps({ value: "Keep this draft", onSubmit })}
+      />,
+    );
+    const submit = screen.getByRole("button", { name: "Submit (Enter)" });
+    vi.spyOn(submit, "getBoundingClientRect").mockReturnValue(
+      new DOMRect(0, 0, 40, 40),
+    );
+    const touch = {
+      button: 0,
+      pointerType: "touch",
+      pointerId: 1,
+      isPrimary: true,
+      clientX: 38,
+      clientY: 20,
+    };
+    fireEvent.pointerDown(submit, touch);
+    if (gesture === "cancel") fireEvent.pointerCancel(submit, touch);
+    if (gesture === "drag") {
+      fireEvent.pointerMove(submit, { ...touch, clientX: 60 });
+    }
+    fireEvent.pointerUp(submit, {
+      ...touch,
+      clientX: gesture === "outside" ? 42 : touch.clientX,
+    });
+    fireEvent.click(submit, { detail: 1 });
+    expect(onSubmit).toHaveBeenCalledTimes(sends ? 1 : 0);
+  });
 
   it("keeps the editor focused through a pointer submit", async () => {
     const onSubmit = vi.fn();
@@ -4824,7 +4877,7 @@ describe("PromptBoxInternal fast mode command", () => {
       provider: { options: [{ value: "claude-code", label: "Claude Code" }] },
       selectModel,
     });
-    expect(modelShortcuts?.map(({ name }) => name)).toEqual(["opus"]);
+    expect(modelShortcuts?.map(({ name }) => name)).toEqual(["fable", "opus"]);
     const { changes, onSubmit, promptBoxRef } = renderPromptBox(
       "Review this /opus",
       { modelShortcuts },
@@ -5114,5 +5167,140 @@ describe("voice recording escape", () => {
 
     expect(pressEscape().defaultPrevented).toBe(false);
     expect(cancel).not.toHaveBeenCalled();
+  });
+});
+
+describe("PromptBoxInternal prompt history", () => {
+  const sent = (text: string): PromptDraftState => ({
+    ...emptyPromptDraftState(),
+    text,
+  });
+  const logFile: PromptMentionSuggestion = {
+    kind: "path",
+    source: "workspace",
+    entryKind: "file",
+    path: "logs/app.log",
+    name: "app.log",
+    replacement: "logs/app.log",
+  };
+
+  function renderWithHistory(
+    entries: readonly PromptDraftState[],
+    options: Partial<PromptBoxProps> & { initialText?: string } = {},
+  ) {
+    const { initialText = "", ...props } = options;
+    const promptBoxRef = createRef<PromptBoxHandle>();
+    function Harness() {
+      const [draft, setDraft] = useState(sent(initialText));
+      return (
+        <PromptBoxInternal
+          {...createPromptBoxProps({
+            value: draft.text,
+            mentionRanges: draft.mentions,
+            onChange: (text, mentions) =>
+              setDraft((current) => ({ ...current, text, mentions })),
+            history: { currentDraft: draft, entries, onSelectEntry: setDraft },
+            ...props,
+          })}
+          promptBoxRef={promptBoxRef}
+        />
+      );
+    }
+    render(<Harness />);
+    return promptBoxRef;
+  }
+
+  const press = (key: "ArrowUp" | "ArrowDown") =>
+    fireEvent.keyDown(getPromptEditorElement(), { key });
+  const expectDraft = (text: string) =>
+    waitFor(() => expect(getPromptEditorElement().textContent).toBe(text));
+  const menu = () => document.querySelector("[data-promptbox-typeahead-menu]");
+  // A recall moves the caret on the next frame, so the menu settles after it.
+  const nextFrame = () =>
+    act(async () => {
+      await new Promise((resolve) => requestAnimationFrame(resolve));
+    });
+
+  it("recalls older prompts with ArrowUp and returns to the unsent draft with ArrowDown", async () => {
+    const promptBoxRef = renderWithHistory([sent("newest"), sent("older")]);
+    await focusPromptEnd(promptBoxRef);
+
+    press("ArrowUp");
+    await expectDraft("newest");
+    press("ArrowUp");
+    await expectDraft("older");
+    press("ArrowUp");
+    await expectDraft("older");
+    press("ArrowDown");
+    await expectDraft("newest");
+    press("ArrowDown");
+    await expectDraft("");
+  });
+
+  it("stops recalling once the recalled prompt is edited", async () => {
+    const promptBoxRef = renderWithHistory([sent("newest"), sent("older")]);
+    await focusPromptEnd(promptBoxRef);
+    press("ArrowUp");
+    await expectDraft("newest");
+
+    await act(async () => promptBoxRef.current?.insertTextAtCursor("edited"));
+    await expectDraft("newest edited");
+    press("ArrowUp");
+    press("ArrowDown");
+    await nextFrame();
+    await expectDraft("newest edited");
+  });
+
+  it("lets an open menu keep the arrow keys when the history's draft is empty", async () => {
+    // Some callers pass a history whose draft never changes (StoryDraftPromptBox).
+    const promptBoxRef = createRef<PromptBoxHandle>();
+    render(
+      <PromptBoxInternal
+        {...createPromptBoxProps({
+          value: "/",
+          typeahead: buildTypeaheadConfig({
+            commandSuggestions: ["plan", "review"].map((name) => ({
+              kind: "command",
+              name,
+              source: "command",
+              origin: "user",
+              description: null,
+              argumentHint: null,
+            })),
+          }),
+          history: {
+            currentDraft: emptyPromptDraftState(),
+            entries: [],
+            onSelectEntry: vi.fn(),
+          },
+        })}
+        promptBoxRef={promptBoxRef}
+      />,
+    );
+    await focusPromptEnd(promptBoxRef);
+    const first = await screen.findByRole("button", { name: "plan" });
+    await waitFor(() => expect(first.className).toContain("bg-state-active"));
+
+    press("ArrowDown");
+
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "review" }).className).toContain(
+        "bg-state-active",
+      ),
+    );
+  });
+
+  it("opens no menu for a recalled prompt that ends in a trigger, and keeps browsing", async () => {
+    const promptBoxRef = renderWithHistory([sent("see @log"), sent("older")], {
+      typeahead: buildTypeaheadConfig({ mentionSuggestions: [logFile] }),
+    });
+    await focusPromptEnd(promptBoxRef);
+
+    press("ArrowUp");
+    await expectDraft("see @log");
+    await nextFrame();
+    expect(menu()).toBeNull();
+    press("ArrowUp");
+    await expectDraft("older");
   });
 });

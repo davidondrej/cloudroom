@@ -1,12 +1,14 @@
+import { once } from "node:events";
 import { chmod } from "node:fs/promises";
 import http from "node:http";
+import net from "node:net";
 import { networkInterfaces } from "node:os";
 import {
   CALLER_PROOF_STATUS_HEADER,
   CALLER_TOKEN_HEADER,
 } from "@cloudroom/config/caller-proof";
-import { createNodeBbSdk } from "@cloudroom/sdk/node";
-import { afterEach, describe, expect, it } from "vitest";
+import { createNodeRoomSdk } from "@cloudroom/sdk/node";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { upsertHost } from "@cloudroom/db";
 import { HOST_DAEMON_PROTOCOL_VERSION } from "@cloudroom/host-daemon-contract";
 import {
@@ -123,7 +125,7 @@ describe("local caller proof", () => {
 
   it("lets an unsandboxed local process prove itself through the SDK", async () => {
     server = await startTestServer();
-    const sdk = createNodeBbSdk({ baseUrl: server.baseUrl });
+    const sdk = createNodeRoomSdk({ baseUrl: server.baseUrl });
     await expect(sdk.hosts.list()).resolves.toEqual(expect.any(Array));
   });
 
@@ -134,13 +136,56 @@ describe("local caller proof", () => {
       const directory = server.deps.callerProofs.directory;
       await chmod(directory, 0o500);
       try {
-        const sdk = createNodeBbSdk({ baseUrl: server.baseUrl });
+        const sdk = createNodeRoomSdk({ baseUrl: server.baseUrl });
         await expect(sdk.hosts.list()).rejects.toMatchObject({ status: 401 });
       } finally {
         await chmod(directory, 0o700);
       }
     },
   );
+
+  // Linux and macOS tell which user owns each loopback connection. Here the server
+  // takes another uid as its own, so this test's process is the other user.
+  it.runIf(process.platform === "linux" || process.platform === "darwin")(
+    "refuses open reads from another OS user on this computer",
+    async () => {
+      server = await startTestServer();
+      vi.spyOn(process, "getuid").mockReturnValue(process.getuid!() + 1);
+      try {
+        const refused = await send("/api/v1/threads");
+        expect(refused.status).toBe(401);
+        expect(refused.headers.get(CALLER_PROOF_STATUS_HEADER)).toBe(
+          "required",
+        );
+        // Starting a proof stays open: another user can't write the folder.
+        expect((await send("/api/v1/caller-proofs", { body: {} })).status).toBe(
+          200,
+        );
+        const proven = await send("/api/v1/threads", {
+          headers: { [CALLER_TOKEN_HEADER]: server.callerToken },
+        });
+        expect(proven.status).toBe(200);
+      } finally {
+        vi.restoreAllMocks();
+      }
+    },
+  );
+
+  it("survives clients that reset while their WebSocket upgrade is checked", async () => {
+    server = await startTestServer();
+    const url = new URL(server.baseUrl);
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      const client = net.connect(Number(url.port), url.hostname);
+      client.on("error", () => client.destroy());
+      await once(client, "connect");
+      client.write(
+        `GET /api/v1/threads HTTP/1.1\r\nHost: ${url.host}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n`,
+      );
+      client.resetAndDestroy();
+    }
+    // An unhandled socket error would have crashed the server before this.
+    expect((await send("/api/v1/system/version")).status).toBe(200);
+  });
 
   it("tells a stale token apart from a missing or ignored one", async () => {
     server = await startTestServer();

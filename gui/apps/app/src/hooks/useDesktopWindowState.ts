@@ -1,17 +1,17 @@
 import { useEffect, useMemo, useState } from "react";
-import type { BbDesktopWindowState } from "@cloudroom/desktop-contract";
+import type { RoomDesktopWindowState } from "@cloudroom/desktop-contract";
 import {
   DEFAULT_DESKTOP_WINDOW_STATE,
-  getBbDesktopInfo,
-} from "@/lib/bb-desktop";
+  getRoomDesktopInfo,
+} from "@/lib/room-desktop";
 
-export function useDesktopWindowState(): BbDesktopWindowState {
+export function useDesktopWindowState(): RoomDesktopWindowState {
   const [isFullScreen, setIsFullScreen] = useState(
     DEFAULT_DESKTOP_WINDOW_STATE.isFullScreen,
   );
 
   useEffect(() => {
-    const desktopApi = getBbDesktopInfo();
+    const desktopApi = getRoomDesktopInfo();
     let cancelled = false;
 
     const unsubscribe = desktopApi?.onWindowStateChange?.((nextState) => {

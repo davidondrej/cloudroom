@@ -1,5 +1,6 @@
 import type Database from "better-sqlite3";
 import { createAutomationId, createAutomationRunId } from "./ids.js";
+import { computeNextScheduledTime } from "./schedule-helpers.js";
 import {
   automationExecutionSchema,
   automationResponseSchema,
@@ -959,6 +960,55 @@ export function closeAutomationRun(
   })();
 }
 
+/** A failed scheduled run whose thread came back and did its work (#1443) counts as succeeded, and its waiting retry
+ *  moves to the loop's next slot, so the slot never runs twice. A retry at or after that slot is that slot's own run,
+ *  so it stays. The loop and that slot when the run can be recovered, from local checks alone. */
+export function recoverableRun(
+  db: Db,
+  runId: string,
+): { automationId: string; slot: number } | null {
+  const run = getAutomationRun(db, runId);
+  const automation = run && getAutomation(db, run.automationId);
+  if (
+    !run ||
+    !automation?.enabled ||
+    automation.nextRunAt === null ||
+    run.status !== "failed" ||
+    run.runMode !== "agent" ||
+    run.trigger !== "schedule" ||
+    listAutomationRuns(db, { automationId: run.automationId, limit: 1 })[0]
+      ?.id !== run.id
+  )
+    return null;
+  const trigger = parseAutomationTrigger(automation.triggerConfig);
+  if (trigger.triggerType !== "schedule") return null;
+  const slot = computeNextScheduledTime({
+    cron: trigger.cron,
+    timezone: trigger.timezone,
+    now: run.startedAt,
+  });
+  return automation.nextRunAt < slot
+    ? { automationId: automation.id, slot }
+    : null;
+}
+
+/** Recovers a failed run (see recoverableRun). True when the run was recovered. */
+export function recoverFailedRun(db: Db, runId: string, now: number): boolean {
+  return db.transaction(() => {
+    const recoverable = recoverableRun(db, runId);
+    if (!recoverable) return false;
+    db.prepare(
+      `UPDATE automation_runs SET status = 'succeeded', error = NULL WHERE id = ?`,
+    ).run(runId);
+    db.prepare(
+      `UPDATE automations SET next_run_at = @slot, consecutive_failures = 0, last_run_status = 'succeeded',
+         last_error = NULL, updated_at = @now
+       WHERE id = @id`,
+    ).run({ id: recoverable.automationId, slot: recoverable.slot, now });
+    return true;
+  })();
+}
+
 export function createManualRun(
   db: Db,
   args: {
@@ -1107,6 +1157,35 @@ export function listRunningAutomationRunsByThread(
          ORDER BY started_at DESC, id DESC`,
     )
     .all(threadId) as AutomationRunRow[];
+}
+
+/** The run a thread's `loop report` is for (ADR 0298): its running run, else the run that started the thread (its
+ *  spawn or its check script), even settled, while no other run was sent to it: a retried, recovered or continued
+ *  turn there is still that run's work (#1293). A loop's own target thread, or one several runs share, can't tell
+ *  them apart once they end, so it reports only while a run is running there. */
+export function getThreadReportRun(
+  db: Db,
+  threadId: string,
+): AutomationRunRow | null {
+  return optionalRunRow(
+    db
+      .prepare(
+        `SELECT
+           ${AUTOMATION_RUN_COLUMNS}
+         FROM automation_runs r
+         WHERE (r.thread_id = @threadId AND r.status = 'running')
+            OR (r.id IN (
+                  SELECT run_id FROM automation_thread_marks WHERE thread_id = @threadId
+                  UNION ALL
+                  SELECT run_id FROM automation_review_threads WHERE thread_id = @threadId)
+                AND NOT EXISTS (
+                  SELECT 1 FROM automation_runs o WHERE o.thread_id = @threadId AND o.id <> r.id)
+                AND NOT EXISTS (SELECT 1 FROM automations a WHERE a.target_thread_id = @threadId))
+         ORDER BY r.status = 'running' DESC, r.started_at DESC, r.id DESC
+         LIMIT 1`,
+      )
+      .get({ threadId }),
+  );
 }
 
 export function listAutomationRuns(

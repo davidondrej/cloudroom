@@ -57,6 +57,7 @@ import {
   useMessageDirectiveRegistry,
   type MarkdownMessageDirectives,
 } from "@/components/ui/markdown-message-directives.js";
+import { DraftMessageProvider } from "./DraftEditor";
 import {
   boundedMarkdownPreview,
   boundedMarkdownTail,
@@ -645,6 +646,14 @@ function AssistantConversationMessage({
     () => (streaming ? null : parseClaudeContextReport(text)),
     [streaming, text],
   );
+  const hasDraft = text.includes("```draft");
+  const draftMessage = useMemo(
+    () =>
+      hasDraft
+        ? { messageId: id, threadId, projectId: projectId ?? null, streaming }
+        : null,
+    [hasDraft, id, projectId, streaming, threadId],
+  );
   const liveMarkdown = useMemo(() => {
     const tail = streamingSplit?.tail ?? text;
     return streaming ? repairStreamingMarkdownTail(tail) : tail;
@@ -726,31 +735,33 @@ function AssistantConversationMessage({
         <ClaudeContextReportCard report={contextReport} />
       ) : (
         <SelectableMessageProse onSelect={onSelectProse}>
-          <MarkdownPreview
-            className={
-              streamingSplit === null
-                ? undefined
-                : STREAMING_SETTLED_MARKDOWN_CLASS_NAME
-            }
-            content={
-              streamingSplit === null ? liveMarkdown : streamingSplit.settled
-            }
-            incrementalBlocks
-            linkRouting={linkRouting}
-            messageDirectives={messageDirectives}
-            threadMentions={ASSISTANT_THREAD_MENTIONS}
-          />
-          {streamingSplit === null ? null : (
+          <DraftMessageProvider value={draftMessage}>
             <MarkdownPreview
-              className={STREAMING_TAIL_MARKDOWN_CLASS_NAME}
-              content={liveMarkdown}
-              sourcePrefix={streamingSplit.settled}
+              className={
+                streamingSplit === null
+                  ? undefined
+                  : STREAMING_SETTLED_MARKDOWN_CLASS_NAME
+              }
+              content={
+                streamingSplit === null ? liveMarkdown : streamingSplit.settled
+              }
               incrementalBlocks
               linkRouting={linkRouting}
               messageDirectives={messageDirectives}
               threadMentions={ASSISTANT_THREAD_MENTIONS}
             />
-          )}
+            {streamingSplit === null ? null : (
+              <MarkdownPreview
+                className={STREAMING_TAIL_MARKDOWN_CLASS_NAME}
+                content={liveMarkdown}
+                sourcePrefix={streamingSplit.settled}
+                incrementalBlocks
+                linkRouting={linkRouting}
+                messageDirectives={messageDirectives}
+                threadMentions={ASSISTANT_THREAD_MENTIONS}
+              />
+            )}
+          </DraftMessageProvider>
         </SelectableMessageProse>
       )}
       <ConversationAttachments

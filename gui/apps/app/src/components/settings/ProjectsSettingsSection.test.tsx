@@ -295,8 +295,8 @@ describe("ProjectsSettingsSection", () => {
     await screen.findByText("1 of 2 machines");
     const pierre = screen.getByText("pierre");
     expect(pierre.parentElement?.textContent).toContain("offline");
-    const bb = screen.getByText("bb");
-    expect(bb.parentElement?.textContent).not.toContain("offline");
+    const room = screen.getByText("bb");
+    expect(room.parentElement?.textContent).not.toContain("offline");
   });
 
   it("shows a drag handle per project and disables them with a single project", async () => {

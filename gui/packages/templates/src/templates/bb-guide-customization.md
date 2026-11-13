@@ -48,15 +48,11 @@ Add --json to any theme command for machine-readable output.
 
 Packaged launcher settings
 
-`bb-app config` and `bb-app env` reload runtime settings in a running server,
-but the CLI identifies server and launcher settings that are startup-only,
-including binding/ports, data and the dev-app port, telemetry, inherited skill
-roots, and `BB_FF_*` flags. `BB_LOG_LEVEL` is also startup-only. Use
-`bb-app config`, not `bb-app env`, to change `BB_APP_URL`, `BB_INFERENCE`,
-`BB_INFERENCE_FALLBACK`, or `BB_TRANSCRIPTION` live. After a startup-only
-change, run `bb-app stop && bb-app start` or restart the desktop app. Until
-then, changing or unsetting `BB_SERVER_BIND_HOST` does not close a previous
-`0.0.0.0` listener.
+Saved settings live in the data folder: `config.json` (under `"config"`, such
+as `BB_APP_URL`, `BB_INFERENCE`, `BB_INFERENCE_FALLBACK`, `BB_TRANSCRIPTION`,
+`BB_LOG_LEVEL`) and `env.json` (provider credentials and environment). Edit the
+JSON, then restart the app. Until then, changing or removing
+`BB_SERVER_BIND_HOST` does not close a previous `0.0.0.0` listener.
 
 With `--server-bind-host 0.0.0.0`, the startup listener and `app` rows show
 `http://0.0.0.0:<port>`. Health checks and the colocated daemon still connect
@@ -67,8 +63,7 @@ Server helper completions use `BB_INFERENCE` first, then
 `BB_INFERENCE_FALLBACK` after a transient timeout, rate limit, or
 service-unavailable failure. Both default to `codex/gpt-5.6-luna`.
 
-  bb-app config set BB_INFERENCE <provider/model>
-  bb-app config set BB_INFERENCE_FALLBACK <provider/model>
+  config.json: {"config": {"BB_INFERENCE": "<provider/model>", "BB_INFERENCE_FALLBACK": "<provider/model>"}}
 
 Server-backed General settings
 
@@ -133,8 +128,8 @@ branches cloudroom creates after the change.
   room-cli settings reload
 
 `room-cli settings ai-services` shows the helper-inference and voice-transcription
-settings (`BB_INFERENCE`, `BB_INFERENCE_FALLBACK`, `BB_TRANSCRIPTION`, set with
-`bb-app config`) and the plugin-registered AI services they may name as
+settings (`BB_INFERENCE`, `BB_INFERENCE_FALLBACK`, `BB_TRANSCRIPTION`, set in
+`config.json`) and the plugin-registered AI services they may name as
 `<service>/<model>`.
 
 `room-cli settings general` accepts any key from `generalSettings` in
@@ -239,7 +234,7 @@ Host files and voice transcription
 
 Voice transcription uses the `BB_TRANSCRIPTION` model, which defaults to
 `codex/gpt-transcribe`. Override it with
-`bb-app config set BB_TRANSCRIPTION <provider/model>`.
+`BB_TRANSCRIPTION` in `config.json`, then restart the app.
 
 `room-cli file` supports `--host` for remote machines and `--root` on mutating
 commands to confine access beneath an absolute directory. `room-cli file list` and

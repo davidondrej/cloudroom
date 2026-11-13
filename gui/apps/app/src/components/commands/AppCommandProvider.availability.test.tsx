@@ -71,8 +71,8 @@ vi.mock("@/hooks/queries/system-queries", () => ({
   }),
 }));
 
-vi.mock("@/lib/bb-desktop", () => ({
-  getBbDesktopInfo: () => (testState.isDesktop ? {} : null),
+vi.mock("@/lib/room-desktop", () => ({
+  getRoomDesktopInfo: () => (testState.isDesktop ? {} : null),
 }));
 
 function Handler({ command }: { command: AppCommandId }) {

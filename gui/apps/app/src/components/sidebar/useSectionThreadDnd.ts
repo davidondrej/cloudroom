@@ -27,6 +27,12 @@ import {
   useUnpinThread,
   useUpdateThread,
 } from "@/hooks/mutations/thread-state-mutations";
+import { useCommittedRef, useStableCallback } from "@/hooks/useLatestRef";
+import {
+  reuseSameListsByKey,
+  reuseSameItems,
+  useStableValue,
+} from "@/hooks/useStableValue";
 import type { NeighborReorderRequest } from "@cloudroom/client-core";
 import {
   buildSidebarEntitySectionId,
@@ -894,11 +900,15 @@ function hasDropDecisionLanded(
   }
 }
 
+function getThreadId(thread: ThreadListEntry): string {
+  return thread.id;
+}
+
 export function useSectionThreadDnd({
   containerId,
   enabled,
   rootItems,
-  topLevelSectionOrder,
+  topLevelSectionOrder: latestTopLevelSectionOrder,
   onTopLevelSectionOrderChange,
   onExpandThread,
   groups = false,
@@ -922,6 +932,14 @@ export function useSectionThreadDnd({
   const decisionOptions = useMemo(
     () => ({ groups, projectMoves }),
     [groups, projectMoves],
+  );
+  // Collision detection must change only when drag state does (the nest hover
+  // timer), not on every agent event, or every sidebar row redraws. So it reads
+  // the tree through a ref and gets a section order that only changes by value.
+  const lookupRef = useCommittedRef(lookup);
+  const topLevelSectionOrder = useStableValue(
+    latestTopLevelSectionOrder,
+    reuseSameItems,
   );
   const topLevelSectionIds = useMemo(
     () => new Set<string>(topLevelSectionOrder),
@@ -965,26 +983,25 @@ export function useSectionThreadDnd({
     },
     [clearNestCandidate, readyNestCandidate],
   );
-  const isPinnedItem = useCallback(
-    (itemId: string) =>
-      lookup.parentKeyByItemId.get(itemId) === PINNED_THREAD_PARENT_KEY,
-    [lookup],
-  );
   const isPinnedRoot = useCallback(
     (itemId: string) =>
-      isPinnedItem(itemId) && !lookup.nestParentIdByItemId.has(itemId),
-    [isPinnedItem, lookup],
+      lookupRef.current.parentKeyByItemId.get(itemId) ===
+        PINNED_THREAD_PARENT_KEY &&
+      !lookupRef.current.nestParentIdByItemId.has(itemId),
+    [lookupRef],
   );
   const getNestBandFraction = useCallback(
     (threadId: string): number | null => {
       const activeId = activeIdRef.current;
       if (activeId === null || threadId === activeId) return null;
-      if (lookup.itemKindById.get(threadId) !== "thread") return null;
+      if (lookupRef.current.itemKindById.get(threadId) !== "thread") {
+        return null;
+      }
       const armed = armedNestThreadIdRef.current === threadId;
       if (coarsePointerRef.current) return 1;
       return armed ? NEST_BAND_ARMED_FRACTION : NEST_BAND_FRACTION;
     },
-    [lookup],
+    [lookupRef],
   );
   const handleRowPointer = useCallback(
     ({ threadId, relativeY, nesting }: ThreadRowPointerInfo) => {
@@ -1073,13 +1090,14 @@ export function useSectionThreadDnd({
   const pinThread = usePinThread();
   const unpinThread = useUnpinThread();
   const unpinAndMoveThread = useUnpinAndMoveThread();
-  const { handleDragEnd: handlePinnedDragEnd, itemIds: pinnedItemIds } =
+  const { handleDragEnd: handlePinnedDragEnd, itemIds: latestPinnedItemIds } =
     useNeighborReorderSortable({
       disabled: pinnedReorderPending || pinnedThreads.length < 2,
-      getId: (thread: ThreadListEntry) => thread.id,
+      getId: getThreadId,
       items: pinnedThreads,
       onReorder: onReorderPinnedThread,
     });
+  const pinnedItemIds = useStableValue(latestPinnedItemIds, reuseSameItems);
   const setCollapsedSections = useSetAtom(sidebarCollapsedThreadSectionsAtom);
   const [activeThread, setActiveThread] = useState<ThreadListEntry | null>(
     null,
@@ -1439,6 +1457,7 @@ export function useSectionThreadDnd({
           }
           break;
         case "move-project":
+          // A Cloud move waits for the sandbox, so don't hold the ghost (#1252).
           moveThreadToProject(decision.activeId, {
             id: decision.projectId,
             name: decision.projectName,
@@ -1448,9 +1467,9 @@ export function useSectionThreadDnd({
                 ? unpinThread.mutateAsync({ id: decision.activeId })
                 : undefined,
             )
-            .catch(() => undefined)
-            .finally(clearProjectedDrag);
-          break;
+            .catch(() => undefined);
+          clearProjectedDrag();
+          return;
         case "reorder-pinned":
           handlePinnedDragEnd(event);
           clearProjectedDrag();
@@ -1491,34 +1510,55 @@ export function useSectionThreadDnd({
     clearProjectedDrag();
   }, [clearDropDwell, clearProjectedDrag, stopProjectionInputTracking]);
 
+  // Agent events rebuild the lookup and the mutation objects on every render.
+  // Stable handlers keep `dndContextProps`, and so every row's `sectionDnd`
+  // prop, unchanged until drag state really changes.
   const { consumeClickSuppression, dndContextProps, onClickCapture } =
     useSidebarReorderDnd({
       axis: "free",
       collisionDetection,
       measuring: SECTION_THREAD_DROPPABLE_MEASURING,
-      onDragEnd: handleDragEnd,
-      onDragStart: handleDragStart,
-      onDragMove: handleDragMove,
-      onDragOver: handleDragOver,
-      onDragCancel: handleDragCancel,
+      onDragEnd: useStableCallback(handleDragEnd),
+      onDragStart: useStableCallback(handleDragStart),
+      onDragMove: useStableCallback(handleDragMove),
+      onDragOver: useStableCallback(handleDragOver),
+      onDragCancel: useStableCallback(handleDragCancel),
     });
-
-  if (!enabled) return null;
+  const itemIdsByParentKey = useStableValue<
+    ReadonlyMap<string, readonly string[]>
+  >(lookup.itemIdsByParentKey, reuseSameListsByKey);
   const dropDecisionLanded =
     pendingDropDecision !== null &&
     hasDropDecisionLanded(lookup, pendingDropDecision);
-  return {
-    activeThread: dropDecisionLanded ? null : activeThread,
-    consumeClickSuppression,
-    dndContextProps,
-    itemIdsByParentKey: lookup.itemIdsByParentKey,
-    onClickCapture,
-    onPointerDownCapture: captureInitialThreadRowRects,
-    dragOverParentKey: dropDecisionLanded ? null : dragOverParentKey,
-    dropPreview: null,
-    nestTarget: dropDecisionLanded ? null : rowDrop,
-    reorderTarget: dropDecisionLanded ? null : reorderTarget,
-    pinnedItemIds,
-    pinnedReorderPending,
-  };
+  const state = useMemo<SectionThreadDndState>(
+    () => ({
+      activeThread: dropDecisionLanded ? null : activeThread,
+      consumeClickSuppression,
+      dndContextProps,
+      itemIdsByParentKey,
+      onClickCapture,
+      onPointerDownCapture: captureInitialThreadRowRects,
+      dragOverParentKey: dropDecisionLanded ? null : dragOverParentKey,
+      dropPreview: null,
+      nestTarget: dropDecisionLanded ? null : rowDrop,
+      reorderTarget: dropDecisionLanded ? null : reorderTarget,
+      pinnedItemIds,
+      pinnedReorderPending,
+    }),
+    [
+      activeThread,
+      captureInitialThreadRowRects,
+      consumeClickSuppression,
+      dndContextProps,
+      dragOverParentKey,
+      dropDecisionLanded,
+      itemIdsByParentKey,
+      onClickCapture,
+      pinnedItemIds,
+      pinnedReorderPending,
+      reorderTarget,
+      rowDrop,
+    ],
+  );
+  return enabled ? state : null;
 }

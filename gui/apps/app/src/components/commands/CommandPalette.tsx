@@ -6,7 +6,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { pluginCommandId, pluginCommandIdSchema } from "@cloudroom/domain";
+import { pluginCommandId, pluginCommandIdSchema, type ThreadListEntry } from "@cloudroom/domain";
 import type { KeyboardEvent as ReactKeyboardEvent } from "react";
 import { useNavigate } from "react-router-dom";
 import { Dialog, DialogContent, DialogTitle } from "@cloudroom/shared-ui/dialog";
@@ -50,6 +50,7 @@ import {
 } from "@/components/settings/plugin-settings-entries";
 import { useSettingsNavSections } from "@/components/settings/settings-nav";
 import { appQueryClient } from "@/lib/app-query-client";
+import { sdk } from "@/lib/sdk";
 import {
   ThreadPaletteResults,
   type SearchFilters,
@@ -58,6 +59,13 @@ import {
 } from "./ThreadPaletteResults";
 
 type PaletteMode = "commands" | "threads";
+/** One "Search deeper" run. `threads` is null while the agent works. */
+interface DeepSearch {
+  query: string;
+  startedAt: number;
+  threads: readonly ThreadListEntry[] | null;
+  error: string | null;
+}
 
 const FILTERS_KEY = "cloudroom.search.filters";
 const FILTER_CHIPS = [
@@ -128,6 +136,15 @@ export function CommandPalette({ threadId, projectId }: CommandPaletteProps) {
   );
   const [filters, setFilters] = useState<SearchFilters>(readFilters);
   const [summary, setSummary] = useState<ThreadPaletteSummary>({ counts: null, jev: "off" });
+  const [deep, setDeep] = useState<DeepSearch | null>(null);
+  const deepAbortRef = useRef<AbortController | null>(null);
+  const stopDeep = useCallback(() => {
+    deepAbortRef.current?.abort();
+    deepAbortRef.current = null;
+    setDeep(null);
+  }, []);
+  // Closing stops the run, including picking a result, which closes without onOpenChange.
+  useEffect(() => (open ? stopDeep : undefined), [open, stopDeep]);
   const toggleFilter = useCallback((key: keyof SearchFilters) => {
     setFilters((current) => {
       const next = { ...current, [key]: !current[key] };
@@ -242,10 +259,11 @@ export function CommandPalette({ threadId, projectId }: CommandPaletteProps) {
       setQuery(mode === "commands" ? ">" : "");
       setHighlightedIndex(0);
       pickedThreadIdRef.current = null;
+      stopDeep();
       setOpen(true);
       loadInstalledPlugins();
     },
-    [buildActions, loadInstalledPlugins],
+    [buildActions, loadInstalledPlugins, stopDeep],
   );
 
   useAppCommandHandler("palette.open", (invocation) => {
@@ -260,6 +278,24 @@ export function CommandPalette({ threadId, projectId }: CommandPaletteProps) {
 
   const mode: PaletteMode = query.startsWith(">") ? "commands" : "threads";
   const modeQuery = mode === "commands" ? query.slice(1) : query;
+  const deepQuery = mode === "threads" ? query.trim() : "";
+  const searchDeeper = useCallback(() => {
+    if (!deepQuery) return;
+    deepAbortRef.current?.abort();
+    const controller = new AbortController();
+    deepAbortRef.current = controller;
+    const settle = (threads: readonly ThreadListEntry[], error: string | null) => {
+      if (controller.signal.aborted) return;
+      setDeep((current) => (current?.query === deepQuery ? { ...current, threads, error } : current));
+      setHighlightedIndex(0);
+      pickedThreadIdRef.current = null;
+    };
+    setDeep({ query: deepQuery, startedAt: Date.now(), threads: null, error: null });
+    sdk.cloudroom.deepSearch({ query: deepQuery }, controller.signal).then(
+      ({ threads }) => settle(threads, threads.length === 0 ? "Nothing found." : null),
+      (error: unknown) => settle([], error instanceof Error ? error.message.replace(/^HTTP \d+: /, "") : "Search deeper failed."),
+    );
+  }, [deepQuery]);
   const commandActions = useMemo<readonly PaletteAction[]>(
     () => [...actions, ...settingsActions, ...pluginPageActions],
     [actions, pluginPageActions, settingsActions],
@@ -338,6 +374,11 @@ export function CommandPalette({ threadId, projectId }: CommandPaletteProps) {
   const handleKeyDown = useCallback(
     (event: ReactKeyboardEvent<HTMLInputElement>) => {
       if (event.nativeEvent.isComposing) return;
+      if (event.key === "Enter" && (event.metaKey || event.ctrlKey) && mode === "threads") {
+        event.preventDefault();
+        searchDeeper();
+        return;
+      }
       if (resultCount === 0) return;
       const moveTo = (index: number) => {
         event.preventDefault();
@@ -379,6 +420,7 @@ export function CommandPalette({ threadId, projectId }: CommandPaletteProps) {
       mode,
       rankedCommands,
       resultCount,
+      searchDeeper,
       threadItems,
     ],
   );
@@ -429,6 +471,7 @@ export function CommandPalette({ threadId, projectId }: CommandPaletteProps) {
                 const nextQuery = event.target.value;
                 setQuery(nextQuery);
                 if (!nextQuery.startsWith(">")) setThreadItems([]);
+                if (deep !== null) stopDeep();
                 pickedThreadIdRef.current = null;
                 setHighlightedIndex(0);
                 if (listRef.current !== null) listRef.current.scrollTop = 0;
@@ -501,6 +544,7 @@ export function CommandPalette({ threadId, projectId }: CommandPaletteProps) {
           ) : (
             <ThreadPaletteResults
               activeIndex={activeIndex}
+              deepThreads={deep?.query === deepQuery ? (deep.threads ?? undefined) : undefined}
               filters={filters}
               onActiveIndexChange={setHighlightedIndex}
               onIncludeArchived={includeArchived}
@@ -512,7 +556,9 @@ export function CommandPalette({ threadId, projectId }: CommandPaletteProps) {
             />
           )}
         </div>
-        {resultCount > 0 ? (
+        {deepQuery ? (
+          <DeepSearchFooter deep={deep} onSearch={searchDeeper} onStop={stopDeep} />
+        ) : resultCount > 0 ? (
           <div className="flex items-center justify-end gap-3 px-3 pb-2.5 pt-1 text-xs text-muted-foreground">
             <ShortcutHint keys="↑↓" label="move" />
             <ShortcutHint keys="↵" label="open" />
@@ -520,6 +566,51 @@ export function CommandPalette({ threadId, projectId }: CommandPaletteProps) {
         ) : null}
       </DialogContent>
     </Dialog>
+  );
+}
+
+/** Cmd+K "Search deeper" (docs/scopes/search.md): plain text under a hairline, no icons. */
+function DeepSearchFooter({
+  deep,
+  onSearch,
+  onStop,
+}: {
+  deep: DeepSearch | null;
+  onSearch: () => void;
+  onStop: () => void;
+}) {
+  const searching = deep !== null && deep.threads === null;
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!searching) return;
+    const timer = setInterval(() => setNow(Date.now()), 1_000);
+    return () => clearInterval(timer);
+  }, [searching]);
+  const link = (label: string, onClick: () => void) => (
+    <button
+      type="button"
+      className="text-foreground underline underline-offset-2"
+      onMouseDown={(event) => event.preventDefault()}
+      onClick={onClick}
+    >
+      {label}
+    </button>
+  );
+  return (
+    <div className="px-3">
+      <div className={cn("h-px", searching ? "animate-pulse bg-primary/70" : "bg-border")} />
+      <p className="py-2.5 text-center text-xs text-muted-foreground">
+        {searching ? (
+          <>
+            Searching deeper… {Math.max(0, Math.round((now - (deep?.startedAt ?? now)) / 1_000))}s · {link("Stop", onStop)}
+          </>
+        ) : (
+          <>
+            {deep?.error ?? "Not here?"} {link(deep?.error ? "Try again" : "Search deeper", onSearch)}
+          </>
+        )}
+      </p>
+    </div>
   );
 }
 

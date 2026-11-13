@@ -325,6 +325,7 @@ function ThreadUserQuestionPendingInteractionBanner({
         questions.length === 1 ? "Question" : `${questions.length} questions`
       }
       initiallyExpanded
+      headless
       sourceThread={sourceThread}
       testId="user-question-banner"
     >

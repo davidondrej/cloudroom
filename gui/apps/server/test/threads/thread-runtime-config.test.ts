@@ -87,9 +87,9 @@ async function writeDataDirAgentInstructions(
 async function writeWorkspaceAgentInstructions(
   args: WriteWorkspaceAgentInstructionsArgs,
 ): Promise<void> {
-  const bbDir = path.join(args.workspacePath, ".bb");
-  await mkdir(bbDir, { recursive: true });
-  await writeFile(path.join(bbDir, "AGENTS.md"), args.content, "utf8");
+  const roomDir = path.join(args.workspacePath, ".bb");
+  await mkdir(roomDir, { recursive: true });
+  await writeFile(path.join(roomDir, "AGENTS.md"), args.content, "utf8");
 }
 
 function registerRemoteRuntimeFileResponder(

@@ -397,6 +397,21 @@ describe("ModelReasoningPicker", () => {
     expect(onReasoningChange).not.toHaveBeenCalled();
   });
 
+  it("steps effort one level from the hover arrows and stops at the ends", () => {
+    const { onReasoningChange } = renderPicker();
+    const stepButton = (name: string) =>
+      screen.getByRole("button", { name }) as HTMLButtonElement;
+    expect(stepButton("Lower reasoning effort").disabled).toBe(true);
+    fireEvent.click(stepButton("Raise reasoning effort"));
+    expect(onReasoningChange).toHaveBeenCalledExactlyOnceWith("high");
+    cleanup();
+    renderPicker({ reasoningValue: "high", onReasoningChange });
+    expect(stepButton("Raise reasoning effort").disabled).toBe(true);
+    fireEvent.click(stepButton("Lower reasoning effort"));
+    expect(onReasoningChange).toHaveBeenLastCalledWith("medium");
+    expect(screen.queryByRole("menu")).toBeNull();
+  });
+
   it("uses the lower-emphasis chrome token for the composer caret", () => {
     renderPicker({ muted: true });
 
@@ -407,7 +422,7 @@ describe("ModelReasoningPicker", () => {
       name: "Reasoning effort: Medium",
     });
     expect(
-      effort.querySelector('[data-icon="ChevronDown"]')?.classList,
+      screen.getByRole("button", { name: "Raise reasoning effort" }).classList,
     ).toContain("text-subtle-foreground/75");
     expect(trigger.classList).toContain("font-normal");
     expect(effort.classList).toContain("font-normal");
@@ -432,9 +447,8 @@ describe("ModelReasoningPicker", () => {
         true,
       );
       const speed = trigger.querySelector(`[data-speed-tier="${tier}"]`);
-      expect(speed?.querySelectorAll('[data-icon="Zap"]')).toHaveLength(1);
-      expect(speed?.querySelectorAll(".speed-tier-streak")).toHaveLength(
-        tier === "ultrafast" ? 3 : 0,
+      expect(speed?.querySelectorAll('[data-icon="Zap"]')).toHaveLength(
+        tier === "ultrafast" ? 2 : 1,
       );
     },
   );
@@ -454,8 +468,8 @@ describe("ModelReasoningPicker", () => {
       const pressed = within(speed).getByRole("button", { pressed: true });
 
       expect(pressed.textContent).toBe(label);
-      expect(pressed.querySelectorAll(".speed-tier-streak")).toHaveLength(
-        tier === "ultrafast" ? 3 : 0,
+      expect(pressed.querySelectorAll('[data-icon="Zap"]')).toHaveLength(
+        tier === "ultrafast" ? 2 : tier === "fast" ? 1 : 0,
       );
     },
   );

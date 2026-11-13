@@ -78,7 +78,6 @@ describe("ThreadPromptContextBanner", () => {
         gitSectionPending={false}
         archivedSection={{ archivedAt: 1_731_456_000_000 }}
         environmentGoneSection={null}
-        parentThreadSection={null}
         pullRequestSection={null}
         expandedSection={null}
         onToggleSection={noop}
@@ -97,7 +96,6 @@ describe("ThreadPromptContextBanner", () => {
         gitSectionPending={false}
         archivedSection={null}
         environmentGoneSection={{ status: "destroyed" }}
-        parentThreadSection={null}
         pullRequestSection={null}
         expandedSection={null}
         onToggleSection={noop}
@@ -135,11 +133,6 @@ describe("ThreadPromptContextBanner", () => {
             gitSectionPending={false}
             archivedSection={archivedSection}
             environmentGoneSection={environmentGoneSection}
-            parentThreadSection={{
-              parentThreadTitle: "Parent thread",
-              href: "/threads/thr_parent",
-              relationship: "parent",
-            }}
             pullRequestSection={null}
             expandedSection={null}
             onToggleSection={noop}
@@ -165,11 +158,6 @@ describe("ThreadPromptContextBanner", () => {
             onUnarchive: noop,
           }}
           environmentGoneSection={{ status: "destroyed" }}
-          parentThreadSection={{
-            parentThreadTitle: "Parent thread",
-            href: "/threads/thr_parent",
-            relationship: "parent",
-          }}
           pullRequestSection={null}
           expandedSection={null}
           onToggleSection={noop}
@@ -189,7 +177,6 @@ describe("ThreadPromptContextBanner", () => {
         gitSectionPending={false}
         archivedSection={null}
         environmentGoneSection={null}
-        parentThreadSection={null}
         pullRequestSection={{ pullRequest: pullRequestFixture }}
         expandedSection={null}
         onToggleSection={noop}
@@ -209,7 +196,6 @@ describe("ThreadPromptContextBanner", () => {
         gitSectionPending={false}
         archivedSection={null}
         environmentGoneSection={null}
-        parentThreadSection={null}
         pullRequestSection={{
           pullRequest: pullRequestFixture,
           actions: {
@@ -232,7 +218,6 @@ describe("ThreadPromptContextBanner", () => {
         gitSectionPending={false}
         archivedSection={null}
         environmentGoneSection={null}
-        parentThreadSection={null}
         pullRequestSection={{
           pullRequest: {
             ...pullRequestFixture,
@@ -264,7 +249,6 @@ describe("ThreadPromptContextBanner", () => {
         gitSectionPending={false}
         archivedSection={null}
         environmentGoneSection={null}
-        parentThreadSection={null}
         pullRequestSection={{
           pullRequest: {
             ...pullRequestFixture,
@@ -287,7 +271,6 @@ describe("ThreadPromptContextBanner", () => {
         gitSectionPending={false}
         archivedSection={null}
         environmentGoneSection={null}
-        parentThreadSection={null}
         pullRequestSection={{
           pullRequest: {
             ...pullRequestFixture,
@@ -318,7 +301,6 @@ describe("ThreadPromptContextBanner", () => {
         gitSectionPending={false}
         archivedSection={null}
         environmentGoneSection={null}
-        parentThreadSection={null}
         pullRequestSection={{ pullRequest: pullRequestFixture }}
         expandedSection={null}
         onToggleSection={noop}
@@ -339,7 +321,6 @@ describe("ThreadPromptContextBanner", () => {
         gitSectionPending={false}
         archivedSection={null}
         environmentGoneSection={null}
-        parentThreadSection={null}
         pullRequestSection={{
           pullRequest: pullRequestFixture,
           actions: {
@@ -364,7 +345,6 @@ describe("ThreadPromptContextBanner", () => {
         gitSectionPending={false}
         archivedSection={null}
         environmentGoneSection={null}
-        parentThreadSection={null}
         pullRequestSection={{ pullRequest: pullRequestFixture }}
         expandedSection={null}
         onToggleSection={noop}
@@ -410,7 +390,6 @@ describe("ThreadPromptContextBanner", () => {
             gitSectionPending={false}
             archivedSection={null}
             environmentGoneSection={null}
-            parentThreadSection={null}
             pullRequestSection={{ pullRequest }}
             expandedSection={null}
             onToggleSection={noop}
@@ -439,7 +418,6 @@ describe("ThreadPromptContextBanner git section body", () => {
           gitSectionPending={false}
           archivedSection={null}
           environmentGoneSection={null}
-          parentThreadSection={null}
           pullRequestSection={null}
           expandedSection={expandedSection}
           onToggleSection={noop}

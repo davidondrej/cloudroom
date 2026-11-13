@@ -451,7 +451,7 @@ describe("local API server", () => {
 
       expect(response.status).toBe(400);
       expect(await response.text()).toContain(
-        "bb-app client ssh-target set https://remote-bb.example.test <ssh-target>",
+        'Add it to client.json in the data folder: {"servers": {"https://remote-bb.example.test"',
       );
     } finally {
       await rm(dataDir, { recursive: true, force: true });

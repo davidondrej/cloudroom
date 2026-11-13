@@ -607,6 +607,70 @@ describe("Codex ChatGPT client", () => {
     });
   });
 
+  const unsupportedValueBody = (param: string) =>
+    JSON.stringify({
+      error: {
+        message: "Unsupported value: 'none' is not supported.",
+        type: "invalid_request_error",
+        param,
+        code: "unsupported_value",
+      },
+    });
+
+  it.each([
+    {
+      name: "model rejects none",
+      body: unsupportedValueBody("reasoning.effort"),
+      timeoutMs: 10000,
+      requestedEfforts: ["none", "low"],
+    },
+    {
+      name: "other unsupported param",
+      body: unsupportedValueBody("text.format"),
+      timeoutMs: 10000,
+      requestedEfforts: ["none"],
+    },
+    {
+      name: "oversized error body",
+      body: "x".repeat(10 * 1024),
+      timeoutMs: 30,
+      requestedEfforts: ["none"],
+    },
+  ])(
+    "retries at low effort only when the model rejects none ($name)",
+    async ({ body, timeoutMs, requestedEfforts }) => {
+      const homeDir = await makeTempHome();
+      await writeCodexApiKeyAuth({ homeDir, apiKey: "sk-codex-api-key" });
+      const fetchMock = setupFetchMock();
+      fetchMock
+        .mockResolvedValueOnce(new Response(body, { status: 400 }))
+        .mockResolvedValueOnce(
+          sseResponse([
+            { type: "response.output_text.delta", delta: '{"title":"T"}' },
+          ]),
+        );
+
+      const result = completeCodexInference({
+        serviceId: "codex",
+        model: "gpt-6.1-sol",
+        reasoningEffort: "none",
+        prompt: "Return a title",
+        outputSchema: { type: "object" },
+        timeoutMs,
+      });
+
+      await (requestedEfforts.length === 2
+        ? expect(result).resolves.toMatchObject({ value: { title: "T" } })
+        : expect(result).rejects.toThrow("HTTP 400"));
+      expect(
+        fetchMock.mock.calls.map(
+          ([, init]) => JSON.parse(textBodyFromInit(init)).reasoning.effort,
+        ),
+      ).toEqual(requestedEfforts);
+    },
+    1000,
+  );
+
   it("caps oversized Codex error response bodies", async () => {
     const homeDir = await makeTempHome();
     await writeCodexApiKeyAuth({

@@ -10,7 +10,7 @@ import {
   desktopBrowserImportSourceIdSchema,
 } from "@cloudroom/host-daemon-contract";
 import { action } from "../action.js";
-import { createCliBbSdk } from "../client.js";
+import { createCliRoomSdk } from "../client.js";
 
 interface ScopeOptions {
   json?: boolean;
@@ -103,7 +103,7 @@ export function registerBrowserCommands(
   const browser = program
     .command("browser")
     .description("Experimental built-in desktop browser control");
-  const api = () => createCliBbSdk(getUrl()).experimental_desktopBrowsers;
+  const api = () => createCliRoomSdk(getUrl()).experimental_desktopBrowsers;
   browser
     .command("instances")
     .description("List connected desktop windows on a host")

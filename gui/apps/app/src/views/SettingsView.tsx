@@ -55,6 +55,7 @@ import {
 } from "@/hooks/useTheme";
 import { useHostDaemon, useLocalHostDaemonAccess } from "@/hooks/useHostDaemon";
 import { useAppThemePreview } from "@/hooks/useAppThemePreview";
+import { useBrandMark } from "@/hooks/useBrandMark";
 import { useCorners, type Corners } from "@/hooks/useCorners";
 import {
   ProviderTurnDisplaySection,
@@ -83,6 +84,7 @@ import { PluginSettingsSections } from "@/components/plugin/PluginSettingsSectio
 import { FileOpenersSettingsSection } from "@/components/settings/FileOpenersSettingsSection";
 import { VoiceInputSettingsSection } from "@/components/settings/VoiceInputSettingsSection";
 import {
+  FeaturePromptsSettingsSection,
   ProjectNudgeSettingsSection,
   SmartSearchSettingsSection,
   PromptSuggestionsSetting,
@@ -101,7 +103,7 @@ import { ArchivedThreadsSettingsSection } from "@/components/settings/ArchivedTh
 import { ImportChatsSettingsSection } from "@/components/settings/ImportChats";
 import { ExportChatsSettingsSection } from "@/components/settings/ExportChats";
 import { CliSkillsSettingsSection } from "@/components/settings/CliSkillsSettingsSection";
-import { SkillUsageSection } from "@/components/settings/SkillUsageSection";
+import { AnalyticsTabs } from "@/components/settings/AnalyticsTabs";
 import { MarketplacesSettingsSection } from "@/components/settings/MarketplacesSettingsSection";
 import {
   useUpdateGeneralSettings,
@@ -111,7 +113,7 @@ import {
 import { useSystemConfig } from "@/hooks/queries/system-queries";
 import { WorktreeDiskUse } from "@/components/layout/LowDiskBanner";
 import { useWorkspaceOpenTargets } from "@/hooks/useWorkspaceOpenTargets";
-import { isDesktopBrowserAvailable } from "@/lib/bb-desktop";
+import { isDesktopBrowserAvailable } from "@/lib/room-desktop";
 import {
   FAVICON_COLOR_VALUES,
   getFaviconGlyphHref,
@@ -442,6 +444,22 @@ function CornersSetting() {
           ))}
         </DropdownMenuContent>
       </DropdownMenu>
+    </SettingsWithControl>
+  );
+}
+
+function BrandMarkSetting() {
+  const [showBrandMark, setShowBrandMark] = useBrandMark();
+  return (
+    <SettingsWithControl
+      label="Show Cloudroom name"
+      description="The Cloudroom logo and name at the top of the window."
+    >
+      <Switch
+        checked={showBrandMark}
+        onCheckedChange={setShowBrandMark}
+        aria-label="Show Cloudroom name"
+      />
     </SettingsWithControl>
   );
 }
@@ -807,6 +825,7 @@ export function AppearanceSettingsSection({
           </DropdownMenu>
         </SettingsWithControl>
         <CornersSetting />
+        <BrandMarkSetting />
 
         <SettingsWithControl
           label="Palette"
@@ -911,6 +930,7 @@ export function AppearanceSettingsSection({
           />
         </SettingsWithControl>
         <StarterPromptsSetting />
+        <PluginSettingsSections pluginId="wallpaper" />
       </div>
     </SettingsSection>
   );
@@ -1254,6 +1274,8 @@ export function SettingsView() {
   }
   const groupTabs = (
     <SettingsGroupTabs
+      // Analytics draws its own row of pages right under these, and that row carries the line.
+      nested={activeSection === "analytics"}
       links={getSettingsGroupLinks(
         findSettingsNavGroup(activeSection, activePluginId),
         navigation,
@@ -1387,7 +1409,7 @@ export function SettingsView() {
   } else if (activeSection === "account") {
     content = <CloudroomAccountSettings />;
   } else if (activeSection === "analytics") {
-    content = <SkillUsageSection />;
+    content = <AnalyticsTabs />;
   } else if (activeSection === "machines") {
     content = <MachinesSettingsPage />;
   } else if (activeSection === "updates") {
@@ -1437,6 +1459,8 @@ export function SettingsView() {
         {updateGeneralSettingsMutation.error && <p role="alert">{updateGeneralSettingsMutation.error.message}</p>}
       </SettingsSection>
     );
+  } else if (activeSection === "feature-prompts") {
+    content = <FeaturePromptsSettingsSection />;
   } else if (activeSection === "marketplaces") {
     content = <MarketplacesSettingsSection />;
   } else if (activeSection === "community") {
@@ -1575,12 +1599,12 @@ export function MachinesSettingsPage() {
   );
 }
 
-function SettingsGroupTabs({ links }: { links: readonly SettingsNavLink[] }) {
+function SettingsGroupTabs({ links, nested = false }: { links: readonly SettingsNavLink[]; nested?: boolean }) {
   if (links.length < 2) return null;
   return (
     <nav
       aria-label="Settings pages"
-      className="mb-6 flex flex-wrap gap-1 border-b border-border pb-2"
+      className={cn("flex flex-wrap gap-1", nested ? "mb-4" : "mb-6 border-b border-border pb-2")}
     >
       {links.map((link) => (
         <Link

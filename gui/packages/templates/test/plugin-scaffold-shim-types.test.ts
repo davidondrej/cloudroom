@@ -80,6 +80,15 @@ const SHIMMED_SPECIFIERS = [
   "@pierre/diffs/react",
 ];
 
+it("pins every shimmed type package to the exact version the host runs (#906)", () => {
+  for (const [name, pin] of Object.entries(PLUGIN_SHIMMED_TYPE_DEPENDENCIES)) {
+    const installed = JSON.parse(
+      readFileSync(join(workspacePackageRoot(name), "package.json"), "utf8"),
+    ).version;
+    expect(pin, name).toBe(installed);
+  }
+});
+
 describe("scaffold typechecks the runtime-shimmed imports (#2072)", () => {
   let workDir: string;
   let targetDir: string;

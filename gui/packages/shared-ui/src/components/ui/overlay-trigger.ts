@@ -1,4 +1,4 @@
-import type { MouseEvent } from "react";
+import { createContext, useContext, type MouseEvent } from "react";
 import { cn } from "../../lib/utils";
 
 const OVERLAY_TRIGGER_CLASS_NAME = "select-none";
@@ -81,4 +81,25 @@ if (typeof document !== "undefined") {
 
 export function isLastInputKeyboard(): boolean {
   return lastInputModality === "keyboard";
+}
+
+/**
+ * Where focus goes when a popover or menu in this subtree closes, instead of
+ * its trigger. The composer sets it so picking a model or project returns the
+ * caret to the editor.
+ */
+export const OverlayCloseFocusContext = createContext<(() => void) | null>(
+  null,
+);
+
+export function useOverlayCloseFocus(): (event: Event) => void {
+  const returnFocus = useContext(OverlayCloseFocusContext);
+  return (event) => {
+    if (returnFocus === null || event.defaultPrevented) return;
+    // Focus already moved somewhere real (a dialog, a clicked input): keep it.
+    const active = document.activeElement;
+    if (active !== null && active !== document.body) return;
+    event.preventDefault();
+    returnFocus();
+  };
 }

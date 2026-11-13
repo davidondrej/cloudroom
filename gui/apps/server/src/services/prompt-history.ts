@@ -40,10 +40,10 @@ interface ThreadPromptHistoryArgs extends PromptHistoryArgs {
 
 type PromptHistoryServiceDeps = Pick<AppDeps, "db">;
 type PromptHistoryEntryInput = PromptHistoryEntry["input"];
-type PromptHistoryScopeThread = Pick<Thread, "parentThreadId">;
+type PromptHistoryScopeThread = Pick<Thread, "parentThreadId" | "visibility">;
 type PromptHistoryRecordThread = Pick<
   Thread,
-  "id" | "parentThreadId" | "projectId"
+  "id" | "parentThreadId" | "projectId" | "visibility"
 >;
 
 interface PromptHistoryRecordDeps {
@@ -148,7 +148,8 @@ function buildPromptHistoryEntries<TRow>({
 function resolveAcceptedPromptHistoryScope(
   args: ResolveAcceptedPromptHistoryScopeArgs,
 ): PromptHistoryScope | null {
-  if (args.initiator !== "user") {
+  // Hidden threads are plugin workers, not prompts the user typed.
+  if (args.initiator !== "user" || args.thread.visibility !== "visible") {
     return null;
   }
 

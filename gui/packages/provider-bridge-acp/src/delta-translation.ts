@@ -177,6 +177,7 @@ export function createAcpDeltaTranslator(
   let injectedToolsByName = new Map<string, AcpInjectedTool>();
   const injectedToolBindings = new Map<string, AcpInjectedTool>();
   const pendingInjectedCalls = new Map<string, AcpInjectedTool[]>();
+  const turnErrors = new Map<string, string>();
 
   function callKey(
     context: AcpDeltaTranslationContext | undefined,
@@ -613,13 +614,17 @@ export function createAcpDeltaTranslator(
         if (dialect.isNotice?.(text)) {
           return [];
         }
+        const turnError = dialect.errorMessages?.[text.trim()];
+        if (turnError !== undefined) {
+          turnErrors.set(context?.threadId ?? "", turnError);
+        }
         return [
           closeThoughtStream(),
           {
             kind: "item.textDelta",
             key: { channel: ASSISTANT_STREAM_KEY },
             channel: "agentMessage",
-            text,
+            text: turnError ?? text,
             noTurnFallback: noTurnFallbackFor(rawEvent),
           },
         ];
@@ -833,13 +838,19 @@ export function createAcpDeltaTranslator(
     context: AcpDeltaTranslationContext | undefined,
   ): ThreadDelta[] {
     const status = turnStatusForStopReason(stopReason);
+    const turnError = turnErrors.get(context?.threadId ?? "");
+    turnErrors.delete(context?.threadId ?? "");
     return [
       ...flushOpenTurnWork(context, itemStatusForTurnStatus(status)),
       {
         kind: "turn.boundary",
         status,
         ...(status === "failed"
-          ? { error: { message: `Agent stopped the turn: ${stopReason}` } }
+          ? {
+              error: {
+                message: turnError ?? `Agent stopped the turn: ${stopReason}`,
+              },
+            }
           : {}),
         claimIfIdle: true,
       },

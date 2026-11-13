@@ -279,7 +279,7 @@ describe("run-dev", () => {
       "--conditions=source",
       "--import",
       "tsx",
-      path.resolve(import.meta.dirname, "../../..", "scripts/start-bb.mjs"),
+      path.resolve(import.meta.dirname, "../../..", "scripts/start-app.mjs"),
       "--worktree-runtime-policy",
     ]);
   });

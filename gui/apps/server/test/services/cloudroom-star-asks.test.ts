@@ -2,7 +2,7 @@ import { expect, it } from "vitest";
 import { applyPopupEvent, canAskStar, nextStarAsk, type PopupState } from "../../src/services/cloudroom/popups.js";
 
 const DAY = 86_400_000;
-const fresh: PopupState = { closed: [], shownAt: null, credits: false, checklistHides: 0, starAsks: [] };
+const fresh: PopupState = { closed: [], shownAt: null, credits: false, checklistHides: 0, starAsks: [], cards: [] };
 
 it("asks once a day at most: a skipped card leads to the pop-up, then cards every 3 days, 3 at most", () => {
   let state = applyPopupEvent(fresh, "star_card", "shown", undefined, 0);

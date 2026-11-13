@@ -4,7 +4,7 @@ import { useIsCompactViewport } from "@cloudroom/shared-ui/hooks/use-compact-vie
 import { usePreferredTheme } from "@/hooks/useTheme";
 
 const COMPACT_TOAST_OFFSET: NonNullable<ToasterProps["offset"]> = {
-  top: "calc(env(safe-area-inset-top) + var(--bb-app-chrome-row-height) + 16px)",
+  top: "calc(env(safe-area-inset-top) + var(--bb-app-chrome-row-height) / var(--bb-desktop-zoom, 1) + 16px)",
 };
 const COMPACT_TOAST_SWIPE_DIRECTIONS: NonNullable<
   ToasterProps["swipeDirections"]
@@ -17,6 +17,8 @@ export function AppToaster() {
   return (
     <Toaster
       theme={theme}
+      // Holds the macOS zoom value that the compact offset reads.
+      className="bb-zoom"
       style={TOASTER_STYLE}
       position={isCompactViewport ? "top-center" : "bottom-right"}
       offset={isCompactViewport ? COMPACT_TOAST_OFFSET : undefined}

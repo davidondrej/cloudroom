@@ -109,12 +109,6 @@ async fn automation(
         })
 }
 
-/// A harness as Core or the app names it: `cursor` or `acp-cursor`, `hermes` or `acp-hermes-agent`.
-fn harness(name: &str) -> Option<runtime::Kind> {
-    let name = name.strip_prefix("acp-").unwrap_or(name);
-    serde_json::from_value(json!(name.strip_suffix("-agent").unwrap_or(name))).ok()
-}
-
 /// A loop's agent must pass the check a session start runs (#300), so a bad model or effort fails now, while the
 /// agent is here, not on every run. Its base is this session on create and the loop's saved agent on update; another
 /// harness starts at medium (Pi at its own level), as the website's `withAgent` saves it. What can't be checked here
@@ -148,7 +142,7 @@ async fn check_agent(m: &Arc<Manager>, session: &str, input: &Body) -> Result<()
             .map(|l| {
                 let text = |key: &str| l["agent"][key].as_str().map(str::to_owned);
                 (
-                    text("provider").and_then(|p| harness(&p)),
+                    text("provider").and_then(|p| runtime::Kind::named(&p)),
                     text("model"),
                     text("reasoning"),
                 )
@@ -157,7 +151,12 @@ async fn check_agent(m: &Arc<Manager>, session: &str, input: &Body) -> Result<()
     let Some((base, model, reasoning)) = base else {
         return Ok(());
     };
-    let Some(kind) = input.harness.as_deref().map(harness).unwrap_or(base) else {
+    let Some(kind) = input
+        .harness
+        .as_deref()
+        .map(runtime::Kind::named)
+        .unwrap_or(base)
+    else {
         return Ok(());
     };
     let same = Some(kind) == base;

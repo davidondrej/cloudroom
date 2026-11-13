@@ -1,11 +1,18 @@
 import { execFile, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { promisify } from "node:util";
 import { experimental_createHostEntryHarness } from "@get-bb/plugin-sdk/testing/host";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createWorktreeHostEntry } from "./host.js";
 
 const execFileAsync = promisify(execFile);
@@ -79,10 +86,13 @@ async function createDetachedSingleBranchRepository(): Promise<{
   return { root, sourcePath, dataDir };
 }
 
-function createHarness(dataDir: string) {
-  return experimental_createHostEntryHarness(createWorktreeHostEntry(), {
-    experimental_paths: { dataDir, tempDir: join(dataDir, "tmp") },
-  });
+function createHarness(dataDir: string, spares = false) {
+  return experimental_createHostEntryHarness(
+    createWorktreeHostEntry({ spares }),
+    {
+      experimental_paths: { dataDir, tempDir: join(dataDir, "tmp") },
+    },
+  );
 }
 
 function createInput(args: {
@@ -273,6 +283,19 @@ describe("worktree host entry", () => {
     });
     if (result.status !== "created") throw new Error(result.message);
     expect(existsSync(join(result.path, "README.md"))).toBe(true);
+    // A branch only on the remote, and a pull request alias, work too (#985).
+    await git(sourcePath, "fetch", "origin", "main:refs/remotes/origin/pr/1");
+    for (const name of ["main", "origin/pr/1"]) {
+      const remote = await harness.experimental_call("create", {
+        operationId: name,
+        sourcePath,
+        pathKey: `thr_${name.length}`,
+        branchName: `bb/remote-${name.length}`,
+        baseBranch: { kind: "named", name },
+        branchMode: "reset",
+      });
+      expect(remote).toMatchObject({ status: "created" });
+    }
     await harness.experimental_dispose();
   });
 
@@ -508,4 +531,63 @@ describe("worktree host entry", () => {
     expect(await readdir(join(dataDir, "worktrees"))).toEqual([]);
     await harness.experimental_dispose();
   });
+
+  it("claims the prebuilt spare, and falls back when it is broken", async () => {
+    const { root, sourcePath, dataDir } = await createSourceRepository();
+    const hookLog = join(root, "hook.log");
+    await writeFile(
+      join(sourcePath, ".git", "hooks", "post-checkout"),
+      `#!/bin/sh\necho "$1 $(git branch --show-current)" >> "${hookLog}"\n`,
+      { mode: 0o755 },
+    );
+    const harness = createHarness(dataDir, true);
+    const create = async (name: string) => {
+      const created = await harness.experimental_call(
+        "create",
+        createInput({
+          operationId: `create-${name}`,
+          sourcePath,
+          pathKey: name,
+          branchName: `bb/${name}`,
+        }),
+      );
+      if (created.status !== "created") throw new Error(created.message);
+      return created.path;
+    };
+    const worktrees = join(dataDir, "worktrees");
+    const spareDir = async () =>
+      join(
+        worktrees,
+        (await readdir(worktrees)).find((name) => name.startsWith(".spare-")) ??
+          "none",
+      );
+    const spareReady = async () =>
+      vi.waitFor(
+        async () =>
+          expect(existsSync(join(await spareDir(), "ready"))).toBe(true),
+        { timeout: 15_000, interval: 100 },
+      );
+
+    await create("first");
+    await spareReady();
+    const claimed = await create("claimed");
+    // The spare was moved into place, not copied.
+    expect(existsSync(join(await spareDir(), "ready"))).toBe(false);
+    expect(await git(claimed, "branch", "--show-current")).toBe("bb/claimed\n");
+    expect(await git(claimed, "status", "--porcelain")).toBe("");
+    // Its hook saw what a normal create's hook sees: no previous commit.
+    const zero = "0".repeat(40);
+    expect(await readFile(hookLog, "utf8")).toBe(
+      `${zero} bb/first\n${zero} bb/claimed\n`,
+    );
+
+    await spareReady();
+    await rm(join(await spareDir(), "checkout"), { recursive: true });
+    const fallback = await create("fallback");
+    expect(await git(fallback, "branch", "--show-current")).toBe(
+      "bb/fallback\n",
+    );
+    expect(await git(fallback, "status", "--porcelain")).toBe("");
+    await harness.experimental_dispose();
+  }, 30_000);
 });

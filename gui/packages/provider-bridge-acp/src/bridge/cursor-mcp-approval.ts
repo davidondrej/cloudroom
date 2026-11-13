@@ -240,12 +240,12 @@ export async function approveCursorSessionMcpServer(args: {
     config: args.config,
     projectRoot,
   });
-  let installedByBb = false;
+  let installedByRoom = false;
   await mutateApprovals(path, (approvals) => {
-    installedByBb = !approvals.includes(approval);
-    return installedByBb ? [...approvals, approval] : approvals;
+    installedByRoom = !approvals.includes(approval);
+    return installedByRoom ? [...approvals, approval] : approvals;
   });
-  return { approval, installedByBb, path };
+  return { approval, installedByBb: installedByRoom, path };
 }
 
 export async function revokeCursorSessionMcpServer(

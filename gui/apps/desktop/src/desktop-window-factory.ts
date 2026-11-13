@@ -282,10 +282,11 @@ export function createDesktopWindowFactory(
       activeWindows.set(stateKey, browserWindow);
       args.registerWindow?.(browserWindow);
 
-      if (restoredState.isMaximized) {
+      // On macOS, maximize() and setFullScreen() also show a hidden window.
+      if (restoredState.isMaximized && !args.hideWindows) {
         browserWindow.maximize();
       }
-      if (restoredState.isFullScreen) {
+      if (restoredState.isFullScreen && !args.hideWindows) {
         browserWindow.setFullScreen(true);
       }
 

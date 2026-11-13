@@ -35,7 +35,7 @@ import {
   ProviderLogo,
   SkillProvenanceTooltip,
 } from "@/components/tools/SkillsCollection";
-import { BbLogo } from "@/components/ui/bb-logo";
+import { RoomLogo } from "@/components/ui/cloudroom-logo";
 import { ProvenancePill } from "@/components/tools/ProvenancePill";
 import { SkillDetailView } from "@/components/tools/SkillDetailView";
 import {
@@ -172,7 +172,7 @@ const SKILL_PATH = "/Users/you/.bb/skills/writing-voice/SKILL.md";
 
 function SkillLeading({ provider }: { provider: SkillProvider | null }) {
   if (provider === null) {
-    return <BbLogo />;
+    return <RoomLogo />;
   }
   return <ProviderLogo providerId={provider} className="size-4" />;
 }

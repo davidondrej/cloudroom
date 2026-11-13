@@ -21,7 +21,7 @@ import { PluginHostArtifactRegistry } from "./services/plugins/plugin-host-artif
 import { createProviderNativeRootsCache } from "./services/providers/native-roots.js";
 import { createAiServiceRegistry } from "./services/ai/ai-service-registry.js";
 import { createAppVersionService } from "./services/system/app-version.js";
-import { createBbAppManagedConfigReloader } from "./services/system/bb-app-managed-config.js";
+import { createRoomAppManagedConfigReloader } from "./services/system/app-managed-config.js";
 import { startEventLoopStallMonitor } from "./services/system/event-loop-stall-monitor.js";
 import {
   runPeriodicSweeps,
@@ -152,14 +152,13 @@ export async function runServer(serverConfig: ServerConfig): Promise<void> {
     hub,
     logger,
   });
-  const bbAppManagedConfig = await createBbAppManagedConfigReloader({
+  const roomAppManagedConfig = await createRoomAppManagedConfigReloader({
     config: runtimeConfig,
     hub,
     logger,
   });
 
   const telemetry = await createTelemetryService({
-    apiKey: serverConfig.BB_POSTHOG_API_KEY,
     appSurface: serverConfig.BB_APP_SURFACE,
     appVersion: serverConfig.BB_APP_VERSION,
     dataDir: serverConfig.BB_DATA_DIR,
@@ -211,7 +210,7 @@ export async function runServer(serverConfig: ServerConfig): Promise<void> {
   } = createApp(
     {
       appVersion,
-      bbAppManagedConfig,
+      bbAppManagedConfig: roomAppManagedConfig,
       callerProofs,
       config: runtimeConfig,
       db,
@@ -342,7 +341,8 @@ export async function runServer(serverConfig: ServerConfig): Promise<void> {
     }
     shutdownPromise = (async () => {
       // The last events get as long as shutdown takes, and at most 1.5 s.
-      const lastEvents = Promise.race([telemetry.flush(), new Promise((resolve) => setTimeout(resolve, 1_500))]);
+      const sendEvents = () => Promise.race([telemetry.flush(), new Promise((resolve) => setTimeout(resolve, 1_500))]);
+      let lastEvents = sendEvents();
       providerModelCatalogPrewarm.stop();
       eventLoopStallMonitor.stop();
       cloud.stop();
@@ -359,6 +359,8 @@ export async function runServer(serverConfig: ServerConfig): Promise<void> {
       await pluginService.stop().catch((error: unknown) => {
         logger.warn({ err: error }, "Plugin shutdown failed");
       });
+      // Plugins send their last usage counts as they stop, after the first send took the queue.
+      lastEvents = lastEvents.then(sendEvents);
       const closeServer = new Promise<void>((resolve, reject) => {
         server.close((error) => {
           if (error) {

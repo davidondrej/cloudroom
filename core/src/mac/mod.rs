@@ -203,6 +203,14 @@ impl Mac {
             .as_ref()
             .is_some_and(|h| h.generation == generation)
     }
+    /// The app runs on Windows, so no helper will ever connect: refuse at once instead of waiting (#1334).
+    fn unsupported(&self) -> bool {
+        self.report
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|(r, at)| r.unsupported && at.elapsed() < REPORTED)
+    }
     /// Why agents can't reach the Mac: the newest thing Core or the Mac app knows (#109).
     fn unavailable(&self) -> String {
         self.why_unavailable().1
@@ -332,6 +340,8 @@ async fn app_report(
         return Err(conflict("Invalid Mac access report"));
     }
     *m.mac.report.lock().unwrap() = Some((input, Instant::now()));
+    // A `mac run` waiting for the helper rechecks, so a Windows report ends its wait.
+    m.mac.touch();
     Ok((StatusCode::ACCEPTED, Json(json!({"accepted":true}))))
 }
 
@@ -508,7 +518,7 @@ async fn local_run(
                 h.events.clone(),
             );
         }
-        if Instant::now() >= wait {
+        if Instant::now() >= wait || mac.unsupported() {
             return Err(refused(&m, started));
         }
         tokio::select! {
@@ -658,6 +668,21 @@ async fn local_status(
     }))
 }
 
+/// Every route on the agent socket. Two modules using the same method and path panic here, which a test catches.
+fn agent_router() -> Router<Arc<Manager>> {
+    Router::new()
+        .route("/jobs", post(local_run))
+        .route("/jobs/{id}", get(local_result).delete(local_forget))
+        .route("/status", get(local_status))
+        .merge(crate::secrets::agent_routes())
+        .merge(crate::session::thread::agent_routes())
+        .merge(crate::session::report::agent_routes())
+        .merge(crate::session::automation::agent_routes())
+        .merge(crate::computer_use::agent_routes())
+        .merge(crate::gpu::agent_routes())
+        .layer(DefaultBodyLimit::max(BODY))
+}
+
 pub async fn listen(manager: &Arc<Manager>) -> io::Result<()> {
     let Some((path, _)) = manager.previews.agent() else {
         return Ok(());
@@ -670,18 +695,7 @@ pub async fn listen(manager: &Arc<Manager>) -> io::Result<()> {
     }
     let listener = UnixListener::bind(&path)?;
     fs::set_permissions(&path, fs::Permissions::from_mode(0o666))?;
-    let app = Router::new()
-        .route("/jobs", post(local_run))
-        .route("/jobs/{id}", get(local_result).delete(local_forget))
-        .route("/status", get(local_status))
-        .merge(crate::secrets::agent_routes())
-        .merge(crate::session::thread::agent_routes())
-        .merge(crate::session::report::agent_routes())
-        .merge(crate::session::automation::agent_routes())
-        .merge(crate::computer_use::agent_routes())
-        .merge(crate::gpu::agent_routes())
-        .layer(DefaultBodyLimit::max(BODY))
-        .with_state(manager.clone());
+    let app = agent_router().with_state(manager.clone());
     tokio::spawn(async move {
         if axum::serve(listener, app.into_make_service_with_connect_info::<Peer>())
             .await
@@ -941,6 +955,12 @@ async fn print_result(value: Value) -> io::Result<i32> {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn agent_socket_routes_do_not_collide() {
+        // A duplicate method and path panics when Core opens the socket, which would stop Core in every sandbox.
+        let _ = super::agent_router();
+    }
+
+    #[test]
     fn a_push_job_keeps_its_copy_for_the_mac() {
         // Security fix (#222): without `copy`, the Mac helper falls back to the sandbox's own unpack command.
         let copy =
@@ -962,6 +982,11 @@ mod tests {
             let now = std::time::Instant::now();
             *mac.report.lock().unwrap() = Some((serde_json::from_str(&report).unwrap(), now));
             assert_eq!(mac.why_unavailable().0, reason, "{report}");
+            // #1334: only Windows skips the wait for the helper; an old report may predate a reinstall.
+            assert_eq!(mac.unsupported(), !extra.is_empty(), "{report}");
+            let old = now.checked_sub(super::REPORTED).unwrap();
+            mac.report.lock().unwrap().as_mut().unwrap().1 = old;
+            assert!(!mac.unsupported(), "{report}");
         }
     }
 

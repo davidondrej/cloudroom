@@ -2,14 +2,14 @@ import { COMPUTER } from "@cloudroom/domain";
 import { useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { appToast } from "@/components/ui/app-toast";
-import { getBbDesktopInfo } from "@/lib/bb-desktop";
+import { getRoomDesktopInfo } from "@/lib/room-desktop";
 import { getThreadRoutePath } from "@/lib/route-paths";
 import { sdk } from "@/lib/sdk";
 
 export function SharedThreadOpener() {
   const navigate = useNavigate();
   useEffect(() => {
-    const desktop = getBbDesktopInfo();
+    const desktop = getRoomDesktopInfo();
     if (!desktop?.onOpenLink) return;
     return desktop.onOpenLink((url) => {
       if (!url.startsWith("cloudroom://share/")) return;

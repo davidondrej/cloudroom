@@ -218,6 +218,8 @@ pub struct Guard {
     value: Mutex<(Snapshot, Instant)>,
     writers: Mutex<Vec<Weak<linux::Workload>>>,
     floor: Mutex<Option<u64>>,
+    /// The last real reading's level. Normal at boot: the blocked placeholder is no reading (#1188).
+    last: Mutex<Level>,
 }
 impl Guard {
     pub fn new(config: &Config) -> io::Result<Self> {
@@ -229,6 +231,7 @@ impl Guard {
             history: config.state_dir.clone(),
             writers: Mutex::new(Vec::new()),
             floor: Mutex::new(None),
+            last: Mutex::new(Level::Normal),
             value: Mutex::new((
                 Snapshot::unavailable(config.storage.is_some()),
                 Instant::now(),
@@ -258,6 +261,37 @@ impl Guard {
     }
     pub fn blocks(&self) -> bool {
         self.snapshot().level == Level::Blocked
+    }
+    /// The reading behind a warning or pause, for its notice and record (#1188): free space on the workspace (history
+    /// shares its disk), the line that ends or extends the state, and when. In GiB, as `df -h` shows it.
+    pub fn measured(&self, s: &Snapshot, workspace: &Path) -> String {
+        let (Some(p), Some(w), Some(h), Some(at)) = (
+            &self.policy,
+            s.workspace_available_bytes,
+            s.history_available_bytes,
+            s.sampled_at,
+        ) else {
+            return String::new();
+        };
+        let free = w.min(h);
+        // A pause lasts until space passes the resume line, and a warning until a fifth above its line (`level`).
+        let (name, line) = match (s.level, *self.floor.lock().unwrap()) {
+            (Level::Blocked, Some(floor)) => ("pause line", floor),
+            (Level::Blocked, None) if free < p.pause_bytes => ("pause line", p.pause_bytes),
+            (Level::Blocked, None) => ("resumes above", p.resume_bytes),
+            _ if free <= p.warning_bytes => ("warning line", p.warning_bytes),
+            _ => ("warning ends above", p.warning_bytes / 5 * 6),
+        };
+        let (gib, secs) = (|n: u64| n as f64 / (1u64 << 30) as f64, at / 1000 % 86_400);
+        format!(
+            " Measured {:02}:{:02}:{:02} UTC: {:.2} GiB free on {}, {name} {:.2} GiB.",
+            secs / 3600,
+            secs / 60 % 60,
+            secs % 60,
+            gib(free),
+            workspace.display(),
+            gib(line)
+        )
     }
     /// Frozen work never frees space. Once Cloudroom has stopped the command filling the disk, work continues
     /// until half of the space left is used, then pauses again. Space above `resume_bytes` ends the rescue.
@@ -348,7 +382,8 @@ impl Guard {
         let Some(p) = &self.policy else {
             return self.snapshot();
         };
-        let previous = self.value.lock().unwrap().0.level;
+        // Not the stored value's level: Core boots with a blocked placeholder, which paused a fresh Core with 2-2.5 GB free.
+        let previous = *self.last.lock().unwrap();
         let measured = async {
             p.check_filesystems(config)?;
             workspaces.check_filesystems()?;
@@ -361,6 +396,7 @@ impl Guard {
                 }
                 p.level(available, previous, *floor)
             };
+            *self.last.lock().unwrap() = level;
             Ok::<_, io::Error>(Snapshot {
                 enabled: true,
                 level,
@@ -648,6 +684,7 @@ mod tests {
                 history: PathBuf::new(),
                 writers: Mutex::new(Vec::new()),
                 floor: Mutex::new(None),
+                last: Mutex::new(Level::Normal),
                 value: Mutex::new((
                     Snapshot {
                         enabled: true,
@@ -688,6 +725,7 @@ mod tests {
             history: PathBuf::new(),
             writers: Mutex::new(Vec::new()),
             floor: Mutex::new(None),
+            last: Mutex::new(Level::Normal),
             value: Mutex::new((
                 Snapshot {
                     enabled: true,
@@ -707,6 +745,25 @@ mod tests {
             policy: Some(policy),
             ..guard
         };
+        // A pause names its reading (#1188): the lower free space, the rescue's pause line, and the time.
+        let reading = Snapshot {
+            sampled_at: Some(37_083_000),
+            ..guard.value.lock().unwrap().0.clone()
+        };
+        let code = Path::new("/code");
+        assert_eq!(
+            guard.measured(&reading, code),
+            " Measured 10:18:03 UTC: 1.68 GiB free on /code, pause line 0.84 GiB."
+        );
+        // Still paused above the pause line: it names the line that ends the pause.
+        *guard.floor.lock().unwrap() = None;
+        let paused = Snapshot {
+            workspace_available_bytes: Some(2_300_000_000),
+            history_available_bytes: Some(2_300_000_000),
+            ..reading
+        };
+        let line = guard.measured(&paused, code);
+        assert!(line.ends_with("2.14 GiB free on /code, resumes above 2.33 GiB."));
         for (available, rescued, floor) in [
             (400_000_000, true, Some(250_000_000)),
             (250_000_000, false, Some(250_000_000)),
@@ -726,6 +783,7 @@ mod tests {
             history: PathBuf::new(),
             writers: Mutex::new(Vec::new()),
             floor: Mutex::new(None),
+            last: Mutex::new(Level::Normal),
             value: Mutex::new((Snapshot::unavailable(true), Instant::now())),
         };
         assert!(guard.blocks());

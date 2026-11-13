@@ -96,6 +96,11 @@ test("reports allowlisted rejections, keeps temporary conflicts retryable, and s
     });
   }
   assert.equal(service.requests.length, 12);
+  // A failed Claude login check names its known cause (#1222); any other text stays hidden.
+  for (const [error, shown] of [["Claude account could not be verified: the login check timed out", " Cause: the login check timed out."], ["Claude account could not be verified: SECRET-CANARY", ""]]) {
+    body = { code: "claude_auth_unavailable", error };
+    await assert.rejects(service.client.start("rejected", "claude-code"), (rejected: unknown) => rejected instanceof CloudroomError && rejected.retryable && rejected.message === `Claude Code in Cloud didn't answer the login check. Cloudroom tries again by itself.${shown}`);
+  }
 });
 
 test("attachment failures distinguish permissions and size without disclosing server details or retrying", async (t) => {

@@ -1,6 +1,6 @@
 ---
 name: workflow-scan
-description: "Run a Workflow scan: review the user's own past agent chats on this computer, find the work they keep repeating, and suggest their first 1–2 loops with a 10/90 split. Use when the Loops → Scans tab starts a scan, or the user asks to scan their workflow."
+description: Review the user's past agent chats, find repeated work, and suggest 1-2 loops. Use when the Scans tab starts a scan or the user asks for one.
 ---
 
 # Workflow scan
@@ -29,7 +29,7 @@ You are the lead of a Workflow scan the user started on their own computer. It r
    ```
    If it fails partway, run the same command again: it starts only the missing readers.
 3. **Wait:** run `python3 "$s/readers.py" wait "$d"` with a 10-minute command timeout. Repeat until it prints `done`.
-4. **Patterns:** read all of `$d/lines.txt`, then run `python3 "$s/readers.py" archive "$d"`. Find the top 3–4 patterns in how the user works: what they repeat most, their workflows, recurring problems. Lines tagged `agent-written` and work that already runs as a loop don't count.
+4. **Patterns:** read all of `$d/lines.txt`, then run `python3 "$s/readers.py" archive "$d"`. Find the top 3–4 patterns in how the user works: what they repeat most, their workflows, recurring problems. Lines tagged `agent-written` and work that already runs as a loop don't count. `wait` removes chat IDs a reader invented (not in its slice) and says how many.
 5. **The 10/90 step:** pick the 1–3 most obvious loops. For each, read 3–5 example chats: `python3 "$s/extract.py" sessions "$d" --ids ID1,ID2 --chars 5000`. Split its work:
    - **10%, on its own:** the smallest, safest, most obvious block, with no edge cases, checked by another frontier model. The loop does it and merges to main.
    - **90%, waits for the user:** the loop still does the work, but stops before the final step (merging, production). It explains the problem in 2–3 short plain-English sentences, with the best fix.

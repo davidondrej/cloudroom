@@ -54,7 +54,7 @@ export function reportAgentConnect(agent: "claude" | "codex", outcome: "ok" | "f
   }
 }
 
-export function reportCliInstall(cli: KnownCli, trigger: "claude_connect" | "local_thread" | "repair", outcome: "ok" | "failed", ms: number, message?: string | null): void {
+export function reportCliInstall(cli: KnownCli, trigger: "claude_connect" | "codex_connect" | "local_thread" | "repair", outcome: "ok" | "failed", ms: number, message?: string | null): void {
   capture("cli_install", () => ({ cli, trigger, outcome, ms, message: scrub(message) }));
 }
 
@@ -99,8 +99,10 @@ async function reportWindowsInstall(): Promise<void> {
   const text = await readFile(file, "utf8").catch(() => null);
   if (text === null) return;
   await rm(file, { force: true });
-  const { ms, update } = JSON.parse(text) as { ms?: unknown; update?: unknown };
-  if (typeof ms === "number" && ms >= 0) capture("windows_install", () => ({ ms, update: update === true }));
+  const { ms, update, lock_wait_ms, prompts } = JSON.parse(text) as Record<string, unknown>;
+  const count = (value: unknown) => typeof value === "number" && value >= 0 ? value : null;
+  // lock_wait_ms: setup waited for Cloudroom.exe to unlock. prompts: "Cloudroom is still running" dialogs shown.
+  if (typeof ms === "number" && ms >= 0) capture("windows_install", () => ({ ms, update: update === true, lock_wait_ms: count(lock_wait_ms), prompts: count(prompts) }));
 }
 
 async function reportUpdateAttempt(dataDir: string): Promise<void> {
@@ -158,7 +160,7 @@ function updateFailureCode(lines: string[]): string {
   return "installer_failed";
 }
 
-/** Links this install to its Cloudroom account, so its PostHog events map to a person. At startup and after sign-in. */
+/** Links this install to its Cloudroom account, so its usage events map to an account. At startup and after sign-in. */
 export const linkInstall = () => { void save("install_linked", {}); };
 
 const helperProblems = new Map<string, number>();
@@ -184,11 +186,11 @@ export function reportMacHelperDown(message: string): void {
   }).catch(() => {});
 }
 
-/** Telemetry must never break setup, so building or sending an event can't throw. `postHogOnly` never reaches our database. */
-function capture(name: "setup_snapshot" | "agent_connect" | "cli_install" | "account_sign_in_failed" | "update_install" | "update_ready" | "app_crash" | "windows_install", properties: () => Record<string, TelemetryValue>, postHogOnly: Record<string, TelemetryValue> = {}): void {
+/** Telemetry must never break setup, so building or sending an event can't throw. `eventOnly` never reaches our database. */
+function capture(name: "setup_snapshot" | "agent_connect" | "cli_install" | "account_sign_in_failed" | "update_install" | "update_ready" | "app_crash" | "windows_install", properties: () => Record<string, TelemetryValue>, eventOnly: Record<string, TelemetryValue> = {}): void {
   try {
     const event: Record<string, TelemetryValue> = { ...properties(), seconds_since_first_launch: secondsSinceFirstLaunch() };
-    deps?.telemetry.capture({ name, properties: { ...event, ...postHogOnly } });
+    deps?.telemetry.capture({ name, properties: { ...event, ...eventOnly } });
     if (event.outcome === "failed" || event.reason === "connect_failed") void save(name, event);
   } catch (error) { deps?.logger.debug({ err: error, event: name }, "Setup telemetry failed"); }
 }

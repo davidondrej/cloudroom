@@ -37,7 +37,7 @@ import { DEFAULT_ENVIRONMENT_PROVIDER_ID } from "../environments/environment-pro
 import { requestQueuedMessageDispatch } from "../threads/queued-message-dispatch.js";
 import { requireThreadStoragePath } from "../threads/thread-storage.js";
 import { cloudroom } from "./commands.js";
-import type { CloudroomClient } from "./client.js";
+import { RECORD_VALUES, values, type CloudroomClient } from "./client.js";
 import { SKIPPED } from "./project-copy.js";
 import { cloudForkPoint, FORK_HARNESSES, isFiles, localCheckpoint, sourceCode } from "./fork.js";
 import { binding, localTeleports, teleportProgress } from "./store.js";
@@ -55,6 +55,11 @@ const PREVIEW_MB = 20;
 const DOWNLOAD_MB = 200;
 /** What one Teleport, Fork, or copy downloads in all: the Mac holds it at once, and the sandbox reports every size. */
 const MAX_DOWNLOAD_MB = 1024;
+/** Parsing tiny JSON values (`[{},{},...]`) takes about 30 times their bytes in memory, so a byte limit alone doesn't bound
+ *  it: one conversation file holds at most this many values, over all its lines, which caps its parse at about 512 MB of
+ *  heap. Tool-heavy Claude chats hold one value per about 30 bytes, so this is about 500 MB of them, where V8 can no longer
+ *  hold the file as one string anyway. */
+const CONVERSATION_VALUES = 64 * RECORD_VALUES;
 /** The bytes left for one operation's downloads, which they share. */
 export type Allowance = { mb: number; bytes: number };
 export const allowance = (mb = MAX_DOWNLOAD_MB): Allowance => ({ mb, bytes: mb * 1024 * 1024 });
@@ -89,9 +94,15 @@ export async function teleportToLocal(deps: AppDeps, threadId: string): Promise<
   try {
     return await run(deps, threadId, step);
   } finally {
+    // A Teleport that didn't land lets go of Core's freeze at once, instead of after its 5 minutes (#237).
+    const frozen = freezes.get(threadId);
+    freezes.delete(threadId);
+    frozen?.end(getThread(deps.db, threadId)?.executionTarget === "cloud");
     step();
   }
 }
+
+const freezes = new Map<string, NonNullable<Awaited<ReturnType<ReturnType<typeof cloudroom>["freezeForTeleport"]>>>>();
 
 async function run(deps: AppDeps, threadId: string, step: (value: TeleportLocalStep) => void): Promise<{ conflicts: number }> {
   const thread = getThread(deps.db, threadId);
@@ -106,6 +117,10 @@ async function run(deps: AppDeps, threadId: string, step: (value: TeleportLocalS
     throw new ApiError(409, "teleport_unavailable", "This cloud thread has no saved conversation yet.");
   const environment = await localEnvironment(deps, thread);
   const client = await cloudroom(deps).teleportClient(threadId, "teleport_local");
+  // Other computers' sends wait until this lands (Core's freeze, #237); every message Core queued must be here first.
+  const frozen = await cloudroom(deps).freezeForTeleport(threadId, client, saved.sessionId);
+  if (frozen) freezes.set(threadId, frozen);
+  await frozen?.check();
 
   await cloudroom(deps).control(threadId, "stop");
   await waitUntilStopped(client, saved.sessionId);
@@ -131,6 +146,8 @@ async function run(deps: AppDeps, threadId: string, step: (value: TeleportLocalS
   if (harness === "acp-opencode") await importOpenCode(deps, threadId, environment, nativeId, session);
   else await installNative(harness, nativeId, vmPath, session, environment.path);
   const conflicts = await applyChanges(environment.path, changes.archive, randomUUID(), changes.base);
+  // The freeze still holds and nothing new was queued, so nothing sent meanwhile is lost.
+  await frozen?.check();
   step("switching");
 
   const queued = cloudroom(deps).queue(threadId);
@@ -147,11 +164,12 @@ async function run(deps: AppDeps, threadId: string, step: (value: TeleportLocalS
     tx.update(threads).set({ executionTarget: "local", environmentId: environment.id, status: "idle", updatedAt: Date.now() }).where(eq(threads.id, threadId)).run();
   });
   cloudroom(deps).detach(threadId);
+  cloudroom(deps).threadStates.set(threadId, null);
   deps.hub.notifyThread(threadId, ["status-changed", "queue-changed"]);
   deps.hub.notifyProject(thread.projectId, ["threads-changed"]);
   requestQueuedMessageDispatch(deps, { kind: "thread-ready", threadId });
   void markLocal(deps, threadId, saved.sessionId);
-  await client.close(saved.sessionId, randomUUID()).catch((error: unknown) =>
+  await client.close(saved.sessionId, randomUUID(), frozen?.id).catch((error: unknown) =>
     deps.logger.warn({ threadId, error }, "Cloud session did not close after Teleport to Local"));
   return { conflicts };
 }
@@ -191,13 +209,14 @@ export async function prepareLocalFork(deps: AppDeps, source: Thread, request: {
   const [file, parents] = await Promise.all([download(client, vmPath, allowed), downloadEach(client, lineage, allowed)]);
   const session = file.subarray(0, file.lastIndexOf(10) + 1);
   const checkpoint = localCheckpoint(harness, session, point);
+  const nativeId = harness === "claude-code" ? randomUUID() : saved.nativeId;
+  const parse = conversationParser();
+  const data = harness === "claude-code" ? Buffer.from(session.toString("utf8").split("\n").map((line) => line && JSON.stringify({ ...parse(line), sessionId: nativeId })).join("\n")) : session;
   const folder = await localForkFolder(deps, source);
   const inUse = (id: string) => deps.db.select({ id: threads.id }).from(threads)
     .where(and(eq(threads.providerId, "codex"), eq(threads.executionTarget, "local"), isNull(threads.archivedAt), isNull(threads.deletedAt))).all()
     .some((row) => getLastProviderThreadId(deps, row.id) === id);
   for (const [index, path] of lineage.entries()) await installNative("codex", "", path, parents[index]!, folder, inUse);
-  const nativeId = harness === "claude-code" ? randomUUID() : saved.nativeId;
-  const data = harness === "claude-code" ? Buffer.from(session.toString("utf8").split("\n").map((line) => line && JSON.stringify({ ...JSON.parse(line), sessionId: nativeId })).join("\n")) : session;
   await installNative(harness, nativeId, vmPath, data, folder);
   return {
     fork: { descriptor: { sourceProviderThreadId: nativeId, ...(checkpoint ? { sourceProviderCheckpointId: checkpoint } : {}) }, history: { kind: "thread", sourceThreadId: source.id, endSequence: point.end_sequence } },
@@ -495,6 +514,16 @@ export async function download(client: CloudroomClient, path: string, limit: num
   return Buffer.concat(parts);
 }
 
+/** JSON.parse for one conversation file, whole or line by line with the same parser. */
+export function conversationParser() {
+  let left = CONVERSATION_VALUES;
+  return (text: string) => {
+    left -= values(text, left);
+    if (left < 0) throw new ApiError(413, "conversation_too_complex", "This conversation is too complex to copy safely, so it stays where it is.");
+    return JSON.parse(text);
+  };
+}
+
 /** One file at a time, so a sandbox can't start many reads at once. */
 async function downloadEach(client: CloudroomClient, paths: string[], allowed: Allowance): Promise<Buffer[]> {
   const files: Buffer[] = [];
@@ -645,7 +674,7 @@ async function installNative(harness: Harness, nativeId: string, vmPath: string,
   let data = bytes;
   if (lineage) nativeId = /^rollout-.{19}-(.+)\.jsonl$/.exec(basename(vmPath))?.[1] ?? "";
   else if (harness !== "claude-code") {
-    const header = JSON.parse(bytes.subarray(0, end).toString("utf8"));
+    const header = conversationParser()(bytes.subarray(0, end).toString("utf8"));
     if (harness === "codex" && header.type === "session_meta") {
       const { cwd: source, runtime_workspace_roots: roots } = header.payload;
       header.payload.cwd = cwd;
@@ -675,7 +704,7 @@ async function installNative(harness: Harness, nativeId: string, vmPath: string,
 }
 
 async function importOpenCode(deps: AppDeps, threadId: string, environment: { id: string; hostId: string; path: string }, nativeId: string, data: Buffer) {
-  JSON.parse(data.toString("utf8"));
+  conversationParser()(data.toString("utf8"));
   const folder = await mkdtemp(join(tmpdir(), "cloudroom-teleport-local-"));
   try {
     const file = join(folder, `${nativeId}.json`);
@@ -718,7 +747,7 @@ async function installCursor(nativeId: string, archive: Buffer, cwd: string) {
     await exec(tarCommand(), ["-xzf", `${staged}.tgz`, "-C", staged]);
     await assertPlainTree(staged);
     const meta = join(staged, "meta.json");
-    await writeFile(meta, JSON.stringify({ ...JSON.parse(await readFile(meta, "utf8")), cwd }));
+    await writeFile(meta, JSON.stringify({ ...conversationParser()(await readFile(meta, "utf8")), cwd }));
     if (existsSync(target)) await rename(target, `${target}.before-teleport-${Date.now()}`);
     await rename(staged, target);
   } finally {

@@ -8,7 +8,9 @@ import {
 import type { ThreadQueuedMessage } from "@cloudroom/domain";
 import { createDeferredPromise } from "@cloudroom/test-helpers";
 import type { PluginHookName } from "@get-bb/plugin-sdk";
+import { createFakePluginHost } from "@get-bb/plugin-sdk/testing";
 import { afterEach, describe, expect, it } from "vitest";
+import draftsPlugin from "../../../../plugins/drafts/server.js";
 import { ApiError } from "../../src/errors.js";
 import {
   invokePluginInline,
@@ -232,14 +234,12 @@ describe("message.dispatch hook context", () => {
 
   it("applies plugin policy before a future schedule", async () => {
     await withTestHarness(async (harness) => {
-      installHooks({
-        "message.dispatch": [
-          {
-            pluginId: "drafts",
-            handler: () => ({ action: "wait", reason: "Draft" }),
-          },
-        ],
-      });
+      // The real Drafts hook: its draft must stay a draft past the schedule.
+      const fake = createFakePluginHost({ pluginId: "drafts" });
+      draftsPlugin(fake.bb);
+      const handler = fake.harness.registrations.hooks["message.dispatch"];
+      if (handler === null) throw new Error("Drafts registered no hook");
+      installHooks({ "message.dispatch": [{ pluginId: "drafts", handler }] });
       const { thread } = seedRunnableThread(harness, {
         hostId: "host-plugin-before-time",
         status: "idle",
@@ -251,6 +251,7 @@ describe("message.dispatch hook context", () => {
           input: textInput("scheduled draft"),
           mode: "auto",
           sendAt,
+          pluginSubmission: { pluginId: "drafts", data: { kind: "draft" } },
         },
         thread,
       });
@@ -262,8 +263,89 @@ describe("message.dispatch hook context", () => {
         reason: "Draft",
       });
       expect(onlyQueuedRow(harness, thread.id).sendAt).toBeNull();
+      const turns = turnRequests(harness, thread.id).length;
+      await runQueuedMessageDispatch(harness.deps, { kind: "plugin-recheck" });
+      await runQueuedMessageDispatch(harness.deps, {
+        kind: "time-reached",
+        now: sendAt,
+      });
+      expect(turnRequests(harness, thread.id)).toHaveLength(turns);
+      expect(onlyQueuedRow(harness, thread.id).waitingOn?.kind).toBe("plugin");
     });
   });
+
+  it.each([
+    ["parking", 60_000, null],
+    ["limiter", 8 * 60 * 60_000, 60_000],
+  ])(
+    "a %s hold never sends before the sender's own time (#999)",
+    async (pluginId, delayMs, pluginDelayMs) => {
+      await withTestHarness(async (harness) => {
+        let holding = true;
+        let asked = 0;
+        installHooks({
+          "message.dispatch": [
+            {
+              pluginId,
+              handler: () => {
+                asked += 1;
+                return holding
+                  ? {
+                      action: "wait",
+                      reason: "held",
+                      sendAt:
+                        pluginDelayMs === null
+                          ? null
+                          : Date.now() + pluginDelayMs,
+                    }
+                  : { action: "proceed" };
+              },
+            },
+          ],
+        });
+        const { thread } = seedRunnableThread(harness, {
+          hostId: `host-${pluginId}-before-time`,
+          status: "idle",
+        });
+
+        const sendAt = Date.now() + delayMs;
+        const response = await acceptThreadSendRequest(harness.deps, {
+          payload: { input: textInput("scheduled"), mode: "auto", sendAt },
+          thread,
+        });
+
+        // Plugin policy still runs first; its hold yields to the schedule.
+        expect(response.delivery).toBe("queued");
+        expect(asked).toBe(1);
+        expect(onlyQueuedRow(harness, thread.id)).toMatchObject({
+          waitingOn: { kind: "time" },
+          sendAt,
+        });
+        const turns = turnRequests(harness, thread.id).length;
+        holding = false;
+        for (const wake of [
+          { kind: "plugin-recheck" },
+          { kind: "plugin-unregistered", pluginId },
+          {
+            kind: "orphaned-plugin-recovery",
+            plugins: { isPluginLoaded: () => false },
+          },
+          { kind: "idle-recovery", now: Date.now() },
+          { kind: "thread-ready", threadId: thread.id },
+        ] as const) {
+          await runQueuedMessageDispatch(harness.deps, wake);
+        }
+        expect(turnRequests(harness, thread.id)).toHaveLength(turns);
+
+        await runQueuedMessageDispatch(harness.deps, {
+          kind: "time-reached",
+          now: sendAt,
+        });
+        expect(asked).toBe(2);
+        expect(turnRequests(harness, thread.id)).toHaveLength(turns + 1);
+      });
+    },
+  );
 
   it("hands the hook the start intent's host before an environment exists", async () => {
     await withTestHarness(async (harness) => {

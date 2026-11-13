@@ -12,30 +12,35 @@ import {
 } from "./src/model-catalog-data.js";
 import { CLAUDE_NATIVE_ROOTS_DECLARATION } from "./src/native-roots.js";
 
-export default function plugin(bb: BbPluginApi) {
-  registerUsageSource(bb);
-  bb.experimental_aiServices.register({
+export default function plugin(room: BbPluginApi) {
+  registerUsageSource(room);
+  // The provider skill is only useful in this provider's own threads.
+  room.agents.configure(({ provider }) => ({ tools: [], skills: provider.id === "claude-code" ? ["claude-code-provider"] : [] }));
+  room.experimental_aiServices.register({
     id: "claude-code",
     displayName: "Claude Code",
     kinds: ["inference"],
   });
-  const host = bb.hosts.experimental_client({
+  const host = room.hosts.experimental_client({
     contract: claudeLoginHostContract,
   });
-  bb.rpc.register(claudeLoginRpcContract, {
+  room.rpc.register(claudeLoginRpcContract, {
     async claudeAccount({ hostId, environmentId, ...input }) {
       const target = environmentId
-        ? (await bb.sdk.environments.get({ environmentId })).hostId
-        : (hostId ?? (await bb.sdk.system.config()).primaryHostId);
+        ? (await room.sdk.environments.get({ environmentId })).hostId
+        : (hostId ?? (await room.sdk.system.config()).primaryHostId);
       if (!target) throw new Error("No local machine is connected.");
-      const status = await host.call("account", input, { hostId: target });
+      const status = {
+        ...(await host.call("account", input, { hostId: target })),
+        host_id: target,
+      };
       if (status.state !== "missing" || input.action !== "status") return status;
-      return (await hasSuppliedClaudeLogin(bb, target))
+      return (await hasSuppliedClaudeLogin(room, target))
         ? { ...status, state: "connected" as const }
         : status;
     },
   });
-  bb.settings.define({
+  room.settings.define({
     memoryEnabled: {
       type: "boolean",
       label: "Claude Code memory",
@@ -72,7 +77,7 @@ export default function plugin(bb: BbPluginApi) {
     },
   });
 
-  bb.providers.register({
+  room.providers.register({
     id: "claude-code",
     displayName: "Claude Code",
     icon: "./icons/claude-code.svg",
@@ -142,11 +147,11 @@ export default function plugin(bb: BbPluginApi) {
 /** `claude auth status` sees only the Mac's own login. Threads can also run on a login Cloudroom supplies, like the
  *  account's cloud Claude login (ADR 0175); provider health counts those. */
 async function hasSuppliedClaudeLogin(
-  bb: BbPluginApi,
+  room: BbPluginApi,
   hostId: string,
 ): Promise<boolean> {
   try {
-    const { providers } = await bb.sdk.system.providerStates({ hostId });
+    const { providers } = await room.sdk.system.providerStates({ hostId });
     return providers.some(
       (provider) => provider.providerId === "claude-code" && provider.status === "ready",
     );

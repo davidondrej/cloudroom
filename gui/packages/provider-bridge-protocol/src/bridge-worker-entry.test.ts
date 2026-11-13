@@ -1,8 +1,8 @@
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, expect, it } from "vitest";
 
@@ -88,9 +88,53 @@ it("starts an exported bridge with its plugin-scoped directories", async () => {
   expect(reported.line).toBe('{"hello":true}');
   expect(reported.context.pluginId).toBe("provider-fixture");
   expect(reported.context.dataDir).toBe(fixture.dataDir);
-  expect(reported.context.tempDir).toContain("provider-fixture");
+  // In `.cloudroom-tmp` under the plugin data folder.
+  expect(dirname(reported.context.tempDir)).toBe(
+    join(await realpath(fixture.dataDir), ".cloudroom-tmp"),
+  );
   expect(existsSync(reported.context.tempDir)).toBe(false);
 });
+
+it.skipIf(process.platform === "win32")(
+  "removes the temp folder when a bridge with no SIGTERM handler is stopped",
+  async () => {
+    const fixture = await createFixture(
+      [
+        "export const experimental_providerBridge = {",
+        "  experimental_apiVersion: 1,",
+        "  start(context) { process.stdout.write(context.tempDir + '\\n'); },",
+        "  handleLine() {},",
+        "};",
+      ].join("\n"),
+    );
+    const child = spawn(
+      process.execPath,
+      [
+        "--conditions=source",
+        "--import",
+        import.meta.resolve("tsx"),
+        workerEntry,
+        fixture.bridgeModulePath,
+        "provider-fixture",
+        fixture.dataDir,
+      ],
+      { stdio: ["pipe", "pipe", "inherit"] },
+    );
+    const tempDir = await new Promise<string>((resolve) =>
+      child.stdout
+        .setEncoding("utf8")
+        .once("data", (chunk: string) => resolve(chunk.trim())),
+    );
+    expect(existsSync(tempDir)).toBe(true);
+    const exited = new Promise<NodeJS.Signals | null>((resolve) =>
+      child.once("exit", (_code, signal) => resolve(signal)),
+    );
+    child.kill("SIGTERM");
+
+    expect(await exited).toBe("SIGTERM");
+    expect(existsSync(tempDir)).toBe(false);
+  },
+);
 
 it("refuses an artifact with no bridge export, naming the plugin", async () => {
   const fixture = await createFixture("export default { notABridge: true };\n");

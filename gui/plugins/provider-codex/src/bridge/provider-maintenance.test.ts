@@ -123,12 +123,75 @@ describe("Codex provider maintenance", () => {
         ],
       },
     });
+    // A broken npm Codex is reinstalled into the prefix that owns it.
+    expect(
+      __testing.buildProviderInstallationRun(
+        {
+          ...installationStatus(),
+          installed: false,
+          installSource: "notInstalled",
+          currentVersion: null,
+          installAction: {
+            kind: "install",
+            label: "Install",
+            command: "npm install -g @openai/codex@latest",
+          },
+          needsUpdate: false,
+        },
+        "install",
+        "/Users/me/.local",
+      ),
+    ).toMatchObject({
+      available: true,
+      command: {
+        command: "npm",
+        args: [
+          "install",
+          "-g",
+          "--prefix",
+          "/Users/me/.local",
+          "@openai/codex@latest",
+        ],
+      },
+      verification: { kind: "installed" },
+    });
     expect(
       __testing.buildProviderInstallationRun(installationStatus(), "install"),
     ).toEqual({
       available: false,
-      message: "Codex install is no longer available on this host.",
+      message:
+        "Codex install is not available on this host: Codex 1.0.0 is installed. Run update instead.",
     });
+  });
+
+  it("runs Windows' install.ps1 so the user Path keeps its REG_EXPAND_SZ kind", () => {
+    const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
+    Object.defineProperty(process, "platform", { ...platform, value: "win32" });
+    try {
+      const run = __testing.buildProviderInstallationRun(
+        installationStatus(),
+        "update",
+      );
+      const fallback = run.available ? run.fallback : undefined;
+      expect(fallback).toMatchObject({
+        command: "powershell.exe",
+        displayCommand:
+          "$env:CODEX_NON_INTERACTIVE='1'; irm https://chatgpt.com/codex/install.ps1 | iex",
+      });
+      const script = fallback?.args.at(-1) ?? "";
+      // Raw Path and its kind before, written back with that kind after.
+      expect(script).toContain(
+        "$p = $k.GetValue('Path', $null, 'DoNotExpandEnvironmentNames')",
+      );
+      expect(script).toContain("$k.SetValue('Path', $p, $t)");
+      expect(script).toContain(
+        "-Command '$env:CODEX_NON_INTERACTIVE=''1''; irm https://chatgpt.com/codex/install.ps1 | iex'",
+      );
+      // Windows command lines escape double quotes in ways PowerShell misreads.
+      expect(script).not.toContain('"');
+    } finally {
+      Object.defineProperty(process, "platform", platform);
+    }
   });
 });
 
@@ -270,10 +333,22 @@ describe("Codex credential health and usage", () => {
         ),
       },
     });
-    // ...but an unclear probe failure keeps it ready.
+    // Only this fake bin on PATH, so no real npm runs.
+    vi.stubEnv("PATH", path.dirname(codex));
+    // ...and offers a reinstall instead of looking installed.
+    await expect(getCodexProviderInstallationStatus()).resolves.toMatchObject({
+      installed: false,
+      executablePath: codex,
+      installAction: { kind: "install" },
+    });
+    // ...but an unclear probe failure keeps it ready and installed.
     await fs.writeFile(codex, "#!/bin/sh\nexit 1\n");
     await expect(getCodexProviderHealth()).resolves.toMatchObject({
       health: { status: "ready" },
+    });
+    await expect(getCodexProviderInstallationStatus()).resolves.toMatchObject({
+      installed: true,
+      installAction: null,
     });
   });
 

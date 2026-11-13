@@ -4,7 +4,10 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { MemoryRouter } from "react-router-dom";
-import type { PendingInteraction, PluginPendingInteraction } from "@cloudroom/domain";
+import type {
+  PendingInteraction,
+  PluginPendingInteraction,
+} from "@cloudroom/domain";
 import type { PluginPendingInteractionProps } from "@get-bb/plugin-sdk";
 import {
   resetPluginSlotStoreForTest,
@@ -504,7 +507,7 @@ describe("ThreadPendingInteractionBanner collapsed strip", () => {
     ).toBeTruthy();
   });
 
-  it("renders a user question open by default and keeps draft answers across collapse", () => {
+  it("renders a user question without a header and submits on the pick", () => {
     const question: PendingInteraction = {
       ...planReview,
       id: "pint_question",
@@ -526,25 +529,8 @@ describe("ThreadPendingInteractionBanner collapsed strip", () => {
     renderBanner(question);
     const banner = screen.getByTestId("user-question-banner");
     expect(banner.hasAttribute("data-expanded")).toBe(true);
+    expect(screen.queryByRole("button", { name: "Hide details" })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "AOption A" }));
-    expect(
-      screen
-        .getByRole("button", { name: "AOption A" })
-        .getAttribute("aria-pressed"),
-    ).toBe("true");
-    fireEvent.click(screen.getByRole("button", { name: "Hide details" }));
-    expect(banner.hasAttribute("data-expanded")).toBe(false);
-    expect(
-      isHidden(screen.getByRole("button", { name: "AOption A", hidden: true })),
-    ).toBe(true);
-    expect(banner.textContent).toContain("Which path should I take?");
-    fireEvent.click(screen.getByRole("button", { name: "Show details" }));
-    expect(
-      screen
-        .getByRole("button", { name: "AOption A" })
-        .getAttribute("aria-pressed"),
-    ).toBe("true");
-    fireEvent.click(screen.getByRole("button", { name: "Submit answer" }));
     expect(mocks.resolveMutateAsync).toHaveBeenCalledWith({
       threadId: "thr_1",
       interactionId: "pint_question",

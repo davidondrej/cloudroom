@@ -72,6 +72,7 @@ import {
 } from "@cloudroom/shared-ui/tooltip";
 import { cn } from "@cloudroom/shared-ui/lib/utils";
 import {
+  computeMutedPrefixLength,
   countQueuedMessageAttachments,
   formatQueuedMessagePreview,
 } from "@cloudroom/client-core";
@@ -477,6 +478,7 @@ function trimQueuedMessagePreviewTextRange({
 
 function buildQueuedMessagePreviewText(
   input: readonly PromptInput[],
+  initiator: ThreadQueuedMessage["initiator"],
 ): QueuedMessagePreviewText {
   let text = "";
   const mentions: PromptTextMention[] = [];
@@ -485,7 +487,11 @@ function buildQueuedMessagePreviewText(
     const trimmedChunk = trimQueuedMessagePreviewTextRange({
       text: chunk.text,
       mentions: chunk.mentions,
-      rangeStart: 0,
+      // The row already says "From System", so its `[system]` tag is dropped.
+      rangeStart:
+        initiator === "system" && text.length === 0
+          ? computeMutedPrefixLength(initiator, chunk.text)
+          : 0,
       rangeEnd: chunk.text.length,
     });
     if (!trimmedChunk) continue;
@@ -528,16 +534,21 @@ function QueuedMessagePreview({
   queuedMessage: ThreadQueuedMessage;
   resolveMentionLink?: PromptMentionLinkResolver;
 }) {
-  const preview = useMemo(
-    () =>
-      formatQueuedMessagePreview(queuedMessage.content, {
-        truncate: false,
-      }),
-    [queuedMessage.content],
-  );
+  const preview = useMemo(() => {
+    const text = formatQueuedMessagePreview(queuedMessage.content, {
+      truncate: false,
+    });
+    return queuedMessage.initiator === "system"
+      ? text.slice(computeMutedPrefixLength("system", text))
+      : text;
+  }, [queuedMessage.content, queuedMessage.initiator]);
   const markdownPreview = useMemo(
-    () => buildQueuedMessagePreviewText(queuedMessage.content),
-    [queuedMessage.content],
+    () =>
+      buildQueuedMessagePreviewText(
+        queuedMessage.content,
+        queuedMessage.initiator,
+      ),
+    [queuedMessage.content, queuedMessage.initiator],
   );
 
   if (queuedMessage.payload.kind === "retry") {

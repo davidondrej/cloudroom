@@ -1,6 +1,13 @@
 @import "@fontsource-variable/inter";
 @import "@/components/ui/theme.css";
 
+/* Set per element by watchMacosDesktopZoom; non-inherited so zoom steps restyle only `.bb-zoom` elements. */
+@property --bb-desktop-zoom {
+  syntax: "<number>";
+  inherits: false;
+  initial-value: 1;
+}
+
 @layer base {
   /*
    * Keep the real app shell from becoming a second scroll container. These
@@ -27,7 +34,7 @@
    * variable is the single switch both they and the shell root read.
    */
   :root {
-    --bb-app-chrome-row-height: calc(3rem / var(--bb-desktop-zoom, 1));
+    --bb-app-chrome-row-height: 3rem;
     --bb-shell-height: 100dvh;
     --secondary-panel-width-mobile: min(76vw, 320px);
   }
@@ -316,25 +323,7 @@
     animation-delay: 0.9s;
   }
 
-  /* Ultrafast's speed streaks fly off to the left while their button is
-   * hovered. The negative delays keep all three in flight at once. */
-  button:hover .speed-tier-streak {
-    animation: speed-tier-streak 0.6s linear infinite;
-  }
-
-  button:hover .speed-tier-streak:nth-child(2) {
-    animation-delay: -0.2s;
-  }
-
-  button:hover .speed-tier-streak:nth-child(3) {
-    animation-delay: -0.4s;
-  }
-
   @media (prefers-reduced-motion: reduce) {
-    button:hover .speed-tier-streak {
-      animation: none;
-    }
-
     .prompt-ultracode-highlight {
       animation: none;
       background-position: 50% 0%;
@@ -652,6 +641,11 @@
     .ProseMirror
     p.is-editor-empty:first-child::before {
     content: var(--promptbox-container-compact-placeholder);
+    height: auto;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   [data-follow-up-composer]:not([data-follow-up-composer-expanded])
@@ -873,21 +867,6 @@
   }
 }
 
-/* Fly an Ultrafast speed streak off to the left, fading as it goes. */
-@keyframes speed-tier-streak {
-  0% {
-    opacity: 0;
-    transform: translateX(1px);
-  }
-  20% {
-    opacity: 1;
-  }
-  100% {
-    opacity: 0;
-    transform: translateX(-6px);
-  }
-}
-
 /* Briefly highlight a conversation message that a thread-search result
  * deep-links to, then fade back to transparent. */
 @keyframes bb-search-flash {
@@ -901,9 +880,6 @@
 
 [data-window-blurred]
   :is(
-    .animate-shine,
-    .animate-shine-icon,
-    .animate-spin,
     .animate-pulse,
     .motion-safe\:animate-pulse,
     .animate-indeterminate-progress,
@@ -917,6 +893,19 @@
 [data-window-blurred] :is(.prompt-ultracode-highlight, .bb-beam)::after {
   animation-play-state: paused !important;
   will-change: auto;
+}
+
+/* A frozen spinner or shimmer looks like a hung agent, and an unfocused window is often
+   still in plain view on a second monitor (#832). Keep them moving at about 4 frames a
+   second: same cycle, fewer steps, so they don't jump when focus changes. */
+[data-window-blurred] .animate-spin {
+  animation-timing-function: steps(6) !important;
+}
+[data-window-blurred] .animate-shine {
+  animation-timing-function: steps(8) !important;
+}
+[data-window-blurred] .animate-shine-icon {
+  animation-timing-function: steps(10) !important;
 }
 
 .bb-search-flash {
@@ -1170,4 +1159,8 @@
 :root[data-corners="sharp"] *::before,
 :root[data-corners="sharp"] *::after {
   border-radius: 0 !important;
+}
+
+::highlight(cloudroom-draft-note) {
+  background-color: color-mix(in oklab, var(--primary) 40%, transparent);
 }

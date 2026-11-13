@@ -1,12 +1,14 @@
 import { useState } from "react";
-import { useMutation } from "@tanstack/react-query";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Button } from "@cloudroom/shared-ui/button";
 import { Icon } from "@cloudroom/shared-ui/icon";
-import { cn } from "@cloudroom/shared-ui/lib/utils";
-import { PROMPT_STACK_CARD_HEADER_BUTTON_CLASS, PromptStackCard, PromptStackCardChevron } from "@/components/promptbox/banner/PromptStackCard";
+import { PromptStackCard } from "@/components/promptbox/banner/PromptStackCard";
+import { appToast } from "@/components/ui/app-toast";
 import { useCloudroomAccount, type CloudDisk } from "@/hooks/queries/cloudroom-queries";
 import { fetchWithAppSurface } from "@/lib/app-surface";
+import { sdk } from "@/lib/sdk";
 import { openUpgrade, useUpgradePromptViewed } from "@/lib/upgrade-prompt";
+import { refillText } from "@/components/CloudQueue";
 
 async function askForMoreUsage() {
   const response = await fetchWithAppSurface("/api/v1/cloudroom/account/more-usage", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
@@ -26,14 +28,14 @@ const UPGRADES: Record<string, { name: string; price: string; pitch: string }> =
  *  account never sees them while its plan loads. */
 export function CloudUsageLimitNotice() {
   const ask = useMutation({ mutationFn: askForMoreUsage });
-  const plan = useCloudroomAccount().data?.plan ?? null;
+  const account = useCloudroomAccount().data, plan = account?.plan ?? null;
   const upgrade = plan ? UPGRADES[plan] : undefined;
   const paid = Boolean(plan && plan !== "free");
   useUpgradePromptViewed(upgrade ? "limit_notice" : null);
   return (
     <PromptStackCard ariaLabel="Cloud usage limit" className="space-y-2 p-3 text-xs">
       <p className="text-sm font-medium">{plan === "free" ? "You hit the Free plan's cloud limit." : "You hit your plan's cloud limit."}</p>
-      <p className="text-muted-foreground">Your messages are saved, and Local threads still work. {upgrade?.pitch ?? "Older usage stops counting after 30 days."}</p>
+      <p className="text-muted-foreground">Your messages are saved, and Local threads still work. {refillText(account?.planUsage?.resetsAt)}{upgrade ? ` ${upgrade.pitch}` : ""}</p>
       <div className="flex flex-wrap items-center gap-2">
         {upgrade && (
           <Button type="button" size="sm" onClick={() => openUpgrade("limit_notice")}>
@@ -57,34 +59,40 @@ export function CloudUsageLimitNotice() {
 
 const gb = (bytes: number) => Number((bytes / 1e9).toFixed(1));
 
-/** A full cloud disk: one live card instead of a chat row per pause and resume. No upgrade: every plan has the same disk (ADR 0282). */
-export function CloudDiskNotice({ disk }: { disk: CloudDisk }) {
-  const [open, setOpen] = useState(false);
+/** A full cloud disk, as one pill above the composer. No upgrade: every plan has the same disk (ADR 0282). Its button clears
+ *  caches and builds while the agent is paused, and the waiting message then sends by itself. The server shows it only
+ *  once Core has measured the disk. */
+export function CloudDiskNotice({ threadId, disk }: { threadId: string; disk: CloudDisk }) {
+  const client = useQueryClient();
+  const [dismissed, setDismissed] = useState(false);
+  const clear = useMutation({
+    mutationFn: () => sdk.cloudroom.clearDisk(threadId),
+    onSuccess: ({ freedBytes: freed }) => freed >= 5e8
+      ? appToast.success(`Cleared ${gb(freed)} GB of caches and builds.`)
+      : appToast.warning(`Only ${gb(freed)} GB of caches and builds to clear. The rest of the disk is other files.`),
+    onError: (error) => appToast.error(error.message),
+    onSettled: () => client.invalidateQueries({ queryKey: ["cloudroom-thread", threadId] }),
+  });
+  if (dismissed) return null;
   const measured = disk.reason === "disk_capacity";
-  const total = measured && disk.usedBytes !== null && disk.totalBytes ? disk.totalBytes : null;
+  const used = measured ? disk.usedBytes : null;
+  const total = used !== null && disk.totalBytes ? disk.totalBytes : null;
+  const divider = <span aria-hidden className="h-3.5 w-px shrink-0 bg-border" />;
   return (
-    <PromptStackCard ariaLabel="Cloud disk full" className="overflow-hidden border-attention/50 text-xs">
-      <div className="flex items-center">
-        <button type="button" aria-expanded={open} onClick={() => setOpen(!open)} className={cn(PROMPT_STACK_CARD_HEADER_BUTTON_CLASS, "gap-2")}>
-          <Icon name="AlertTriangle" className="size-3.5 shrink-0 text-warning-text" aria-hidden />
-          <span className="shrink-0 font-medium">{measured ? "Cloud disk full" : "Can't check cloud disk"}</span>
-          <span className="min-w-0 truncate text-muted-foreground">{!measured ? "Work is paused until disk space can be measured" : disk.paused ? "Work is paused until space frees up" : "Work resumed, but space is still low"}</span>
-          {total !== null && (
-            <span className="ml-auto flex shrink-0 items-center gap-2 tabular-nums text-muted-foreground">
-              <span className="h-1 w-[72px] overflow-hidden rounded-full bg-foreground/10">
-                <span className="block h-full rounded-full bg-warning" style={{ width: `${Math.min(100, (disk.usedBytes ?? 0) / total * 100)}%` }} />
-              </span>
-              {gb(disk.usedBytes ?? 0)} / {gb(total)} GB
-            </span>
-          )}
-          <PromptStackCardChevron isExpanded={open} className={cn("text-muted-foreground", total === null && "ml-auto")} />
-        </button>
-      </div>
-      {open && (
-        <p className="px-3 pb-2.5 text-muted-foreground">
-          {measured ? "Cloudroom stops the command filling the disk within 30 seconds, then work resumes. Then ask the agent to delete what it no longer needs, like build output, caches, or node_modules." : "Your files and history are kept. Work resumes once the disk can be checked again."}
-        </p>
+    <div role="alert" aria-label="Cloud disk full" className="flex min-w-0 max-w-full items-center gap-2 justify-self-center rounded-full border border-border bg-background py-1 pl-3 pr-1.5 text-xs text-muted-foreground">
+      <span aria-hidden className="size-1.5 shrink-0 rounded-full bg-warning" />
+      <span className="truncate text-foreground">{!measured ? "Can't check cloud disk" : disk.paused ? "Cloud disk is full" : "Cloud disk is almost full"}</span>
+      {used !== null && total !== null && <span className="shrink-0 tabular-nums">{gb(used)} / {gb(total)} GB</span>}
+      {divider}
+      {measured && (
+        <>
+          <button type="button" disabled={clear.isPending} onClick={() => clear.mutate()} className="flex shrink-0 cursor-pointer items-center gap-1 text-foreground underline underline-offset-2 disabled:opacity-50">
+            <Icon name="Trash2" className="size-3" aria-hidden />{clear.isPending ? "Clearing…" : "Clear caches & builds"}
+          </button>
+          {divider}
+        </>
       )}
-    </PromptStackCard>
+      <button type="button" aria-label="Dismiss" className="flex size-5 shrink-0 cursor-pointer items-center justify-center text-muted-foreground hover:text-foreground" onClick={() => setDismissed(true)}><Icon name="X" className="size-3" aria-hidden /></button>
+    </div>
   );
 }

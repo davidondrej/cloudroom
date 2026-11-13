@@ -12,6 +12,7 @@ import { tarCommand } from "@cloudroom/process-utils";
 import type { ProjectCopyProgress } from "@cloudroom/domain";
 import type { AppDeps } from "../../types.js";
 import { CloudroomError, UPLOAD_PART, type CloudroomClient } from "./client.js";
+import { macAccessSupported } from "./previews.js";
 import { command, saveProjectCopyProgress } from "./store.js";
 import { copyMacGithub } from "./sync.js";
 
@@ -69,9 +70,23 @@ async function smallProject(root: string): Promise<boolean> {
 export async function localProjectNote(deps: Deps, projectId: string): Promise<string | undefined> {
   const project = getProject(deps.db, projectId);
   const path = project ? localProjectPath(deps, project.id) : undefined;
-  if (!project || !path || githubRepository(await projectRemote(deps, project, path)) || await smallProject(path)) return undefined;
-  return `This project is not on GitHub and too large to copy, so only its \`.env\` files are here. The rest is on the user's ${COMPUTER} at \`${path}\`. Pull only what the task needs with \`room-cli mac pull\`.`;
+  if (!project || !path) return undefined;
+  const remote = await projectRemote(deps, project, path);
+  if (githubRepository(remote) || (await smallProject(path))) return undefined;
+  // A project with another remote (GitLab, Azure) keeps it, so pushing to GitHub wouldn't help; Teleport uploads it.
+  const rest = macAccessSupported
+    ? `The rest is on the user's ${COMPUTER} at \`${path}\`. Pull only what the task needs with \`room-cli mac pull\`.`
+    : remote
+      ? "Cloud agents can't reach the user's Windows computer, so ask the user to start the thread Local and Teleport it to Cloud, which uploads the project."
+      : "Cloud agents can't reach the user's Windows computer, so ask the user to push the project to GitHub, then start a new thread.";
+  return `This project is not on GitHub and too large to copy, so only its \`.env\` files are here. ${rest}`;
 }
+
+/** What the agent does when a failed copy left the project on the user's computer. Cloud agents can't reach Windows (ADR 0294). */
+export const localFilesNote = (path: string) =>
+  macAccessSupported
+    ? `The full project is on the user's ${COMPUTER} at \`${path}\`. Pull only what the task needs with \`room-cli mac pull\`.`
+    : "Cloud agents can't reach the user's Windows computer. Tell the user what failed: pass on any fix the message names, otherwise ask them to start a new thread.";
 
 export function planProjectCopy(...args: Parameters<typeof planProjectCopyOrThrow>): Promise<ProjectCopyJob | null> {
   return planProjectCopyOrThrow(...args).catch(() => null);
@@ -79,12 +94,17 @@ export function planProjectCopy(...args: Parameters<typeof planProjectCopyOrThro
 
 /** A new thread's copy (#337): a request its just-claimed sandbox drops is tried once more a second later, and an error
  *  that remains throws, so the thread is told instead of starting with an empty folder. Its sandbox gets 10 seconds in
- *  all, so the first message never waits long (ADR 0160); Try again covers the rest. A folder another copy fills needs nothing more. */
+ *  all, so the first message never waits long (ADR 0160); the caller plans again later (#1040). Each try gets its own
+ *  deadline, so the second never starts already timed out. A folder another copy fills needs nothing more. */
 export function planNewProjectCopy(deps: Deps, client: CloudroomClient, threadId: string, workspace: string, options: { key: string; branch?: string }): Promise<ProjectCopyJob | null> {
-  const signal = AbortSignal.timeout(10_000);
-  const plan = () => planProjectCopyOrThrow(deps, client, threadId, workspace, { ...options, signal });
-  return plan()
-    .catch(() => new Promise(resolve => setTimeout(resolve, 1_000)).then(plan))
+  const end = Date.now() + 10_000;
+  const plan = (ms: number) => planProjectCopyOrThrow(deps, client, threadId, workspace, { ...options, signal: AbortSignal.timeout(ms) });
+  return plan(6_000)
+    .catch(async (error: unknown) => {
+      await new Promise(resolve => setTimeout(resolve, 1_000));
+      if (end - Date.now() < 3_000) throw error;
+      return plan(end - Date.now());
+    })
     .catch((error: unknown) => {
       if (copying.has(options.key)) return null;
       throw error;
@@ -115,6 +135,9 @@ export async function planProjectCopyOrThrow(deps: Deps, client: CloudroomClient
   // A Mac folder that can't be read has no `.env` files to send, so it reads as nothing left, never as a reason to wait.
   return clone || copyAll || teleport || (path !== null && !noEnv && (await localFiles(path, "env").catch(() => [])).length) ? job : null;
 }
+
+/** Whether a copy fills this folder (copy key) in this app. */
+export const keyCopying = (key: string) => copying.has(key);
 
 /** Whether a copy for this thread runs in this app: an app restart ends every copy, but leaves its saved progress. */
 export const copyRunning = (threadId: string) => [...copying.values()].includes(threadId);
@@ -207,7 +230,7 @@ async function writeFailureNote(client: CloudroomClient, job: ProjectCopyJob, me
   const target = (await client.workspace(job.workspace))?.path;
   if (!target) return;
   const next = job.localPath
-    ? `The full project is on the user's ${COMPUTER} at \`${job.localPath}\`. Pull only what the task needs with \`room-cli mac pull\`.`
+    ? localFilesNote(job.localPath)
     : "Tell the user, since the files are not available anywhere else.";
   const note = `Cloudroom could not copy this project into the cloud, so do not wait for more files.\n\n${message}\n\n${next}\n`;
   await vm(client, `mkdir -p -- ${quote(`${target}/.cloudroom`)} && cat > ${quote(`${target}/${FAILURE_NOTE}`)}`, Buffer.from(note));
@@ -260,10 +283,15 @@ async function clone(deps: Deps, client: CloudroomClient, target: string, reposi
       )
     : "";
   const temporary = quote(`${target}.cloudroom-clone`);
+  // Holds the clone's shell PID while it runs, so an answer the connection lost can be checked against what really happened.
+  const running = quote(`${target}.cloudroom-clone.pid`);
+  const deadline = Date.now() + CLONE_TIMEOUT;
   const result = await client.runOnVm({
     command: [
+      `p=${running}; echo $$ > "$p"; trap 'rm -f -- "$p"' EXIT`,
       "export GIT_TERMINAL_PROMPT=0",
-      token ? "{ { gh auth status --hostname github.com || gh auth login --hostname github.com --with-token; } && gh auth setup-git --hostname github.com; } >/dev/null 2>&1 || true" : "",
+      // `gh auth status` asks GitHub's API, so a used-up quota reads as a bad token (#1182). Log in only when gh has no token.
+      token ? "{ gh auth token --hostname github.com || gh auth login --hostname github.com --with-token; gh auth setup-git --hostname github.com; } >/dev/null 2>&1 || true" : "",
       `rm -rf -- ${temporary}`,
       `git clone --quiet --filter=blob:none -c gc.auto=0 -- ${quote(repository)} ${temporary} || { printf '\\035'; timeout 10 gh api user --jq .login 2>/dev/null; exit 1; }`,
       branch && branch !== "HEAD" ? `git -C ${temporary} checkout --quiet ${quote(branch)} 2>/dev/null || true` : "",
@@ -272,7 +300,22 @@ async function clone(deps: Deps, client: CloudroomClient, target: string, reposi
       `test -e ${quote(`${target}/.git`)} || { echo 'The clone did not reach the project folder.' >&2; exit 1; }`,
     ].join("\n"),
     stdin: Buffer.from(token).toString("hex"),
-  }, AbortSignal.timeout(CLONE_TIMEOUT));
+  }, AbortSignal.timeout(CLONE_TIMEOUT)).catch((error: unknown) => {
+    if (error instanceof CloudroomError && error.retryable) return error;
+    throw error;
+  });
+  // A proxy's 504 or a dropped connection loses the answer, not the clone, which goes on and can land later (#1524). So wait
+  // for its shell to end: a clone that landed is done, and only one that didn't fails as before, so no copy competes with it.
+  // Each check waits up to 44 s in the sandbox, under a proxy's timeout, since Core saves every VM command as a diagnostic row.
+  if (result instanceof CloudroomError) {
+    const check = `for _ in $(seq 22); do kill -0 "$(cat -- ${running} 2>/dev/null)" 2>/dev/null || { [ ! -e ${temporary} ] && [ -e ${quote(`${target}/.git`)} ]; exit; }; sleep 2; done; exit 3`;
+    for (;;) {
+      const { code } = await retry(() => client.runOnVm({ command: check, stdin: "" }));
+      if (code === 0) return null;
+      if (code !== 3) throw result;
+      if (Date.now() >= deadline) throw new Error(`The GitHub clone did not finish in ${CLONE_TIMEOUT / 60_000} minutes.`);
+    }
+  }
   if (result.code === 0) return null;
   const error = Buffer.from(result.stderr, "hex").toString().trim().slice(-300) || `git clone exited with code ${result.code}`;
   const stdout = Buffer.from(result.stdout, "hex");
@@ -329,6 +372,7 @@ export function envRefusal(root: string, repository: string | null): string | un
 }
 
 /** `all`: every project file; `changed`: uncommitted and untracked files; `env`: only `.env` files. Ignored `.env` files always count.
+ *  `env` leaves out ones the last commit has and Git still tracks, even edited: the clone brings them, and edits stay here (#1405).
  *  Throws once the files pass `limit` bytes. */
 export async function localFiles(root: string, scope: "all" | "changed" | "env", limit = MAX_TOTAL): Promise<string[]> {
   const listed = await git(root, ["ls-files", "-z", scope === "all" ? "--cached" : "--modified", "--others", "--exclude-standard"]);
@@ -341,13 +385,15 @@ export async function localFiles(root: string, scope: "all" | "changed" | "env",
   const envAt = (path: string) => repoRoot || dirname(path) === "." || existsSync(join(root, dirname(path), ".git"));
   const env = ignored.split("\0").filter((path) => path && !path.endsWith("/") && isEnv(path) && envAt(path));
   // Unignored `.env` files follow the same rule, unless Git tracks them (a committed `.env.example` is project code).
-  const tracked = repoRoot || listed === null ? null : new Set((await git(root, ["ls-files", "-z", "--cached"]) ?? "").split("\0"));
+  const tracked = (repoRoot && scope !== "env") || listed === null ? null : new Set((await git(root, ["ls-files", "-z", "--cached"]) ?? "").split("\0"));
+  const committed = scope !== "env" || listed === null ? null : new Set((await git(root, ["ls-tree", "-r", "-z", "--name-only", "HEAD"]) ?? "").split("\0"));
   const found = listed === null ? walk(root, "") : [...new Set([...listed.split("\0"), ...staged.split("\0"), ...env].filter(Boolean))];
   const files: string[] = [];
   let total = 0;
   for await (const path of found) {
     if (scope === "env" && !isEnv(path)) continue;
     if (isEnv(path) && !envAt(path) && !tracked?.has(path)) continue;
+    if (committed?.has(path) && tracked?.has(path)) continue;
     const info = await lstat(join(root, path)).catch(() => null);
     if (!info || !(info.isFile() || info.isSymbolicLink()) || info.size > MAX_FILE) continue;
     total += info.size;

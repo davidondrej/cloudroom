@@ -45,6 +45,7 @@ import {
 import { useSidebarNavigation } from "@/hooks/queries/sidebar-navigation-query";
 import { usePluginSlots } from "@/lib/plugin-slots";
 import { getMutationErrorMessage } from "@/lib/mutation-errors";
+import { BbHttpError } from "@cloudroom/sdk/browser";
 import { PluginMachineServerAccessNotice } from "@/components/machines/MachineServerAccessNotice";
 import { invalidateMachineProviders } from "@/hooks/cache-owners/system-cache-effects";
 import {
@@ -452,10 +453,35 @@ function AutosavingPluginSetting({
   );
 }
 
+const SETTINGS_LOAD_FAILED = "Could not load this plugin's settings.";
+
 export function PluginSettingsForm({ pluginId }: { pluginId: string }) {
   const viewQuery = usePluginSettingsView(pluginId, { enabled: true });
-  const view = viewQuery.data ?? null;
-  if (view === null || Object.keys(view.schema).length === 0) return null;
+  const view = viewQuery.data;
+  if (view === undefined && viewQuery.isError) {
+    return (
+      <div className="flex items-center justify-between gap-3" role="alert">
+        <p className="min-w-0 break-words text-xs text-destructive">
+          {viewQuery.error instanceof BbHttpError
+            ? getMutationErrorMessage({
+                error: viewQuery.error,
+                fallbackMessage: SETTINGS_LOAD_FAILED,
+              }).slice(0, 300)
+            : SETTINGS_LOAD_FAILED}
+        </p>
+        <Button
+          variant="outline"
+          size="sm"
+          disabled={viewQuery.isFetching}
+          onClick={() => void viewQuery.refetch()}
+        >
+          Retry
+        </Button>
+      </div>
+    );
+  }
+  if (view === undefined) return <PluginSettingsFieldSkeleton />;
+  if (Object.keys(view.schema).length === 0) return null;
 
   return (
     <div className="space-y-4">
@@ -474,6 +500,9 @@ export function PluginSettingsForm({ pluginId }: { pluginId: string }) {
 
 // Connect renders its whole settings page, its one setting included, in tabs.
 const CONNECT_PLUGIN_ID = "connect";
+
+// Accounts is always on and its tab already names the page, so it shows only its own content.
+const ACCOUNTS_PLUGIN_ID = "accounts";
 
 const PLUGIN_STATUSES_WITH_SETTINGS = [
   "running",
@@ -555,7 +584,8 @@ export function PluginSettingsPage({
       (entry: PluginListItem) => entry.id === pluginId,
     ) ?? null;
   if (listQuery.data === undefined && !listQuery.isError) {
-    return <PluginSettingsPageSkeleton />;
+    // Accounts has no header, so its skeleton would flash one.
+    return pluginId === ACCOUNTS_PLUGIN_ID ? null : <PluginSettingsPageSkeleton />;
   }
   if (listQuery.data === undefined && listQuery.isError) {
     return (
@@ -608,6 +638,17 @@ function PluginSettingsContent({
   const hasAvailableSettings =
     plugin.hasSettings ||
     settingsSections.some((section) => section.pluginId === plugin.id);
+  if (
+    plugin.id === ACCOUNTS_PLUGIN_ID &&
+    plugin.enabled &&
+    PLUGIN_STATUSES_WITH_SETTINGS.includes(plugin.status)
+  ) {
+    return (
+      <div className="mx-auto w-full max-w-5xl">
+        <PluginSettingsSections pluginId={plugin.id} showHeadings={false} />
+      </div>
+    );
+  }
   return (
     <div className="mx-auto w-full max-w-5xl">
       <header className="flex items-center justify-between gap-4">

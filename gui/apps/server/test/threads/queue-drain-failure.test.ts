@@ -7,7 +7,7 @@ import {
   setQueuedThreadMessageFailureReason,
 } from "@cloudroom/db";
 import type { PluginHookName } from "@get-bb/plugin-sdk";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { ApiError } from "../../src/errors.js";
 import {
   setPluginHookProvider,
@@ -359,10 +359,24 @@ describe("recordQueuedMessageDrainFailure", () => {
         hostName: "M4",
       });
 
+      const capture = vi.fn();
+      harness.deps.telemetry = { ...harness.deps.telemetry, capture };
       recordQueuedMessageDrainFailure(harness.deps, {
         error: new Error("Cannot read properties of undefined (reading 'id')"),
         row,
         thread,
+      });
+      // We hear about it, with the fault but no message text or IDs (#1341).
+      expect(capture).toHaveBeenCalledWith({
+        name: "queue_delivery",
+        properties: {
+          outcome: "failed",
+          message: "user",
+          waiting_on: "thread-busy",
+          thread_status: thread.status,
+          error: "Error",
+          detail: "Cannot read properties of undefined (reading 'id')",
+        },
       });
 
       // `ApiError` messages are written for a caller; anything else was

@@ -1,4 +1,4 @@
-import { useCallback, useMemo } from "react";
+import { useCallback, useContext, useMemo } from "react";
 import { useStore } from "jotai";
 import {
   PERSONAL_PROJECT_ID,
@@ -14,6 +14,7 @@ import type {
   PluginSidebarThreadPullRequestState,
   PluginSidebarThreadsState,
 } from "@get-bb/plugin-sdk";
+import { PluginContext } from "@/components/plugin/plugin-context";
 import { useThreadActions } from "@/components/thread/ThreadActionsProvider";
 import {
   getEnvironmentPullRequestFromResponse,
@@ -28,7 +29,10 @@ import { useSidebarNavigation } from "@/hooks/queries/sidebar-navigation-query";
 import { useUpdateThread } from "@/hooks/mutations/thread-state-mutations";
 import { useRouteNavigate } from "@/components/ui/app-route-anchor";
 import { toPluginSidebarThread } from "./plugin-sidebar-threads";
-import { useSetRootComposeProjectId } from "./root-compose-selection";
+import {
+  pluginComposeRouteState,
+  useSetRootComposeProjectId,
+} from "./root-compose-selection";
 import { openThreadInSplit } from "./split-layout/openThreadInSplit";
 import { getRootComposeRoutePath, getThreadRoutePath } from "./route-paths";
 
@@ -131,6 +135,7 @@ export function useSidebarThreadActions(): PluginSidebarThreadActions {
   const store = useStore();
   const isCompact = useIsCompactViewport();
   const setRootComposeProjectId = useSetRootComposeProjectId();
+  const pluginId = useContext(PluginContext);
   const hostActions = useThreadActions();
   const entriesById = useThreadEntryMap();
   const { mutateAsync: updateThreadAsync } = useUpdateThread();
@@ -169,8 +174,23 @@ export function useSidebarThreadActions(): PluginSidebarThreadActions {
         if (projectId !== undefined) {
           setRootComposeProjectId(projectId);
         }
-        const state = options?.focusPrompt ? { focusPrompt: true } : undefined;
-        navigate(getRootComposeRoutePath(), state ? { state } : undefined);
+        const placement = options?.experimental_placement;
+        const state = {
+          ...(options?.focusPrompt ? { focusPrompt: true } : {}),
+          ...pluginComposeRouteState(pluginId, "openNewThread", {
+            sectionId:
+              placement !== undefined
+                ? placement.sectionId
+                : options?.sectionId,
+            pinned: placement?.pinned,
+            environmentId: options?.environmentId,
+            hostId: options?.hostId,
+          }),
+        };
+        navigate(
+          getRootComposeRoutePath(),
+          Object.keys(state).length > 0 ? { state } : undefined,
+        );
       },
       async setPinned(threadId, pinned) {
         const entry = requireEntry(threadId);
@@ -210,6 +230,7 @@ export function useSidebarThreadActions(): PluginSidebarThreadActions {
       hostActions,
       isCompact,
       navigate,
+      pluginId,
       requireEntry,
       setRootComposeProjectId,
       store,

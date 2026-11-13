@@ -1,12 +1,12 @@
 import type { CallerProofIssuer } from "@cloudroom/config/caller-proof";
-import type { CustomProviderModel } from "@cloudroom/config/bb-app-managed-config";
+import type { CustomProviderModel } from "@cloudroom/config/app-managed-config";
 import type { DbConnection } from "@cloudroom/db";
 import type { FeatureFlags, ProviderNativeSkillRoots } from "@cloudroom/domain";
 import type { Logger } from "@cloudroom/logger";
 import type { PendingInteractionLifecycle } from "./services/interactions/pending-interactions.js";
 import type { MachineAuthService } from "./services/machine-auth.js";
 import type { AppVersionService } from "./services/system/app-version.js";
-import type { BbAppManagedConfigReloader } from "./services/system/bb-app-managed-config.js";
+import type { RoomAppManagedConfigReloader } from "./services/system/app-managed-config.js";
 import type { TelemetryService } from "./services/system/telemetry.js";
 import type { TerminalSessionLifecycle } from "./services/terminals/terminal-session-lifecycle.js";
 import type { LifecycleDedupers } from "./lifecycle-dedupers.js";
@@ -67,7 +67,7 @@ export interface AppDeps {
 
 export interface ServerAppDeps extends AppDeps {
   appVersion: AppVersionService;
-  bbAppManagedConfig: BbAppManagedConfigReloader;
+  bbAppManagedConfig: RoomAppManagedConfigReloader;
   callerProofs: CallerProofIssuer;
 }
 

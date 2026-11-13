@@ -363,7 +363,7 @@ async function pluginThemeCssPath(rootDir: string, localId: string, signal?: Abo
 }
 
 async function readPluginThemeCss(
-  bb: BbPluginApi,
+  room: BbPluginApi,
   themeId: string,
   rootDirs: Map<string, string>,
   signal?: AbortSignal,
@@ -378,7 +378,7 @@ async function readPluginThemeCss(
     return cssPath ? await readFile(cssPath, { encoding: "utf8", signal }) : null;
   } catch (error) {
     signal?.throwIfAborted();
-    bb.log.warn(`theme-preview: could not read ${themeId}: ${String(error)}`);
+    room.log.warn(`theme-preview: could not read ${themeId}: ${String(error)}`);
     return null;
   }
 }
@@ -420,7 +420,7 @@ async function activeThemePath(
  * newer picker action. File stamps are keyed by path: changing the active
  * theme is not itself mistaken for editing the previous theme's stylesheet.
  */
-export function createCatalogLoader(bb: BbPluginApi) {
+export function createCatalogLoader(room: BbPluginApi) {
   const slowWarningMs = 5_000;
   const catalogOperationTimeoutMs = 15_000;
   const stamps = new Map<string, string>();
@@ -435,7 +435,7 @@ export function createCatalogLoader(bb: BbPluginApi) {
 
   const warnIfSlow = async <T>(label: string, operation: () => Promise<T>): Promise<T> => {
     const warning = setTimeout(() => {
-      bb.log.warn(`theme-preview: ${label} still pending after ${slowWarningMs}ms`);
+      room.log.warn(`theme-preview: ${label} still pending after ${slowWarningMs}ms`);
     }, slowWarningMs);
     try {
       return await operation();
@@ -465,25 +465,25 @@ export function createCatalogLoader(bb: BbPluginApi) {
   };
 
   const loadCatalog = async (selectionAtStart: number) => {
-    const raw = (await observeCatalogOperation("theme catalog", (signal) => bb.sdk.theme.catalog({ signal }))) as {
+    const raw = (await observeCatalogOperation("theme catalog", (signal) => room.sdk.theme.catalog({ signal }))) as {
       dir?: unknown;
     };
     const dir = typeof raw?.dir === "string" ? raw.dir : null;
     const rootDirs = new Map<string, string>();
     try {
-      const listed = (await observeCatalogOperation("plugin list", (signal) => bb.sdk.plugins.list({ signal }))) as {
+      const listed = (await observeCatalogOperation("plugin list", (signal) => room.sdk.plugins.list({ signal }))) as {
         plugins?: Array<{ id?: string; rootDir?: string }>;
       };
       for (const entry of listed.plugins ?? []) {
         if (typeof entry.id === "string" && typeof entry.rootDir === "string") rootDirs.set(entry.id, entry.rootDir);
       }
     } catch (error) {
-      bb.log.warn(`theme-preview: plugin list unavailable: ${String(error)}`);
+      room.log.warn(`theme-preview: plugin list unavailable: ${String(error)}`);
     }
     const built = await observeCatalogOperation("catalog enrichment", (signal) =>
       buildCatalog(raw, async (id) =>
         id.startsWith("plugin:")
-          ? readPluginThemeCss(bb, id, rootDirs, signal)
+          ? readPluginThemeCss(room, id, rootDirs, signal)
           : dir
             ? readCustomThemeCss(dir, id, signal)
             : null,
@@ -508,17 +508,17 @@ export function createCatalogLoader(bb: BbPluginApi) {
             // Everything above can await. Confirm that neither this panel nor
             // another bb surface selected a different theme in the meantime.
             const current = (await observeCatalogOperation("active theme confirmation", (signal) =>
-              bb.sdk.theme.catalog({ signal }),
+              room.sdk.theme.catalog({ signal }),
             )) as { active?: { themeId?: unknown } };
             const currentThemeId = typeof current.active?.themeId === "string" ? current.active.themeId : null;
             if (selectionGeneration === selectionAtStart && currentThemeId === built.activeThemeId) {
-              await warnIfSlow(`theme re-apply (${built.activeThemeId})`, () => bb.sdk.theme.set(built.activeThemeId!));
+              await warnIfSlow(`theme re-apply (${built.activeThemeId})`, () => room.sdk.theme.set(built.activeThemeId!));
               revision += 1;
-              bb.log.info(`theme-preview: ${built.activeThemeId} changed on disk — re-applied (rev ${revision})`);
+              room.log.info(`theme-preview: ${built.activeThemeId} changed on disk — re-applied (rev ${revision})`);
             }
           }
         } catch (error) {
-          bb.log.warn(`theme-preview: could not stat ${path}: ${String(error)}`);
+          room.log.warn(`theme-preview: could not stat ${path}: ${String(error)}`);
         }
       }
     }
@@ -544,7 +544,7 @@ export function createCatalogLoader(bb: BbPluginApi) {
     // Theme application is global and not cancellable. Preserve click order
     // so a slower earlier apply cannot land after the user's newer choice.
     const apply = selectionQueue.then(async () => {
-      await warnIfSlow(`theme apply (${themeId})`, () => bb.sdk.theme.set(themeId));
+      await warnIfSlow(`theme apply (${themeId})`, () => room.sdk.theme.set(themeId));
     });
     selectionQueue = apply.catch(() => undefined);
     await apply;
@@ -562,7 +562,7 @@ export function createCatalogLoader(bb: BbPluginApi) {
   return { catalog, setTheme };
 }
 
-export default async function plugin(bb: BbPluginApi) {
+export default async function plugin(room: BbPluginApi) {
   // Live-reload support. bb reads a custom theme's CSS from disk on demand and
   // never watches the file, so an agent editing `<dataDir>/theme/<id>/theme.css`
   // in one split leaves every open window painted with the previous version.
@@ -570,7 +570,7 @@ export default async function plugin(bb: BbPluginApi) {
   // catalog poll also stats the active custom or plugin theme as a fallback;
   // when it has changed we re-set the same palette, which makes bb re-read the
   // CSS and push it to every client.
-  const catalogLoader = createCatalogLoader(bb);
+  const catalogLoader = createCatalogLoader(room);
   const catalog = catalogLoader.catalog;
 
   // Instant path. Watch the custom-theme directory (new themes, edits) and push
@@ -578,12 +578,12 @@ export default async function plugin(bb: BbPluginApi) {
   // theme shows up in the dropdown and an edited one repaints within the
   // watcher's latency instead of the next poll. The poll stays as a slow
   // fallback for filesystems where watching is unreliable.
-  bb.background.service("theme-watch", {
+  room.background.service("theme-watch", {
     async start(signal) {
       let watcher: FSWatcher | null = null;
       let timer: ReturnType<typeof setTimeout> | null = null;
       try {
-        const raw = (await bb.sdk.theme.catalog({ signal })) as { dir?: unknown };
+        const raw = (await room.sdk.theme.catalog({ signal })) as { dir?: unknown };
         if (signal.aborted) return;
         const dir = typeof raw?.dir === "string" ? raw.dir : null;
         if (!dir) return;
@@ -592,18 +592,18 @@ export default async function plugin(bb: BbPluginApi) {
           timer = setTimeout(async () => {
             try {
               const next = await catalog(); // re-applies the active theme if its file changed
-              bb.realtime.publish("theme-preview:changed", { revision: next.revision, at: Date.now() });
+              room.realtime.publish("theme-preview:changed", { revision: next.revision, at: Date.now() });
             } catch (error) {
-              bb.log.warn(`theme-preview: watch refresh failed: ${String(error)}`);
+              room.log.warn(`theme-preview: watch refresh failed: ${String(error)}`);
             }
           }, 120);
         };
         try {
           watcher = watch(dir, { recursive: true }, onChange);
-          watcher.on("error", (error) => bb.log.warn(`theme-preview: watcher error: ${String(error)}`));
-          bb.log.info(`theme-preview: watching ${dir}`);
+          watcher.on("error", (error) => room.log.warn(`theme-preview: watcher error: ${String(error)}`));
+          room.log.info(`theme-preview: watching ${dir}`);
         } catch (error) {
-          bb.log.warn(`theme-preview: cannot watch ${dir}: ${String(error)}`);
+          room.log.warn(`theme-preview: cannot watch ${dir}: ${String(error)}`);
           return;
         }
         await new Promise<void>((resolve) => {
@@ -619,7 +619,7 @@ export default async function plugin(bb: BbPluginApi) {
     },
   });
 
-  bb.rpc.register(rpcContract, {
+  room.rpc.register(rpcContract, {
     async themeCatalog() {
       return catalog();
     },
@@ -628,5 +628,5 @@ export default async function plugin(bb: BbPluginApi) {
     },
   });
 
-  bb.log.info("theme-preview ready");
+  room.log.info("theme-preview ready");
 }

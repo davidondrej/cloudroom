@@ -1,4 +1,8 @@
-import { findEnvironmentPathClaim } from "../src/data/environments.js";
+import {
+  findEnvironmentPathClaim,
+  findEnvironmentSharingPath,
+  type EnvironmentRow,
+} from "../src/data/environments.js";
 import { describe, expect, it } from "vitest";
 import { threadScope, turnScope } from "@cloudroom/domain";
 import {
@@ -278,6 +282,24 @@ describe("slow query index plans", () => {
       expect(details).not.toContain("SCAN environments");
     },
   );
+
+  it("indexes the same-folder check before a worktree removal", () => {
+    const { db } = setup();
+    const owner = { id: "env_owner", hostId: "host_test", path: "/tmp/tree" };
+    const captured = captureStatements(db, () => {
+      expect(
+        findEnvironmentSharingPath(db, owner as EnvironmentRow & typeof owner),
+      ).toBeNull();
+    });
+    const plans = captured.map((query) =>
+      queryPlanDetails({ db, params: query.params, sql: query.sql }),
+    );
+    expect(plans).toEqual([
+      expect.stringContaining("environments_host_path_lookup_idx"),
+      expect.stringContaining("environments_claim_idx"),
+    ]);
+    for (const plan of plans) expect(plan).not.toContain("SCAN environments");
+  });
 
   // Both queue indexes are PARTIAL. A partial index is only usable when the
   // query repeats its WHERE clause, so a refactor that drops one liveness

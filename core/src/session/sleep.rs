@@ -7,6 +7,10 @@ const IDLE_SLEEP_MS: u64 = 30 * 60 * 1000;
 /// Its reply is already saved for the parent; its next message resumes it.
 const SHARED_IDLE_SLEEP_MS: u64 = 30 * 1000;
 const CHECK_EVERY: Duration = Duration::from_secs(5);
+/// Claude's list saying a background Bash task runs is trusted this long after it came (#1216): longer than most test
+/// suites and builds, and half the website's 2-hour cap on background work. A lost clearing list costs at most this;
+/// a longer job that the process count also misses then sleeps as before.
+const BASH_TRUST_MS: u64 = 60 * 60 * 1000;
 
 /// The running harness and its workload size when it became ready.
 #[derive(Clone, Copy)]
@@ -14,6 +18,8 @@ pub(super) struct Awake {
     pid: u32,
     since_ms: u64,
     processes: Option<usize>,
+    /// When Claude last listed a background Bash task as running. Per harness: a new one starts with none.
+    bash: Option<u64>,
 }
 
 impl Session {
@@ -22,7 +28,19 @@ impl Session {
             pid: handle.pid(),
             since_ms: now_ms(),
             processes: handle.process_count(),
+            bash: None,
         });
+    }
+
+    pub(super) fn background_bash(&mut self, running: bool) {
+        if let Some(awake) = &mut self.awake {
+            awake.bash = running.then(now_ms);
+        }
+    }
+
+    fn listed_bash(&self, now: u64) -> bool {
+        let at = self.awake.and_then(|awake| awake.bash);
+        at.is_some_and(|at| now.saturating_sub(at) < BASH_TRUST_MS)
     }
 
     pub(super) fn sleep_pending(&self) -> bool {
@@ -59,15 +77,17 @@ impl Session {
     }
 
     /// Processes beyond the harness's count at launch: background jobs such as downloads, builds, or dev servers.
+    /// Or a background Bash task Claude lists, which the count misses once a launch process (an MCP server) exits.
     pub(super) fn has_background_jobs(&self) -> bool {
         let (Some(handle), Some(awake)) = (&self.handle, self.awake) else {
             return false;
         };
         awake.pid == handle.pid()
-            && handle
-                .process_count()
-                .zip(awake.processes)
-                .is_some_and(|(now, baseline)| now > baseline)
+            && (self.listed_bash(now_ms())
+                || handle
+                    .process_count()
+                    .zip(awake.processes)
+                    .is_some_and(|(now, baseline)| now > baseline))
     }
 
     /// Started in its parent's sandbox: still true once detached, as when its archived parent kept it open (#603).
@@ -304,7 +324,7 @@ impl Manager {
         });
     }
 
-    fn release(&self, local: &mut Local, id: &str) {
+    pub(super) fn release(&self, local: &mut Local, id: &str) {
         let session = local.sessions.get_mut(id).unwrap();
         session.ready = false;
         session.releasing = true;
@@ -313,16 +333,16 @@ impl Manager {
         }
     }
 
-    /// Claude reads its login only at start, so after a new sign-in an idle agent sleeps
-    /// before its next prompt; the queued prompt wakes it with the new login.
+    /// Claude reads its login and connects MCP servers only at start, so after a new sign-in
+    /// (or cloud MCP sign-in) an idle agent sleeps before its next prompt; the queued prompt
+    /// wakes it with the new login.
     pub(super) fn sleep_for_login(&self, local: &mut Local, id: &str) -> bool {
         let session = &local.sessions[id];
         let changed = session.can_resume()
             && local.can_sleep(id)
-            && session
-                .handle
-                .as_ref()
-                .is_some_and(|h| h.login_changed(&self.config));
+            && session.handle.as_ref().is_some_and(|h| {
+                h.login_changed(&self.config) || h.mcp_login_changed(&self.config)
+            });
         if changed {
             self.release(local, id);
         }
@@ -407,5 +427,31 @@ impl Manager {
             self.schedule_resume(local, id, false)?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_listed_bash_task_is_trusted_for_an_hour() {
+        let awake = Awake {
+            pid: 1,
+            since_ms: 0,
+            processes: None,
+            bash: None,
+        };
+        let mut session = Session {
+            awake: Some(awake),
+            ..Default::default()
+        };
+        session.background_bash(true);
+        let at = session.awake.unwrap().bash.unwrap();
+        for (later, listed) in [(0, true), (BASH_TRUST_MS - 1, true), (BASH_TRUST_MS, false)] {
+            assert_eq!(session.listed_bash(at + later), listed, "{later}");
+        }
+        session.background_bash(false);
+        assert!(!session.listed_bash(at));
     }
 }

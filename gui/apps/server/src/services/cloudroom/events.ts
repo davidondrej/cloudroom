@@ -1,14 +1,15 @@
 import { createHash } from "node:crypto";
 import { commandGuardBlockReason } from "@get-bb/plugin-sdk/internal/command-guard";
-import { cloudroomCommands, cloudroomThreads, deleteThreadEventSuffixInTransaction, events, threadConversationOutlines, threadSearchSegments, getThread, type DbConnection, type DbQueryConnection, type DbTransaction, type AppendStoredThreadEventArgs } from "@cloudroom/db";
+import { cloudroomCommands, cloudroomThreads, deleteThreadEventSuffixInTransaction, events, threads, threadConversationOutlines, threadSearchSegments, getThread, type DbConnection, type DbQueryConnection, type DbTransaction, type AppendStoredThreadEventArgs } from "@cloudroom/db";
 import { and, desc, eq } from "drizzle-orm";
 import { appendThreadEventsInTransaction, appendThreadProvisioningEventInTransaction } from "../threads/thread-events.js";
-import { LEGACY_CODEX_GOAL_EXTENSION_KIND, THREAD_ACCOUNT_SWITCH_OPERATION, cloudDeltaEvent, cloudItemEvent, codexItemEvent, reasoningLevelSchema, threadEventSchema, threadScope, turnScope, encodeClientTurnRequestIdNumber, type ProvisioningTranscriptEntry, type SystemThreadProvisioningStatus, type ThreadEvent, type ThreadEventTurnStatus } from "@cloudroom/domain";
+import { markCustomInstructionsLost } from "../threads/custom-instructions.js";
+import { LEGACY_CODEX_GOAL_EXTENSION_KIND, THREAD_ACCOUNT_SWITCH_OPERATION, cloudDeltaEvent, cloudItemEvent, codexItemEvent, isStreamDeltaEvent, joinStreamDeltas, reasoningLevelSchema, threadEventSchema, threadScope, turnScope, encodeClientTurnRequestIdNumber, type ProvisioningTranscriptEntry, type SystemThreadProvisioningStatus, type ThreadEvent, type ThreadEventTurnStatus } from "@cloudroom/domain";
 import { z } from "zod";
 import { cloudAccountSwitch } from "./account-switches.js";
 import { CloudroomError, type SessionRecord } from "./client.js";
-import { codexErrorFields, codexErrorFrameFields } from "./codex-errors.js";
-import { binding, command, coreFailure, queuedPrompts, saveBinding, saveCommandState, saveStatus, effectivePrompt, statusOf, unstartedTurn, type Binding, type Command } from "./store.js";
+import { codexErrorFields, codexErrorFrameFields, mentionsOpenAISide401 } from "./codex-errors.js";
+import { binding, command, coreFailure, queuedPrompts, saveBinding, saveCommandState, saveStatus, showingEarlier, effectivePrompt, statusOf, unstartedTurn, type Binding, type Command } from "./store.js";
 
 const object = z.record(z.string(), z.unknown());
 const nativeFrame = z.object({ method: z.string(), params: object.optional() });
@@ -19,6 +20,10 @@ export const isCloudProvider = (id: string | undefined): id is CloudProvider => 
 export const HARNESS_NAMES: Record<CloudProvider, string> = { codex: "Codex", pi: "Pi", "claude-code": "Claude Code", "acp-cursor": "Cursor", "acp-fx": "fx", "acp-opencode": "opencode", "acp-hermes-agent": "Hermes Agent", "acp-devin": "Devin", "acp-droid": "Droid", "acp-kimi": "Kimi Code", "acp-openclaw": "OpenClaw" };
 export const isAcpProvider = (id: string | undefined): id is Extract<CloudProvider, `acp-${string}`> => isCloudProvider(id) && id.startsWith("acp-");
 const FINISHED = ["completed", "failed", "interrupted", "unknown", "unknown_after_restart"];
+/** A message that failed or was cancelled may never have reached the agent. If it carried the custom instructions, the next one must. */
+function lostInstructions(tx: DbTransaction, threadId: string, message: Command | null): void {
+  if (message && (JSON.parse(message.input) as { customInstructions?: string }).customInstructions) markCustomInstructionsLost(tx, threadId);
+}
 const turnStatus = (state: string): ThreadEventTurnStatus => state === "completed" ? "completed" : state === "interrupted" ? "interrupted" : "failed";
 export function endedTurn(record: SessionRecord): ThreadEventTurnStatus | null {
   const receipt = record.kind === "receipt" ? z.object({ command: z.string(), state: z.string() }).safeParse(record.data) : null;
@@ -32,7 +37,7 @@ const exitDetail = (data: Record<string, unknown>) => {
   const detail = [typeof data.stderr === "string" && `Harness stderr (last lines):\n${data.stderr.trimEnd()}`, typeof data.diagnostic_id === "string" && `Cloudroom diagnostic ID: ${data.diagnostic_id}`].filter(Boolean).join("\n\n");
   return detail ? { detail } : {};
 };
-const bbRequestId = (id: string) => encodeClientTurnRequestIdNumber({ value: createHash("sha256").update(id).digest().readUIntBE(0, 6) });
+const roomRequestId = (id: string) => encodeClientTurnRequestIdNumber({ value: createHash("sha256").update(id).digest().readUIntBE(0, 6) });
 
 function messageReasoning(input: string, fallback: string): string {
   try {
@@ -100,7 +105,7 @@ function promptRequestedEvent(db: DbQueryConnection, saved: Binding, request: Co
   const sender = typeof stored.sender_thread_id === "string" ? stored.sender_thread_id : null;
   return threadEventSchema.parse({
     type: "client/turn/requested", scope: threadScope(), threadId: saved.threadId,
-    direction: "outbound", requestId: bbRequestId(request.id), source: initial ? "spawn" : "tell", ...(sender ? { initiator: "agent" } : childNotice(db, saved, request, stored.text)), senderThreadId: sender,
+    direction: "outbound", requestId: roomRequestId(request.id), source: initial ? "spawn" : "tell", ...(sender ? { initiator: "agent" } : childNotice(db, saved, request, stored.text)), senderThreadId: sender,
     input: hidden ? input.map((block: Record<string, unknown>) => ({ ...block, visibility: "agent-only" })) : input,
     target: steeredTurnId ? { kind: "steer", expectedTurnId: steeredTurnId } : { kind: initial ? "thread-start" : "new-turn" },
     request: { method: initial ? "thread/start" : "turn/start", params: {} },
@@ -121,7 +126,7 @@ export function projectInitialPrompt(tx: DbTransaction, threadId: string): boole
   const request = command(tx, `first_${threadId}`);
   if (!saved || !request || request.command !== "prompt" || saved.turnId ||
       !(request.state === "sending" || request.state === "accepted" || (request.state === "failed" && !saved.sessionId)) ||
-      requestedTurns(tx, threadId).has(bbRequestId(request.id))) return false;
+      requestedTurns(tx, threadId).has(roomRequestId(request.id))) return false;
   appendPrompt(tx, saved, request);
   return true;
 }
@@ -175,7 +180,7 @@ export function projectFollowUp(tx: DbTransaction, threadId: string, id: string)
 }
 
 export function retractStillQueuedPrompts(db: DbConnection, threadId: string, requestIds: readonly string[]): boolean {
-  const wanted = new Set(requestIds.filter(id => id !== `first_${threadId}`).map(bbRequestId));
+  const wanted = new Set(requestIds.filter(id => id !== `first_${threadId}`).map(roomRequestId));
   const matches = [...requestedTurns(db, threadId)].filter(([id]) => wanted.has(id));
   if (!matches.length) return false;
   db.transaction((tx) => {
@@ -188,8 +193,98 @@ export function retractStillQueuedPrompts(db: DbConnection, threadId: string, re
   return true;
 }
 
-export function projectRecord(db: DbConnection, threadId: string, record: SessionRecord, codexOutage = false): ThreadEvent["type"][] {
+/** A streamed token: Core sends one record per piece of a reply, reasoning, or command output, and it only adds events. */
+export function isStreamDelta(record: SessionRecord): boolean {
+  if (["text_delta", "thinking_delta", "tool_delta"].includes(record.kind))
+    return true;
+  const method =
+    record.kind === "native_event"
+      ? (record.data as { method?: unknown } | null)?.method
+      : undefined;
+  return typeof method === "string" && /(?:\/delta|Delta)$/.test(method);
+}
+
+// Records that can wait are saved together this often (#1248). Every save costs about the same disk write however
+// little it holds, and the app shows streamed text a whole line at a time. The daemon's sink does the same for
+// Local threads (STREAM_DELTA_DEBOUNCE_MS).
+export const STREAM_BATCH_MS = 250;
+export const STREAM_BATCH_MAX_RECORDS = 500;
+// Records that only add events: the stream loop has no other work before or after them.
+const PLAIN_RECORD_KINDS = ["item_started", "item_completed", "native_event"];
+// Plain records nobody waits to see: a line of the harness's own chat file (no event, only the cursor), token
+// counts, and tool progress.
+const QUIET_RECORD_KINDS = ["native_record", "usage", "tool_snapshot"];
+
+/**
+ * How the stream loop saves a record. Every save is a disk write of about the same size, however little it holds
+ * (#1248), so records share one where they can.
+ * - "wait": saved with the next batch, at most STREAM_BATCH_MS later.
+ * - "now": saved at once, in one transaction with the records that waited.
+ * - "alone": the loop has other work to do around it. The waiting records are saved first.
+ */
+export function recordSaving(record: SessionRecord): "wait" | "now" | "alone" {
+  if (isStreamDelta(record) || QUIET_RECORD_KINDS.includes(record.kind)) return "wait";
+  return PLAIN_RECORD_KINDS.includes(record.kind) && !mentionsOpenAISide401(record) ? "now" : "alone";
+}
+
+/** Where showing an earlier session's history left off, carried from one page to the next. */
+export type EarlierSession = { session: string; after: number; nativeId: string | null; turnId: string | null; harness: string | null };
+/** The app's agent for a session, from its start receipt (Core names its own harness). */
+export function sessionHarness(records: readonly SessionRecord[]): string | null {
+  const start = records.find((record) => record.kind === "receipt" && (record.data as { command?: unknown }).command === "start")?.data as { input?: { harness?: unknown } } | undefined;
+  return (Object.keys(CLOUD_HARNESSES) as CloudProvider[]).find((id) => CLOUD_HARNESSES[id] === start?.input?.harness) ?? null;
+}
+
+/** Saved history shown here (#237, App 4): never acted on, and its turns change no status or date and tell no plugin.
+ *  For a session before the thread's current one (`earlier`), the thread points at that session inside one
+ *  transaction, with its own agent and where its last page left off, then back, so no send or stream sees it. */
+export function projectShown(db: DbConnection, threadId: string, records: readonly SessionRecord[], earlier?: EarlierSession): { types: ThreadEvent["type"][]; earlier?: EarlierSession } {
   return db.transaction((tx) => {
+    const current = binding(tx, threadId), thread = tx.select().from(threads).where(eq(threads.id, threadId)).get();
+    if (!current || !thread || !records.length) return { types: [], ...(earlier ? { earlier } : {}) };
+    showingEarlier.add(threadId);
+    try {
+      if (earlier) {
+        saveBinding(tx, threadId, { sessionId: earlier.session, cursor: earlier.after, nativeId: earlier.nativeId, turnId: earlier.turnId });
+        if (earlier.harness) tx.update(threads).set({ providerId: earlier.harness }).where(eq(threads.id, threadId)).run();
+      }
+      const types = projectRecords(tx as unknown as DbConnection, threadId, records);
+      const reached = earlier ? binding(tx, threadId)! : null;
+      if (earlier) {
+        const { threadId: _same, ...restore } = current;
+        saveBinding(tx, threadId, restore);
+      }
+      tx.update(threads).set({ status: thread.status, updatedAt: thread.updatedAt, latestAttentionAt: thread.latestAttentionAt, providerId: thread.providerId }).where(eq(threads.id, threadId)).run();
+      return { types, ...(earlier && reached ? { earlier: { ...earlier, after: reached.cursor, nativeId: reached.nativeId, turnId: reached.turnId } } : {}) };
+    } finally { showingEarlier.delete(threadId); }
+  });
+}
+
+export function projectRecord(db: DbConnection, threadId: string, record: SessionRecord, codexOutage = false): ThreadEvent["type"][] {
+  return projectRecords(db, threadId, [record], codexOutage);
+}
+
+/**
+ * Saves records in order, in one transaction. Streamed pieces of one item that follow each other become one
+ * event row: a row per token is what made streaming write so much (#1248).
+ */
+export function projectRecords(
+  db: DbConnection,
+  threadId: string,
+  records: readonly SessionRecord[],
+  codexOutage = false,
+): ThreadEvent["type"][] {
+  return db.transaction((tx) => {
+    // The newest streamed piece, not yet written, so the next piece can join it.
+    const held: { piece: AppendStoredThreadEventArgs | null } = { piece: null };
+    const takeHeld = () => {
+      const piece = held.piece;
+      held.piece = null;
+      return piece ? [piece] : [];
+    };
+    const types = records.flatMap((record) => {
+    // Only a streamed piece may follow a held one unwritten: anything else may read or cut the saved events.
+    if (!isStreamDelta(record)) appendThreadEventsInTransaction(tx, takeHeld());
     const saved = binding(tx, threadId);
     if (!saved || record.sequence <= saved.cursor) return [];
     if (record.session_id !== saved.sessionId) throw new Error("Cloudroom session mismatch");
@@ -209,6 +304,11 @@ export function projectRecord(db: DbConnection, threadId: string, record: Sessio
       emit({ type: "provider/warning", scope: threadScope(), threadId, providerThreadId: saved.nativeId, category: "general",
         summary: z.string().parse(data.message), ...(typeof data.detail === "string" ? { details: data.detail } : {}) });
     }
+    // Claude's safeguards flagged a message and it switched models: the same notice as a Local thread's (#1313).
+    if (record.kind === "model_fallback" && saved.nativeId && typeof data.original_model === "string" && data.original_model && typeof data.fallback_model === "string" && data.fallback_model) {
+      emit({ type: "provider/modelFallback", scope: threadScope(), threadId, providerThreadId: saved.nativeId, reason: "refusal",
+        originalModel: data.original_model, fallbackModel: data.fallback_model, message: String(data.message ?? "") });
+    }
     if (record.kind === "teleport") {
       const imported = z.array(z.object({ request_id: z.string(), input: object, state: z.string() })).parse(data.prompts);
       for (const [index, prompt] of imported.entries()) {
@@ -225,6 +325,7 @@ export function projectRecord(db: DbConnection, threadId: string, record: Sessio
         tx.insert(cloudroomCommands).values({ id: receipt.request_id, threadId, command: receipt.command as "prompt" | "edit" | "cancel" | "reorder" | "steer", input: JSON.stringify(data.input), state: receipt.state, createdAt: record.timestamp_ms ?? 0 }).run();
       }
       saveCommandState(tx, threadId, receipt.request_id, receipt.state);
+      if (["failed", "unknown", "unknown_after_restart"].includes(receipt.state)) lostInstructions(tx, threadId, previous);
       if (receipt.command === "start" && receipt.state === "accepted" && object.parse(data.input).workspace) saveStatus(tx, threadId, "pending");
       if ((harness === "pi" || isAcpProvider(harness) || harness === "claude-code") && (receipt.command === "auto" || (previous && receipt.command === "prompt")) && FINISHED.includes(receipt.state) && saved.nativeId && turnStarted(tx, threadId, receipt.request_id)) {
         emit({ threadId, providerThreadId: saved.nativeId, scope: turnScope(receipt.request_id), type: "turn/completed", status: turnStatus(receipt.state) });
@@ -247,12 +348,15 @@ export function projectRecord(db: DbConnection, threadId: string, record: Sessio
       }
       if (receipt.command === "cancel" && ["accepted", "completed"].includes(receipt.state)) {
         const stored = data.input ? object.parse(data.input) : previous ? JSON.parse(previous.input) as { target_request_id?: string } : {};
-        if (typeof stored.target_request_id === "string") saveCommandState(tx, threadId, stored.target_request_id, "cancelled");
+        if (typeof stored.target_request_id === "string") {
+          saveCommandState(tx, threadId, stored.target_request_id, "cancelled");
+          lostInstructions(tx, threadId, command(tx, stored.target_request_id));
+        }
       }
-      if (receipt.command === "steer" && receipt.state === "completed" && previous?.command === "steer" && saved.nativeId && !requestedTurns(tx, threadId).has(bbRequestId(previous.id))) {
+      if (receipt.command === "steer" && receipt.state === "completed" && previous?.command === "steer" && saved.nativeId && !requestedTurns(tx, threadId).has(roomRequestId(previous.id))) {
         const target = z.object({ target_request_id: z.string() }).parse(JSON.parse(previous.input)).target_request_id;
         emit(promptRequestedEvent(tx, saved, previous, target));
-        emit({ threadId, providerThreadId: saved.nativeId, scope: turnScope(target), type: "turn/input/accepted", clientRequestId: bbRequestId(previous.id) });
+        emit({ threadId, providerThreadId: saved.nativeId, scope: turnScope(target), type: "turn/input/accepted", clientRequestId: roomRequestId(previous.id) });
       }
     }
     if (record.kind === "receipt" && data.command === "rewind" && data.state === "accepted") saveStatus(tx, threadId, "starting");
@@ -263,7 +367,7 @@ export function projectRecord(db: DbConnection, threadId: string, record: Sessio
     if (record.kind === "rewind" && typeof data.id === "string") {
       const checkpoints = tx.select({ data: events.data }).from(events).where(and(eq(events.threadId, threadId), eq(events.type, "system/operation"))).all();
       const checkpoint = checkpoints.map((row) => JSON.parse(row.data)).find((event) => event.operation === "checkpoint" && event.metadata?.id === data.before);
-      const cutoff = typeof checkpoint?.metadata?.request_id === "string" ? requestedTurns(tx, threadId).get(bbRequestId(checkpoint.metadata.request_id))?.sequence : undefined;
+      const cutoff = typeof checkpoint?.metadata?.request_id === "string" ? requestedTurns(tx, threadId).get(roomRequestId(checkpoint.metadata.request_id))?.sequence : undefined;
       if (cutoff !== undefined) {
         const last = tx.select({ sequence: events.sequence }).from(events).where(eq(events.threadId, threadId)).orderBy(desc(events.sequence)).get();
         deleteThreadEventSuffixInTransaction(tx, { threadId, cutoffSequence: cutoff, oldMaxSequence: last?.sequence ?? cutoff });
@@ -326,7 +430,7 @@ export function projectRecord(db: DbConnection, threadId: string, record: Sessio
         saveBinding(tx, threadId, { turnId: data.request_id });
         const request = command(tx, data.request_id);
         saveCommandState(tx, threadId, data.request_id, "running");
-        if (request?.command === "prompt" && !JSON.parse(request.input).teleport_handoff && !requestedTurns(tx, threadId).has(bbRequestId(data.request_id))) {
+        if (request?.command === "prompt" && !JSON.parse(request.input).teleport_handoff && !requestedTurns(tx, threadId).has(roomRequestId(data.request_id))) {
           const switched = switchContinuation(tx, threadId, harness, request);
           if (switched) emit({ type: "system/operation", scope: threadScope(), threadId, operation: THREAD_ACCOUNT_SWITCH_OPERATION, operationId: `account-switch:${data.request_id}`,
             status: "completed", message: `Continued on ${switched.to}.`, metadata: switched });
@@ -335,7 +439,7 @@ export function projectRecord(db: DbConnection, threadId: string, record: Sessio
         if ((harness === "pi" || isAcpProvider(harness) || harness === "claude-code") && saved.nativeId) {
           const base = { threadId, providerThreadId: saved.nativeId, scope: turnScope(data.request_id) };
           emit({ ...base, type: "turn/started" });
-          if (request) emit({ ...base, type: "turn/input/accepted", clientRequestId: bbRequestId(data.request_id) });
+          if (request) emit({ ...base, type: "turn/input/accepted", clientRequestId: roomRequestId(data.request_id) });
         }
       }
       const status = statusOf(state);
@@ -437,7 +541,7 @@ export function projectRecord(db: DbConnection, threadId: string, record: Sessio
             emit({ ...base, type: method });
             const request = command(tx, saved.turnId);
             if (request?.command === "prompt") {
-              emit({ ...base, type: "turn/input/accepted", clientRequestId: bbRequestId(request.id) });
+              emit({ ...base, type: "turn/input/accepted", clientRequestId: roomRequestId(request.id) });
             }
           } else if (method === "turn/completed") {
             const turn = object.parse(params.turn);
@@ -489,11 +593,20 @@ export function projectRecord(db: DbConnection, threadId: string, record: Sessio
         }
       }
     }
-    appendThreadEventsInTransaction(tx, projected.map((event) => ({
-      threadId, environmentId: null, providerThreadId: saved.nativeId, createdAt: record.timestamp_ms,
-      type: event.type, scope: event.scope, data: event,
-    } as AppendStoredThreadEventArgs)));
+    const writes: AppendStoredThreadEventArgs[] = [];
+    for (const event of projected) {
+      const joined = held.piece && joinStreamDeltas(held.piece.data as ThreadEvent, event);
+      if (held.piece && joined) { held.piece = { ...held.piece, data: joined } as AppendStoredThreadEventArgs; continue; }
+      writes.push(...takeHeld());
+      const args = { threadId, environmentId: null, providerThreadId: saved.nativeId, createdAt: record.timestamp_ms, type: event.type, scope: event.scope, data: event } as AppendStoredThreadEventArgs;
+      if (isStreamDeltaEvent(event)) held.piece = args;
+      else writes.push(args);
+    }
+    appendThreadEventsInTransaction(tx, writes);
     saveBinding(tx, threadId, { cursor: record.sequence, error: null });
     return projected.map((event) => event.type);
+    });
+    appendThreadEventsInTransaction(tx, takeHeld());
+    return types;
   });
 }

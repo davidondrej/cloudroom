@@ -1,7 +1,7 @@
 import { useMutation } from "@tanstack/react-query";
 import { useState } from "react";
 import { Button } from "@cloudroom/shared-ui/button";
-import { ClaudeSignIn, useClaudeConnection } from "@/components/ClaudeConnection";
+import { ClaudeSignIn, useClaudeConnection, useInstallPercent } from "@/components/ClaudeConnection";
 import { PromptStackCard } from "@/components/promptbox/banner/PromptStackCard";
 import { sdk } from "@/lib/sdk";
 
@@ -9,14 +9,16 @@ const loginCommands: Record<string, string> = {
   "acp-cursor": "cursor-agent login",
 };
 
-async function signInMacCodex(): Promise<void> {
+/** Signs in on this Mac; a missing Codex installs first, and `onInstall` gets when that began (ADR 20261111-123959). */
+async function signInMacCodex(onInstall: (since: number | null) => void): Promise<void> {
   const call = async (method: "GET" | "POST") => {
     const response = await fetch("/api/v1/cloudroom/mac/codex-login", method === "POST" ? { method, headers: { "content-type": "application/json" }, body: "{}" } : {});
     if (!response.ok) throw new Error("Codex sign-in could not start.");
-    return (await response.json()) as { state: string; message?: string };
+    return (await response.json()) as { state: string; message?: string; installing_since?: number | null };
   };
   let status = await call("POST");
   while (status.state === "waiting") {
+    onInstall(status.installing_since ?? null);
     await new Promise((resolve) => setTimeout(resolve, 2000));
     status = await call("GET");
   }
@@ -25,21 +27,23 @@ async function signInMacCodex(): Promise<void> {
 
 function CodexSignIn({ onSignedIn, continuing }: { onSignedIn: () => void; continuing: boolean }) {
   const [waiting, setWaiting] = useState(false);
+  const [installingSince, setInstallingSince] = useState<number | null>(null);
+  const installing = useInstallPercent(installingSince);
   const [error, setError] = useState("");
   const signIn = () => {
     setWaiting(true);
     setError("");
-    signInMacCodex().then(onSignedIn, (cause: unknown) => setError(cause instanceof Error ? cause.message : String(cause))).finally(() => setWaiting(false));
+    signInMacCodex(setInstallingSince).then(onSignedIn, (cause: unknown) => setError(cause instanceof Error ? cause.message : String(cause))).finally(() => { setWaiting(false); setInstallingSince(null); });
   };
   return (
     <>
       <div className="flex items-center justify-between gap-2">
         <div>
           <p className="text-sm font-medium">Sign in to Codex to continue</p>
-          <p className="text-muted-foreground">{waiting ? "Finish signing in in your browser." : "Your login expired. Your message is saved."}</p>
+          <p className="text-muted-foreground">{installing !== null ? "Installing Codex first." : waiting ? "Finish signing in in your browser." : "Your login expired. Your message is saved."}</p>
         </div>
-        <Button type="button" size="sm" className="h-7 shrink-0 text-xs" disabled={waiting || continuing} onClick={signIn}>
-          {continuing ? "Starting…" : waiting ? "Waiting…" : "Sign in"}
+        <Button type="button" size="sm" className="h-7 shrink-0 text-xs tabular-nums" disabled={waiting || continuing} onClick={signIn}>
+          {continuing ? "Starting…" : installing !== null ? `Installing ${installing}%` : waiting ? "Waiting…" : "Sign in"}
         </Button>
       </div>
       {error && <p role="alert" className="mt-2 text-destructive">{error}</p>}

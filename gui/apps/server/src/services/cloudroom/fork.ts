@@ -26,7 +26,7 @@ import { CloudroomError, UPLOAD_PART, type CloudroomClient, type Harness, type T
 import { cloudroom } from "./commands.js";
 import { PIECE_TIMEOUT, retry, SKIPPED } from "./project-copy.js";
 import { binding, isDead } from "./store.js";
-import { allowance, codexLineage, download, findNative, vm } from "./teleport-local.js";
+import { allowance, codexLineage, conversationParser, download, findNative, vm } from "./teleport-local.js";
 
 /** A Cloud fork: a new Cloud thread, in its own sandbox, that continues another Cloud thread's conversation
  *  from a chosen turn, with that thread's code (docs/scopes/sandboxes.md). Saved in the fork's first message. */
@@ -253,7 +253,7 @@ function localForkSource(deps: Parameters<typeof cloudroom>[0], sourceId: string
   };
 }
 
-const lines = (native: Buffer) => native.toString("utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line) as { type?: string; uuid?: string; parentUuid?: string | null; isMeta?: boolean });
+const lines = (native: Buffer, parse = conversationParser()) => native.toString("utf8").split("\n").filter(Boolean).map((line) => parse(line) as { type?: string; uuid?: string; parentUuid?: string | null; isMeta?: boolean });
 const prompt = (entry: ReturnType<typeof lines>[number]) => entry.type === "user" && entry.isMeta !== true;
 
 export function corePoint(harness: string, native: Buffer, checkpoint: string | undefined): Pick<CloudFork, "before" | "last_turn_id"> {
@@ -542,8 +542,10 @@ function codeScript(workspace: string, id: string, thin: boolean): string {
 export async function uploadInParts(client: CloudroomClient, file: string, data: Buffer, signal?: AbortSignal): Promise<void> {
   for (let offset = 0; offset < data.length; offset += UPLOAD_PART) {
     const part = new Uint8Array(data.subarray(offset, offset + UPLOAD_PART));
-    const send = (wait?: AbortSignal) => client.runOnVm({ command: `mkdir -p ~/.cache/cloudroom && truncate -s ${offset} ~/${file} && cat >> ~/${file}` }, wait, part);
-    const result = await (signal ? send(signal) : retry(() => send(AbortSignal.timeout(PIECE_TIMEOUT))));
+    // Each part overwrites its own place and the file never grows past `data`, so a send that runs late or twice
+    // rewrites the same bytes. A busy or waking sandbox refuses for a few seconds: resend unless the caller gave up (#1314).
+    const send = (wait?: AbortSignal) => client.runOnVm({ command: `f=~/${file} && mkdir -p ~/.cache/cloudroom && dd of="$f" bs=${UPLOAD_PART} seek=${offset / UPLOAD_PART} conv=notrunc && truncate -s ${data.length} "$f"` }, wait, part);
+    const result = await retry(() => { signal?.throwIfAborted(); return send(signal ?? AbortSignal.timeout(PIECE_TIMEOUT)); });
     if (result.code !== 0) throw new Error(Buffer.from(result.stderr, "hex").toString().trim() || "The upload failed.");
   }
 }

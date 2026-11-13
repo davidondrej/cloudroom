@@ -1,4 +1,5 @@
 import { join } from "node:path";
+import { personalProjectAllowsEnvironment } from "@cloudroom/domain";
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import {
@@ -14,8 +15,9 @@ import {
   listAllAutomations,
   listAutomationRuns,
   listAutomationsForProject,
-  listRunningAutomationRunsByThread,
+  getThreadReportRun,
   linkRunThread,
+  recoverFailedRun,
   setAutomationEnabled,
   THREAD_ARCHIVED_ERROR,
   setReviewed,
@@ -54,7 +56,7 @@ import {
   type RunAutomationInput,
   type UpdateAutomationInput,
 } from "./rpc-types.js";
-import { buildReview } from "./review.js";
+import { buildReview, reportsSchema } from "./review.js";
 import {
   computeInitialNextRunAt,
   computeNextScheduledTime,
@@ -340,7 +342,7 @@ function requireCanonicalAutomationForWrite(
 }
 
 function toStoredAutomationReadResult(
-  bb: Pick<ServiceApi, "log">,
+  room: Pick<ServiceApi, "log">,
   pluginDataDir: string,
   row: AutomationRow,
 ): AutomationReadResult {
@@ -349,7 +351,7 @@ function toStoredAutomationReadResult(
     return withStoredScriptPath(pluginDataDir, decoded.automation);
   }
   if (decoded.automation.problem === "invalid-stored-data") {
-    bb.log.warn(
+    room.log.warn(
       `Malformed stored automation ${row.id}: ${decoded.error.message}`,
     );
   }
@@ -492,34 +494,55 @@ function parseRunCursor(
 }
 
 async function projectNameById(
-  bb: Pick<ServiceApi, "sdk" | "log">,
+  room: Pick<ServiceApi, "sdk" | "log">,
 ): Promise<Map<string, string>> {
   try {
     return new Map(
-      (await listLiveProjects(bb)).map((project) => [
+      (await listLiveProjects(room)).map((project) => [
         project.id,
         project.name ?? project.id,
       ]),
     );
   } catch (error) {
-    bb.log.warn(
+    room.log.warn(
       `Failed to list projects for automations overview: ${errorMessage(error)}`,
     );
     return new Map();
   }
 }
 
-const projectAvailableSchema = z.object({ id: z.string() }).passthrough();
+const projectAvailableSchema = z
+  .object({ id: z.string(), kind: z.string().optional() })
+  .passthrough();
 
 async function requireProjectAvailable(
-  bb: Pick<ServiceApi, "sdk">,
+  room: Pick<ServiceApi, "sdk">,
   projectId: string,
-): Promise<void> {
+): Promise<{ kind?: string }> {
   try {
-    projectAvailableSchema.parse(await bb.sdk.projects.get({ projectId }));
+    return projectAvailableSchema.parse(
+      await room.sdk.projects.get({ projectId }),
+    );
   } catch (error) {
     throw new Error(
       `Project ${projectId} is not available: ${errorMessage(error)}`,
+    );
+  }
+}
+
+/** A fresh-thread loop in the Personal project must pass thread creation's workspace rule, or every run fails. */
+function assertLoopWorkspace(
+  project: { kind?: string },
+  execution: AutomationExecution,
+): void {
+  if (
+    project.kind === "personal" &&
+    execution.mode === "agent" &&
+    execution.targetThreadId === undefined &&
+    !personalProjectAllowsEnvironment(execution.environment)
+  ) {
+    throw new Error(
+      "Personal project loops must use the personal workspace. Leave out --environment and --new-environment, or create the loop in the project that owns this folder.",
     );
   }
 }
@@ -536,12 +559,12 @@ function tookEvents(run: AutomationRunRow): boolean {
 
 /** A Local webhook loop's URL from the website, which keeps the events while this Mac is off (ADR 0262). */
 async function webhookUrl(
-  bb: ServiceApi,
+  room: ServiceApi,
   automationId: string,
 ): Promise<string> {
-  if (!bb.sdk.cloudroom)
+  if (!room.sdk.cloudroom)
     throw new Error("Webhook loops need a Cloudroom account.");
-  const { url } = await bb.sdk.cloudroom.automations({
+  const { url } = await room.sdk.cloudroom.automations({
     action: "hook",
     local: automationId,
   });
@@ -666,7 +689,8 @@ export function createAutomationService(args: {
     },
 
     async create(payload) {
-      await requireProjectAvailable(bb, payload.projectId);
+      const project = await requireProjectAvailable(bb, payload.projectId);
+      assertLoopWorkspace(project, payload.execution);
       const now = Date.now();
       validateTrigger(payload.trigger, now);
       assertNotRecursiveCreation(db, payload.createdByThreadId);
@@ -744,7 +768,7 @@ export function createAutomationService(args: {
     },
 
     async update(input) {
-      await requireProjectAvailable(bb, input.projectId);
+      const project = await requireProjectAvailable(bb, input.projectId);
       const current = requireProjectAutomation(db, input);
       const currentAutomation = decodeAutomationRow(current).automation;
       if (
@@ -839,6 +863,8 @@ export function createAutomationService(args: {
         }
         patch.execution = updatedExecution;
       }
+      if (patch.execution !== undefined)
+        assertLoopWorkspace(project, patch.execution);
       if (
         "problem" in currentAutomation &&
         currentAutomation.problem === "missing-agent-prompt" &&
@@ -1061,16 +1087,31 @@ export function createAutomationService(args: {
     },
 
     async report(input) {
-      const run = listRunningAutomationRunsByThread(db, input.threadId)[0];
+      const run = getThreadReportRun(db, input.threadId);
       const automation = run ? getAutomation(db, run.automationId) : null;
       if (!run || !automation)
         throw new Error(
-          "This thread is not a running loop run, so there is nothing to report.",
+          "Nothing to report: no loop run is running in this thread, and it is not the thread of one finished loop run.",
         );
       if (!bb.sdk.cloudroom || (await signedOut(bb.sdk))) {
         throw new Error(
           "Loop reports need a Cloudroom sign-in; this run's local status is still recorded.",
         );
+      }
+      // A finished run keeps the report it sent from this thread: a later turn there, such as a user's follow-up,
+      // can't flip it. Another thread of its check script can (the newest report wins). One read, only when late.
+      if (run.status !== "running") {
+        const saved = reportsSchema.parse(
+          await bb.sdk.cloudroom.automations({
+            action: "reports",
+            runs: [run.id],
+            threads: [],
+          }),
+        );
+        if (saved.reports.some((row) => row.thread_id === input.threadId))
+          throw new Error(
+            "This loop run already reported from this thread and has finished, so its report stays.",
+          );
       }
       await bb.sdk.cloudroom.automations({
         action: "report",
@@ -1084,6 +1125,24 @@ export function createAutomationService(args: {
         reason: input.reason,
         actions: input.actions,
       });
+      // A failed run's thread that came back to report did the run's work, so the run gets no retry, unless it
+      // reports that it failed (#1443).
+      if (
+        run.status === "failed" &&
+        input.outcome !== "failed" &&
+        recoverFailedRun(db, run.id, Date.now())
+      )
+        publishAutomationChange(bb, automation.projectId, [
+          "automations-changed",
+          "automation-runs-changed",
+        ]);
+      // A running run's idle event reloads Review; one that already settled needs this signal to show the report.
+      if (run.status !== "running")
+        publishAutomationChange(
+          bb,
+          REVIEW_SIGNAL_PROJECT,
+          "automation-runs-changed",
+        );
       return { reported: true };
     },
 

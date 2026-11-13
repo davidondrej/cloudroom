@@ -25,7 +25,7 @@ import { writeHostFile } from "./file-write.js";
 
 type SkillRootResolution = DeclaredScanRootResolution;
 
-function createBbSkillScanRoot(
+function createRoomSkillScanRoot(
   rootPath: string,
   rootKind: Extract<SkillRootKind, `bb-${string}`>,
 ): SkillScanRoot {
@@ -40,13 +40,13 @@ function createBbSkillScanRoot(
   };
 }
 
-function resolveBbSkillScanRoots(
+function resolveRoomSkillScanRoots(
   resolution: SkillRootResolution,
 ): SkillScanRoot[] {
   const roots: SkillScanRoot[] = [];
   if (resolution.cwd !== null) {
     roots.push(
-      createBbSkillScanRoot(
+      createRoomSkillScanRoot(
         path.join(resolution.cwd, ".bb", "skills"),
         "bb-project",
       ),
@@ -88,7 +88,7 @@ function classifySkillRoot(
 export async function resolveSkillScanRoots(
   resolution: SkillRootResolution,
 ): Promise<SkillScanRoot[]> {
-  const skillRoots = resolveBbSkillScanRoots(resolution);
+  const skillRoots = resolveRoomSkillScanRoots(resolution);
   const providerRoots = await resolveDeclaredScanRoots(resolution);
   for (const root of providerRoots) {
     const classification = classifySkillRoot(root, resolution);

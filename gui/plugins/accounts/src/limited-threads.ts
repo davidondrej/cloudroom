@@ -25,12 +25,12 @@ const code = (error: unknown) => Reflect.get(Object(error), "code");
  * any thread or Settings, continues every one of them on it (ADR 20261107-082836). Cloud threads are Core's (ADR 0117).
  */
 export async function limitedThreads(
-  bb: BbPluginApi,
+  room: BbPluginApi,
   label: (provider: Provider, account: string) => Promise<string>,
 ) {
-  const stopped = storedSchema.parse(await bb.storage.kv.get(KEY));
+  const stopped = storedSchema.parse(await room.storage.kv.get(KEY));
   const resuming = new Set<string>();
-  const save = () => bb.storage.kv.set(KEY, stopped);
+  const save = () => room.storage.kv.set(KEY, stopped);
 
   const forget = async (threadId: string) => {
     if (!(threadId in stopped)) return;
@@ -51,7 +51,7 @@ export async function limitedThreads(
       };
       for (let attempt = 1; attempt <= ATTEMPTS; attempt++) {
         try {
-          await bb.sdk.threads.retry({
+          await room.sdk.threads.retry({
             threadId,
             ...(entry.requestId ? { turnRequestId: entry.requestId } : {}),
             reason: "Switched account",
@@ -63,14 +63,14 @@ export async function limitedThreads(
           // Stopped, or moved on since: nothing to continue.
           if (code(error) === "no_failed_turn") return await forget(threadId);
           if (code(error) !== "retry_already_queued" || attempt === ATTEMPTS) {
-            bb.log.warn(`Thread ${threadId} not continued: ${String(error)}`);
+            room.log.warn(`Thread ${threadId} not continued: ${String(error)}`);
             return;
           }
           // A retry waiting for the old account's reset goes: the new account needs no wait.
-          const queued = await bb.sdk.threads.queuedMessages.list({ threadId });
+          const queued = await room.sdk.threads.queuedMessages.list({ threadId });
           for (const row of queued) {
             if (row.payload.kind !== "retry") continue;
-            await bb.sdk.threads.queuedMessages.delete({
+            await room.sdk.threads.queuedMessages.delete({
               threadId,
               queuedMessageId: row.id,
             });

@@ -7,6 +7,7 @@ import {
   stubServerApi,
 } from "../helpers/command-output-harness.js";
 import type { CommandRegistrar } from "../helpers/command-output-harness.js";
+import { createCliRoomSdk } from "../../client.js";
 import {
   formatMachineLastSeen,
   registerMachineCommands,
@@ -218,7 +219,7 @@ describe("room-cli machine command output", () => {
 
     expect(collectLogPayloads(vi.mocked(console.log))).toEqual([
       "",
-      "Name         ID            Type        Status        Provider       Last seen\n-----------  ------------  ----------  ------------  -------------  ---------\nworkstation  host-primary  persistent  connected     user-enrolled  2m ago\n-----------  ------------  ----------  ------------  -------------  ---------\nlaptop       host-remote   persistent  disconnected  ssh            never",
+      "Name         ID            Type        Status        Provider       Last seen\n-----------  ------------  ----------  ------------  -------------  ---------\nworkstation  host-primary  persistent  connected     user-enrolled  2m ago\nlaptop       host-remote   persistent  disconnected  ssh            never",
       "",
     ]);
   });
@@ -245,6 +246,43 @@ describe("room-cli machine command output", () => {
     ).toEqual([...hosts, sandbox]);
   });
 
+  // `slow`: the VPS missed the website's 5 s health probe, so the list must wait longer than that for the answer.
+  it.each([
+    [["machine", "list"], true, false],
+    [["machine", "list"], false, false],
+    [["machine", "list"], true, true],
+    [["machine", "show", "vps", "--json"], true, false],
+    [["machine", "show", "srv1"], true, false],
+  ])(
+    "room-cli %j finds a connected VPS (%s, slow: %s)",
+    async (args, connected, slow) => {
+      const vps = {
+        connected,
+        name: connected ? "srv1.example.cloud" : null,
+        health: slow ? null : { running: 2 },
+      };
+      stubServerApi({ "v1.hosts.$get": vi.fn(async () => hosts) });
+      vi.mocked(globalThis.fetch).mockResolvedValue(Response.json(vps));
+      vi.mocked(createCliRoomSdk).mockClear();
+
+      await runCommand(args, register);
+
+      const output = collectLogPayloads(vi.mocked(console.log));
+      if (args[1] === "show") expect(JSON.parse(output[0]!)).toEqual(vps);
+      else if (connected)
+        expect(output.at(-1)).toBe(
+          `VPS: srv1.example.cloud (${slow ? "offline" : "online, 2 agents running"}). Start threads on it from the app's new-thread picker; \`room-cli machine show vps\` shows it.`,
+        );
+      else expect(output.join("\n")).not.toContain("VPS");
+      if (slow)
+        expect(
+          vi
+            .mocked(createCliRoomSdk)
+            .mock.calls.some(([, ms]) => (ms ?? 0) > 5_000),
+        ).toBe(true);
+    },
+  );
+
   it("room-cli machine retry-update resolves the machine and requests a retry", async () => {
     const retryUpdate = vi.fn(async () => ({ ok: true as const }));
     stubServerApi({
@@ -258,6 +296,28 @@ describe("room-cli machine command output", () => {
     expect(collectLogPayloads(vi.mocked(console.log))).toEqual([
       "Machine host-remote update retry requested",
     ]);
+  });
+
+  it("room-cli machine provider-cli install runs the action status offers", async () => {
+    const install = vi.fn(async () => new Response(""));
+    stubServerApi({
+      "v1.hosts.$get": vi.fn(async () => hosts),
+      "v1.hosts.:id.provider-clis.status.$get": vi.fn(async () => ({
+        pi: { installAction: { kind: "update" } },
+      })),
+      "v1.hosts.:id.provider-clis.install.$post": install,
+    });
+
+    await runCommand(
+      ["machine", "provider-cli", "install", "laptop", "pi"],
+      register,
+    );
+
+    expect(install).toHaveBeenCalledWith(
+      expect.objectContaining({
+        json: { provider: "pi", actionKind: "update" },
+      }),
+    );
   });
 
   it.each([
@@ -364,6 +424,9 @@ describe("machine selection", () => {
   it("lists available machines for an unknown selector", () => {
     expect(() => resolveMachineId(hosts, "desktop")).toThrow(
       "Machine 'desktop' was not found. Available machines: workstation (host-primary), laptop (host-remote).",
+    );
+    expect(() => resolveMachineId(hosts, "vps")).toThrow(
+      "use VPS in the app's new-thread picker for now.",
     );
   });
 

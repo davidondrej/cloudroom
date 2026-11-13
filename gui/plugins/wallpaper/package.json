@@ -1,0 +1,38 @@
+{
+  "name": "bb-plugin-wallpaper",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Put your own image or GIF behind New thread and your chats. Save six and switch in one click.",
+  "engines": {
+    "bb": ">=0.0"
+  },
+  "bb": {
+    "name": "Wallpaper",
+    "description": "Put your own image or GIF behind New thread and your chats. Save six and switch in one click.",
+    "branding": {
+      "icon": "Image"
+    },
+    "server": "./server.ts",
+    "app": "./app.tsx"
+  },
+  "keywords": [
+    "bb-plugin"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "prepare:bundled": "bb-plugin-build prepare-bundled"
+  },
+  "dependencies": {
+    "@cloudroom/shared-ui": "workspace:*",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@cloudroom/plugin-build": "workspace:*",
+    "@get-bb/plugin-sdk": "workspace:*",
+    "@types/node": "^22.0.0",
+    "@types/react": "^19.0.0",
+    "react": "^19.0.0",
+    "typescript": "npm:@typescript/typescript6@^6.0.2"
+  }
+}

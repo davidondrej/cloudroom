@@ -24,8 +24,8 @@ import { useThreadTimelineNavigation } from "@/components/thread/timeline/Thread
 import { definePluginApp } from "./plugin-app-definition";
 import { installDeprecatedAliases } from "./plugin-sdk-deprecated-aliases";
 import {
-  useBbContext,
-  useBbNavigate,
+  useRoomContext,
+  useRoomNavigate,
   useComposer,
   useComposerView,
   useProviders,
@@ -52,8 +52,8 @@ export const pluginSdkAppImplementation = installDeprecatedAliases(
     definePluginApp,
     experimental_Icon: Icon,
     experimental_ProviderIcon: ProviderIcon,
-    useBbContext,
-    useBbNavigate,
+    useBbContext: useRoomContext,
+    useBbNavigate: useRoomNavigate,
     experimental_useAppPanel,
     experimental_useFixedTabTarget,
     useComposer,

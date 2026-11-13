@@ -1,13 +1,16 @@
 import { findProviderEnvironmentContainingPath } from "@cloudroom/db";
 import { realpathSync } from "node:fs";
 import { resolve } from "node:path";
-import { isBbManagedWorkspacePath } from "../threads/workspace-paths.js";
+import { isRoomManagedWorkspacePath } from "../threads/workspace-paths.js";
 import {
   getInstalledPlugin,
   getInstalledPluginRegistration,
+  listInstalledPlugins,
   listUnnormalizedPluginRegistrations,
+  markInstalledPluginRemoved,
   normalizeInstalledPluginRegistration,
   setInstalledPluginSourceClassification,
+  renameBuiltinPlugin,
   upsertInstalledPlugin,
   type InstalledPluginRow,
   type LegacyPluginExactResolution,
@@ -18,6 +21,8 @@ import {
 } from "@cloudroom/db";
 import {
   BUNDLED_PLUGINS,
+  RENAMED_BUILTIN_PLUGINS,
+  RETIRED_BUNDLED_PLUGIN_NAMES,
   builtinPluginSource,
   type BundledPluginRegistration,
 } from "./builtin-registry.js";
@@ -446,7 +451,7 @@ export function createPluginRegistration(context: PluginRegistrationContext) {
             "plugin subdirectory",
           );
     if (
-      isBbManagedWorkspacePath({ dataDir: deps.dataDir, path: rootDir }) ||
+      isRoomManagedWorkspacePath({ dataDir: deps.dataDir, path: rootDir }) ||
       findProviderEnvironmentContainingPath(deps.db, rootDir) !== null
     ) {
       logger.warn(
@@ -666,6 +671,20 @@ export function createPluginRegistration(context: PluginRegistrationContext) {
   }
 
   async function reconcileBundled(): Promise<void> {
+    for (const renamed of RENAMED_BUILTIN_PLUGINS) {
+      renameBuiltinPlugin(deps.db, renamed);
+    }
+    for (const row of listInstalledPlugins(deps.db)) {
+      const name = row.sourceKind === "builtin" ? row.sourceBuiltinName : null;
+      if (
+        name !== null &&
+        RETIRED_BUNDLED_PLUGIN_NAMES.has(name) &&
+        !bundledPlugins.some((bundled) => bundled.name === name)
+      ) {
+        markInstalledPluginRemoved(deps.db, row.id);
+        logger.info(`plugin ${row.id} is no longer part of the app; removed`);
+      }
+    }
     for (const bundled of bundledPlugins) {
       const source = builtinPluginSource(bundled.name);
       let manifest: PluginManifest;

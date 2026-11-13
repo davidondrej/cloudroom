@@ -8,7 +8,7 @@ import { tarCommand } from "@cloudroom/process-utils";
 import type { CloudroomClient } from "../../src/services/cloudroom/client.js";
 import { checksOutCrlf } from "../../src/services/cloudroom/project-copy.js";
 import { landForkCode, sourceCode } from "../../src/services/cloudroom/fork.js";
-import { allowance, applyChanges, cloudChanges, codexLineage, download, packChangesCommand } from "../../src/services/cloudroom/teleport-local.js";
+import { allowance, applyChanges, cloudChanges, codexLineage, conversationParser, download, packChangesCommand } from "../../src/services/cloudroom/teleport-local.js";
 
 it("Teleport to Local never overwrites Mac work and never writes into .git", async () => {
   const temp = mkdtempSync(join(tmpdir(), "cloudroom-teleport-local-"));
@@ -161,7 +161,7 @@ it.skipIf(process.platform !== "linux")("Teleport to Local stops before switchin
   }
 });
 
-it("a replaced Core can't make downloads hold more than their sizes and shared allowance", async () => {
+it("a replaced Core can't make downloads hold more than their sizes, shared allowance, and JSON values", async () => {
   // `wc -c` reports `size`, and each piece holds `piece` bytes.
   const cloud = (size: string, piece: number) => async (command: string) => command.startsWith("[ -f") ? Buffer.from(`${size}\n`) : Buffer.alloc(piece);
   const client = {} as CloudroomClient;
@@ -174,6 +174,12 @@ it("a replaced Core can't make downloads hold more than their sizes and shared a
   const parents = Buffer.from(Array.from({ length: 65 }, (_, i) => `/parent-${i}.jsonl`).join("\n")).toString("hex");
   const lineage = { runOnVm: async () => ({ code: 0, stdout: parents, stderr: "", truncated: false }) } as unknown as CloudroomClient;
   await expect(codexLineage(lineage, "/fork.jsonl")).rejects.toThrow("too many parents");
+  // Tiny JSON values far inside the byte limit, in one line or spread over a file's lines.
+  const tiny = `[${"{},".repeat(3_000_000)}{}]`, parse = conversationParser();
+  parse(tiny);
+  parse(tiny);
+  expect(() => parse(tiny)).toThrow("too complex");
+  expect(() => conversationParser()(`[${tiny},${tiny},${tiny}]`)).toThrow("too complex");
 });
 
 it("CRLF checkouts are found in every spelling Git accepts", async () => {

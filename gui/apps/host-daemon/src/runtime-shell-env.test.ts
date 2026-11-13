@@ -6,7 +6,7 @@ import {
   createUserShellEnvResolver,
   prepareRuntimeShellEnv,
   resolvePowerShellExecutionPolicyDefault,
-  resolveLocalBbExecutablePath,
+  resolveLocalRoomExecutablePath,
   type SpawnUserShellEnv,
   type SpawnUserShellEnvArgs,
   type UserShellEnvSpawnResult,
@@ -162,7 +162,7 @@ describe("resolveLocalBbExecutablePath", () => {
     });
 
     await expect(
-      resolveLocalBbExecutablePath({
+      resolveLocalRoomExecutablePath({
         cliExecutablePath: cliEntryPath,
         cliRuntimePath,
       }),
@@ -175,7 +175,7 @@ describe("resolveLocalBbExecutablePath", () => {
     });
 
     await expect(
-      resolveLocalBbExecutablePath({
+      resolveLocalRoomExecutablePath({
         cliExecutablePath: cliEntryPath,
         cliRuntimePath,
       }),
@@ -190,7 +190,7 @@ describe("resolveLocalBbExecutablePath", () => {
     });
 
     await expect(
-      resolveLocalBbExecutablePath({
+      resolveLocalRoomExecutablePath({
         cliExecutablePath: cliEntryPath,
       }),
     ).rejects.toThrow(
@@ -206,7 +206,7 @@ describe("resolveLocalBbExecutablePath", () => {
       });
 
       await expect(
-        resolveLocalBbExecutablePath({
+        resolveLocalRoomExecutablePath({
           cliExecutablePath: cliEntryPath,
         }),
       ).rejects.toThrow(
@@ -222,7 +222,7 @@ describe("resolveLocalBbExecutablePath", () => {
 
     await expect(
       withPlatform("win32", () =>
-        resolveLocalBbExecutablePath({
+        resolveLocalRoomExecutablePath({
           cliExecutablePath: cliEntryPath,
         }),
       ),

@@ -79,6 +79,7 @@ const LARGE_CLAUDE_CONTEXT_MODELS = new Set([
   "best",
   "claude-fable-5",
   "claude-fable-5-1",
+  "claude-fable-5-2",
   "claude-mythos-5",
   "claude-mythos-5-1",
   "fable",

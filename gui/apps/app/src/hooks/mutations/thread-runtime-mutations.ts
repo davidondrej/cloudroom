@@ -128,7 +128,7 @@ export function useCreateThread() {
         () =>
           sdk.threads.spawn({
             ...request,
-            origin: "app",
+            origin: request.origin ?? "app",
             originKind: request.originKind ?? null,
             startedOnBehalfOf: request.startedOnBehalfOf ?? null,
           }),

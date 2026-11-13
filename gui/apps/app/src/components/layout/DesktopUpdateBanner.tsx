@@ -4,15 +4,17 @@ import type { ThreadListEntry } from "@cloudroom/domain";
 import { Button } from "@cloudroom/shared-ui/button";
 import { Icon } from "@cloudroom/shared-ui/icon";
 import { cn } from "@cloudroom/shared-ui/lib/utils";
-import { PromptStackCard } from "@/components/promptbox/banner/PromptStackCard";
-import { BbLogo } from "@/components/ui/bb-logo";
+import { PROMPT_STACK_ON_INPUT_CLASS, PromptStackCard } from "@/components/promptbox/banner/PromptStackCard";
+import { RoomLogo } from "@/components/ui/cloudroom-logo";
 import {
   DESKTOP_DOWNLOAD_URL,
   useDesktopUpdateInfo,
 } from "@/hooks/useDesktopUpdateInfo";
 import { useHostDesktopUpdate } from "@/hooks/queries/cloudroom-queries";
 import { useSidebarNavigationThreadSelection } from "@/hooks/queries/sidebar-navigation-query";
+import { getRoomDesktopInfo } from "@/lib/room-desktop";
 import { rawStringLocalStorage } from "@/lib/browser-storage";
+import { useCard } from "@/lib/popups";
 import { localHostStatusAtom } from "@/lib/system-config-atoms";
 import { openUrlInExternalBrowser } from "@/lib/url-open-routing";
 import { useAsyncAtomValue } from "@/lib/use-async-atom-value";
@@ -264,7 +266,9 @@ export function DesktopUpdateCard({ attached }: { attached: boolean }) {
   }, []);
   const since = readBehindSince(update.desktopInfo?.version);
   const days = since === null ? 0 : Math.floor((now - since) / DAY_MS);
-  if (!update.offered || !agentsIdle || days < 3 || now < laterUntil) return null;
+  const wants = update.offered && agentsIdle && days >= 3 && now >= laterUntil;
+  const first = useCard("update", wants ? true : update.desktopInfo === null && getRoomDesktopInfo() !== null ? null : false);
+  if (!first) return null;
 
   const later = () => {
     const until = Date.now() + (days >= 7 ? 4 * HOUR_MS : DAY_MS);
@@ -276,14 +280,14 @@ export function DesktopUpdateCard({ attached }: { attached: boolean }) {
       ariaLabel="Update Cloudroom"
       className={cn(
         "mx-3 overflow-hidden rounded-xl border-primary/40 bg-[color-mix(in_oklab,var(--primary)_10%,var(--surface-raised-solid))] sm:mx-4",
-        attached && "relative z-10 -mb-5 rounded-b-none border-b-0 pb-3",
+        attached && PROMPT_STACK_ON_INPUT_CLASS,
       )}
     >
       <div
         data-testid="desktop-update-card"
         className="flex min-h-9 items-center gap-2 px-3 py-1.5 text-xs"
       >
-        <BbLogo className="size-4.5 shrink-0 rounded-[4px]" />
+        <RoomLogo className="size-4.5 shrink-0 rounded-[4px]" />
         <span className="min-w-0 flex-1 truncate">
           <span className="font-semibold text-foreground">
             Your version is {days} days behind.

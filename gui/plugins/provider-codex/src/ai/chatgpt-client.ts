@@ -101,6 +101,8 @@ interface OpenAiTranscriptionFetchArgs {
 
 interface CodexHttpErrorArgs {
   deadline: CodexRequestDeadline;
+  /** The error body, when the caller already read it. */
+  errorText?: string;
   operation: CodexRequestOperation;
   response: Response;
 }
@@ -325,12 +327,11 @@ async function readErrorText(
   response: Response,
   deadline: CodexRequestDeadline,
 ): Promise<string> {
-  const text = await readLimitedResponseText(response, {
+  return readLimitedResponseText(response, {
     deadline,
     maxBytes: CODEX_ERROR_TEXT_MAX_BYTES,
     overflowBehavior: "truncate",
   }).catch(() => "");
-  return text.length > 400 ? `${text.slice(0, 400)}...` : text;
 }
 
 type FailureCodes = [generic: ExperimentalAiServiceErrorCode, detail: string];
@@ -428,6 +429,7 @@ const CODEX_API_KEY_ROUTE_HINT: Record<CodexRequestOperation, string> = {
 
 async function createCodexHttpError({
   deadline,
+  errorText,
   operation,
   response,
 }: CodexHttpErrorArgs): Promise<AiServiceFailure> {
@@ -439,9 +441,12 @@ async function createCodexHttpError({
       `${prefix}: chatgpt.com answered with a Cloudflare challenge that bb cannot solve. Retry, or set ${CODEX_API_KEY_ROUTE_HINT[operation]} to an openai/ model with OPENAI_API_KEY.`,
     );
   }
-  const providerMessage = isHtmlResponse(response)
-    ? null
-    : extractProviderErrorMessage(await readErrorText(response, deadline));
+  const text = isHtmlResponse(response)
+    ? ""
+    : (errorText ?? (await readErrorText(response, deadline)));
+  const providerMessage = extractProviderErrorMessage(
+    text.length > 400 ? `${text.slice(0, 400)}...` : text,
+  );
   const details = providerMessage ? `: ${providerMessage}` : "";
   return new AiServiceFailure(
     ...codexRequestErrorCode(response.status),
@@ -803,17 +808,47 @@ async function fetchResponses(args: ResponsesFetchArgs): Promise<Response> {
       });
 }
 
+function rejectsReasoningEffort(errorText: string): boolean {
+  try {
+    const error = toJsonObject(toJsonObject(parseJsonValue(errorText))?.error);
+    return (
+      error?.param === "reasoning.effort" && error.code === "unsupported_value"
+    );
+  } catch {
+    return false;
+  }
+}
+
 export async function completeCodexInference(
   command: InferenceCompleteCommand,
 ): Promise<Extract<ExperimentalAiInferenceCompleteOutput, { ok: true }>> {
   const deadline = createCodexRequestDeadline(command.timeoutMs);
   const auth = await readCodexAuthCredentials();
   const request = buildCodexResponsesRequest(command);
-  const response = await fetchResponses({ auth, command, deadline, request });
+  let response = await fetchResponses({ auth, command, deadline, request });
+  let errorText: string | undefined;
+  // Some Codex models (gpt-6.1-sol, gpt-6-astra) reject "none"; retry once at their lowest level.
+  if (
+    request.reasoning.effort === "none" &&
+    response.status === 400 &&
+    !isHtmlResponse(response)
+  ) {
+    errorText = await readErrorText(response, deadline);
+    if (rejectsReasoningEffort(errorText)) {
+      errorText = undefined;
+      response = await fetchResponses({
+        auth,
+        command,
+        deadline,
+        request: { ...request, reasoning: { effort: "low" } },
+      });
+    }
+  }
 
   if (!response.ok) {
     throw await createCodexHttpError({
       deadline,
+      errorText,
       operation: "inference",
       response,
     });

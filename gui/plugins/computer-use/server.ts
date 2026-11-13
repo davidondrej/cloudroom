@@ -1,5 +1,3 @@
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import type {
   BbPluginApi,
   PluginCliContext,
@@ -90,31 +88,34 @@ export function outcomeOf(result: PluginCliResult): { outcome: string; effect: s
   }
 }
 
-export default async function computerUsePlugin(bb: BbPluginApi) {
-  const host = bb.hosts.experimental_client({ contract: hostContract });
+export default async function computerUsePlugin(room: BbPluginApi) {
+  const host = room.hosts.experimental_client({ contract: hostContract });
   const pending = new Map<string, { request: Promise<PluginInteractionResult>; startedAt: number }>();
   const track = (name: string, properties: Record<string, string | number | boolean | null>) =>
-    bb.experimental_telemetry.capture(name, { execution: "local", ...properties });
+    room.experimental_telemetry.capture(name, { execution: "local", ...properties });
   const busy = new Map<string, { threadId: string; at: number }>();
   const active = new Map<string, string>();
   const threadKey = (threadId: string) => `thread/${encodeURIComponent(threadId)}`;
 
   const readList = async (key: string) =>
-    z.array(appSchema).catch([]).parse((await bb.storage.kv.get(key)) ?? []);
+    z.array(appSchema).catch([]).parse((await room.storage.kv.get(key)) ?? []);
+  // macOS matches bundle IDs regardless of case, and approvals saved before #975 kept the typed case.
+  const listed = (list: AppIdentity[], key: string) =>
+    list.some((entry) => entry.key.toLowerCase() === key.toLowerCase());
   const addTo = async (key: string, app: AppIdentity) => {
     const list = await readList(key);
-    if (!list.some((entry) => entry.key === app.key)) await bb.storage.kv.set(key, [...list, app]);
+    if (!listed(list, app.key)) await room.storage.kv.set(key, [...list, app]);
   };
 
   async function threadInfo(threadId: string) {
-    const thread = threadHostSchema.parse(await bb.sdk.threads.get({ threadId, include: "host" }));
+    const thread = threadHostSchema.parse(await room.sdk.threads.get({ threadId, include: "host" }));
     return { hostId: thread.host?.id ?? null, provider: thread.providerId ?? null };
   }
 
   async function localHostId() {
     const hosts = z
       .array(z.object({ id: z.string(), status: z.string(), machineProviderId: z.string().nullable().optional() }))
-      .parse(await bb.sdk.hosts.list());
+      .parse(await room.sdk.hosts.list());
     return (
       hosts.find((entry) => entry.status === "connected" && !entry.machineProviderId)?.id ??
       hosts.find((entry) => entry.status === "connected")?.id ??
@@ -153,11 +154,11 @@ export default async function computerUsePlugin(bb: BbPluginApi) {
     const { threadId, app } = args;
     const always = await readList(ALWAYS_KEY);
     const thread = await readList(threadKey(threadId));
-    if ([...always, ...thread].some((entry) => entry.key === app.key)) return null;
+    if (listed([...always, ...thread], app.key)) return null;
     const pendingKey = `${threadId}\0${app.key}`;
     let entry = pending.get(pendingKey);
     if (!entry) {
-      const request = bb.ui.requestInput({
+      const request = room.ui.requestInput({
         threadId,
         rendererId: APPROVAL_RENDERER_ID,
         title: `Allow this agent to use ${app.name}?`,
@@ -234,6 +235,11 @@ export default async function computerUsePlugin(bb: BbPluginApi) {
     if (status.installMs !== null) track("computer_use_setup", { step: "driver_install", ok: true, ms: status.installMs });
     if (!status.supported) return fail("unsupported", status.reason ?? "Computer use is not available on this machine.");
     const app = await identify(hostId, gate);
+    if (gate.kind === "name" && !app)
+      return fail(
+        "app_not_installed",
+        `macOS doesn't know an app "${gate.name}". Check the bundle ID or name. An app inside another app (like Simulator in Xcode) may need one \`open <path to the .app>\` first, then retry.`,
+      );
     if (gate.kind !== "free" && !app) return fail("app_not_found", "No running app has that pid.");
     seen.app = app?.key ?? null;
     if (app) {
@@ -256,7 +262,7 @@ export default async function computerUsePlugin(bb: BbPluginApi) {
         tool,
         args: input,
         session: sessionFor(threadId),
-        shotsDir: join(tmpdir(), "cloudroom-computer-use", threadId.replace(/[^A-Za-z0-9_-]/g, "_")),
+        shotsKey: threadId.replace(/[^A-Za-z0-9_-]/g, "_"),
       },
       { hostId, timeoutMs: 150_000, ...(ctx.signal ? { signal: ctx.signal } : {}) },
     );
@@ -322,8 +328,8 @@ export default async function computerUsePlugin(bb: BbPluginApi) {
     }
   }
 
-  bb.agents.configure(() => ({ tools: [], skills: ["computer-use"] }));
-  bb.cli.register({
+  room.agents.configure(() => ({ tools: [], skills: ["computer-use"] }));
+  room.cli.register({
     name: "computer-use",
     summary: "See and control desktop apps, with a per-app approval from the user",
     commands,
@@ -336,11 +342,11 @@ export default async function computerUsePlugin(bb: BbPluginApi) {
     },
   });
 
-  bb.rpc.register(rpcContract, {
+  room.rpc.register(rpcContract, {
     getSettings: () => settings(),
     async removeAlwaysAllowed({ key }) {
       const list = await readList(ALWAYS_KEY);
-      await bb.storage.kv.set(ALWAYS_KEY, list.filter((entry) => entry.key !== key));
+      await room.storage.kv.set(ALWAYS_KEY, list.filter((entry) => entry.key !== key));
       return settings();
     },
     async requestPermission({ kind }) {
@@ -368,10 +374,10 @@ export default async function computerUsePlugin(bb: BbPluginApi) {
   }
 
   for (const event of ["thread.idle", "thread.failed"] as const)
-    bb.events.on(event, ({ thread }) => release(thread.id));
+    room.events.on(event, ({ thread }) => release(thread.id));
   for (const event of ["thread.archived", "thread.deleted"] as const) {
-    bb.events.on(event, async ({ thread }) => {
-      await bb.storage.kv.delete(threadKey(thread.id));
+    room.events.on(event, async ({ thread }) => {
+      await room.storage.kv.delete(threadKey(thread.id));
       await release(thread.id);
     });
   }

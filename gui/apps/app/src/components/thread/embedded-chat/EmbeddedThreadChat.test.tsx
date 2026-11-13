@@ -33,6 +33,7 @@ const mocks = vi.hoisted(() => ({
   serviceTier: undefined as string | undefined,
   supportsServiceTier: false,
   timelineRows: [] as Array<{ text: string }>,
+  contextWindowUsage: null as { usedTokens: number } | null,
   injectedTimelineProps: [] as Array<unknown>,
   timelinePanelProps: [] as Array<Record<string, unknown>>,
   timelineProjectIds: [] as Array<string | undefined>,
@@ -73,6 +74,7 @@ vi.mock("@/components/promptbox/FollowUpPromptBox", async () => {
       pendingInteraction,
       stack,
       pluginComposerHost,
+      contextWindowUsage,
     }: {
       composer: Pick<
         FollowUpComposerProps,
@@ -81,6 +83,7 @@ vi.mock("@/components/promptbox/FollowUpPromptBox", async () => {
       pendingInteraction?: ReactNode;
       stack: ReactNode;
       pluginComposerHost?: PluginComposerHost | null;
+      contextWindowUsage?: { usedTokens: number } | null;
     }) => (
       <div>
         {stack}
@@ -88,6 +91,7 @@ vi.mock("@/components/promptbox/FollowUpPromptBox", async () => {
         <input
           data-testid="embedded-chat-composer"
           data-submit-mode={composer.submitMode.kind}
+          data-context-used={contextWindowUsage?.usedTokens}
           data-submit-reason={
             composer.submitMode.kind === "blocked"
               ? composer.submitMode.reason
@@ -253,6 +257,12 @@ vi.mock("@/hooks/queries/thread-queries", () => ({
         : undefined,
   }),
   useThreadQueuedMessages: () => ({ data: mocks.queuedMessages }),
+  useThreadTimeline: (
+    _threadId: string,
+    options: { select: (timeline: unknown) => unknown },
+  ) => ({
+    data: options.select({ contextWindowUsage: mocks.contextWindowUsage }),
+  }),
   useThreadPendingInteractions: () => ({
     data: mocks.pendingInteractions,
     isError: mocks.pendingInteractionsIsError,
@@ -414,6 +424,7 @@ describe("EmbeddedThreadChat", () => {
     mocks.serviceTier = undefined;
     mocks.supportsServiceTier = false;
     mocks.timelineRows = [];
+    mocks.contextWindowUsage = null;
     mocks.injectedTimelineProps = [];
     mocks.timelinePanelProps = [];
     mocks.timelineProjectIds = [];
@@ -476,6 +487,14 @@ describe("EmbeddedThreadChat", () => {
     );
   });
 
+  it("passes the thread's context window usage to the composer ring", () => {
+    mocks.contextWindowUsage = { usedTokens: 109169 };
+    renderEmbeddedChat();
+    expect(
+      screen.getByTestId("embedded-chat-composer").dataset.contextUsed,
+    ).toBe("109169");
+  });
+
   it("restores the draft and a stream that advanced while unmounted on remount", () => {
     mocks.threadRuntimeDisplayStatus = "active";
     mocks.timelineRows = [{ text: "First reply" }];
@@ -503,6 +522,8 @@ describe("EmbeddedThreadChat", () => {
     fireEvent.change(screen.getByTestId("embedded-chat-composer"), {
       target: { value: "Queue me" },
     });
+    // A real click starts with a press, which catches React up on typed text.
+    fireEvent.pointerDown(screen.getByText("Send"));
     fireEvent.click(screen.getByText("Send"));
     await vi.waitFor(() => {
       expect(mocks.createQueuedMessageMutateAsync).toHaveBeenCalledTimes(1);
@@ -527,6 +548,8 @@ describe("EmbeddedThreadChat", () => {
     fireEvent.change(screen.getByTestId("embedded-chat-composer"), {
       target: { value: "Send me" },
     });
+    // A real click starts with a press, which catches React up on typed text.
+    fireEvent.pointerDown(screen.getByText("Send"));
     fireEvent.click(screen.getByText("Send"));
     await vi.waitFor(() => {
       expect(mocks.sendThreadMessageMutateAsync).toHaveBeenCalledTimes(1);
@@ -553,6 +576,7 @@ describe("EmbeddedThreadChat", () => {
       fireEvent.change(screen.getByTestId("embedded-chat-composer"), {
         target: { value: "Go" },
       });
+      fireEvent.pointerDown(screen.getByText("Send"));
       fireEvent.click(screen.getByText("Send"));
       await vi.waitFor(() => {
         expect(mocks.sendThreadMessageMutateAsync).toHaveBeenCalledWith(
@@ -687,6 +711,20 @@ describe("EmbeddedThreadChat", () => {
     expect(screen.getByTestId("embedded-chat-composer").hidden).toBe(true);
     fireEvent.click(screen.getByRole("button", { name: "Retry" }));
     expect(mocks.pendingInteractionsRefetch).toHaveBeenCalledOnce();
+  });
+
+  it("gives plugins typed text before React hears about it", () => {
+    render(
+      buildEmbeddedChat({
+        threadId: "thr_child",
+        pluginComposerBottomScope: { kind: "thread", threadId: "thr_child" },
+      }),
+    );
+    fireEvent.change(screen.getByTestId("embedded-chat-composer"), {
+      target: { value: "review this" },
+    });
+    // A plugin edit right after typing must build on the latest text.
+    expect(hostDraftMocks.latestHost?.getCurrent().text).toBe("review this");
   });
 
   it("delivers the new thread's draft to host subscribers immediately on a thread switch", () => {

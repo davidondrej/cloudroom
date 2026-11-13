@@ -241,8 +241,8 @@ vi.mock("@/hooks/queries/system-queries", () => ({
   }),
 }));
 
-vi.mock("@/lib/bb-desktop", () => ({
-  getBbDesktopInfo: () => testState.desktop,
+vi.mock("@/lib/room-desktop", () => ({
+  getRoomDesktopInfo: () => testState.desktop,
 }));
 
 interface HandlerProps {

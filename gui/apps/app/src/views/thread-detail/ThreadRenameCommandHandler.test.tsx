@@ -44,8 +44,8 @@ vi.mock("@/hooks/queries/system-queries", () => ({
   }),
 }));
 
-vi.mock("@/lib/bb-desktop", () => ({
-  getBbDesktopInfo: () => null,
+vi.mock("@/lib/room-desktop", () => ({
+  getRoomDesktopInfo: () => null,
 }));
 
 function makeThread(id: string, title: string): Thread {

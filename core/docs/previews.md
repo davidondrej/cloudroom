@@ -13,7 +13,7 @@ room-cli preview close 3000
 
 Commands return JSON. Only `state: "ready"` includes a current laptop URL, such as `http://p3000-1234abcd.localhost:3000`. The local port can differ when occupied. Registration retries reuse the preview; close/reopen creates a new generation. Close removes registration and disconnects the dedicated preview SSH connections, never the development server. Other previews reconnect automatically. The agent owns the server's lifecycle.
 
-The open command waits briefly for the helper, then returns pending rather than blocking cloud work. Readiness expires after 15 seconds without a helper report. Readiness checks the browser-facing local proxy through SSH to an HTTP server, not merely the SSH process. It does not mean the application passed its tests.
+The open command waits briefly for the helper, then returns pending rather than blocking cloud work. Readiness expires after 15 seconds without a helper report. A pending status says why: no paired Mac, no helper report yet, reports stopped N seconds ago, or the tunnel is still opening. Readiness checks the browser-facing local proxy through SSH to an HTTP server, not merely the SSH process. It does not mean the application passed its tests.
 
 ## Machines without inbound SSH
 

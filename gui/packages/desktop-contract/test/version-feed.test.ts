@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
-  bbDesktopInfoSchema,
-  bbDesktopThemeSchema,
-  bbDesktopVersionFeedSchema,
-  bbDesktopWindowStateSchema,
-  createBbDesktopVersionFeedFileName,
+  roomDesktopInfoSchema,
+  roomDesktopThemeSchema,
+  roomDesktopVersionFeedSchema,
+  roomDesktopWindowStateSchema,
+  createRoomDesktopVersionFeedFileName,
 } from "../src/index.js";
 
 const checkedAt = "2026-05-21T00:00:00.000Z";
@@ -12,7 +12,7 @@ const checkedAt = "2026-05-21T00:00:00.000Z";
 describe("desktop info schema", () => {
   it("accepts the desktop update info payload", () => {
     expect(
-      bbDesktopInfoSchema.safeParse({
+      roomDesktopInfoSchema.safeParse({
         lastCheckedAt: checkedAt,
         latestVersion: "0.0.2",
         pendingVersion: null,
@@ -25,11 +25,11 @@ describe("desktop info schema", () => {
   });
 
   it("accepts the desktop theme values", () => {
-    expect(bbDesktopThemeSchema.safeParse("dark").success).toBe(true);
-    expect(bbDesktopThemeSchema.safeParse("light").success).toBe(true);
-    expect(bbDesktopThemeSchema.safeParse("system").success).toBe(true);
+    expect(roomDesktopThemeSchema.safeParse("dark").success).toBe(true);
+    expect(roomDesktopThemeSchema.safeParse("light").success).toBe(true);
+    expect(roomDesktopThemeSchema.safeParse("system").success).toBe(true);
     expect(
-      bbDesktopThemeSchema.safeParse({
+      roomDesktopThemeSchema.safeParse({
         canvasColor: "oklch(0.195 0 0)",
         inkColor: "oklch(0.81 0 0)",
         mode: "dark",
@@ -39,10 +39,10 @@ describe("desktop info schema", () => {
 
   it("accepts strict desktop window state payloads", () => {
     expect(
-      bbDesktopWindowStateSchema.safeParse({ isFullScreen: true }).success,
+      roomDesktopWindowStateSchema.safeParse({ isFullScreen: true }).success,
     ).toBe(true);
     expect(
-      bbDesktopWindowStateSchema.safeParse({
+      roomDesktopWindowStateSchema.safeParse({
         isFullScreen: true,
         extra: true,
       }).success,
@@ -53,7 +53,7 @@ describe("desktop info schema", () => {
 describe("desktop version feed schema", () => {
   it("accepts a valid desktop-version.json payload", () => {
     expect(
-      bbDesktopVersionFeedSchema.safeParse({
+      roomDesktopVersionFeedSchema.safeParse({
         channel: "latest",
         files: [
           {
@@ -78,7 +78,7 @@ describe("desktop version feed schema", () => {
 
   it("accepts the isolated nightly desktop channel", () => {
     expect(
-      bbDesktopVersionFeedSchema.safeParse({
+      roomDesktopVersionFeedSchema.safeParse({
         channel: "nightly",
         files: [
           {
@@ -103,7 +103,7 @@ describe("desktop version feed schema", () => {
 
   it("accepts a Linux AppImage version feed payload", () => {
     expect(
-      bbDesktopVersionFeedSchema.safeParse({
+      roomDesktopVersionFeedSchema.safeParse({
         channel: "latest",
         files: [
           {
@@ -127,17 +127,17 @@ describe("desktop version feed schema", () => {
   });
 
   it("keeps the macOS feed file name unsuffixed so shipped builds keep updating", () => {
-    expect(createBbDesktopVersionFeedFileName("macos")).toBe(
+    expect(createRoomDesktopVersionFeedFileName("macos")).toBe(
       "desktop-version.json",
     );
-    expect(createBbDesktopVersionFeedFileName("linux")).toBe(
+    expect(createRoomDesktopVersionFeedFileName("linux")).toBe(
       "desktop-version-linux.json",
     );
   });
 
   it("rejects malformed version feed payloads", () => {
     expect(
-      bbDesktopVersionFeedSchema.safeParse({
+      roomDesktopVersionFeedSchema.safeParse({
         channel: "latest",
         files: [],
         minimumSystemVersion: null,

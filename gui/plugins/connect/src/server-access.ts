@@ -27,14 +27,14 @@ export interface RelayAccess {
 }
 
 export function createServerAccessRecheck(
-  bb: BbPluginApi,
+  room: BbPluginApi,
 ): (status: { paired: boolean; url: string | null }) => void {
   let last: string | null = null;
   return (status) => {
     const signature = `${status.paired}:${status.url ?? ""}`;
     const changed = last !== null && last !== signature;
     last = signature;
-    if (changed) bb.experimental_serverAccess.recheck();
+    if (changed) room.experimental_serverAccess.recheck();
   };
 }
 
@@ -42,7 +42,7 @@ function grantKey(hostId: string): string {
   return `server-access-grant:${hostId}`;
 }
 
-export async function registerServerAccess(bb: BbPluginApi, relay: RelayAccess) {
+export async function registerServerAccess(room: BbPluginApi, relay: RelayAccess) {
   let queue = Promise.resolve();
   function serialized<T>(action: () => Promise<T>): Promise<T> {
     const result = queue.then(action);
@@ -53,10 +53,10 @@ export async function registerServerAccess(bb: BbPluginApi, relay: RelayAccess) 
     return result;
   }
   async function load(hostId: string) {
-    const parsed = storedSchema.safeParse(await bb.storage.kv.get<unknown>(grantKey(hostId)));
+    const parsed = storedSchema.safeParse(await room.storage.kv.get<unknown>(grantKey(hostId)));
     return parsed.success ? parsed.data.result : undefined;
   }
-  bb.experimental_serverAccess.register({
+  room.experimental_serverAccess.register({
     id: "connect",
     displayName: "Cloudroom Connect",
     description: `Use this ${COMPUTER}'s private cloudroom.run address.`,
@@ -83,7 +83,7 @@ export async function registerServerAccess(bb: BbPluginApi, relay: RelayAccess) 
           serverUrl: machine.serverUrl,
           headers: { [MACHINE_CREDENTIAL_HEADER]: machine.credential },
         };
-        await bb.storage.kv.set(grantKey(hostId), {
+        await room.storage.kv.set(grantKey(hostId), {
           result: { connectMachineId: machine.machineId, grant },
         });
         return grant;
@@ -95,7 +95,7 @@ export async function registerServerAccess(bb: BbPluginApi, relay: RelayAccess) 
         if (stored) {
           await relay.call("/api/machines/revoke", { machineId: stored.connectMachineId });
         }
-        await bb.storage.kv.delete(grantKey(hostId));
+        await room.storage.kv.delete(grantKey(hostId));
       });
     },
   });

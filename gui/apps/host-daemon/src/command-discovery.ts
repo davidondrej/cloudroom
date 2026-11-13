@@ -507,10 +507,10 @@ interface DiscoverSkillsArgs {
   roots: readonly SkillScanRoot[];
 }
 
-function buildSkillRecord(
+async function buildSkillRecord(
   root: SkillScanRoot,
   match: SkillFileMatch,
-): DiscoveredSkill {
+): Promise<DiscoveredSkill> {
   const rootPath =
     "rootPath" in root ? root.rootPath : path.dirname(root.filePath);
   const logicalPath = path
@@ -526,6 +526,10 @@ function buildSkillRecord(
     filePath: match.filePath,
     rootKind: root.rootKind,
     linked: match.linked,
+    // File commands reject a symlinked root, so reads use the real folder.
+    realDirectoryPath: match.linked
+      ? await fs.realpath(path.dirname(match.filePath)).catch(() => undefined)
+      : undefined,
   };
 }
 
@@ -536,7 +540,7 @@ export async function discoverSkills(
   const budget = { remainingEntries: MAX_SCAN_ENTRY_COUNT };
   for (const root of args.roots) {
     for (const match of await scanSkillFiles({ budget, root })) {
-      records.push(buildSkillRecord(root, match));
+      records.push(await buildSkillRecord(root, match));
     }
   }
   const uniqueRecords: DiscoveredSkill[] = [];

@@ -1,8 +1,8 @@
 import { afterEach, describe, it, expect, vi } from "vitest";
 import {
-  BbHttpError,
+  RoomHttpError,
   createRequestTimeoutFetch,
-  DEFAULT_BB_REQUEST_TIMEOUT_MS,
+  DEFAULT_ROOM_REQUEST_TIMEOUT_MS,
   readJsonResponse,
   readVoidResponse,
 } from "../src/response.js";
@@ -218,8 +218,8 @@ describe("readJsonResponse()", () => {
       (caught: unknown) => caught,
     );
 
-    expect(error).toBeInstanceOf(BbHttpError);
-    if (!(error instanceof BbHttpError)) {
+    expect(error).toBeInstanceOf(RoomHttpError);
+    if (!(error instanceof RoomHttpError)) {
       throw new Error("Expected a BbHttpError");
     }
     expect(error.message).toBe("HTTP 404: Thread thread-1 not found");
@@ -347,7 +347,7 @@ describe("createRequestTimeoutFetch()", () => {
 
   it("uses the default timeout when creating the node transport", async () => {
     useImmediateTimeoutSignalFor({
-      timeoutMs: DEFAULT_BB_REQUEST_TIMEOUT_MS,
+      timeoutMs: DEFAULT_ROOM_REQUEST_TIMEOUT_MS,
     });
     mockPendingFetchUntilAbort();
     const transport = createNodeTransport({ baseUrl: "http://server" });

@@ -138,11 +138,11 @@ function httpStatus(error: unknown): number | null {
 }
 
 async function readSnapshot(
-  bb: BbPluginApi,
+  room: BbPluginApi,
   args: { hostId: string; path: string },
 ): Promise<FileSnapshot> {
   try {
-    const result = fileReadResultSchema.parse(await bb.sdk.files.read(args));
+    const result = fileReadResultSchema.parse(await room.sdk.files.read(args));
     if (result.contentEncoding !== "utf8")
       throw new Error("Dotenv file is not valid UTF-8 text.");
     return { content: result.content, sha256: result.sha256 };
@@ -153,7 +153,7 @@ async function readSnapshot(
 }
 
 async function runRequest(
-  bb: BbPluginApi,
+  room: BbPluginApi,
   argv: string[],
   ctx: PluginCliContext,
 ): Promise<PluginCliResult> {
@@ -165,7 +165,7 @@ async function runRequest(
       "room-cli secret request requires the invoking working directory.",
     );
   const thread = threadHostSchema.parse(
-    await bb.sdk.threads.get({
+    await room.sdk.threads.get({
       threadId: ctx.threadId,
       include: "host",
     }),
@@ -174,10 +174,10 @@ async function runRequest(
   if (!host?.id) throw new Error("The thread needs a live host.");
   const destinationPath = resolveHostPath(ctx.cwd, parsed.writeEnv);
   const fileArgs = { hostId: host.id, path: destinationPath };
-  let snapshot = await readSnapshot(bb, fileArgs);
+  let snapshot = await readSnapshot(room, fileArgs);
   assertNoDuplicateAssignments(snapshot.content, parsed.names);
 
-  const result = await bb.ui.requestInput(
+  const result = await room.ui.requestInput(
     {
       threadId: ctx.threadId,
       rendererId: SECRET_REQUEST_RENDERER_ID,
@@ -214,7 +214,7 @@ async function runRequest(
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const reconciled = reconcileDotenv(snapshot.content, response.values);
     const write = fileWriteResultSchema.parse(
-      await bb.sdk.files.write({
+      await room.sdk.files.write({
         ...fileArgs,
         content: reconciled.content,
         contentEncoding: "utf8",
@@ -233,14 +233,14 @@ async function runRequest(
       throw new Error(
         "Dotenv file changed twice while secrets were being written; no write was applied.",
       );
-    snapshot = await readSnapshot(bb, fileArgs);
+    snapshot = await readSnapshot(room, fileArgs);
     assertNoDuplicateAssignments(snapshot.content, parsed.names);
   }
   throw new Error("Unreachable dotenv write state.");
 }
 
-export default function plugin(bb: BbPluginApi) {
-  bb.cli.register({
+export default function plugin(room: BbPluginApi) {
+  room.cli.register({
     name: "secret",
     summary: "Securely request credentials and write them to a dotenv file.",
     commands: [
@@ -253,7 +253,7 @@ export default function plugin(bb: BbPluginApi) {
     ],
     async run(argv, ctx) {
       try {
-        return await runRequest(bb, argv, ctx);
+        return await runRequest(room, argv, ctx);
       } catch (error) {
         return {
           exitCode: 1,

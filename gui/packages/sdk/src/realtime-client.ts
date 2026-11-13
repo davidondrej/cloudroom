@@ -7,21 +7,21 @@ import { realtimeSubscriptionTargetKey } from "@cloudroom/domain";
 import { serverMessageLenientSchema } from "@cloudroom/server-contract";
 import { resolveRealtimeUrl } from "./realtime-url.js";
 import type {
-  BbRealtime,
-  BbRealtimeCallback,
-  BbRealtimeConnectionEvent,
-  BbRealtimeEventMap,
-  BbRealtimeEventName,
-  BbRealtimeSubscribeArgs,
-  BbRealtimeSubscribeArgsUnion,
-  BbRealtimeUnsubscribe,
+  RoomRealtime,
+  RoomRealtimeCallback,
+  RoomRealtimeConnectionEvent,
+  RoomRealtimeEventMap,
+  RoomRealtimeEventName,
+  RoomRealtimeSubscribeArgs,
+  RoomRealtimeSubscribeArgsUnion,
+  RoomRealtimeUnsubscribe,
   SystemRealtimeEvent,
 } from "./realtime-types.js";
 import type {
-  BbRealtimeSocket,
-  BbRealtimeSocketFactory,
-  BbRealtimeSocketMessageEvent,
-  BbSdkTransport,
+  RoomRealtimeSocket,
+  RoomRealtimeSocketFactory,
+  RoomRealtimeSocketMessageEvent,
+  RoomSdkTransport,
 } from "./transport.js";
 
 const SOCKET_CONNECTING = 0;
@@ -30,8 +30,8 @@ const INITIAL_RECONNECT_DELAY_MS = 1000;
 const MAX_RECONNECT_DELAY_MS = 30_000;
 const RECONNECT_DELAY_MULTIPLIER = 1.5;
 
-interface CreateBbRealtimeClientArgs {
-  transport: BbSdkTransport;
+interface CreateRoomRealtimeClientArgs {
+  transport: RoomSdkTransport;
 }
 
 interface TargetSubscription {
@@ -56,7 +56,7 @@ interface IdScopedChangedListenerRecord<
   TEventName extends IdScopedChangedEventName,
 > {
   active: boolean;
-  callback: BbRealtimeCallback<TEventName>;
+  callback: RoomRealtimeCallback<TEventName>;
   event: TEventName;
   selectorId?: string;
   target: RealtimeSubscriptionTarget;
@@ -66,7 +66,7 @@ interface UnscopedChangedListenerRecord<
   TEventName extends UnscopedChangedEventName,
 > {
   active: boolean;
-  callback: BbRealtimeCallback<TEventName>;
+  callback: RoomRealtimeCallback<TEventName>;
   event: TEventName;
   target: RealtimeSubscriptionTarget;
 }
@@ -85,7 +85,7 @@ type ChangedListenerRecord =
 
 interface ConnectionListenerRecord {
   active: boolean;
-  callback: BbRealtimeCallback<"realtime:connection">;
+  callback: RoomRealtimeCallback<"realtime:connection">;
   event: "realtime:connection";
 }
 
@@ -129,7 +129,7 @@ export function createRealtimeSocketAdapter(socket: {
   close(): void;
   readonly readyState: number;
   send(data: string): void;
-}): BbRealtimeSocket {
+}): RoomRealtimeSocket {
   return {
     close: () => socket.close(),
     onclose: null,
@@ -143,7 +143,7 @@ export function createRealtimeSocketAdapter(socket: {
   };
 }
 
-export function wrapStandardWebsocket(socket: WebSocket): BbRealtimeSocket {
+export function wrapStandardWebsocket(socket: WebSocket): RoomRealtimeSocket {
   const adapter = createRealtimeSocketAdapter(socket);
   socket.onopen = () => adapter.onopen?.();
   socket.onmessage = (event) => adapter.onmessage?.({ data: event.data });
@@ -152,7 +152,7 @@ export function wrapStandardWebsocket(socket: WebSocket): BbRealtimeSocket {
   return adapter;
 }
 
-function resolveDefaultWebsocketFactory(): BbRealtimeSocketFactory | null {
+function resolveDefaultWebsocketFactory(): RoomRealtimeSocketFactory | null {
   if (typeof WebSocket === "undefined") {
     return null;
   }
@@ -174,32 +174,32 @@ function isIdScopedChangedListenerFor<
   return listener.event === event;
 }
 
-export class BbRealtimeClient implements BbRealtime {
+export class RoomRealtimeClient implements RoomRealtime {
   private readonly listeners = new Set<RealtimeListenerRecord>();
   private readonly targetSubscriptions = new Map<string, TargetSubscription>();
-  private readonly transport: BbSdkTransport;
-  private lastConnectionEvent: BbRealtimeConnectionEvent | null = null;
+  private readonly transport: RoomSdkTransport;
+  private lastConnectionEvent: RoomRealtimeConnectionEvent | null = null;
   private reconnectDelayMs = INITIAL_RECONNECT_DELAY_MS;
   private reconnectingAfterUnexpectedClose = false;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private rejectSocketReady: ((error: Error) => void) | null = null;
   private resolveSocketReady: (() => void) | null = null;
-  private socket: BbRealtimeSocket | null = null;
+  private socket: RoomRealtimeSocket | null = null;
   private socketReadyPromise: Promise<void> | null = null;
 
-  constructor(args: CreateBbRealtimeClientArgs) {
+  constructor(args: CreateRoomRealtimeClientArgs) {
     this.transport = args.transport;
   }
 
-  subscribe<TEventName extends BbRealtimeEventName>(
-    args: BbRealtimeSubscribeArgs<TEventName>,
-  ): BbRealtimeUnsubscribe {
+  subscribe<TEventName extends RoomRealtimeEventName>(
+    args: RoomRealtimeSubscribeArgs<TEventName>,
+  ): RoomRealtimeUnsubscribe {
     return this.addListener(args);
   }
 
   private addListener(
-    args: BbRealtimeSubscribeArgsUnion,
-  ): BbRealtimeUnsubscribe {
+    args: RoomRealtimeSubscribeArgsUnion,
+  ): RoomRealtimeUnsubscribe {
     switch (args.event) {
       case "thread:changed":
         return this.activateListener({
@@ -258,7 +258,7 @@ export class BbRealtimeClient implements BbRealtime {
 
   private addConnectionListener(
     listener: ConnectionListenerRecord,
-  ): BbRealtimeUnsubscribe {
+  ): RoomRealtimeUnsubscribe {
     const unsubscribe = this.activateListener(listener);
     const snapshot = this.lastConnectionEvent;
     if (snapshot) {
@@ -273,7 +273,7 @@ export class BbRealtimeClient implements BbRealtime {
 
   private activateListener(
     listener: RealtimeListenerRecord,
-  ): BbRealtimeUnsubscribe {
+  ): RoomRealtimeUnsubscribe {
     this.listeners.add(listener);
     if (isTargetedListener(listener)) {
       this.addTarget(listener.target);
@@ -489,7 +489,7 @@ export class BbRealtimeClient implements BbRealtime {
     }
   }
 
-  private handleSocketMessage(event: BbRealtimeSocketMessageEvent): void {
+  private handleSocketMessage(event: RoomRealtimeSocketMessageEvent): void {
     if (typeof event.data !== "string") {
       return;
     }
@@ -544,7 +544,7 @@ export class BbRealtimeClient implements BbRealtime {
 
   private dispatchIdScopedChangedMessage<
     TEventName extends IdScopedChangedEventName,
-  >(event: TEventName, message: BbRealtimeEventMap[TEventName]): void {
+  >(event: TEventName, message: RoomRealtimeEventMap[TEventName]): void {
     for (const listener of this.listenerSnapshot()) {
       if (
         !isIdScopedChangedListenerFor(listener, event) ||
@@ -631,7 +631,7 @@ export class BbRealtimeClient implements BbRealtime {
     this.socket.send(JSON.stringify(message));
   }
 
-  private emitConnection(event: BbRealtimeConnectionEvent): void {
+  private emitConnection(event: RoomRealtimeConnectionEvent): void {
     this.lastConnectionEvent = event;
     for (const listener of this.listenerSnapshot()) {
       if (listener.event !== "realtime:connection" || !listener.active) {
@@ -645,9 +645,9 @@ export class BbRealtimeClient implements BbRealtime {
     return [...this.listeners];
   }
 
-  private callListener<TEventName extends BbRealtimeEventName>(
-    callback: BbRealtimeCallback<TEventName>,
-    event: Parameters<BbRealtimeCallback<TEventName>>[0],
+  private callListener<TEventName extends RoomRealtimeEventName>(
+    callback: RoomRealtimeCallback<TEventName>,
+    event: Parameters<RoomRealtimeCallback<TEventName>>[0],
   ): void {
     try {
       callback(event);
@@ -657,8 +657,8 @@ export class BbRealtimeClient implements BbRealtime {
   }
 }
 
-export function createBbRealtimeClient(
-  args: CreateBbRealtimeClientArgs,
-): BbRealtimeClient {
-  return new BbRealtimeClient(args);
+export function createRoomRealtimeClient(
+  args: CreateRoomRealtimeClientArgs,
+): RoomRealtimeClient {
+  return new RoomRealtimeClient(args);
 }

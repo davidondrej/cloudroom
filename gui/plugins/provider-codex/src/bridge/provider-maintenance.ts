@@ -14,6 +14,7 @@ import {
   experimental_findCliExecutable as findCliExecutable,
   experimental_formatCommand as formatCommand,
   experimental_npmCommand as npmCommand,
+  experimental_installationRunUnavailable as installationRunUnavailable,
   experimental_installationVerification as installationVerification,
   experimental_npmGlobalInstallCommand as npmGlobalInstallCommand,
   experimental_npmGlobalInstallSource as npmGlobalInstallSource,
@@ -43,6 +44,23 @@ const CODEX_OFFICIAL_INSTALL =
 // PowerShell installer needs neither. PowerShell gets it as one argument, never through cmd.exe.
 const CODEX_WINDOWS_INSTALL =
   "$env:CODEX_NON_INTERACTIVE='1'; irm https://chatgpt.com/codex/install.ps1 | iex";
+// install.ps1 rewrites the user Path as REG_SZ, which expands entries like %NVM_HOME% for good,
+// and has no flag to skip that. So save the raw Path and its kind, run the installer in its own
+// PowerShell (it can `exit`), write Path back as it was, add only Codex's bin folder, and
+// broadcast the change so new terminals see it.
+const CODEX_WINDOWS_INSTALL_KEEPING_PATH = [
+  "$k = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey('Environment')",
+  "$p = $k.GetValue('Path', $null, 'DoNotExpandEnvironmentNames')",
+  "$t = if ($null -eq $p) { 'ExpandString' } else { $k.GetValueKind('Path') }",
+  `& (Join-Path $PSHOME 'powershell.exe') -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command '${CODEX_WINDOWS_INSTALL.replaceAll("'", "''")}'`,
+  "$c = $LASTEXITCODE",
+  "$b = Join-Path $env:LOCALAPPDATA 'Programs\\OpenAI\\Codex\\bin'",
+  "$e = if ($t -eq 'ExpandString') { [char]37 + 'LOCALAPPDATA' + [char]37 + '\\Programs\\OpenAI\\Codex\\bin' } else { $b }",
+  "if ((Test-Path (Join-Path $b 'codex.exe')) -and ([Environment]::ExpandEnvironmentVariables([string]$p).Split(';') -notcontains $b)) { $p = (@($p, $e) | Where-Object { $_ }) -join ';' }",
+  "if ($null -eq $p) { $k.DeleteValue('Path', $false) } else { $k.SetValue('Path', $p, $t) }",
+  "[Environment]::SetEnvironmentVariable('CLOUDROOM_PATH_REFRESH', $null, 'User')",
+  "exit $c",
+].join("; ");
 
 /** OpenAI's own installer, run when npm can't install or update Codex. */
 function codexOfficialInstaller(): ProviderInstallationCommand {
@@ -55,7 +73,7 @@ function codexOfficialInstaller(): ProviderInstallationCommand {
           "-ExecutionPolicy",
           "Bypass",
           "-Command",
-          CODEX_WINDOWS_INSTALL,
+          CODEX_WINDOWS_INSTALL_KEEPING_PATH,
         ],
         displayCommand: CODEX_WINDOWS_INSTALL,
       }
@@ -147,7 +165,15 @@ export async function getCodexProviderInstallationStatus(
     npmLatestVersion(CODEX_NPM_PACKAGE),
     probeNpmGlobalPackage(CODEX_NPM_PACKAGE),
   ]);
-  const installed = executable !== null;
+  // A launcher that can't find its native binary can't run anything, so it
+  // counts as not installed and gets the install action (a reinstall).
+  const broken =
+    executable !== null &&
+    versionOutput === null &&
+    codexBrokenInstallHint(
+      (await probeCliVersion(executable)).failedOutput ?? "",
+    ) !== null;
+  const installed = executable !== null && !broken;
   const currentVersion = versionFrom(versionOutput);
   const needsUpdate =
     installed &&
@@ -223,17 +249,17 @@ function buildCodexProviderInstallationRun(
   npmPrefix: string | null = null,
 ): ProviderInstallationRunResult {
   if (status.installAction?.kind !== action) {
-    return {
-      available: false,
-      message: `Codex ${action} is no longer available on this host.`,
-    };
+    return installationRunUnavailable("Codex", action, status);
   }
   return {
     available: true,
     command:
       action === "update" && status.executablePath !== null
         ? codexUpdateCommand(status.executablePath, npmPrefix)
-        : npmGlobalInstallCommand(CODEX_NPM_PACKAGE),
+        : action === "install" && npmPrefix !== null
+          ? // Reinstall a broken npm Codex into the prefix that owns it.
+            codexUpdateCommand("codex", npmPrefix)
+          : npmGlobalInstallCommand(CODEX_NPM_PACKAGE),
     verification: installationVerification(status, action),
     fallback: codexOfficialInstaller(),
   };

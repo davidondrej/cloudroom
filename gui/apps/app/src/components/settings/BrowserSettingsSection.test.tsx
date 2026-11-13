@@ -7,7 +7,7 @@ import {
   screen,
   waitFor,
 } from "@testing-library/react";
-import type { BbDesktopBrowserApi } from "@cloudroom/desktop-contract";
+import type { RoomDesktopBrowserApi } from "@cloudroom/desktop-contract";
 import type { DesktopBrowserImportSource } from "@cloudroom/host-daemon-contract";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { BrowserSettingsSectionContent } from "./BrowserSettingsSection";
@@ -45,8 +45,8 @@ const sources: DesktopBrowserImportSource[] = [
 ];
 
 function makeDesktopBrowser(
-  overrides: Partial<BbDesktopBrowserApi> = {},
-): BbDesktopBrowserApi {
+  overrides: Partial<RoomDesktopBrowserApi> = {},
+): RoomDesktopBrowserApi {
   const noop = () => undefined;
   return {
     attach: noop,

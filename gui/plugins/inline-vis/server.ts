@@ -152,20 +152,20 @@ export const inlineVisRpcContract = defineRpcContract({
   },
 });
 
-export default async function plugin(bb: BbPluginApi) {
-  bb.rpc.register(inlineVisRpcContract, {
+export default async function plugin(room: BbPluginApi) {
+  room.rpc.register(inlineVisRpcContract, {
     async preparePreview({ threadId, file, source }) {
       let rootPath: string;
       let hostId: string;
       let target: NonNullable<MarkdownProps["experimental_document"]>["target"];
 
       if (source === "thread-storage") {
-        const storage = await bb.sdk.threads.storageLocation({ threadId });
+        const storage = await room.sdk.threads.storageLocation({ threadId });
         rootPath = storage.storageRootPath;
         hostId = storage.hostId;
         target = { kind: source, threadId, path: file };
       } else {
-        const thread = await bb.sdk.threads.get({
+        const thread = await room.sdk.threads.get({
           threadId,
           include: "environment",
         });
@@ -200,7 +200,7 @@ export default async function plugin(bb: BbPluginApi) {
 
       let result;
       try {
-        result = await bb.sdk.files.read({
+        result = await room.sdk.files.read({
           path: absolutePath,
           rootPath,
           hostId,

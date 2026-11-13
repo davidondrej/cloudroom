@@ -201,3 +201,46 @@ it.each(["start", "resume", "fork"] as const)(
   },
   30_000,
 );
+
+const SOL_NEEDS_AUTO_REVIEW = {
+  autoReview: { requiredOnModels: ["gpt-6.1-sol"] },
+};
+
+it.each([
+  // An unanswered requirements read skips the check well before 30 s.
+  ["start", "hang", undefined],
+  [
+    "start",
+    { allowedApprovalPolicies: ["on-request"] },
+    `does not allow approval_policy "never"`,
+  ],
+  ["start", SOL_NEEDS_AUTO_REVIEW, `does not allow model "gpt-6.1-sol"`],
+  // Resume keeps the saved thread model, not today's config model.
+  ["resume", SOL_NEEDS_AUTO_REVIEW, undefined],
+] as const)(
+  "checks managed requirements on thread/%s: %o",
+  async (kind, configRequirements, expectedError) => {
+    writeFileSync(
+      join(workspaceDir, "script.json"),
+      JSON.stringify({
+        requestLogPath,
+        configRequirements,
+        configModel: "gpt-6.1-sol",
+      }),
+    );
+    harness.sendRequest(1, `thread/${kind}`, {
+      threadId: THREAD_ID,
+      ...(kind === "resume" ? { providerThreadId: "provider-saved" } : {}),
+      cwd: workspaceDir,
+      instructionMode: "append",
+      options: { ...FULL_ACCESS_SESSION_OPTIONS },
+    });
+    const response = await harness.waitForResponse(1);
+    if (expectedError === undefined) {
+      expect(response.error).toBeUndefined();
+    } else {
+      expect(response.error?.message).toContain(expectedError);
+    }
+  },
+  10_000,
+);

@@ -12,7 +12,8 @@ interface WaveformVisualizerProps {
 const BAR_WIDTH = 3;
 const BAR_GAP = 2;
 const BAR_PITCH = BAR_WIDTH + BAR_GAP;
-const SAMPLE_EVERY_N_FRAMES = 2;
+// One bar per ~33 ms (150 px/s), the old 60 Hz speed, at any frame rate.
+const BAR_INTERVAL_MS = 1000 / 30;
 const NOISE_FLOOR = 0.006;
 const AMPLITUDE_GAIN = 8;
 const AMPLITUDE_GAMMA = 0.6;
@@ -41,6 +42,7 @@ export function WaveformVisualizer({
     let midY = 0;
     let maxHalf = 0;
     let edgeFade = 0;
+    let scrollOffset = 0;
 
     const measure = () => {
       const dpr = window.devicePixelRatio || 1;
@@ -70,7 +72,7 @@ export function WaveformVisualizer({
       const bars = barsRef.current;
       for (let i = 0; i < bars.length; i++) {
         const amp = bars[bars.length - 1 - i];
-        const cx = cssWidth - BAR_WIDTH / 2 - i * BAR_PITCH;
+        const cx = cssWidth - BAR_WIDTH / 2 - i * BAR_PITCH - scrollOffset;
         if (cx + BAR_WIDTH < 0) break;
         const half = amp * maxHalf;
         ctx.globalAlpha = cx < edgeFade ? Math.max(0.15, cx / edgeFade) : 1;
@@ -130,30 +132,37 @@ export function WaveformVisualizer({
     source.connect(analyser);
 
     const timeData = new Uint8Array(analyser.fftSize);
-    let frame = 0;
     let rafId = 0;
+    let lastBarAt: number | undefined;
+    let peak = 0;
 
-    const tick = () => {
+    const tick = (now: number) => {
       if (audioCtx.state === "suspended") void audioCtx.resume();
-      if (frame % SAMPLE_EVERY_N_FRAMES === 0) {
-        analyser.getByteTimeDomainData(timeData);
-        let sumSquares = 0;
-        for (let i = 0; i < timeData.length; i++) {
-          const centered = (timeData[i] - 128) / 128;
-          sumSquares += centered * centered;
-        }
-        const rms = Math.sqrt(sumSquares / timeData.length);
-        const boosted = Math.max(0, rms - NOISE_FLOOR) * AMPLITUDE_GAIN;
-        const amp = Math.min(1, boosted ** AMPLITUDE_GAMMA);
-        const ambient = isPointerCoarse
-          ? IDLE_AMPLITUDE * (1.5 + 0.5 * Math.sin(frame / 24))
-          : 0;
-        const bars = barsRef.current;
-        bars.push(Math.max(amp, ambient));
-        if (bars.length > barCount) bars.shift();
-        draw();
+      analyser.getByteTimeDomainData(timeData);
+      let sumSquares = 0;
+      for (let i = 0; i < timeData.length; i++) {
+        const centered = (timeData[i] - 128) / 128;
+        sumSquares += centered * centered;
       }
-      frame++;
+      const rms = Math.sqrt(sumSquares / timeData.length);
+      const boosted = Math.max(0, rms - NOISE_FLOOR) * AMPLITUDE_GAIN;
+      const amp = Math.min(1, boosted ** AMPLITUDE_GAMMA);
+      const ambient = isPointerCoarse
+        ? IDLE_AMPLITUDE * (1.5 + 0.5 * Math.sin(now / 400))
+        : 0;
+      peak = Math.max(peak, amp, ambient);
+      // After a long gap (hidden tab), resume instead of catching up.
+      if (lastBarAt === undefined || now - lastBarAt > 1000) lastBarAt = now;
+      const due = Math.floor((now - lastBarAt) / BAR_INTERVAL_MS);
+      if (due > 0) {
+        lastBarAt += due * BAR_INTERVAL_MS;
+        const bars = barsRef.current;
+        for (let i = Math.min(due, barCount); i > 0; i--) bars.push(peak);
+        if (bars.length > barCount) bars.splice(0, bars.length - barCount);
+        peak = 0;
+      }
+      scrollOffset = ((now - lastBarAt) / BAR_INTERVAL_MS) * BAR_PITCH;
+      draw();
       rafId = requestAnimationFrame(tick);
     };
 

@@ -128,6 +128,14 @@ export function hasProviderCliAction(
   return issue.action !== null;
 }
 
+/** Auto-update needs to know the newest version: from npm, or from the CLI's
+ *  own release check (Cursor). */
+export function canAutoUpdateProviderCli(
+  status: Pick<ProviderCliStatus, "latestVersion" | "npmPackageName">,
+): boolean {
+  return status.npmPackageName !== null || status.latestVersion !== null;
+}
+
 export function useProviderCliInstallRunner() {
   const snapshot = useSyncExternalStore(
     subscribeProviderCliInstalls,

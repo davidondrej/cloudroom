@@ -6,7 +6,7 @@ import {
   showDesktopDialogHtml,
 } from "./desktop-dialog-window.js";
 import {
-  BB_DESKTOP_EXISTING_SERVER_DIALOG_CHOOSE_CHANNEL,
+  ROOM_DESKTOP_EXISTING_SERVER_DIALOG_CHOOSE_CHANNEL,
   existingServerDialogChooseRequestSchema,
 } from "./existing-server-dialog-ipc.js";
 import type { ForeignRuntimeDetails } from "./foreign-runtime.js";
@@ -192,7 +192,7 @@ export function openExistingServerDialog(
       }
       settled = true;
       ipcMain.removeListener(
-        BB_DESKTOP_EXISTING_SERVER_DIALOG_CHOOSE_CHANNEL,
+        ROOM_DESKTOP_EXISTING_SERVER_DIALOG_CHOOSE_CHANNEL,
         handleChoose,
       );
       if (!dialogWindow.isDestroyed()) {
@@ -215,7 +215,7 @@ export function openExistingServerDialog(
       finish(parsed.data.choice);
     }
 
-    ipcMain.on(BB_DESKTOP_EXISTING_SERVER_DIALOG_CHOOSE_CHANNEL, handleChoose);
+    ipcMain.on(ROOM_DESKTOP_EXISTING_SERVER_DIALOG_CHOOSE_CHANNEL, handleChoose);
     dialogWindow.on("closed", () => {
       finish("quit");
     });

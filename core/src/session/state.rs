@@ -206,11 +206,13 @@ impl Local {
         let journal = Journal::open_from(directory, snapshot.as_ref().map_or(0, |s| s.sequence))?;
         let (changed, _) = watch::channel(journal.last());
         let mut local = Local {
+            loud: journal.last(),
             journal,
             sessions: BTreeMap::new(),
             sequences: BTreeMap::new(),
             changed,
-            database_available: false,
+            database_available: true,
+            report_waits: false,
             draining: false,
             snapshot_at: 0,
             browser: sleep::Browser::Paused,
@@ -416,6 +418,9 @@ impl Local {
                     | "child_state"
                     | "child_start_state"
                     | "own_child"
+                    | "thread_report"
+                    | "continuing"
+                    | "continued"
             )
         {
             session.last_activity = record.timestamp_ms.or(session.last_activity);
@@ -491,6 +496,27 @@ impl Local {
                 if receipt.command == "close" {
                     session.close_request = Some(receipt.request_id.clone());
                 }
+                if receipt.command == "start" && session.title.is_none() {
+                    session.title = receipt.input["title"].as_str().map(str::to_owned);
+                }
+                // Which computer last used the thread, and a user's prompt cancelling an archive the agent made (#237).
+                if matches!(
+                    receipt.command.as_str(),
+                    "prompt" | "steer" | "edit" | "rewind"
+                ) && receipt.state == "accepted"
+                    && !session.receipts.contains_key(&receipt.request_id)
+                {
+                    if receipt.request_id.starts_with("app_") {
+                        session.last_app_prompt = Some(
+                            json!({"request_id":receipt.request_id,"sequence":record.sequence}),
+                        );
+                    }
+                    if super::user_request(&receipt.request_id) {
+                        session
+                            .thread_reports
+                            .retain(|report| report["kind"] != "archived");
+                    }
+                }
                 if receipt.command == "prompt" {
                     // Acceptance is also queue insertion: one fsynced record, including
                     // legacy receipts whose separate enqueue write never finished.
@@ -529,6 +555,16 @@ impl Local {
                     && let Some(target) = receipt.input["target_request_id"].as_str()
                 {
                     session.queue.retain(|id| id != target);
+                }
+                // The user's model pick (`model`): the session's model and effort from now on, restarts included.
+                if receipt.command == "model"
+                    && receipt.state == "accepted"
+                    && !session.receipts.contains_key(&receipt.request_id)
+                {
+                    session.model = receipt.input["model"].as_str().map(str::to_owned);
+                    if let Some(level) = receipt.input["reasoning"].as_str() {
+                        session.reasoning = Some(level.to_owned());
+                    }
                 }
                 if receipt.command == "reorder"
                     && receipt.state == "accepted"
@@ -671,6 +707,7 @@ impl Local {
                 if let Some(level) = record.data["reasoning"].as_str() {
                     session.reasoning = Some(level.into());
                 }
+                session.owe("reasoning", &record.data, record.sequence);
             }
             "launch_reasoning" => {
                 if session.reasoning.is_none() {
@@ -711,6 +748,12 @@ impl Local {
             }
             "archive" => {
                 session.archived = true;
+                // The thread's own archive by its agent reaches the website, once no other visible thread is left in
+                // the sandbox (relay.rs). A user's archive went there from the app.
+                session.owe("archived", &record.data, record.sequence);
+                if record.data["self"] == true {
+                    session.archive_turn = session.current_request.clone();
+                }
                 // Its children still starting never start (relay.rs).
                 for start in session.child_starts.values_mut() {
                     if !start.done && start.error.is_none() {
@@ -720,6 +763,27 @@ impl Local {
                 }
             }
             "detach" => session.parent_session = None,
+            "title" => {
+                session.title = record.data["title"].as_str().map(str::to_owned);
+                session.owe("title", &record.data, record.sequence);
+            }
+            "thread_report" => session
+                .thread_reports
+                .retain(|report| report["seq"] != record.data["seq"]),
+            // A user's restore (#237): its own kind, which apps before it ignore. An archive still owed is dropped.
+            "unarchive" => {
+                session.archived = false;
+                session
+                    .thread_reports
+                    .retain(|report| report["kind"] != "archived");
+            }
+            "continuing" => session.continuing = record.data["session"].as_str().map(str::to_owned),
+            "continued" => {
+                session.continued = Some(record.data.clone());
+                if session.last_app_prompt.is_none() && !record.data["last_app_prompt"].is_null() {
+                    session.last_app_prompt = Some(record.data["last_app_prompt"].clone());
+                }
+            }
             "child_state" => {
                 if let (Some(child), Some(state)) =
                     (record.data["child"].as_str(), record.data["state"].as_str())
@@ -727,6 +791,19 @@ impl Local {
                     session
                         .child_states
                         .insert(child.to_owned(), state.to_owned());
+                    match record.timestamp_ms.filter(|_| state == "archived") {
+                        Some(at) => session.child_archived_at.insert(child.to_owned(), at),
+                        None => session.child_archived_at.remove(child),
+                    };
+                    let late = record.data["late"].as_array().into_iter().flatten();
+                    let late: std::collections::BTreeSet<String> = late
+                        .filter_map(|id| Some(id.as_str()?.to_owned()))
+                        .collect();
+                    if late.is_empty() {
+                        session.late_reports.remove(child);
+                    } else {
+                        session.late_reports.insert(child.to_owned(), late);
+                    }
                 }
             }
             "child_start" => {
@@ -854,6 +931,9 @@ impl Local {
             native,
         };
         self.journal.append(&serde_json::to_vec(&record)?)?;
+        if kind != "parent_report" {
+            self.loud = record.sequence;
+        }
         self.apply(&record)?;
         if record.sequence >= self.snapshot_at + SNAPSHOT_EVERY {
             self.save_snapshot();
@@ -1075,6 +1155,26 @@ mod tests {
     }
 
     /// Today's answers for every state and the side fields they combine with. A type change must keep each one.
+    #[test]
+    fn a_model_pick_survives_a_restart_and_resumes_on_its_model_and_effort() {
+        let dir = std::env::temp_dir().join(format!("cloudroom-model-pick-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let mut local = Local::open(&dir).unwrap();
+        let start = json!({"request_id":"s1","command":"start","state":"accepted","model":"claude-opus-5-5","input":{"harness":"claude-code","reasoning":"max"}});
+        local.append("s", "receipt", start, None).unwrap();
+        let native = json!({"id":"native","path":"/native.jsonl","model":"claude-opus-5-5"});
+        local.append("s", "native_identity", native, None).unwrap();
+        for state in ["accepted", "completed"] {
+            let pick = json!({"request_id":"m1","command":"model","state":state,"input":{"model":"claude-haiku-5-5","reasoning":"high"}});
+            local.append("s", "receipt", pick, None).unwrap();
+        }
+        drop(local);
+        let resume = Local::open(&dir).unwrap().sessions["s"].resume().unwrap();
+        fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(resume.model.as_deref(), Some("claude-haiku-5-5"));
+        assert_eq!(resume.reasoning.as_deref(), Some("high"));
+    }
+
     #[test]
     fn state_answers_stay_the_same() {
         let dir = std::env::temp_dir().join(format!("cloudroom-answers-{}", std::process::id()));

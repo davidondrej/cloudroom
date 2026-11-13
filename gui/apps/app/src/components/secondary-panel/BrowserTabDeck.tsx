@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { BbDesktopBrowserTarget } from "@cloudroom/desktop-contract";
+import type { RoomDesktopBrowserTarget } from "@cloudroom/desktop-contract";
 import type { BrowserFixedPanelTab } from "@/lib/fixed-panel-tabs-state";
-import { getDesktopBrowserApi } from "@/lib/bb-desktop";
+import { getDesktopBrowserApi } from "@/lib/room-desktop";
 import {
   BrowserTabContent,
   type BrowserAddressFocusRequest,
@@ -110,7 +110,7 @@ export function BrowserTabDeck({
   const target = activeBrowserTab?.desktopTarget;
   const targetHostId = target?.hostId;
   const [verifiedTarget, setVerifiedTarget] =
-    useState<BbDesktopBrowserTarget | null>(null);
+    useState<RoomDesktopBrowserTarget | null>(null);
   useEffect(() => {
     let current = true;
     setVerifiedTarget(null);

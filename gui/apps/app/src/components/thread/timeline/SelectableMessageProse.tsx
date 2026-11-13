@@ -160,6 +160,14 @@ function readSelectionWithinNode(
   const selection = window.getSelection();
   if (selection === null || selection.rangeCount === 0) return null;
   const range = selection.getRangeAt(0);
+  const common = range.commonAncestorContainer;
+  const commonElement =
+    common instanceof Element ? common : common.parentElement;
+  if (
+    commonElement?.closest('[contenteditable]:not([contenteditable="false"])')
+  ) {
+    return null;
+  }
 
   const accepted = isSelectionWithinNode(node, {
     isCollapsed: selection.isCollapsed,

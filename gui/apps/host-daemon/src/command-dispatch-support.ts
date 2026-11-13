@@ -42,6 +42,8 @@ export const noopEventSink: Pick<EventSink, "emit" | "flush"> = {
 };
 
 export interface CommandDispatchOptions {
+  /** An interrupting Stop for this thread is waiting behind the command now running. */
+  isThreadStopPending?: (threadId: string) => boolean;
   emitEnvironmentHookProgress?: (
     message: EnvironmentHookProgressMessage,
   ) => void;

@@ -4,11 +4,13 @@ import {
   createEnvironment,
   type EnvironmentRow,
   createEventId,
+  environmentHasRestorableThreads,
   findProjectEnvironmentByHostPath,
   getEnvironment,
   getThread,
   updateThread,
 } from "@cloudroom/db";
+import { applyEnvironmentLifecycleEvent } from "@cloudroom/db/internal-environment-lifecycle";
 import {
   canonicalizeHostPath,
   isAbsoluteHostPath,
@@ -19,7 +21,10 @@ import {
 } from "@cloudroom/domain";
 import type { DynamicTool, Thread, ToolCallResponse } from "@cloudroom/domain";
 import type { AppDeps } from "../../types.js";
+import { ApiError } from "../../errors.js";
+import { trackEnvironmentAttach } from "../environments/environment-engine.js";
 import { runLiveHostCommand } from "../hosts/live-command.js";
+import { isHostUnavailableApiError } from "../hosts/online-rpc.js";
 import { appendThreadEventInTransaction } from "./thread-events.js";
 import { buildEnvironmentProvisionCommand } from "./thread-create-helpers.js";
 import { findHostDataDir } from "../lib/entity-lookup.js";
@@ -34,6 +39,10 @@ export const UPDATE_ENVIRONMENT_DIRECTORY_TOOL_NAME =
   "update_environment_directory";
 
 const UPDATE_ENVIRONMENT_DIRECTORY_TIMEOUT_MS = 5 * 60 * 1000;
+const CHECKOUT_HINT =
+  "Check that the folder exists and any checkout in it has finished, then try again.";
+const SETUP_RUNNING_MESSAGE =
+  "This folder is already being set up. Try again in a few seconds.";
 
 const updateEnvironmentDirectoryInputSchema = z
   .object({
@@ -251,6 +260,74 @@ function attachReadyEnvironment(
   return result;
 }
 
+/** A failed folder the tool made itself, not a worktree or a thread's own setup. */
+function isFailedUnmanagedEnvironment(
+  environment: EnvironmentRow,
+): environment is EnvironmentRow & { path: string } {
+  return (
+    environment.status === "error" &&
+    environment.path !== null &&
+    environment.environmentProviderId === null &&
+    !environment.providerOwnsPath &&
+    environment.ownerThreadId === null &&
+    environment.teardownStatus === null
+  );
+}
+
+/** The host ran the setup and refused the folder; offline, timeout and cancel are not folder problems. */
+function isFolderSetupFailure(error: unknown): boolean {
+  return (
+    error instanceof ApiError &&
+    error.status === 502 &&
+    !isHostUnavailableApiError(error) &&
+    error.body.code !== "provision_cancelled"
+  );
+}
+
+function withPeriod(message: string): string {
+  return /[.!?]$/u.test(message) ? message : `${message}.`;
+}
+
+/** Reuses this project's environment at the path; a failed unmanaged one is checked again first (#1306). */
+export async function reuseEnvironmentForPath(
+  deps: AppDeps,
+  environment: EnvironmentRow,
+): Promise<ReadyEnvironment | { failure: string }> {
+  // The host keeps its first answer per environment ID, so a real recheck
+  // retires the failed row (only when no thread, archived ones included, can
+  // still use it) and sets up a fresh one; files are untouched.
+  if (isFailedUnmanagedEnvironment(environment)) {
+    if (
+      !environmentHasRestorableThreads(deps.db, environment.id) &&
+      applyEnvironmentLifecycleEvent(deps.db, deps.hub, {
+        environmentId: environment.id,
+        event: { type: "destroy.recorded" },
+      }).applied
+    ) {
+      return provisionUnmanagedEnvironmentForPath(deps, {
+        hostId: environment.hostId,
+        path: environment.path,
+        projectId: environment.projectId,
+      });
+    }
+    return {
+      failure:
+        "Environment at this path is error, not ready. Another thread still uses it: message that thread (unarchive it first if needed) to redo its setup, then try again.",
+    };
+  }
+  if (
+    environment.status === "provisioning" &&
+    environment.environmentProviderId === null &&
+    !environment.providerOwnsPath
+  ) {
+    return { failure: SETUP_RUNNING_MESSAGE };
+  }
+  return resolveReadyEnvironment(environment);
+}
+
+/** Folders being set up here, so a parallel switch to one waits instead of racing (#1306). */
+const foldersSettingUp = new Set<string>();
+
 export async function provisionUnmanagedEnvironmentForPath(
   deps: AppDeps,
   args: { hostId: string; path: string; projectId: string },
@@ -264,39 +341,71 @@ export async function provisionUnmanagedEnvironmentForPath(
   if (refusal !== null) {
     return { failure: `${refusal}. Use a different directory.` };
   }
-  const environment = createEnvironment(deps.db, deps.hub, {
-    projectId: args.projectId,
-    hostId: args.hostId,
-    providerOwnsPath: false,
-    status: "provisioning",
-    environmentProvider: null,
-  });
+  const folder = `${args.projectId}\0${args.hostId}\0${args.path}`;
+  if (foldersSettingUp.has(folder)) {
+    return { failure: SETUP_RUNNING_MESSAGE };
+  }
+  foldersSettingUp.add(folder);
+  try {
+    const environment = createEnvironment(deps.db, deps.hub, {
+      projectId: args.projectId,
+      hostId: args.hostId,
+      providerOwnsPath: false,
+      status: "provisioning",
+      environmentProvider: null,
+    });
+    return await setUpUnmanagedEnvironment(deps, {
+      environmentId: environment.id,
+      hostId: args.hostId,
+      path: args.path,
+    });
+  } finally {
+    foldersSettingUp.delete(folder);
+  }
+}
+
+async function setUpUnmanagedEnvironment(
+  deps: AppDeps,
+  args: { environmentId: string; hostId: string; path: string },
+): Promise<ReadyEnvironment | { failure: string }> {
   const command = buildEnvironmentProvisionCommand({
-    environmentId: environment.id,
+    environmentId: args.environmentId,
     hostId: args.hostId,
     initiator: null,
     path: args.path,
     setupScriptTimeoutMs: null,
   });
-
-  try {
-    await runLiveHostCommand(deps, {
+  // Registered in the same tick the row turns provisioning, so the
+  // provisioning sweep never marks this run abandoned.
+  const run = trackEnvironmentAttach(deps, args.environmentId, () =>
+    runLiveHostCommand(deps, {
       hostId: args.hostId,
       command,
       timeoutMs: UPDATE_ENVIRONMENT_DIRECTORY_TIMEOUT_MS,
-    });
+    }),
+  );
+  if (run === null) {
+    return { failure: SETUP_RUNNING_MESSAGE };
+  }
+  try {
+    await run;
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = withPeriod(
+      error instanceof Error ? error.message : String(error),
+    );
     return {
-      failure: `Could not update environment directory to ${args.path}: ${message}`,
+      failure: `Could not update environment directory to ${args.path}: ${message}${isFolderSetupFailure(error) ? ` ${CHECKOUT_HINT}` : ""}`,
     };
   }
 
-  const readyEnvironment = getEnvironment(deps.db, environment.id);
+  const readyEnvironment = getEnvironment(deps.db, args.environmentId);
   if (!readyEnvironment) {
     return { failure: "Prepared environment no longer exists." };
   }
-  return resolveReadyEnvironment(readyEnvironment);
+  const ready = resolveReadyEnvironment(readyEnvironment);
+  return "failure" in ready
+    ? { failure: `${ready.failure} Try again.` }
+    : ready;
 }
 
 export async function handleUpdateEnvironmentDirectoryToolCall(
@@ -361,11 +470,12 @@ export async function handleUpdateEnvironmentDirectoryToolCall(
   let targetEnvironment: ReadyEnvironment;
 
   if (existingEnvironment) {
-    const ready = resolveReadyEnvironment(existingEnvironment);
+    const ready = await reuseEnvironmentForPath(deps, existingEnvironment);
     if ("failure" in ready) {
       return toolCallFailure(ready.failure);
     }
     targetEnvironment = ready;
+    createdEnvironment = ready.id !== existingEnvironment.id;
   } else {
     const provisionedEnvironment = await provisionUnmanagedEnvironmentForPath(
       deps,

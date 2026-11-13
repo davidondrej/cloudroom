@@ -23,7 +23,7 @@ import { PERSONAL_PROJECT_ID } from "@cloudroom/domain";
 import { defineRpcContract, type BbPluginApi } from "@get-bb/plugin-sdk";
 import type { AutomationService } from "./service.js";
 import type { Db } from "./data.js";
-import { cloudLoopUsage, localLoopUsage } from "./usage.js";
+import { cloudLoopUsage, localLoopUsage, templateUsage } from "./usage.js";
 import { agentSessions, agentSessionsSchema } from "./agent-sessions.js";
 import {
   forgetCloud,
@@ -130,7 +130,7 @@ export const automationRpcContract = defineRpcContract({
   },
   // Loops their own failures paused, local and Cloud, for the sidebar's paused label (ADR 20261101-191413).
   paused_loops: {
-    input: z.null(),
+    input: z.object({ fresh: z.literal(true) }).strict().nullable(),
     output: z.object({ loops: z.array(pausedLoopSchema) }).strict(),
   },
   // Usage estimates (docs/scopes/loops.md): each schedule's rough share of the weekly Claude or Codex limit.
@@ -140,6 +140,10 @@ export const automationRpcContract = defineRpcContract({
       .object({ limit: z.string(), percents: z.record(z.string(), z.number()) })
       .strict()
       .nullable(),
+  },
+  templates_usage: {
+    input: z.null(),
+    output: z.record(z.string(), z.object({ limit: z.string(), percent: z.number() }).strict()),
   },
   cloud_template_add: {
     input: cloudTemplateInputSchema,
@@ -239,6 +243,9 @@ export function createRpcHandlers(
         return localLoopUsage(sdk, db, input.automationId, input.crons);
       return null;
     },
+    async templates_usage() {
+      return sdk ? templateUsage(sdk) : {};
+    },
     async cloud_automations(
       input: z.output<typeof cloudAutomationInputSchema>,
     ) {
@@ -256,7 +263,9 @@ export function createRpcHandlers(
       const { variables } = await sdk.cloudroom.environment();
       return { names: variables.map((variable) => variable.name) };
     },
-    async paused_loops() {
+    async paused_loops(input: { fresh: true } | null) {
+      // Right after a reconnect the website retried its paused loops: read it again, not the 15-minute copy.
+      if (input?.fresh) forgetCloud();
       const now = Date.now();
       const loops = [
         ...(db ? pausedLocal(db, now) : []),

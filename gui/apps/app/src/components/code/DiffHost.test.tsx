@@ -25,17 +25,17 @@ import { diffRendererProviderAtom } from "./codeRendererProvider";
 import { DiffHost } from "./DiffHost";
 import { makePluginRegistrationSet } from "@/test/fixtures/plugins";
 
-const bbDiff = vi.hoisted(() => ({
+const roomDiff = vi.hoisted(() => ({
   loaded: false,
   lastProps: null as Record<string, unknown> | null,
 }));
 
-vi.mock("./BbDiff", async () => {
+vi.mock("./RoomDiff", async () => {
   const React = await import("react");
-  bbDiff.loaded = true;
+  roomDiff.loaded = true;
   return {
     default: (props: Record<string, unknown>) => {
-      bbDiff.lastProps = props;
+      roomDiff.lastProps = props;
       return React.createElement(
         "div",
         { "data-testid": "bb-diff" },
@@ -100,8 +100,8 @@ function registerDiffRenderer(
 }
 
 beforeEach(() => {
-  bbDiff.loaded = false;
-  bbDiff.lastProps = null;
+  roomDiff.loaded = false;
+  roomDiff.lastProps = null;
   receivedProps.length = 0;
   resetPluginSlotStoreForTest();
   resetDeprecatedAliasWarningsForTests();
@@ -135,7 +135,7 @@ describe("DiffHost", () => {
     await act(async () => {
       await Promise.resolve();
     });
-    expect(bbDiff.loaded).toBe(false);
+    expect(roomDiff.loaded).toBe(false);
     expect(receivedProps.at(-1)?.experimental_fullFileContents).toBe(
       FULL_FILE_CONTENTS,
     );
@@ -205,8 +205,8 @@ describe("DiffHost", () => {
     );
 
     expect(await screen.findByTestId("bb-diff")).toBeDefined();
-    expect(bbDiff.loaded).toBe(true);
-    expect(bbDiff.lastProps?.file).toBeDefined();
+    expect(roomDiff.loaded).toBe(true);
+    expect(roomDiff.lastProps?.file).toBeDefined();
   });
 
   it("honours a pin to BB's renderer without disabling the plugin", async () => {
@@ -290,9 +290,9 @@ describe("DiffHost", () => {
     render(<DiffHost file={parseFixture()} fullFileContents={null} />);
 
     await screen.findByTestId("bb-diff");
-    expect(bbDiff.lastProps?.view).toBe("unified");
-    expect(bbDiff.lastProps?.overflow).toBe("scroll");
-    expect(bbDiff.lastProps?.showLineNumbers).toBe(true);
+    expect(roomDiff.lastProps?.view).toBe("unified");
+    expect(roomDiff.lastProps?.overflow).toBe("scroll");
+    expect(roomDiff.lastProps?.showLineNumbers).toBe(true);
   });
 });
 
@@ -308,7 +308,7 @@ describe("experimental_Diff", () => {
     await screen.findByTestId("plugin-diff");
     expect(receivedProps.at(-1)?.path).toBe("src/app.ts");
     expect(receivedProps.at(-1)?.experimental_fullFileContents).toBeNull();
-    expect(bbDiff.loaded).toBe(false);
+    expect(roomDiff.loaded).toBe(false);
   });
 
   it("completes a header-less patch before handing it to a replacement", async () => {
@@ -342,13 +342,13 @@ describe("experimental_Diff", () => {
     );
 
     await screen.findByTestId("bb-diff");
-    const file = bbDiff.lastProps?.file as ReturnType<
+    const file = roomDiff.lastProps?.file as ReturnType<
       typeof parseFixture
     > | null;
     expect(file?.isPartial).toBe(true);
-    expect(bbDiff.lastProps?.patchText).toBe(PATCH);
-    expect(bbDiff.lastProps?.fullFileContents).toBe(FULL_FILE_CONTENTS);
-    expect(bbDiff.lastProps).not.toHaveProperty("expansionLineCount");
+    expect(roomDiff.lastProps?.patchText).toBe(PATCH);
+    expect(roomDiff.lastProps?.fullFileContents).toBe(FULL_FILE_CONTENTS);
+    expect(roomDiff.lastProps).not.toHaveProperty("expansionLineCount");
   });
 
   it("degrades to plain text instead of an empty diff when the patch will not parse", () => {
@@ -356,7 +356,7 @@ describe("experimental_Diff", () => {
 
     expect(screen.getByText("not a patch at all")).toBeDefined();
     expect(screen.queryByTestId("bb-diff")).toBeNull();
-    expect(bbDiff.loaded).toBe(false);
+    expect(roomDiff.loaded).toBe(false);
   });
 });
 
@@ -381,7 +381,7 @@ describe("DiffHost experimental_Original alias", () => {
       />,
     );
     expect(await screen.findByTestId("bb-diff")).toBeDefined();
-    expect(bbDiff.lastProps?.view).toBe("unified");
+    expect(roomDiff.lastProps?.view).toBe("unified");
 
     rerender(
       <DiffHost

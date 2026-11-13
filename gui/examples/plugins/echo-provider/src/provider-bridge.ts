@@ -602,6 +602,7 @@ const handlers: Record<string, RequestHandler> = {
         fork: "none",
         approvalEnforcedBy: "runtime",
         steerMode: "queue",
+        stopsUnopenedTurns: false,
       },
     });
   },

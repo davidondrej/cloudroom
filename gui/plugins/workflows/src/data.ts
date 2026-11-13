@@ -334,6 +334,27 @@ export function claimQueuedRun(
   })();
 }
 
+/** What holds a queued run: dispatch counts running runs in every project. */
+export function countRunsAhead(
+  db: Db,
+  run: Pick<WorkflowRunRow, "projectId" | "createdAt">,
+): { running: number; runningInOtherProjects: number; queuedAhead: number } {
+  return db
+    .prepare(
+      `SELECT COUNT(*) FILTER (WHERE status = 'running') AS running,
+         COUNT(*) FILTER (WHERE status = 'running' AND project_id <> @projectId)
+           AS runningInOtherProjects,
+         COUNT(*) FILTER (WHERE status = 'queued' AND created_at < @createdAt)
+           AS queuedAhead
+       FROM workflow_runs WHERE status IN ('queued', 'running')`,
+    )
+    .get({ projectId: run.projectId, createdAt: run.createdAt }) as {
+    running: number;
+    runningInOtherProjects: number;
+    queuedAhead: number;
+  };
+}
+
 export function settleRun(
   db: Db,
   args: {

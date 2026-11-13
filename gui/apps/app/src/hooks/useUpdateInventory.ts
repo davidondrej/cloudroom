@@ -3,7 +3,7 @@ import { useQueries } from "@tanstack/react-query";
 import type { Host } from "@cloudroom/domain";
 import type { ProviderCliStatusResponse } from "@cloudroom/host-daemon-contract";
 import type { SystemVersionResponse } from "@cloudroom/server-contract";
-import type { BbDesktopInfo } from "@cloudroom/desktop-contract";
+import type { RoomDesktopInfo } from "@cloudroom/desktop-contract";
 import {
   buildProviderCliIssue,
   isProviderCliIssue,
@@ -38,7 +38,7 @@ export interface UpdateInventoryMachine {
 export interface UpdateInventory {
   isLoading: boolean;
   systemVersion: SystemVersionResponse | undefined;
-  desktopInfo: BbDesktopInfo | null;
+  desktopInfo: RoomDesktopInfo | null;
   appUpdateAvailable: boolean;
   desktopUpdateReady: boolean;
   machines: UpdateInventoryMachine[];

@@ -726,16 +726,20 @@ const Sidebar = React.forwardRef<HTMLDivElement, React.ComponentProps<"div">>(
           data-sidebar="gap"
           style={widthStyle}
           className={cn(
-            "relative hidden h-full w-(--sidebar-width) bg-transparent transition-[width] duration-200 ease-linear md:block",
+            // The width snaps so the page re-lays out once; animating it re-wrapped every chat on every frame.
+            // Keep bb-zoom: --sidebar-width reads the macOS zoom value, which only `.bb-zoom` elements get.
+            "bb-zoom relative hidden h-full w-(--sidebar-width) bg-sidebar md:block",
             "group-data-[collapsible=offcanvas]:w-0",
           )}
         />
         <div
           data-sidebar="panel"
           className={cn(
-            "fixed inset-y-0 z-10 flex h-(--bb-shell-height) w-(--sidebar-width) select-none flex-col bg-sidebar text-sidebar-foreground [transition:left_200ms_linear,right_200ms_linear,width_200ms_linear,visibility_0s_linear_0s]",
-            "group-data-[collapsible=offcanvas]:invisible group-data-[collapsible=offcanvas]:[transition:left_200ms_linear,right_200ms_linear,width_200ms_linear,visibility_0s_linear_200ms]",
-            "left-0 group-data-[collapsible=offcanvas]:left-[calc(var(--sidebar-width)*-1)]",
+            // Slide with translate only: the GPU animates it without layout or paint.
+            // Keep bb-zoom: --sidebar-width reads the macOS zoom value, which only `.bb-zoom` elements get.
+            "bb-zoom fixed inset-y-0 left-0 z-10 flex h-(--bb-shell-height) w-(--sidebar-width) select-none flex-col bg-sidebar text-sidebar-foreground [transition:translate_220ms_cubic-bezier(0.32,0.72,0,1),visibility_0s_linear_0s] motion-reduce:transition-none!",
+            // Closing: stay above the page while sliding, then move truly off-screen so no hidden drag region stays at the left edge.
+            "group-data-[collapsible=offcanvas]:invisible group-data-[collapsible=offcanvas]:z-40 group-data-[collapsible=offcanvas]:left-[calc(var(--sidebar-width)*-1)] group-data-[collapsible=offcanvas]:-translate-x-full group-data-[collapsible=offcanvas]:[transition:translate_220ms_cubic-bezier(0.32,0.72,0,1),visibility_0s_linear_220ms,left_0s_linear_220ms]",
             "border-border-seam group-data-[side=left]:border-r",
             className,
           )}

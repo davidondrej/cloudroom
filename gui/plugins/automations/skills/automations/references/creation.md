@@ -22,9 +22,9 @@ Agent mode flags:
 --base-branch <branch>         Base branch for new managed worktrees
 ```
 
-When `--permission-mode` is omitted, the plugin chooses Auto
-(`auto`) when the provider supports it and otherwise uses Full Access
-(`full`).
+When `--permission-mode` is omitted, the plugin chooses Full Access
+(`full`) when the provider supports it and otherwise uses Auto
+(`auto`).
 
 Script mode flags:
 

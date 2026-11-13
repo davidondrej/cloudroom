@@ -425,7 +425,7 @@ async function writeToolPluginFixture(rootDir: string): Promise<void> {
   await writeFile(join(rootDir, "icons", "stamp.svg"), STAMP_SVG);
 }
 
-function bbToolItem(
+function roomToolItem(
   threadId: string,
   id: string,
   tool: string,
@@ -480,9 +480,9 @@ describe("presentation icon ingest validation for bb-injected tool rows", () => 
 
       const response = await post(harness, session.id, [
         turnStarted(thread.id),
-        bbToolItem(thread.id, "item-1", "stamp_tool", TOOL_ICON_GLYPH),
-        bbToolItem(thread.id, "item-2", "stamp_tool", "other-plugin/stamp"),
-        bbToolItem(thread.id, "item-3", "no_such_tool", TOOL_ICON_GLYPH),
+        roomToolItem(thread.id, "item-1", "stamp_tool", TOOL_ICON_GLYPH),
+        roomToolItem(thread.id, "item-2", "stamp_tool", "other-plugin/stamp"),
+        roomToolItem(thread.id, "item-3", "no_such_tool", TOOL_ICON_GLYPH),
         toolItem(thread.id, "item-4", TOOL_ICON_GLYPH),
       ]);
       expect(response.status).toBe(200);

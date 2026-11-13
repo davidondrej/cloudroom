@@ -2,10 +2,10 @@ import { useState } from "react";
 import { cn } from "@cloudroom/shared-ui/lib/utils";
 import { useSystemVersion } from "@/hooks/queries/system-queries";
 import { useDesktopUpdate, useInstallDesktopUpdate } from "@/hooks/queries/cloudroom-queries";
-import { CHROME_ROW_CLASS, getBbDesktopInfo } from "@/lib/bb-desktop";
+import { CHROME_ROW_CLASS, getRoomDesktopInfo } from "@/lib/room-desktop";
 
 export function CloudroomVersionMark() {
-  const app = getBbDesktopInfo()?.version;
+  const app = getRoomDesktopInfo()?.version;
   const live = useSystemVersion().data?.desktopVersion;
   const [server, setServer] = useState<string>();
   if (live && server === undefined) setServer(live);

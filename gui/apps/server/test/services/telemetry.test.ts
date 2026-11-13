@@ -25,9 +25,21 @@ function createTestLogger() {
   };
 }
 
+type Telemetry = Awaited<ReturnType<typeof createTelemetryService>>;
+type Batch = { install_id: string; events: { id: string; name: string; properties: Record<string, unknown> }[] };
+
 describe("telemetry service", () => {
   let dataDir: string;
   let fetchMock: ReturnType<typeof vi.fn>;
+  /** Sends what is queued, and returns every batch sent so far. */
+  const batches = async (telemetry: Telemetry): Promise<Batch[]> => {
+    telemetry.setTargetSource(async () => ({ website: "https://example.test" }));
+    await telemetry.flush();
+    return fetchMock.mock.calls.map(([url, init]) => {
+      expect(url).toBe("https://example.test/api/desktop/events");
+      return JSON.parse((init as { body: string }).body) as Batch;
+    });
+  };
 
   beforeEach(async () => {
     dataDir = await mkdtemp(join(tmpdir(), "bb-telemetry-test-"));
@@ -42,7 +54,6 @@ describe("telemetry service", () => {
 
   it("sends events with a stable anonymous install id", async () => {
     const telemetry = await createTelemetryService({
-      apiKey: "phc_test",
       appSurface: "web",
       appVersion: "1.2.3",
       dataDir,
@@ -73,25 +84,16 @@ describe("telemetry service", () => {
       },
     });
 
-    expect(fetchMock).toHaveBeenCalledTimes(3);
+    const sent = await batches(telemetry);
+    expect(sent).toHaveLength(1);
     const persistedId = (
       await readFile(join(dataDir, "telemetry-id"), "utf8")
     ).trim();
     expect(persistedId).toMatch(/^[0-9a-f]{32}$/);
-
-    const calls = fetchMock.mock.calls.map((call) => {
-      const [url, init] = call as [string, { body: string }];
-      return { url, payload: JSON.parse(init.body) as Record<string, never> };
-    });
-    for (const { url, payload } of calls) {
-      expect(url).toBe("https://us.i.posthog.com/capture/");
-      expect(payload).toMatchObject({
-        api_key: "phc_test",
-        distinct_id: persistedId,
-      });
-    }
-    expect(calls[0]?.payload).toMatchObject({
-      event: "app_started",
+    expect(sent[0]?.install_id).toBe(persistedId);
+    const events = sent[0]!.events;
+    expect(events[0]).toMatchObject({
+      name: "app_started",
       properties: {
         app_version: "1.2.3",
         app_surface: "web",
@@ -100,8 +102,8 @@ describe("telemetry service", () => {
         platform: process.platform,
       },
     });
-    expect(calls[1]?.payload).toMatchObject({
-      event: "thread_created",
+    expect(events[1]).toMatchObject({
+      name: "thread_created",
       properties: {
         app_version: "1.2.3",
         app_surface: "desktop",
@@ -109,8 +111,8 @@ describe("telemetry service", () => {
         provider: "claude-code",
       },
     });
-    expect(calls[2]?.payload).toMatchObject({
-      event: "user_message_sent",
+    expect(events[2]).toMatchObject({
+      name: "user_message_sent",
       properties: {
         app_version: "1.2.3",
         app_surface: "web",
@@ -124,7 +126,6 @@ describe("telemetry service", () => {
 
   it("reuses the persisted install id across restarts", async () => {
     const args = {
-      apiKey: "phc_test",
       appSurface: "web" as const,
       appVersion: "1.2.3",
       dataDir,
@@ -134,38 +135,28 @@ describe("telemetry service", () => {
     };
     const first = await createTelemetryService(args);
     first.capture({ name: "app_started" });
+    await batches(first);
     const second = await createTelemetryService(args);
     second.capture({ name: "app_started" });
 
-    const ids = fetchMock.mock.calls.map((call) => {
-      const [, init] = call as [string, { body: string }];
-      return (JSON.parse(init.body) as { distinct_id: string }).distinct_id;
-    });
+    const ids = (await batches(second)).map((batch) => batch.install_id);
+    expect(ids).toHaveLength(2);
     expect(ids[0]).toBe(ids[1]);
   });
 
   it.each([
     {
-      apiKey: "",
-      appVersion: "1.2.3",
-      enabled: true,
-      label: "there is no API key",
-    },
-    {
-      apiKey: "phc_test",
       appVersion: "1.2.3",
       enabled: false,
       label: "the user opted out",
     },
     {
-      apiKey: "phc_test",
       appVersion: DEFAULTS.appVersion,
       enabled: true,
       label: "the release version is unresolved",
     },
-  ])("is fully inert when $label", async ({ apiKey, appVersion, enabled }) => {
+  ])("is fully inert when $label", async ({ appVersion, enabled }) => {
     const telemetry = await createTelemetryService({
-      apiKey,
       appSurface: "web",
       appVersion,
       dataDir,
@@ -176,7 +167,7 @@ describe("telemetry service", () => {
     telemetry.setEnabled(true);
     telemetry.capture({ name: "app_started" });
 
-    expect(fetchMock).not.toHaveBeenCalled();
+    expect(await batches(telemetry)).toEqual([]);
     await expect(readdir(dataDir)).resolves.toEqual([]);
   });
 
@@ -186,8 +177,7 @@ describe("telemetry service", () => {
     try {
       setAppSettings(db, { ...getAppSettings(db), telemetryEnabled: false });
       const args = {
-        apiKey: "phc_test",
-        appSurface: "web" as const,
+          appSurface: "web" as const,
         appVersion: "1.2.3",
         dataDir,
         enabled: true,
@@ -196,11 +186,11 @@ describe("telemetry service", () => {
       };
       const telemetry = await createTelemetryService(args);
       telemetry.capture({ name: "app_started" });
-      expect(fetchMock).not.toHaveBeenCalled();
+      expect(await batches(telemetry)).toEqual([]);
       setAppSettings(db, { ...getAppSettings(db), telemetryEnabled: true });
       telemetry.setEnabled(true);
       telemetry.capture({ name: "app_started" });
-      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(await batches(telemetry)).toHaveLength(1);
       setAppSettings(db, { ...getAppSettings(db), telemetryEnabled: false });
       telemetry.setEnabled(false);
       telemetry.capture({ name: "app_started" });
@@ -209,7 +199,8 @@ describe("telemetry service", () => {
         telemetryEnabled: getAppSettings(db).telemetryEnabled,
       });
       restarted.capture({ name: "app_started" });
-      expect(fetchMock).toHaveBeenCalledTimes(1);
+      await batches(telemetry);
+      expect(await batches(restarted)).toHaveLength(1);
     } finally {
       db.$client.close();
     }
@@ -218,8 +209,7 @@ describe("telemetry service", () => {
   it("updates the cached preference only after valid settings writes", async () => {
     await withTestHarness(async (harness) => {
       const telemetry = await createTelemetryService({
-        apiKey: "phc_test",
-        appSurface: "web",
+          appSurface: "web",
         appVersion: "1.2.3",
         dataDir,
         enabled: true,
@@ -234,29 +224,28 @@ describe("telemetry service", () => {
           body: JSON.stringify(settings),
         });
       telemetry.capture({ name: "app_started" });
-      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(await batches(telemetry)).toHaveLength(1);
       expect(
         (await put({ ...defaultAppSettings, telemetryEnabled: false })).status,
       ).toBe(200);
       telemetry.capture({ name: "app_started" });
-      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(await batches(telemetry)).toHaveLength(1);
       expect((await put({ telemetryEnabled: true })).status).toBe(400);
       telemetry.capture({ name: "app_started" });
-      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(await batches(telemetry)).toHaveLength(1);
       const { telemetryEnabled, ...legacy } = defaultAppSettings;
       expect(telemetryEnabled).toBe(true);
       expect((await put(legacy)).status).toBe(200);
       telemetry.capture({ name: "app_started" });
-      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(await batches(telemetry)).toHaveLength(1);
       expect((await put(defaultAppSettings)).status).toBe(200);
       telemetry.capture({ name: "app_started" });
-      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(await batches(telemetry)).toHaveLength(2);
     });
   });
 
-  it("batches events to the website with the PostHog event's ID, and sends nothing once turned off", async () => {
+  it("batches events to the website, and sends nothing once turned off", async () => {
     const telemetry = await createTelemetryService({
-      apiKey: "phc_test",
       appSurface: "desktop",
       appVersion: "1.2.3",
       dataDir,
@@ -264,7 +253,7 @@ describe("telemetry service", () => {
       enabled: true,
       logger: createTestLogger(),
     });
-    const batches = () => fetchMock.mock.calls.filter(([url]) => String(url).endsWith("/api/desktop/events"));
+    const calls = () => fetchMock.mock.calls.filter(([url]) => String(url).endsWith("/api/desktop/events"));
     let release = () => {};
     telemetry.setTargetSource(() => new Promise((resolve) => { release = () => resolve({ website: "https://example.test" }); }));
     telemetry.capture({ name: "bug_report_clicked" });
@@ -272,27 +261,24 @@ describe("telemetry service", () => {
     telemetry.setEnabled(false);
     release();
     await pending;
-    expect(batches()).toHaveLength(0);
+    expect(calls()).toHaveLength(0);
 
     telemetry.setEnabled(true);
     telemetry.setTargetSource(async () => ({ website: "https://example.test", authorization: "Basic abc" }));
     telemetry.capture({ name: "bug_report_clicked" });
     await telemetry.flush();
-    expect(batches()).toHaveLength(1);
-    const [, init] = batches()[0] as [string, { body: string; headers: Record<string, string> }];
+    expect(calls()).toHaveLength(1);
+    const [, init] = calls()[0] as [string, { body: string; headers: Record<string, string> }];
     const sent = JSON.parse(init.body) as { install_id: string; events: { id: string; name: string }[] };
     expect(sent.install_id).toMatch(/^[0-9a-f]{32}$/);
     expect(sent.events.map((event) => event.name)).toEqual(["bug_report_clicked"]);
     expect(init.headers.authorization).toBe("Basic abc");
-    const posthog = fetchMock.mock.calls.filter(([url]) => String(url).includes("posthog")).at(-1) as [string, { body: string }];
-    expect(JSON.parse(posthog[1].body).uuid).toBe(sent.events[0]!.id);
   });
 
   it("logs and swallows send failures", async () => {
     const logger = createTestLogger();
     fetchMock.mockRejectedValue(new Error("offline"));
     const telemetry = await createTelemetryService({
-      apiKey: "phc_test",
       appSurface: "desktop",
       appVersion: "1.2.3",
       dataDir,
@@ -302,15 +288,8 @@ describe("telemetry service", () => {
     });
 
     telemetry.capture({ name: "app_started" });
-    await vi.waitFor(() => {
-      expect(logger.debug).toHaveBeenCalledWith(
-        {
-          app_surface: "desktop",
-          err: expect.any(Error),
-          event: "app_started",
-        },
-        "Telemetry event send failed",
-      );
-    });
+    telemetry.setTargetSource(async () => ({ website: "https://example.test" }));
+    await telemetry.flush();
+    expect(logger.debug).toHaveBeenCalledWith({ err: expect.any(Error) }, "Telemetry batch send failed");
   });
 });

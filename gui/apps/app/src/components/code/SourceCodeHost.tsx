@@ -4,19 +4,19 @@ import { deprecatedOriginalAlias } from "@/lib/plugin-sdk-deprecated-aliases";
 import { useSourceCodeRendererReplacement } from "./codeRendererProvider";
 import {
   DEFAULT_CODE_OVERFLOW,
-  type BbSourceCodeProps,
+  type RoomSourceCodeProps,
 } from "./code-rendering";
 
 const SOURCE_CODE_RENDERER_SLOT_KIND = "sourceCodeRenderer";
 
-const BbSourceCode = lazy(() => import("./BbSourceCode"));
+const RoomSourceCode = lazy(() => import("./RoomSourceCode"));
 
 interface SourceCodeHostProps extends Omit<
-  BbSourceCodeProps,
+  RoomSourceCodeProps,
   "overflow" | "highlightedLines"
 > {
-  overflow?: BbSourceCodeProps["overflow"];
-  highlightedLines?: BbSourceCodeProps["highlightedLines"];
+  overflow?: RoomSourceCodeProps["overflow"];
+  highlightedLines?: RoomSourceCodeProps["highlightedLines"];
   fallback?: ReactNode;
 }
 
@@ -35,7 +35,7 @@ export function SourceCodeHost({
 
   const original = (
     <Suspense fallback={fallback}>
-      <BbSourceCode
+      <RoomSourceCode
         content={content}
         path={path}
         cacheKey={cacheKey}

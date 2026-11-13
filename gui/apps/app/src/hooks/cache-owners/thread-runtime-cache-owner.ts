@@ -576,7 +576,7 @@ function requestWillOptimisticallyQueue(
   );
 }
 
-function buildOptimisticUserMessageRow({
+export function buildOptimisticUserMessageRow({
   createdAt,
   input,
   mode,

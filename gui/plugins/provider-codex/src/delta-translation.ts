@@ -884,7 +884,7 @@ function toolStatusFields(status: CodexItemStatus): {
 
 const PLAN_STEPS_CHANNEL = "planSteps";
 
-const BB_TOOL_SERVER = "bb";
+const ROOM_TOOL_SERVER = "bb";
 
 function isTerminalCodexItemStatus(status: CodexItemStatus): boolean {
   return status !== "inProgress";
@@ -1013,7 +1013,7 @@ function translateCodexItemShape(
         kind: "translated",
         shape: {
           type: "tool",
-          ...(injected === undefined ? {} : { server: BB_TOOL_SERVER }),
+          ...(injected === undefined ? {} : { server: ROOM_TOOL_SERVER }),
           tool: parsedItem.tool,
           ...(parsedItem.arguments === undefined
             ? {}
@@ -1169,11 +1169,20 @@ function hookProblemWarning(
     return null;
   }
   const entries: unknown[] = Array.isArray(run.entries) ? run.entries : [];
+  // Codex puts failures in error entries and block or stop reasons in
+  // feedback or stop entries. statusMessage is only the progress label, and
+  // context entries are notes for the model, so both come last.
+  const texts = (match: (kind: unknown) => boolean) =>
+    entries.map((entry) =>
+      isRecord(entry) && match(entry.kind)
+        ? getStringProperty(entry, "text")
+        : undefined,
+    );
   const reason = [
+    ...texts((kind) => kind === "error"),
+    ...texts((kind) => kind !== "error" && kind !== "context"),
     getStringProperty(run, "statusMessage"),
-    ...entries.map((entry) =>
-      isRecord(entry) ? getStringProperty(entry, "text") : undefined,
-    ),
+    ...texts((kind) => kind === "context"),
   ]
     .map((text) => text?.trim())
     .find(Boolean);

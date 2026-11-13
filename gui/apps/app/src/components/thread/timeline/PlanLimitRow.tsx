@@ -59,7 +59,7 @@ export function PlanLimitRow({
   switched?: PlanLimitSwitch | undefined;
   className?: string;
 }) {
-  const { thread, self, selfResetsAt, agents, primary } =
+  const { thread, model, self, selfResetsAt, agents, primary } =
     usePlanLimitAgents(threadId);
   const accounts = usePlanLimitAccounts(thread?.providerId ?? "");
   const queryClient = useQueryClient();
@@ -177,7 +177,7 @@ export function PlanLimitRow({
               logo={self}
               label="Switch account"
               onClick={() => {
-                const next = nextAccount(accounts.others);
+                const next = nextAccount(accounts.others, model);
                 if (next) pickAccount(next.id);
               }}
               menuLabel="Switch to"
@@ -188,7 +188,7 @@ export function PlanLimitRow({
                   key={account.id}
                   logo={self}
                   label={account.label}
-                  detail={atLimit(account) ? "At limit" : null}
+                  detail={atLimit(account, model) ? "At limit" : null}
                   onSelect={() => pickAccount(account.id)}
                 />
               ))}

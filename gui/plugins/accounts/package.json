@@ -17,6 +17,7 @@
     "app": "./app.tsx"
   },
   "scripts": {
+    "test": "vitest run --config vitest.config.ts",
     "typecheck": "tsc --noEmit",
     "prepare:bundled": "bb-plugin-build prepare-bundled"
   },
@@ -32,6 +33,7 @@
     "@types/node": "^22.0.0",
     "@types/react": "^19.0.0",
     "react": "^19.0.0",
-    "typescript": "npm:@typescript/typescript6@^6.0.2"
+    "typescript": "npm:@typescript/typescript6@^6.0.2",
+    "vitest": "^4.1.1"
   }
 }

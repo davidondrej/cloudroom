@@ -14,7 +14,7 @@ import { PluginIcon } from "@/components/plugin/PluginIcon";
 import type { PluginPanelActionEntry } from "@/components/plugin/PluginPanelActions";
 import { useSidebarSortable } from "@/components/sidebar/sortableMotion";
 import { useReorderDnd } from "@/components/ui/useReorderDnd";
-import { isDesktopBrowserAvailable } from "@/lib/bb-desktop";
+import { isDesktopBrowserAvailable } from "@/lib/room-desktop";
 import { arrangeByStoredOrder, reorderStoredOrder } from "@/lib/stored-order";
 import type { AppShortcutPresentation } from "@/lib/app-keybindings";
 import {

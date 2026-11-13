@@ -3,6 +3,7 @@ import {
   CALLER_PROOF_REQUIRED_MESSAGE,
   CALLER_PROOF_STATUS_HEADER,
   CALLER_TOKEN_HEADER,
+  type CallerPeer,
   type CallerProofIssuer,
 } from "@cloudroom/config/caller-proof";
 import { isLoopbackAddress } from "@cloudroom/config/loopback";
@@ -71,15 +72,27 @@ export function callerProofStatus(context: CallerTrustReader): string {
 }
 
 interface IncomingSocketBindings {
-  incoming?: { socket?: { localAddress?: string } };
+  incoming?: { socket?: CallerPeer };
 }
 
-export function arrivedOverLoopback(context: Pick<Context, "env">): boolean {
+function incomingSocket(context: Pick<Context, "env">): CallerPeer | undefined {
   const env = context.env as
     | (IncomingSocketBindings & { server?: IncomingSocketBindings })
     | undefined;
-  const localAddress = (env?.server ?? env)?.incoming?.socket?.localAddress;
+  return (env?.server ?? env)?.incoming?.socket;
+}
+
+export function arrivedOverLoopback(context: Pick<Context, "env">): boolean {
+  const localAddress = incomingSocket(context)?.localAddress;
   return localAddress === undefined || isLoopbackAddress(localAddress);
+}
+
+// The connection whose OS user an open read must match. Null for a request
+// without a socket (in process) or one from another computer: binding beyond
+// loopback is only for trusted networks (start-server.ts).
+export function loopbackPeer(context: Pick<Context, "env">): CallerPeer | null {
+  const socket = incomingSocket(context);
+  return socket !== undefined && arrivedOverLoopback(context) ? socket : null;
 }
 
 export function isTrustedCaller(context: CallerTrustReader): boolean {

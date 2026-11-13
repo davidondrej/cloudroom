@@ -18,7 +18,7 @@ import type { ThreadStartParams } from "./generated/codex-app-server/schema/v2/T
 import type { UserInput as CodexUserInput } from "./generated/codex-app-server/schema/v2/UserInput.js";
 import type { AskForApproval } from "./generated/codex-app-server/schema/v2/AskForApproval.js";
 import type { ApprovalsReviewer } from "./generated/codex-app-server/schema/v2/ApprovalsReviewer.js";
-import { mapBbReasoningLevelToCodex } from "./models.js";
+import { mapRoomReasoningLevelToCodex } from "./models.js";
 
 export type CodexSessionOptions = {
   model?: string;
@@ -43,12 +43,12 @@ export interface CodexThreadPermissionSettings {
   sandbox: CodexSandboxMode;
 }
 
-export type BbThreadStartParams = ThreadStartParams & {
+export type RoomThreadStartParams = ThreadStartParams & {
   experimentalRawEvents?: boolean;
   dynamicTools?: DynamicToolSpec[];
 };
 
-export type BbThreadForkParams = {
+export type RoomThreadForkParams = {
   threadId: string;
   lastTurnId?: string | null;
   excludeTurns?: boolean;
@@ -132,8 +132,12 @@ type GitHeadState =
   | { type: "unsafe" };
 
 interface CodexInstructionSource {
+  approvalPolicy?: AskForApproval;
   instructionMode: "append" | "replace";
-  options: { instructions?: string };
+  options: {
+    instructions?: string;
+    permissionScope?: CodexSessionOptions["permissionScope"];
+  };
 }
 
 interface CodexInstructionOverrides {
@@ -146,20 +150,32 @@ interface CodexInstructionOverrides {
 const CODEX_PLAIN_CHAT =
   "request_user_input and request_user_input_async don't reach the user; ask in plain chat instead.";
 
+// #1294. The workspace sandbox keeps .agents and .codex read-only, so in a linked
+// worktree git can half finish a branch change and still exit 0.
+const CODEX_READ_ONLY_GIT =
+  "Your sandbox keeps .agents and .codex read-only. git switch, checkout, reset, merge, pull or stash can leave old files there even with exit 0, so run them with escalation. Record git status --porcelain first. After a sandboxed command, preserve pre-existing edits and staged changes, inspect .agents and .codex against that command's intended result, and fix only verified stale files before committing. For merge, pull or stash recovery, do not restore from HEAD or clean; that can discard intended changes. If the intended state is unclear, stop and tell the user.";
+
+// #1456. With approval "never" (Full Access), Codex rejects any command that a
+// prompt rule matches (user, project or managed .rules), and the model can't ask.
+const CODEX_NEVER_ASKS =
+  "This permission mode can't ask the user for approval. If a command fails with \"approval required by policy, but AskForApproval is set to Never\", a Codex rule requires approval for that command. Do not retry or work around it. Tell the user that a Codex rule needs approval: they can switch this thread to Manual and send again to approve it themselves, use Auto to let Codex's automatic review decide, or change that rule.";
+
 export function resolveCodexInstructionOverrides(
   command: CodexInstructionSource,
 ): CodexInstructionOverrides {
+  const notes = [
+    CODEX_PLAIN_CHAT,
+    ...(command.options.permissionScope === "workspace"
+      ? [CODEX_READ_ONLY_GIT]
+      : []),
+    ...(command.approvalPolicy === "never" ? [CODEX_NEVER_ASKS] : []),
+  ].join("\n\n");
   const instructions = command.options.instructions?.trim();
   if (instructions && command.instructionMode === "replace") {
-    return {
-      baseInstructions: instructions,
-      developerInstructions: CODEX_PLAIN_CHAT,
-    };
+    return { baseInstructions: instructions, developerInstructions: notes };
   }
   return {
-    developerInstructions: instructions
-      ? `${CODEX_PLAIN_CHAT}\n\n${instructions}`
-      : CODEX_PLAIN_CHAT,
+    developerInstructions: instructions ? `${notes}\n\n${instructions}` : notes,
   };
 }
 
@@ -535,6 +551,104 @@ export function toCodexThreadPermissionSettings(
   }
 }
 
+/** Allowed lists from Codex `configRequirements/read`; null means unrestricted. */
+export interface CodexManagedRequirements {
+  allowedApprovalPolicies?: readonly unknown[] | null;
+  allowedApprovalsReviewers?: readonly unknown[] | null;
+  allowedSandboxModes?: readonly unknown[] | null;
+  autoReview?: { requiredOnModels?: readonly string[] | null } | null;
+}
+
+// Codex settings of Cloudroom's modes, as toCodexThreadPermissionSettings maps them.
+const CLOUDROOM_PERMISSION_MODES = [
+  ["Manual", "on-request", "user", "workspace-write"],
+  ["Auto", "on-request", "auto_review", "workspace-write"],
+  ["Full Access", "never", "user", "danger-full-access"],
+] as const;
+
+/** Codex's rule: one `namespace/` prefix is stripped; other slashes never match. */
+function requiresAutoReview(
+  model: string,
+  requirements: CodexManagedRequirements,
+): boolean {
+  const slug = /^(?:[\w-]+\/)?([^/]+)$/.exec(model)?.[1];
+  return (
+    slug !== undefined &&
+    (requirements.autoReview?.requiredOnModels?.includes(slug) ?? false)
+  );
+}
+
+function managedPolicyConflicts(
+  settings: CodexThreadPermissionSettings,
+  requirements: CodexManagedRequirements,
+  model: string | null,
+): string[] {
+  // Codex 0.136 reports auto_review under its old name, guardian_subagent.
+  const reviewers = requirements.allowedApprovalsReviewers?.map((reviewer) =>
+    reviewer === "guardian_subagent" ? "auto_review" : reviewer,
+  );
+  const autoReviewOnly: readonly unknown[] | null =
+    model !== null && requiresAutoReview(model, requirements)
+      ? ["auto_review"]
+      : null;
+  const checks = [
+    [
+      "approval_policy",
+      settings.approvalPolicy,
+      requirements.allowedApprovalPolicies,
+    ],
+    ["approvals_reviewer", settings.approvalsReviewer, reviewers],
+    [
+      `model "${model}" with approvals_reviewer`,
+      settings.approvalsReviewer,
+      autoReviewOnly,
+    ],
+    ["sandbox_mode", settings.sandbox, requirements.allowedSandboxModes],
+  ] as const;
+  return checks.flatMap(([key, value, allowed]) =>
+    allowed == null || allowed.includes(value)
+      ? []
+      : [
+          `${key} "${value}" (allowed: ${allowed.map((v) => JSON.stringify(v)).join(", ")})`,
+        ],
+  );
+}
+
+/**
+ * Codex starts a thread despite a managed requirements.toml conflict, then
+ * rejects every turn (#1096). Names the conflict and the modes that fit.
+ * `model` is null when Codex picks it (its default, or a resumed thread's
+ * saved model); then only suggestions assume it could require auto review.
+ */
+export function codexManagedPolicyError(
+  policy: RuntimePermissionPolicy,
+  requirements: CodexManagedRequirements | null | undefined,
+  model: string | null,
+): string | null {
+  if (!requirements) return null;
+  const conflicts = managedPolicyConflicts(
+    toCodexThreadPermissionSettings(policy),
+    requirements,
+    model,
+  );
+  if (conflicts.length === 0) return null;
+  const worstModel =
+    model ?? requirements.autoReview?.requiredOnModels?.[0] ?? null;
+  const fits = CLOUDROOM_PERMISSION_MODES.filter(
+    ([, approvalPolicy, approvalsReviewer, sandbox]) =>
+      managedPolicyConflicts(
+        { approvalPolicy, approvalsReviewer, sandbox },
+        requirements,
+        worstModel,
+      ).length === 0,
+  ).map(([label]) => label);
+  return `Your organization's Codex policy (requirements.toml) does not allow ${conflicts.join(" or ")}. ${
+    fits.length > 0
+      ? `Switch this thread's permission mode to ${fits.join(" or ")}.`
+      : "No Cloudroom permission mode fits it; ask your Codex admin."
+  }`;
+}
+
 export function toCodexPermissionSettings(
   args: ToCodexPermissionSettingsArgs,
 ): CodexPermissionSettings {
@@ -561,7 +675,7 @@ export function toCodexServiceTier(
 export function toCodexReasoningEffort(
   reasoningLevel: ReasoningLevel,
 ): CodexReasoningEffort {
-  const codexEffort = mapBbReasoningLevelToCodex(reasoningLevel);
+  const codexEffort = mapRoomReasoningLevelToCodex(reasoningLevel);
   if (codexEffort == null) {
     throw new Error(
       `Codex does not support the ${reasoningLevel} reasoning level.`,

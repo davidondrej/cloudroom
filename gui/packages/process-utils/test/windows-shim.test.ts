@@ -1,6 +1,6 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import { afterAll, afterEach, beforeEach, expect, it, vi } from "vitest";
 
 const originalPlatform = process.platform;
@@ -8,8 +8,12 @@ Object.defineProperty(process, "platform", {
   configurable: true,
   value: "win32",
 });
-const { resolvePortableCommand, resolveWindowsShim } =
-  await import("../src/index.js");
+const {
+  findCliExecutable,
+  isClaudeNpmPlaceholder,
+  resolvePortableCommand,
+  resolveWindowsShim,
+} = await import("../src/index.js");
 
 const NPM_SHIM_HEAD =
   "@ECHO off\r\nGOTO start\r\n:find_dp0\r\nSET dp0=%~dp0\r\nEXIT /b\r\n:start\r\nSETLOCAL\r\nCALL :find_dp0\r\n";
@@ -176,4 +180,38 @@ it("finds a command in a quoted PATH entry", () => {
   expect(
     resolvePortableCommand("npm.cmd", { env: { PATH: `"${nodejs}"` } }),
   ).toBe(join(nodejs, "npm.cmd"));
+});
+
+it("skips npm's claude.cmd when it runs the unfinished Claude stub (#1148)", () => {
+  const npm = dir({});
+  const shim = join(npm, "claude.cmd");
+  const stub = join(npm, "node_modules", "@anthropic-ai", "claude-code", "bin");
+  mkdirSync(stub, { recursive: true });
+  writeFileSync(
+    join(stub, "claude.exe"),
+    'echo "Error: claude native binary not installed." >&2\nexit 1\n',
+  );
+  writeFileSync(
+    shim,
+    `${NPM_SHIM_HEAD}"%dp0%\\node_modules\\@anthropic-ai\\claude-code\\bin\\claude.exe"   %*\r\n`,
+    { mode: 0o755 },
+  );
+  const native = dir({});
+  writeFileSync(join(native, "claude.exe"), "", { mode: 0o755 });
+  expect(isClaudeNpmPlaceholder(shim)).toBe(true);
+  expect(
+    findCliExecutable("claude", {
+      PATH: [npm, native].join(delimiter),
+      PATHEXT: ".exe;.cmd",
+    }),
+  ).toBe(join(native, "claude.exe"));
+});
+
+it("finds Grok in %USERPROFILE%\\.grok\\bin when it is not on PATH (#1256)", () => {
+  const home = dir({});
+  mkdirSync(join(home, ".grok", "bin"), { recursive: true });
+  writeFileSync(join(home, ".grok", "bin", "grok.exe"), "", { mode: 0o755 });
+  expect(
+    findCliExecutable("grok", { PATH: "", USERPROFILE: home, PATHEXT: ".exe" }),
+  ).toBe(join(home, ".grok", "bin", "grok.exe"));
 });

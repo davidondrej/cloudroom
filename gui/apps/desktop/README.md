@@ -46,7 +46,7 @@ Node runtime:
 pnpm exec turbo run start --filter=@cloudroom/desktop
 ```
 
-Electron is pinned to `44.10.0`. macOS builds require macOS 13 (Ventura) or
+Electron is pinned to `44.11.1`. macOS builds require macOS 13 (Ventura) or
 newer. The bundled `bb-app` runtime uses `better-sqlite3@13.0.3`, whose N-API
 binaries work with Electron without an ABI-specific rebuild. The packaging
 hook opens an in-memory database with Electron before accepting the packaged
@@ -277,7 +277,10 @@ Cloudroom releases are built, signed, and notarized by GitHub Actions (see the
 `release` skill). The [signing wrapper](scripts/run-electron-builder.mjs)
 signs and notarizes when `CSC_LINK`, `CSC_KEY_PASSWORD`, `APPLE_ID`,
 `APPLE_APP_SPECIFIC_PASSWORD`, and `APPLE_TEAM_ID` are all set, then notarizes
-and staples the DMG too. A partial set fails before packaging. Locally,
+and staples the DMG too. A partial set fails before packaging. Releases set
+`CLOUDROOM_NOTARIZE_LATER=1` instead: the wrapper only signs, and
+[notarize-once.sh](scripts/notarize-once.sh) sends just the DMG to Apple, whose
+ticket covers the app inside it. Locally,
 `APPLE_KEYCHAIN_PROFILE=<notarytool profile>` does the same with the Keychain's
 Developer ID identity. Local builds with neither sign via keychain
 auto-discovery and skip notarization.

@@ -18,9 +18,12 @@ import {
 } from "../ai/inference.js";
 import { macClaudeSignedIn } from "../cloudroom/claude-token.js";
 import { hasMacCodexLogin } from "../cloudroom/sandboxes.js";
+import { providerLoginEnvironment } from "../hosts/host-environment.js";
+import { readPrimaryHostIdFromDataDir } from "../hosts/primary-host.js";
 import { runtimeErrorLogFields } from "../lib/error-log-fields.js";
 import { readUiPreferences } from "../system/ui-preferences.js";
 import { getLastThreadOutput } from "./thread-data.js";
+import { cloudTurnsElsewhere } from "../plugins/plugin-thread-events.js";
 
 const MAX_MESSAGE_LENGTH = 600;
 const MAX_REPLY_LENGTH = 2_000;
@@ -45,12 +48,28 @@ let logins: {
   value: Promise<{ claude: boolean; codex: boolean }>;
 } | null = null;
 
-function signedInHarnesses(): Promise<{ claude: boolean; codex: boolean }> {
+type LoginDeps = Pick<CommandResultSideEffectsDeps, "config">;
+
+/** Claude Code can answer on the Mac's own login, or on one Cloudroom passes in: a picked account or the cloud login. */
+async function claudeSignedIn(deps: LoginDeps): Promise<boolean> {
+  const hostId = readPrimaryHostIdFromDataDir({ dataDir: deps.config.dataDir });
+  const passedIn = hostId
+    ? await providerLoginEnvironment(deps, { hostId, providerId: "claude-code" })
+    : [];
+  return (
+    passedIn.some((entry) => entry.value !== "") ||
+    (await macClaudeSignedIn()) === true
+  );
+}
+
+function signedInHarnesses(
+  deps: LoginDeps,
+): Promise<{ claude: boolean; codex: boolean }> {
   if (!logins || Date.now() - logins.at > LOGIN_CHECK_MS) {
     logins = {
       at: Date.now(),
-      value: Promise.all([macClaudeSignedIn(), hasMacCodexLogin()]).then(
-        ([claude, codex]) => ({ claude: claude === true, codex }),
+      value: Promise.all([claudeSignedIn(deps), hasMacCodexLogin()]).then(
+        ([claude, codex]) => ({ claude, codex }),
       ),
     };
   }
@@ -58,10 +77,11 @@ function signedInHarnesses(): Promise<{ claude: boolean; codex: boolean }> {
 }
 
 export async function purposeModels(
+  deps: LoginDeps,
   chosen: string | null,
 ): Promise<{ primary: string; fallback: string } | null> {
   if (chosen) return { primary: chosen, fallback: chosen };
-  const { claude, codex } = await signedInHarnesses();
+  const { claude, codex } = await signedInHarnesses(deps);
   if (claude) {
     return {
       primary: THREAD_PURPOSE_CLAUDE_MODEL,
@@ -86,7 +106,8 @@ export function installThreadPurpose(
   const unsubscribe = deps.hub.onChangedMessage((message) => {
     if (
       message.entity === "thread" &&
-      message.changes.includes("status-changed")
+      message.changes.includes("status-changed") &&
+      !cloudTurnsElsewhere.has(message.id)
     ) {
       refresh(current, message.id);
     }
@@ -227,7 +248,10 @@ async function writePurpose(
   if (!first) return;
   const agentReply =
     sourceSeq > 0 ? getLastThreadOutput(deps.db, threadId) : null;
-  const models = await purposeModels(preferences["threadPurpose.model"].value);
+  const models = await purposeModels(
+    deps,
+    preferences["threadPurpose.model"].value,
+  );
   if (!models) return;
   const previous = thread.purpose;
   const prompt = renderTemplate("generateThreadPurpose", {

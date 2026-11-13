@@ -37,6 +37,8 @@ const EXITED_TERMINAL_OUTPUT_TTL_MS = 15 * 60 * 1000;
 const MAX_OUTPUT_CHUNK_BYTES = 64 * 1024;
 const DEFAULT_OUTPUT_BATCH_DELAY_MS = 4;
 const DEFAULT_TERMINAL_CLOSE_GRACE_PERIOD_MS = 2_000;
+// Under the server's 10 s open limit, so a slow step is named (#1277).
+const TERMINAL_OPEN_STEPS_TIMEOUT_MS = 8_000;
 const PRIMARY_DEVICE_ATTRIBUTES_QUERY_PATTERN = /\u001b\[(?:0)?c/g;
 const PRIMARY_DEVICE_ATTRIBUTES_RESPONSE = "\u001b[?1;2c";
 const MAX_PRIMARY_DEVICE_ATTRIBUTES_REPLIES_PER_CHUNK = 8;
@@ -463,6 +465,31 @@ async function requireTerminalCwd(cwd: string | null): Promise<string> {
   return resolvedCwd;
 }
 
+async function withinTerminalOpenDeadline<T>(args: {
+  deadline: number;
+  step: string;
+  work: Promise<T>;
+}): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const expired = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () =>
+        reject(
+          new ExpectedCommandDispatchError(
+            "terminal_open_step_timeout",
+            `${args.step} took too long on this machine. Try again in a moment.`,
+          ),
+        ),
+      Math.max(0, args.deadline - Date.now()),
+    );
+  });
+  try {
+    return await Promise.race([args.work, expired]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 function createTerminalOperationCompletion(): TerminalOperationCompletion {
   let resolveCompletion: () => void = () => {
     throw new Error("Terminal operation completion resolver was not set");
@@ -648,9 +675,19 @@ export class TerminalManager {
     } catch (error) {
       const code =
         error instanceof ExpectedCommandDispatchError &&
-        error.code === "workspace_type_mismatch"
+        (error.code === "workspace_type_mismatch" ||
+          error.code === "terminal_open_step_timeout")
           ? error.code
           : "terminal_open_failed";
+      this.options.logger.warn(
+        {
+          code,
+          requestId: message.requestId,
+          terminalId: message.terminalId,
+          ...runtimeErrorLogFields(error),
+        },
+        "Terminal open failed",
+      );
       this.sendTerminalError({
         code,
         message: error instanceof Error ? error.message : String(error),
@@ -684,7 +721,12 @@ export class TerminalManager {
         target: { cwd: cloud.cwd, environmentId: null },
       };
     }
-    const target = await this.resolveTerminalOpenTarget(message);
+    const deadline = Date.now() + TERMINAL_OPEN_STEPS_TIMEOUT_MS;
+    const target = await withinTerminalOpenDeadline({
+      deadline,
+      step: "Preparing the terminal folder",
+      work: this.resolveTerminalOpenTarget(message),
+    });
     const env = normalizeWindowsEnv(
       buildTerminalEnv({
         shellEnv: operationEnvironment(
@@ -698,7 +740,11 @@ export class TerminalManager {
         threadStoragePath: message.threadStoragePath,
       }),
     );
-    const shell = await this.resolveShell();
+    const shell = await withinTerminalOpenDeadline({
+      deadline,
+      step: "Finding the shell",
+      work: this.resolveShell(),
+    });
     const launch =
       process.platform !== "win32"
         ? { file: shell, args: posixShellArgs(message.start) }

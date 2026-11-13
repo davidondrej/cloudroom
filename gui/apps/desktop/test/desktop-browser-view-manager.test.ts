@@ -11,7 +11,7 @@ import {
   desktopBrowserChangedSchema,
 } from "@cloudroom/host-daemon-contract";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { BbDesktopBrowserViewBounds } from "@cloudroom/desktop-contract";
+import type { RoomDesktopBrowserViewBounds } from "@cloudroom/desktop-contract";
 import { createDesktopBrowserCdpAdapter } from "../src/desktop-browser-cdp-adapter.js";
 import { createDesktopBrowserBroker } from "../src/desktop-browser-broker.js";
 import { createDesktopBrowserBrokerClient } from "../src/desktop-browser-broker-client.js";
@@ -636,7 +636,7 @@ const electronMock = vi.hoisted(() => {
   let nextWebContentsId = 1;
 
   class FakeWebContentsView {
-    public readonly boundsCalls: BbDesktopBrowserViewBounds[] = [];
+    public readonly boundsCalls: RoomDesktopBrowserViewBounds[] = [];
     public readonly webContents: FakeWebContents;
     public visible = false;
 
@@ -647,7 +647,7 @@ const electronMock = vi.hoisted(() => {
       nextWebContentsId += 1;
     }
 
-    setBounds(bounds: BbDesktopBrowserViewBounds): void {
+    setBounds(bounds: RoomDesktopBrowserViewBounds): void {
       this.boundsCalls.push(bounds);
     }
 

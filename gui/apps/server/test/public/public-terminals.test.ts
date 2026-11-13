@@ -1449,6 +1449,7 @@ describe("public terminal routes", () => {
     expect(response.status).toBe(504);
     expect(apiErrorSchema.parse(await readJson(response))).toMatchObject({
       code: "terminal_open_timeout",
+      message: expect.stringContaining("Test Host did not answer"),
     });
     const sessions = listTerminalSessionsByThread(
       fixture.harness.db,

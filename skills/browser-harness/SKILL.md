@@ -1,6 +1,6 @@
 ---
 name: browser-harness
-description: 'Control a real browser with browser-harness, built into Cloudroom: navigate, click, type, read JavaScript-heavy or logged-in pages, upload, download, and screenshot. Use for any web page interaction in Local and Cloud threads. Use curl for plain public pages and computer use for desktop apps.'
+description: 'Control a real browser: click, type, read logged-in or JavaScript-heavy pages, screenshot. Use for any web page interaction; curl for plain pages.'
 ---
 
 # browser-harness

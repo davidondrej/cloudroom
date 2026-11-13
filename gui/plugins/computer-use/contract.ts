@@ -40,7 +40,8 @@ export const hostContract = defineRpcContract({
         tool: z.string().min(1).max(80),
         args: z.record(z.string(), z.unknown()),
         session: z.string().min(1).max(64),
-        shotsDir: z.string().min(1),
+        // Folder name only: each host saves screenshots under its own temp dir (#1411).
+        shotsKey: z.string().regex(/^[A-Za-z0-9_-]+$/),
       })
       .strict(),
     output: z
@@ -66,7 +67,7 @@ export const hostContract = defineRpcContract({
   },
   appForName: {
     input: z.object({ name: z.string().min(1).max(200) }).strict(),
-    output: appSchema,
+    output: appSchema.nullable(),
   },
   requestPermission: {
     input: z.object({ kind: permissionKindSchema }).strict(),

@@ -42,7 +42,7 @@ interface UnavailableServerProbeResult {
   serverUrl: string;
 }
 
-interface ProbeBbServerArgs {
+interface ProbeRoomServerArgs {
   fetchImpl?: ServerProbeFetch;
   serverUrl: string;
   timeoutMs: number;
@@ -156,8 +156,8 @@ function formatFetchFailure(result: FetchJsonFailureResult): string {
   return result.message;
 }
 
-export async function probeBbServer(
-  args: ProbeBbServerArgs,
+export async function probeRoomServer(
+  args: ProbeRoomServerArgs,
 ): Promise<ServerProbeResult> {
   const fetchImpl = args.fetchImpl ?? globalThis.fetch;
   const healthResult = await fetchJson({
@@ -248,7 +248,7 @@ export async function waitForCompatibleServer(
   };
 
   while (!timedOut()) {
-    lastResult = await probeBbServer({
+    lastResult = await probeRoomServer({
       ...(args.fetchImpl === undefined ? {} : { fetchImpl: args.fetchImpl }),
       serverUrl: args.serverUrl,
       timeoutMs: Math.min(args.intervalMs, 1_000),

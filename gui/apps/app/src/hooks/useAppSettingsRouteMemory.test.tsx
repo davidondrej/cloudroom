@@ -7,8 +7,7 @@ import { useAppSettingsRouteMemory } from "./useAppSettingsRouteMemory";
 
 function RouteMemoryTestSurface() {
   const location = useLocation();
-  const { appRoutePath, settingsRoutePath, toolsBackRoutePath } =
-    useAppSettingsRouteMemory();
+  const { appRoutePath, settingsRoutePath } = useAppSettingsRouteMemory();
 
   return (
     <>
@@ -19,9 +18,6 @@ function RouteMemoryTestSurface() {
       </div>
       <Link to={appRoutePath}>App</Link>
       <Link to={settingsRoutePath}>Settings</Link>
-      <Link to="/plugins">Tools</Link>
-      <Link to={toolsBackRoutePath}>Tools back</Link>
-      <Link to="/plugins/ui-patterns?tab=settings#source">Plugin detail</Link>
       <Link to="/settings/providers/codex?tab=models#preferred">
         Codex settings
       </Link>
@@ -93,34 +89,6 @@ describe("useAppSettingsRouteMemory", () => {
     );
   });
 
-  it("resets Plugins after Back to app returns to core app context", () => {
-    render(
-      <MemoryRouter
-        initialEntries={[
-          "/projects/proj_one/threads/thr_one?message=12#event-12",
-        ]}
-      >
-        <RouteMemoryTestSurface />
-      </MemoryRouter>,
-    );
-
-    fireEvent.click(screen.getByRole("link", { name: "Tools" }));
-    expect(screen.getByTestId("location").textContent).toBe("/plugins");
-
-    fireEvent.click(screen.getByRole("link", { name: "Plugin detail" }));
-    expect(screen.getByTestId("location").textContent).toBe(
-      "/plugins/ui-patterns?tab=settings#source",
-    );
-
-    fireEvent.click(screen.getByRole("link", { name: "Tools back" }));
-    expect(screen.getByTestId("location").textContent).toBe(
-      "/projects/proj_one/threads/thr_one?message=12#event-12",
-    );
-
-    fireEvent.click(screen.getByRole("link", { name: "Tools" }));
-    expect(screen.getByTestId("location").textContent).toBe("/plugins");
-  });
-
   it("remembers installed plugin management as Settings and preserves the app destination", () => {
     render(
       <MemoryRouter initialEntries={["/projects/proj_one/threads/thr_one"]}>
@@ -155,9 +123,6 @@ describe("useAppSettingsRouteMemory", () => {
     );
     expect(
       screen.getByRole("link", { name: "Settings" }).getAttribute("href"),
-    ).toBe("/settings/plugins");
-    expect(
-      screen.getByRole("link", { name: "Tools back" }).getAttribute("href"),
     ).toBe("/settings/plugins");
   });
 

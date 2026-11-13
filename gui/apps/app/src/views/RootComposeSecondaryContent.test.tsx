@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 
 import type { ComponentProps, ReactNode } from "react";
+import { createPortal } from "react-dom";
 import { act, cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { CompactViewportOverrideProvider } from "@cloudroom/shared-ui/hooks/use-compact-viewport";
@@ -31,6 +32,7 @@ interface PanelProps {
 }
 
 interface RenderRootComposeArgs {
+  footer?: ReactNode;
   isCompactViewport: boolean;
   isSecondaryPanelOpen: boolean;
   isTopRow?: boolean;
@@ -196,6 +198,7 @@ function renderRootCompose(args: RenderRootComposeArgs) {
       isCompactViewport={renderArgs.isCompactViewport}
     >
       <RootComposeSecondaryContent
+        footer={renderArgs.footer}
         compactScrollContent={null}
         isSecondaryPanelOpen={renderArgs.isSecondaryPanelOpen}
         onToggleSecondaryPanel={() => undefined}
@@ -360,5 +363,28 @@ describe("RootComposeSecondaryContent desktop layout", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe("RootComposeSecondaryContent footer", () => {
+  it("collapses a footer that renders nothing and leaves the safe area to the app shell", () => {
+    // Like a hidden Connect agents button: no button, only its portaled login drawer.
+    const { container } = renderRootCompose({
+      isCompactViewport: true,
+      isSecondaryPanelOpen: false,
+      footer: (
+        <>
+          {false}
+          {createPortal(<div />, document.body)}
+        </>
+      ),
+    });
+
+    const footer = container.querySelector(
+      '[data-wallpaper="new-thread"]',
+    )?.lastElementChild;
+    expect(footer?.childNodes).toHaveLength(0);
+    expect(footer?.className).toContain("empty:hidden");
+    expect(footer?.className).not.toContain("safe-area");
   });
 });

@@ -32,8 +32,8 @@ const sleep = (ms: number, signal?: AbortSignal) =>
     signal?.addEventListener("abort", () => { clearTimeout(timer); resolve(); }, { once: true });
   });
 
-export default async function gpuPlugin(bb: BbPluginApi) {
-  const website = async (input: { argv: string[]; thread?: string }) => bb.sdk.cloudroom.gpu(input);
+export default async function gpuPlugin(room: BbPluginApi) {
+  const website = async (input: { argv: string[]; thread?: string }) => room.sdk.cloudroom.gpu(input);
   async function runCli(argv: string[], ctx: PluginCliContext): Promise<PluginCliResult> {
     const cwd = ctx.cwd ?? process.cwd(), started = Date.now();
     let stdout = "";
@@ -59,8 +59,8 @@ export default async function gpuPlugin(bb: BbPluginApi) {
     }
   }
 
-  bb.agents.configure(() => ({ tools: [], skills: ["gpu"] }));
-  bb.cli.register({
+  room.agents.configure(() => ({ tools: [], skills: ["gpu"] }));
+  room.cli.register({
     name: "gpu",
     summary: "Rent a GPU box for heavy GPU work, after the user approves its Cloud Credits (beta)",
     commands: [

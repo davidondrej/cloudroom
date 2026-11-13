@@ -12,7 +12,7 @@ import {
   type EnvironmentStatus,
 } from "@cloudroom/domain";
 import { action } from "../action.js";
-import { createCliBbSdk } from "../client.js";
+import { createCliRoomSdk } from "../client.js";
 import { resolveMachineHostId, resolveMachineTargetOption } from "./machine.js";
 import { collectOption, outputJson, prependErrorContext } from "./helpers.js";
 
@@ -356,7 +356,7 @@ export function registerEnvironmentCommands(
                 serverUrl: getUrl(),
                 target: machineTarget,
               });
-        const providers = await createCliBbSdk(
+        const providers = await createCliRoomSdk(
           getUrl(),
         ).environments.listProviders({
           ...(opts.project === undefined ? {} : { projectId: opts.project }),
@@ -413,7 +413,7 @@ export function registerEnvironmentCommands(
       action(async (opts: EnvironmentListCommandOptions) => {
         const limit = parseNonNegativeIntegerOption(opts.limit, "--limit");
         const offset = parseNonNegativeIntegerOption(opts.offset, "--offset");
-        const sdk = createCliBbSdk(getUrl());
+        const sdk = createCliRoomSdk(getUrl());
         const hostId =
           opts.host === undefined
             ? undefined
@@ -449,7 +449,7 @@ export function registerEnvironmentCommands(
     .option("--json", "Print machine-readable JSON output")
     .action(
       action(async (id: string, opts: { json?: boolean }) => {
-        const sdk = createCliBbSdk(getUrl());
+        const sdk = createCliRoomSdk(getUrl());
         const result = await sdk.environments.delete({ environmentId: id });
         if (outputJson(opts, result)) return;
         const environment = await sdk.environments.get({ environmentId: id });
@@ -464,7 +464,7 @@ export function registerEnvironmentCommands(
     .option("--json", "Print machine-readable JSON output")
     .action(
       action(async (id: string, opts: EnvironmentShowCommandOptions) => {
-        const sdk = createCliBbSdk(getUrl());
+        const sdk = createCliRoomSdk(getUrl());
         const env = await sdk.environments.get({ environmentId: id });
         if (outputJson(opts, env)) return;
         console.log(`Environment: ${env.id}`);
@@ -515,7 +515,7 @@ export function registerEnvironmentCommands(
     .option("--json", "Print machine-readable JSON output")
     .action(
       action(async (id: string, opts: EnvironmentStatusCommandOptions) => {
-        const result = await createCliBbSdk(getUrl()).environments.status({
+        const result = await createCliRoomSdk(getUrl()).environments.status({
           environmentId: id,
           ...(opts.mergeBaseBranch !== undefined
             ? { mergeBaseBranch: opts.mergeBaseBranch }
@@ -558,7 +558,7 @@ export function registerEnvironmentCommands(
     .action(
       action(async (id: string, opts: EnvironmentBranchesCommandOptions) => {
         validateLimit(opts.limit);
-        const result = await createCliBbSdk(getUrl()).environments.diffBranches(
+        const result = await createCliRoomSdk(getUrl()).environments.diffBranches(
           {
             environmentId: id,
             ...(opts.query !== undefined ? { query: opts.query } : {}),
@@ -591,7 +591,7 @@ export function registerEnvironmentCommands(
         const includeFiles = opts.files === true || opts.directories !== true;
         const includeDirectories =
           opts.directories === true || opts.files !== true;
-        const result = await createCliBbSdk(getUrl()).environments.paths({
+        const result = await createCliRoomSdk(getUrl()).environments.paths({
           environmentId: id,
           includeFiles: booleanQueryValue(includeFiles),
           includeDirectories: booleanQueryValue(includeDirectories),
@@ -614,7 +614,7 @@ export function registerEnvironmentCommands(
     .option("--json", "Print machine-readable JSON output")
     .action(
       action(async (id: string, opts: EnvironmentDiffCommandOptions) => {
-        const result = await createCliBbSdk(getUrl()).environments.diff(
+        const result = await createCliRoomSdk(getUrl()).environments.diff(
           buildEnvironmentDiffArgs(id, opts),
         );
         if (outputJson(opts, result)) return;
@@ -647,7 +647,7 @@ export function registerEnvironmentCommands(
     .option("--json", "Print machine-readable JSON output")
     .action(
       action(async (id: string, opts: EnvironmentDiffCommandOptions) => {
-        const result = await createCliBbSdk(getUrl()).environments.diffFiles(
+        const result = await createCliRoomSdk(getUrl()).environments.diffFiles(
           buildEnvironmentDiffArgs(id, opts),
         );
         if (outputJson(opts, result)) return;
@@ -693,7 +693,7 @@ export function registerEnvironmentCommands(
     .option("--json", "Print machine-readable JSON output")
     .action(
       action(async (id: string, opts: EnvironmentDiffFileCommandOptions) => {
-        const result = await createCliBbSdk(getUrl()).environments.diffFile(
+        const result = await createCliRoomSdk(getUrl()).environments.diffFile(
           buildEnvironmentDiffFileArgs(id, opts),
         );
         if (outputJson(opts, result)) return;
@@ -727,7 +727,7 @@ export function registerEnvironmentCommands(
     .option("--json", "Print machine-readable JSON output")
     .action(
       action(async (id: string, opts: EnvironmentDiffPatchCommandOptions) => {
-        const result = await createCliBbSdk(getUrl()).environments.diffPatch(
+        const result = await createCliRoomSdk(getUrl()).environments.diffPatch(
           buildEnvironmentDiffPatchArgs(id, opts),
         );
         if (outputJson(opts, result)) return;
@@ -787,7 +787,7 @@ export function registerEnvironmentCommands(
           );
         }
 
-        const sdk = createCliBbSdk(getUrl());
+        const sdk = createCliRoomSdk(getUrl());
         const environment = await sdk.environments.update(
           buildEnvironmentUpdateArgs({ id, opts }),
         );
@@ -815,7 +815,7 @@ export function registerEnvironmentCommands(
     .option("--json", "Print machine-readable JSON output")
     .action(
       action(async (id: string, opts: EnvironmentCommitCommandOptions) => {
-        const sdk = createCliBbSdk(getUrl());
+        const sdk = createCliRoomSdk(getUrl());
         let result: CommitActionResponse;
         try {
           result = await sdk.environments.commit({ environmentId: id });
@@ -836,7 +836,7 @@ export function registerEnvironmentCommands(
     .option("--json", "Print machine-readable JSON output")
     .action(
       action(async (id: string, opts: EnvironmentCommitCommandOptions) => {
-        const result = await createCliBbSdk(
+        const result = await createCliRoomSdk(
           getUrl(),
         ).environments.archiveThreads({
           environmentId: id,
@@ -858,7 +858,7 @@ export function registerEnvironmentCommands(
     .option("--json", "Print machine-readable JSON output")
     .action(
       action(async (id: string, opts: EnvironmentPullRequestCommandOptions) => {
-        const result = await createCliBbSdk(getUrl()).environments.pullRequest({
+        const result = await createCliRoomSdk(getUrl()).environments.pullRequest({
           environmentId: id,
         });
         if (outputJson(opts, result)) return;
@@ -893,7 +893,7 @@ export function registerEnvironmentCommands(
     .option("--json", "Print machine-readable JSON output")
     .action(
       action(async (id: string, opts: EnvironmentPullRequestCommandOptions) => {
-        const result = await createCliBbSdk(
+        const result = await createCliRoomSdk(
           getUrl(),
         ).environments.markPullRequestReady({ environmentId: id });
         if (outputJson(opts, result)) return;
@@ -907,7 +907,7 @@ export function registerEnvironmentCommands(
     .option("--json", "Print machine-readable JSON output")
     .action(
       action(async (id: string, opts: EnvironmentPullRequestCommandOptions) => {
-        const result = await createCliBbSdk(
+        const result = await createCliRoomSdk(
           getUrl(),
         ).environments.markPullRequestDraft({ environmentId: id });
         if (outputJson(opts, result)) return;
@@ -933,7 +933,7 @@ export function registerEnvironmentCommands(
         ) {
           throw new Error("--method must be merge, squash, or rebase.");
         }
-        const result = await createCliBbSdk(
+        const result = await createCliRoomSdk(
           getUrl(),
         ).environments.mergePullRequest({
           environmentId: id,

@@ -58,7 +58,8 @@ vi.mock("@cloudroom/shared-ui/hooks/use-compact-viewport", () => ({
   useIsCompactViewport: () => false,
 }));
 
-vi.mock("./root-compose-selection", () => ({
+vi.mock("./root-compose-selection", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./root-compose-selection")>()),
   useSetRootComposeProjectId: () => actions.setRootComposeProjectId,
 }));
 
@@ -132,5 +133,24 @@ describe("useSidebarThreadActions", () => {
     expect(actions.navigate).toHaveBeenCalledWith("/", {
       state: { focusPrompt: true },
     });
+  });
+
+  it("passes the plugin's section and environment to the composer (#995)", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { result } = renderHook(() => useSidebarThreadActions());
+
+    act(() => {
+      result.current.openNewThread({
+        sectionId: "sec_old",
+        experimental_placement: { sectionId: null, pinned: true },
+        environmentId: "env_1",
+      });
+    });
+
+    expect(actions.navigate).toHaveBeenCalledWith("/", {
+      state: { sectionId: null, reuseEnvironmentId: "env_1" },
+    });
+    expect(warn).toHaveBeenCalledOnce();
+    warn.mockRestore();
   });
 });

@@ -41,6 +41,7 @@ import {
 } from "@/components/ui/settings-section";
 import {
   buildProviderCliIssue,
+  canAutoUpdateProviderCli,
   hasProviderCliAction,
   useProviderCliInstallRunner,
   type ProviderCliInstallTarget,
@@ -368,7 +369,7 @@ function AutoUpdateSwitch({
   provider: ProviderInfo;
   status: ProviderCliStatus | undefined;
 }) {
-  if (status?.npmPackageName == null) return DASH;
+  if (status === undefined || !canAutoUpdateProviderCli(status)) return DASH;
   const autoUpdate = generalSettings.providerAutoUpdate ?? [];
   return (
     <Switch

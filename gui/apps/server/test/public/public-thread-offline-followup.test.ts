@@ -5,7 +5,10 @@ import { describe, expect, it } from "vitest";
 import { applyLoggedThreadLifecycleEvent } from "../../src/services/threads/lifecycle-outcome.js";
 import { queueParentSystemMessage } from "../../src/services/threads/parent-system-messages.js";
 import { runQueuedMessageDispatch } from "../../src/services/threads/queued-message-dispatch.js";
-import { onDaemonSocketOpen } from "../../src/ws/daemon-protocol.js";
+import {
+  onDaemonSocketClose,
+  onDaemonSocketOpen,
+} from "../../src/ws/daemon-protocol.js";
 import {
   listQueuedThreadCommands,
   registerTestHostRpcCapture,
@@ -34,6 +37,13 @@ describe("offline host follow-ups", () => {
       mode: "queue-if-active",
       status: "active",
       waitingOn: { kind: "thread-busy" },
+    },
+    {
+      // The daemon drops during the send's own host reads (#1283).
+      dropsDuringSend: true,
+      mode: "steer-if-active",
+      status: "idle",
+      waitingOn: { kind: "host-offline", hostName: "M5" },
     },
   ] as const)("queues an offline $status follow-up", async (testCase) => {
     await withTestHarness(async (harness) => {
@@ -66,6 +76,18 @@ describe("offline host follow-ups", () => {
           threadId: thread.id,
           turnId: "turn-current",
         });
+      }
+      if ("dropsDuringSend" in testCase) {
+        const session = seedSession(harness.deps, host.id);
+        const socket = registerTestHostRpcCapture(harness.deps, {
+          hostId: host.id,
+          sessionId: session.id,
+        });
+        const send = socket.send.bind(socket);
+        socket.send = (data) =>
+          data.includes('"host.list_files"')
+            ? queueMicrotask(() => onDaemonSocketClose(harness.deps, session.id))
+            : send(data);
       }
       const input = [
         {

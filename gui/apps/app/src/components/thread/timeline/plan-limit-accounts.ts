@@ -18,7 +18,11 @@ const accountsSchema = z.array(
     needsSignIn: z.boolean().optional(),
     limitedUntil: z.number().nullish(),
     windows: z.array(
-      z.object({ usedPercent: z.number(), resetsAt: z.number().nullish() }),
+      z.object({
+        usedPercent: z.number(),
+        resetsAt: z.number().nullish(),
+        model: z.string().nullish(),
+      }),
     ),
   }),
 );
@@ -31,24 +35,37 @@ export interface PlanLimitAccount {
   windows: AccountView["windows"];
 }
 
-/** Checked against the clock each time, since a card can stay open past a reset. */
-export function atLimit(account: PlanLimitAccount, now = Date.now()): boolean {
+/**
+ * Checked against the clock each time, since a card can stay open past a reset.
+ * One model's full bar ("7d fable") only counts for a thread on that model.
+ */
+export function atLimit(
+  account: PlanLimitAccount,
+  model: string,
+  now = Date.now(),
+): boolean {
   return (
     (account.limitedUntil ?? 0) > now ||
     account.windows.some(
       (window) =>
         window.usedPercent >= 100 &&
-        (window.resetsAt == null || window.resetsAt > now),
+        (window.resetsAt == null || window.resetsAt > now) &&
+        (!window.model || model.toLowerCase().includes(window.model)),
     )
   );
 }
 
-/** The first account with room, else the first one: it may still have credits. */
+/** The first account with room for the thread's model, else the first one: it may still have credits. */
 export function nextAccount(
   others: readonly PlanLimitAccount[],
+  model: string,
 ): PlanLimitAccount | null {
   const now = Date.now();
-  return others.find((account) => !atLimit(account, now)) ?? others[0] ?? null;
+  return (
+    others.find((account) => !atLimit(account, model, now)) ??
+    others[0] ??
+    null
+  );
 }
 
 /** The thread agent's accounts (ADR 0194). Every other signed-in account is offered, even at its limit. */
