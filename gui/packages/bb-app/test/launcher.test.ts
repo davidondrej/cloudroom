@@ -946,7 +946,22 @@ describe("bb-app launcher", () => {
     );
   });
 
-  it("runs the extensionless bundled CLI through Node on Windows", () => {
+  it.each(["win32", "linux", "darwin"] as const)("runs the bundled JavaScript CLI through Node on %s without execute permission", (platform) => {
+    const root = mkdtempSync(join(tmpdir(), "cloudroom-bundled-cli-"));
+    const cliPath = join(root, "room-cli");
+    try {
+      writeFileSync(cliPath, "console.log(process.argv[2]);\n", { mode: 0o644 });
+      const launch = resolveBundledCliLaunch({
+        args: ["CLI_OK"], cliPath, nodePath: process.execPath, platform, bundled: true,
+      });
+      expect(launch.command).toBe(process.execPath);
+      expect(execFileSync(launch.command, launch.args, { encoding: "utf8" }).trim()).toBe("CLI_OK");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("runs the extensionless CLI override through Node on Windows", () => {
     expect(
       resolveBundledCliLaunch({
         args: ["status"],

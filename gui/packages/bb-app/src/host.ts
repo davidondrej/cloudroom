@@ -127,12 +127,12 @@ export async function runHostDaemon(args: string[], flags: LauncherOptions, entr
   }
 }
 
-/** On Windows, an extensionless script runs through node; elsewhere it runs directly. */
-export function resolveBundledCliLaunch(args: { args: string[]; cliPath: string; nodePath: string; platform: NodeJS.Platform }): {
+/** The bundled CLI is JavaScript, even when its package lacks Unix execute bits. */
+export function resolveBundledCliLaunch(args: { args: string[]; cliPath: string; nodePath: string; platform: NodeJS.Platform; bundled?: boolean }): {
   command: string;
   args: string[];
 } {
-  return args.platform === "win32" && win32.extname(args.cliPath) === ""
+  return args.bundled || (args.platform === "win32" && win32.extname(args.cliPath) === "")
     ? { command: args.nodePath, args: [args.cliPath, ...args.args] }
     : { command: args.cliPath, args: args.args };
 }
@@ -146,11 +146,13 @@ export async function runRoomCli(cliArgs: string[] = process.argv.slice(2)): Pro
   const runtime = await resolveRuntime({ entrypointUrl: import.meta.url, env, homeDir: homedir(), options: {}, mode: "remote" });
   const { context } = runtime;
   assertArtifacts(context, "host");
+  const cliOverride = toOptionalString(runtime.env.ROOM_CLI);
   const launch = resolveBundledCliLaunch({
     args: cliArgs,
-    cliPath: toOptionalString(runtime.env.ROOM_CLI) ?? join(context.daemonBundleDir, "room-cli"),
+    cliPath: cliOverride ?? join(context.daemonBundleDir, "room-cli"),
     nodePath: process.execPath,
     platform: process.platform,
+    bundled: cliOverride === undefined,
   });
   const child = spawn(launch.command, launch.args, {
     cwd: process.cwd(),

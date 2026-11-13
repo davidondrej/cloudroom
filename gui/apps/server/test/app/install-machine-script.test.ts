@@ -9,6 +9,7 @@ import {
   readFileSync,
   realpathSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -210,6 +211,10 @@ cp "${roomAppTemplatePath}" "$prefix/bin/room-cli"
 chmod +x "$prefix/bin/room-cli"
 mkdir -p "$prefix/lib/node_modules/bb-app/host-daemon/dist"
 printf '%s\n' 'fixture' >"$prefix/lib/node_modules/bb-app/host-daemon/dist/daemon-bundle.mjs"
+if [ -z "$FAKE_NPM_SKIP_BUNDLED_CLI" ]; then
+  cp "${roomAppTemplatePath}" "$prefix/lib/node_modules/bb-app/host-daemon/dist/room-cli"
+  chmod 644 "$prefix/lib/node_modules/bb-app/host-daemon/dist/room-cli"
+fi
 for module in node-pty @parcel/watcher; do
   mkdir -p "$prefix/lib/node_modules/bb-app/node_modules/$module"
   if [ -z "$FAKE_NPM_SKIP_NATIVE_MODULES" ]; then
@@ -234,6 +239,9 @@ done
 mkdir -p "$prefix/bin"
 cp "${roomApp}" "$prefix/bin/bb-app"
 if [ -x "${cli}" ]; then cp "${cli}" "$prefix/bin/room-cli"; else cp "${roomApp}" "$prefix/bin/room-cli"; fi
+mkdir -p "$prefix/lib/node_modules/bb-app/host-daemon/dist"
+cp "$prefix/bin/room-cli" "$prefix/lib/node_modules/bb-app/host-daemon/dist/room-cli"
+chmod 644 "$prefix/lib/node_modules/bb-app/host-daemon/dist/room-cli"
 for module in node-pty @parcel/watcher; do
   mkdir -p "$prefix/lib/node_modules/bb-app/node_modules/$module"
   printf '%s\n' 'module.exports = {};' >"$prefix/lib/node_modules/bb-app/node_modules/$module/index.js"
@@ -283,12 +291,14 @@ printf '%s' '${artifactStatus}'
 
 afterEach(() => {
   for (const directory of createdDirectories.splice(0)) {
-    try {
-      const servicePid = Number(
-        readFileSync(join(directory, "data/service-daemon.pid"), "utf8"),
-      );
-      process.kill(servicePid, "SIGTERM");
-    } catch {}
+    for (const pidFile of ["service-daemon.pid", "install-daemon.pid"]) {
+      try {
+        const pid = Number(
+          readFileSync(join(directory, "data", pidFile), "utf8"),
+        );
+        process.kill(pid, "SIGTERM");
+      } catch {}
+    }
     rmSync(directory, { force: true, recursive: true });
   }
 });
@@ -324,7 +334,9 @@ exec '${process.execPath}' "$@"
       expect(result.status).not.toBe(0);
       expect(result.stderr).not.toContain("HOME");
       expect(existsSync(join(fixture.dataDir, "resolved-home"))).toBe(unset);
-      expect(existsSync(join(fixture.homeDir, ".local/bin/room-cli"))).toBe(true);
+      expect(existsSync(join(fixture.homeDir, ".local/bin/room-cli"))).toBe(
+        true,
+      );
       expect(existsSync(join(fixture.dataDir, "auth.json"))).toBe(false);
     },
   );
@@ -794,12 +806,19 @@ fs.writeFileSync(path.join(process.env.ROOM_DATA_DIR, "config.json"), JSON.strin
       BB_INSTALL_SKIP_SERVICE: "1",
     });
     expect(first.status, first.stderr).toBe(0);
+    const bundledCli = join(
+      fixture.dataDir,
+      "npm/lib/node_modules/bb-app/host-daemon/dist/room-cli",
+    );
+    expect(statSync(bundledCli).mode & 0o100).toBe(0o100);
+    chmodSync(bundledCli, 0o644);
 
     const second = runScript(JOIN_ARGS, fixture, {
       BB_INSTALL_SKIP_SERVICE: "1",
     });
 
     expect(second.status, second.stderr).toBe(0);
+    expect(statSync(bundledCli).mode & 0o100).toBe(0o100);
     expect(second.stdout).toContain(
       "The identical server host artifact is already installed",
     );
@@ -818,6 +837,38 @@ fs.writeFileSync(path.join(process.env.ROOM_DATA_DIR, "config.json"), JSON.strin
     process.kill(daemonPid, "SIGTERM");
   });
 
+  it("reinstalls a cached artifact on retry when its bundled CLI is missing", () => {
+    const fixture = createFixture();
+    writeServerInstallTools(fixture, 200);
+    const env = { BB_INSTALL_SKIP_SERVICE: "1" };
+    const first = runScript(JOIN_ARGS, fixture, env);
+    expect(first.status, first.stderr).toBe(0);
+    rmSync(
+      join(
+        fixture.dataDir,
+        "npm/lib/node_modules/bb-app/host-daemon/dist/room-cli",
+      ),
+    );
+
+    const second = runScript(JOIN_ARGS, fixture, env);
+    expect(second.status).toBe(1);
+    expect(second.stderr).toContain(
+      "Could not make the bundled Cloudroom CLI executable",
+    );
+    expect(existsSync(join(fixture.dataDir, "host-artifact.sha256"))).toBe(
+      false,
+    );
+
+    const third = runScript(JOIN_ARGS, fixture, env);
+    expect(third.status, third.stderr).toBe(0);
+    expect(
+      readFileSync(join(fixture.dataDir, "npm.log"), "utf8").trim().split("\n"),
+    ).toHaveLength(2);
+    expect(
+      readFileSync(join(fixture.dataDir, "host-artifact.sha256"), "utf8"),
+    ).toBe(`${FIXTURE_ARTIFACT_DIGEST}\n`);
+  });
+
   it("rejects a server host artifact whose digest does not match", () => {
     const fixture = createFixture();
     writeServerInstallTools(fixture, 200, "a".repeat(64));
@@ -832,6 +883,22 @@ fs.writeFileSync(path.join(process.env.ROOM_DATA_DIR, "config.json"), JSON.strin
     expect(existsSync(join(fixture.dataDir, "host-artifact.sha256"))).toBe(
       false,
     );
+  });
+
+  it("reports a missing bundled CLI before enrollment", () => {
+    const fixture = createFixture();
+    writeServerInstallTools(fixture, 200);
+
+    const result = runScript(JOIN_ARGS, fixture, {
+      BB_INSTALL_SKIP_SERVICE: "1",
+      FAKE_NPM_SKIP_BUNDLED_CLI: "1",
+    });
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(
+      "Could not make the bundled Cloudroom CLI executable",
+    );
+    expect(existsSync(join(fixture.dataDir, "auth.json"))).toBe(false);
   });
 
   it("refuses a join code before installing when the address hides enrollment", () => {

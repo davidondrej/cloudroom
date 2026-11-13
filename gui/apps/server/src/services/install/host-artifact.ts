@@ -1,4 +1,3 @@
-import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   chmod,
@@ -14,10 +13,10 @@ import {
 } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { promisify } from "node:util";
 import { HOST_DAEMON_PROTOCOL_VERSION } from "@cloudroom/host-daemon-contract";
+import { resolvePluginNpmCli } from "@cloudroom/plugin-build";
+import { execPortableFile } from "@cloudroom/process-utils";
 
-const execFileAsync = promisify(execFile);
 const HOST_DEPENDENCIES = [
   "@parcel/watcher",
   "fs-native-extensions",
@@ -69,10 +68,17 @@ async function defaultCommandRunner(
   args: readonly string[],
   cwd: string,
 ): Promise<string> {
-  const result = await execFileAsync(command, [...args], {
-    cwd,
-    maxBuffer: 10 * 1024 * 1024,
-  });
+  // Packaged desktops ship npm. Launch its JS entry with this Node runtime:
+  // npm.cmd cannot be execFile'd on Windows, and npm may not be on PATH.
+  const npmCli = command === "npm" ? resolvePluginNpmCli() : null;
+  const result = await execPortableFile(
+    npmCli === null ? command : process.execPath,
+    npmCli === null ? args : [npmCli, ...args],
+    {
+      cwd,
+      maxBuffer: 10 * 1024 * 1024,
+    },
+  );
   return result.stdout;
 }
 
