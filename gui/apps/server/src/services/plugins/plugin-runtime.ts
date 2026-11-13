@@ -37,7 +37,7 @@ import {
 } from "@cloudroom/plugin-build";
 import { PluginHostArtifactRegistry } from "./plugin-host-artifact-registry.js";
 import { getPluginBuildToolchain } from "./build-toolchain.js";
-import { createNodeBbSdk, type BbSdk } from "@cloudroom/sdk";
+import { createNodeRoomSdk, type BbSdk } from "@cloudroom/sdk";
 import { experimental_aiServicesHostContract } from "@get-bb/plugin-sdk/ai-services";
 import {
   getInstalledPlugin,
@@ -1945,7 +1945,7 @@ export function createPluginRuntime(context: PluginRuntimeContext) {
   }
 
   function bindSdk(args: { baseUrl: string; callerToken?: string }): void {
-    boundSdk = createNodeBbSdk({
+    boundSdk = createNodeRoomSdk({
       baseUrl: args.baseUrl,
       callerToken: args.callerToken,
     });

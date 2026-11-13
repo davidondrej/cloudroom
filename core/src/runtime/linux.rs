@@ -17,8 +17,18 @@ const AGENT_DIR: &str = "/run/cloudroom/agent";
 /// It runs after login startup files, so a Mac environment they set (#1034, #1033) can't hide tools or logins: the
 /// system tool folders go back on PATH, last, so the user's own folders still win. HOME, XDG_CONFIG_HOME and
 /// GH_CONFIG_DIR change only when they name a missing Mac folder. Plain sh, since CLAUDE_ENV_FILE may meet zsh.
+/// Commands Claude runs (CLAUDECODE, which Claude sets only for them) get back the Anthropic keys Core hid from Claude
+/// itself under CLOUDROOM_APP_ names, once and only where unset: deeper shells keep what the command set or unset,
+/// and a key the command's own settings set stays (#1340). Tracing (`bash -x`) pauses there, so it never prints them.
 const BASH_ENV: &str = r#"{ read -r _cloudroom_parent < /proc/$PPID/comm; } 2>/dev/null
 [ "$_cloudroom_parent" = cloudroom ] || { echo 500 > /proc/$$/oom_score_adj; } 2>/dev/null
+if [ -n "${CLAUDECODE-}" ]; then
+  case $- in *x*) _cloudroom_x=1; { set +x; } 2>/dev/null ;; *) _cloudroom_x= ;; esac
+  [ -n "${ANTHROPIC_API_KEY+x}" ] || [ -z "${CLOUDROOM_APP_ANTHROPIC_API_KEY+x}" ] || export ANTHROPIC_API_KEY="$CLOUDROOM_APP_ANTHROPIC_API_KEY"
+  [ -n "${ANTHROPIC_AUTH_TOKEN+x}" ] || [ -z "${CLOUDROOM_APP_ANTHROPIC_AUTH_TOKEN+x}" ] || export ANTHROPIC_AUTH_TOKEN="$CLOUDROOM_APP_ANTHROPIC_AUTH_TOKEN"
+  unset CLOUDROOM_APP_ANTHROPIC_API_KEY CLOUDROOM_APP_ANTHROPIC_AUTH_TOKEN
+  [ -z "$_cloudroom_x" ] || set -x
+fi
 for _cloudroom_dir in /usr/local/bin /usr/bin /bin; do
   case ":${PATH-}:" in *":$_cloudroom_dir:"*) ;; *) PATH="${PATH:+$PATH:}$_cloudroom_dir" ;; esac
 done
@@ -27,18 +37,31 @@ case "${HOME-}" in /Users/*|/Volumes/*)
 esac
 case "${XDG_CONFIG_HOME-}" in /Users/*|/Volumes/*) [ -e "$XDG_CONFIG_HOME" ] || unset XDG_CONFIG_HOME ;; esac
 case "${GH_CONFIG_DIR-}" in /Users/*|/Volumes/*) [ -e "$GH_CONFIG_DIR" ] || unset GH_CONFIG_DIR ;; esac
-unset _cloudroom_parent _cloudroom_dir
+unset _cloudroom_parent _cloudroom_dir _cloudroom_x
 "#;
 /// A container's `os.cpus()` lists every host CPU, and tools such as Next.js start a worker per CPU.
 const NODE_CPUS: &str = r#"const os = require('node:os'), cpus = os.cpus, usable = os.availableParallelism?.();
 if (usable) { os.cpus = () => cpus().slice(0, usable); require('node:module').syncBuiltinESMExports(); }
 "#;
+/// Like BASH_ENV, gives the Anthropic keys back once to Node that Claude starts without a shell, such as an MCP server,
+/// unless its own settings set one (#1340).
+const NODE_KEYS: &str = r#"for (const name of process.env.CLAUDECODE ? ['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN'] : []) {
+  const alias = 'CLOUDROOM_APP_' + name;
+  if (alias in process.env && !(name in process.env)) process.env[name] = process.env[alias];
+  delete process.env[alias];
+}
+"#;
 /// Python 3.13 reads PYTHON_CPU_COUNT itself; older versions count every host CPU for worker pools. Then it runs the
-/// `sitecustomize` this one hides (the user's or the system's), since Python loads only the first it finds.
+/// `sitecustomize` this one hides (the user's or the system's), since Python loads only the first it finds. Like
+/// NODE_KEYS, it gives the Anthropic keys back once to Python that Claude starts without a shell (#1340).
 const PYTHON_CPUS: &str = r#"import importlib.machinery, importlib.util, os, sys
 if sys.version_info < (3, 13) and os.environ.get('PYTHON_CPU_COUNT', '').isdigit():
     _count = int(os.environ['PYTHON_CPU_COUNT'])
     os.cpu_count = lambda: _count
+for _name in ('ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN') if os.environ.get('CLAUDECODE') else ():
+    _app = os.environ.pop('CLOUDROOM_APP_' + _name, None)
+    if _app is not None:
+        os.environ.setdefault(_name, _app)
 _here = os.path.dirname(os.path.abspath(__file__))
 _next = importlib.machinery.PathFinder.find_spec('sitecustomize', [p for p in sys.path if os.path.abspath(p or '.') != _here])
 if _next and _next.loader:
@@ -57,28 +80,53 @@ pub(crate) fn agent_env() -> &'static [(&'static str, String)] {
             let hook = dir.join("bash-env.sh").display().to_string();
             env.extend([("BASH_ENV", hook.clone()), ("CLAUDE_ENV_FILE", hook)]);
         }
-        if let Some(cpus) = cpu_quota() {
+        let quota = cpu_quota();
+        if let Some(cpus) = quota {
             env.push(("OMP_NUM_THREADS", cpus.to_string())); // nproc, make -j$(nproc), OpenMP and BLAS
             env.push(("PYTHON_CPU_COUNT", cpus.to_string()));
-            if helpers {
-                let node = dir.join("cpus.cjs");
-                env.push(("NODE_OPTIONS", format!("--require {}", node.display())));
-                env.push(("PYTHONPATH", dir.display().to_string()));
-            }
+        }
+        // The CPU limits apply only with a quota; the Anthropic keys come back with or without one (#1340).
+        if helpers {
+            let node = if quota.is_some() {
+                vec!["cpus.cjs", "keys.cjs"]
+            } else {
+                vec!["keys.cjs"]
+            };
+            let node = node
+                .iter()
+                .map(|file| format!("--require {}", dir.join(file).display()));
+            env.push(("NODE_OPTIONS", node.collect::<Vec<_>>().join(" ")));
+            env.push(("PYTHONPATH", dir.display().to_string()));
         }
         env
     })
 }
 
+const HELPERS: [(&str, &str); 4] = [
+    ("bash-env.sh", BASH_ENV),
+    ("cpus.cjs", NODE_CPUS),
+    ("keys.cjs", NODE_KEYS),
+    ("sitecustomize.py", PYTHON_CPUS),
+];
+
+/// Whether the helpers are on disk for the next launch, written again if one went missing (a cleaned /run). Without
+/// them, a launch gets none of the variables that name them: Node would fail on a missing `--require` (#1340).
+pub(crate) fn helpers_ready() -> bool {
+    let dir = Path::new(AGENT_DIR);
+    HELPERS.iter().all(|(name, _)| dir.join(name).is_file()) || write_helpers(dir).is_ok()
+}
+
 fn write_helpers(dir: &Path) -> io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
+    // One writer at a time: launches starting together share the temporary names, and a lost race in `agent_env`
+    // would leave every launch until Core restarts without the hook (#1340).
+    static WRITING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _writing = WRITING
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     fs::create_dir_all(dir)?;
     fs::set_permissions(dir, fs::Permissions::from_mode(0o755))?;
-    for (name, text) in [
-        ("bash-env.sh", BASH_ENV),
-        ("cpus.cjs", NODE_CPUS),
-        ("sitecustomize.py", PYTHON_CPUS),
-    ] {
+    for (name, text) in HELPERS {
         // Replaced whole, so an agent already running never reads half a file.
         let temporary = dir.join(format!(".{name}"));
         fs::write(&temporary, text)?;
@@ -737,6 +785,50 @@ mod tests {
                 .unwrap();
             assert_eq!(String::from_utf8_lossy(&output.stdout), expected);
         }
+        // An app's Anthropic key, hidden from Claude itself, is back in its commands once: a deeper shell keeps the
+        // command's own value, a key already set stays, and shells outside Claude (no CLAUDECODE) never get it (#1340).
+        let keys = r#"printf %s "${ANTHROPIC_API_KEY-unset}|${CLOUDROOM_APP_ANTHROPIC_API_KEY-gone}|"
+ANTHROPIC_API_KEY=temp bash -c 'printf %s "$ANTHROPIC_API_KEY|"'; unset ANTHROPIC_API_KEY
+bash -c 'printf %s "${ANTHROPIC_API_KEY-unset}"'"#;
+        for (claude, own, expected) in [
+            ("1", None, "app|gone|temp|unset"),
+            ("1", Some("own"), "own|gone|temp|unset"),
+            ("", None, "unset|app|temp|unset"),
+        ] {
+            let mut command = std::process::Command::new("/bin/bash");
+            command
+                .args(["-c", keys])
+                .env_clear()
+                .env("PATH", "/usr/bin:/bin")
+                .env("CLAUDECODE", claude)
+                .env("CLOUDROOM_APP_ANTHROPIC_API_KEY", "app")
+                .env("BASH_ENV", home.join("hook.sh"));
+            if let Some(own) = own {
+                command.env("ANTHROPIC_API_KEY", own);
+            }
+            let output = command.output().unwrap();
+            assert_eq!(String::from_utf8_lossy(&output.stdout), expected);
+        }
+        // A traced launcher (`bash -x`) never prints the keys, and is still traced afterwards.
+        let output = std::process::Command::new("/bin/bash")
+            .args([
+                "-xc",
+                "printenv ANTHROPIC_API_KEY > /dev/null && case $- in *x*) printf on ;; esac",
+            ])
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("CLAUDECODE", "1")
+            .env("CLOUDROOM_APP_ANTHROPIC_API_KEY", "sk-app-secret")
+            .env("CLOUDROOM_APP_ANTHROPIC_AUTH_TOKEN", "sk-token-secret")
+            .env("BASH_ENV", home.join("hook.sh"))
+            .output()
+            .unwrap();
+        let trace = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "on");
+        assert!(
+            !trace.contains("secret") && trace.contains("printf"),
+            "{trace}"
+        );
         let _ = fs::remove_dir_all(home);
     }
 

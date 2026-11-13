@@ -335,8 +335,8 @@
     --bb-sidebar-sticky-tier-top: var(--bb-sidebar-sticky-label-top);
     --bb-sidebar-sticky-tier-height: var(--bb-sidebar-sticky-label-height);
     --bb-sidebar-sticky-tier-z-index: 60;
-    --bb-sidebar-sticky-tier-shield-top-height: var(
-      --bb-sidebar-sticky-stack-padding
+    --bb-sidebar-sticky-tier-shield-top-height: calc(
+      var(--bb-sidebar-sticky-stack-padding) + 2px
     );
     --bb-sidebar-sticky-tier-shield-bottom-height: var(
       --bb-sidebar-sticky-label-gap

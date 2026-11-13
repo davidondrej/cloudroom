@@ -31,9 +31,9 @@ export const keepAwakeRpcContract = defineRpcContract({
   setConfiguration: { input: configurationSchema, output: viewSchema },
 });
 
-export default async function keepAwakePlugin(bb: BbPluginApi): Promise<void> {
-  const host = bb.hosts.experimental_client({ contract: keepAwakeHostContract });
-  const stored = configurationSchema.safeParse(await bb.storage.kv.get<unknown>(STORAGE_KEY));
+export default async function keepAwakePlugin(room: BbPluginApi): Promise<void> {
+  const host = room.hosts.experimental_client({ contract: keepAwakeHostContract });
+  const stored = configurationSchema.safeParse(await room.storage.kv.get<unknown>(STORAGE_KEY));
   let config: Configuration = stored.success
     ? stored.data
     : { enabled: false, selection: { mode: "all" } };
@@ -49,12 +49,12 @@ export default async function keepAwakePlugin(bb: BbPluginApi): Promise<void> {
     try {
       const actual = await host.call("setEnabled", { enabled: wanted }, { hostId: id, signal });
       if (actual.supported && actual.enabled === wanted) return true;
-      if (actual.supported) bb.log.warn(`Keep Awake did not reach its configured state on host ${id}; retrying`);
-      else if (wanted) bb.log.warn(`Keep Awake is enabled but host ${id} is not supported`);
+      if (actual.supported) room.log.warn(`Keep Awake did not reach its configured state on host ${id}; retrying`);
+      else if (wanted) room.log.warn(`Keep Awake is enabled but host ${id} is not supported`);
       return !actual.supported;
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
-      if (!signal.aborted) bb.log.warn(`Could not apply Keep Awake on host ${id}: ${reason}`);
+      if (!signal.aborted) room.log.warn(`Could not apply Keep Awake on host ${id}: ${reason}`);
       return false;
     }
   }
@@ -66,7 +66,7 @@ export default async function keepAwakePlugin(bb: BbPluginApi): Promise<void> {
   async function applyOnce(signal: AbortSignal): Promise<boolean> {
     const { enabled, selection } = config;
     try {
-      const machines = (await bb.sdk.hosts.list()).filter((machine) => machine.status === "connected");
+      const machines = (await room.sdk.hosts.list()).filter((machine) => machine.status === "connected");
       const settled = await Promise.all(
         machines.map(({ id }) =>
           applyTo(id, enabled && (selection.mode === "all" || selection.hostIds.includes(id)), signal),
@@ -75,7 +75,7 @@ export default async function keepAwakePlugin(bb: BbPluginApi): Promise<void> {
       return settled.every(Boolean);
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
-      if (!signal.aborted) bb.log.warn(`Could not load Keep Awake state: ${reason}`);
+      if (!signal.aborted) room.log.warn(`Could not load Keep Awake state: ${reason}`);
       return false;
     }
   }
@@ -107,17 +107,17 @@ export default async function keepAwakePlugin(bb: BbPluginApi): Promise<void> {
     if (selection.mode === "selected") {
       next = { ...next, selection: { ...selection, hostIds: [...new Set(selection.hostIds)] } };
     }
-    await bb.storage.kv.set(STORAGE_KEY, next);
+    await room.storage.kv.set(STORAGE_KEY, next);
     config = next;
     apply();
   }
 
   const view = async () => ({
     ...config,
-    hosts: (await bb.sdk.hosts.list()).map(({ id, name, status }) => ({ id, name, status })),
+    hosts: (await room.sdk.hosts.list()).map(({ id, name, status }) => ({ id, name, status })),
   });
 
-  bb.rpc.register(keepAwakeRpcContract, {
+  room.rpc.register(keepAwakeRpcContract, {
     getConfiguration: view,
     async setConfiguration(next) {
       await save(next);
@@ -125,7 +125,7 @@ export default async function keepAwakePlugin(bb: BbPluginApi): Promise<void> {
     },
   });
 
-  bb.cli.register({
+  room.cli.register({
     name: "keep-awake",
     summary: "Configure sleep prevention",
     commands: [
@@ -168,21 +168,21 @@ export default async function keepAwakePlugin(bb: BbPluginApi): Promise<void> {
   });
 
   host.experimental_onWorkerExit(({ hostId }) => {
-    bb.log.warn(`Keep Awake host worker exited unexpectedly on host ${hostId}; retrying`);
+    room.log.warn(`Keep Awake host worker exited unexpectedly on host ${hostId}; retrying`);
     retryLater();
   });
 
-  bb.background.service("desired-state-reconciler", {
+  room.background.service("desired-state-reconciler", {
     async start(serviceSignal) {
       signal = serviceSignal;
       const unsubscribe = [
-        bb.sdk.subscribe({
+        room.sdk.subscribe({
           event: "host:changed",
           callback: (event) => {
             if (event.changes.includes("host-connected")) apply();
           },
         }),
-        bb.sdk.subscribe({
+        room.sdk.subscribe({
           event: "realtime:connection",
           callback: (event) => {
             if (event.state === "connected" && event.reconnected) apply();

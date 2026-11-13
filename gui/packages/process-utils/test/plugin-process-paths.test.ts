@@ -12,7 +12,10 @@ import { spawnSync } from "node:child_process";
 import { homedir, tmpdir, userInfo } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
-import { createPluginProcessTempDir } from "../src/plugin-process-paths.js";
+import {
+  createPluginProcessTempDir,
+  ensureDataTempDir,
+} from "../src/plugin-process-paths.js";
 
 const roots: string[] = [];
 
@@ -30,11 +33,7 @@ async function makeRoot(parent: string): Promise<string> {
 }
 
 function create(dataDir: string): Promise<string> {
-  return createPluginProcessTempDir({
-    pluginId: "provider-pi",
-    prefix: "bb-provider-bridge",
-    dataDir,
-  });
+  return createPluginProcessTempDir({ prefix: "bb-provider-bridge", dataDir });
 }
 
 it.skipIf(process.platform === "win32")(
@@ -103,20 +102,43 @@ it.skipIf(process.platform === "win32" || !ownGroupIsPrivate)(
   },
 );
 
-it.skipIf(process.platform === "win32")(
-  "keeps using a temp folder only this account can write to, at its real path",
-  async () => {
-    // Like macOS's per-account temp folder (the home folder's chain is private).
-    const own = await makeRoot(homedir());
-    await chmod(own, 0o700);
-    const link = join(own, "link");
-    await symlink(own, link);
-    vi.stubEnv("TMPDIR", link);
-    const dataDir = join(own, "bridge-data");
+it("never uses the OS temp folder, even one only this account can write to", async () => {
+  // Like macOS's per-account temp folder or Windows' %TEMP%: no other account
+  // can write it, but Read-only Mac commands and agent sandboxes that run as
+  // this account can.
+  const own = await makeRoot(homedir());
+  await chmod(own, 0o700);
+  const temp = join(own, "temp");
+  await mkdir(temp);
+  for (const name of ["TMPDIR", "TEMP", "TMP"]) vi.stubEnv(name, temp);
+  // Given through a link, the folder must be at the data folder's real path,
+  // so no symlink in it can be swapped. Windows needs admin rights for links.
+  const viaLink = process.platform !== "win32";
+  if (viaLink) await symlink(own, join(own, "link"));
 
-    const tempDir = await create(dataDir);
+  const tempDir = await create(join(own, viaLink ? "link" : "", "bridge-data"));
 
-    expect(dirname(tempDir)).toBe(await realpath(own));
-    await expect(stat(join(dataDir, ".cloudroom-tmp"))).rejects.toThrow();
-  },
-);
+  expect(dirname(tempDir)).toBe(
+    join(await realpath(own), "bridge-data", ".cloudroom-tmp"),
+  );
+  expect(await readdir(temp)).toEqual([]);
+});
+
+it("gives what Cloudroom runs outside any sandbox the same folder", async () => {
+  // Installers and Claude's sign-in opener, beside a private OS temp folder.
+  const own = await makeRoot(homedir());
+  await chmod(own, 0o700);
+  const temp = join(own, "temp");
+  await mkdir(temp);
+  for (const name of ["TMPDIR", "TEMP", "TMP"]) vi.stubEnv(name, temp);
+  const dataDir = join(own, "data");
+
+  const base = ensureDataTempDir(dataDir);
+
+  expect(base).toBe(join(await realpath(own), "data", ".cloudroom-tmp"));
+  if (process.platform !== "win32") {
+    expect((await stat(base)).mode & 0o777).toBe(0o700);
+  }
+  expect(dirname(await create(dataDir))).toBe(base);
+  expect(await readdir(temp)).toEqual([]);
+});

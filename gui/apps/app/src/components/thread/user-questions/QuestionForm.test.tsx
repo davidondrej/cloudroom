@@ -36,7 +36,7 @@ vi.mock("@/hooks/queries/system-queries", () => ({
     },
   }),
 }));
-vi.mock("@/lib/bb-desktop", () => ({ getBbDesktopInfo: () => null }));
+vi.mock("@/lib/room-desktop", () => ({ getRoomDesktopInfo: () => null }));
 const pane = vi.hoisted(() => ({ isFocused: true }));
 vi.mock("@/views/thread-detail/PaneContext", () => ({
   useOptionalPaneContext: () => pane,

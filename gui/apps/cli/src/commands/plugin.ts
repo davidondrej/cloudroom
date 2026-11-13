@@ -28,7 +28,7 @@ import {
   type PluginPackageLayoutMigration,
 } from "@cloudroom/templates/plugin-scaffold";
 import { action } from "../action.js";
-import { cliFetch, createCliBbSdk } from "../client.js";
+import { cliFetch, createCliRoomSdk } from "../client.js";
 import {
   buildPluginApp,
   buildPluginHost,
@@ -39,7 +39,7 @@ import {
   type PluginBuildToolchain,
 } from "@cloudroom/plugin-build";
 import { exitWhenIdle, runPluginCliCommand } from "../plugin-cli-proxy.js";
-import { resolveBbCliVersion } from "../version.js";
+import { resolveRoomCliVersion } from "../version.js";
 
 import { outputJson, type JsonOutputOptions } from "./helpers.js";
 import { renderBorderlessTable } from "../table.js";
@@ -98,7 +98,7 @@ async function searchCatalog(
   baseUrl: string,
   query: string,
 ): Promise<PluginCatalogSearchResult[]> {
-  return (await createCliBbSdk(baseUrl).plugins.catalog.search({ query }))
+  return (await createCliRoomSdk(baseUrl).plugins.catalog.search({ query }))
     .results;
 }
 
@@ -554,7 +554,7 @@ function installPlan(
   baseUrl: string,
   args: { entryId: string; marketplace?: string },
 ): Promise<PluginCatalogInstallPlan> {
-  return createCliBbSdk(baseUrl).plugins.catalog.installPlan(args);
+  return createCliRoomSdk(baseUrl).plugins.catalog.installPlan(args);
 }
 
 async function resolveInstallIntent(
@@ -804,7 +804,7 @@ export function registerPluginCommands(
           pluginId: string | undefined,
           opts: JsonOutputOptions & { method?: string },
         ) => {
-          const methods = await createCliBbSdk(
+          const methods = await createCliRoomSdk(
             getUrl(),
           ).plugins.experimental_discoverRpc({ pluginId, method: opts.method });
           if (opts.json) {
@@ -840,7 +840,7 @@ export function registerPluginCommands(
               : jsonValueSchema.parse(
                   JSON.parse(await readFile(opts.inputFile, "utf8")),
                 );
-          const result = await createCliBbSdk(getUrl()).plugins.callRpc({
+          const result = await createCliRoomSdk(getUrl()).plugins.callRpc({
             pluginId,
             method,
             input,
@@ -865,7 +865,7 @@ export function registerPluginCommands(
           method: string | undefined,
           opts: JsonOutputOptions,
         ) => {
-          const methods = await createCliBbSdk(
+          const methods = await createCliRoomSdk(
             getUrl(),
           ).plugins.experimental_discoverRpc({ pluginId, method });
           if (opts.json) {
@@ -958,7 +958,7 @@ export function registerPluginCommands(
     .option("--json", "Output JSON")
     .action(
       action(async (opts: JsonOutputOptions) => {
-        const result = await createCliBbSdk(getUrl()).plugins.list();
+        const result = await createCliRoomSdk(getUrl()).plugins.list();
         if (opts.json) {
           outputJson(opts, result);
           return;
@@ -979,7 +979,7 @@ export function registerPluginCommands(
     .option("--json", "Output JSON")
     .action(
       action(async (id: string, opts: JsonOutputOptions) => {
-        const source = await createCliBbSdk(getUrl()).plugins.getSource({
+        const source = await createCliRoomSdk(getUrl()).plugins.getSource({
           pluginId: id,
         });
         if (opts.json) {
@@ -1091,7 +1091,7 @@ export function registerPluginCommands(
                 summary = `Installing ${pkg.name}@${pkg.version ?? "?"} from ${path}`;
                 const pluginId = derivePluginId(pkg.name);
                 const { plugins } =
-                  await createCliBbSdk(getUrl()).plugins.list();
+                  await createCliRoomSdk(getUrl()).plugins.list();
                 const installed = plugins.find((p) => p.id === pluginId);
                 if (
                   installed !== undefined &&
@@ -1123,14 +1123,14 @@ export function registerPluginCommands(
           );
           const plugin =
             intent.kind === "source"
-              ? await createCliBbSdk(getUrl()).plugins.install({
+              ? await createCliRoomSdk(getUrl()).plugins.install({
                   source: intent.source,
                   ...(opts.subdirectory === undefined
                     ? {}
                     : { subdirectory: opts.subdirectory }),
                   ...(opts.plugin === undefined ? {} : { plugin: opts.plugin }),
                 })
-              : await createCliBbSdk(getUrl()).plugins.catalog.install(
+              : await createCliRoomSdk(getUrl()).plugins.catalog.install(
                   intent.plan.kind === "marketplace"
                     ? {
                         entryId: intent.plan.entryId,
@@ -1158,7 +1158,7 @@ export function registerPluginCommands(
     .option("--json", "Output the raw update results as JSON")
     .action(
       action(async (opts: JsonOutputOptions) => {
-        const results = await createCliBbSdk(getUrl()).plugins.checkUpdates();
+        const results = await createCliRoomSdk(getUrl()).plugins.checkUpdates();
         if (opts.json) {
           outputJson(opts, results);
           return;
@@ -1207,7 +1207,7 @@ export function registerPluginCommands(
             console.error("Specify exactly one plugin id or --all.");
             process.exit(1);
           }
-          const sdk = createCliBbSdk(getUrl());
+          const sdk = createCliRoomSdk(getUrl());
           const results = await sdk.plugins.checkUpdates(
             id === undefined ? {} : { pluginId: id },
           );
@@ -1295,7 +1295,7 @@ export function registerPluginCommands(
         await scaffoldPlugin({
           targetDir,
           packageName,
-          bbVersion: resolveBbCliVersion(),
+          bbVersion: resolveRoomCliVersion(),
         });
         console.log(`Created ${directoryName}/ (${packageName}).`);
         await warnIfSdkVersionUnpublished();
@@ -1487,7 +1487,7 @@ export function registerPluginCommands(
     .action(
       action(async (path: string | undefined) => {
         const rootDir = resolve(process.cwd(), path ?? ".");
-        const bbVersion = resolveBbCliVersion();
+        const roomVersion = resolveRoomCliVersion();
         const manifest = await readPluginManifest(rootDir);
         const hasApp = typeof manifest?.bb?.app === "string";
         const hasHost = typeof manifest?.bb?.host === "string";
@@ -1495,14 +1495,14 @@ export function registerPluginCommands(
           await refreshPluginTypes(rootDir, hasApp);
         }
         const toolchain = await cliBuildToolchain();
-        const server = await buildPluginServer(rootDir, bbVersion, toolchain);
+        const server = await buildPluginServer(rootDir, roomVersion, toolchain);
         const files = [server.jsPath, server.mapPath, server.metaPath];
         if (hasApp) {
-          const app = await buildPluginApp(rootDir, bbVersion, toolchain);
+          const app = await buildPluginApp(rootDir, roomVersion, toolchain);
           files.push(app.jsPath, app.cssPath, app.metaPath);
         }
         if (hasHost) {
-          const host = await buildPluginHost(rootDir, bbVersion, toolchain);
+          const host = await buildPluginHost(rootDir, roomVersion, toolchain);
           files.push(host.jsPath, host.mapPath, host.metaPath);
         }
         for (const file of files) {
@@ -1524,7 +1524,7 @@ export function registerPluginCommands(
         const hasHost = typeof manifest.bb?.host === "string";
         await refreshPluginTypes(rootDir, hasApp);
         const realDir = await realpath(rootDir).catch(() => rootDir);
-        const list = await createCliBbSdk(getUrl()).plugins.list();
+        const list = await createCliRoomSdk(getUrl()).plugins.list();
         const entry = list.plugins.find(
           (candidate) =>
             candidate.rootDir === rootDir || candidate.rootDir === realDir,
@@ -1550,7 +1550,7 @@ export function registerPluginCommands(
           buildApp: async () => {
             await buildPluginApp(
               rootDir,
-              resolveBbCliVersion(),
+              resolveRoomCliVersion(),
               await cliBuildToolchain(),
               { minify: false },
             );
@@ -1558,7 +1558,7 @@ export function registerPluginCommands(
           buildHost: async () => {
             await buildPluginHost(
               rootDir,
-              resolveBbCliVersion(),
+              resolveRoomCliVersion(),
               await cliBuildToolchain(),
             );
           },
@@ -1661,7 +1661,7 @@ export function registerPluginCommands(
         if (state !== undefined && state !== "on" && state !== "off") {
           exitWithError({ error: `expected "on" or "off", got "${state}"` });
         }
-        const plugins = createCliBbSdk(getUrl()).plugins;
+        const plugins = createCliRoomSdk(getUrl()).plugins;
         const updated =
           state === undefined
             ? null

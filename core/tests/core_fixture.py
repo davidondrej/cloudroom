@@ -2,6 +2,7 @@
 """Deterministic Rust HTTP/Codex-protocol checks; no inference or database required."""
 import json
 import os
+import re
 from pathlib import Path
 import signal
 import shutil
@@ -279,7 +280,11 @@ class ReplayTests(unittest.TestCase):
         api('GET', '/v1/accounts/codex', expected=401, token=None)
         self.assertEqual(api('GET', '/v1/accounts/codex')['state'], 'missing')
         start = {'request_id': 'auth-gated', 'harness': 'codex', 'model': 'fixture'}
-        self.assertEqual(api('POST', '/v1/sessions', start, 409)['code'], 'codex_auth_required')
+        refused = api('POST', '/v1/sessions', start, 409)
+        self.assertEqual(refused['code'], 'codex_auth_required')
+        self.assertIn('this sandbox has no Codex login. Sign in to Codex in', refused['error'])
+        # The website passes only short plain text on to a parent agent (web/lib/remote.ts plainReason).
+        self.assertRegex(refused['error'], re.compile(r"^[\w ,;:'.()-]{1,160}$", re.ASCII))
         first = api('POST', '/v1/accounts/codex/login', {'request_id': 'login-one'}, 202)
         self.assertEqual(first['state'], 'waiting')
         self.assertEqual(first['user_code'], 'TEST-1234')
@@ -313,6 +318,10 @@ class ReplayTests(unittest.TestCase):
                 (self.repo / 'auth-state').write_text(mode)
                 self.start()
                 self.assertEqual(self.service.request('GET', '/v1/accounts/codex')['state'], expected)
+                if mode == 'unauthorized':
+                    refused = self.service.request('POST', '/v1/sessions', {'request_id': 'rejected', 'harness': 'codex', 'model': 'fixture'}, 409)
+                    self.assertEqual(refused['code'], 'codex_auth_required')
+                    self.assertIn("OpenAI rejected this sandbox's Codex login", refused['error'])
                 if mode == 'offline':
                     self.assertEqual(self.service.request('POST', '/v1/accounts/codex/login', {'request_id': 'must-not-replace'}, 202)['state'], expected)
                     self.assertFalse((self.repo / 'auth-attempts').exists())
@@ -325,7 +334,23 @@ class ReplayTests(unittest.TestCase):
         self.service.request('POST', '/v1/accounts/codex/login', {'request_id': 'rejected'}, 202)
         (self.repo / 'auth-finish').write_text('failure')
         until(lambda: self.service.request('GET', '/v1/accounts/codex')['state'] == 'error', 'failed login', 6)
+        refused = self.service.request('POST', '/v1/sessions', {'request_id': 'failed-login', 'harness': 'codex', 'model': 'fixture'}, 409)
+        self.assertIn('a Codex sign-in here failed, or its saved login is invalid', refused['error'])
         self.assertNotIn('PRIVATE-AUTH-ERROR-CANARY', json.dumps(self.service.request('GET', '/v1/accounts/codex')))
+
+    def test_claude_login_check_failures_say_why(self):
+        home = Path(self.env['CLOUDROOM_ACCOUNT_HOME'])
+        (home / '.claude').mkdir()
+        claude = home / '.local/bin/claude'
+        claude.parent.mkdir(parents=True)
+        claude.write_text('#!/bin/sh\nexit 3\n')
+        claude.chmod(0o755)
+        self.start()
+        # Only Core's own words for the cause, never the CLI's output (#1222).
+        for script, cause in [('exit 3', 'exited with an error'), ('echo SECRET-CANARY', 'gave an unreadable answer')]:
+            claude.write_text(f'#!/bin/sh\n{script}\n')
+            refused = self.service.request('POST', '/v1/sessions', {'request_id': cause.replace(' ', '-'), 'harness': 'claude-code'}, 409)
+            self.assertEqual(refused, {'code': 'claude_auth_unavailable', 'error': f'Claude account could not be verified: the Claude CLI {cause}'})
 
     def test_non_loopback_http_requires_permission_before_storage_or_binding(self):
         binary = BINARY
@@ -1010,6 +1035,25 @@ class RecoveryTests(unittest.TestCase):
         self.ready()
         self.assertTrue(self.status()["queue_paused"])
         self.assertEqual(self.status()["queue"], ["relay_report"])
+
+    def test_a_relayed_tell_keeps_the_sender_the_website_names(self):
+        # #1369: a Cloud parent's tell to its own child showed as the user's message. Steered and queued alike.
+        self.seed(); self.start(); self.ready()
+        self.prompt("running", "hold")
+        self.wait(lambda: self.status()["state"] == "running", "running turn")
+        # #1517: `tell --mode queue` comes with an ID ending `_queue` and waits for the running turn, never steers it.
+        self.service.request("POST", "/v1/sessions/cr_seed/relay", {"request_id": "q_wait_queue", "action": "tell", "text": "later"})
+        self.assertEqual((self.status()["queue"], self.status()["receipts"].get("q_wait_queue_steer")), (["q_wait_queue"], None))
+        for key, sender, expected in [("s_named", "thr_parent", "thr_parent"), ("q_named", "thr_parent", "thr_parent"),
+                                      ("q_bad", "cr_session", None), ("q_none", None, None)]:
+            if key == "q_named":
+                self.service.request("POST", "/v1/sessions/cr_seed/interrupt", {"request_id": "halt", "target_request_id": "running"}, 202)
+                self.ready()
+            headers = {"X-Cloudroom-Sender": sender} if sender else None
+            self.service.request("POST", "/v1/sessions/cr_seed/relay", {"request_id": key, "action": "tell", "text": "next"}, headers=headers)
+            receipt = self.status()["receipts"][key + "_steer" if key.startswith("s_") else key]
+            self.assertEqual((receipt["input"].get("sender_thread_id"), receipt["input"]["text"]), (expected, "next"), key)
+            if key.startswith("q_"): self.ready()
 
     def test_a_late_turn_report_never_unarchives_a_child(self):
         # #1000: a report the child had in flight when its parent archived it made `thread list` show it again. Any

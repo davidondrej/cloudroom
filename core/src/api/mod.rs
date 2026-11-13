@@ -85,6 +85,7 @@ pub fn router(manager: Arc<Manager>, token: String) -> Router {
         .route("/v1/sessions/{id}/edit", post(edit))
         .route("/v1/sessions/{id}/cancel", post(cancel))
         .route("/v1/sessions/{id}/reorder", post(reorder))
+        .route("/v1/sessions/{id}/model", post(model))
         .route("/v1/sessions/{id}/steer", post(steer))
         .route("/v1/sessions/{id}/compact", post(compact))
         .route("/v1/sessions/{id}/goal", post(goal))
@@ -306,7 +307,7 @@ async fn drain(State(manager): State<Arc<Manager>>, Json(input): Json<Drain>) ->
                 std::time::Duration::from_secs(7),
                 manager.send_plan_reports()
             ),
-            manager.flush_history(std::time::Duration::from_secs(8)),
+            manager.flush_history(std::time::Duration::from_secs(8), false),
         );
         if sent.is_err() {
             manager.delay_plan_reports();
@@ -591,9 +592,9 @@ impl IntoResponse for session::Error {
                 "session_waking"
             }
             e if e.starts_with("model catalog unavailable") => "model_catalog_unavailable",
-            "connect Codex before starting cloud work" => "codex_auth_required",
+            e if e.starts_with("connect Codex before starting cloud work") => "codex_auth_required",
             "connect Claude Code before starting cloud work" => "claude_auth_required",
-            "Claude account could not be verified" => "claude_auth_unavailable",
+            e if e.starts_with("Claude account could not be verified") => "claude_auth_unavailable",
             "Codex usage limit reached" => "codex_usage_limit",
             "extra credits are off for loops" => "plan_credits",
             "Codex account could not be verified" => "codex_auth_unavailable",
@@ -1295,6 +1296,40 @@ async fn reorder(
         key(target)?;
     }
     let receipt = manager.command(&id, body.request_id, "reorder", json!({"order":body.order}))?;
+    Ok(accepted(&manager, &id, receipt))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Model {
+    request_id: String,
+    model: String,
+    reasoning: Option<String>,
+}
+
+/// The user's model pick: the session runs it from its next turn, whoever sends it (`set_model`).
+async fn model(
+    State(manager): State<Arc<Manager>>,
+    Path(id): Path<String>,
+    Json(body): Json<Model>,
+) -> Result<impl IntoResponse> {
+    key(&body.request_id)?;
+    if body.reasoning.as_deref().is_some_and(|level| {
+        level.is_empty() || level.len() > 64 || !level.bytes().all(|b| b.is_ascii_lowercase())
+    }) {
+        return Err(session::Error::Conflict("invalid reasoning effort"));
+    }
+    let reasoning = if manager.known_request(&id, &body.request_id) {
+        body.reasoning
+    } else {
+        Some(
+            manager
+                .check_model_switch(&id, &body.model, body.reasoning.as_deref())
+                .await?,
+        )
+    };
+    let input = json!({"model":body.model,"reasoning":reasoning});
+    let receipt = manager.command(&id, body.request_id, "model", input)?;
     Ok(accepted(&manager, &id, receipt))
 }
 

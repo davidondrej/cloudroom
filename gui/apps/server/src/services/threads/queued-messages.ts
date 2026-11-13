@@ -5,10 +5,12 @@ import {
   deleteClaimedQueuedThreadMessageInTransaction,
   getQueuedThreadMessage,
   getEnvironment,
+  isErrorQueueReleaseHeld,
   getHost,
   getThread,
   isOrdinaryTurnEndQueuedMessage,
   isThreadQueueAutoSendPaused,
+  listQueuedThreadMessages,
   releaseQueuedMessageClaim,
   releaseStaleQueuedMessageClaims,
   setQueuedThreadMessageWaitingOn,
@@ -17,6 +19,7 @@ import {
   type DbQueryConnection,
   type QueuedThreadMessageClaimPolicy,
   type QueuedThreadMessageEligibility,
+  type QueuedThreadMessageRow,
 } from "@cloudroom/db";
 import { queuedMessageSystemNoticeSchema } from "@cloudroom/domain";
 import type {
@@ -73,6 +76,7 @@ import {
 import { validatePromptAttachmentReferences } from "../projects/attachments.js";
 import { requestQueuedMessageDispatch } from "./queued-message-dispatch.js";
 import { isHardQueueHeld } from "./thread-parent.js";
+import { hasLiveThreadStopInFlight } from "./thread-lifecycle.js";
 import { ThreadContextClearInProgressError } from "./thread-context-mutation-guard.js";
 
 interface SendQueuedMessageArgs {
@@ -102,9 +106,27 @@ export function createAutomaticQueuedMessageEligibility(
   args: { now: number; thread: Thread },
 ): QueuedThreadMessageEligibility {
   const activeTurnId = getActiveTurnId(deps, args.thread.id);
+  const stopInFlight = hasLiveThreadStopInFlight(args.thread.id);
+  let retryQueued: boolean | undefined;
+  let releaseSpent: boolean | undefined;
+  const isFailedAndReleasable = (row: QueuedThreadMessageRow) => {
+    if (args.thread.status !== "error") return false;
+    releaseSpent ??= isErrorQueueReleaseHeld(deps.db, {
+      graceMs: 30_000,
+      now: args.now,
+      threadId: args.thread.id,
+    });
+    if (releaseSpent) return false;
+    if (row.payloadKind === "retry") return true;
+    retryQueued ??= listQueuedThreadMessages(deps.db, args.thread.id).some(
+      (queued) => queued.payloadKind === "retry",
+    );
+    return !retryQueued;
+  };
   let hardQueueHeld: boolean | undefined;
   return (row) => {
     if (row.failureReason !== null) return false;
+    const failedAndReleasable = isFailedAndReleasable(row);
     if (row.hardQueue) {
       hardQueueHeld ??= isHardQueueHeld(deps.db, args.thread);
       if (hardQueueHeld) return false;
@@ -112,6 +134,7 @@ export function createAutomaticQueuedMessageEligibility(
     const waitingOn = parseStoredQueuedThreadMessageWaitingOn(row);
     switch (waitingOn?.kind) {
       case undefined:
+        return args.thread.status !== "error" || failedAndReleasable;
       case "plugin":
         return true;
       case "time":
@@ -119,11 +142,15 @@ export function createAutomaticQueuedMessageEligibility(
       case "thread-busy":
       case "stopping":
         return (
-          args.thread.status === "idle" || args.thread.status === "pending"
+          !stopInFlight &&
+          (args.thread.status === "idle" ||
+            args.thread.status === "pending" ||
+            failedAndReleasable)
         );
       case "turn-starting":
         return (
-          args.thread.status === "idle" ||
+          (!stopInFlight &&
+            (args.thread.status === "idle" || failedAndReleasable)) ||
           (args.thread.status === "active" && activeTurnId !== null)
         );
       case "host-offline": {

@@ -693,8 +693,8 @@ describe("SkillsOverview", () => {
     expect(await screen.findByText("codex-skill")).toBeTruthy();
 
     fireEvent.pointerDown(screen.getByRole("button", { name: /^Filters/ }));
-    const bbFilter = screen.getByRole("menuitemcheckbox", { name: "Cloudroom" });
-    expect(bbFilter.getAttribute("aria-checked")).toBe("false");
+    const roomFilter = screen.getByRole("menuitemcheckbox", { name: "Cloudroom" });
+    expect(roomFilter.getAttribute("aria-checked")).toBe("false");
   });
 
   it("preserves a user-selected provider filter across library refreshes", async () => {

@@ -18,7 +18,7 @@ import type { ThreadStartParams } from "./generated/codex-app-server/schema/v2/T
 import type { UserInput as CodexUserInput } from "./generated/codex-app-server/schema/v2/UserInput.js";
 import type { AskForApproval } from "./generated/codex-app-server/schema/v2/AskForApproval.js";
 import type { ApprovalsReviewer } from "./generated/codex-app-server/schema/v2/ApprovalsReviewer.js";
-import { mapBbReasoningLevelToCodex } from "./models.js";
+import { mapRoomReasoningLevelToCodex } from "./models.js";
 
 export type CodexSessionOptions = {
   model?: string;
@@ -43,12 +43,12 @@ export interface CodexThreadPermissionSettings {
   sandbox: CodexSandboxMode;
 }
 
-export type BbThreadStartParams = ThreadStartParams & {
+export type RoomThreadStartParams = ThreadStartParams & {
   experimentalRawEvents?: boolean;
   dynamicTools?: DynamicToolSpec[];
 };
 
-export type BbThreadForkParams = {
+export type RoomThreadForkParams = {
   threadId: string;
   lastTurnId?: string | null;
   excludeTurns?: boolean;
@@ -132,6 +132,7 @@ type GitHeadState =
   | { type: "unsafe" };
 
 interface CodexInstructionSource {
+  approvalPolicy?: AskForApproval;
   instructionMode: "append" | "replace";
   options: {
     instructions?: string;
@@ -154,13 +155,21 @@ const CODEX_PLAIN_CHAT =
 const CODEX_READ_ONLY_GIT =
   "Your sandbox keeps .agents and .codex read-only. git switch, checkout, reset, merge, pull or stash can leave old files there even with exit 0, so run them with escalation. Record git status --porcelain first. After a sandboxed command, preserve pre-existing edits and staged changes, inspect .agents and .codex against that command's intended result, and fix only verified stale files before committing. For merge, pull or stash recovery, do not restore from HEAD or clean; that can discard intended changes. If the intended state is unclear, stop and tell the user.";
 
+// #1456. With approval "never" (Full Access), Codex rejects any command that a
+// prompt rule matches (user, project or managed .rules), and the model can't ask.
+const CODEX_NEVER_ASKS =
+  "This permission mode can't ask the user for approval. If a command fails with \"approval required by policy, but AskForApproval is set to Never\", a Codex rule requires approval for that command. Do not retry or work around it. Tell the user that a Codex rule needs approval: they can switch this thread to Manual and send again to approve it themselves, use Auto to let Codex's automatic review decide, or change that rule.";
+
 export function resolveCodexInstructionOverrides(
   command: CodexInstructionSource,
 ): CodexInstructionOverrides {
-  const notes =
-    command.options.permissionScope === "workspace"
-      ? `${CODEX_PLAIN_CHAT}\n\n${CODEX_READ_ONLY_GIT}`
-      : CODEX_PLAIN_CHAT;
+  const notes = [
+    CODEX_PLAIN_CHAT,
+    ...(command.options.permissionScope === "workspace"
+      ? [CODEX_READ_ONLY_GIT]
+      : []),
+    ...(command.approvalPolicy === "never" ? [CODEX_NEVER_ASKS] : []),
+  ].join("\n\n");
   const instructions = command.options.instructions?.trim();
   if (instructions && command.instructionMode === "replace") {
     return { baseInstructions: instructions, developerInstructions: notes };
@@ -666,7 +675,7 @@ export function toCodexServiceTier(
 export function toCodexReasoningEffort(
   reasoningLevel: ReasoningLevel,
 ): CodexReasoningEffort {
-  const codexEffort = mapBbReasoningLevelToCodex(reasoningLevel);
+  const codexEffort = mapRoomReasoningLevelToCodex(reasoningLevel);
   if (codexEffort == null) {
     throw new Error(
       `Codex does not support the ${reasoningLevel} reasoning level.`,

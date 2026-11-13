@@ -156,19 +156,19 @@ function resourceProvider(
   };
 }
 
-export default function providerUsagePlugin(bb: BbPluginApi): void {
+export default function providerUsagePlugin(room: BbPluginApi): void {
   const mergeAccounts = async (
     machines: UsageMachine[],
     providers: Provider[],
   ): Promise<void> => {
     const sources = (
-      await bb.sdk.plugins
+      await room.sdk.plugins
         .experimental_discoverRpc({ method: ACCOUNTS_LIST_METHOD })
         .catch(() => [])
     ).filter((source) => source.method === ACCOUNTS_LIST_METHOD);
     for (const source of sources)
       for (const providerId of ["claude-code", "codex", "acp-cursor"]) {
-        const raw: unknown = await bb.sdk.plugins
+        const raw: unknown = await room.sdk.plugins
           .callRpc({
             pluginId: source.pluginId,
             method: ACCOUNTS_LIST_METHOD,
@@ -181,7 +181,17 @@ export default function providerUsagePlugin(bb: BbPluginApi): void {
         const accounts = (parsed.success ? parsed.data : []).filter(
           (account) => !account.needsSignIn,
         );
-        if (!accounts.some((account) => account.id !== "local")) continue;
+        // The name the user gave "This Mac" belongs to this computer's own login, not another machine's.
+        const localName = accounts.find((account) => account.id === "local")?.name;
+        const named = (machine: UsageMachine, entry: UsageProvider) =>
+          machine.primary && localName ? { ...entry, accountLabel: localName } : entry;
+        if (!accounts.some((account) => account.id !== "local")) {
+          for (const machine of machines)
+            machine.providers = machine.providers.map((entry) =>
+              entry.providerId === providerId ? named(machine, entry) : entry,
+            );
+          continue;
+        }
         const metadata = providers.find(
           (provider) => provider.id === providerId,
         );
@@ -198,7 +208,7 @@ export default function providerUsagePlugin(bb: BbPluginApi): void {
           const entries = accounts.flatMap((account): UsageProvider[] => {
             if (account.id === "local")
               return local
-                ? [{ ...local, accountId: "local", inUse: account.inUse }]
+                ? [named(machine, { ...local, accountId: "local", inUse: account.inUse })]
                 : [];
             // Accounts that report no usage still show when they hit a limit.
             // So does a limit no bar shows as full, like one model's weekly limit.
@@ -277,7 +287,7 @@ export default function providerUsagePlugin(bb: BbPluginApi): void {
       await running.promise.catch(() => undefined);
       return fetchResource(pluginId, resourceId, force);
     }
-    const promise = bb.sdk.plugins
+    const promise = room.sdk.plugins
       .callRpc({
         pluginId,
         method: usageFetchMethod,
@@ -300,18 +310,18 @@ export default function providerUsagePlugin(bb: BbPluginApi): void {
   const readUsage = async (request: UsageRequest): Promise<UsageSnapshot> => {
     const hostId = request.machineIds?.find((id) => !id.startsWith("source:"));
     const [hosts, sources, providers, config] = await Promise.all([
-      bb.sdk.hosts
+      room.sdk.hosts
         .list()
         .then((hosts) => hosts.filter((host) => host.type !== "ephemeral")),
-      bb.sdk.plugins.experimental_discoverRpc({ method: usageListMethod }),
-      bb.sdk.providers
+      room.sdk.plugins.experimental_discoverRpc({ method: usageListMethod }),
+      room.sdk.providers
         .list(
           hostId === undefined
             ? { capability: "usage" }
             : { capability: "usage", hostId },
         )
         .catch(() => []),
-      bb.sdk.system.config().catch(() => null),
+      room.sdk.system.config().catch(() => null),
     ]);
     hosts.sort(
       (a, b) =>
@@ -325,7 +335,7 @@ export default function providerUsagePlugin(bb: BbPluginApi): void {
       await Promise.all(
         sources.slice(offset, offset + 3).map(async (source) => {
           try {
-            const inventory = await bb.sdk.plugins.callRpc({
+            const inventory = await room.sdk.plugins.callRpc({
               pluginId: source.pluginId,
               method: usageListMethod,
               input: {},
@@ -475,10 +485,10 @@ export default function providerUsagePlugin(bb: BbPluginApi): void {
       );
     return { machines };
   };
-  bb.rpc.register(providerUsageRpcContract, { getUsage: readUsage });
+  room.rpc.register(providerUsageRpcContract, { getUsage: readUsage });
   const markDirty = () => {
     for (const value of measurements.values()) value.loadedAt = 0;
   };
-  bb.events.on("thread.idle", markDirty);
-  bb.events.on("thread.failed", markDirty);
+  room.events.on("thread.idle", markDirty);
+  room.events.on("thread.failed", markDirty);
 }

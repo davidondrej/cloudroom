@@ -1,5 +1,8 @@
+import { mkdtemp, rm } from "node:fs/promises";
+import { join } from "node:path";
 import { PassThrough, type Readable } from "node:stream";
 import {
+  ensureDataTempDir,
   gitShell,
   normalizeWindowsEnv,
   preparePortablePtyCommand,
@@ -88,6 +91,27 @@ export async function withWindowsGitShell(args: {
   return shell === null
     ? args
     : { plan: { ...args.plan, command: shell.command }, env: shell.env };
+}
+
+/**
+ * Installers run outside any sandbox. On macOS and Linux each run gets a fresh TMPDIR in the data folder, so the
+ * downloaded script (`${TMPDIR:-/tmp}/provider-installation.XXXXXX`) and whatever else the installer stages there stay
+ * out of the OS temp folder, which Read-only Mac commands and sandboxed agents can change. Windows keeps its TEMP.
+ */
+export async function withPrivateInstallTemp<T>(
+  dataDir: string,
+  env: NodeJS.ProcessEnv,
+  run: (env: NodeJS.ProcessEnv) => Promise<T>,
+): Promise<T> {
+  if (process.platform === "win32") return run(env);
+  const folder = await mkdtemp(
+    join(ensureDataTempDir(dataDir), "provider-installation-"),
+  );
+  try {
+    return await run({ ...env, TMPDIR: folder });
+  } finally {
+    await rm(folder, { recursive: true, force: true });
+  }
 }
 
 function createPtyProviderInstallationProcessSpawner(): ProviderInstallationProcessSpawner {

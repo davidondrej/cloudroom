@@ -40,7 +40,7 @@ import { cn } from "@cloudroom/shared-ui/lib/utils";
 import {
   MACOS_APP_REGION_NO_DRAG_CLASS,
   MACOS_WINDOW_NO_DRAG_CLASS,
-} from "@/lib/bb-desktop";
+} from "@/lib/room-desktop";
 import type {
   SecondaryPanelRenderableTab,
   SecondaryPanelTabReorderHandler,

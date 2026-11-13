@@ -657,6 +657,11 @@ export class SandboxDirectory {
     return this.call(body, "popups");
   }
 
+  /** Monthly Wrapped: this account's "Top N%" by agents started in a finished month, or null (docs/scopes/wrapped.md). */
+  async wrappedTop(month: string): Promise<number | null> {
+    return z.object({ top: z.number().nullable() }).parse(await this.call({ month }, "wrapped")).top;
+  }
+
   /** Whether the website judges a generated thread title too vague to keep, at the user's sensitivity (2–5). */
   async titleTooVague(check: { title: string; firstMessage: string; agentReply: string; sensitivity: number }): Promise<boolean> {
     const value = await this.call({ ...check, sensitivity: String(check.sensitivity) }, "thread-title");

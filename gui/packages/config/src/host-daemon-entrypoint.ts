@@ -4,12 +4,12 @@ import {
   type EnvLoaderArgs,
 } from "./env.js";
 import {
-  BB_BRIDGE_DIR_ENV,
-  BB_CLI_DIR_ENV,
-  BB_HOST_ENROLL_KEY_ENV,
-  BB_HOST_DAEMON_AUTO_UPDATE_ENV,
-  BB_HOST_ID_ENV,
-  BB_HOST_NAME_ENV,
+  ROOM_BRIDGE_DIR_ENV,
+  ROOM_CLI_DIR_ENV,
+  ROOM_HOST_ENROLL_KEY_ENV,
+  ROOM_HOST_DAEMON_AUTO_UPDATE_ENV,
+  ROOM_HOST_ID_ENV,
+  ROOM_HOST_NAME_ENV,
 } from "./env-vars.js";
 import { assignIfDefined } from "./objects.js";
 
@@ -31,32 +31,32 @@ export function loadHostDaemonEntrypointConfig(
   const config: HostDaemonEntrypointConfig = {};
   const bridgeDir = readOptionalEnvVar({
     context: loader.context,
-    definition: BB_BRIDGE_DIR_ENV,
+    definition: ROOM_BRIDGE_DIR_ENV,
     env: loader.env,
   });
   const cliDir = readOptionalEnvVar({
     context: loader.context,
-    definition: BB_CLI_DIR_ENV,
+    definition: ROOM_CLI_DIR_ENV,
     env: loader.env,
   });
   const enrollKey = readOptionalEnvVar({
     context: loader.context,
-    definition: BB_HOST_ENROLL_KEY_ENV,
+    definition: ROOM_HOST_ENROLL_KEY_ENV,
     env: loader.env,
   });
   const autoUpdate = readOptionalEnvVar({
     context: loader.context,
-    definition: BB_HOST_DAEMON_AUTO_UPDATE_ENV,
+    definition: ROOM_HOST_DAEMON_AUTO_UPDATE_ENV,
     env: loader.env,
   });
   const hostId = readOptionalEnvVar({
     context: loader.context,
-    definition: BB_HOST_ID_ENV,
+    definition: ROOM_HOST_ID_ENV,
     env: loader.env,
   });
   const hostName = readOptionalEnvVar({
     context: loader.context,
-    definition: BB_HOST_NAME_ENV,
+    definition: ROOM_HOST_NAME_ENV,
     env: loader.env,
   });
 

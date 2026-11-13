@@ -73,7 +73,7 @@ describe("Connect remote host access", () => {
       serverUrl: SERVER_URL,
       headers: { "x-bb-connect-machine": "secret-1" },
     });
-    const restarted = await original.harness.lifecycle.reload((bb) => registerServerAccess(bb, relay));
+    const restarted = await original.harness.lifecycle.reload((room) => registerServerAccess(room, relay));
     hosts.push(restarted);
     expect(await provider(restarted).acquire(request)).toEqual(grant);
     expect(relay.machines).toEqual(new Set(["machine-1"]));

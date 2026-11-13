@@ -232,7 +232,7 @@ function describeImportedNames(names: readonly string[]): string {
     .join(", ");
 }
 
-function privateBbImportError(specifier: string): string {
+function privateRoomImportError(specifier: string): string {
   return `host entries cannot import private Cloudroom workspace package "${specifier}"; use @get-bb/plugin-sdk, Node APIs, or a regular plugin dependency`;
 }
 
@@ -333,7 +333,7 @@ async function removeStaleHostStageDirectories(distDir: string): Promise<void> {
 
 export async function buildPluginHost(
   rootDir: string,
-  bbVersion: string,
+  roomVersion: string,
   toolchain: PluginBuildToolchain,
 ): Promise<PluginHostBuildResult> {
   const { hostEntry, packageName, pluginVersion } =
@@ -430,7 +430,7 @@ export async function buildPluginHost(
           name: "reject-private-bb-host-imports",
           setup(build) {
             build.onResolve({ filter: /^@cloudroom(?:\/|$)/ }, (args) => ({
-              errors: [{ text: privateBbImportError(args.path) }],
+              errors: [{ text: privateRoomImportError(args.path) }],
             }));
             build.onLoad({ filter: /\.[cm]?[jt]sx?$/ }, async (args) => {
               const owner = await owningPackageName(
@@ -439,14 +439,14 @@ export async function buildPluginHost(
               );
               if (owner === "@cloudroom" || owner?.startsWith("@cloudroom/")) {
                 return {
-                  errors: [{ text: privateBbImportError(owner) }],
+                  errors: [{ text: privateRoomImportError(owner) }],
                 };
               }
               const source = await readFile(args.path, "utf8");
               for (const specifier of sourceImportSpecifiers(source)) {
                 if (specifier === "@cloudroom" || specifier.startsWith("@cloudroom/")) {
                   return {
-                    errors: [{ text: privateBbImportError(specifier) }],
+                    errors: [{ text: privateRoomImportError(specifier) }],
                   };
                 }
                 if (!specifier.startsWith(".") && !isAbsolute(specifier)) {
@@ -469,7 +469,7 @@ export async function buildPluginHost(
                   importedOwner?.startsWith("@cloudroom/")
                 ) {
                   return {
-                    errors: [{ text: privateBbImportError(importedOwner) }],
+                    errors: [{ text: privateRoomImportError(importedOwner) }],
                   };
                 }
               }
@@ -493,7 +493,7 @@ export async function buildPluginHost(
           ...createPluginArtifactMeta({
             packageName,
             pluginVersion,
-            bbVersion,
+            bbVersion: roomVersion,
           }),
           artifactDigest,
         },

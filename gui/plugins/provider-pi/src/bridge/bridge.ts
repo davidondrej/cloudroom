@@ -52,7 +52,7 @@ import {
   buildPiTurnOptions,
   type PiSessionParams,
 } from "../session-params.js";
-import { BB_PI_EXTENSION_SOURCE } from "./bb-pi-extension.js";
+import { ROOM_PI_EXTENSION_SOURCE } from "./bb-pi-extension.js";
 import {
   createExtensionUiCoordinator,
   type ExtensionUiCoordinator,
@@ -237,17 +237,18 @@ function requireScratchDir(): string {
   return scratchDir;
 }
 
-// Checked before every pi spawn: the bridge can outlive files in the OS temp
-// dir (macOS can delete ones unused for 3 days), and a missing extension
-// would fail the next session start or respawn.
+// Checked before every pi spawn: a missing extension would fail the next
+// session start or respawn.
 function requireExtensionPath(): string {
   const dir = requireScratchDir();
   const path = join(dir, "bb-pi-extension.mjs");
   if (!existsSync(path)) {
     // This may recreate the worker's temp root. That is safe because the root
-    // sits in a folder no other account can write to (createPluginProcessTempDir).
+    // sits in a folder that nothing less trusted can write: not another
+    // account, a Read-only Mac command, or an agent sandbox
+    // (createPluginProcessTempDir).
     mkdirSync(dir, { recursive: true, mode: 0o700 });
-    writeFileSync(path, BB_PI_EXTENSION_SOURCE, "utf8");
+    writeFileSync(path, ROOM_PI_EXTENSION_SOURCE, "utf8");
   }
   return path;
 }

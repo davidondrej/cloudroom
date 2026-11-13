@@ -67,7 +67,10 @@ import {
   dispatchThreadUnarchiveCommand,
   prepareTurnSubmitCommandPayload,
 } from "../../services/threads/thread-commands.js";
-import { getLastProviderThreadId } from "../../services/threads/thread-events.js";
+import {
+  appendThreadInterruptedEventInTransaction,
+  getLastProviderThreadId,
+} from "../../services/threads/thread-events.js";
 import { stopThreadForCurrentState } from "../../services/threads/thread-lifecycle.js";
 import {
   getThreadPromptBannerActivity,
@@ -116,6 +119,24 @@ function toQueuedMessageOrderResponse(
         "invalid_request",
         "Queued message order is invalid",
       );
+  }
+}
+
+// Goals run only on providers that offer /goal, today Codex (#855).
+// Waits out startup registration; an unknown provider ends at settle.
+async function requireGoalSupport(
+  deps: AppDeps,
+  thread: Thread,
+): Promise<void> {
+  await deps.providerRegistry.whenProviderRegistered(thread.providerId);
+  const actions = deps.providerRegistry.get(thread.providerId)?.info
+    .composerActions;
+  if (!actions?.some((action) => action.kind === "goal")) {
+    throw new ApiError(
+      409,
+      "invalid_request",
+      `Provider "${thread.providerId}" does not support Goals. Goals work on Codex threads.`,
+    );
   }
 }
 
@@ -341,6 +362,17 @@ export function registerThreadActionRoutes(app: Hono, deps: AppDeps): void {
     teleports(deps).abandon(thread.id);
     const cancelledRetries = cancelRetriesForExplicitStop(deps, thread.id);
     cancelInterruptedThreadStartInput(deps.db, thread.id);
+    if (thread.status === "error" && !isCloudThread(thread)) {
+      deps.db.transaction((tx) =>
+        appendThreadInterruptedEventInTransaction(tx, {
+          threadId: thread.id,
+          reason: "manual-stop",
+        }),
+      );
+      deps.hub.notifyThread(thread.id, ["events-appended"], {
+        eventTypes: ["system/thread/interrupted"],
+      });
+    }
     await stopThreadForCurrentState(
       deps,
       thread,
@@ -407,6 +439,7 @@ export function registerThreadActionRoutes(app: Hono, deps: AppDeps): void {
 
   post(routes.clearGoal, async (context) => {
     const thread = requirePublicThread(deps.db, context.req.param("id"));
+    await requireGoalSupport(deps, thread);
     if (!getThreadPromptBannerActivity(deps, thread).hasGoal) {
       throw new ApiError(409, "invalid_request", "No Goal to clear");
     }
@@ -460,6 +493,7 @@ export function registerThreadActionRoutes(app: Hono, deps: AppDeps): void {
 
   post(routes.setGoal, async (context, payload) => {
     const thread = requirePublicThread(deps.db, context.req.param("id"));
+    await requireGoalSupport(deps, thread);
     const environment = await requireThreadCommandEnvironment(deps, {
       thread,
     });

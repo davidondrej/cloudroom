@@ -43,7 +43,7 @@ describe("@cloudroom/templates", () => {
 
     expect(rendered).toBe(
       [
-        "[bb message from thread:thr_sender]",
+        "[message from thread:thr_sender]",
         "",
         "Please check the failing test.",
       ].join("\n"),

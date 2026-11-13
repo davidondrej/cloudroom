@@ -1,6 +1,6 @@
 import { loadDevAppConfig } from "./dev-app.js";
 import { type EnvLoaderArgs } from "./env.js";
-import { BB_LOOPBACK_HOST } from "./runtime.js";
+import { ROOM_LOOPBACK_HOST } from "./runtime.js";
 import { loadServerPortConfig } from "./server-port.js";
 
 interface ViteDevConfig {
@@ -19,7 +19,7 @@ function resolveViteDevAppHost(configuredHost: string): string {
     return configuredHost;
   }
 
-  return BB_LOOPBACK_HOST;
+  return ROOM_LOOPBACK_HOST;
 }
 
 export function loadViteDevConfig(
@@ -36,7 +36,7 @@ export function loadViteDevConfig(
   return {
     appHost: resolveViteDevAppHost(devAppConfig.BB_DEV_APP_HOST),
     appPort,
-    serverHttpOrigin: `http://${BB_LOOPBACK_HOST}:${serverPort}`,
+    serverHttpOrigin: `http://${ROOM_LOOPBACK_HOST}:${serverPort}`,
     serverPort,
   };
 }

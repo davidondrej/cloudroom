@@ -377,7 +377,7 @@ function buildAcpProviderInstallationRun(
     args.installer === undefined
   ) {
     return installationRunUnavailable(
-      args.command ?? "This ACP agent",
+      args.command === null ? "This ACP agent" : path.basename(args.command),
       args.action,
       status,
     );

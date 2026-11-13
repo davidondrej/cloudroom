@@ -15,17 +15,17 @@ interface PreparedWorkflowSource extends ResolvedWorkflowSource {
 }
 
 export async function prepareWorkflowSource(
-  bb: BbPluginApi,
+  room: BbPluginApi,
   context: WorkflowSourceContext,
   input: WorkflowSourceInput,
 ): Promise<PreparedWorkflowSource> {
   const resolved = await resolveWorkflowSource(input, context, {
     async getThreadEnvironmentId(threadId) {
-      const thread = await bb.sdk.threads.get({ threadId });
+      const thread = await room.sdk.threads.get({ threadId });
       return thread.environmentId;
     },
     async getEnvironment(environmentId) {
-      const environment = await bb.sdk.environments.get({ environmentId });
+      const environment = await room.sdk.environments.get({ environmentId });
       return {
         id: environment.id,
         projectId: environment.projectId,
@@ -34,7 +34,7 @@ export async function prepareWorkflowSource(
       };
     },
     readFile(input) {
-      return bb.sdk.files.read(input);
+      return room.sdk.files.read(input);
     },
   });
   const validation = await validateWorkflowSource(
@@ -42,10 +42,10 @@ export async function prepareWorkflowSource(
     resolved.environmentId,
     {
       listProviders(environmentId) {
-        return bb.sdk.providers.list({ environmentId });
+        return room.sdk.providers.list({ environmentId });
       },
       loadModels(environmentId, providerId) {
-        return bb.sdk.providers.models({ environmentId, providerId });
+        return room.sdk.providers.models({ environmentId, providerId });
       },
     },
   );

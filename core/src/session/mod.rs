@@ -162,6 +162,9 @@ pub struct Session {
     // parent's archive (relay.rs, #1000).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub late_reports: BTreeMap<String, std::collections::BTreeSet<String>>,
+    // When this parent archived each of them, while it still knows them as archived (relay.rs, #1430).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub child_archived_at: BTreeMap<String, u64>,
     // Children this session asked the website to start in sandboxes of their own, by request ID (relay.rs).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub child_starts: BTreeMap<String, ChildStart>,
@@ -413,7 +416,12 @@ struct Local {
     // Status snapshots must not clone the potentially large replay index.
     sequences: BTreeMap<String, Vec<u64>>,
     changed: watch::Sender<u64>,
+    // Whether the last upload succeeded: true until one fails.
     database_available: bool,
+    // The newest record that needs an upload. A parent report's ack doesn't: it rides with the next one (#1410).
+    loud: u64,
+    // A turn report waits for an upload: due at the uploader's next check, but never inside a failure's backoff.
+    report_waits: bool,
     // Set by a drain before the sandbox stops; refuses new work until released.
     draining: bool,
     // The journal position of the latest replay snapshot (or failed attempt).
@@ -884,7 +892,24 @@ impl Manager {
                         "connect Claude Code before starting cloud work",
                     ));
                 }
-                Err(_) => return Err(Error::Conflict("Claude account could not be verified")),
+                // Why, in our own words: never the CLI's output (#1222). Same prefix, so the code stays.
+                Err(reason) => {
+                    return Err(Error::Conflict(match reason {
+                        "check_timeout" => {
+                            "Claude account could not be verified: the login check timed out"
+                        }
+                        "check_failed" => {
+                            "Claude account could not be verified: the Claude CLI could not run"
+                        }
+                        "check_bad_exit" => {
+                            "Claude account could not be verified: the Claude CLI exited with an error"
+                        }
+                        "check_bad_response" => {
+                            "Claude account could not be verified: the Claude CLI gave an unreadable answer"
+                        }
+                        _ => "Claude account could not be verified",
+                    }));
+                }
             }
         }
         if kind == runtime::Kind::Cursor {
@@ -897,10 +922,34 @@ impl Manager {
             }
         }
         if kind == runtime::Kind::Codex {
-            match self.codex_auth_status().await.state {
+            let status = self.codex_auth_status().await;
+            // Which login state failed, and the fix (#1017). Same prefix, so the code and matchers stay.
+            match status.state {
                 "connected" => {}
-                "missing" | "waiting" | "expired" | "error" => {
-                    return Err(Error::Conflict("connect Codex before starting cloud work"));
+                "missing" if status.message == Some(runtime::auth::LOGIN_REJECTED) => {
+                    return Err(Error::Conflict(
+                        "connect Codex before starting cloud work: OpenAI rejected this sandbox's Codex login. Sign in to Codex again in Cloudroom's Agents settings, then retry",
+                    ));
+                }
+                "missing" => {
+                    return Err(Error::Conflict(
+                        "connect Codex before starting cloud work: this sandbox has no Codex login. Sign in to Codex in Cloudroom's Agents settings, then retry",
+                    ));
+                }
+                "waiting" => {
+                    return Err(Error::Conflict(
+                        "connect Codex before starting cloud work: a Codex sign-in here is not finished. Finish it or sign in again in Cloudroom's Agents settings, then retry",
+                    ));
+                }
+                "expired" => {
+                    return Err(Error::Conflict(
+                        "connect Codex before starting cloud work: a Codex sign-in here expired before it was finished. Sign in again in Cloudroom's Agents settings, then retry",
+                    ));
+                }
+                "error" => {
+                    return Err(Error::Conflict(
+                        "connect Codex before starting cloud work: a Codex sign-in here failed, or its saved login is invalid. Sign in again in Cloudroom's Agents settings, then retry",
+                    ));
                 }
                 "limited" => return Err(Error::Conflict("Codex usage limit reached")),
                 _ => return Err(Error::Conflict("Codex account could not be verified")),
@@ -1837,6 +1886,20 @@ impl Manager {
         input: Value,
         held: bool,
     ) -> Result<Receipt> {
+        self.command_from(id, request, command, input, held, None)
+    }
+
+    /// `thread tell`'s commands: `sender` must still reach `id` when the command is accepted, under the same lock,
+    /// since a session continued from a lost one loses its children if that one resumes meanwhile (#1296).
+    pub(crate) fn command_from(
+        self: &Arc<Self>,
+        id: &str,
+        request: String,
+        command: &str,
+        input: Value,
+        held: bool,
+        sender: Option<&str>,
+    ) -> Result<Receipt> {
         enum Next {
             None,
             Deliver(runtime::Handle, String),
@@ -1853,6 +1916,9 @@ impl Manager {
             let session = local.sessions.get(id).ok_or(Error::NotFound)?;
             if let Some(receipt) = Self::retry(session, &request, command, &input)? {
                 return Ok(receipt);
+            }
+            if sender.is_some_and(|sender| children::may_tell(&local, sender, id).is_none()) {
+                return Err(Error::Conflict(children::NOT_IN_TREE));
             }
             if !local.journal.writable() {
                 return Err(Error::Storage(JOURNAL_UNWRITABLE.into()));
@@ -1938,6 +2004,7 @@ impl Manager {
                     | "goal"
                     | "rewind"
                     | "attach"
+                    | "model"
             ) {
                 return Err(Error::Conflict("unsupported command"));
             }
@@ -1954,10 +2021,12 @@ impl Manager {
                     "saved conversation is unavailable; inspect session recovery before retrying",
                 ));
             }
+            // A model pick needs no agent, so it can rescue one that lost its agent to its model.
             if matches!(
                 session.state,
                 SessionState::Closed | SessionState::ProcessLost | SessionState::Failed
             ) && !retry_lost
+                && !(command == "model" && session.state != SessionState::Closed)
             {
                 return Err(Error::Conflict(
                     "process unavailable; history does not restore execution",
@@ -2143,7 +2212,7 @@ impl Manager {
                     self.wake(&mut local, id)?;
                     Next::None
                 }
-                "edit" | "cancel" | "reorder" | "attach" => {
+                "edit" | "cancel" | "reorder" | "attach" | "model" => {
                     local.finish_receipt(id, &request, "completed")?;
                     Next::None
                 }
@@ -2307,6 +2376,11 @@ impl Manager {
                     .cloned()
                     .unwrap_or_else(|| json!({"text":""}));
                 let reasoning = prompt::reasoning(&input).or_else(|| session.reasoning.clone());
+                // Every turn runs the session's model, whoever sent it: Claude switches first (`set_model`).
+                let mut input = input;
+                if let (runtime::Kind::Claude, Some(model)) = (session.harness, &session.model) {
+                    input["model"] = json!(model);
+                }
                 (input, reasoning)
             };
             let (input, notice) = prompt::with_notice(&self.config.state_dir, input);
@@ -3037,6 +3111,9 @@ impl Manager {
                     let _ = local.append(id, "usage", usage, None);
                 }
             }
+            runtime::Event::Background { running } => {
+                local.sessions.get_mut(id).unwrap().background_bash(running);
+            }
             runtime::Event::Compacted { status } => {
                 if let Some(request) = local.sessions[id].compact_request.clone() {
                     let status = match status.as_str() {
@@ -3335,7 +3412,7 @@ impl Manager {
             }
             runtime::shutdown().await;
             // The harnesses' last records, then diagnostics. A drain already saved the rest; systemd waits 10 s.
-            self.flush_history(Duration::from_secs(2)).await;
+            self.flush_history(Duration::from_secs(2), false).await;
             self.observability.shutdown().await;
         };
         if tokio::time::timeout(runtime::SHUTDOWN_GRACE + Duration::from_secs(4), cleanup)

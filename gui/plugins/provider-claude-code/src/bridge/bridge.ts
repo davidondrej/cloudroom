@@ -84,6 +84,7 @@ import {
   buildReadonlyDenialMessage,
   buildMutableFlagSettings,
   buildPermissionSessionOptions,
+  claudeSettingsAllowTrustd,
   buildSessionOptions,
   buildWorkspaceWriteDenialMessage,
   toSdkEffort,
@@ -99,7 +100,7 @@ import {
   getAllowedToolNames,
   type ToolCallForwarder,
 } from "./tool-proxy-mcp.js";
-import { BB_BRIDGE_MCP_SERVER_NAME } from "../tool-classification.js";
+import { ROOM_BRIDGE_MCP_SERVER_NAME } from "../tool-classification.js";
 import {
   type ClaudeInteractiveResponse,
   type ClaudePermissionMode,
@@ -420,6 +421,29 @@ function applyChromeSetting(
   }
 }
 
+// The trustd flag follows the user's Claude settings and account, which can
+// change mid-thread, so recheck it each turn and rebuild when it flips (#1117).
+function applyTrustdSetting(attachment: ThreadAttachment): void {
+  const sandbox = attachment.sessionOptions.sandbox;
+  if (!sandbox) return;
+  const allow = claudeSettingsAllowTrustd(
+    attachment.sessionConstructionConfig.sessionOptions.cwd,
+    attachment.sessionOptions.env ?? process.env,
+  );
+  if (allow === (sandbox.enableWeakerNetworkIsolation === true)) return;
+  const { enableWeakerNetworkIsolation: _, ...rest } = sandbox;
+  attachment.sessionOptions.sandbox = allow
+    ? { ...rest, enableWeakerNetworkIsolation: true }
+    : rest;
+  if (attachment.residentSession) {
+    attachment.residentSession.restartBeforeNextTurn ??= {
+      reason:
+        "Claude sandbox settings changed; the session was rebuilt to apply them.",
+      showRuntimeNote: false,
+    };
+  }
+}
+
 // Claude fixes the permission mode and sandbox when a session starts, so a
 // mode change mid-thread rebuilds the session before the next message.
 function applyPermissionSetting(
@@ -455,7 +479,10 @@ function applyPermissionSetting(
   delete attachment.sessionOptions.additionalDirectories;
   Object.assign(
     attachment.sessionOptions,
-    buildPermissionSessionOptions(sessionOptions),
+    buildPermissionSessionOptions(
+      sessionOptions,
+      attachment.sessionOptions.env ?? process.env,
+    ),
   );
   if (attachment.residentSession) {
     attachment.residentSession.restartBeforeNextTurn = {
@@ -2364,7 +2391,7 @@ function attachThreadSession(
       params.dynamicTools,
       createForwardToolCall(() => threadIdRef.current),
     );
-    sessionOptions.mcpServers = { [BB_BRIDGE_MCP_SERVER_NAME]: mcpServer };
+    sessionOptions.mcpServers = { [ROOM_BRIDGE_MCP_SERVER_NAME]: mcpServer };
     sessionOptions.allowedTools = getAllowedToolNames(params.dynamicTools);
   }
 
@@ -2526,6 +2553,7 @@ async function runTurnInput(
     applyChromeSetting(attachment, params.chromeEnabled);
     if (intent === "new-turn") {
       applyPermissionSetting(attachment, params);
+      applyTrustdSetting(attachment);
     }
   }
 
@@ -2536,7 +2564,11 @@ async function runTurnInput(
   }
 
   if (!threadSession.session.canPushInput()) {
-    sendError(id, -32000, "Claude SDK input stream is closed");
+    sendError(
+      id,
+      -32000,
+      "Claude can no longer take messages in this thread. Try restarting Cloudroom on the computer running this thread, or start a new thread.",
+    );
     return;
   }
   // A Stop can be on its way while this turn is still being set up, which
@@ -2574,7 +2606,7 @@ async function runTurnInput(
     if (stopped) return text;
     await enterPlanModeIfRequested(threadSession, params);
     if (intent === "new-turn") {
-      await threadSession.session.reconnectFailedMcpServers().catch((error) => {
+      await threadSession.session.reconnectMcpServers().catch((error) => {
         logBridgeError(
           `Failed to check MCP servers: ${error instanceof Error ? error.message : String(error)}`,
         );

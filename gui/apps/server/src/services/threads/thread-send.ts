@@ -95,6 +95,7 @@ interface SendThreadMessageArgs {
    * attempt number correct without a separate tally.
    */
   retryOf?: TurnRequestRetryMarker;
+  queueDelivered?: true;
   environment: EnvironmentRow;
   historyReplacement?: {
     forkSourceProviderThreadId: string | null;
@@ -148,6 +149,7 @@ interface SendThreadMessageQueueRequest {
 interface AppendAndQueueSendThreadMessageArgs {
   /** Retry provenance; absent for an original dispatch. */
   retryOf?: TurnRequestRetryMarker;
+  queueDelivered?: true;
   beforeAppendInTransaction?: SendThreadMessageTransactionPreflight;
   db: DbConnection;
   environmentId: string | null;
@@ -413,6 +415,7 @@ export function captureUserMessageSentTelemetry(
 
 function appendAndQueueSendThreadMessageInTransaction({
   retryOf,
+  queueDelivered,
   beforeAppendInTransaction,
   db,
   environmentId,
@@ -438,6 +441,7 @@ function appendAndQueueSendThreadMessageInTransaction({
             environmentId,
             type: "client/turn/requested",
             ...(retryOf !== undefined ? { retryOf } : {}),
+            ...(queueDelivered ? { queueDelivered } : {}),
             input,
             ...(inputGroups !== undefined ? { inputGroups } : {}),
             execution,
@@ -703,6 +707,7 @@ async function sendThreadMessageWithoutContextClear(
       : await prepareReadyThreadTurnCommand(deps, commandArgs);
     const queuedRequest = appendAndQueueSendThreadMessageInTransaction({
       ...(args.retryOf !== undefined ? { retryOf: args.retryOf } : {}),
+      ...(args.queueDelivered ? { queueDelivered: true } : {}),
       beforeAppendInTransaction: ({ tx }) => {
         beforeAppendInTransaction({ tx });
         ensureThreadCanStartRequest(thread);
@@ -795,6 +800,7 @@ async function sendThreadMessageWithoutContextClear(
   });
   const queuedRequest = appendAndQueueSendThreadMessageInTransaction({
     ...(args.retryOf !== undefined ? { retryOf: args.retryOf } : {}),
+    ...(args.queueDelivered ? { queueDelivered: true } : {}),
     beforeAppendInTransaction,
     db: deps.db,
     environmentId: thread.environmentId,

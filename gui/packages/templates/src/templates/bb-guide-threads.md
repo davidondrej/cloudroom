@@ -331,6 +331,7 @@ Messaging:
   room-cli thread pause-goal [id]                Pause the active Goal
   room-cli thread resume-goal [id]               Resume a paused or blocked Goal
   room-cli thread set-goal <objective> [id]      Start a Goal or replace its objective
+                                                 (Goal commands: Codex threads only)
     --self                                 Target current thread
 
   `thread compact` enqueues the same structured /compact turn used by the

@@ -45,7 +45,8 @@ export const claudeLoginRpcContract = defineRpcContract({
       hostId: z.string().min(1).optional(),
       environmentId: z.string().min(1).optional(),
     }),
-    output: claudeLoginStatus,
+    // The machine Claude signs in on, so the app can tell whether it is the one its browser runs on.
+    output: claudeLoginStatus.extend({ host_id: z.string() }),
   },
 });
 export type ClaudeLoginInput = z.infer<typeof claudeLoginInput>;

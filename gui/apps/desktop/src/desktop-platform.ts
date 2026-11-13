@@ -1,4 +1,4 @@
-import type { BbDesktopInfo } from "@cloudroom/desktop-contract";
+import type { RoomDesktopInfo } from "@cloudroom/desktop-contract";
 
 export function getDesktopVersion(version: string | undefined): string {
   if (version === undefined || version.length === 0) {
@@ -7,9 +7,9 @@ export function getDesktopVersion(version: string | undefined): string {
   return version;
 }
 
-export function resolveBbDesktopPlatform(
+export function resolveRoomDesktopPlatform(
   platform: NodeJS.Platform,
-): BbDesktopInfo["platform"] {
+): RoomDesktopInfo["platform"] {
   if (platform === "darwin") {
     return "macos";
   }

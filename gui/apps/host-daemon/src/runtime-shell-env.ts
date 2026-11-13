@@ -7,7 +7,7 @@ import type { AgentRuntimeOptions } from "@cloudroom/agent-runtime";
 import { assignIfDefined } from "@cloudroom/config/objects";
 import { resolvePortableCommand } from "@cloudroom/process-utils";
 
-interface ResolveLocalBbExecutablePathOptions {
+interface ResolveLocalRoomExecutablePathOptions {
   cliExecutablePath?: string;
   cliRuntimePath?: string;
 }
@@ -664,8 +664,8 @@ export function createUserShellEnvResolver(
   };
 }
 
-export async function resolveLocalBbExecutablePath(
-  options: ResolveLocalBbExecutablePathOptions = {},
+export async function resolveLocalRoomExecutablePath(
+  options: ResolveLocalRoomExecutablePathOptions = {},
 ): Promise<string> {
   const resolvedCliExecutablePath =
     options.cliExecutablePath ?? getDefaultCliExecutablePath();
@@ -681,18 +681,18 @@ export async function resolveLocalBbExecutablePath(
   return cliEntryPath;
 }
 
-export function resolveBbExecutablePathInDirectory(
-  bbExecutableDirectory: string,
+export function resolveRoomExecutablePathInDirectory(
+  roomExecutableDirectory: string,
 ): string {
-  return resolve(bbExecutableDirectory, "room-cli");
+  return resolve(roomExecutableDirectory, "room-cli");
 }
 
 export function prepareRuntimeShellEnv(
   options: PrepareRuntimeShellEnvOptions,
 ): NonNullable<AgentRuntimeOptions["shellEnv"]> {
-  const bbExecutablePath =
+  const roomExecutablePath =
     options.bbExecutablePath ??
-    resolveBbExecutablePathInDirectory(options.bbExecutableDirectory);
+    resolveRoomExecutablePathInDirectory(options.bbExecutableDirectory);
   const inheritedPath = options.inheritedPath ?? process.env.PATH;
   const shellEnv: NonNullable<AgentRuntimeOptions["shellEnv"]> = {
     PATH: prependPath(
@@ -701,7 +701,7 @@ export function prepareRuntimeShellEnv(
         ? inheritedPath
         : prependPath(options.toolsDirectory, inheritedPath),
     ),
-    ROOM_CLI: bbExecutablePath,
+    ROOM_CLI: roomExecutablePath,
     ROOM_SERVER_URL: options.serverUrl,
     ...(options.dataDir === undefined
       ? {}

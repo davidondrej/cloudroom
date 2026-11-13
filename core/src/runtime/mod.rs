@@ -60,6 +60,11 @@ pub enum Kind {
     OpenClaw,
 }
 impl Kind {
+    /// A harness as Core or the app names it: `cursor` or `acp-cursor`, `hermes` or `acp-hermes-agent`.
+    pub fn named(name: &str) -> Option<Kind> {
+        let name = name.strip_prefix("acp-").unwrap_or(name);
+        serde_json::from_value(json!(name.strip_suffix("-agent").unwrap_or(name))).ok()
+    }
     /// Harnesses that accept a per-turn `fast` service tier. Claude Fast stays off (ADR 0133).
     pub fn fast(self) -> bool {
         matches!(self, Kind::Codex | Kind::Cursor)
@@ -113,6 +118,22 @@ pub fn supports(kind: Kind, models: &[Model], model: &str, reasoning: &str) -> R
     ))
 }
 
+/// The nearest effort `model` takes: `reasoning` itself, else the highest level below it, else its lowest. `None` when
+/// the catalog doesn't offer the model.
+pub fn fit_reasoning(kind: Kind, models: &[Model], model: &str, reasoning: &str) -> Option<String> {
+    const ORDER: [&str; 7] = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
+    let rank = |level: &str| ORDER.iter().position(|known| *known == level).unwrap_or(0);
+    let levels = reasoning_levels(kind, models, model)?;
+    if levels.contains(&reasoning) {
+        return Some(reasoning.to_owned());
+    }
+    let below = levels.iter().filter(|level| rank(level) <= rank(reasoning));
+    below
+        .max_by_key(|level| rank(level))
+        .or_else(|| levels.iter().min_by_key(|level| rank(level)))
+        .map(|level| (*level).to_owned())
+}
+
 pub const PI_REASONING_LEVELS: &[&str] = &["none", "minimal", "low", "medium", "high", "xhigh"];
 
 /// Pi and fx also take `max`: few models have it, and Kimi has nothing above it. Pi rejects it for models without it,
@@ -148,7 +169,7 @@ pub async fn shutdown() {
 pub use openclaw::gateway_pid as openclaw_gateway_pid;
 
 pub async fn claude_auth_ready(config: &Config) -> io::Result<bool> {
-    claude::auth_ready(config).await
+    claude::auth_ready(config).await.map_err(io::Error::other)
 }
 
 pub async fn codex_models(config: &Config) -> (io::Result<Vec<Model>>, Option<Event>) {
@@ -279,6 +300,10 @@ pub enum Event {
     },
     Compacted {
         status: String,
+    },
+    /// Whether Claude lists a background Bash task as running (#1216).
+    Background {
+        running: bool,
     },
     Exited {
         reason: &'static str,
@@ -427,6 +452,8 @@ pub struct Handle {
     context_file: Option<PathBuf>,
     reasoning: Option<String>,
     baseline: Arc<Mutex<Option<String>>>,
+    /// The model Claude runs now: its launch model, then each one a prompt switched it to (`set_model`).
+    live_model: Arc<Mutex<String>>,
     /// ACP agent capabilities from `initialize`; empty for other harnesses.
     acp: Arc<Mutex<Value>>,
     /// The ACP session's latest config options (model, effort); only fx keeps them.
@@ -666,6 +693,7 @@ impl Handle {
             strip_ai_co_authors_env(&mut command, Some(&config.repository));
         }
         let (process, events) = process::Process::spawn(config, command, adapter)?;
+        let live_model = Arc::new(Mutex::new(profile.model.clone()));
         Ok((
             Self {
                 process,
@@ -675,6 +703,7 @@ impl Handle {
                 file_identity,
                 reasoning: resume.as_ref().and_then(|saved| saved.reasoning.clone()),
                 baseline: Arc::new(Mutex::new(None)),
+                live_model,
                 acp: Arc::new(Mutex::new(Value::Null)),
                 acp_config: Arc::new(Mutex::new(Value::Null)),
                 rpc_timeout: config.rpc_timeout,
@@ -700,6 +729,12 @@ impl Handle {
     }
     pub fn launch_baseline(&self) -> Option<String> {
         self.baseline.lock().unwrap().clone()
+    }
+    pub(super) fn live_model(&self) -> String {
+        self.live_model.lock().unwrap().clone()
+    }
+    pub(super) fn set_live_model(&self, model: &str) {
+        *self.live_model.lock().unwrap() = model.to_owned();
     }
 
     pub fn pid(&self) -> u32 {
@@ -1201,7 +1236,16 @@ pub(super) fn command(binary: &Path, config: &Config) -> Command {
         command.env(name, value);
     }
     // Memory and CPU limits (linux.rs). The user's own value wins; lists keep it after ours.
+    let helpers = linux::helpers_ready();
     for (name, value) in linux::agent_env() {
+        if !helpers
+            && matches!(
+                *name,
+                "BASH_ENV" | "CLAUDE_ENV_FILE" | "NODE_OPTIONS" | "PYTHONPATH"
+            )
+        {
+            continue; // Nothing then hides the Anthropic keys from Claude either (`claude::hide_app_keys`).
+        }
         match saved
             .iter()
             .rev()

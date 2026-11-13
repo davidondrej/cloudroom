@@ -10,23 +10,23 @@ import {
   type ReactNode,
 } from "react";
 import type {
-  BbDesktopBrowserApi,
-  BbDesktopBrowserControl,
-  BbDesktopBrowserFindInPageRequest,
-  BbDesktopBrowserState,
-  BbDesktopBrowserViewportBounds,
-  BbDesktopBrowserViewBounds,
+  RoomDesktopBrowserApi,
+  RoomDesktopBrowserControl,
+  RoomDesktopBrowserFindInPageRequest,
+  RoomDesktopBrowserState,
+  RoomDesktopBrowserViewportBounds,
+  RoomDesktopBrowserViewBounds,
 } from "@cloudroom/desktop-contract";
 import {
-  BB_DESKTOP_BROWSER_MAX_FIND_TEXT_LENGTH,
-  clampBbDesktopBrowserViewBounds,
+  ROOM_DESKTOP_BROWSER_MAX_FIND_TEXT_LENGTH,
+  clampRoomDesktopBrowserViewBounds,
 } from "@cloudroom/desktop-contract";
 import {
   COARSE_POINTER_COMPACT_ICON_SIZE_SHRINK_CLASS,
   COARSE_POINTER_TEXT_SM_CLASS,
 } from "@cloudroom/shared-ui/coarse-pointer-sizing";
 import { Icon } from "@cloudroom/shared-ui/icon";
-import { getBbDesktopInfo, getDesktopBrowserApi } from "@/lib/bb-desktop";
+import { getRoomDesktopInfo, getDesktopBrowserApi } from "@/lib/room-desktop";
 import { cn } from "@cloudroom/shared-ui/lib/utils";
 import {
   getBrowserUrlSecurity,
@@ -84,7 +84,7 @@ export interface BrowserAddressFocusRequest {
 interface BrowserChromeProps {
   addressDraft: string;
   isEditing: boolean;
-  state: BbDesktopBrowserState | null;
+  state: RoomDesktopBrowserState | null;
   currentUrl: string;
   addressInputRef: RefObject<HTMLInputElement | null>;
   onAddressChange: (value: string) => void;
@@ -105,8 +105,8 @@ interface BrowserViewBoundsFromElementArgs {
 }
 
 interface BrowserViewBoundsEqualArgs {
-  a: BbDesktopBrowserViewBounds;
-  b: BbDesktopBrowserViewBounds;
+  a: RoomDesktopBrowserViewBounds;
+  b: RoomDesktopBrowserViewBounds;
 }
 
 interface SyncBrowserViewPlacementArgs {
@@ -126,14 +126,14 @@ interface BrowserPageLoadErrorProps {
   url: string;
 }
 
-const EMPTY_BROWSER_VIEW_BOUNDS: BbDesktopBrowserViewBounds = {
+const EMPTY_BROWSER_VIEW_BOUNDS: RoomDesktopBrowserViewBounds = {
   x: 0,
   y: 0,
   width: 0,
   height: 0,
 };
 
-function roundedBoundsFromRect(rect: DOMRect): BbDesktopBrowserViewBounds {
+function roundedBoundsFromRect(rect: DOMRect): RoomDesktopBrowserViewBounds {
   return {
     x: Math.round(rect.left),
     y: Math.round(rect.top),
@@ -142,7 +142,7 @@ function roundedBoundsFromRect(rect: DOMRect): BbDesktopBrowserViewBounds {
   };
 }
 
-function browserViewportBounds(): BbDesktopBrowserViewportBounds {
+function browserViewportBounds(): RoomDesktopBrowserViewportBounds {
   return {
     width: window.innerWidth,
     height: window.innerHeight,
@@ -151,8 +151,8 @@ function browserViewportBounds(): BbDesktopBrowserViewportBounds {
 
 function browserViewBoundsFromElement(
   args: BrowserViewBoundsFromElementArgs,
-): BbDesktopBrowserViewBounds {
-  return clampBbDesktopBrowserViewBounds({
+): RoomDesktopBrowserViewBounds {
+  return clampRoomDesktopBrowserViewBounds({
     bounds: roundedBoundsFromRect(args.element.getBoundingClientRect()),
     viewport: browserViewportBounds(),
   });
@@ -401,7 +401,7 @@ export function BrowserTabContent({
   const locationShortcut = useAppCommandShortcut("browser.focusLocation");
   const reloadShortcut = useAppCommandShortcut("browser.reload");
   const findShortcut = useAppCommandShortcut("browser.find");
-  const desktopBrowser = useMemo<BbDesktopBrowserApi | null>(
+  const desktopBrowser = useMemo<RoomDesktopBrowserApi | null>(
     () => getDesktopBrowserApi(),
     [],
   );
@@ -416,8 +416,8 @@ export function BrowserTabContent({
     clear: clearRecent,
   } = useBrowserHistory(threadId);
 
-  const [state, setState] = useState<BbDesktopBrowserState | null>(null);
-  const [control, setControl] = useState<BbDesktopBrowserControl | null>(null);
+  const [state, setState] = useState<RoomDesktopBrowserState | null>(null);
+  const [control, setControl] = useState<RoomDesktopBrowserControl | null>(null);
   useEffect(() => {
     let current = true;
     let receivedEvent = false;
@@ -425,7 +425,7 @@ export function BrowserTabContent({
     const accept = (next: {
       tabId: string;
       threadId: string;
-      control: BbDesktopBrowserControl | null;
+      control: RoomDesktopBrowserControl | null;
     }) => {
       if (current && next.tabId === tabId && next.threadId === threadId)
         setControl(next.control);
@@ -481,7 +481,7 @@ export function BrowserTabContent({
   const pageLoadErrorText = state?.errorText ?? null;
   const hasPageLoadError = pageLoadErrorText !== null && hasPage;
   const isBrowserDimmingModalOpen = useIsBrowserDimmingModalOpen();
-  const lastSentBoundsRef = useRef<BbDesktopBrowserViewBounds | null>(null);
+  const lastSentBoundsRef = useRef<RoomDesktopBrowserViewBounds | null>(null);
 
   const readBounds = useCallback(() => {
     const element = contentRef.current;
@@ -492,7 +492,7 @@ export function BrowserTabContent({
   }, []);
 
   const sendBounds = useCallback(
-    (bounds: BbDesktopBrowserViewBounds) => {
+    (bounds: RoomDesktopBrowserViewBounds) => {
       if (desktopBrowser === null) {
         return;
       }
@@ -552,7 +552,7 @@ export function BrowserTabContent({
     });
     setAttachedBrowserViewIdentity({ environmentId, tabId, threadId });
 
-    let lastSeenState: BbDesktopBrowserState | null = null;
+    let lastSeenState: RoomDesktopBrowserState | null = null;
     const unsubscribe = desktopBrowser.onState((nextState) => {
       if (nextState.tabId !== tabId) {
         return;
@@ -776,7 +776,7 @@ export function BrowserTabContent({
     hasPage;
 
   const runFind = useCallback(
-    (args: Omit<BbDesktopBrowserFindInPageRequest, "tabId">) => {
+    (args: Omit<RoomDesktopBrowserFindInPageRequest, "tabId">) => {
       desktopBrowser?.findInPage?.({ tabId, ...args });
     },
     [desktopBrowser, tabId],
@@ -797,7 +797,7 @@ export function BrowserTabContent({
 
   const handleFindQueryChange = useCallback(
     (rawQuery: string) => {
-      const query = rawQuery.slice(0, BB_DESKTOP_BROWSER_MAX_FIND_TEXT_LENGTH);
+      const query = rawQuery.slice(0, ROOM_DESKTOP_BROWSER_MAX_FIND_TEXT_LENGTH);
       setFindQuery(query);
       if (query.length === 0) {
         clearFind();
@@ -854,7 +854,7 @@ export function BrowserTabContent({
   );
 
   const handleOpenExternal = useCallback(() => {
-    getBbDesktopInfo()?.openExternalUrl(currentUrl);
+    getRoomDesktopInfo()?.openExternalUrl(currentUrl);
   }, [currentUrl]);
 
   if (desktopBrowser === null) {

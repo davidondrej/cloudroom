@@ -7,8 +7,9 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { execFileSync } from "node:child_process";
+import { homedir, tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
   CanUseTool,
@@ -38,6 +39,7 @@ import { SdkSession } from "../sdk-session.js";
 import {
   type BuildSessionOptionsArgs,
   buildSessionOptions,
+  macUserTempDirs,
 } from "../session-options.js";
 import {
   type ClaudePermissionMode,
@@ -665,6 +667,17 @@ async function forwardAskUserQuestion({
   };
 }
 
+// The macOS-only sandbox allowances depend on process.platform.
+function withPlatform<T>(platform: NodeJS.Platform, run: () => T): T {
+  const original = Object.getOwnPropertyDescriptor(process, "platform")!;
+  Object.defineProperty(process, "platform", { ...original, value: platform });
+  try {
+    return run();
+  } finally {
+    Object.defineProperty(process, "platform", original);
+  }
+}
+
 describe("bridge", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -1176,48 +1189,174 @@ describe("bridge", () => {
     ).toThrow("BB_CLAUDE_CODE_EXECUTABLE must point to an executable");
   });
 
-  it("configures acceptEdits and auto sessions with the same Claude sandbox", () => {
-    const acceptEditsOptions = buildSessionOptions(
-      {
-        chromeEnabled: false,
-        workflowsEnabled: false,
-        baseInstructions: "You are a coder.",
-        cwd: "/tmp/worktree",
-        instructionMode: "append",
-        permissionMode: "acceptEdits",
-        permissionScope: "workspace",
-      },
-      {},
+  const WEAKER_FALSE = '{"sandbox":{"enableWeakerNetworkIsolation":false}}';
+  const WEAKER_TRUE = WEAKER_FALSE.replace("false", "true");
+  // root/config is the user's Claude dir; root/repo is a git repo with a
+  // linked worktree at root/wt; root/plain is not a repo.
+  function makeClaudeSettingsFixture(files: Record<string, string> = {}) {
+    const root = mkdtempSync(join(tmpdir(), "bb-claude-sandbox-"));
+    const git = (...args: string[]) =>
+      execFileSync("git", ["-C", join(root, "repo"), ...args], {
+        stdio: "ignore",
+      });
+    for (const dir of ["config", "plain", "repo/src"]) {
+      mkdirSync(join(root, dir), { recursive: true });
+    }
+    git("init", "-q");
+    git(
+      "-c",
+      "user.name=t",
+      "-c",
+      "user.email=t@t",
+      "commit",
+      "-q",
+      "--allow-empty",
+      "-m",
+      "init",
     );
-    const autoOptions = buildSessionOptions(
-      {
-        chromeEnabled: false,
-        workflowsEnabled: false,
-        baseInstructions: "You are a coder.",
-        cwd: "/tmp/worktree",
-        instructionMode: "append",
-        permissionMode: "auto",
-        permissionScope: "workspace",
-      },
-      {},
-    );
+    git("worktree", "add", "-q", join(root, "wt"));
+    for (const [file, contents] of Object.entries(files)) {
+      mkdirSync(dirname(join(root, file)), { recursive: true });
+      writeFileSync(join(root, file), contents);
+    }
+    return root;
+  }
 
-    expect(acceptEditsOptions.permissionMode).toBe("acceptEdits");
-    expect(acceptEditsOptions.sandbox).toEqual({
-      enabled: true,
-      failIfUnavailable: false,
-      autoAllowBashIfSandboxed: true,
-      allowUnsandboxedCommands: true,
-      network: { allowLocalBinding: true },
+  it.each([
+    ["unset", "repo", {}, true],
+    [
+      "true in user settings",
+      "repo",
+      { "config/settings.json": WEAKER_TRUE },
+      true,
+    ],
+    ["malformed user settings", "repo", { "config/settings.json": "{" }, false],
+    [
+      "false in user settings",
+      "repo",
+      { "config/settings.json": WEAKER_FALSE },
+      false,
+    ],
+    [
+      "false in cwd local settings",
+      "repo",
+      { "repo/.claude/settings.local.json": WEAKER_FALSE },
+      false,
+    ],
+    [
+      "false in repo-root local settings from a subfolder",
+      "repo/src",
+      { "repo/.claude/settings.local.json": WEAKER_FALSE },
+      false,
+    ],
+    [
+      "false in main-checkout local settings from a worktree",
+      "wt",
+      { "repo/.claude/settings.local.json": WEAKER_FALSE },
+      false,
+    ],
+    ["git failure", "plain", {}, false],
+  ] as const)(
+    "configures acceptEdits and auto sessions with the same Claude sandbox (trustd %s)",
+    (_name, cwdPath, files, weakerNetwork) => {
+      const root = makeClaudeSettingsFixture(files);
+      const build = (permissionMode: "acceptEdits" | "auto") =>
+        withPlatform("linux", () =>
+          buildSessionOptions(
+            {
+              chromeEnabled: false,
+              workflowsEnabled: false,
+              baseInstructions: "You are a coder.",
+              cwd: join(root, cwdPath),
+              instructionMode: "append",
+              permissionMode,
+              permissionScope: "workspace",
+            },
+            { CLAUDE_CONFIG_DIR: join(root, "config") },
+          ),
+        );
+      const acceptEditsOptions = build("acceptEdits");
+      const autoOptions = build("auto");
+      rmSync(root, { recursive: true, force: true });
+
+      expect(acceptEditsOptions.permissionMode).toBe("acceptEdits");
+      expect(acceptEditsOptions.sandbox).toEqual({
+        enabled: true,
+        failIfUnavailable: false,
+        autoAllowBashIfSandboxed: true,
+        allowUnsandboxedCommands: true,
+        ...(weakerNetwork ? { enableWeakerNetworkIsolation: true } : {}),
+        network: { allowLocalBinding: true },
+      });
+      expect(autoOptions.permissionMode).toBe("auto");
+      expect(autoOptions.sandbox).toEqual(acceptEditsOptions.sandbox);
+    },
+  );
+
+  it.each([
+    ["an account switch to settings that set it false", "accountB", null],
+    ["a user settings edit to false", "config", "config/settings.json"],
+    [
+      "a project settings edit to false",
+      "config",
+      "repo/.claude/settings.json",
+    ],
+  ] as const)("drops the trustd flag on the next turn after %s", async (_name, nextAccount, editedFile) => {
+    const root = makeClaudeSettingsFixture({
+      "accountB/settings.json": WEAKER_FALSE,
     });
-    expect(autoOptions.permissionMode).toBe("auto");
-    expect(autoOptions.sandbox).toEqual({
-      enabled: true,
-      failIfUnavailable: false,
-      autoAllowBashIfSandboxed: true,
-      allowUnsandboxedCommands: true,
-      network: { allowLocalBinding: true },
+    const bridge = createBridgeJsonRpcTestHarness(handleLine);
+    const queries: ControlledClaudeQuery[] = [];
+    queryMock.mockImplementation(() => {
+      const query = createControlledClaudeQuery();
+      queries.push(query);
+      return query;
     });
+    const options = (account: string) => ({
+      permissionMode: "auto",
+      permissionScope: "workspace",
+      approvalReviewer: "automatic",
+      permissionEscalation: "deny",
+      envVars: { CLAUDE_CONFIG_DIR: join(root, account) },
+      providerOptions: { workflowsEnabled: false },
+    });
+
+    try {
+      bridge.sendRequest(1, "thread/start", {
+        threadId: "thread-account-switch",
+        cwd: join(root, "repo"),
+        instructionMode: "append",
+        options: options("config"),
+      });
+      const providerThreadId = getProviderThreadIdFromResult(
+        await bridge.waitForResponse(1),
+      );
+      expect(getLatestQueryOptions().sandbox).toMatchObject({
+        enableWeakerNetworkIsolation: true,
+      });
+
+      if (editedFile) {
+        mkdirSync(dirname(join(root, editedFile)), { recursive: true });
+        writeFileSync(join(root, editedFile), WEAKER_FALSE);
+      }
+      bridge.sendRequest(2, "turn/start", {
+        threadId: "thread-account-switch",
+        providerThreadId,
+        clientRequestId: "creq_23456789ab",
+        input: [{ type: "text", text: "continue", mentions: [] }],
+        options: options(nextAccount),
+      });
+      await bridge.flushWork();
+
+      expect(queries).toHaveLength(2);
+      expect(getLatestQueryOptions().sandbox).not.toHaveProperty(
+        "enableWeakerNetworkIsolation",
+      );
+    } finally {
+      queries.forEach((query) => query.finish());
+      bridge.restore();
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it("keeps plan sessions on native gating without the workspace sandbox", () => {
@@ -1269,9 +1408,26 @@ describe("bridge", () => {
       allowUnsandboxedCommands: true,
       network: { allowLocalBinding: true },
       filesystem: {
-        allowWrite: ["/repo/.git/worktrees/bb13", "/repo/.git/objects"],
+        allowWrite: [
+          "/repo/.git/worktrees/bb13",
+          "/repo/.git/objects",
+          ...macUserTempDirs(),
+        ],
       },
     });
+  });
+
+  it.each([
+    ["$HOME", homedir()],
+    ["/", "/"],
+    ["/tmp", "/tmp"],
+    ["a dotted escape", "/var/folders/../../etc"],
+    ["empty output", ""],
+    ["a failed getconf", undefined],
+  ])("grants no macOS temp dir when getconf reports %s", (_name, reported) => {
+    expect(
+      withPlatform("darwin", () => macUserTempDirs(() => reported)),
+    ).toEqual([]);
   });
 
   describe("Bash canUseTool policy", () => {
@@ -2976,7 +3132,11 @@ describe("bridge", () => {
             ],
             sandbox: expect.objectContaining({
               filesystem: {
-                allowWrite: ["/repo/.git/worktrees/bb13", "/repo/.git/objects"],
+                allowWrite: [
+                  "/repo/.git/worktrees/bb13",
+                  "/repo/.git/objects",
+                  ...macUserTempDirs(),
+                ],
               },
             }),
           }),
@@ -3038,7 +3198,11 @@ describe("bridge", () => {
             ],
             sandbox: expect.objectContaining({
               filesystem: {
-                allowWrite: ["/repo/.git/worktrees/bb13", "/repo/.git/objects"],
+                allowWrite: [
+                  "/repo/.git/worktrees/bb13",
+                  "/repo/.git/objects",
+                  ...macUserTempDirs(),
+                ],
               },
             }),
           }),
@@ -4776,7 +4940,7 @@ describe("bridge", () => {
             : {}),
         });
         await expect(bridge.waitForResponse(2)).resolves.toMatchObject({
-          error: { code: -32000 },
+          error: { code: -32000, message: expect.stringContaining("Try restarting Cloudroom on the computer running this thread") },
         });
 
         await expect(

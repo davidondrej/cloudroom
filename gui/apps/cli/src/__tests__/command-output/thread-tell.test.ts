@@ -126,7 +126,15 @@ describe("room-cli thread tell command output", () => {
     [
       "may already have been sent",
       () => Promise.reject(new TypeError("fetch failed")),
-      "Error: Cloudroom did not confirm the message, so it may already have been sent (fetch failed). Check `room-cli thread show thread-x` before sending it again.",
+      "Error: Cloudroom did not confirm the message, so it may already have been sent (fetch failed). Check `room-cli thread log thread-x` and `room-cli thread queue list thread-x` before sending it again.",
+    ],
+    [
+      "may already have been sent after a tunnel timeout (#1513)",
+      async () =>
+        new Response("cloudroom: timed out waiting for the tunnel client\n", {
+          status: 504,
+        }),
+      "Error: Cloudroom did not confirm the message, so it may already have been sent (HTTP 504: cloudroom: timed out waiting for the tunnel client).",
     ],
   ])(
     "room-cli thread tell says a failed message %s",

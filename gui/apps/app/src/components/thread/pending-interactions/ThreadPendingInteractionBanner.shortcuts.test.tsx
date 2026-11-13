@@ -29,8 +29,8 @@ vi.mock("@/hooks/queries/system-queries", () => ({
   }),
 }));
 
-vi.mock("@/lib/bb-desktop", () => ({
-  getBbDesktopInfo: () => null,
+vi.mock("@/lib/room-desktop", () => ({
+  getRoomDesktopInfo: () => null,
 }));
 
 vi.mock("@/hooks/mutations/thread-runtime-mutations", () => ({

@@ -52,7 +52,7 @@ import {
   isThreadRunning,
 } from "@cloudroom/client-core";
 import { getRootComposeRoutePath, getThreadRoutePath } from "@/lib/route-paths";
-import { getDesktopBrowserApi } from "@/lib/bb-desktop";
+import { getDesktopBrowserApi } from "@/lib/room-desktop";
 import { useRouteNavigate } from "@/components/ui/app-route-anchor";
 import {
   getSidebarThreadNavigationTargets,

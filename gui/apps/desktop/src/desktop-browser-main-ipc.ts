@@ -1,28 +1,28 @@
 import { BrowserWindow, ipcMain, type IpcMainEvent } from "electron";
 import type { z } from "zod";
 import {
-  bbDesktopBrowserAttachRequestSchema,
-  bbDesktopBrowserFindInPageRequestSchema,
-  bbDesktopBrowserNavigateRequestSchema,
-  bbDesktopBrowserSetBoundsRequestSchema,
-  bbDesktopBrowserSetVisibleRequestSchema,
-  bbDesktopBrowserStopFindInPageRequestSchema,
-  bbDesktopBrowserTabRefSchema,
+  roomDesktopBrowserAttachRequestSchema,
+  roomDesktopBrowserFindInPageRequestSchema,
+  roomDesktopBrowserNavigateRequestSchema,
+  roomDesktopBrowserSetBoundsRequestSchema,
+  roomDesktopBrowserSetVisibleRequestSchema,
+  roomDesktopBrowserStopFindInPageRequestSchema,
+  roomDesktopBrowserTabRefSchema,
 } from "@cloudroom/desktop-contract";
 import {
-  BB_DESKTOP_BROWSER_ATTACH_CHANNEL,
-  BB_DESKTOP_BROWSER_DETACH_CHANNEL,
-  BB_DESKTOP_BROWSER_FOCUS_CHANNEL,
-  BB_DESKTOP_BROWSER_FIND_IN_PAGE_CHANNEL,
-  BB_DESKTOP_BROWSER_GO_BACK_CHANNEL,
-  BB_DESKTOP_BROWSER_GO_FORWARD_CHANNEL,
-  BB_DESKTOP_BROWSER_NAVIGATE_CHANNEL,
-  BB_DESKTOP_BROWSER_RELOAD_CHANNEL,
-  BB_DESKTOP_BROWSER_SET_BOUNDS_CHANNEL,
-  BB_DESKTOP_BROWSER_SET_VISIBLE_CHANNEL,
-  BB_DESKTOP_BROWSER_SET_VISIBLE_WITHOUT_FOCUS_CHANNEL,
-  BB_DESKTOP_BROWSER_STOP_CHANNEL,
-  BB_DESKTOP_BROWSER_STOP_FIND_IN_PAGE_CHANNEL,
+  ROOM_DESKTOP_BROWSER_ATTACH_CHANNEL,
+  ROOM_DESKTOP_BROWSER_DETACH_CHANNEL,
+  ROOM_DESKTOP_BROWSER_FOCUS_CHANNEL,
+  ROOM_DESKTOP_BROWSER_FIND_IN_PAGE_CHANNEL,
+  ROOM_DESKTOP_BROWSER_GO_BACK_CHANNEL,
+  ROOM_DESKTOP_BROWSER_GO_FORWARD_CHANNEL,
+  ROOM_DESKTOP_BROWSER_NAVIGATE_CHANNEL,
+  ROOM_DESKTOP_BROWSER_RELOAD_CHANNEL,
+  ROOM_DESKTOP_BROWSER_SET_BOUNDS_CHANNEL,
+  ROOM_DESKTOP_BROWSER_SET_VISIBLE_CHANNEL,
+  ROOM_DESKTOP_BROWSER_SET_VISIBLE_WITHOUT_FOCUS_CHANNEL,
+  ROOM_DESKTOP_BROWSER_STOP_CHANNEL,
+  ROOM_DESKTOP_BROWSER_STOP_FIND_IN_PAGE_CHANNEL,
 } from "./desktop-browser-ipc.js";
 import type { DesktopBrowserViewManager } from "./desktop-browser-view.js";
 
@@ -65,73 +65,73 @@ export function registerDesktopBrowserIpc(
   ): void => registerRequestCommand(channel, schema, isTrustedSender, run);
 
   command(
-    BB_DESKTOP_BROWSER_ATTACH_CHANNEL,
-    bbDesktopBrowserAttachRequestSchema,
+    ROOM_DESKTOP_BROWSER_ATTACH_CHANNEL,
+    roomDesktopBrowserAttachRequestSchema,
     (args) => manager.attach(args),
   );
   command(
-    BB_DESKTOP_BROWSER_NAVIGATE_CHANNEL,
-    bbDesktopBrowserNavigateRequestSchema,
+    ROOM_DESKTOP_BROWSER_NAVIGATE_CHANNEL,
+    roomDesktopBrowserNavigateRequestSchema,
     (args) => manager.navigate(args),
   );
   command(
-    BB_DESKTOP_BROWSER_SET_BOUNDS_CHANNEL,
-    bbDesktopBrowserSetBoundsRequestSchema,
+    ROOM_DESKTOP_BROWSER_SET_BOUNDS_CHANNEL,
+    roomDesktopBrowserSetBoundsRequestSchema,
     (args) => manager.setBounds(args),
   );
   command(
-    BB_DESKTOP_BROWSER_SET_VISIBLE_CHANNEL,
-    bbDesktopBrowserSetVisibleRequestSchema,
+    ROOM_DESKTOP_BROWSER_SET_VISIBLE_CHANNEL,
+    roomDesktopBrowserSetVisibleRequestSchema,
     (args) => manager.setVisible(args),
   );
   command(
-    BB_DESKTOP_BROWSER_SET_VISIBLE_WITHOUT_FOCUS_CHANNEL,
-    bbDesktopBrowserSetVisibleRequestSchema,
+    ROOM_DESKTOP_BROWSER_SET_VISIBLE_WITHOUT_FOCUS_CHANNEL,
+    roomDesktopBrowserSetVisibleRequestSchema,
     (args) => manager.setVisibleWithoutFocus(args),
   );
   command(
-    BB_DESKTOP_BROWSER_FIND_IN_PAGE_CHANNEL,
-    bbDesktopBrowserFindInPageRequestSchema,
+    ROOM_DESKTOP_BROWSER_FIND_IN_PAGE_CHANNEL,
+    roomDesktopBrowserFindInPageRequestSchema,
     (args) => manager.findInPage(args),
   );
   command(
-    BB_DESKTOP_BROWSER_STOP_FIND_IN_PAGE_CHANNEL,
-    bbDesktopBrowserStopFindInPageRequestSchema,
+    ROOM_DESKTOP_BROWSER_STOP_FIND_IN_PAGE_CHANNEL,
+    roomDesktopBrowserStopFindInPageRequestSchema,
     (args) => manager.stopFindInPage(args),
   );
   command(
-    BB_DESKTOP_BROWSER_DETACH_CHANNEL,
-    bbDesktopBrowserTabRefSchema,
+    ROOM_DESKTOP_BROWSER_DETACH_CHANNEL,
+    roomDesktopBrowserTabRefSchema,
     ({ hostWindow, request }) =>
       manager.detach({ hostWindow, tabId: request.tabId }),
   );
   command(
-    BB_DESKTOP_BROWSER_FOCUS_CHANNEL,
-    bbDesktopBrowserTabRefSchema,
+    ROOM_DESKTOP_BROWSER_FOCUS_CHANNEL,
+    roomDesktopBrowserTabRefSchema,
     ({ hostWindow, request }) =>
       manager.focus({ hostWindow, tabId: request.tabId }),
   );
   command(
-    BB_DESKTOP_BROWSER_GO_BACK_CHANNEL,
-    bbDesktopBrowserTabRefSchema,
+    ROOM_DESKTOP_BROWSER_GO_BACK_CHANNEL,
+    roomDesktopBrowserTabRefSchema,
     ({ hostWindow, request }) =>
       manager.goBack({ hostWindow, tabId: request.tabId }),
   );
   command(
-    BB_DESKTOP_BROWSER_GO_FORWARD_CHANNEL,
-    bbDesktopBrowserTabRefSchema,
+    ROOM_DESKTOP_BROWSER_GO_FORWARD_CHANNEL,
+    roomDesktopBrowserTabRefSchema,
     ({ hostWindow, request }) =>
       manager.goForward({ hostWindow, tabId: request.tabId }),
   );
   command(
-    BB_DESKTOP_BROWSER_RELOAD_CHANNEL,
-    bbDesktopBrowserTabRefSchema,
+    ROOM_DESKTOP_BROWSER_RELOAD_CHANNEL,
+    roomDesktopBrowserTabRefSchema,
     ({ hostWindow, request }) =>
       manager.reload({ hostWindow, tabId: request.tabId }),
   );
   command(
-    BB_DESKTOP_BROWSER_STOP_CHANNEL,
-    bbDesktopBrowserTabRefSchema,
+    ROOM_DESKTOP_BROWSER_STOP_CHANNEL,
+    roomDesktopBrowserTabRefSchema,
     ({ hostWindow, request }) =>
       manager.stop({ hostWindow, tabId: request.tabId }),
   );

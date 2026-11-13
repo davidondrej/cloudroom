@@ -1,11 +1,11 @@
 import { COMPUTER } from "@cloudroom/domain";
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { accessSync, constants, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { accessSync, constants, existsSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { execPortableFile, findCliExecutable } from "@cloudroom/process-utils";
-import { claudeInstallerCommand, NO_TERMINAL, readClaudeToken, screenText, spawnInTerminal } from "@cloudroom/process-utils/claude-token";
+import { claudeInstallerCommand, createBrowserOpener, NO_TERMINAL, readClaudeToken, screenText, spawnInTerminal } from "@cloudroom/process-utils/claude-token";
 import type { HostDaemonOnlineRpcResult } from "@cloudroom/host-daemon-contract";
 import type { AppDeps } from "../../types.js";
 import { ApiError } from "../../errors.js";
@@ -92,13 +92,11 @@ let tokenRun: TokenRun | null = null;
  * Runs `claude setup-token` on this Mac for a one-year token (ADR 0121), using the Claude desktop app's copy when no CLI is installed.
  * `BROWSER` hands us Claude's sign-in link, so the app opens it itself. The token goes straight to `save`; it never reaches the UI.
  */
-function runSetupToken(id: string, save: (token: string) => Promise<unknown>, deps?: AppDeps): TokenRun {
+function runSetupToken(id: string, save: (token: string) => Promise<unknown>, deps: AppDeps): TokenRun {
   const binary = claudeBinary() ?? desktopClaude();
   if (!binary) throw new ApiError(409, "claude_missing", `Claude Code isn't installed on ${here}.`);
-  if (windows && deps) return runWindowsSetupToken(deps, id, binary, save);
-  const dir = mkdtempSync(join(tmpdir(), "cloudroom-claude-"));
-  const browser = join(dir, "open");
-  writeFileSync(browser, `#!/bin/sh\nprintf '%s' "$1" > "$0.url"\n`, { mode: 0o700 });
+  if (windows) return runWindowsSetupToken(deps, id, binary, save);
+  const { dir, browser } = browserOpener(deps);
   // A wide terminal keeps the token on one line.
   const child = spawnInTerminal(`stty cols 1000; exec "$CLAUDE_BIN" setup-token`, { ...process.env, CLAUDE_BIN: binary, BROWSER: browser });
   if (!child) {
@@ -217,8 +215,17 @@ function reportSetupToken(error: string | null, output: string, binary: string, 
   });
 }
 
+/** Claude runs the sign-in opener outside any sandbox, so it goes in the data folder, never the OS temp folder. */
+function browserOpener(deps: AppDeps) {
+  try {
+    return createBrowserOpener(deps.config.dataDir);
+  } catch (error) {
+    throw failed(`Claude sign-in could not start: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
 /** Starts Claude sign-in (or joins the running one) and waits briefly for its sign-in link. */
-async function startClaudeToken(id: string, save: (token: string) => Promise<unknown>, deps?: AppDeps): Promise<void> {
+async function startClaudeToken(id: string, save: (token: string) => Promise<unknown>, deps: AppDeps): Promise<void> {
   if (!tokenRun || tokenRun.done) tokenRun = runSetupToken(id, save, deps);
   const run = tokenRun;
   for (let waited = 0; !run.url && !run.done && waited < 15_000; waited += 250) await new Promise(resolve => setTimeout(resolve, 250));

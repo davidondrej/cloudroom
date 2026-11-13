@@ -32,7 +32,7 @@ import {
 import { makeProviderInfo } from "@cloudroom/test-helpers/domain-fixtures";
 import { getSettingsRoutePath } from "../src/lib/route-paths";
 import {
-  BbAppUpdateRows,
+  RoomAppUpdateRows,
   MachineUpdatesFleetSection,
   MachineUpdatesRows,
   MachineUpdatesSection,
@@ -251,7 +251,7 @@ export function SettingsUpdatesStory() {
         machine={settingsUpdateMachine}
         isThisMachine={false}
       >
-        <BbAppUpdateRows
+        <RoomAppUpdateRows
           systemVersion={systemVersion}
           desktopInfo={null}
           isDesktop={false}

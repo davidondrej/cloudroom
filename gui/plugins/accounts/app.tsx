@@ -23,7 +23,9 @@ import {
   DropdownMenuTrigger,
 } from "@cloudroom/shared-ui/dropdown-menu";
 import { Icon } from "@cloudroom/shared-ui/icon";
+import { hideEmail, usePrivacyMode } from "@cloudroom/shared-ui/lib/privacy-mode";
 import { cn } from "@cloudroom/shared-ui/lib/utils";
+import { Switch } from "@cloudroom/shared-ui/switch";
 import {
   ACCOUNTS_CHANGED,
   LOCAL,
@@ -57,20 +59,47 @@ function windowLabel(label: string): string {
     .replace("On-demand spend", "Spend");
 }
 
-function Meter({ label, usedPercent }: { label: string; usedPercent: number }) {
+// `resetsAt` adds a second line with the limit's reset. Undefined: no bar in this row has one, so the row stays one line.
+function Meter({
+  label,
+  usedPercent,
+  resetsAt,
+}: {
+  label: string;
+  usedPercent: number;
+  resetsAt?: number | null;
+}) {
   const hot = usedPercent >= 90;
   return (
-    <div className="flex w-32 items-center gap-2 text-xs tabular-nums text-subtle-foreground">
-      <span className="min-w-5">{windowLabel(label)}</span>
-      <span className="h-[3px] flex-1 overflow-hidden rounded-full bg-border">
-        <span
-          className={cn("block h-full", hot ? "bg-warning-text" : "bg-muted-foreground")}
-          style={{ width: `${Math.min(100, usedPercent)}%` }}
-        />
-      </span>
-      <span className={cn("w-8 text-right", hot && "text-warning-text")}>
-        {Math.round(usedPercent)}%
-      </span>
+    <div className="w-32 text-xs tabular-nums text-subtle-foreground">
+      <div className="flex items-center gap-2">
+        <span className="min-w-5">{windowLabel(label)}</span>
+        <span className="h-[3px] flex-1 overflow-hidden rounded-full bg-border">
+          <span
+            className={cn("block h-full", hot ? "bg-warning-text" : "bg-muted-foreground")}
+            style={{ width: `${Math.min(100, usedPercent)}%` }}
+          />
+        </span>
+        <span className={cn("w-8 text-right", hot && "text-warning-text")}>
+          {Math.round(usedPercent)}%
+        </span>
+      </div>
+      {resetsAt === undefined ? null : resetsAt === null ? (
+        <div aria-hidden>&nbsp;</div>
+      ) : (
+        <div
+          className="whitespace-nowrap text-right"
+          title={new Date(resetsAt).toLocaleString(undefined, {
+            weekday: "short",
+            month: "short",
+            day: "numeric",
+            hour: "numeric",
+            minute: "2-digit",
+          })}
+        >
+          Resets in {until(resetsAt)}
+        </div>
+      )}
     </div>
   );
 }
@@ -112,15 +141,34 @@ function AccountRow({
         : null,
     windows: loaded.windows.map((window) =>
       window.resetsAt !== null && window.resetsAt <= now
-        ? { ...window, usedPercent: 0 }
+        ? { ...window, usedPercent: 0, resetsAt: null }
         : window,
     ),
   };
+  // The page shows two bars. Each says when it resets, so "Resets in" alone shows only for a limit they don't show:
+  // one on a hidden bar, or one that lasts longer than the full bar shown.
+  const shown = account.windows.slice(0, 2);
+  const resets = shown.some((window) => window.resetsAt !== null);
+  const full = shown.some(
+    (window) =>
+      Math.round(window.usedPercent) >= 100 &&
+      window.resetsAt !== null &&
+      window.resetsAt >= (account.limitedUntil ?? 0) - 60_000,
+  );
   const [editing, setEditing] = useState(false);
+  const [privacy] = usePrivacyMode();
   const local = account.id === LOCAL;
-  const fallback = fallbackName(account, index);
-  const name = account.name ?? fallback;
-  const detail = [name === account.email ? null : account.email, account.plan]
+  // A name belongs to a login, so "This Mac" needs one to be named.
+  const renamable = !local || account.email !== null;
+  // Privacy mode hides emails. A name the user wrote stays.
+  const real = account.name ?? fallbackName(account, index);
+  const fallback = hideEmail(fallbackName(account, index), privacy);
+  const name = hideEmail(real, privacy);
+  const detail = [
+    real === account.email ? null : hideEmail(account.email ?? "", privacy),
+    account.plan,
+    local && account.name ? fallback : null,
+  ]
     .filter(Boolean)
     .join(" · ");
   const pickable = !account.inUse && !locked && !editing;
@@ -231,16 +279,17 @@ function AccountRow({
       </div>
       {/* On a narrow screen the usage drops to its own line, under the name. */}
       <div className="order-last flex basis-full flex-wrap items-center gap-x-5 gap-y-1 pl-7 sm:order-none sm:basis-auto sm:justify-end sm:pl-0">
-        {account.limitedUntil ? (
+        {account.limitedUntil && !full ? (
           <span className="whitespace-nowrap text-xs text-subtle-foreground">
             Resets in {until(account.limitedUntil)}
           </span>
         ) : null}
-        {account.windows.slice(0, 2).map((window) => (
+        {shown.map((window) => (
           <Meter
             key={window.label}
             label={window.label}
             usedPercent={window.usedPercent}
+            resetsAt={resets ? window.resetsAt : undefined}
           />
         ))}
         {account.inUse && account.needsSignIn ? (
@@ -249,42 +298,42 @@ function AccountRow({
           </Button>
         ) : null}
       </div>
-      {local ? (
-        <span className="size-7 shrink-0" />
-      ) : (
-        <DropdownMenu modal={false}>
-          <DropdownMenuTrigger asChild>
-            <Button
-              variant="ghost"
-              size="icon"
-              className="size-7 shrink-0 text-muted-foreground"
-              aria-label="Account actions"
-            >
-              <Icon name="MoreHorizontal" />
-            </Button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent
-            align="end"
-            // Keep focus on the rename field instead of the menu button.
-            onCloseAutoFocus={(event) => event.preventDefault()}
+      {/* "This Mac" signed out has nothing to do: no login to name, and the computer's own login is never removed here. */}
+      <DropdownMenu modal={false}>
+        <DropdownMenuTrigger asChild disabled={!renamable}>
+          <Button
+            variant="ghost"
+            size="icon"
+            className="size-7 shrink-0 text-muted-foreground"
+            aria-label="Account actions"
           >
-            <DropdownMenuItem onSelect={() => setEditing(true)}>
-              <Icon name="Edit" /> Rename
+            <Icon name="MoreHorizontal" />
+          </Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent
+          align="end"
+          // Keep focus on the rename field instead of the menu button.
+          onCloseAutoFocus={(event) => event.preventDefault()}
+        >
+          <DropdownMenuItem onSelect={() => setEditing(true)}>
+            <Icon name="Edit" /> Rename
+          </DropdownMenuItem>
+          {onSignInAgain ? (
+            <DropdownMenuItem onSelect={onSignInAgain}>
+              <Icon name="RotateCcw" /> Sign in again
             </DropdownMenuItem>
-            {onSignInAgain ? (
-              <DropdownMenuItem onSelect={onSignInAgain}>
-                <Icon name="RotateCcw" /> Sign in again
-              </DropdownMenuItem>
-            ) : null}
+          ) : null}
+          {/* Removing This Mac would sign the computer out. */}
+          {local ? null : (
             <DropdownMenuItem
               onSelect={onRemove}
               className="text-destructive-text focus:text-destructive-text"
             >
               <Icon name="Trash2" /> Remove
             </DropdownMenuItem>
-          </DropdownMenuContent>
-        </DropdownMenu>
-      )}
+          )}
+        </DropdownMenuContent>
+      </DropdownMenu>
     </div>
   );
 }
@@ -513,6 +562,7 @@ function AccountsSection({ provider, name }: { provider: Provider; name: string 
   // The account being switched to, and the one a finished switch names for a few seconds.
   const [picking, setPicking] = useState<string | null>(null);
   const [switched, setSwitched] = useState<string | null>(null);
+  const [privacy] = usePrivacyMode();
   const load = useCallback(() => {
     rpc
       .call("accounts.list", { provider })
@@ -609,7 +659,9 @@ function AccountsSection({ provider, name }: { provider: Provider; name: string 
             <>
               <Icon name="Check" className="size-3.5 shrink-0" />
               All threads now use
-              <span className="truncate font-medium text-foreground">{switched}</span>
+              <span className="truncate font-medium text-foreground">
+                {hideEmail(switched, privacy)}
+              </span>
             </>
           ) : null}
         </p>
@@ -673,7 +725,7 @@ function AccountsSection({ provider, name }: { provider: Provider; name: string 
                   )
                 }
                 onSignInAgain={
-                  provider === "claude-code" && adding === null
+                  provider === "claude-code" && account.id !== LOCAL && adding === null
                     ? () => setAdding({ mac: false, id: account.id })
                     : undefined
                 }
@@ -730,11 +782,19 @@ function AccountsPage() {
     const timer = window.setInterval(() => tick((count) => count + 1), 60_000);
     return () => window.clearInterval(timer);
   }, []);
+  const [privacy, setPrivacy] = usePrivacyMode();
   return (
-    <div className="space-y-6">
-      {AGENTS.map((agent) => (
-        <AccountsSection key={agent.provider} {...agent} />
-      ))}
+    <div className="space-y-2">
+      {/* Hides emails here and in the usage box, for recordings. */}
+      <label className="ml-auto flex w-fit cursor-pointer items-center gap-2 text-xs text-muted-foreground">
+        Privacy mode
+        <Switch checked={privacy} onCheckedChange={setPrivacy} />
+      </label>
+      <div className="space-y-6">
+        {AGENTS.map((agent) => (
+          <AccountsSection key={agent.provider} {...agent} />
+        ))}
+      </div>
     </div>
   );
 }

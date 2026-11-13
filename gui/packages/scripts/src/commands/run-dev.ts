@@ -50,7 +50,7 @@ export function createStartWorktreeCommand(dryRun = false): DevCommand {
       "--conditions=source",
       "--import",
       "tsx",
-      resolve(repoRoot, "scripts", "start-bb.mjs"),
+      resolve(repoRoot, "scripts", "start-app.mjs"),
       "--worktree-runtime-policy",
       ...(dryRun ? ["--dryrun"] : []),
     ],

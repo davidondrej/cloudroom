@@ -5,7 +5,7 @@ import type {
   UpdateInfo,
 } from "electron-updater";
 import { existsSync } from "node:fs";
-import type { BbDesktopInfo } from "@cloudroom/desktop-contract";
+import type { RoomDesktopInfo } from "@cloudroom/desktop-contract";
 import {
   DESKTOP_AUTO_UPDATE_FEED_CONFIG,
   type DesktopAutoUpdateFeedConfig,
@@ -63,7 +63,7 @@ interface CreateDesktopAutoUpdateServiceArgs {
   installNeedsPassword?: boolean;
   logger: DesktopAutoUpdateLogger;
   now?: () => number;
-  platform: BbDesktopInfo["platform"];
+  platform: RoomDesktopInfo["platform"];
   updater: DesktopAutoUpdaterAdapter;
 }
 
@@ -106,10 +106,10 @@ export interface DesktopAutoUpdateService extends DesktopUpdateService {
 
 function createBaseInfo(
   currentVersion: string,
-  platform: BbDesktopInfo["platform"],
+  platform: RoomDesktopInfo["platform"],
   autoUpdateEnabled: boolean,
   installNeedsPassword: boolean,
-): BbDesktopInfo {
+): RoomDesktopInfo {
   return {
     autoUpdateEnabled,
     downloadState: "idle",

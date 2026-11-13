@@ -17,6 +17,7 @@ import {
   listAutomationsForProject,
   getThreadReportRun,
   linkRunThread,
+  recoverFailedRun,
   setAutomationEnabled,
   THREAD_ARCHIVED_ERROR,
   setReviewed,
@@ -341,7 +342,7 @@ function requireCanonicalAutomationForWrite(
 }
 
 function toStoredAutomationReadResult(
-  bb: Pick<ServiceApi, "log">,
+  room: Pick<ServiceApi, "log">,
   pluginDataDir: string,
   row: AutomationRow,
 ): AutomationReadResult {
@@ -350,7 +351,7 @@ function toStoredAutomationReadResult(
     return withStoredScriptPath(pluginDataDir, decoded.automation);
   }
   if (decoded.automation.problem === "invalid-stored-data") {
-    bb.log.warn(
+    room.log.warn(
       `Malformed stored automation ${row.id}: ${decoded.error.message}`,
     );
   }
@@ -493,17 +494,17 @@ function parseRunCursor(
 }
 
 async function projectNameById(
-  bb: Pick<ServiceApi, "sdk" | "log">,
+  room: Pick<ServiceApi, "sdk" | "log">,
 ): Promise<Map<string, string>> {
   try {
     return new Map(
-      (await listLiveProjects(bb)).map((project) => [
+      (await listLiveProjects(room)).map((project) => [
         project.id,
         project.name ?? project.id,
       ]),
     );
   } catch (error) {
-    bb.log.warn(
+    room.log.warn(
       `Failed to list projects for automations overview: ${errorMessage(error)}`,
     );
     return new Map();
@@ -515,12 +516,12 @@ const projectAvailableSchema = z
   .passthrough();
 
 async function requireProjectAvailable(
-  bb: Pick<ServiceApi, "sdk">,
+  room: Pick<ServiceApi, "sdk">,
   projectId: string,
 ): Promise<{ kind?: string }> {
   try {
     return projectAvailableSchema.parse(
-      await bb.sdk.projects.get({ projectId }),
+      await room.sdk.projects.get({ projectId }),
     );
   } catch (error) {
     throw new Error(
@@ -558,12 +559,12 @@ function tookEvents(run: AutomationRunRow): boolean {
 
 /** A Local webhook loop's URL from the website, which keeps the events while this Mac is off (ADR 0262). */
 async function webhookUrl(
-  bb: ServiceApi,
+  room: ServiceApi,
   automationId: string,
 ): Promise<string> {
-  if (!bb.sdk.cloudroom)
+  if (!room.sdk.cloudroom)
     throw new Error("Webhook loops need a Cloudroom account.");
-  const { url } = await bb.sdk.cloudroom.automations({
+  const { url } = await room.sdk.cloudroom.automations({
     action: "hook",
     local: automationId,
   });
@@ -1124,6 +1125,17 @@ export function createAutomationService(args: {
         reason: input.reason,
         actions: input.actions,
       });
+      // A failed run's thread that came back to report did the run's work, so the run gets no retry, unless it
+      // reports that it failed (#1443).
+      if (
+        run.status === "failed" &&
+        input.outcome !== "failed" &&
+        recoverFailedRun(db, run.id, Date.now())
+      )
+        publishAutomationChange(bb, automation.projectId, [
+          "automations-changed",
+          "automation-runs-changed",
+        ]);
       // A running run's idle event reloads Review; one that already settled needs this signal to show the report.
       if (run.status !== "running")
         publishAutomationChange(

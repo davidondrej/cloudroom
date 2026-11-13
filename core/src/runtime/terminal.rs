@@ -134,7 +134,7 @@ fn set_size(pty: &impl AsRawFd, cols: u16, rows: u16) -> io::Result<()> {
 /// the shell starts. Only this shell's variables change; the agents' own logins are untouched.
 fn logins(process: &mut tokio::process::Command, config: &Config) {
     if let Some(profile) = config.harnesses.get(&Kind::Claude) {
-        super::claude::profile_env(process, config, profile);
+        super::claude::profile_env(process, config, profile, true);
     }
     if let Some(profile) = config.harnesses.get(&Kind::Codex) {
         process.env("CODEX_HOME", &profile.home);

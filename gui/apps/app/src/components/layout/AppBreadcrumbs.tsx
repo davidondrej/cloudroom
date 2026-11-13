@@ -1,7 +1,7 @@
 import { Link } from "react-router-dom";
 import { Icon } from "@cloudroom/shared-ui/icon";
 import { cn } from "@cloudroom/shared-ui/lib/utils";
-import { MACOS_WINDOW_NO_DRAG_CLASS } from "@/lib/bb-desktop";
+import { MACOS_WINDOW_NO_DRAG_CLASS } from "@/lib/room-desktop";
 
 interface AppBreadcrumbSegment {
   label: string;

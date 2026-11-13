@@ -5,7 +5,7 @@ import {
 } from "node:http";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
-  probeBbServer,
+  probeRoomServer,
   type ServerProbeFetch,
   waitForCompatibleServer,
 } from "../src/server-probe.js";
@@ -81,7 +81,7 @@ describe("probeBbServer", () => {
       );
 
     await expect(
-      probeBbServer({
+      probeRoomServer({
         fetchImpl,
         serverUrl: "https://studio.example",
         timeoutMs: 1_000,
@@ -118,7 +118,7 @@ describe("probeBbServer", () => {
     });
 
     await expect(
-      probeBbServer({ serverUrl: testServer.url, timeoutMs: 500 }),
+      probeRoomServer({ serverUrl: testServer.url, timeoutMs: 500 }),
     ).resolves.toEqual({
       dataDir: null,
       kind: "compatible",
@@ -139,7 +139,7 @@ describe("probeBbServer", () => {
       );
 
     await expect(
-      probeBbServer({
+      probeRoomServer({
         fetchImpl,
         serverUrl: "https://studio.example",
         timeoutMs: 1_000,
@@ -162,7 +162,7 @@ describe("probeBbServer", () => {
       },
     });
 
-    const result = await probeBbServer({
+    const result = await probeRoomServer({
       serverUrl: testServer.url,
       timeoutMs: 500,
     });
@@ -200,7 +200,7 @@ describe("probeBbServer", () => {
     });
 
     await expect(
-      probeBbServer({ serverUrl: testServer.url, timeoutMs: 500 }),
+      probeRoomServer({ serverUrl: testServer.url, timeoutMs: 500 }),
     ).resolves.toEqual({
       dataDir: null,
       kind: "compatible",
@@ -219,7 +219,7 @@ describe("probeBbServer", () => {
     await testServer.close();
     testServers.pop();
 
-    const result = await probeBbServer({
+    const result = await probeRoomServer({
       serverUrl: unavailableUrl,
       timeoutMs: 500,
     });

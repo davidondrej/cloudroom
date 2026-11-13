@@ -8,6 +8,8 @@ import { Icon } from "@cloudroom/shared-ui/icon";
 import { Popover, PopoverContent, PopoverTrigger } from "@cloudroom/shared-ui/popover";
 import { useCloudroomAccount } from "@/hooks/queries/cloudroom-queries";
 import { sdk } from "@/lib/sdk";
+import { localHostDaemonHostIdAtom } from "@/lib/system-config-atoms";
+import { useAsyncAtomState } from "@/lib/use-async-atom-value";
 import { openUrlInExternalBrowser } from "@/lib/url-open-routing";
 import { ClaudeApiKeyForm } from "./ClaudeApiKeyForm";
 import { CopyableInlineLabel } from "@/components/ui/copy-button";
@@ -51,9 +53,19 @@ const schema = z.object({
   verification_url: signInUrl.nullable(),
   manual_url: signInUrl.nullable().optional(),
   installing_since: z.number().nullable().optional(),
+  host_id: z.string().optional(),
 });
 type Status = z.infer<typeof schema>;
 const returnsToMac = (url: string) => new URL(url).searchParams.get("redirect_uri")?.startsWith("http://localhost") === true;
+/** True when Claude signs in on another machine than the one this browser runs on (added over SSH, or the app on a phone).
+ *  Its automatic link returns to that machine's localhost, so those sign-ins use the one-time code, as Cloud does (#1510). */
+function useSignsInElsewhere() {
+  const here = useAsyncAtomState(localHostDaemonHostIdAtom, null);
+  return (status?: Status) =>
+    Boolean(status?.host_id) &&
+    !here.isLoading &&
+    status?.host_id !== here.data;
+}
 type Action = {
   action?: "login" | "cancel" | "complete" | "setup-token";
   requestId?: string;
@@ -228,6 +240,8 @@ export function ClaudeConnectionPanel({
   const [manual, setManual] = useState(false);
   const client = useQueryClient();
   const auth = useClaudeConnection(target);
+  const elsewhere = useSignsInElsewhere();
+  const codeFlow = manual || elsewhere(auth.data);
   const action = useMutation({
     mutationFn: async (kind: "login" | "cancel" | "complete") => {
       const codeInput = code.trim();
@@ -259,7 +273,8 @@ export function ClaudeConnectionPanel({
       if (kind === "complete") {
         const [authorizationCode, state] = codeInput.split("#");
         const expected = new URL(
-          (manual ? auth.data?.manual_url : auth.data?.verification_url) ?? "",
+          (codeFlow ? auth.data?.manual_url : auth.data?.verification_url) ??
+            "",
         ).searchParams.get("state");
         if (
           !authorizationCode ||
@@ -275,9 +290,12 @@ export function ClaudeConnectionPanel({
       const result = await request(target, input).catch((error: unknown) => {
         throw tokenError ?? error;
       });
-      if (kind === "login" && result.verification_url) {
+      const link = elsewhere(result)
+        ? result.manual_url
+        : result.verification_url;
+      if (kind === "login" && link) {
         setManual(false);
-        openUrlInExternalBrowser(result.verification_url);
+        openUrlInExternalBrowser(link);
       }
       if (
         result.state === "error" ||
@@ -292,8 +310,13 @@ export function ClaudeConnectionPanel({
   });
   const state = auth.data?.state;
   const error = (auth.error?.message ?? action.error?.message)?.replace(/^HTTP \d+: /, "");
-  const signInUrl = manual ? auth.data?.manual_url : auth.data?.verification_url;
-  const pasteCode = target.target === "cloud" ? Boolean(signInUrl) && !returnsToMac(signInUrl!) : manual;
+  const signInUrl = codeFlow
+    ? auth.data?.manual_url
+    : auth.data?.verification_url;
+  const pasteCode =
+    target.target === "cloud"
+      ? Boolean(signInUrl) && !returnsToMac(signInUrl!)
+      : codeFlow;
   return (
     <div className="space-y-2 text-xs">
       <div className="flex items-center justify-between gap-2">
@@ -403,19 +426,21 @@ export function ClaudeConnectionPanel({
             >
               Open sign-in page
             </Button>
-            {target.target === "local" && !manual && auth.data?.manual_url && (
-              <Button
-                variant="ghost"
-                size="sm"
-                className="h-7 text-xs text-muted-foreground"
-                onClick={() => {
-                  setManual(true);
-                  openUrlInExternalBrowser(auth.data!.manual_url!);
-                }}
-              >
-                Use a code
-              </Button>
-            )}
+            {target.target === "local" &&
+              !codeFlow &&
+              auth.data?.manual_url && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-7 text-xs text-muted-foreground"
+                  onClick={() => {
+                    setManual(true);
+                    openUrlInExternalBrowser(auth.data!.manual_url!);
+                  }}
+                >
+                  Use a code
+                </Button>
+              )}
             <Button
               variant="ghost"
               size="sm"

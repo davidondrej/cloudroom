@@ -103,10 +103,10 @@ import {
 } from "./splitThreadNavigation";
 import { ThreadDetailWorkerPoolProvider } from "./ThreadDetailWorkerPoolProvider";
 import {
-  getBbDesktopInfo,
+  getRoomDesktopInfo,
   MACOS_WINDOW_NO_DRAG_CLASS,
   shouldUseMacosDesktopChrome,
-} from "@/lib/bb-desktop";
+} from "@/lib/room-desktop";
 import { SplitWorkspaceSecondaryPanelHost } from "./SplitWorkspaceSecondaryPanelHost";
 import { SecondaryPanelHostLayoutContext } from "@/components/secondary-panel/SecondaryPanelHostLayoutContext";
 import {
@@ -1046,7 +1046,7 @@ function NonThreadPaneContent({
   };
   const hostLayout = useContext(SecondaryPanelHostLayoutContext);
   const showsWindowPanelToggle = hostLayout?.pinsCornerToggle === true;
-  const [desktopInfo] = useState(getBbDesktopInfo);
+  const [desktopInfo] = useState(getRoomDesktopInfo);
   const usesDesktopChrome = shouldUseMacosDesktopChrome(desktopInfo);
   const panelEntry =
     content.kind === "plugin-panel"

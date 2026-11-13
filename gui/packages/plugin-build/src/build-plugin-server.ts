@@ -90,7 +90,7 @@ interface PluginServerBuildResult {
 
 export async function buildPluginServer(
   rootDir: string,
-  bbVersion: string,
+  roomVersion: string,
   toolchain: PluginBuildToolchain,
   options: PluginServerBuildOptions = {},
 ): Promise<PluginServerBuildResult> {
@@ -190,7 +190,7 @@ export async function buildPluginServer(
     await writeFile(
       stagedMetaPath,
       JSON.stringify(
-        createPluginArtifactMeta({ packageName, pluginVersion, bbVersion }),
+        createPluginArtifactMeta({ packageName, pluginVersion, bbVersion: roomVersion }),
         null,
         2,
       ) + "\n",

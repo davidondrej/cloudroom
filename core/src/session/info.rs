@@ -85,7 +85,7 @@ async fn models(
     Path(id): Path<String>,
 ) -> Result<Json<Value>, Failure> {
     agent(&m, peer, "provider models")?;
-    let known = serde_json::from_value::<runtime::Kind>(json!(id)).ok();
+    let known = runtime::Kind::named(&id);
     let Some((kind, profile)) = known.and_then(|k| Some((k, m.config.harnesses.get(&k)?))) else {
         return Err(fail(
             StatusCode::NOT_FOUND,

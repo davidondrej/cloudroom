@@ -14,6 +14,7 @@ import type {
   AutomationAgentSummary,
   AutomationsOverviewResponse,
 } from "./src/rpc-types.js";
+import type { TemplateUsage } from "./src/usage.js";
 import type { CloudAutomation } from "./cloud-view.js";
 import { formatAutomationTrigger } from "./lib/format-schedule.js";
 import {
@@ -44,6 +45,14 @@ export interface LoopTemplatesState {
   /** True on the Free plan, null while the plan loads. */
   locked: boolean | null;
   onUpgrade: () => void;
+  /** Each template's rough share of the weekly Claude or Codex limit, by template ID. Templates it can't price are missing. */
+  usage?: TemplateUsage;
+}
+
+/** "~6%" or "<1%": a rough share of a weekly limit. */
+export function shareLabel(percent: number | undefined): string | null {
+  if (percent === undefined) return null;
+  return percent < 1 ? "<1%" : `~${Math.round(percent)}%`;
 }
 
 type OverviewEntry = AutomationsOverviewResponse["automations"][number];
@@ -301,6 +310,7 @@ function TemplateCard({
   repos,
   activeIds,
   projects,
+  usage,
   renderAgent,
   onAdd,
 }: {
@@ -308,6 +318,7 @@ function TemplateCard({
   repos: readonly string[];
   activeIds: ReadonlySet<string>;
   projects: readonly TemplateProject[] | null;
+  usage: TemplateUsage[string] | undefined;
   renderAgent: (agent: AutomationAgentSummary) => ReactNode;
   onAdd: LoopTemplatesState["onAdd"];
 }) {
@@ -340,9 +351,9 @@ function TemplateCard({
           model: template.model,
           reasoningLevel: template.reasoningLevel,
         })}
-        <span aria-hidden className="text-muted-foreground/40">
-          ·
-        </span>
+      </span>
+      {/* The schedule and what it costs share a line: the schedule drives the usage. */}
+      <span className="col-span-2 col-start-2 mt-1 flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground/80">
         <span className="shrink-0">
           {formatAutomationTrigger({
             triggerType: "schedule",
@@ -350,6 +361,22 @@ function TemplateCard({
             timezone: "UTC",
           }).replace(/^On the hour, every/u, "Every")}
         </span>
+        {usage ? (
+          <>
+            <span aria-hidden className="text-muted-foreground/40">
+              ·
+            </span>
+            <span
+              className="min-w-0 truncate"
+              title={`A rough share of your weekly ${usage.limit} limit, from what this loop's runs usually use`}
+            >
+              <span className="text-foreground">
+                {shareLabel(usage.percent)}
+              </span>{" "}
+              of weekly limit
+            </span>
+          </>
+        ) : null}
       </span>
       {on ? (
         <span className="col-span-2 col-start-2 mt-2 flex flex-wrap gap-1">
@@ -621,6 +648,7 @@ export function LoopTemplatesView({
                       repos={[...active.values()]}
                       activeIds={new Set(active.keys())}
                       projects={templates.projects}
+                      usage={templates.usage?.[template.id]}
                       renderAgent={renderAgent}
                       onAdd={templates.onAdd}
                     />

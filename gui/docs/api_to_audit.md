@@ -1157,7 +1157,10 @@ dist-tag and `doctor` parsing) beside them.
    enum should grow before it is relied on.
 4. **`downloadedInstallerCommand` is POSIX.** `sh -c` with `mktemp`, `curl`
    and `bash`; there is no Windows form. Decide whether it should refuse on
-   win32 rather than hand the daemon a command that cannot run.
+   win32 rather than hand the daemon a command that cannot run. Its script
+   waits in `${TMPDIR:-/tmp}`, which the daemon points at a private folder
+   (macOS, Linux). A plugin's own plan that hard-codes `/tmp` gets no such
+   protection.
 
 ## Presentation builders (`experimental_presentationTitle`, `experimental_presentationDetail`, `experimental_withTitle`, `experimental_presentationFileName`, `experimental_COMPACTION_PRESENTATION`, `experimental_REASONING_PRESENTATION`, `experimental_fileReadPresentation`, `experimental_searchPresentation`, `experimental_webSearchPresentation`, `experimental_webFetchPresentation`, `experimental_planStepsPresentation`, `experimental_toolPresentation`) (`@get-bb/plugin-sdk/provider-bridge`)
 

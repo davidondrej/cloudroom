@@ -679,6 +679,7 @@ function dropMarketplaceCatalogSchema(db: DbConnection): void {
 function dropCloudroomSchema(db: DbConnection): void {
   db.$client.exec("DROP TABLE IF EXISTS cloudroom_commands");
   db.$client.exec("DROP TABLE IF EXISTS cloudroom_threads");
+  db.$client.exec("DROP INDEX IF EXISTS threads_execution_target_updated_idx");
   for (const [table, column] of [
     ["threads", "execution_target"],
     ["queued_thread_messages", "hard_queue"],

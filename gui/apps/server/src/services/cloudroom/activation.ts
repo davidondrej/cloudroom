@@ -6,7 +6,7 @@ import type { AppDeps } from "../../types.js";
 import type { PluginService } from "../plugins/plugin-service.js";
 import { firstAgentThreadId } from "../system/first-agent.js";
 import { ACTIVATION_STEPS, type ActivationStep } from "../system/telemetry.js";
-import { cloudroom } from "./commands.js";
+import { cloudroom, importedThreadIds } from "./commands.js";
 
 const file = (deps: AppDeps) => join(deps.config.dataDir, "cloudroom-activation.json");
 const CHECK_MS = 15 * 60_000;
@@ -48,9 +48,6 @@ async function signedInPhone(plugins: PluginService): Promise<boolean> {
   return result.ok && (result.result as { phone?: unknown }).phone === true;
 }
 
-const readImported = (deps: AppDeps, name: string) =>
-  readFile(join(deps.config.dataDir, name), "utf8").then((text) => Object.values(JSON.parse(text) as Record<string, string>), () => []);
-
 /** The first agent (ADR 20261111-220912) is a thread Cloudroom started, not the user: no step and no count includes it. */
 const notFirstAgent = (deps: AppDeps) => {
   const id = firstAgentThreadId(deps.db);
@@ -58,7 +55,7 @@ const notFirstAgent = (deps: AppDeps) => {
 };
 
 async function startedThreads(deps: AppDeps): Promise<number> {
-  const imported = [...new Set((await Promise.all([readImported(deps, "session-imports.json"), readImported(deps, "bb-imports.json")])).flat())];
+  const imported = await importedThreadIds(deps);
   const [row] = deps.db.select({ n: sql<number>`count(*)` }).from(threads)
     .where(and(isNull(threads.parentThreadId), isNull(threads.originPluginId), notFirstAgent(deps), imported.length ? notInArray(threads.id, imported) : undefined)).all();
   return row?.n ?? 0;

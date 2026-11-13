@@ -4,8 +4,8 @@ import {
   resolveEnvLoader,
   type EnvLoaderArgs,
 } from "./env.js";
-import { BB_LOG_LEVEL_ENV } from "./env-vars.js";
-import { resolveRuntimeDataDir, type BbRuntimeMode } from "./runtime.js";
+import { ROOM_LOG_LEVEL_ENV } from "./env-vars.js";
+import { resolveRuntimeDataDir, type RoomRuntimeMode } from "./runtime.js";
 
 export interface LogLevelConfig {
   BB_LOG_LEVEL: string;
@@ -21,7 +21,7 @@ export interface LoadCommonConfigArgs extends EnvLoaderArgs {
   repoRoot?: string;
 }
 
-function resolveDefaultLogLevel(mode: BbRuntimeMode): string {
+function resolveDefaultLogLevel(mode: RoomRuntimeMode): string {
   return mode === "prod" ? DEFAULTS.logLevel.prod : DEFAULTS.logLevel.dev;
 }
 
@@ -33,7 +33,7 @@ export function loadLogLevelConfig(
     BB_LOG_LEVEL: readEnvVarWithDefault({
       context: loader.context,
       defaultValue: resolveDefaultLogLevel(loader.mode),
-      definition: BB_LOG_LEVEL_ENV,
+      definition: ROOM_LOG_LEVEL_ENV,
       env: loader.env,
     }),
   };

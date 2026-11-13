@@ -9,16 +9,21 @@ const STAR_ANSWERS = ["starred", "opened", "dismissed", "already", "closed"] as 
 type StarAnswer = (typeof STAR_ANSWERS)[number];
 export type StarSurface = "popup" | "card";
 export type StarAsk = { surface: StarSurface; at: number; answer: StarAnswer | null };
-export type PopupState = { closed: Popup[]; shownAt: number | null; credits: boolean; checklistHides: number; starAsks: StarAsk[] };
+/** `cards`: when each budgeted card above the chat input showed (the star card and the Cloud cards). */
+export type PopupState = { closed: Popup[]; shownAt: number | null; credits: boolean; checklistHides: number; starAsks: StarAsk[]; cards: number[] };
 const DAY = 86_400_000;
+// One weekly budget for the cards above the chat input, per account (ADR 20261111-222457). The database enforces it too.
+const CARD_BUDGET = 3;
+const BUDGETED: readonly Popup[] = ["star_card", "cloud_card"];
 const RECHECK_MS = 10 * 60_000;
 const MAX_STAR_CARDS = 3;
 const STAR_CARD_EVERY_MS = 3 * DAY;
 const FINAL: ReadonlySet<StarAnswer | null> = new Set(["starred", "opened", "already", "closed"]);
 const asksSchema = z.array(z.object({ surface: z.enum(["popup", "card"]), at: z.string(), answer: z.enum(STAR_ANSWERS).nullable() })).catch([]);
-const stateSchema = z.object({ closed: z.array(z.string()), shown_at: z.string().nullable(), credits: z.boolean(), checklist_hides: z.number().int().catch(0), star_asks: asksSchema });
-const savedSchema = z.object({ closed: z.record(z.string(), z.string()).catch({}), shown_at: z.string().nullable().catch(null), star_asks: asksSchema })
-  .catch({ closed: {}, shown_at: null, star_asks: [] });
+const cardsSchema = z.array(z.string()).catch([]);
+const stateSchema = z.object({ closed: z.array(z.string()), shown_at: z.string().nullable(), credits: z.boolean(), checklist_hides: z.number().int().catch(0), star_asks: asksSchema, cards: cardsSchema });
+const savedSchema = z.object({ closed: z.record(z.string(), z.string()).catch({}), shown_at: z.string().nullable().catch(null), star_asks: asksSchema, cards: cardsSchema })
+  .catch({ closed: {}, shown_at: null, star_asks: [], cards: [] });
 const localFile = (deps: AppDeps) => join(deps.config.dataDir, "cloudroom-popups.json");
 let cache: { key: string; at: number; value: PopupState } | null = null;
 
@@ -28,13 +33,17 @@ const toState = (value: z.infer<typeof stateSchema>): PopupState => ({
   credits: value.credits,
   checklistHides: value.checklist_hides,
   starAsks: value.star_asks.map((ask) => ({ ...ask, at: Date.parse(ask.at) })),
+  cards: value.cards.map((at) => Date.parse(at)),
 });
 const readLocal = async (deps: AppDeps) => savedSchema.parse(await readFile(localFile(deps), "utf8").then(JSON.parse, () => ({})));
 const localState = (saved: z.infer<typeof savedSchema>) =>
-  toState({ closed: Object.keys(saved.closed), shown_at: saved.shown_at, credits: false, checklist_hides: 0, star_asks: saved.star_asks });
+  toState({ closed: Object.keys(saved.closed), shown_at: saved.shown_at, credits: false, checklist_hides: 0, star_asks: saved.star_asks, cards: saved.cards });
 const starSurface = (popup: Popup): StarSurface | null => popup === "star" ? "popup" : popup === "star_card" ? "card" : null;
 
 export const starDone = (state: PopupState) => state.starAsks.some((ask) => FINAL.has(ask.answer));
+
+/** How many more cards above the chat input this account may see this week. */
+export const cardsLeft = (state: PopupState, now = Date.now()) => Math.max(0, CARD_BUDGET - state.cards.filter((at) => now - at < 7 * DAY).length);
 
 export function canAskStar(state: PopupState, surface: StarSurface, now = Date.now()): boolean {
   const asks = state.starAsks;
@@ -43,7 +52,7 @@ export function canAskStar(state: PopupState, surface: StarSurface, now = Date.n
     return !state.closed.includes("star") && !asks.some((ask) => ask.surface === "popup") && (state.shownAt === null || now - state.shownAt >= DAY);
   }
   const cards = asks.filter((ask) => ask.surface === "card");
-  return cards.length < MAX_STAR_CARDS && cards.every((ask) => now - ask.at >= STAR_CARD_EVERY_MS);
+  return cardsLeft(state, now) > 0 && cards.length < MAX_STAR_CARDS && cards.every((ask) => now - ask.at >= STAR_CARD_EVERY_MS);
 }
 
 export function nextStarAsk(state: PopupState, due: { card: boolean; popup: boolean }, now = Date.now()): StarSurface | null {
@@ -54,8 +63,10 @@ export function nextStarAsk(state: PopupState, due: { card: boolean; popup: bool
 export function applyPopupEvent(state: PopupState, popup: Popup, event: "shown" | "closed", detail: PopupDetail | undefined, now: number): PopupState {
   const surface = starSurface(popup);
   if (event === "shown") {
-    return { ...state, shownAt: surface === "card" ? state.shownAt : now, starAsks: surface ? [...state.starAsks, { surface, at: now, answer: null }] : state.starAsks };
+    const starAsks = surface ? [...state.starAsks, { surface, at: now, answer: null }] : state.starAsks;
+    return BUDGETED.includes(popup) ? { ...state, starAsks, cards: [...state.cards, now] } : { ...state, starAsks, shownAt: now };
   }
+  if (popup === "cloud_card") return state;
   if (!surface) return { ...state, closed: [...new Set([...state.closed, popup])] };
   const answer: StarAnswer = detail === undefined ? "dismissed" : detail === "migrated" ? "closed" : detail;
   const open = state.starAsks.map((ask) => ask.surface === surface && ask.answer === null).lastIndexOf(true);
@@ -85,7 +96,8 @@ export async function popupState(deps: AppDeps): Promise<PopupState | null> {
 
 async function saveLocal(deps: AppDeps, popup: Popup, event: "shown" | "closed", detail: PopupDetail | undefined): Promise<boolean> {
   const saved = await readLocal(deps), now = Date.now(), state = localState(saved), surface = starSurface(popup);
-  const allowed = surface ? canAskStar(state, surface, now) : !state.closed.includes(popup) && (state.shownAt === null || now - state.shownAt >= DAY);
+  const allowed = surface ? canAskStar(state, surface, now) : popup === "cloud_card" ? cardsLeft(state, now) > 0
+    : !state.closed.includes(popup) && (state.shownAt === null || now - state.shownAt >= DAY);
   if (event === "shown" && !allowed) return false;
   const next = applyPopupEvent(state, popup, event, detail, now);
   const iso = (at: number) => new Date(at).toISOString();
@@ -93,6 +105,7 @@ async function saveLocal(deps: AppDeps, popup: Popup, event: "shown" | "closed",
     closed: Object.fromEntries(next.closed.map((closed) => [closed, saved.closed[closed] ?? iso(now)])),
     shown_at: next.shownAt === null ? null : iso(next.shownAt),
     star_asks: next.starAsks.map((ask) => ({ ...ask, at: iso(ask.at) })),
+    cards: next.cards.filter((at) => now - at < 7 * DAY).map(iso),
   }), { mode: 0o600 });
   return true;
 }
@@ -103,7 +116,8 @@ export async function recordPopup(deps: AppDeps, popup: Popup, event: "shown" | 
   const ok = account
     ? z.object({ ok: z.boolean() }).parse(await cloudroom(deps).sandboxes.popups({ popup, event, ...answer })).ok
     : await saveLocal(deps, popup, event, detail);
-  if (cache?.key === (account?.userId ?? "local")) cache.value = applyPopupEvent(cache.value, popup, event, detail, Date.now());
+  // A refused show means another device got there first: read the account again instead of guessing.
+  if (cache?.key === (account?.userId ?? "local")) cache = ok ? { ...cache, value: applyPopupEvent(cache.value, popup, event, detail, Date.now()) } : null;
   if (ok) deps.telemetry.capture({ name: "popup", properties: { popup, action: detail ?? (event === "shown" ? "viewed" : "closed") } });
   return ok;
 }

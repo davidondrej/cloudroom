@@ -39,11 +39,11 @@ import { applyPackagedDesktopRuntimeEnv } from "@cloudroom/config/runtime";
 import type { ConnectCredential } from "@cloudroom/connect-client";
 import { COMPUTER, type AppKeybindings } from "@cloudroom/domain";
 import {
-  bbDesktopBrowserImportCookiesRequestSchema,
-  bbDesktopThemeSchema,
-  type BbDesktopInfo,
-  type BbDesktopVitals,
-  type BbDesktopWindowState,
+  roomDesktopBrowserImportCookiesRequestSchema,
+  roomDesktopThemeSchema,
+  type RoomDesktopInfo,
+  type RoomDesktopVitals,
+  type RoomDesktopWindowState,
 } from "@cloudroom/desktop-contract";
 import { installSocketTypeOfServiceGuard } from "@cloudroom/process-utils/socket-type-of-service";
 import {
@@ -63,11 +63,11 @@ import {
 } from "./room-cli-shim.js";
 import { ensureLinuxDesktopEntry } from "./linux-desktop-entry.js";
 import {
-  resolveBbAppProcessRuntime,
-  type BbAppProcess,
-  type BbAppProcessExit,
-  startBbAppProcess,
-} from "./bb-process.js";
+  resolveRoomAppProcessRuntime,
+  type RoomAppProcess,
+  type RoomAppProcessExit,
+  startRoomAppProcess,
+} from "./app-process.js";
 import { openExistingServerDialog } from "./existing-server-dialog.js";
 import {
   readForeignRuntimeDetails,
@@ -82,7 +82,7 @@ import {
 } from "./desktop-app-window-policy.js";
 import { createLocalViewUrl, STARTUP_RETRY_CHANNEL } from "./local-view.js";
 import { installApplicationMenu } from "./menu.js";
-import { startMacVitals } from "./mac-vitals.js";
+import { noteQuit, startMacVitals } from "./mac-vitals.js";
 import {
   DEFAULT_APPLICATION_MENU_ACCELERATORS,
   resolveApplicationMenuAccelerators,
@@ -93,7 +93,7 @@ import {
   writeOwnedRuntimePidFile,
 } from "./owned-runtime-supervisor.js";
 import {
-  probeBbServer,
+  probeRoomServer,
   waitForCompatibleServer,
   type CompatibleServerProbeResult,
   type ServerProbeResult,
@@ -156,7 +156,7 @@ import { registerDesktopContextMenu } from "./desktop-context-menu.js";
 import { saveCrash, startCrashReports, watchWindowCrashes } from "./desktop-crash-report.js";
 import {
   getDesktopVersion,
-  resolveBbDesktopPlatform,
+  resolveRoomDesktopPlatform,
 } from "./desktop-platform.js";
 import { createDesktopUpdateService } from "./desktop-update-check.js";
 import {
@@ -196,30 +196,30 @@ import {
   takeAppOwnership,
 } from "./desktop-update-install.js";
 import {
-  BB_DESKTOP_CHECK_FOR_UPDATES_CHANNEL,
-  BB_DESKTOP_GET_INFO_CHANNEL,
-  BB_DESKTOP_INFO_CHANGED_CHANNEL,
-  BB_DESKTOP_INSTALL_UPDATE_CHANNEL,
-  BB_DESKTOP_MOVE_TO_APPLICATIONS_CHANNEL,
-  BB_DESKTOP_OPEN_EXTERNAL_URL_CHANNEL,
-  BB_DESKTOP_SET_THEME_CHANNEL,
-  BB_DESKTOP_FOCUS_WINDOW_CHANNEL,
-  BB_DESKTOP_SET_BADGE_COUNT_CHANNEL,
+  ROOM_DESKTOP_CHECK_FOR_UPDATES_CHANNEL,
+  ROOM_DESKTOP_GET_INFO_CHANNEL,
+  ROOM_DESKTOP_INFO_CHANGED_CHANNEL,
+  ROOM_DESKTOP_INSTALL_UPDATE_CHANNEL,
+  ROOM_DESKTOP_MOVE_TO_APPLICATIONS_CHANNEL,
+  ROOM_DESKTOP_OPEN_EXTERNAL_URL_CHANNEL,
+  ROOM_DESKTOP_SET_THEME_CHANNEL,
+  ROOM_DESKTOP_FOCUS_WINDOW_CHANNEL,
+  ROOM_DESKTOP_SET_BADGE_COUNT_CHANNEL,
 } from "./desktop-update-ipc.js";
 import { allowQuitWithoutAsking, canQuitNow } from "./desktop-quit-prompt.js";
 import {
-  BB_DESKTOP_APP_COMMAND_CHANNEL,
-  BB_DESKTOP_CLOSE_WINDOW_REQUEST_CHANNEL,
-  BB_DESKTOP_CLOSE_WINDOW_RESPONSE_CHANNEL,
-  BB_DESKTOP_GET_WINDOW_STATE_CHANNEL,
-  BB_DESKTOP_OPEN_LINK_CHANNEL,
-  BB_DESKTOP_OPEN_NEW_TAB_CHANNEL,
-  BB_DESKTOP_OPEN_COMPUTER_CHANNEL,
-  BB_DESKTOP_OPEN_SERVER_DAEMON_LOGS_CHANNEL,
-  BB_DESKTOP_SHOW_THIS_COMPUTER_CHANNEL,
-  BB_DESKTOP_REFRESH_COMPUTERS_CHANNEL,
-  BB_DESKTOP_TOP_RIGHT_DRAG_CHANNEL,
-  BB_DESKTOP_WINDOW_STATE_CHANGED_CHANNEL,
+  ROOM_DESKTOP_APP_COMMAND_CHANNEL,
+  ROOM_DESKTOP_CLOSE_WINDOW_REQUEST_CHANNEL,
+  ROOM_DESKTOP_CLOSE_WINDOW_RESPONSE_CHANNEL,
+  ROOM_DESKTOP_GET_WINDOW_STATE_CHANNEL,
+  ROOM_DESKTOP_OPEN_LINK_CHANNEL,
+  ROOM_DESKTOP_OPEN_NEW_TAB_CHANNEL,
+  ROOM_DESKTOP_OPEN_COMPUTER_CHANNEL,
+  ROOM_DESKTOP_OPEN_SERVER_DAEMON_LOGS_CHANNEL,
+  ROOM_DESKTOP_SHOW_THIS_COMPUTER_CHANNEL,
+  ROOM_DESKTOP_REFRESH_COMPUTERS_CHANNEL,
+  ROOM_DESKTOP_TOP_RIGHT_DRAG_CHANNEL,
+  ROOM_DESKTOP_WINDOW_STATE_CHANGED_CHANNEL,
   CLOSE_WINDOW_REQUEST_TIMEOUT_MS,
 } from "./desktop-window-command-ipc.js";
 import {
@@ -235,14 +235,14 @@ import {
   type DesktopBrowserBroker,
 } from "./desktop-browser-broker.js";
 import { createDesktopBrowserBrokerClient } from "./desktop-browser-broker-client.js";
-import { bbDesktopBrowserTabRefSchema } from "@cloudroom/desktop-contract";
+import { roomDesktopBrowserTabRefSchema } from "@cloudroom/desktop-contract";
 import {
-  BB_DESKTOP_BROWSER_TARGET_CHANNEL,
-  BB_DESKTOP_BROWSER_GET_CONTROL_CHANNEL,
-  BB_DESKTOP_BROWSER_RELEASE_CONTROL_CHANNEL,
-  BB_DESKTOP_BROWSER_LIST_IMPORT_SOURCES_CHANNEL,
-  BB_DESKTOP_BROWSER_IMPORT_COOKIES_CHANNEL,
-  BB_DESKTOP_BROWSER_OPEN_FULL_DISK_ACCESS_SETTINGS_CHANNEL,
+  ROOM_DESKTOP_BROWSER_TARGET_CHANNEL,
+  ROOM_DESKTOP_BROWSER_GET_CONTROL_CHANNEL,
+  ROOM_DESKTOP_BROWSER_RELEASE_CONTROL_CHANNEL,
+  ROOM_DESKTOP_BROWSER_LIST_IMPORT_SOURCES_CHANNEL,
+  ROOM_DESKTOP_BROWSER_IMPORT_COOKIES_CHANNEL,
+  ROOM_DESKTOP_BROWSER_OPEN_FULL_DISK_ACCESS_SETTINGS_CHANNEL,
 } from "./desktop-browser-ipc.js";
 import { parseDesktopSystemConfig } from "./desktop-system-config.js";
 import { ensurePackagedUserShellPath } from "./desktop-shell-path.js";
@@ -268,7 +268,7 @@ import {
 } from "./log-viewer-contract.js";
 import {
   ATTACH_PROBE_TIMEOUT_MS,
-  DEFAULT_BB_SERVER_URL,
+  DEFAULT_ROOM_SERVER_URL,
   PROCESS_LOG_LINE_LIMIT,
   STARTUP_POLL_INTERVAL_MS,
   STARTUP_TIMEOUT_MS,
@@ -286,7 +286,7 @@ const FOREIGN_RUNTIME_KILL_TIMEOUT_MS = 3_000;
 const REMOTE_SYSTEM_CONFIG_POLL_INTERVAL_MS = 5 * 60 * 1000;
 
 interface DesktopRuntime {
-  bbProcess: BbAppProcess | null;
+  bbProcess: RoomAppProcess | null;
   ownership: RuntimeOwnership;
   serverUrl: string;
   userDataPath: string | null;
@@ -330,7 +330,7 @@ type StartupRaceResult =
   | ServerProbeStartupRaceResult;
 
 interface ProcessExitedStartupRaceResult {
-  exit: BbAppProcessExit;
+  exit: RoomAppProcessExit;
   kind: "process-exited";
 }
 
@@ -355,7 +355,7 @@ interface ResolveDesktopWindowUrlArgs {
 
 interface ResolveDesktopUpdateFeedUrlArgs {
   env: NodeJS.ProcessEnv;
-  platform: BbDesktopInfo["platform"];
+  platform: RoomDesktopInfo["platform"];
 }
 
 interface SystemConfigRequestArgs {
@@ -384,7 +384,7 @@ let currentApplicationMenuAccelerators = DEFAULT_APPLICATION_MENU_ACCELERATORS;
 let desktopUpdateService: DesktopUpdateService | null = null;
 let desktopAutoUpdateService: DesktopAutoUpdateService | null = null;
 let idleInstall: ReturnType<typeof startIdleInstall> | null = null;
-let macVitals: BbDesktopVitals | undefined;
+let macVitals: RoomDesktopVitals | undefined;
 let currentRuntime: DesktopRuntime | null = null;
 let currentWindowUrl: string | null = null;
 let logViewerLineBuffer: LogLineBuffer | null = null;
@@ -400,7 +400,7 @@ const localCallerAuth = createLocalCallerAuth({
   localServerUrl: () => currentRuntime?.serverUrl ?? builtinServerUrl,
   reloadAppWindows: () => reloadApplicationWindows(),
 });
-let bbAppLoaded = false;
+let roomAppLoaded = false;
 let startupRetryUrl: string | null = null;
 let startupRetryPending = false;
 let stoppingForQuit = false;
@@ -425,7 +425,7 @@ let relayCredential: ConnectCredential | null = null;
 // `back` turns true once that Mac is online again, so the app can offer to switch.
 let computerFallback: { handle: string; name: string; back: boolean } | null = null;
 let thisComputerName = BUILTIN_SERVER_NAME;
-let builtinServerUrl: string = DEFAULT_BB_SERVER_URL;
+let builtinServerUrl: string = DEFAULT_ROOM_SERVER_URL;
 let desktopBridgePath: string | null = null;
 let desktopUserDataPath: string | null = null;
 let serverUrlDialogPreloadPath: string | null = null;
@@ -434,7 +434,7 @@ let existingServerDialogPreloadPath: string | null = null;
 function resolveDesktopServerUrl(args: ResolveDesktopServerUrlArgs): string {
   const rawPort = args.env.BB_SERVER_PORT?.trim();
   if (rawPort === undefined || rawPort.length === 0) {
-    return DEFAULT_BB_SERVER_URL;
+    return DEFAULT_ROOM_SERVER_URL;
   }
 
   const port = Number(rawPort);
@@ -523,7 +523,7 @@ async function showAboutDialog(): Promise<void> {
   }
 }
 
-function getCurrentDesktopInfo(): BbDesktopInfo | null {
+function getCurrentDesktopInfo(): RoomDesktopInfo | null {
   const info = mergeDesktopUpdateInfo({
     autoInfo: desktopAutoUpdateService?.getInfo() ?? null,
     feedInfo: desktopUpdateService?.getInfo() ?? null,
@@ -540,7 +540,7 @@ function getCurrentDesktopInfo(): BbDesktopInfo | null {
   };
 }
 
-function describeComputers(): BbDesktopInfo["computers"] {
+function describeComputers(): RoomDesktopInfo["computers"] {
   const target = serverTargetStore?.getTarget();
   const viewing =
     computerFallback === null && target?.kind === "connect" && isRelayUrl(target.server.url)
@@ -612,18 +612,18 @@ function sendDesktopInfoChanged(): void {
     if (applicationWindowWebContentsIds.has(browserWindow.webContents.id)) {
       sendToApplicationRenderer(
         browserWindow,
-        BB_DESKTOP_INFO_CHANGED_CHANNEL,
+        ROOM_DESKTOP_INFO_CHANGED_CHANNEL,
         info,
       );
     } else {
-      browserWindow.webContents.send(BB_DESKTOP_INFO_CHANGED_CHANNEL, info);
+      browserWindow.webContents.send(ROOM_DESKTOP_INFO_CHANGED_CHANNEL, info);
     }
   }
 }
 
 function getDesktopWindowState(
   browserWindow: Pick<BrowserWindow, "isFullScreen" | "isFocused"> | null,
-): BbDesktopWindowState {
+): RoomDesktopWindowState {
   return {
     isFullScreen: browserWindow?.isFullScreen() ?? false,
     isFocused: browserWindow?.isFocused() ?? true,
@@ -632,7 +632,7 @@ function getDesktopWindowState(
 
 function getSenderDesktopWindowState(
   event: IpcMainInvokeEvent,
-): BbDesktopWindowState {
+): RoomDesktopWindowState {
   return getDesktopWindowState(resolveApplicationWindow(event.sender));
 }
 
@@ -641,7 +641,7 @@ function sendDesktopWindowStateChanged(
 ): void {
   sendToApplicationRenderer(
     browserWindow as BrowserWindow,
-    BB_DESKTOP_WINDOW_STATE_CHANGED_CHANNEL,
+    ROOM_DESKTOP_WINDOW_STATE_CHANGED_CHANNEL,
     getDesktopWindowState(browserWindow as BrowserWindow),
   );
 }
@@ -710,7 +710,7 @@ function formatLogDirectory(): string {
   );
 }
 
-function formatExitResult(result: BbAppProcessExit): string {
+function formatExitResult(result: RoomAppProcessExit): string {
   if (result.code !== null) {
     return `exit code ${result.code}`;
   }
@@ -755,7 +755,7 @@ function requestRendererWindowClose(browserWindow: BrowserWindow): void {
   );
   sendToApplicationRenderer(
     browserWindow,
-    BB_DESKTOP_CLOSE_WINDOW_REQUEST_CHANNEL,
+    ROOM_DESKTOP_CLOSE_WINDOW_REQUEST_CHANNEL,
     null,
   );
 }
@@ -890,7 +890,7 @@ function refreshApplicationMenu(): void {
       browserWindow.focus();
       sendToApplicationRenderer(
         browserWindow,
-        BB_DESKTOP_APP_COMMAND_CHANNEL,
+        ROOM_DESKTOP_APP_COMMAND_CHANNEL,
         "settings.checkForUpdates",
       );
     },
@@ -902,12 +902,12 @@ function refreshApplicationMenu(): void {
       if (browserWindow !== null) {
         sendToApplicationRenderer(
           browserWindow,
-          BB_DESKTOP_OPEN_NEW_TAB_CHANNEL,
+          ROOM_DESKTOP_OPEN_NEW_TAB_CHANNEL,
           null,
         );
         sendToApplicationRenderer(
           browserWindow,
-          BB_DESKTOP_APP_COMMAND_CHANNEL,
+          ROOM_DESKTOP_APP_COMMAND_CHANNEL,
           "panel.newTab",
         );
       }
@@ -917,7 +917,7 @@ function refreshApplicationMenu(): void {
       if (browserWindow !== null) {
         sendToApplicationRenderer(
           browserWindow,
-          BB_DESKTOP_APP_COMMAND_CHANNEL,
+          ROOM_DESKTOP_APP_COMMAND_CHANNEL,
           "thread.new",
         );
       }
@@ -927,7 +927,7 @@ function refreshApplicationMenu(): void {
       if (browserWindow !== null) {
         sendToApplicationRenderer(
           browserWindow,
-          BB_DESKTOP_APP_COMMAND_CHANNEL,
+          ROOM_DESKTOP_APP_COMMAND_CHANNEL,
           "thread.archive",
         );
       }
@@ -937,7 +937,7 @@ function refreshApplicationMenu(): void {
       if (browserWindow !== null) {
         sendToApplicationRenderer(
           browserWindow,
-          BB_DESKTOP_APP_COMMAND_CHANNEL,
+          ROOM_DESKTOP_APP_COMMAND_CHANNEL,
           "panel.reopenClosedTab",
         );
       }
@@ -947,7 +947,7 @@ function refreshApplicationMenu(): void {
       if (browserWindow !== null) {
         sendToApplicationRenderer(
           browserWindow,
-          BB_DESKTOP_APP_COMMAND_CHANNEL,
+          ROOM_DESKTOP_APP_COMMAND_CHANNEL,
           "settings.open",
         );
       }
@@ -1209,14 +1209,14 @@ function deliverOpenLink(url: string): void {
     pendingOpenLinks.push(url);
     return;
   }
-  sendToApplicationRenderer(browserWindow, BB_DESKTOP_OPEN_LINK_CHANNEL, url);
+  sendToApplicationRenderer(browserWindow, ROOM_DESKTOP_OPEN_LINK_CHANNEL, url);
 }
 
 function registerApplicationWindow(browserWindow: DesktopBrowserWindow): void {
   const webContentsId = browserWindow.webContents.id;
   (browserWindow as BrowserWindow).webContents.on("did-finish-load", () => {
     for (const url of pendingOpenLinks.splice(0)) {
-      sendToApplicationRenderer(browserWindow as BrowserWindow, BB_DESKTOP_OPEN_LINK_CHANNEL, url);
+      sendToApplicationRenderer(browserWindow as BrowserWindow, ROOM_DESKTOP_OPEN_LINK_CHANNEL, url);
     }
   });
   applicationWindowWebContentsIds.add(webContentsId);
@@ -1246,7 +1246,7 @@ function registerApplicationWindow(browserWindow: DesktopBrowserWindow): void {
     if (y < 60 && bounds.width - x < 140) {
       sendToApplicationRenderer(
         browserWindow as BrowserWindow,
-        BB_DESKTOP_TOP_RIGHT_DRAG_CHANNEL,
+        ROOM_DESKTOP_TOP_RIGHT_DRAG_CHANNEL,
         `${x},${y}`,
       );
     }
@@ -1265,7 +1265,7 @@ async function ensureBuiltinRuntimeAttached(): Promise<boolean> {
     return false;
   }
 
-  const existingProbe = await probeBbServer({
+  const existingProbe = await probeRoomServer({
     serverUrl: builtinServerUrl,
     timeoutMs: ATTACH_PROBE_TIMEOUT_MS,
   });
@@ -1388,7 +1388,7 @@ async function showThisMac(isCurrent: () => boolean): Promise<boolean> {
   }
   const localServerUrl = currentRuntime?.serverUrl ?? builtinServerUrl;
   startSystemConfigSync(localServerUrl);
-  await loadBbApp(
+  await loadRoomApp(
     resolveDesktopWindowUrl({
       env: process.env,
       serverUrl: localServerUrl,
@@ -1532,7 +1532,7 @@ async function loadRemoteServerTarget(
   if (!loaded || !isCurrent()) {
     return loaded;
   }
-  bbAppLoaded = true;
+  roomAppLoaded = true;
   startRemoteSystemConfigSync(serverUrl);
   return true;
 }
@@ -1849,7 +1849,7 @@ function getLoadingLogoSrc(): string {
 }
 
 async function loadLoadingView(): Promise<void> {
-  bbAppLoaded = false;
+  roomAppLoaded = false;
   await loadWindowUrl({
     url: createLocalViewUrl({
       viewModel: {
@@ -1862,7 +1862,7 @@ async function loadLoadingView(): Promise<void> {
 }
 
 async function loadStartupError(args: LoadStartupErrorArgs): Promise<void> {
-  bbAppLoaded = false;
+  roomAppLoaded = false;
   const url = createLocalViewUrl({
     viewModel: {
       details: `${args.details} Logs are under ${formatLogDirectory()}/.`,
@@ -1877,8 +1877,8 @@ async function loadStartupError(args: LoadStartupErrorArgs): Promise<void> {
   await loading;
 }
 
-async function loadBbApp(serverUrl: string): Promise<void> {
-  bbAppLoaded = true;
+async function loadRoomApp(serverUrl: string): Promise<void> {
+  roomAppLoaded = true;
   await localCallerAuth.prepare(
     currentRuntime?.serverUrl ?? builtinServerUrl,
     serverUrl,
@@ -1904,7 +1904,7 @@ async function createApplicationWindow(
     initialUrl: args.initialUrl,
     stateKey: args.stateKey,
   });
-  if (bbAppLoaded && shouldOpenDevTools()) {
+  if (roomAppLoaded && shouldOpenDevTools()) {
     browserWindow.webContents.openDevTools({ mode: "detach" });
   }
   return browserWindow;
@@ -1960,8 +1960,15 @@ async function finishQuit(): Promise<void> {
   idleInstall?.stop();
   desktopBrowserViewManager?.destroyAll();
   await desktopWindowFactory?.persistOpenWindows();
+  // The next launch tells these threads how long the quit stopped them. Never holds the quit up for more than 2 s.
+  if (process.platform === "darwin" && currentRuntime?.ownership === "spawned") {
+    const working = runningLocalThreadIds(currentRuntime.serverUrl).then((threads) => noteQuit(quitFile(), threads));
+    await Promise.race([working, new Promise((resolve) => setTimeout(resolve, 2_000))]).catch(() => undefined);
+  }
   await stopOwnedRuntime();
 }
+
+const quitFile = () => join(app.getPath("userData"), "quit-with-agents.json");
 
 // electron-updater's "96.0.0" as Cloudroom's "v96".
 function displayVersion(version: string): string {
@@ -2151,60 +2158,60 @@ async function checkForDesktopUpdates(): Promise<void> {
 }
 
 function registerDesktopUpdateIpc(): void {
-  ipcMain.handle(BB_DESKTOP_GET_INFO_CHANNEL, (event) => {
+  ipcMain.handle(ROOM_DESKTOP_GET_INFO_CHANNEL, (event) => {
     if (!isAppWindowMainFrameSender(event)) return null;
     return getCurrentDesktopInfo();
   });
-  ipcMain.handle(BB_DESKTOP_GET_WINDOW_STATE_CHANNEL, (event) => {
+  ipcMain.handle(ROOM_DESKTOP_GET_WINDOW_STATE_CHANNEL, (event) => {
     if (!isAppWindowMainFrameSender(event)) return null;
     return getSenderDesktopWindowState(event);
   });
-  ipcMain.handle(BB_DESKTOP_OPEN_SERVER_DAEMON_LOGS_CHANNEL, async (event) => {
+  ipcMain.handle(ROOM_DESKTOP_OPEN_SERVER_DAEMON_LOGS_CHANNEL, async (event) => {
     if (!isPrivilegedAppSender(event)) return;
     await openServerDaemonLogs();
   });
-  ipcMain.handle(BB_DESKTOP_OPEN_COMPUTER_CHANNEL, async (event, handle: unknown) => {
+  ipcMain.handle(ROOM_DESKTOP_OPEN_COMPUTER_CHANNEL, async (event, handle: unknown) => {
     if (!isPrivilegedAppSender(event)) return;
     await openComputerTarget(typeof handle === "string" ? handle : null);
   });
   // "Use this Mac" under "Reconnecting…": only while the window shows another Mac, which stays the user's pick.
-  ipcMain.handle(BB_DESKTOP_SHOW_THIS_COMPUTER_CHANNEL, async (event) => {
+  ipcMain.handle(ROOM_DESKTOP_SHOW_THIS_COMPUTER_CHANNEL, async (event) => {
     if (!isPrivilegedAppSender(event)) return;
     if (serverTargetStore?.getTarget().kind !== "connect" || computerFallback !== null) return;
     await applyServerTarget({ useThisMac: true });
   });
   // Settings → Machines opened: refresh which Macs are online (at most once a minute, like Window → Server).
-  ipcMain.on(BB_DESKTOP_REFRESH_COMPUTERS_CHANNEL, (event) => {
+  ipcMain.on(ROOM_DESKTOP_REFRESH_COMPUTERS_CHANNEL, (event) => {
     if (!isPrivilegedAppSender(event)) return;
     computersSync?.onListRequested();
   });
-  ipcMain.handle(BB_DESKTOP_CHECK_FOR_UPDATES_CHANNEL, async (event) => {
+  ipcMain.handle(ROOM_DESKTOP_CHECK_FOR_UPDATES_CHANNEL, async (event) => {
     if (!isPrivilegedAppSender(event)) return null;
     await checkForDesktopUpdates();
     return getCurrentDesktopInfo();
   });
-  ipcMain.handle(BB_DESKTOP_INSTALL_UPDATE_CHANNEL, (event) => {
+  ipcMain.handle(ROOM_DESKTOP_INSTALL_UPDATE_CHANNEL, (event) => {
     if (!isPrivilegedAppSender(event)) return;
     return installDownloadedUpdate();
   });
-  ipcMain.handle(BB_DESKTOP_MOVE_TO_APPLICATIONS_CHANNEL, (event) => {
+  ipcMain.handle(ROOM_DESKTOP_MOVE_TO_APPLICATIONS_CHANNEL, (event) => {
     if (!isPrivilegedAppSender(event)) return false;
     return moveToApplications();
   });
-  ipcMain.on(BB_DESKTOP_SET_THEME_CHANNEL, (event, payload: unknown) => {
+  ipcMain.on(ROOM_DESKTOP_SET_THEME_CHANNEL, (event, payload: unknown) => {
     if (!isPrivilegedAppSender(event)) return;
-    const parsed = bbDesktopThemeSchema.safeParse(payload);
+    const parsed = roomDesktopThemeSchema.safeParse(payload);
     if (!parsed.success) {
       return;
     }
     nativeTheme.themeSource = parsed.data;
   });
-  ipcMain.on(BB_DESKTOP_SET_BADGE_COUNT_CHANNEL, (event, payload: unknown) => {
+  ipcMain.on(ROOM_DESKTOP_SET_BADGE_COUNT_CHANNEL, (event, payload: unknown) => {
     if (!isPrivilegedAppSender(event)) return;
     const parsed = z.number().int().nonnegative().safeParse(payload);
     if (parsed.success) app.setBadgeCount(parsed.data);
   });
-  ipcMain.on(BB_DESKTOP_FOCUS_WINDOW_CHANNEL, (event) => {
+  ipcMain.on(ROOM_DESKTOP_FOCUS_WINDOW_CHANNEL, (event) => {
     if (!isPrivilegedAppSender(event)) return;
     const window = BrowserWindow.fromWebContents(event.sender);
     if (!window) return;
@@ -2226,7 +2233,7 @@ function registerDesktopUpdateIpc(): void {
     void retryStartup();
   });
 
-  ipcMain.on(BB_DESKTOP_CLOSE_WINDOW_RESPONSE_CHANNEL, (event, payload) => {
+  ipcMain.on(ROOM_DESKTOP_CLOSE_WINDOW_RESPONSE_CHANNEL, (event, payload) => {
     if (!isAppWindowMainFrameSender(event)) return;
     const pending = pendingCloseWindowRequests.get(event.sender.id);
     if (pending !== undefined) {
@@ -2238,7 +2245,7 @@ function registerDesktopUpdateIpc(): void {
     }
   });
   ipcMain.on(
-    BB_DESKTOP_OPEN_EXTERNAL_URL_CHANNEL,
+    ROOM_DESKTOP_OPEN_EXTERNAL_URL_CHANNEL,
     (event, payload: unknown) => {
       if (!isPrivilegedAppSender(event)) return;
       if (typeof payload !== "string") {
@@ -2309,7 +2316,7 @@ async function startOwnedRuntime(
     });
     return null;
   }
-  const bbProcess = startBbAppProcess({
+  const roomProcess = startRoomAppProcess({
     bridgePath: args.bridgePath,
     cwd: homedir(),
     env: {
@@ -2319,7 +2326,7 @@ async function startOwnedRuntime(
       BB_DESKTOP_UPDATE_NEEDS_PASSWORD: appUpdateNeedsPassword() ? "1" : undefined,
     },
     logLineLimit: PROCESS_LOG_LINE_LIMIT,
-    runtime: resolveBbAppProcessRuntime({
+    runtime: resolveRoomAppProcessRuntime({
       env: process.env,
       isPackaged: app.isPackaged,
       platform: process.platform,
@@ -2327,31 +2334,31 @@ async function startOwnedRuntime(
     }),
   });
   const runtime: DesktopRuntime = {
-    bbProcess,
+    bbProcess: roomProcess,
     ownership: "spawned",
     serverUrl: args.serverUrl,
     userDataPath: args.userDataPath,
   };
   await writeOwnedRuntimePidFile({
     bridgePath: args.bridgePath,
-    pid: bbProcess.pid,
+    pid: roomProcess.pid,
     serverUrl: args.serverUrl,
     userDataPath: args.userDataPath,
   });
   setCurrentRuntime(runtime);
 
-  void bbProcess.exit.then((exit) => {
+  void roomProcess.exit.then((exit) => {
     void clearOwnedRuntimePidFile({ userDataPath: args.userDataPath });
     if (quitting || currentRuntime !== runtime) {
       return;
     }
     setCurrentRuntime(null);
-    saveCrash({ what: "backend", reason: formatExitResult(exit), exit_code: exit.code, logs: bbProcess.logs.text().split("\n").slice(-20).join("\n") });
+    saveCrash({ what: "backend", reason: formatExitResult(exit), exit_code: exit.code, logs: roomProcess.logs.text().split("\n").slice(-20).join("\n") });
     void loadStartupError({
       details: `The Cloudroom backend stopped with ${formatExitResult(
         exit,
       )}.`,
-      logs: bbProcess.logs.text(),
+      logs: roomProcess.logs.text(),
       retryable: false,
       title: "Cloudroom stopped",
     });
@@ -2366,7 +2373,7 @@ async function startOwnedRuntime(
       kind: "server-probe",
       result,
     })),
-    bbProcess.exit.then((exit) => ({
+    roomProcess.exit.then((exit) => ({
       exit,
       kind: "process-exited",
     })),
@@ -2377,7 +2384,7 @@ async function startOwnedRuntime(
       details: `The Cloudroom backend exited before it was ready with ${formatExitResult(
         raceResult.exit,
       )}.`,
-      logs: bbProcess.logs.text(),
+      logs: roomProcess.logs.text(),
       retryable: false,
       title: "Could not start Cloudroom",
     });
@@ -2401,7 +2408,7 @@ async function startOwnedRuntime(
       raceResult.result.kind === "incompatible"
         ? `Port ${args.serverUrl} is responding, but it does not look like Cloudroom: ${raceResult.result.reason}.`
         : `Timed out waiting for Cloudroom at ${args.serverUrl}: ${raceResult.result.reason}.`,
-    logs: bbProcess.logs.text(),
+    logs: roomProcess.logs.text(),
     retryable: false,
     title: "Could not start Cloudroom",
   });
@@ -2432,7 +2439,7 @@ function shouldAskBeforeAttaching(): boolean {
 async function waitForServerToStop(serverUrl: string): Promise<boolean> {
   const deadline = Date.now() + FOREIGN_RUNTIME_STOP_TIMEOUT_MS;
   while (Date.now() <= deadline) {
-    const probe = await probeBbServer({
+    const probe = await probeRoomServer({
       serverUrl,
       timeoutMs: ATTACH_PROBE_TIMEOUT_MS,
     });
@@ -2527,7 +2534,7 @@ async function decideOnExistingServer(
 }
 
 async function initializeRuntime(args: InitializeRuntimeArgs): Promise<void> {
-  const existingProbe = await probeBbServer({
+  const existingProbe = await probeRoomServer({
     serverUrl: args.serverUrl,
     timeoutMs: ATTACH_PROBE_TIMEOUT_MS,
   });
@@ -2546,7 +2553,7 @@ async function initializeRuntime(args: InitializeRuntimeArgs): Promise<void> {
         userDataPath: args.userDataPath,
       });
       if (freshRuntime !== null) {
-        await loadBbApp(freshRuntime.serverUrl);
+        await loadRoomApp(freshRuntime.serverUrl);
         startSystemConfigSync(freshRuntime.serverUrl);
         refreshApplicationMenu();
       }
@@ -2559,7 +2566,7 @@ async function initializeRuntime(args: InitializeRuntimeArgs): Promise<void> {
       serverUrl: existingProbe.serverUrl,
       userDataPath: null,
     });
-    await loadBbApp(
+    await loadRoomApp(
       resolveDesktopWindowUrl({
         env: process.env,
         serverUrl: existingProbe.serverUrl,
@@ -2586,7 +2593,7 @@ async function initializeRuntime(args: InitializeRuntimeArgs): Promise<void> {
     userDataPath: args.userDataPath,
   });
   if (runtime !== null) {
-    await loadBbApp(runtime.serverUrl);
+    await loadRoomApp(runtime.serverUrl);
     startSystemConfigSync(runtime.serverUrl);
     refreshApplicationMenu();
   }
@@ -2697,6 +2704,13 @@ async function runDesktopApp(): Promise<void> {
     refreshRemoteSystemConfig?.();
   });
   app.on("browser-window-created", (_event, browserWindow) => {
+    // Tests run on developers' Macs. Hide any window that shows anyway; preload-build.test.ts fails on this log line.
+    if (hideWindowsForTests) {
+      browserWindow.on("show", () => {
+        desktopLogger.error("[desktop] TEST_WINDOW_SHOWN: a window showed during a test");
+        browserWindow.hide();
+      });
+    }
     // Windows and Linux quit when the last window closes, so ask while it is still open.
     if (process.platform !== "darwin") {
       browserWindow.on("close", (event) => {
@@ -2791,7 +2805,7 @@ async function runDesktopApp(): Promise<void> {
   builtinServerUrl = serverUrl;
   desktopBridgePath = bridgePath;
   const desktopVersion = getDesktopVersion(process.env.BB_DESKTOP_VERSION);
-  const desktopPlatform = resolveBbDesktopPlatform(process.platform);
+  const desktopPlatform = resolveRoomDesktopPlatform(process.platform);
   const desktopUpdateFeedUrl = resolveDesktopUpdateFeedUrl({
     env: process.env,
     platform: desktopPlatform,
@@ -3029,7 +3043,7 @@ async function runDesktopApp(): Promise<void> {
     startMacVitals((vitals) => {
       macVitals = vitals;
       sendDesktopInfoChanged();
-    });
+    }, { working: async () => (currentRuntime ? runningLocalThreadIds(currentRuntime.serverUrl) : []), quitFile: quitFile() });
   }
   desktopBrowserViewManager = createDesktopBrowserViewManager({
     dispatchAppShortcut(target) {
@@ -3041,7 +3055,7 @@ async function runDesktopApp(): Promise<void> {
       }
       sendToApplicationRenderer(
         browserWindow,
-        BB_DESKTOP_APP_COMMAND_CHANNEL,
+        ROOM_DESKTOP_APP_COMMAND_CHANNEL,
         "command" in target ? target.command : target.input,
       );
     },
@@ -3080,17 +3094,17 @@ async function runDesktopApp(): Promise<void> {
     browserImport: browserImportService,
   });
   ipcMain.handle(
-    BB_DESKTOP_BROWSER_LIST_IMPORT_SOURCES_CHANNEL,
+    ROOM_DESKTOP_BROWSER_LIST_IMPORT_SOURCES_CHANNEL,
     async (event) => {
       if (!browserImportService || !isPrivilegedAppSender(event)) return null;
       return { sources: await browserImportService.listSources() };
     },
   );
   ipcMain.handle(
-    BB_DESKTOP_BROWSER_IMPORT_COOKIES_CHANNEL,
+    ROOM_DESKTOP_BROWSER_IMPORT_COOKIES_CHANNEL,
     async (event, payload: unknown) => {
       const parsed =
-        bbDesktopBrowserImportCookiesRequestSchema.safeParse(payload);
+        roomDesktopBrowserImportCookiesRequestSchema.safeParse(payload);
       if (
         !browserImportService ||
         !parsed.success ||
@@ -3109,7 +3123,7 @@ async function runDesktopApp(): Promise<void> {
     },
   );
   ipcMain.on(
-    BB_DESKTOP_BROWSER_OPEN_FULL_DISK_ACCESS_SETTINGS_CHANNEL,
+    ROOM_DESKTOP_BROWSER_OPEN_FULL_DISK_ACCESS_SETTINGS_CHANNEL,
     (event) => {
       if (!isPrivilegedAppSender(event) || process.platform !== "darwin")
         return;
@@ -3118,15 +3132,15 @@ async function runDesktopApp(): Promise<void> {
       );
     },
   );
-  ipcMain.handle(BB_DESKTOP_BROWSER_TARGET_CHANNEL, (event) => {
+  ipcMain.handle(ROOM_DESKTOP_BROWSER_TARGET_CHANNEL, (event) => {
     return isPrivilegedAppSender(event)
       ? (desktopBrowserBroker?.getTarget(event.sender.id) ?? null)
       : null;
   });
   ipcMain.handle(
-    BB_DESKTOP_BROWSER_GET_CONTROL_CHANNEL,
+    ROOM_DESKTOP_BROWSER_GET_CONTROL_CHANNEL,
     (event, payload: unknown) => {
-      const parsed = bbDesktopBrowserTabRefSchema.safeParse(payload);
+      const parsed = roomDesktopBrowserTabRefSchema.safeParse(payload);
       return parsed.success && isPrivilegedAppSender(event)
         ? (desktopBrowserBroker?.getControl(
             event.sender.id,
@@ -3136,9 +3150,9 @@ async function runDesktopApp(): Promise<void> {
     },
   );
   ipcMain.on(
-    BB_DESKTOP_BROWSER_RELEASE_CONTROL_CHANNEL,
+    ROOM_DESKTOP_BROWSER_RELEASE_CONTROL_CHANNEL,
     (event, payload: unknown) => {
-      const parsed = bbDesktopBrowserTabRefSchema.safeParse(payload);
+      const parsed = roomDesktopBrowserTabRefSchema.safeParse(payload);
       if (parsed.success && isPrivilegedAppSender(event))
         desktopBrowserBroker?.takeOver(event.sender.id, parsed.data.tabId);
     },

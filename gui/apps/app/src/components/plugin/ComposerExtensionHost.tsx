@@ -5,7 +5,7 @@ import {
   useAppCommandHandler,
 } from "@/components/commands/AppCommandProvider";
 import { appToast } from "@/components/ui/app-toast";
-import { getBbDesktopInfo } from "@/lib/bb-desktop";
+import { getRoomDesktopInfo } from "@/lib/room-desktop";
 import {
   PluginComposerHostProvider,
   PluginComposerViewProvider,
@@ -66,7 +66,7 @@ export function useComposerExtensionController({
   useAppCommandContext("promptAvailable", true);
   useAppCommandHandler("composer.focus", focus);
   useEffect(() => {
-    const desktop = getBbDesktopInfo();
+    const desktop = getRoomDesktopInfo();
     if (
       !desktop?.onAddImageToChat ||
       !attachFiles ||

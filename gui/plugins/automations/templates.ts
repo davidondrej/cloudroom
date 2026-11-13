@@ -33,6 +33,9 @@ export interface LoopTemplate {
   model: string;
   reasoningLevel: ReasoningLevel;
   prompt: string;
+  /** What one run uses, for the usage estimate (docs/scopes/loops.md): the average of our own runs, 2026-11-13, in
+   *  tokens weighted like `weightedTokens`. Unset without at least 5 runs on the template's agent. */
+  tokensPerRun?: number;
   /** Mac only: Cloud threads only see their own subagents, not the project's threads (#549). */
   localOnly?: true;
 }
@@ -57,6 +60,7 @@ export const LOOP_TEMPLATES: readonly LoopTemplate[] = [
     providerId: "claude-code",
     model: "claude-opus-5-5",
     reasoningLevel: "max",
+    tokensPerRun: 1_200_000,
     prompt: `Security sweep: a defensive review of this repo's own code. ${READ_ONLY}
 ${rotate("Security sweep")}
 In that area, look for missing auth or access checks, data one user can see that belongs to another, secrets in code or logs, unsafe input handling, and risky defaults. Only report what you confirmed by reading the code; drop guesses.${REPORT}`,
@@ -73,6 +77,7 @@ In that area, look for missing auth or access checks, data one user can see that
     providerId: "claude-code",
     model: "claude-opus-5-5",
     reasoningLevel: "xhigh",
+    tokensPerRun: 440_000,
     prompt: `Supply-chain security sweep. ${READ_ONLY}
 Find every lockfile in this repo (package-lock.json, pnpm-lock.yaml, yarn.lock, bun.lock, Cargo.lock, go.sum, poetry.lock, uv.lock, and so on). Check the exact locked versions against recent advisories: the OSV database (https://api.osv.dev), GitHub advisories, and news of malicious or hijacked releases from the last few days. Report only advisories that hit a version this repo actually locks, with the fixed version.${REPORT}`,
   },
@@ -88,6 +93,7 @@ Find every lockfile in this repo (package-lock.json, pnpm-lock.yaml, yarn.lock, 
     providerId: "codex",
     model: "gpt-6.1-sol",
     reasoningLevel: "xhigh",
+    tokensPerRun: 430_000,
     prompt: `Dep watch. ${READ_ONLY}
 List the runtimes and frameworks this repo runs on, with their versions (for example Node, Python, PHP, Go, Next.js, and the base images in Dockerfiles). Search for security fixes released in the last 24 hours that affect those versions. Report only critical or high fixes we are missing, with the version to update to.${REPORT}`,
   },
@@ -103,6 +109,7 @@ List the runtimes and frameworks this repo runs on, with their versions (for exa
     providerId: "claude-code",
     model: "claude-opus-5-5",
     reasoningLevel: "max",
+    tokensPerRun: 2_100_000,
     prompt: `Web security test of this project's own live website. Find its production URL in the README, config, or deploy files; if there is none, say so and archive this thread.
 Test it from outside like a careful attacker: auth and session handling, access to other users' data, exposed admin or debug routes, open redirects, missing security headers, and leaked keys in the shipped JavaScript. Stay gentle: no load testing, no destructive requests, no real user data changes. Do not edit code.${REPORT}`,
   },
@@ -166,6 +173,7 @@ Either way, your Loop note names the parser, how many inputs ran, and the result
     providerId: "codex",
     model: "gpt-6.1-sol",
     reasoningLevel: "max",
+    tokensPerRun: 420_000,
     prompt: `Simplify sweep. Investigate only: do not edit code.
 ${rotate("Simplify sweep")}
 In that area, find dead code, duplication, needless abstractions, and code that is far more complex than its job. Report only changes that clearly make the code smaller or simpler without changing behavior.${REPORT}`,
@@ -198,6 +206,7 @@ Find the single most important missing test in that area: code where a silent br
     providerId: "claude-code",
     model: "claude-opus-5-5",
     reasoningLevel: "xhigh",
+    tokensPerRun: 2_600_000,
     prompt: `Dependency diet. Investigate only: do not edit code.
 List this repo's direct dependencies, biggest and least used first. Pick the one that is easiest to drop: a language built-in, the platform, or a few lines of our own code could replace it safely. Check every place it is used.${REPORT}`,
   },
@@ -213,6 +222,7 @@ List this repo's direct dependencies, biggest and least used first. Pick the one
     providerId: "codex",
     model: "gpt-6.1-sol",
     reasoningLevel: "max",
+    tokensPerRun: 980_000,
     prompt: `Side effects review. ${READ_ONLY}
 Fetch the default branch and review the commits that landed in the last 4 hours (\`git fetch\`, then \`git log --since="4 hours ago"\` on the remote default branch). If nothing landed, archive this thread.
 Hunt the unintended side effects of those changes: security holes, usage or billing bypasses, data loss, broken older clients, and edge cases the author missed. Confirm each one in the code.${REPORT}`,
@@ -243,6 +253,7 @@ List issues and pull requests opened or updated in the last 4 hours. For each, g
     providerId: "claude-code",
     model: "claude-opus-5-5",
     reasoningLevel: "xhigh",
+    tokensPerRun: 400_000,
     prompt: `Payments review. ${READ_ONLY}
 Find this repo's billing and plan code (checkout, webhooks, subscriptions, plan limits). If there is none, archive this thread. Look for ways to get paid features or usage for free, double charges, missed webhook events, refunds or cancellations that leave access on, and plan limits that are not enforced on the server.${REPORT}`,
   },
@@ -303,6 +314,7 @@ Then write a short list of what you archived and why, and archive this thread wi
     providerId: "claude-code",
     model: "claude-opus-5-5",
     reasoningLevel: "xhigh",
+    tokensPerRun: 220_000,
     prompt: `Tweet scout. Read this repo's README to learn what the project does and who it is for. Do not touch code or git.
 Find the 3 best tweets on X from the last 48 hours for the user to reply to: big or rising accounts in this niche, real questions or pain this project solves, and threads where a founder's reply would add value. Never post, like, or reply. Give each tweet's link and one line on why it is worth replying to; do not draft the reply.
 Leave this thread open for the user.`,

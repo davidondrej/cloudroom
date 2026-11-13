@@ -1,4 +1,4 @@
-import type { BbDesktopBrowserApi } from "@cloudroom/desktop-contract";
+import type { RoomDesktopBrowserApi } from "@cloudroom/desktop-contract";
 
 export interface BrowserViewVisibilityCoordinator {
   show(
@@ -23,24 +23,24 @@ interface RegisterBrowserViewArgs {
 }
 
 interface DestroyPersistedBrowserViewArgs {
-  desktopBrowser: BbDesktopBrowserApi;
+  desktopBrowser: RoomDesktopBrowserApi;
   tabId: string;
 }
 
 interface DestroyPersistedBrowserViewsForThreadArgs {
-  desktopBrowser: BbDesktopBrowserApi | null;
+  desktopBrowser: RoomDesktopBrowserApi | null;
   threadId: string;
 }
 
 interface DestroyPersistedBrowserViewsForEnvironmentArgs {
-  desktopBrowser: BbDesktopBrowserApi | null;
+  desktopBrowser: RoomDesktopBrowserApi | null;
   environmentId: string;
 }
 
 const browserViewRecords = new Map<string, BrowserViewRecord>();
 
 export function createBrowserViewVisibilityCoordinator(
-  desktopBrowser: BbDesktopBrowserApi,
+  desktopBrowser: RoomDesktopBrowserApi,
 ): BrowserViewVisibilityCoordinator {
   let visibleTabId: string | null = null;
   return {

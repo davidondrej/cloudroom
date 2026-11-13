@@ -111,7 +111,7 @@ import { getBrowserUrlHost } from "@/lib/browser-url";
 import {
   getDesktopBrowserApi,
   isDesktopBrowserAvailable,
-} from "@/lib/bb-desktop";
+} from "@/lib/room-desktop";
 import {
   useFixedPanelTabsState,
   useFixedPanelTabsStorageMaintenance,

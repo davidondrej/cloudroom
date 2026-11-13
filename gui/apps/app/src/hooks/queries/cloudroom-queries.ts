@@ -37,7 +37,8 @@ export const cloudroomStatusSchema = z.object({
   cloudQueue: z.object({ position: z.number(), total: z.number(), regionBlocked: z.boolean() }).nullable().default(null),
   usedCloud: z.boolean().default(true),
   lastCloudAt: z.number().nullable().optional(),
-  lastNewCloudAt: z.number().nullable().optional(),
+  /** Threads the user started in the last 30 days, by where they run (ADR 20261111-222458). */
+  recentThreads: z.object({ local: z.number(), cloud: z.number() }).optional(),
   harnesses: z.array(z.object({
     id: z.string(),
     provider: z.string().nullable().optional(),
@@ -302,7 +303,7 @@ export function useSetCopyLogins() {
   });
 }
 
-export function useImportBb() {
+export function useImportRoom() {
   const client = useQueryClient();
   return useMutation({
     mutationFn: (hostId: string) => sdk.cloudroom.importBb(hostId),

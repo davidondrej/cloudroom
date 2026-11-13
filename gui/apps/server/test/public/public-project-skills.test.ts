@@ -948,6 +948,7 @@ describe("public project skills route", () => {
       expect(await readJson(response)).toEqual({ ok: true, filePath });
       expect(installServerRegistrySkillMock).toHaveBeenCalledWith({
         dataDir: harness.deps.config.dataDir,
+        userSkillsRootPath: harness.deps.config.userSkillsRootPath,
         packageRef: "vercel-labs/skills",
         registrySkillId: "github.com/vercel-labs/skills/find-skills",
         skillId: "find-skills",
@@ -1074,7 +1075,7 @@ describe("public project skills route", () => {
         projectId: project.id,
         path: "/tmp/skills-env",
       });
-      const bbSkill = discovered(
+      const roomSkill = discovered(
         "bb-helper",
         "bb-data-dir",
         "/data/skills/bb-helper/SKILL.md",
@@ -1084,7 +1085,7 @@ describe("public project skills route", () => {
         sessionId: session.id,
         skillsByProvider: {
           "claude-code": [
-            bbSkill,
+            roomSkill,
             discovered(
               "cp",
               "provider-project",
@@ -1097,7 +1098,7 @@ describe("public project skills route", () => {
             ),
           ],
           codex: [
-            bbSkill,
+            roomSkill,
             discovered(
               "cx",
               "provider-user",
@@ -1672,21 +1673,21 @@ describe("public project skills route", () => {
         hostId: host.id,
         path: "/tmp/stale-skill-edit-project",
       });
-      const bbPath = "/data/skills/review/SKILL.md";
+      const roomPath = "/data/skills/review/SKILL.md";
       const providerPath = "/home/.claude/skills/review/SKILL.md";
       const stub = registerSkillRpc(harness, {
         hostId: host.id,
         sessionId: session.id,
         skillsByProvider: {
           "claude-code": [
-            discovered("review", "bb-data-dir", bbPath),
+            discovered("review", "bb-data-dir", roomPath),
             discovered("review", "provider-user", providerPath),
           ],
         },
         writeConflicts: true,
       });
 
-      for (const id of [skillId(bbPath), skillId(providerPath)]) {
+      for (const id of [skillId(roomPath), skillId(providerPath)]) {
         const response = await harness.app.request(
           `/api/v1/projects/${project.id}/skills/content`,
           {

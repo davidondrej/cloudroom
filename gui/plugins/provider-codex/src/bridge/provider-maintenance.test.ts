@@ -163,6 +163,36 @@ describe("Codex provider maintenance", () => {
         "Codex install is not available on this host: Codex 1.0.0 is installed. Run update instead.",
     });
   });
+
+  it("runs Windows' install.ps1 so the user Path keeps its REG_EXPAND_SZ kind", () => {
+    const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
+    Object.defineProperty(process, "platform", { ...platform, value: "win32" });
+    try {
+      const run = __testing.buildProviderInstallationRun(
+        installationStatus(),
+        "update",
+      );
+      const fallback = run.available ? run.fallback : undefined;
+      expect(fallback).toMatchObject({
+        command: "powershell.exe",
+        displayCommand:
+          "$env:CODEX_NON_INTERACTIVE='1'; irm https://chatgpt.com/codex/install.ps1 | iex",
+      });
+      const script = fallback?.args.at(-1) ?? "";
+      // Raw Path and its kind before, written back with that kind after.
+      expect(script).toContain(
+        "$p = $k.GetValue('Path', $null, 'DoNotExpandEnvironmentNames')",
+      );
+      expect(script).toContain("$k.SetValue('Path', $p, $t)");
+      expect(script).toContain(
+        "-Command '$env:CODEX_NON_INTERACTIVE=''1''; irm https://chatgpt.com/codex/install.ps1 | iex'",
+      );
+      // Windows command lines escape double quotes in ways PowerShell misreads.
+      expect(script).not.toContain('"');
+    } finally {
+      Object.defineProperty(process, "platform", platform);
+    }
+  });
 });
 
 describe("Codex credential health and usage", () => {

@@ -146,7 +146,7 @@ function unwrapTask(result: TaskMutationResult): Task {
 }
 
 async function resolveClientHostId(
-  bb: BbPluginApi,
+  room: BbPluginApi,
   domain: TasksDomain,
   args: ParsedArgs,
   ctx: PluginCliContext,
@@ -154,9 +154,9 @@ async function resolveClientHostId(
   const machine = option(args, "machine");
   if (machine !== undefined) return resolveMachineId(domain, machine);
   if (!ctx.threadId) return undefined;
-  const thread = await bb.sdk.threads.get({ threadId: ctx.threadId });
+  const thread = await room.sdk.threads.get({ threadId: ctx.threadId });
   if (!thread.environmentId) return undefined;
-  const environment = await bb.sdk.environments.get({
+  const environment = await room.sdk.environments.get({
     environmentId: thread.environmentId,
   });
   return environment.hostId;
@@ -168,11 +168,11 @@ function isMissingClientFileError(error: unknown): boolean {
 }
 
 async function readClientFile(
-  bb: BbPluginApi,
+  room: BbPluginApi,
   hostId: string | undefined,
   path: string,
 ): Promise<{ bytes: Buffer; text: string | null }> {
-  const file = await bb.sdk.files.read({
+  const file = await room.sdk.files.read({
     ...(hostId ? { hostId } : {}),
     path,
   });
@@ -186,12 +186,12 @@ async function readClientFile(
 }
 
 async function readAttachmentSource(
-  bb: BbPluginApi,
+  room: BbPluginApi,
   hostId: string | undefined,
   path: string,
 ): Promise<Buffer> {
   try {
-    return (await readClientFile(bb, hostId, path)).bytes;
+    return (await readClientFile(room, hostId, path)).bytes;
   } catch (error) {
     if (isMissingClientFileError(error)) {
       throw new CliError(`attachment source is not a file: ${path}`);
@@ -201,12 +201,12 @@ async function readAttachmentSource(
 }
 
 async function writeClientFile(
-  bb: BbPluginApi,
+  room: BbPluginApi,
   hostId: string | undefined,
   path: string,
   content: Buffer,
 ): Promise<void> {
-  await bb.sdk.files.write({
+  await room.sdk.files.write({
     ...(hostId ? { hostId } : {}),
     path,
     content: content.toString("base64"),
@@ -220,7 +220,7 @@ function attachmentFileName(path: string): string {
 }
 
 async function readFileOption(
-  bb: BbPluginApi,
+  room: BbPluginApi,
   args: ParsedArgs,
   ctx: PluginCliContext,
   hostId: string | undefined,
@@ -235,7 +235,7 @@ async function readFileOption(
   if (file === undefined) return inline;
   const path = resolve(ctx.cwd ?? process.cwd(), file);
   try {
-    const { text } = await readClientFile(bb, hostId, path);
+    const { text } = await readClientFile(room, hostId, path);
     if (text === null) {
       throw new CliError(`could not read ${file}: file is not UTF-8 text`);
     }
@@ -572,7 +572,7 @@ function taskAuthor(ctx: PluginCliContext): string {
 }
 
 async function runProject(
-  bb: BbPluginApi,
+  room: BbPluginApi,
   store: TasksApiStore,
   domain: TasksDomain,
   argv: string[],
@@ -663,7 +663,7 @@ async function runProject(
     );
     const project = await resolveProject(domain, address!);
     const folderAddress = option(args, "folder");
-    const linkedBbProjectId = option(args, "link-bb-project");
+    const linkedRoomProjectId = option(args, "link-bb-project");
     validateSingleFlagChoice(
       folderAddress,
       args.flags.has("no-folder"),
@@ -671,7 +671,7 @@ async function runProject(
       "no-folder",
     );
     validateSingleFlagChoice(
-      linkedBbProjectId,
+      linkedRoomProjectId,
       args.flags.has("unlink-bb-project"),
       "link-bb-project",
       "unlink-bb-project",
@@ -685,7 +685,7 @@ async function runProject(
       folderId: args.flags.has("no-folder") ? null : folder?.id,
       linkedBbProjectId: args.flags.has("unlink-bb-project")
         ? null
-        : linkedBbProjectId,
+        : linkedRoomProjectId,
     };
     const renamePrefix = option(args, "rename-prefix");
     if (
@@ -732,7 +732,7 @@ async function runProject(
         linkedBbProjectId: updateInput?.linkedBbProjectId,
       }),
     );
-    publishProjectsChanged(bb, updated.id);
+    publishProjectsChanged(room, updated.id);
     return args.flags.has("json")
       ? JSON.stringify({ project: updated })
       : `Updated project ${updated.prefix}  ${updated.name}`;
@@ -742,7 +742,7 @@ async function runProject(
 }
 
 async function runFolder(
-  bb: BbPluginApi,
+  room: BbPluginApi,
   store: TasksApiStore,
   domain: TasksDomain,
   argv: string[],
@@ -846,7 +846,7 @@ async function runFolder(
         parentFolderId: moveInput?.parentFolderId,
       }),
     );
-    publishProjectsChanged(bb, null);
+    publishProjectsChanged(room, null);
     return args.flags.has("json")
       ? JSON.stringify({ folder: updated })
       : `Updated folder ${updated.name}  ${updated.id}`;
@@ -892,7 +892,7 @@ async function runFolder(
 }
 
 async function runCreate(
-  bb: BbPluginApi,
+  room: BbPluginApi,
   store: TasksApiStore,
   domain: TasksDomain,
   ctx: PluginCliContext,
@@ -922,13 +922,13 @@ async function runCreate(
     throw new CliError("--machine requires --attach or --description-file");
   }
   const clientHostId = usesClientFiles
-    ? await resolveClientHostId(bb, domain, args, ctx)
+    ? await resolveClientHostId(room, domain, args, ctx)
     : undefined;
   const attachSources: Array<{ path: string; bytes: Buffer }> = [];
   for (const path of attachPaths) {
     attachSources.push({
       path,
-      bytes: await readAttachmentSource(bb, clientHostId, path),
+      bytes: await readAttachmentSource(room, clientHostId, path),
     });
   }
   const project = await selectedProject(
@@ -951,7 +951,7 @@ async function runCreate(
     title: requireOption(args, "title"),
     description:
       (await readFileOption(
-        bb,
+        room,
         args,
         ctx,
         clientHostId,
@@ -978,7 +978,7 @@ async function runCreate(
           fileName: attachmentFileName(source.path),
         },
       );
-      publishAttachmentChanged(bb, store.tasks, attachment);
+      publishAttachmentChanged(room, store.tasks, attachment);
       attachments.push(attachment);
     } catch (error) {
       failedAttachments.push({
@@ -1250,7 +1250,7 @@ async function runShow(domain: TasksDomain, argv: string[]): Promise<string> {
 }
 
 async function runUpdate(
-  bb: BbPluginApi,
+  room: BbPluginApi,
   domain: TasksDomain,
   ctx: PluginCliContext,
   argv: string[],
@@ -1296,10 +1296,10 @@ async function runUpdate(
   }
   const clientHostId =
     option(args, "description-file") !== undefined
-      ? await resolveClientHostId(bb, domain, args, ctx)
+      ? await resolveClientHostId(room, domain, args, ctx)
       : undefined;
   const description = await readFileOption(
-    bb,
+    room,
     args,
     ctx,
     clientHostId,
@@ -1355,7 +1355,7 @@ async function runUpdate(
 }
 
 async function runComment(
-  bb: BbPluginApi,
+  room: BbPluginApi,
   store: TasksApiStore,
   domain: TasksDomain,
   ctx: PluginCliContext,
@@ -1374,10 +1374,10 @@ async function runComment(
   }
   const clientHostId =
     option(args, "body-file") !== undefined
-      ? await resolveClientHostId(bb, domain, args, ctx)
+      ? await resolveClientHostId(room, domain, args, ctx)
       : undefined;
   const body = await readFileOption(
-    bb,
+    room,
     args,
     ctx,
     clientHostId,
@@ -1387,7 +1387,7 @@ async function runComment(
   if (body === undefined)
     throw new CliError("missing required --body or --body-file");
   if (!body.trim()) throw new CliError("comment body must not be blank");
-  const comment = await createComment(bb, store, {
+  const comment = await createComment(room, store, {
     taskId: task.id,
     kind: ctx.threadId ? "agent" : "user",
     authorName: option(args, "author") ?? taskAuthor(ctx),
@@ -1478,7 +1478,7 @@ async function runLabel(domain: TasksDomain, argv: string[]): Promise<string> {
 }
 
 async function runAttachment(
-  bb: BbPluginApi,
+  room: BbPluginApi,
   store: TasksApiStore,
   domain: TasksDomain,
   ctx: PluginCliContext,
@@ -1508,13 +1508,13 @@ async function runAttachment(
     const owner = comment
       ? { commentId: comment.id }
       : { taskId: (await resolveTask(domain, ownerAddress!)).id };
-    const clientHostId = await resolveClientHostId(bb, domain, args, ctx);
-    const bytes = await readAttachmentSource(bb, clientHostId, sourcePath);
+    const clientHostId = await resolveClientHostId(room, domain, args, ctx);
+    const bytes = await readAttachmentSource(room, clientHostId, sourcePath);
     const attachment = await saveAttachmentFromBytes(store.tasks, bytes, {
       ...owner,
       fileName: option(args, "name") ?? attachmentFileName(sourcePath),
     });
-    publishAttachmentChanged(bb, store.tasks, attachment);
+    publishAttachmentChanged(room, store.tasks, attachment);
     const payload = {
       attachment,
       url: attachmentDownloadUrl(attachment.id),
@@ -1533,12 +1533,12 @@ async function runAttachment(
     );
     const outOption = requireOption(args, "out");
     const outPath = resolve(ctx.cwd ?? process.cwd(), outOption);
-    const clientHostId = await resolveClientHostId(bb, domain, args, ctx);
+    const clientHostId = await resolveClientHostId(room, domain, args, ctx);
     const { attachment, content } = await readAttachmentContent(
       store.tasks,
       attachmentId!,
     );
-    await writeClientFile(bb, clientHostId, outPath, content);
+    await writeClientFile(room, clientHostId, outPath, content);
     return args.flags.has("json")
       ? JSON.stringify({ attachment, out: outPath })
       : `Saved ${attachment.fileName}  ${outPath}`;
@@ -1796,7 +1796,7 @@ async function runPreset(domain: TasksDomain, argv: string[]): Promise<string> {
 }
 
 async function runDispatch(
-  bb: BbPluginApi,
+  room: BbPluginApi,
   store: TasksApiStore,
   domain: TasksDomain,
   argv: string[],
@@ -1811,7 +1811,7 @@ async function runDispatch(
     requireOption(args, "preset"),
   );
   const result = delegationRpcContract.delegate.output.parse(
-    await delegationHandlers(bb, store).delegate(
+    await delegationHandlers(room, store).delegate(
       delegationRpcContract.delegate.input.parse({
         taskId: task.id,
         presetId: preset.id,
@@ -1837,7 +1837,7 @@ function resolveInvokingThreadId(
 }
 
 async function runAttach(
-  bb: BbPluginApi,
+  room: BbPluginApi,
   store: TasksApiStore,
   domain: TasksDomain,
   ctx: PluginCliContext,
@@ -1850,7 +1850,7 @@ async function runAttach(
   const task = await resolveTask(domain, address!);
   const threadId = resolveInvokingThreadId(args, ctx);
   const result = delegationRpcContract.taskThreadsAttach.output.parse(
-    await delegationHandlers(bb, store).taskThreadsAttach(
+    await delegationHandlers(room, store).taskThreadsAttach(
       delegationRpcContract.taskThreadsAttach.input.parse({
         taskId: task.id,
         threadId,
@@ -1863,7 +1863,7 @@ async function runAttach(
 }
 
 async function runDetach(
-  bb: BbPluginApi,
+  room: BbPluginApi,
   store: TasksApiStore,
   domain: TasksDomain,
   ctx: PluginCliContext,
@@ -1876,7 +1876,7 @@ async function runDetach(
   const task = await resolveTask(domain, address!);
   const threadId = resolveInvokingThreadId(args, ctx);
   const result = delegationRpcContract.taskThreadsDetach.output.parse(
-    await delegationHandlers(bb, store).taskThreadsDetach(
+    await delegationHandlers(room, store).taskThreadsDetach(
       delegationRpcContract.taskThreadsDetach.input.parse({
         taskId: task.id,
         threadId,
@@ -1936,12 +1936,12 @@ function friendlyError(error: unknown): string {
 }
 
 export function registerTasksCli(
-  bb: BbPluginApi,
+  room: BbPluginApi,
   store: TasksApiStore,
   status: PluginStatus,
 ): void {
-  const domain = registerHandlers(bb, store);
-  bb.cli.register({
+  const domain = registerHandlers(room, store);
+  room.cli.register({
     name: "tasks",
     summary:
       "Create and manage task-tracker projects, tasks, labels, and comments",
@@ -2045,13 +2045,13 @@ export function registerTasksCli(
             break;
           }
           case "project":
-            stdout = await runProject(bb, store, domain, rest);
+            stdout = await runProject(room, store, domain, rest);
             break;
           case "folder":
-            stdout = await runFolder(bb, store, domain, rest);
+            stdout = await runFolder(room, store, domain, rest);
             break;
           case "create": {
-            const result = await runCreate(bb, store, domain, ctx, rest);
+            const result = await runCreate(room, store, domain, ctx, rest);
             if (typeof result !== "string") return result;
             stdout = result;
             break;
@@ -2063,29 +2063,29 @@ export function registerTasksCli(
             stdout = await runShow(domain, rest);
             break;
           case "update":
-            stdout = await runUpdate(bb, domain, ctx, rest);
+            stdout = await runUpdate(room, domain, ctx, rest);
             break;
           case "comment":
-            stdout = await runComment(bb, store, domain, ctx, rest);
+            stdout = await runComment(room, store, domain, ctx, rest);
             break;
           case "label":
             stdout = await runLabel(domain, rest);
             break;
           case "attachment":
-            stdout = await runAttachment(bb, store, domain, ctx, rest);
+            stdout = await runAttachment(room, store, domain, ctx, rest);
             break;
           case "preset":
             stdout = await runPreset(domain, rest);
             break;
           case "dispatch":
           case "delegate":
-            stdout = await runDispatch(bb, store, domain, rest);
+            stdout = await runDispatch(room, store, domain, rest);
             break;
           case "attach":
-            stdout = await runAttach(bb, store, domain, ctx, rest);
+            stdout = await runAttach(room, store, domain, ctx, rest);
             break;
           case "detach":
-            stdout = await runDetach(bb, store, domain, ctx, rest);
+            stdout = await runDetach(room, store, domain, ctx, rest);
             break;
           case "threads":
             stdout = await runThreads(domain, rest);

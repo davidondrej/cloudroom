@@ -413,14 +413,32 @@ export function registerThreadBaseRoutes(app: Hono, deps: AppDeps): void {
       });
     }
 
-    // Another harness, or any model change in Cloud (Core fixes a session's model), moves the thread in place (ADR 0211).
+    // Another harness, or a Cloud model change its Core can't make in the session, moves the thread in place (ADR 0211).
+    // Cloud Claude changes models in the same session, as Local does: the pick is saved now and rides the next prompt.
     const switchTo = payload.providerId ?? thread.providerId;
     let resend: HarnessSwitchResend | null = null;
-    if (
+    const model = typeof payload.model === "string" ? payload.model : null;
+    const cloudModel =
+      model !== null &&
+      switchTo === thread.providerId &&
+      isCloudThread(thread) &&
+      model !== binding(deps.db, thread.id)?.model;
+    const inSession =
+      model !== null &&
+      cloudModel &&
+      payload.resend !== true &&
+      (await cloudroom(deps).changeModel(
+        thread,
+        model,
+        payload.reasoningLevel ?? null,
+      ));
+    if (inSession) {
+      deps.hub.notifyThread(thread.id, ["execution-options-changed"], {
+        projectId: thread.projectId,
+      });
+    } else if (
       typeof payload.model === "string" &&
-      (switchTo !== thread.providerId ||
-        (isCloudThread(thread) &&
-          payload.model !== binding(deps.db, thread.id)?.model))
+      (switchTo !== thread.providerId || cloudModel)
     ) {
       resend = await switchThreadHarness(
         deps,

@@ -241,7 +241,7 @@ describe("user message parsing", () => {
 
   it("populates initiator, senderThreadId, and turnRequest for agent-initiated messages", () => {
     const factory = createTimelineEventFactory({ threadId: "thread-1" });
-    const agentText = "[bb message from thread:thr_sender]\n\nHi";
+    const agentText = "[message from thread:thr_sender]\n\nHi";
     const row = factory.clientTurnRequested({
       initiator: "agent",
       senderThreadId: SENDER_THREAD_ID,

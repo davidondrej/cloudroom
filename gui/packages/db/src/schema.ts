@@ -629,6 +629,12 @@ export const threads = sqliteTable(
       table.id,
     ),
     index("threads_archived_status_idx").on(table.archivedAt, table.status),
+    // Connection status reads the latest cloud thread times on every poll; without this it scans every thread.
+    index("threads_execution_target_updated_idx").on(
+      table.executionTarget,
+      table.updatedAt,
+      table.createdAt,
+    ),
     index("threads_environment_archived_deleted_idx").on(
       table.environmentId,
       table.archivedAt,
@@ -662,7 +668,7 @@ export const cloudroomThreads = sqliteTable("cloudroom_threads", {
 export const cloudroomCommands = sqliteTable("cloudroom_commands", {
   id: text("id").primaryKey(),
   threadId: text("thread_id").notNull().references(() => cloudroomThreads.threadId, { onDelete: "cascade" }),
-  command: text("command", { enum: ["prompt", "stop", "resume", "sleep", "edit", "cancel", "reorder", "steer", "compact", "goal", "rewind", "attach", "title", "teleport", "side_chat"] }).notNull(),
+  command: text("command", { enum: ["prompt", "stop", "resume", "sleep", "edit", "cancel", "reorder", "steer", "compact", "goal", "rewind", "attach", "title", "teleport", "side_chat", "model"] }).notNull(),
   input: text("input").notNull(),
   state: text("state").notNull().default("sending"),
   createdAt: integer("created_at").notNull(),

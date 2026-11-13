@@ -2,7 +2,7 @@ import { Command } from "commander";
 import type { AvailableModel } from "@cloudroom/domain";
 import type { SystemProviderInfo } from "@cloudroom/server-contract";
 import { action } from "../action.js";
-import { createCliBbSdk } from "../client.js";
+import { createCliRoomSdk } from "../client.js";
 import { columnWidths, printBorderlessTable } from "../table.js";
 import { outputJson } from "./helpers.js";
 import { resolveMachineEnvironmentRouting } from "./machine.js";
@@ -58,7 +58,7 @@ export function registerProviderCommands(
     .action(
       action(async (opts: ProviderListCommandOptions) => {
         const serverUrl = getUrl();
-        const sdk = createCliBbSdk(serverUrl);
+        const sdk = createCliRoomSdk(serverUrl);
         const routing = await resolveMachineEnvironmentRouting(opts, serverUrl);
         const providers = opts.installable
           ? await sdk.providers.installable(routing)
@@ -94,7 +94,7 @@ export function registerProviderCommands(
           opts: ProviderModelsCommandOptions,
         ) => {
           const serverUrl = getUrl();
-          const sdk = createCliBbSdk(serverUrl);
+          const sdk = createCliRoomSdk(serverUrl);
           if (opts.restart && !providerId)
             throw new Error("--restart requires a provider ID");
           const routing = await resolveMachineEnvironmentRouting(
@@ -183,7 +183,7 @@ export function registerProviderCommands(
     .description("Show a removed agent again and let its login copy again")
     .action(
       action(async (providerId: string) => {
-        await createCliBbSdk(getUrl()).cloudroom.restoreAgent(providerId);
+        await createCliRoomSdk(getUrl()).cloudroom.restoreAgent(providerId);
         console.log(`${providerId} restored`);
       }),
     );
@@ -194,7 +194,7 @@ async function disconnectAgent(
   providerId: string,
   remove: boolean,
 ): Promise<void> {
-  await createCliBbSdk(serverUrl).cloudroom.disconnectAgent(providerId, { remove });
+  await createCliRoomSdk(serverUrl).cloudroom.disconnectAgent(providerId, { remove });
 }
 
 function includeSelectedOnlyModel(

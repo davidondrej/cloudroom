@@ -32,6 +32,7 @@ import {
   environmentHasLiveThreads,
   environmentHasRestorableThreads,
   environments,
+  findEnvironmentSharingPath,
   getEnvironment,
   getThread,
   findProjectEnvironmentByHostPath,
@@ -623,6 +624,9 @@ export async function cancelProviderEnvironmentCreation(
 
 const WORK_RECHECK_MS = 60 * 60_000;
 const explicitRemovals = new Set<string>();
+// A removal refused because another environment uses the folder waits for
+// its recheck, even when asked again (#1284). Project deletion asks every 10 s.
+const deferredRemovals = new Map<string, number>();
 
 export function requestEnvironmentRemoval(
   deps: Deps,
@@ -632,6 +636,8 @@ export function requestEnvironmentRemoval(
   const row = getEnvironment(deps.db, environmentId);
   if (row === null || environmentHasLiveThreads(deps.db, environmentId))
     return false;
+  if ((deferredRemovals.get(environmentId) ?? 0) > Date.now()) return true;
+  deferredRemovals.delete(environmentId);
   if (explicit) explicitRemovals.add(environmentId);
   if (row.ownerThreadId !== null && row.teardownStatus === null) {
     const owner = getThread(deps.db, row.ownerThreadId);
@@ -707,10 +713,28 @@ async function runRemove(
       teardownMessage: null,
       retireAt,
     });
-  const inUse = () =>
-    automatic && environmentHasLiveThreads(deps.db, environmentId);
+  // Last guards, before the hook and again before the folder goes (#1284):
+  // never remove a folder a live thread or another environment still uses.
+  const refused = () => {
+    const live = environmentHasLiveThreads(deps.db, environmentId);
+    const other =
+      live || !row.providerOwnsPath || row.path === null
+        ? null
+        : findEnvironmentSharingPath(deps.db, { ...row, path: row.path });
+    const reason = live
+      ? "A live thread uses it"
+      : other && `Environment ${other.id} uses the same folder`;
+    if (reason === null) return false;
+    deps.logger.warn({ environmentId, reason }, "Environment removal refused");
+    explicitRemovals.delete(environmentId);
+    const recheckAt = live ? null : Date.now() + WORK_RECHECK_MS;
+    if (recheckAt !== null) deferredRemovals.set(environmentId, recheckAt);
+    keep(recheckAt);
+    return true;
+  };
   await withHostCleanup(deps, row.hostId, async () => {
     try {
+      if (refused()) return;
       if (row.providerOwnsPath && row.hostId !== null && row.path !== null) {
         await runEnvironmentHook(deps, {
           id: `environment:${environmentId}:${row.environmentProviderInstanceKey}:teardown`,
@@ -742,10 +766,7 @@ async function runRemove(
         // Recorded before the folder goes: a retry can't save it again.
         writeEnvironment(deps, environmentId, { branchName });
       }
-      if (inUse()) {
-        keep(null);
-        return;
-      }
+      if (refused()) return;
       const invocation = await invokeEnvironmentProvider(
         record,
         "environment remove",
@@ -767,6 +788,10 @@ async function runRemove(
         throw new Error("The environment provider became unavailable.");
       const result = removeResultSchema.parse(invocation.value);
       if (result.status === "failed") {
+        deps.logger.warn(
+          { environmentId, reason: result.message },
+          "Environment removal failed",
+        );
         writeEnvironment(deps, environmentId, {
           teardownStatus: "failed",
           teardownMessage: result.message,

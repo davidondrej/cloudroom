@@ -14,8 +14,8 @@ const SKILLS = {
 const toggle = (label: string, description: string) =>
   ({ type: "boolean", label, description, default: true }) as const;
 
-export default async function plugin(bb: BbPluginApi) {
-  const settings = bb.settings.define({
+export default async function plugin(room: BbPluginApi) {
+  const settings = room.settings.define({
     skills: toggle(
       "Enable bundled skills",
       "Make the selected Cloudroom guide skills available to agents.",
@@ -28,7 +28,7 @@ export default async function plugin(bb: BbPluginApi) {
   settings.onChange((next) => {
     on = next;
   });
-  bb.agents.configure(() => ({
+  room.agents.configure(() => ({
     tools: [],
     skills: (["roomCli", "pluginAuthoring", "skillCreator"] as const)
       .filter((key) => on.skills && on[key])

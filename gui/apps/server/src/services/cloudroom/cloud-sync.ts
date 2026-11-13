@@ -16,7 +16,7 @@ import { ELSEWHERE, type CloudThreadStates } from "./cloud-threads.js";
 import { isCloudProvider } from "./events.js";
 import { githubRepository } from "./project-copy.js";
 import { SANDBOX_PREFIX, type SandboxDirectory, type ThreadChange } from "./sandboxes.js";
-import { binding, bindings, coreInUse, saveBinding } from "./store.js";
+import { binding, bindings, commands, coreInUse, saveBinding } from "./store.js";
 
 /** What the sync needs from the Cloud service (commands.ts). */
 export interface SyncHost {
@@ -66,6 +66,8 @@ const syncSchema = z.object({
 type SyncState = z.infer<typeof syncSchema>;
 
 const PAUSE_MS = 5_000, FRESH_MS = 10 * 60_000, DEFERRED_MAX = 2_000, LABEL_MS = 3_600_000, RETRY_MS = 30_000;
+/** The week the website's awake answer names launches for (web `RUNS_WINDOW_MS`). */
+const LAUNCH_WINDOW_MS = 7 * 86_400_000;
 const repo = (url: string | null | undefined) => url?.toLowerCase().replace(/\.git$/, "").replace(/\/$/, "") ?? null;
 const asleep = (row: ThreadChange) => row.state === "open" && (row.sandbox === "asleep" || row.sandbox === "cold");
 /** Asleep or cold since, per thread, for the Thread cleanup loop (`room-cli thread list --json`). */
@@ -212,7 +214,16 @@ export class CloudSync {
     else { delete state.asleep[row.thread]; asleepSince.delete(row.thread); }
     const thread = getThread(this.deps.db, row.thread);
     if (!thread) {
-      if (row.state === "open" && !state.deleted.includes(row.thread)) this.adopt(row, state, buffer);
+      // A top-level launch (from a Cloud thread or the phone) archived before this computer saw it shows archived, from
+      // the last week (#1072). Loop runs and other archived rows stay out.
+      const late = row.state === "archived" && /^cr_(launch|phone)_/.test(row.session) && !row.loop && !row.parent && Date.now() - Date.parse(row.created_at) < LAUNCH_WINDOW_MS;
+      if ((row.state === "open" || late) && !state.deleted.includes(row.thread)) this.adopt(row, state, buffer);
+      // Then archived here only: no cascade and nothing sent, so a child that waited for it stays open, at the top level.
+      const adopted = late ? getThread(this.deps.db, row.thread) : null;
+      if (adopted) {
+        if (!state.archived.includes(adopted.id)) state.archived.push(adopted.id);
+        this.local?.archive(adopted);
+      }
       return;
     }
     const saved = binding(this.deps.db, thread.id), known = this.host.threadStates.get(thread.id);
@@ -264,7 +275,9 @@ export class CloudSync {
       this.host.threadStates.set(thread.id, { home: null, from: null, ...known, session: row.session, actFrom: null, before: [saved.sessionId, ...known?.before ?? []].filter((id): id is string => Boolean(id)).slice(0, 5) });
     }
     if (row.harness && isCloudProvider(row.harness) && row.harness !== thread.providerId) updateThread(this.deps.db, buffer, thread.id, { providerId: row.harness });
-    if (row.model && row.model !== saved.model) saveBinding(this.deps.db, thread.id, { model: row.model });
+    // A model picked here (changeModel) wins over the row until Core and the website have it; a new session always wins.
+    const pickedHere = () => unsent.includes("model") || commands(this.deps.db, thread.id).some((item) => item.command === "model" && item.state === "sending");
+    if (row.model && row.model !== saved.model && (row.session !== saved.sessionId || !pickedHere())) saveBinding(this.deps.db, thread.id, { model: row.model });
     // The agent's effort change (Core reports it): what main's record handler did, so the next prompt uses it. Only a
     // change in the row since this computer last saw it: the row is as old as its last writer, and a thread already
     // here takes nothing on first sight.
@@ -317,12 +330,19 @@ export class CloudSync {
   /** `adoptThread`, the one path a Cloud thread from elsewhere takes: idle and read, with the row's title and dates,
    *  no local commands and no title job. A child whose parent isn't here yet waits for it. */
   private adopt(row: ThreadChange, state: SyncState, buffer: NotificationBuffer): void {
-    if (!row.harness || !isCloudProvider(row.harness) || !row.model || state.deletedProjects.includes(row.project)) return;
+    // A launch (ADR 0267) this computer can't show says why, once per thread and app run (#1072).
+    const skip = (why: string) => {
+      if (!row.session.startsWith("cr_launch_") || this.skipped.has(row.thread)) return;
+      this.skipped.add(row.thread);
+      this.deps.logger?.warn({ threadId: row.thread, projectId: row.project, error: why }, "A launched Cloud thread isn't shown here");
+    };
+    if (!row.harness || !isCloudProvider(row.harness) || !row.model) return skip("it names no agent or model");
+    if (state.deletedProjects.includes(row.project)) return;
     if (this.deps.db.select().from(cloudroomThreads).where(eq(cloudroomThreads.sessionId, row.session)).get()) return;
     const parent = this.parentOf(row);
     if (parent === undefined) { this.defer(row, state); return; }
     const projectId = this.project(row, state);
-    if (!projectId) return;
+    if (!projectId) return skip("its project isn't on this computer");
     const adopted = this.deps.db.transaction((tx) => {
       if (getThread(tx, row.thread)) return null;
       const thread = createThread(tx, buffer, { id: row.thread, executionTarget: "cloud", projectId, providerId: row.harness!, ...(parent ? { parentThreadId: parent } : {}), title: row.title, titleFallback: row.loop ? "Loop run" : null, status: "idle", createdAt: Date.parse(row.created_at), latestAttentionAt: Date.parse(row.updated_at) });
@@ -332,10 +352,11 @@ export class CloudSync {
     if (!adopted) return;
     state.efforts[row.thread] = row.reasoning ?? "";
     // A thread made in the last 10 minutes is live: its records are acted on from the start, as on main. An older
-    // one's are shown only, from Core's `last_sequence` on. Who acts until a tagged prompt says (Who acts): a website
-    // child's parent's home; for a loop run or launch, each computer with its project ID (main's rule); else not here.
+    // one's, or one adopted archived (a Restore must not replay its archive), are shown only, from Core's
+    // `last_sequence` on. Who acts until a tagged prompt says (Who acts): a website child's parent's home; for a loop
+    // run or launch, each computer with its project ID (main's rule); else not here.
     const child = row.session.startsWith("cr_sub_"), byId = (row.loop || row.session.startsWith("cr_launch_")) && projectId === row.project;
-    this.host.threadStates.set(row.thread, { session: row.session, actFrom: Date.now() - Date.parse(row.created_at) < FRESH_MS ? 0 : null, home: child ? null : byId && this.tag ? this.tag : ELSEWHERE, from: child ? parent : null, adopted: true });
+    this.host.threadStates.set(row.thread, { session: row.session, actFrom: row.state === "open" && Date.now() - Date.parse(row.created_at) < FRESH_MS ? 0 : null, home: child ? null : byId && this.tag ? this.tag : ELSEWHERE, from: child ? parent : null, adopted: true });
     this.host.adopted(row.thread, row.sandbox === "awake");
     emitPluginThreadCreated(adopted);
     const waiting = state.deferred[row.thread];
@@ -357,6 +378,8 @@ export class CloudSync {
   }
 
   private readonly missed = new Set<string>();
+  /** Launches already warned about as not shown here (`adopt`). */
+  private readonly skipped = new Set<string>();
   private openChildren(threadId: string): boolean {
     return Boolean(this.deps.db.select({ id: threads.id }).from(threads).where(and(eq(threads.parentThreadId, threadId), isNull(threads.archivedAt), isNull(threads.deletedAt))).limit(1).get());
   }

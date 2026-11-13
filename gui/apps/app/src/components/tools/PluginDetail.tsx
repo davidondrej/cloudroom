@@ -269,9 +269,9 @@ export function PluginDetail({
 
   const hasUpdateManagement = pluginHasUpdateSurfaces(plugin);
   const canEditSource = pluginIsLocalSource(plugin);
-  const updatesWithBb = plugin.source.startsWith("builtin:");
+  const updatesWithRoom = plugin.source.startsWith("builtin:");
   const installedAt = sourceQuery.data?.installedAt ?? null;
-  const installedValue = updatesWithBb
+  const installedValue = updatesWithRoom
     ? "Updates with Cloudroom"
     : installedAt !== null
       ? formatAbsoluteDate(installedAt)
@@ -414,7 +414,7 @@ export function PluginDetail({
         >
           <PluginDetailTable>
             <PluginDetailFieldRow
-              label={updatesWithBb ? "Delivery" : "Installed"}
+              label={updatesWithRoom ? "Delivery" : "Installed"}
               labelClassName="font-medium"
             >
               {installedValue}

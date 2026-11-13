@@ -9,7 +9,7 @@ import {
   type MenuItemConstructorOptions,
   type Session,
 } from "electron";
-import { BB_DESKTOP_ADD_IMAGE_TO_CHAT_CHANNEL } from "./desktop-window-command-ipc.js";
+import { ROOM_DESKTOP_ADD_IMAGE_TO_CHAT_CHANNEL } from "./desktop-window-command-ipc.js";
 
 export interface DesktopContextMenuWebContents {
   on(
@@ -143,7 +143,7 @@ export function buildDesktopContextMenuTemplate({
       {
         label: "Add to Chat",
         click: () => {
-          webContents.send(BB_DESKTOP_ADD_IMAGE_TO_CHAT_CHANNEL, params.srcURL);
+          webContents.send(ROOM_DESKTOP_ADD_IMAGE_TO_CHAT_CHANNEL, params.srcURL);
         },
       },
       {

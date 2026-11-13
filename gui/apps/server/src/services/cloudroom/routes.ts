@@ -21,7 +21,7 @@ import { startClaudeVersionSync } from "./harness-versions.js";
 import { macSignedInAgents } from "./mac-agents.js";
 import { disconnectAgent, restoreAgent } from "./agent-logins.js";
 import { autoDeleteDaysSchema, readAutoDelete, saveAutoDelete, startAutoDeleteSync } from "./auto-delete.js";
-import { importBbThreads } from "./bb-import.js";
+import { importRoomThreads } from "./bb-import.js";
 import { importConductorExport, importNativeSessions, listConductorExport, listNativeSessions } from "./session-import.js";
 import { conductorAppFound } from "./session-import-more.js";
 import { exportableChats, exportChats } from "./chat-export.js";
@@ -31,6 +31,7 @@ import { CloudroomError } from "./client.js";
 import { projectLoopSettings } from "./project-loops.js";
 import { tokenUsageSince } from "./loop-usage.js";
 import { macClis } from "./clis.js";
+import { deepSearch } from "./deep-search.js";
 import { finishMcpSignIn, isRemoteMcp, startMcpSignIn } from "./mcp-login.js";
 import { archiveFromWebsite, archiveThreadAndChildren, listThreadWithDescendants } from "../threads/thread-archive.js";
 import { unarchiveThreadKeepingOpenParent } from "../threads/thread-ownership.js";
@@ -45,15 +46,16 @@ import { getGateAuthKind } from "../../request-context.js";
 import { noteActiveMinute, timeInApp } from "./time-in-app.js";
 import { starPrompt, starRepo } from "./star-prompt.js";
 import { rewriteDraft } from "../ai/draft-rewrite.js";
-import { popupState, recordChecklistHide, recordPopup } from "./popups.js";
+import { cardsLeft, popupState, recordChecklistHide, recordPopup } from "./popups.js";
 import { activation } from "./activation.js";
 import { disconnectGithub, githubAccount, githubAuth } from "./github-login.js";
 import { addGithubRepo, githubBranches, macRepoSuggestions, repoSuggestions } from "./repo-suggestions.js";
 import { projectSuggestion } from "./project-nudge.js";
 import { promptSuggestion, promptSuggestionEvent } from "../threads/prompt-suggestion.js";
 import { readUiPreferences } from "../system/ui-preferences.js";
+import { readWrapped } from "../system/wrapped.js";
 import { forgetCloudAccountSwitch, noteCloudAccountSwitch } from "./account-switches.js";
-import { ACTIVATION_STEPS, CLOUD_CHOICE_ACTIONS, CLOUD_CHOICE_REASONS, POPUP_DETAILS, POPUPS, SETUP_ACTIONS, SETUP_AGENTS, SETUP_DETAILS, SETUP_STEPS, SHARE_CLICKS, STARTER_PROMPTS, UPGRADE_PROMPTS } from "../system/telemetry.js";
+import { ACTIVATION_STEPS, CLOUD_CHOICE_ACTIONS, CLOUD_CHOICE_REASONS, POPUP_DETAILS, POPUPS, SETUP_ACTIONS, SETUP_AGENTS, SETUP_DETAILS, SETUP_STEPS, SHARE_CLICKS, STARTER_PROMPTS, UPGRADE_PROMPTS, WRAPPED_ACTIONS } from "../system/telemetry.js";
 
 const SAFE_SETTINGS_SEARCH = /^(?=.{2,40}$)\p{L}+(?: \p{L}+){0,3}$/u;
 // A Cloud loop run's request (auto_<loop>_<due>), the website's name for the run that starts its thread.
@@ -148,7 +150,7 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: Plugin
     const problem = browserRequestProblem(context, deps, { requireJsonForMutation: true });
     if (problem) return context.json({ message: "Use the local Cloudroom app or CLI." }, problem.status);
     const input = z.object({ hostId: z.string().min(1) }).strict().parse(await context.req.json());
-    return context.json(await importBbThreads(deps, input.hostId));
+    return context.json(await importRoomThreads(deps, input.hostId));
   });
   app.get("/api/v1/cloudroom/import/sessions", async context => context.json({ sessions: await listNativeSessions(deps), conductorApp: conductorAppFound() }));
   app.post("/api/v1/cloudroom/import/sessions", async context => {
@@ -212,7 +214,21 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: Plugin
     await noteActiveMinute(deps);
     return context.json({ ok: true });
   });
-  app.get("/api/v1/cloudroom/popups", async (context) => context.json(await popupState(deps)));
+  // Monthly Wrapped (docs/scopes/wrapped.md): GET works out one month's numbers, POST counts a click.
+  const wrappedMonth = z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/);
+  app.get("/api/v1/cloudroom/wrapped", async (context) => {
+    const query = z.object({ month: wrappedMonth, utcOffsetMinutes: z.coerce.number().int().min(-840).max(840) }).parse(context.req.query());
+    return context.json(await readWrapped(deps, query));
+  });
+  app.post("/api/v1/cloudroom/wrapped", async (context) => {
+    const input = z.object({ month: wrappedMonth, action: z.enum(WRAPPED_ACTIONS) }).strict().parse(await context.req.json());
+    deps.telemetry.capture({ name: "wrapped", properties: input });
+    return context.json({ ok: true });
+  });
+  app.get("/api/v1/cloudroom/popups", async (context) => {
+    const state = await popupState(deps);
+    return context.json(state && { ...state, cardsLeft: cardsLeft(state) });
+  });
   app.post("/api/v1/cloudroom/popups", async (context) => {
     const input = z.object({ popup: z.enum(POPUPS), event: z.enum(["shown", "closed"]), detail: z.enum(POPUP_DETAILS).optional() }).strict().parse(await context.req.json());
     return context.json({ ok: await recordPopup(deps, input.popup, input.event, input.detail) });
@@ -626,6 +642,10 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: Plugin
       return off;
     });
     return context.json(rank);
+  });
+  app.post("/api/v1/cloudroom/account/deep-search", async context => {
+    const { query } = z.object({ query: z.string().trim().min(1).max(500) }).strict().parse(await context.req.json());
+    return context.json({ threads: await deepSearch(deps, query, context.req.raw.signal) });
   });
   app.get("/api/v1/cloudroom/account/github-branches", async context => {
     const projectId = z.string().min(1).parse(context.req.query("project"));

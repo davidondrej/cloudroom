@@ -3,9 +3,9 @@ import { basename, join } from "node:path";
 import { z } from "zod";
 import { isProcessRunning } from "./verified-process-stop.js";
 
-const BB_APP_RUNTIME_FILE_NAME = "bb-app-runtime.json";
+const ROOM_APP_RUNTIME_FILE_NAME = "bb-app-runtime.json";
 
-const bbAppRuntimeFileSchema = z.object({
+const roomAppRuntimeFileSchema = z.object({
   entryPath: z.string().min(1),
   pid: z.number().int().positive(),
   surface: z.string().min(1),
@@ -14,9 +14,9 @@ const bbAppRuntimeFileSchema = z.object({
   version: z.string().min(1),
 });
 
-export type BbAppRuntimeFile = z.infer<typeof bbAppRuntimeFileSchema>;
+export type RoomAppRuntimeFile = z.infer<typeof roomAppRuntimeFileSchema>;
 
-interface WriteBbAppRuntimeFileArgs {
+interface WriteRoomAppRuntimeFileArgs {
   dataDir: string;
   entryPath: string;
   pid: number;
@@ -26,14 +26,14 @@ interface WriteBbAppRuntimeFileArgs {
   version: string;
 }
 
-export function formatBbAppRuntimeFilePath(dataDir: string): string {
-  return join(dataDir, BB_APP_RUNTIME_FILE_NAME);
+export function formatRoomAppRuntimeFilePath(dataDir: string): string {
+  return join(dataDir, ROOM_APP_RUNTIME_FILE_NAME);
 }
 
-export async function writeBbAppRuntimeFile(
-  args: WriteBbAppRuntimeFileArgs,
+export async function writeRoomAppRuntimeFile(
+  args: WriteRoomAppRuntimeFileArgs,
 ): Promise<void> {
-  const runtimeFile: BbAppRuntimeFile = {
+  const runtimeFile: RoomAppRuntimeFile = {
     entryPath: args.entryPath,
     pid: args.pid,
     serverUrl: args.serverUrl,
@@ -43,17 +43,17 @@ export async function writeBbAppRuntimeFile(
   };
   await mkdir(args.dataDir, { recursive: true });
   await writeFile(
-    formatBbAppRuntimeFilePath(args.dataDir),
+    formatRoomAppRuntimeFilePath(args.dataDir),
     `${JSON.stringify(runtimeFile, null, 2)}\n`,
     "utf8",
   );
 }
 
-export async function claimBbAppRuntimeFile(
-  args: WriteBbAppRuntimeFileArgs & { isRunning?: (pid: number) => boolean },
+export async function claimRoomAppRuntimeFile(
+  args: WriteRoomAppRuntimeFileArgs & { isRunning?: (pid: number) => boolean },
 ): Promise<boolean> {
   const isRunning = args.isRunning ?? isProcessRunning;
-  const existing = await readBbAppRuntimeFile(args.dataDir);
+  const existing = await readRoomAppRuntimeFile(args.dataDir);
   if (
     existing !== null &&
     existing.pid !== args.pid &&
@@ -61,42 +61,42 @@ export async function claimBbAppRuntimeFile(
   ) {
     return false;
   }
-  await writeBbAppRuntimeFile(args);
+  await writeRoomAppRuntimeFile(args);
   return true;
 }
 
-async function clearBbAppRuntimeFile(dataDir: string): Promise<void> {
-  await rm(formatBbAppRuntimeFilePath(dataDir), { force: true });
+async function clearRoomAppRuntimeFile(dataDir: string): Promise<void> {
+  await rm(formatRoomAppRuntimeFilePath(dataDir), { force: true });
 }
 
-export async function clearOwnBbAppRuntimeFile(args: {
+export async function clearOwnRoomAppRuntimeFile(args: {
   dataDir: string;
   pid: number;
 }): Promise<boolean> {
-  const runtimeFile = await readBbAppRuntimeFile(args.dataDir);
+  const runtimeFile = await readRoomAppRuntimeFile(args.dataDir);
   if (runtimeFile === null || runtimeFile.pid !== args.pid) {
     return false;
   }
-  await clearBbAppRuntimeFile(args.dataDir);
+  await clearRoomAppRuntimeFile(args.dataDir);
   return true;
 }
 
-export function bbAppRuntimeVerifyTokens(entryPath: string): string[] {
+export function roomAppRuntimeVerifyTokens(entryPath: string): string[] {
   return [entryPath, basename(entryPath)];
 }
 
-export async function readBbAppRuntimeFile(
+export async function readRoomAppRuntimeFile(
   dataDir: string,
-): Promise<BbAppRuntimeFile | null> {
+): Promise<RoomAppRuntimeFile | null> {
   let rawContents: string;
   try {
-    rawContents = await readFile(formatBbAppRuntimeFilePath(dataDir), "utf8");
+    rawContents = await readFile(formatRoomAppRuntimeFilePath(dataDir), "utf8");
   } catch {
     return null;
   }
 
   try {
-    const parsed = bbAppRuntimeFileSchema.safeParse(JSON.parse(rawContents));
+    const parsed = roomAppRuntimeFileSchema.safeParse(JSON.parse(rawContents));
     return parsed.success ? parsed.data : null;
   } catch {
     return null;

@@ -29,10 +29,10 @@ export const experimental_providerBridge = experimental_defineProviderBridge({
 it content-addressed and hands hosts `{pluginId, digest}`; the daemon
 downloads, verifies, caches and runs it — through a bootstrap that owns
 everything outside the protocol: argv, the plugin-scoped `dataDir`/`tempDir`
-above, the bounded stdin framing, and the signals. No other OS account can
-write to `tempDir`: it is in the OS temp folder only when that folder is
-private to the account (macOS, Windows), and otherwise in
-`<dataDir>/.cloudroom-tmp`, because Linux's `/tmp` is shared. A bridge that started
+above, the bounded stdin framing, and the signals. Nothing less trusted than
+Cloudroom can write to `tempDir`: it is in `<dataDir>/.cloudroom-tmp`, never
+the OS temp folder, which other accounts (Linux's `/tmp`), Read-only Mac
+commands and agent sandboxes can write. A bridge that started
 itself could not be imported by a test, and could not share an artifact with a
 host RPC entry. First-party bridges use exactly this path —
 `plugins/provider-codex/src/bridge/bridge.ts` is the largest worked example,
@@ -133,8 +133,10 @@ returns either `available: false` or a typed executable/argument plan with a
 post-run verification rule. The host daemon—not the bridge, server, or browser—
 chooses the environment and working directory, serializes installations,
 supervises the process, streams output, and asks the bridge for fresh status to
-verify success. Raw executable arguments never cross from the host daemon to a
-product client.
+verify success. On macOS and Linux each run gets a fresh `TMPDIR` in the data
+folder, so an installer that a plan downloads to `${TMPDIR:-/tmp}` can't be
+changed by Read-only Mac commands or sandboxed agents before it runs. Raw
+executable arguments never cross from the host daemon to a product client.
 
 Every capability listed there gates a request method, which is why the set
 holds no compaction fact. Compaction is triggered by a standalone builtin

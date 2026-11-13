@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createBbSdk } from "../src/core.js";
+import { createRoomSdk } from "../src/core.js";
 import { createHttpTransport } from "../src/transport-http.js";
 
 const scope = {
@@ -13,7 +13,7 @@ afterEach(() => vi.useRealTimers());
 describe("desktop browser SDK", () => {
   it("leaves default policy at the server and keeps scope explicit", async () => {
     const requests: object[] = [];
-    const sdk = createBbSdk({
+    const sdk = createRoomSdk({
       transport: createHttpTransport({
         baseUrl: "http://bb.test",
         runtime: "node",
@@ -46,7 +46,7 @@ describe("desktop browser SDK", () => {
           resolve = done;
         }),
     );
-    const sdk = createBbSdk({
+    const sdk = createRoomSdk({
       transport: createHttpTransport({
         baseUrl: "http://bb.test",
         runtime: "node",

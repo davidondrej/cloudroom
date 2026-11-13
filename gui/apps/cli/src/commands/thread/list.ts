@@ -1,7 +1,7 @@
 import { Command } from "commander";
 import { threadStatusValues } from "@cloudroom/domain";
 import { action } from "../../action.js";
-import { CLI_READ_TIMEOUT_MS, createCliBbSdk } from "../../client.js";
+import { CLI_READ_TIMEOUT_MS, createCliRoomSdk } from "../../client.js";
 import { resolveExplicitIdFlag } from "../../context-env.js";
 import { joinValues, outputJson } from "../helpers.js";
 import { parseStatus } from "./count.js";
@@ -68,7 +68,7 @@ export function registerListCommand(
     )
     .action(
       action(async (opts: ThreadListCommandOptions) => {
-        const sdk = createCliBbSdk(getUrl(), CLI_READ_TIMEOUT_MS);
+        const sdk = createCliRoomSdk(getUrl(), CLI_READ_TIMEOUT_MS);
         const projectId = resolveExplicitIdFlag({
           flagName: "--project flag",
           value: opts.project,

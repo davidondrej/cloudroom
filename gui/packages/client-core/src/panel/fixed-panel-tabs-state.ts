@@ -1,9 +1,9 @@
 import { z } from "zod";
 import {
-  BB_DESKTOP_BROWSER_MAX_TITLE_LENGTH,
-  BB_DESKTOP_BROWSER_MAX_URL_LENGTH,
-  bbDesktopBrowserTargetSchema,
-  type BbDesktopBrowserTarget,
+  ROOM_DESKTOP_BROWSER_MAX_TITLE_LENGTH,
+  ROOM_DESKTOP_BROWSER_MAX_URL_LENGTH,
+  roomDesktopBrowserTargetSchema,
+  type RoomDesktopBrowserTarget,
 } from "@cloudroom/desktop-contract";
 import {
   terminalCreateTargetSchema,
@@ -119,13 +119,13 @@ const browserFixedPanelTabSchema = z
     environmentId: z.string().min(1).nullable().default(null),
     id: z.string().min(1),
     kind: z.literal("browser"),
-    desktopTarget: bbDesktopBrowserTargetSchema.optional(),
+    desktopTarget: roomDesktopBrowserTargetSchema.optional(),
     title: z
       .string()
       .min(1)
-      .max(BB_DESKTOP_BROWSER_MAX_TITLE_LENGTH)
+      .max(ROOM_DESKTOP_BROWSER_MAX_TITLE_LENGTH)
       .nullable(),
-    url: z.string().max(BB_DESKTOP_BROWSER_MAX_URL_LENGTH),
+    url: z.string().max(ROOM_DESKTOP_BROWSER_MAX_URL_LENGTH),
   })
   .strict();
 const newTabFixedPanelTabSchema = z
@@ -259,7 +259,7 @@ export interface ThreadStorageFilePreviewFixedPanelTab {
 }
 
 export interface BrowserFixedPanelTab {
-  desktopTarget?: BbDesktopBrowserTarget;
+  desktopTarget?: RoomDesktopBrowserTarget;
   environmentId: string | null;
   id: string;
   kind: "browser";

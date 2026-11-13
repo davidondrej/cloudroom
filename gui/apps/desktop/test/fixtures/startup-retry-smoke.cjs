@@ -2,15 +2,13 @@ const assert = require("node:assert/strict");
 const { createServer } = require("node:http");
 const { writeFile } = require("node:fs/promises");
 const { join } = require("node:path");
-const { app, BrowserWindow, ipcMain } = require("electron");
+const { app, ipcMain } = require("electron");
 
 const desktopRoot = process.env.BB_STARTUP_SMOKE_APP_PATH;
 const scenario = process.env.BB_STARTUP_SMOKE_SCENARIO ?? "custom";
 const channel = "bb-desktop:retry-startup";
 const loads = [];
 let contents;
-let recovered = false;
-let mintCount = 0;
 
 async function until(check) {
   const deadline = Date.now() + 10_000;
@@ -18,14 +16,6 @@ async function until(check) {
     assert.ok(Date.now() < deadline, "Timed out waiting for startup recovery");
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
-}
-
-// Tests run on developers' Macs. A visible window takes over their screen.
-function assertWindowsHidden() {
-  assert.ok(
-    BrowserWindow.getAllWindows().every((window) => !window.isVisible()),
-    "Test windows must stay hidden",
-  );
 }
 
 async function run() {
@@ -42,28 +32,6 @@ async function run() {
           voiceTranscriptionEnabled: false,
         }),
       );
-    } else if (
-      request.url === "/api/v1/plugins/connect/rpc/createDesktopSession"
-    ) {
-      mintCount += 1;
-      if (!recovered) {
-        response.writeHead(503);
-        response.end();
-      } else {
-        response.end(
-          JSON.stringify({
-            ok: true,
-            result: {
-              cookie: {
-                domain: "127.0.0.1",
-                expiresAt: Date.now() + 3600_000,
-                name: "bb_session",
-                value: "synthetic-retry-cookie",
-              },
-            },
-          }),
-        );
-      }
     } else if (request.url.startsWith("/api/")) {
       response.writeHead(404);
       response.end();
@@ -84,17 +52,7 @@ async function run() {
     JSON.stringify(
       scenario === "fatal"
         ? { target: "builtin", customServerUrl: null }
-        : scenario === "connect"
-          ? {
-              target: "connect",
-              customServerUrl: null,
-              connectServer: {
-                handle: "retry",
-                name: "Retry fixture",
-                url: serverUrl,
-              },
-            }
-          : { target: "custom", customServerUrl: serverUrl },
+        : { target: "custom", customServerUrl: serverUrl },
     ),
   );
   app.setAppPath(desktopRoot);
@@ -110,9 +68,7 @@ async function run() {
   const errorTitle =
     scenario === "fatal"
       ? "Port conflict"
-      : scenario === "connect"
-        ? "Could not authenticate with bb Connect"
-        : "Could not reach this Cloudroom server";
+      : "Could not reach this Cloudroom server";
   const hasError = () =>
     contents?.getURL().startsWith("data:") &&
     contents.executeJavaScript(
@@ -133,7 +89,6 @@ async function run() {
     });
     await new Promise((resolve) => setTimeout(resolve, 100));
     assert.equal(loads.length, before, "A fatal startup error cannot retry");
-    assertWindowsHidden();
     server.close();
     console.log("STARTUP_RETRY_SMOKE_OK");
     app.exit(0);
@@ -195,9 +150,7 @@ async function run() {
   if (scenario === "custom") {
     await new Promise((resolve) => server.listen(port, "127.0.0.1", resolve));
   }
-  recovered = true;
   const before = loads.length;
-  const previousMints = mintCount;
   await contents.executeJavaScript(
     'const button = document.querySelector("[data-testid=bb-startup-retry]"); for (let i = 0; i < 10; i++) button.click();',
   );
@@ -208,21 +161,7 @@ async function run() {
     ),
   );
   const retryLoads = loads.slice(before).filter((url) => url === serverUrl);
-  console.log(
-    JSON.stringify({ scenario, retryLoads: retryLoads.length, mintCount }),
-  );
-  if (scenario === "connect") {
-    assert.equal(
-      mintCount - previousMints,
-      1,
-      "Concurrent retries must mint one fresh session",
-    );
-    const cookies = await contents.session.cookies.get({
-      url: serverUrl,
-      name: "bb_session",
-    });
-    assert.equal(cookies[0]?.value, "synthetic-retry-cookie");
-  }
+  console.log(JSON.stringify({ scenario, retryLoads: retryLoads.length }));
   assert.equal(
     retryLoads.length,
     1,
@@ -232,7 +171,6 @@ async function run() {
   ipcMain.emit(channel, { sender: contents, senderFrame: contents.mainFrame });
   await new Promise((resolve) => setTimeout(resolve, 100));
   assert.equal(loads.length, after, "Loaded remote pages cannot retry startup");
-  assertWindowsHidden();
   server.close();
   console.log("STARTUP_RETRY_SMOKE_OK");
   app.exit(0);

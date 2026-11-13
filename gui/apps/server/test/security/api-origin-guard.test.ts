@@ -1,5 +1,5 @@
 import http from "node:http";
-import { createNodeBbSdk } from "@cloudroom/sdk/node";
+import { createNodeRoomSdk } from "@cloudroom/sdk/node";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   startTestServer,
@@ -72,7 +72,7 @@ describe("/api/v1 browser origin guard", () => {
       }),
     ).not.toBe(415);
 
-    const sdk = createNodeBbSdk({ baseUrl: server.baseUrl });
+    const sdk = createNodeRoomSdk({ baseUrl: server.baseUrl });
     await expect(sdk.threads.list()).resolves.toBeDefined();
   });
 

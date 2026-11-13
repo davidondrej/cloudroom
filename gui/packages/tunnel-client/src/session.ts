@@ -87,7 +87,7 @@ function roundDurationMs(durationMs: number): number {
   return Math.round(durationMs * 10) / 10;
 }
 
-export function isBareBbRealtimeWs(
+export function isBareRoomRealtimeWs(
   path: string,
   target: string | undefined,
 ): boolean {
@@ -403,7 +403,7 @@ export class TunnelSession {
       ...(resolved.host !== undefined ? { host: resolved.host } : {}),
       ...(resolved.headers !== undefined ? { headers: resolved.headers } : {}),
     });
-    const countsAsRemoteClient = isBareBbRealtimeWs(frame.path, frame.target);
+    const countsAsRemoteClient = isBareRoomRealtimeWs(frame.path, frame.target);
     let socket: NodeWebSocket;
     try {
       socket = new NodeWebSocket(`${wsOrigin}${frame.path}`, frame.protocols, {

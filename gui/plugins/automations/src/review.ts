@@ -97,7 +97,7 @@ function runTitle(run: ReviewRunRow): string {
 }
 
 async function readThreads(
-  bb: ReviewApi,
+  room: ReviewApi,
   threadIds: readonly string[],
 ): Promise<Map<string, ReviewThread | null>> {
   const threads = new Map<string, ReviewThread | null>();
@@ -107,7 +107,7 @@ async function readThreads(
         try {
           threads.set(
             threadId,
-            reviewThreadSchema.parse(await bb.sdk.threads.get({ threadId })),
+            reviewThreadSchema.parse(await room.sdk.threads.get({ threadId })),
           );
         } catch {
           threads.set(threadId, null);
@@ -140,8 +140,8 @@ export const reportsSchema = z.object({
 /** The runs' own reports (ADR 0298), the record `room-cli loop runs` shows: one per run, by Local run ID, or by the
  *  thread a Cloud run started (this app sends the website that run's request). Signed out, an older website, a slow
  *  one (over 3 s), or any unexpected row: none, so Review shows what the threads say. */
-async function savedReports(
-  bb: ReviewApi,
+export async function savedReports(
+  room: Pick<ReviewApi, "log"> & { sdk: Pick<ReviewApi["sdk"], "cloudroom"> },
   runIds: readonly string[],
   cloudThreadIds: readonly string[],
 ): Promise<{
@@ -151,7 +151,7 @@ async function savedReports(
   const runs = new Map<string, SavedReport>();
   const threads = new Map<string, SavedReport>();
   const local = new Set(runIds.filter((id) => LOCAL_RUN.test(id)));
-  if (!bb.sdk.cloudroom || local.size + cloudThreadIds.length === 0)
+  if (!room.sdk.cloudroom || local.size + cloudThreadIds.length === 0)
     return { runs, threads };
   try {
     const signal = AbortSignal.timeout(3_000);
@@ -159,7 +159,7 @@ async function savedReports(
       signal.addEventListener("abort", () => resolve(null)),
     );
     const answer = await Promise.race([
-      bb.sdk.cloudroom.automations({
+      room.sdk.cloudroom.automations({
         action: "reports",
         runs: [...local],
         threads: [...cloudThreadIds],
@@ -177,9 +177,7 @@ async function savedReports(
       else if (cloud.has(row.thread_id)) threads.set(row.thread_id, saved);
     }
   } catch (error) {
-    bb.log.warn(
-      `Failed to read loop reports for review: ${errorMessage(error)}`,
-    );
+    room.log.warn(`Failed to read loop reports: ${errorMessage(error)}`);
   }
   return { runs, threads };
 }
@@ -196,16 +194,16 @@ function withReport(
   };
 }
 
-async function projectNames(bb: ReviewApi): Promise<Map<string, string>> {
+async function projectNames(room: ReviewApi): Promise<Map<string, string>> {
   try {
     return new Map(
-      (await listLiveProjects(bb)).map((project) => [
+      (await listLiveProjects(room)).map((project) => [
         project.id,
         project.name ?? project.id,
       ]),
     );
   } catch (error) {
-    bb.log.warn(
+    room.log.warn(
       `Failed to list projects for loop review: ${errorMessage(error)}`,
     );
     return new Map();
@@ -213,7 +211,7 @@ async function projectNames(bb: ReviewApi): Promise<Map<string, string>> {
 }
 
 export async function buildReview(
-  bb: ReviewApi,
+  room: ReviewApi,
   db: Db,
   now = Date.now(),
 ): Promise<ReviewResponse> {
@@ -238,10 +236,10 @@ export async function buildReview(
     row !== null ? [row.threadId] : run.threadId ? [run.threadId] : [],
   );
   const [threads, projects, reports] = await Promise.all([
-    readThreads(bb, [...new Set(threadIds)]),
-    projectNames(bb),
+    readThreads(room, [...new Set(threadIds)]),
+    projectNames(room),
     savedReports(
-      bb,
+      room,
       newest.flatMap(({ run, row }) => run?.id ?? row?.runId ?? []),
       newest.flatMap(({ row }) => (row && !row.runId ? [row.threadId] : [])),
     ),
@@ -334,13 +332,13 @@ export function recordCloudRun(db: Db, raw: unknown): boolean {
 }
 
 export async function backfillCloudRuns(
-  bb: { sdk: { threads: Pick<BbPluginApi["sdk"]["threads"], "list"> } },
+  room: { sdk: { threads: Pick<BbPluginApi["sdk"]["threads"], "list"> } },
   db: Db,
   now = Date.now(),
 ): Promise<void> {
   const pages = await Promise.all([
-    bb.sdk.threads.list({ limit: 500 }),
-    bb.sdk.threads.list({ archived: true, limit: 500 }),
+    room.sdk.threads.list({ limit: 500 }),
+    room.sdk.threads.list({ archived: true, limit: 500 }),
   ]);
   for (const thread of pages.flat()) {
     if (thread.createdAt >= now - REVIEW_WINDOW_MS) recordCloudRun(db, thread);

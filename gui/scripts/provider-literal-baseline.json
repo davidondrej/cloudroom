@@ -15,8 +15,8 @@
     "apps/server/src/services/cloudroom/teleport.ts": 13,
     "packages/host-daemon-contract/src/commands.ts": 2,
     "apps/server/src/services/threads/thread-edit-message.ts": 1,
-    "packages/config/src/bb-app-managed-config.ts": 4,
-    "packages/scripts/src/commands/archive-codex-tmp-bb-sessions.ts": 1,
+    "packages/config/src/app-managed-config.ts": 4,
+    "packages/scripts/src/commands/archive-codex-tmp-sessions.ts": 1,
     "packages/scripts/src/lib/seed-perf-fixture.ts": 3
   },
   "allowlist": {
@@ -98,13 +98,13 @@
       "owner": "provider-codex",
       "diesAt": "legacy-tool-item-backfill migration (stamps the checkpoint onto old rows)"
     },
-    "packages/config/src/bb-app-managed-config.ts": {
+    "packages/config/src/app-managed-config.ts": {
       "count": 4,
       "reason": "BUNDLED_PROVIDER_IDS: the legacy `customAcpAgents` reader refuses an agent id that shadows a bundled provider, AND `customModelProviderIdSchema` (live `customModels` config) accepts only a bundled id or an `acp-*` id, so a third-party provider cannot carry custom models today (documented DEBT in the file).",
       "owner": "provider-acp (legacy reader); core config (customModels enum)",
       "diesAt": "the reader with LEGACY_CUSTOM_AGENTS_REMOVED_IN (0.41); the enum when customModels accepts any registered provider id"
     },
-    "packages/scripts/src/commands/archive-codex-tmp-bb-sessions.ts": {
+    "packages/scripts/src/commands/archive-codex-tmp-sessions.ts": {
       "count": 1,
       "reason": "ops script for codex temp sessions: names the `codex` executable, not a provider branch.",
       "owner": "owner-accepted (ops script)",

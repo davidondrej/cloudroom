@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, it, vi } from "vitest";
 import { z } from "zod";
-import { runBbApp } from "../src/launcher.js";
+import { runApp } from "../src/start.js";
 
 async function captureStdout(run: () => Promise<void>): Promise<string> {
   const chunks: string[] = [];
@@ -44,7 +44,7 @@ it("previews occupied ports without creating data or starting services", async (
       "127.0.0.1",
     ];
     const output = await captureStdout(() =>
-      runBbApp(args, {
+      runApp(args, {
         dryRun: true,
         worktreePolicy: null,
         beforeServerStart() {

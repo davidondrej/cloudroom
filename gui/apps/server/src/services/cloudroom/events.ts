@@ -37,7 +37,7 @@ const exitDetail = (data: Record<string, unknown>) => {
   const detail = [typeof data.stderr === "string" && `Harness stderr (last lines):\n${data.stderr.trimEnd()}`, typeof data.diagnostic_id === "string" && `Cloudroom diagnostic ID: ${data.diagnostic_id}`].filter(Boolean).join("\n\n");
   return detail ? { detail } : {};
 };
-const bbRequestId = (id: string) => encodeClientTurnRequestIdNumber({ value: createHash("sha256").update(id).digest().readUIntBE(0, 6) });
+const roomRequestId = (id: string) => encodeClientTurnRequestIdNumber({ value: createHash("sha256").update(id).digest().readUIntBE(0, 6) });
 
 function messageReasoning(input: string, fallback: string): string {
   try {
@@ -105,7 +105,7 @@ function promptRequestedEvent(db: DbQueryConnection, saved: Binding, request: Co
   const sender = typeof stored.sender_thread_id === "string" ? stored.sender_thread_id : null;
   return threadEventSchema.parse({
     type: "client/turn/requested", scope: threadScope(), threadId: saved.threadId,
-    direction: "outbound", requestId: bbRequestId(request.id), source: initial ? "spawn" : "tell", ...(sender ? { initiator: "agent" } : childNotice(db, saved, request, stored.text)), senderThreadId: sender,
+    direction: "outbound", requestId: roomRequestId(request.id), source: initial ? "spawn" : "tell", ...(sender ? { initiator: "agent" } : childNotice(db, saved, request, stored.text)), senderThreadId: sender,
     input: hidden ? input.map((block: Record<string, unknown>) => ({ ...block, visibility: "agent-only" })) : input,
     target: steeredTurnId ? { kind: "steer", expectedTurnId: steeredTurnId } : { kind: initial ? "thread-start" : "new-turn" },
     request: { method: initial ? "thread/start" : "turn/start", params: {} },
@@ -126,7 +126,7 @@ export function projectInitialPrompt(tx: DbTransaction, threadId: string): boole
   const request = command(tx, `first_${threadId}`);
   if (!saved || !request || request.command !== "prompt" || saved.turnId ||
       !(request.state === "sending" || request.state === "accepted" || (request.state === "failed" && !saved.sessionId)) ||
-      requestedTurns(tx, threadId).has(bbRequestId(request.id))) return false;
+      requestedTurns(tx, threadId).has(roomRequestId(request.id))) return false;
   appendPrompt(tx, saved, request);
   return true;
 }
@@ -180,7 +180,7 @@ export function projectFollowUp(tx: DbTransaction, threadId: string, id: string)
 }
 
 export function retractStillQueuedPrompts(db: DbConnection, threadId: string, requestIds: readonly string[]): boolean {
-  const wanted = new Set(requestIds.filter(id => id !== `first_${threadId}`).map(bbRequestId));
+  const wanted = new Set(requestIds.filter(id => id !== `first_${threadId}`).map(roomRequestId));
   const matches = [...requestedTurns(db, threadId)].filter(([id]) => wanted.has(id));
   if (!matches.length) return false;
   db.transaction((tx) => {
@@ -353,10 +353,10 @@ export function projectRecords(
           lostInstructions(tx, threadId, command(tx, stored.target_request_id));
         }
       }
-      if (receipt.command === "steer" && receipt.state === "completed" && previous?.command === "steer" && saved.nativeId && !requestedTurns(tx, threadId).has(bbRequestId(previous.id))) {
+      if (receipt.command === "steer" && receipt.state === "completed" && previous?.command === "steer" && saved.nativeId && !requestedTurns(tx, threadId).has(roomRequestId(previous.id))) {
         const target = z.object({ target_request_id: z.string() }).parse(JSON.parse(previous.input)).target_request_id;
         emit(promptRequestedEvent(tx, saved, previous, target));
-        emit({ threadId, providerThreadId: saved.nativeId, scope: turnScope(target), type: "turn/input/accepted", clientRequestId: bbRequestId(previous.id) });
+        emit({ threadId, providerThreadId: saved.nativeId, scope: turnScope(target), type: "turn/input/accepted", clientRequestId: roomRequestId(previous.id) });
       }
     }
     if (record.kind === "receipt" && data.command === "rewind" && data.state === "accepted") saveStatus(tx, threadId, "starting");
@@ -367,7 +367,7 @@ export function projectRecords(
     if (record.kind === "rewind" && typeof data.id === "string") {
       const checkpoints = tx.select({ data: events.data }).from(events).where(and(eq(events.threadId, threadId), eq(events.type, "system/operation"))).all();
       const checkpoint = checkpoints.map((row) => JSON.parse(row.data)).find((event) => event.operation === "checkpoint" && event.metadata?.id === data.before);
-      const cutoff = typeof checkpoint?.metadata?.request_id === "string" ? requestedTurns(tx, threadId).get(bbRequestId(checkpoint.metadata.request_id))?.sequence : undefined;
+      const cutoff = typeof checkpoint?.metadata?.request_id === "string" ? requestedTurns(tx, threadId).get(roomRequestId(checkpoint.metadata.request_id))?.sequence : undefined;
       if (cutoff !== undefined) {
         const last = tx.select({ sequence: events.sequence }).from(events).where(eq(events.threadId, threadId)).orderBy(desc(events.sequence)).get();
         deleteThreadEventSuffixInTransaction(tx, { threadId, cutoffSequence: cutoff, oldMaxSequence: last?.sequence ?? cutoff });
@@ -430,7 +430,7 @@ export function projectRecords(
         saveBinding(tx, threadId, { turnId: data.request_id });
         const request = command(tx, data.request_id);
         saveCommandState(tx, threadId, data.request_id, "running");
-        if (request?.command === "prompt" && !JSON.parse(request.input).teleport_handoff && !requestedTurns(tx, threadId).has(bbRequestId(data.request_id))) {
+        if (request?.command === "prompt" && !JSON.parse(request.input).teleport_handoff && !requestedTurns(tx, threadId).has(roomRequestId(data.request_id))) {
           const switched = switchContinuation(tx, threadId, harness, request);
           if (switched) emit({ type: "system/operation", scope: threadScope(), threadId, operation: THREAD_ACCOUNT_SWITCH_OPERATION, operationId: `account-switch:${data.request_id}`,
             status: "completed", message: `Continued on ${switched.to}.`, metadata: switched });
@@ -439,7 +439,7 @@ export function projectRecords(
         if ((harness === "pi" || isAcpProvider(harness) || harness === "claude-code") && saved.nativeId) {
           const base = { threadId, providerThreadId: saved.nativeId, scope: turnScope(data.request_id) };
           emit({ ...base, type: "turn/started" });
-          if (request) emit({ ...base, type: "turn/input/accepted", clientRequestId: bbRequestId(data.request_id) });
+          if (request) emit({ ...base, type: "turn/input/accepted", clientRequestId: roomRequestId(data.request_id) });
         }
       }
       const status = statusOf(state);
@@ -541,7 +541,7 @@ export function projectRecords(
             emit({ ...base, type: method });
             const request = command(tx, saved.turnId);
             if (request?.command === "prompt") {
-              emit({ ...base, type: "turn/input/accepted", clientRequestId: bbRequestId(request.id) });
+              emit({ ...base, type: "turn/input/accepted", clientRequestId: roomRequestId(request.id) });
             }
           } else if (method === "turn/completed") {
             const turn = object.parse(params.turn);

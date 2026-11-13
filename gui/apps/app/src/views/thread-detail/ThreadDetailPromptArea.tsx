@@ -2243,11 +2243,22 @@ export function ThreadDetailPromptArea({
     </div>}
   </>) : null);
 
+  // The one card above the chat input (ADR 20261111-222457). It sits right on the input, unless queued messages already do.
+  // It renders in one place and the cards move themselves there with CSS: moving it in the tree would rebuild it and lose a shown hint.
+  const cardsOnInput = queuedMessageCount === 0 && !queuedMessagesPending;
+  const slotCards = shouldHideComposer ? null : (
+    <>
+      {!isCloud && !teleporting && canTeleport && <TryCloudCard threadId={thread.id} active={thread.status === "active"} attached={cardsOnInput} onMove={startTeleport} />}
+      <StarCard active={thread.status === "active"} attached={cardsOnInput} />
+      <DesktopUpdateCard attached={cardsOnInput} />
+    </>
+  );
+
   const bottomContent = (
     <FollowUpPromptBox
       id={THREAD_DETAIL_COMPOSER_TEXTAREA_ID}
       attachments={bottomAttachmentsConfig}
-      stack={<>{!isCloud && !teleporting && <TeleportCheckCard error={teleport.error} models={[...modelOptions, ...moreModelOptions]} reasoning={reasoningLevel} usedTokens={contextWindowUsage?.usedTokens ?? null} levelsFor={(model) => cloudReasoningLevels(cloudConnection.data, thread.providerId, model)} onTeleport={(choice) => teleport.mutate(choice)} onDismiss={teleport.reset} />}{!isCloud && !teleporting && canTeleport && !shouldHideComposer && <TryCloudCard threadId={thread.id} active={thread.status === "active"} attached={queuedMessageCount === 0} onMove={startTeleport} />}{!shouldHideComposer && <StarCard active={thread.status === "active"} attached={queuedMessageCount === 0} />}{!shouldHideComposer && <DesktopUpdateCard attached={queuedMessageCount === 0} />}{thread.teleport && !movingToLocal && <TeleportNotice thread={thread} pendingDelivery={cloudState.data?.pendingDelivery} paused={cloudState.data?.paused} sending={sendMessage.isPending} />}{movingToLocal && <TeleportLocalNotice step={thread.teleportLocalStep} />}{thread.projectCopy && <ProjectCopyNotice thread={thread} />}{cloudNotice}{isCloud && claudeThread && !shouldHideComposer && <CloudMcpSignInNotice />}{!isCloud && !shouldHideComposer && <LocalSignInNotice threadId={thread.id} providerId={thread.providerId} hostId={environmentHostId} environmentId={thread.environmentId} authFailed={providerAuthFailed} started={thread.status !== "pending"} />}{pendingInteractionNode && !pendingInteractionIsModal ? pendingInteractionStack : promptStack}{pendingInteractionIsModal && pendingInteractionNode}</>}
+      stack={<>{!isCloud && !teleporting && <TeleportCheckCard error={teleport.error} models={[...modelOptions, ...moreModelOptions]} reasoning={reasoningLevel} usedTokens={contextWindowUsage?.usedTokens ?? null} levelsFor={(model) => cloudReasoningLevels(cloudConnection.data, thread.providerId, model)} onTeleport={(choice) => teleport.mutate(choice)} onDismiss={teleport.reset} />}{slotCards}{thread.teleport && !movingToLocal && <TeleportNotice thread={thread} pendingDelivery={cloudState.data?.pendingDelivery} paused={cloudState.data?.paused} sending={sendMessage.isPending} />}{movingToLocal && <TeleportLocalNotice step={thread.teleportLocalStep} />}{thread.projectCopy && <ProjectCopyNotice thread={thread} />}{cloudNotice}{isCloud && claudeThread && !shouldHideComposer && <CloudMcpSignInNotice />}{!isCloud && !shouldHideComposer && <LocalSignInNotice threadId={thread.id} providerId={thread.providerId} hostId={environmentHostId} environmentId={thread.environmentId} authFailed={providerAuthFailed} started={thread.status !== "pending"} />}{pendingInteractionNode && !pendingInteractionIsModal ? pendingInteractionStack : promptStack}{pendingInteractionIsModal && pendingInteractionNode}</>}
       pendingInteraction={pendingInteractionIsModal ? undefined : pendingInteractionNode}
       activePromptMode={activePromptMode}
       composer={shouldHideComposer || (teleporting && !movingToLocal) || transferredChild ? null : bottomComposerConfig}

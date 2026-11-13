@@ -22,7 +22,7 @@ import {
   type ExperimentalHostRpcContext,
   type ExperimentalHostWorkerLease,
 } from "@get-bb/plugin-sdk/host";
-import { hostContract, type HostStatus } from "./contract.js";
+import { hostContract, type AppIdentity, type HostStatus } from "./contract.js";
 import { DRIVER, SESSION_TOOLS, assetFor } from "./driver.js";
 
 const run = promisify(execFile);
@@ -108,6 +108,47 @@ async function osascript(script: string, env?: NodeJS.ProcessEnv) {
   return stdout.trim();
 }
 
+// Cua Driver 0.35.2 finds a launch_app name only as <name>.app in these folders (apps/mod.rs
+// locate_by_name; its other two are under its private HOME). A bundle_id goes to LaunchServices.
+const APP_ROOTS = [
+  "/Applications",
+  "/System/Applications",
+  "/System/Applications/Utilities",
+  "/Applications/Utilities",
+];
+
+// The app macOS knows by this bundle ID, or else by this name (as AppleScript finds it), so apps
+// nested in another app, such as Simulator in Xcode, resolve too. Null when macOS doesn't know it.
+async function resolveApp(ref: string): Promise<AppIdentity | null> {
+  const app = JSON.parse(
+    await osascript(`ObjC.import("AppKit");
+(() => {
+  const ws = $.NSWorkspace.sharedWorkspace, ref = ${JSON.stringify(ref)};
+  const urlFor = (id) => { const u = ws.URLForApplicationWithBundleIdentifier(id); return u && !u.isNil() ? u : null; };
+  let url = urlFor(ref);
+  if (!url) try { url = urlFor(Application(ref).id()); } catch (e) {}
+  const bundle = url && $.NSBundle.bundleWithURL(url);
+  if (!bundle || bundle.isNil() || bundle.bundleIdentifier.isNil()) return "{}";
+  const name = $.NSFileManager.defaultManager.displayNameAtPath(url.path).js.replace(/\\.app$/, "");
+  return JSON.stringify({ key: bundle.bundleIdentifier.js, name });
+})()`),
+  ) as Partial<AppIdentity>;
+  return app.key ? { key: app.key, name: app.name || app.key } : null;
+}
+
+// A name the driver can't find (#975) goes to it as the bundle ID macOS knows. Paths stay (#914).
+async function withBundleId(args: Record<string, unknown>) {
+  const name = args.name;
+  if (process.platform !== "darwin" || typeof args.bundle_id === "string")
+    return;
+  if (typeof name !== "string" || !name || name.includes("/")) return;
+  const file = name.endsWith(".app") ? name : `${name}.app`;
+  const roots = APP_ROOTS.map((root) => exists(join(root, file)));
+  if ((await Promise.all(roots)).some(Boolean)) return;
+  const app = await resolveApp(name);
+  if (app) args.bundle_id = app.key;
+}
+
 // Cua Driver 0.35.2's own cold launch (platform-macos apps/nsworkspace.rs, tools/launch_app.rs):
 // NSWorkspace in the background with an `oapp` event so the app opens its window, then the
 // prior frontmost app gets focus back whenever the new app takes it (registered + 1.5 s).
@@ -116,7 +157,7 @@ function launchScript(app: string, byName: boolean) {
 (() => {
   const ws = $.NSWorkspace.sharedWorkspace, ref = ${JSON.stringify(app)};
   const file = ref.endsWith(".app") ? ref : ref + ".app";
-  const roots = ["/Applications", "/System/Applications", "/System/Applications/Utilities", "/Applications/Utilities"];
+  const roots = ${JSON.stringify(APP_ROOTS)};
   const path = ${byName} ? roots.map((root) => root + "/" + file).find((p) => $.NSFileManager.defaultManager.fileExistsAtPath(p)) : undefined;
   const bundle = path ? $.NSBundle.bundleWithPath(path) : null;
   const bid = !bundle ? ref : bundle.isNil() || bundle.bundleIdentifier.isNil() ? "" : bundle.bundleIdentifier.js;
@@ -389,8 +430,10 @@ export function createHostEntry() {
         const args: Record<string, unknown> = { ...input.args };
         if (SESSION_TOOLS.has(input.tool) && args.session === undefined) args.session = input.session;
         // On failure the driver launches the app as before.
-        if (input.tool === "launch_app")
+        if (input.tool === "launch_app") {
+          await withBundleId(args).catch(() => {});
           await openWithUserHome(args).catch(() => {});
+        }
         const result = await run(binary(), ["call", "--socket", path, input.tool, JSON.stringify(args)], {
           env: driverEnv(home()),
           timeout: 120_000,
@@ -407,7 +450,8 @@ export function createHostEntry() {
         lastUsed = Date.now();
         const exits = driverExits;
         driverExits = 0;
-        return { ...result, stdout: await saveImages(result.stdout, input.shotsDir), driverExits: exits };
+        const shotsDir = join(tmpdir(), "cloudroom-computer-use", input.shotsKey);
+        return { ...result, stdout: await saveImages(result.stdout, shotsDir), driverExits: exits };
       },
       async release({ session }) {
         if (!sessions.delete(session) || !daemon || !socket) return null;
@@ -445,18 +489,8 @@ export function createHostEntry() {
         return name ? { key: name, name } : null;
       },
       async appForName({ name }) {
-        if (process.platform === "darwin") {
-          const ask = (script: string) =>
-            run("/usr/bin/osascript", ["-e", script], { timeout: 10_000 }).then(
-              ({ stdout }) => stdout.trim(),
-              () => "",
-            );
-          const label = await ask(`name of application id ${JSON.stringify(name)}`);
-          if (label) return { key: name, name: label };
-          const key = await ask(`id of application ${JSON.stringify(name)}`);
-          if (key) return { key, name };
-        }
-        return { key: name, name };
+        if (process.platform !== "darwin") return { key: name, name };
+        return resolveApp(name).catch(() => ({ key: name, name }));
       },
       async requestPermission({ kind }, context) {
         paths = context.experimental_paths;

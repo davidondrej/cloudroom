@@ -123,6 +123,8 @@ export type TelemetryEvent =
   | { name: "activation_step"; properties: { step: ActivationStep; action: "clicked" | "done" | "hidden" } }
   | { name: "starter_prompt"; properties: { starter: StarterPrompt } }
   | { name: "popup"; properties: { popup: Popup; action: "viewed" | "closed" | PopupDetail } }
+  /** Monthly Wrapped (docs/scopes/wrapped.md): the top-right card and the Story it opens. `month` is `2026-10`. */
+  | { name: "wrapped"; properties: { month: string; action: (typeof WRAPPED_ACTIONS)[number] } }
   | { name: "prompt_suggestion"; properties: { action: "shown" | "accepted"; provider: string } }
   | { name: "cloud_choice"; properties: { action: (typeof CLOUD_CHOICE_ACTIONS)[number]; reason: (typeof CLOUD_CHOICE_REASONS)[number] | null } }
   /** A Local message the queue failed or dropped (services/threads/queue-drain-failure.ts). */
@@ -131,14 +133,16 @@ export type TelemetryEvent =
 /** `opened` is a click on the Share button and `copied` one on Copy. The website adds what viewers do. */
 export const SHARE_CLICKS = ["opened", "copied"] as const;
 export type ShareAction = (typeof SHARE_CLICKS)[number] | "created" | "updated" | "stopped" | "continued";
+/** `viewed`: the card showed. `opened`: the Story opened. `closed`: the card's X. Then the Story's three buttons. */
+export const WRAPPED_ACTIONS = ["viewed", "opened", "closed", "saved", "copied", "shared"] as const;
 export const CLOUD_CHOICE_ACTIONS = ["picked_local", "cloud_blocked", "forced_local"] as const;
 export const CLOUD_CHOICE_REASONS = ["signed_out", "agent_unsupported", "agent_not_in_cloud", "queue", "region"] as const;
-export const UPGRADE_PROMPTS = ["limit_notice", "queue", "queue_badge", "plan_card", "free_tip", "auto_delete", "try_cloud", "new_thread_cloud", "limit_notice_pack", "mac_battery", "mac_load", "mac_disk", "mac_network"] as const;
+export const UPGRADE_PROMPTS = ["limit_notice", "queue", "queue_badge", "plan_card", "free_tip", "auto_delete", "try_cloud", "new_thread_cloud", "limit_notice_pack", "mac_battery", "mac_cpu", "mac_memory", "mac_heat", "mac_disk", "mac_network", "moment_slept", "moment_quit", "moment_crowded"] as const;
 export const ACTIVATION_STEPS = ["cloud", "subagents", "second", "phone", "loop"] as const;
 export type ActivationStep = (typeof ACTIVATION_STEPS)[number];
 export const STARTER_PROMPTS = ["security", "keys", "packages", "mac"] as const;
 export type StarterPrompt = (typeof STARTER_PROMPTS)[number];
-export const POPUPS = ["credits", "star", "install", "star_card"] as const;
+export const POPUPS = ["credits", "star", "install", "star_card", "cloud_card"] as const;
 export type Popup = (typeof POPUPS)[number];
 export const POPUP_DETAILS = ["starred", "opened", "already", "migrated"] as const;
 export type PopupDetail = (typeof POPUP_DETAILS)[number];

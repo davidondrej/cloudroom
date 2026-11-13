@@ -2,6 +2,20 @@
 
 Also on [cloudroom.dev/changelog](https://www.cloudroom.dev/changelog).
 
+## 152
+
+Search deeper from Cmd+K (2026-11-13)
+
+### Changes
+
+- Cmd+K has a new "Not here? Search deeper" link. An agent finds the chat you mean, archived ones too.
+- Switching Claude models in a Cloud thread is now instant, and the chat keeps its full context.
+- Monthly Wrapped: a shareable Story of your last month in Cloudroom.
+- Rename "This Mac" on the Accounts page, and one privacy switch hides emails there and in the usage box.
+- New Local worktrees are ready faster.
+- Cloud subagents report back to a sleeping parent right away instead of getting lost.
+- Security fixes.
+
 ## 151
 
 Edit messages with no delay (2026-11-12)

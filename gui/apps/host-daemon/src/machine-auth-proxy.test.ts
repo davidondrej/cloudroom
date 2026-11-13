@@ -465,9 +465,9 @@ describe("startMachineAuthProxy", () => {
     }
   });
 
-  // Linux reports which uid owns each loopback connection. Here the proxy
+  // Linux and macOS tell which user owns each loopback connection. Here the proxy
   // takes another uid as its own, so this test's process is the other user.
-  it.runIf(process.platform === "linux")(
+  it.runIf(process.platform === "linux" || process.platform === "darwin")(
     "refuses open reads from another OS user on this machine",
     async () => {
       const received: string[] = [];

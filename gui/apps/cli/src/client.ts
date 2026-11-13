@@ -1,7 +1,7 @@
 import { createCallerProofFetch } from "@cloudroom/config/caller-proof";
 import {
   BbRequestTimeoutError,
-  createNodeBbSdk,
+  createNodeRoomSdk,
   createRequestTimeoutFetch,
   type BbSdk,
 } from "@cloudroom/sdk/node";
@@ -22,12 +22,12 @@ export function cliFetch(
   return callerProofFetch(input, init);
 }
 
-export function createCliBbSdk(baseUrl: string, timeoutMs?: number): BbSdk {
+export function createCliRoomSdk(baseUrl: string, timeoutMs?: number): BbSdk {
   if (timeoutMs === undefined) {
-    return createNodeBbSdk({ baseUrl, fetch: cliFetch });
+    return createNodeRoomSdk({ baseUrl, fetch: cliFetch });
   }
   const timeoutFetch = createRequestTimeoutFetch({ timeoutMs });
-  return createNodeBbSdk({
+  return createNodeRoomSdk({
     baseUrl,
     fetch: async (input, init) => {
       try {

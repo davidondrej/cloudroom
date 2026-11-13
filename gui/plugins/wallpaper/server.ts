@@ -28,9 +28,9 @@ const SIGNATURES: Record<(typeof MIMES)[number], string> = {
 
 interface Row { slot: number; active: number; version: string; mime: string; look: string }
 
-export default function wallpaper(bb: BbPluginApi) {
-  const db = bb.storage.database();
-  bb.storage.migrate(db, [
+export default function wallpaper(room: BbPluginApi) {
+  const db = room.storage.database();
+  room.storage.migrate(db, [
     "CREATE TABLE wallpaper (slot INTEGER PRIMARY KEY CHECK (slot BETWEEN 1 AND 6), active INTEGER NOT NULL DEFAULT 0, version TEXT NOT NULL, mime TEXT NOT NULL, look TEXT NOT NULL, image BLOB NOT NULL)",
   ]);
 
@@ -44,13 +44,13 @@ export default function wallpaper(bb: BbPluginApi) {
   /** Tells every open window the new state, so none has to ask for it. */
   function changed(): WallpaperState {
     const state = read();
-    bb.realtime.publish(CHANGED, state);
+    room.realtime.publish(CHANGED, state);
     return state;
   }
   // `IS` so that null turns every slot off.
   const activate = (active: number | null) => db.prepare("UPDATE wallpaper SET active = (slot IS ?)").run(active);
 
-  bb.rpc.register(rpcContract, {
+  room.rpc.register(rpcContract, {
     get: read,
     upload({ slot, mime, data }) {
       const image = Buffer.from(data, "base64");
@@ -81,7 +81,7 @@ export default function wallpaper(bb: BbPluginApi) {
     },
   });
 
-  bb.http.route("GET", "/image", (context) => {
+  room.http.route("GET", "/image", (context) => {
     const row = db.prepare("SELECT mime, image FROM wallpaper WHERE version = ?").get(context.req.query("v") ?? "") as { mime: string; image: Buffer } | undefined;
     if (!row) return context.notFound();
     return new Response(new Uint8Array(row.image), {

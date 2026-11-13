@@ -28,19 +28,9 @@ async function copyBuildOutput({ from, label, to }) {
   await copyDirectory({ from, to });
 }
 
-async function buildPublicSdkDeclarations() {
-  await execFileAsync(
-    "node",
-    [resolve(scriptsDir, "build-public-sdk-dts.mjs")],
-    { cwd: packageRoot },
-  );
-}
-
 const entrypoints = [
   ["bb-app", "bb-app.js"],
   ["room-cli", "room-cli.js"],
-  ["bb-server", "bb-server.js"],
-  ["bb-host-daemon", "bb-host-daemon.js"],
 ];
 
 for (const [sourceName, outputName] of entrypoints) {
@@ -55,15 +45,8 @@ for (const [sourceName, outputName] of entrypoints) {
 
 await buildNodeEsmEntry({
   cleanDist: false,
-  entryPoint: resolve(packageRoot, "src", "public-sdk.ts"),
-  outfile: resolve(packageRoot, "dist", "index.js"),
-  packageRoot,
-});
-await buildPublicSdkDeclarations();
-await buildNodeEsmEntry({
-  cleanDist: false,
-  entryPoint: resolve(scriptsDir, "prune-bb-chunks.mjs"),
-  outfile: resolve(packageRoot, "dist", "prune-bb-chunks.mjs"),
+  entryPoint: resolve(scriptsDir, "prune-cli-chunks.mjs"),
+  outfile: resolve(packageRoot, "dist", "prune-cli-chunks.mjs"),
   packageRoot,
 });
 
@@ -117,7 +100,7 @@ await assertPathExists(
 );
 const pruneRun = await execFileAsync(
   "node",
-  [resolve(packageRoot, "dist", "prune-bb-chunks.mjs")],
+  [resolve(packageRoot, "dist", "prune-cli-chunks.mjs")],
   { cwd: packageRoot },
 );
 process.stderr.write(pruneRun.stderr);

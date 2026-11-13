@@ -7,7 +7,7 @@ import {
   stubServerApi,
 } from "../helpers/command-output-harness.js";
 import type { CommandRegistrar } from "../helpers/command-output-harness.js";
-import { createCliBbSdk } from "../../client.js";
+import { createCliRoomSdk } from "../../client.js";
 import {
   formatMachineLastSeen,
   registerMachineCommands,
@@ -263,7 +263,7 @@ describe("room-cli machine command output", () => {
       };
       stubServerApi({ "v1.hosts.$get": vi.fn(async () => hosts) });
       vi.mocked(globalThis.fetch).mockResolvedValue(Response.json(vps));
-      vi.mocked(createCliBbSdk).mockClear();
+      vi.mocked(createCliRoomSdk).mockClear();
 
       await runCommand(args, register);
 
@@ -277,7 +277,7 @@ describe("room-cli machine command output", () => {
       if (slow)
         expect(
           vi
-            .mocked(createCliBbSdk)
+            .mocked(createCliRoomSdk)
             .mock.calls.some(([, ms]) => (ms ?? 0) > 5_000),
         ).toBe(true);
     },

@@ -283,8 +283,12 @@ async function clone(deps: Deps, client: CloudroomClient, target: string, reposi
       )
     : "";
   const temporary = quote(`${target}.cloudroom-clone`);
+  // Holds the clone's shell PID while it runs, so an answer the connection lost can be checked against what really happened.
+  const running = quote(`${target}.cloudroom-clone.pid`);
+  const deadline = Date.now() + CLONE_TIMEOUT;
   const result = await client.runOnVm({
     command: [
+      `p=${running}; echo $$ > "$p"; trap 'rm -f -- "$p"' EXIT`,
       "export GIT_TERMINAL_PROMPT=0",
       // `gh auth status` asks GitHub's API, so a used-up quota reads as a bad token (#1182). Log in only when gh has no token.
       token ? "{ gh auth token --hostname github.com || gh auth login --hostname github.com --with-token; gh auth setup-git --hostname github.com; } >/dev/null 2>&1 || true" : "",
@@ -296,7 +300,22 @@ async function clone(deps: Deps, client: CloudroomClient, target: string, reposi
       `test -e ${quote(`${target}/.git`)} || { echo 'The clone did not reach the project folder.' >&2; exit 1; }`,
     ].join("\n"),
     stdin: Buffer.from(token).toString("hex"),
-  }, AbortSignal.timeout(CLONE_TIMEOUT));
+  }, AbortSignal.timeout(CLONE_TIMEOUT)).catch((error: unknown) => {
+    if (error instanceof CloudroomError && error.retryable) return error;
+    throw error;
+  });
+  // A proxy's 504 or a dropped connection loses the answer, not the clone, which goes on and can land later (#1524). So wait
+  // for its shell to end: a clone that landed is done, and only one that didn't fails as before, so no copy competes with it.
+  // Each check waits up to 44 s in the sandbox, under a proxy's timeout, since Core saves every VM command as a diagnostic row.
+  if (result instanceof CloudroomError) {
+    const check = `for _ in $(seq 22); do kill -0 "$(cat -- ${running} 2>/dev/null)" 2>/dev/null || { [ ! -e ${temporary} ] && [ -e ${quote(`${target}/.git`)} ]; exit; }; sleep 2; done; exit 3`;
+    for (;;) {
+      const { code } = await retry(() => client.runOnVm({ command: check, stdin: "" }));
+      if (code === 0) return null;
+      if (code !== 3) throw result;
+      if (Date.now() >= deadline) throw new Error(`The GitHub clone did not finish in ${CLONE_TIMEOUT / 60_000} minutes.`);
+    }
+  }
   if (result.code === 0) return null;
   const error = Buffer.from(result.stderr, "hex").toString().trim().slice(-300) || `git clone exited with code ${result.code}`;
   const stdout = Buffer.from(result.stdout, "hex");
@@ -353,6 +372,7 @@ export function envRefusal(root: string, repository: string | null): string | un
 }
 
 /** `all`: every project file; `changed`: uncommitted and untracked files; `env`: only `.env` files. Ignored `.env` files always count.
+ *  `env` leaves out ones the last commit has and Git still tracks, even edited: the clone brings them, and edits stay here (#1405).
  *  Throws once the files pass `limit` bytes. */
 export async function localFiles(root: string, scope: "all" | "changed" | "env", limit = MAX_TOTAL): Promise<string[]> {
   const listed = await git(root, ["ls-files", "-z", scope === "all" ? "--cached" : "--modified", "--others", "--exclude-standard"]);
@@ -365,13 +385,15 @@ export async function localFiles(root: string, scope: "all" | "changed" | "env",
   const envAt = (path: string) => repoRoot || dirname(path) === "." || existsSync(join(root, dirname(path), ".git"));
   const env = ignored.split("\0").filter((path) => path && !path.endsWith("/") && isEnv(path) && envAt(path));
   // Unignored `.env` files follow the same rule, unless Git tracks them (a committed `.env.example` is project code).
-  const tracked = repoRoot || listed === null ? null : new Set((await git(root, ["ls-files", "-z", "--cached"]) ?? "").split("\0"));
+  const tracked = (repoRoot && scope !== "env") || listed === null ? null : new Set((await git(root, ["ls-files", "-z", "--cached"]) ?? "").split("\0"));
+  const committed = scope !== "env" || listed === null ? null : new Set((await git(root, ["ls-tree", "-r", "-z", "--name-only", "HEAD"]) ?? "").split("\0"));
   const found = listed === null ? walk(root, "") : [...new Set([...listed.split("\0"), ...staged.split("\0"), ...env].filter(Boolean))];
   const files: string[] = [];
   let total = 0;
   for await (const path of found) {
     if (scope === "env" && !isEnv(path)) continue;
     if (isEnv(path) && !envAt(path) && !tracked?.has(path)) continue;
+    if (committed?.has(path) && tracked?.has(path)) continue;
     const info = await lstat(join(root, path)).catch(() => null);
     if (!info || !(info.isFile() || info.isSymbolicLink()) || info.size > MAX_FILE) continue;
     total += info.size;

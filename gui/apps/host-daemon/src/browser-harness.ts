@@ -28,8 +28,11 @@ if [ ! -f "$venv/.ready" ]; then
   # One installer at a time; a lock left by a killed install expires after 10 minutes.
   find "$home" -maxdepth 1 -name install.lock -mmin +10 -exec rmdir {} + 2>/dev/null || true
   until mkdir "$home/install.lock" 2>/dev/null; do sleep 1; done
-  tmp=$(mktemp -d)
+  # uv runs from this download outside any sandbox, so it stays in the data folder, never the OS temp folder, which
+  # Read-only Mac commands and sandboxed agents can change. A stopped install removes it too.
+  tmp=$(mktemp -d "$home/install.XXXXXX")
   trap 'rm -rf "$tmp"; rmdir "$home/install.lock" 2>/dev/null' EXIT
+  trap 'exit 1' HUP INT TERM
   if [ ! -f "$venv/.ready" ]; then
     echo "browser-harness: installing $version (first use only)..." >&2
     curl -fsSL --proto '=https' "https://github.com/astral-sh/uv/releases/download/$uv_version/uv-$target.tar.gz" -o "$tmp/uv.tgz"
@@ -42,7 +45,7 @@ if [ ! -f "$venv/.ready" ]; then
     for old in "$home"/0.*; do [ "$old" = "$venv" ] || rm -rf "$old"; done
     touch "$venv/.ready"
   fi
-  rm -rf "$tmp"; rmdir "$home/install.lock"; trap - EXIT
+  rm -rf "$tmp"; rmdir "$home/install.lock"; trap - EXIT HUP INT TERM
 fi
 
 # 0.1.13 misses Brave's Linux folders (upstream PRs 650 and 843). Drop once a release has them.

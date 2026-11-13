@@ -1,12 +1,12 @@
 import { useEffect, type ReactNode } from "react";
 import type {
   BbDesktopApi,
-  BbDesktopBrowserApi,
-  BbDesktopBrowserState,
-  BbDesktopInfo,
+  RoomDesktopBrowserApi,
+  RoomDesktopBrowserState,
+  RoomDesktopInfo,
 } from "@cloudroom/desktop-contract";
 
-const STORY_DESKTOP_INFO: BbDesktopInfo = {
+const STORY_DESKTOP_INFO: RoomDesktopInfo = {
   lastCheckedAt: null,
   latestVersion: null,
   pendingVersion: null,
@@ -17,8 +17,8 @@ const STORY_DESKTOP_INFO: BbDesktopInfo = {
 };
 
 function createStoryDesktopBrowserApi(
-  initialState: BbDesktopBrowserState | null,
-): BbDesktopBrowserApi {
+  initialState: RoomDesktopBrowserState | null,
+): RoomDesktopBrowserApi {
   return {
     attach() {},
     detach() {},
@@ -47,7 +47,7 @@ function createStoryDesktopBrowserApi(
 }
 
 function createStoryDesktopApi(
-  browserState: BbDesktopBrowserState | null,
+  browserState: RoomDesktopBrowserState | null,
 ): BbDesktopApi {
   return {
     ...STORY_DESKTOP_INFO,
@@ -68,7 +68,7 @@ function createStoryDesktopApi(
 }
 
 interface WithDesktopBrowserProps {
-  browserState?: BbDesktopBrowserState | null;
+  browserState?: RoomDesktopBrowserState | null;
   children: ReactNode;
 }
 

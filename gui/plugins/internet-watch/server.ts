@@ -113,7 +113,7 @@ export function createDispatchPolicy(
 }
 
 export default function plugin(
-  bb: BbPluginApi,
+  room: BbPluginApi,
   options: { probe?: () => Promise<boolean> } = {},
 ): void {
   const probe = options.probe ?? probeInternet;
@@ -121,55 +121,55 @@ export default function plugin(
   const monitor = createInternetMonitor({
     probe,
     onStable() {
-      bb.experimental_hooks
+      room.experimental_hooks
         .recheck("message.dispatch")
-        .catch((error: unknown) => bb.log.debug(`Recheck failed: ${errorText(error)}`));
+        .catch((error: unknown) => room.log.debug(`Recheck failed: ${errorText(error)}`));
     },
   });
-  bb.onDispose(() => monitor.stop());
-  bb.experimental_hooks.on(
+  room.onDispose(() => monitor.stop());
+  room.experimental_hooks.on(
     "message.dispatch",
     createDispatchPolicy(monitor, { proxied }),
   );
 
   // Retries held before a restart: start checking so they resume promptly.
   if (!proxied) {
-    void bb.sdk.threads.queue
+    void room.sdk.threads.queue
       .list({})
       .then((rows) => {
         if (rows.some(isNetworkRetry)) monitor.watch();
       })
       .catch((error: unknown) => {
-        bb.log.debug(`Held retries not restored: ${errorText(error)}`);
+        room.log.debug(`Held retries not restored: ${errorText(error)}`);
       });
   }
 
-  bb.events.on("turn.failed", async (event) => {
+  room.events.on("turn.failed", async (event) => {
     const kind = networkFailureKind(event.errorInfo);
     if (kind === null) return;
     if (event.turnStartedBeforeBoot || event.attemptNumber >= MAX_ATTEMPTS) {
       return;
     }
     try {
-      const thread = await bb.sdk.threads.get({ threadId: event.threadId });
+      const thread = await room.sdk.threads.get({ threadId: event.threadId });
       // A Cloud thread runs on the cloud's internet; a Mac drop never stops it.
       if (thread.executionTarget === "cloud") return;
       if (kind === "maybe" && (proxied || (await probe()))) return;
       if (!proxied) monitor.reportNetworkFailure();
-      await bb.sdk.threads.retry({
+      await room.sdk.threads.retry({
         threadId: event.threadId,
         turnRequestId: event.requestId,
         sendAt: Date.now() + RETRY_DELAY_MS,
         reason: NETWORK_RETRY_REASON,
       });
     } catch (error) {
-      bb.log.debug(
+      room.log.debug(
         `Network retry not scheduled for ${event.threadId}: ${errorText(error)}`,
       );
     }
   });
 
-  bb.cli.register({
+  room.cli.register({
     name: "internet-watch",
     summary: "Show the internet state and threads waiting for it",
     commands: [
@@ -186,7 +186,7 @@ export default function plugin(
           stderr: "Usage: bb internet-watch status [--json]\n",
         };
       }
-      const rows = await bb.sdk.threads.queue.list({});
+      const rows = await room.sdk.threads.queue.list({});
       const waiting = rows.filter(isNetworkRetry).map((row) => row.threadId);
       const stable = monitor.stableForMs();
       const internet = !monitor.watching()

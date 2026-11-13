@@ -8,18 +8,18 @@ import {
   DEFAULT_HOST_DAEMON_LOCAL_BIND_HOST,
 } from "@cloudroom/host-daemon-contract";
 import { createGuideArea } from "./areas/guide.js";
-import { createBbSdk, type BbSdk, type BbSdkAreas } from "./core.js";
+import { createRoomSdk, type RoomSdk, type RoomSdkAreas } from "./core.js";
 import { createNodeWebsocketFactory } from "./node-websocket.js";
 import {
   createRequestTimeoutFetch,
-  DEFAULT_BB_REQUEST_TIMEOUT_MS,
+  DEFAULT_ROOM_REQUEST_TIMEOUT_MS,
   type FetchImplementation,
 } from "./response.js";
 import { createHttpTransport } from "./transport-http.js";
 import type {
-  BbRealtimeSocketFactory,
-  BbSdkContext,
-  BbSdkTransport,
+  RoomRealtimeSocketFactory,
+  RoomSdkContext,
+  RoomSdkTransport,
 } from "./transport.js";
 
 export interface CreateNodeTransportArgs {
@@ -29,11 +29,11 @@ export interface CreateNodeTransportArgs {
   fetch?: FetchImplementation;
   realtimeUrl?: string;
   timeoutMs?: number;
-  websocket?: BbRealtimeSocketFactory;
+  websocket?: RoomRealtimeSocketFactory;
 }
 
-export interface CreateNodeBbSdkArgs extends CreateNodeTransportArgs {
-  context?: BbSdkContext;
+export interface CreateNodeRoomSdkArgs extends CreateNodeTransportArgs {
+  context?: RoomSdkContext;
 }
 
 export interface FetchLocalHostIdArgs {
@@ -63,11 +63,11 @@ function withCallerToken(
 
 export function createNodeTransport(
   args: CreateNodeTransportArgs = {},
-): BbSdkTransport {
+): RoomSdkTransport {
   const fetchImpl =
     args.fetch ??
     createRequestTimeoutFetch({
-      timeoutMs: args.timeoutMs ?? DEFAULT_BB_REQUEST_TIMEOUT_MS,
+      timeoutMs: args.timeoutMs ?? DEFAULT_ROOM_REQUEST_TIMEOUT_MS,
     });
   return createHttpTransport({
     baseUrl: args.baseUrl ?? resolveCliConfig(args.cliConfig).ROOM_SERVER_URL,
@@ -83,8 +83,8 @@ export function createNodeTransport(
   });
 }
 
-export function createNodeBbSdk(args: CreateNodeBbSdkArgs = {}): BbSdk {
-  return createBbSdk({
+export function createNodeRoomSdk(args: CreateNodeRoomSdkArgs = {}): RoomSdk {
+  return createRoomSdk({
     context: args.context,
     guide: createGuideArea(),
     transport: createNodeTransport(args),
@@ -110,12 +110,12 @@ export async function fetchLocalHostId(
 }
 
 export {
-  createBbSdk,
+  createRoomSdk as createBbSdk,
   createHttpTransport,
   createRequestTimeoutFetch,
-  DEFAULT_BB_REQUEST_TIMEOUT_MS,
+  DEFAULT_ROOM_REQUEST_TIMEOUT_MS as DEFAULT_BB_REQUEST_TIMEOUT_MS,
 };
-export { BbHttpError, BbRequestTimeoutError } from "./response.js";
+export { RoomHttpError as BbHttpError, RoomRequestTimeoutError as BbRequestTimeoutError } from "./response.js";
 export {
   pluginMutationResponseSchema,
   type PluginMutationResponse,
@@ -129,17 +129,17 @@ export {
   ThreadWaitUnreachableError,
 } from "./areas/threads.js";
 export type {
-  BbSdk,
-  BbSdkAreas,
-  BbSdkContext,
-  BbSdkTransport,
+  RoomSdk as BbSdk,
+  RoomSdkAreas as BbSdkAreas,
+  RoomSdkContext as BbSdkContext,
+  RoomSdkTransport as BbSdkTransport,
   FetchImplementation,
 };
 export type * from "./areas/skills.js";
 export type {
-  BbRealtimeSocket,
-  BbRealtimeSocketFactory,
-  BbRealtimeSocketMessageEvent,
+  RoomRealtimeSocket as BbRealtimeSocket,
+  RoomRealtimeSocketFactory as BbRealtimeSocketFactory,
+  RoomRealtimeSocketMessageEvent as BbRealtimeSocketMessageEvent,
 } from "./transport.js";
-export type { BbHttpErrorArgs } from "./response.js";
+export type { RoomHttpErrorArgs as BbHttpErrorArgs } from "./response.js";
 export type * from "./public-types.js";

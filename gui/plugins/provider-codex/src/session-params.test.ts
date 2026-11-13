@@ -822,6 +822,26 @@ describe("resolveCodexInstructionOverrides", () => {
       expect(developerInstructions("full")).not.toContain("git status");
     }
   });
+
+  it("tells only never-asking sessions how to get past a prompt rule (#1456)", () => {
+    const developerInstructions = (
+      options: typeof FULL_OPTIONS | typeof WORKSPACE_ASK_OPTIONS,
+    ) =>
+      resolveCodexInstructionOverrides({
+        approvalPolicy: toCodexThreadPermissionSettings(options).approvalPolicy,
+        instructionMode: "append",
+        options,
+      }).developerInstructions;
+    expect(developerInstructions(FULL_OPTIONS)).toContain(
+      "AskForApproval is set to Never",
+    );
+    expect(developerInstructions(FULL_OPTIONS)).toContain(
+      "switch this thread to Manual",
+    );
+    expect(developerInstructions(WORKSPACE_ASK_OPTIONS)).not.toContain(
+      "AskForApproval",
+    );
+  });
 });
 
 describe("toCodexReasoningEffort", () => {

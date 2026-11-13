@@ -140,8 +140,8 @@ entry with a warning. The entry then appears in room-cli provider models output 
 in the model picker, but the provider must still accept the id: claude-code
 and codex accept unlisted ids, while an ACP agent can reject an id it does
 not know at session start. OpenCode rejects unlisted ids, so add an OpenCode
-model to the OpenCode config instead. Edit the JSON and run bb-app config
-refresh; there is no set/unset CLI surface. The streamerMode
+model to the OpenCode config instead. Edit the JSON and restart the app;
+there is no set/unset CLI surface. The streamerMode
 General setting hides every entry from these lists; see the customization
 chapter.
 

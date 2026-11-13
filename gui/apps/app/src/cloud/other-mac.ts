@@ -1,11 +1,11 @@
 // The desktop app showing another of your Macs through cloudroom.run. When that Mac drops off the relay, its page
 // stays on screen: requests are sent again, and a small "Reconnecting…" note shows until it is back.
-import { getBbDesktopInfo } from "@/lib/bb-desktop";
+import { getRoomDesktopInfo } from "@/lib/room-desktop";
 import { wsManager } from "@/lib/ws";
 import { isPhoneRelay, tunnelOffline } from "./cloud-mode";
 
 export const viewingOtherMac = () =>
-  isPhoneRelay() && getBbDesktopInfo() !== null;
+  isPhoneRelay() && getRoomDesktopInfo() !== null;
 
 const RETRY_DELAYS_MS = [500, 1_000, 2_000, 4_000, 8_000];
 /** After this long without the Mac, requests fail at once and the note offers "Use this Mac". */

@@ -1,5 +1,5 @@
 import type { KeyboardEvent, RefObject } from "react";
-import { BB_DESKTOP_BROWSER_MAX_FIND_TEXT_LENGTH } from "@cloudroom/desktop-contract";
+import { ROOM_DESKTOP_BROWSER_MAX_FIND_TEXT_LENGTH } from "@cloudroom/desktop-contract";
 import {
   COARSE_POINTER_HEADER_ICON_BUTTON_CLASS,
   COARSE_POINTER_TEXT_SM_CLASS,
@@ -134,7 +134,7 @@ export function BrowserFindBar({
           aria-keyshortcuts={shortcut?.ariaKeyshortcuts}
           autoComplete="off"
           spellCheck={false}
-          maxLength={BB_DESKTOP_BROWSER_MAX_FIND_TEXT_LENGTH}
+          maxLength={ROOM_DESKTOP_BROWSER_MAX_FIND_TEXT_LENGTH}
           className={cn(
             "min-w-0 flex-1 bg-transparent text-foreground outline-none placeholder:text-muted-foreground",
             COARSE_POINTER_TEXT_SM_CLASS,

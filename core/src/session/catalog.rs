@@ -236,6 +236,7 @@ impl Manager {
                     harness["compact"] = json!(true);
                     harness["service_tier"] = json!(kind.fast());
                     harness["skill_mentions"] = json!(*kind == runtime::Kind::Claude);
+                    harness["set_model"] = json!(*kind == runtime::Kind::Claude);
                     harness["rewind"] = json!(true);
                     harness["attachments"] = json!({"images":true,"files":true});
                     harness["subagents"] = json!(true);
@@ -303,6 +304,39 @@ impl Manager {
             capabilities[*feature] = json!(true);
         }
         capabilities
+    }
+
+    /// A model pick for Claude, which switches in its session (`set_model`); other agents keep their launch model.
+    /// Returns the effort it runs with: the one asked for, or the session's nearest one the model takes.
+    pub async fn check_model_switch(
+        &self,
+        id: &str,
+        model: &str,
+        reasoning: Option<&str>,
+    ) -> Result<String> {
+        if model.is_empty() || model.len() > 256 || model.chars().any(char::is_control) {
+            return Err(Error::Conflict("invalid model"));
+        }
+        let current = {
+            let local = self.local.lock().unwrap();
+            let session = local.sessions.get(id).ok_or(Error::NotFound)?;
+            if session.harness != runtime::Kind::Claude {
+                return Err(Error::Conflict(
+                    "this agent keeps its model; switch agents to change it",
+                ));
+            }
+            session.reasoning.clone().unwrap_or_else(|| "none".into())
+        };
+        let kind = runtime::Kind::Claude;
+        if let Some(level) = reasoning {
+            if !self.reasoning_supported(kind, model, level).await? {
+                return Err(Error::Conflict("invalid reasoning effort"));
+            }
+            return Ok(level.to_owned());
+        }
+        let models = self.catalog(kind, true).await?;
+        runtime::fit_reasoning(kind, &models, model, &current)
+            .ok_or(Error::Conflict("invalid model"))
     }
 
     /// Follow-up reasoning is checked against the launch model. Omitted reasoning stays on the launch default.

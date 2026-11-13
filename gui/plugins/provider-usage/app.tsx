@@ -36,6 +36,7 @@ import {
   formatUsdCents,
   usageBarColorClass,
 } from "@cloudroom/shared-ui/lib/usage-format";
+import { hideEmail, usePrivacyMode } from "@cloudroom/shared-ui/lib/privacy-mode";
 import { LIST_HOVER_TRANSITION } from "@cloudroom/shared-ui/motion";
 import {
   OPTION_BASE_CLASS_NAME,
@@ -571,7 +572,13 @@ function AccountChip({
   const shown =
     accounts.find((account) => account.inUse) ??
     (accounts.length === 1 ? accounts[0] : undefined);
-  const label = shown ? accountName(shown) : null;
+  // Privacy mode hides emails. A name the user wrote stays.
+  const [privacy] = usePrivacyMode();
+  const name = (account: UsageProvider) => {
+    const label = accountName(account);
+    return label === null ? null : hideEmail(label, privacy);
+  };
+  const label = shown ? name(shown) : null;
   const switchable = accounts.filter((account) => account.accountId);
   const chip = "block min-w-0 truncate font-normal text-subtle-foreground";
   if (label === null) return null;
@@ -614,7 +621,7 @@ function AccountChip({
             className="flex items-center gap-2"
           >
             <span className="min-w-0 flex-1 truncate">
-              {accountName(account) ?? `This ${COMPUTER_TITLE}`}
+              {name(account) ?? `This ${COMPUTER_TITLE}`}
             </span>
             <Icon
               name="Check"
@@ -825,6 +832,7 @@ export function ProviderUsageStatusContent({
   reloadPlan?: () => void;
   refreshEnabled?: boolean;
 }) {
+  const [privacy] = usePrivacyMode();
   const [, refreshCountdowns] = useState(0);
   useEffect(() => {
     const timer = window.setInterval(
@@ -1015,10 +1023,10 @@ export function ProviderUsageStatusContent({
                     provider.accounts.length === 1 ||
                     account.accountId ? null : (
                       <h3
-                        title={account.accountLabel}
+                        title={hideEmail(account.accountLabel, privacy)}
                         className="truncate text-subtle-foreground"
                       >
-                        {account.accountLabel}
+                        {hideEmail(account.accountLabel, privacy)}
                       </h3>
                     )}
                     {account.usage === null && snapshot.isRefreshing ? (

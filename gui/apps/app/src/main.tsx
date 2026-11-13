@@ -24,7 +24,7 @@ import { initializeFavicon } from "./lib/favicon-color-preference";
 import { installForeignDomMutationGuard } from "./lib/foreign-dom-mutation-guard";
 import { installAppQueryClientBrowserEvents } from "./lib/query-client";
 import { appQueryClient } from "./lib/app-query-client";
-import { getBbDesktopInfo } from "./lib/bb-desktop";
+import { getRoomDesktopInfo } from "./lib/room-desktop";
 import { applyCachedAppThemeCss } from "./lib/themes";
 import { installPerfMonitor } from "./lib/perf";
 import { installNewThreadKeyboardPrimer } from "./lib/new-thread-keyboard-primer";
@@ -57,7 +57,7 @@ document.documentElement.toggleAttribute(
 // Pause looping animations only when Electron and the page both say the
 // window is unfocused. Either signal alone can be wrong: the page loses focus
 // to the in-app browser view, and Electron's state can disagree with the page.
-const desktopApi = getBbDesktopInfo();
+const desktopApi = getRoomDesktopInfo();
 let nativeFocused: boolean | undefined;
 const updateWindowBlurred = () => {
   document.documentElement.toggleAttribute(

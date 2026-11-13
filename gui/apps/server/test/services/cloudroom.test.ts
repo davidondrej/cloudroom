@@ -98,8 +98,9 @@ it("reports storage before models and preserves transiently blocked messages thr
     expect(prompts).toHaveLength(0);
     reason = "measurement_unavailable";
     expect(await (await request("/cloudroom")).json()).toMatchObject({ error: expect.stringContaining("measured") });
+    // A sandbox clock a minute behind this computer's is not a missing measurement (#1463).
     reason = "disk_capacity"; level = "normal"; sampleAge = 60_000;
-    expect(await (await request("/cloudroom")).json()).toMatchObject({ ready: false, storage: { workspace_available_bytes: null }, error: expect.stringContaining("measured") });
+    expect(await (await request("/cloudroom")).json()).toMatchObject({ ready: true, storage: { workspace_available_bytes: 3e9 }, error: null });
     sampleAge = 0; level = "low_space";
     expect(await (await request("/cloudroom")).json()).toMatchObject({ ready: true, storage: { level: "low_space" } });
     const response = await request("/threads", input);
@@ -868,7 +869,7 @@ it("adopts another computer's Cloud thread into the project with its repo, and f
   const harness = await createTestAppHarness();
   const service = cloudroom(harness.deps);
   const calls: string[] = [];
-  let state: "open" | "archived" = "open";
+  let state: "open" | "archived" = "open", here = "";
   const updated = () => new Date(Date.now() - (state === "open" ? 60_000 : 0)).toISOString();
   const website = createServer(async (req, res) => {
     let text = ""; for await (const chunk of req) text += chunk;
@@ -876,17 +877,25 @@ it("adopts another computer's Cloud thread into the project with its repo, and f
     calls.push(String(input.action));
     const row = { thread: "thr_234567abcd", session: "cr_elsewhere", project: "proj_on_another_mac", project_name: "Another name", repository: "https://github.com/example/app", title: "Started elsewhere", state, sandbox: state === "open" ? "asleep" : null, harness: "codex", model: "test-model", reasoning: "medium", parent: null, parent_state: null, loop: false, created_at: new Date(Date.now() - 3_600_000).toISOString(), woke_at: null, updated_at: updated() };
     res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify(input.action === "threads" ? { threads: [row], next: `${new Date().toISOString()}~`, more: false } : {}));
+    // Archived before this computer saw them, in its project (so it's their home): launches from a Cloud thread and the
+    // phone, and a loop run; before them, a child of the first launch that waits for it (#1072).
+    const late = (thread: string, session: string) => ({ ...row, thread, session, project: here, state: "archived", sandbox: null, repository: null, loop: session.startsWith("cr_auto_") });
+    const child = { ...row, thread: "thr_234567abcg", session: "cr_sub_late", project: here, parent: "thr_234567abce", parent_state: "open" };
+    res.end(JSON.stringify(input.action === "threads" ? { threads: [row, child, ...[["abce", "cr_launch_late"], ["abch", "cr_phone_late"], ["abcf", "cr_auto_late"]].map(([id, session]) => late(`thr_234567${id}`, session!))], next: `${new Date().toISOString()}~`, more: false } : {}));
   });
   website.listen(0, "127.0.0.1"); await once(website, "listening");
   const address = website.address(); if (!address || typeof address === "string") throw new Error("fixture did not listen");
   try {
     const { host } = seedHostSession(harness.deps);
     const { project } = seedProjectWithSource(harness.deps, { hostId: host.id });
+    here = project.id;
     setProjectGitRemoteUrlIfMissing(harness.db, harness.deps.hub, project.id, "git@github.com:example/app.git");
     await service.configure(null, { id: "11111111-1111-4111-8111-111111111111", email: "two@example.com" }, undefined, `http://127.0.0.1:${address.port}`, "a".repeat(64));
     await service.sync.run();
     expect(getThread(harness.db, "thr_234567abcd")).toMatchObject({ projectId: project.id, executionTarget: "cloud", status: "idle", title: "Started elsewhere", archivedAt: null });
+    // The launches show in the archived list, the loop run stays out, and the child stays open: nothing cascades.
+    const shown = (id: string) => { const thread = getThread(harness.db, `thr_234567${id}`); return thread && (thread.archivedAt ? "archived" : "open"); };
+    expect(["abce", "abch", "abcf", "abcg"].map(shown)).toEqual(["archived", "archived", null, "open"]);
     state = "archived";
     await service.sync.run();
     expect(getThread(harness.db, "thr_234567abcd")?.archivedAt).not.toBeNull();

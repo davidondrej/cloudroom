@@ -11,11 +11,11 @@ import { SecondaryPanelLayout } from "@/components/secondary-panel/SecondaryPane
 import { LazyThreadSecondaryPanel } from "@/components/secondary-panel/lazySecondaryPanelComponents";
 import {
   CHROME_ROW_HEIGHT_CLASS,
-  getBbDesktopInfo,
+  getRoomDesktopInfo,
   MACOS_APP_REGION_NO_DRAG_CLASS,
   MACOS_WINDOW_DRAG_CLASS,
   shouldUseMacosDesktopChrome,
-} from "@/lib/bb-desktop";
+} from "@/lib/room-desktop";
 import { RootComposeCompactHome } from "./RootComposeCompactHome";
 import { useOptionalPaneContext } from "./thread-detail/PaneContext";
 import { getCompactPanelPresentation } from "@/components/secondary-panel/panelToggleControlState";
@@ -77,7 +77,7 @@ export function RootComposeSecondaryContent({
   const paneContext = useOptionalPaneContext();
   const secondaryPanelHost = paneContext?.secondaryPanelHost ?? null;
   const composerHost = usePluginComposerHost();
-  const [desktopInfo] = useState(getBbDesktopInfo);
+  const [desktopInfo] = useState(getRoomDesktopInfo);
   const usesDesktopChrome = shouldUseMacosDesktopChrome(desktopInfo);
   const rendersWindowDragStrip =
     usesDesktopChrome && paneContext?.isTopRow !== false;
@@ -145,8 +145,9 @@ export function RootComposeSecondaryContent({
           </div>
         </>
       )}
+      {/* A footer that renders nothing takes no space. The app shell already pads the bottom safe area. */}
       {footer ? (
-        <div className="flex shrink-0 justify-center px-4 pb-[max(0.75rem,env(safe-area-inset-bottom))] pt-2">
+        <div className="flex shrink-0 justify-center px-4 pb-3 pt-2 empty:hidden">
           {footer}
         </div>
       ) : null}

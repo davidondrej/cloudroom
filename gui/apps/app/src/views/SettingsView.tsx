@@ -113,7 +113,7 @@ import {
 import { useSystemConfig } from "@/hooks/queries/system-queries";
 import { WorktreeDiskUse } from "@/components/layout/LowDiskBanner";
 import { useWorkspaceOpenTargets } from "@/hooks/useWorkspaceOpenTargets";
-import { isDesktopBrowserAvailable } from "@/lib/bb-desktop";
+import { isDesktopBrowserAvailable } from "@/lib/room-desktop";
 import {
   FAVICON_COLOR_VALUES,
   getFaviconGlyphHref,

@@ -21,8 +21,10 @@ through Tailscale Serve:
 
 ```bash
 tailscale serve --bg --https=443 http://127.0.0.1:38886
-npx bb-app config set BB_APP_URL https://<machine>.<tailnet>.ts.net
 ```
+
+Then set `BB_APP_URL` to `https://<machine>.<tailnet>.ts.net` in the data folder's
+`config.json` (`{"config": {"BB_APP_URL": "…"}}`) and restart the app.
 
 Start bb with `npx bb-app` and open the HTTPS URL. Tailscale ACLs are the access
 boundary for this route; do not expose the server through Funnel or the public
@@ -57,12 +59,12 @@ If that browser should open work-host files in its local editor, first make
 sure bb is running on the browser device. Verify `ssh <work-host>` succeeds
 there, then map the server/work-host to that SSH target:
 
-```bash
-npx bb-app client ssh-target set <bb-server-origin> <ssh-target> --host-id <work-host-id>
+```json
+{ "servers": { "<bb-server-origin>": { "hosts": { "<work-host-id>": { "sshAuthority": "<ssh-target>" } } } } }
 ```
 
-Copy the work-host ID from `bb machine list`. `--host-id` may be omitted when
-the server has exactly one machine. A browser running on an enrolled execution
+Save that as `client.json` in the browser device's data folder. Copy the
+work-host ID from `room-cli machine list`. A browser running on an enrolled execution
 machine needs no SSH mapping for that same machine: connected daemons report
 their helper ports to the server, and the browser discovers the matching local
 helper after you enable integration.
@@ -78,8 +80,7 @@ If Settings reports that it cannot connect to the helper:
 2. Confirm the browser allows local network access for the bb page.
 3. A helper enrolled with this exact server trusts its origin automatically.
    For a separate local bb helper serving a custom HTTPS or Tailscale browser,
-   configure that exact origin with
-   `npx bb-app config set BB_APP_URL <origin>` and restart bb.
+   set that exact origin as `BB_APP_URL` in `config.json` and restart the app.
 4. Return to Settings → Files and choose **Retry**.
 
 Phones and tablets need no helper; editor-launch actions are simply unavailable.

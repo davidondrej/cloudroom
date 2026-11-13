@@ -7,7 +7,7 @@ import {
   ThreadWaitUnreachableError,
 } from "@cloudroom/sdk";
 import { action, CliExitError } from "../../action.js";
-import { createCliBbSdk } from "../../client.js";
+import { createCliRoomSdk } from "../../client.js";
 import { resolveContextThreadId } from "../../context-env.js";
 import { outputJson, requireThreadId } from "../helpers.js";
 import {
@@ -62,7 +62,7 @@ export function registerWaitCommand(
     .option("--json", "Print machine-readable JSON output")
     .action(
       action(async (id: string | undefined, opts: ThreadWaitCommandOptions) => {
-        const sdk = createCliBbSdk(getUrl());
+        const sdk = createCliRoomSdk(getUrl());
         if (opts.children) {
           await waitForChildren({
             sdk,

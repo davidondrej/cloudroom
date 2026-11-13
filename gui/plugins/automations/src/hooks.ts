@@ -27,7 +27,7 @@ export function formatEvents(events: readonly HookEvent[]): string {
 }
 
 export async function pollWebhooks(
-  bb: HookApi,
+  room: HookApi,
   db: Db,
   service: Pick<AutomationService, "runWebhook">,
   signal: AbortSignal,
@@ -37,10 +37,10 @@ export async function pollWebhooks(
   // Batches still running here: a slow thread start or script must not start a second attempt.
   const busy = new Set<string>();
   const ack = (batch: string) =>
-    bb.sdk.cloudroom.automations({ action: "ack", batches: [batch] }).then(
+    room.sdk.cloudroom.automations({ action: "ack", batches: [batch] }).then(
       () => undefined,
       (error: unknown) =>
-        bb.log.warn(
+        room.log.warn(
           `Webhook batch ${batch} not acked; it comes back and is acked then: ${errorMessage(error)}`,
         ),
     );
@@ -48,7 +48,7 @@ export async function pollWebhooks(
     const loops = listEnabledWebhookAutomations(db).map((row) => row.id);
     if (loops.length > 0) {
       try {
-        const answer = await bb.sdk.cloudroom.automations({
+        const answer = await room.sdk.cloudroom.automations({
           action: "events",
           local: loops,
         });
@@ -67,7 +67,7 @@ export async function pollWebhooks(
             })
             .then((took) => (took ? ack(batch.batch) : undefined))
             .catch((error: unknown) =>
-              bb.log.error(
+              room.log.error(
                 `Webhook run for loop ${batch.local} not started: ${errorMessage(error)}`,
               ),
             )
@@ -78,7 +78,7 @@ export async function pollWebhooks(
         // Signed out or offline: say so once, and keep asking.
         const problem = errorMessage(error);
         if (problem !== lastProblem)
-          bb.log.warn(`Webhook loops could not get their events: ${problem}`);
+          room.log.warn(`Webhook loops could not get their events: ${problem}`);
         lastProblem = problem;
       }
     }

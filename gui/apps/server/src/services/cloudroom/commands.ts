@@ -1,13 +1,14 @@
 import { createHash, randomUUID } from "node:crypto";
 import { readFile, writeFile, mkdir, stat, rename, rm } from "node:fs/promises";
 import { join, win32 } from "node:path";
-import { and, desc, eq, inArray, isNull, max, notInArray } from "drizzle-orm";
+import { and, desc, eq, gt, inArray, isNull, max, notInArray, sql } from "drizzle-orm";
 import { createThread, findLastCompletedRootStoredTurn, getAppSettings, getProject, getThread, getThreadExecutionOverride, setThreadExecutionOverride, updateThread, cloudroomThreads, cloudroomCommands, events, threads, type DbConnection, type DbQueryConnection, type DbTransaction } from "@cloudroom/db";
 import { PERSONAL_PROJECT_ID, cloudLoginName, cloudLoginProvider, type CloudLoginProvider, rawThreadIdSchema, encodeClientTurnRequestIdNumber, isStandaloneBuiltinCompactCommand, promptInputSchema, reasoningLevelSchema, reconcileReasoningLevel, defaultReasoningLevel, threadQueuedMessageSchema, type Thread, type PromptInput, type ThreadEventType, type ThreadEventTurnStatus, type ThreadChangeKind, type ReasoningLevel, COMPUTER, COMPUTER_TITLE } from "@cloudroom/domain";
 import type { CreateThreadRequest, ForkThreadRequest, SendMessageRequest, SendMessageResponse } from "@cloudroom/server-contract";
 import { z } from "zod";
 import { findCliExecutable } from "@cloudroom/process-utils";
 import { ApiError } from "../../errors.js";
+import { firstAgentThreadId } from "../system/first-agent.js";
 import { CloudroomClient, CloudroomConnectionError, CloudroomError, UPLOAD_PART, authRequiredMessages, type CodexAuthStatus, type SessionRecord, type VmRun, type VmRunResult } from "./client.js";
 import { CLOUD_HARNESSES, HARNESS_NAMES, appendStartProgress, endedTurn, projectShown, sessionHarness, type EarlierSession, isAcpProvider, isCloudProvider, projectFollowUp, projectInitialPrompt, projectRecord, projectRecords, recordSaving, retractStillQueuedPrompts, STREAM_BATCH_MAX_RECORDS, STREAM_BATCH_MS, startStepRunning, type CloudProvider, type StartStep } from "./events.js";
 import { mentionsOpenAISide401 } from "./codex-errors.js";
@@ -16,7 +17,7 @@ import { buildThreadStatusChangeMetadata } from "../threads/thread-runtime-displ
 import { cloudPluginInstructions, cloudroomSystemPrompt, dueCustomInstructions, markCustomInstructionsLost, prepareCloudInstructionInput, resolveCustomInstructions } from "../threads/custom-instructions.js";
 import { TIMED_OUT, baseBranch, binding, bindings, command, commands, coreInUse, localTeleports, openBindings, queuedPrompts, saveBinding, saveCommandState, saveStatus, effectivePrompt, projectCopyProgress, stampBindings, teleportBlocked, unstartedTurn, type Binding, type Command, type OpenBinding, isDead, statusOf } from "./store.js";
 import { syncLoopEnv } from "./project-loops.js";
-import { copyProject, copyRunning, keyCopying, githubRepository, localFilesNote, localProjectNote, localProjectPath, planNewProjectCopy, workspaceId, workspaceName, planProjectCopy, planProjectCopyOrThrow, reportProjectCopy, writeFilesState, type ProjectCopyJob } from "./project-copy.js";
+import { copyProject, copyRunning, keyCopying, githubRepository, localFilesNote, localProjectNote, localProjectPath, planNewProjectCopy, workspaceId, workspaceName, planProjectCopy, planProjectCopyOrThrow, reportProjectCopy, retry, writeFilesState, type ProjectCopyJob } from "./project-copy.js";
 import { CHILD_HINT, cloudForkOf, cloudForkPoint, codeFromOf, FORK_HARNESSES, FORK_HINT, landForkCode, localForkPoint, startCloudFork, threadCode, uploadInParts } from "./fork.js";
 import { copyForkSourceHistory } from "../threads/thread-fork-history.js";
 import { CloudGitError, savedWorkspacePath } from "./git.js";
@@ -128,8 +129,12 @@ const capabilitiesSchema = z.object({
     usage: z.boolean().default(false),
     /** fx switches effort per turn; other ACP harnesses keep the launch level. */
     prompt_reasoning: z.boolean().default(false),
+    /** Claude switches models in its session (`POST …/model`), as on Local; the others start a new session (ADR 0211). */
+    set_model: z.boolean().default(false),
   })),
 });
+/** A queued model pick (changeModel), with what the thread ran before it for when Core doesn't take it. */
+const modelPickSchema = z.object({ model: z.string(), reasoning: z.string(), before: z.object({ model: z.string(), reasoning: z.string(), override: reasoningLevelSchema.nullable() }) });
 type Connection = z.infer<typeof connectionSchema>;
 type Capabilities = z.infer<typeof capabilitiesSchema>;
 const storageBytes = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).nullable().default(null);
@@ -490,8 +495,12 @@ const startsWork = (item: Command) => ["prompt", "steer", "resume", "compact", "
 const unsentWork = (db: DbQueryConnection, threadId: string) => {
   const unsent = commands(db, threadId).filter(c => c.state === "sending");
   const stopped = unsent.some(c => c.command === "stop");
-  return unsent.some(c => c.command !== "stop" && (!stopped || startsWork(c)));
+  return unsent.some(c => c.command !== "stop" && c.command !== "model" && (!stopped || startsWork(c)));
 };
+
+/** Threads made by importing old chats. They are not agents the user started (ADR 20261102-073449). */
+export const importedThreadIds = async (deps: Pick<AppDeps, "config">): Promise<string[]> => [...new Set((await Promise.all(["session-imports.json", "bb-imports.json"].map((name) =>
+  readFile(join(deps.config.dataDir, name), "utf8").then((text) => Object.values(JSON.parse(text) as Record<string, string>), () => [])))).flat())];
 
 class CloudroomService {
   teleportRecovery?: () => void;
@@ -771,6 +780,8 @@ class CloudroomService {
 
   /** Runs an awake answer named, so each asks for a list once (#237). */
   private readonly runsSeen = new Set<string>();
+  /** Runs an older website's awake answer named that this computer can't show, warned about once (#1072). */
+  private readonly runsSkipped = new Set<string>();
   private tag = "";
   /** This install's tag, on every prompt, steer, edit and rewind it sends (#237, cloud-threads.ts). */
   async me(): Promise<string> { return this.tag ||= await installTag(this.deps.config.dataDir); }
@@ -931,7 +942,14 @@ class CloudroomService {
       if (child && run.parent !== undefined && shown && this.linkParent(shown, existing.parentThreadId) !== run.parent) updateThread(this.deps.db, this.deps.hub, existing.id, { parentThreadId: parent?.id ?? null });
       return;
     }
-    if (!providerId || !model || (source && source.projectId !== run.project) || !getProject(this.deps.db, run.project)) return;
+    // Not shown here: said once per thread and app run, not on each minute's list (#1072).
+    const skip = (why: string) => {
+      if (!this.runsSkipped.has(run.thread)) this.warn("A Cloud thread the website started isn't shown here", why, { threadId: run.thread, projectId: run.project });
+      this.runsSkipped.add(run.thread);
+    };
+    if (!providerId || !model) return skip("it names no agent or model");
+    if (source && source.projectId !== run.project) return skip("the thread that started it is in another project here");
+    if (!getProject(this.deps.db, run.project)) return skip("its project isn't on this computer");
     const adopted = this.deps.db.transaction(tx => {
       if (getThread(tx, run.thread) || tx.select().from(cloudroomThreads).where(eq(cloudroomThreads.sessionId, run.session)).get()) return null;
       const thread = createThread(tx, this.deps.hub, { id: run.thread, executionTarget: "cloud", projectId: run.project, providerId, ...(parent ? { parentThreadId: parent.id } : {}), title: run.title, titleFallback: parent ? `${HARNESS_NAMES[providerId as CloudProvider] ?? "Cloud"} child` : "Loop run", status: "pending" });
@@ -1158,7 +1176,9 @@ class CloudroomService {
     const parsed = storageSchema.safeParse(health.storage);
     if (!parsed.success) throw new ApiError(503, "cloudroom_storage_unknown", "Cloud storage status is invalid. Available disk space is unknown.");
     const storage = parsed.data;
-    if (storage.enabled && (storage.reason === "measurement_unavailable" || (storage.sampled_at !== null && (Date.now() - storage.sampled_at > 30_000 || storage.sampled_at > Date.now() + 60_000)))) {
+    // Core never reports a reading older than 5 s on its own clock (`Guard::snapshot`). A sandbox clock that drifts from
+    // the Mac's can make a 30 s age check here fail with ample space (#1463).
+    if (storage.enabled && storage.reason === "measurement_unavailable") {
       return { ...storage, level: "blocked", reason: "measurement_unavailable", workspace_available_bytes: null, history_available_bytes: null, workspace_total_bytes: null, history_total_bytes: null };
     }
     return storage;
@@ -1404,10 +1424,26 @@ class CloudroomService {
     }).finally(() => { if (this.previewSetupEpoch === epoch) this.previewSetupEpoch = -1; });
   }
 
+  private recent: { at: number; local: number; cloud: number } | null = null;
+  /** Threads the user started in the last 30 days, by where they run: it tells who mostly uses Local (ADR 20261111-222458).
+   *  Imports, subagents, hidden threads, and plugin runs don't count. Counted at most every 5 minutes. */
+  private async recentThreads(): Promise<{ local: number; cloud: number }> {
+    if (!this.recent || Date.now() - this.recent.at >= 5 * 60_000) {
+      // The first agent is a thread Cloudroom started, not the user (ADR 20261111-220912).
+      const skipped = [...await importedThreadIds(this.deps), firstAgentThreadId(this.deps.db) ?? []].flat();
+      const rows = this.deps.db.select({ target: threads.executionTarget, n: sql<number>`count(*)` }).from(threads)
+        .where(and(isNull(threads.parentThreadId), isNull(threads.originPluginId), eq(threads.visibility, "visible"),
+          gt(threads.createdAt, Date.now() - 30 * 86_400_000), skipped.length ? notInArray(threads.id, skipped) : undefined))
+        .groupBy(threads.executionTarget).all();
+      const count = (target: "local" | "cloud") => rows.find((row) => row.target === target)?.n ?? 0;
+      this.recent = { at: Date.now(), local: count("local"), cloud: count("cloud") };
+    }
+    return { local: this.recent.local, cloud: this.recent.cloud };
+  }
+
   async status() {
-    const cloud = this.deps.db.select({ updated: max(threads.updatedAt), created: max(threads.createdAt) }).from(threads).where(eq(threads.executionTarget, "cloud")).get();
-    const lastCloudAt = cloud?.updated ?? null;
-    const lastNewCloudAt = cloud?.created ?? null;
+    const lastCloudAt = this.deps.db.select({ updated: max(threads.updatedAt) }).from(threads).where(eq(threads.executionTarget, "cloud")).get()?.updated ?? null;
+    const recentThreads = await this.recentThreads();
     let account: CloudroomAccount | null = null;
     let projectId: string | null = null;
     let storage: Storage | null = null;
@@ -1438,7 +1474,7 @@ class CloudroomService {
           model: capabilities?.harnesses.find((h) => h.id === "codex")?.model ?? null,
           steer: capabilities?.steer ?? false, rewind: capabilities?.rewind ?? false, attachments: capabilities?.attachments ?? false,
           compact: capabilities?.compact ?? false, queue_edit: capabilities?.queue_edit ?? false, queue_cancel: capabilities?.queue_cancel ?? false,
-          queue_reorder: capabilities?.queue_reorder ?? false, error: null, cloudQueue: this.sandboxes.cloudQueue(), usedCloud: lastCloudAt !== null, lastCloudAt, lastNewCloudAt,
+          queue_reorder: capabilities?.queue_reorder ?? false, error: null, cloudQueue: this.sandboxes.cloudQueue(), usedCloud: lastCloudAt !== null, lastCloudAt, recentThreads,
           plan: this.sandboxes.currentPlan(), planUsage: this.sandboxes.planUsage(),
         };
       }
@@ -1457,7 +1493,7 @@ class CloudroomService {
         model: capabilities.harnesses.find((h) => h.id === "codex")?.model ?? null,
         steer: capabilities.steer, rewind: capabilities.rewind, attachments: capabilities.attachments,
         compact: capabilities.compact, queue_edit: capabilities.queue_edit, queue_cancel: capabilities.queue_cancel,
-        queue_reorder: capabilities.queue_reorder, error: null, usedCloud: lastCloudAt !== null, lastCloudAt, lastNewCloudAt,
+        queue_reorder: capabilities.queue_reorder, error: null, usedCloud: lastCloudAt !== null, lastCloudAt, recentThreads,
       };
     } catch (error) { return { ready: false, account, signedOut, selfHosted, projectId, storage, workspaces: false, repository: null, model: null, error: publicError(error) }; }
   }
@@ -1840,6 +1876,60 @@ class CloudroomService {
       }
     }
     setThreadExecutionOverride(this.deps.db, { threadId: thread.id, reasoningLevelOverride: reasoningLevel });
+  }
+
+  /** Cores whose harness switches models in its session (`set_model`), by Core and harness. A Core never loses it. */
+  private readonly modelSwitchers = new Set<string>();
+  private async switchesModels(coreUrl: string, harness: string, ask: () => Promise<Capabilities>): Promise<boolean> {
+    const key = `${coreUrl} ${harness}`;
+    if (this.modelSwitchers.has(key)) return true;
+    const takes = Boolean(harnessProfile(await ask(), harness)?.set_model);
+    if (takes) this.modelSwitchers.add(key);
+    return takes;
+  }
+
+  /** A model pick in the same Claude session, as on Local: saved here at once, then Core gets it as a queued `model`
+   *  command, ahead of the next work. Core owns it, so every turn runs it, whoever sends it. False when this thread's
+   *  Core can't, so the caller starts a new session instead (ADR 0211). Never wakes the sandbox: an asleep one wakes
+   *  with the pinned Core, which the saved capabilities describe. */
+  async changeModel(thread: Thread, model: string, reasoningLevel: ReasoningLevel | null): Promise<boolean> {
+    const saved = binding(this.deps.db, thread.id);
+    if (!saved?.sessionId || thread.archivedAt || thread.deletedAt || this.switching.has(thread.id)) return false;
+    await this.requireOwnThread(saved);
+    const sandbox = sandboxThread(saved.coreUrl);
+    const known = sandbox ? await this.savedCapabilities() : this.lastCapabilities;
+    if (!known || !harnessProfile(known, thread.providerId)?.set_model) return false;
+    const asleep = sandbox !== null && !this.sandboxes.isAwake(sandbox);
+    const live = async () => this.capabilities(await this.client(saved, false));
+    if (!asleep && !await this.switchesModels(saved.coreUrl, thread.providerId, live).catch(() => false)) return false;
+    const current = this.currentReasoning(thread.id, saved);
+    const levels = reasoningLevels(thread.providerId, model, known) as ReasoningLevel[] | undefined;
+    const reasoning = reasoningLevelSchema.parse(reasoningLevel ?? (levels?.length ? reconcileReasoningLevel(current as ReasoningLevel, levels) : current));
+    validateReasoning(thread.providerId, model, reasoning, known);
+    // Core records the effort with the model, so a wake resumes on a level the model takes; edits send it too. A newer
+    // pick replaces an unsent one, and keeps what the thread ran before both.
+    const waiting = commands(this.deps.db, thread.id).filter((item) => item.command === "model" && item.state === "sending");
+    const before = waiting[0] ? JSON.parse(waiting[0].input).before : { model: saved.model, reasoning: saved.reasoning, override: getThreadExecutionOverride(this.deps.db, thread.id)?.reasoningLevelOverride ?? null };
+    this.deps.db.transaction((tx) => {
+      for (const item of waiting) saveCommandState(tx, thread.id, item.id, "cancelled");
+      saveBinding(tx, thread.id, { model, reasoning });
+      setThreadExecutionOverride(tx, { threadId: thread.id, modelOverride: null, reasoningLevelOverride: reasoning });
+    });
+    this.enqueue(thread.id, randomUUID(), "model", { model, reasoning, before });
+    void this.deliver(thread.id).catch(() => {});
+    return true;
+  }
+
+  /** Core didn't take a model pick (`model` command): the thread shows the model it still runs. */
+  private keepModel(threadId: string, pick: Command): void {
+    const { before } = modelPickSchema.parse(JSON.parse(pick.input));
+    this.deps.db.transaction((tx) => {
+      saveCommandState(tx, threadId, pick.id, "failed");
+      saveBinding(tx, threadId, { model: before.model, reasoning: before.reasoning });
+      setThreadExecutionOverride(tx, { threadId, reasoningLevelOverride: before.override });
+    });
+    this.deps.logger?.warn({ threadId }, "Cloud model pick not taken; the thread keeps its model");
+    this.deps.hub.notifyThread(threadId, ["execution-options-changed"], { projectId: getThread(this.deps.db, threadId)?.projectId });
   }
 
   private async queueCapabilities(saved: Binding): Promise<Capabilities> {
@@ -2621,8 +2711,17 @@ class CloudroomService {
     if (!saved?.sessionId || !thread || sandboxThread(saved.coreUrl) !== threadId) return null;
     const name = buildSuggestedBranchName({ branchPrefix: "room/", title: thread.title ?? thread.titleFallback ?? null, threadId });
     try {
-      const client = await this.client(saved, false);
-      const workspace = await client.sessionWorkspace(saved.sessionId);
+      const client = await this.client(saved, false), sessionId = saved.sessionId;
+      // A new thread's lost answer (a dropped connection, a proxy's 504) is asked again (#1524). A try this app gave up
+      // waiting for, such as a stuck fetch, is not run again.
+      const again = <T>(attempt: (signal: AbortSignal) => Promise<T>) => {
+        const once = () => {
+          const signal = AbortSignal.timeout(5 * 60_000);
+          return attempt(signal).catch((error: unknown) => { throw signal.aborted && error instanceof Error ? new Error(error.message) : error; });
+        };
+        return create ? retry(once) : once();
+      };
+      const workspace = await again(signal => client.sessionWorkspace(sessionId, signal));
       if (create) this.progress(threadId, [{ key: "workspace", text: `Using workspace: ${workspace.path}`, status: "completed" }]);
       if (!workspace.head) return null;
       const quoted = `'${name}'`;
@@ -2636,7 +2735,10 @@ class CloudroomService {
       const script = create
         ? `current=$(git symbolic-ref --quiet --short HEAD) || exit 0; case "$current" in room/*|cloudroom/*) ;; *) ${own}${switchBase}git pull -q --ff-only 2>/dev/null; git checkout -q -b ${quoted} ;; esac`
         : `current=$(git symbolic-ref --quiet --short HEAD) || exit 0; case "$current" in room/*|cloudroom/*) [ "$current" = ${quoted} ] || git rev-parse -q --verify "$current@{upstream}" >/dev/null || git branch -m ${quoted} ;; esac`;
-      const result = await client.runOnVm({ command: `${script}\ngit symbolic-ref --quiet --short HEAD`, cwd: workspace.path });
+      // One switch at a time per checkout: a retry waits for the try whose answer was lost, then finds its branch and
+      // changes nothing, so the late try can't move the folder back to the base branch (#1524).
+      const lock = `exec 9>>"$(git rev-parse --git-path cloudroom-branch.lock)" && flock 9; `;
+      const result = await again(signal => client.runOnVm({ command: `${lock}${script}\ngit symbolic-ref --quiet --short HEAD`, cwd: workspace.path }, signal));
       const branch = Buffer.from(result.stdout, "hex").toString().trim().split("\n").at(-1);
       if (branch) this.progress(threadId, [{ key: "branch", text: `Using branch: ${branch}`, status: "completed" }]);
       if (create && result.code === kept && branch) { onKept?.(branch); return null; }
@@ -3332,6 +3434,14 @@ class CloudroomService {
               ...(parsed.reasoning ? { reasoning: parsed.reasoning } : {}),
               ...(parsed.service_tier ? { service_tier: parsed.service_tier } : {}),
             });
+          } else if (pending.command === "model") {
+            const parsed = modelPickSchema.parse(JSON.parse(pending.input));
+            // A Core that predates the switch (still awake from before a release) keeps its model, and so does the thread.
+            if (!harness || !await this.switchesModels(saved.coreUrl, harness, () => this.capabilities(client))) {
+              this.keepModel(threadId, pending);
+              continue;
+            }
+            accepted = await client.setModel(sessionId, pending.id, parsed.model, parsed.reasoning);
           } else if (pending.command === "cancel") {
             accepted = await client.cancel(sessionId, pending.id, JSON.parse(pending.input).target_request_id);
           } else if (pending.command === "reorder") {
@@ -3379,6 +3489,10 @@ class CloudroomService {
               if (this.deps.db.transaction(tx => projectFollowUp(tx, threadId, id))) this.notify(threadId, ["client/turn/requested"]);
               void this.deliver(threadId).catch(() => {});
               return;
+            }
+            if (pending.command === "model") {
+              this.keepModel(threadId, pending);
+              continue;
             }
             saveCommandState(this.deps.db, threadId, pending.id, "failed");
             if (["edit", "cancel"].includes(pending.command) && error instanceof CloudroomError && /queued message is (no longer pending|already being sent)/.test(error.message)) continue;

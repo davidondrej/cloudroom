@@ -884,7 +884,7 @@ function toolStatusFields(status: CodexItemStatus): {
 
 const PLAN_STEPS_CHANNEL = "planSteps";
 
-const BB_TOOL_SERVER = "bb";
+const ROOM_TOOL_SERVER = "bb";
 
 function isTerminalCodexItemStatus(status: CodexItemStatus): boolean {
   return status !== "inProgress";
@@ -1013,7 +1013,7 @@ function translateCodexItemShape(
         kind: "translated",
         shape: {
           type: "tool",
-          ...(injected === undefined ? {} : { server: BB_TOOL_SERVER }),
+          ...(injected === undefined ? {} : { server: ROOM_TOOL_SERVER }),
           tool: parsedItem.tool,
           ...(parsedItem.arguments === undefined
             ? {}

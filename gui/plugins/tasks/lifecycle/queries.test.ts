@@ -28,11 +28,11 @@ function fixture(taskCount: number, mappingCount: number) {
       },
     },
   });
-  const bb = {
+  const room = {
     ...host.bb,
     storage: { ...host.bb.storage, database: () => db },
   };
-  const store = createStore(bb);
+  const store = createStore(room);
   const project = store.tasks.createProject({
     name: "Query counts",
     prefix: "QUERY",
@@ -52,7 +52,7 @@ function fixture(taskCount: number, mappingCount: number) {
   );
   return {
     ...host,
-    bb,
+    bb: room,
     db,
     store,
     tasks,

@@ -11,7 +11,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import Database from "better-sqlite3";
 import type { PluginCliRegistration } from "@get-bb/plugin-sdk";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import {
   claimAutomationScheduledRun,
   closeAutomationRun,
@@ -37,7 +37,7 @@ import {
   validateOnceDefinition,
 } from "./schedule-helpers.js";
 import {
-  bbBinaryCandidates,
+  roomBinaryCandidates,
   executeStoredScript,
   isWakeAgentSuppressed,
   mapScriptResultToRun,
@@ -65,6 +65,7 @@ function createScheduledAutomation(
   db: Db,
   nextRunAt: number,
   id = "auto_test",
+  cron = "* * * * *",
 ) {
   return createAutomation(db, {
     id,
@@ -73,7 +74,7 @@ function createScheduledAutomation(
     enabled: true,
     trigger: {
       triggerType: "schedule",
-      cron: "* * * * *",
+      cron,
       timezone: "UTC",
     },
     runMode: "agent",
@@ -166,7 +167,7 @@ function legacyAutomationRow(
   };
 }
 
-function createAutomationServiceBb() {
+function createAutomationServiceRoom() {
   return {
     sdk: {
       projects: {
@@ -305,7 +306,7 @@ describe("data migrations", () => {
 });
 
 describe("startup reconciliation", () => {
-  function reconcileBb(threads: {
+  function reconcileRoom(threads: {
     get: (args: { threadId: string }) => Promise<unknown>;
     events?: (args: {
       threadId: string;
@@ -382,7 +383,7 @@ describe("startup reconciliation", () => {
       runMode: "agent",
       now: 1000,
     }).run;
-    const { bb, published } = reconcileBb({
+    const { bb, published } = reconcileRoom({
       get: async () => {
         throw new Error("no thread should be asked about");
       },
@@ -444,7 +445,7 @@ describe("startup reconciliation", () => {
       setAutomationRunThread(db, { runId: run.id, threadId });
       threads.set(threadId, testCase.thread);
     }
-    const { bb } = reconcileBb({
+    const { bb } = reconcileRoom({
       get: async ({ threadId }) => {
         const value = threads.get(threadId);
         if (value === null) {
@@ -481,7 +482,7 @@ describe("startup reconciliation", () => {
     ] as const;
     // A loop's target thread predates its runs; a spawned thread does not.
     const createdAt = (id: string) => (id === "target" ? 0 : 1000);
-    const { bb } = reconcileBb({
+    const { bb } = reconcileRoom({
       get: async ({ threadId }) => ({
         ...thread(threadId, "idle"),
         createdAt: createdAt(threadId),
@@ -881,7 +882,7 @@ describe("automation data access", () => {
   it("does not claim due agent automations when no host is connected", async () => {
     const db = createTestDb();
     const automation = createScheduledAutomation(db, 1000);
-    const bb = {
+    const room = {
       sdk: {
         projects: { list: async () => [] },
         hosts: {
@@ -917,7 +918,7 @@ describe("automation data access", () => {
       },
     };
 
-    await sweepDueAutomations(bb, db, {
+    await sweepDueAutomations(room, db, {
       pluginDataDir: "/tmp",
       serverUrl: "http://127.0.0.1:38886",
       now: 1000,
@@ -952,7 +953,7 @@ describe("automation data access", () => {
     const notExpected = async () => {
       throw new Error("not expected");
     };
-    const bb = {
+    const room = {
       sdk: {
         projects: { list: async () => [{ id: "proj_test" }] },
         hosts: {
@@ -991,7 +992,7 @@ describe("automation data access", () => {
     const overdueStarted = () =>
       overdue.reduce((total, id) => total + runs(id), 0);
     const sweep = (at: number) =>
-      sweepDueAutomations(bb, db, {
+      sweepDueAutomations(room, db, {
         pluginDataDir: "/tmp",
         serverUrl: "http://127.0.0.1:38886",
         now: at,
@@ -1015,6 +1016,25 @@ describe("automation data access", () => {
     ["error", "error", 0, ["thr_1", "thr_2"]],
     // A finished run's thread can work on too: a child reports back or a person continues it (#1279).
     ["active after a finished run", "active", 0, ["thr_1"], "idle"],
+    // A failed run's thread that came back and finished did its slot's work: a daily loop's retry would redo it (#1443).
+    [
+      "back after a failure, before the next slot",
+      "active",
+      0,
+      ["thr_1"],
+      "failed",
+      "0 9 * * *",
+    ],
+    // Unless that thread reported that it failed: then its retry runs, as before (#1443).
+    [
+      "back after a failure it reported",
+      "active",
+      0,
+      ["thr_1"],
+      "failed",
+      "0 9 * * *",
+      "failed",
+    ],
   ] as const)(
     "a loop's next run when its last run's thread is %s (#887, #1279)",
     async (
@@ -1023,12 +1043,17 @@ describe("automation data access", () => {
       wait,
       atRetry,
       ended: "idle" | "failed" = "failed",
+      cron?: string,
+      reported?: string,
     ) => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(1000);
+      onTestFinished(() => void vi.useRealTimers());
       const db = createTestDb();
-      const automation = createScheduledAutomation(db, 1000);
+      const automation = createScheduledAutomation(db, 1000, "auto_test", cron);
       const spawned: string[] = [];
       let threadStatus: string = "active";
-      const bb = {
+      const room = {
         sdk: {
           projects: { list: async () => [{ id: "proj_test" }] },
           hosts: { list: async () => [{ id: "host_test", status: "connected" }] },
@@ -1047,15 +1072,27 @@ describe("automation data access", () => {
               return { id: spawned.at(-1), status: "active", archivedAt: null, deletedAt: null };
             },
           },
+          cloudroom: {
+            automations: async ({ runs }: { runs: string[] }) => ({
+              reports: reported
+                ? runs.map((request) => ({
+                    request,
+                    thread_id: "thr_1",
+                    outcome: reported,
+                    reason: null,
+                  }))
+                : [],
+            }),
+          } as never,
         },
         realtime: { publish: () => undefined },
         log: { debug: () => undefined, error: () => undefined, info: () => undefined, warn: () => undefined },
       };
       const sweep = (now: number) =>
-        sweepDueAutomations(bb, db, { pluginDataDir: "/tmp", serverUrl: "http://127.0.0.1:38886", now });
+        sweepDueAutomations(room, db, { pluginDataDir: "/tmp", serverUrl: "http://127.0.0.1:38886", now });
 
       await sweep(1000);
-      await closeAutomationRunForSettledThread(bb, db, {
+      await closeAutomationRunForSettledThread(room, db, {
         threadId: "thr_1",
         status: ended,
         error: "host daemon restarted",
@@ -1065,10 +1102,12 @@ describe("automation data access", () => {
       await sweep(retryAt);
       expect(spawned).toEqual(atRetry);
 
-      // Once the old thread settles, the waiting retry runs as before.
+      // Once the old thread settles, the waiting retry runs as before, unless it redoes a recovered run's slot.
       threadStatus = "idle";
       await sweep(retryAt + 10_000);
-      expect(spawned).toEqual(["thr_1", "thr_2"]);
+      expect(spawned).toEqual(
+        cron && !reported ? ["thr_1"] : ["thr_1", "thr_2"],
+      );
     },
   );
 
@@ -1079,7 +1118,7 @@ describe("automation data access", () => {
     const notExpected = async () => {
       throw new Error("not expected");
     };
-    const bb = {
+    const room = {
       sdk: {
         projects: {
           list: async ({ hidden }: { hidden?: boolean }) =>
@@ -1097,7 +1136,7 @@ describe("automation data access", () => {
       },
     };
     const sweep = () =>
-      sweepDueAutomations(bb, db, {
+      sweepDueAutomations(room, db, {
         pluginDataDir: "/tmp",
         serverUrl: "http://127.0.0.1:38886",
         now: 1000,
@@ -1250,7 +1289,7 @@ describe("automation data access", () => {
 describe("automation service", () => {
   it("validates project availability before creating an automation", async () => {
     const db = createTestDb();
-    const bb = {
+    const room = {
       sdk: {
         projects: {
           get: async () => {
@@ -1285,7 +1324,7 @@ describe("automation service", () => {
       },
     };
     const service = createAutomationService({
-      bb,
+      bb: room,
       db,
       pluginDataDir: "/tmp",
       serverUrl: "http://127.0.0.1:38886",
@@ -1314,14 +1353,14 @@ describe("automation service", () => {
 
   it("rejects a Personal project loop in a folder thread creation would reject", async () => {
     const db = createTestDb();
-    const bb = createAutomationServiceBb();
-    const getProject = bb.sdk.projects.get;
-    bb.sdk.projects.get = async (args) => ({
+    const room = createAutomationServiceRoom();
+    const getProject = room.sdk.projects.get;
+    room.sdk.projects.get = async (args) => ({
       ...(await getProject(args)),
       kind: "personal" as never,
     });
     const service = createAutomationService({
-      bb,
+      bb: room,
       db,
       pluginDataDir: "/tmp",
       serverUrl: "http://127.0.0.1:38886",
@@ -1379,7 +1418,7 @@ describe("automation service", () => {
     await mkdir(scriptDir, { recursive: true });
     await writeFile(join(scriptDir, "old.sh"), "echo old\n");
     const service = createAutomationService({
-      bb: createAutomationServiceBb(),
+      bb: createAutomationServiceRoom(),
       db,
       pluginDataDir,
       serverUrl: "http://127.0.0.1:38886",
@@ -1430,7 +1469,7 @@ describe("automation service", () => {
     await writeFile(join(scriptDir, "old.sh"), "echo old\n");
     await writeFile(join(scriptDir, "keep.txt"), "keep\n");
     const service = createAutomationService({
-      bb: createAutomationServiceBb(),
+      bb: createAutomationServiceRoom(),
       db,
       pluginDataDir,
       serverUrl: "http://127.0.0.1:38886",
@@ -1488,7 +1527,7 @@ describe("automation service", () => {
         SELECT RAISE(ABORT, 'update rejected');
       END`);
     const service = createAutomationService({
-      bb: createAutomationServiceBb(),
+      bb: createAutomationServiceRoom(),
       db,
       pluginDataDir,
       serverUrl: "http://127.0.0.1:38886",
@@ -1544,7 +1583,7 @@ describe("automation service", () => {
         SELECT RAISE(ABORT, 'update rejected');
       END`);
     const service = createAutomationService({
-      bb: createAutomationServiceBb(),
+      bb: createAutomationServiceRoom(),
       db,
       pluginDataDir,
       serverUrl: "http://127.0.0.1:38886",
@@ -1585,19 +1624,19 @@ describe("automation service", () => {
       const automation = createScheduledAutomation(db, 1000);
       const { run } = createManualRun(db, { automationId: automation.id, runMode: "agent", now: 1 });
       const prompts: string[] = [];
-      const base = createAutomationServiceBb();
+      const base = createAutomationServiceRoom();
       const thread = { id: "thr_run", archivedAt: null, deletedAt: null, status: "active" };
       const spawn = async (input: { prompt?: string }) => (prompts.push(input.prompt!), thread as never);
       const cloudroom = { automations: async () => ({ reports: [] }), status: status as never };
-      const bb = { ...base, sdk: { ...base.sdk, cloudroom, threads: { ...base.sdk.threads, spawn } } };
-      await executeAgentRun(bb, db, { automation, run, execution: automation.execution as never, onFailure: () => {} });
+      const room = { ...base, sdk: { ...base.sdk, cloudroom, threads: { ...base.sdk.threads, spawn } } };
+      await executeAgentRun(room, db, { automation, run, execution: automation.execution as never, onFailure: () => {} });
       expect(prompts[0]!.includes("room-cli loop report")).toBe(ask);
-      const service = createAutomationService({ bb, db, pluginDataDir: "/tmp", serverUrl: "" });
+      const service = createAutomationService({ bb: room, db, pluginDataDir: "/tmp", serverUrl: "" });
       const report = () => service.report({ threadId: "thr_run", outcome: "done", confidence: "high", reason: "ok", actions: [] });
       await (ask ? expect(report()).resolves.toEqual({ reported: true }) : expect(report()).rejects.toThrow("need a Cloudroom sign-in"));
       if (status !== rows[1]!.status) continue;
       // A retried or continued turn still reports its run after the thread failed or went idle early (#1293).
-      await closeAutomationRunForSettledThread(bb, db, { threadId: "thr_run", status: "failed" });
+      await closeAutomationRunForSettledThread(room, db, { threadId: "thr_run", status: "failed" });
       await expect(report()).resolves.toEqual({ reported: true });
       // Once another run used the thread, a late report can't tell which run it is for, so it never overwrites one.
       const { run: next } = createManualRun(db, { automationId: automation.id, runMode: "agent", now: 2 });
@@ -1616,15 +1655,15 @@ describe("automation CLI --script-file", () => {
     const pluginDataDir = await mkdtemp(join(tmpdir(), "bb-1649-data-"));
     const srcDir = await mkdtemp(join(tmpdir(), "bb-1649-src-"));
     const reads: FileReadCall[] = [];
-    const serviceBb = createAutomationServiceBb();
+    const serviceRoom = createAutomationServiceRoom();
     const service = createAutomationService({
-      bb: serviceBb,
+      bb: serviceRoom,
       db,
       pluginDataDir,
       serverUrl: "http://127.0.0.1:1",
     });
     const sdk = {
-      ...serviceBb.sdk,
+      ...serviceRoom.sdk,
       hosts: {
         list: async () => [
           { id: "host_server", name: "server" },
@@ -1632,7 +1671,7 @@ describe("automation CLI --script-file", () => {
         ],
       },
       threads: {
-        ...serviceBb.sdk.threads,
+        ...serviceRoom.sdk.threads,
         get: async ({ threadId }: { threadId: string }) =>
           threadId === "thr_env"
             ? { id: threadId, environment: { hostId: "host_laptop" } }
@@ -1959,40 +1998,40 @@ describe("automation CLI --script-file", () => {
 describe("room CLI injection for script runs", () => {
   it("prefers the env pointers over PATH and macOS install locations", () => {
     expect(
-      bbBinaryCandidates({
+      roomBinaryCandidates({
         ROOM_CLI: "/daemon/bundle/room-cli",
         BB_CLI_DIR: "/other/dir",
       })[0],
     ).toBe("/daemon/bundle/room-cli");
-    expect(bbBinaryCandidates({ BB_CLI_DIR: "/daemon/bundle" })[0]).toBe(
+    expect(roomBinaryCandidates({ BB_CLI_DIR: "/daemon/bundle" })[0]).toBe(
       "/daemon/bundle/room-cli",
     );
   });
 
   it("expands PATH itself so every candidate is absolute", () => {
-    expect(bbBinaryCandidates({ PATH: "/usr/bin:/opt/tools" })).toEqual([
+    expect(roomBinaryCandidates({ PATH: "/usr/bin:/opt/tools" })).toEqual([
       "/usr/bin/room-cli",
       "/opt/tools/room-cli",
       "/opt/homebrew/bin/room-cli",
       "/usr/local/bin/room-cli",
     ]);
     expect(
-      bbBinaryCandidates({ PATH: "/usr/bin" }).every((c) => c.startsWith("/")),
+      roomBinaryCandidates({ PATH: "/usr/bin" }).every((c) => c.startsWith("/")),
     ).toBe(true);
   });
 
   it("drops entries that would resolve against the wrong directory", () => {
-    expect(bbBinaryCandidates({ PATH: "/usr/bin::/bin" })).toEqual([
+    expect(roomBinaryCandidates({ PATH: "/usr/bin::/bin" })).toEqual([
       "/usr/bin/room-cli",
       "/bin/room-cli",
       "/opt/homebrew/bin/room-cli",
       "/usr/local/bin/room-cli",
     ]);
     expect(
-      bbBinaryCandidates({ ROOM_CLI: "  ", BB_CLI_DIR: "", PATH: "" }),
+      roomBinaryCandidates({ ROOM_CLI: "  ", BB_CLI_DIR: "", PATH: "" }),
     ).toEqual(["/opt/homebrew/bin/room-cli", "/usr/local/bin/room-cli"]);
     expect(
-      bbBinaryCandidates({
+      roomBinaryCandidates({
         ROOM_CLI: "./room",
         BB_CLI_DIR: "rel/dir",
         PATH: "",
@@ -2131,7 +2170,7 @@ describe("legacy import", () => {
       }),
     );
     const kv = new Map<string, unknown>();
-    const bb = {
+    const room = {
       storage: {
         kv: {
           get: async <T>(key: string) => kv.get(key) as T | undefined,
@@ -2143,8 +2182,8 @@ describe("legacy import", () => {
       log: { info: () => undefined },
     };
 
-    await ingestLegacyImport({ bb, db, pluginDataDir });
-    await ingestLegacyImport({ bb, db, pluginDataDir });
+    await ingestLegacyImport({ bb: room, db, pluginDataDir });
+    await ingestLegacyImport({ bb: room, db, pluginDataDir });
 
     const imported = getAutomation(db, "auto_legacy");
     expect(imported).not.toBeNull();
@@ -2195,7 +2234,7 @@ describe("legacy import", () => {
           }),
         );
         const kv = new Map<string, unknown>();
-        const bb = {
+        const room = {
           storage: {
             kv: {
               get: async <T>(key: string) => kv.get(key) as T | undefined,
@@ -2208,7 +2247,7 @@ describe("legacy import", () => {
         };
 
         await expect(
-          ingestLegacyImport({ bb, db, pluginDataDir }),
+          ingestLegacyImport({ bb: room, db, pluginDataDir }),
           testCase.name,
         ).rejects.toThrow(/does not match/u);
       } finally {

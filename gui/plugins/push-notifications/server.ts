@@ -33,9 +33,9 @@ export function createPushNotificationsPlugin(options: PluginOptions = {}) {
   const now = options.now ?? Date.now;
 
   return async function pushNotificationsPlugin(
-    bb: BbPluginApi,
+    room: BbPluginApi,
   ): Promise<void> {
-    const settings = bb.settings.define({
+    const settings = room.settings.define({
       webEnabled: {
         type: "boolean",
         label: "Web notifications",
@@ -65,7 +65,7 @@ export function createPushNotificationsPlugin(options: PluginOptions = {}) {
     }
 
     function publish(message: Omit<ClientNotification, "id">): void {
-      bb.realtime.publish(CLIENT_NOTIFICATION_CHANNEL, {
+      room.realtime.publish(CLIENT_NOTIFICATION_CHANNEL, {
         id: randomUUID(),
         ...message,
       } satisfies ClientNotification);
@@ -74,12 +74,12 @@ export function createPushNotificationsPlugin(options: PluginOptions = {}) {
     async function flush(threadId: string, events: PendingEvents) {
       const channels = await enabledChannels();
       if (channels.length === 0) return;
-      const thread = await bb.sdk.threads.get({ threadId }).catch(() => null);
+      const thread = await room.sdk.threads.get({ threadId }).catch(() => null);
       if (thread === null) return;
       const openInteraction =
         events.bodies.question === undefined
           ? null
-          : ((await bb.sdk.threads.interactions.list({ threadId })).find(
+          : ((await room.sdk.threads.interactions.list({ threadId })).find(
               (interaction) => interaction.status === "pending",
             ) ?? null);
       const notification = resolveNotification(thread, events, openInteraction);
@@ -101,7 +101,7 @@ export function createPushNotificationsPlugin(options: PluginOptions = {}) {
         pending.delete(threadId);
         if (events === undefined || !running) return;
         flush(threadId, events).catch((error: unknown) => {
-          bb.log.error(
+          room.log.error(
             `Notification failed for thread ${threadId}: ${errorMessage(error)}`,
           );
         });
@@ -127,11 +127,11 @@ export function createPushNotificationsPlugin(options: PluginOptions = {}) {
       return { ok: true as const };
     }
 
-    bb.rpc.register(pushNotificationsRpcContract, {
+    room.rpc.register(pushNotificationsRpcContract, {
       "notifications.test": ({ channel }) => sendTest(channel),
     });
 
-    bb.cli.register({
+    room.cli.register({
       name: "push-notifications",
       summary: "Web and desktop notifications",
       commands: [
@@ -177,14 +177,14 @@ export function createPushNotificationsPlugin(options: PluginOptions = {}) {
       },
     });
 
-    bb.events.on("interaction.pending", ({ thread, interaction }) => {
+    room.events.on("interaction.pending", ({ thread, interaction }) => {
       queue(thread.id, "question", describeInteraction(interaction));
     });
-    bb.events.on("thread.failed", ({ thread, error, notify }) => {
+    room.events.on("thread.failed", ({ thread, error, notify }) => {
       if (notify === false) return;
       queue(thread.id, "error", firstLine(error) || "The thread hit an error");
     });
-    bb.events.on("thread.idle", ({ thread, lastAssistantText, notify }) => {
+    room.events.on("thread.idle", ({ thread, lastAssistantText, notify }) => {
       if (notify === false || thread.parentThreadId !== null || thread.visibility !== "visible") {
         return;
       }
@@ -195,7 +195,7 @@ export function createPushNotificationsPlugin(options: PluginOptions = {}) {
       );
     });
 
-    bb.background.service("notifier", {
+    room.background.service("notifier", {
       async start(signal) {
         running = true;
         await new Promise<void>((resolve) => {

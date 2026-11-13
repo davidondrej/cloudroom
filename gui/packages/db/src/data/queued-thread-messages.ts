@@ -517,7 +517,7 @@ export function listIdleThreadsWithQueuedMessages(
     .leftJoin(environments, eq(environments.id, threads.environmentId))
     .where(
       and(
-        inArray(threads.status, ["idle", "pending"]),
+        inArray(threads.status, ["idle", "pending", "error"]),
         isNull(threads.archivedAt),
         isNull(threads.deletedAt),
         or(

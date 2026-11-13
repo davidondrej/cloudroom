@@ -137,9 +137,9 @@ class Service:
             self.log.close()
         self.process = None
 
-    def request(self, method, path, body=None, expected=200, token=True):
+    def request(self, method, path, body=None, expected=200, token=True, headers=None):
         connection = http.client.HTTPConnection(self.address, timeout=15)
-        headers = {"Content-Type": "application/json"}
+        headers = {"Content-Type": "application/json", **(headers or {})}
         if token is not None:
             headers["Authorization"] = "Bearer " + (self.env["CLOUDROOM_TOKEN"] if token is True else token)
         connection.request(method, path, json.dumps(body) if body is not None else None, headers)

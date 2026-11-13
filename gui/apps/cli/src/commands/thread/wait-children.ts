@@ -1,6 +1,6 @@
 import type { ThreadListEntry } from "@cloudroom/domain";
 import { CliExitError } from "../../action.js";
-import type { createCliBbSdk } from "../../client.js";
+import type { createCliRoomSdk } from "../../client.js";
 import { truncateCell } from "../../table.js";
 import { outputJson } from "../helpers.js";
 import { THREAD_WAIT_EXIT_CODE_TIMEOUT } from "./helpers.js";
@@ -31,7 +31,7 @@ interface WaitForChildrenArgs {
   json?: boolean;
   parentThreadId: string;
   pollIntervalMs: number;
-  sdk: ReturnType<typeof createCliBbSdk>;
+  sdk: ReturnType<typeof createCliRoomSdk>;
   timeoutMs: number;
 }
 

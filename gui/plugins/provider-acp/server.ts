@@ -42,13 +42,13 @@ async function sleepUntilAbort(ms: number, signal: AbortSignal): Promise<void> {
 }
 
 export default async function acpProvidersPlugin(
-  bb: BbPluginApi,
+  room: BbPluginApi,
 ): Promise<void> {
-  registerUsageSource(bb);
+  registerUsageSource(room);
   // The ACP skill is only useful in ACP threads: every provider but the three with their own plugin.
-  bb.agents.configure(({ provider }) => ({ tools: [], skills: ["claude-code", "codex", "pi"].includes(provider.id) ? [] : ["acp-provider"] }));
-  const host = bb.hosts.experimental_client({ contract: acpHostContract });
-  const settings = bb.settings.define({
+  room.agents.configure(({ provider }) => ({ tools: [], skills: ["claude-code", "codex", "pi"].includes(provider.id) ? [] : ["acp-provider"] }));
+  const host = room.hosts.experimental_client({ contract: acpHostContract });
+  const settings = room.settings.define({
     customAgents: {
       type: "string",
       label: "Custom agents",
@@ -95,13 +95,13 @@ export default async function acpProvidersPlugin(
 
   function register(declaration: PluginProviderDeclaration): void {
     try {
-      const { dispose } = bb.providers.register(declaration);
+      const { dispose } = room.providers.register(declaration);
       registered.set(declaration.id, {
         key: JSON.stringify(declaration),
         dispose,
       });
     } catch (error) {
-      bb.log.error(
+      room.log.error(
         `Could not register ACP provider "${declaration.id}": ${String(error)}`,
       );
     }
@@ -129,7 +129,7 @@ export default async function acpProvidersPlugin(
 
   async function resolveAndReconcile(settingValue: string): Promise<void> {
     const legacy = await readLegacyCustomAcpAgents(
-      bb.server.experimental_dataDir,
+      room.server.experimental_dataDir,
     );
     const resolved = resolveConfiguredAcpAgents({
       settingValue,
@@ -141,12 +141,12 @@ export default async function acpProvidersPlugin(
       shippedAgents: KNOWN_ACP_AGENTS,
     });
     for (const warning of resolved.warnings) {
-      bb.log.warn(warning);
+      room.log.warn(warning);
     }
     configuredAgents = resolved.agents;
     reconcile(desiredAgents());
     if (resolved.agents.length > 0) {
-      bb.log.info(
+      room.log.info(
         `Registered ${resolved.agents.length} configured ACP agent(s).`,
       );
     }
@@ -182,7 +182,7 @@ export default async function acpProvidersPlugin(
           { hostId, signal },
         );
       } catch (error) {
-        bb.log.debug(
+        room.log.debug(
           `Could not probe ${agent.id} on host ${hostId}: ${String(error)}`,
         );
         continue;
@@ -191,7 +191,7 @@ export default async function acpProvidersPlugin(
       if (applied === null) {
         continue;
       }
-      bb.log.info(
+      room.log.info(
         `${agent.id} on host ${hostId}: ${applied.reason}; re-registering.`,
       );
       narrowed.set(agent.id, applied.agent);
@@ -207,17 +207,17 @@ export default async function acpProvidersPlugin(
   await queueReconcile(initial.customAgents);
   settings.onChange((next) => {
     void queueReconcile(next.customAgents).catch((error: unknown) => {
-      bb.log.error(
+      room.log.error(
         `Could not re-register the configured ACP agents: ${String(error)}`,
       );
     });
   });
 
-  bb.background.service("acp-capability-probe", {
+  room.background.service("acp-capability-probe", {
     async start(signal: AbortSignal): Promise<void> {
       const probed = new Set<string>();
       while (!signal.aborted) {
-        const hosts = await bb.sdk.hosts.list();
+        const hosts = await room.sdk.hosts.list();
         const connected = new Set(
           hosts
             .filter((available) => available.status === "connected")
@@ -237,7 +237,7 @@ export default async function acpProvidersPlugin(
     },
   });
 
-  bb.onDispose(() => {
+  room.onDispose(() => {
     for (const [, entry] of registered) {
       entry.dispose();
     }

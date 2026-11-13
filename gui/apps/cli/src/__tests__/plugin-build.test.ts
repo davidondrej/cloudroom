@@ -24,7 +24,7 @@ function testToolchain() {
   return resolvePluginBuildToolchain(join(tmpdir(), "bb-toolchain-unused"));
 }
 
-const TEST_BB_VERSION = "0.9.0-test";
+const TEST_ROOM_VERSION = "0.9.0-test";
 
 async function failingTailwindToolchain(
   dir: string,
@@ -113,7 +113,7 @@ describe("buildPluginApp", () => {
     await writeFixture();
     const result = await buildPluginApp(
       root,
-      TEST_BB_VERSION,
+      TEST_ROOM_VERSION,
       await testToolchain(),
     );
 
@@ -158,7 +158,7 @@ describe("buildPluginApp", () => {
       pluginId: "fixture",
       pluginVersion: "0.1.0",
       builtWith: {
-        bbVersion: TEST_BB_VERSION,
+        bbVersion: TEST_ROOM_VERSION,
         pluginSdkVersion: PLUGIN_SDK_VERSION,
       },
     });
@@ -178,7 +178,7 @@ describe("buildPluginApp", () => {
 
     const { cssPath } = await buildPluginApp(
       root,
-      TEST_BB_VERSION,
+      TEST_ROOM_VERSION,
       await testToolchain(),
     );
     const css = await readFile(cssPath, "utf8");
@@ -198,7 +198,7 @@ describe("buildPluginApp", () => {
     await writeFixture();
     const { jsPath } = await buildPluginApp(
       root,
-      TEST_BB_VERSION,
+      TEST_ROOM_VERSION,
       await testToolchain(),
     );
     const url = pathToFileURL(jsPath).href;
@@ -237,7 +237,7 @@ describe("buildPluginApp", () => {
     );
     const { jsPath } = await buildPluginApp(
       root,
-      TEST_BB_VERSION,
+      TEST_ROOM_VERSION,
       await testToolchain(),
     );
     const js = await readFile(jsPath, "utf8");
@@ -266,7 +266,7 @@ describe("buildPluginApp", () => {
     );
     const { jsPath } = await buildPluginApp(
       root,
-      TEST_BB_VERSION,
+      TEST_ROOM_VERSION,
       await testToolchain(),
     );
     const js = await readFile(jsPath, "utf8");
@@ -278,7 +278,7 @@ describe("buildPluginApp", () => {
     await writeFixture();
     const first = await buildPluginApp(
       root,
-      TEST_BB_VERSION,
+      TEST_ROOM_VERSION,
       await testToolchain(),
     );
     const originalJs = await readFile(first.jsPath, "utf8");
@@ -292,7 +292,7 @@ describe("buildPluginApp", () => {
     await expect(
       buildPluginApp(
         root,
-        TEST_BB_VERSION,
+        TEST_ROOM_VERSION,
         await failingTailwindToolchain(root, "tailwind exploded"),
       ),
     ).rejects.toThrow("tailwind exploded");
@@ -322,14 +322,14 @@ describe("buildPluginApp", () => {
       }),
     );
     await expect(
-      buildPluginApp(root, TEST_BB_VERSION, await testToolchain()),
+      buildPluginApp(root, TEST_ROOM_VERSION, await testToolchain()),
     ).rejects.toThrow(/no frontend entry/);
   });
 
   it("errors when bb.app points at a missing file", async () => {
     await writeFile(join(root, "package.json"), FIXTURE_PACKAGE_JSON);
     await expect(
-      buildPluginApp(root, TEST_BB_VERSION, await testToolchain()),
+      buildPluginApp(root, TEST_ROOM_VERSION, await testToolchain()),
     ).rejects.toThrow(/missing file/);
   });
 
@@ -345,14 +345,14 @@ describe("buildPluginApp", () => {
     );
 
     await expect(
-      buildPluginApp(root, TEST_BB_VERSION, await testToolchain()),
+      buildPluginApp(root, TEST_ROOM_VERSION, await testToolchain()),
     ).rejects.toThrow(/bb\.branding\.icon points at a missing file/);
 
     await mkdir(join(root, "assets"));
     await writeFile(join(root, "assets", "icon.svg"), "<svg/>");
     const result = await buildPluginApp(
       root,
-      TEST_BB_VERSION,
+      TEST_ROOM_VERSION,
       await testToolchain(),
     );
     expect(result.jsPath).toBe(join(root, "dist", "app.js"));
@@ -373,7 +373,7 @@ describe("buildPluginApp", () => {
     ]);
     const result = await buildPluginApp(
       targetDir,
-      TEST_BB_VERSION,
+      TEST_ROOM_VERSION,
       await metafileRejectingToolchain(root),
     );
     const js = await readFile(result.jsPath, "utf8");

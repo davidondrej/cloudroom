@@ -14,7 +14,7 @@ use super::{
 use axum::{
     Json, Router,
     extract::{Path, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     routing::post,
 };
 use serde::Deserialize;
@@ -49,6 +49,9 @@ fn unconfirmed(why: &str) -> String {
 const MOVED: &str = "This thread moved to the Mac.";
 const PARENT_MOVED: &str = "Not delivered: your parent moved to the user's Mac, and Cloud children can't message a Local parent yet. The app can still forward your completed-turn reply to your current Local parent while it is open.";
 const STARTING: &str = "This child is still starting in its own sandbox. Retry in a few seconds.";
+/// A relayed `tell --mode queue` ends its request ID with this: the website passes on only the ID and text, and an
+/// older Core ignores it and steers, as before (#1517).
+const QUEUE: &str = "_queue";
 
 /// The website delivers here, with this Core's token.
 pub fn routes() -> Router<Arc<Manager>> {
@@ -110,6 +113,7 @@ pub(super) async fn command(
     action: &str,
     text: Option<&str>,
     to_parent: bool,
+    queue: bool,
 ) -> Result<Json<Value>, Failure> {
     // A caller sharing another thread's sandbox has no link of its own on the website: its children in sandboxes of
     // their own are linked to this sandbox's thread (ADR 20261104-015709), so commands for them go through the
@@ -145,7 +149,8 @@ pub(super) async fn command(
         );
     };
     let key = random_key().map_err(|e| fail(StatusCode::SERVICE_UNAVAILABLE, &e.to_string()))?;
-    let body = json!({"action":action,"thread":id,"text":text,"request_id":format!("relay_{key}"),"label":other,"parent":to_parent});
+    let request = format!("relay_{key}{}", if queue { QUEUE } else { "" });
+    let body = json!({"action":action,"thread":id,"text":text,"request_id":request,"label":other,"parent":to_parent});
     let failed = start_error(m, caller, id).filter(|_| action != "archive");
     let mut answer = match api.post_waking("relay", &body).await {
         // The website may not know a child that just started yet (#317).
@@ -256,6 +261,7 @@ struct Relayed {
 async fn receive(
     State(m): State<Arc<Manager>>,
     Path(id): Path<String>,
+    headers: HeaderMap,
     Json(input): Json<Relayed>,
 ) -> Result<Json<Value>, Failure> {
     let bad = |message: &str| fail(StatusCode::BAD_REQUEST, message);
@@ -355,7 +361,17 @@ async fn receive(
         }
         _ => return Err(bad("unknown action")),
     };
-    let answer = deliver(&m, &id, &request, &text, true).await?;
+    // The thread that sent a tell, from the website's own records (web/lib/mobile.ts): the app then shows it as that
+    // agent's message, as in Local (#1369). A header, since older Cores refuse unknown body fields.
+    let sender = headers
+        .get("x-cloudroom-sender")
+        .and_then(|v| v.to_str().ok());
+    let mut prompt = json!({"text":text});
+    if let Some(sender) = sender.filter(|s| input.action == "tell" && thread_id(s)) {
+        prompt["sender_thread_id"] = json!(sender);
+    }
+    let queue = input.action == "tell" && request.ends_with(QUEUE);
+    let answer = deliver(&m, &id, &request, prompt, true, None, queue).await?;
     // A steer not yet confirmed may still fail; the sender retries, and a failed steer is then queued instead.
     let steering = m.receipt(&id, &format!("{request}_steer"));
     if m.receipt(&id, &request).is_none() && steering.is_some_and(|s| s.state == "accepted") {
@@ -434,9 +450,15 @@ fn next_report(local: &Local) -> Option<(String, String, Value)> {
 pub(super) async fn own_children(m: &Manager, caller: &str, archived: bool, answer: &mut Value) {
     // The website links every child started here to this sandbox's thread: each session lists the ones it started,
     // and the sandbox's thread also those an older app started.
-    let (shared, known, mine, others) = {
+    let (shared, known, mine, others, archiving) = {
         let local = m.local.lock().unwrap();
         let session = local.sessions.get(caller);
+        // Archived here in the last 10 minutes: the website tries a queued archive for 2, then says if it failed.
+        let since = crate::observability::now_ms().saturating_sub(10 * 60_000);
+        let archiving: HashSet<String> = (session.into_iter())
+            .flat_map(|s| s.child_archived_at.iter().filter(|(_, at)| **at > since))
+            .map(|(child, _)| child.clone())
+            .collect();
         // Only sessions sharing the sandbox keep theirs apart: the thread lists what its earlier sessions started.
         let others: HashSet<String> = local
             .sessions
@@ -449,6 +471,7 @@ pub(super) async fn own_children(m: &Manager, caller: &str, archived: bool, answ
             session.map(|s| s.child_states.clone()).unwrap_or_default(),
             session.map(|s| s.started.clone()).unwrap_or_default(),
             others,
+            archiving,
         )
     };
     let Some(api) = m
@@ -484,13 +507,13 @@ pub(super) async fn own_children(m: &Manager, caller: &str, archived: bool, answ
             continue;
         }
         let sandbox = child["state"].as_str().unwrap_or("unknown");
-        let state = match sandbox {
-            "archived" | "deleted" => "archived",
-            "new" if recent.iter().any(|c| c == id) => "starting",
-            // A sandbox that sleeps or failed runs nothing, whatever its last report here said.
-            "asleep" | "failed" => sandbox,
-            _ => known.get(id).map_or(sandbox, String::as_str),
-        };
+        let starting = recent.iter().any(|c| c == id);
+        let state = shown(
+            sandbox,
+            known.get(id).map(String::as_str),
+            starting,
+            archiving.contains(id),
+        );
         // The website may still list a child that was archived a moment ago.
         if state == "archived" && !archived {
             continue;
@@ -512,6 +535,21 @@ pub(super) async fn own_children(m: &Manager, caller: &str, archived: bool, answ
                 json!({"id":id,"title":null,"state":"starting","status":"active","sandbox":"own"}),
             );
         }
+    }
+}
+
+/// A child's state in `thread list`: its sandbox's, or what this thread last heard of it. `archiving`: this thread
+/// archived it a moment ago.
+fn shown<'a>(sandbox: &'a str, known: Option<&'a str>, starting: bool, archiving: bool) -> &'a str {
+    match sandbox {
+        "archived" | "deleted" => "archived",
+        // The website lists it until the archive lands, and an asleep one's waits for a wake (#1430). Later, asleep
+        // means it never landed or the user restored it.
+        _ if archiving => "archived",
+        "new" if starting => "starting",
+        // A sandbox that sleeps or failed runs nothing, whatever its last report here said.
+        "asleep" | "failed" => sandbox,
+        _ => known.unwrap_or(sandbox),
     }
 }
 
@@ -706,8 +744,9 @@ async fn drive_start(
                     "[Cloudroom] The child thread you spawned with request ID {request} could not be started: {error}."
                 ),
             };
-            let id: String = request.chars().take(40).collect();
-            let _ = deliver(&m, &session, &format!("start_{id}"), &text, true).await;
+            let id = format!("start_{}", request.chars().take(40).collect::<String>());
+            let prompt = json!({"text":text});
+            let _ = deliver(&m, &session, &id, prompt, true, None, false).await;
         }
     }
     DRIVING
@@ -843,6 +882,10 @@ impl Manager {
                     }
                     continue;
                 };
+                // The parent reads this turn with `thread output`, from saved history: save it first (#1410). The
+                // uploader's own upload, 2 s after idle, also takes the harness's last lines, so one covers the turn.
+                // While uploads fail, the report goes at once.
+                manager.flush_history(Duration::from_secs(5), true).await;
                 // Taken, or refused for good (410: the parent is gone or archived): never sent again.
                 let done = match api.post_waking("relay", &body).await {
                     Ok(_) | Err(ApiError::Status(400 | 403 | 410, _)) => manager
@@ -1017,5 +1060,14 @@ mod tests {
             .unwrap();
         assert!(next_report(&local).is_none());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A child this thread archived stays archived while the website still lists it as asleep (#1430), but not once
+    /// that archive is old: the user may have restored it.
+    #[test]
+    fn a_child_archived_here_stays_hidden_while_its_archive_is_queued() {
+        assert_eq!(shown("asleep", Some("archived"), false, true), "archived");
+        assert_eq!(shown("asleep", Some("archived"), false, false), "asleep");
+        assert_eq!(shown("asleep", Some("replied"), false, false), "asleep");
     }
 }

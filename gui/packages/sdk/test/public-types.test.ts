@@ -30,7 +30,7 @@ import type {
 } from "@cloudroom/sdk";
 import type {
   BbSdk as BrowserBbSdk,
-  BrowserBbSdk as BrowserRuntimeBbSdk,
+  BrowserRoomSdk as BrowserRuntimeBbSdk,
   BbRealtimeConnectionEvent as BrowserRealtimeConnection,
   EnvironmentStatusResult as BrowserEnvironmentStatus,
   FileReadResult as BrowserFileRead,
@@ -57,7 +57,7 @@ import type {
   ThreadSpawnResult as BrowserThreadSpawn,
 } from "@cloudroom/sdk/browser";
 import type {
-  BbSdk as CoreBbSdk,
+  RoomSdk as CoreBbSdk,
   BbRealtimeConnectionEvent as CoreRealtimeConnection,
   EnvironmentStatusResult as CoreEnvironmentStatus,
   FileReadResult as CoreFileRead,
@@ -110,7 +110,7 @@ import type {
   ThreadSectionListResult as NodeThreadSectionList,
   ThreadSpawnResult as NodeThreadSpawn,
 } from "@cloudroom/sdk/node";
-import type { createBrowserBbSdk } from "@cloudroom/sdk/browser";
+import type { createBrowserRoomSdk } from "@cloudroom/sdk/browser";
 
 interface RootSurface {
   environmentStatus: RootEnvironmentStatus;
@@ -220,7 +220,7 @@ interface NodeSurface {
   threadSpawn: NodeThreadSpawn;
 }
 
-type ExpectedBbSdkKey =
+type ExpectedRoomSdkKey =
   | "cloudroom"
   | "experimental_desktopBrowsers"
   | "environments"
@@ -467,7 +467,7 @@ describe("SDK public type entrypoints", () => {
   });
 
   it("preserves the complete SDK surface at every entrypoint", () => {
-    expectTypeOf<keyof RootBbSdk>().toEqualTypeOf<ExpectedBbSdkKey>();
+    expectTypeOf<keyof RootBbSdk>().toEqualTypeOf<ExpectedRoomSdkKey>();
     expectTypeOf<BrowserBbSdk>().toEqualTypeOf<RootBbSdk>();
     expectTypeOf<CoreBbSdk>().toEqualTypeOf<RootBbSdk>();
     expectTypeOf<NodeBbSdk>().toEqualTypeOf<RootBbSdk>();
@@ -475,10 +475,10 @@ describe("SDK public type entrypoints", () => {
 
   it("keeps the local guide area off the browser SDK instance", () => {
     expectTypeOf<keyof BrowserRuntimeBbSdk>().toEqualTypeOf<
-      Exclude<ExpectedBbSdkKey, "guide">
+      Exclude<ExpectedRoomSdkKey, "guide">
     >();
     expectTypeOf<
-      ReturnType<typeof createBrowserBbSdk>
+      ReturnType<typeof createBrowserRoomSdk>
     >().toEqualTypeOf<BrowserRuntimeBbSdk>();
   });
 

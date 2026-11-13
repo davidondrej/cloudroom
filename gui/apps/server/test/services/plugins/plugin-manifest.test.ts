@@ -16,7 +16,7 @@ describe("plugin manifest", () => {
     await rm(rootDir, { recursive: true, force: true });
   });
 
-  const validBb = {
+  const validRoom = {
     name: "Contract fixture",
     description: "Plugin manifest contract fixture.",
     branding: { icon: "Zap" },
@@ -24,16 +24,16 @@ describe("plugin manifest", () => {
   };
 
   async function writeManifest(
-    bbPluginSdk?: string,
-    bb: Record<string, unknown> = validBb,
+    roomPluginSdk?: string,
+    room: Record<string, unknown> = validRoom,
   ): Promise<void> {
     await writeFile(
       join(rootDir, "package.json"),
       JSON.stringify({
         name: "bb-plugin-contract",
         version: "2.3.4",
-        ...(bbPluginSdk === undefined ? {} : { engines: { bbPluginSdk } }),
-        bb,
+        ...(roomPluginSdk === undefined ? {} : { engines: { bbPluginSdk: roomPluginSdk } }),
+        bb: room,
       }),
     );
   }
@@ -61,7 +61,7 @@ describe("plugin manifest", () => {
 
   it("accepts one optional host entry and resolves it inside the plugin", async () => {
     await writeFile(join(rootDir, "host.ts"), "export default {};\n");
-    await writeManifest(undefined, { ...validBb, host: "./host.ts" });
+    await writeManifest(undefined, { ...validRoom, host: "./host.ts" });
 
     expect((await readPluginManifest(rootDir)).hostEntry).toBe(
       join(rootDir, "host.ts"),
@@ -69,12 +69,12 @@ describe("plugin manifest", () => {
   });
 
   it("rejects a missing or escaping host entry", async () => {
-    await writeManifest(undefined, { ...validBb, host: "./missing.ts" });
+    await writeManifest(undefined, { ...validRoom, host: "./missing.ts" });
     await expect(readPluginManifest(rootDir)).rejects.toThrow(
       /bb\.host.*missing file/u,
     );
 
-    await writeManifest(undefined, { ...validBb, host: "../host.ts" });
+    await writeManifest(undefined, { ...validRoom, host: "../host.ts" });
     await expect(readPluginManifest(rootDir)).rejects.toThrow(
       /bb\.host.*escapes the plugin directory/u,
     );
@@ -83,18 +83,18 @@ describe("plugin manifest", () => {
   it.each(["name", "description"] as const)(
     "requires a non-empty bb.%s string",
     async (field: "name" | "description") => {
-      const { [field]: _omitted, ...withoutField } = validBb;
+      const { [field]: _omitted, ...withoutField } = validRoom;
       await writeManifest(undefined, withoutField);
       await expect(readPluginManifest(rootDir)).rejects.toThrow(
         new RegExp(`bb\\.${field}`),
       );
 
-      await writeManifest(undefined, { ...validBb, [field]: "   " });
+      await writeManifest(undefined, { ...validRoom, [field]: "   " });
       await expect(readPluginManifest(rootDir)).rejects.toThrow(
         new RegExp(`bb\\.${field}`),
       );
 
-      await writeManifest(undefined, { ...validBb, [field]: null });
+      await writeManifest(undefined, { ...validRoom, [field]: null });
       await expect(readPluginManifest(rootDir)).rejects.toThrow(
         new RegExp(`bb\\.${field}`),
       );
@@ -103,7 +103,7 @@ describe("plugin manifest", () => {
 
   it("requires branding with an icon or light logo", async () => {
     for (const branding of [undefined, null, {}, { icon: "   " }]) {
-      await writeManifest(undefined, { ...validBb, branding });
+      await writeManifest(undefined, { ...validRoom, branding });
       await expect(readPluginManifest(rootDir)).rejects.toThrow(/bb\.branding/);
     }
   });
@@ -112,7 +112,7 @@ describe("plugin manifest", () => {
     await mkdir(join(rootDir, "assets"));
     await writeFile(join(rootDir, "assets", "icon.svg"), "<svg/>");
     await writeManifest(undefined, {
-      ...validBb,
+      ...validRoom,
       branding: { icon: "./assets/icon.svg" },
     });
 
@@ -132,13 +132,13 @@ describe("plugin manifest", () => {
 
   it("requires path-shaped branding.icon to be a readable SVG", async () => {
     await writeManifest(undefined, {
-      ...validBb,
+      ...validRoom,
       branding: { icon: "./missing.svg" },
     });
     await expect(readPluginManifest(rootDir)).rejects.toThrow(/missing file/);
 
     await writeManifest(undefined, {
-      ...validBb,
+      ...validRoom,
       branding: { icon: "./icon.png" },
     });
     await expect(readPluginManifest(rootDir)).rejects.toThrow(
@@ -160,7 +160,7 @@ describe("plugin manifest", () => {
     async (_case, icon, error) => {
       await writeFile(join(rootDir, "icon.svg"), icon);
       await writeManifest(undefined, {
-        ...validBb,
+        ...validRoom,
         branding: { icon: "./icon.svg" },
       });
 
@@ -170,7 +170,7 @@ describe("plugin manifest", () => {
 
   it("rejects a dark logo without a light logo", async () => {
     await writeManifest(undefined, {
-      ...validBb,
+      ...validRoom,
       branding: { logo: { dark: "./dark.svg" } },
     });
     await expect(readPluginManifest(rootDir)).rejects.toThrow(
@@ -181,7 +181,7 @@ describe("plugin manifest", () => {
   it("rejects null and empty branding asset paths", async () => {
     for (const light of [null, "   "]) {
       await writeManifest(undefined, {
-        ...validBb,
+        ...validRoom,
         branding: { logo: { light } },
       });
       await expect(readPluginManifest(rootDir)).rejects.toThrow(
@@ -190,7 +190,7 @@ describe("plugin manifest", () => {
     }
     for (const dark of [null, "   "]) {
       await writeManifest(undefined, {
-        ...validBb,
+        ...validRoom,
         branding: { logo: { light: "./light.svg", dark } },
       });
       await expect(readPluginManifest(rootDir)).rejects.toThrow(
@@ -207,7 +207,7 @@ describe("plugin manifest", () => {
   ])(
     "rejects the legacy bb.%s field instead of ignoring it",
     async (field, value) => {
-      await writeManifest(undefined, { ...validBb, [field]: value });
+      await writeManifest(undefined, { ...validRoom, [field]: value });
       await expect(readPluginManifest(rootDir)).rejects.toThrow(
         /unrecognized key/i,
       );
@@ -216,14 +216,14 @@ describe("plugin manifest", () => {
 
   it("requires declared logo assets to be supported files", async () => {
     await writeManifest(undefined, {
-      ...validBb,
+      ...validRoom,
       branding: { logo: { light: "./missing.svg" } },
     });
     await expect(readPluginManifest(rootDir)).rejects.toThrow(/missing file/);
 
     await mkdir(join(rootDir, "directory.svg"));
     await writeManifest(undefined, {
-      ...validBb,
+      ...validRoom,
       branding: { logo: { light: "./directory.svg" } },
     });
     await expect(readPluginManifest(rootDir)).rejects.toThrow(
@@ -231,7 +231,7 @@ describe("plugin manifest", () => {
     );
 
     await writeManifest(undefined, {
-      ...validBb,
+      ...validRoom,
       branding: { logo: { light: "./logo.gif" } },
     });
     await expect(readPluginManifest(rootDir)).rejects.toThrow(
@@ -248,7 +248,7 @@ describe("plugin manifest", () => {
       await writeFile(outsideAsset, "<svg/>");
       await symlink(outsideAsset, join(rootDir, "linked.svg"));
       await writeManifest(undefined, {
-        ...validBb,
+        ...validRoom,
         branding: { logo: { light: "./linked.svg" } },
       });
       await expect(readPluginManifest(rootDir)).rejects.toThrow(

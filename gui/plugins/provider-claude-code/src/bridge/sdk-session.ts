@@ -363,7 +363,8 @@ export class SdkSession {
     this.options.model = model;
   }
 
-  async reconnectFailedMcpServers(): Promise<void> {
+  /** Retries `failed` and `needs-auth` servers, so a sign-in made after the thread started connects (#661). */
+  async reconnectMcpServers(): Promise<void> {
     const q = this.query;
     if (!q || this.mcpReconnecting) return;
     this.mcpReconnecting = true;
@@ -373,7 +374,7 @@ export class SdkSession {
       reconnects = (await q.mcpServerStatus())
         .filter(
           (server) =>
-            server.status === "failed" &&
+            (server.status === "failed" || server.status === "needs-auth") &&
             now >= (this.mcpRetryAt.get(server.name) ?? 0),
         )
         .map((server) => this.reconnectMcpServer(q, server.name));

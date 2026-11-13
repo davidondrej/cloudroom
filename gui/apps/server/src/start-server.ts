@@ -21,7 +21,7 @@ import { PluginHostArtifactRegistry } from "./services/plugins/plugin-host-artif
 import { createProviderNativeRootsCache } from "./services/providers/native-roots.js";
 import { createAiServiceRegistry } from "./services/ai/ai-service-registry.js";
 import { createAppVersionService } from "./services/system/app-version.js";
-import { createBbAppManagedConfigReloader } from "./services/system/bb-app-managed-config.js";
+import { createRoomAppManagedConfigReloader } from "./services/system/app-managed-config.js";
 import { startEventLoopStallMonitor } from "./services/system/event-loop-stall-monitor.js";
 import {
   runPeriodicSweeps,
@@ -152,7 +152,7 @@ export async function runServer(serverConfig: ServerConfig): Promise<void> {
     hub,
     logger,
   });
-  const bbAppManagedConfig = await createBbAppManagedConfigReloader({
+  const roomAppManagedConfig = await createRoomAppManagedConfigReloader({
     config: runtimeConfig,
     hub,
     logger,
@@ -210,7 +210,7 @@ export async function runServer(serverConfig: ServerConfig): Promise<void> {
   } = createApp(
     {
       appVersion,
-      bbAppManagedConfig,
+      bbAppManagedConfig: roomAppManagedConfig,
       callerProofs,
       config: runtimeConfig,
       db,

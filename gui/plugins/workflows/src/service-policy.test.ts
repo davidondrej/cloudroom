@@ -607,12 +607,29 @@ describe("workflow service policy integration", () => {
       "bounded-concurrency",
     );
     const first = await test.start(parallelSource);
-    const second = await test.start(parallelSource);
+    const second = await test.service.start({
+      projectId: "project-other",
+      originThreadId: "origin",
+      source: parallelSource,
+      args: null,
+      resumedFromRunId: null,
+    });
+    const queue = () =>
+      test.service.queueStatus(getRunRequired(test.db, second.id));
+    expect(queue()?.reason).toBe("dispatcher-stopped");
     const controller = new AbortController();
     const worker = test.service.runWorker(controller.signal);
     await eventually(() => expect(test.childCount()).toBe(1));
     expect(getRunRequired(test.db, first.id).status).toBe("running");
     expect(getRunRequired(test.db, second.id).status).toBe("queued");
+    expect(queue()).toMatchObject({
+      reason: "waiting-for-active-runs",
+      running: 1,
+      runningInOtherProjects: 1,
+    });
+    const clock = vi.spyOn(Date, "now").mockReturnValue(Date.now() + 61_000);
+    expect(queue()?.reason).toBe("dispatcher-busy");
+    clock.mockRestore();
     test.service.onThreadIdle("child-1", "one");
     await eventually(() => expect(test.childCount()).toBe(2));
     expect(getRunRequired(test.db, second.id).status).toBe("queued");

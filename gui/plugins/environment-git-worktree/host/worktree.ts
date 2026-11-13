@@ -11,6 +11,7 @@ import {
   readGitRepositoryState,
   runGit,
   WorkspaceError,
+  type GitCommandResult,
   type GitProcessOptions,
 } from "bb-environment-provider-host/git";
 import {
@@ -35,6 +36,7 @@ import {
   WORKTREE_INCLUDE_FILE_NAME,
   type CopyWorktreeIncludeFilesResult,
 } from "./worktree-include.js";
+import { resolveWorktreeAttemptRoot } from "./paths.js";
 
 export type BranchMode = "reset" | "reuse-existing";
 
@@ -42,6 +44,10 @@ interface CreateWorktreeArgs {
   sourcePath: string;
   targetPath: string;
   completionPath: string;
+  /** A faster way to get the checkout: moves a prebuilt one into place. Null when there is none. */
+  claimSpare?:
+    | ((startPoint: string) => Promise<GitCommandResult | null>)
+    | undefined;
   ownWorktreesRoot: string;
   branchName: string;
   baseBranch: string | null;
@@ -52,6 +58,10 @@ interface CreateWorktreeArgs {
 
 interface RemoveWorktreeArgs {
   path: string;
+  /** Leave the folder unless it is safe to remove for this key (#1284). */
+  owner?: { dataDir: string; pathKey: string } | undefined;
+  /** For callers that outlive their host call, whose environment is gone by then. */
+  env?: NodeJS.ProcessEnv | undefined;
   onProgress?: ProgressCallback | undefined;
   signal?: AbortSignal | undefined;
 }
@@ -237,6 +247,50 @@ async function isPathInside(root: string, target: string): Promise<boolean> {
   );
   return (
     relative !== "" && !relative.startsWith("..") && !path.isAbsolute(relative)
+  );
+}
+
+/**
+ * Git lists `target` as a linked worktree of its repository, or Git sees no
+ * repository of its own there and it sits in the key's own folder (its
+ * repository was moved or deleted, or an interrupted removal took its .git).
+ * Never a main checkout or a folder inside one.
+ */
+async function isRemovableWorktree(
+  target: string,
+  owner: { dataDir: string; pathKey: string },
+  signal: AbortSignal | undefined,
+): Promise<boolean> {
+  const git = (args: string[]) =>
+    runGit(args, { cwd: target, ...signalOptions(signal), allowFailure: true });
+  const resolved = await realpathOrResolved(target);
+  const top = await git(["rev-parse", "--show-toplevel"]);
+  const toplevel =
+    top.exitCode === 0 ? await realpathOrResolved(top.stdout.trim()) : null;
+  if (toplevel !== null && path.relative(toplevel, resolved) === "") {
+    const listed = await git(["worktree", "list", "--porcelain"]);
+    // The first entry is the main checkout.
+    const linked = listed.stdout
+      .split("\n")
+      .filter((line) => line.startsWith("worktree "))
+      .slice(1);
+    for (const line of linked) {
+      const worktree = await realpathOrResolved(line.slice("worktree ".length));
+      if (path.relative(worktree, resolved) === "") return true;
+    }
+    return false;
+  }
+  // No repository, or only an ancestor's (a Git-tracked home folder): fine
+  // in the key's own folder, unless a checkout lives in that folder.
+  const root = resolveWorktreeAttemptRoot(owner);
+  const gitDirectory = await fs.stat(path.join(target, ".git")).then(
+    (stat) => stat.isDirectory(),
+    () => false,
+  );
+  return (
+    !gitDirectory &&
+    (await isPathInside(root, target)) &&
+    (toplevel === null || (await isPathInside(toplevel, root)))
   );
 }
 
@@ -645,7 +699,7 @@ async function removeCreateTarget(args: CreateWorktreeArgs): Promise<void> {
 
 export async function createWorktree(
   args: CreateWorktreeArgs,
-): Promise<{ path: string }> {
+): Promise<{ path: string; startPoint?: string }> {
   throwIfProvisionAborted(args.signal);
   const existingWorkspaceMatches = await ensureExistingWorkspaceMatches(
     args.targetPath,
@@ -705,6 +759,7 @@ export async function createWorktree(
     (await hasRef(args.sourcePath, `refs/heads/${args.branchName}`));
 
   let gitArgs: string[];
+  let startPoint: string | undefined;
   if (reuseExistingBranch) {
     gitArgs = ["worktree", "add", args.targetPath, args.branchName];
   } else {
@@ -723,18 +778,19 @@ export async function createWorktree(
       onProgress: args.onProgress,
       signal: args.signal,
     });
+    startPoint = await resolveStartPoint({
+      sourcePath: args.sourcePath,
+      baseBranch,
+      onProgress: args.onProgress,
+      signal: args.signal,
+    });
     gitArgs = [
       "worktree",
       "add",
       "-B",
       args.branchName,
       args.targetPath,
-      await resolveStartPoint({
-        sourcePath: args.sourcePath,
-        baseBranch,
-        onProgress: args.onProgress,
-        signal: args.signal,
-      }),
+      startPoint,
     ];
   }
 
@@ -748,10 +804,16 @@ export async function createWorktree(
   });
   let worktreeCreated = false;
   try {
-    const result = await runGitWithWorktreeMetadataLock(gitArgs, {
-      cwd: args.sourcePath,
-      ...(args.signal !== undefined ? { signal: args.signal } : {}),
-    });
+    const result =
+      (startPoint === undefined ? null : await args.claimSpare?.(startPoint)) ??
+      // One checkout worker per core; Git's default is one in total.
+      (await runGitWithWorktreeMetadataLock(
+        ["-c", "checkout.workers=0", ...gitArgs],
+        {
+          cwd: args.sourcePath,
+          ...(args.signal !== undefined ? { signal: args.signal } : {}),
+        },
+      ));
     emitGitOutput(args.onProgress, "git-worktree", result);
     emitStep({
       onProgress: args.onProgress,
@@ -763,7 +825,10 @@ export async function createWorktree(
     });
     worktreeCreated = true;
     await finishWorktreeSetup(args);
-    return { path: args.targetPath };
+    return {
+      path: args.targetPath,
+      ...(startPoint === undefined ? {} : { startPoint }),
+    };
   } catch (error) {
     if (!worktreeCreated) {
       emitStep({
@@ -807,13 +872,23 @@ export async function removeWorktree(args: RemoveWorktreeArgs): Promise<void> {
     await removeDirectoryIfEmpty(parentPath);
     return;
   }
+  if (
+    args.owner !== undefined &&
+    !(await isRemovableWorktree(workspacePath, args.owner, args.signal))
+  )
+    throw new WorkspaceError(
+      "not_a_worktree",
+      `${workspacePath} is not a Git worktree, so it was left in place. Delete it by hand if you no longer need it.`,
+    );
 
   await experimental_killProcessesWithCwdUnder({ directory: workspacePath });
   throwIfProvisionAborted(args.signal);
 
+  const env = args.env !== undefined ? { env: args.env } : {};
   const commonDirResult = await runGit(["rev-parse", "--git-common-dir"], {
     cwd: workspacePath,
     ...(args.signal !== undefined ? { signal: args.signal } : {}),
+    ...env,
     allowFailure: true,
   });
 
@@ -840,6 +915,7 @@ export async function removeWorktree(args: RemoveWorktreeArgs): Promise<void> {
               {
                 cwd: path.dirname(workspacePath),
                 ...(args.signal !== undefined ? { signal: args.signal } : {}),
+                ...env,
                 allowFailure: true,
               },
             ),

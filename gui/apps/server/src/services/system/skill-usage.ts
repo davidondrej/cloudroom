@@ -31,6 +31,7 @@ export interface SkillUseRow {
 export function readSkillUseRows(
   db: DbQueryConnection,
   since: number,
+  until = Number.MAX_SAFE_INTEGER,
 ): SkillUseRow[] {
   return db.all<SkillUseRow>(sql`
     SELECT 'name' AS kind,
@@ -42,7 +43,7 @@ export function readSkillUseRows(
         AND e.type = 'client/turn/requested',
       json_each(e.data, '$.input') AS item,
       json_each(item.value, '$.mentions') AS mention
-    WHERE e.created_at >= ${since}
+    WHERE e.created_at >= ${since} AND e.created_at < ${until}
       AND json_extract(e.data, '$.retryAttempt') IS NULL
       AND json_extract(mention.value, '$.resource.kind') = 'command'
       AND json_extract(mention.value, '$.resource.source') = 'skill'
@@ -63,7 +64,7 @@ export function readSkillUseRows(
     FROM events
     WHERE type = 'item/completed'
       AND item_kind IN ('toolCall', 'fileRead', 'commandExecution')
-      AND created_at >= ${since}
+      AND created_at >= ${since} AND created_at < ${until}
       AND CASE item_kind
         WHEN 'toolCall' THEN json_extract(data, '$.item.tool') = 'Skill'
           OR (json_extract(data, '$.item.tool') IN ('Read', 'Bash')

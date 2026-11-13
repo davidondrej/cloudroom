@@ -1,9 +1,9 @@
 import { execFileSync } from "node:child_process";
-import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { placePull } from "../commands/cloudroom.js";
+import { WINDOWS_PULL_ARCHIVE, placePull } from "../commands/cloudroom.js";
 
 // Windows can't rename a folder onto an existing one, even an empty one (#1396); the "win32" test turns this on.
 let windowsRename = false;
@@ -109,5 +109,21 @@ describe.skipIf(process.platform === "win32")("vm pull to a new name on Windows"
     await writeFile(join(folder, "taken"), "mine");
     await expect(placePull(await archive({ "site/index.html": "hi" }), "~/site", join(folder, "taken"), false)).rejects.toThrow("already exists; nothing was copied.");
     expect((await lstat(join(folder, "taken"))).isFile()).toBe(true);
+  });
+});
+
+describe.skipIf(process.platform === "win32")("vm pull to Windows: what the VM sends", () => {
+  it.each([["the file", "build.tar.gz"], ["the folder", "site/index.html"]])("copies %s the link points to (#1454)", async (_, path) => {
+    const vm = await mkdtemp(join(root, "vm-"));
+    await mkdir(dirname(join(vm, path)), { recursive: true });
+    await writeFile(join(vm, path), "data");
+    await symlink(path.split("/")[0]!, join(vm, "latest"));
+    const sent = execFileSync("sh", ["-c", `n=latest; ${WINDOWS_PULL_ARCHIVE}`], { cwd: vm });
+    expect(await placePull(sent, "~/latest", folder, true)).toBe(join(folder, "latest"));
+    expect(await readFile(join(folder, "latest", ...path.split("/").slice(1)), "utf8")).toBe("data");
+  });
+
+  it("fails on the VM for a missing path instead of sending an empty archive (#1454)", () => {
+    expect(() => execFileSync("sh", ["-c", `n=missing; ${WINDOWS_PULL_ARCHIVE}`], { cwd: root, stdio: "pipe" })).toThrow("No such file or directory");
   });
 });

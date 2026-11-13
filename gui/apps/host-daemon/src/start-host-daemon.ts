@@ -25,8 +25,8 @@ import {
   prepareRuntimeShellEnv,
   providerEnvFromUserShell,
   resolvePowerShellExecutionPolicyDefault,
-  resolveBbExecutablePathInDirectory,
-  resolveLocalBbExecutablePath,
+  resolveRoomExecutablePathInDirectory,
+  resolveLocalRoomExecutablePath,
 } from "./runtime-shell-env.js";
 import type { HostDaemonLogger } from "./logger.js";
 import {
@@ -126,11 +126,11 @@ export async function startHostDaemon(
     const localApiConfig = resolveHostDaemonLocalApiConfig({
       hostDaemonPort: hostDaemonConfig.BB_HOST_DAEMON_PORT,
     });
-    const bbExecutablePath =
+    const roomExecutablePath =
       options.bbExecutableDirectory !== undefined
-        ? resolveBbExecutablePathInDirectory(options.bbExecutableDirectory)
-        : await resolveLocalBbExecutablePath();
-    const bbExecutableDirectory = dirname(bbExecutablePath);
+        ? resolveRoomExecutablePathInDirectory(options.bbExecutableDirectory)
+        : await resolveLocalRoomExecutablePath();
+    const roomExecutableDirectory = dirname(roomExecutablePath);
     const logger = createLogger({
       component: "host-daemon",
       base: { serverUrl },
@@ -179,8 +179,8 @@ export async function startHostDaemon(
         providerUserEnv = providerEnvFromUserShell(userShellEnv);
       }
       return prepareRuntimeShellEnv({
-        bbExecutableDirectory,
-        bbExecutablePath,
+        bbExecutableDirectory: roomExecutableDirectory,
+        bbExecutablePath: roomExecutablePath,
         dataDir,
         hostDaemonPort: localApiConfig.port,
         inheritedPath: userShellEnv?.PATH ?? process.env.PATH,

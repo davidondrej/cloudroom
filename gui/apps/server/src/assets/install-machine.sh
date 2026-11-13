@@ -565,7 +565,12 @@ complete_step "Using local host-daemon port $host_daemon_port"
 # Always install the server's own build. Never fall back to a bb-app on PATH
 # or on npm: that could be other people's software (ADR 0147).
 package_url="${server_url%/}/install/bb-app.tgz"
-package_dir=$(mktemp -d "${TMPDIR:-/tmp}/bb-app.XXXXXX")
+# npm runs this package's install scripts outside any sandbox, so it stays in
+# the data folder, never the OS temp folder, which Read-only Mac commands and
+# sandboxed agents can change. A stopped install removes it too.
+package_dir=$(mktemp -d "$canonical_data_dir/bb-app-download.XXXXXX")
+trap 'rm -rf "$package_dir"' EXIT
+trap 'exit 1' HUP INT TERM
 package_file="$package_dir/bb-app.tgz"
 # The server's access headers (a relay key) reach curl through a pipe, never a
 # file: Read-only Mac commands can read temp folders.
@@ -667,6 +672,7 @@ else
   exit 1
 fi
 rm -rf "$package_dir"
+trap - EXIT HUP INT TERM
 
 if [ -n "$bb_app_npm_prefix" ]; then
   bb_app="$bb_app_npm_prefix/bin/bb-app"

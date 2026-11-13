@@ -23,7 +23,7 @@ import { PERSONAL_PROJECT_ID } from "@cloudroom/domain";
 import { defineRpcContract, type BbPluginApi } from "@get-bb/plugin-sdk";
 import type { AutomationService } from "./service.js";
 import type { Db } from "./data.js";
-import { cloudLoopUsage, localLoopUsage } from "./usage.js";
+import { cloudLoopUsage, localLoopUsage, templateUsage } from "./usage.js";
 import { agentSessions, agentSessionsSchema } from "./agent-sessions.js";
 import {
   forgetCloud,
@@ -141,6 +141,10 @@ export const automationRpcContract = defineRpcContract({
       .strict()
       .nullable(),
   },
+  templates_usage: {
+    input: z.null(),
+    output: z.record(z.string(), z.object({ limit: z.string(), percent: z.number() }).strict()),
+  },
   cloud_template_add: {
     input: cloudTemplateInputSchema,
     output: z.unknown(),
@@ -238,6 +242,9 @@ export function createRpcHandlers(
       if (input.automationId && db)
         return localLoopUsage(sdk, db, input.automationId, input.crons);
       return null;
+    },
+    async templates_usage() {
+      return sdk ? templateUsage(sdk) : {};
     },
     async cloud_automations(
       input: z.output<typeof cloudAutomationInputSchema>,

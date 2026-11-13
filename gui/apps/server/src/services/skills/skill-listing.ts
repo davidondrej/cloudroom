@@ -185,7 +185,7 @@ function listServerOwnedSkills(deps: AppDeps): SkillSummary[] {
     .sort(compareSkillSummaries);
 }
 
-function listBbPluginSkills(deps: AppDeps): SkillSummary[] {
+function listRoomPluginSkills(deps: AppDeps): SkillSummary[] {
   return resolveSkillCatalog(deps)
     .map(({ provenance, runtimeSource }): SkillSummary | null => {
       if (
@@ -248,7 +248,7 @@ export async function listProjectSkills(
     ...assembleSkillList(perProvider),
     ...sharedSkills.summaries,
     ...listServerOwnedSkills(deps),
-    ...listBbPluginSkills(deps),
+    ...listRoomPluginSkills(deps),
   ].sort(compareSkillSummaries);
 }
 

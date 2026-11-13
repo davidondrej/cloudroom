@@ -121,6 +121,8 @@ const rejectionMessages: Record<string, string> = {
 };
 // Thread errors with these messages ask the user to connect an account, not retry blindly.
 export const authRequiredMessages = new Set([rejectionMessages.codex_auth_required, rejectionMessages.cursor_auth_required, rejectionMessages.claude_auth_required]);
+// Why Core could not check the Claude login (core/src/session/mod.rs, #1222). Only these exact causes are shown.
+const claudeCheckCauses = ["the login check timed out", "the Claude CLI could not run", "the Claude CLI exited with an error", "the Claude CLI gave an unreadable answer"];
 const transientRejections = new Set(["storage_blocked", "service_stopping", "service_draining", "session_waking", "model_catalog_unavailable", "codex_auth_unavailable", "claude_auth_unavailable", "cursor_auth_unavailable"]);
 
 export class CloudroomError extends Error {
@@ -490,7 +492,8 @@ export class CloudroomClient {
       await response.body?.cancel().catch(() => {});
       // Only 400/409 codes steer retry decisions; other statuses keep status-based rules.
       const code = response.status === 400 || response.status === 409 ? known : null;
-      const message = code ? rejectionMessages[code] : `Cloudroom rejected the request (HTTP ${response.status})${error ? `: ${error}` : ""}`;
+      const cause = code === "claude_auth_unavailable" ? claudeCheckCauses.find((c) => error === `Claude account could not be verified: ${c}`) : undefined;
+      const message = code ? `${rejectionMessages[code]}${cause ? ` Cause: ${cause}.` : ""}` : `Cloudroom rejected the request (HTTP ${response.status})${error ? `: ${error}` : ""}`;
       throw new CloudroomError(message, response.status, code);
     }
     return response;
@@ -715,6 +718,16 @@ export class CloudroomClient {
       `${sessionPath(sessionId)}/reorder`,
       "reorder",
       { request_id: id, order: order.map(requestId) },
+      sessionId,
+    );
+  }
+
+  /** The user's model pick (`set_model`): the session runs it, with this effort, from its next turn. */
+  setModel(sessionId: string, id: string, model: string, reasoning?: string) {
+    return this.#command(
+      `${sessionPath(sessionId)}/model`,
+      "model",
+      { request_id: id, model, ...(reasoning ? { reasoning } : {}) },
       sessionId,
     );
   }

@@ -1,13 +1,6 @@
 import { execFile } from "node:child_process";
-import { createHash, randomUUID } from "node:crypto";
-import {
-  accessSync,
-  constants,
-  mkdtempSync,
-  readFileSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
+import { randomUUID } from "node:crypto";
+import { accessSync, constants, readFileSync, rmSync } from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -21,13 +14,14 @@ import {
   spawnPortableProcess,
 } from "@cloudroom/process-utils";
 import {
+  createBrowserOpener,
   NO_TERMINAL,
   readClaudeToken,
   readOpenedUrl,
   spawnInTerminal,
-  writeBrowserOpener,
 } from "@cloudroom/process-utils/claude-token";
 import type { UsageWindow } from "./contract.js";
+import { readLogin } from "./profile.js";
 import { readReset, SignInAgainError, type Secret } from "./tokens.js";
 
 const YEAR_MS = 365 * 24 * 60 * 60_000;
@@ -77,9 +71,8 @@ interface Run {
   stop: () => void;
 }
 
-function windowsLogin(binary: string, profile: string): Run {
-  const dir = mkdtempSync(path.join(os.tmpdir(), "cloudroom-claude-"));
-  const browser = writeBrowserOpener(dir);
+function windowsLogin(binary: string, profile: string, dataDir: string): Run {
+  const { dir, browser } = createBrowserOpener(dataDir);
   const child = spawnPortableProcess({
     command: binary,
     args: ["auth", "login", "--claudeai"],
@@ -123,7 +116,9 @@ function windowsLogin(binary: string, profile: string): Run {
 export class ClaudeLogin {
   private readonly runs = new Map<string, Run>();
 
+  /** `dataDir` holds the sign-in opener: Claude runs it outside any sandbox, so it never goes in the OS temp folder. */
   constructor(
+    private readonly dataDir: string,
     private readonly setupToken: () =>
       | PluginClaudeSetupTokenRun
       | undefined = () => undefined,
@@ -150,7 +145,9 @@ export class ClaudeLogin {
     binary: string,
     profile?: string,
   ): Promise<{ sessionId: string; authorizeUrl: string }> {
-    const run = profile ? windowsLogin(binary, profile) : this.windowsToken();
+    const run = profile
+      ? windowsLogin(binary, profile, this.dataDir)
+      : this.windowsToken();
     const sessionId = randomUUID();
     this.runs.set(sessionId, run);
     for (
@@ -173,11 +170,7 @@ export class ClaudeLogin {
     if (!binary)
       throw new Error("Install Claude Code on this computer, then try again.");
     if (windows) return this.startWindows(binary, profile);
-    const dir = mkdtempSync(path.join(os.tmpdir(), "cloudroom-claude-"));
-    const browser = path.join(dir, "open");
-    writeFileSync(browser, `#!/bin/sh\nprintf '%s' "$1" > "$0.url"\n`, {
-      mode: 0o700,
-    });
+    const { dir, browser } = createBrowserOpener(this.dataDir);
     const command = `stty cols 1000; exec "$CLAUDE_BIN" ${profile ? "auth login --claudeai" : "setup-token"}`;
     const child = spawnInTerminal(command, {
       ...(profile ? profileEnv(profile) : process.env),
@@ -309,54 +302,18 @@ const loginSchema = z.object({
   }),
 });
 
-// A Keychain read that failed may have shown a macOS popup (a timeout, Deny, a locked Keychain).
-// It is not tried again until the app restarts, so the popup can't come back every few minutes.
-const keychainFailed = new Set<string>();
-
-async function keychainLogin(profile: string): Promise<string> {
-  if (process.platform !== "darwin" || keychainFailed.has(profile)) return "";
-  const folder = createHash("sha256")
-    .update(profile.normalize("NFC"))
-    .digest("hex")
-    .slice(0, 8);
-  const text = await promisify(execFile)(
-    "security",
-    ["find-generic-password", "-s", `Claude Code-credentials-${folder}`, "-w"],
-    { timeout: 10_000 },
-  ).then(
-    ({ stdout }) => stdout.trim(),
-    () => {
-      keychainFailed.add(profile);
-      return "";
-    },
-  );
-  // `security` prints a value with special characters as hex.
-  return /^(?:[0-9a-f]{2})+$/iu.test(text)
-    ? Buffer.from(text, "hex").toString("utf8")
-    : text;
-}
-
-// Claude Code keeps a profile's full login in the Keychain on macOS, in an entry named after the folder.
-// Elsewhere, or when the Keychain has none, it is a file in the folder. Null when it can't be read or has expired.
+// A profile's full login, as Claude Code saved it (`readLogin`). Null when it can't be read or has expired.
 async function profileToken(profile: string): Promise<string | null> {
-  const file = () =>
-    fs.readFile(path.join(profile, ".credentials.json"), "utf8").catch(() => "");
-  for (const read of [() => keychainLogin(profile), file]) {
-    const login = loginSchema.safeParse(
-      await read().then(JSON.parse).catch(() => null),
-    ).data?.claudeAiOauth;
-    if (login)
-      return login.expiresAt != null && Date.now() >= login.expiresAt
-        ? null
-        : login.accessToken;
-  }
-  return null;
+  const login = loginSchema.safeParse(await readLogin(profile)).data?.claudeAiOauth;
+  return !login || (login.expiresAt != null && Date.now() >= login.expiresAt)
+    ? null
+    : login.accessToken;
 }
 
 // A full login reads Claude's usage page data: no reply is used, and each model's weekly limit (Fable) shows too.
 // Null when the login can't be read, has expired, or is rejected; Claude Code renews it on the account's next turn.
 // A short error (429, 5xx, a timeout) throws.
-async function profileUsage(profile: string): Promise<ClaudeUsage | null> {
+export async function profileUsage(profile: string): Promise<ClaudeUsage | null> {
   const token = await profileToken(profile);
   if (!token) return null;
   const response = await fetch("https://api.anthropic.com/api/oauth/usage", {

@@ -7,7 +7,7 @@ import { Command } from "commander";
 import { jsonValueSchema, type Host, type JsonValue } from "@cloudroom/domain";
 import type { CloudVps } from "@cloudroom/sdk/node";
 import { action, CliExitError } from "../action.js";
-import { CLI_READ_TIMEOUT_MS, createCliBbSdk } from "../client.js";
+import { CLI_READ_TIMEOUT_MS, createCliRoomSdk } from "../client.js";
 import { columnWidths, printBorderlessTable } from "../table.js";
 import { outputJson } from "./helpers.js";
 import { confirmDestructiveAction } from "./helpers.js";
@@ -84,7 +84,7 @@ async function waitForMachineLifecycle(args: {
 
 // Removal can stop at a failed cleanup, e.g. while the machine is offline (#1307).
 async function reportMachineCleanup(
-  sdk: ReturnType<typeof createCliBbSdk>,
+  sdk: ReturnType<typeof createCliRoomSdk>,
   hostId: string,
   done: string,
 ): Promise<void> {
@@ -199,7 +199,7 @@ export async function resolveMachineHostId(args: {
   serverUrl: string;
   target: string;
 }): Promise<string> {
-  const hosts = await createCliBbSdk(
+  const hosts = await createCliRoomSdk(
     args.serverUrl,
     CLI_READ_TIMEOUT_MS,
   ).hosts.list({
@@ -223,7 +223,7 @@ async function resolveMachineOrVps(args: {
 }): Promise<
   { hostId: string; vps?: never } | { hostId?: never; vps: CloudVps }
 > {
-  const sdk = createCliBbSdk(args.serverUrl, CLI_READ_TIMEOUT_MS);
+  const sdk = createCliRoomSdk(args.serverUrl, CLI_READ_TIMEOUT_MS);
   const target = args.target.trim();
   const hosts = await sdk.hosts.list({ includeCreating: true });
   const native = () => ({ hostId: resolveMachineId(hosts, target) });
@@ -308,7 +308,7 @@ export function registerMachineCommands(
         const cancel = () => controller.abort();
         process.once("SIGINT", cancel);
         try {
-          const sdk = createCliBbSdk(getUrl());
+          const sdk = createCliRoomSdk(getUrl());
           controller.signal.throwIfAborted();
           let host = await sdk.hosts.experimental_create({
             machineProviderId,
@@ -378,7 +378,7 @@ export function registerMachineCommands(
     .action(
       action(async (opts: MachineListCommandOptions) => {
         const providers =
-          await createCliBbSdk(getUrl()).hosts.experimental_listProviders();
+          await createCliRoomSdk(getUrl()).hosts.experimental_listProviders();
         if (outputJson(opts, providers)) return;
         if (providers.length === 0) {
           console.log("No machine providers found");
@@ -405,12 +405,12 @@ export function registerMachineCommands(
         // The VPS lives on the website, not in the machine list; JSON keeps its list of native machines.
         // Its status is a hint here, so a slow website holds up the list for VPS_HINT_TIMEOUT_MS at most.
         const [all, vps] = await Promise.all([
-          createCliBbSdk(getUrl(), CLI_READ_TIMEOUT_MS).hosts.list({
+          createCliRoomSdk(getUrl(), CLI_READ_TIMEOUT_MS).hosts.list({
             includeCreating: true,
           }),
           opts.json
             ? null
-            : createCliBbSdk(getUrl(), VPS_HINT_TIMEOUT_MS)
+            : createCliRoomSdk(getUrl(), VPS_HINT_TIMEOUT_MS)
                 .cloudroom.vps()
                 .catch(() => null),
         ]);
@@ -431,7 +431,7 @@ export function registerMachineCommands(
     .option("--json", "Print machine-readable JSON output")
     .action(
       action(async (target: string, opts: MachineListCommandOptions) => {
-        const sdk = createCliBbSdk(getUrl(), CLI_READ_TIMEOUT_MS);
+        const sdk = createCliRoomSdk(getUrl(), CLI_READ_TIMEOUT_MS);
         const { hostId, vps } = await resolveMachineOrVps({
           serverUrl: getUrl(),
           target,
@@ -452,7 +452,7 @@ export function registerMachineCommands(
     .option("--json", "Print machine-readable JSON output")
     .action(
       action(async (opts: MachineListCommandOptions) => {
-        const result = await createCliBbSdk(getUrl()).hosts.createJoinCode();
+        const result = await createCliRoomSdk(getUrl()).hosts.createJoinCode();
         if (outputJson(opts, result)) return;
         console.log(result.joinCode);
       }),
@@ -469,7 +469,7 @@ export function registerMachineCommands(
           name: string,
           opts: MachineListCommandOptions,
         ) => {
-          const sdk = createCliBbSdk(getUrl());
+          const sdk = createCliRoomSdk(getUrl());
           const hostId = await resolveMachineHostId({
             serverUrl: getUrl(),
             target,
@@ -488,7 +488,7 @@ export function registerMachineCommands(
     .option("--json", "Print machine-readable JSON output")
     .action(
       action(async (target: string, opts: MachineMutationCommandOptions) => {
-        const sdk = createCliBbSdk(getUrl());
+        const sdk = createCliRoomSdk(getUrl());
         const hostId = await resolveMachineHostId({
           serverUrl: getUrl(),
           target,
@@ -510,7 +510,7 @@ export function registerMachineCommands(
     .option("--json", "Print machine-readable JSON output")
     .action(
       action(async (target: string, opts: MachineListCommandOptions) => {
-        const sdk = createCliBbSdk(getUrl());
+        const sdk = createCliRoomSdk(getUrl());
         const hostId = await resolveMachineHostId({
           serverUrl: getUrl(),
           target,
@@ -527,7 +527,7 @@ export function registerMachineCommands(
     .option("--json", "Print machine-readable JSON output")
     .action(
       action(async (target: string, opts: MachineListCommandOptions) => {
-        const sdk = createCliBbSdk(getUrl());
+        const sdk = createCliRoomSdk(getUrl());
         const hostId = await resolveMachineHostId({
           serverUrl: getUrl(),
           target,
@@ -552,7 +552,7 @@ export function registerMachineCommands(
     .option("--json", "Print machine-readable JSON output")
     .action(
       action(async (target: string, opts: MachineListCommandOptions) => {
-        const sdk = createCliBbSdk(getUrl());
+        const sdk = createCliRoomSdk(getUrl());
         const hostId = await resolveMachineHostId({
           serverUrl: getUrl(),
           target,
@@ -574,7 +574,7 @@ export function registerMachineCommands(
     .option("--json", "Print machine-readable JSON output")
     .action(
       action(async (target: string, opts: MachineListCommandOptions) => {
-        const sdk = createCliBbSdk(getUrl());
+        const sdk = createCliRoomSdk(getUrl());
         const hostId = await resolveMachineHostId({
           serverUrl: getUrl(),
           target,
@@ -596,7 +596,7 @@ export function registerMachineCommands(
     .option("--json", "Print machine-readable JSON output")
     .action(
       action(async (target: string, opts: MachineListCommandOptions) => {
-        const sdk = createCliBbSdk(getUrl());
+        const sdk = createCliRoomSdk(getUrl());
         const hostId = await resolveMachineHostId({
           serverUrl: getUrl(),
           target,
@@ -620,7 +620,7 @@ export function registerMachineCommands(
     .option("--json", "Print machine-readable JSON output")
     .action(
       action(async (target: string, opts: MachineListCommandOptions) => {
-        const sdk = createCliBbSdk(getUrl());
+        const sdk = createCliRoomSdk(getUrl());
         const hostId = await resolveMachineHostId({
           serverUrl: getUrl(),
           target,
@@ -652,7 +652,7 @@ export function registerMachineCommands(
           ) {
             throw new Error("--action must be install or update.");
           }
-          const sdk = createCliBbSdk(getUrl());
+          const sdk = createCliRoomSdk(getUrl());
           const hostId = await resolveMachineHostId({
             serverUrl: getUrl(),
             target,

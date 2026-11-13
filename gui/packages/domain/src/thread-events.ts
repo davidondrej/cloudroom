@@ -86,6 +86,7 @@ export const turnRequestEventDataSchema = z.object({
   retryOfRequestId: clientTurnRequestIdSchema.optional(),
   /** Which attempt this is: 2 is the first retry of the original request. */
   retryAttempt: z.number().int().min(2).optional(),
+  queueDelivered: z.literal(true).optional(),
   source: z.enum(["spawn", "tell"]),
   initiator: threadTurnInitiatorSchema,
   senderThreadId: z.string().nullable(),

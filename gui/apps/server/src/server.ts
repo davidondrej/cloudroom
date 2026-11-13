@@ -34,7 +34,7 @@ import {
   createPluginService,
   type PluginService,
 } from "./services/plugins/plugin-service.js";
-import { bbCompatAppVersion } from "./services/plugins/sdk-compat.js";
+import { roomCompatAppVersion } from "./services/plugins/sdk-compat.js";
 import { setPluginAgentContributions } from "./services/plugins/plugin-agent-contributions.js";
 import { setPluginThreadEventEmitter } from "./services/plugins/plugin-thread-events.js";
 import { setPluginHookProvider } from "./services/plugins/plugin-hook-registry.js";
@@ -90,9 +90,9 @@ import {
   onTerminalSocketOpen,
 } from "./ws/terminal-protocol.js";
 import {
-  createBbAppArtifactService,
-  type BbAppArtifactService,
-} from "./services/install/bb-app-artifact.js";
+  createRoomAppArtifactService,
+  type RoomAppArtifactService,
+} from "./services/install/host-artifact.js";
 import { HOST_DAEMON_PROTOCOL_VERSION } from "@cloudroom/host-daemon-contract";
 import {
   createPluginCatalogService,
@@ -160,7 +160,7 @@ function normalizeInternalAuthPath(path: string): string {
 }
 
 interface CreateAppOptions {
-  bbAppArtifactService?: BbAppArtifactService;
+  bbAppArtifactService?: RoomAppArtifactService;
   slowApiRequestLogThresholdMs?: number;
   staticDir?: string;
 }
@@ -441,9 +441,9 @@ export function createApp(
   });
   const slowApiRequestLogThresholdMs =
     options?.slowApiRequestLogThresholdMs ?? SLOW_API_REQUEST_LOG_THRESHOLD_MS;
-  const bbAppArtifactService =
+  const roomAppArtifactService =
     options?.bbAppArtifactService ??
-    createBbAppArtifactService({
+    createRoomAppArtifactService({
       dataDir: deps.config.dataDir,
       serverEntryUrl: import.meta.url,
     });
@@ -525,12 +525,12 @@ export function createApp(
   });
   app.get("/install/version", async (context) => {
     return context.json({
-      version: await bbAppArtifactService.getVersion(),
+      version: await roomAppArtifactService.getVersion(),
       protocolVersion: HOST_DAEMON_PROTOCOL_VERSION,
     });
   });
   app.get("/install/bb-app.tgz", async (context) => {
-    const artifact = await bbAppArtifactService
+    const artifact = await roomAppArtifactService
       .getArtifact()
       .catch((error: unknown) => {
         deps.logger.error({ err: error }, "Couldn't build the host package");
@@ -637,7 +637,7 @@ export function createApp(
     telemetry: deps.telemetry,
     pendingInteractions: deps.pendingInteractions,
     dataDir: deps.config.dataDir,
-    appVersion: bbCompatAppVersion(deps.config.appVersion),
+    appVersion: roomCompatAppVersion(deps.config.appVersion),
     getAppUrl: () => deps.config.appUrl ?? null,
     sharedPorts: deps.sharedPorts,
     providerRegistry: deps.providerRegistry,
@@ -722,7 +722,7 @@ export function createApp(
   });
   const pluginCatalogService = createPluginCatalogService({
     db: deps.db,
-    appVersion: bbCompatAppVersion(deps.config.appVersion),
+    appVersion: roomCompatAppVersion(deps.config.appVersion),
     marketplaceUrl: deps.config.marketplaceUrl,
     dataDir: deps.config.dataDir,
     plugins: pluginService,

@@ -10,11 +10,11 @@ import { ClaudeConnectionButton, useClaudeConnection, useInstallPercent } from "
 import { openCodexConnection } from "@/components/CodexConnectionPanel";
 import { selectCloudForNewThreads } from "@/components/promptbox/NewThreadComposer";
 import { ImportChats } from "@/components/settings/ImportChats";
-import { BbLogo } from "@/components/ui/bb-logo";
+import { RoomLogo } from "@/components/ui/cloudroom-logo";
 import { appToast } from "@/components/ui/app-toast";
 import { useCreateProject } from "@/hooks/mutations/project-mutations";
 import { useUpdateGeneralSettings } from "@/hooks/mutations/settings-mutations";
-import { cloudCanRunHarness, useCloudroomAccount, useCloudroomSignIn, useImportBb, useMacAgents, useNativeSessions, useProjectSuggestions, useSetCopyLogins, useSetMacAccess } from "@/hooks/queries/cloudroom-queries";
+import { cloudCanRunHarness, useCloudroomAccount, useCloudroomSignIn, useImportRoom, useMacAgents, useNativeSessions, useProjectSuggestions, useSetCopyLogins, useSetMacAccess } from "@/hooks/queries/cloudroom-queries";
 import { useSidebarNavigation } from "@/hooks/queries/sidebar-navigation-query";
 import { useStartFirstAgent } from "@/hooks/useFirstAgent";
 import { useHostDaemon, useThisComputer } from "@/hooks/useHostDaemon";
@@ -23,7 +23,7 @@ import { usePathPickerHost } from "@/hooks/useLocalPathPicker";
 import { useQuickCreateProjectController } from "@/hooks/useQuickCreateProject";
 import { usePromptBoxProviderPreference } from "@/hooks/thread-creation-options/persisted-selection-fields";
 import { booleanLocalStorage } from "@/lib/browser-storage";
-import { getBbDesktopInfo, MACOS_APP_REGION_NO_DRAG_CLASS, MACOS_WINDOW_DRAG_CLASS } from "@/lib/bb-desktop";
+import { getRoomDesktopInfo, MACOS_APP_REGION_NO_DRAG_CLASS, MACOS_WINDOW_DRAG_CLASS } from "@/lib/room-desktop";
 import { copyTextToClipboard, copyToClipboardWithToast, useClipboardCopy } from "@/lib/clipboard";
 import { fetchWithAppSurface } from "@/lib/app-surface";
 import { useSystemConfig, useSystemProviders } from "@/hooks/queries/system-queries";
@@ -91,7 +91,7 @@ export function Onboarding() {
   const account = useCloudroomAccount();
   const locked = account.isSuccess && !account.data.account && !account.data.selfHosted;
   // Only the desktop app opens setup by itself: "skipped" is saved per browser, so phones and other browsers would see it again.
-  const firstRun = !dismissed && getBbDesktopInfo() !== null && projects !== undefined && projects.length === 0;
+  const firstRun = !dismissed && getRoomDesktopInfo() !== null && projects !== undefined && projects.length === 0;
   // Stay open once shown: adding a folder or importing chats creates projects, which would otherwise end the first run mid-step.
   useEffect(() => { if (firstRun) setOpen(true); }, [firstRun, setOpen]);
   const visible = locked || open || firstRun;
@@ -100,7 +100,7 @@ export function Onboarding() {
   if (!visible) return null;
   // The first time setup closes on the desktop app, by any path, it starts the first agent (ADR 20261111-220912).
   const close = (agents: { claude: boolean; codex: boolean }) => {
-    if (!dismissed && getBbDesktopInfo() !== null) startFirstAgent(agents);
+    if (!dismissed && getRoomDesktopInfo() !== null) startFirstAgent(agents);
     setDismissed(true);
     setOpen(false);
   };
@@ -181,7 +181,7 @@ function Setup({ locked, fresh, close: closeSetup }: { locked: boolean; fresh: b
       <div className="flex min-h-0 flex-1">
         <aside className="hidden w-[300px] shrink-0 flex-col border-r border-(--ob-line) bg-(--ob-rail) px-[22px] pt-7 pb-6 md:flex">
           <div className="flex items-center gap-2.5 text-base font-semibold tracking-tight">
-            <BbLogo className="size-7" />
+            <RoomLogo className="size-7" />
             cloudroom
           </div>
           <p className="mt-10 mb-3 ml-3 text-[11px] tracking-[0.14em] text-(--ob-muted) uppercase">Setup</p>
@@ -232,7 +232,7 @@ function Setup({ locked, fresh, close: closeSetup }: { locked: boolean; fresh: b
             </button>
           )}
           <div key={step} className={cn("my-auto w-full duration-300 animate-in fade-in-0 slide-in-from-bottom-1", step === 3 ? "max-w-[860px]" : "max-w-[600px]")}>
-            {step === 1 && stamped ? <TickStamp key={`${claude}-${codex}`} /> : <BbLogo className="mb-6 size-[72px] -rotate-[5deg]" />}
+            {step === 1 && stamped ? <TickStamp key={`${claude}-${codex}`} /> : <RoomLogo className="mb-6 size-[72px] -rotate-[5deg]" />}
             <p className="font-serif text-base text-(--ob-muted) italic">Step {step + 1} of 4</p>
             {step === 0 && <AccountStep email={account.data?.account?.email ?? null} signingIn={account.data?.signingIn === true} error={account.data?.signInError ?? null} next={next} fresh={fresh} />}
             {step === 1 && <AgentStep progress={progress} next={next} stamped={stamped} left={countdown?.left ?? null} choices={choices} setChoices={setChoices} />}
@@ -381,7 +381,7 @@ function AccountStep({ email, signingIn, error, next, fresh }: { email: string |
   const openNow = () => { setLeft(null); begin(); };
   const cancel = () => { setLeft(null); setGroup("auto_done"); };
   // Only the desktop app on a new install, and only once: Cancel or a finished countdown never auto-opens again.
-  const offered = fresh && !email && getBbDesktopInfo() !== null;
+  const offered = fresh && !email && getRoomDesktopInfo() !== null;
   useEffect(() => {
     if (!offered || busy) return;
     if (group === null) setGroup(Math.random() < 0.2 ? "manual" : "auto");
@@ -744,7 +744,7 @@ function ProjectStep({ close, added, setAdded, imported, setImported }: {
   const { canUseNativeFolderPicker, clientHostId, hostId } = usePathPickerHost();
   const here = useThisComputer();
   const { localHostId } = useHostDaemon();
-  const importBb = useImportBb();
+  const importRoom = useImportRoom();
   const sessions = useNativeSessions().data?.sessions;
   // An import empties the scan; keep "Import your work" with Continue instead of flipping to "No agent chats to import".
   const empty = sessions?.length === 0 && !imported;
@@ -779,7 +779,7 @@ function ProjectStep({ close, added, setAdded, imported, setImported }: {
   const bringWorkOver = () => {
     if (!localHostId) return appToast.error(`${here[0]!.toUpperCase()}${here.slice(1)} is not connected yet. Try again in a moment.`);
     track("project", "started", "bb_import");
-    importBb.mutate(localHostId, {
+    importRoom.mutate(localHostId, {
       onSuccess: ({ imported }) => {
         appToast.success(`Imported ${imported.length} BB thread${imported.length === 1 ? "" : "s"}`);
         if (imported.length) setImported(true);
@@ -849,8 +849,8 @@ function ProjectStep({ close, added, setAdded, imported, setImported }: {
             <span aria-hidden className="mx-2 text-(--ob-dash)">·</span>
           </>
         )}
-        <button type="button" className={QUIET_LINK} disabled={importBb.isPending} onClick={bringWorkOver}>
-          {importBb.isPending ? "Bringing your BB threads over…" : "Coming from BB?"}
+        <button type="button" className={QUIET_LINK} disabled={importRoom.isPending} onClick={bringWorkOver}>
+          {importRoom.isPending ? "Bringing your BB threads over…" : "Coming from BB?"}
         </button>
       </p>
       {done && (

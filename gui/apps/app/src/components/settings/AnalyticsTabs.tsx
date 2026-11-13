@@ -9,6 +9,7 @@ import { ModelsSection } from "@/components/settings/ModelsSection";
 import { PromptsSection } from "@/components/settings/PromptsSection";
 import { SkillUsageSection } from "@/components/settings/SkillUsageSection";
 import { TokensSection } from "@/components/settings/TokensSection";
+import { WrappedButton } from "@/components/Wrapped";
 import { useCloudroomAccount } from "@/hooks/queries/cloudroom-queries";
 import { systemSkillUsageQueryKey, systemUsageAnalyticsQueryKey } from "@/hooks/queries/query-keys";
 
@@ -51,11 +52,14 @@ export function AnalyticsTabs() {
             </button>
           ))}
         </nav>
-        {updating ? (
-          <span role="status" aria-label="Updating" className="mb-2 ml-auto shrink-0">
-            <Icon name="Spinner" className="size-4 animate-spin text-muted-foreground" />
-          </span>
-        ) : null}
+        <span className="mb-2 ml-auto flex shrink-0 items-center gap-2">
+          {updating ? (
+            <span role="status" aria-label="Updating">
+              <Icon name="Spinner" className="size-4 animate-spin text-muted-foreground" />
+            </span>
+          ) : null}
+          <WrappedButton />
+        </span>
       </div>
       {active.content()}
     </div>

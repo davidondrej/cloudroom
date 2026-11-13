@@ -18,7 +18,7 @@ const LOOP_PREFIXES = ["[room-cli automation due:", '[Cloudroom automation "'];
 
 const MODELS_SHOWN = 8;
 
-interface Range { start: number; days: number; offset: number }
+export interface Range { start: number; days: number; offset: number }
 const zeros = (length: number) => new Array<number>(length).fill(0);
 const round = (values: number[]) => values.map((value) => Math.round(value * 100) / 100);
 /** The day's place in the range, or -1 outside it. */
@@ -67,7 +67,7 @@ interface PromptRow {
 }
 
 /** Every prompt in the range, once: retries are skipped, and so are the copies a fork keeps. */
-function readPrompts(db: DbQueryConnection, range: Range): PromptRow[] {
+export function readPrompts(db: DbQueryConnection, range: Range): PromptRow[] {
   const seen = new Set<string>();
   return db.all<PromptRow>(sql`
     SELECT e.created_at AS at, t.execution_target AS target, t.parent_thread_id IS NOT NULL AS child,
@@ -97,7 +97,7 @@ export function modelName(raw: string | null): string {
     .join(" ").replace(/^GPT /, "GPT-");
 }
 
-function models(rows: readonly PromptRow[], range: Range) {
+export function models(rows: readonly PromptRow[], range: Range) {
   const daily = new Map<string, number[]>();
   let cloud = 0;
   for (const row of rows) {
@@ -121,7 +121,7 @@ function models(rows: readonly PromptRow[], range: Range) {
  * Prompts you sent: not loop runs, not agent messages, not the prompt a child thread was started with.
  * Known limit: most messages agents send with `room-cli` are saved as user prompts, so they count as yours.
  */
-function prompts(rows: readonly PromptRow[], range: Range) {
+export function prompts(rows: readonly PromptRow[], range: Range) {
   const daily = zeros(range.days), hours = zeros(7 * 24);
   for (const row of rows) {
     if (row.initiator !== "user" || (row.child && row.source === "spawn")) continue;

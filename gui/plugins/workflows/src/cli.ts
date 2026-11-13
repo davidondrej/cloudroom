@@ -6,6 +6,7 @@ import type {
 import type { JsonValue } from "./types.js";
 import type {
   WorkflowCallInspection,
+  WorkflowQueueStatus,
   WorkflowRunInspectionPage,
   WorkflowService,
 } from "./service.js";
@@ -179,7 +180,10 @@ function inlineRunResult(run: WorkflowRunRow): {
   };
 }
 
-function statusSummary(page: WorkflowRunInspectionPage) {
+function statusSummary(
+  page: WorkflowRunInspectionPage,
+  queue: WorkflowQueueStatus | null,
+) {
   const { run, callCounts } = page;
   const result = inlineRunResult(run);
   const name = boundedText(run.name, STATUS_DISPLAY_TEXT_MAX_BYTES);
@@ -226,6 +230,7 @@ function statusSummary(page: WorkflowRunInspectionPage) {
       parseStoredJson(run.settingsJson, "workflow settings"),
     ),
     status: run.status,
+    queue,
     phase: phase.value,
     phaseTruncated: phase.truncated,
     resumedFromRunId: run.resumedFromRunId,
@@ -327,10 +332,10 @@ function callLogRecord(call: WorkflowCallInspection, exportedAt: number) {
 }
 
 export function registerWorkflowCli(
-  bb: BbPluginApi,
+  room: BbPluginApi,
   service: WorkflowService,
 ): void {
-  bb.cli.register({
+  room.cli.register({
     name: "workflows",
     summary: "Run and inspect durable Cloudroom workflows",
     commands: [
@@ -382,7 +387,7 @@ export function registerWorkflowCli(
           ]);
           const context = requireContext(ctx);
           const prepared = await prepareWorkflowSource(
-            bb,
+            room,
             context,
             sourceInput(options, ctx.cwd),
           );
@@ -404,7 +409,7 @@ export function registerWorkflowCli(
           ]);
           const context = requireContext(ctx);
           const prepared = await prepareWorkflowSource(
-            bb,
+            room,
             context,
             sourceInput(options, ctx.cwd),
           );
@@ -421,7 +426,7 @@ export function registerWorkflowCli(
           if (page === null || page.run.projectId !== context.projectId) {
             throw new Error(`Unknown workflow run ${runId}`);
           }
-          return success(statusSummary(page));
+          return success(statusSummary(page, service.queueStatus(page.run)));
         }
         if (command === "history") {
           const { options, positionals } = parseArguments(

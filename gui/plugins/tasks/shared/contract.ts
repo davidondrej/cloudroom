@@ -760,7 +760,7 @@ export type TaskPullRequest = z.infer<typeof taskPullRequestSchema>;
 export type Preset = z.infer<typeof presetSchema>;
 export type TasksDomainError = z.infer<typeof tasksDomainErrorSchema>;
 export type TaskMutationResult = z.infer<typeof taskMutationResultSchema>;
-export type BbProjectOption = z.infer<
+export type RoomProjectOption = z.infer<
   (typeof tasksRpcContract)["listBbProjects"]["output"]
 >["bbProjects"][number];
 export type SidebarProjectSummary = z.infer<

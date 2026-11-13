@@ -44,7 +44,7 @@ import {
   SettingsWithControl,
 } from "@/components/ui/settings-section";
 import { AppCommandShortcutPill } from "@/components/commands/AppCommandShortcutHint";
-import { getBbDesktopInfo } from "@/lib/bb-desktop";
+import { getRoomDesktopInfo } from "@/lib/room-desktop";
 
 const EMPTY_OVERRIDES: AppKeybindingOverrides = [];
 const SETTINGS_SHORTCUT_PILL_CLASS =
@@ -462,7 +462,7 @@ export function KeyboardSettingsSection() {
     isPending: isKeyboardSettingsPending,
     mutate: mutateKeyboardSettings,
   } = useUpdateKeyboardSettings();
-  const isDesktop = getBbDesktopInfo() !== null;
+  const isDesktop = getRoomDesktopInfo() !== null;
   const platform = browserPlatform();
   const generalSettings =
     systemConfig.data?.generalSettings ?? defaultAppSettings;

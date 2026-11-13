@@ -645,7 +645,7 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
     });
   }
 
-  function resolveBbThreadIdForProcess(
+  function resolveRoomThreadIdForProcess(
     proc: ProviderProcess,
     providerThreadId: string | undefined,
   ): string | undefined {
@@ -664,7 +664,7 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
   function resolveProviderRequestThreadId(
     args: ResolveProviderRequestThreadIdArgs,
   ): string | null {
-    const resolvedThreadId = resolveBbThreadIdForProcess(
+    const resolvedThreadId = resolveRoomThreadIdForProcess(
       args.proc,
       args.providerThreadId,
     );
@@ -1234,18 +1234,18 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
         providerState: args.proc.identity,
         sourceThreadId: args.sourceThreadId,
       };
-      const resolvedBbThreadId =
+      const resolvedRoomThreadId =
         event.type === "thread/identity"
           ? threadIdentityRegistry.resolveProviderIdentityThreadId(scope)
           : threadIdentityRegistry.resolveProviderEventThreadId(scope);
 
-      if (!resolvedBbThreadId) {
+      if (!resolvedRoomThreadId) {
         options.onStderr?.(
           `Dropping unscoped provider event ${event.type}; no Cloudroom thread could be resolved`,
         );
         continue;
       }
-      const targetThreadId = resolvedBbThreadId;
+      const targetThreadId = resolvedRoomThreadId;
 
       if (suppressedThreadEventIds.has(targetThreadId)) {
         continue;

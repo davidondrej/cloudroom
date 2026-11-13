@@ -10,15 +10,23 @@ import {
 import { mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { environments, getEnvironment, getThread, threads } from "@cloudroom/db";
+import {
+  environments,
+  getEnvironment,
+  getThread,
+  threads,
+} from "@cloudroom/db";
 import { eq } from "drizzle-orm";
 import { expect, it, vi } from "vitest";
 import {
+  requestEnvironmentRemoval,
   restoreParkedWorktree,
+  sweepProviderEnvironment,
   sweepProviderLifecycles,
 } from "../../src/services/environments/environment-engine.js";
 import { setPluginEnvironmentProviderBridge } from "../../src/services/plugins/plugin-environment-provider-registry.js";
 import { createThreadFromRequest } from "../../src/services/threads/thread-create.js";
+import { registerTestHostRpcCapture } from "../helpers/commands.js";
 import { textInput } from "../helpers/prompt-input.js";
 import {
   seedEnvironment,
@@ -51,7 +59,10 @@ async function installWorktreeProvider(h: TestAppHarness, repo: string) {
   );
   await writeFile(join(root, "server.js"), "export default function () {}");
   expect((await h.pluginService.installPath(root)).status).toBe("running");
-  const provider = { loseNextRemoveAck: false };
+  const provider = {
+    loseNextRemoveAck: false,
+    removed: [] as (string | null)[],
+  };
   h.pluginService.getApi("fake-worktree")!.experimental_environments.register({
     id: "git-worktree",
     displayName: "Worktree",
@@ -67,6 +78,7 @@ async function installWorktreeProvider(h: TestAppHarness, repo: string) {
       return { status: "created", path, ownsPath: true };
     },
     remove: async (context) => {
+      provider.removed.push(context.path);
       if (existsSync(context.path!))
         git(repo, "worktree", "remove", "--force", context.path!);
       if (provider.loseNextRemoveAck) {
@@ -84,7 +96,9 @@ async function withWorktree(
     h: TestAppHarness;
     repo: string;
     tree: string;
-    provider: { loseNextRemoveAck: boolean };
+    provider: Awaited<ReturnType<typeof installWorktreeProvider>>;
+    host: { id: string };
+    session: { id: string };
     project: { id: string };
     environment: { id: string };
     thread: { id: string };
@@ -108,7 +122,7 @@ async function withWorktree(
       writeFileSync(join(tree, "private", "plan.md"), "plan");
       const provider = await installWorktreeProvider(h, repo);
 
-      const { host } = seedHostSession(h.deps);
+      const { host, session } = seedHostSession(h.deps);
       seedPrimaryHost(h.deps, host.id);
       const { project } = seedProjectWithSource(h.deps, { hostId: host.id, path: repo });
       const environment = seedEnvironment(h.deps, {
@@ -130,6 +144,8 @@ async function withWorktree(
         repo,
         tree,
         provider,
+        host,
+        session,
         project,
         environment,
         thread,
@@ -229,3 +245,97 @@ it("rebuilds a parked worktree for a new thread that reuses it", () =>
     });
     expect(git(tree, "status", "--porcelain")).toBe("?? draft.txt\n");
   }));
+
+it("keeps a worktree whose thread comes back while an explicit removal runs", () =>
+  withWorktree(
+    async ({
+      h,
+      tree,
+      provider,
+      host,
+      session,
+      environment,
+      thread,
+      archive,
+    }) => {
+      h.db
+        .update(environments)
+        .set({ providerOwnsPath: true })
+        .where(eq(environments.id, environment.id))
+        .run();
+      registerTestHostRpcCapture(h.deps, {
+        hostId: host.id,
+        sessionId: session.id,
+        onEnvironmentHook: async () => {
+          h.db
+            .update(threads)
+            .set({ archivedAt: null })
+            .where(eq(threads.id, thread.id))
+            .run();
+        },
+      });
+      archive();
+      const deleted = await h.app.request(
+        `/api/v1/environments/${environment.id}`,
+        { method: "DELETE" },
+      );
+      expect(deleted.status).toBe(200);
+      await sweepProviderLifecycles(h.deps);
+      expect(provider.removed).toEqual([]);
+      expect(existsSync(join(tree, "draft.txt"))).toBe(true);
+      expect(getEnvironment(h.db, environment.id)).toMatchObject({
+        status: "ready",
+        teardownStatus: null,
+      });
+    },
+  ));
+
+it.each([
+  ["the same folder", null],
+  [
+    "a Windows folder in another letter case and slash direction",
+    ["C:\\Work\\thr_task-1", "c:/work/THR_TASK-1"],
+  ],
+])(
+  "keeps a worktree when another environment's live thread works in %s",
+  (_label, windows) =>
+    withWorktree(async ({ h, tree, provider, host, environment, archive }) => {
+      const [own, other] = windows ?? [tree, tree];
+      h.db
+        .update(environments)
+        .set({ path: own, providerOwnsPath: true })
+        .where(eq(environments.id, environment.id))
+        .run();
+      const { project } = seedProjectWithSource(h.deps, {
+        hostId: host.id,
+        path: "/tmp/other-project",
+      });
+      const shared = seedEnvironment(h.deps, {
+        hostId: host.id,
+        projectId: project.id,
+        path: other,
+      });
+      seedThread(h.deps, {
+        projectId: project.id,
+        environmentId: shared.id,
+        status: "idle",
+      });
+      const warn = vi.spyOn(h.deps.logger, "warn");
+      archive();
+      await sweepProviderLifecycles(h.deps);
+      // Project deletion asks again every 10 s; the refusal waits for its recheck.
+      expect(requestEnvironmentRemoval(h.deps, environment.id)).toBe(true);
+      await sweepProviderEnvironment(h.deps, environment.id);
+      expect(provider.removed).toEqual([]);
+      expect(
+        warn.mock.calls.filter(
+          (call) => call[1] === "Environment removal refused",
+        ),
+      ).toHaveLength(1);
+      expect(git(tree, "status", "--porcelain")).toContain("draft.txt");
+      expect(getEnvironment(h.db, environment.id)).toMatchObject({
+        teardownStatus: null,
+        parkedAt: null,
+      });
+    }),
+);

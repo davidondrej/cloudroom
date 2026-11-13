@@ -1667,7 +1667,20 @@ export async function stopThreadForCurrentState(
     ]);
     return;
   }
-  await revokeThreadDesktopBrowserControl(deps, thread.id);
+  await Promise.all([
+    stopLocalThreadRuntime(deps, thread, environment, release),
+    revokeThreadDesktopBrowserControl(deps, thread.id),
+  ]);
+}
+
+async function stopLocalThreadRuntime(
+  deps: RequestThreadStopForCurrentStateDeps,
+  thread: RequestThreadStopForCurrentStateThread,
+  environment: RequestThreadStopForCurrentStateEnvironment | null,
+  release: NonNullable<Parameters<typeof stopThreadForCurrentState>[3]> & {
+    startsSent: number;
+  },
+): Promise<void> {
   if (hasLiveThreadRuntime(deps, thread)) {
     if (environment === null) {
       return;
@@ -1680,11 +1693,11 @@ export async function stopThreadForCurrentState(
     };
     if (markThreadStopRequested(deps, args)) {
       await runAwaitedThreadStopCommand(deps, {
-        requireStopped: options?.requireStopped,
+        requireStopped: release.requireStopped,
         command: buildThreadStopCommand({
           ...args,
           intent: "interrupt",
-          keepSession: options?.keepSession,
+          keepSession: release.keepSession,
         }),
         hostId: args.hostId,
         threadId: thread.id,

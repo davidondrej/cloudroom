@@ -14,7 +14,7 @@ import {
 import { describeQueueWait } from "./actions.js";
 import { formatQueueSendCountdown } from "./send-time.js";
 import { action } from "../../action.js";
-import { createCliBbSdk } from "../../client.js";
+import { createCliRoomSdk } from "../../client.js";
 import {
   collectOption,
   confirmDestructiveAction,
@@ -123,6 +123,11 @@ function printQueueTable(rows: ThreadQueuedMessagesResult): void {
     },
     table,
   );
+  for (const row of rows) {
+    if (row.failureReason !== null) {
+      console.log(`${row.id} failed: ${row.failureReason}`);
+    }
+  }
 }
 
 function queuedMessagePreview(content: PromptInput[]): string {
@@ -159,7 +164,7 @@ export function registerOrganizationCommands(
     .option("--json", "Print machine-readable JSON output")
     .action(
       action(async (opts: JsonOptions) => {
-        const sections = await createCliBbSdk(getUrl()).threadSections.list();
+        const sections = await createCliRoomSdk(getUrl()).threadSections.list();
         if (outputJson(opts, sections)) return;
         if (sections.length === 0) {
           console.log("No thread sections found");
@@ -175,7 +180,7 @@ export function registerOrganizationCommands(
     .option("--json", "Print machine-readable JSON output")
     .action(
       action(async (name: string, opts: JsonOptions) => {
-        const result = await createCliBbSdk(getUrl()).threadSections.create({
+        const result = await createCliRoomSdk(getUrl()).threadSections.create({
           name,
         });
         if (outputJson(opts, result)) return;
@@ -189,7 +194,7 @@ export function registerOrganizationCommands(
     .option("--json", "Print machine-readable JSON output")
     .action(
       action(async (id: string, name: string, opts: JsonOptions) => {
-        const result = await createCliBbSdk(getUrl()).threadSections.update({
+        const result = await createCliRoomSdk(getUrl()).threadSections.update({
           id,
           name,
         });
@@ -210,7 +215,7 @@ export function registerOrganizationCommands(
           !(await confirmDestructiveAction(`Delete thread section ${id}?`))
         )
           return;
-        const result = await createCliBbSdk(getUrl()).threadSections.delete({
+        const result = await createCliRoomSdk(getUrl()).threadSections.delete({
           id,
         });
         if (outputJson(opts, result)) return;
@@ -230,7 +235,7 @@ export function registerOrganizationCommands(
     .option("--json", "Print machine-readable JSON output")
     .action(
       action(async (query: string, opts: SearchOptions) => {
-        const result = await createCliBbSdk(getUrl()).threads.search({
+        const result = await createCliRoomSdk(getUrl()).threads.search({
           query,
           limitPerGroup: parsePositiveInteger(
             opts.limit,
@@ -250,7 +255,7 @@ export function registerOrganizationCommands(
     .option("--json", "Print machine-readable JSON output")
     .action(
       action(async (id: string, opts: HistoryOptions) => {
-        const result = await createCliBbSdk(getUrl()).threads.promptHistory({
+        const result = await createCliRoomSdk(getUrl()).threads.promptHistory({
           threadId: id,
           limit: parsePositiveInteger(opts.limit, "--limit"),
         });
@@ -271,7 +276,7 @@ export function registerOrganizationCommands(
       .action(
         action(async (id: string | undefined, opts: SelfOptions) => {
           const threadId = requireThreadIdOrSelf(id, opts);
-          const sdk = createCliBbSdk(getUrl());
+          const sdk = createCliRoomSdk(getUrl());
           const result = markRead
             ? await sdk.threads.markRead({ threadId })
             : await sdk.threads.markUnread({ threadId });
@@ -289,7 +294,7 @@ export function registerOrganizationCommands(
     .option("--json", "Print machine-readable JSON output")
     .action(
       action(async (id: string, opts: ReorderPinnedOptions) => {
-        const result = await createCliBbSdk(getUrl()).threads.reorderPinned({
+        const result = await createCliRoomSdk(getUrl()).threads.reorderPinned({
           threadId: id,
           previousThreadId: opts.after ?? null,
           nextThreadId: opts.before ?? null,
@@ -315,7 +320,7 @@ export function registerOrganizationCommands(
     .action(
       action(
         async (threadId: string | undefined, opts: QueueListOptions) => {
-          const sdk = createCliBbSdk(getUrl());
+          const sdk = createCliRoomSdk(getUrl());
           // A thread argument keeps the thread-scoped route, which is the one
           // that returns queue ORDER; the cross-thread route answers "what is
           // queued anywhere" and is ordered by age instead.
@@ -348,7 +353,7 @@ export function registerOrganizationCommands(
     .action(
       action(
         async (threadId: string, message: string, opts: QueueCreateOptions) => {
-          const result = await createCliBbSdk(
+          const result = await createCliRoomSdk(
             getUrl(),
           ).threads.queuedMessages.create({
             threadId,
@@ -387,7 +392,7 @@ export function registerOrganizationCommands(
           message: string,
           opts: QueueUpdateOptions,
         ) => {
-          const sdk = createCliBbSdk(getUrl());
+          const sdk = createCliRoomSdk(getUrl());
           const queuedMessages = sdk.threads.queuedMessages;
           const existing = (await queuedMessages.list({ threadId })).find(
             (queuedMessage) => queuedMessage.id === messageId,
@@ -428,7 +433,7 @@ export function registerOrganizationCommands(
         async (threadId: string, messageId: string, opts: QueueSendOptions) => {
           if (opts.mode !== "auto" && opts.mode !== "steer")
             throw new Error("--mode must be auto or steer.");
-          const result = await createCliBbSdk(
+          const result = await createCliRoomSdk(
             getUrl(),
           ).threads.queuedMessages.send({
             threadId,
@@ -452,7 +457,7 @@ export function registerOrganizationCommands(
     .option("--json", "Print machine-readable JSON output")
     .action(
       action(async (threadId: string, messageId: string, opts: JsonOptions) => {
-        const result = await createCliBbSdk(
+        const result = await createCliRoomSdk(
           getUrl(),
         ).threads.queuedMessages.delete({
           threadId,
@@ -475,7 +480,7 @@ export function registerOrganizationCommands(
           messageId: string,
           opts: QueueReorderOptions,
         ) => {
-          const result = await createCliBbSdk(
+          const result = await createCliRoomSdk(
             getUrl(),
           ).threads.queuedMessages.reorder({
             threadId,
@@ -498,7 +503,7 @@ export function registerOrganizationCommands(
     .option("--json", "Print machine-readable JSON output")
     .action(
       action(async (threadId: string, opts: JsonOptions) => {
-        const result = await createCliBbSdk(getUrl()).threads.tabs.get({
+        const result = await createCliRoomSdk(getUrl()).threads.tabs.get({
           threadId,
         });
         if (outputJson(opts, result)) return;
@@ -524,7 +529,7 @@ export function registerOrganizationCommands(
             expectedRevision: Number(opts.expectedRevision),
             tabs: JSON.parse(opts.tabsJson),
           });
-          const result = await createCliBbSdk(getUrl()).threads.tabs.update({
+          const result = await createCliRoomSdk(getUrl()).threads.tabs.update({
             threadId,
             ...request,
           });

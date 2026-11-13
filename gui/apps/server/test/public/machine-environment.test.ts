@@ -1,7 +1,7 @@
 import { stat } from "node:fs/promises";
 import { join } from "node:path";
 import { appSettingsValues, upsertHost, updateHost } from "@cloudroom/db";
-import { createBbSdk } from "@cloudroom/sdk/core";
+import { createRoomSdk } from "@cloudroom/sdk/core";
 import { createHttpTransport } from "@cloudroom/sdk/node";
 import { describe, expect, it, vi } from "vitest";
 import { withTestHarness } from "../helpers/test-app.js";
@@ -22,7 +22,7 @@ describe("machine environment settings", () => {
       ]);
     try {
       await withTestHarness(async (harness) => {
-        const sdk = createBbSdk({
+        const sdk = createRoomSdk({
           transport: createHttpTransport({
             baseUrl: "http://localhost",
             runtime: "node",

@@ -7,7 +7,7 @@ import type {
   SystemRestartModelDiscoveryRequest,
   SystemProvidersQuery,
 } from "@cloudroom/server-contract";
-import { type CustomProviderModel } from "@cloudroom/config/bb-app-managed-config";
+import { type CustomProviderModel } from "@cloudroom/config/app-managed-config";
 import {
   reasoningEffortsForLevels,
   type AvailableModel,

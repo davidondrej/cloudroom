@@ -377,6 +377,31 @@ describe("process utils", () => {
     expect(findCliExecutable("codex", env)).toBe(official);
   });
 
+  it("on Windows, finds install.ps1's current\\bin Codex ahead of the older layout and PATH", () => {
+    const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
+    Object.defineProperty(process, "platform", { ...platform, value: "win32" });
+    try {
+      const home = mkdtempSync(join(tmpdir(), "codex-win-"));
+      const codexAt = (...parts: string[]) => {
+        const file = join(home, ...parts);
+        mkdirSync(join(file, ".."), { recursive: true });
+        writeFileSync(file, "", { mode: 0o755 });
+        return file;
+      };
+      // No LOCALAPPDATA: its junction to current\bin can't help here.
+      const env = { HOME: home, PATH: join(home, "bin"), PATHEXT: ".EXE" };
+      const current = [".codex", "packages", "standalone", "current"];
+      const onPath = codexAt("bin", "codex.exe");
+      expect(findCliExecutable("codex", env)).toBe(onPath);
+      const legacy = codexAt(...current, "codex.exe");
+      expect(findCliExecutable("codex", env)).toBe(legacy);
+      const bin = codexAt(...current, "bin", "codex.exe");
+      expect(findCliExecutable("codex", env)).toBe(bin);
+    } finally {
+      Object.defineProperty(process, "platform", platform);
+    }
+  });
+
   it("skips npm's unfinished Claude placeholder for the next claude (#1148)", () => {
     const home = mkdtempSync(join(tmpdir(), "claude-pick-"));
     const extension = process.platform === "win32" ? ".exe" : "";

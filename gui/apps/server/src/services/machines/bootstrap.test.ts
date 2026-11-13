@@ -8,8 +8,8 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { tmpdir, userInfo } from "node:os";
+import { basename, dirname, join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import type { MachineExecutor } from "@get-bb/plugin-sdk";
 import type { MachineEnrollments, EnrollmentBootstrap } from "./enrollments.js";
@@ -94,7 +94,7 @@ describe("machine bootstrap", () => {
       );
       write(
         "curl",
-        `#!/bin/sh\ncat >"${dir}/curl-config"\ncat <<'EOF'\nprintf '%s %s' "$BB_ENROLLMENT" "$*" >"${dir}/installer-input"\nEOF\n`,
+        `#!/bin/sh\ncat >"${dir}/curl-config"\ncat <<'EOF'\nprintf '%s %s' "$BB_ENROLLMENT" "$*" >"${dir}/installer-input"\nprintf '%s' "$0" >"${dir}/installer-path"\nEOF\n`,
       );
       const result = spawnSync(command[0]!, command.slice(1), {
         input: stdin,
@@ -109,6 +109,13 @@ describe("machine bootstrap", () => {
         `${stdin} --bootstrap-env BB_ENROLLMENT`,
       );
       expect(existsSync(join(dir, "node-env-leaks"))).toBe(false);
+      // sh runs the installer outside any sandbox, so it waits in the home
+      // folder (found without HOME here), never the OS temp folder, and is
+      // gone afterwards.
+      const installer = readFileSync(join(dir, "installer-path"), "utf8");
+      expect(dirname(installer)).toBe(userInfo().homedir);
+      expect(basename(installer)).toMatch(/^\.bb-machine-install\./u);
+      expect(existsSync(installer)).toBe(false);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

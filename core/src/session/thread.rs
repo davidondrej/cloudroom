@@ -29,13 +29,13 @@ room-cli thread update --self [--title TITLE] [--reasoning-level LEVEL]
 room-cli thread archive --self
 room-cli thread move --self --project PROJECT
 room-cli thread stop --self
-room-cli thread spawn --provider codex|claude-code|pi|cursor|opencode|hermes|devin|droid|kimi|fx|openclaw [--model MODEL] [--reasoning-level LEVEL] [--service-tier default|fast] [--title TITLE] [--shared-sandbox|--top-level] --prompt TEXT|--prompt-file PATH
-room-cli thread fork [--provider codex|claude-code|pi|opencode|hermes|devin|droid|kimi|fx|openclaw] [--model MODEL] [--reasoning-level LEVEL] [--title TITLE] --prompt TEXT|--prompt-file PATH
+room-cli thread spawn --provider codex|claude-code|cursor|pi|opencode|hermes|devin|droid|kimi|fx|openclaw [--model MODEL] [--reasoning-level LEVEL] [--service-tier default|fast] [--title TITLE] [--shared-sandbox|--top-level] --prompt TEXT|--prompt-file PATH
+room-cli thread fork [--provider codex|claude-code|cursor|pi|opencode|hermes|devin|droid|kimi|fx|openclaw] [--model MODEL] [--reasoning-level LEVEL] [--title TITLE] --prompt TEXT|--prompt-file PATH
 room-cli thread list [--include-archived]
 room-cli thread wait --children
 room-cli thread output CHILD_ID [--all]
 room-cli thread log CHILD_ID
-room-cli thread tell THREAD_ID|--parent TEXT|--message-file PATH
+room-cli thread tell THREAD_ID|--parent [--mode queue|steer|auto] TEXT|--message-file PATH
 room-cli thread stop CHILD_ID
 room-cli thread archive CHILD_ID...
 Flags go in any order.";
@@ -210,6 +210,9 @@ pub struct Effort {
 #[serde(deny_unknown_fields)]
 pub struct Tell {
     text: String,
+    /// `--mode queue`: wait for a running turn to end instead of joining it.
+    #[serde(default)]
+    mode: Option<String>,
 }
 
 fn valid(title: &str) -> bool {
@@ -405,7 +408,7 @@ pub(super) fn random_key() -> io::Result<String> {
 async fn spawn(
     State(m): State<Arc<Manager>>,
     ConnectInfo(peer): ConnectInfo<Peer>,
-    Json(input): Json<SpawnBody>,
+    Json(mut input): Json<SpawnBody>,
 ) -> Result<Json<Value>, Failure> {
     let parent = caller(&m, peer, "thread spawn")?;
     let bad = |message: &str| fail(StatusCode::CONFLICT, message);
@@ -416,6 +419,8 @@ async fn spawn(
         input.reasoning.as_deref(),
         input.provider.as_deref(),
     )?;
+    // The website and the app read Core's name: `acp-cursor` goes on as `cursor`.
+    input.provider = harness.and_then(|k| json!(k).as_str().map(str::to_owned));
     if input
         .service_tier
         .as_deref()
@@ -660,16 +665,8 @@ fn check_start(
     }
     provider
         .map(|p| {
-            serde_json::from_value(json!(p)).map_err(|_| {
-                // The Local CLI's names, such as `acp-cursor`, are a common mistake here.
-                let hint = if p.starts_with("acp-") {
-                    ". Cloud names have no acp- prefix: acp-cursor is cursor"
-                } else {
-                    ""
-                };
-                bad(&format!(
-                    "Use --provider codex, claude-code, pi, cursor, opencode, hermes, devin, droid, kimi, fx or openclaw{hint}"
-                ))
+            crate::runtime::Kind::named(p).ok_or_else(|| {
+                bad("Use --provider codex, claude-code, cursor, pi, opencode, hermes, devin, droid, kimi, fx or openclaw")
             })
         })
         .transpose()
@@ -767,7 +764,7 @@ async fn ask_app(
 async fn fork(
     State(m): State<Arc<Manager>>,
     ConnectInfo(peer): ConnectInfo<Peer>,
-    Json(input): Json<ForkBody>,
+    Json(mut input): Json<ForkBody>,
 ) -> Result<Json<Value>, Failure> {
     let parent = caller(&m, peer, "thread fork")?;
     let harness = check_start(
@@ -777,6 +774,8 @@ async fn fork(
         input.reasoning.as_deref(),
         input.provider.as_deref(),
     )?;
+    // The website and the app read Core's name: `acp-cursor` goes on as `cursor`.
+    input.provider = harness.and_then(|k| json!(k).as_str().map(str::to_owned));
     pi_model(&m, &parent, harness, input.model.as_deref())?;
     let key = request_key(input.request_id)?;
     let mut data = json!({"id":format!("fork_{key}"),"prompt":input.prompt});
@@ -962,6 +961,7 @@ async fn tell(
         ));
     }
     let to_parent = id == "parent";
+    let queue = input.mode.as_deref() == Some("queue");
     let id = if to_parent {
         // `thread tell --parent`: the thread that started this one, in this sandbox or another. A sandbox's thread
         // that started without one (the user moved it, or its start left it out) asks the website for its saved
@@ -982,7 +982,8 @@ async fn tell(
         id
     };
     if relay::thread_id(&id) || id == "parent" {
-        return relay::command(&m, &sender, &id, "tell", Some(&input.text), to_parent).await;
+        let text = Some(input.text.as_str());
+        return relay::command(&m, &sender, &id, "tell", text, to_parent, queue).await;
     }
     let under = m.tell_target(&sender, &id).map_err(session_failure)?;
     let text = if under {
@@ -990,9 +991,10 @@ async fn tell(
     } else {
         from_thread(&sender, &input.text)
     };
+    let prompt = json!({"text":text});
     let request =
         random_key().map_err(|e| fail(StatusCode::SERVICE_UNAVAILABLE, &e.to_string()))?;
-    deliver(&m, &id, &request, &text, under).await
+    deliver(&m, &id, &request, prompt, under, Some(&sender), queue).await
 }
 
 pub(super) const NO_PARENT: &str = "This thread has no parent that `thread tell --parent` can reach. If another thread started it, Cloudroom passes it your reply when this turn ends.";
@@ -1000,17 +1002,19 @@ pub(super) const NO_PARENT: &str = "This thread has no parent that `thread tell 
 /// A message to a thread that isn't the sender's subagent says who sent it, as in Local threads, where the app shows
 /// it as an agent's message.
 fn from_thread(sender: &str, text: &str) -> String {
-    format!("[bb message from thread:{sender}]\n\n{text}")
+    format!("[message from thread:{sender}]\n\n{text}")
 }
 
-/// Sends a message into the session's running turn, or else queues it. A request already delivered stays as it is,
-/// so a retried relay never sends it twice.
+/// Sends a message (`input`, a prompt's) into the session's running turn, or else queues it; `queue` (`tell --mode
+/// queue`) always queues it. A request already delivered stays as it is, so a retried relay never sends it twice.
 pub(super) async fn deliver(
     m: &Arc<Manager>,
     id: &str,
     request: &str,
-    text: &str,
+    input: Value,
     child: bool,
+    sender: Option<&str>,
+    queue: bool,
 ) -> Result<Json<Value>, Failure> {
     let notes = if child { CHILD_NOTES } else { OTHER_NOTES };
     let steer_id = format!("{request}_steer");
@@ -1021,7 +1025,8 @@ pub(super) async fn deliver(
     let steered = match m.receipt(id, &steer_id) {
         Some(s) if s.state != "failed" => return Ok(Json(json!({"id":id,"state":s.state}))),
         Some(_) => None,
-        None => steer(m, id, &steer_id, text).await,
+        None if queue => None,
+        None => steer(m, id, &steer_id, input.clone(), sender).await,
     };
     match steered.as_deref() {
         Some("completed") => {
@@ -1033,7 +1038,7 @@ pub(super) async fn deliver(
         None => {}
     }
     let receipt = m
-        .command_held(id, request.to_owned(), "prompt", json!({"text":text}), true)
+        .command_from(id, request.to_owned(), "prompt", input, true, sender)
         .map_err(session_failure)?;
     let local = m.local.lock().unwrap();
     if local.sessions.get(id).is_some_and(|s| s.queue_paused) {
@@ -1060,7 +1065,13 @@ pub(super) fn website_failure(error: super::history::ApiError, what: &str) -> Fa
 
 /// Sends a busy child the message in its running turn, as in Local threads, so it never waits
 /// behind older messages. None means it was not delivered, so it can safely queue instead.
-async fn steer(m: &Arc<Manager>, id: &str, request: &str, text: &str) -> Option<String> {
+async fn steer(
+    m: &Arc<Manager>,
+    id: &str,
+    request: &str,
+    mut input: Value,
+    sender: Option<&str>,
+) -> Option<String> {
     let target = m
         .local
         .lock()
@@ -1070,8 +1081,9 @@ async fn steer(m: &Arc<Manager>, id: &str, request: &str, text: &str) -> Option<
         .current_request
         .clone()?;
     let mut changed = m.subscribe();
-    let input = json!({"text":text,"target_request_id":target});
-    m.command(id, request.to_owned(), "steer", input).ok()?;
+    input["target_request_id"] = json!(target);
+    m.command_from(id, request.to_owned(), "steer", input, false, sender)
+        .ok()?;
     let settled = async {
         loop {
             let state = m.receipt(id, request).map(|r| r.state).unwrap_or_default();
@@ -1095,7 +1107,7 @@ async fn stop_child(
 ) -> Result<Json<Value>, Failure> {
     let parent = caller(&m, peer, "thread stop")?;
     if relay::thread_id(&id) {
-        return relay::command(&m, &parent, &id, "stop", None, false).await;
+        return relay::command(&m, &parent, &id, "stop", None, false, false).await;
     }
     m.own_child(&parent, &id).map_err(session_failure)?;
     let key = || random_key().map_err(|e| fail(StatusCode::SERVICE_UNAVAILABLE, &e.to_string()));
@@ -1116,7 +1128,7 @@ async fn archive_child(
 ) -> Result<Json<Value>, Failure> {
     let parent = caller(&m, peer, "thread archive")?;
     if relay::thread_id(&id) {
-        return relay::command(&m, &parent, &id, "archive", None, false).await;
+        return relay::command(&m, &parent, &id, "archive", None, false, false).await;
     }
     m.own_child(&parent, &id).map_err(session_failure)?;
     // A child that already ended has nothing to stop. Stop it first, so it starts no new children.
@@ -1170,7 +1182,8 @@ const FORK_VALUES: [&str; 8] = [
 /// A flag that needs a value and has none, or has another option right after it: `--title --self`.
 fn missing_value<'a>(words: &[&'a str]) -> Option<&'a str> {
     let option = |word: &str| word.starts_with("--") && !word.contains(' ');
-    let takes_value = |word: &str| SPAWN_VALUES.contains(&word) || word == "--message-file";
+    let takes_value =
+        |word: &str| SPAWN_VALUES.contains(&word) || matches!(word, "--message-file" | "--mode");
     (0..words.len())
         .find(|&i| takes_value(words[i]) && words.get(i + 1).is_none_or(|next| option(next)))
         .map(|i| words[i])
@@ -1489,8 +1502,22 @@ pub async fn cli(args: &[String]) -> io::Result<i32> {
             Err(code) => return Ok(code),
         },
         "tell" => {
-            let Ok(ids) = own(&["--prompt", "--message-file"], &["--parent"]) else {
+            let Ok(ids) = own(&["--prompt", "--message-file", "--mode"], &["--parent"]) else {
                 return Ok(2);
+            };
+            // The Local CLI's modes and their long names (#1517). Steer and auto are what Core always did, so only
+            // queue is sent: a plain tell still works while an older Core runs.
+            let given = flag(rest, "--mode");
+            let queue = match given.map(|m| m.trim().to_ascii_lowercase()).as_deref() {
+                None | Some("auto" | "steer" | "steer-if-active") => false,
+                Some("queue" | "queue-if-active") => true,
+                Some(_) => {
+                    let given = given.unwrap_or_default();
+                    eprintln!(
+                        "Invalid message mode '{given}'. Expected 'queue', 'steer', or 'auto'."
+                    );
+                    return Ok(2);
+                }
             };
             // `--parent` names the thread that started this one.
             let (id, said) = match (rest.contains(&"--parent"), ids.as_slice()) {
@@ -1506,7 +1533,12 @@ pub async fn cli(args: &[String]) -> io::Result<i32> {
                 _ => return usage(),
             };
             let path = format!("/children/{id}/messages");
-            call("POST", &path, Some(json!({"text":text}))).await?
+            let body = if queue {
+                json!({"text":text,"mode":"queue"})
+            } else {
+                json!({"text":text})
+            };
+            call("POST", &path, Some(body)).await?
         }
         "update" => {
             let ids = match own(&["--title", "--reasoning-level"], &["--self"]) {

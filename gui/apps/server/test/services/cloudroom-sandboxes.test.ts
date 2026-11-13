@@ -1,4 +1,4 @@
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { createServer } from "node:http";
 import { once } from "node:events";
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
@@ -470,7 +470,7 @@ it("sends a new thread's first message before its project copy starts, so a slow
 it.each([
   ["existing checkout", null], ["fresh clone", null], ["existing checkout", "index.lock"], ["existing checkout", "terminated"],
   ["existing checkout", "checkout probe"], ["personal child", "checkout probe"], ["existing checkout", "status write"], ["existing checkout", "status write x3"],
-  ["existing checkout", "agent branch"], ["child", null], ["child", "agent branch"],
+  ["existing checkout", "agent branch"], ["child", null], ["child", "agent branch"], ["fresh clone", "clone 504"], ["existing checkout", "branch dropped"],
 ] as const)("`room-cli files wait` reads a new thread's %s as copying until its branch and files are ready (#816, fault: %s)", async (kind, fault) => {
   const root = await mkdtemp(join(tmpdir(), "cloudroom-files-ready-"));
   const folder = join(root, "project"), origin = join(root, "origin.git"), mac = join(root, "mac");
@@ -485,7 +485,7 @@ it.each([
   const source = join(root, "parent");
   if (kind === "child") { git(root, "clone", "-q", origin, source); await writeFile(join(source, "file0.txt"), "parent\n"); git(source, "commit", "-qam", "Parent work"); }
   if (fault === "index.lock") await writeFile(join(folder, ".git", "index.lock"), "");
-  let faults = fault === "status write x3" ? 99 : fault === "checkout probe" || fault === "status write" ? 1 : 0;
+  let faults = fault === "status write x3" || fault === "clone 504" ? 99 : 1;
   const harness = await createTestAppHarness();
   const { host } = seedHostSession(harness.deps);
   const { project: own } = seedProjectWithSource(harness.deps, { hostId: host.id, path: mac });
@@ -519,9 +519,17 @@ it.each([
       // The agent made its own branch before the thread's branch setup ran: it must stay there (#1377).
       if (fault === "agent branch" && command.includes("git checkout -q -b")) { git(folder, "checkout", "-q", "-b", "feature"); await writeFile(join(folder, "agent.txt"), "agent\n"); git(folder, "add", "-A"); git(folder, "commit", "-qm", "Agent work"); }
       if (command.includes("git checkout -q -b")) await new Promise(resolve => setTimeout(resolve, 800));
+      // A proxy's 504 cuts off every clone's answer, while the clone goes on and lands a moment later (#1524).
+      if (fault === "clone 504" && command.includes("git clone") && faults-- > 0) {
+        spawn("/bin/bash", ["-c", command.replace("git clone", "sleep 2 && git clone")], { cwd: root, stdio: "ignore" });
+        await new Promise(resolve => setTimeout(resolve, 300));
+        return void res.writeHead(504).end("Gateway Timeout");
+      }
       // Killed mid-setup (say, SIGTERM): no exit code, no output.
       if (fault === "terminated" && command.includes("git checkout -q -b")) return json({ code: null, stdout: "", stderr: "", truncated: false });
       const result = spawnSync("/bin/bash", ["-c", command], { cwd: input.cwd ?? root, input: Buffer.from(input.stdin ?? "", "hex") });
+      // The branch switch ran, but its answer is lost with the connection (#1524).
+      if (fault === "branch dropped" && command.includes("git checkout -q -b") && faults-- > 0) return void req.socket.destroy();
       const state = await marker();
       if (state && state !== "copying") atDone ??= { marker: state, ...checkout() };
       return json({ code: result.status, stdout: result.stdout.toString("hex"), stderr: result.stderr.toString("hex"), truncated: false });

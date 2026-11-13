@@ -1,3 +1,4 @@
+import { execFile } from "node:child_process";
 import {
   createHash,
   createHmac,
@@ -225,22 +226,112 @@ function nextTcpTables(): Promise<TcpTables> {
   });
 }
 
+const LSOF = "/usr/sbin/lsof";
+const LSOF_TIMEOUT_MS = 5_000;
+const LSOF_MAX_BYTES = 8 * 1024 * 1024;
+
+// One form for an address however it is written: `[::1]`, `::ffff:127.0.0.1`.
+function comparableAddress(text: string): string | null {
+  const bytes = addressBytes(text.replace(/^\[|\]$/gu, ""));
+  if (bytes === null) return null;
+  const mapped =
+    bytes.length === 16 &&
+    IPV4_MAPPED_PREFIX.every((byte, at) => bytes[at] === byte);
+  return (mapped ? bytes.slice(12) : bytes).join(".");
+}
+
+// macOS has no table of socket owners. `lsof -u <uid> -Fn` lists that user's
+// sockets, one `n<from>:<port>-><to>:<port>` line each. The caller runs as
+// that user only when its end of this connection is listed: from the caller,
+// to us. Anything else, an empty listing included, is no.
+export function lsofListsCaller(peer: CallerPeer, listing: string): boolean {
+  const { localAddress, localPort, remoteAddress, remotePort } = peer;
+  if (
+    localAddress === undefined ||
+    localPort === undefined ||
+    remoteAddress === undefined ||
+    remotePort === undefined
+  ) {
+    return false;
+  }
+  const caller = comparableAddress(remoteAddress);
+  const ours = comparableAddress(localAddress);
+  if (caller === null || ours === null) return false;
+  return listing.split("\n").some((line) => {
+    const socket = /^n(.+):(\d+)->(.+):(\d+)$/u.exec(line);
+    return (
+      socket !== null &&
+      Number(socket[2]) === remotePort &&
+      Number(socket[4]) === localPort &&
+      comparableAddress(socket[1] ?? "") === caller &&
+      comparableAddress(socket[3] ?? "") === ours
+    );
+  });
+}
+
+interface LsofQueue {
+  running: boolean;
+  waiting: Array<(listing: string) => void>;
+}
+
+const lsofQueues = new Map<number, LsofQueue>();
+
+function runLsof(port: number, uid: number, queue: LsofQueue): void {
+  const waiters = queue.waiting;
+  queue.waiting = [];
+  execFile(
+    LSOF,
+    ["-nP", "-a", "-u", String(uid), `-iTCP:${port}`, "-Fn"],
+    { maxBuffer: LSOF_MAX_BYTES, timeout: LSOF_TIMEOUT_MS },
+    // lsof exits 1 when it lists nothing. Its output is the answer either way:
+    // a failed or cut-short run lists no caller, so the caller is refused.
+    (_error, stdout) => {
+      for (const waiter of waiters) waiter(stdout);
+      if (queue.waiting.length > 0) runLsof(port, uid, queue);
+      else queue.running = false;
+    },
+  );
+}
+
+// One lsof at a time per port (about 70 ms on a busy Mac), shared by every
+// lookup that was waiting when it started. A run that started before a
+// connection opened can't vouch for it, so later lookups wait for the next.
+function nextLsofListing(port: number, uid: number): Promise<string> {
+  const queue = lsofQueues.get(port) ?? { running: false, waiting: [] };
+  lsofQueues.set(port, queue);
+  return new Promise((resolve) => {
+    queue.waiting.push(resolve);
+    if (queue.running) return;
+    queue.running = true;
+    setImmediate(() => runLsof(port, uid, queue));
+  });
+}
+
 const peerUserChecks = new WeakMap<CallerPeer, Promise<boolean>>();
 
 // Every OS account on a computer can reach its loopback, so the open reads
-// need a caller that runs as this OS user. Linux names each socket's owner.
-// macOS and Windows can't tell cheaply, so there every local caller still
-// gets them (docs/scopes/security.md). One lookup per connection.
+// need a caller that runs as this OS user. Linux names each socket's owner,
+// and on macOS lsof lists this user's sockets. Windows can't tell cheaply,
+// so there every local caller still gets them (docs/scopes/security.md).
+// One lookup per connection.
 function runsAsThisOsUser(peer: CallerPeer): Promise<boolean> {
   const uid = process.getuid?.();
-  if (process.platform !== "linux" || uid === undefined) {
+  const { platform } = process;
+  if ((platform !== "linux" && platform !== "darwin") || uid === undefined) {
     return Promise.resolve(true);
   }
   let check = peerUserChecks.get(peer);
   if (check === undefined) {
-    check = nextTcpTables().then(
-      (tables) => tcpConnectionOwner(peer, tables) === uid,
-    );
+    check =
+      platform === "linux"
+        ? nextTcpTables().then(
+            (tables) => tcpConnectionOwner(peer, tables) === uid,
+          )
+        : peer.localPort === undefined
+          ? Promise.resolve(false)
+          : nextLsofListing(peer.localPort, uid).then((listing) =>
+              lsofListsCaller(peer, listing),
+            );
     peerUserChecks.set(peer, check);
   }
   return check;

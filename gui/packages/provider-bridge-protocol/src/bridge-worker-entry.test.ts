@@ -1,8 +1,8 @@
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, expect, it } from "vitest";
 
@@ -88,7 +88,10 @@ it("starts an exported bridge with its plugin-scoped directories", async () => {
   expect(reported.line).toBe('{"hello":true}');
   expect(reported.context.pluginId).toBe("provider-fixture");
   expect(reported.context.dataDir).toBe(fixture.dataDir);
-  expect(reported.context.tempDir).toContain("provider-fixture");
+  // In `.cloudroom-tmp` under the plugin data folder.
+  expect(dirname(reported.context.tempDir)).toBe(
+    join(await realpath(fixture.dataDir), ".cloudroom-tmp"),
+  );
   expect(existsSync(reported.context.tempDir)).toBe(false);
 });
 

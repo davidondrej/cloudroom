@@ -7,7 +7,7 @@ import {
   CALLER_PROOF_STATUS_HEADER,
   CALLER_TOKEN_HEADER,
 } from "@cloudroom/config/caller-proof";
-import { createNodeBbSdk } from "@cloudroom/sdk/node";
+import { createNodeRoomSdk } from "@cloudroom/sdk/node";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { upsertHost } from "@cloudroom/db";
 import { HOST_DAEMON_PROTOCOL_VERSION } from "@cloudroom/host-daemon-contract";
@@ -125,7 +125,7 @@ describe("local caller proof", () => {
 
   it("lets an unsandboxed local process prove itself through the SDK", async () => {
     server = await startTestServer();
-    const sdk = createNodeBbSdk({ baseUrl: server.baseUrl });
+    const sdk = createNodeRoomSdk({ baseUrl: server.baseUrl });
     await expect(sdk.hosts.list()).resolves.toEqual(expect.any(Array));
   });
 
@@ -136,7 +136,7 @@ describe("local caller proof", () => {
       const directory = server.deps.callerProofs.directory;
       await chmod(directory, 0o500);
       try {
-        const sdk = createNodeBbSdk({ baseUrl: server.baseUrl });
+        const sdk = createNodeRoomSdk({ baseUrl: server.baseUrl });
         await expect(sdk.hosts.list()).rejects.toMatchObject({ status: 401 });
       } finally {
         await chmod(directory, 0o700);
@@ -144,9 +144,9 @@ describe("local caller proof", () => {
     },
   );
 
-  // Linux reports which uid owns each loopback connection. Here the server
+  // Linux and macOS tell which user owns each loopback connection. Here the server
   // takes another uid as its own, so this test's process is the other user.
-  it.runIf(process.platform === "linux")(
+  it.runIf(process.platform === "linux" || process.platform === "darwin")(
     "refuses open reads from another OS user on this computer",
     async () => {
       server = await startTestServer();

@@ -27,8 +27,8 @@ function maximumWaitMs(value: string): number | null {
   }
 }
 
-export default async function plugin(bb: BbPluginApi) {
-  const settings = bb.settings.define({
+export default async function plugin(room: BbPluginApi) {
+  const settings = room.settings.define({
     maximumWait: {
       type: "select",
       label: "Maximum automatic wait",
@@ -52,7 +52,7 @@ export default async function plugin(bb: BbPluginApi) {
    * What is left is policy, and then one call: core owns the queue, the
    * schedule and the re-attempt, so asking for the retry IS scheduling it.
    */
-  bb.events.on("turn.failed", async (event) => {
+  room.events.on("turn.failed", async (event) => {
     const decision = decideRetry({
       failure: event,
       maximumWaitMs: maximumWait,
@@ -63,22 +63,22 @@ export default async function plugin(bb: BbPluginApi) {
       return;
     }
     try {
-      await bb.sdk.threads.retry({
+      await room.sdk.threads.retry({
         threadId: event.threadId,
         turnRequestId: event.requestId,
         sendAt: decision.sendAt,
         reason: decision.reason,
       });
     } catch (error) {
-      bb.log.debug(
+      room.log.debug(
         `Retry not scheduled for ${event.threadId}: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
   });
 
-  bb.rpc.register(loopFallbackRpcContract, {
+  room.rpc.register(loopFallbackRpcContract, {
     async loopFallback({ fallback }) {
-      const settings = await bb.sdk.cloudroom.automations({
+      const settings = await room.sdk.cloudroom.automations({
         action: "settings",
         ...(fallback === undefined ? {} : { fallback }),
       });
@@ -86,5 +86,5 @@ export default async function plugin(bb: BbPluginApi) {
     },
   });
 
-  registerProviderRetryCli(bb);
+  registerProviderRetryCli(room);
 }

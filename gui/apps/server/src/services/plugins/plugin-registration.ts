@@ -1,7 +1,7 @@
 import { findProviderEnvironmentContainingPath } from "@cloudroom/db";
 import { realpathSync } from "node:fs";
 import { resolve } from "node:path";
-import { isBbManagedWorkspacePath } from "../threads/workspace-paths.js";
+import { isRoomManagedWorkspacePath } from "../threads/workspace-paths.js";
 import {
   getInstalledPlugin,
   getInstalledPluginRegistration,
@@ -451,7 +451,7 @@ export function createPluginRegistration(context: PluginRegistrationContext) {
             "plugin subdirectory",
           );
     if (
-      isBbManagedWorkspacePath({ dataDir: deps.dataDir, path: rootDir }) ||
+      isRoomManagedWorkspacePath({ dataDir: deps.dataDir, path: rootDir }) ||
       findProviderEnvironmentContainingPath(deps.db, rootDir) !== null
     ) {
       logger.warn(

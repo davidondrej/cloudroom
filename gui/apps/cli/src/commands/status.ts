@@ -6,7 +6,7 @@ import {
   resolveContextSnapshot,
   type ContextSnapshot,
 } from "../context-env.js";
-import { CLI_READ_TIMEOUT_MS, createCliBbSdk } from "../client.js";
+import { CLI_READ_TIMEOUT_MS, createCliRoomSdk } from "../client.js";
 import { outputJson } from "./helpers.js";
 import {
   type ThreadEnvironmentInfo,
@@ -14,6 +14,7 @@ import {
   printEnvironmentInfo,
 } from "./environment-helpers.js";
 import { printPendingTodos } from "./thread/pending-todos.js";
+import { cloudIssue, cloudIssueText, type CloudIssue } from "./thread/helpers.js";
 
 interface StatusPayload {
   serverUrl: string;
@@ -33,6 +34,8 @@ interface StatusPayload {
     status: string;
     title: string | null;
     archivedAt: number | null;
+    /** Why a Cloud child that hasn't started yet is still waiting. */
+    cloud?: CloudIssue;
   }> | null;
   pendingTodos: ThreadTimelinePendingTodos | null;
   pluginsNeedingAttention: Array<{ id: string; status: string }>;
@@ -69,7 +72,7 @@ export function registerStatusCommand(
         };
 
         let serverAvailable = false;
-        const sdk = createCliBbSdk(getUrl(), CLI_READ_TIMEOUT_MS);
+        const sdk = createCliRoomSdk(getUrl(), CLI_READ_TIMEOUT_MS);
 
         try {
           payload.dataDir = (await sdk.system.config()).dataDir;
@@ -126,11 +129,12 @@ export function registerStatusCommand(
             serverAvailable = true;
 
             if (status.childThreads) {
-              payload.childThreads = status.childThreads.map((thread) => ({
-                id: thread.id,
-                status: thread.status,
-                title: thread.title ?? null,
-                archivedAt: thread.archivedAt ?? null,
+              // Only Cloud children not started yet are asked, briefly and best effort: the status above is already known.
+              payload.childThreads = await Promise.all(status.childThreads.map(async (thread) => {
+                const cloud = thread.executionTarget === "cloud" && ["pending", "starting"].includes(thread.status) && thread.archivedAt == null
+                  ? cloudIssue(await sdk.cloudroom.threadStatus(thread.id, AbortSignal.timeout(5_000)).catch(() => null))
+                  : null;
+                return { id: thread.id, status: thread.status, title: thread.title ?? null, archivedAt: thread.archivedAt ?? null, ...(cloud ? { cloud } : {}) };
               }));
             }
           }
@@ -180,6 +184,8 @@ export function registerStatusCommand(
               const title = mt.title ? `"${mt.title}"` : "";
               const archived = mt.archivedAt !== null ? " (archived)" : "";
               console.log(`  ${mt.id}  ${mt.status}${archived}  ${title}`);
+              const note = cloudIssueText(mt.cloud ?? null);
+              if (note) console.log(`    Cloud: ${note}`);
             }
           }
 

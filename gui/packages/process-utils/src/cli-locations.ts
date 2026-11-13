@@ -10,7 +10,7 @@ import {
   statSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { delimiter, isAbsolute, join } from "node:path";
+import { delimiter, dirname, isAbsolute, join } from "node:path";
 import { resolveWindowsShim, windowsExecutableExtensions } from "./windows.js";
 
 export type KnownCli = "codex" | "claude" | "opencode" | "fx";
@@ -132,14 +132,17 @@ export function officialCodexPath(
   );
 }
 
-// Every official Codex, ahead of PATH. On Windows, install.ps1 also links its current
-// Codex into LOCALAPPDATA and only adds that to the user's PATH, which an open
-// Cloudroom doesn't see until it restarts.
+// Every official Codex, ahead of PATH. On Windows, install.ps1 puts it in `current\bin`
+// (older versions used `current`), links that into LOCALAPPDATA and only adds the link
+// to the user's PATH, which an open Cloudroom doesn't see until it restarts.
 function officialCodexPaths(env: NodeJS.ProcessEnv): string[] {
+  const official = officialCodexPath(env);
+  if (process.platform !== "win32") return [official];
   const localAppData = env.LOCALAPPDATA?.trim();
   return [
-    officialCodexPath(env),
-    ...(process.platform === "win32" && localAppData
+    join(dirname(official), "bin", "codex"),
+    official,
+    ...(localAppData
       ? [join(localAppData, "Programs", "OpenAI", "Codex", "bin", "codex")]
       : []),
   ];

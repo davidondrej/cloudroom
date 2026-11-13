@@ -5,13 +5,14 @@ export { checkCommand, commandGuardBlockReason } from "../../../../../core/src/r
 
 let cached: { path: string; config: ReturnType<typeof codexGuardConfig> } | undefined;
 
-// Codex runs whatever file is at this path before every shell command, so
-// `directory` must be one no other account can write to: the bridge's temp
-// folder (see createPluginProcessTempDir).
+// Codex runs whatever file is at this path before every shell command, outside
+// its sandbox. So nothing less trusted may write `directory`: not another
+// account, a Read-only Mac command, or an agent sandbox. The bridge's temp
+// folder is one (see createPluginProcessTempDir).
 export function prepareCodexGuard(directory: string): ReturnType<typeof codexGuardConfig> {
   const path = join(directory, "cloudroom-command-guard.mjs");
-  // The OS can delete idle temp files, and a missing guard lets every command
-  // through (`|| true` below), so each new session writes it again if needed.
+  // A missing guard lets every command through (`|| true` below), so each new
+  // session writes it again if the file is gone.
   if (!existsSync(path)) {
     mkdirSync(directory, { recursive: true, mode: 0o700 });
     writeFileSync(path, codexHookSource(), { mode: 0o600 });

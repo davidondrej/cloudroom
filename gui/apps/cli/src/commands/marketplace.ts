@@ -2,7 +2,7 @@ import { resolve } from "node:path";
 import { Command } from "commander";
 import type { PluginMarketplace } from "@cloudroom/server-contract";
 import { action } from "../action.js";
-import { createCliBbSdk } from "../client.js";
+import { createCliRoomSdk } from "../client.js";
 import { renderBorderlessTable } from "../table.js";
 import { outputJson, type JsonOutputOptions } from "./helpers.js";
 
@@ -48,7 +48,7 @@ export function registerMarketplaceCommands(
     .option("--json", "Output JSON")
     .action(
       action(async (source: string, opts: JsonOutputOptions) => {
-        const added = await createCliBbSdk(getUrl()).plugins.marketplaces.add({
+        const added = await createCliRoomSdk(getUrl()).plugins.marketplaces.add({
           source: normalizeSource(source),
         });
         if (opts.json) {
@@ -70,7 +70,7 @@ export function registerMarketplaceCommands(
     .action(
       action(async (opts: JsonOutputOptions) => {
         const marketplaces =
-          await createCliBbSdk(getUrl()).plugins.marketplaces.list();
+          await createCliRoomSdk(getUrl()).plugins.marketplaces.list();
         if (opts.json) {
           outputJson(opts, marketplaces);
           return;
@@ -103,7 +103,7 @@ export function registerMarketplaceCommands(
     .option("--json", "Output JSON")
     .action(
       action(async (name: string | undefined, opts: JsonOutputOptions) => {
-        const results = await createCliBbSdk(
+        const results = await createCliRoomSdk(
           getUrl(),
         ).plugins.marketplaces.refresh(name === undefined ? {} : { name });
         if (opts.json) {
@@ -129,7 +129,7 @@ export function registerMarketplaceCommands(
     .option("--json", "Output JSON")
     .action(
       action(async (name: string, opts: JsonOutputOptions) => {
-        const removed = await createCliBbSdk(
+        const removed = await createCliRoomSdk(
           getUrl(),
         ).plugins.marketplaces.remove({ name });
         if (opts.json) {

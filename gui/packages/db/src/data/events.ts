@@ -3697,6 +3697,62 @@ export function getLastStoredTurnRequestEvent(
   );
 }
 
+export function isErrorQueueReleaseHeld(
+  db: DbQueryConnection,
+  args: { graceMs: number; now: number; threadId: string },
+): boolean {
+  const failure = db
+    .select({ createdAt: events.createdAt })
+    .from(events)
+    .where(
+      sql`${events.threadId} = ${args.threadId}
+      AND ${events.type} IN ('turn/completed', 'system/error')`,
+    )
+    .orderBy(sql`${events.sequence} DESC`)
+    .limit(1)
+    .get();
+  if (failure && args.now - failure.createdAt < args.graceMs) return true;
+  const settled = db
+    .select({ sequence: events.sequence })
+    .from(events)
+    .where(
+      sql`${events.threadId} = ${args.threadId}
+      AND ${events.type} = 'turn/completed'
+      AND json_extract(${events.data}, '$.status') IN ('completed', 'interrupted')
+      AND EXISTS (
+        SELECT 1 FROM events AS settled_start
+        WHERE settled_start.thread_id = ${events.threadId}
+          AND settled_start.turn_id = ${events.turnId}
+          AND settled_start.type = 'turn/started'
+          AND settled_start.parent_tool_call_id IS NULL
+      )`,
+    )
+    .orderBy(sql`${events.sequence} DESC`)
+    .limit(1)
+    .get();
+  const runs = db
+    .select({
+      // Queue drains and system notices are automatic; only other runs re-arm.
+      automatic: sql<number>`COALESCE(json_extract(${events.data}, '$.queueDelivered'), 0) = 1
+        OR json_extract(${events.data}, '$.initiator') = 'system'`,
+    })
+    .from(events)
+    .where(
+      sql`${events.threadId} = ${args.threadId}
+      AND ${events.type} = 'client/turn/requested'
+      AND ${events.sequence} > ${settled?.sequence ?? 0}
+      AND COALESCE(json_extract(${events.data}, '$.target.kind'), 'new-turn') != 'steer'
+      AND NOT (
+        json_extract(${events.data}, '$.target.kind') = 'auto'
+        AND json_extract(${events.data}, '$.target.expectedTurnId') IS NOT NULL
+      )`,
+    )
+    .orderBy(sql`${events.sequence} DESC`)
+    .limit(2)
+    .all();
+  return runs.length === 2 && runs[0]?.automatic === 1;
+}
+
 export function pruneThreadEventsBeforeSequence(
   db: DbConnection,
   args: PruneThreadEventsBeforeSequenceArgs,

@@ -34,7 +34,6 @@ if (
 }
 
 const tempDir = await createPluginProcessTempDir({
-  pluginId,
   prefix: "bb-provider-bridge",
   dataDir,
 });
@@ -93,7 +92,7 @@ if (entry.onSigterm) {
   process.once("SIGTERM", entry.onSigterm);
 } else {
   // The runtime stops bridges with SIGTERM, and dying by it skips the "exit"
-  // cleanup. The temp folder may be in the data folder, where no OS cleaner
+  // cleanup. The temp folder is in the data folder, where no OS cleaner
   // removes it, so remove it and then die by the same signal.
   process.once("SIGTERM", () => {
     removeTempDir();

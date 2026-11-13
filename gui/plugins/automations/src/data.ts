@@ -1,5 +1,6 @@
 import type Database from "better-sqlite3";
 import { createAutomationId, createAutomationRunId } from "./ids.js";
+import { computeNextScheduledTime } from "./schedule-helpers.js";
 import {
   automationExecutionSchema,
   automationResponseSchema,
@@ -956,6 +957,55 @@ export function closeAutomationRun(
     const run = getAutomationRun(db, args.runId);
     if (!run) return null;
     return { run, automationId: run.automationId };
+  })();
+}
+
+/** A failed scheduled run whose thread came back and did its work (#1443) counts as succeeded, and its waiting retry
+ *  moves to the loop's next slot, so the slot never runs twice. A retry at or after that slot is that slot's own run,
+ *  so it stays. The loop and that slot when the run can be recovered, from local checks alone. */
+export function recoverableRun(
+  db: Db,
+  runId: string,
+): { automationId: string; slot: number } | null {
+  const run = getAutomationRun(db, runId);
+  const automation = run && getAutomation(db, run.automationId);
+  if (
+    !run ||
+    !automation?.enabled ||
+    automation.nextRunAt === null ||
+    run.status !== "failed" ||
+    run.runMode !== "agent" ||
+    run.trigger !== "schedule" ||
+    listAutomationRuns(db, { automationId: run.automationId, limit: 1 })[0]
+      ?.id !== run.id
+  )
+    return null;
+  const trigger = parseAutomationTrigger(automation.triggerConfig);
+  if (trigger.triggerType !== "schedule") return null;
+  const slot = computeNextScheduledTime({
+    cron: trigger.cron,
+    timezone: trigger.timezone,
+    now: run.startedAt,
+  });
+  return automation.nextRunAt < slot
+    ? { automationId: automation.id, slot }
+    : null;
+}
+
+/** Recovers a failed run (see recoverableRun). True when the run was recovered. */
+export function recoverFailedRun(db: Db, runId: string, now: number): boolean {
+  return db.transaction(() => {
+    const recoverable = recoverableRun(db, runId);
+    if (!recoverable) return false;
+    db.prepare(
+      `UPDATE automation_runs SET status = 'succeeded', error = NULL WHERE id = ?`,
+    ).run(runId);
+    db.prepare(
+      `UPDATE automations SET next_run_at = @slot, consecutive_failures = 0, last_run_status = 'succeeded',
+         last_error = NULL, updated_at = @now
+       WHERE id = @id`,
+    ).run({ id: recoverable.automationId, slot: recoverable.slot, now });
+    return true;
   })();
 }
 

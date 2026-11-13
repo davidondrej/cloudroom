@@ -1,11 +1,11 @@
 import { CliExitError } from "../../action.js";
-import type { createCliBbSdk } from "../../client.js";
+import type { createCliRoomSdk } from "../../client.js";
 import { getErrorMessage, outputJson, requireThreadId } from "../helpers.js";
 
 interface ArchiveManyArgs {
   ids: readonly string[];
   json?: boolean;
-  sdk: ReturnType<typeof createCliBbSdk>;
+  sdk: ReturnType<typeof createCliRoomSdk>;
   self?: boolean;
 }
 

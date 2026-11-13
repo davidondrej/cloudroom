@@ -6,7 +6,7 @@ import {
 } from "@cloudroom/domain/update-state";
 import type { HostProviderCliStatusResponse } from "@cloudroom/server-contract";
 import { action } from "../action.js";
-import { createCliBbSdk } from "../client.js";
+import { createCliRoomSdk } from "../client.js";
 import { columnWidths, printBorderlessTable } from "../table.js";
 import { outputJson } from "./helpers.js";
 import { resolveMachineId, selectMachines } from "./machine.js";
@@ -72,7 +72,7 @@ function selectUpdateHosts(
 }
 
 async function collectMachineUpdates(
-  sdk: ReturnType<typeof createCliBbSdk>,
+  sdk: ReturnType<typeof createCliRoomSdk>,
   hosts: readonly Host[],
 ): Promise<MachineUpdatesEntry[]> {
   return Promise.all(
@@ -161,7 +161,7 @@ export function registerUpdatesCommands(
     .option("--json", "Print machine-readable JSON output")
     .action(
       action(async (opts: UpdatesCommandOptions) => {
-        const sdk = createCliBbSdk(getUrl());
+        const sdk = createCliRoomSdk(getUrl());
         const [version, hosts] = await Promise.all([
           sdk.system.version(),
           sdk.hosts.list(),
@@ -207,7 +207,7 @@ export function registerUpdatesCommands(
     .option("--json", "Print machine-readable JSON output")
     .action(
       action(async (opts: UpdatesCommandOptions) => {
-        const sdk = createCliBbSdk(getUrl());
+        const sdk = createCliRoomSdk(getUrl());
         const hosts = await sdk.hosts.list();
         const entries = await collectMachineUpdates(
           sdk,

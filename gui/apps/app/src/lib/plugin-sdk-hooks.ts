@@ -289,7 +289,7 @@ export function useProviders(): PluginProvidersState {
   );
 }
 
-export function useBbContext(): BbContext {
+export function useRoomContext(): BbContext {
   const { projectId, threadId } = useRouteState();
   return useMemo(
     () => ({ projectId: projectId ?? null, threadId: threadId ?? null }),
@@ -297,11 +297,11 @@ export function useBbContext(): BbContext {
   );
 }
 
-interface BbNavigateWithDeprecatedAliases extends BbNavigate {
+interface RoomNavigateWithDeprecatedAliases extends BbNavigate {
   experimental_openUrl: BbNavigate["openUrl"];
 }
 
-export function useBbNavigate(): BbNavigate {
+export function useRoomNavigate(): BbNavigate {
   const pluginId = usePluginId();
   const location = useLocation();
   const openThreadPanelHandler = usePluginThreadPanelOpenHandler();
@@ -393,7 +393,7 @@ export function useBbNavigate(): BbNavigate {
     },
     [appNavigation],
   );
-  return useMemo<BbNavigateWithDeprecatedAliases>(
+  return useMemo<RoomNavigateWithDeprecatedAliases>(
     () => ({
       toThread,
       toProject,

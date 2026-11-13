@@ -77,27 +77,27 @@ function errorResult(error: string): PluginAgentToolResult {
   return { content: [{ type: "text", text: error }], isError: true };
 }
 
-export default async function plugin(bb: BbPluginApi) {
-  const settings = registerWorkflowSettings(bb);
-  const db = bb.storage.database();
-  bb.storage.migrate(db, migrations);
+export default async function plugin(room: BbPluginApi) {
+  const settings = registerWorkflowSettings(room);
+  const db = room.storage.database();
+  room.storage.migrate(db, migrations);
   let initialSettings = DEFAULT_WORKFLOW_SETTINGS;
   try {
     initialSettings = await settings.get();
   } catch (error) {
-    bb.status.needsConfiguration(
+    room.status.needsConfiguration(
       `Workflow settings are invalid; defaults are active until the settings are corrected: ${error instanceof Error ? error.message : String(error)}`,
     );
   }
-  const service = createWorkflowService(bb, db, initialSettings);
+  const service = createWorkflowService(room, db, initialSettings);
   settings.onChange(
     (next) => service.updateSettings(next),
     (error) =>
-      bb.status.needsConfiguration(
+      room.status.needsConfiguration(
         `Workflow settings are invalid; the last valid values remain active: ${error.message}`,
       ),
   );
-  registerWorkflowCli(bb, service);
+  registerWorkflowCli(room, service);
 
   function workflowForThread(threadId: string, runId: string | null) {
     const run =
@@ -111,7 +111,7 @@ export default async function plugin(bb: BbPluginApi) {
     return run;
   }
 
-  bb.rpc.register(workflowUiRpcContract, {
+  room.rpc.register(workflowUiRpcContract, {
     workflowActiveRuns({ threadId }) {
       return {
         runs: service
@@ -133,7 +133,7 @@ export default async function plugin(bb: BbPluginApi) {
     },
   });
 
-  bb.agents.registerTool({
+  room.agents.registerTool({
     name: "bb_workflow_run",
     presentation: {
       label: { pending: "Starting workflow", completed: "Started workflow" },
@@ -144,7 +144,7 @@ export default async function plugin(bb: BbPluginApi) {
     parameters: runInputSchema,
     async execute(input, ctx) {
       try {
-        const prepared = await prepareWorkflowSource(bb, ctx, input);
+        const prepared = await prepareWorkflowSource(room, ctx, input);
         const run = await service.start({
           projectId: ctx.projectId,
           originThreadId: ctx.threadId,
@@ -167,7 +167,7 @@ export default async function plugin(bb: BbPluginApi) {
     },
   });
 
-  bb.agents.registerTool({
+  room.agents.registerTool({
     name: "bb_workflow_result",
     presentation: {
       label: {
@@ -195,7 +195,7 @@ export default async function plugin(bb: BbPluginApi) {
     },
   });
 
-  bb.agents.configure((context) => {
+  room.agents.configure((context) => {
     const worker = service.agentConfiguration(context.thread.id);
     if (worker !== null) {
       return {
@@ -214,7 +214,7 @@ export default async function plugin(bb: BbPluginApi) {
           : { instructions: worker.instructions }),
       };
     }
-    if (context.origin.pluginId === bb.pluginId) {
+    if (context.origin.pluginId === room.pluginId) {
       return {
         tools: ["bb_workflow_result"],
         skills: [],
@@ -230,17 +230,17 @@ export default async function plugin(bb: BbPluginApi) {
     };
   });
 
-  bb.events.on("thread.idle", ({ thread, lastAssistantText }) => {
+  room.events.on("thread.idle", ({ thread, lastAssistantText }) => {
     service.onThreadIdle(thread.id, lastAssistantText, thread);
   });
-  bb.events.on("thread.failed", ({ thread, error }) => {
+  room.events.on("thread.failed", ({ thread, error }) => {
     service.onThreadFailed(thread.id, error);
   });
-  bb.events.on("thread.deleted", ({ thread }) => {
+  room.events.on("thread.deleted", ({ thread }) => {
     service.onThreadDeleted(thread.id);
   });
 
-  bb.background.service("workflow-worker", {
+  room.background.service("workflow-worker", {
     start(signal) {
       return service.runWorker(signal);
     },

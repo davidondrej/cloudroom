@@ -77,8 +77,8 @@ import {
   toCodexServiceTier,
   toCodexThreadPermissionSettings,
   toCodexUserInput,
-  type BbThreadForkParams,
-  type BbThreadStartParams,
+  type RoomThreadForkParams,
+  type RoomThreadStartParams,
   type CodexSessionOptions,
 } from "../session-params.js";
 import type { ThreadResumeParams } from "../generated/codex-app-server/schema/v2/ThreadResumeParams.js";
@@ -102,7 +102,7 @@ import {
   getCodexProviderUsage,
 } from "./provider-maintenance.js";
 
-type BbThreadResumeParams = ThreadResumeParams & { excludeTurns: boolean };
+type RoomThreadResumeParams = ThreadResumeParams & { excludeTurns: boolean };
 
 const codexBridgeCommandSchema = z.discriminatedUnion("method", [
   z.object({
@@ -487,14 +487,15 @@ interface CodexBridgeSession {
   stopRequested: AbortController;
 }
 
-const sessionsByBbThreadId = new Map<string, CodexBridgeSession>();
+const sessionsByRoomThreadId = new Map<string, CodexBridgeSession>();
 const maintenanceConnections = new Set<CodexAppServerConnection>();
 let sessionSerialCounter = 0;
 let configuredSkillExtraRoots: string[] | null = null;
 let bridgeTempDir: string | null = null;
 
-// The worker entry's start() supplies a temp folder no other account can
-// write to. Tests that import this module directly get their own folder.
+// The worker entry's start() supplies a temp folder that nothing less trusted
+// can write (createPluginProcessTempDir). Tests that import this module
+// directly get their own folder.
 function commandGuardDir(): string {
   bridgeTempDir ??= mkdtempSync(join(tmpdir(), "bb-codex-bridge-"));
   return join(bridgeTempDir, "command-guard");
@@ -508,10 +509,10 @@ function stripLegacyBridgeIdPrefix(id: string): string {
 }
 
 function currentSession(
-  bbThreadId: string,
+  roomThreadId: string,
   serial: number,
 ): CodexBridgeSession | undefined {
-  const session = sessionsByBbThreadId.get(bbThreadId);
+  const session = sessionsByRoomThreadId.get(roomThreadId);
   if (!session || session.serial !== serial || session.closing) {
     return undefined;
   }
@@ -524,8 +525,8 @@ function releaseSession(session: CodexBridgeSession): Promise<void> {
   }
   session.closing = true;
   session.stopRequested.abort();
-  if (sessionsByBbThreadId.get(session.bbThreadId) === session) {
-    sessionsByBbThreadId.delete(session.bbThreadId);
+  if (sessionsByRoomThreadId.get(session.bbThreadId) === session) {
+    sessionsByRoomThreadId.delete(session.bbThreadId);
   }
   const previousChildExit = session.previousChildExit;
   session.previousChildExit = null;
@@ -679,12 +680,12 @@ function toProviderRuntimeEvent(
 }
 
 function handleChildNotification(
-  bbThreadId: string,
+  roomThreadId: string,
   serial: number,
   method: string,
   params: unknown,
 ): void {
-  const session = currentSession(bbThreadId, serial);
+  const session = currentSession(roomThreadId, serial);
   if (!session) {
     return;
   }
@@ -735,13 +736,13 @@ const codexChildToolCallParamsSchema = z.object({
 });
 
 function handleChildRequest(
-  bbThreadId: string,
+  roomThreadId: string,
   serial: number,
   method: string,
   params: unknown,
   responder: CodexAppServerRequestResponder,
 ): void {
-  const session = currentSession(bbThreadId, serial);
+  const session = currentSession(roomThreadId, serial);
   if (!session) {
     responder.error(
       BRIDGE_JSON_RPC_ERRORS.BRIDGE_ERROR,
@@ -860,11 +861,11 @@ function buildMacOsPermissionItemDelta(
 }
 
 function handleChildExit(
-  bbThreadId: string,
+  roomThreadId: string,
   serial: number,
   info: CodexAppServerExitInfo,
 ): void {
-  const session = currentSession(bbThreadId, serial);
+  const session = currentSession(roomThreadId, serial);
   if (!session) {
     return;
   }
@@ -1021,7 +1022,7 @@ interface ConstructedCodexSession {
 async function constructThreadSession(
   args: ConstructThreadSessionArgs,
 ): Promise<ConstructedCodexSession> {
-  const existing = sessionsByBbThreadId.get(args.threadId);
+  const existing = sessionsByRoomThreadId.get(args.threadId);
   const decoded = decodeCodexOptions(args.options);
   sessionSerialCounter += 1;
   const serial = sessionSerialCounter;
@@ -1063,7 +1064,7 @@ async function constructThreadSession(
     releasePromise: null,
     stopRequested: new AbortController(),
   };
-  sessionsByBbThreadId.set(args.threadId, session);
+  sessionsByRoomThreadId.set(args.threadId, session);
   if (existing) {
     const previousChildExit = releaseSession(existing);
     session.previousChildExit = previousChildExit;
@@ -1157,6 +1158,7 @@ async function constructThreadSession(
     });
     const dynamicTools = toCodexDynamicTools(args.dynamicTools);
     const instructionOverrides = resolveCodexInstructionOverrides({
+      approvalPolicy: preparedGitRoots.permissionSettings.approvalPolicy,
       instructionMode: args.instructionMode,
       options: decoded.sessionOptions,
     });
@@ -1180,11 +1182,11 @@ async function constructThreadSession(
     };
 
     let method: string;
-    let params: BbThreadStartParams | BbThreadResumeParams | BbThreadForkParams;
+    let params: RoomThreadStartParams | RoomThreadResumeParams | RoomThreadForkParams;
     switch (args.request.kind) {
       case "start": {
         method = "thread/start";
-        const startParams: BbThreadStartParams = {
+        const startParams: RoomThreadStartParams = {
           ...sharedConstructionParams,
           ephemeral: false,
           experimentalRawEvents: true,
@@ -1194,7 +1196,7 @@ async function constructThreadSession(
       }
       case "resume": {
         method = "thread/resume";
-        const resumeParams: BbThreadResumeParams = {
+        const resumeParams: RoomThreadResumeParams = {
           threadId: args.request.providerThreadId,
           excludeTurns: true,
           ...sharedConstructionParams,
@@ -1204,7 +1206,7 @@ async function constructThreadSession(
       }
       case "fork": {
         method = "thread/fork";
-        const forkParams: BbThreadForkParams = {
+        const forkParams: RoomThreadForkParams = {
           threadId: args.request.sourceProviderThreadId,
           excludeTurns: true,
           ...(args.request.sourceProviderCheckpointId !== undefined
@@ -1245,8 +1247,8 @@ async function constructThreadSession(
     return { session, codexThreadId };
   } catch (error) {
     const released = session.closing;
-    if (sessionsByBbThreadId.get(args.threadId) === session) {
-      sessionsByBbThreadId.delete(args.threadId);
+    if (sessionsByRoomThreadId.get(args.threadId) === session) {
+      sessionsByRoomThreadId.delete(args.threadId);
     }
     session.closing = true;
     await spawned?.kill();
@@ -1264,12 +1266,12 @@ class CodexSessionReleasedError extends Error {
 function registerResumableSession(session: CodexBridgeSession): void {
   if (
     session.codexThreadId === null ||
-    sessionsByBbThreadId.has(session.bbThreadId)
+    sessionsByRoomThreadId.has(session.bbThreadId)
   ) {
     return;
   }
   sessionSerialCounter += 1;
-  sessionsByBbThreadId.set(session.bbThreadId, {
+  sessionsByRoomThreadId.set(session.bbThreadId, {
     bbThreadId: session.bbThreadId,
     codexThreadId: session.codexThreadId,
     serial: sessionSerialCounter,
@@ -1353,10 +1355,10 @@ async function withMaintenanceChild<T>(
 }
 
 async function withChildForThread<T>(
-  bbThreadId: string,
+  roomThreadId: string,
   fn: (connection: CodexAppServerConnection) => Promise<T>,
 ): Promise<T> {
-  const session = sessionsByBbThreadId.get(bbThreadId);
+  const session = sessionsByRoomThreadId.get(roomThreadId);
   if (
     session &&
     !session.closing &&
@@ -1466,7 +1468,7 @@ interface LiveSessionForTurn {
 async function requireLiveSessionForTurn(
   params: TurnStartParamsShape,
 ): Promise<LiveSessionForTurn> {
-  let session = sessionsByBbThreadId.get(params.threadId);
+  let session = sessionsByRoomThreadId.get(params.threadId);
   if (!session || session.closing) {
     throw new Error(`No active codex session for thread "${params.threadId}"`);
   }
@@ -1623,7 +1625,7 @@ async function handleTurnSteer(
   id: string | number,
   params: TurnSteerParamsShape,
 ): Promise<void> {
-  const session = sessionsByBbThreadId.get(params.threadId);
+  const session = sessionsByRoomThreadId.get(params.threadId);
   if (
     !session ||
     session.closing ||
@@ -1715,7 +1717,7 @@ async function handleThreadStop(
   id: string | number,
   params: ThreadStopParamsShape,
 ): Promise<void> {
-  const session = sessionsByBbThreadId.get(params.threadId);
+  const session = sessionsByRoomThreadId.get(params.threadId);
 
   if (params.intent === "release") {
     if (session) {
@@ -1935,7 +1937,7 @@ async function handleThreadMaintenance(
 ): Promise<void> {
   const settle = async (): Promise<void> => {
     if (options?.releaseAfter) {
-      const session = sessionsByBbThreadId.get(params.threadId);
+      const session = sessionsByRoomThreadId.get(params.threadId);
       if (session) {
         await releaseSession(session);
       }
@@ -1998,7 +2000,7 @@ async function handleSkillsConfigure(
 ): Promise<void> {
   configuredSkillExtraRoots = params.roots.map((root) => root.path);
   try {
-    for (const session of sessionsByBbThreadId.values()) {
+    for (const session of sessionsByRoomThreadId.values()) {
       if (
         session.closing ||
         session.connection === null ||
@@ -2149,7 +2151,7 @@ function handleParsedMessage(parsed: unknown): void {
   const stopRequested = threadStopRequestedNotificationSchema.safeParse(parsed);
   if (stopRequested.success) {
     const { threadId } = stopRequested.data.params;
-    sessionsByBbThreadId.get(threadId)?.stopRequested.abort();
+    sessionsByRoomThreadId.get(threadId)?.stopRequested.abort();
     return;
   }
   const response = decodeBridgeJsonRpcResponse(parsed);
@@ -2188,12 +2190,12 @@ function handleParsedMessage(parsed: unknown): void {
 export const handleLine = createBridgeLineHandler({ handleParsedMessage });
 
 function killAllChildren(): void {
-  for (const session of sessionsByBbThreadId.values()) {
+  for (const session of sessionsByRoomThreadId.values()) {
     session.closing = true;
     session.connection?.kill();
     session.connection = null;
   }
-  sessionsByBbThreadId.clear();
+  sessionsByRoomThreadId.clear();
   for (const connection of maintenanceConnections) {
     connection.kill();
   }

@@ -258,20 +258,47 @@ fn under(local: &Local, ancestor: &str, child: &Session) -> bool {
     false
 }
 
-/// Any thread above a child may use it, so no grandchild outlives the threads above it.
-/// A side chat may use the child threads of the thread it was forked from, like its own.
-fn may_use(local: &Local, caller: &str, child: &Session) -> bool {
-    under(local, caller, child)
-        || local
-            .sessions
-            .get(caller)
-            .and_then(fork_of)
-            .is_some_and(|source| under(local, source, child))
+/// The session `session` took over in Core's own agent switch or project move (#237), recorded by Core, while that
+/// one can't run: closed, closing, or crashed (a lost agent can't be closed). One resumed again counts no more.
+fn continued_from<'a>(local: &'a Local, session: &Session) -> Option<&'a str> {
+    let from = session.continued.as_ref()?["from"].as_str()?;
+    let (from, old) = local.sessions.get_key_value(from)?;
+    let gone = matches!(
+        old.state,
+        SessionState::Closing
+            | SessionState::Closed
+            | SessionState::Failed
+            | SessionState::ProcessLost
+    );
+    (gone || old.close_request.is_some()).then_some(from.as_str())
 }
+
+/// Any thread above a child may use it, so no grandchild outlives the threads above it.
+/// A side chat may use the child threads of the thread it was forked from, like its own,
+/// and a session the child threads of the sessions it continued once they closed (#1296).
+fn may_use(local: &Local, caller: &str, child: &Session) -> bool {
+    let mut caller = Some(caller);
+    // Bounded, in case saved history ever holds a loop.
+    for _ in 0..=local.sessions.len() {
+        let Some(id) = caller else { return false };
+        let session = local.sessions.get(id);
+        if under(local, id, child)
+            || session
+                .and_then(fork_of)
+                .is_some_and(|source| under(local, source, child))
+        {
+            return true;
+        }
+        caller = session.and_then(|s| continued_from(local, s));
+    }
+    false
+}
+
+pub(super) const NOT_IN_TREE: &str = "not in this thread's tree: tell reaches its subagents, its parent (`room-cli thread tell --parent TEXT`) and the threads under its parent";
 
 /// `thread tell` also reaches the caller's parent and every thread under that parent, like Local threads (#177).
 /// Some(true) for a thread the caller may use, Some(false) for the others, which see who sent it.
-fn may_tell(local: &Local, caller: &str, target: &str) -> Option<bool> {
+pub(super) fn may_tell(local: &Local, caller: &str, target: &str) -> Option<bool> {
     let t = local.sessions.get(target)?;
     let parent = local.sessions.get(caller)?.parent_session.as_deref();
     if may_use(local, caller, t) {
@@ -903,9 +930,7 @@ impl Manager {
 
     /// `thread tell`'s target: true for a thread under the caller, false for any other it may tell.
     pub(crate) fn tell_target(&self, caller: &str, target: &str) -> Result<bool> {
-        may_tell(&self.local.lock().unwrap(), caller, target).ok_or(Error::Conflict(
-            "not in this thread's tree: tell reaches its subagents, its parent (`room-cli thread tell --parent TEXT`) and the threads under its parent",
-        ))
+        may_tell(&self.local.lock().unwrap(), caller, target).ok_or(Error::Conflict(NOT_IN_TREE))
     }
 
     /// Every thread under `id`: its ID, whether it is archived, and whether to keep it open because it, a thread
@@ -1002,6 +1027,71 @@ mod tests {
         // A file left from an older turn never stands in for a newer reply.
         let newer = ("p2".to_owned(), "newer".to_owned());
         assert_eq!(saved_reply(&dir, "cr_child_a", &newer), "newer");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// #1296: an agent switch or project move continues the thread in a new session; it keeps the old one's children
+    /// once the old one closes, along the whole chain, also after a restart. Other sessions get nothing.
+    #[test]
+    fn a_continued_session_may_use_the_children_of_the_closed_one() {
+        let dir = std::env::temp_dir().join(format!("cloudroom-continued-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut local = Local::open(&dir).unwrap();
+        for (id, input) in [
+            ("a", json!({})),
+            ("kid", json!({"parent_session":"a"})),
+            ("lost", json!({})),
+            ("lost_kid", json!({"parent_session":"lost"})),
+        ] {
+            let start =
+                json!({"request_id":"s","command":"start","state":"completed","input":input});
+            local.append(id, "receipt", start, None).unwrap();
+        }
+        for (id, from) in [("b", "a"), ("c", "b"), ("x", "c"), ("after_crash", "lost")] {
+            let start = json!({"request_id":"s","command":"start","state":"completed","input":{}});
+            local.append(id, "receipt", start, None).unwrap();
+            local
+                .append(id, "continued", json!({"from":from}), None)
+                .unwrap();
+        }
+        let start = json!({"request_id":"s","command":"start","state":"completed","input":{}});
+        local.append("other", "receipt", start, None).unwrap();
+        let use_kid = |local: &Local, caller| may_use(local, caller, &local.sessions["kid"]);
+        assert!(!use_kid(&local, "b"), "a is still live");
+        for id in ["a", "b"] {
+            local
+                .append(id, "state", json!({"state":"closed"}), None)
+                .unwrap();
+        }
+        drop(local);
+        let local = Local::open(&dir).unwrap();
+        for (caller, allowed) in [
+            ("a", true),
+            ("b", true),
+            ("c", true),
+            ("x", false),
+            ("other", false),
+        ] {
+            assert_eq!(use_kid(&local, caller), allowed, "{caller}");
+        }
+        // A switch away from a crashed parent, whose close Core refuses; until that parent runs again.
+        let use_lost_kid =
+            |local: &Local| may_use(local, "after_crash", &local.sessions["lost_kid"]);
+        assert!(!use_lost_kid(&local), "lost is still live");
+        let mut local = local;
+        let lost = json!({"state":"process_lost"});
+        local.append("lost", "state", lost, None).unwrap();
+        drop(local);
+        let mut local = Local::open(&dir).unwrap();
+        assert!(use_lost_kid(&local), "after a restart too");
+        assert_eq!(may_tell(&local, "after_crash", "lost_kid"), Some(true));
+        local
+            .append("lost", "state", json!({"state":"idle"}), None)
+            .unwrap();
+        assert!(!use_lost_kid(&local), "lost runs again");
+        // `thread tell` checks again when its message is accepted (command_from): after a resume, refused.
+        assert_eq!(may_tell(&local, "after_crash", "lost_kid"), None);
+        assert_eq!(may_tell(&local, "lost", "lost_kid"), Some(true));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

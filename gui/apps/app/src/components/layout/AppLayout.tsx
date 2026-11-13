@@ -69,7 +69,7 @@ import {
 import {
   BROWSER_SIDEBAR_TRIGGER_INSET_CLASS,
   CHROME_ROW_CLASS,
-  getBbDesktopInfo,
+  getRoomDesktopInfo,
   MACOS_CHROME_CONTROL_AXIS_CLASS,
   MACOS_CHROME_CONTROL_NO_DRAG_CLASS,
   MACOS_SIDEBAR_MIN_WIDTH,
@@ -78,7 +78,7 @@ import {
   MACOS_WINDOW_NO_DRAG_CLASS,
   shouldReserveMacosTrafficLights,
   shouldUseMacosDesktopChrome,
-} from "@/lib/bb-desktop";
+} from "@/lib/room-desktop";
 import { useDesktopWindowState } from "@/hooks/useDesktopWindowState";
 import { useServerDaemonLogsCommand } from "@/hooks/useServerDaemonLogsCommand";
 import { useServerUpdateReload } from "@/hooks/useServerUpdateReload";
@@ -556,7 +556,7 @@ export function AppLayout({ children }: AppLayoutProps) {
   const liveWidthRef = useRef(0);
   const animationFrameRef = useRef<number | null>(null);
   const showHeader = !isThreadView && !isRootView && pluginPanelMatch === null;
-  const [desktopInfo] = useState(getBbDesktopInfo);
+  const [desktopInfo] = useState(getRoomDesktopInfo);
   const desktopWindowState = useDesktopWindowState();
   const usesDesktopChrome = shouldUseMacosDesktopChrome(desktopInfo);
   const reserveMacosTrafficLights = shouldReserveMacosTrafficLights({

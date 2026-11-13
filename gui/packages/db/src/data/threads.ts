@@ -226,7 +226,18 @@ export function upsertThreadSearchSegments(
   args: UpsertThreadSearchSegmentsArgs,
 ): void {
   const updatedAt = args.updatedAt ?? Date.now();
+  // Hidden threads are plugin workers nobody searches. Indexing their large prompts filled bb.db with GBs.
+  const visible = new Map<string, boolean>();
   for (const segment of args.segments) {
+    if (!visible.has(segment.threadId)) {
+      const row = db
+        .select({ visibility: threads.visibility })
+        .from(threads)
+        .where(eq(threads.id, segment.threadId))
+        .get();
+      visible.set(segment.threadId, row?.visibility !== "hidden");
+    }
+    if (!visible.get(segment.threadId)) continue;
     upsertThreadSearchSegment(db, {
       ...segment,
       id: buildThreadSearchSegmentId(segment),

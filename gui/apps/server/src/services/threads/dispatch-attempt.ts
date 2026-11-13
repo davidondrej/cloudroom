@@ -691,6 +691,7 @@ async function runDispatchAttempt(
       trigger: args.trigger,
       onStartSettled: args.onStartSettled,
       ...(args.retryOf !== undefined ? { retryOf: args.retryOf } : {}),
+      ...(claimed !== null && !sendNow ? { queueDelivered: true } : {}),
       beforeAppendInTransaction: ({ tx }) => {
         saving = true;
         args.beforeDispatch?.();

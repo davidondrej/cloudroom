@@ -215,8 +215,8 @@ type AcpDeferredStartEmitter = (
   sessionId?: string,
 ) => void;
 
-const sessionsByBbThreadId = new Map<string, AcpThreadSession>();
-const bbThreadIdByProviderThreadId = new Map<string, string>();
+const sessionsByRoomThreadId = new Map<string, AcpThreadSession>();
+const roomThreadIdByProviderThreadId = new Map<string, string>();
 const pendingRuntimeRequests = new Map<
   number,
   (response: BridgeJsonRpcResponse) => void
@@ -384,7 +384,7 @@ async function forwardDynamicToolCall(
     }
   | { ok: false; error: string }
 > {
-  const session = sessionsByBbThreadId.get(args.threadId);
+  const session = sessionsByRoomThreadId.get(args.threadId);
   if (!session || !session.providerThreadId || session.stopping) {
     return { ok: false, error: "No active ACP session for dynamic tool call." };
   }
@@ -1221,11 +1221,24 @@ async function selectAcpNativeModel(args: {
       }
     }
     if (setModel) {
-      configState = await args.connection.request({
-        method: "session/set_model",
-        params: { sessionId: args.sessionId, modelId: selection.modelId },
-        resultSchema: z.union([acpConfigStateResultSchema, z.null()]),
-      });
+      try {
+        configState = await args.connection.request({
+          method: "session/set_model",
+          params: { sessionId: args.sessionId, modelId: selection.modelId },
+          resultSchema: z.union([acpConfigStateResultSchema, z.null()]),
+        });
+      } catch (error) {
+        if (
+          !(error instanceof AcpAgentResponseError) ||
+          isAcpAuthRequiredResponse(error)
+        ) {
+          throw error;
+        }
+        throw new AcpAgentResponseError(
+          `Model "${selection.modelId}" rejected: ${error.message}`,
+          error.code,
+        );
+      }
     }
     configOptions = configState?.configOptions ?? configOptions;
   }
@@ -1640,9 +1653,9 @@ async function handleFsWriteTextFile(
 }
 
 function liveSessionForThread(
-  bbThreadId: string,
+  roomThreadId: string,
 ): AcpThreadSession | undefined {
-  const session = sessionsByBbThreadId.get(bbThreadId);
+  const session = sessionsByRoomThreadId.get(roomThreadId);
   if (!session || session.stopping || session.providerThreadId === "") {
     return undefined;
   }
@@ -1651,14 +1664,14 @@ function liveSessionForThread(
 
 function removeSession(session: AcpThreadSession): void {
   for (const controller of session.pendingToolCalls) controller.abort();
-  if (sessionsByBbThreadId.get(session.bbThreadId) === session) {
-    sessionsByBbThreadId.delete(session.bbThreadId);
+  if (sessionsByRoomThreadId.get(session.bbThreadId) === session) {
+    sessionsByRoomThreadId.delete(session.bbThreadId);
   }
   if (
-    bbThreadIdByProviderThreadId.get(session.providerThreadId) ===
+    roomThreadIdByProviderThreadId.get(session.providerThreadId) ===
     session.bbThreadId
   ) {
-    bbThreadIdByProviderThreadId.delete(session.providerThreadId);
+    roomThreadIdByProviderThreadId.delete(session.providerThreadId);
   }
 }
 
@@ -1684,8 +1697,8 @@ async function releaseCursorMcpApproval(
 function getSessionByProviderThreadId(
   providerThreadId: string,
 ): AcpThreadSession | undefined {
-  const bbThreadId = bbThreadIdByProviderThreadId.get(providerThreadId);
-  return bbThreadId ? sessionsByBbThreadId.get(bbThreadId) : undefined;
+  const roomThreadId = roomThreadIdByProviderThreadId.get(providerThreadId);
+  return roomThreadId ? sessionsByRoomThreadId.get(roomThreadId) : undefined;
 }
 
 type AcpSessionStartRequest =
@@ -1707,9 +1720,9 @@ async function startAgentSession(
   request: AcpSessionStartRequest,
 ): Promise<AcpThreadSession> {
   const params = request.params;
-  const bbThreadId = params.threadId;
+  const roomThreadId = params.threadId;
 
-  const existing = sessionsByBbThreadId.get(bbThreadId);
+  const existing = sessionsByRoomThreadId.get(roomThreadId);
   if (existing) {
     await stopSession(existing);
   }
@@ -1746,7 +1759,7 @@ async function startAgentSession(
   const launch = await resolveAgentLaunchArgs(params);
   if (launch.warning) {
     emitStartNotification(ACP_WARNING_METHOD, {
-      threadId: bbThreadId,
+      threadId: roomThreadId,
       summary: launch.warning,
     });
   }
@@ -1766,13 +1779,13 @@ async function startAgentSession(
     args: launch.args,
     cwd: params.cwd,
     env: childEnv,
-    recordThreadId: bbThreadId,
+    recordThreadId: roomThreadId,
     onNotification: (method, notificationParams) =>
       handleAgentNotification(session, method, notificationParams),
     onRequest: (method, requestParams, responder) =>
       handleAgentRequest(session, method, requestParams, responder),
     onExit: (info) => {
-      const wasCurrent = sessionsByBbThreadId.get(bbThreadId) === session;
+      const wasCurrent = sessionsByRoomThreadId.get(roomThreadId) === session;
       cancelPendingPermissions(session);
       removeSession(session);
       if (!wasCurrent || session.stopping || session.providerThreadId === "") {
@@ -1788,7 +1801,7 @@ async function startAgentSession(
     },
   });
   session = {
-    bbThreadId,
+    bbThreadId: roomThreadId,
     turnOutput: false,
     construction: params,
     providerThreadId: "",
@@ -1826,7 +1839,7 @@ async function startAgentSession(
     cursorMcpApproval: undefined,
     deferStartEmit: emitStartNotification,
   };
-  sessionsByBbThreadId.set(bbThreadId, session);
+  sessionsByRoomThreadId.set(roomThreadId, session);
 
   try {
     const initializeResult = await requestAcpInitialize(connection, {
@@ -1870,7 +1883,7 @@ async function startAgentSession(
       });
       if (session.cursorMcpApproval?.installedByBb) {
         process.stderr.write(
-          `acp bridge: installed Cursor session MCP approval for thread "${bbThreadId}"\n`,
+          `acp bridge: installed Cursor session MCP approval for thread "${roomThreadId}"\n`,
         );
       }
     }
@@ -1911,7 +1924,7 @@ async function startAgentSession(
           if (request.recovery) throw error;
           console.error(`ACP session restore failed for ${request.resumeProviderThreadId}; starting a new session:`, error);
           emitStartNotification(ACP_WARNING_METHOD, {
-            threadId: bbThreadId,
+            threadId: roomThreadId,
             summary: `${agentLabel} could not restore the previous session; continuing in a fresh session without in-agent history.`,
           });
         }
@@ -2014,7 +2027,7 @@ async function startAgentSession(
       });
       if (request.kind === "resume") {
         emitStartNotification(ACP_WARNING_METHOD, {
-          threadId: bbThreadId,
+          threadId: roomThreadId,
           summary: `${agentLabel} could not restore the previous session; continuing in a fresh session without in-agent history.`,
         });
       }
@@ -2041,17 +2054,17 @@ async function startAgentSession(
 
     if (session.stopping) {
       throw new Error(
-        `ACP session for thread "${bbThreadId}" was released during construction`,
+        `ACP session for thread "${roomThreadId}" was released during construction`,
       );
     }
     session.providerThreadId = sessionId;
-    bbThreadIdByProviderThreadId.set(sessionId, bbThreadId);
+    roomThreadIdByProviderThreadId.set(sessionId, roomThreadId);
     sendNotification(BRIDGE_NOTIFICATION_METHODS.threadIdentity, {
-      threadId: bbThreadId,
+      threadId: roomThreadId,
       providerThreadId: sessionId,
       sessionRestorable: session.supportsLoadSession,
     });
-    sendThreadDeltas(bbThreadId, [{ kind: "session.reset" }]);
+    sendThreadDeltas(roomThreadId, [{ kind: "session.reset" }]);
     session.deferStartEmit = undefined;
     for (const deferred of deferredEmits) {
       if (
@@ -2070,7 +2083,11 @@ async function startAgentSession(
     connection.kill();
     removeSession(session);
     await releaseCursorMcpApproval(session);
-    throw error;
+    const startError =
+      error instanceof Error
+        ? dialect.startError?.(error.message, params.agent.command)
+        : undefined;
+    throw startError === undefined ? error : new Error(startError);
   }
 }
 
@@ -2098,10 +2115,10 @@ async function recoverClosedStream(
     if (!stop.signal.aborted) return session;
     await stopSession(session);
   } catch (error) {
-    if (!stop.signal.aborted && !sessionsByBbThreadId.has(old.bbThreadId)) {
+    if (!stop.signal.aborted && !sessionsByRoomThreadId.has(old.bbThreadId)) {
       old.stopping = false;
-      sessionsByBbThreadId.set(old.bbThreadId, old);
-      bbThreadIdByProviderThreadId.set(old.providerThreadId, old.bbThreadId);
+      sessionsByRoomThreadId.set(old.bbThreadId, old);
+      roomThreadIdByProviderThreadId.set(old.providerThreadId, old.bbThreadId);
       console.error("ACP closed-stream recovery failed:", error);
       return "The agent lost its connection and could not reload this conversation. Your message was not sent; send it again to retry.";
     }
@@ -3044,7 +3061,7 @@ async function handleRequest(
 
     case "thread/stop": {
       closedStreamRecoveries.get(request.params.threadId)?.abort();
-      const session = sessionsByBbThreadId.get(request.params.threadId);
+      const session = sessionsByRoomThreadId.get(request.params.threadId);
       if (session) {
         if (request.params.intent === "release") {
           await releaseSession(session);
@@ -3130,7 +3147,7 @@ export const handleLine = createBridgeLineHandler({ handleParsedMessage });
 
 async function stopAllSessions(): Promise<void> {
   await Promise.all(
-    Array.from(sessionsByBbThreadId.values()).map((session) =>
+    Array.from(sessionsByRoomThreadId.values()).map((session) =>
       stopSession(session),
     ),
   );

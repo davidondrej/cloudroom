@@ -56,6 +56,8 @@ export interface ThreadPaletteSummary {
 
 interface ThreadPaletteResultsProps {
   activeIndex: number;
+  /** "Search deeper" picks, best first. They go on top of the list. */
+  deepThreads?: readonly ThreadListEntry[];
   filters?: SearchFilters;
   onActiveIndexChange: (index: number) => void;
   onIncludeArchived?: () => void;
@@ -281,6 +283,7 @@ function useJevRank(
 
 export function ThreadPaletteResults({
   activeIndex,
+  deepThreads,
   filters = ALL_FILTERS,
   onActiveIndexChange,
   onIncludeArchived,
@@ -426,7 +429,7 @@ export function ThreadPaletteResults({
   const jev = useJevRank(trimmedQuery, candidates, hasQuery && !isLoading, projectNamesById);
   const probabilities = jev.answer?.probabilities ?? null;
 
-  const rows = useMemo(() => {
+  const rankedRows = useMemo(() => {
     const answer = jev.answer;
     if (!answer) return localRows;
     const byId = new Map(candidates.map((row) => [row.id, row]));
@@ -437,6 +440,12 @@ export function ThreadPaletteResults({
     const shown = new Set(top.map((row) => row.id));
     return [...top, ...localRows.filter((row) => !shown.has(row.id))];
   }, [candidates, jev.answer, localRows]);
+  const rows = useMemo(() => {
+    if (!hasQuery || !deepThreads?.length) return rankedRows;
+    const deep = deepThreads.map((thread): ThreadRowData => ({ kind: "thread", id: `thread:${thread.id}`, thread, matches: EMPTY_MATCHES }));
+    const shown = new Set(deep.map((row) => row.id));
+    return [...deep, ...rankedRows.filter((row) => !shown.has(row.id))];
+  }, [deepThreads, hasQuery, rankedRows]);
   const navigationItems = useMemo(
     () => rows.map((row) => toNavigationItem(row, optionIdPrefix)),
     [optionIdPrefix, rows],

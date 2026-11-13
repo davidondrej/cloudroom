@@ -558,17 +558,17 @@ describe("provider-native id translation", () => {
     const [started] = feedDeltas(adapter, "t_1", [
       { kind: "turn.open", providerTurnId: "codex-turn-1" },
     ]);
-    const bbTurnId =
+    const roomTurnId =
       started?.type === "turn/started" && started.scope.kind === "turn"
         ? started.scope.turnId
         : "";
-    expect(bbTurnId).not.toBe("");
+    expect(roomTurnId).not.toBe("");
 
     const steer = adapter.buildCommandPlan({
       type: "turn/steer",
       threadId: "t_1",
       providerThreadId: "p_1",
-      expectedTurnId: bbTurnId,
+      expectedTurnId: roomTurnId,
       input: [],
       clientRequestId: "creq_abcdefghjk",
       options: fullModeOptions,
@@ -581,7 +581,7 @@ describe("provider-native id translation", () => {
       type: "thread/stop",
       threadId: "t_1",
       providerThreadId: "p_1",
-      activeTurnId: bbTurnId,
+      activeTurnId: roomTurnId,
     });
     expect(stop).toMatchObject({
       params: { intent: "interrupt", activeTurnId: "codex-turn-1" },
@@ -612,9 +612,9 @@ describe("provider-native id translation", () => {
         providerTurnId: "codex-turn-1",
       },
     ]);
-    const bbItemId =
+    const roomItemId =
       events[1]?.type === "item/started" ? events[1].item.id : "";
-    const bbTurnId =
+    const roomTurnId =
       events[0]?.type === "turn/started" && events[0].scope.kind === "turn"
         ? events[0].scope.turnId
         : "";
@@ -644,8 +644,8 @@ describe("provider-native id translation", () => {
       params,
     });
     expect(decoded).toMatchObject({
-      turnId: bbTurnId,
-      payload: { subject: { itemId: bbItemId } },
+      turnId: roomTurnId,
+      payload: { subject: { itemId: roomItemId } },
     });
 
     const unmarked = adapter.decodeInteractiveRequest?.({
@@ -670,9 +670,9 @@ describe("provider-native id translation", () => {
         providerTurnId: "codex-turn-1",
       },
     ]);
-    const bbItemId =
+    const roomItemId =
       events[1]?.type === "item/started" ? events[1].item.id : "";
-    const bbTurnId =
+    const roomTurnId =
       events[0]?.type === "turn/started" && events[0].scope.kind === "turn"
         ? events[0].scope.turnId
         : "";
@@ -690,6 +690,6 @@ describe("provider-native id translation", () => {
         providerNativeIds: true,
       },
     });
-    expect(decoded).toMatchObject({ turnId: bbTurnId, callId: bbItemId });
+    expect(decoded).toMatchObject({ turnId: roomTurnId, callId: roomItemId });
   });
 });

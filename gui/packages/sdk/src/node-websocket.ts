@@ -5,7 +5,7 @@ import {
 } from "@cloudroom/config/caller-proof";
 import { WebSocket as NodeWsWebSocket, type RawData } from "ws";
 import { createRealtimeSocketAdapter } from "./realtime-client.js";
-import type { BbRealtimeSocket, BbRealtimeSocketFactory } from "./transport.js";
+import type { RoomRealtimeSocket, RoomRealtimeSocketFactory } from "./transport.js";
 
 const SOCKET_CONNECTING = 0;
 const SOCKET_CLOSED = 3;
@@ -31,7 +31,7 @@ function callerHeaders(
 
 function bindNodeWsEvents(
   socket: NodeWsWebSocket,
-  adapter: BbRealtimeSocket,
+  adapter: RoomRealtimeSocket,
 ): void {
   socket.on("open", () => adapter.onopen?.());
   socket.on("message", (data) =>
@@ -44,7 +44,7 @@ function bindNodeWsEvents(
 export function wrapNodeWsWebsocket(
   url: string,
   headers: Record<string, string> = {},
-): BbRealtimeSocket {
+): RoomRealtimeSocket {
   const socket = new NodeWsWebSocket(url, { headers });
   const adapter = createRealtimeSocketAdapter(socket);
   bindNodeWsEvents(socket, adapter);
@@ -57,10 +57,10 @@ function httpOrigin(url: string): string {
   return parsed.origin;
 }
 
-function wrapProvenNodeWsWebsocket(url: string): BbRealtimeSocket {
+function wrapProvenNodeWsWebsocket(url: string): RoomRealtimeSocket {
   let socket: NodeWsWebSocket | null = null;
   let closedEarly = false;
-  const adapter: BbRealtimeSocket = {
+  const adapter: RoomRealtimeSocket = {
     close: () => {
       if (socket !== null) {
         socket.close();
@@ -100,7 +100,7 @@ function wrapProvenNodeWsWebsocket(url: string): BbRealtimeSocket {
 
 export function createNodeWebsocketFactory(
   options: { callerToken?: string } = {},
-): BbRealtimeSocketFactory {
+): RoomRealtimeSocketFactory {
   return (url) =>
     options.callerToken === undefined
       ? wrapProvenNodeWsWebsocket(url)

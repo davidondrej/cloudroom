@@ -230,10 +230,10 @@ import { getFileExtension } from "@/lib/plugin-slot-resolvers";
 import { Button } from "@cloudroom/shared-ui/button";
 import { Icon } from "@cloudroom/shared-ui/icon";
 import {
-  getBbDesktopInfo,
+  getRoomDesktopInfo,
   getDesktopBrowserApi,
   isDesktopBrowserAvailable,
-} from "@/lib/bb-desktop";
+} from "@/lib/room-desktop";
 import {
   openUrlByPreference,
   useOpenLinksInAppBrowserPreference,
@@ -1826,7 +1826,7 @@ function ThreadDetailViewInternal(props: ThreadRoutePathArgs) {
     if (!isFocused) {
       return;
     }
-    const desktopInfo = getBbDesktopInfo();
+    const desktopInfo = getRoomDesktopInfo();
     if (
       desktopInfo === null ||
       desktopInfo.onAppCommand !== undefined ||
@@ -1953,7 +1953,7 @@ function ThreadDetailViewInternal(props: ThreadRoutePathArgs) {
     if (!isFocused) {
       return;
     }
-    const desktopInfo = getBbDesktopInfo();
+    const desktopInfo = getRoomDesktopInfo();
     if (
       desktopInfo === null ||
       desktopInfo.onCloseWindowRequest === undefined
