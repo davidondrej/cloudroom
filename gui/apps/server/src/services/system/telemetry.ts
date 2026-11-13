@@ -17,7 +17,7 @@ export type TelemetryExecution = "local" | "cloud_sandbox" | "cloud_vm";
 /** The desktop app's first-run setup funnel: which step people see, act on, finish, skip, or leave. */
 export const SETUP_STEPS = ["account", "agent", "github", "project", "first_agent"] as const;
 export const SETUP_ACTIONS = ["viewed", "started", "done", "skipped", "closed", "detected", "waitlist"] as const;
-export const SETUP_AGENTS = ["pi", "opencode", "cursor", "hermes", "grok", "devin", "droid", "kimi", "fx", "openclaw"] as const;
+export const SETUP_AGENTS = ["pi", "opencode", "cursor", "hermes", "grok", "devin", "droid", "kimi", "antigravity", "fx", "openclaw"] as const;
 export const SETUP_DETAILS = ["github", "google", "email", "claude", "codex", "both", "none", "existing", "found", "folder", "recent_folder", "bb_import", "chat_import", "auto", "manual", "cloud", "local", "blocked", "failed", ...SETUP_AGENTS] as const;
 
 export type TelemetryValue = string | number | boolean | null;

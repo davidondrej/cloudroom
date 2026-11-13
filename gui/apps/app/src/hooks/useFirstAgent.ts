@@ -5,7 +5,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
 import { PERSONAL_PROJECT_ID, sameLevelModel } from "@cloudroom/domain";
 import { useCreateThread } from "@/hooks/mutations/thread-runtime-mutations";
-import { cloudCatalogKnown, cloudHarness, fetchCloudroomConnection } from "@/hooks/queries/cloudroom-queries";
+import { cloudCanRunHarness, cloudCatalogKnown, cloudHarness, fetchCloudroomConnection } from "@/hooks/queries/cloudroom-queries";
 import { useHostDaemon } from "@/hooks/useHostDaemon";
 import { fetchWithAppSurface } from "@/lib/app-surface";
 import { getThreadRoutePath } from "@/lib/route-paths";
@@ -16,7 +16,7 @@ import { sdk } from "@/lib/sdk";
 const PROMPT = "explain how Cloudroom works, and why it's more powerful than default Claude or Codex.\n\nanswer in short, in plain english. be very concise.";
 const MODEL = "claude-opus-5-5";
 const HOLDOUT = 0.2;
-/** Decided once per install: `auto` starts it, `manual` is the holdout, `none` had no Claude Code or Codex. */
+/** Decided once per install: `auto` starts it, `manual` is the holdout, `none` had no Claude Code, Codex or Antigravity. */
 const groupAtom = atomWithStorage<"auto" | "manual" | "none" | null>("cloudroom.setup.firstAgent", null, undefined, { getOnInit: true });
 
 function report(action: "started" | "done" | "skipped", detail: "auto" | "manual" | "none" | "cloud" | "local" | "blocked" | "failed") {
@@ -32,10 +32,10 @@ export function useStartFirstAgent() {
   const { localHostId } = useHostDaemon();
   const { mutateAsync: createThread } = useCreateThread();
   const navigate = useNavigate();
-  return useCallback((agents: { claude: boolean; codex: boolean }) => {
+  return useCallback((agents: { claude: boolean; codex: boolean; antigravity: boolean }) => {
     if (group !== null) return;
-    // Claude Code by default; Codex only when it is the one they connected.
-    const providerId = agents.claude ? "claude-code" : agents.codex ? "codex" : null;
+    // Claude Code by default; Codex or Antigravity only when it is the one they connected.
+    const providerId = agents.claude ? "claude-code" : agents.codex ? "codex" : agents.antigravity ? "antigravity" : null;
     if (providerId === null) { setGroup("none"); return report("skipped", "none"); }
     if (Math.random() < HOLDOUT) { setGroup("manual"); return report("skipped", "manual"); }
     setGroup("auto");
@@ -44,14 +44,15 @@ export function useStartFirstAgent() {
       // Cloud when it can take this agent now (the composer's own checks), else this computer when the agent is ready
       // here. Neither: start nothing, rather than a first thread that fails.
       const cloud = await fetchCloudroomConnection(queryClient).catch(() => undefined);
-      const inCloud = cloud?.ready === true && cloud.cloudQueue === null && !(cloudCatalogKnown(cloud) && !cloudHarness(cloud, providerId));
+      const inCloud = cloudCanRunHarness(providerId) && cloud?.ready === true && cloud.cloudQueue === null && !(cloudCatalogKnown(cloud) && !cloudHarness(cloud, providerId));
       if (!inCloud && (localHostId === null || !(await sdk.system.providerStates({ hostId: localHostId })).providers.some((provider) => provider.providerId === providerId && provider.status === "ready"))) return report("skipped", "blocked");
       const thread = await createThread({
         origin: "setup",
         // No project: nothing to copy, so the reply comes fast.
         projectId: PERSONAL_PROJECT_ID,
         providerId,
-        model: providerId === "codex" ? sameLevelModel(MODEL, "claude-code", "codex") ?? MODEL : MODEL,
+        // Antigravity starts on its plan's own default model.
+        ...(providerId === "antigravity" ? {} : { model: providerId === "codex" ? sameLevelModel(MODEL, "claude-code", "codex") ?? MODEL : MODEL }),
         reasoningLevel: "medium",
         input: [{ type: "text", text: PROMPT, mentions: [] }],
         ...(inCloud || localHostId === null
