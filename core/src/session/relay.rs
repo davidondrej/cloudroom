@@ -49,6 +49,8 @@ fn unconfirmed(why: &str) -> String {
 const MOVED: &str = "This thread moved to the Mac.";
 const PARENT_MOVED: &str = "Not delivered: your parent moved to the user's Mac, and Cloud children can't message a Local parent yet. The app can still forward your completed-turn reply to your current Local parent while it is open.";
 const STARTING: &str = "This child is still starting in its own sandbox. Retry in a few seconds.";
+/// A child this thread started that the website no longer links to it (#149).
+pub(super) const UNLINKED: &str = "The website no longer links this child to this thread, so this is what this thread last heard of it. Its replies still arrive as messages when its turns end; `thread stop|archive|tell` go through the user's Cloudroom app.";
 /// A relayed `tell --mode queue` ends its request ID with this: the website passes on only the ID and text, and an
 /// older Core ignores it and steers, as before (#1517).
 const QUEUE: &str = "_queue";
@@ -104,6 +106,18 @@ fn note_unless(
     true
 }
 
+/// What `caller` last heard of `id`, a child it started in a sandbox of its own (`unknown` if nothing yet), so it keeps
+/// it when the website forgets the link (#149). None for any other thread: that one gets the website's answer.
+pub(super) fn started_here(m: &Manager, caller: &str, id: &str) -> Option<String> {
+    let local = m.local.lock().unwrap();
+    let session = local
+        .sessions
+        .get(caller)
+        .filter(|s| s.started.contains(id))?;
+    let state = session.child_states.get(id).map(String::as_str);
+    Some(state.unwrap_or("unknown").to_owned())
+}
+
 /// `tell`, `stop` or `archive` from the calling session to a child in a sandbox of its own. `to_parent`: a
 /// `tell --parent`, which the website sends to the parent it saved now, not `id`, this session's first one (#968).
 pub(super) async fn command(
@@ -133,6 +147,7 @@ pub(super) async fn command(
         )
     };
     let other = shared && !mine;
+    let started = started_here(m, caller, id).is_some();
     let Some(api) = m
         .history
         .api
@@ -179,6 +194,14 @@ pub(super) async fn command(
                 text,
                 if other { MAYBE_NOTE } else { APP_NOTE },
             );
+        }
+        // The website forgot the link to a child this thread started (#149): the app, which still nests it, applies
+        // it. An archive hides it from `thread list` here at once, as one the website took does.
+        Err(ApiError::Status(403 | 404, _)) if started && !up => {
+            if action == "archive" {
+                note_child(m, caller, id, "archived", &Value::Null);
+            }
+            return via_app(m, caller, id, action, text, APP_NOTE);
         }
         // Core had no parent, and the website has none it can reach: as before (#994).
         Err(ApiError::Status(404, _)) if id == "parent" => {
@@ -446,7 +469,7 @@ fn next_report(local: &Local) -> Option<(String, String, Value)> {
 
 /// `thread list` also shows children in sandboxes of their own, at any depth, from the website's links (ADR 0256):
 /// what this thread last heard of each, or else its sandbox's state. Ones started in the last few minutes show as
-/// `starting` until their sandbox wakes, linked or not.
+/// `starting` until their sandbox wakes, linked or not, and the ones this thread started, linked or not (#149).
 pub(super) async fn own_children(m: &Manager, caller: &str, archived: bool, answer: &mut Value) {
     // The website links every child started here to this sandbox's thread: each session lists the ones it started,
     // and the sandbox's thread also those an older app started.
@@ -535,6 +558,40 @@ pub(super) async fn own_children(m: &Manager, caller: &str, archived: bool, answ
                 json!({"id":id,"title":null,"state":"starting","status":"active","sandbox":"own"}),
             );
         }
+    }
+    // Children this thread started that the website's answer left out (#149): it forgot the link. An archived one the
+    // website still knows stays hidden, so this asks for those too. Without an answer, nothing is guessed.
+    let mut missing: Vec<&String> = (mine.iter())
+        .filter(|id| {
+            !(!shared && others.contains(*id)) && !list.iter().any(|c| c["id"] == id.as_str())
+        })
+        .collect();
+    if !found.is_object() || missing.is_empty() {
+        return;
+    }
+    if !archived {
+        let Ok(all) = api.get("children", &[("archived", "1")]).await else {
+            return;
+        };
+        let all = all["children"].as_array().cloned().unwrap_or_default();
+        missing.retain(|id| !all.iter().any(|c| c["id"] == id.as_str()));
+    }
+    for id in missing {
+        let known = known.get(id).map(String::as_str).unwrap_or("unknown");
+        let state = if archiving.contains(id) {
+            "archived"
+        } else {
+            known
+        };
+        if state == "archived" && !archived {
+            continue;
+        }
+        let status = super::children::status(state, false);
+        let mut item = json!({"id":id,"title":null,"state":state,"status":status,"sandbox":"own","unlinked":true,"note":UNLINKED});
+        if let Some(issue) = start_error(m, caller, id).filter(|_| state == "error") {
+            item["issue"] = json!(issue);
+        }
+        list.push(item);
     }
 }
 
@@ -908,6 +965,151 @@ impl Manager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A fake website that has lost this sandbox's links: it lists no children and refuses every command for them,
+    /// as Cloud did after a Cloudroom restart. Answers `GET children` and `POST relay`.
+    async fn forgetful_website() -> String {
+        let app = Router::new()
+            .route(
+                "/api/core/children",
+                axum::routing::get(|| async { Json(json!({"children":[]})) }),
+            )
+            .route(
+                "/api/core/relay",
+                post(|| async {
+                    (
+                        StatusCode::FORBIDDEN,
+                        Json(json!({"error":"Not a subagent of this thread"})),
+                    )
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/api/core", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        url
+    }
+
+    /// A Core whose top-level thread `cr_parent` started `thr_kid` in a sandbox of its own (no longer `starting`),
+    /// reopened from its journal as after a restart.
+    async fn restarted_parent(name: &str) -> (Arc<Manager>, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("cloudroom-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut local = Local::open(&dir).unwrap();
+        for (kind, data) in [
+            (
+                "child_start",
+                json!({"request_id":"r1","body":{"prompt":"go"}}),
+            ),
+            (
+                "child_start_state",
+                json!({"request_id":"r1","child":"thr_kid","done":true}),
+            ),
+            ("child_state", json!({"child":"thr_kid","state":"idle"})),
+        ] {
+            local.append("cr_parent", kind, data, None).unwrap();
+        }
+        drop(local);
+        let config = crate::config::Config {
+            listen: "127.0.0.1:0".parse().unwrap(),
+            token: "t".repeat(32),
+            state_dir: dir.clone(),
+            repository: dir.clone(),
+            api_url: Some(forgetful_website().await),
+            store: "test".into(),
+            instance: None,
+            account_home: dir.clone(),
+            default_harness: crate::runtime::Kind::Codex,
+            harnesses: [(
+                crate::runtime::Kind::Codex,
+                crate::config::HarnessConfig {
+                    binary: "/bin/false".into(),
+                    home: dir.clone(),
+                    model: "fixture".into(),
+                    provider: None,
+                },
+            )]
+            .into(),
+            storage: None,
+            rpc_timeout: Duration::from_secs(30),
+            diagnostic_upload: Duration::from_secs(3600),
+        };
+        (Manager::open(config).unwrap(), dir)
+    }
+
+    /// `thread list` and `status` showed `childThreads: []` for a child this thread started itself, once the website
+    /// stopped listing it and it was no longer `starting`.
+    #[tokio::test]
+    async fn a_child_this_thread_started_stays_listed_when_the_website_forgets_it() {
+        let (m, dir) = restarted_parent("listed").await;
+        let mut answer = m.children("cr_parent", None, false).await;
+        own_children(&m, "cr_parent", false, &mut answer).await;
+        let ids: Vec<&str> = answer["children"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|c| c["id"].as_str())
+            .collect();
+        assert_eq!(ids, ["thr_kid"], "{answer}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// After a restart the website refused `archive` (and `stop`, `tell`) with "Not a subagent of this thread" while
+    /// the sidebar still showed the child under its parent, so nobody could clear it.
+    #[tokio::test]
+    async fn a_child_this_thread_started_can_be_archived_when_the_website_forgets_it() {
+        let (m, dir) = restarted_parent("archived").await;
+        let archived = command(&m, "cr_parent", "thr_kid", "archive", None, false, false).await;
+        assert!(
+            archived.is_ok(),
+            "archive was refused: {:?}",
+            archived.err().map(|f| format!("{f:?}"))
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The app takes what the website forgot only for a child this thread started: any other thread still gets the
+    /// website's refusal, so a parent gains no reach it didn't have (#149).
+    #[tokio::test]
+    async fn a_thread_this_one_did_not_start_still_gets_the_websites_refusal() {
+        let (m, dir) = restarted_parent("stranger").await;
+        for action in ["archive", "stop", "tell"] {
+            let text = (action == "tell").then_some("hi");
+            let answer = command(&m, "cr_parent", "thr_other", action, text, false, false).await;
+            let (status, _) = answer.expect_err(action);
+            assert_eq!(status, StatusCode::FORBIDDEN, "{action}");
+            let kid = command(&m, "cr_parent", "thr_kid", action, text, false, false).await;
+            assert_eq!(kid.unwrap().0["state"], "requested", "{action}");
+        }
+        let records = m.records("cr_parent", 0).await.unwrap();
+        let sent: Vec<&Value> = (records.iter())
+            .filter(|r| r.kind == "child_command")
+            .map(|r| &r.data["id"])
+            .collect();
+        assert_eq!(sent, [&json!("thr_kid"); 3]);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A forgotten child this thread archived leaves `thread list`, and shows again only with `--include-archived`.
+    #[tokio::test]
+    async fn an_archived_forgotten_child_shows_only_with_include_archived() {
+        let (m, dir) = restarted_parent("hidden").await;
+        let archived = command(&m, "cr_parent", "thr_kid", "archive", None, false, false).await;
+        assert_eq!(archived.unwrap().0["state"], "requested");
+        let mut states = Vec::new();
+        for archived in [false, true] {
+            let mut answer = m.children("cr_parent", None, archived).await;
+            own_children(&m, "cr_parent", archived, &mut answer).await;
+            let children = answer["children"].as_array().unwrap();
+            states.push(
+                children
+                    .iter()
+                    .map(|c| c["state"].clone())
+                    .collect::<Vec<_>>(),
+            );
+        }
+        assert_eq!(states, [vec![], vec![json!("archived")]]);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn a_relayed_message_names_its_sender_with_or_without_bb() {
