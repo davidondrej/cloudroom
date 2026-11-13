@@ -1100,6 +1100,9 @@ impl Manager {
             runtime::Kind::Devin => runtime::DEVIN_REASONING_LEVELS.contains(&reasoning),
             runtime::Kind::Droid => runtime::DROID_REASONING_LEVELS.contains(&reasoning),
             runtime::Kind::Kimi => runtime::KIMI_REASONING_LEVELS.contains(&reasoning),
+            runtime::Kind::Antigravity => {
+                runtime::ANTIGRAVITY_REASONING_LEVELS.contains(&reasoning)
+            }
             runtime::Kind::OpenClaw => runtime::OPENCLAW_REASONING_LEVELS.contains(&reasoning),
             runtime::Kind::AgentZero => runtime::AGENT_ZERO_REASONING_LEVELS.contains(&reasoning),
         };

@@ -86,6 +86,7 @@ impl Config {
             "devin" => Kind::Devin,
             "droid" => Kind::Droid,
             "kimi" => Kind::Kimi,
+            "antigravity" => Kind::Antigravity,
             "openclaw" => Kind::OpenClaw,
             "agent-zero" => Kind::AgentZero,
             _ => return Err(io::Error::other("unsupported CLOUDROOM_HARNESS")),
@@ -160,6 +161,8 @@ impl Config {
             (Kind::Kimi, "kimi", ".kimi-code"),
             // Agent Zero's bridge; the agent itself is the user's own server (ADR 20261116-153548).
             (Kind::AgentZero, "a0", ".agent-zero"),
+            // Google's installer names the Antigravity CLI `agy`; it keeps its home in ~/.gemini.
+            (Kind::Antigravity, "agy", ".gemini"),
         ] {
             let home = account_home.join(home);
             let binary = [
