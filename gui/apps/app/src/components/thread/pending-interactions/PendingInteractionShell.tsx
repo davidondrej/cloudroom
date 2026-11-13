@@ -21,6 +21,8 @@ interface PendingInteractionShellProps {
   label: string;
   title?: string;
   initiallyExpanded: boolean;
+  /** No header row and no collapse: the content is the whole card. */
+  headless?: boolean;
   errorMessage?: string | null;
   footer?: ReactNode;
   children?: (isExpanded: boolean) => ReactNode;
@@ -32,6 +34,7 @@ export function PendingInteractionShell({
   label,
   title,
   initiallyExpanded,
+  headless = false,
   errorMessage,
   footer,
   children,
@@ -43,7 +46,12 @@ export function PendingInteractionShell({
   const contentId = useId();
   const errorId = useId();
   const handleKeyDown = (event: KeyboardEvent<HTMLElement>) => {
-    if (event.key === "Escape" && isExpanded && !event.defaultPrevented) {
+    if (
+      event.key === "Escape" &&
+      isExpanded &&
+      !headless &&
+      !event.defaultPrevented
+    ) {
       event.preventDefault();
       event.stopPropagation();
       setIsExpanded(false);
@@ -101,44 +109,53 @@ export function PendingInteractionShell({
       onKeyDown={handleKeyDown}
       className="@container mb-2 min-w-0 max-w-full rounded-lg border border-border bg-surface-recessed text-xs text-muted-foreground"
     >
-      <div
-        className={cn(
-          "flex min-h-9 items-center gap-2 pl-3 pr-1.5",
-          isExpanded ? "border-b border-border-hairline py-1.5" : "py-1",
-        )}
-      >
-        <button
-          type="button"
-          aria-controls={contentId}
-          aria-expanded={isExpanded}
-          aria-label={label}
-          aria-describedby={errorMessage ? errorId : undefined}
-          onClick={handleToggle}
-          className="flex min-h-7 min-w-0 flex-1 items-center rounded-md text-left focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+      {headless ? null : (
+        <div
+          className={cn(
+            "flex min-h-9 items-center gap-2 pl-3 pr-1.5",
+            isExpanded ? "border-b border-border-hairline py-1.5" : "py-1",
+          )}
         >
-          <span className="flex min-w-0 flex-1 items-start gap-2">
-            <span className="flex h-[1lh] shrink-0 items-center text-sm">
-              <AttentionDot hasError={Boolean(errorMessage)} />
+          <button
+            type="button"
+            aria-controls={contentId}
+            aria-expanded={isExpanded}
+            aria-label={label}
+            aria-describedby={errorMessage ? errorId : undefined}
+            onClick={handleToggle}
+            className="flex min-h-7 min-w-0 flex-1 items-center rounded-md text-left focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+          >
+            <span className="flex min-w-0 flex-1 items-start gap-2">
+              <span className="flex h-[1lh] shrink-0 items-center text-sm">
+                <AttentionDot hasError={Boolean(errorMessage)} />
+              </span>
+              <span
+                title={label}
+                className={cn(
+                  "min-w-0 text-sm text-foreground",
+                  isExpanded
+                    ? "whitespace-normal font-semibold"
+                    : "truncate font-medium",
+                )}
+              >
+                {label}
+              </span>
             </span>
-            <span
-              title={label}
-              className={cn(
-                "min-w-0 text-sm text-foreground",
-                isExpanded
-                  ? "whitespace-normal font-semibold"
-                  : "truncate font-medium",
-              )}
-            >
-              {label}
-            </span>
-          </span>
-        </button>
-        {isExpanded ? sourceThreadLink : null}
-        {toggle}
-      </div>
+          </button>
+          {isExpanded ? sourceThreadLink : null}
+          {toggle}
+        </div>
+      )}
       <Activity mode={isExpanded ? "visible" : "hidden"}>
         <ThreadQuestionFormHost>
-          <div id={contentId} hidden={!isExpanded} className="px-3 pb-3 pt-2.5">
+          <div
+            id={contentId}
+            hidden={!isExpanded}
+            className={cn("px-3 pb-3", headless ? "pt-3" : "pt-2.5")}
+          >
+            {headless && sourceThreadLink ? (
+              <div className="mb-2 flex">{sourceThreadLink}</div>
+            ) : null}
             {title ? (
               <h3 className="min-w-0 text-sm font-medium text-foreground">
                 <ExpandableLine

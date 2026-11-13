@@ -94,7 +94,8 @@ export function ConnectVpsDialog({ open, onOpenChange }: { open: boolean; onOpen
   const ready = code.isSuccess && vps.data?.connected === true && vps.data.health !== null;
   return (
     <Dialog open={open} onOpenChange={(next) => { if (!next) void queryClient.invalidateQueries({ queryKey: KEY }); onOpenChange(next); }} modal={false}>
-      <DialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto">
+      {/* The "Add a machine" menu takes focus back as it closes. Losing focus must not close this dialog (#1116). */}
+      <DialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto" onFocusOutside={(event) => event.preventDefault()}>
         <DialogHeader>
           <DialogTitle>Connect your VPS</DialogTitle>
           <DialogDescription>Run Cloud threads on your own server. When it's busy, new threads use Cloudroom Cloud.</DialogDescription>

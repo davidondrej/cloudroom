@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync } from "node:fs";
 import {
   experimental_defineHostEntry,
@@ -6,219 +6,113 @@ import {
 } from "@get-bb/plugin-sdk/host";
 import { keepAwakeHostContract } from "./contract.js";
 
-const CAFFEINATE_COMMAND = "/usr/bin/caffeinate";
-const SYSTEMD_INHIBIT_COMMAND = "/usr/bin/systemd-inhibit";
-const GNOME_SESSION_INHIBIT_COMMAND = "/usr/bin/gnome-session-inhibit";
-const KEEP_AWAKE_REASON = "Keep Awake is on in Cloudroom";
-const RESTART_DELAY_MS = 1_000;
-const MAX_RESTART_DELAY_MS = 60_000;
-const SETTLED_CHILD_MS = 10_000;
-const WINDOWS_AWAKE_STATE = 0x80000001;
+const REASON = "Keep Awake is on in Cloudroom";
+const GNOME_INHIBIT = "/usr/bin/gnome-session-inhibit";
+const SYSTEMD_INHIBIT = "/usr/bin/systemd-inhibit";
+const RESTART_MIN_MS = 1_000;
+const RESTART_MAX_MS = 60_000;
+/** A helper that ran this long was healthy, so its next restart is quick again. */
+const HEALTHY_MS = 10_000;
 
-interface KeepAwakeChild {
-  kill(signal: NodeJS.Signals): boolean;
-  once(event: "error" | "exit", listener: () => void): this;
-}
-
-interface KeepAwakeHostDependencies {
-  readonly pid: number;
-  readonly platform: NodeJS.Platform;
-  readonly hasSystemdInhibit?: boolean;
-  readonly hasGnomeSessionInhibit?: boolean;
-  now?(): number;
-  spawn(
-    command: string,
-    args: readonly string[],
-    options: { readonly stdio: "ignore"; readonly windowsHide: true },
-  ): KeepAwakeChild;
-}
-
-function keepAwakeCommand(
-  deps: KeepAwakeHostDependencies,
-): readonly [string, readonly string[]] | null {
-  const pid = String(deps.pid);
-  if (deps.platform === "darwin") {
-    return [CAFFEINATE_COMMAND, ["-d", "-i", "-s", "-w", pid]];
-  }
-  const waitForCloudroom = ["tail", `--pid=${pid}`, "-f", "/dev/null"];
-  if (deps.platform === "linux" && deps.hasGnomeSessionInhibit === true) {
-    // GNOME suspends on its own idle timer and ignores logind idle locks.
-    // An idle inhibit stops that timer and still lets lid close and Suspend work.
+/**
+ * The helper that keeps this OS awake. Every helper watches process `pid` and
+ * exits with it, so sleep prevention can never outlive Cloudroom. `null` means
+ * this OS is not supported.
+ */
+export function keepAwakeCommand(
+  platform: NodeJS.Platform,
+  pid: number,
+  env: NodeJS.ProcessEnv = process.env,
+  exists: (path: string) => boolean = existsSync,
+): [command: string, args: string[]] | null {
+  if (platform === "darwin") return ["/usr/bin/caffeinate", ["-d", "-i", "-s", "-w", String(pid)]];
+  if (platform === "win32") {
+    const script = [
+      "$ErrorActionPreference = 'Stop'",
+      "$power = Add-Type -Name KeepAwake -Namespace Cloudroom -PassThru -MemberDefinition '[DllImport(\"kernel32.dll\")] public static extern uint SetThreadExecutionState(uint flags);'",
+      // ES_CONTINUOUS | ES_SYSTEM_REQUIRED, as a decimal: PowerShell reads the hex as negative.
+      `if ($power::SetThreadExecutionState(${0x80000001}) -eq 0) { exit 1 }`,
+      `Wait-Process -Id ${pid}`,
+    ].join("; ");
     return [
-      GNOME_SESSION_INHIBIT_COMMAND,
-      [
-        "--app-id",
-        "Cloudroom",
-        "--reason",
-        KEEP_AWAKE_REASON,
-        "--inhibit",
-        "idle",
-        ...waitForCloudroom,
-      ],
+      `${env.SystemRoot ?? "C:\\Windows"}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe`,
+      ["-NoProfile", "-NonInteractive", "-Command", script],
     ];
   }
-  if (deps.platform === "linux" && deps.hasSystemdInhibit === true) {
-    return [
-      SYSTEMD_INHIBIT_COMMAND,
-      [
-        "--what=idle:sleep",
-        "--who=Cloudroom",
-        `--why=${KEEP_AWAKE_REASON}`,
-        "--mode=block",
-        ...waitForCloudroom,
-      ],
-    ];
+  if (platform !== "linux") return null;
+  const untilPidExits = ["tail", `--pid=${pid}`, "-f", "/dev/null"];
+  // GNOME suspends on its own idle timer and ignores logind idle locks. An
+  // idle inhibit stops that timer and still lets lid close and Suspend work.
+  if (/gnome/i.test(env.XDG_CURRENT_DESKTOP ?? "") && exists(GNOME_INHIBIT)) {
+    const args = ["--app-id", "Cloudroom", "--reason", REASON, "--inhibit", "idle"];
+    return [GNOME_INHIBIT, [...args, ...untilPidExits]];
   }
-  if (deps.platform === "win32") {
-    return [
-      `${process.env.SystemRoot ?? "C:\\Windows"}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe`,
-      [
-        "-NoProfile",
-        "-NonInteractive",
-        "-Command",
-        [
-          "$ErrorActionPreference = 'Stop'",
-          "$power = Add-Type -Name KeepAwake -Namespace Cloudroom -PassThru -MemberDefinition '[DllImport(\"kernel32.dll\")] public static extern uint SetThreadExecutionState(uint flags);'",
-          `if ($power::SetThreadExecutionState(${WINDOWS_AWAKE_STATE}) -eq 0) { exit 1 }`,
-          `Wait-Process -Id ${pid}`,
-        ].join("; "),
-      ],
-    ];
-  }
-  return null;
+  if (!exists(SYSTEMD_INHIBIT)) return null;
+  const args = ["--what=idle:sleep", "--who=Cloudroom", `--why=${REASON}`, "--mode=block"];
+  return [SYSTEMD_INHIBIT, [...args, ...untilPidExits]];
 }
 
-export function createKeepAwakeHostEntry(deps: KeepAwakeHostDependencies) {
-  const command = keepAwakeCommand(deps);
-  let child: KeepAwakeChild | null = null;
-  let lifecycleSignal: AbortSignal | null = null;
-  let desiredEnabled = false;
-  let restartTimer: ReturnType<typeof setTimeout> | null = null;
-  let restartDelayMs = RESTART_DELAY_MS;
-  let workerLease: ExperimentalHostWorkerLease | null = null;
-  const now = deps.now ?? Date.now;
+const command = keepAwakeCommand(process.platform, process.pid);
+let wanted = false;
+let helper: ChildProcess | null = null;
+let restart: ReturnType<typeof setTimeout> | null = null;
+let restartMs = RESTART_MIN_MS;
+/** Stops the daemon from closing this idle worker, which would end the helper. */
+let lease: ExperimentalHostWorkerLease | null = null;
 
-  function clearRestart(): void {
-    if (restartTimer === null) return;
-    clearTimeout(restartTimer);
-    restartTimer = null;
+function restartLater(): void {
+  restart = setTimeout(() => {
+    restart = null;
+    start();
+  }, restartMs);
+  restartMs = Math.min(restartMs * 2, RESTART_MAX_MS);
+}
+
+function start(): void {
+  if (!wanted || command === null || helper !== null || restart !== null) return;
+  const startedAt = Date.now();
+  let next: ChildProcess;
+  try {
+    next = spawn(command[0], command[1], { stdio: "ignore", windowsHide: true });
+  } catch {
+    restartLater();
+    return;
   }
+  helper = next;
+  const ended = (): void => {
+    if (helper !== next) return; // stopped on purpose, or already handled
+    helper = null;
+    if (Date.now() - startedAt >= HEALTHY_MS) restartMs = RESTART_MIN_MS;
+    restartLater();
+  };
+  next.once("error", ended).once("exit", ended);
+}
 
-  function stop(): void {
-    const active = child;
-    child = null;
-    active?.kill("SIGTERM");
-  }
+function stop(): void {
+  wanted = false;
+  if (restart !== null) clearTimeout(restart);
+  restart = null;
+  restartMs = RESTART_MIN_MS;
+  const running = helper;
+  helper = null;
+  running?.kill("SIGTERM");
+  void lease?.dispose();
+  lease = null;
+}
 
-  function releaseWorkerLease(): void {
-    const lease = workerLease;
-    workerLease = null;
-    void lease?.dispose();
-  }
-
-  function scheduleRestart(): void {
-    if (
-      restartTimer !== null ||
-      !desiredEnabled ||
-      lifecycleSignal?.aborted === true
-    ) {
-      return;
-    }
-    const delayMs = restartDelayMs;
-    if (deps.platform === "win32") {
-      restartDelayMs = Math.min(restartDelayMs * 2, MAX_RESTART_DELAY_MS);
-    }
-    restartTimer = setTimeout(() => {
-      restartTimer = null;
-      start();
-    }, delayMs);
-  }
-
-  function start(): void {
-    if (
-      child !== null ||
-      restartTimer !== null ||
-      !desiredEnabled ||
-      command === null ||
-      lifecycleSignal?.aborted === true
-    ) {
-      return;
-    }
-    let next: KeepAwakeChild;
-    try {
-      next = deps.spawn(command[0], command[1], {
-        stdio: "ignore",
-        windowsHide: true,
-      });
-    } catch {
-      scheduleRestart();
-      return;
-    }
-    child = next;
-    const startedAt = now();
-    const clear = (): void => {
-      if (child !== next) return;
-      child = null;
-      if (now() - startedAt >= SETTLED_CHILD_MS) {
-        restartDelayMs = RESTART_DELAY_MS;
-      }
-      scheduleRestart();
-    };
-    next.once("error", clear);
-    next.once("exit", clear);
-  }
-
-  function disposeState(): void {
-    desiredEnabled = false;
-    clearRestart();
-    stop();
-    releaseWorkerLease();
-  }
-
-  function bindLifecycle(signal: AbortSignal): void {
-    if (lifecycleSignal === signal) return;
-    lifecycleSignal = signal;
-    signal.addEventListener("abort", disposeState, { once: true });
-  }
-
-  function status(): { enabled: boolean; supported: boolean } {
-    return { enabled: child !== null, supported: command !== null };
-  }
-
-  return experimental_defineHostEntry({
-    contract: keepAwakeHostContract,
-    handlers: {
-      setEnabled(input, context) {
-        bindLifecycle(context.lifecycle.signal);
-        desiredEnabled = command !== null && input.enabled;
-        if (!desiredEnabled) {
-          restartDelayMs = RESTART_DELAY_MS;
-          clearRestart();
-          stop();
-          releaseWorkerLease();
-          return status();
-        }
-        workerLease ??= context.experimental_retainWorker();
+export default experimental_defineHostEntry({
+  contract: keepAwakeHostContract,
+  handlers: {
+    setEnabled({ enabled }, context) {
+      if (enabled && command !== null) {
+        wanted = true;
+        lease ??= context.experimental_retainWorker();
         start();
-        return status();
-      },
+      } else {
+        stop();
+      }
+      return { enabled: helper !== null, supported: command !== null };
     },
-    dispose() {
-      disposeState();
-    },
-  });
-}
-
-export default createKeepAwakeHostEntry({
-  pid: process.pid,
-  platform: process.platform,
-  hasSystemdInhibit:
-    process.platform === "linux" && existsSync(SYSTEMD_INHIBIT_COMMAND),
-  hasGnomeSessionInhibit:
-    process.platform === "linux" &&
-    /gnome/i.test(process.env.XDG_CURRENT_DESKTOP ?? "") &&
-    existsSync(GNOME_SESSION_INHIBIT_COMMAND),
-  spawn(command, args, options) {
-    return spawn(command, [...args], options);
   },
+  dispose: stop,
 });

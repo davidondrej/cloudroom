@@ -85,6 +85,7 @@ pub fn router(manager: Arc<Manager>, token: String) -> Router {
         .route("/v1/sessions/{id}/edit", post(edit))
         .route("/v1/sessions/{id}/cancel", post(cancel))
         .route("/v1/sessions/{id}/reorder", post(reorder))
+        .route("/v1/sessions/{id}/model", post(model))
         .route("/v1/sessions/{id}/steer", post(steer))
         .route("/v1/sessions/{id}/compact", post(compact))
         .route("/v1/sessions/{id}/goal", post(goal))
@@ -95,6 +96,9 @@ pub fn router(manager: Arc<Manager>, token: String) -> Router {
         )
         .route("/v1/sessions/{id}/interrupt", post(interrupt))
         .route("/v1/sessions/{id}/stop", post(stop))
+        .route("/v1/sessions/{id}/freeze", post(freeze))
+        .route("/v1/sessions/{id}/archive", post(archive))
+        .route("/v1/sessions/{id}/title", post(title))
         .route("/v1/sessions/{id}/sleep", post(sleep))
         .route("/v1/sessions/{id}/detach", post(detach))
         .route("/v1/sessions/{id}/resume", post(resume))
@@ -303,7 +307,7 @@ async fn drain(State(manager): State<Arc<Manager>>, Json(input): Json<Drain>) ->
                 std::time::Duration::from_secs(7),
                 manager.send_plan_reports()
             ),
-            manager.flush_history(std::time::Duration::from_secs(8)),
+            manager.flush_history(std::time::Duration::from_secs(8), false),
         );
         if sent.is_err() {
             manager.delay_plan_reports();
@@ -577,16 +581,20 @@ impl IntoResponse for session::Error {
             | "saved session has no matching receipt" => "request_conflict",
             "agent setup is incomplete" | "harness is not configured" => "harness_not_configured",
             "invalid workspace" | "workspace mapping unavailable" => "invalid_workspace",
-            "storage unsafe; new execution is blocked" => "storage_blocked",
+            "storage unsafe; new execution is blocked" | "storage unsafe; uploads are blocked" => {
+                "storage_blocked"
+            }
             "service is stopping" => "service_stopping",
+            session::MOVING => "moving",
+            session::SWITCHING => "switching",
             "service is draining" => "service_draining",
             "this thread was asleep and is waking up; try again in a few seconds" => {
                 "session_waking"
             }
             e if e.starts_with("model catalog unavailable") => "model_catalog_unavailable",
-            "connect Codex before starting cloud work" => "codex_auth_required",
+            e if e.starts_with("connect Codex before starting cloud work") => "codex_auth_required",
             "connect Claude Code before starting cloud work" => "claude_auth_required",
-            "Claude account could not be verified" => "claude_auth_unavailable",
+            e if e.starts_with("Claude account could not be verified") => "claude_auth_unavailable",
             "Codex usage limit reached" => "codex_usage_limit",
             "extra credits are off for loops" => "plan_credits",
             "Codex account could not be verified" => "codex_auth_unavailable",
@@ -628,6 +636,8 @@ struct Start {
     title: Option<String>,
     /// Starts a side chat on a copy of this session's conversation, or a `fresh` one with none; it inherits the source's settings.
     fork: Option<session::ForkFrom>,
+    /// Continues this session's conversation in a new one: an agent switch or project move from any computer (#237).
+    continue_from: Option<String>,
 }
 
 async fn workspace(
@@ -779,14 +789,103 @@ async fn capabilities(State(manager): State<Arc<Manager>>) -> Json<Value> {
     Json(manager.capabilities().await)
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Stop {
+    request_id: String,
+    /// A Stop the app held while the sandbox slept stops only the turn it was meant for (#237).
+    after: Option<String>,
+}
+
 async fn stop(
     State(manager): State<Arc<Manager>>,
     Path(id): Path<String>,
-    Json(body): Json<RequestId>,
+    Json(body): Json<Stop>,
 ) -> Result<impl IntoResponse> {
     key(&body.request_id)?;
+    if let Some(after) = &body.after {
+        let running = manager.session(&id).await?.current_request;
+        if running.as_ref().is_some_and(|running| running != after) {
+            let receipt =
+                json!({"request_id":body.request_id,"command":"stop","input":{},"state":"ignored"});
+            return Ok((
+                StatusCode::ACCEPTED,
+                Json(json!({"session_id":id,"receipt":receipt,"saving":manager.saving()})),
+            ));
+        }
+    }
     let receipt = manager.command(&id, body.request_id, "stop", json!({}))?;
     Ok(accepted(&manager, &id, receipt))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Freeze {
+    request_id: String,
+    #[serde(default)]
+    release: bool,
+}
+
+/// Teleport to Local holds the session while it moves, so no other client starts work it would cut off (#237).
+async fn freeze(
+    State(manager): State<Arc<Manager>>,
+    Path(id): Path<String>,
+    Json(body): Json<Freeze>,
+) -> Result<Json<Value>> {
+    key(&body.request_id)?;
+    Ok(Json(manager.freeze(&id, &body.request_id, body.release)?))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Title {
+    request_id: String,
+    title: String,
+}
+
+/// The user renames a session in an app (#237). For a thread sharing another's sandbox, which has no website row,
+/// Core keeps its title; every computer reads it from the session list.
+async fn title(
+    State(manager): State<Arc<Manager>>,
+    Path(id): Path<String>,
+    Json(body): Json<Title>,
+) -> Result<Json<Value>> {
+    key(&body.request_id)?;
+    let title = body.title.trim();
+    if title.is_empty() || title.chars().count() > 200 || title.chars().any(char::is_control) {
+        return Err(session::Error::Conflict("Use a title of 1-200 characters"));
+    }
+    manager.set_title(&id, title)?;
+    Ok(Json(json!({"id":id,"title":title})))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Archive {
+    request_id: String,
+    archived: bool,
+}
+
+/// The user archives or restores a thread in an app that the website can't (#237): one sharing another thread's
+/// sandbox, or one its agent archived while a child kept the sandbox. Archiving stops its agent too.
+async fn archive(
+    State(manager): State<Arc<Manager>>,
+    Path(id): Path<String>,
+    Json(body): Json<Archive>,
+) -> Result<Json<Value>> {
+    key(&body.request_id)?;
+    manager.set_archived(&id, body.archived)?;
+    if body.archived {
+        let base: String = body.request_id.chars().take(56).collect();
+        let _ = manager.command(&id, format!("{base}_stop"), "stop", json!({}));
+        let _ = manager.command(
+            &id,
+            format!("{base}_sleep"),
+            "sleep",
+            json!({"end_jobs":true}),
+        );
+    }
+    Ok(Json(json!({"id":id,"archived":body.archived})))
 }
 
 #[derive(Deserialize)]
@@ -867,6 +966,36 @@ async fn start(
         .is_some_and(|p| p.trim().is_empty() || p.len() > 32768 || p.contains('\0'))
     {
         return Err(session::Error::Conflict("invalid system prompt"));
+    }
+    if let Some(from) = body.continue_from {
+        if body.fork.is_some()
+            || body.parent_session.is_some()
+            || body.prompt.is_some()
+            || body.title.is_some()
+            || body.command_guard_enabled.is_some()
+            || body.strip_ai_co_authors.is_some()
+            || body.system_prompt.is_some()
+            || body.parent_thread.is_some()
+        {
+            return Err(session::Error::Conflict(
+                "a continued session keeps the settings it continues",
+            ));
+        }
+        // Its own task: an app that gives up mid-switch (a timeout, a closed laptop) drops this request, and a switch
+        // cut off there would leave the old session refusing messages until Core's next start.
+        let (switching, request) = (manager.clone(), body.request_id);
+        let agent = (body.harness, body.model, body.reasoning, body.provider);
+        let place = (body.workspace, body.workspace_name);
+        let (id, receipt, pending) = tokio::spawn(async move {
+            switching
+                .continue_session(request, from, agent, place)
+                .await
+        })
+        .await
+        .map_err(|_| session::Error::Conflict("the switch stopped unexpectedly; try it again"))??;
+        let (status, Json(mut answer)) = accepted(&manager, &id, receipt);
+        answer["pending"] = json!(pending);
+        return Ok((status, Json(answer)));
     }
     if let Some(fork) = body.fork {
         if body.parent_session.is_some()
@@ -956,12 +1085,29 @@ fn accepted(manager: &Manager, id: &str, receipt: session::Receipt) -> (StatusCo
     )
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Close {
+    request_id: String,
+    /// Teleport to Local's freeze: the close happens only while it still holds (#237).
+    freeze: Option<String>,
+}
+
 async fn close(
     State(manager): State<Arc<Manager>>,
     Path(id): Path<String>,
-    Json(body): Json<RequestId>,
+    Json(body): Json<Close>,
 ) -> Result<impl IntoResponse> {
     key(&body.request_id)?;
+    if body
+        .freeze
+        .as_ref()
+        .is_some_and(|request| !manager.holds(&id, request))
+    {
+        return Err(session::Error::Conflict(
+            "the move to the computer timed out, and this thread may have changed since; it stays in Cloud",
+        ));
+    }
     let receipt = manager.command(&id, body.request_id, "close", json!({}))?;
     Ok(accepted(&manager, &id, receipt))
 }
@@ -1153,6 +1299,40 @@ async fn reorder(
     Ok(accepted(&manager, &id, receipt))
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Model {
+    request_id: String,
+    model: String,
+    reasoning: Option<String>,
+}
+
+/// The user's model pick: the session runs it from its next turn, whoever sends it (`set_model`).
+async fn model(
+    State(manager): State<Arc<Manager>>,
+    Path(id): Path<String>,
+    Json(body): Json<Model>,
+) -> Result<impl IntoResponse> {
+    key(&body.request_id)?;
+    if body.reasoning.as_deref().is_some_and(|level| {
+        level.is_empty() || level.len() > 64 || !level.bytes().all(|b| b.is_ascii_lowercase())
+    }) {
+        return Err(session::Error::Conflict("invalid reasoning effort"));
+    }
+    let reasoning = if manager.known_request(&id, &body.request_id) {
+        body.reasoning
+    } else {
+        Some(
+            manager
+                .check_model_switch(&id, &body.model, body.reasoning.as_deref())
+                .await?,
+        )
+    };
+    let input = json!({"model":body.model,"reasoning":reasoning});
+    let receipt = manager.command(&id, body.request_id, "model", input)?;
+    Ok(accepted(&manager, &id, receipt))
+}
+
 async fn steer(
     State(manager): State<Arc<Manager>>,
     Path(id): Path<String>,
@@ -1296,7 +1476,11 @@ async fn attach(
             "session journal is not writable".into(),
         ));
     }
-    if manager.is_stopping() || manager.storage.blocks() {
+    // A stopping Core (sleep, move) is not a full disk: the app wakes the sandbox and retries.
+    if manager.is_stopping() {
+        return Err(session::Error::Conflict("service is stopping"));
+    }
+    if manager.storage.blocks() {
         return Err(session::Error::Conflict(
             "storage unsafe; uploads are blocked",
         ));

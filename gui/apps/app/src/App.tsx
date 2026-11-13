@@ -12,6 +12,7 @@ import { CloudroomAccountPanels } from "./components/CloudroomAccountPanels";
 import { Onboarding } from "./components/Onboarding";
 import { InviteOffer } from "./components/InviteOffer";
 import { StarPrompt } from "./components/StarPrompt";
+import { Wrapped } from "./components/Wrapped";
 import { MoveToApplicationsPrompt } from "./components/MoveToApplicationsPrompt";
 import { CreditsExplainer } from "./components/CloudQueue";
 import { ActivationChecklist } from "./components/ActivationChecklist";
@@ -22,7 +23,7 @@ import { QuickCreateProjectProvider } from "./hooks/useQuickCreateProject";
 import { RouteNavigationProvider } from "./components/ui/app-route-anchor";
 import { RouteNavigationIndicator } from "./components/ui/route-navigation-indicator";
 import { AppNavigationUrlHost } from "./lib/url-open-routing";
-import { watchMacosDesktopZoom } from "./lib/bb-desktop";
+import { watchMacosDesktopZoom } from "./lib/room-desktop";
 import { UiPreferencesSync } from "@/lib/ui-preferences/UiPreferencesSync";
 import { AppFileExternalNavigationHost } from "./components/plugin/AppFileExternalNavigationHost";
 import { useAppTheme } from "./hooks/useAppTheme";
@@ -455,6 +456,7 @@ export function App() {
               <InviteOffer />
               <CreditsExplainer />
               <StarPrompt />
+              <Wrapped />
               <SharedThreadOpener />
               <InstallAppSheet />
               <CloudroomAccountPanels />

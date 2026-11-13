@@ -291,6 +291,38 @@ describe("useProviderCliInstallRunner", () => {
     expect(remounted.result.current.runningJobKey).toBe("host_1:claude-code");
   });
 
+  it("stays running until the CLI status refetch lands", async () => {
+    let refetched = () => {};
+    vi.spyOn(queryClient, "invalidateQueries").mockImplementation(
+      (filters) =>
+        JSON.stringify(filters?.queryKey) ===
+        JSON.stringify(hostProviderCliStatusQueryKey("host_1"))
+          ? new Promise<void>((resolve) => (refetched = resolve))
+          : Promise.resolve(),
+    );
+    const { result } = renderRunner();
+    act(() => {
+      result.current.startInstall({
+        hostId: "host_1",
+        issue: issueForProvider("codex"),
+      });
+    });
+
+    await act(async () => {
+      completeInstall(installAt(0), {
+        type: "completed",
+        provider: "codex",
+        success: true,
+        exitCode: 0,
+        signal: null,
+      });
+    });
+    expect(result.current.runningJobKey).toBe("host_1:codex");
+
+    await act(async () => refetched());
+    expect(result.current.runningJobKey).toBeNull();
+  });
+
   it("keeps a failed install and its stderr available for a retry", async () => {
     const { result } = renderRunner();
     const issue = issueForProvider("codex");

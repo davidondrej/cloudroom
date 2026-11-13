@@ -169,6 +169,7 @@ export function usePlanLimitAgents(threadId: string) {
     );
   return {
     thread,
+    model: currentModel,
     self: self
       ? {
           name: self.displayName,

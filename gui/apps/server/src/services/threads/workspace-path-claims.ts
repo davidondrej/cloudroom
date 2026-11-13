@@ -3,7 +3,7 @@ import {
   findProjectEnvironmentByHostPath,
   type DbConnection,
 } from "@cloudroom/db";
-import { isBbManagedWorkspacePath } from "./workspace-paths.js";
+import { isRoomManagedWorkspacePath } from "./workspace-paths.js";
 
 interface ForeignProviderOwnedPathCheckArgs {
   dataDir: string | null;
@@ -31,7 +31,7 @@ export function foreignProviderOwnedPathRefusal(
 
   if (
     args.dataDir !== null &&
-    isBbManagedWorkspacePath({ dataDir: args.dataDir, path: args.path }) &&
+    isRoomManagedWorkspacePath({ dataDir: args.dataDir, path: args.path }) &&
     findProjectEnvironmentByHostPath(
       db,
       args.projectId,

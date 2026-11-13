@@ -21,6 +21,7 @@ import {
   requestAutomaticMachineRemoval,
   requestMachineRemoval,
   requestMachineSuspension,
+  retryMachineCleanup,
   submitMachine,
   sweepMachineLifecycles,
   sweepProviderMachine,
@@ -30,13 +31,17 @@ import {
   hasPendingProjectSourceSetupOnHost,
 } from "../../../src/services/projects/project-source-setup.js";
 import { setPluginMachineProviderBridge } from "../../../src/services/plugins/plugin-machine-provider-registry.js";
+import { DEFAULT_ENVIRONMENT_PROVIDER_ID } from "../../../src/services/environments/environment-provider-ids.js";
 import {
   reportQueuedCommandError,
   waitForQueuedCommand,
 } from "../../helpers/commands.js";
 import { readJson } from "../../helpers/json.js";
+import { installFakeGitWorktreeProvider } from "../../helpers/environment-provider.js";
 import { installMachineProvider } from "../../helpers/machine-provider.js";
 import {
+  seedEnvironment,
+  seedHost,
   seedHostSession,
   seedProjectWithSource,
   seedThread,
@@ -475,6 +480,39 @@ describe("machine retirement", () => {
       });
       expect(requestAutomaticMachineRemoval(harness.deps, host.id)).toBe(false);
       expect(getHost(harness.db, host.id)?.phase).toBe("active");
+    }));
+
+  it("fails cleanup of an offline persistent machine so it can be retried", async () =>
+    withTestHarness(async (harness) => {
+      const remove = vi.fn(async () => ({ status: "removed" as const }));
+      installMachineProvider({ remove });
+      installFakeGitWorktreeProvider();
+      const host = seedHost(harness.deps);
+      updateHost(harness.db, harness.hub, host.id, {
+        machineProviderId: "test-machine",
+        type: "persistent",
+        phase: "active",
+        resource: { allocation: "persistent" },
+      });
+      const { project } = seedProjectWithSource(harness.deps, {
+        hostId: host.id,
+      });
+      seedEnvironment(harness.deps, {
+        hostId: host.id,
+        projectId: project.id,
+        providerOwnsPath: true,
+        environmentProviderId: DEFAULT_ENVIRONMENT_PROVIDER_ID.gitWorktree,
+        environmentProviderPluginId: "environment-git-worktree",
+      });
+      expect(requestMachineRemoval(harness.deps, host.id)).toBe(true);
+      await sweepProviderMachine(harness.deps, host.id);
+      expect(getHost(harness.db, host.id)).toMatchObject({
+        phase: "removing",
+        teardownStatus: "failed",
+        statusMessage: expect.stringContaining("offline"),
+      });
+      await retryMachineCleanup(harness.deps, host.id);
+      expect(remove).not.toHaveBeenCalled();
     }));
 
   it("waits for in-flight cleanup before a second sweep completes", async () =>

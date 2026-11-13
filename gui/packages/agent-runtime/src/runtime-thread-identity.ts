@@ -22,7 +22,7 @@ interface RecordProviderThreadIdentityArgs {
   threadId: string;
 }
 
-interface ResolveBbThreadIdForProviderThreadArgs {
+interface ResolveRoomThreadIdForProviderThreadArgs {
   providerState: RuntimeProviderIdentityState;
   providerThreadId: string | undefined;
 }
@@ -91,7 +91,7 @@ export class RuntimeThreadIdentityRegistry {
   }
 
   resolveBbThreadIdForProviderThread(
-    args: ResolveBbThreadIdForProviderThreadArgs,
+    args: ResolveRoomThreadIdForProviderThreadArgs,
   ): string | undefined {
     if (!args.providerThreadId) {
       return undefined;

@@ -1,6 +1,6 @@
 {
   "_comment": "Provider-literal ratchet (G1). Per-file occurrence count of provider-ID references in core. May only go DOWN. Regenerate: node scripts/check-provider-literal-ratchet.mjs --write. Every counted file must have an `allowlist` entry (count, reason, owner, diesAt); the entries are authored by hand and survive --write. Delete this file and the guard when empty.",
-  "total": 91,
+  "total": 86,
   "files": {
     "apps/app/src/components/CodexConnectionPanel.tsx": 2,
     "apps/app/src/components/promptbox/NewThreadComposer.tsx": 1,
@@ -14,11 +14,9 @@
     "apps/server/src/services/cloudroom/events.ts": 12,
     "apps/server/src/services/cloudroom/teleport.ts": 13,
     "packages/host-daemon-contract/src/commands.ts": 2,
-    "apps/demo-server/src/fixtures/providers.ts": 3,
-    "apps/demo-server/src/fixtures/world.ts": 2,
     "apps/server/src/services/threads/thread-edit-message.ts": 1,
-    "packages/config/src/bb-app-managed-config.ts": 4,
-    "packages/scripts/src/commands/archive-codex-tmp-bb-sessions.ts": 1,
+    "packages/config/src/app-managed-config.ts": 4,
+    "packages/scripts/src/commands/archive-codex-tmp-sessions.ts": 1,
     "packages/scripts/src/lib/seed-perf-fixture.ts": 3
   },
   "allowlist": {
@@ -94,31 +92,19 @@
       "owner": "Cloudroom GUI",
       "diesAt": "when core events no longer require harness-specific timeline translation"
     },
-    "apps/demo-server/src/fixtures/providers.ts": {
-      "count": 3,
-      "reason": "demo fixtures: the demo server's static provider roster.",
-      "owner": "owner-accepted (demo fixture)",
-      "diesAt": "never (demo fixture)"
-    },
-    "apps/demo-server/src/fixtures/world.ts": {
-      "count": 2,
-      "reason": "demo fixtures: the demo world's default provider.",
-      "owner": "owner-accepted (demo fixture)",
-      "diesAt": "never (demo fixture)"
-    },
     "apps/server/src/services/threads/thread-edit-message.ts": {
       "count": 1,
       "reason": "legacy persisted data: pre-v3 codex timelines recorded the native turn id with no checkpoint; the fallback reads them.",
       "owner": "provider-codex",
       "diesAt": "legacy-tool-item-backfill migration (stamps the checkpoint onto old rows)"
     },
-    "packages/config/src/bb-app-managed-config.ts": {
+    "packages/config/src/app-managed-config.ts": {
       "count": 4,
       "reason": "BUNDLED_PROVIDER_IDS: the legacy `customAcpAgents` reader refuses an agent id that shadows a bundled provider, AND `customModelProviderIdSchema` (live `customModels` config) accepts only a bundled id or an `acp-*` id, so a third-party provider cannot carry custom models today (documented DEBT in the file).",
       "owner": "provider-acp (legacy reader); core config (customModels enum)",
       "diesAt": "the reader with LEGACY_CUSTOM_AGENTS_REMOVED_IN (0.41); the enum when customModels accepts any registered provider id"
     },
-    "packages/scripts/src/commands/archive-codex-tmp-bb-sessions.ts": {
+    "packages/scripts/src/commands/archive-codex-tmp-sessions.ts": {
       "count": 1,
       "reason": "ops script for codex temp sessions: names the `codex` executable, not a provider branch.",
       "owner": "owner-accepted (ops script)",

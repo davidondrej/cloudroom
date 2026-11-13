@@ -700,7 +700,11 @@ function FollowUpPromptBoxWithComposer({
         }
         ghostText={composer.ghostText}
         onGhostText={composer.onGhostText}
-        containerCompactPlaceholder={composer.compactPromptPlaceholder}
+        containerCompactPlaceholder={
+          isPointerCoarse && composer.ghostText
+            ? composer.ghostText
+            : composer.compactPromptPlaceholder
+        }
         heightAnimationKey={isInteractionExpanded ? "expanded" : "compact"}
         mentionMenuPlacement="top"
         submission={{

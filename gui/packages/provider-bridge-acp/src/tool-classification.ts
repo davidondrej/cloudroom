@@ -38,7 +38,7 @@ export interface AcpInjectedTool {
   presentation?: DeltaPresentation;
 }
 
-const BB_TOOL_SERVER = "bb";
+const ROOM_TOOL_SERVER = "bb";
 
 export function isInjectedToolCandidate(
   event: AcpToolCallUpdateEvent,
@@ -466,7 +466,7 @@ function genericToolItem(
   };
 }
 
-function bbToolItem(
+function roomToolItem(
   event: AcpToolCallUpdateEvent,
   injected: AcpInjectedTool,
 ): AcpClassifiedToolCall {
@@ -474,7 +474,7 @@ function bbToolItem(
     item: {
       type: "tool",
       tool: injected.name,
-      server: BB_TOOL_SERVER,
+      server: ROOM_TOOL_SERVER,
       ...genericToolFields(event),
     },
     presentation: injected.presentation ?? toolPresentation(injected.name),
@@ -487,7 +487,7 @@ export function classifyAcpToolCall(
   options?: AcpToolCallPathOptions,
 ): AcpClassifiedToolCall {
   if (injected !== undefined && isInjectedToolCandidate(event)) {
-    return bbToolItem(event, injected);
+    return roomToolItem(event, injected);
   }
   const operation = classifyAcpToolCallOperation(event, options);
   if (operation.kind === "command") {

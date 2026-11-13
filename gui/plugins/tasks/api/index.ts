@@ -58,8 +58,8 @@ export interface TasksApiStore {
   sidebarSummary(): SidebarProjectSummary[];
 }
 
-export function createStore(bb: BbPluginApi): TasksApiStore {
-  const database = bb.storage.database();
+export function createStore(room: BbPluginApi): TasksApiStore {
+  const database = room.storage.database();
   const tasks = createTasksStore(database);
 
   return {
@@ -170,25 +170,25 @@ function taskFailure(error: TasksDomainFailure) {
 }
 
 export function publishTasksChanged(
-  bb: BbPluginApi,
+  room: BbPluginApi,
   taskId: string,
   projectId: string,
 ): void {
   const payload: TasksChangedEvent = { taskId, projectId };
-  bb.realtime.publish("tasks:changed", payload);
+  room.realtime.publish("tasks:changed", payload);
 }
 
 export function publishProjectsChanged(
-  bb: BbPluginApi,
+  room: BbPluginApi,
   projectId: string | null,
 ): void {
   const payload: ProjectsChangedEvent = { projectId };
-  bb.realtime.publish("projects:changed", payload);
+  room.realtime.publish("projects:changed", payload);
 }
 
-export function publishCommentsChanged(bb: BbPluginApi, taskId: string): void {
+export function publishCommentsChanged(room: BbPluginApi, taskId: string): void {
   const payload: CommentsChangedEvent = { taskId };
-  bb.realtime.publish("comments:changed", payload);
+  room.realtime.publish("comments:changed", payload);
 }
 
 function apiTask(store: TasksApiStore, task: StoredTask): Task {
@@ -343,7 +343,7 @@ interface AgentThreadInfo {
 }
 
 async function resolveAgentThreadInfo(
-  bb: BbPluginApi,
+  room: BbPluginApi,
   comments: readonly StoredComment[],
 ): Promise<Map<string, AgentThreadInfo>> {
   const threadIds = new Set<string>();
@@ -356,7 +356,7 @@ async function resolveAgentThreadInfo(
   await Promise.all(
     [...threadIds].map(async (threadId) => {
       try {
-        const thread = await bb.sdk.threads.get({ threadId });
+        const thread = await room.sdk.threads.get({ threadId });
         const isSideChat = isSideChatShapedThread(thread);
         const title = isSideChat
           ? undefined
@@ -374,7 +374,7 @@ async function resolveAgentThreadInfo(
 }
 
 async function resolveProviderBadges(
-  bb: BbPluginApi,
+  room: BbPluginApi,
   threadInfo: ReadonlyMap<string, AgentThreadInfo>,
 ): Promise<Map<string, CommentProvider>> {
   const providerIds = new Set(
@@ -382,9 +382,9 @@ async function resolveProviderBadges(
   );
   const badges = new Map<string, CommentProvider>();
   if (providerIds.size === 0) return badges;
-  let providers: Awaited<ReturnType<typeof bb.sdk.providers.list>>;
+  let providers: Awaited<ReturnType<typeof room.sdk.providers.list>>;
   try {
-    providers = await bb.sdk.providers.list();
+    providers = await room.sdk.providers.list();
   } catch {
     return badges;
   }
@@ -413,7 +413,7 @@ interface CreateCommentInput {
 }
 
 export async function createComment(
-  bb: BbPluginApi,
+  room: BbPluginApi,
   store: TasksApiStore,
   input: CreateCommentInput,
 ): Promise<StoredComment> {
@@ -430,7 +430,7 @@ export async function createComment(
   );
 
   if (input.notify) {
-    const notifiedCount = await deliverCommentToLatestAgent(bb, store.tasks, {
+    const notifiedCount = await deliverCommentToLatestAgent(room, store.tasks, {
       taskId: comment.taskId,
       commentId: comment.id,
       body: comment.body,
@@ -441,7 +441,7 @@ export async function createComment(
     );
   }
 
-  publishCommentsChanged(bb, input.taskId);
+  publishCommentsChanged(room, input.taskId);
   return comment;
 }
 
@@ -474,7 +474,7 @@ async function mapWithConcurrency<T, R>(
 }
 
 async function listTaskPullRequests(
-  bb: BbPluginApi,
+  room: BbPluginApi,
   store: TasksApiStore,
   taskId: string,
 ): Promise<TaskPullRequestsResult> {
@@ -485,7 +485,7 @@ async function listTaskPullRequests(
   await Promise.all(
     taskThreads.map(async (taskThread) => {
       try {
-        const thread = await bb.sdk.threads.get({
+        const thread = await room.sdk.threads.get({
           threadId: taskThread.threadId,
         });
         if (!thread.environmentId) return;
@@ -507,7 +507,7 @@ async function listTaskPullRequests(
         ReturnType<BbPluginApi["sdk"]["environments"]["pullRequest"]>
       >;
       try {
-        result = await bb.sdk.environments.pullRequest({ environmentId });
+        result = await room.sdk.environments.pullRequest({ environmentId });
       } catch {
         for (const threadId of threadIds) unavailable.add(threadId);
         return;
@@ -569,32 +569,32 @@ async function listTaskPullRequests(
 }
 
 export function registerHandlers(
-  bb: BbPluginApi,
+  room: BbPluginApi,
   store: TasksApiStore,
 ): PluginRpcHandlers<typeof tasksRpcContract> {
   return {
     createFolder(input) {
       const folder = store.tasks.createFolder(input);
-      publishProjectsChanged(bb, null);
+      publishProjectsChanged(room, null);
       return { folder };
     },
     renameFolder(input) {
       const folder = store.tasks.updateFolder(input.folderId, {
         name: input.name,
       });
-      publishProjectsChanged(bb, null);
+      publishProjectsChanged(room, null);
       return { folder };
     },
     moveFolder(input) {
       const folder = store.tasks.updateFolder(input.folderId, {
         parentFolderId: input.parentFolderId,
       });
-      publishProjectsChanged(bb, null);
+      publishProjectsChanged(room, null);
       return { folder };
     },
     deleteFolder(input) {
       const result = store.tasks.deleteFolder(input.folderId);
-      if (result.deleted) publishProjectsChanged(bb, null);
+      if (result.deleted) publishProjectsChanged(room, null);
       return result;
     },
     listFolders() {
@@ -602,13 +602,13 @@ export function registerHandlers(
     },
     createProject(input) {
       const project = store.tasks.createProject(input);
-      publishProjectsChanged(bb, project.id);
+      publishProjectsChanged(room, project.id);
       return { project };
     },
     updateProject(input) {
       const { projectId, ...changes } = input;
       const project = store.tasks.updateProject(projectId, changes);
-      publishProjectsChanged(bb, project.id);
+      publishProjectsChanged(room, project.id);
       return { project };
     },
     renameProjectPrefix(input) {
@@ -622,7 +622,7 @@ export function registerHandlers(
         const project = store.tasks.updateProject(input.projectId, {
           prefix: input.prefix,
         });
-        publishProjectsChanged(bb, project.id);
+        publishProjectsChanged(room, project.id);
         return { ok: true, project };
       } catch (error) {
         if (error instanceof TasksDomainFailure) return taskFailure(error);
@@ -643,8 +643,8 @@ export function registerHandlers(
         const attachments = attachmentsForTasks(store.tasks, taskIds);
         const deleted = store.tasks.deleteProject(input.projectId);
         if (deleted) {
-          await removeAttachmentBlobs(bb, store.tasks, attachments);
-          publishProjectsChanged(bb, input.projectId);
+          await removeAttachmentBlobs(room, store.tasks, attachments);
+          publishProjectsChanged(room, input.projectId);
         }
         return { ok: true, deleted };
       } catch (error) {
@@ -672,7 +672,7 @@ export function registerHandlers(
           replaceTaskLabels(store, created.id, input.labelIds);
           return apiTask(store, created);
         });
-        publishTasksChanged(bb, task.id, task.projectId);
+        publishTasksChanged(room, task.id, task.projectId);
         return { ok: true, task };
       } catch (error) {
         if (error instanceof TasksDomainFailure) return taskFailure(error);
@@ -744,9 +744,9 @@ export function registerHandlers(
           };
         });
 
-        publishTasksChanged(bb, result.task.id, result.task.projectId);
+        publishTasksChanged(room, result.task.id, result.task.projectId);
         if (result.systemCommentsWritten > 0) {
-          publishCommentsChanged(bb, result.task.id);
+          publishCommentsChanged(room, result.task.id);
         }
         return { ok: true, task: result.task };
       } catch (error) {
@@ -759,8 +759,8 @@ export function registerHandlers(
       const attachments = attachmentsForTasks(store.tasks, [input.taskId]);
       const deleted = store.tasks.deleteTask(input.taskId);
       if (deleted && task) {
-        await removeAttachmentBlobs(bb, store.tasks, attachments);
-        publishTasksChanged(bb, task.id, task.projectId);
+        await removeAttachmentBlobs(room, store.tasks, attachments);
+        publishTasksChanged(room, task.id, task.projectId);
       }
       return { deleted };
     },
@@ -799,13 +799,13 @@ export function registerHandlers(
         }
         return { task: apiTask(store, moved), statusChanged };
       });
-      publishTasksChanged(bb, result.task.id, result.task.projectId);
-      if (result.statusChanged) publishCommentsChanged(bb, result.task.id);
+      publishTasksChanged(room, result.task.id, result.task.projectId);
+      if (result.statusChanged) publishCommentsChanged(room, result.task.id);
       return { ok: true, task: result.task };
     },
     createLabel(input) {
       const label = store.tasks.createLabel(input);
-      publishProjectsChanged(bb, label.projectId);
+      publishProjectsChanged(room, label.projectId);
       return { label };
     },
     updateLabel(input) {
@@ -813,20 +813,20 @@ export function registerHandlers(
         name: input.name,
         color: input.color,
       });
-      publishProjectsChanged(bb, label.projectId);
+      publishProjectsChanged(room, label.projectId);
       return { label };
     },
     deleteLabel(input) {
       const label = store.tasks.getLabel(input.labelId);
       const deleted = store.tasks.deleteLabel(input.labelId);
-      if (deleted && label) publishProjectsChanged(bb, label.projectId);
+      if (deleted && label) publishProjectsChanged(room, label.projectId);
       return { deleted };
     },
     listLabels(input) {
       return { labels: store.tasks.listLabels(input.projectId) };
     },
     async createComment(input) {
-      const comment = await createComment(bb, store, {
+      const comment = await createComment(room, store, {
         taskId: input.taskId,
         kind: "user",
         authorName: "You",
@@ -839,8 +839,8 @@ export function registerHandlers(
     },
     async listComments(input) {
       const comments = store.tasks.listComments(input.taskId);
-      const threadInfo = await resolveAgentThreadInfo(bb, comments);
-      const providerBadges = await resolveProviderBadges(bb, threadInfo);
+      const threadInfo = await resolveAgentThreadInfo(room, comments);
+      const providerBadges = await resolveProviderBadges(room, threadInfo);
       return {
         comments: comments.map((comment) => {
           const info =
@@ -876,7 +876,7 @@ export function registerHandlers(
     async deleteAttachment(input) {
       try {
         const attachment = await deleteAttachmentById(
-          bb,
+          room,
           store.tasks,
           input.attachmentId,
           {
@@ -910,11 +910,11 @@ export function registerHandlers(
       return { metadata: store.tasks.getTaskMetadata(input.taskIds) };
     },
     async listTaskPullRequests(input) {
-      return listTaskPullRequests(bb, store, input.taskId);
+      return listTaskPullRequests(room, store, input.taskId);
     },
     createPreset(input) {
       const preset = store.tasks.createPreset({ ...input, builtin: false });
-      publishProjectsChanged(bb, null);
+      publishProjectsChanged(room, null);
       return { preset };
     },
     updatePreset(input) {
@@ -925,19 +925,19 @@ export function registerHandlers(
           ? { ...changes, baseBranch: null, machineId: null }
           : changes,
       );
-      publishProjectsChanged(bb, null);
+      publishProjectsChanged(room, null);
       return { preset };
     },
     deletePreset(input) {
       const deleted = store.tasks.deletePreset(input.presetId);
-      if (deleted) publishProjectsChanged(bb, null);
+      if (deleted) publishProjectsChanged(room, null);
       return { deleted };
     },
     listPresets() {
       return { presets: store.tasks.listPresets() };
     },
     async listMachines() {
-      const machines = await bb.sdk.hosts.list();
+      const machines = await room.sdk.hosts.list();
       return {
         machines: machines.map((machine) => ({
           id: machine.id,
@@ -950,7 +950,7 @@ export function registerHandlers(
       const limit = Math.min(input.limit ?? MAX_THREAD_SEARCH_RESULTS, 10);
       const candidates =
         query.length >= 2
-          ? await bb.sdk.threads.search({
+          ? await room.sdk.threads.search({
               query,
               limitPerGroup: String(MAX_THREAD_SEARCH_RESULTS),
             })
@@ -960,7 +960,7 @@ export function registerHandlers(
             (result) => result.thread,
           )
         : (
-            await bb.sdk.threads.list({
+            await room.sdk.threads.list({
               limit: MAX_THREAD_SEARCH_RESULTS,
             })
           ).filter((thread) => {
@@ -982,7 +982,7 @@ export function registerHandlers(
       };
     },
     async listBbProjects() {
-      const projects = await bb.sdk.projects.list({ includePersonal: true });
+      const projects = await room.sdk.projects.list({ includePersonal: true });
       return {
         bbProjects: projects.map((project) => ({
           id: project.id,
@@ -999,6 +999,6 @@ export function registerHandlers(
   };
 }
 
-export function registerTasksApi(bb: BbPluginApi, store: TasksApiStore): void {
-  bb.rpc.register(tasksRpcContract, registerHandlers(bb, store));
+export function registerTasksApi(room: BbPluginApi, store: TasksApiStore): void {
+  room.rpc.register(tasksRpcContract, registerHandlers(room, store));
 }

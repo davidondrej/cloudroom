@@ -10,7 +10,7 @@ import {
   DropdownMenuTrigger,
 } from "@cloudroom/shared-ui/dropdown-menu";
 import { Icon } from "@cloudroom/shared-ui/icon";
-import { loopsChanged } from "./paused-notice";
+import { loopsChanged, useCloudLoginFixed } from "./paused-notice";
 import type { automationRpcContract } from "./src/rpc.js";
 import type { AutomationAgentSummary } from "./src/rpc-types.js";
 
@@ -132,6 +132,7 @@ export function useCloudAutomations(): {
   useEffect(() => {
     void load();
   }, [load]);
+  useCloudLoginFixed(() => void load());
   const act = useCallback(
     async (request: Request, done: string) => {
       try {

@@ -1,4 +1,5 @@
 import { COMPUTER_TITLE } from "@cloudroom/domain/computer-name";
+import { installPercent } from "@cloudroom/domain/install-progress";
 import {
   type CSSProperties,
   useCallback,
@@ -35,6 +36,7 @@ import {
   formatUsdCents,
   usageBarColorClass,
 } from "@cloudroom/shared-ui/lib/usage-format";
+import { hideEmail, usePrivacyMode } from "@cloudroom/shared-ui/lib/privacy-mode";
 import { LIST_HOVER_TRANSITION } from "@cloudroom/shared-ui/motion";
 import {
   OPTION_BASE_CLASS_NAME,
@@ -166,6 +168,13 @@ function refreshUsage({
   })();
 }
 
+/** Time until plan credits refill. A paid plan's wait for its renewal, charged during that day, so a day past it the
+ *  payment is late. */
+function refillCountdown(resetsAt: string): string {
+  if (Date.now() >= Date.parse(resetsAt) + 86_400_000) return "after payment";
+  return formatResetCountdown(resetsAt) ?? "—";
+}
+
 function formatResetCountdown(resetsAt: string | null): string | null {
   if (resetsAt === null) return null;
   const remaining = new Date(resetsAt).getTime() - Date.now();
@@ -202,7 +211,7 @@ function UsageBlocks({ usedPercent }: { usedPercent: number }) {
         <span
           key={index}
           className={cn(
-            "h-[9px] w-[clamp(2px,calc((100cqw_-_11ch_-_81px_-_var(--usage-label,44px))/12),5px)] min-w-px rounded-[1px]",
+            "h-[9px] w-[clamp(2px,calc((100cqw_-_12ch_-_81px_-_var(--usage-label,calc(7ch_+_1px)))/12),5px)] min-w-px rounded-[1px]",
             index < lit ? usageBarColorClass(usedPercent) : "bg-sidebar-border",
           )}
         />
@@ -221,6 +230,7 @@ function rowLabel(label: string): { prefix: string | null; label: string } {
       .replace(/^Five-hour limit$|^5 hours$/u, "5h")
       .replace(/^Weekly limit$|^Weekly/u, "7d")
       .replace(/^Daily limit$/u, "1d")
+      .replace(/^Limit hit$/u, "limit")
       .replace(/^Plan usage$/u, "plan")
       .replace(/^On-demand spend$/u, "spend"),
   };
@@ -237,7 +247,7 @@ function labelColumnStyle(
   if (models.length === 0) return undefined;
   // 1px of slack: the prefix and the model are separate text runs, which can round past a whole number of ch.
   const width = (lengths: number[]) =>
-    `max(2.75rem, calc(${Math.max(...lengths)}ch + 1px))`;
+    `calc(${Math.max(7, ...lengths)}ch + 1px)`;
   return {
     "--usage-label": width(
       models.map((row) => `${row.prefix} ${row.label}`.length),
@@ -265,7 +275,7 @@ function UsageLine({
         {last ? "└" : "├"}
       </span>
       {/* Under 190px a row can't fit "7d fable" plus bars, percent and countdown, so it shows just "fable". */}
-      <span className="w-[var(--usage-label,2.75rem)] shrink-0 truncate lowercase text-muted-foreground @max-[190px]:w-[var(--usage-label-narrow,2.75rem)]">
+      <span className="w-[var(--usage-label,calc(7ch+1px))] shrink-0 truncate lowercase text-muted-foreground @max-[190px]:w-[var(--usage-label-narrow,calc(7ch+1px))]">
         {prefix === null ? null : (
           <span className="@max-[190px]:hidden">{prefix} </span>
         )}
@@ -282,7 +292,7 @@ function UsageLine({
       </span>
       <span
         aria-hidden="true"
-        className="min-w-0 truncate tabular-nums text-subtle-foreground"
+        className="ml-[1ch] min-w-0 truncate tabular-nums text-subtle-foreground"
       >
         {detail}
       </span>
@@ -331,10 +341,10 @@ function PlanUsage({
         >
           <span aria-hidden="true">
             <UsageLine
-              last={index === plan.meters.length - 1}
+              last={!plan.left && index === plan.meters.length - 1}
               label={meter.label}
               usedPercent={planMeterPercent(meter)}
-              detail={planMeterLeft(meter)}
+              detail={meter.label !== "extra" && plan.resetsAt ? refillCountdown(plan.resetsAt) : planMeterLeft(meter)}
             />
           </span>
           <span className="sr-only">
@@ -342,6 +352,14 @@ function PlanUsage({
           </span>
         </p>
       ))}
+      {/* Like the agents' rows: % used, then time until every plan credit comes back (ADR 20261108-142517); the
+          credits left go on the line below. */}
+      {plan.left && (
+        <p className="flex items-center gap-[7px] whitespace-nowrap text-subtle-foreground">
+          <span aria-hidden="true">└</span>
+          <span className="min-w-0 truncate tabular-nums">{plan.left}</span>
+        </p>
+      )}
     </section>
   );
 }
@@ -432,36 +450,41 @@ function UsageNote({ children }: { children: string }) {
   );
 }
 
-async function signInMacCodex(): Promise<void> {
+/** Signs in on this Mac; a missing Codex installs first, and `onInstall` gets when that began (ADR 20261111-123959). */
+async function signInMacCodex(onInstall: (since: number | null) => void): Promise<void> {
   const call = async (method: "GET" | "POST") => {
     const response = await fetch("/api/v1/cloudroom/mac/codex-login", method === "POST" ? { method, headers: { "content-type": "application/json" }, body: "{}" } : {});
     if (!response.ok) throw new Error("Codex sign-in could not start.");
-    return (await response.json()) as { state: string; message?: string };
+    return (await response.json()) as { state: string; message?: string; installing_since?: number | null };
   };
   let status = await call("POST");
   while (status.state === "waiting") {
+    onInstall(status.installing_since ?? null);
     await new Promise((resolve) => setTimeout(resolve, 2000));
     status = await call("GET");
   }
   if (status.state === "error") throw new Error(status.message ?? "Codex sign-in failed.");
 }
 
-function CodexSignIn({ onSignedIn }: { onSignedIn: () => void }) {
+/** Sign in instead of "run `codex` in a terminal" (ADR 20261111-123959). */
+function CodexSignIn({ label, onSignedIn }: { label: string; onSignedIn: () => void }) {
   const [state, setState] = useState<"idle" | "waiting" | "error">("idle");
+  // Each 2 s poll refreshes the percent.
+  const [installing, setInstalling] = useState<number | null>(null);
   const [error, setError] = useState("");
   const signIn = () => {
     setState("waiting");
-    signInMacCodex().then(
-      () => { setState("idle"); onSignedIn(); },
-      (cause: unknown) => { setState("error"); setError(cause instanceof Error ? cause.message : String(cause)); },
+    signInMacCodex((since) => setInstalling(since === null ? null : installPercent(since))).then(
+      () => { setState("idle"); setInstalling(null); onSignedIn(); },
+      (cause: unknown) => { setState("error"); setInstalling(null); setError(cause instanceof Error ? cause.message : String(cause)); },
     );
   };
   return (
     <div>
       <div className="flex items-center justify-between gap-2">
-        <UsageNote>{state === "waiting" ? "finish in your browser" : "session expired"}</UsageNote>
-        <Button type="button" size="sm" className="h-6 px-2.5 text-xs" disabled={state === "waiting"} onClick={signIn}>
-          {state === "waiting" ? "Waiting…" : "Sign in"}
+        <UsageNote>{installing !== null ? "installing codex" : state === "waiting" ? "finish in your browser" : label}</UsageNote>
+        <Button type="button" size="sm" className="h-6 px-2.5 text-xs tabular-nums" disabled={state === "waiting"} onClick={signIn}>
+          {installing !== null ? `Installing ${installing}%` : state === "waiting" ? "Waiting…" : "Sign in"}
         </Button>
       </div>
       {state === "error" ? <p role="alert" className="text-destructive">{error}</p> : null}
@@ -495,13 +518,12 @@ function ProviderUsageBody({ provider, onCodexSignedIn }: { provider: UsageProvi
     case "not_installed":
       return <UsageNote>Not installed on this machine.</UsageNote>;
     case "unauthenticated":
-      return <UsageNote>{provider.signInHint}</UsageNote>;
-    case "expired":
-      return provider.providerId === "codex" && onCodexSignedIn ? (
-        <CodexSignIn onSignedIn={onCodexSignedIn} />
-      ) : (
-        <UsageNote>{provider.expiredHint}</UsageNote>
-      );
+    case "expired": {
+      const label = usage.status === "expired" ? "session expired" : "signed out";
+      if (provider.providerId === "codex" && onCodexSignedIn)
+        return <CodexSignIn label={label} onSignedIn={onCodexSignedIn} />;
+      return <UsageNote>{usage.status === "expired" ? provider.expiredHint : provider.signInHint}</UsageNote>;
+    }
     case "error":
       return <UsageNote>{usage.message}</UsageNote>;
   }
@@ -550,7 +572,13 @@ function AccountChip({
   const shown =
     accounts.find((account) => account.inUse) ??
     (accounts.length === 1 ? accounts[0] : undefined);
-  const label = shown ? accountName(shown) : null;
+  // Privacy mode hides emails. A name the user wrote stays.
+  const [privacy] = usePrivacyMode();
+  const name = (account: UsageProvider) => {
+    const label = accountName(account);
+    return label === null ? null : hideEmail(label, privacy);
+  };
+  const label = shown ? name(shown) : null;
   const switchable = accounts.filter((account) => account.accountId);
   const chip = "block min-w-0 truncate font-normal text-subtle-foreground";
   if (label === null) return null;
@@ -593,7 +621,7 @@ function AccountChip({
             className="flex items-center gap-2"
           >
             <span className="min-w-0 flex-1 truncate">
-              {accountName(account) ?? `This ${COMPUTER_TITLE}`}
+              {name(account) ?? `This ${COMPUTER_TITLE}`}
             </span>
             <Icon
               name="Check"
@@ -804,6 +832,7 @@ export function ProviderUsageStatusContent({
   reloadPlan?: () => void;
   refreshEnabled?: boolean;
 }) {
+  const [privacy] = usePrivacyMode();
   const [, refreshCountdowns] = useState(0);
   useEffect(() => {
     const timer = window.setInterval(
@@ -994,10 +1023,10 @@ export function ProviderUsageStatusContent({
                     provider.accounts.length === 1 ||
                     account.accountId ? null : (
                       <h3
-                        title={account.accountLabel}
+                        title={hideEmail(account.accountLabel, privacy)}
                         className="truncate text-subtle-foreground"
                       >
-                        {account.accountLabel}
+                        {hideEmail(account.accountLabel, privacy)}
                       </h3>
                     )}
                     {account.usage === null && snapshot.isRefreshing ? (
@@ -1010,7 +1039,8 @@ export function ProviderUsageStatusContent({
                       <ProviderUsageBody
                         provider={account}
                         onCodexSignedIn={
-                          activeMachine?.id.startsWith("source:") ||
+                          // Sign in runs on the computer running Cloudroom, so another machine keeps its hint.
+                          !activeMachine?.primary ||
                           (account.accountId && account.accountId !== "local")
                             ? undefined
                             : () =>

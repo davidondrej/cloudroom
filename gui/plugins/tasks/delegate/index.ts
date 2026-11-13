@@ -155,7 +155,7 @@ function requirePreset(store: TasksStore, presetId: string): Preset {
   return preset;
 }
 
-function requireLinkedBbProject(project: Project): string {
+function requireLinkedRoomProject(project: Project): string {
   if (project.linkedBbProjectId) return project.linkedBbProjectId;
   throw new DelegationError(
     "project_not_linked",
@@ -185,7 +185,7 @@ type SpawnEnvironment = Parameters<
 >[0]["environment"];
 
 async function presetSpawnEnvironment(
-  bb: BbPluginApi,
+  room: BbPluginApi,
   preset: Preset,
 ): Promise<SpawnEnvironment> {
   if (preset.environmentKind === "project-default") {
@@ -193,7 +193,7 @@ async function presetSpawnEnvironment(
   }
 
   const hostId =
-    preset.machineId ?? (await bb.sdk.system.config()).primaryHostId;
+    preset.machineId ?? (await room.sdk.system.config()).primaryHostId;
   if (hostId === null) {
     throw new DelegationError(
       "spawn_target_invalid",
@@ -213,7 +213,7 @@ async function presetSpawnEnvironment(
   };
 }
 
-function isBbHttpError(
+function isRoomHttpError(
   error: unknown,
 ): error is Error & { code: string | null; status: number } {
   return (
@@ -237,7 +237,7 @@ const SPAWN_TARGET_ERROR_CODES = new Set([
 function mapSpawnTargetError(error: unknown, preset: Preset): never {
   if (
     preset.environmentKind === "new-worktree" &&
-    isBbHttpError(error) &&
+    isRoomHttpError(error) &&
     error.code !== null &&
     SPAWN_TARGET_ERROR_CODES.has(error.code)
   ) {
@@ -272,9 +272,9 @@ export function createSystemComment(
   });
 }
 
-export function publishThreadsChanged(bb: BbPluginApi, taskId: string): void {
+export function publishThreadsChanged(room: BbPluginApi, taskId: string): void {
   const payload: ThreadsChangedEvent = { taskId };
-  bb.realtime.publish("threads:changed", payload);
+  room.realtime.publish("threads:changed", payload);
 }
 
 type SdkThread = Awaited<ReturnType<BbPluginApi["sdk"]["threads"]["get"]>>;
@@ -298,14 +298,14 @@ function taskThreadLiveStatus(thread: SdkThread): TaskThreadLiveStatus {
 }
 
 export function handlers(
-  bb: BbPluginApi,
+  room: BbPluginApi,
   store: TasksApiStore,
 ): PluginRpcHandlers<typeof delegationRpcContract> {
   return {
     async delegate(input) {
       const task = requireTask(store.tasks, input.taskId);
       const project = requireProject(store.tasks, task.projectId);
-      const linkedBbProjectId = requireLinkedBbProject(project);
+      const linkedRoomProjectId = requireLinkedRoomProject(project);
       const preset = requirePreset(store.tasks, input.presetId);
       const comments = store.tasks.listComments(task.id);
       const recentComments = comments.slice(-5);
@@ -327,10 +327,10 @@ export function handlers(
         extraInstructions: input.extraInstructions,
       });
 
-      const environment = await presetSpawnEnvironment(bb, preset);
-      const thread = await bb.sdk.threads
+      const environment = await presetSpawnEnvironment(room, preset);
+      const thread = await room.sdk.threads
         .spawn({
-          projectId: linkedBbProjectId,
+          projectId: linkedRoomProjectId,
           environment,
           providerId: execution.providerId,
           model: execution.model,
@@ -373,28 +373,28 @@ export function handlers(
       });
 
       try {
-        const currentThread = await bb.sdk.threads.get({ threadId: thread.id });
+        const currentThread = await room.sdk.threads.get({ threadId: thread.id });
         const currentLiveStatus = taskThreadLiveStatus(currentThread);
         if (currentLiveStatus !== taskThread.liveStatus) {
           store.tasks.updateTaskThreadStatus(taskThread.id, currentLiveStatus);
         }
       } catch (error) {
-        bb.log.warn(
+        room.log.warn(
           `Could not read delegated thread ${thread.id} after attach: ${errorMessage(
             error,
           )}`,
         );
       }
 
-      publishThreadsChanged(bb, task.id);
-      publishTasksChanged(bb, task.id, task.projectId);
-      publishCommentsChanged(bb, task.id);
+      publishThreadsChanged(room, task.id);
+      publishTasksChanged(room, task.id, task.projectId);
+      publishCommentsChanged(room, task.id);
       return { threadId: thread.id };
     },
 
     async taskThreadsAttach(input) {
       const task = requireTask(store.tasks, input.taskId);
-      const thread = await bb.sdk.threads.get({ threadId: input.threadId });
+      const thread = await room.sdk.threads.get({ threadId: input.threadId });
       const title = (
         thread.title ??
         thread.titleFallback ??
@@ -409,8 +409,8 @@ export function handlers(
         liveStatus: taskThreadLiveStatus(thread),
       });
 
-      publishThreadsChanged(bb, task.id);
-      publishTasksChanged(bb, task.id, task.projectId);
+      publishThreadsChanged(room, task.id);
+      publishTasksChanged(room, task.id, task.projectId);
       return { threadId: thread.id };
     },
 
@@ -427,16 +427,16 @@ export function handlers(
       }
       store.tasks.deleteTaskThread(taskThread.id);
 
-      publishThreadsChanged(bb, task.id);
-      publishTasksChanged(bb, task.id, task.projectId);
+      publishThreadsChanged(room, task.id);
+      publishTasksChanged(room, task.id, task.projectId);
       return { threadId: taskThread.threadId };
     },
   };
 }
 
 export function registerDelegation(
-  bb: BbPluginApi,
+  room: BbPluginApi,
   store: TasksApiStore,
 ): void {
-  bb.rpc.register(delegationRpcContract, handlers(bb, store));
+  room.rpc.register(delegationRpcContract, handlers(room, store));
 }

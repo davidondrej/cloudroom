@@ -1,28 +1,29 @@
 import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
-import { atom, useAtom, useAtomValue, useSetAtom } from "jotai";
+import { atom, useAtom, useAtomValue } from "jotai";
 import { atomWithStorage } from "jotai/utils";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
 import { deriveProjectNameFromPath } from "@cloudroom/domain";
 import { Icon } from "@cloudroom/shared-ui/icon";
 import { cn } from "@cloudroom/shared-ui/lib/utils";
-import { ClaudeConnectionButton, useClaudeConnection } from "@/components/ClaudeConnection";
+import { ClaudeConnectionButton, useClaudeConnection, useInstallPercent } from "@/components/ClaudeConnection";
 import { openCodexConnection } from "@/components/CodexConnectionPanel";
 import { selectCloudForNewThreads } from "@/components/promptbox/NewThreadComposer";
 import { ImportChats } from "@/components/settings/ImportChats";
-import { BbLogo } from "@/components/ui/bb-logo";
+import { RoomLogo } from "@/components/ui/cloudroom-logo";
 import { appToast } from "@/components/ui/app-toast";
 import { useCreateProject } from "@/hooks/mutations/project-mutations";
 import { useUpdateGeneralSettings } from "@/hooks/mutations/settings-mutations";
-import { cloudCanRunHarness, useCloudroomAccount, useCloudroomSignIn, useImportBb, useMacAgents, useNativeSessions, useProjectSuggestions, useSetCopyLogins, useSetMacAccess } from "@/hooks/queries/cloudroom-queries";
+import { cloudCanRunHarness, useCloudroomAccount, useCloudroomSignIn, useImportRoom, useMacAgents, useNativeSessions, useProjectSuggestions, useSetCopyLogins, useSetMacAccess } from "@/hooks/queries/cloudroom-queries";
 import { useSidebarNavigation } from "@/hooks/queries/sidebar-navigation-query";
+import { useStartFirstAgent } from "@/hooks/useFirstAgent";
 import { useHostDaemon, useThisComputer } from "@/hooks/useHostDaemon";
 import { GitForWindowsBanner } from "@/components/layout/DesktopUpdateBanner";
 import { usePathPickerHost } from "@/hooks/useLocalPathPicker";
 import { useQuickCreateProjectController } from "@/hooks/useQuickCreateProject";
 import { usePromptBoxProviderPreference } from "@/hooks/thread-creation-options/persisted-selection-fields";
 import { booleanLocalStorage } from "@/lib/browser-storage";
-import { getBbDesktopInfo, MACOS_APP_REGION_NO_DRAG_CLASS, MACOS_WINDOW_DRAG_CLASS } from "@/lib/bb-desktop";
+import { getRoomDesktopInfo, MACOS_APP_REGION_NO_DRAG_CLASS, MACOS_WINDOW_DRAG_CLASS } from "@/lib/room-desktop";
 import { copyTextToClipboard, copyToClipboardWithToast, useClipboardCopy } from "@/lib/clipboard";
 import { fetchWithAppSurface } from "@/lib/app-surface";
 import { useSystemConfig, useSystemProviders } from "@/hooks/queries/system-queries";
@@ -36,7 +37,6 @@ const dismissedAtom = atomWithStorage("cloudroom.setup.dismissed", false, boolea
 const openAtom = atom(false);
 // A new install's sign-in page opens by itself (David, 2026-11-03, docs/scopes/onboarding.md). 20% keep the button, to measure it.
 const signInGroupAtom = atomWithStorage<"auto" | "manual" | "auto_done" | null>("cloudroom.setup.signInGroup", null, undefined, { getOnInit: true });
-export const useOpenSetup = () => useSetAtom(openAtom);
 
 const STEPS = ["Sign in", "Connect an agent", "Connect GitHub", "Import your work"];
 const STEP_IDS = ["account", "agent", "github", "project"] as const;
@@ -51,7 +51,7 @@ function track(step: SetupStepId, action: "viewed" | "started" | "done" | "skipp
 const LATER = ["Your Cloudroom account", "Claude Code or Codex", "For private repos", "Last step"];
 const PALETTE = {
   "--ob-bg": "#faf7ef", "--ob-rail": "#f2ecde", "--ob-card": "#fffdf7", "--ob-line": "#e2dac6", "--ob-dash": "#c9bfa6",
-  "--ob-ink": "#29251e", "--ob-muted": "#7a7263", "--ob-lime": "#bfff00", "--ob-ok": "#4d6b00", "--ob-green": "#17803f",
+  "--ob-ink": "#29251e", "--ob-muted": "#7a7263", "--ob-lime": "#bfff00", "--ob-ok": "#4d6b00", "--ob-green": "#17803f", "--ob-error": "#b42318",
 } as CSSProperties;
 
 export function useSetupProgress() {
@@ -91,16 +91,25 @@ export function Onboarding() {
   const account = useCloudroomAccount();
   const locked = account.isSuccess && !account.data.account && !account.data.selfHosted;
   // Only the desktop app opens setup by itself: "skipped" is saved per browser, so phones and other browsers would see it again.
-  const firstRun = !dismissed && getBbDesktopInfo() !== null && projects !== undefined && projects.length === 0;
+  const firstRun = !dismissed && getRoomDesktopInfo() !== null && projects !== undefined && projects.length === 0;
   // Stay open once shown: adding a folder or importing chats creates projects, which would otherwise end the first run mid-step.
   useEffect(() => { if (firstRun) setOpen(true); }, [firstRun, setOpen]);
   const visible = locked || open || firstRun;
+  // Started here, not in Setup: this component stays mounted after setup closes, so the new thread can still open.
+  const startFirstAgent = useStartFirstAgent();
   if (!visible) return null;
-  return <Setup locked={locked} fresh={projects?.length === 0} close={() => { setDismissed(true); setOpen(false); }} />;
+  // The first time setup closes on the desktop app, by any path, it starts the first agent (ADR 20261111-220912).
+  const close = (agents: { claude: boolean; codex: boolean }) => {
+    if (!dismissed && getRoomDesktopInfo() !== null) startFirstAgent(agents);
+    setDismissed(true);
+    setOpen(false);
+  };
+  return <Setup locked={locked} fresh={projects?.length === 0} close={close} />;
 }
 
-function Setup({ locked, fresh, close }: { locked: boolean; fresh: boolean; close: () => void }) {
+function Setup({ locked, fresh, close: closeSetup }: { locked: boolean; fresh: boolean; close: (agents: { claude: boolean; codex: boolean }) => void }) {
   const progress = useSetupProgress();
+  const close = () => closeSetup(progress.agents);
   const { done, account } = progress;
   const [choices, setChoices] = useState({ macAccess: true, copyLogins: true });
   // Step 4's progress lives here, so going back a step keeps the Added ticks and Continue.
@@ -172,7 +181,7 @@ function Setup({ locked, fresh, close }: { locked: boolean; fresh: boolean; clos
       <div className="flex min-h-0 flex-1">
         <aside className="hidden w-[300px] shrink-0 flex-col border-r border-(--ob-line) bg-(--ob-rail) px-[22px] pt-7 pb-6 md:flex">
           <div className="flex items-center gap-2.5 text-base font-semibold tracking-tight">
-            <BbLogo className="size-7" />
+            <RoomLogo className="size-7" />
             cloudroom
           </div>
           <p className="mt-10 mb-3 ml-3 text-[11px] tracking-[0.14em] text-(--ob-muted) uppercase">Setup</p>
@@ -214,7 +223,6 @@ function Setup({ locked, fresh, close }: { locked: boolean; fresh: boolean; clos
               );
             })}
           </ol>
-          <p className="mt-auto px-3 text-[12.5px] text-(--ob-muted)">Reopen setup anytime from the account button in the sidebar.</p>
         </aside>
         <main className="relative flex min-w-0 flex-1 overflow-y-auto px-6 pt-16 pb-8 md:px-[110px] md:py-10">
           {!locked && (
@@ -224,9 +232,9 @@ function Setup({ locked, fresh, close }: { locked: boolean; fresh: boolean; clos
             </button>
           )}
           <div key={step} className={cn("my-auto w-full duration-300 animate-in fade-in-0 slide-in-from-bottom-1", step === 3 ? "max-w-[860px]" : "max-w-[600px]")}>
-            {step === 1 && stamped ? <TickStamp key={`${claude}-${codex}`} /> : <BbLogo className="mb-6 size-[72px] -rotate-[5deg]" />}
+            {step === 1 && stamped ? <TickStamp key={`${claude}-${codex}`} /> : <RoomLogo className="mb-6 size-[72px] -rotate-[5deg]" />}
             <p className="font-serif text-base text-(--ob-muted) italic">Step {step + 1} of 4</p>
-            {step === 0 && <AccountStep email={account.data?.account?.email ?? null} signingIn={account.data?.signingIn === true} next={next} fresh={fresh} />}
+            {step === 0 && <AccountStep email={account.data?.account?.email ?? null} signingIn={account.data?.signingIn === true} error={account.data?.signInError ?? null} next={next} fresh={fresh} />}
             {step === 1 && <AgentStep progress={progress} next={next} stamped={stamped} left={countdown?.left ?? null} choices={choices} setChoices={setChoices} />}
             {step === 2 && <GithubStep progress={progress} next={next} />}
             {step === 3 && <ProjectStep close={leave} added={added} setAdded={setAdded} imported={imported} setImported={setImported} />}
@@ -363,7 +371,7 @@ function CopyLink({ url }: { url: string }) {
 }
 
 const SIGN_IN_COUNTDOWN = 3;
-function AccountStep({ email, signingIn, next, fresh }: { email: string | null; signingIn: boolean; next: () => void; fresh: boolean }) {
+function AccountStep({ email, signingIn, error, next, fresh }: { email: string | null; signingIn: boolean; error: string | null; next: () => void; fresh: boolean }) {
   const signIn = useCloudroomSignIn();
   const busy = signingIn || signIn.isPending;
   const [group, setGroup] = useAtom(signInGroupAtom);
@@ -373,7 +381,7 @@ function AccountStep({ email, signingIn, next, fresh }: { email: string | null; 
   const openNow = () => { setLeft(null); begin(); };
   const cancel = () => { setLeft(null); setGroup("auto_done"); };
   // Only the desktop app on a new install, and only once: Cancel or a finished countdown never auto-opens again.
-  const offered = fresh && !email && getBbDesktopInfo() !== null;
+  const offered = fresh && !email && getRoomDesktopInfo() !== null;
   useEffect(() => {
     if (!offered || busy) return;
     if (group === null) setGroup(Math.random() < 0.2 ? "manual" : "auto");
@@ -413,7 +421,7 @@ function AccountStep({ email, signingIn, next, fresh }: { email: string | null; 
           <p className="mt-3 text-base text-(--ob-muted)">Use the account you made on cloudroom.dev.</p>
           <div className="mt-8 flex flex-col items-start gap-4">
             <Cta onClick={() => start()}>Sign in with browser <Icon name="ArrowRight" aria-hidden /></Cta>
-            <Note>Already signed in there? You come right back.</Note>
+            {error ? <p role="alert" className="text-[13px] text-(--ob-error)">{error}</p> : <Note>Already signed in there? You come right back.</Note>}
           </div>
         </>
       )}
@@ -474,6 +482,16 @@ function AgentStep({ progress, next, stamped, left, choices, setChoices }: { pro
   });
   const finish = useMutation({ mutationFn: saveChoices, onSuccess: () => { track("agent", "done", agents.other ? agentDetail(agents.other) : agents.claude && agents.codex ? "both" : agents.claude ? "claude" : "codex"); next(); }, meta: { showErrorToast: false }, onError: (error) => appToast.error(error.message) });
   const codexBrowser = codex.data?.state === "waiting" && !codex.data.user_code ? codex.data : null;
+  // Connect installs a missing Codex first; the button shows it (ADR 20261111-123959).
+  const codexInstalling = useInstallPercent(codexBrowser?.installing_since);
+  // An install or sign-in that fails after Connect arrives through the status poll, not the mutation: show it once.
+  const codexState = codex.data?.state;
+  const codexMessage = codex.data?.message;
+  const codexWasWaiting = useRef(false);
+  useEffect(() => {
+    if (codexState === "error" && codexWasWaiting.current && codexMessage) appToast.error(codexMessage);
+    codexWasWaiting.current = codexState === "waiting";
+  }, [codexState, codexMessage]);
   const waiting = !account.data?.account ? "Log in first" : offline ? "Cloud unreachable" : !ready ? "Starting your cloud…" : null;
   const connectedLead = agents.claude && agents.codex ? "Agents" : agents.claude ? "Claude Code" : "Codex";
   const action = (connected: boolean, button: ReactNode) => (connected ? <Connected /> : waiting ? <Note>{waiting}</Note> : button);
@@ -489,13 +507,13 @@ function AgentStep({ progress, next, stamped, left, choices, setChoices }: { pro
           {action(agents.claude, <span onClickCapture={() => started("claude")}><ClaudeConnectionButton target="cloud" className={CONNECT} /></span>)}
         </Card>
         <Card on={agents.codex} isDefault={agents.codex && defaultAgent === "codex"} logo={<AgentLogo id="codex" className="bg-black text-white" />} name="Codex" detail={account.data?.localLogins?.codex ? `Found on ${here}` : "Uses your ChatGPT plan"}>
-          {action(agents.codex, codexBrowser ? (
+          {action(agents.codex, codexBrowser && codexInstalling === null ? (
             <Note>
               Finish in your browser.{" "}
               {codexBrowser.verification_url && <button type="button" className={LINK} onClick={() => openUrlInExternalBrowser(codexBrowser.verification_url!)}>Reopen</button>}
             </Note>
           ) : (
-            <Outline className={CONNECT} disabled={connectCodex.isPending} onClick={() => { started("codex"); connectCodex.mutate(); }}>{connectCodex.isPending ? "Connecting…" : "Connect"}</Outline>
+            <Outline className={cn(CONNECT, "tabular-nums")} disabled={connectCodex.isPending || codexInstalling !== null} onClick={() => { started("codex"); connectCodex.mutate(); }}>{codexInstalling !== null ? `Installing ${codexInstalling}%` : connectCodex.isPending ? "Connecting…" : "Connect"}</Outline>
           ))}
         </Card>
       </div>
@@ -726,9 +744,10 @@ function ProjectStep({ close, added, setAdded, imported, setImported }: {
   const { canUseNativeFolderPicker, clientHostId, hostId } = usePathPickerHost();
   const here = useThisComputer();
   const { localHostId } = useHostDaemon();
-  const importBb = useImportBb();
+  const importRoom = useImportRoom();
   const sessions = useNativeSessions().data?.sessions;
-  const empty = sessions?.length === 0;
+  // An import empties the scan; keep "Import your work" with Continue instead of flipping to "No agent chats to import".
+  const empty = sessions?.length === 0 && !imported;
   // Unless the scan found no chats, added folders stay on this step with a tick, and the lime Continue button leaves it.
   const addedPaths = new Set(added.map((folder) => folder.path));
   const suggested = useProjectSuggestions()?.repos.filter((repo) => repo.source === "mac").filter((repo) => !addedPaths.has(repo.path)) ?? [];
@@ -760,7 +779,7 @@ function ProjectStep({ close, added, setAdded, imported, setImported }: {
   const bringWorkOver = () => {
     if (!localHostId) return appToast.error(`${here[0]!.toUpperCase()}${here.slice(1)} is not connected yet. Try again in a moment.`);
     track("project", "started", "bb_import");
-    importBb.mutate(localHostId, {
+    importRoom.mutate(localHostId, {
       onSuccess: ({ imported }) => {
         appToast.success(`Imported ${imported.length} BB thread${imported.length === 1 ? "" : "s"}`);
         if (imported.length) setImported(true);
@@ -830,8 +849,8 @@ function ProjectStep({ close, added, setAdded, imported, setImported }: {
             <span aria-hidden className="mx-2 text-(--ob-dash)">·</span>
           </>
         )}
-        <button type="button" className={QUIET_LINK} disabled={importBb.isPending} onClick={bringWorkOver}>
-          {importBb.isPending ? "Bringing your BB threads over…" : "Coming from BB?"}
+        <button type="button" className={QUIET_LINK} disabled={importRoom.isPending} onClick={bringWorkOver}>
+          {importRoom.isPending ? "Bringing your BB threads over…" : "Coming from BB?"}
         </button>
       </p>
       {done && (

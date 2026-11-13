@@ -9,7 +9,11 @@ set -eu
 umask 077
 bundle=$(cat)
 installer_url=$1
-installer_file=$(mktemp)
+# sh runs this file outside any sandbox, so it stays in the home folder, never the OS temp folder, which Read-only
+# Mac commands and sandboxed agents can change. Without HOME, find it as the installer does.
+home=\${HOME:-}
+[ -n "$home" ] || home=$(node -e 'const home = require("node:os").homedir(); if (!require("node:path").isAbsolute(home)) process.exit(1); process.stdout.write(home);')
+installer_file=$(mktemp "$home/.bb-machine-install.XXXXXX")
 trap 'rm -f "$installer_file"' EXIT HUP INT TERM
 printf '%s' "$bundle" | node -e 'for (const [name,value] of Object.entries(JSON.parse(require("node:fs").readFileSync(0, "utf8")).headers ?? {})) console.log("header = " + JSON.stringify(name + ": " + value))' | curl --config - --fail --silent --show-error --location --connect-timeout 10 --max-time 60 "$installer_url" > "$installer_file"
 BB_ENROLLMENT=$bundle sh "$installer_file" --bootstrap-env BB_ENROLLMENT
@@ -61,6 +65,18 @@ function createOutputReporter(report: PluginMachineProviderProgress) {
   };
 }
 
+// Executor errors can echo their input: keep one bounded line with the
+// enrollment credential and access header values removed.
+function safeReason(error: unknown, secrets: readonly string[]): string {
+  let text = error instanceof Error ? error.message : String(error);
+  for (const secret of secrets) {
+    if (secret.length > 0) text = text.replaceAll(secret, "[redacted]");
+  }
+  return (
+    (text.trim().split(/\r?\n/u)[0] ?? "").slice(0, 300) || "unknown error"
+  );
+}
+
 async function installerStartCommand(hostId: string) {
   return {
     command: ["sh", "-s", "--", "--start", "--host-id", hostId],
@@ -74,14 +90,19 @@ export function createMachineBootstrapApi(
   return {
     async bootstrap(request) {
       request.signal.throwIfAborted();
-      request.report.step("Preparing machine enrollment");
+      let stage = "Preparing machine enrollment";
+      const step = (text: string) => {
+        stage = text;
+        request.report.step(text);
+      };
+      step(stage);
       try {
         const enrollment = await enrollments.prepare({
           key: request.key,
           signal: request.signal,
         });
         request.signal.throwIfAborted();
-        request.report.step(
+        step(
           enrollment.state === "enrolled"
             ? "Starting enrolled machine"
             : "Bootstrapping machine",
@@ -98,14 +119,23 @@ export function createMachineBootstrapApi(
             signal: request.signal,
             onOutput: output.onOutput,
           });
-        } catch {
+        } catch (error) {
           request.signal.throwIfAborted();
-          throw new Error("Machine bootstrap command failed");
+          const secrets =
+            enrollment.state === "enrolled"
+              ? []
+              : [
+                  enrollment.bootstrap.credential,
+                  ...Object.values(enrollment.bootstrap.headers ?? {}),
+                ];
+          throw new Error(
+            `Machine bootstrap command failed: ${safeReason(error, secrets)}`,
+          );
         }
         output.finish();
         if (result.exitCode !== 0) throw new Error(output.failureMessage());
         request.signal.throwIfAborted();
-        request.report.step("Waiting for machine connection");
+        step("Waiting for machine connection");
         await enrollments.waitForConnection({
           enrollmentId: enrollment.id,
           timeoutMs: 120_000,
@@ -114,7 +144,8 @@ export function createMachineBootstrapApi(
         return { hostId: enrollment.hostId };
       } catch (error) {
         enrollments.clearPending(request.key);
-        throw error;
+        if (request.signal.aborted || !(error instanceof Error)) throw error;
+        throw new Error(`${stage}: ${error.message}`, { cause: error });
       }
     },
   };

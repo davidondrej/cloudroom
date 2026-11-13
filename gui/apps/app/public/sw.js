@@ -9,6 +9,9 @@ const OFFLINE_HEADERS = ["x-cloudroom-offline", "x-bb-tunnel-offline"];
 const MAC_HEADER = "x-cloudroom-mac";
 const MAC_KEY = "/__cloudroom-mac";
 const OLD_INSTALL = self.location.hostname !== "app.cloudroom.run";
+// The desktop app showing another Mac keeps its page on screen and sends failed requests again.
+// A saved copy would look like a fresh answer there, and stay on screen after the Mac is back.
+const DESKTOP_APP = /\bElectron\//.test(self.navigator.userAgent);
 
 self.addEventListener("install", () => self.skipWaiting());
 self.addEventListener("activate", (event) =>
@@ -161,6 +164,7 @@ async function api(request, clientId) {
   try {
     response = await fetch(request);
   } catch {
+    if (DESKTOP_APP) return Response.error();
     return (
       (await savedFor(
         request,
@@ -186,7 +190,7 @@ async function api(request, clientId) {
         .catch(() => undefined);
     return response;
   }
-  if (!offline(response)) return response;
+  if (!offline(response) || DESKTOP_APP) return response;
   void tellMacOffline();
   return (await savedFor(request, mac).catch(() => undefined)) ?? response;
 }

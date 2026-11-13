@@ -206,6 +206,7 @@ function PluginThreadChatBody({
       hasMultipleMachines,
       host: environmentHost,
       machineProviders,
+      isWorktree: environment.isWorktree,
     });
     return (
       <ThreadEnvironmentSummary

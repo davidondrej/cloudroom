@@ -14,7 +14,7 @@ import { CLOUD_LOCKED_REASON, showCloudSignIn, useCloudLocked } from "@/hooks/us
 import { fetchWithAppSurface } from "@/lib/app-surface";
 import { useIsCompactViewport } from "@cloudroom/shared-ui/hooks/use-compact-viewport";
 import { ProviderRequirementBanner } from "./banner/ProviderRequirementBanner";
-import { CloudQueueCard, FreePlanTip, OgLetter } from "@/components/CloudQueue";
+import { CloudQueueCard, FreePlanTip } from "@/components/CloudQueue";
 import { StarterPrompts } from "@/components/ActivationChecklist";
 import { TryCloudHint } from "@/components/promptbox/TryCloudHint";
 import { CloudBranchPicker } from "./CloudBranchPicker";
@@ -533,8 +533,14 @@ export function NewThreadComposer({
     [currentProject?.sources],
   );
   const projectOptions = useMemo(
-    () => projects?.map(({ id, name }) => ({ id, name })) ?? [],
-    [projects],
+    () =>
+      sidebarNavigationQuery.data?.projects.map(({ id, name, updatedAt, threads }) => ({
+        id,
+        name,
+        // Its newest thread: the picker lists recently used projects first.
+        updatedAt: Math.max(updatedAt, ...threads.map((thread) => thread.updatedAt)),
+      })) ?? [],
+    [sidebarNavigationQuery.data],
   );
 
   const hostsQuery = useHosts();
@@ -1632,6 +1638,10 @@ export function NewThreadComposer({
     executionTarget === "cloud"
       ? (cloudBlockedReason
           ?? (cloudQueue ? (cloudQueue.regionBlocked ? "Cloud isn't available in your region yet" : "You're in the cloud queue")
+          // Until the project list loads, the pick may be a removed project, even one the saved copy of the list
+          // still shows: it would fail as "Project not found", then quietly turn into no project (#1347).
+          : !isProjectless && (!sidebarNavigationSettled || sidebarNavigationQuery.isPlaceholderData)
+            ? "Loading projects…"
           : !selectedThreadModel || isLoadingModels
             ? "Select a model"
             : cloudFiltered && !cloudLevels.includes(reasoningLevel)
@@ -1840,7 +1850,8 @@ export function NewThreadComposer({
           mentionRanges={promptDraft.mentions}
           onChange={(text, mentions) => {
             // An edit can remove what the last error was about, so the old error must not linger.
-            setComposerError(null);
+            // Guarded: even a same-value setState can re-render the composer on every key.
+            if (composerError !== null) setComposerError(null);
             promptDraft.setTextAndMentions(text, mentions);
           }}
           onSubmit={() => void handleSubmit(options.blockedReason ?? null)}
@@ -1978,7 +1989,7 @@ export function NewThreadComposer({
                 <Icon name="AlertTriangle" className="size-3.5 shrink-0 text-warning-text" aria-hidden />
                 {vps.data.health ? `Your VPS is busy (${vps.data.busy}), so this thread starts in Cloud.` : "Your VPS is offline, so this thread starts in Cloud."}
               </p>
-            ) : null}<StarterPrompts onPick={pickStarter} fallback={<FreePlanTip />} /><OgLetter /></>,
+            ) : null}<StarterPrompts onPick={pickStarter} fallback={<FreePlanTip />} /></>,
             banner:
               executionTarget === "cloud" ? (
                 cloudBlockedReason === null ? null : (

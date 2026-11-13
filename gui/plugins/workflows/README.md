@@ -181,6 +181,11 @@ bb provider models <provider-id> --environment "$BB_ENVIRONMENT_ID" --json
 `status` is deliberately bounded: it returns run state, phase, call counts,
 notification state, and only a small final result. It omits source, arguments,
 and call history so polling cannot be truncated into invalid JSON.
+A queued run's `queue` says why it waits and how to unblock it:
+`dispatcher-stopped`, `dispatcher-busy` (a slow pass; wait),
+`dispatcher-stuck` (no progress for 15 minutes; restart Cloudroom),
+`waiting-for-active-runs` (slots are shared by all projects, so it counts runs
+that this project's `list` omits), or `starting`.
 `list` is likewise bounded and returns compact run summaries rather than source
 or result bodies. Untrusted names, phases, and errors are capped by UTF-8 bytes;
 the adjacent `*Truncated` fields report when a displayed value was shortened.

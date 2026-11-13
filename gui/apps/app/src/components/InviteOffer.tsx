@@ -4,10 +4,10 @@ import { atomWithStorage } from "jotai/utils";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { z } from "zod";
 import { cn } from "@cloudroom/shared-ui/lib/utils";
-import { BbLogo } from "@/components/ui/bb-logo";
+import { RoomLogo } from "@/components/ui/cloudroom-logo";
 import { useCloudroomAccount } from "@/hooks/queries/cloudroom-queries";
 import { fetchWithAppSurface } from "@/lib/app-surface";
-import { MACOS_WINDOW_DRAG_CLASS } from "@/lib/bb-desktop";
+import { MACOS_WINDOW_DRAG_CLASS } from "@/lib/room-desktop";
 import { createJsonLocalStorage } from "@/lib/browser-storage";
 import { copyToClipboardWithToast } from "@/lib/clipboard";
 
@@ -199,7 +199,7 @@ function InviteTickets({ data, finish }: { data: Invites; finish: () => void }) 
       <div className="flex h-full items-center max-md:h-auto max-md:min-h-full max-md:flex-col max-md:justify-center max-md:pt-[calc(env(safe-area-inset-top)+32px)] max-md:pb-[calc(env(safe-area-inset-bottom)+28px)]">
         <div className="w-[44%] shrink-0 pr-8 pl-[8.5%] max-md:w-full max-md:px-7">
           <div className="flex items-center gap-2.5 font-mono text-xs tracking-[0.2em] text-[#8d8676] uppercase">
-            <BbLogo className="size-[22px]" />
+            <RoomLogo className="size-[22px]" />
             Cloudroom
           </div>
           <h1 className="mt-7 font-serif text-[64px] max-md:mt-5 max-md:text-[42px] leading-[1.02] font-medium tracking-[-0.03em] [&_em]:text-[#bfff00]">{current.title}</h1>

@@ -65,16 +65,23 @@ describe("Codex lifecycle notification diagnostics", () => {
     },
   );
 
-  it.each(["failed", "blocked", "stopped"])(
+  it.each([
+    ["failed", "error"],
+    ["blocked", "feedback"],
+    ["stopped", "stop"],
+  ])(
     "shows a %s hook as one warning with its raw notification",
-    (status) => {
+    (status, kind) => {
       const translate = createHarness();
       const run = {
         status,
         eventName: "preToolUse",
         sourcePath: "/tmp/hooks.json",
-        statusMessage: null,
-        entries: [{ kind: "error", text: "lint-guard: not found\nstack" }],
+        statusMessage: "Checking lint",
+        entries: [
+          { kind: "context", text: "Remember the lint rules" },
+          { kind, text: "lint-guard: not found\nstack" },
+        ],
       };
       const timing = { id: "r1", startedAt: 1, completedAt: 2, durationMs: 1 };
       const [event] = translate("hook/completed", {
@@ -93,10 +100,13 @@ describe("Codex lifecycle notification diagnostics", () => {
     },
   );
 
-  it("suppresses routine account/updated notifications", () => {
-    const translate = createHarness();
+  it.each([
+    ["account/updated", { authMode: "chatgpt", planType: "pro" }],
+    ["item/reasoning/summaryPartAdded", { itemId: "i1", summaryIndex: 1 }],
+    ["thread/readState/changed", { readState: { firstUnread: null } }],
+  ])("suppresses routine %s notifications", (method, params) => {
     expect(
-      translate("account/updated", { authMode: "chatgpt", planType: "pro" }),
+      createHarness()(method, { threadId: "thread-test", ...params }),
     ).toEqual([]);
   });
 

@@ -60,6 +60,11 @@ pub enum Kind {
     OpenClaw,
 }
 impl Kind {
+    /// A harness as Core or the app names it: `cursor` or `acp-cursor`, `hermes` or `acp-hermes-agent`.
+    pub fn named(name: &str) -> Option<Kind> {
+        let name = name.strip_prefix("acp-").unwrap_or(name);
+        serde_json::from_value(json!(name.strip_suffix("-agent").unwrap_or(name))).ok()
+    }
     /// Harnesses that accept a per-turn `fast` service tier. Claude Fast stays off (ADR 0133).
     pub fn fast(self) -> bool {
         matches!(self, Kind::Codex | Kind::Cursor)
@@ -113,6 +118,22 @@ pub fn supports(kind: Kind, models: &[Model], model: &str, reasoning: &str) -> R
     ))
 }
 
+/// The nearest effort `model` takes: `reasoning` itself, else the highest level below it, else its lowest. `None` when
+/// the catalog doesn't offer the model.
+pub fn fit_reasoning(kind: Kind, models: &[Model], model: &str, reasoning: &str) -> Option<String> {
+    const ORDER: [&str; 7] = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
+    let rank = |level: &str| ORDER.iter().position(|known| *known == level).unwrap_or(0);
+    let levels = reasoning_levels(kind, models, model)?;
+    if levels.contains(&reasoning) {
+        return Some(reasoning.to_owned());
+    }
+    let below = levels.iter().filter(|level| rank(level) <= rank(reasoning));
+    below
+        .max_by_key(|level| rank(level))
+        .or_else(|| levels.iter().min_by_key(|level| rank(level)))
+        .map(|level| (*level).to_owned())
+}
+
 pub const PI_REASONING_LEVELS: &[&str] = &["none", "minimal", "low", "medium", "high", "xhigh"];
 
 /// Pi and fx also take `max`: few models have it, and Kimi has nothing above it. Pi rejects it for models without it,
@@ -148,11 +169,47 @@ pub async fn shutdown() {
 pub use openclaw::gateway_pid as openclaw_gateway_pid;
 
 pub async fn claude_auth_ready(config: &Config) -> io::Result<bool> {
-    claude::auth_ready(config).await
+    claude::auth_ready(config).await.map_err(io::Error::other)
 }
 
 pub async fn codex_models(config: &Config) -> (io::Result<Vec<Model>>, Option<Event>) {
     models(config, Kind::Codex).await
+}
+
+/// Codex app-servers that start together on a new CODEX_HOME race to create its SQLite state, and all but one exit
+/// with code 1 (#819): in a fresh sandbox, the login check and the model list did, failing ~1 in 3 first starts.
+/// So Core starts Codex once before it serves, only while the home has no state yet (~0.2 s).
+pub async fn warm_codex(config: &Config) {
+    let Some(profile) = config.harnesses.get(&Kind::Codex) else {
+        return;
+    };
+    let state = |entry: std::fs::DirEntry| {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        name.starts_with("state_") && name.ends_with(".sqlite")
+    };
+    if std::fs::read_dir(&profile.home).is_ok_and(|entries| entries.flatten().any(state)) {
+        return;
+    }
+    let (handle, mut events) = match Handle::spawn(config, Kind::Codex, None) {
+        Ok(spawned) => spawned,
+        Err(error) => return eprintln!("Codex warm-up could not start: {error}"),
+    };
+    let drain = tokio::spawn(async move {
+        while let Some(event) = events.recv().await {
+            if matches!(event, Event::Exited { .. }) {
+                break;
+            }
+        }
+    });
+    if let Err(error) = tokio::time::timeout(Duration::from_secs(5), codex::initialize(&handle))
+        .await
+        .unwrap_or_else(|_| Err(io::Error::new(io::ErrorKind::TimedOut, "timed out")))
+    {
+        eprintln!("Codex warm-up failed: {error}");
+    }
+    handle.request_shutdown();
+    let _ = drain.await;
 }
 
 /// Prove the harness can answer with this exact model before Teleport moves anything.
@@ -243,6 +300,10 @@ pub enum Event {
     },
     Compacted {
         status: String,
+    },
+    /// Whether Claude lists a background Bash task as running (#1216).
+    Background {
+        running: bool,
     },
     Exited {
         reason: &'static str,
@@ -357,7 +418,7 @@ fn strip_ai_co_authors_env(command: &mut Command, session: Option<&Path>) {
         )
     });
     let hook = format!(
-        r#"cloudroom_strip_ai_co_authors() {{ grep -qiE {PATTERN} "$1" || return 0; {scope}t=$(mktemp) || return 0; grep -viE {PATTERN} "$1" > "$t"; [ $? -le 1 ] && cat "$t" > "$1" && echo 'Cloudroom removed AI Co-authored-by lines (turn off: room-cli settings general stripAiCoAuthorsEnabled false)' >&2; rm -f "$t"; return 0; }}; cloudroom_strip_ai_co_authors"#
+        r#"cloudroom_strip_ai_co_authors() {{ grep -qiE {PATTERN} "$1" || return 0; {scope}t=$(mktemp) || return 0; grep -viE {PATTERN} "$1" > "$t"; [ $? -le 1 ] && cat "$t" > "$1" && echo 'Cloudroom removed AI Co-authored-by lines (turn off for new threads in the Cloudroom app: Settings > Defaults > Remove AI co-authors, or room-cli mac run --write "~/.local/bin/room-cli settings general stripAiCoAuthorsEnabled false")' >&2; rm -f "$t"; return 0; }}; cloudroom_strip_ai_co_authors"#
     );
     command.envs([
         ("GIT_CONFIG_COUNT", "3"),
@@ -391,6 +452,8 @@ pub struct Handle {
     context_file: Option<PathBuf>,
     reasoning: Option<String>,
     baseline: Arc<Mutex<Option<String>>>,
+    /// The model Claude runs now: its launch model, then each one a prompt switched it to (`set_model`).
+    live_model: Arc<Mutex<String>>,
     /// ACP agent capabilities from `initialize`; empty for other harnesses.
     acp: Arc<Mutex<Value>>,
     /// The ACP session's latest config options (model, effort); only fx keeps them.
@@ -402,6 +465,8 @@ pub struct Handle {
     controls: Arc<tokio::sync::Mutex<()>>,
     /// Claude's login when it started; it reads the login only then.
     login: Option<u64>,
+    /// Claude's cloud MCP sign-ins when it started; it connects MCP servers only then.
+    mcp_login: Option<u64>,
 }
 impl Handle {
     pub fn spawn(
@@ -495,6 +560,7 @@ impl Handle {
         let file_identity = config.storage.as_ref().map(|p| (p.agent_uid, p.agent_gid));
         // Read before the command does, so a login saved in between causes a restart, never a miss.
         let login = matches!(kind, Kind::Claude).then(|| claude::login(config));
+        let mcp_login = matches!(kind, Kind::Claude).then(|| claude::mcp_login(config));
         let (command, adapter, session_file, context_file): (_, Box<dyn Adapter>, _, _) = match kind
         {
             Kind::Claude => {
@@ -627,6 +693,7 @@ impl Handle {
             strip_ai_co_authors_env(&mut command, Some(&config.repository));
         }
         let (process, events) = process::Process::spawn(config, command, adapter)?;
+        let live_model = Arc::new(Mutex::new(profile.model.clone()));
         Ok((
             Self {
                 process,
@@ -636,6 +703,7 @@ impl Handle {
                 file_identity,
                 reasoning: resume.as_ref().and_then(|saved| saved.reasoning.clone()),
                 baseline: Arc::new(Mutex::new(None)),
+                live_model,
                 acp: Arc::new(Mutex::new(Value::Null)),
                 acp_config: Arc::new(Mutex::new(Value::Null)),
                 rpc_timeout: config.rpc_timeout,
@@ -644,6 +712,7 @@ impl Handle {
                 system_prompt,
                 controls: Arc::new(tokio::sync::Mutex::new(())),
                 login,
+                mcp_login,
                 resume,
                 session_file,
                 context_file,
@@ -661,6 +730,12 @@ impl Handle {
     pub fn launch_baseline(&self) -> Option<String> {
         self.baseline.lock().unwrap().clone()
     }
+    pub(super) fn live_model(&self) -> String {
+        self.live_model.lock().unwrap().clone()
+    }
+    pub(super) fn set_live_model(&self, model: &str) {
+        *self.live_model.lock().unwrap() = model.to_owned();
+    }
 
     pub fn pid(&self) -> u32 {
         self.process.pid()
@@ -669,6 +744,11 @@ impl Handle {
     pub fn login_changed(&self, config: &Config) -> bool {
         self.login
             .is_some_and(|login| login != claude::login(config))
+    }
+    /// A new cloud MCP sign-in was saved after this agent started.
+    pub fn mcp_login_changed(&self, config: &Config) -> bool {
+        self.mcp_login
+            .is_some_and(|login| login != claude::mcp_login(config))
     }
     pub fn process_count(&self) -> Option<usize> {
         self.process.process_count()
@@ -1156,7 +1236,16 @@ pub(super) fn command(binary: &Path, config: &Config) -> Command {
         command.env(name, value);
     }
     // Memory and CPU limits (linux.rs). The user's own value wins; lists keep it after ours.
+    let helpers = linux::helpers_ready();
     for (name, value) in linux::agent_env() {
+        if !helpers
+            && matches!(
+                *name,
+                "BASH_ENV" | "CLAUDE_ENV_FILE" | "NODE_OPTIONS" | "PYTHONPATH"
+            )
+        {
+            continue; // Nothing then hides the Anthropic keys from Claude either (`claude::hide_app_keys`).
+        }
         match saved
             .iter()
             .rev()
@@ -1345,7 +1434,7 @@ mod tests {
 Co-authored-by: Ada <ada@example.com>'; git log -1 --format=%B"), Some(session));
             let result = (
                 !body.contains("Claude"),
-                notice.contains("stripAiCoAuthorsEnabled false"),
+                notice.contains("room-cli mac run --write"),
                 body.contains("Ada"),
             );
             assert_eq!(

@@ -35,7 +35,7 @@ import {
   createAppVersionService,
   type AppVersionService,
 } from "../../src/services/system/app-version.js";
-import { createBbAppManagedConfigReloader } from "../../src/services/system/bb-app-managed-config.js";
+import { createRoomAppManagedConfigReloader } from "../../src/services/system/app-managed-config.js";
 import { createNoopTelemetryService } from "../../src/services/system/telemetry.js";
 import { TerminalSessionLifecycle } from "../../src/services/terminals/terminal-session-lifecycle.js";
 import { createLifecycleDedupers } from "../../src/lifecycle-dedupers.js";
@@ -264,7 +264,7 @@ export async function createTestAppHarness(
     logger,
     openTimeoutMs: 50,
   });
-  const bbAppManagedConfig = await createBbAppManagedConfigReloader({
+  const roomAppManagedConfig = await createRoomAppManagedConfigReloader({
     config,
     hub,
     logger,
@@ -292,7 +292,7 @@ export async function createTestAppHarness(
   const callerToken = callerProofs.issueInternal();
   const deps: ServerAppDeps = {
     appVersion,
-    bbAppManagedConfig,
+    bbAppManagedConfig: roomAppManagedConfig,
     callerProofs,
     config,
     db,

@@ -88,6 +88,12 @@ import {
   PlanLimitSwitchedRow,
 } from "./PlanLimitRow.js";
 import {
+  CloudLoginRow,
+  cloudLoginRowProvider,
+  findLatestCloudLoginRowId,
+  LatestCloudLoginRowIdContext,
+} from "./CloudLoginRow.js";
+import {
   LatestPlanLimitRowIdContext,
   findLatestPlanLimitRowId,
 } from "./plan-limit-agents.js";
@@ -1566,6 +1572,7 @@ function TimelineRowView({
   );
   const staticLeadingIconUrl = useLeadingIconUrlForRow(row);
   const latestPlanLimitRowId = useContext(LatestPlanLimitRowIdContext);
+  const latestCloudLoginRowId = useContext(LatestCloudLoginRowIdContext);
 
   const planLimitSwitch =
     row.kind === "system" && row.systemKind === "error"
@@ -1580,6 +1587,17 @@ function TimelineRowView({
       <PlanLimitAccountSwitchedRow
         switched={row.planLimitAccountSwitch}
         detail={row.detail}
+        className={timelineRowHorizontalPaddingClassName(horizontalPadding)}
+      />
+    );
+  }
+  const cloudLogin = cloudLoginRowProvider(row);
+  if (cloudLogin) {
+    return (
+      <CloudLoginRow
+        row={row}
+        provider={cloudLogin}
+        latest={row.id === latestCloudLoginRowId}
         className={timelineRowHorizontalPaddingClassName(horizontalPadding)}
       />
     );
@@ -2238,6 +2256,10 @@ function ThreadTimelineRowsForTimelineView(props: ThreadTimelineRowsProps) {
     () => findLatestPlanLimitRowId(rows, scopeActive),
     [rows, scopeActive],
   );
+  const latestCloudLoginRowId = useMemo(
+    () => findLatestCloudLoginRowId(rows) ?? null,
+    [rows],
+  );
   const computedAutoExpansionRowIds = useMemo(
     () => collectTimelineAutoExpansionRowIds({ rows, scopeActive }),
     [rows, scopeActive],
@@ -2499,6 +2521,9 @@ function ThreadTimelineRowsForTimelineView(props: ThreadTimelineRowsProps) {
                       value={props.timelineWindowingEnabled ?? false}
                     >
                       <AutoHeightContainer snapRevision={heightSnapRevision}>
+                        <LatestCloudLoginRowIdContext.Provider
+                          value={latestCloudLoginRowId}
+                        >
                         <LatestPlanLimitRowIdContext.Provider
                           value={latestPlanLimitRowId}
                         >
@@ -2524,6 +2549,7 @@ function ThreadTimelineRowsForTimelineView(props: ThreadTimelineRowsProps) {
                             }
                           />
                         </LatestPlanLimitRowIdContext.Provider>
+                        </LatestCloudLoginRowIdContext.Provider>
                       </AutoHeightContainer>
                     </TimelineWindowingEnabledContext.Provider>
                   </TimelineWindowingMeasurementsContext.Provider>

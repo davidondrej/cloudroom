@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
-import type { BbDesktopBrowserApi } from "@cloudroom/desktop-contract";
+import type { RoomDesktopBrowserApi } from "@cloudroom/desktop-contract";
 import type { BrowserFixedPanelTab } from "@/lib/fixed-panel-tabs-state";
-import { createNoopDesktopBrowserApi } from "@/test/bb-desktop-test-utils";
+import { createNoopDesktopBrowserApi } from "@/test/room-desktop-test-utils";
 import {
   createBrowserViewVisibilityCoordinator,
   resetBrowserViewPersistence,
@@ -29,7 +29,7 @@ interface VisibilityCall {
 }
 
 interface RecordingApi {
-  api: BbDesktopBrowserApi;
+  api: RoomDesktopBrowserApi;
   attachments: AttachCall[];
   navigations: AttachCall[];
   visibility: VisibilityCall[];
@@ -39,7 +39,7 @@ function createRecordingApi(): RecordingApi {
   const attachments: AttachCall[] = [];
   const navigations: AttachCall[] = [];
   const visibility: VisibilityCall[] = [];
-  const api: BbDesktopBrowserApi = {
+  const api: RoomDesktopBrowserApi = {
     ...createNoopDesktopBrowserApi(),
     attach(request) {
       attachments.push({ tabId: request.tabId, url: request.url });

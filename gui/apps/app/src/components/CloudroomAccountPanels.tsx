@@ -1,6 +1,6 @@
 import { useEffect, useRef } from "react";
 import { useCloudroomAccount } from "@/hooks/queries/cloudroom-queries";
-import { getBbDesktopInfo } from "@/lib/bb-desktop";
+import { getRoomDesktopInfo } from "@/lib/room-desktop";
 import { CodexConnectionPanel, CursorConnectionPanel } from "./CodexConnectionPanel";
 
 export function CloudroomAccountPanels() {
@@ -13,7 +13,7 @@ export function CloudroomAccountPanels() {
     if (signingIn) wasSigningIn.current = true;
     else if (wasSigningIn.current && accountId) {
       wasSigningIn.current = false;
-      getBbDesktopInfo()?.focusWindow?.();
+      getRoomDesktopInfo()?.focusWindow?.();
     }
   }, [signingIn, accountId]);
   if (!accountId) return null;

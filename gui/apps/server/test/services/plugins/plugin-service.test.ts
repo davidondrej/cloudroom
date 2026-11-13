@@ -855,7 +855,7 @@ describe("plugin service", () => {
     ).toBe("tasks");
   });
 
-  it("names public plugins in the install event so PostHog can rank them", () => {
+  it("names public plugins in the install event so we can rank them", () => {
     expect(
       pluginInstalledTelemetryEvent(
         "tasks",

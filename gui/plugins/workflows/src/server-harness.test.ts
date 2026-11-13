@@ -589,6 +589,23 @@ describe("workflows plugin", () => {
       await eventually(() => {
         expect(harness.sdk.callsTo("threads.spawn")).toHaveLength(4);
       });
+      // A turn that ends with background work still running isn't the result (#1371).
+      await harness.emitThreadEvent("thread.idle", {
+        thread: {
+          id: "child-4",
+          activeBackgroundAgentCount: 0,
+          activeBackgroundCommandCount: 1,
+        } as never,
+        lastAssistantText: null,
+      });
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(
+        harness.sdk
+          .callsTo("threads.send")
+          .filter(
+            ([args]) => (args as { threadId?: string }).threadId === "child-4",
+          ),
+      ).toHaveLength(0);
       for (let failure = 1; failure <= 2; failure += 1) {
         await harness.emitThreadEvent("thread.idle", {
           thread: { id: "child-4" } as never,

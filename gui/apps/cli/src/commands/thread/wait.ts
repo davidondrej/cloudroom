@@ -7,7 +7,8 @@ import {
   ThreadWaitUnreachableError,
 } from "@cloudroom/sdk";
 import { action, CliExitError } from "../../action.js";
-import { createCliBbSdk } from "../../client.js";
+import { createCliRoomSdk } from "../../client.js";
+import { resolveContextThreadId } from "../../context-env.js";
 import { outputJson, requireThreadId } from "../helpers.js";
 import {
   DEFAULT_THREAD_WAIT_TIMEOUT_SECONDS,
@@ -17,8 +18,14 @@ import {
   THREAD_WAIT_EXIT_CODE_TIMEOUT,
   THREAD_WAIT_EXIT_CODE_UNREACHABLE,
 } from "./helpers.js";
+import {
+  DEFAULT_CHILDREN_WAIT_POLL_INTERVAL_MS,
+  DEFAULT_CHILDREN_WAIT_TIMEOUT_SECONDS,
+  waitForChildren,
+} from "./wait-children.js";
 
 interface ThreadWaitCommandOptions {
+  children?: boolean;
   status?: string;
   event?: string;
   timeout?: string;
@@ -31,9 +38,13 @@ export function registerWaitCommand(
   getUrl: () => string,
 ): void {
   parent
-    .command("wait <id>")
+    .command("wait [id]")
     .description(
-      "Wait for a thread status or event (defaults to --status idle)",
+      "Wait for a thread status or event (defaults to --status idle), or with --children for all of a thread's children",
+    )
+    .option(
+      "--children",
+      `Wait until every open child of the thread (default: this one) is done, failed, or needs input, then print one line per child. Times out after ${DEFAULT_CHILDREN_WAIT_TIMEOUT_SECONDS} seconds by default: run it again to keep waiting`,
     )
     .option("--status <status>", "Wait until the thread reaches this status")
     .option(
@@ -51,7 +62,23 @@ export function registerWaitCommand(
     .option("--json", "Print machine-readable JSON output")
     .action(
       action(async (id: string | undefined, opts: ThreadWaitCommandOptions) => {
-        const sdk = createCliBbSdk(getUrl());
+        const sdk = createCliRoomSdk(getUrl());
+        if (opts.children) {
+          await waitForChildren({
+            sdk,
+            parentThreadId: resolveChildrenParentId(id, opts),
+            timeoutMs:
+              (opts.timeout === undefined
+                ? DEFAULT_CHILDREN_WAIT_TIMEOUT_SECONDS
+                : parseThreadWaitTimeoutSeconds(opts.timeout)) * 1000,
+            pollIntervalMs:
+              opts.pollInterval === undefined
+                ? DEFAULT_CHILDREN_WAIT_POLL_INTERVAL_MS
+                : parseThreadWaitPollIntervalMs(opts.pollInterval),
+            json: opts.json,
+          });
+          return;
+        }
         const threadId = requireThreadId(id);
         const target = parseThreadWaitTarget(opts);
         const timeoutSeconds = parseThreadWaitTimeoutSeconds(opts.timeout);
@@ -95,6 +122,25 @@ export function registerWaitCommand(
         );
       }),
     );
+}
+
+/** The parent whose children to wait for: the given thread, else the one running the command. */
+function resolveChildrenParentId(
+  id: string | undefined,
+  opts: ThreadWaitCommandOptions,
+): string {
+  if (opts.status || opts.event) {
+    throw new CliExitError(
+      "--children cannot be combined with --status or --event.",
+      THREAD_WAIT_EXIT_CODE_INVALID_REQUEST,
+    );
+  }
+  const parentThreadId = id ? requireThreadId(id) : resolveContextThreadId();
+  if (parentThreadId) return parentThreadId;
+  throw new CliExitError(
+    "Pass the parent thread ID: this shell has no ROOM_THREAD_ID.",
+    THREAD_WAIT_EXIT_CODE_INVALID_REQUEST,
+  );
 }
 
 function parseThreadWaitTarget(

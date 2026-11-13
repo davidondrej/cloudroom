@@ -121,6 +121,8 @@ const machineSweepOperations = new WeakMap<
 >();
 
 const MACHINE_CREATE_FAILURE_CLEANUP_GRACE_MS = 30_000;
+const OFFLINE_CLEANUP_MESSAGE =
+  "This machine is offline, so its environments can't be removed. Reconnect it, then retry cleanup.";
 
 function runTrackedOperation(args: {
   map: Map<string, ActiveOperation>;
@@ -1369,7 +1371,24 @@ export async function sweepProviderMachine(
       });
       if (current.length > 0) pendingEnvironment = true;
     }
-    if (pendingEnvironment) return;
+    if (pendingEnvironment) {
+      // An offline machine can't remove its environments. Show that as a
+      // failed teardown so the user sees why and can retry cleanup (#1307).
+      if (!deps.hub.hasDaemonForHost(hostId)) {
+        updateHost(deps.db, deps.hub, hostId, {
+          teardownAttempt: row.teardownAttempt + 1,
+          teardownStatus: "failed",
+          statusMessage: OFFLINE_CLEANUP_MESSAGE,
+          removeRetryAt: Date.now() + 60_000,
+        });
+      } else if (row.statusMessage === OFFLINE_CLEANUP_MESSAGE) {
+        updateHost(deps.db, deps.hub, hostId, {
+          teardownStatus: null,
+          statusMessage: null,
+        });
+      }
+      return;
+    }
   }
   if (
     row.teardownStatus === "failed" &&

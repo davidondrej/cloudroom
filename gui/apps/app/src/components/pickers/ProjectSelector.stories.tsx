@@ -30,7 +30,7 @@ export function Overview() {
       </StoryRow>
       <StoryRow
         label="no project selected — optional mode"
-        hint='allowNoProject=true: trigger shows "Work in a project" + FolderPlus icon, menu adds "Don&apos;t work in a project" item'
+        hint='allowNoProject=true: trigger shows "Work in a project" + FolderPlus icon, the footer adds "No project"'
       >
         <ProjectSelector
           projects={projects}
@@ -41,13 +41,13 @@ export function Overview() {
       </StoryRow>
       <StoryRow
         label="open menu"
-        hint="defaultOpen + modal=false (allowNoProject=true — shows the no-project item below a separator)"
+        hint="defaultOpen + modal=false (allowNoProject=true — No project sits in the footer)"
       >
         <ProjectSelectorInteractive allowNoProject />
       </StoryRow>
       <StoryRow
         label="open menu with actions"
-        hint="createProject + allowNoProject share one separator below the project list"
+        hint="createProject + allowNoProject share the footer under the project list"
       >
         <ProjectSelectorInteractive allowNoProject createProject />
       </StoryRow>

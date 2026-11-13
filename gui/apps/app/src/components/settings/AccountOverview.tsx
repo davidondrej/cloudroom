@@ -8,8 +8,8 @@ import { cn } from "@cloudroom/shared-ui/lib/utils";
 import { useClaudeConnection } from "@/components/ClaudeConnection";
 import { useCloudLogin } from "@/components/CodexConnectionPanel";
 import { InviteTicketCard } from "@/components/InviteOffer";
-import { CreditsBar } from "@/components/CloudQueue";
-import { BbLogo } from "@/components/ui/bb-logo";
+import { CreditsBar, refillText } from "@/components/CloudQueue";
+import { RoomLogo } from "@/components/ui/cloudroom-logo";
 import { SETTINGS_CARD_CLASS, SETTINGS_CARD_ROW_CLASS } from "@/components/ui/settings-section";
 import { useCloudroomAccount } from "@/hooks/queries/cloudroom-queries";
 import { useSystemProviders } from "@/hooks/queries/system-queries";
@@ -69,7 +69,7 @@ function MembershipCard({ email, plan, login, usage }: { email: string; plan: st
   return <div className="relative flex min-h-64 flex-col overflow-hidden rounded-2xl bg-primary p-6 text-primary-foreground shadow-[0_24px_60px_-28px_var(--primary)]">
     <div aria-hidden className="pointer-events-none absolute inset-0 bg-[radial-gradient(120%_90%_at_100%_0%,rgb(255_255_255/0.32),transparent_55%),repeating-linear-gradient(115deg,rgb(0_0_0/0.035)_0_2px,transparent_2px_9px)]" />
     <div className="relative flex items-center gap-2">
-      <BbLogo className="size-7 rounded-md" />
+      <RoomLogo className="size-7 rounded-md" />
       <span className="text-xs font-bold tracking-[0.22em]">CLOUDROOM</span>
       <span className="ml-auto rounded-full bg-primary-foreground px-2.5 py-1 text-2xs font-bold tracking-[0.14em] text-primary">MEMBER</span>
     </div>
@@ -84,7 +84,7 @@ function MembershipCard({ email, plan, login, usage }: { email: string; plan: st
       <CreditsBar className="mt-2 h-1.5 bg-primary-foreground/15" plan={left} limit={usage.creditsLimit} extra={extra} extraTotal={usage.extraCreditsTotal ?? 0} planClassName="bg-primary-foreground" edgeClassName="border-primary" />
       {extra > 0
         ? <p className="mt-1.5 flex justify-between gap-3 text-2xs font-semibold tabular-nums"><span>{count(extra)} extra · used last</span><span className="opacity-65">{count(left)} of {count(usage.creditsLimit)} plan</span></p>
-        : <p className="mt-1.5 text-2xs opacity-65">Refills every rolling 30 days</p>}
+        : <p className="mt-1.5 text-2xs opacity-65">{refillText(usage.resetsAt)}</p>}
     </div>}
   </div>;
 }

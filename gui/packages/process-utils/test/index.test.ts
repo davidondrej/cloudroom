@@ -8,7 +8,7 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
-import { join, resolve } from "node:path";
+import { delimiter, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { describe, expect, it } from "vitest";
 import {
@@ -375,6 +375,51 @@ describe("process utils", () => {
     mkdirSync(join(official, ".."), { recursive: true });
     writeFileSync(official, "", { mode: 0o755 });
     expect(findCliExecutable("codex", env)).toBe(official);
+  });
+
+  it("on Windows, finds install.ps1's current\\bin Codex ahead of the older layout and PATH", () => {
+    const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
+    Object.defineProperty(process, "platform", { ...platform, value: "win32" });
+    try {
+      const home = mkdtempSync(join(tmpdir(), "codex-win-"));
+      const codexAt = (...parts: string[]) => {
+        const file = join(home, ...parts);
+        mkdirSync(join(file, ".."), { recursive: true });
+        writeFileSync(file, "", { mode: 0o755 });
+        return file;
+      };
+      // No LOCALAPPDATA: its junction to current\bin can't help here.
+      const env = { HOME: home, PATH: join(home, "bin"), PATHEXT: ".EXE" };
+      const current = [".codex", "packages", "standalone", "current"];
+      const onPath = codexAt("bin", "codex.exe");
+      expect(findCliExecutable("codex", env)).toBe(onPath);
+      const legacy = codexAt(...current, "codex.exe");
+      expect(findCliExecutable("codex", env)).toBe(legacy);
+      const bin = codexAt(...current, "bin", "codex.exe");
+      expect(findCliExecutable("codex", env)).toBe(bin);
+    } finally {
+      Object.defineProperty(process, "platform", platform);
+    }
+  });
+
+  it("skips npm's unfinished Claude placeholder for the next claude (#1148)", () => {
+    const home = mkdtempSync(join(tmpdir(), "claude-pick-"));
+    const extension = process.platform === "win32" ? ".exe" : "";
+    const stub = join(home, "npm", `claude${extension}`);
+    const real = join(home, "native", `claude${extension}`);
+    mkdirSync(join(stub, ".."));
+    mkdirSync(join(real, ".."));
+    writeFileSync(
+      stub,
+      'echo "Error: claude native binary not installed." >&2\nexit 1\n',
+      { mode: 0o755 },
+    );
+    writeFileSync(real, "", { mode: 0o755 });
+    const env = {
+      HOME: home,
+      PATH: [stub, real].map((file) => join(file, "..")).join(delimiter),
+    };
+    expect(findCliExecutable("claude", env)).toBe(real);
   });
 
   // #96: running a binary inside a flagged Codex.app gets the whole app moved to the Bin.

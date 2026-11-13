@@ -39,9 +39,9 @@ const secondaryPanelMockState = vi.hoisted(() => ({
     | undefined,
 }));
 
-vi.mock("@/lib/bb-desktop", () => ({
+vi.mock("@/lib/room-desktop", () => ({
   DEFAULT_DESKTOP_WINDOW_STATE: { isFullScreen: false },
-  getBbDesktopInfo: () => null,
+  getRoomDesktopInfo: () => null,
   shouldReserveMacosTrafficLights: () => false,
   shouldUseMacosDesktopChrome: () => false,
 }));

@@ -40,6 +40,9 @@ function interaction(
   }
 }
 
+const NEXT_STEP =
+  "`room-cli thread interactions show pint_1 thr_child` prints the details. A `thread tell` only queues behind it.";
+
 describe("child-thread blocker summary", () => {
   it("names a provider's plugin-defined request by its plugin, with the title as the detail", () => {
     expect(
@@ -50,7 +53,7 @@ describe("child-thread blocker summary", () => {
           data: { fields: ["TOKEN"] },
         }),
       ),
-    ).toBe("Blocked on secrets request:\nAdd a token");
+    ).toBe(`Blocked on secrets request:\nAdd a token\n${NEXT_STEP}`);
   });
 
   it("names a plugin's own request the same way", () => {
@@ -61,7 +64,7 @@ describe("child-thread blocker summary", () => {
           { kind: "plugin", pluginId: "secrets", rendererId: "secret-request" },
         ),
       ),
-    ).toBe("Blocked on plugin request:\nAdd secrets");
+    ).toBe(`Blocked on plugin request:\nAdd secrets\n${NEXT_STEP}`);
   });
 
   it("keeps the approval detail lines as the summary body", () => {
@@ -82,7 +85,7 @@ describe("child-thread blocker summary", () => {
         }),
       ),
     ).toBe(
-      "Blocked on command approval:\nCommand: git push\nCwd: /tmp/project",
+      `Blocked on command approval:\nCommand: git push\nCwd: /tmp/project\n${NEXT_STEP}`,
     );
   });
 });

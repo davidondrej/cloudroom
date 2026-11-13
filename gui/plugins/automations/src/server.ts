@@ -22,47 +22,47 @@ function resolveServerUrl(): string {
   return process.env.ROOM_SERVER_URL?.trim() || "http://127.0.0.1:39886";
 }
 
-export default async function plugin(bb: BbPluginApi) {
-  const db = bb.storage.database();
-  bb.storage.migrate(db, migrations);
+export default async function plugin(room: BbPluginApi) {
+  const db = room.storage.database();
+  room.storage.migrate(db, migrations);
   const pluginDataDir = pluginDataDirFromDb(db);
-  await ingestLegacyImport({ bb, db, pluginDataDir });
+  await ingestLegacyImport({ bb: room, db, pluginDataDir });
 
   const service = createAutomationService({
-    bb,
+    bb: room,
     db,
     pluginDataDir,
     serverUrl: resolveServerUrl(),
   });
 
-  bb.rpc.register(
+  room.rpc.register(
     automationRpcContract,
-    createRpcHandlers(service, bb.sdk, db),
+    createRpcHandlers(service, room.sdk, db),
   );
-  registerAutomationCli({ bb, service });
+  registerAutomationCli({ bb: room, service });
 
   const reviewChanged = (threadId: string) => {
     if (isReviewThread(db, threadId)) {
       publishAutomationChange(
-        bb,
+        room,
         REVIEW_SIGNAL_PROJECT,
         "automation-runs-changed",
       );
     }
   };
-  bb.events.on("thread.created", ({ thread }) => {
+  room.events.on("thread.created", ({ thread }) => {
     if (recordCloudRun(db, thread)) reviewChanged(thread.id);
   });
-  bb.events.on("thread.idle", async ({ thread }) => {
-    await closeAutomationRunForSettledThread(bb, db, {
+  room.events.on("thread.idle", async ({ thread }) => {
+    await closeAutomationRunForSettledThread(room, db, {
       threadId: thread.id,
       threadCreatedAt: thread.createdAt,
       status: "idle",
     });
     reviewChanged(thread.id);
   });
-  bb.events.on("thread.failed", async ({ thread, error, errorInfo }) => {
-    await closeAutomationRunForSettledThread(bb, db, {
+  room.events.on("thread.failed", async ({ thread, error, errorInfo }) => {
+    await closeAutomationRunForSettledThread(room, db, {
       threadId: thread.id,
       status: "failed",
       error,
@@ -70,37 +70,37 @@ export default async function plugin(bb: BbPluginApi) {
     });
     reviewChanged(thread.id);
   });
-  bb.events.on("thread.archived", ({ thread }) => reviewChanged(thread.id));
-  bb.events.on("thread.unarchived", ({ thread }) => {
+  room.events.on("thread.archived", ({ thread }) => reviewChanged(thread.id));
+  room.events.on("thread.unarchived", ({ thread }) => {
     reviewChanged(thread.id);
-    resumeAutomationsForUnarchivedThread(bb, db, thread.id);
+    resumeAutomationsForUnarchivedThread(room, db, thread.id);
   });
 
-  bb.events.on("thread.deleted", ({ thread }) => {
-    disableAutomationsForDeletedThreadEvent(bb, db, thread.id);
+  room.events.on("thread.deleted", ({ thread }) => {
+    disableAutomationsForDeletedThreadEvent(room, db, thread.id);
   });
 
-  bb.background.service("automation-sweep", {
+  room.background.service("automation-sweep", {
     async start(signal) {
       try {
-        await reconcileRunningAutomationRuns(bb, db);
-        await reconcileArchivePausedAutomations(bb, db);
+        await reconcileRunningAutomationRuns(room, db);
+        await reconcileArchivePausedAutomations(room, db);
       } catch (error) {
-        bb.log.error(
+        room.log.error(
           `Automation startup reconciliation failed: ${errorMessage(error)}`,
         );
       }
-      void backfillCloudRuns(bb, db).catch((error: unknown) =>
-        bb.log.warn(`Loop review backfill failed: ${errorMessage(error)}`),
+      void backfillCloudRuns(room, db).catch((error: unknown) =>
+        room.log.warn(`Loop review backfill failed: ${errorMessage(error)}`),
       );
       while (!signal.aborted) {
         try {
-          await sweepDueAutomations(bb, db, {
+          await sweepDueAutomations(room, db, {
             pluginDataDir,
             serverUrl: resolveServerUrl(),
           });
         } catch (error) {
-          bb.log.error(`Automation sweep failed: ${errorMessage(error)}`);
+          room.log.error(`Automation sweep failed: ${errorMessage(error)}`);
         }
         await sleep(SWEEP_INTERVAL_MS, signal);
       }
@@ -108,7 +108,7 @@ export default async function plugin(bb: BbPluginApi) {
   });
 
   // Local webhook loops get their events from the website (ADR 0262).
-  bb.background.service("automation-webhooks", {
-    start: (signal) => pollWebhooks(bb, db, service, signal),
+  room.background.service("automation-webhooks", {
+    start: (signal) => pollWebhooks(room, db, service, signal),
   });
 }

@@ -526,12 +526,14 @@ export function createPiDeltaTranslator(
     const errorEnvelope = errorEnvelopeSchema.safeParse(event);
     if (errorEnvelope.success) {
       clearThreadToolShapes(context);
+      const detail = errorEnvelope.data.params?.message ?? "unknown error";
       return [
         {
           kind: "provider.error",
           message: "Provider error",
-          detail: errorEnvelope.data.params?.message ?? "unknown error",
+          detail,
           settlesTurn: true,
+          ...piNetworkErrorInfo(detail),
         },
       ];
     }
@@ -685,6 +687,7 @@ export function createPiDeltaTranslator(
               message: "Provider error",
               detail: lastAssistant.errorMessage,
               settlesTurn: true,
+              ...piNetworkErrorInfo(lastAssistant.errorMessage),
             },
           ];
         }
@@ -937,6 +940,25 @@ function extractCustomMessageText(
           .join("\n")
   ).trim();
   return text.length > 0 ? text : undefined;
+}
+
+/**
+ * Pi's model SDKs surface a dead network as Node's bare "fetch failed" or a
+ * socket code, with no category of their own.
+ */
+const PI_NETWORK_ERROR =
+  /^fetch failed$|\b(?:ENOTFOUND|EAI_AGAIN|ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENETUNREACH|EHOSTUNREACH|ENETDOWN)\b/;
+
+function piNetworkErrorInfo(detail: string) {
+  return PI_NETWORK_ERROR.test(detail.trim())
+    ? {
+        errorInfo: {
+          category: "connection-failed" as const,
+          providerCode: null,
+          httpStatusCode: null,
+        },
+      }
+    : {};
 }
 
 function isPiAssistantError(

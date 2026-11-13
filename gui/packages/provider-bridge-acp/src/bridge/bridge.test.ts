@@ -116,14 +116,14 @@ function threadEventsOfType(type: string): Record<string, unknown>[] {
   return threadEvents().filter((event) => event.type === type);
 }
 
-const bbThreadIdByProviderThreadId = new Map<string, string>();
+const roomThreadIdByProviderThreadId = new Map<string, string>();
 const permissionModeByProviderThreadId = new Map<
   string,
   "accept-edits" | "full"
 >();
 
-function bbThreadIdFor(providerThreadId: string): string {
-  const recorded = bbThreadIdByProviderThreadId.get(providerThreadId);
+function roomThreadIdFor(providerThreadId: string): string {
+  const recorded = roomThreadIdByProviderThreadId.get(providerThreadId);
   if (recorded !== undefined) {
     return recorded;
   }
@@ -254,9 +254,9 @@ async function startThread(args?: StartThreadArgs): Promise<{
   providerThreadId: string;
 }> {
   nextThreadSerial += 1;
-  const bbThreadId = `thread-${nextThreadSerial}`;
+  const roomThreadId = `thread-${nextThreadSerial}`;
   const id = sendRequest("thread/start", {
-    threadId: bbThreadId,
+    threadId: roomThreadId,
     cwd: workspaceDir,
     instructionMode: "append",
     options: executionOptions({
@@ -299,17 +299,17 @@ async function startThread(args?: StartThreadArgs): Promise<{
     throw new Error("thread/start did not return a providerThreadId");
   }
   startedProviderThreadIds.push(result.providerThreadId);
-  bbThreadIdByProviderThreadId.set(result.providerThreadId, bbThreadId);
+  roomThreadIdByProviderThreadId.set(result.providerThreadId, roomThreadId);
   permissionModeByProviderThreadId.set(
     result.providerThreadId,
     args?.permissionMode ?? "full",
   );
-  return { bbThreadId, providerThreadId: result.providerThreadId };
+  return { bbThreadId: roomThreadId, providerThreadId: result.providerThreadId };
 }
 
 async function stopThread(providerThreadId: string): Promise<void> {
   const id = sendRequest("thread/stop", {
-    threadId: bbThreadIdFor(providerThreadId),
+    threadId: roomThreadIdFor(providerThreadId),
     providerThreadId,
     intent: "interrupt",
     activeTurnId: null,
@@ -424,7 +424,7 @@ function sendTurnRequest(
   params: Record<string, unknown>,
 ): number {
   return sendRequest(method, {
-    threadId: bbThreadIdFor(providerThreadId),
+    threadId: roomThreadIdFor(providerThreadId),
     providerThreadId,
     clientRequestId: CLIENT_REQUEST_ID,
     options: executionOptions({
@@ -921,7 +921,7 @@ describe("acp bridge", () => {
       );
       const providerThreadId = providerThreadIdOf(response);
       startedProviderThreadIds.push(providerThreadId);
-      bbThreadIdByProviderThreadId.set(providerThreadId, threadId);
+      roomThreadIdByProviderThreadId.set(providerThreadId, threadId);
     },
   );
 
@@ -1193,14 +1193,23 @@ describe("acp bridge", () => {
     );
   });
 
-  it("fails model/list when the list command reports ACP auth is required", async () => {
-    const authId = sendModelList({
+  it.each<{ name: string; envVars: Record<string, string>; modelLines: string }>([
+    {
+      name: "Cursor's failing auth error",
       envVars: {
         FAKE_ACP_MODEL_LIST_STDERR:
           "Error: Authentication required. Run 'agent login', pass --api-key/--auth-token, or set CURSOR_API_KEY/CURSOR_AUTH_TOKEN.",
       },
       modelLines: "",
-    });
+    },
+    {
+      name: "Grok's signed-out header on a successful list",
+      envVars: {},
+      modelLines:
+        "You are not authenticated.\n\nDefault model: grok-4.6\n\nAvailable models:\n  * grok-4.6 (default)\n  - grok-4.5",
+    },
+  ])("fails model/list as auth required on $name", async ({ envVars, modelLines }) => {
+    const authId = sendModelList({ envVars, modelLines });
 
     const response = await waitForResponse(authId);
     expect(response.error?.message).toBe("ACP agent is not authenticated.");
@@ -1530,11 +1539,12 @@ describe("acp bridge", () => {
   });
 
   it("falls back to session/set_model when the model config option errors", async () => {
+    const envVars = {
+      FAKE_ACP_MODEL_CONFIG: "1",
+      FAKE_ACP_SET_CONFIG_MODEL_ERROR: "1",
+    };
     const { providerThreadId } = await startThread({
-      envVars: {
-        FAKE_ACP_MODEL_CONFIG: "1",
-        FAKE_ACP_SET_CONFIG_MODEL_ERROR: "1",
-      },
+      envVars,
       model: "fake/strong",
     });
 
@@ -1544,6 +1554,11 @@ describe("acp bridge", () => {
     await waitForTurnCompleted();
 
     expect(agentMessageTexts()).toContain("selected-model:fake/strong");
+
+    // #1236: the error names the id the agent rejected.
+    await expect(startThread({ envVars, model: "fake/gone" })).rejects.toThrow(
+      'Model "fake/gone" rejected: model not found: fake/gone',
+    );
   });
 
   it("rebuilds the session when a turn picks a different model", async () => {
@@ -3073,7 +3088,7 @@ describe("acp bridge", () => {
     });
     await waitForResponse(steerId);
     const stopId = sendRequest("thread/stop", {
-      threadId: bbThreadIdFor(providerThreadId),
+      threadId: roomThreadIdFor(providerThreadId),
       providerThreadId,
       intent: "interrupt",
       activeTurnId: null,
@@ -3104,7 +3119,7 @@ describe("acp bridge", () => {
     await waitForResponse(turnId);
 
     const stopId = sendRequest("thread/stop", {
-      threadId: bbThreadIdFor(providerThreadId),
+      threadId: roomThreadIdFor(providerThreadId),
       providerThreadId,
       intent: "interrupt",
       activeTurnId: null,
@@ -3411,7 +3426,7 @@ describe("acp bridge", () => {
       throw new Error("thread/fork did not return a providerThreadId");
     }
     startedProviderThreadIds.push(forkResult.providerThreadId);
-    bbThreadIdByProviderThreadId.set(
+    roomThreadIdByProviderThreadId.set(
       forkResult.providerThreadId,
       "thread-fork-reset",
     );
@@ -3468,7 +3483,7 @@ describe("acp bridge", () => {
       await waitForResponse(forkId),
     );
     startedProviderThreadIds.push(forkedProviderThreadId);
-    bbThreadIdByProviderThreadId.set(forkedProviderThreadId, forkThreadId);
+    roomThreadIdByProviderThreadId.set(forkedProviderThreadId, forkThreadId);
 
     const wire = messagesForThread(forkThreadId);
     const identityIndex = wire.findIndex(
@@ -3781,7 +3796,7 @@ describe("acp bridge", () => {
       await waitForResponse(secondStartId),
     );
     startedProviderThreadIds.push(liveProviderThreadId);
-    bbThreadIdByProviderThreadId.set(liveProviderThreadId, threadId);
+    roomThreadIdByProviderThreadId.set(liveProviderThreadId, threadId);
 
     const first = await waitForResponse(firstStartId);
     expect(first.result).toBeUndefined();

@@ -48,7 +48,11 @@ describe("turn-start watchdog", () => {
       runtime: {
         workspacePath: tmpDir,
         onEvent: (event) => events.push(event),
-        turnStartWatchdog: { thresholdMs: 120, intervalMs: 25 },
+        turnStartWatchdog: {
+          thresholdMs: 120,
+          intervalMs: 25,
+          stopAfterMs: 400,
+        },
       },
       launch: { scripted: { swallowTurnStart: true } },
     });
@@ -85,6 +89,16 @@ describe("turn-start watchdog", () => {
           event.code === "provider_turn_start_timeout",
       ),
     ).toHaveLength(1);
+
+    // Much later the runtime stops the thread, then fails the turn (#1364).
+    await waitFor(() =>
+      events.find(
+        (event) =>
+          event.type === "system/error" &&
+          event.code === "provider_turn_start_failed",
+      ),
+    );
+    expect(runtime.hasThread("t1")).toBe(false);
   });
 
   it("stays silent when the turn starts within the threshold", async () => {

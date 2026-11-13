@@ -1,186 +1,74 @@
+import { EventEmitter } from "node:events";
 import { experimental_createHostEntryHarness } from "@get-bb/plugin-sdk/testing/host";
-import { afterEach, describe, expect, it, vi } from "vitest";
-import { createKeepAwakeHostEntry } from "./host.js";
+import { afterEach, expect, it, vi } from "vitest";
+import hostEntry, { keepAwakeCommand } from "./host.js";
 
-function createChild() {
-  const listeners = new Map<"error" | "exit", () => void>();
-  return {
-    kill: vi.fn(() => true),
-    once(event: "error" | "exit", listener: () => void) {
-      listeners.set(event, listener);
-      return this;
-    },
-    emit(event: "error" | "exit") {
-      listeners.get(event)?.();
-    },
-  };
-}
+const spawn = vi.hoisted(() => vi.fn());
+vi.mock("node:child_process", async (original) => ({
+  ...(await original<typeof import("node:child_process")>()),
+  spawn,
+}));
+// Every OS finds a helper, so the restart test runs the same on any machine.
+vi.mock("node:fs", async (original) => ({
+  ...(await original<typeof import("node:fs")>()),
+  existsSync: () => true,
+}));
 
-describe("builtin Keep Awake host entry", () => {
-  afterEach(() => {
-    vi.useRealTimers();
+const GNOME = "/usr/bin/gnome-session-inhibit";
+const SYSTEMD = "/usr/bin/systemd-inhibit";
+
+afterEach(() => {
+  vi.useRealTimers();
+});
+
+it("picks the helper for each OS", () => {
+  const linux = (desktop: string, installed: string[]) =>
+    keepAwakeCommand("linux", 7, { XDG_CURRENT_DESKTOP: desktop }, (path) =>
+      installed.includes(path),
+    )?.[0] ?? null;
+
+  expect(keepAwakeCommand("darwin", 7)).toEqual([
+    "/usr/bin/caffeinate",
+    ["-d", "-i", "-s", "-w", "7"],
+  ]);
+  const windows = keepAwakeCommand("win32", 7, { SystemRoot: "D:\\Win" });
+  expect(windows?.[0]).toBe(
+    "D:\\Win\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+  );
+  expect(windows?.[1].at(-1)).toContain("SetThreadExecutionState(2147483649)");
+  expect(windows?.[1].at(-1)).toContain("Wait-Process -Id 7");
+  expect(linux("ubuntu:GNOME", [GNOME, SYSTEMD])).toBe(GNOME);
+  expect(linux("KDE", [GNOME, SYSTEMD])).toBe(SYSTEMD);
+  expect(linux("ubuntu:GNOME", [])).toBeNull();
+  expect(keepAwakeCommand("freebsd", 7)).toBeNull();
+});
+
+it("keeps one helper running, restarts it more slowly each time, and stops it", async () => {
+  vi.useFakeTimers();
+  const helpers: (EventEmitter & { kill: ReturnType<typeof vi.fn> })[] = [];
+  spawn.mockImplementation(() => {
+    helpers.push(Object.assign(new EventEmitter(), { kill: vi.fn() }));
+    return helpers.at(-1);
   });
+  const harness = experimental_createHostEntryHarness(hostEntry);
+  const setEnabled = (enabled: boolean) =>
+    harness.experimental_call("setEnabled", { enabled });
 
-  it("owns and restarts one caffeinate child for its generation", async () => {
-    vi.useFakeTimers();
-    const firstChild = createChild();
-    const secondChild = createChild();
-    const spawn = vi
-      .fn()
-      .mockReturnValueOnce(firstChild)
-      .mockReturnValueOnce(secondChild);
-    const harness = experimental_createHostEntryHarness(
-      createKeepAwakeHostEntry({ platform: "darwin", pid: 1234, spawn }),
-    );
+  await expect(setEnabled(true)).resolves.toEqual({ enabled: true, supported: true });
+  await setEnabled(true);
+  expect(spawn).toHaveBeenCalledOnce();
+  expect(harness.experimental_getRetainedWorkerLeaseCount()).toBe(1);
 
-    await expect(
-      harness.experimental_call("setEnabled", { enabled: true }),
-    ).resolves.toEqual({ enabled: true, supported: true });
-    await harness.experimental_call("setEnabled", { enabled: true });
-    expect(spawn).toHaveBeenCalledOnce();
-    expect(spawn).toHaveBeenCalledWith(
-      "/usr/bin/caffeinate",
-      ["-d", "-i", "-s", "-w", "1234"],
-      { stdio: "ignore", windowsHide: true },
-    );
-    expect(harness.experimental_getRetainedWorkerLeaseCount()).toBe(1);
+  helpers[0].emit("exit");
+  await vi.advanceTimersByTimeAsync(1_000);
+  expect(spawn).toHaveBeenCalledTimes(2);
+  helpers[1].emit("exit");
+  await vi.advanceTimersByTimeAsync(1_999);
+  expect(spawn).toHaveBeenCalledTimes(2);
+  await vi.advanceTimersByTimeAsync(1);
+  expect(spawn).toHaveBeenCalledTimes(3);
 
-    firstChild.emit("exit");
-    await vi.advanceTimersByTimeAsync(1_000);
-    expect(spawn).toHaveBeenCalledTimes(2);
-    await expect(
-      harness.experimental_call("setEnabled", { enabled: true }),
-    ).resolves.toEqual({ enabled: true, supported: true });
-    await harness.experimental_dispose();
-  });
-
-  it("retries when spawning caffeinate fails synchronously", async () => {
-    vi.useFakeTimers();
-    const child = createChild();
-    const spawn = vi
-      .fn()
-      .mockImplementationOnce(() => {
-        throw new Error("spawn failed");
-      })
-      .mockReturnValueOnce(child);
-    const harness = experimental_createHostEntryHarness(
-      createKeepAwakeHostEntry({ platform: "darwin", pid: 1234, spawn }),
-    );
-
-    await expect(
-      harness.experimental_call("setEnabled", { enabled: true }),
-    ).resolves.toEqual({ enabled: false, supported: true });
-
-    await vi.advanceTimersByTimeAsync(1_000);
-    expect(spawn).toHaveBeenCalledTimes(2);
-    await expect(
-      harness.experimental_call("setEnabled", { enabled: true }),
-    ).resolves.toEqual({ enabled: true, supported: true });
-
-    await harness.experimental_dispose();
-  });
-
-  it("holds a Windows execution state for the worker's lifetime", async () => {
-    const spawn = vi.fn(() => createChild());
-    const harness = experimental_createHostEntryHarness(
-      createKeepAwakeHostEntry({ platform: "win32", pid: 4321, spawn }),
-    );
-
-    await expect(
-      harness.experimental_call("setEnabled", { enabled: true }),
-    ).resolves.toEqual({ enabled: true, supported: true });
-    expect(spawn).toHaveBeenCalledExactlyOnceWith(
-      expect.stringMatching(/\\System32\\WindowsPowerShell\\v1\.0\\powershell\.exe$/u),
-      [
-        "-NoProfile",
-        "-NonInteractive",
-        "-Command",
-        expect.stringMatching(
-          /SetThreadExecutionState\(2147483649\).*Wait-Process -Id 4321$/u,
-        ),
-      ],
-      { stdio: "ignore", windowsHide: true },
-    );
-    await harness.experimental_dispose();
-  });
-
-  it("waits longer between restarts while the child keeps exiting at once", async () => {
-    vi.useFakeTimers();
-    const children = [createChild(), createChild(), createChild()];
-    const spawn = vi
-      .fn()
-      .mockReturnValueOnce(children[0])
-      .mockReturnValueOnce(children[1])
-      .mockReturnValueOnce(children[2]);
-    const harness = experimental_createHostEntryHarness(
-      createKeepAwakeHostEntry({ platform: "win32", pid: 4321, spawn }),
-    );
-
-    await harness.experimental_call("setEnabled", { enabled: true });
-    children[0]?.emit("exit");
-    await vi.advanceTimersByTimeAsync(1_000);
-    expect(spawn).toHaveBeenCalledTimes(2);
-    children[1]?.emit("exit");
-    await vi.advanceTimersByTimeAsync(1_000);
-    expect(spawn).toHaveBeenCalledTimes(2);
-    await vi.advanceTimersByTimeAsync(1_000);
-    expect(spawn).toHaveBeenCalledTimes(3);
-    await harness.experimental_dispose();
-  });
-
-  it("keeps main's flat 1 s restart off Windows", async () => {
-    vi.useFakeTimers();
-    const children = [createChild(), createChild(), createChild()];
-    const spawn = vi
-      .fn()
-      .mockReturnValueOnce(children[0])
-      .mockReturnValueOnce(children[1])
-      .mockReturnValueOnce(children[2]);
-    const harness = experimental_createHostEntryHarness(
-      createKeepAwakeHostEntry({ platform: "darwin", pid: 1234, spawn }),
-    );
-
-    await harness.experimental_call("setEnabled", { enabled: true });
-    children[0]?.emit("exit");
-    await vi.advanceTimersByTimeAsync(1_000);
-    children[1]?.emit("exit");
-    await vi.advanceTimersByTimeAsync(1_000);
-    expect(spawn).toHaveBeenCalledTimes(3);
-    await harness.experimental_dispose();
-  });
-
-  it("never spawns on unsupported hosts", async () => {
-    const spawn = vi.fn(() => createChild());
-    const harness = experimental_createHostEntryHarness(
-      createKeepAwakeHostEntry({ platform: "linux", pid: 1234, spawn }),
-    );
-
-    await expect(
-      harness.experimental_call("setEnabled", { enabled: true }),
-    ).resolves.toEqual({ enabled: false, supported: false });
-    expect(spawn).not.toHaveBeenCalled();
-  });
-
-  it("stops its child on disable and generation disposal", async () => {
-    const firstChild = createChild();
-    const secondChild = createChild();
-    const spawn = vi
-      .fn()
-      .mockReturnValueOnce(firstChild)
-      .mockReturnValueOnce(secondChild);
-    const harness = experimental_createHostEntryHarness(
-      createKeepAwakeHostEntry({ platform: "darwin", pid: 1234, spawn }),
-    );
-
-    await harness.experimental_call("setEnabled", { enabled: true });
-    await harness.experimental_call("setEnabled", { enabled: false });
-    expect(firstChild.kill).toHaveBeenCalledWith("SIGTERM");
-    expect(harness.experimental_getRetainedWorkerLeaseCount()).toBe(0);
-
-    await harness.experimental_call("setEnabled", { enabled: true });
-    expect(harness.experimental_getRetainedWorkerLeaseCount()).toBe(1);
-    await harness.experimental_dispose();
-    expect(secondChild.kill).toHaveBeenCalledWith("SIGTERM");
-    expect(harness.experimental_getRetainedWorkerLeaseCount()).toBe(0);
-  });
+  await expect(setEnabled(false)).resolves.toEqual({ enabled: false, supported: true });
+  expect(helpers[2].kill).toHaveBeenCalledWith("SIGTERM");
+  expect(harness.experimental_getRetainedWorkerLeaseCount()).toBe(0);
 });

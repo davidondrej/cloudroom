@@ -10,7 +10,7 @@ import { mkdtemp } from "node:fs/promises";
 import net, { type AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { WebSocket, WebSocketServer, type RawData } from "ws";
 import {
   startMachineAuthProxy,
@@ -464,6 +464,38 @@ describe("startMachineAuthProxy", () => {
       expect(request.headers[CALLER_TOKEN_HEADER]).toBeUndefined();
     }
   });
+
+  // Linux and macOS tell which user owns each loopback connection. Here the proxy
+  // takes another uid as its own, so this test's process is the other user.
+  it.runIf(process.platform === "linux" || process.platform === "darwin")(
+    "refuses open reads from another OS user on this machine",
+    async () => {
+      const received: string[] = [];
+      const upstream = http.createServer((request, response) => {
+        received.push(request.url ?? "");
+        response.end("{}");
+      });
+      const { proxy, token } = await startProxy(await listen(upstream));
+      vi.spyOn(process, "getuid").mockReturnValue(process.getuid!() + 1);
+      try {
+        const refused = await fetch(`${proxy.serverUrl}/api/v1/threads`);
+        expect(refused.status).toBe(401);
+        expect(refused.headers.get(CALLER_PROOF_STATUS_HEADER)).toBe(
+          "required",
+        );
+        expect(await refused.json()).toMatchObject({
+          code: "caller_proof_required",
+        });
+        const proven = await fetch(`${proxy.serverUrl}/api/v1/threads`, {
+          headers: { [CALLER_TOKEN_HEADER]: token },
+        });
+        expect(proven.status).toBe(200);
+      } finally {
+        vi.restoreAllMocks();
+      }
+      expect(received).toEqual(["/api/v1/threads"]);
+    },
+  );
 
   it("gives a token only to a caller that writes the proof file", async () => {
     let upstreamRequests = 0;

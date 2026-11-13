@@ -50,8 +50,7 @@ both recall (`memories.use_memories`) and future generation
 (`memories.generate_memories`). Claude Code memory controls native auto-memory
 reads and writes (`autoMemoryEnabled`). Both preferences default on and apply
 when a provider thread is started, resumed, or forked; they do not interrupt
-an active turn. These settings are separate from Cloudroom's optional Memory plugin,
-an official plugin bundled with the app.
+an active turn.
 
 Provider-native subagents can also be disabled on those provider pages. For
 Codex, cloudroom turns off the native multi-agent feature and caps V2 sessions at the
@@ -141,8 +140,8 @@ entry with a warning. The entry then appears in room-cli provider models output 
 in the model picker, but the provider must still accept the id: claude-code
 and codex accept unlisted ids, while an ACP agent can reject an id it does
 not know at session start. OpenCode rejects unlisted ids, so add an OpenCode
-model to the OpenCode config instead. Edit the JSON and run bb-app config
-refresh; there is no set/unset CLI surface. The streamerMode
+model to the OpenCode config instead. Edit the JSON and restart the app;
+there is no set/unset CLI surface. The streamerMode
 General setting hides every entry from these lists; see the customization
 chapter.
 

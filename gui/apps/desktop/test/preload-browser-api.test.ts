@@ -2,50 +2,50 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppCommandId, AppShortcutInput } from "@cloudroom/domain";
 import type {
   BbDesktopApi,
-  BbDesktopBrowserFindResult,
-  BbDesktopBrowserOpenTabRequest,
-  BbDesktopBrowserScopedOpenTabRequest,
-  BbDesktopBrowserSnapshot,
-  BbDesktopBrowserState,
-  BbDesktopInfo,
-  BbDesktopWindowState,
+  RoomDesktopBrowserFindResult,
+  RoomDesktopBrowserOpenTabRequest,
+  RoomDesktopBrowserScopedOpenTabRequest,
+  RoomDesktopBrowserSnapshot,
+  RoomDesktopBrowserState,
+  RoomDesktopInfo,
+  RoomDesktopWindowState,
 } from "@cloudroom/desktop-contract";
 import {
-  BB_DESKTOP_CHECK_FOR_UPDATES_CHANNEL,
-  BB_DESKTOP_GET_INFO_CHANNEL,
-  BB_DESKTOP_INFO_CHANGED_CHANNEL,
-  BB_DESKTOP_INSTALL_UPDATE_CHANNEL,
-  BB_DESKTOP_SET_THEME_CHANNEL,
+  ROOM_DESKTOP_CHECK_FOR_UPDATES_CHANNEL,
+  ROOM_DESKTOP_GET_INFO_CHANNEL,
+  ROOM_DESKTOP_INFO_CHANGED_CHANNEL,
+  ROOM_DESKTOP_INSTALL_UPDATE_CHANNEL,
+  ROOM_DESKTOP_SET_THEME_CHANNEL,
 } from "../src/desktop-update-ipc.js";
 import {
-  BB_DESKTOP_BROWSER_ATTACH_CHANNEL,
-  BB_DESKTOP_BROWSER_DETACH_CHANNEL,
-  BB_DESKTOP_BROWSER_FOCUS_CHANNEL,
-  BB_DESKTOP_BROWSER_FOCUSED_CHANNEL,
-  BB_DESKTOP_BROWSER_FIND_IN_PAGE_CHANNEL,
-  BB_DESKTOP_BROWSER_FIND_RESULT_CHANNEL,
-  BB_DESKTOP_BROWSER_GO_BACK_CHANNEL,
-  BB_DESKTOP_BROWSER_GO_FORWARD_CHANNEL,
-  BB_DESKTOP_BROWSER_NAVIGATE_CHANNEL,
-  BB_DESKTOP_BROWSER_OPEN_TAB_CHANNEL,
-  BB_DESKTOP_BROWSER_RELOAD_CHANNEL,
-  BB_DESKTOP_BROWSER_SCOPED_OPEN_TAB_CHANNEL,
-  BB_DESKTOP_BROWSER_SET_BOUNDS_CHANNEL,
-  BB_DESKTOP_BROWSER_SET_VISIBLE_CHANNEL,
-  BB_DESKTOP_BROWSER_SET_VISIBLE_WITHOUT_FOCUS_CHANNEL,
-  BB_DESKTOP_BROWSER_SNAPSHOT_CHANNEL,
-  BB_DESKTOP_BROWSER_STATE_CHANNEL,
-  BB_DESKTOP_BROWSER_STOP_CHANNEL,
-  BB_DESKTOP_BROWSER_STOP_FIND_IN_PAGE_CHANNEL,
+  ROOM_DESKTOP_BROWSER_ATTACH_CHANNEL,
+  ROOM_DESKTOP_BROWSER_DETACH_CHANNEL,
+  ROOM_DESKTOP_BROWSER_FOCUS_CHANNEL,
+  ROOM_DESKTOP_BROWSER_FOCUSED_CHANNEL,
+  ROOM_DESKTOP_BROWSER_FIND_IN_PAGE_CHANNEL,
+  ROOM_DESKTOP_BROWSER_FIND_RESULT_CHANNEL,
+  ROOM_DESKTOP_BROWSER_GO_BACK_CHANNEL,
+  ROOM_DESKTOP_BROWSER_GO_FORWARD_CHANNEL,
+  ROOM_DESKTOP_BROWSER_NAVIGATE_CHANNEL,
+  ROOM_DESKTOP_BROWSER_OPEN_TAB_CHANNEL,
+  ROOM_DESKTOP_BROWSER_RELOAD_CHANNEL,
+  ROOM_DESKTOP_BROWSER_SCOPED_OPEN_TAB_CHANNEL,
+  ROOM_DESKTOP_BROWSER_SET_BOUNDS_CHANNEL,
+  ROOM_DESKTOP_BROWSER_SET_VISIBLE_CHANNEL,
+  ROOM_DESKTOP_BROWSER_SET_VISIBLE_WITHOUT_FOCUS_CHANNEL,
+  ROOM_DESKTOP_BROWSER_SNAPSHOT_CHANNEL,
+  ROOM_DESKTOP_BROWSER_STATE_CHANNEL,
+  ROOM_DESKTOP_BROWSER_STOP_CHANNEL,
+  ROOM_DESKTOP_BROWSER_STOP_FIND_IN_PAGE_CHANNEL,
 } from "../src/desktop-browser-ipc.js";
 import {
-  BB_DESKTOP_APP_COMMAND_CHANNEL,
-  BB_DESKTOP_CLOSE_WINDOW_REQUEST_CHANNEL,
-  BB_DESKTOP_CLOSE_WINDOW_RESPONSE_CHANNEL,
-  BB_DESKTOP_GET_WINDOW_STATE_CHANNEL,
-  BB_DESKTOP_OPEN_NEW_TAB_CHANNEL,
-  BB_DESKTOP_OPEN_SERVER_DAEMON_LOGS_CHANNEL,
-  BB_DESKTOP_WINDOW_STATE_CHANGED_CHANNEL,
+  ROOM_DESKTOP_APP_COMMAND_CHANNEL,
+  ROOM_DESKTOP_CLOSE_WINDOW_REQUEST_CHANNEL,
+  ROOM_DESKTOP_CLOSE_WINDOW_RESPONSE_CHANNEL,
+  ROOM_DESKTOP_GET_WINDOW_STATE_CHANNEL,
+  ROOM_DESKTOP_OPEN_NEW_TAB_CHANNEL,
+  ROOM_DESKTOP_OPEN_SERVER_DAEMON_LOGS_CHANNEL,
+  ROOM_DESKTOP_WINDOW_STATE_CHANGED_CHANNEL,
 } from "../src/desktop-window-command-ipc.js";
 const electronMock = vi.hoisted(() => {
   interface IpcRendererEvent {}
@@ -60,7 +60,7 @@ const electronMock = vi.hoisted(() => {
     payload: unknown,
   ) => void;
 
-  const desktopInfo: BbDesktopInfo = {
+  const desktopInfo: RoomDesktopInfo = {
     lastCheckedAt: null,
     latestVersion: null,
     pendingVersion: null,
@@ -69,7 +69,7 @@ const electronMock = vi.hoisted(() => {
     updateDownloaded: false,
     version: "0.0.0-test",
   };
-  const desktopWindowState: BbDesktopWindowState = {
+  const desktopWindowState: RoomDesktopWindowState = {
     isFullScreen: false,
   };
   const invokeCalls: string[] = [];
@@ -109,7 +109,7 @@ const electronMock = vi.hoisted(() => {
       },
     },
     ipcRenderer: {
-      invoke(channel: string): Promise<BbDesktopInfo | BbDesktopWindowState> {
+      invoke(channel: string): Promise<RoomDesktopInfo | RoomDesktopWindowState> {
         invokeCalls.push(channel);
         if (channel === "bb-desktop:get-window-state") {
           return Promise.resolve(desktopWindowState);
@@ -266,66 +266,66 @@ describe("desktop preload browser API", () => {
     await api.installUpdate();
 
     expect(electronMock.sendCalls).toEqual([
-      { channel: BB_DESKTOP_BROWSER_ATTACH_CHANNEL, payload: attachRequest },
+      { channel: ROOM_DESKTOP_BROWSER_ATTACH_CHANNEL, payload: attachRequest },
       {
-        channel: BB_DESKTOP_BROWSER_DETACH_CHANNEL,
+        channel: ROOM_DESKTOP_BROWSER_DETACH_CHANNEL,
         payload: { tabId: "browser:a" },
       },
       {
-        channel: BB_DESKTOP_BROWSER_NAVIGATE_CHANNEL,
+        channel: ROOM_DESKTOP_BROWSER_NAVIGATE_CHANNEL,
         payload: navigateRequest,
       },
       {
-        channel: BB_DESKTOP_BROWSER_GO_BACK_CHANNEL,
+        channel: ROOM_DESKTOP_BROWSER_GO_BACK_CHANNEL,
         payload: { tabId: "browser:a" },
       },
       {
-        channel: BB_DESKTOP_BROWSER_GO_FORWARD_CHANNEL,
+        channel: ROOM_DESKTOP_BROWSER_GO_FORWARD_CHANNEL,
         payload: { tabId: "browser:a" },
       },
       {
-        channel: BB_DESKTOP_BROWSER_RELOAD_CHANNEL,
+        channel: ROOM_DESKTOP_BROWSER_RELOAD_CHANNEL,
         payload: { tabId: "browser:a" },
       },
       {
-        channel: BB_DESKTOP_BROWSER_STOP_CHANNEL,
+        channel: ROOM_DESKTOP_BROWSER_STOP_CHANNEL,
         payload: { tabId: "browser:a" },
       },
       {
-        channel: BB_DESKTOP_BROWSER_FOCUS_CHANNEL,
+        channel: ROOM_DESKTOP_BROWSER_FOCUS_CHANNEL,
         payload: { tabId: "browser:a" },
       },
       {
-        channel: BB_DESKTOP_BROWSER_SET_BOUNDS_CHANNEL,
+        channel: ROOM_DESKTOP_BROWSER_SET_BOUNDS_CHANNEL,
         payload: boundsRequest,
       },
       {
-        channel: BB_DESKTOP_BROWSER_SET_VISIBLE_CHANNEL,
+        channel: ROOM_DESKTOP_BROWSER_SET_VISIBLE_CHANNEL,
         payload: visibleRequest,
       },
       {
-        channel: BB_DESKTOP_BROWSER_SET_VISIBLE_WITHOUT_FOCUS_CHANNEL,
+        channel: ROOM_DESKTOP_BROWSER_SET_VISIBLE_WITHOUT_FOCUS_CHANNEL,
         payload: visibleRequest,
       },
       {
-        channel: BB_DESKTOP_BROWSER_FIND_IN_PAGE_CHANNEL,
+        channel: ROOM_DESKTOP_BROWSER_FIND_IN_PAGE_CHANNEL,
         payload: findRequest,
       },
       {
-        channel: BB_DESKTOP_BROWSER_STOP_FIND_IN_PAGE_CHANNEL,
+        channel: ROOM_DESKTOP_BROWSER_STOP_FIND_IN_PAGE_CHANNEL,
         payload: stopFindRequest,
       },
-      { channel: BB_DESKTOP_SET_THEME_CHANNEL, payload: "dark" },
+      { channel: ROOM_DESKTOP_SET_THEME_CHANNEL, payload: "dark" },
     ]);
-    expect(electronMock.invokeCalls).toContain(BB_DESKTOP_GET_INFO_CHANNEL);
+    expect(electronMock.invokeCalls).toContain(ROOM_DESKTOP_GET_INFO_CHANNEL);
     expect(electronMock.invokeCalls).toContain(
-      BB_DESKTOP_CHECK_FOR_UPDATES_CHANNEL,
+      ROOM_DESKTOP_CHECK_FOR_UPDATES_CHANNEL,
     );
     expect(electronMock.invokeCalls).toContain(
-      BB_DESKTOP_GET_WINDOW_STATE_CHANNEL,
+      ROOM_DESKTOP_GET_WINDOW_STATE_CHANNEL,
     );
     expect(electronMock.invokeCalls).toContain(
-      BB_DESKTOP_INSTALL_UPDATE_CHANNEL,
+      ROOM_DESKTOP_INSTALL_UPDATE_CHANNEL,
     );
   }, 10_000);
 
@@ -369,7 +369,7 @@ describe("desktop preload browser API", () => {
 
     expect(electronMock.sendCalls).toEqual([
       {
-        channel: BB_DESKTOP_BROWSER_ATTACH_CHANNEL,
+        channel: ROOM_DESKTOP_BROWSER_ATTACH_CHANNEL,
         payload: {
           threadId: "thread-1",
           tabId: "browser:zoomed",
@@ -379,7 +379,7 @@ describe("desktop preload browser API", () => {
         },
       },
       {
-        channel: BB_DESKTOP_BROWSER_SET_BOUNDS_CHANNEL,
+        channel: ROOM_DESKTOP_BROWSER_SET_BOUNDS_CHANNEL,
         payload: {
           tabId: "browser:zoomed",
           bounds: { x: 1001, y: 51, width: 499, height: 749 },
@@ -389,12 +389,12 @@ describe("desktop preload browser API", () => {
   });
 
   it("validates browser event payloads before notifying renderer listeners", () => {
-    const states: BbDesktopBrowserState[] = [];
-    const openTabs: BbDesktopBrowserOpenTabRequest[] = [];
-    const scopedOpenTabs: BbDesktopBrowserScopedOpenTabRequest[] = [];
+    const states: RoomDesktopBrowserState[] = [];
+    const openTabs: RoomDesktopBrowserOpenTabRequest[] = [];
+    const scopedOpenTabs: RoomDesktopBrowserScopedOpenTabRequest[] = [];
     const focusedTabs: string[] = [];
-    const snapshots: BbDesktopBrowserSnapshot[] = [];
-    const findResults: BbDesktopBrowserFindResult[] = [];
+    const snapshots: RoomDesktopBrowserSnapshot[] = [];
+    const findResults: RoomDesktopBrowserFindResult[] = [];
     let closeWindowRequestCount = 0;
     let openNewTabCount = 0;
     const appCommands: (AppCommandId | AppShortcutInput)[] = [];
@@ -406,8 +406,8 @@ describe("desktop preload browser API", () => {
       metaKey: false,
       shiftKey: false,
     };
-    const windowStates: BbDesktopWindowState[] = [];
-    const state: BbDesktopBrowserState = {
+    const windowStates: RoomDesktopWindowState[] = [];
+    const state: RoomDesktopBrowserState = {
       tabId: "browser:a",
       url: "https://example.com/",
       title: "Example",
@@ -416,18 +416,18 @@ describe("desktop preload browser API", () => {
       canGoForward: true,
       errorText: null,
     };
-    const openTab: BbDesktopBrowserOpenTabRequest = {
+    const openTab: RoomDesktopBrowserOpenTabRequest = {
       url: "https://example.com/popup",
     };
-    const scopedOpenTab: BbDesktopBrowserScopedOpenTabRequest = {
+    const scopedOpenTab: RoomDesktopBrowserScopedOpenTabRequest = {
       tabId: "browser:a",
       url: "https://example.com/scoped-popup",
     };
-    const snapshot: BbDesktopBrowserSnapshot = {
+    const snapshot: RoomDesktopBrowserSnapshot = {
       tabId: "browser:a",
       dataUrl: null,
     };
-    const findResult: BbDesktopBrowserFindResult = {
+    const findResult: RoomDesktopBrowserFindResult = {
       tabId: "browser:a",
       requestId: 3,
       activeMatchOrdinal: 1,
@@ -468,87 +468,87 @@ describe("desktop preload browser API", () => {
     });
 
     emitIpcPayload({
-      channel: BB_DESKTOP_BROWSER_STATE_CHANNEL,
+      channel: ROOM_DESKTOP_BROWSER_STATE_CHANNEL,
       payload: { ...state, extra: true },
     });
     emitIpcPayload({
-      channel: BB_DESKTOP_BROWSER_OPEN_TAB_CHANNEL,
+      channel: ROOM_DESKTOP_BROWSER_OPEN_TAB_CHANNEL,
       payload: { url: "" },
     });
     emitIpcPayload({
-      channel: BB_DESKTOP_BROWSER_SCOPED_OPEN_TAB_CHANNEL,
+      channel: ROOM_DESKTOP_BROWSER_SCOPED_OPEN_TAB_CHANNEL,
       payload: { tabId: "", url: "https://example.com/scoped-popup" },
     });
     emitIpcPayload({
-      channel: BB_DESKTOP_BROWSER_FOCUSED_CHANNEL,
+      channel: ROOM_DESKTOP_BROWSER_FOCUSED_CHANNEL,
       payload: { tabId: "", extra: true },
     });
     emitIpcPayload({
-      channel: BB_DESKTOP_BROWSER_SNAPSHOT_CHANNEL,
+      channel: ROOM_DESKTOP_BROWSER_SNAPSHOT_CHANNEL,
       payload: { tabId: "browser:a", dataUrl: 42 },
     });
     emitIpcPayload({
-      channel: BB_DESKTOP_BROWSER_FIND_RESULT_CHANNEL,
+      channel: ROOM_DESKTOP_BROWSER_FIND_RESULT_CHANNEL,
       payload: { ...findResult, matches: -1 },
     });
     emitIpcPayload({
-      channel: BB_DESKTOP_BROWSER_FIND_RESULT_CHANNEL,
+      channel: ROOM_DESKTOP_BROWSER_FIND_RESULT_CHANNEL,
       payload: { ...findResult, selectionArea: {} },
     });
     emitIpcPayload({
-      channel: BB_DESKTOP_WINDOW_STATE_CHANGED_CHANNEL,
+      channel: ROOM_DESKTOP_WINDOW_STATE_CHANGED_CHANNEL,
       payload: { isFullScreen: false, extra: true },
     });
     emitIpcPayload({
-      channel: BB_DESKTOP_BROWSER_STATE_CHANNEL,
+      channel: ROOM_DESKTOP_BROWSER_STATE_CHANNEL,
       payload: state,
     });
     emitIpcPayload({
-      channel: BB_DESKTOP_BROWSER_OPEN_TAB_CHANNEL,
+      channel: ROOM_DESKTOP_BROWSER_OPEN_TAB_CHANNEL,
       payload: openTab,
     });
     emitIpcPayload({
-      channel: BB_DESKTOP_BROWSER_SCOPED_OPEN_TAB_CHANNEL,
+      channel: ROOM_DESKTOP_BROWSER_SCOPED_OPEN_TAB_CHANNEL,
       payload: scopedOpenTab,
     });
     emitIpcPayload({
-      channel: BB_DESKTOP_BROWSER_FOCUSED_CHANNEL,
+      channel: ROOM_DESKTOP_BROWSER_FOCUSED_CHANNEL,
       payload: { tabId: "browser:a" },
     });
     emitIpcPayload({
-      channel: BB_DESKTOP_BROWSER_SNAPSHOT_CHANNEL,
+      channel: ROOM_DESKTOP_BROWSER_SNAPSHOT_CHANNEL,
       payload: snapshot,
     });
     emitIpcPayload({
-      channel: BB_DESKTOP_BROWSER_FIND_RESULT_CHANNEL,
+      channel: ROOM_DESKTOP_BROWSER_FIND_RESULT_CHANNEL,
       payload: findResult,
     });
     emitIpcPayload({
-      channel: BB_DESKTOP_WINDOW_STATE_CHANGED_CHANNEL,
+      channel: ROOM_DESKTOP_WINDOW_STATE_CHANGED_CHANNEL,
       payload: { isFullScreen: true },
     });
     emitIpcPayload({
-      channel: BB_DESKTOP_OPEN_NEW_TAB_CHANNEL,
+      channel: ROOM_DESKTOP_OPEN_NEW_TAB_CHANNEL,
       payload: null,
     });
     emitIpcPayload({
-      channel: BB_DESKTOP_APP_COMMAND_CHANNEL,
+      channel: ROOM_DESKTOP_APP_COMMAND_CHANNEL,
       payload: "not-a-command",
     });
     emitIpcPayload({
-      channel: BB_DESKTOP_APP_COMMAND_CHANNEL,
+      channel: ROOM_DESKTOP_APP_COMMAND_CHANNEL,
       payload: "thread.new",
     });
     emitIpcPayload({
-      channel: BB_DESKTOP_APP_COMMAND_CHANNEL,
+      channel: ROOM_DESKTOP_APP_COMMAND_CHANNEL,
       payload: { ...shortcut, extra: true },
     });
     emitIpcPayload({
-      channel: BB_DESKTOP_APP_COMMAND_CHANNEL,
+      channel: ROOM_DESKTOP_APP_COMMAND_CHANNEL,
       payload: shortcut,
     });
     emitIpcPayload({
-      channel: BB_DESKTOP_CLOSE_WINDOW_REQUEST_CHANNEL,
+      channel: ROOM_DESKTOP_CLOSE_WINDOW_REQUEST_CHANNEL,
       payload: null,
     });
 
@@ -563,7 +563,7 @@ describe("desktop preload browser API", () => {
     expect(openNewTabCount).toBe(1);
     expect(appCommands).toEqual(["thread.new", shortcut]);
     expect(electronMock.sendCalls).toContainEqual({
-      channel: BB_DESKTOP_CLOSE_WINDOW_RESPONSE_CHANNEL,
+      channel: ROOM_DESKTOP_CLOSE_WINDOW_RESPONSE_CHANNEL,
       payload: true,
     });
   });
@@ -571,12 +571,12 @@ describe("desktop preload browser API", () => {
   it("routes the log viewer request to main and mirrors its availability", async () => {
     await api.openServerDaemonLogs?.();
     expect(electronMock.invokeCalls).toContain(
-      BB_DESKTOP_OPEN_SERVER_DAEMON_LOGS_CHANNEL,
+      ROOM_DESKTOP_OPEN_SERVER_DAEMON_LOGS_CHANNEL,
     );
 
     expect(api.serverDaemonLogsAvailable).toBeUndefined();
     emitIpcPayload({
-      channel: BB_DESKTOP_INFO_CHANGED_CHANNEL,
+      channel: ROOM_DESKTOP_INFO_CHANGED_CHANNEL,
       payload: {
         lastCheckedAt: null,
         latestVersion: null,
@@ -593,12 +593,12 @@ describe("desktop preload browser API", () => {
 
   it("answers unhandled close-window requests so main closes the window", () => {
     emitIpcPayload({
-      channel: BB_DESKTOP_CLOSE_WINDOW_REQUEST_CHANNEL,
+      channel: ROOM_DESKTOP_CLOSE_WINDOW_REQUEST_CHANNEL,
       payload: null,
     });
 
     expect(electronMock.sendCalls).toContainEqual({
-      channel: BB_DESKTOP_CLOSE_WINDOW_RESPONSE_CHANNEL,
+      channel: ROOM_DESKTOP_CLOSE_WINDOW_RESPONSE_CHANNEL,
       payload: false,
     });
   });

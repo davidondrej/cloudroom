@@ -147,6 +147,7 @@ interface SummaryDisplayOverrides {
   hasMultipleMachines?: boolean;
   hostName?: string | null;
   hostType?: Host["type"] | null;
+  isWorktree?: boolean;
 }
 
 function getSummaryDisplay({
@@ -156,6 +157,7 @@ function getSummaryDisplay({
   hasMultipleMachines = false,
   hostName = "Michael-M4",
   hostType = "persistent",
+  isWorktree = false,
 }: SummaryDisplayOverrides = {}) {
   return getEnvironmentWorkspaceSummaryDisplay({
     display,
@@ -164,6 +166,7 @@ function getSummaryDisplay({
     hasMultipleMachines,
     hostName,
     hostType,
+    isWorktree,
   });
 }
 
@@ -266,23 +269,34 @@ describe("getEnvironmentWorkspaceSummaryDisplay", () => {
   });
   it.each([
     {
-      name: "a local project checkout",
+      name: "a local folder",
       display: makeDisplay(),
+      isWorktree: false,
+      label: "Local",
     },
     {
-      name: "a remote project checkout",
+      name: "a local worktree",
+      display: makeDisplay(),
+      isWorktree: true,
+      label: "Local Worktree",
+    },
+    {
+      name: "a remote folder",
       display: makeDisplay({
         modeLabel: "Working remotely",
         compactModeLabel: "Remote",
       }),
+      isWorktree: false,
+      label: "Remote",
     },
-  ])("shows nothing for $name with no environment provider", (testCase) => {
+  ])("still labels $name with no environment provider", (testCase) => {
     expect(
       getSummaryDisplay({
         display: testCase.display,
         providerLookup: noProviderLookup,
+        isWorktree: testCase.isWorktree,
       }),
-    ).toBeNull();
+    ).toMatchObject({ label: testCase.label, icon: "Laptop" });
   });
 
   it.each([

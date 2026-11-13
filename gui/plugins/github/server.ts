@@ -572,8 +572,8 @@ export async function fetchRepoItems(
   ];
 }
 
-export default async function plugin(bb: BbPluginApi) {
-  const settings = bb.settings.define({
+export default async function plugin(room: BbPluginApi) {
+  const settings = room.settings.define({
     extraRepos: {
       type: "string",
       label: "Extra repositories",
@@ -636,7 +636,7 @@ export default async function plugin(bb: BbPluginApi) {
       ghAuthError = null;
       if (ghWasDown) {
         ghWasDown = false;
-        bb.realtime.publish("data-changed", {});
+        room.realtime.publish("data-changed", {});
       }
       return;
     } catch (error) {
@@ -693,7 +693,7 @@ export default async function plugin(bb: BbPluginApi) {
     }
     const byRepo = new Map<string, RepoInfo>();
     try {
-      const projects = await bb.sdk.projects.list();
+      const projects = await room.sdk.projects.list();
       for (const project of projects) {
         for (const source of project.sources ?? []) {
           if (source.type !== "local_path") continue;
@@ -711,7 +711,7 @@ export default async function plugin(bb: BbPluginApi) {
         }
       }
     } catch (error) {
-      bb.log.warn(`project discovery failed: ${errorMessage(error)}`);
+      room.log.warn(`project discovery failed: ${errorMessage(error)}`);
     }
     const { extraRepos } = await settings.get();
     const parsed = parseExtraRepos(extraRepos);
@@ -724,7 +724,7 @@ export default async function plugin(bb: BbPluginApi) {
     if (ignoredKey !== lastIgnoredExtraReposKey) {
       lastIgnoredExtraReposKey = ignoredKey;
       if (parsed.ignored.length > 0) {
-        bb.log.warn(describeIgnoredExtraRepos(parsed.ignored));
+        room.log.warn(describeIgnoredExtraRepos(parsed.ignored));
       }
     }
     ignoredExtraRepos = parsed.ignored;
@@ -733,8 +733,8 @@ export default async function plugin(bb: BbPluginApi) {
     return repos;
   }
 
-  const db = bb.storage.database();
-  bb.storage.migrate(db, [
+  const db = room.storage.database();
+  room.storage.migrate(db, [
     `CREATE TABLE IF NOT EXISTS items (
        repo TEXT NOT NULL,
        number INTEGER NOT NULL,
@@ -875,7 +875,7 @@ export default async function plugin(bb: BbPluginApi) {
         "UPDATE items SET labels = ? WHERE repo = ? AND kind = 'issue' AND number = ?",
       ).run(JSON.stringify(patch.labels), repo, number);
     }
-    bb.realtime.publish("data-changed", {});
+    room.realtime.publish("data-changed", {});
   }
 
   async function syncAll(
@@ -901,7 +901,7 @@ export default async function plugin(bb: BbPluginApi) {
       } catch (error) {
         failed += 1;
         lastFailure = errorMessage(error);
-        bb.log.warn(`sync failed for ${repo}: ${lastFailure}`);
+        room.log.warn(`sync failed for ${repo}: ${lastFailure}`);
       }
     }
     if (repos.length > 0 && failed === repos.length) {
@@ -916,19 +916,19 @@ export default async function plugin(bb: BbPluginApi) {
         )
         .all(),
     );
-    await bb.storage.kv.set("sync-cursor", {
+    await room.storage.kv.set("sync-cursor", {
       lastSyncedAt: new Date().toISOString(),
       repos: repos.length,
       items: total,
     });
     if (before !== after) {
-      bb.realtime.publish("data-changed", { items: total });
+      room.realtime.publish("data-changed", { items: total });
     }
-    bb.log.info(`synced ${total} item(s) across ${repos.length} repo(s)`);
+    room.log.info(`synced ${total} item(s) across ${repos.length} repo(s)`);
     return { repos: repos.length, items: total };
   }
 
-  bb.background.service("sync", {
+  room.background.service("sync", {
     async start(signal) {
       let failures = 0;
       while (!signal.aborted) {
@@ -943,7 +943,7 @@ export default async function plugin(bb: BbPluginApi) {
             SYNC_RETRY_BASE_MS * 2 ** (failures - 1),
             SYNC_RETRY_MAX_MS,
           );
-          bb.log.warn(
+          room.log.warn(
             `sync failed (retry in ${Math.round(delayMs / 1000)}s): ${errorMessage(
               error,
             )}`,
@@ -969,9 +969,9 @@ export default async function plugin(bb: BbPluginApi) {
     await checkAuth();
   } catch (error) {
     if (isNeedsConfigurationError(error)) {
-      bb.status.needsConfiguration(error.message);
+      room.status.needsConfiguration(error.message);
     } else if (isGhUnavailableError(error)) {
-      bb.log.warn(error.message);
+      room.log.warn(error.message);
     } else {
       throw error;
     }
@@ -983,16 +983,16 @@ export default async function plugin(bb: BbPluginApi) {
 
   async function addLink(link: ThreadLink): Promise<void> {
     const key = linkKey(link.kind, link.repo, link.number);
-    const existing = (await bb.storage.kv.get<ThreadLink[]>(key)) ?? [];
-    await bb.storage.kv.set(key, [...existing, link]);
-    bb.realtime.publish("links-changed", { key });
+    const existing = (await room.storage.kv.get<ThreadLink[]>(key)) ?? [];
+    await room.storage.kv.set(key, [...existing, link]);
+    room.realtime.publish("links-changed", { key });
   }
 
   async function listAllLinks(): Promise<Record<string, ThreadLink[]>> {
-    const keys = await bb.storage.kv.list("link:");
+    const keys = await room.storage.kv.list("link:");
     const result: Record<string, ThreadLink[]> = {};
     for (const key of keys) {
-      const links = await bb.storage.kv.get<ThreadLink[]>(key);
+      const links = await room.storage.kv.get<ThreadLink[]>(key);
       if (links !== undefined && links.length > 0) {
         result[key.slice("link:".length)] = links;
       }
@@ -1039,7 +1039,7 @@ export default async function plugin(bb: BbPluginApi) {
             "Do not push changes or post to GitHub unless the user asks.",
           ]),
     ].join("\n");
-    const thread = await bb.sdk.threads.spawn({
+    const thread = await room.sdk.threads.spawn({
       projectId,
       environment: { type: "project-default" },
       title: `${ref}: ${title}`.slice(0, 120),
@@ -1052,7 +1052,7 @@ export default async function plugin(bb: BbPluginApi) {
       threadId: thread.id,
       createdAt: new Date().toISOString(),
     });
-    bb.log.info(`spawned thread ${thread.id} for ${kind} ${ref}`);
+    room.log.info(`spawned thread ${thread.id} for ${kind} ${ref}`);
     return { threadId: thread.id };
   }
 
@@ -1115,14 +1115,14 @@ export default async function plugin(bb: BbPluginApi) {
     return labels;
   }
 
-  bb.rpc.register(githubRpcContract, {
+  room.rpc.register(githubRpcContract, {
     async status() {
       if (ghState !== "ready") {
         try {
           await checkAuth();
         } catch {}
       }
-      const cursor = await bb.storage.kv.get<{
+      const cursor = await room.storage.kv.get<{
         lastSyncedAt: string;
         repos: number;
         items: number;
@@ -1495,10 +1495,10 @@ export default async function plugin(bb: BbPluginApi) {
     async pullForThread({ threadId }) {
       let environmentId: string | null = null;
       try {
-        const thread = await bb.sdk.threads.get({ threadId });
+        const thread = await room.sdk.threads.get({ threadId });
         if (thread?.environmentId) {
           environmentId = thread.environmentId;
-          const result = await bb.sdk.environments.pullRequest({
+          const result = await room.sdk.environments.pullRequest({
             environmentId: thread.environmentId,
           });
           const url =
@@ -1564,7 +1564,7 @@ export default async function plugin(bb: BbPluginApi) {
       const number = match !== null ? Number(match[1]) : null;
       try {
         replaceRepoRows(input.repo, await fetchRepoItems(gh, input.repo));
-        bb.realtime.publish("data-changed", {});
+        room.realtime.publish("data-changed", {});
       } catch {}
       return { number, url: stdout.trim() };
     },
@@ -1613,7 +1613,7 @@ export default async function plugin(bb: BbPluginApi) {
     };
   }
 
-  bb.ui.registerMentionProvider({
+  room.ui.registerMentionProvider({
     id: "issue",
     label: "GitHub issues",
     triggers: ["@", "#"],
@@ -1625,7 +1625,7 @@ export default async function plugin(bb: BbPluginApi) {
     },
   });
 
-  bb.ui.registerMentionProvider({
+  room.ui.registerMentionProvider({
     id: "pr",
     label: "GitHub pull requests",
     triggers: ["@", "#"],
@@ -1645,7 +1645,7 @@ export default async function plugin(bb: BbPluginApi) {
     "  room-cli github sync               Refresh the cache from GitHub now",
   ].join("\n");
 
-  bb.cli.register({
+  room.cli.register({
     name: "github",
     summary: "Browse tracked GitHub repos, issues, and PRs",
     commands: [

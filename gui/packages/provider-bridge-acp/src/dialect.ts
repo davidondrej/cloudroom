@@ -71,6 +71,10 @@ export interface AcpDialect {
     params: unknown,
   ): AcpClientRequestOutcome | undefined;
   isNotice?(text: string): boolean;
+  // Exact agent messages that mean the turn failed, mapped to a clearer error.
+  errorMessages?: Readonly<Record<string, string>>;
+  // A clearer error when the agent fails to start; `command` is the launched executable.
+  startError?(message: string, command: string): string | undefined;
   stopReasons?: Readonly<Record<string, AcpStopReason>>;
   steerMeta?: string;
   resumeSession?: boolean;
@@ -428,9 +432,21 @@ function normalizeOpenCodeCommandEvent(
   };
 }
 
+// Two OpenCode versions sharing one data folder fail on each other's SQLite schema (#858).
+function openCodeStartError(
+  message: string,
+  command: string,
+): string | undefined {
+  const mismatch = /no such column: ?["'`]?[\w.]*["'`]?/u.exec(message)?.[0];
+  return mismatch === undefined
+    ? undefined
+    : `OpenCode's data may have been written by another OpenCode version (${mismatch}). Update or reinstall OpenCode, or remove the older copy if you have two. Cloudroom started ${command}.\n\n${message}`;
+}
+
 export const OPENCODE_ACP_DIALECT: AcpDialect = {
   id: "opencode",
   normalizeCommandEvent: normalizeOpenCodeCommandEvent,
+  startError: openCodeStartError,
 };
 
 export const FX_ACP_DIALECT: AcpDialect = {
@@ -438,6 +454,11 @@ export const FX_ACP_DIALECT: AcpDialect = {
   isNotice: (text) =>
     text.startsWith("[context] ") ||
     text.startsWith("skill discovery warning: "),
+  // fx reports every model API failure as just "HTTP error" and stop reason "refused".
+  errorMessages: {
+    "HTTP error":
+      "fx's model request failed (HTTP error). On Claude Fable, a known fx bug breaks the session after a turn that read files, and every later message fails. Start a new thread, or use Claude Code for Fable.",
+  },
   stopReasons: {
     refused: "refusal",
     max_output_tokens: "max_tokens",

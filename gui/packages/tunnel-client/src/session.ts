@@ -7,7 +7,6 @@ import { request as httpsRequest } from "node:https";
 import { WebSocket as NodeWebSocket } from "ws";
 import {
   HEARTBEAT_REQUEST,
-  HEARTBEAT_RESPONSE,
   chunkBody,
   decodeFrame,
   encodeFrame,
@@ -19,8 +18,14 @@ import {
 import { headersForLoopbackRequest } from "./headers.js";
 import type { TunnelClientLogger } from "./logger.js";
 
-const HEARTBEAT_INTERVAL_MS = 10_000;
-const HEARTBEAT_DEADLINE_MS = 25_000;
+/** The relay drops a tunnel that is silent for 12 s (protocol 2). */
+const HEARTBEAT_INTERVAL_MS = 4_000;
+const HEARTBEAT_DEADLINE_MS = 10_000;
+/** This Mac's own server took this long to start answering a relayed request. */
+const SLOW_ORIGIN_MS = 5_000;
+/** A download waits while this much is queued for the relay, so a ping is never stuck behind megabytes of it. */
+const MAX_QUEUED_BYTES = 256 * 1024;
+const QUEUE_CHECK_MS = 10;
 
 const UNREGISTERED_PORT_BODY = "this port is not shared";
 const textEncoder = new TextEncoder();
@@ -82,7 +87,7 @@ function roundDurationMs(durationMs: number): number {
   return Math.round(durationMs * 10) / 10;
 }
 
-export function isBareBbRealtimeWs(
+export function isBareRoomRealtimeWs(
   path: string,
   target: string | undefined,
 ): boolean {
@@ -126,7 +131,8 @@ interface TunnelSessionOptions {
 export class TunnelSession {
   private readonly httpStreams = new Map<number, HttpStream>();
   private readonly wsStreams = new Map<number, WsStream>();
-  private lastAck = Date.now();
+  /** When the relay was last heard. Any message counts: a big upload can queue ping answers behind it. */
+  private lastHeard = Date.now();
   private heartbeat: ReturnType<typeof setInterval> | undefined;
   private disposed = false;
   private remoteClientCount = 0;
@@ -141,7 +147,7 @@ export class TunnelSession {
   start(): void {
     const { tunnel } = this.options;
     this.heartbeat = setInterval(() => {
-      if (Date.now() - this.lastAck > HEARTBEAT_DEADLINE_MS) {
+      if (Date.now() - this.lastHeard > HEARTBEAT_DEADLINE_MS) {
         this.options.log.warn("tunnel heartbeat missed; reconnecting");
         this.dispose();
         tunnel.terminate();
@@ -153,10 +159,8 @@ export class TunnelSession {
 
     tunnel.on("message", (data: Buffer, isBinary: boolean) => {
       if (this.disposed) return;
-      if (!isBinary) {
-        if (data.toString() === HEARTBEAT_RESPONSE) this.lastAck = Date.now();
-        return;
-      }
+      this.lastHeard = Date.now();
+      if (!isBinary) return;
       try {
         this.onFrame(decodeFrame(data));
       } catch (e) {
@@ -198,6 +202,18 @@ export class TunnelSession {
   private send(frame: Frame): void {
     if (this.options.tunnel.readyState === NodeWebSocket.OPEN) {
       this.options.tunnel.send(encodeFrame(frame));
+    }
+  }
+
+  /** Waits until the tunnel has sent most of what is queued. Not reading on meanwhile slows the Mac's own answer down. */
+  private async queueDrained(signal: AbortSignal): Promise<void> {
+    const { tunnel } = this.options;
+    while (
+      tunnel.bufferedAmount > MAX_QUEUED_BYTES &&
+      tunnel.readyState === NodeWebSocket.OPEN &&
+      !signal.aborted
+    ) {
+      await new Promise((resolve) => setTimeout(resolve, QUEUE_CHECK_MS));
     }
   }
 
@@ -294,6 +310,11 @@ export class TunnelSession {
       ...(resolved.host !== undefined ? { host: resolved.host } : {}),
       ...(resolved.headers !== undefined ? { headers: resolved.headers } : {}),
     });
+    // The relay can only say "waiting for the Mac". These lines say the wait is this Mac's own server.
+    const label = `${meta.method} ${meta.path.split("?")[0]}`;
+    const waiting = setTimeout(() => {
+      this.options.log.warn(`slow answer from this Mac: ${label} has none after ${SLOW_ORIGIN_MS / 1000} s`);
+    }, SLOW_ORIGIN_MS);
     try {
       const startedAt = performance.now();
       const body = meta.hasBody ? Buffer.concat(stream.chunks) : undefined;
@@ -305,6 +326,10 @@ export class TunnelSession {
         signal: stream.abort.signal,
       });
       const originTtfbMs = performance.now() - startedAt;
+      clearTimeout(waiting);
+      if (originTtfbMs >= SLOW_ORIGIN_MS) {
+        this.options.log.warn(`slow answer from this Mac: ${label} took ${roundDurationMs(originTtfbMs)} ms`);
+      }
       const respHeaders = responseHeaderPairs(res);
       const initialThreadLoad = isInitialThreadLoad(meta.path);
       if (initialThreadLoad) {
@@ -325,6 +350,7 @@ export class TunnelSession {
           chunk instanceof Uint8Array ? chunk : Buffer.from(String(chunk));
         responseBytes += value.byteLength;
         for (const frame of chunkBody(streamId, value)) this.send(frame);
+        await this.queueDrained(stream.abort.signal);
       }
       this.send({ type: "body-end", streamId });
       if (initialThreadLoad) {
@@ -344,6 +370,7 @@ export class TunnelSession {
       }
     } catch (e) {
       if (!stream.abort.signal.aborted) {
+        this.options.log.warn(`no answer from this Mac: ${label} failed (${String(e)})`);
         this.send({
           type: "close-stream",
           streamId,
@@ -352,6 +379,7 @@ export class TunnelSession {
         });
       }
     } finally {
+      clearTimeout(waiting);
       this.httpStreams.delete(streamId);
     }
   }
@@ -375,7 +403,7 @@ export class TunnelSession {
       ...(resolved.host !== undefined ? { host: resolved.host } : {}),
       ...(resolved.headers !== undefined ? { headers: resolved.headers } : {}),
     });
-    const countsAsRemoteClient = isBareBbRealtimeWs(frame.path, frame.target);
+    const countsAsRemoteClient = isBareRoomRealtimeWs(frame.path, frame.target);
     let socket: NodeWebSocket;
     try {
       socket = new NodeWebSocket(`${wsOrigin}${frame.path}`, frame.protocols, {

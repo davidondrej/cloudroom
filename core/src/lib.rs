@@ -19,6 +19,9 @@ pub const COMMIT: &str = env!("CLOUDROOM_COMMIT");
 /// Features `/v1/capabilities` always reports. Release pins record this list, so CI can
 /// check that new VMs support everything the app uses.
 pub const FEATURES: &[&str] = &[
+    // Every computer follows a Cloud thread (#237): thread reports, `continue_from`, freeze, Stop `after`, the
+    // session list's title, archive and `last_app_prompt`, and archive or unarchive of a session.
+    "cloud_threads",
     "stop",
     "resume",
     "launch_settings",
@@ -82,6 +85,7 @@ pub async fn serve(mut config: config::Config) -> Result<(), Box<dyn std::error:
     let listener = tokio::net::TcpListener::bind(config.listen).await?;
     let manager = session::Manager::open(config.clone())?;
     manager.check_storage().await;
+    runtime::warm_codex(&config).await;
     // Reconcile previous workloads before the API or storage guard can start work.
     manager.restore_all().await?;
     manager.previews.listen().await?;

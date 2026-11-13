@@ -340,7 +340,7 @@ it("collapses known account observations per machine, preserves unknown identiti
             {
               id: "adapter:account",
               usage: {
-                planLabel: "Max (20x)",
+                planLabel: "Ultra",
                 windows: [{ label: "Weekly limit", usedPercent: 42 }],
               },
             },

@@ -4,6 +4,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type ComponentType,
   type ReactNode,
   type UIEvent,
 } from "react";
@@ -52,6 +53,7 @@ export interface ModelShortcutCommandSuggestion {
   kind: "model-shortcut";
   name: string;
   description: string;
+  icon?: ComponentType<{ className?: string }>;
 }
 
 export interface LocationCommandSuggestion {
@@ -235,7 +237,12 @@ function getCommandIcon(item: ComposerCommandSuggestion): ReactNode {
     return <Icon name="Zap" className={ROW_ICON_CLASS} aria-hidden />;
   }
   if (item.kind === "model-shortcut") {
-    return <Icon name="Bot" className={ROW_ICON_CLASS} aria-hidden />;
+    const HarnessLogo = item.icon;
+    return HarnessLogo ? (
+      <HarnessLogo className={ROW_ICON_CLASS} />
+    ) : (
+      <Icon name="Bot" className={ROW_ICON_CLASS} aria-hidden />
+    );
   }
   if (item.kind === "reasoning") {
     return <Icon name="Brain" className={ROW_ICON_CLASS} aria-hidden />;

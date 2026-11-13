@@ -179,7 +179,7 @@ async function loadOneBundle(
   }
 }
 
-interface BbPluginRuntime {
+interface RoomPluginRuntime {
   react: unknown;
   reactDom: unknown;
   reactDomClient: unknown;
@@ -208,7 +208,7 @@ interface BbPluginRuntime {
   browserDimming: typeof browserDimming;
 }
 
-type RuntimeHost = typeof globalThis & { __bbPluginRuntime?: BbPluginRuntime };
+type RuntimeHost = typeof globalThis & { __bbPluginRuntime?: RoomPluginRuntime };
 
 export function installPluginRuntime(): void {
   const host = globalThis as RuntimeHost;

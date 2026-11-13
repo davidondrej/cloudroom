@@ -50,6 +50,7 @@ export const KNOWN_ACP_AGENTS: readonly AcpAgentDefinition[] = [
       "grok-4.6",
       "gpt-5.6-sol",
       "claude-opus-5-5",
+      "claude-fable-5-2",
       "claude-fable-5",
       "composer-2.5",
     ],
@@ -204,6 +205,7 @@ export const KNOWN_ACP_AGENTS: readonly AcpAgentDefinition[] = [
     fork: "none",
     primaryModels: [
       "anthropic/claude-opus-5.5",
+      "anthropic/claude-fable-5.2",
       "anthropic/claude-sonnet-5",
       "openai/gpt-6-sol",
       "spacexai/grok-4.7",
@@ -327,6 +329,8 @@ export const KNOWN_ACP_AGENTS: readonly AcpAgentDefinition[] = [
     signInCommand: "kilo auth login",
     installUrl: "https://kilo.ai/docs/cli",
     installer: { scriptUrl: "https://kilo.ai/cli/install" },
+    // Kilo 0.x (the old npm CLI) has no `acp` command (#1156).
+    minimumVersion: "1.0.0",
     visibility: "installed",
     dialect: "opencode",
     primaryModels: [

@@ -190,23 +190,23 @@ describe("plugin catalog service", () => {
         ...BUNDLED_CURATED_MARKETPLACE.plugins.map((entry) => entry.id),
       ].sort(),
     );
-    const docs = results.find((entry) => entry.entryId === "docs");
-    expect(docs).toMatchObject({
-      pluginId: "simple-notes",
-      displayName: "Docs",
-      icon: "FileText",
+    const tasks = results.find((entry) => entry.entryId === "tasks");
+    expect(tasks).toMatchObject({
+      pluginId: "tasks",
+      displayName: "Tasks",
+      icon: "ListTodo",
       iconUrl: null,
-      category: "File Viewers & Editors",
+      category: "Tasks & Workflows",
       screenshots: [],
       collections: [
         {
           id: "bb-official",
           rank: BUNDLED_PLUGINS.findIndex(
-            (plugin) => plugin.pluginId === "simple-notes",
+            (plugin) => plugin.pluginId === "tasks",
           ),
         },
       ],
-      source: "builtin:docs",
+      source: "builtin:tasks",
       marketplace: "bb-official",
       marketplaceDisplayName: "Cloudroom Official",
       publisherKey: "bb-official",
@@ -252,11 +252,8 @@ describe("plugin catalog service", () => {
   it("matches queries against entry id, plugin id, manifest text, and tags", async () => {
     const catalog = service();
     expect(
-      (await catalog.search("docs")).map((entry) => entry.entryId),
-    ).toContain("docs");
-    expect(
-      (await catalog.search("simple-notes")).map((entry) => entry.entryId),
-    ).toEqual(["docs"]);
+      (await catalog.search("tasks")).map((entry) => entry.entryId),
+    ).toContain("tasks");
     expect(
       (await catalog.search("sidebar")).map((entry) => entry.entryId),
     ).toContain("thread-hover-cards");
@@ -265,19 +262,22 @@ describe("plugin catalog service", () => {
 
   it("reflects install and remove in the installed flag", async () => {
     const catalog = service();
-    registerInstalledOfficial({ pluginId: "simple-notes", name: "docs" });
-    expect((await catalog.search("docs"))[0]?.installed).toBe(true);
+    registerInstalledOfficial({ pluginId: "tasks", name: "tasks" });
+    const installed = async () =>
+      (await catalog.search("tasks")).find((entry) => entry.entryId === "tasks")
+        ?.installed;
+    expect(await installed()).toBe(true);
 
-    markInstalledPluginRemoved(db, "simple-notes");
-    expect((await catalog.search("docs"))[0]?.installed).toBe(false);
+    markInstalledPluginRemoved(db, "tasks");
+    expect(await installed()).toBe(false);
   });
 
   it("delegates install to the plugin service by bundled name", async () => {
     const catalog = service();
-    await expect(catalog.install({ entryId: "docs" })).rejects.toThrow(
+    await expect(catalog.install({ entryId: "tasks" })).rejects.toThrow(
       "installation stopped by test",
     );
-    expect(installedNames).toEqual(["docs"]);
+    expect(installedNames).toEqual(["tasks"]);
   });
 
   it("rejects unknown catalog entries", async () => {
@@ -970,10 +970,9 @@ describe("plugin catalog service", () => {
 
     it("reports counts for curated entries and bundled plugins", async () => {
       const bundled = listBundledPluginRegistrations().find(
-        (plugin) =>
-          plugin.name === "docs" && plugin.pluginId === "simple-notes",
+        (plugin) => plugin.name === "tasks",
       );
-      if (bundled === undefined) throw new Error("docs registration missing");
+      if (bundled === undefined) throw new Error("tasks registration missing");
       const catalog = service({
         fetch: fetchWith(() =>
           statsResponse({

@@ -227,7 +227,7 @@ vi.mock("@/lib/file-opener-preference", () => ({
   useFileOpenerPreferenceValue: () => ({ kind: "automatic" }),
 }));
 
-vi.mock("@/lib/bb-desktop", () => ({
+vi.mock("@/lib/room-desktop", () => ({
   getDesktopBrowserApi: () => null,
   isDesktopBrowserAvailable: () => browserState.available,
 }));

@@ -21,9 +21,9 @@ import {
 const execFileAsync = promisify(execFile);
 const SCRIPT_OUTPUT_MAX_BYTES = 1024 * 1024;
 
-let resolvedBbPath: string | null = null;
+let resolvedRoomPath: string | null = null;
 
-const BB_NOT_INJECTED_WARNING =
+const ROOM_NOT_INJECTED_WARNING =
   "[Cloudroom] warning: could not locate the CLI, so `room-cli` is not on PATH for this script.";
 
 async function commandWorks(command: string, args: string[]): Promise<boolean> {
@@ -35,7 +35,7 @@ async function commandWorks(command: string, args: string[]): Promise<boolean> {
   }
 }
 
-export function bbBinaryCandidates(env: NodeJS.ProcessEnv): string[] {
+export function roomBinaryCandidates(env: NodeJS.ProcessEnv): string[] {
   const candidates: string[] = [];
   const pushIfAbsolute = (candidate: string): void => {
     if (isAbsolute(candidate)) {
@@ -71,18 +71,18 @@ async function isExecutableFile(candidate: string): Promise<boolean> {
   }
 }
 
-async function resolveBbBinary(
+async function resolveRoomBinary(
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<string | null> {
-  if (resolvedBbPath !== null) return resolvedBbPath;
-  for (const candidate of bbBinaryCandidates(env)) {
+  if (resolvedRoomPath !== null) return resolvedRoomPath;
+  for (const candidate of roomBinaryCandidates(env)) {
     if (!(await isExecutableFile(candidate))) continue;
     const works =
       process.platform === "win32"
         ? await commandWorks(process.execPath, [candidate, "--version"])
         : await commandWorks(candidate, ["--version"]);
     if (works) {
-      resolvedBbPath = candidate;
+      resolvedRoomPath = candidate;
       return candidate;
     }
   }
@@ -90,15 +90,15 @@ async function resolveBbBinary(
 }
 
 export function scriptPathEnv(
-  bbPath: string | null,
+  roomPath: string | null,
   inheritedPath: string | undefined,
 ): string {
   const basePath = inheritedPath ?? "";
-  if (bbPath === null || !isAbsolute(bbPath)) {
+  if (roomPath === null || !isAbsolute(roomPath)) {
     return basePath;
   }
-  const bbDir = dirname(bbPath);
-  return basePath.length > 0 ? `${bbDir}${delimiter}${basePath}` : bbDir;
+  const roomDir = dirname(roomPath);
+  return basePath.length > 0 ? `${roomDir}${delimiter}${basePath}` : roomDir;
 }
 
 export function isWakeAgentSuppressed(output: string): boolean {
@@ -342,19 +342,19 @@ export async function executeStoredScript(args: {
   });
   const interpreter =
     args.interpreter ?? resolveDefaultInterpreter(args.scriptFile);
-  const bbPath = await resolveBbBinary();
-  const warning = bbPath === null ? `${BB_NOT_INJECTED_WARNING}\n` : "";
+  const roomPath = await resolveRoomBinary();
+  const warning = roomPath === null ? `${ROOM_NOT_INJECTED_WARNING}\n` : "";
   const scriptEnv: NodeJS.ProcessEnv = {
     ...process.env,
     ...(args.env ?? {}),
-    PATH: scriptPathEnv(bbPath, process.env.PATH),
+    PATH: scriptPathEnv(roomPath, process.env.PATH),
     ROOM_SERVER_URL: args.serverUrl,
     ROOM_PROJECT_ID: args.projectId,
     BB_AUTOMATION_ID: args.automationId,
     BB_AUTOMATION_RUN_ID: args.runId,
   };
-  if (bbPath !== null) {
-    scriptEnv.ROOM_CLI = bbPath;
+  if (roomPath !== null) {
+    scriptEnv.ROOM_CLI = roomPath;
   }
   const cwd = scriptsRoot(args.pluginDataDir);
   await mkdir(cwd, { recursive: true });

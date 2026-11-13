@@ -4,15 +4,14 @@ import {
   type ServerResponse,
 } from "node:http";
 import { afterEach, describe, expect, it } from "vitest";
-import { superviseFullStackProcesses } from "../src/launcher.js";
+import { supervise, type Processes } from "../src/start.js";
+import type { AppContext } from "../src/context.js";
 import type {
-  BbAppStartContext,
-  ManagedFullStackProcesses,
   ManagedProcessName,
   ManagedProcessRun,
   NamedProcessExitResult,
   ProcessExitResult,
-} from "../src/launcher.js";
+} from "../src/processes.js";
 
 type ResolveExit = (result: NamedProcessExitResult) => void;
 
@@ -67,12 +66,11 @@ describe("full-stack supervisor port takeover", () => {
 
     const serverRun = new FakeManagedProcessRun("server");
     const daemonRun = new FakeManagedProcessRun("daemon");
-    const processes: ManagedFullStackProcesses = { daemonRun, serverRun };
+    const processes: Processes = { daemon: daemonRun, server: serverRun };
     let restartAttempts = 0;
-    const context: BbAppStartContext = {
+    const context: AppContext = {
       appDistDir: "/tmp/bb-app-test/app/dist",
       appVersion: "0.0.0-test",
-      configFile: "/tmp/bb-app-test/config.json",
       daemonBundleDir: "/tmp/bb-app-test/host-daemon/dist",
       daemonEntry: "/tmp/bb-app-test/host-daemon/dist/daemon-bundle.mjs",
       daemonLockDir: "/tmp/bb-app-test/daemon.lock.lock",
@@ -82,17 +80,16 @@ describe("full-stack supervisor port takeover", () => {
       dbPath: "/tmp/bb-app-test/bb.db",
       envFile: "/tmp/bb-app-test/env.json",
       logDir: "/tmp/bb-app-test/logs",
-      packageRoot: "/tmp/bb-app-test/package",
       serverEntry: "/tmp/bb-app-test/server/dist/index.js",
       serverPort: address.port,
       serverUrl: `http://127.0.0.1:${String(address.port)}`,
     };
-    const supervision = superviseFullStackProcesses({
+    const supervision = supervise({
       context,
-      delayMilliseconds: async () => {
+      wait: async () => {
         throw new Error("Unexpected server restart delay");
       },
-      isShutdownRequested: () => false,
+      isShuttingDown: () => false,
       processes,
       startDaemon: async () => daemonRun,
       startServer: async () => {

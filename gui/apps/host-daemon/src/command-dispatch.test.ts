@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -1933,8 +1934,16 @@ describe("dispatchCommand", () => {
         success: true,
       },
     ];
-    const streamProviderInstallation = vi.fn(() =>
-      createProviderCliInstallEventStream(events),
+    const installTemps: { path: string | undefined; existed: boolean }[] = [];
+    const streamProviderInstallation = vi.fn(
+      (args: { env?: NodeJS.ProcessEnv }) => {
+        const tempDir = args.env?.TMPDIR;
+        installTemps.push({
+          path: tempDir,
+          existed: tempDir !== undefined && existsSync(tempDir),
+        });
+        return createProviderCliInstallEventStream(events);
+      },
     );
     const command: CommandOf<"provider.installation.run"> = {
       type: "provider.installation.run",
@@ -1995,6 +2004,17 @@ describe("dispatchCommand", () => {
       }),
     );
     expect(staleRuntime.shutdown).toHaveBeenCalledOnce();
+    // Installers run outside any sandbox, so their TMPDIR is a fresh folder in
+    // the data folder, never the OS temp folder, and it is gone afterwards.
+    if (process.platform !== "win32") {
+      const [installTemp] = installTemps;
+      expect(path.dirname(installTemp?.path ?? "")).toBe(
+        path.join(await fs.realpath(dataDir), ".cloudroom-tmp"),
+      );
+      expect(installTemp?.existed).toBe(true);
+      expect(existsSync(installTemp?.path ?? "")).toBe(false);
+      expect(process.env.TMPDIR).not.toBe(installTemp?.path);
+    }
 
     await manager.ensureProviderMaintenanceRuntime({ dataDir });
     expect(createRuntimeSpy).toHaveBeenCalledTimes(2);
@@ -2212,7 +2232,7 @@ describe("dispatchCommand", () => {
       },
     );
 
-    expect(providerInstallationStatus).not.toHaveBeenCalled();
+    expect(providerInstallationStatus).toHaveBeenCalledTimes(1);
     expect(streamProviderInstallation).not.toHaveBeenCalled();
     expect(result.events).toEqual([
       {

@@ -137,7 +137,7 @@ async function writeSummaries(deps: Deps): Promise<void> {
 }
 
 async function writeSummary(deps: Deps, projectId: string, name: string, folder: string): Promise<string | null> {
-  const models = await purposeModels(null);
+  const models = await purposeModels(deps, null);
   if (!models) return null;
   const result = await inferenceCompleteWithFallback(deps, {
     fallbackOnAnyError: true,

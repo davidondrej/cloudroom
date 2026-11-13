@@ -132,7 +132,7 @@ describe("room-cli provider command output", () => {
     expect(collectLogPayloads(vi.mocked(console.log))).toEqual([
       "Models for claude-code:",
       "",
-      "Model             Name              Default\n----------------  ----------------  -------\nclaude-opus-4-6   Claude Opus 4.6\n----------------  ----------------  -------\nclaude-haiku-4-5  Claude Haiku 4.5  *",
+      "Model             Name              Default\n----------------  ----------------  -------\nclaude-opus-4-6   Claude Opus 4.6\nclaude-haiku-4-5  Claude Haiku 4.5  *",
       "",
     ]);
   });

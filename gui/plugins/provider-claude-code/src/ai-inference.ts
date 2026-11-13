@@ -5,6 +5,7 @@ import type {
   ExperimentalAiInferenceCompleteOutput,
   ExperimentalAiServiceErrorCode,
 } from "@get-bb/plugin-sdk/ai-services";
+import { withoutBlankAccountEnv } from "./bridge/bridge.js";
 import { claudeExecutable } from "./bridge/provider-maintenance.js";
 import { withoutBridgeRuntimeEnv } from "@get-bb/plugin-sdk/provider-bridge";
 
@@ -44,7 +45,9 @@ function parseResult(
   let value = result.structured_output;
   if (!value && result.result && !result.is_error) {
     try {
-      value = JSON.parse(result.result);
+      // A plain-text answer may wrap the JSON in a code fence or a few words.
+      const text = result.result;
+      value = JSON.parse(text.slice(text.indexOf("{"), text.lastIndexOf("}") + 1));
     } catch {}
   }
   if (
@@ -70,9 +73,14 @@ export function completeClaudeInference(
   input: ExperimentalAiInferenceCompleteInput,
 ): Promise<ExperimentalAiInferenceCompleteOutput> {
   return new Promise((resolve) => {
-    const env = withoutBridgeRuntimeEnv(process.env);
+    // `input.env` is the login the user's Claude threads run on; without it, this is the machine's own login.
+    const env = withoutBlankAccountEnv({
+      ...withoutBridgeRuntimeEnv(process.env),
+      ...input.env,
+    });
     delete env.CLAUDECODE;
     delete env.CLAUDE_AGENT_SDK_CLIENT_APP;
+    const schema = JSON.stringify(input.outputSchema);
     const child = spawn(
       claudeExecutable(),
       [
@@ -102,8 +110,14 @@ export function completeClaudeInference(
         "--output-format",
         "stream-json",
         "--verbose",
-        "--json-schema",
-        JSON.stringify(input.outputSchema),
+        // Claude Code's schema tool costs a second model round. Without a folder there are no tool calls to keep in shape,
+        // so a short system prompt asks for the JSON as plain text: about 0.3 s faster and half the tokens.
+        ...(input.folder
+          ? ["--json-schema", schema]
+          : [
+              "--system-prompt",
+              `Answer with only a JSON object that matches this JSON schema. No other text, no code fence.\n${schema}`,
+            ]),
       ],
       { cwd: input.folder ?? os.homedir(), env, stdio: "pipe" },
     );
@@ -121,6 +135,12 @@ export function completeClaudeInference(
     child.stdout.setEncoding("utf8");
     child.stdout.on("data", (chunk: string) => {
       stdout += chunk;
+      // The result line is the answer. Claude Code takes about 0.75 s more to exit, so answer now.
+      // Later resolve calls do nothing, and the timer still kills a process that never exits.
+      if (stdout.includes('"type":"result"')) {
+        const result = parseResult(stdout, input.model);
+        if (result.ok) resolve(result);
+      }
     });
     child.stderr.setEncoding("utf8");
     child.stderr.on("data", (chunk: string) => {

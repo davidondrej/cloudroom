@@ -20,6 +20,8 @@ export const worktreeHostContract = defineRpcContract({
         // What the diff panel compares against, when not the start branch: a fork starts from its snapshot branch but compares against main.
         diffBase: worktreeBaseBranchSchema.optional(),
         branchMode: z.enum(["reset", "reuse-existing"]),
+        // A rebuild in place keeps its old folder name, even after the checkout was renamed (#1213).
+        folderName: z.string().min(1).optional(),
       })
       .strict(),
     output: z.discriminatedUnion("status", [

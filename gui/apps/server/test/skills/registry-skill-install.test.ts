@@ -2,14 +2,16 @@ import { EventEmitter } from "node:events";
 import {
   mkdir,
   mkdtemp,
+  readdir,
   readFile,
+  realpath,
   rm,
   stat,
   symlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 const spawnMock = vi.hoisted(() => vi.fn());
@@ -86,6 +88,7 @@ describe("installServerRegistrySkill", () => {
       stubDownloadedSkill("find-skills");
 
       const result = await installServerRegistrySkill({
+        dataDir,
         userSkillsRootPath: join(dataDir, "skills"),
         packageRef: "vercel-labs/skills",
         registrySkillId: "github.com/vercel-labs/skills/find-skills",
@@ -104,6 +107,19 @@ describe("installServerRegistrySkill", () => {
       expect(readSkillTreeManifest(skillDirectory).entries).toEqual([
         expect.objectContaining({ path: "SKILL.md" }),
       ]);
+      // npx runs outside any sandbox, so its folder (and, through TMPDIR, the
+      // CLI's clone) is in the data folder, never the OS temp folder.
+      const [, , options] = spawnMock.mock.calls[0] as [
+        string,
+        string[],
+        { cwd: string; env: NodeJS.ProcessEnv },
+      ];
+      const base = join(await realpath(dataDir), ".cloudroom-tmp");
+      expect(dirname(options.cwd)).toBe(base);
+      if (process.platform !== "win32") {
+        expect(options.env.TMPDIR).toBe(options.cwd);
+      }
+      expect(await readdir(base)).toEqual([]);
     } finally {
       await rm(dataDir, { recursive: true, force: true });
     }
@@ -119,6 +135,7 @@ describe("installServerRegistrySkill", () => {
       stubDownloadedSkill("find-skills");
 
       const result = await installServerRegistrySkill({
+        dataDir,
         userSkillsRootPath: join(dataDir, "skills"),
         packageRef: "vercel-labs/skills",
         registrySkillId: "github.com/vercel-labs/skills/find-skills",
@@ -149,6 +166,7 @@ describe("installServerRegistrySkill", () => {
 
       await expect(
         installServerRegistrySkill({
+          dataDir,
           userSkillsRootPath: join(dataDir, "skills"),
           packageRef: "vercel-labs/skills",
           registrySkillId: "github.com/vercel-labs/skills/find-skills",
@@ -181,6 +199,7 @@ describe("installServerRegistrySkill", () => {
 
       await expect(
         installServerRegistrySkill({
+          dataDir,
           userSkillsRootPath: join(dataDir, "skills"),
           packageRef: "vercel-labs/skills",
           registrySkillId: "github.com/vercel-labs/skills/find-skills",
@@ -203,6 +222,7 @@ describe("installServerRegistrySkill", () => {
     try {
       await expect(
         installServerRegistrySkill({
+          dataDir,
           userSkillsRootPath: join(dataDir, "skills"),
           packageRef: "vercel-labs/skills",
           registrySkillId: "github.com/vercel-labs/skills/find-skills",
@@ -230,6 +250,7 @@ describe("installServerRegistrySkill", () => {
 
       await expect(
         installServerRegistrySkill({
+          dataDir,
           userSkillsRootPath: join(dataDir, "skills"),
           packageRef: "vercel-labs/skills",
           registrySkillId: "github.com/vercel-labs/skills/find-skills",

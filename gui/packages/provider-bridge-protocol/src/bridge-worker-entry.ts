@@ -34,14 +34,12 @@ if (
 }
 
 const tempDir = await createPluginProcessTempDir({
-  pluginId,
   prefix: "bb-provider-bridge",
+  dataDir,
 });
 
-let removedTempDir = false;
+// Runs on stdin close and again at exit: async shutdown may still write here.
 function removeTempDir(): void {
-  if (removedTempDir) return;
-  removedTempDir = true;
   try {
     rmSync(tempDir, { recursive: true, force: true });
   } catch {}
@@ -92,6 +90,14 @@ entry.start?.({ pluginId, dataDir, tempDir });
 
 if (entry.onSigterm) {
   process.once("SIGTERM", entry.onSigterm);
+} else {
+  // The runtime stops bridges with SIGTERM, and dying by it skips the "exit"
+  // cleanup. The temp folder is in the data folder, where no OS cleaner
+  // removes it, so remove it and then die by the same signal.
+  process.once("SIGTERM", () => {
+    removeTempDir();
+    process.kill(process.pid, "SIGTERM");
+  });
 }
 if (entry.onSigint) {
   process.once("SIGINT", entry.onSigint);

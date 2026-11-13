@@ -1,13 +1,15 @@
 #!/usr/bin/env node
-import { Command } from "commander";
+import { Command, CommanderError } from "commander";
 import { maybeReexecViaRoomCli } from "./room-cli-reexec.js";
 import {
   CORE_COMMAND_GROUPS,
   type CommandGroupDeps,
+  isCommandHelp,
+  isTopLevelHelp,
   pluginProxyCandidate,
   selectCommandGroups,
 } from "./command-groups.js";
-import { formatCloudroomVersion, resolveBbCliVersion } from "./version.js";
+import { formatCloudroomVersion, resolveRoomCliVersion } from "./version.js";
 import type { CliRuntimeContext } from "./context-env.js";
 
 if (process.platform === "win32" && process.env.ROOM_CLI_ARGV !== undefined) {
@@ -30,7 +32,7 @@ program
   .name("room-cli")
   .description("Cloudroom CLI - manage your local and cloud agents")
   .enablePositionalOptions()
-  .version(formatCloudroomVersion(resolveBbCliVersion()));
+  .version(formatCloudroomVersion(resolveRoomCliVersion()));
 
 const KNOWN_COMMAND_NAMES: ReadonlySet<string> = new Set([
   ...CORE_COMMAND_GROUPS.map((group) => group.name),
@@ -51,10 +53,15 @@ function createCommandGroupDeps(
   };
 }
 
+async function exitWhenIdle(code: number): Promise<void> {
+  await (await import("./plugin-cli-proxy.js")).exitWhenIdle(code);
+}
+
+// Returns the exit code once the plugin path handled the command.
 async function tryPluginCommandProxy(
   candidate: string,
   getUrl: () => string,
-): Promise<void> {
+): Promise<number | undefined> {
   const proxy = await import("./plugin-cli-proxy.js");
   const result = await proxy.fetchPluginCliContributions(getUrl());
   if (result.outcome === "unreachable") {
@@ -66,7 +73,7 @@ async function tryPluginCommandProxy(
         result.attempts,
       ),
     );
-    process.exit(1);
+    return 1;
   }
   if (result.outcome === "invalid") return;
   const match = proxy.findPluginCliCommand(result.contributions, candidate);
@@ -80,11 +87,16 @@ async function tryPluginCommandProxy(
         `room-cli ${candidate} is provided by the "${disabledId}" plugin, which is disabled — ` +
           `run \`room-cli plugin enable ${disabledId}\` or enable it in Plugins.`,
       );
-      process.exit(1);
+      return 1;
     }
     return;
   }
   const argv = process.argv.slice(3);
+  // `room-cli PLUGIN --help` always prints help: the plugin's own, or one built from its commands.
+  if (match.rendersHelp !== true && isCommandHelp(argv)) {
+    const help = await import("./plugin-cli-help.js");
+    process.exit(await help.printPluginCommandHelp(getUrl(), match));
+  }
   const command = match.commands.find((entry) => entry.name === argv[0]);
   if (
     command !== undefined &&
@@ -92,12 +104,17 @@ async function tryPluginCommandProxy(
     argv.slice(1).some((arg) => arg === "--help" || arg === "-h")
   ) {
     console.log(command.usage.replace(/^(bb|room|cloudroom) /, "room-cli "));
-    process.exit(0);
+    return 0;
   }
-  process.exit(await proxy.runPluginCliCommand(getUrl(), match.pluginId, argv));
+  return proxy.runPluginCliCommand(getUrl(), match.pluginId, argv);
 }
 
 async function main(): Promise<void> {
+  // `room-cli help loop` is `room-cli loop --help`: commander only knows the core commands.
+  const helpTarget = process.argv[2] === "help" ? process.argv[3] : undefined;
+  if (helpTarget !== undefined && !KNOWN_COMMAND_NAMES.has(helpTarget)) {
+    process.argv.splice(2, 2, helpTarget, "--help");
+  }
   const firstArg = process.argv[2];
   const groups = selectCommandGroups(firstArg);
   if (groups.length === 0) {
@@ -111,12 +128,14 @@ async function main(): Promise<void> {
   ]);
   const deps = createCommandGroupDeps(contextEnv);
 
+  // Set when the plugin commands could not be added to the top-level help.
+  let pluginCommandsNote = "";
   program.addHelpText("after", () => {
     const context = deps.getContext();
     const project = context.projectId ?? "<unset>";
     const thread = context.threadId ?? "<unset>";
 
-    return `
+    return `${pluginCommandsNote}
 
 Current context:
   ROOM_PROJECT_ID: ${project}
@@ -135,14 +154,29 @@ Quick start:
     register(program, deps);
   }
 
+  // Top-level help lists the plugin commands too (loop, secret, gpu, ...).
+  if (isTopLevelHelp(process.argv.slice(2))) {
+    const help = await import("./plugin-cli-help.js");
+    pluginCommandsNote = await help.addPluginCommandsToHelp(
+      program,
+      deps.getUrl(),
+    );
+  }
+
   const candidate = pluginProxyCandidate(firstArg, KNOWN_COMMAND_NAMES);
   if (candidate !== null) {
-    await tryPluginCommandProxy(candidate, deps.getUrl);
+    const exitCode = await tryPluginCommandProxy(candidate, deps.getUrl);
+    if (exitCode !== undefined) return exitWhenIdle(exitCode);
+    // Commander rejects the unknown command: throw instead of process.exit() (#684).
+    program.exitOverride();
   }
-  await program.parseAsync(process.argv);
+  await program.parseAsync(process.argv).catch((error: unknown) => {
+    if (!(error instanceof CommanderError)) throw error;
+    return exitWhenIdle(error.exitCode);
+  });
 }
 
-main().catch((err) => {
+main().catch(async (err) => {
   console.error(err.message);
-  process.exit(1);
+  await exitWhenIdle(1);
 });

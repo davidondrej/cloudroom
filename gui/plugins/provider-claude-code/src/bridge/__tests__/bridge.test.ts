@@ -7,8 +7,9 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { execFileSync } from "node:child_process";
+import { homedir, tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
   CanUseTool,
@@ -38,6 +39,7 @@ import { SdkSession } from "../sdk-session.js";
 import {
   type BuildSessionOptionsArgs,
   buildSessionOptions,
+  macUserTempDirs,
 } from "../session-options.js";
 import {
   type ClaudePermissionMode,
@@ -101,9 +103,11 @@ interface ControlledClaudeQuery {
   fail(error: Error): void;
   finish(): void;
   initializationResult: ReturnType<typeof vi.fn>;
+  interrupt: ReturnType<typeof vi.fn>;
   mcpServerStatus: ReturnType<typeof vi.fn>;
   setModel: ReturnType<typeof vi.fn>;
   setPermissionMode: ReturnType<typeof vi.fn>;
+  stopTask: ReturnType<typeof vi.fn>;
   [Symbol.asyncIterator](): AsyncIterator<SDKMessage>;
 }
 
@@ -311,9 +315,11 @@ function createControlledClaudeQuery(): ControlledClaudeQuery {
     },
     getContextUsage: vi.fn().mockResolvedValue(null),
     initializationResult: vi.fn(),
+    interrupt: vi.fn().mockResolvedValue({ still_queued: [] }),
     mcpServerStatus: vi.fn().mockResolvedValue([]),
     setModel: vi.fn().mockResolvedValue(undefined),
     setPermissionMode: vi.fn().mockResolvedValue(undefined),
+    stopTask: vi.fn().mockResolvedValue(undefined),
     [Symbol.asyncIterator]() {
       return iterator;
     },
@@ -659,6 +665,17 @@ async function forwardAskUserQuestion({
     questionRequest,
     resultPromise,
   };
+}
+
+// The macOS-only sandbox allowances depend on process.platform.
+function withPlatform<T>(platform: NodeJS.Platform, run: () => T): T {
+  const original = Object.getOwnPropertyDescriptor(process, "platform")!;
+  Object.defineProperty(process, "platform", { ...original, value: platform });
+  try {
+    return run();
+  } finally {
+    Object.defineProperty(process, "platform", original);
+  }
 }
 
 describe("bridge", () => {
@@ -1172,48 +1189,174 @@ describe("bridge", () => {
     ).toThrow("BB_CLAUDE_CODE_EXECUTABLE must point to an executable");
   });
 
-  it("configures acceptEdits and auto sessions with the same Claude sandbox", () => {
-    const acceptEditsOptions = buildSessionOptions(
-      {
-        chromeEnabled: false,
-        workflowsEnabled: false,
-        baseInstructions: "You are a coder.",
-        cwd: "/tmp/worktree",
-        instructionMode: "append",
-        permissionMode: "acceptEdits",
-        permissionScope: "workspace",
-      },
-      {},
+  const WEAKER_FALSE = '{"sandbox":{"enableWeakerNetworkIsolation":false}}';
+  const WEAKER_TRUE = WEAKER_FALSE.replace("false", "true");
+  // root/config is the user's Claude dir; root/repo is a git repo with a
+  // linked worktree at root/wt; root/plain is not a repo.
+  function makeClaudeSettingsFixture(files: Record<string, string> = {}) {
+    const root = mkdtempSync(join(tmpdir(), "bb-claude-sandbox-"));
+    const git = (...args: string[]) =>
+      execFileSync("git", ["-C", join(root, "repo"), ...args], {
+        stdio: "ignore",
+      });
+    for (const dir of ["config", "plain", "repo/src"]) {
+      mkdirSync(join(root, dir), { recursive: true });
+    }
+    git("init", "-q");
+    git(
+      "-c",
+      "user.name=t",
+      "-c",
+      "user.email=t@t",
+      "commit",
+      "-q",
+      "--allow-empty",
+      "-m",
+      "init",
     );
-    const autoOptions = buildSessionOptions(
-      {
-        chromeEnabled: false,
-        workflowsEnabled: false,
-        baseInstructions: "You are a coder.",
-        cwd: "/tmp/worktree",
-        instructionMode: "append",
-        permissionMode: "auto",
-        permissionScope: "workspace",
-      },
-      {},
-    );
+    git("worktree", "add", "-q", join(root, "wt"));
+    for (const [file, contents] of Object.entries(files)) {
+      mkdirSync(dirname(join(root, file)), { recursive: true });
+      writeFileSync(join(root, file), contents);
+    }
+    return root;
+  }
 
-    expect(acceptEditsOptions.permissionMode).toBe("acceptEdits");
-    expect(acceptEditsOptions.sandbox).toEqual({
-      enabled: true,
-      failIfUnavailable: false,
-      autoAllowBashIfSandboxed: true,
-      allowUnsandboxedCommands: true,
-      network: { allowLocalBinding: true },
+  it.each([
+    ["unset", "repo", {}, true],
+    [
+      "true in user settings",
+      "repo",
+      { "config/settings.json": WEAKER_TRUE },
+      true,
+    ],
+    ["malformed user settings", "repo", { "config/settings.json": "{" }, false],
+    [
+      "false in user settings",
+      "repo",
+      { "config/settings.json": WEAKER_FALSE },
+      false,
+    ],
+    [
+      "false in cwd local settings",
+      "repo",
+      { "repo/.claude/settings.local.json": WEAKER_FALSE },
+      false,
+    ],
+    [
+      "false in repo-root local settings from a subfolder",
+      "repo/src",
+      { "repo/.claude/settings.local.json": WEAKER_FALSE },
+      false,
+    ],
+    [
+      "false in main-checkout local settings from a worktree",
+      "wt",
+      { "repo/.claude/settings.local.json": WEAKER_FALSE },
+      false,
+    ],
+    ["git failure", "plain", {}, false],
+  ] as const)(
+    "configures acceptEdits and auto sessions with the same Claude sandbox (trustd %s)",
+    (_name, cwdPath, files, weakerNetwork) => {
+      const root = makeClaudeSettingsFixture(files);
+      const build = (permissionMode: "acceptEdits" | "auto") =>
+        withPlatform("linux", () =>
+          buildSessionOptions(
+            {
+              chromeEnabled: false,
+              workflowsEnabled: false,
+              baseInstructions: "You are a coder.",
+              cwd: join(root, cwdPath),
+              instructionMode: "append",
+              permissionMode,
+              permissionScope: "workspace",
+            },
+            { CLAUDE_CONFIG_DIR: join(root, "config") },
+          ),
+        );
+      const acceptEditsOptions = build("acceptEdits");
+      const autoOptions = build("auto");
+      rmSync(root, { recursive: true, force: true });
+
+      expect(acceptEditsOptions.permissionMode).toBe("acceptEdits");
+      expect(acceptEditsOptions.sandbox).toEqual({
+        enabled: true,
+        failIfUnavailable: false,
+        autoAllowBashIfSandboxed: true,
+        allowUnsandboxedCommands: true,
+        ...(weakerNetwork ? { enableWeakerNetworkIsolation: true } : {}),
+        network: { allowLocalBinding: true },
+      });
+      expect(autoOptions.permissionMode).toBe("auto");
+      expect(autoOptions.sandbox).toEqual(acceptEditsOptions.sandbox);
+    },
+  );
+
+  it.each([
+    ["an account switch to settings that set it false", "accountB", null],
+    ["a user settings edit to false", "config", "config/settings.json"],
+    [
+      "a project settings edit to false",
+      "config",
+      "repo/.claude/settings.json",
+    ],
+  ] as const)("drops the trustd flag on the next turn after %s", async (_name, nextAccount, editedFile) => {
+    const root = makeClaudeSettingsFixture({
+      "accountB/settings.json": WEAKER_FALSE,
     });
-    expect(autoOptions.permissionMode).toBe("auto");
-    expect(autoOptions.sandbox).toEqual({
-      enabled: true,
-      failIfUnavailable: false,
-      autoAllowBashIfSandboxed: true,
-      allowUnsandboxedCommands: true,
-      network: { allowLocalBinding: true },
+    const bridge = createBridgeJsonRpcTestHarness(handleLine);
+    const queries: ControlledClaudeQuery[] = [];
+    queryMock.mockImplementation(() => {
+      const query = createControlledClaudeQuery();
+      queries.push(query);
+      return query;
     });
+    const options = (account: string) => ({
+      permissionMode: "auto",
+      permissionScope: "workspace",
+      approvalReviewer: "automatic",
+      permissionEscalation: "deny",
+      envVars: { CLAUDE_CONFIG_DIR: join(root, account) },
+      providerOptions: { workflowsEnabled: false },
+    });
+
+    try {
+      bridge.sendRequest(1, "thread/start", {
+        threadId: "thread-account-switch",
+        cwd: join(root, "repo"),
+        instructionMode: "append",
+        options: options("config"),
+      });
+      const providerThreadId = getProviderThreadIdFromResult(
+        await bridge.waitForResponse(1),
+      );
+      expect(getLatestQueryOptions().sandbox).toMatchObject({
+        enableWeakerNetworkIsolation: true,
+      });
+
+      if (editedFile) {
+        mkdirSync(dirname(join(root, editedFile)), { recursive: true });
+        writeFileSync(join(root, editedFile), WEAKER_FALSE);
+      }
+      bridge.sendRequest(2, "turn/start", {
+        threadId: "thread-account-switch",
+        providerThreadId,
+        clientRequestId: "creq_23456789ab",
+        input: [{ type: "text", text: "continue", mentions: [] }],
+        options: options(nextAccount),
+      });
+      await bridge.flushWork();
+
+      expect(queries).toHaveLength(2);
+      expect(getLatestQueryOptions().sandbox).not.toHaveProperty(
+        "enableWeakerNetworkIsolation",
+      );
+    } finally {
+      queries.forEach((query) => query.finish());
+      bridge.restore();
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it("keeps plan sessions on native gating without the workspace sandbox", () => {
@@ -1265,9 +1408,26 @@ describe("bridge", () => {
       allowUnsandboxedCommands: true,
       network: { allowLocalBinding: true },
       filesystem: {
-        allowWrite: ["/repo/.git/worktrees/bb13", "/repo/.git/objects"],
+        allowWrite: [
+          "/repo/.git/worktrees/bb13",
+          "/repo/.git/objects",
+          ...macUserTempDirs(),
+        ],
       },
     });
+  });
+
+  it.each([
+    ["$HOME", homedir()],
+    ["/", "/"],
+    ["/tmp", "/tmp"],
+    ["a dotted escape", "/var/folders/../../etc"],
+    ["empty output", ""],
+    ["a failed getconf", undefined],
+  ])("grants no macOS temp dir when getconf reports %s", (_name, reported) => {
+    expect(
+      withPlatform("darwin", () => macUserTempDirs(() => reported)),
+    ).toEqual([]);
   });
 
   describe("Bash canUseTool policy", () => {
@@ -1482,6 +1642,237 @@ describe("bridge", () => {
     }
   });
 
+  // Claude sends an ask rule's ask, and a Plan mode write, with no reason,
+  // suggestions or blocked path. They must still reach the user, and the card
+  // for a command that leaves the sandbox must say so.
+  it.each([
+    {
+      name: "Manual: an ask rule's command run outside the sandbox",
+      options: canonicalOptions(),
+      toolName: "Bash",
+      input: {
+        command: "git push --dry-run; touch /tmp/x",
+        dangerouslyDisableSandbox: true,
+      },
+      reason: "Run this command outside the sandbox?",
+    },
+    {
+      name: "Manual: an unsandboxed command with Claude's own reason",
+      options: canonicalOptions(),
+      toolName: "Bash",
+      input: { command: "echo x > ~/.zshrc", dangerouslyDisableSandbox: true },
+      decisionReason: "Writes a shell startup file.",
+      reason: "Run this command outside the sandbox? Writes a shell startup file.",
+    },
+    {
+      name: "Auto: an ask rule's file read",
+      options: {
+        ...canonicalOptions(),
+        permissionMode: "auto",
+        approvalReviewer: "automatic",
+      },
+      toolName: "Read",
+      input: { file_path: "/tmp/worktree/.env" },
+      reason: null,
+    },
+    {
+      name: "Plan: a file write",
+      options: canonicalOptions({
+        providerOptions: { claudeCodePermissionMode: "plan" },
+      }),
+      toolName: "Write",
+      input: { file_path: "/tmp/worktree/notes.md", content: "hi" },
+      reason: null,
+    },
+  ])("asks the user about a bare ask ($name)", async (testCase) => {
+    const bridge = createBridgeJsonRpcTestHarness(handleLine);
+    const queries: ControlledClaudeQuery[] = [];
+    queryMock.mockImplementation(() => {
+      const query = createControlledClaudeQuery();
+      queries.push(query);
+      return query;
+    });
+
+    try {
+      const threadId = "thread-bare-ask";
+      const toolUseID = "tool-bare-ask";
+      bridge.sendRequest(1, "thread/start", {
+        threadId,
+        cwd: "/tmp/worktree",
+        instructionMode: "append",
+        options: testCase.options,
+      });
+      await bridge.waitForResponse(1);
+
+      const resultPromise = getLastCanUseTool()(
+        testCase.toolName,
+        testCase.input,
+        {
+          requestId: "control-request",
+          signal: new AbortController().signal,
+          toolUseID,
+          ...(testCase.decisionReason !== undefined
+            ? { decisionReason: testCase.decisionReason }
+            : {}),
+        },
+      );
+      await bridge.flushWork();
+
+      const approval = bridge.messages.find(isApprovalInteraction);
+      if (approval?.id === undefined) {
+        throw new Error("Expected the ask to reach the user");
+      }
+      expect(approval.params).toMatchObject({
+        payload: {
+          kind: "approval",
+          reason: testCase.reason,
+          subject: expect.objectContaining({ itemId: toolUseID }),
+        },
+      });
+
+      handleLine(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: approval.id,
+          result: { decision: "deny", grantedPermissions: null },
+        }),
+      );
+      await expect(resultPromise).resolves.toMatchObject({
+        behavior: "deny",
+        toolUseID,
+      });
+
+      await stopBridgeThread({ bridge, queries, threadId });
+    } finally {
+      bridge.restore();
+    }
+  });
+
+  it("answers a later ask from Allow for session only for sandbox network", async () => {
+    const bridge = createBridgeJsonRpcTestHarness(handleLine);
+    const queries: ControlledClaudeQuery[] = [];
+    queryMock.mockImplementation(() => {
+      const query = createControlledClaudeQuery();
+      queries.push(query);
+      return query;
+    });
+    const allowRule = (toolName: string, ruleContent: string) => [
+      {
+        type: "addRules" as const,
+        rules: [{ toolName, ruleContent }],
+        behavior: "allow" as const,
+        destination: "localSettings" as const,
+      },
+    ];
+    const ask = (
+      toolName: string,
+      input: Record<string, unknown>,
+      toolUseID: string,
+      suggestions?: ReturnType<typeof allowRule>,
+    ) =>
+      getLastCanUseTool()(toolName, input, {
+        requestId: "control-request",
+        signal: new AbortController().signal,
+        toolUseID,
+        ...(suggestions ? { suggestions } : {}),
+      });
+    const approvals = () => bridge.messages.filter(isApprovalInteraction);
+    const answer = (id: unknown, decision: "allow_for_session" | "deny") =>
+      handleLine(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id,
+          result:
+            decision === "deny"
+              ? { decision, grantedPermissions: null }
+              : {
+                  decision,
+                  grantedPermissions: {
+                    network: { enabled: true },
+                    fileSystem: null,
+                  },
+                },
+        }),
+      );
+    const allowForSession = async (
+      ...args: Parameters<typeof ask>
+    ): Promise<void> => {
+      const result = ask(...args);
+      await bridge.flushWork();
+      answer(approvals().at(-1)?.id, "allow_for_session");
+      await expect(result).resolves.toMatchObject({ behavior: "allow" });
+    };
+
+    try {
+      const threadId = "thread-allow-for-session";
+      await startBridgeThread({ bridge, threadId });
+      await allowForSession(
+        "SandboxNetworkAccess",
+        { host: "registry.npmjs.org" },
+        "tool-network",
+        allowRule("WebFetch", "domain:registry.npmjs.org"),
+      );
+      await allowForSession(
+        "Bash",
+        { command: "curl -s https://example.com" },
+        "tool-bash",
+        allowRule("Bash", "curl -s https://example.com"),
+      );
+      await allowForSession(
+        "WebFetch",
+        { url: "https://example.com" },
+        "tool-fetch",
+        allowRule("WebFetch", "domain:example.com"),
+      );
+      expect(approvals()).toHaveLength(3);
+
+      // Claude keeps no session rule for sandbox hosts, so the bridge does.
+      await expect(
+        ask("SandboxNetworkAccess", { host: "github.com" }, "tool-network-2"),
+      ).resolves.toMatchObject({
+        behavior: "allow",
+        decisionClassification: "user_permanent",
+      });
+      expect(approvals()).toHaveLength(3);
+
+      // Claude's session rules already allow plain repeats, so these asks are
+      // ones Claude still wants a person for: an ask rule matched part of the
+      // command or the fetch.
+      const command = ask(
+        "Bash",
+        {
+          command: "git push --dry-run; curl -s https://example.net",
+          dangerouslyDisableSandbox: true,
+        },
+        "tool-bash-2",
+        allowRule("Bash", "curl -s https://example.net"),
+      );
+      const fetch = ask(
+        "WebFetch",
+        { url: "https://example.com/admin" },
+        "tool-fetch-2",
+      );
+      await bridge.flushWork();
+      const pending = approvals().slice(3);
+      expect(pending.map((message) => interactionPayload(message))).toEqual([
+        expect.objectContaining({
+          reason: "Run this command outside the sandbox?",
+          subject: expect.objectContaining({ itemId: "tool-bash-2" }),
+        }),
+        expect.objectContaining({
+          subject: expect.objectContaining({ itemId: "tool-fetch-2" }),
+        }),
+      ]);
+      for (const message of pending) answer(message.id, "deny");
+      await expect(command).resolves.toMatchObject({ behavior: "deny" });
+      await expect(fetch).resolves.toMatchObject({ behavior: "deny" });
+
+      await stopBridgeThread({ bridge, queries, threadId });
+    } finally {
+      bridge.restore();
+    }
+  });
+
   it("forwards a sandbox network ask with a grantable network permission", async () => {
     const bridge = createBridgeJsonRpcTestHarness(handleLine);
     const queries: ControlledClaudeQuery[] = [];
@@ -1626,7 +2017,58 @@ describe("bridge", () => {
         params: { requestId: permissionRequest.id },
       });
 
-      await stopBridgeThread({ bridge, queries, threadId });
+      // Claude drops an interrupting deny's message and records the user's
+      // rejection instead (#878): a stop that ends Claude keeps its reason.
+      const pendingAtStop = askForNetwork(
+        new AbortController().signal,
+        "tool-at-stop",
+      );
+      await bridge.flushWork();
+      bridge.sendRequest(2, "thread/stop", {
+        threadId,
+        providerThreadId: threadId,
+        intent: "interrupt",
+        activeTurnId: null,
+      });
+      await bridge.flushWork();
+      const cancelled = await pendingAtStop;
+      expect(cancelled).toMatchObject({
+        behavior: "deny",
+        message: expect.stringContaining("the user did not reject it"),
+      });
+      expect(cancelled).not.toHaveProperty("interrupt");
+      const prompts = bridge.messages.filter(isApprovalInteraction).length;
+      await expect(
+        askForNetwork(new AbortController().signal, "tool-after-stop"),
+      ).resolves.toMatchObject({
+        message: expect.stringContaining("Reason: Thread stopped"),
+      });
+      expect(bridge.messages.filter(isApprovalInteraction)).toHaveLength(
+        prompts,
+      );
+      // Without the interrupt Claude goes on: a queued auto-allowed tool is denied too.
+      const [queuedWrite] = await invokeBridgeHooks(
+        getLatestQueryCall().options.hooks?.PreToolUse,
+        {
+          hook_event_name: "PreToolUse",
+          tool_name: "Write",
+          tool_input: {},
+          tool_use_id: "tool-queued-write",
+          session_id: "session-1",
+          transcript_path: "/tmp/transcript.jsonl",
+          cwd: "/tmp/worktree",
+        },
+      );
+      expect(queuedWrite).toMatchObject({
+        hookSpecificOutput: {
+          permissionDecision: "deny",
+          permissionDecisionReason: expect.stringContaining(
+            "Reason: Thread stopped",
+          ),
+        },
+      });
+      queries[0]?.finish();
+      await bridge.waitForResponse(2);
     } finally {
       bridge.restore();
     }
@@ -2442,6 +2884,7 @@ describe("bridge", () => {
     });
     expect(models.map((model) => model.model)).toEqual([
       "claude-opus-5-5[1m]",
+      "claude-fable-5-2",
       "claude-fable-5-1",
       "claude-opus-5[1m]",
       "claude-opus-4-8[1m]",
@@ -2689,7 +3132,11 @@ describe("bridge", () => {
             ],
             sandbox: expect.objectContaining({
               filesystem: {
-                allowWrite: ["/repo/.git/worktrees/bb13", "/repo/.git/objects"],
+                allowWrite: [
+                  "/repo/.git/worktrees/bb13",
+                  "/repo/.git/objects",
+                  ...macUserTempDirs(),
+                ],
               },
             }),
           }),
@@ -2751,7 +3198,11 @@ describe("bridge", () => {
             ],
             sandbox: expect.objectContaining({
               filesystem: {
-                allowWrite: ["/repo/.git/worktrees/bb13", "/repo/.git/objects"],
+                allowWrite: [
+                  "/repo/.git/worktrees/bb13",
+                  "/repo/.git/objects",
+                  ...macUserTempDirs(),
+                ],
               },
             }),
           }),
@@ -3780,6 +4231,162 @@ describe("bridge", () => {
     }
   });
 
+  it.each([
+    { name: "mid-turn", end: "finish", statuses: ["failed", "completed"] },
+    { name: "after a result", end: "result", statuses: ["completed"] },
+    { name: "during Stop", end: "stop", statuses: ["interrupted"] },
+  ] as const)(
+    "fails the open turn only when the SDK stream ends cleanly $name (#1075)",
+    async ({ end, statuses }) => {
+      const bridge = createBridgeJsonRpcTestHarness(handleLine);
+      const queries: ControlledClaudeQuery[] = [];
+      queryMock.mockImplementation(() => {
+        const query = createControlledClaudeQuery();
+        queries.push(query);
+        return query;
+      });
+      try {
+        const threadId = `thread-clean-stream-end-${end}`;
+        // The SDK messages below report this Claude session.
+        const providerThreadId = "session-1";
+        sendResumeThread({
+          bridge,
+          providerThreadId,
+          requestId: 1,
+          threadId,
+        });
+        await bridge.waitForResponse(1);
+        bridge.sendRequest(3, "turn/start", {
+          threadId,
+          providerThreadId: threadId,
+          input: [{ type: "text", text: "work" }],
+          clientRequestId: "creq_abcdefghjk",
+          options: canonicalOptions({}),
+        });
+        await readNextPromptText(getLatestQueryCall());
+        await bridge.waitForResponse(3);
+        queries[0]?.emit(
+          createAssistantToolUseMessage({
+            parentToolUseId: null,
+            toolInput: { command: "sleep 600" },
+            toolName: "Bash",
+            toolUseId: "tool-open",
+          }),
+        );
+        await bridge.flushWork();
+        if (end === "stop") {
+          await stopBridgeThread({ bridge, queries, threadId });
+        } else {
+          if (end === "result") {
+            queries[0]?.emit(createSuccessfulResultMessage(providerThreadId));
+          }
+          queries[0]?.finish();
+          await bridge.flushWork();
+        }
+        if (end === "finish") {
+          // Retry resumes the same Claude session and completes.
+          bridge.sendRequest(4, "turn/start", {
+            threadId,
+            providerThreadId,
+            input: [{ type: "text", text: "retry" }],
+            clientRequestId: "creq_abcdefghjm",
+            options: canonicalOptions({}),
+          });
+          await readNextPromptText(getLatestQueryCall());
+          await bridge.waitForResponse(4);
+          expect(getLatestQueryOptions()).toMatchObject({
+            resume: providerThreadId,
+          });
+          queries[1]?.emit(createSuccessfulResultMessage(providerThreadId));
+          await bridge.flushWork();
+        }
+        expect(
+          assembleCapturedThreadEvents(bridge.messages, "claude-code").flatMap(
+            (event) => (event.type === "turn/completed" ? [event.status] : []),
+          ),
+        ).toEqual(statuses);
+      } finally {
+        bridge.restore();
+      }
+    },
+  );
+
+  it("a keep-session stop interrupts the turn and keeps the same Claude for the next one", async () => {
+    const bridge = createBridgeJsonRpcTestHarness(handleLine);
+    const queries: ControlledClaudeQuery[] = [];
+    queryMock.mockImplementation(() => {
+      const query = createControlledClaudeQuery();
+      queries.push(query);
+      return query;
+    });
+    try {
+      const threadId = "thread-keep-session-stop";
+      const providerThreadId = "session-1";
+      sendResumeThread({ bridge, providerThreadId, requestId: 1, threadId });
+      await bridge.waitForResponse(1);
+      const prompts = getLatestQueryCall().prompt[Symbol.asyncIterator]();
+      const sendTurn = async (requestId: number, text: string) => {
+        bridge.sendRequest(requestId, "turn/start", {
+          threadId,
+          providerThreadId,
+          input: [{ type: "text", text }],
+          clientRequestId: `creq_abcdefghj${requestId}`,
+          options: canonicalOptions({}),
+        });
+        await prompts.next();
+        await bridge.waitForResponse(requestId);
+      };
+      await sendTurn(2, "work");
+      queries[0]?.emit(
+        createAssistantToolUseMessage({
+          parentToolUseId: null,
+          toolInput: { command: "sleep 600" },
+          toolName: "Bash",
+          toolUseId: "tool-open",
+        }),
+      );
+      queries[0]?.emit({
+        type: "system",
+        subtype: "task_started",
+        session_id: providerThreadId,
+        task_id: "task-1",
+        task_type: "local_bash",
+        description: "sleep",
+      } as unknown as SDKMessage);
+      await bridge.flushWork();
+
+      bridge.sendRequest(3, "thread/stop", {
+        threadId,
+        providerThreadId,
+        intent: "interrupt",
+        activeTurnId: null,
+        keepSession: true,
+      });
+      await bridge.flushWork();
+      expect(queries[0]?.interrupt).toHaveBeenCalledTimes(1);
+      // Claude confirms the interrupt with the stopped turn's result.
+      queries[0]?.emit(createSuccessfulResultMessage(providerThreadId));
+      expect((await bridge.waitForResponse(3)).result).toEqual({
+        ok: true,
+        sessionKept: true,
+      });
+      expect(queries[0]?.stopTask).toHaveBeenCalledWith("task-1");
+      expect(queries[0]?.close).not.toHaveBeenCalled();
+
+      await sendTurn(4, "next");
+      queries[0]?.emit(createSuccessfulResultMessage(providerThreadId));
+      await bridge.flushWork();
+      expect(queries).toHaveLength(1);
+      expect(
+        assembleCapturedThreadEvents(bridge.messages, "claude-code").flatMap(
+          (event) => (event.type === "turn/completed" ? [event.status] : []),
+        ),
+      ).toEqual(["interrupted", "completed"]);
+    } finally {
+      bridge.restore();
+    }
+  });
+
   it("resumes the same Claude session on the next turn after a failed stop", async () => {
     const bridge = createBridgeJsonRpcTestHarness(handleLine);
     const queries: ControlledClaudeQuery[] = [];
@@ -4333,7 +4940,7 @@ describe("bridge", () => {
             : {}),
         });
         await expect(bridge.waitForResponse(2)).resolves.toMatchObject({
-          error: { code: -32000 },
+          error: { code: -32000, message: expect.stringContaining("Try restarting Cloudroom on the computer running this thread") },
         });
 
         await expect(

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 import type { Environment, JsonValue } from "@cloudroom/domain";
-import { createBbSdk } from "../src/core.js";
+import { createRoomSdk } from "../src/core.js";
 import { createHttpTransport } from "../src/transport-http.js";
 import { ThreadWaitTimeoutError } from "../src/areas/threads.js";
 import type { FetchImplementation } from "../src/response.js";
@@ -136,7 +136,7 @@ describe("@cloudroom/sdk", () => {
       },
     };
     const queue = createFetchQueue([{ body: creating }, { body: host }]);
-    const sdk = createBbSdk({
+    const sdk = createRoomSdk({
       transport: createHttpTransport({
         baseUrl: "http://bb.test",
         fetch: queue.fetch,
@@ -170,7 +170,7 @@ describe("@cloudroom/sdk", () => {
     const queue = createFetchQueue([
       { body: { joinCode: "one", hostId: "host_1", expiresAt: 1 } },
     ]);
-    const sdk = createBbSdk({
+    const sdk = createRoomSdk({
       transport: createHttpTransport({
         baseUrl: "http://bb.test",
         fetch: queue.fetch,
@@ -212,7 +212,7 @@ describe("@cloudroom/sdk", () => {
       value: async () =>
         events.map((event) => JSON.stringify(event)).join("\n"),
     });
-    const sdk = createBbSdk({
+    const sdk = createRoomSdk({
       transport: createHttpTransport({
         baseUrl: "http://bb.test",
         fetch: async () => response,
@@ -231,7 +231,7 @@ describe("@cloudroom/sdk", () => {
 
   it("sends thread pane presentation actions through the typed transport", async () => {
     const queue = createFetchQueue([{ body: { delivered: 3 } }]);
-    const sdk = createBbSdk({
+    const sdk = createRoomSdk({
       transport: createHttpTransport({
         baseUrl: "http://bb.test",
         fetch: queue.fetch,
@@ -256,7 +256,7 @@ describe("@cloudroom/sdk", () => {
 
   it("keeps realtime subscriptions distinct under subscribe", () => {
     const queue = createFetchQueue([]);
-    const sdk = createBbSdk({
+    const sdk = createRoomSdk({
       transport: createHttpTransport({
         baseUrl: "http://bb.test",
         fetch: queue.fetch,
@@ -270,7 +270,7 @@ describe("@cloudroom/sdk", () => {
 
   it("maps thread event filters and reverse pagination onto the public query", async () => {
     const queue = createFetchQueue([{ body: [] }]);
-    const sdk = createBbSdk({
+    const sdk = createRoomSdk({
       transport: createHttpTransport({
         baseUrl: "http://bb.test",
         fetch: queue.fetch,
@@ -303,7 +303,7 @@ describe("@cloudroom/sdk", () => {
       receivedSignal = init?.signal;
       return jsonResponse({ body: [] });
     };
-    const sdk = createBbSdk({
+    const sdk = createRoomSdk({
       transport: createHttpTransport({
         baseUrl: "http://bb.test",
         fetch,
@@ -324,7 +324,7 @@ describe("@cloudroom/sdk", () => {
       receivedSignal = init?.signal;
       return jsonResponse({ body: {} });
     };
-    const sdk = createBbSdk({
+    const sdk = createRoomSdk({
       transport: createHttpTransport({
         baseUrl: "http://bb.test",
         fetch,
@@ -344,7 +344,7 @@ describe("@cloudroom/sdk", () => {
     const controller = new AbortController();
     let receivedSignal: AbortSignal | null | undefined;
     const queue = createFetchQueue([{ body: [] }]);
-    const sdk = createBbSdk({
+    const sdk = createRoomSdk({
       transport: createHttpTransport({
         baseUrl: "http://bb.test",
         fetch: async (input, init) => {
@@ -376,7 +376,7 @@ describe("@cloudroom/sdk", () => {
       },
     };
     const queue = createFetchQueue([{ body: appearance }]);
-    const sdk = createBbSdk({
+    const sdk = createRoomSdk({
       transport: createHttpTransport({
         baseUrl: "http://bb.test",
         fetch: queue.fetch,
@@ -420,7 +420,7 @@ describe("@cloudroom/sdk", () => {
       },
     };
     const queue = createFetchQueue([{ body: current }, { body: updated }]);
-    const sdk = createBbSdk({
+    const sdk = createRoomSdk({
       transport: createHttpTransport({
         baseUrl: "http://bb.test",
         fetch: queue.fetch,
@@ -455,7 +455,7 @@ describe("@cloudroom/sdk", () => {
       },
     };
     const queue = createFetchQueue([{ body: resolved }]);
-    const sdk = createBbSdk({
+    const sdk = createRoomSdk({
       transport: createHttpTransport({
         baseUrl: "http://bb.test",
         fetch: queue.fetch,
@@ -493,7 +493,7 @@ describe("@cloudroom/sdk", () => {
         status: 201,
       });
     };
-    const sdk = createBbSdk({
+    const sdk = createRoomSdk({
       transport: createHttpTransport({
         baseUrl: "https://remote-bb.test/",
         fetch: authenticatedFetch,
@@ -560,7 +560,7 @@ describe("@cloudroom/sdk", () => {
       if (!response) throw new Error("No queued attachment response");
       return response;
     };
-    const sdk = createBbSdk({
+    const sdk = createRoomSdk({
       transport: createHttpTransport({
         baseUrl: "http://bb.test",
         fetch,
@@ -591,7 +591,7 @@ describe("@cloudroom/sdk", () => {
   });
 
   it("preserves project attachment error envelopes", async () => {
-    const sdk = createBbSdk({
+    const sdk = createRoomSdk({
       transport: createHttpTransport({
         baseUrl: "http://bb.test",
         fetch: async () =>
@@ -624,7 +624,7 @@ describe("@cloudroom/sdk", () => {
     const fetch = async (): Promise<Response> => {
       throw new Error("Voice transcription should not reach the transport");
     };
-    const sdk = createBbSdk({
+    const sdk = createRoomSdk({
       transport: createHttpTransport({
         baseUrl: "http://bb.test",
         fetch,
@@ -669,7 +669,7 @@ describe("@cloudroom/sdk", () => {
       if (!response) throw new Error("No queued project file response");
       return response;
     };
-    const sdk = createBbSdk({
+    const sdk = createRoomSdk({
       transport: createHttpTransport({
         baseUrl: "http://bb.test",
         fetch,
@@ -727,7 +727,7 @@ describe("@cloudroom/sdk", () => {
         },
       },
     ]);
-    const sdk = createBbSdk({
+    const sdk = createRoomSdk({
       transport: createHttpTransport({
         baseUrl: "http://bb.test",
         fetch: queue.fetch,
@@ -766,7 +766,7 @@ describe("@cloudroom/sdk", () => {
       "acp-cursor": { status: "unauthenticated" as const },
     };
     const queue = createFetchQueue([{ body: usage }]);
-    const sdk = createBbSdk({
+    const sdk = createRoomSdk({
       transport: createHttpTransport({
         baseUrl: "http://bb.test",
         fetch: queue.fetch,
@@ -811,7 +811,7 @@ describe("@cloudroom/sdk", () => {
       },
     ];
     const queue = createFetchQueue([{ body: { providers } }]);
-    const sdk = createBbSdk({
+    const sdk = createRoomSdk({
       transport: createHttpTransport({
         baseUrl: "http://bb.test",
         fetch: queue.fetch,
@@ -837,7 +837,7 @@ describe("@cloudroom/sdk", () => {
   it("routes onboarding agent status through a reused environment", async () => {
     const states = { providers: [] };
     const queue = createFetchQueue([{ body: states }]);
-    const sdk = createBbSdk({
+    const sdk = createRoomSdk({
       transport: createHttpTransport({
         baseUrl: "http://bb.test",
         fetch: queue.fetch,
@@ -859,7 +859,7 @@ describe("@cloudroom/sdk", () => {
 
   it("routes thread list calls through the HTTP transport", async () => {
     const queue = createFetchQueue([{ body: [] }]);
-    const sdk = createBbSdk({
+    const sdk = createRoomSdk({
       transport: createHttpTransport({
         baseUrl: "http://bb.test",
         fetch: queue.fetch,
@@ -889,7 +889,7 @@ describe("@cloudroom/sdk", () => {
       },
     ];
     const queue = createFetchQueue([{ body: resolved }]);
-    const sdk = createBbSdk({
+    const sdk = createRoomSdk({
       transport: createHttpTransport({
         baseUrl: "http://bb.test",
         fetch: queue.fetch,
@@ -929,7 +929,7 @@ describe("@cloudroom/sdk", () => {
       { body: { chunks: [], nextSeq: 4, truncated: false } },
       { body: { ...session, status: "exited", closeReason: "user" } },
     ]);
-    const sdk = createBbSdk({
+    const sdk = createRoomSdk({
       transport: createHttpTransport({
         baseUrl: "http://bb.test",
         fetch: queue.fetch,
@@ -1069,7 +1069,7 @@ describe("@cloudroom/sdk", () => {
   it("restarts a terminal without requiring its scope from the caller", async () => {
     const replacement = makeTerminalSession({ id: "term_new" });
     const queue = createFetchQueue([{ body: replacement, status: 201 }]);
-    const sdk = createBbSdk({
+    const sdk = createRoomSdk({
       transport: createHttpTransport({
         baseUrl: "http://bb.test",
         fetch: queue.fetch,
@@ -1091,7 +1091,7 @@ describe("@cloudroom/sdk", () => {
 
   it("rejects mixed terminal scope selectors before transport", async () => {
     const queue = createFetchQueue([]);
-    const sdk = createBbSdk({
+    const sdk = createRoomSdk({
       transport: createHttpTransport({
         baseUrl: "http://bb.test",
         fetch: queue.fetch,
@@ -1119,7 +1119,7 @@ describe("@cloudroom/sdk", () => {
         status: 404,
       },
     ]);
-    const sdk = createBbSdk({
+    const sdk = createRoomSdk({
       transport: createHttpTransport({
         baseUrl: "http://bb.test",
         fetch: queue.fetch,
@@ -1135,7 +1135,7 @@ describe("@cloudroom/sdk", () => {
   it("routes environment pull request calls through the HTTP transport", async () => {
     const response = { outcome: "absent" };
     const queue = createFetchQueue([{ body: response }]);
-    const sdk = createBbSdk({
+    const sdk = createRoomSdk({
       transport: createHttpTransport({
         baseUrl: "http://bb.test",
         fetch: queue.fetch,
@@ -1163,7 +1163,7 @@ describe("@cloudroom/sdk", () => {
       mergeBaseBranch: "release",
     });
     const queue = createFetchQueue([{ body: environment }]);
-    const sdk = createBbSdk({
+    const sdk = createRoomSdk({
       transport: createHttpTransport({
         baseUrl: "http://bb.test",
         fetch: queue.fetch,
@@ -1193,7 +1193,7 @@ describe("@cloudroom/sdk", () => {
 
   it("rejects empty environment updates before sending a request", async () => {
     const queue = createFetchQueue([]);
-    const sdk = createBbSdk({
+    const sdk = createRoomSdk({
       transport: createHttpTransport({
         baseUrl: "http://bb.test",
         fetch: queue.fetch,
@@ -1210,7 +1210,7 @@ describe("@cloudroom/sdk", () => {
 
   it("fills thread spawn defaults before sending a request", async () => {
     const queue = createFetchQueue([{ body: { id: "thr_1" }, status: 201 }]);
-    const sdk = createBbSdk({
+    const sdk = createRoomSdk({
       transport: createHttpTransport({
         baseUrl: "http://bb.test",
         fetch: queue.fetch,
@@ -1246,7 +1246,7 @@ describe("@cloudroom/sdk", () => {
 
   it("defaults thread forks to source-environment reuse and preserves an agent-only context seed", async () => {
     const queue = createFetchQueue([{ body: { id: "thr_fork" }, status: 201 }]);
-    const sdk = createBbSdk({
+    const sdk = createRoomSdk({
       transport: createHttpTransport({
         baseUrl: "http://bb.test",
         fetch: queue.fetch,
@@ -1290,7 +1290,7 @@ describe("@cloudroom/sdk", () => {
       { body: [] },
       { body: { id: "thr_hidden", visibility: "hidden" } },
     ]);
-    const sdk = createBbSdk({
+    const sdk = createRoomSdk({
       transport: createHttpTransport({
         baseUrl: "http://bb.test",
         fetch: queue.fetch,
@@ -1318,7 +1318,7 @@ describe("@cloudroom/sdk", () => {
       { body: { ok: true, delivery: "sent" } },
       { body: { id: "qmsg_full" }, status: 201 },
     ]);
-    const sdk = createBbSdk({
+    const sdk = createRoomSdk({
       transport: createHttpTransport({
         baseUrl: "http://bb.test",
         fetch: queue.fetch,
@@ -1377,7 +1377,7 @@ describe("@cloudroom/sdk", () => {
         },
       },
     ]);
-    const sdk = createBbSdk({
+    const sdk = createRoomSdk({
       transport: createHttpTransport({
         baseUrl: "http://bb.test",
         fetch: queue.fetch,
@@ -1409,7 +1409,7 @@ describe("@cloudroom/sdk", () => {
 
   it("preserves explicit thread spawn origin for CLI callers", async () => {
     const queue = createFetchQueue([{ body: { id: "thr_1" }, status: 201 }]);
-    const sdk = createBbSdk({
+    const sdk = createRoomSdk({
       transport: createHttpTransport({
         baseUrl: "http://bb.test",
         fetch: queue.fetch,
@@ -1446,7 +1446,7 @@ describe("@cloudroom/sdk", () => {
         },
       },
     ]);
-    const sdk = createBbSdk({
+    const sdk = createRoomSdk({
       transport: createHttpTransport({
         baseUrl: "http://bb.test",
         fetch: queue.fetch,
@@ -1468,7 +1468,7 @@ describe("@cloudroom/sdk", () => {
 
   it("sends the queued message version when updating its content", async () => {
     const queue = createFetchQueue([{ body: { id: "qmsg_123" } }]);
-    const sdk = createBbSdk({
+    const sdk = createRoomSdk({
       transport: createHttpTransport({
         baseUrl: "http://bb.test",
         fetch: queue.fetch,
@@ -1501,7 +1501,7 @@ describe("@cloudroom/sdk", () => {
       { body: { ok: true, delivery: "sent" } },
       { body: null, status: 204 },
     ]);
-    const sdk = createBbSdk({
+    const sdk = createRoomSdk({
       transport: createHttpTransport({
         baseUrl: "http://bb.test",
         fetch: queue.fetch,
@@ -1545,7 +1545,7 @@ describe("@cloudroom/sdk", () => {
         },
       },
     ]);
-    const sdk = createBbSdk({
+    const sdk = createRoomSdk({
       transport: createHttpTransport({
         baseUrl: "http://bb.test",
         fetch: queue.fetch,
@@ -1601,7 +1601,7 @@ describe("@cloudroom/sdk", () => {
         },
       },
     ]);
-    const sdk = createBbSdk({
+    const sdk = createRoomSdk({
       transport: createHttpTransport({
         baseUrl: "http://bb.test",
         fetch: queue.fetch,
@@ -1641,7 +1641,7 @@ describe("@cloudroom/sdk", () => {
       { id: "thr_b", hostId: null },
     ];
     const queue = createFetchQueue([{ body: rows }]);
-    const sdk = createBbSdk({
+    const sdk = createRoomSdk({
       transport: createHttpTransport({
         baseUrl: "http://bb.test",
         fetch: queue.fetch,
@@ -1667,7 +1667,7 @@ describe("@cloudroom/sdk", () => {
         status: 201,
       },
     ]);
-    const sdk = createBbSdk({
+    const sdk = createRoomSdk({
       transport: createHttpTransport({
         baseUrl: "http://bb.test",
         fetch: queue.fetch,
@@ -1694,7 +1694,7 @@ describe("@cloudroom/sdk", () => {
         },
       },
     ]);
-    const sdk = createBbSdk({
+    const sdk = createRoomSdk({
       transport: createHttpTransport({
         baseUrl: "http://bb.test/",
         fetch: queue.fetch,
@@ -1819,7 +1819,7 @@ describe("@cloudroom/sdk", () => {
         },
       },
     ]);
-    const sdk = createBbSdk({
+    const sdk = createRoomSdk({
       transport: createHttpTransport({
         baseUrl: "http://bb.test/",
         fetch: queue.fetch,
@@ -1918,7 +1918,7 @@ describe("@cloudroom/sdk", () => {
       { body: { ok: true, plugin } },
       { body: { ok: true, plugin } },
     ]);
-    const sdk = createBbSdk({
+    const sdk = createRoomSdk({
       transport: createHttpTransport({
         baseUrl: "http://bb.test",
         fetch: queue.fetch,
@@ -1959,7 +1959,7 @@ describe("@cloudroom/sdk", () => {
     const queue = createFetchQueue([
       { body: { error: "candidate unavailable" }, status: 422 },
     ]);
-    const sdk = createBbSdk({
+    const sdk = createRoomSdk({
       transport: createHttpTransport({
         baseUrl: "http://bb.test",
         fetch: queue.fetch,
@@ -1974,7 +1974,7 @@ describe("@cloudroom/sdk", () => {
 
   it("rejects thread spawn requests with both prompt and input", async () => {
     const queue = createFetchQueue([]);
-    const sdk = createBbSdk({
+    const sdk = createRoomSdk({
       transport: createHttpTransport({
         baseUrl: "http://bb.test",
         fetch: queue.fetch,
@@ -2003,7 +2003,7 @@ describe("@cloudroom/sdk", () => {
       { body: { id: "thr_wait", status: "active" } },
       { body: { id: "thr_wait", status: "idle" } },
     ]);
-    const sdk = createBbSdk({
+    const sdk = createRoomSdk({
       transport: createHttpTransport({
         baseUrl: "http://bb.test",
         fetch: queue.fetch,
@@ -2030,11 +2030,90 @@ describe("@cloudroom/sdk", () => {
     ]);
   });
 
+  // Fake server steps: a reset code, a late reset (after the deadline), a
+  // thread status, or an event long-poll that holds for its waitMs, then 204.
+  it.each([
+    ["one reset", ["ECONNRESET", "idle"], 2, true],
+    ["socket closed", ["UND_ERR_SOCKET", "idle"], 2, true],
+    ["lasting resets", Array(4).fill("ECONNRESET"), 4, false],
+    ["refused", ["ECONNREFUSED"], 1, false],
+    [
+      "count restarts after a success",
+      [
+        ...Array(3).fill("ECONNRESET"),
+        "active",
+        ...Array(3).fill("ECONNRESET"),
+        "idle",
+      ],
+      8,
+      true,
+    ],
+    ["no retry after the deadline", ["late", "idle"], 1, false],
+    [
+      "event retry asks only for the time left",
+      ["late", "long-poll"],
+      2,
+      false,
+    ],
+  ])(
+    "thread wait retries only brief resets: %s",
+    async (name, steps, expectedPolls, matches) => {
+      const event = name.startsWith("event");
+      const timeoutMs = steps[0] === "late" ? (event ? 200 : 50) : 1_000;
+      const deadline = Date.now() + timeoutMs;
+      const remaining = [...steps];
+      let overAsked = false;
+      let polls = 0;
+      const sdk = createRoomSdk({
+        transport: createHttpTransport({
+          baseUrl: "http://bb.test",
+          fetch: async (input) => {
+            polls += 1;
+            const waitMs = new URL(String(input)).searchParams.get("waitMs");
+            if (waitMs && Number(waitMs) > deadline - Date.now() + 5) {
+              overAsked = true;
+            }
+            const step = remaining.shift();
+            if (step === "long-poll") {
+              const until = Date.now() + Number(waitMs);
+              // A Node timer can wake early; hold for the full requested wait.
+              while (Date.now() < until) {
+                await new Promise((r) => setTimeout(r, until - Date.now()));
+              }
+              return new Response(null, { status: 204 });
+            }
+            if (step === "idle" || step === "active") {
+              return jsonResponse({ body: { id: "thr_wait", status: step } });
+            }
+            if (step === "late") {
+              await new Promise((r) => setTimeout(r, 60));
+            }
+            const code = step === "late" ? "ECONNRESET" : step;
+            throw new TypeError("fetch failed", { cause: { code } });
+          },
+          runtime: "node",
+        }),
+      });
+
+      const waiting = sdk.threads.wait({
+        threadId: "thr_wait",
+        ...(event ? { event: "turn/completed" } : { status: "idle" }),
+        timeoutMs,
+        pollIntervalMs: 1,
+      });
+      await (matches
+        ? expect(waiting).resolves.toMatchObject({ matched: true })
+        : expect(waiting).rejects.toThrow());
+      expect(polls).toBe(expectedPolls);
+      expect(overAsked).toBe(false);
+    },
+  );
+
   it("throws a typed timeout error from thread wait", async () => {
     const queue = createFetchQueue([
       { body: { id: "thr_wait", status: "active" } },
     ]);
-    const sdk = createBbSdk({
+    const sdk = createRoomSdk({
       transport: createHttpTransport({
         baseUrl: "http://bb.test",
         fetch: queue.fetch,
@@ -2093,7 +2172,7 @@ describe("@cloudroom/sdk", () => {
       { body: { stars: 27_053 } },
       { body: { ok: true, filePath: "/skills/useful-skill/SKILL.md" } },
     ]);
-    const sdk = createBbSdk({
+    const sdk = createRoomSdk({
       transport: createHttpTransport({
         baseUrl: "http://bb.test",
         fetch: queue.fetch,
@@ -2159,7 +2238,7 @@ describe("@cloudroom/sdk", () => {
       },
       { body: { deletedPath: "/skills/review" } },
     ]);
-    const sdk = createBbSdk({
+    const sdk = createRoomSdk({
       transport: createHttpTransport({
         baseUrl: "http://bb.test",
         fetch: queue.fetch,

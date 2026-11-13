@@ -10,11 +10,15 @@ import type { HostDaemonContributedEnvEntry } from "@cloudroom/host-daemon-contr
 import { cursorAuthFile, execPortableFile, findCliExecutable, killPortableProcess, spawnPortableProcess, tarCommand, userEnvironmentEntries } from "@cloudroom/process-utils";
 import { rawThreadIdSchema, reasoningLevelSchema, COMPUTER, type ThreadCreateOrigin } from "@cloudroom/domain";
 import { z } from "zod";
+import type { WorkSessionDeps } from "../../types.js";
+import { requirePrimaryHostId } from "../hosts/primary-host.js";
 import { hasSupportedFrontmatterDelimiter, parseFrontmatter } from "../skills/injected-skills.js";
+import { runProviderCliInstall } from "../system/provider-installations.js";
 import { macClaudeSignedIn } from "./claude-token.js";
-import { CloudroomConnectionError, CloudroomError } from "./client.js";
+import { CloudroomConnectionError, CloudroomError, type SessionRecord } from "./client.js";
 import { macHarnessVersions } from "./harness-versions.js";
 import { cancelMcpSignIns, isRemoteMcp, mcpSignInKey, needsMcpSignIn, type McpSignIn, type RemoteMcpServer } from "./mcp-login.js";
+import { reportCliInstall } from "./setup-telemetry.js";
 
 export const SANDBOX_PREFIX = "sandbox:";
 export const sandboxThread = (coreUrl: string) => coreUrl.startsWith(SANDBOX_PREFIX) ? coreUrl.slice(SANDBOX_PREFIX.length) : null;
@@ -35,6 +39,16 @@ const runSchema = z.object({ thread: rawThreadIdSchema, project: z.string(), tit
   // The website's parent link (ADR 20261104-015709); missing from websites before 20261107-093805.
   parent: z.string().nullable().optional().catch(undefined) });
 export type AutomationRun = z.infer<typeof runSchema>;
+/** A Cloud thread of the account as every computer follows it (#237, web `threadChanges`). */
+const threadChangeSchema = z.object({
+  thread: rawThreadIdSchema, session: z.string().regex(/^cr_[A-Za-z0-9_-]{1,80}$/), project: z.string(), project_name: z.string().nullable(),
+  repository: z.string().nullable(), title: z.string().nullable(), state: z.enum(["open", "archived", "deleted", "local"]), sandbox: z.string().nullable(),
+  harness: z.string().nullable(), model: z.string().nullable(), reasoning: z.string().nullable(), parent: z.string().nullable(),
+  parent_state: z.enum(["open", "closed"]).nullable(), loop: z.boolean(), created_at: z.string(), woke_at: z.string().nullable(), updated_at: z.string(),
+});
+export type ThreadChange = z.infer<typeof threadChangeSchema>;
+const threadPageSchema = z.object({ threads: z.array(threadChangeSchema), next: z.string(), more: z.boolean(), recheck_ms: z.number().int().positive().default(3_600_000), recheck_offline_ms: z.number().int().positive().default(600_000) });
+export type ThreadPage = z.infer<typeof threadPageSchema>;
 const awakeSchema = z.object({
   sandboxes: z.array(z.object({ thread: z.string(), origin: z.string().url(), token: z.string() })),
   runs: z.array(runSchema).catch([]).default([]),
@@ -47,7 +61,7 @@ export type SandboxTrigger = "app_launch" | "app_activity" | "composer" | "threa
 /** Why a sleeping thread wakes before any work is sent: the user opened it or started typing (ADR 0176), or its work
  *  leaves Cloud (`teleport_local`: Teleport to Local, Copy to Mac, Fork to Local), which may pass the credit limit once a day. */
 export type SandboxWakeTrigger = Extract<SandboxTrigger, "thread_typing" | "thread_view" | "teleport_local">;
-type FirstWake = { target?: "vps" | "cloud"; launch?: ThreadCreateOrigin };
+type FirstWake = { target?: "vps" | "cloud"; launch?: ThreadCreateOrigin; launcher?: string };
 /** Logins the website keeps for every sandbox of an account (ADR 0145). */
 export type SandboxLogin = "claude" | "codex" | "pi" | "github" | "cursor" | "opencode" | "mcp" | "hermes" | "devin" | "kimi" | "openclaw";
 /** GitHub projects also name their repository and cloud folder, so the website can build a template. */
@@ -59,16 +73,18 @@ const insideLoginLock = new AsyncLocalStorage<true>();
 const PRELOAD_BATCH = 10, PRELOADS_PER_HOUR = 30, PRELOAD_AGAIN_MS = 3_600_000;
 const placeOf = (thread: string, project: SandboxProject) => ({ thread, project: project.id, ...(project.repository ? { repository: project.repository, folder: project.folder } : {}) });
 export type CloudQueue = { position: number; total: number; regionBlocked: boolean };
-/** The account's Cloud Credits in the rolling 30 days (ADR 0307), for the sidebar card; null credits while metering is stale.
- *  `og` is the OG letter, which the website sends only to OGs still on the free Pro it gave them (ADR 0218). */
-/** Plan credits used in the rolling 30 days, and credits left in live packs (ADR 0317): 0 from older websites. */
-export type PlanUsage = { plan: string; credits: number | null; creditsLimit: number; extraCredits: number; extraCreditsTotal: number; og: { name: string | null; endsAt: string } | null };
+/** The account's Cloud Credits in the rolling 30 days (ADR 0307), for the sidebar card; null credits while metering is stale. */
+/** Plan credits used this credit period, when they refill (ADR 20261108-142517; null from older websites), and credits
+ *  left in live packs (ADR 0317): 0 from older websites. */
+export type PlanUsage = { plan: string; credits: number | null; creditsLimit: number; resetsAt: string | null; extraCredits: number; extraCreditsTotal: number };
 const USAGE_LIMIT = "cloud_usage_limit";
 const AGENT_LIMIT = "cloud_agent_limit";
 /** Free's shared daily budget is spent: like the limits above, the website refused before starting the sandbox. */
 export const BUDGET_LIMIT = "cloud_budget_limit";
 const CLOUD_QUEUE = "cloud_queue";
 export const CLOUD_REGION = "cloud_region";
+/** The website no longer has this sign-in's token: it was signed out there, or the password was reset. */
+const SIGNED_OUT = "desktop_signed_out";
 export const startRefused = (error: unknown): error is CloudroomError & { code: string } => error instanceof CloudroomError && [USAGE_LIMIT, AGENT_LIMIT, CLOUD_QUEUE, CLOUD_REGION].includes(error.code ?? "");
 // The Mac's skills and global instructions that sandboxes receive, one way (docs/scopes/sandboxes.md).
 const SKILL_ROOTS = [".agents/skills", ".claude/skills", ".codex/skills", ".pi/agent/skills"];
@@ -76,6 +92,8 @@ const INSTRUCTION_FILES = [".claude/CLAUDE.md", ".codex/AGENTS.md", ".pi/agent/A
 const CONFIG_LIMIT = 45 * 1024 * 1024;
 const codexAuthPath = () => join(process.env.CODEX_HOME || join(homedir(), ".codex"), "auth.json");
 export const hasMacCodexLogin = () => access(codexAuthPath()).then(() => true, () => false);
+/** A fingerprint of this Mac's Codex login file, or null without one: it changes whenever Codex renews or signs in. */
+export const macCodexDigest = () => readFile(codexAuthPath()).then(file => createHash("sha256").update(file).digest("hex"), () => null);
 /** What `codex logout` does, for a Mac without the Codex CLI. */
 export const removeMacCodexLogin = () => rm(codexAuthPath(), { force: true });
 
@@ -102,19 +120,74 @@ export function codexLoginFailure(output: string): string {
   return `Codex on this ${COMPUTER} only allows API-key login, but Cloudroom needs ChatGPT sign-in. Remove \`forced_login_method = "api"\` from ${config}, then click Connect again. If the file is locked, run \`chflags nouchg ${config}\` first.`;
 }
 
-type MacCodexLogin = { child: ChildProcess | null; url: string | null; error: string | null; done: boolean };
+/** `installingSince` is set while a missing Codex installs before sign-in, in ms since 1970. */
+type MacCodexLogin = { child: ChildProcess | null; url: string | null; error: string | null; done: boolean; installingSince: number | null };
 let macCodexLoginRun: MacCodexLogin | null = null;
 // Most Windows PCs have no Node, so npm would fail there (#475).
 const codexInstallHint = () => process.platform === "win32" ? "Install it in PowerShell with `irm https://chatgpt.com/codex/install.ps1 | iex`" : "Install it with `npm i -g @openai/codex`";
 const codexMissing = () => `Codex is not installed on this ${COMPUTER}.${process.platform === "darwin" ? " Cloudroom never runs the copy inside Codex.app or ChatGPT.app." : ""} ${codexInstallHint()}, then click Connect again.`;
+
+type InstallEvents = Awaited<ReturnType<typeof runProviderCliInstall>>;
+let codexInstall: Promise<void> | null = null;
+/** Installs Codex on this Mac with the provider's own installer, the one Local threads use. A sign-in started after a
+ *  cancel joins the install still running, instead of queueing a second one that fails once Codex is there. */
+function installMacCodex(deps: WorkSessionDeps): Promise<void> {
+  codexInstall ??= runMacCodexInstall(deps).finally(() => { codexInstall = null; });
+  return codexInstall;
+}
+
+async function runMacCodexInstall(deps: WorkSessionDeps): Promise<void> {
+  const started = Date.now();
+  const events = await runProviderCliInstall(deps, { hostId: requirePrimaryHostId(deps), provider: "codex", actionKind: "install" });
+  const ok = events.some(event => event.type === "completed" && event.success);
+  const message = ok ? null : installFailure(events);
+  // A second "started" means the normal command failed and the official installer ran.
+  reportCliInstall("codex", events.filter(event => event.type === "started").length > 1 ? "repair" : "codex_connect", ok ? "ok" : "failed", Date.now() - started, message);
+  if (message) throw new Error(message);
+}
+
+/** Why an install failed: its error, else the last command's final output lines and exit, without colors or npm's spinner. */
+function installFailure(events: InstallEvents): string {
+  const error = events.filter(event => event.type === "error").at(-1);
+  if (error?.type === "error") return error.message;
+  const lastStart = events.map(event => event.type).lastIndexOf("started");
+  const tail = events.slice(lastStart + 1).map(event => event.type === "output" ? event.text : "").join("")
+    .replace(/\x1b\[[0-9;?]*[A-Za-z]|[⠀-⣿]/gu, "").split("\n").map(line => line.trim()).filter(Boolean).slice(-3).join(" ").slice(-300);
+  const done = events.filter(event => event.type === "completed").at(-1);
+  const exit = done?.type !== "completed" ? "it stopped early" : done.exitCode !== null ? `exit code ${done.exitCode}` : `signal ${done.signal ?? "unknown"}`;
+  return tail ? `${tail} (${exit})` : `The installer failed (${exit})`;
+}
+
 /** Runs `codex login` on this Mac. Codex opens the default browser and saves the login itself; one run at a time, 10 minutes at most.
- *  No Codex found means not installed: a bare `codex` could reach the one inside Codex.app through PATH (#96). */
-export function startMacCodexLogin(): MacCodexLogin {
+ *  No Codex found means not installed: a bare `codex` could reach the one inside Codex.app through PATH (#96). A missing Codex is
+ *  installed first, and the run reports the install while it lasts, never a silent wait (ADR 20261111-123959). */
+export function startMacCodexLogin(deps: WorkSessionDeps): MacCodexLogin {
   if (macCodexLoginRun && !macCodexLoginRun.done) return macCodexLoginRun;
+  const run: MacCodexLogin = { child: null, url: null, error: null, done: false, installingSince: null };
+  macCodexLoginRun = run;
   const codex = findCliExecutable("codex");
-  if (!codex) return macCodexLoginRun = { child: null, url: null, error: codexMissing(), done: true };
+  if (codex) {
+    runCodexLogin(run, codex);
+    return run;
+  }
+  run.installingSince = Date.now();
+  installMacCodex(deps).then(() => {
+    run.installingSince = null;
+    // Cancelled while installing: the install stays, the sign-in doesn't start.
+    if (macCodexLoginRun !== run) return;
+    const installed = findCliExecutable("codex");
+    if (installed) runCodexLogin(run, installed);
+    else Object.assign(run, { done: true, error: codexMissing() });
+  }, (error: unknown) => {
+    const reason = (error instanceof Error ? error.message : String(error)).trim().replace(/[^.!?]$/, "$&.");
+    Object.assign(run, { installingSince: null, done: true, error: `Codex could not be installed on this ${COMPUTER}: ${reason} Try again.` });
+  });
+  return run;
+}
+
+function runCodexLogin(run: MacCodexLogin, codex: string): void {
   const child = spawnPortableProcess({ command: codex, args: ["login"], stdio: ["ignore", "pipe", "pipe"], timeout: 10 * 60_000 });
-  const run: MacCodexLogin = { child, url: null, error: null, done: false };
+  run.child = child;
   let output = "";
   const read = (chunk: Buffer) => { output += chunk.toString(); run.url ??= output.match(/https:\/\/auth\.openai\.com\/\S+/)?.[0] ?? null; };
   child.stdout?.on("data", read);
@@ -125,8 +198,6 @@ export function startMacCodexLogin(): MacCodexLogin {
   });
   // A cancel or the 10-minute timeout kills Codex (code null); only a real exit has an error worth showing.
   child.on("exit", code => { run.done = true; if (code !== 0) run.error ??= codexLoginFailure(code === null ? "" : output); });
-  macCodexLoginRun = run;
-  return run;
 }
 /** The current `codex login` run; a finished run is returned once, then forgotten. */
 export function macCodexLogin(): MacCodexLogin | null {
@@ -435,8 +506,10 @@ const MAC_PATH = process.platform === "win32"
   ? WINDOWS_LOCAL_PATH
   : /(^|[\s=:'"])(~\/|\/Users\/|\/Volumes\/|\/Applications\/|\/Library\/|\/opt\/homebrew\/|\/private\/)/;
 const LOCAL_URL = /^https?:\/\/(localhost|127\.|0\.0\.0\.0|\[::1\])/i;
+/** Programs only macOS has, such as Xcode's `xcrun mcpbridge` (#1244). */
+const MAC_PROGRAM = /^(xcrun|xcodebuild|osascript)$/i;
 const portable = (server: McpServer) => server.type === "stdio"
-  ? !server.command.includes("/") && !(process.platform === "win32" && (server.command.includes("\\") || MAC_PATH.test(server.command))) && ![...server.args, ...Object.values(server.env)].some(text => MAC_PATH.test(text))
+  ? !server.command.includes("/") && !MAC_PROGRAM.test(server.command) && !(process.platform === "win32" && (server.command.includes("\\") || MAC_PATH.test(server.command))) && ![...server.args, ...Object.values(server.env)].some(text => MAC_PATH.test(text))
   : !LOCAL_URL.test(server.url);
 /** On Windows, Claude Code runs npx through `cmd /c` and Codex may name `npx.cmd`. Sandboxes run the command itself. */
 function windowsCommand(server: McpServer): McpServer {
@@ -498,8 +571,9 @@ export function revokeDesktopToken(account: SandboxAccount): void {
 /** Each cloud thread's own sandbox, managed by the website (docs/scopes/sandboxes.md). Lookups never wake it. */
 export class SandboxDirectory {
   private readonly views = new Map<string, View>();
-  /** A new thread's first-wake hints: its VPS-or-Cloud pick (ADR 0319) and how it was started (`launch`: app, cli,
-   *  sdk or plugin), which the website saves on the start's events. */
+  /** A new thread's first-wake hints: its VPS-or-Cloud pick (ADR 0319), how it was started (`launch`: app, cli,
+   *  sdk or plugin), and the agent thread whose `room-cli` call started it (`launcher`), which the website saves on
+   *  the start's events. */
   private readonly firstWake = new Map<string, FirstWake>();
   /** The sandbox whose API keys a new child or fork gets (ADR 0342), from its saved first message, so an app restart
    *  never loses it. Sent with each wake; the website reads it only when it registers the thread. */
@@ -520,6 +594,8 @@ export class SandboxDirectory {
   private uploaded = new Map<string, string>();
   /** Gets the threads automations started, from each awake check; the app shows the ones it doesn't have yet. */
   onRuns: (runs: AutomationRun[]) => void = () => {};
+  /** Gets the token the website refused as signed out, so the app signs out too and asks to sign in again. */
+  onSignedOut: (token: string) => void = () => {};
   /** `woke` runs after each wake, so the Mac helper lists the new sandbox now instead of at its next minute check. */
   constructor(readonly account: () => Promise<SandboxAccount | null>, private readonly woke: (thread: string) => void = () => {}) {}
 
@@ -544,6 +620,7 @@ export class SandboxDirectory {
       if (code === USAGE_LIMIT) this.limit = { on: true, at: Date.now() };
       // Refused for the cloud queue or the region: ask again soon, so the composer shows the right card.
       if (code === CLOUD_QUEUE || code === CLOUD_REGION) this.mode = null;
+      if (code === SIGNED_OUT) this.onSignedOut(account.token);
       throw new CloudroomError(message, response.status >= 500 ? null : response.status, code);
     }
     return value;
@@ -578,6 +655,11 @@ export class SandboxDirectory {
 
   popups(body: Record<string, string>): Promise<unknown> {
     return this.call(body, "popups");
+  }
+
+  /** Monthly Wrapped: this account's "Top N%" by agents started in a finished month, or null (docs/scopes/wrapped.md). */
+  async wrappedTop(month: string): Promise<number | null> {
+    return z.object({ top: z.number().nullable() }).parse(await this.call({ month }, "wrapped")).top;
   }
 
   /** Whether the website judges a generated thread title too vague to keep, at the user's sensitivity (2–5). */
@@ -839,20 +921,23 @@ export class SandboxDirectory {
       this.checkingUsage = true;
       void this.call({ action: "usage" }).then((value) => {
         // A website without credits (say, rolled back) shows no card rather than old units.
-        const parsed = z.object({ plan: z.string(), credits: z.number().nullable(), credits_limit: z.number(),
-          extra_credits: z.number().catch(0), extra_credits_total: z.number().catch(0),
-          og: z.object({ name: z.string().nullable(), ends_at: z.string() }).nullable().catch(null) }).safeParse(value);
+        const parsed = z.object({ plan: z.string(), credits: z.number().nullable(), credits_limit: z.number(), resets_at: z.string().nullable().catch(null),
+          extra_credits: z.number().catch(0), extra_credits_total: z.number().catch(0) }).safeParse(value);
         const recheck = z.object({ recheck_seconds: z.number().default(600) }).parse(value).recheck_seconds;
         this.usage = {
-          value: parsed.success ? { plan: parsed.data.plan, credits: parsed.data.credits, creditsLimit: parsed.data.credits_limit,
-            extraCredits: parsed.data.extra_credits, extraCreditsTotal: parsed.data.extra_credits_total,
-            og: parsed.data.plan === "pro" && parsed.data.og ? { name: parsed.data.og.name, endsAt: parsed.data.og.ends_at } : null } : null,
+          value: parsed.success ? { plan: parsed.data.plan, credits: parsed.data.credits, creditsLimit: parsed.data.credits_limit, resetsAt: parsed.data.resets_at,
+            extraCredits: parsed.data.extra_credits, extraCreditsTotal: parsed.data.extra_credits_total } : null,
           next: Date.now() + Math.max(recheck, 60) * 1000,
         };
       }, () => { this.usage = { value: this.usage?.value ?? null, next: Date.now() + RECHECK_MS }; }).finally(() => { this.checkingUsage = false; });
     }
     // A plan change shows nothing until the next check, never the old plan's card.
     return this.usage?.value?.plan === this.plan ? this.usage.value : null;
+  }
+
+  /** When the account's credits were used, hour by hour (Settings → Analytics). Asked only while that page is open. */
+  async usageWave(): Promise<unknown> {
+    return z.object({ wave: z.unknown() }).parse(await this.call({ action: "usage_wave" })).wave ?? null;
   }
 
   /** What the account's cloud offers, read by the website from a running spare or sandbox. Null until one runs. */
@@ -908,10 +993,15 @@ export class SandboxDirectory {
     this.configAt = 0;
     this.configDigest = "";
     this.configIssue = null;
+    // The next sign-in asks again whether the website lists threads, instead of keeping an old "no" for an hour.
+    this.threadsSupport = null;
+    this.threadsFailed = 0;
   }
 
   /** A broken stream or failed request may mean the sandbox went to sleep; look it up again next time. */
   forget(thread: string): void { this.views.delete(thread); this.awake.delete(thread); }
+  /** What the website says the thread's sandbox is doing. Never wakes it; the answer isn't kept. */
+  async state(thread: string): Promise<View["state"]> { return viewSchema.parse(await this.call({ action: "lookup", thread })).state; }
 
   /** Whether each thread runs on the user's own VPS (ADR 0319), from the website's last answer about it. */
   private placed = new Map<string, boolean>();
@@ -951,9 +1041,43 @@ export class SandboxDirectory {
   coolingDown(thread: string | null): boolean { return Boolean(thread && (this.backoff.get(thread)?.until ?? 0) > Date.now()); }
 
   /** Saves a thread's title, project name, harness, model, Core session ID, and the thread that started it on the
-   *  website (ADR 0182, 0239, 0256). */
-  async label(thread: string, label: { title: string | null; project_name: string | null; project: string; session: string; harness: string; model: string | null; parent?: string | null; moved?: true }): Promise<boolean> {
+   *  website (ADR 0182, 0239, 0256). A `v: 2` label (#237) changes only the fields it sends, and its session only fills
+   *  an empty one; the whole label is for websites before that. */
+  async label(thread: string, label: { title?: string | null; project_name?: string | null; project?: string; session?: string; harness?: string; model?: string | null; parent?: string | null; moved?: true; v?: 2 }): Promise<boolean> {
     return z.object({ saved: z.boolean() }).catch({ saved: false }).parse(await this.call({ action: "label", thread, ...label })).saved;
+  }
+  /** The account's Cloud threads changed since `since` (#237), `null` for all of them, 500 a page. */
+  async threads(since: string | null): Promise<ThreadPage> {
+    const page = threadPageSchema.parse(await this.call({ action: "threads", ...(since ? { since } : {}) }));
+    this.threadsSupport = { ok: true, at: Date.now() };
+    this.threadsFailed = 0;
+    return page;
+  }
+  private threadsSupport: { ok: boolean; at: number } | null = null;
+  /** Whether the website lists the account's Cloud threads (#237): then it takes `v: 2` labels and the other new calls.
+   *  Asked once, and again hourly while it doesn't. */
+  /** Whether the website lists threads (#237): asked once, then again hourly while it doesn't. Callers share a question
+   *  in flight. `null`: it didn't answer (a blip), remembered for a minute; never read as an older website. */
+  async followsThreads(): Promise<boolean | null> {
+    const known = this.threadsSupport;
+    if (known && (known.ok || Date.now() - known.at < 3_600_000)) return known.ok;
+    if (Date.now() - this.threadsFailed < 60_000) return null;
+    return this.threadsAsking ??= this.threads(`${new Date().toISOString()}~`).then(() => true, (error: unknown) => {
+      // A blip: no answer, a timeout, a busy or failing website, or a sign-in that just ended (the next one asks again).
+      // Any other answer means it doesn't list threads.
+      if (error instanceof CloudroomError && (error.status === null || error.status >= 500 || [408, 429].includes(error.status) || error.code === SIGNED_OUT)) {
+        this.threadsFailed = Date.now();
+        return null;
+      }
+      this.threadsSupport = { ok: false, at: Date.now() };
+      return false;
+    }).finally(() => { this.threadsAsking = null; });
+  }
+  private threadsAsking: Promise<boolean | null> | null = null;
+  private threadsFailed = 0;
+  /** A page of a Cloud thread's saved records, as Core streams them (#237). Never wakes the thread. */
+  async records(thread: string, session: string, after: number): Promise<{ records: SessionRecord[]; more: boolean }> {
+    return z.object({ records: z.array(z.unknown()), more: z.boolean() }).parse(await this.call({ action: "records", thread, session, after, limit: 1000 })) as { records: SessionRecord[]; more: boolean };
   }
   /** Teleport to Local closed `session`: the website stops sending this thread's Cloud subagents' reports there. */
   async markLocal(thread: string, session: string): Promise<boolean> {
@@ -962,11 +1086,12 @@ export class SandboxDirectory {
   async archive(thread: string): Promise<void> { this.forget(thread); await this.call({ action: "archive", thread }); }
   async refreshCodex(thread: string): Promise<void> { await this.call({ action: "codex", thread }); }
   /** An unarchive right after an archive finds the sandbox busy until the archive ends (up to ~60 s), so keep trying. */
-  async restore(thread: string): Promise<void> {
+  async restore(thread: string, session?: string): Promise<void> {
     this.forget(thread);
     this.backoff.delete(thread);
     for (let tries = 1; ; tries++) {
-      try { return void await this.call({ action: "restore", thread }); }
+      // `session`: the one the user restored, so its loops the archive paused run again (#237; older websites ignore it).
+      try { return void await this.call({ action: "restore", thread, ...(session ? { session } : {}) }); }
       catch (error) { if (!(error instanceof CloudroomConnectionError) || tries >= 30) throw error; }
       await new Promise(resolve => setTimeout(resolve, 3_000));
     }
@@ -1160,6 +1285,20 @@ export class SandboxDirectory {
     return this.withLogins(() => this.uploadMacLogins());
   }
 
+  /** Sends this Mac's Codex login again, even unchanged: Cloud's copy may have died while this one still works.
+   *  Answers the digest it sent, or null when there was nothing to send (no login, or Disconnect stopped it). */
+  resendMacCodexLogin(): Promise<string | null> {
+    return this.withLogins(async () => {
+      if ((await this.skipLogins()).has("codex")) return null;
+      const value = await readFile(codexAuthPath(), "utf8").catch(() => null);
+      try { if (!value || !JSON.parse(value)) return null; } catch { return null; }
+      const digest = createHash("sha256").update(value).digest("hex");
+      this.uploaded.delete("codex");
+      await this.putLogin("codex", value);
+      return digest;
+    });
+  }
+
   private async uploadMacLogins(): Promise<void> {
     const skip = await this.skipLogins();
     const piHome = process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi/agent");
@@ -1249,6 +1388,8 @@ export class SandboxDirectory {
     const instructions = (await Promise.all(INSTRUCTION_FILES.map(path => stat(join(home, path)).then(() => path, () => null)))).filter((path): path is string => path !== null);
     const present = [...(await macSkills()).filter(skill => inCloud(skill.name)).flatMap(skill => skill.paths), ...instructions];
     const files = await configFiles(home, present);
+    // A computer with no skills or instructions never replaces the account's bundle on its own (#237); only a Settings change may empty it.
+    if (!files.length && !force) { this.configIssue = null; return; }
     const run = files.length ? promisify(execFile)(tarCommand(), ["-c", "-h", ...(process.platform === "linux" ? ["--hard-dereference"] : []), "--no-recursion", "--format", "ustar", "-C", home, "--null", "-T", "-"],
       { encoding: "buffer", maxBuffer: 4 * CONFIG_LIMIT, timeout: 30_000, env: { ...process.env, COPYFILE_DISABLE: "1" } }) : null;
     run?.child.stdin?.on("error", () => {}).end(files.join("\0") + "\0");

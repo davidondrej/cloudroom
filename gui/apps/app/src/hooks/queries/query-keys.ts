@@ -1144,6 +1144,11 @@ export function systemSkillUsageQueryKey(
   return [SYSTEM_SKILL_USAGE_QUERY_KEY, days];
 }
 
+export const SYSTEM_USAGE_ANALYTICS_QUERY_KEY = "systemUsageAnalytics";
+export function systemUsageAnalyticsQueryKey(metric: string, days: string) {
+  return [SYSTEM_USAGE_ANALYTICS_QUERY_KEY, metric, days] as const;
+}
+
 export function systemWorktreeStorageQueryKey(): SystemWorktreeStorageQueryKey {
   return [SYSTEM_WORKTREE_STORAGE_QUERY_KEY];
 }

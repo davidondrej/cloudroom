@@ -1,5 +1,5 @@
 import type { CreateSdkAreaArgs } from "./common.js";
-import type { TeleportProgress } from "@cloudroom/domain";
+import type { TeleportProgress, ThreadListEntry } from "@cloudroom/domain";
 
 export interface CloudroomStorage {
   enabled: boolean;
@@ -14,6 +14,8 @@ export interface CloudroomStorage {
 
 /** Mac access levels (ADR 0186). */
 export type MacAccessLevel = "off" | "read-only" | "ask" | "full";
+
+export type CloudroomThreadStatus = { model: string; reasoning: string; error?: string | null; reconnecting?: boolean };
 
 export interface CloudroomStatus {
   storage?: CloudroomStorage | null;
@@ -47,9 +49,9 @@ export interface CloudroomStatus {
   cloudQueue?: { position: number; total: number; regionBlocked: boolean } | null;
   /** The account's plan (free, pro, super, ultra) from the website's mode check; null while billing is off or unknown. */
   plan?: string | null;
-  /** The account's Cloud Credits in the rolling 30 days: Free's sidebar card, paid plans' meter from 75%. Null while billing is
-   *  off or in the cloud queue; null credits while metering is stale. */
-  planUsage?: { plan: string; credits: number | null; creditsLimit: number; extraCredits?: number; extraCreditsTotal?: number; og?: { name: string | null; endsAt: string } | null } | null;
+  /** The account's Cloud Credits this credit period and when they refill (`resetsAt`, ADR 20261108-142517): Free's sidebar
+   *  card, paid plans' meter from 75%. Null while billing is off or in the cloud queue; null credits while metering is stale. */
+  planUsage?: { plan: string; credits: number | null; creditsLimit: number; resetsAt?: string | null; extraCredits?: number; extraCreditsTotal?: number } | null;
 }
 
 export interface CloudroomCodexAuth {
@@ -60,7 +62,7 @@ export interface CloudroomCodexAuth {
   login_id: string | null;
   verification_url: string | null;
   user_code: string | null;
-  /** Claude: when Cloudroom started installing Claude Code for this sign-in, in ms since 1970. */
+  /** Claude and Codex: when Cloudroom started installing the missing CLI for this sign-in, in ms since 1970. */
   installing_since?: number | null;
 }
 
@@ -188,6 +190,9 @@ export type CloudAutomationRequest =
   | { action: "runs"; id: string }
   // A cloud loop's newest run records (ADR 0298), for `room-cli loop runs ID`.
   | { action: "history"; id: string; limit?: number }
+  // Loops → Review (ADR 0298): the reports of these Local runs and of the Cloud runs that started these threads (this
+  // app sends their requests). Older websites refuse it.
+  | { action: "reports"; runs: string[]; threads: string[] }
   // Webhook loops (ADR 0262): a Local loop's URL, its removal, the events waiting for this Mac's loops, and their ack.
   | { action: "hook" | "unhook"; local: string }
   | { action: "events"; local: string[] }
@@ -196,7 +201,7 @@ export type CloudAutomationRequest =
   | { action: "settings"; stop_at_limit?: boolean; fallback?: boolean }
   // Loop run records (ADR 0298): a Local loop run's `room-cli loop report`, saved with Cloud runs.
   | { action: "report"; local: string; run: string; thread: string; name: string; started_at: string; outcome: string; confidence: string; reason: string; actions: string[] };
-export type CloudAutomationResponse = { automations?: CloudAutomation[]; automation?: CloudAutomation; ok?: boolean; url?: string; batches?: CloudHookBatch[]; recheck_ms?: number; stop_at_limit?: boolean; fallback?: boolean; runs?: string[]; history?: CloudLoopRun[]; reported?: boolean };
+export type CloudAutomationResponse = { automations?: CloudAutomation[]; automation?: CloudAutomation; ok?: boolean; url?: string; batches?: CloudHookBatch[]; recheck_ms?: number; stop_at_limit?: boolean; fallback?: boolean; runs?: string[]; history?: CloudLoopRun[]; reported?: boolean; reports?: { request: string; thread_id: string; outcome: string; reason: string | null }[] };
 /** Weighted tokens the listed threads used since `threadsSince`, and all of the provider's threads since `totalSince`. */
 export type TokenUsageRequest = { providerId: string; threadIds: string[]; threadsSince: number; totalSince: number };
 export type TokenUsageResponse = { total: number; threads: Record<string, number> };
@@ -284,6 +289,8 @@ export interface CloudroomArea {
   promptSuggestion(input: { threadId: string }, signal?: AbortSignal): Promise<{ suggestion: string | null }>;
   promptSuggestionEvent(input: { threadId: string; action: "shown" | "accepted" }): Promise<{ ok: boolean }>;
   searchRank(input: { query: string; items: { id: string; title: string; text: string }[] }, signal?: AbortSignal): Promise<{ probabilities: Record<string, number> | null; ranked: string[] }>;
+  /** Cmd+K "Search deeper": a Claude Code agent reads threads and returns its best 5, best first. */
+  deepSearch(input: { query: string }, signal?: AbortSignal): Promise<{ threads: ThreadListEntry[] }>;
   /** A project's branches on GitHub, for a project with no folder on this Mac. */
   githubBranches(projectId: string, signal?: AbortSignal): Promise<{ defaultBranch: string | null; branches: string[] }>;
   status(signal?: AbortSignal): Promise<CloudroomStatus>;
@@ -330,9 +337,12 @@ export interface CloudroomArea {
   cancel(): Promise<void>;
   logout(): Promise<void>;
   threadWorkspace(threadId: string, signal?: AbortSignal): Promise<CloudroomThreadWorkspace | null>;
-  /** A Cloud thread's model and current effort, or null when it has no cloud session. */
-  threadStatus(threadId: string, signal?: AbortSignal): Promise<{ model: string; reasoning: string } | null>;
+  /** A Cloud thread's model and current effort, or null when it has no cloud session. `error` and `reconnecting`
+   *  say why its start or messages aren't going through yet (older apps send neither). */
+  threadStatus(threadId: string, signal?: AbortSignal): Promise<CloudroomThreadStatus | null>;
   retryStart(threadId: string): Promise<void>;
+  /** Clears package caches and Git-ignored dependency and build folders on a Cloud thread's sandbox, even while a full disk pauses its agent. */
+  clearDisk(threadId: string): Promise<{ freedBytes: number }>;
   /** Copies a Cloud thread's project into its folder again after the copy failed. */
   retryCopy(threadId: string): Promise<void>;
   /** `choice` runs the cloud thread on another model when the cloud cannot offer the local one. */
@@ -348,11 +358,14 @@ export interface CloudroomArea {
   /** Moves a thread from the cloud VM into its own sandbox (moving off the VM). Returns Teleport progress. */
   moveToSandbox(threadId: string): Promise<TeleportProgress>;
   /** Copies open BB threads into idle Local threads by forking their native sessions. Sends no prompts. */
-  importBb(hostId: string): Promise<BbImportResult>;
+  importBb(hostId: string): Promise<RoomImportResult>;
   /** Claude Code and Codex chats on this Mac that are not in Cloudroom yet, newest first. */
-  nativeSessions(signal?: AbortSignal): Promise<{ sessions: NativeSession[] }>;
+  nativeSessions(signal?: AbortSignal): Promise<{ sessions: NativeSession[]; conductorApp?: boolean }>;
   /** Copies chosen chats into idle Local threads by forking their native sessions. Sends no prompts. */
   importSessions(hostId: string, sessions: { harness: NativeSession["harness"]; id: string }[]): Promise<SessionImportResult>;
+  /** Lists the chats in a Conductor Cloud export (its unzipped folder, or the .zip). */
+  conductorExport(path: string): Promise<{ sessions: NativeSession[] }>;
+  importConductorExport(hostId: string, path: string): Promise<SessionImportResult>;
   /** Every Local and Cloud thread that can be exported, with when it last changed. */
   exportableChats(signal?: AbortSignal): Promise<{ threads: { target: "local" | "cloud"; updatedAt: number }[] }>;
   /** Writes chats as Markdown or JSON files into a new folder in ~/Downloads and opens it. */
@@ -360,7 +373,8 @@ export interface CloudroomArea {
   /** Sends a Local agent's Cloudroom bug report. `sent` is false while bug reports are off in Settings. */
   reportBug(input: { message: string; threadId?: string }): Promise<{ sent: boolean }>;
   /** The thread's read-only share link, or null when it is not shared. */
-  threadShare(threadId: string, signal?: AbortSignal): Promise<ThreadShare | null>;
+  /** `fresh`: read a Cloud thread's share from the website (when the share menu opens); otherwise the local copy. */
+  threadShare(threadId: string, signal?: AbortSignal, fresh?: boolean): Promise<ThreadShare | null>;
   /** Shares the thread's messages (no tool output or files, secrets removed), or updates its shared copy. */
   shareThread(threadId: string): Promise<ThreadShare>;
   /** Turns the thread's share link off and deletes its shared copy. */
@@ -378,13 +392,13 @@ export interface ThreadShare {
   updatedAt: string;
 }
 
-export interface BbImportResult {
+export interface RoomImportResult {
   imported: { bbThreadId: string; threadId: string; title: string }[];
   skipped: { bbThreadId: string; title: string; reason: string }[];
 }
 
 export interface NativeSession {
-  harness: "claude-code" | "codex" | "pi" | "acp-hermes-agent" | "t3code";
+  harness: "claude-code" | "codex" | "pi" | "acp-hermes-agent" | "t3code" | "conductor";
   id: string;
   title: string;
   cwd: string;
@@ -427,6 +441,7 @@ export function createCloudroomArea({ transport }: CreateSdkAreaArgs): Cloudroom
     promptSuggestion: (input, signal) => transport.readJson(request("/prompt-suggestion", input, signal)) as Promise<{ suggestion: string | null }>,
     promptSuggestionEvent: (input) => transport.readJson(request("/prompt-suggestion/event", input)) as Promise<{ ok: boolean }>,
     searchRank: (input, signal) => transport.readJson(request("/search-rank", input, signal)) as Promise<{ probabilities: Record<string, number> | null; ranked: string[] }>,
+    deepSearch: (input, signal) => transport.readJson(request("/deep-search", input, signal)) as Promise<{ threads: ThreadListEntry[] }>,
     githubBranches: (projectId, signal) => transport.readJson(request(`/github-branches?project=${encodeURIComponent(projectId)}`, undefined, signal)) as Promise<{ defaultBranch: string | null; branches: string[] }>,
     githubLogin: (requestId) => transport.readJson(request("/github/login", { requestId })) as Promise<CloudroomCodexAuth>,
     cancelGithubLogin: (requestId) => transport.readJson(request("/github/cancel", { requestId })) as Promise<CloudroomCodexAuth>,
@@ -461,7 +476,7 @@ export function createCloudroomArea({ transport }: CreateSdkAreaArgs): Cloudroom
     startMcpSignIn: (name) => transport.readJson(request("/mcp/sign-in", { name })) as Promise<{ url: string }>,
     runOnVm: (input) => transport.readJson(transport.fetch(`${transport.baseUrl}/api/v1/cloudroom/vm/run`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(input) })) as Promise<{ code: number | null; stdout: string; stderr: string; truncated: boolean }>,
     logout: () => transport.readVoid(request("/logout", {})),
-    threadStatus: (threadId, signal) => transport.readJson(transport.fetch(`${transport.baseUrl}/api/v1/cloudroom/threads/${encodeURIComponent(threadId)}`, { signal })) as Promise<{ model: string; reasoning: string } | null>,
+    threadStatus: (threadId, signal) => transport.readJson(transport.fetch(`${transport.baseUrl}/api/v1/cloudroom/threads/${encodeURIComponent(threadId)}`, { signal })) as Promise<CloudroomThreadStatus | null>,
     threadWorkspace: (threadId, signal) => transport.readJson(transport.fetch(`${transport.baseUrl}/api/v1/cloudroom/threads/${encodeURIComponent(threadId)}/workspace`, { signal })) as Promise<CloudroomThreadWorkspace | null>,
     teleport: (threadId, action = "start", choice) => transport.readJson(transport.fetch(`${transport.baseUrl}/api/v1/cloudroom/threads/${encodeURIComponent(threadId)}/teleport`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action, ...choice }) })) as Promise<TeleportProgress>,
     teleportCheck: (threadId, choice) => transport.readJson(transport.fetch(`${transport.baseUrl}/api/v1/cloudroom/threads/${encodeURIComponent(threadId)}/teleport`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "check", ...choice }) })) as Promise<{ model: string; reasoning: string; warnings: string[] }>,
@@ -470,19 +485,22 @@ export function createCloudroomArea({ transport }: CreateSdkAreaArgs): Cloudroom
     moveToSandbox: (threadId) => transport.readJson(transport.fetch(`${transport.baseUrl}/api/v1/cloudroom/threads/${encodeURIComponent(threadId)}/teleport`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "move" }) })) as Promise<TeleportProgress>,
     copyToMac: (threadId) => transport.readJson(transport.fetch(`${transport.baseUrl}/api/v1/cloudroom/threads/${encodeURIComponent(threadId)}/teleport`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "copy" }) })) as Promise<{ branch: string }>,
     openCloudFile: (threadId, path) => transport.readJson(transport.fetch(`${transport.baseUrl}/api/v1/cloudroom/threads/${encodeURIComponent(threadId)}/open-file`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ path }) })) as Promise<{ path: string }>,
-    importBb: (hostId) => transport.readJson(transport.fetch(`${transport.baseUrl}/api/v1/cloudroom/import/bb`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ hostId }) })) as Promise<BbImportResult>,
-    nativeSessions: (signal) => transport.readJson(transport.fetch(`${transport.baseUrl}/api/v1/cloudroom/import/sessions`, { signal })) as Promise<{ sessions: NativeSession[] }>,
+    importBb: (hostId) => transport.readJson(transport.fetch(`${transport.baseUrl}/api/v1/cloudroom/import/bb`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ hostId }) })) as Promise<RoomImportResult>,
+    nativeSessions: (signal) => transport.readJson(transport.fetch(`${transport.baseUrl}/api/v1/cloudroom/import/sessions`, { signal })) as Promise<{ sessions: NativeSession[]; conductorApp?: boolean }>,
     importSessions: (hostId, sessions) => transport.readJson(transport.fetch(`${transport.baseUrl}/api/v1/cloudroom/import/sessions`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ hostId, sessions }) })) as Promise<SessionImportResult>,
+    conductorExport: (path) => transport.readJson(transport.fetch(`${transport.baseUrl}/api/v1/cloudroom/import/conductor-export`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ path }) })) as Promise<{ sessions: NativeSession[] }>,
+    importConductorExport: (hostId, path) => transport.readJson(transport.fetch(`${transport.baseUrl}/api/v1/cloudroom/import/conductor-export`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ hostId, path }) })) as Promise<SessionImportResult>,
     exportableChats: (signal) => transport.readJson(transport.fetch(`${transport.baseUrl}/api/v1/cloudroom/export`, { signal })) as Promise<{ threads: { target: "local" | "cloud"; updatedAt: number }[] }>,
     exportChats: (input) => transport.readJson(transport.fetch(`${transport.baseUrl}/api/v1/cloudroom/export`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(input) })) as Promise<{ folder: string; count: number }>,
     reportBug: (input) => transport.readJson(transport.fetch(`${transport.baseUrl}/api/v1/cloudroom/bug-reports`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(input) })) as Promise<{ sent: boolean }>,
     retryCopy: (threadId) => transport.readVoid(transport.fetch(`${transport.baseUrl}/api/v1/cloudroom/threads/${encodeURIComponent(threadId)}/retry-copy`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" })),
-    threadShare: (threadId, signal) => transport.readJson(transport.fetch(`${transport.baseUrl}/api/v1/cloudroom/threads/${encodeURIComponent(threadId)}/share`, { signal })) as Promise<ThreadShare | null>,
+    threadShare: (threadId, signal, fresh) => transport.readJson(transport.fetch(`${transport.baseUrl}/api/v1/cloudroom/threads/${encodeURIComponent(threadId)}/share${fresh ? "?fresh=1" : ""}`, { signal })) as Promise<ThreadShare | null>,
     shareThread: (threadId) => transport.readJson(transport.fetch(`${transport.baseUrl}/api/v1/cloudroom/threads/${encodeURIComponent(threadId)}/share`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "save" }) })) as Promise<ThreadShare>,
     stopSharingThread: (threadId) => transport.readVoid(transport.fetch(`${transport.baseUrl}/api/v1/cloudroom/threads/${encodeURIComponent(threadId)}/share`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "stop" }) })),
     continueShare: (link) => transport.readJson(transport.fetch(`${transport.baseUrl}/api/v1/cloudroom/shares/continue`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ link }) })) as Promise<{ threadId: string; projectId: string }>,
     connectAccount: () => transport.readJson(transport.fetch(`${transport.baseUrl}/api/v1/cloudroom/connect`)) as Promise<{ accountId: string | null; blocked?: string }>,
     connectRegister: () => transport.readJson(transport.fetch(`${transport.baseUrl}/api/v1/cloudroom/connect`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" })) as Promise<CloudroomConnectRegistration>,
     retryStart: (threadId) => transport.readVoid(transport.fetch(`${transport.baseUrl}/api/v1/cloudroom/threads/${encodeURIComponent(threadId)}/retry-start`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" })),
+    clearDisk: (threadId) => transport.readJson(transport.fetch(`${transport.baseUrl}/api/v1/cloudroom/threads/${encodeURIComponent(threadId)}/clear-disk`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" })) as Promise<{ freedBytes: number }>,
   };
 }

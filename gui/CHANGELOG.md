@@ -2,6 +2,104 @@
 
 Also on [cloudroom.dev/changelog](https://www.cloudroom.dev/changelog).
 
+## 152
+
+Search deeper from Cmd+K (2026-11-13)
+
+### Changes
+
+- Cmd+K has a new "Not here? Search deeper" link. An agent finds the chat you mean, archived ones too.
+- Switching Claude models in a Cloud thread is now instant, and the chat keeps its full context.
+- Monthly Wrapped: a shareable Story of your last month in Cloudroom.
+- Rename "This Mac" on the Accounts page, and one privacy switch hides emails there and in the usage box.
+- New Local worktrees are ready faster.
+- Cloud subagents report back to a sleeping parent right away instead of getting lost.
+- Security fixes.
+
+## 151
+
+Edit messages with no delay (2026-11-12)
+
+### Changes
+
+- Editing a sent message now applies at once, and Cloud edits are seconds faster.
+- Sign in to Codex with one button. Cloudroom installs Codex first if it is missing.
+- The Skills page has a new look, with a Featured shelf and a 3-column grid.
+- Wallpaper: put your own image or GIF behind New thread and your chats.
+- On phones, buttons and suggestions respond to every tap, and new threads open right away.
+- Import chats keeps more of your Codex history and groups a repo's worktrees into one project.
+- Security fixes.
+
+## 150
+
+Attach files while agents work (2026-11-11)
+
+### Changes
+
+- Files and images you send to a busy Cloud agent now reach it right away, instead of waiting or getting lost.
+- After you switch Claude accounts, a thread that hit a limit carries on with the new account.
+- The "Limit hit" mark clears as soon as that account works again.
+- A message sent while a Cloud sandbox sleeps or wakes shows a calm reconnecting state, not a red error.
+- Long voice recordings no longer cut off after 10 seconds.
+- Cursor has an Auto-update switch in Settings, off by default.
+- Security fixes.
+
+## 149
+
+Rewrite drafts before you send (2026-11-11)
+
+### Changes
+
+- Edit an agent's draft right in the chat, and preview a shorter version with tracked changes before you use it.
+- Stop now interrupts Local Claude Code and Codex almost instantly, instead of ending them.
+- Settings → Analytics has new tabs for agent hours, models, tokens, and prompts.
+- Settings → Instructions is now Prompts, with an editable prompt for chat suggestions.
+- The usage panel shows each added Claude account's weekly model limits.
+- A turn that never starts now fails and can be retried, instead of staying on "starting".
+- Cloud threads write far less to disk while agents type.
+
+## 148
+
+Cloud Credits last 20% longer (2026-11-10)
+
+### Changes
+
+- A CPU-hour on a Cloud sandbox now costs 500 credits instead of 600, with the same plans and prices.
+- The project picker for new threads is one clean list: your projects first, repos you can add below.
+- Agent questions and Settings → Accounts have a simpler, cleaner look. Press a number key to answer.
+- The Cloudroom name shows at the top of the window. Turn it off with "Show Cloudroom name" in Settings.
+- Threads start with a shorter system prompt, and custom instructions are sent once per thread.
+- Import chats now brings over your Conductor chats.
+- Security fixes.
+
+## 147
+
+Every keystroke shows instantly (2026-11-10)
+
+### Changes
+
+- Typed letters appear right away, and the sidebar only redraws the rows that changed.
+- Local threads wait out an internet drop and continue on their own once you are back online.
+- When Codex signs out in a Cloud thread, a banner with Reconnect fixes it in place.
+- Claude Fable 5.2 is in the model pickers for Claude Code, Cursor, and fx.
+- The sidebar slides open smoothly, and zooming is faster.
+- Side chats show the context window ring.
+- A project you collapse in the sidebar stays collapsed.
+
+## 146
+
+One click clears a full Cloud disk (2026-11-08)
+
+### Changes
+
+- When a Cloud disk fills up, one pill with a Clear caches & builds button frees space.
+- Hover the effort label to step reasoning effort up or down with small arrows.
+- Typing a thread name after @ keeps that thread above files and folders with similar names.
+- Forked threads show a thin divider in the chat instead of a banner.
+- Settings → Analytics shows when your Cloud Credits were used.
+- Cloud threads now accept folder and project tags.
+- Security fixes.
+
 ## 145
 
 Long messages fold to fit (2026-11-08)

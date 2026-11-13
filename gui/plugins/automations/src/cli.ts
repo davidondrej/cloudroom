@@ -209,8 +209,8 @@ function parseLimit(args: ParsedArgs, fallback: number): number {
 }
 
 /** Templates are for paid plans, like the Templates tab; unknown plans (signed out, billing off) stay open. */
-async function requireTemplatesPlan(bb: Pick<BbPluginApi, "sdk">): Promise<void> {
-  const status = await bb.sdk.cloudroom.status().catch(() => null);
+async function requireTemplatesPlan(room: Pick<BbPluginApi, "sdk">): Promise<void> {
+  const status = await room.sdk.cloudroom.status().catch(() => null);
   if (status?.plan === "free") {
     throw new Error("Loop templates need a paid plan. Upgrade at https://www.cloudroom.dev/billing");
   }
@@ -218,14 +218,14 @@ async function requireTemplatesPlan(bb: Pick<BbPluginApi, "sdk">): Promise<void>
 
 /** `create --template ID`: the template fills every setting the flags leave out, like the Templates tab: a Cloud loop
  *  unless --local, and the template's agent when it is set up here, else the project's default agent. */
-async function applyTemplate(bb: Pick<BbPluginApi, "sdk">, args: ParsedArgs): Promise<void> {
+async function applyTemplate(room: Pick<BbPluginApi, "sdk">, args: ParsedArgs): Promise<void> {
   if (!args.flags.has("template")) return;
   const id = requireFlag(args, "template");
   const template = LOOP_TEMPLATES.find((candidate) => candidate.id === id);
   if (!template) {
     throw new Error(`Unknown template '${id}'. Run room-cli loop templates.`);
   }
-  await requireTemplatesPlan(bb);
+  await requireTemplatesPlan(room);
   if (args.flags.has("cloud") && args.flags.has("local")) {
     throw new Error("Use --cloud or --local, not both.");
   }
@@ -237,8 +237,8 @@ async function applyTemplate(bb: Pick<BbPluginApi, "sdk">, args: ParsedArgs): Pr
   else args.flags.set("cloud", true);
   const projectId = requireFlag(args, "project");
   const [providers, defaults] = await Promise.all([
-    bb.sdk.providers.list().catch(() => []),
-    bb.sdk.projects.defaultExecutionOptions({ projectId }).catch(() => null),
+    room.sdk.providers.list().catch(() => []),
+    room.sdk.projects.defaultExecutionOptions({ projectId }).catch(() => null),
   ]);
   const ownAgent = providers.some(
     (provider) => provider.id === template.providerId && provider.available,
@@ -254,7 +254,7 @@ async function applyTemplate(bb: Pick<BbPluginApi, "sdk">, args: ParsedArgs): Pr
     model: agent.model,
     reasoning: agent.reasoningLevel,
     priority: String(template.priority),
-    ...(local ? { "permission-mode": defaults?.permissionMode ?? "auto" } : {}),
+    ...(local ? { "permission-mode": defaults?.permissionMode ?? "full" } : {}),
     ...(scheduled
       ? {}
       : {
@@ -352,9 +352,9 @@ function parseScriptEnv(
 }
 
 async function resolveConnectedHostId(
-  bb: Pick<BbPluginApi, "sdk">,
+  room: Pick<BbPluginApi, "sdk">,
 ): Promise<string> {
-  const hosts = hostListSchema.parse(await bb.sdk.hosts.list());
+  const hosts = hostListSchema.parse(await room.sdk.hosts.list());
   const host =
     hosts.find((candidate) => candidate.connected === true) ??
     hosts.find((candidate) => candidate.status === "connected") ??
@@ -364,7 +364,7 @@ async function resolveConnectedHostId(
 }
 
 async function buildAgentEnvironment(
-  bb: Pick<BbPluginApi, "sdk">,
+  room: Pick<BbPluginApi, "sdk">,
   args: ParsedArgs,
 ): Promise<AgentEnvironment> {
   const environment = flag(args, "environment")?.trim();
@@ -381,7 +381,7 @@ async function buildAgentEnvironment(
     }
     return {
       type: "host",
-      hostId: await resolveConnectedHostId(bb),
+      hostId: await resolveConnectedHostId(room),
       workspace: {
         type: "managed-worktree",
         baseBranch: baseBranch
@@ -394,7 +394,7 @@ async function buildAgentEnvironment(
   if (looksLikePath(environment)) {
     return {
       type: "host",
-      hostId: await resolveConnectedHostId(bb),
+      hostId: await resolveConnectedHostId(room),
       workspace: { type: "unmanaged", path: environment },
     };
   }
@@ -415,14 +415,14 @@ const threadEnvironmentHostSchema = z
   .passthrough();
 
 async function resolveScriptFileHostId(
-  bb: Pick<BbPluginApi, "sdk">,
+  room: Pick<BbPluginApi, "sdk">,
   ctx: Pick<PluginCliContext, "threadId">,
   override: string | undefined,
 ): Promise<string | undefined> {
   if (override !== undefined) {
     const query = override.trim();
     if (query.length === 0) throw new Error("--host requires a name or id.");
-    const hosts = scriptFileHostListSchema.parse(await bb.sdk.hosts.list());
+    const hosts = scriptFileHostListSchema.parse(await room.sdk.hosts.list());
     const idMatch = hosts.find((host) => host.id === query);
     if (idMatch) return idMatch.id;
     const nameMatches = hosts.filter(
@@ -442,7 +442,7 @@ async function resolveScriptFileHostId(
   }
   if (ctx.threadId === undefined) return undefined;
   const thread = threadEnvironmentHostSchema.parse(
-    await bb.sdk.threads.get({
+    await room.sdk.threads.get({
       threadId: ctx.threadId,
       include: "environment",
     }),
@@ -458,13 +458,13 @@ async function resolveScriptFileHostId(
 // Agents copy the short Claude ID from their system prompt (claude-opus-5-5),
 // which silently picks the 200K model. Keep the caller's exact 1M variant.
 async function preferCallerModel(
-  bb: Pick<BbPluginApi, "sdk">,
+  room: Pick<BbPluginApi, "sdk">,
   ctx: Pick<PluginCliContext, "threadId">,
   model: string,
 ): Promise<string> {
   if (ctx.threadId === undefined) return model;
   try {
-    const own = await bb.sdk.threads.defaultExecutionOptions({
+    const own = await room.sdk.threads.defaultExecutionOptions({
       threadId: ctx.threadId,
     });
     return own?.model === `${model}[1m]` ? own.model : model;
@@ -480,7 +480,7 @@ type ScriptFileSource = {
 };
 
 async function loadScriptFileSource(
-  bb: Pick<BbPluginApi, "sdk">,
+  room: Pick<BbPluginApi, "sdk">,
   args: ParsedArgs,
   ctx: Pick<PluginCliContext, "cwd" | "threadId">,
 ): Promise<ScriptFileSource | undefined> {
@@ -492,11 +492,11 @@ async function loadScriptFileSource(
     }
     return undefined;
   }
-  return readCliTextFile(bb, ctx, "--script-file", scriptFile, hostOverride);
+  return readCliTextFile(room, ctx, "--script-file", scriptFile, hostOverride);
 }
 
 async function readCliTextFile(
-  bb: Pick<BbPluginApi, "sdk">,
+  room: Pick<BbPluginApi, "sdk">,
   ctx: Pick<PluginCliContext, "cwd" | "threadId">,
   flagName: string,
   file: string,
@@ -513,8 +513,8 @@ async function readCliTextFile(
     }
     path = resolve(ctx.cwd, file);
   }
-  const hostId = await resolveScriptFileHostId(bb, ctx, hostOverride);
-  const read = await bb.sdk.files.read({
+  const hostId = await resolveScriptFileHostId(room, ctx, hostOverride);
+  const read = await room.sdk.files.read({
     ...(hostId !== undefined ? { hostId } : {}),
     path,
   });
@@ -526,7 +526,7 @@ async function readCliTextFile(
 
 // Multiline prompts survive Windows' room-cli.cmd only through a file (#974).
 async function applyPromptFile(
-  bb: Pick<BbPluginApi, "sdk">,
+  room: Pick<BbPluginApi, "sdk">,
   args: ParsedArgs,
   ctx: Pick<PluginCliContext, "cwd" | "threadId">,
 ): Promise<void> {
@@ -535,7 +535,7 @@ async function applyPromptFile(
     throw new Error("Choose only one of --prompt and --prompt-file.");
   }
   const file = requireFlag(args, "prompt-file");
-  const { content, sizeBytes } = await readCliTextFile(bb, ctx, "--prompt-file", file, undefined);
+  const { content, sizeBytes } = await readCliTextFile(room, ctx, "--prompt-file", file, undefined);
   if (sizeBytes > 1024 * 1024) throw new Error("--prompt-file is larger than 1 MB.");
   args.flags.set("prompt", content.replace(/^\uFEFF/u, ""));
 }
@@ -551,7 +551,7 @@ type ScriptExecution = Extract<
 >;
 
 async function buildExecution(
-  bb: Pick<BbPluginApi, "sdk">,
+  room: Pick<BbPluginApi, "sdk">,
   args: ParsedArgs,
   ctx: Pick<PluginCliContext, "cwd" | "threadId">,
   current?: ScriptExecution,
@@ -590,7 +590,7 @@ async function buildExecution(
       );
     }
     validateAgentTargetOptions(args);
-    const environment = await buildAgentEnvironment(bb, args);
+    const environment = await buildAgentEnvironment(room, args);
     const targetThreadId = flag(args, "target-thread");
     const reasoning = flag(args, "reasoning");
     const serviceTier = flag(args, "service-tier");
@@ -601,14 +601,14 @@ async function buildExecution(
         mode: "agent",
         prompt,
         providerId: provider,
-        model: await preferCallerModel(bb, ctx, model),
+        model: await preferCallerModel(room, ctx, model),
         reasoningLevel:
           reasoning === undefined ? "medium" : parseReasoningLevel(reasoning),
         ...(parsedServiceTier === null || parsedServiceTier === undefined
           ? {}
           : { serviceTier: parsedServiceTier }),
         permissionMode: await resolvePermissionMode(
-          bb,
+          room,
           provider,
           parsePermissionMode(flag(args, "permission-mode")),
           providerRoutingForEnvironment(environment),
@@ -639,7 +639,7 @@ async function buildExecution(
   );
   const timeoutMs = parseTimeoutMs(optionalFlag(args, "timeout"));
   const env = parseScriptEnv(optionalFlag(args, "env-json")) ?? current?.env;
-  const scriptSource = await loadScriptFileSource(bb, args, ctx);
+  const scriptSource = await loadScriptFileSource(room, args, ctx);
   const content = scriptSource ? scriptSource.content : script;
   const keptScript =
     content !== undefined || current === undefined
@@ -681,7 +681,7 @@ const SCRIPT_EXECUTION_FLAG_NAMES = [
 ] as const;
 
 async function buildAgentExecutionUpdate(
-  bb: Pick<BbPluginApi, "sdk">,
+  room: Pick<BbPluginApi, "sdk">,
   args: ParsedArgs,
   ctx: Pick<PluginCliContext, "threadId">,
 ): Promise<AgentExecutionUpdate | undefined> {
@@ -706,7 +706,7 @@ async function buildAgentExecutionUpdate(
     update.providerId = requireFlag(args, "provider");
   }
   if (args.flags.has("model")) {
-    update.model = await preferCallerModel(bb, ctx, requireFlag(args, "model"));
+    update.model = await preferCallerModel(room, ctx, requireFlag(args, "model"));
   }
   if (args.flags.has("reasoning")) {
     update.reasoningLevel = parseReasoningLevel(requireFlag(args, "reasoning"));
@@ -730,14 +730,14 @@ async function buildAgentExecutionUpdate(
   ) {
     update.target = {
       type: "environment",
-      environment: await buildAgentEnvironment(bb, args),
+      environment: await buildAgentEnvironment(room, args),
     };
   }
   return update;
 }
 
 async function buildUpdateRequest(
-  bb: Pick<BbPluginApi, "sdk">,
+  room: Pick<BbPluginApi, "sdk">,
   service: Pick<AutomationService, "list">,
   args: ParsedArgs,
   ctx: Pick<PluginCliContext, "cwd" | "threadId">,
@@ -784,7 +784,7 @@ async function buildUpdateRequest(
     (hasAgentExecution && currentExecution?.mode !== "agent")
   ) {
     const built = await buildExecution(
-      bb,
+      room,
       args,
       ctx,
       currentExecution?.mode === "script" ? currentExecution : undefined,
@@ -792,7 +792,7 @@ async function buildUpdateRequest(
     request.execution = built.execution;
     scriptSource = built.scriptSource;
   } else {
-    const agentUpdate = await buildAgentExecutionUpdate(bb, args, ctx);
+    const agentUpdate = await buildAgentExecutionUpdate(room, args, ctx);
     if (agentUpdate !== undefined) {
       request.agent = agentUpdate;
     }
@@ -1037,7 +1037,7 @@ A --script/--script-file runs first (60 s), in the loop's own sandbox with fresh
 no output skips the run (exit 0 or 1; other exit codes fail it, 3 in a row pause it), output is added to the prompt.
 A --webhook loop, Local or Cloud, runs when its secret URL gets a POST: create prints the URL once, and each run gets
 the requests that arrived as data. Cloud runs start within seconds; this Mac checks for Local ones about once a minute,
-and they wait while it is off. A Local webhook loop an agent creates starts paused: a person turns it on in Loops.
+and they wait while it is off. A Local webhook loop made here starts paused: a person turns it on in Loops.
 room-cli loop create --cloud --project <id> --name <name> --prompt <text> (--cron <expr> --timezone <tz> | --at <datetime> | --in <duration> | --webhook) [--new-thread | --same-thread] [--script <inline> | --script-file <path>] [--provider <id>] [--model <model>] [--reasoning <level>] [--priority 1-4] [--secrets <KEY,.env|none|all>]
 --secrets picks the only API keys (Settings → Cloud environment) a fresh-thread Cloud loop's runs and script get, plus
 .env for the project's .env files: pick just what it needs, like --secrets SENTRY_TOKEN,.env, or none. Without it, all.
@@ -1097,11 +1097,11 @@ function printCloudAutomation(a: CloudAutomation): string {
   return `${a.id}  ${a.name}  P${a.priority ?? DEFAULT_LOOP_PRIORITY}\n  ${a.thread_id.startsWith("proj_") ? "Project" : "Cloud thread"} ${a.thread_id} · ${mode} · ${schedule} · ${state} · ${a.runs} runs${agent}${secrets}${a.last_error ? `\n  Last error: ${a.last_error}` : ""}\n${a.url ? webhookNote(a.url) : ""}`;
 }
 
-async function projectCloudAutomations(bb: Pick<BbPluginApi, "sdk">, projectId: string): Promise<CloudAutomation[]> {
-  const { automations = [] } = await bb.sdk.cloudroom.automations({ action: "list" });
+async function projectCloudAutomations(room: Pick<BbPluginApi, "sdk">, projectId: string): Promise<CloudAutomation[]> {
+  const { automations = [] } = await room.sdk.cloudroom.automations({ action: "list" });
   const threadIds = [...new Set(automations.map((a) => a.thread_id))];
   const projects = new Map(await Promise.all(threadIds.map(async (threadId) => {
-    const thread = await bb.sdk.threads.get({ threadId }).catch(() => null);
+    const thread = await room.sdk.threads.get({ threadId }).catch(() => null);
     return [threadId, thread && "projectId" in thread ? thread.projectId : null] as const;
   })));
   return automations.filter((a) => a.thread_id === projectId || projects.get(a.thread_id) === projectId);
@@ -1126,17 +1126,17 @@ function webhookNote(url: string): string {
 }
 
 /** The script a cloud automation runs first, from --script or a --script-file read on this Mac; null for --no-script. */
-async function cloudScript(bb: Pick<BbPluginApi, "sdk">, args: ParsedArgs, ctx: PluginCliContext): Promise<{ script?: string | null }> {
+async function cloudScript(room: Pick<BbPluginApi, "sdk">, args: ParsedArgs, ctx: PluginCliContext): Promise<{ script?: string | null }> {
   const inline = flag(args, "script");
   if ([inline !== undefined, args.flags.has("script-file"), boolFlag(args, "no-script")].filter(Boolean).length > 1) throw new Error("Use one of --script, --script-file, or --no-script.");
   if (boolFlag(args, "no-script")) return { script: null };
   if (inline !== undefined) return { script: inline };
-  const file = await loadScriptFileSource(bb, args, ctx);
+  const file = await loadScriptFileSource(room, args, ctx);
   return file ? { script: file.content } : {};
 }
 
-async function runCloudCommand(bb: Pick<BbPluginApi, "sdk">, args: ParsedArgs, ctx: PluginCliContext): Promise<PluginCliResult> {
-  const cloud = bb.sdk.cloudroom;
+async function runCloudCommand(room: Pick<BbPluginApi, "sdk">, args: ParsedArgs, ctx: PluginCliContext): Promise<PluginCliResult> {
+  const cloud = room.sdk.cloudroom;
   const id = args.positionals[0];
   const one = async (request: Parameters<Cloud["automations"]>[0], verb: string) => {
     const { automation } = await cloud.automations(request);
@@ -1168,10 +1168,10 @@ async function runCloudCommand(bb: Pick<BbPluginApi, "sdk">, args: ParsedArgs, c
     const schedule = boolFlag(args, "webhook") && buildTrigger(args).triggerType === "webhook" ? { webhook: true as const } : cloudSchedule(args);
     if (!schedule) throw new Error("Provide exactly one trigger flag: --cron, --at, --in, or --webhook.");
     return one({ action: "create", ...(thread ? { thread } : { project }), name: requireFlag(args, "name"), prompt: requireFlag(args, "prompt"), ...schedule, enabled: !boolFlag(args, "disabled"),
-      ...(boolFlag(args, "new-thread") ? { new_thread: true } : boolFlag(args, "same-thread") ? { new_thread: false } : {}), ...await cloudScript(bb, args, ctx), ...cloudAgent(args), ...parsePriority(args), ...cloudSecrets(args) }, "created");
+      ...(boolFlag(args, "new-thread") ? { new_thread: true } : boolFlag(args, "same-thread") ? { new_thread: false } : {}), ...await cloudScript(room, args, ctx), ...cloudAgent(args), ...parsePriority(args), ...cloudSecrets(args) }, "created");
   }
   if (args.command === "update") {
-    const fields = { ...(flag(args, "name") ? { name: flag(args, "name") } : {}), ...(flag(args, "prompt") ? { prompt: flag(args, "prompt") } : {}), ...cloudSchedule(args), ...await cloudScript(bb, args, ctx), ...cloudAgent(args), ...parsePriority(args), ...cloudSecrets(args) };
+    const fields = { ...(flag(args, "name") ? { name: flag(args, "name") } : {}), ...(flag(args, "prompt") ? { prompt: flag(args, "prompt") } : {}), ...cloudSchedule(args), ...await cloudScript(room, args, ctx), ...cloudAgent(args), ...parsePriority(args), ...cloudSecrets(args) };
     return one({ action: "update", id: requireId(), ...fields }, "updated");
   }
   if (args.command === "pause" || args.command === "resume") return one({ action: "update", id: requireId(), enabled: args.command === "resume" }, args.command === "pause" ? "paused" : "resumed");
@@ -1194,12 +1194,12 @@ async function runCloudCommand(bb: Pick<BbPluginApi, "sdk">, args: ParsedArgs, c
 }
 
 /** Stop at plan limit (ADR 0292) and Switch provider at a limit (ADR 0345): account settings for loops. */
-async function runSettingsCommand(bb: Pick<BbPluginApi, "sdk">, args: ParsedArgs): Promise<PluginCliResult> {
+async function runSettingsCommand(room: Pick<BbPluginApi, "sdk">, args: ParsedArgs): Promise<PluginCliResult> {
   const value = optionalFlag(args, "stop-at-limit");
   if (value !== undefined && value !== "on" && value !== "off") throw new Error("Use --stop-at-limit on or off.");
   const fallbackValue = optionalFlag(args, "fallback");
   if (fallbackValue !== undefined && fallbackValue !== "on" && fallbackValue !== "off") throw new Error("Use --fallback on or off.");
-  const { stop_at_limit: stop, fallback } = await bb.sdk.cloudroom.automations({
+  const { stop_at_limit: stop, fallback } = await room.sdk.cloudroom.automations({
     action: "settings",
     ...(value ? { stop_at_limit: value === "on" } : {}),
     ...(fallbackValue ? { fallback: fallbackValue === "on" } : {}),
@@ -1266,18 +1266,18 @@ const scanProgressSchema = z
 
 /** `room-cli loop scan-progress --data JSON`: the Workflow scan skill saves its progress on its own thread for the progress card. */
 async function runScanProgressCommand(
-  bb: Pick<BbPluginApi, "sdk">,
+  room: Pick<BbPluginApi, "sdk">,
   args: ParsedArgs,
   ctx: PluginCliContext,
 ): Promise<PluginCliResult> {
   if (!ctx.threadId) throw new Error("Run room-cli loop scan-progress from inside a Workflow scan thread.");
   const update = scanProgressSchema.parse(JSON.parse(requireFlag(args, "data")));
-  const metadata = await bb.sdk.threads.getPluginMetadata({ threadId: ctx.threadId });
+  const metadata = await room.sdk.threads.getPluginMetadata({ threadId: ctx.threadId });
   const current = metadata.workflowScan;
   if (current === null || typeof current !== "object" || Array.isArray(current)) {
     throw new Error("This thread is not a Workflow scan.");
   }
-  await bb.sdk.threads.updatePluginMetadata({
+  await room.sdk.threads.updatePluginMetadata({
     threadId: ctx.threadId,
     set: { workflowScan: { ...current, ...update } },
   });
@@ -1447,11 +1447,15 @@ export function registerAutomationCli(args: {
             parsed,
             ctx,
           );
+          const trigger = buildTrigger(parsed);
+          // A missing ROOM_THREAD_ID doesn't prove a person ran this, so every Local webhook loop the CLI makes starts
+          // paused, and a person turns it on in the Loops panel (ADR 0262).
+          const webhook = trigger.triggerType === "webhook";
           const request: ResolvedCreateAutomationInput = {
             projectId,
             name: requireFlag(parsed, "name"),
-            enabled: !boolFlag(parsed, "disabled"),
-            trigger: buildTrigger(parsed),
+            enabled: !boolFlag(parsed, "disabled") && !webhook,
+            trigger,
             execution,
             origin: ctx.threadId ? "agent" : "human",
             ...(ctx.threadId ? { createdByThreadId: ctx.threadId } : {}),
@@ -1460,10 +1464,8 @@ export function registerAutomationCli(args: {
           const created = await service.create(request);
           const json = optionalJson(parsed, created);
           const paused =
-            created.trigger.triggerType === "webhook" &&
-            !created.enabled &&
-            request.enabled
-              ? "  It starts paused, because an agent made it: a person turns it on in the Loops panel.\n"
+            webhook && !boolFlag(parsed, "disabled")
+              ? "  It starts paused: a person turns it on in the Loops panel.\n"
               : "";
           return {
             exitCode: 0,
@@ -1513,7 +1515,7 @@ export function registerAutomationCli(args: {
             automationId,
           };
           // Anyone with a Local webhook loop's URL can prompt an agent on this Mac, so a person turns it on (ADR 0260).
-          if (command === "resume" && ctx.threadId) {
+          if (command === "resume") {
             const found = await service.get(input);
             if ("trigger" in found && found.trigger.triggerType === "webhook") {
               throw new Error(

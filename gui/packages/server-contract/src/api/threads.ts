@@ -133,6 +133,8 @@ export const createThreadRequestSchema = z
     sourceThreadId: z.string().min(1).optional(),
     sourceSeqEnd: z.number().int().nonnegative().optional(),
     startedOnBehalfOf: startedOnBehalfOfSchema.nullable().default(null),
+    /** The agent thread whose `room-cli` call made this thread, logged with a Cloud thread's first start (docs/scopes/credit-burn.md). */
+    launcherThreadId: z.string().regex(/^thr_[a-z0-9]{1,40}$/).optional(),
     originKind: threadOriginKindSchema.nullable().default(null),
     /**
      * Epoch ms at which this thread's first message should dispatch. Present ⇒
@@ -513,6 +515,10 @@ export type ThreadSearchResponse = z.infer<typeof threadSearchResponseSchema>;
 
 export const threadResponseSchema = threadWithRuntimeSchema.extend({
   activeBackgroundAgentCount: z.number().int().nonnegative(),
+  // Background commands and workflows still running; an idle Claude thread
+  // wakes itself when they finish, so its turn's text isn't final (#1371).
+  activeBackgroundCommandCount: z.number().int().nonnegative().optional(),
+  activeWorkflowCount: z.number().int().nonnegative().optional(),
   canSpawnChild: z.boolean(),
   // How many messages are waiting on this thread's queue right now — waiting on
   // the clock, on the running turn, on provisioning, on an interaction, or on
@@ -523,6 +529,9 @@ export const threadResponseSchema = threadWithRuntimeSchema.extend({
   // Queued messages a drain has claimed but not yet sent; only GET /threads/:id
   // sets it, so `thread wait` can tell a turn's end from its follow-up (#1111).
   dispatchingMessageCount: z.number().int().nonnegative().optional(),
+  // A Cloud thread's sandbox has slept since then, as this computer first saw it (#237). Thread cleanup archives Cloud
+  // threads only after a day of it: another computer may be using one.
+  asleepSince: z.string().optional(),
 });
 export type ThreadResponse = z.infer<typeof threadResponseSchema>;
 
@@ -854,7 +863,16 @@ export type ThreadArchiveAllResponse = z.infer<
   typeof threadArchiveAllResponseSchema
 >;
 
+/** Newest first, by last update or by creation. Omitted keeps the app's order: project, pinned, created. */
+export const threadListSortSchema = z.enum(["updated", "created"]);
+export type ThreadListSort = z.infer<typeof threadListSortSchema>;
+
 export const threadListQuerySchema = z.object({
+  status: threadStatusSchema.optional(),
+  providerId: z.string().min(1).optional(),
+  executionTarget: z.enum(["local", "cloud"]).optional(),
+  pinned: z.enum(["true", "false"]).optional(),
+  sort: threadListSortSchema.optional(),
   projectId: z.string().min(1).optional(),
   environmentId: z.string().min(1).optional(),
   parentThreadId: z.string().min(1).optional(),

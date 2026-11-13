@@ -456,7 +456,10 @@ describe("internal interactive request lifecycle", () => {
 
       const response = await registerInteractiveRequest({ body, harness });
       expect(response.status).toBe(200);
-      await expect(readJson(response)).resolves.toMatchObject({
+      const registered = (await readJson(response)) as {
+        interactionId: string;
+      };
+      expect(registered).toMatchObject({
         outcome: "created",
         status: "pending",
       });
@@ -481,6 +484,7 @@ describe("internal interactive request lifecycle", () => {
             "Blocked on command approval:",
             "Command: git push",
             "Cwd: /tmp/project",
+            `\`room-cli thread interactions show ${registered.interactionId} ${childThread.id}\` prints the details. A \`thread tell\` only queues behind it.`,
           ].join("\n"),
           threadMention,
         },

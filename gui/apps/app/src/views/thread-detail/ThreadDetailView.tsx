@@ -3,7 +3,6 @@ import {
   useCallback,
   useEffect,
   useMemo,
-  useReducer,
   useRef,
   useState,
   type ReactNode,
@@ -43,6 +42,7 @@ import {
   defaultAppSettings,
   isStopHeldReport,
   resolveEnvironmentMergeBaseBranch,
+  type PromptInput,
   type ThreadListEntry,
   type ThreadWithRuntime,
 } from "@cloudroom/domain";
@@ -50,6 +50,7 @@ import type {
   PullRequestMergeMethod,
   TerminalSession,
   TimelineRow,
+  TimelineUserConversationRow,
 } from "@cloudroom/server-contract";
 import type { WorkspaceOpenTarget } from "@cloudroom/host-daemon-contract";
 import { appToast } from "@/components/ui/app-toast";
@@ -155,10 +156,7 @@ import {
   promptInputToDraft,
   type PromptDraftState,
 } from "@cloudroom/client-core";
-import {
-  createLocalStorageEnumStorage,
-  withLocalStorage,
-} from "@/lib/browser-storage";
+import { createLocalStorageEnumStorage } from "@/lib/browser-storage";
 import {
   getProjectComposeRoutePath,
   getRootComposeRoutePath,
@@ -180,10 +178,11 @@ import {
   ThreadDetailPromptArea,
   type ThreadDetailSentMessageEdit,
 } from "./ThreadDetailPromptArea";
+import { type ContextBannerMergeBaseConfig } from "@/components/promptbox/banner/ThreadPromptContextBanner";
 import {
-  type ContextBannerMergeBaseConfig,
-  type ThreadPromptParentThreadSection,
-} from "@/components/promptbox/banner/ThreadPromptContextBanner";
+  ThreadOriginMarker,
+  type ThreadOrigin,
+} from "@/components/thread/timeline/ThreadOriginMarker";
 import { ThreadDetailSecondaryContent } from "./ThreadDetailSecondaryContent";
 import {
   useThreadSecondaryPanelDrawerVisibility,
@@ -231,10 +230,10 @@ import { getFileExtension } from "@/lib/plugin-slot-resolvers";
 import { Button } from "@cloudroom/shared-ui/button";
 import { Icon } from "@cloudroom/shared-ui/icon";
 import {
-  getBbDesktopInfo,
+  getRoomDesktopInfo,
   getDesktopBrowserApi,
   isDesktopBrowserAvailable,
-} from "@/lib/bb-desktop";
+} from "@/lib/room-desktop";
 import {
   openUrlByPreference,
   useOpenLinksInAppBrowserPreference,
@@ -372,6 +371,14 @@ interface SentMessageEditSession {
   threadId: string;
 }
 
+interface PendingSentMessageEdit {
+  input: PromptInput[];
+  operationId: string;
+  row: TimelineUserConversationRow;
+  settled: boolean;
+  threadId: string;
+}
+
 function hasTimelineRowId(
   rows: readonly TimelineRow[],
   rowId: string,
@@ -383,6 +390,54 @@ function hasTimelineRowId(
         row.children !== null &&
         hasTimelineRowId(row.children, rowId)),
   );
+}
+
+function findFirstUserRow(
+  rows: readonly TimelineRow[],
+): TimelineUserConversationRow | null {
+  for (const row of rows) {
+    if (row.kind === "conversation" && row.role === "user") return row;
+    if (row.kind === "turn" && row.children !== null) {
+      const userRow = findFirstUserRow(row.children);
+      if (userRow !== null) return userRow;
+    }
+  }
+  return null;
+}
+
+function hasLandedSentMessageEdit(
+  rows: readonly TimelineRow[],
+  edit: PendingSentMessageEdit,
+): boolean {
+  return (
+    !hasTimelineRowId(rows, edit.row.id) &&
+    rows.some(
+      (row) =>
+        row.kind === "conversation" &&
+        row.role === "user" &&
+        row.sourceSeqStart >= edit.row.sourceSeqStart,
+    )
+  );
+}
+
+function showPendingSentMessageEdit(
+  rows: TimelineRow[],
+  edit: PendingSentMessageEdit,
+): TimelineRow[] {
+  if (hasLandedSentMessageEdit(rows, edit)) {
+    return rows;
+  }
+  const text = edit.input.flatMap((item) =>
+    item.type === "text" && item.visibility !== "agent-only" ? [item] : [],
+  );
+  return [
+    ...rows.filter((row) => row.sourceSeqStart < edit.row.sourceSeqStart),
+    {
+      ...edit.row,
+      text: text.map((item) => item.text).join("\n\n"),
+      mentions: text.length === 1 ? text[0]!.mentions : [],
+    },
+  ];
 }
 
 function getPullRequestMergeLoadingTitle(
@@ -1074,7 +1129,44 @@ function ThreadDetailViewInternal(props: ThreadRoutePathArgs) {
     sentMessageEditSession?.threadId === thread?.id
       ? sentMessageEditSession
       : null;
-  const canEditSentMessages =
+  const [pendingSentMessageEdit, setPendingSentMessageEdit] =
+    useState<PendingSentMessageEdit | null>(null);
+  const activePendingSentMessageEdit =
+    pendingSentMessageEdit?.threadId === thread?.id
+      ? pendingSentMessageEdit
+      : null;
+  const displayedTimelineRows = useMemo(
+    () =>
+      activePendingSentMessageEdit
+        ? showPendingSentMessageEdit(timelineRows, activePendingSentMessageEdit)
+        : timelineRows,
+    [activePendingSentMessageEdit, timelineRows],
+  );
+  const pendingSentMessageEditLanded =
+    activePendingSentMessageEdit?.settled === true &&
+    hasLandedSentMessageEdit(timelineRows, activePendingSentMessageEdit);
+  useEffect(() => {
+    if (pendingSentMessageEditLanded) {
+      setPendingSentMessageEdit(null);
+    }
+  }, [pendingSentMessageEditLanded]);
+  const settledPendingSentMessageEditId = pendingSentMessageEdit?.settled
+    ? pendingSentMessageEdit.operationId
+    : null;
+  useEffect(() => {
+    if (settledPendingSentMessageEditId === null) {
+      return;
+    }
+    const timer = setTimeout(() => {
+      setPendingSentMessageEdit((current) =>
+        current?.operationId === settledPendingSentMessageEditId
+          ? null
+          : current,
+      );
+    }, 15_000);
+    return () => clearTimeout(timer);
+  }, [settledPendingSentMessageEditId]);
+  const canOfferSentMessageEdit =
     thread !== undefined &&
     (thread.executionTarget === "cloud"
       ? cloudFeatureSupported(cloudConnection.data, thread.providerId, "rewind")
@@ -1083,6 +1175,7 @@ function ThreadDetailViewInternal(props: ThreadRoutePathArgs) {
     thread.deletedAt === null &&
     !hasPendingInteraction &&
     sentMessageEditSession === null &&
+    pendingSentMessageEdit === null &&
     !sendMessage.isPending &&
     !createQueuedMessage.isPending &&
     !editMessage.isPending &&
@@ -1091,10 +1184,13 @@ function ThreadDetailViewInternal(props: ThreadRoutePathArgs) {
     // (#821). Cloud has no such hold, so any queued row blocks it there.
     (thread.executionTarget === "cloud"
       ? queuedMessagesForEditEligibility.length === 0
-      : queuedMessagesForEditEligibility.every(isStopHeldReport)) &&
-    activeWorkflows.length === 0 &&
-    thread.activeBackgroundAgentCount === 0 &&
-    activeBackgroundCommands.length === 0;
+      : queuedMessagesForEditEligibility.every(isStopHeldReport));
+  const sentMessageEditWaitsForBackgroundWork =
+    activeWorkflows.length > 0 ||
+    (thread?.activeBackgroundAgentCount ?? 0) > 0 ||
+    activeBackgroundCommands.length > 0;
+  const canEditSentMessages =
+    canOfferSentMessageEdit && !sentMessageEditWaitsForBackgroundWork;
   const sentMessageEditEntryRef = useRef({ canEditSentMessages, thread });
   sentMessageEditEntryRef.current = { canEditSentMessages, thread };
   const handleEditSentMessage = useCallback<ThreadTimelineEditMessageHandler>(
@@ -1168,6 +1264,20 @@ function ThreadDetailViewInternal(props: ThreadRoutePathArgs) {
       }
       const session = activeSentMessageEditSession;
       const execution = target.execution;
+      const row = timelineRows.find(
+        (candidate) => candidate.id === session.target.messageId,
+      );
+      const optimistic = row?.kind === "conversation" && row.role === "user";
+      if (optimistic) {
+        setPendingSentMessageEdit({
+          input: target.input,
+          operationId: session.operationId,
+          row,
+          settled: false,
+          threadId: session.threadId,
+        });
+        closeSentMessageEdit(session.operationId);
+      }
       void editMessage
         .mutateAsync({
           id: session.threadId,
@@ -1188,8 +1298,22 @@ function ThreadDetailViewInternal(props: ThreadRoutePathArgs) {
         })
         .then(() => {
           closeSentMessageEdit(session.operationId);
+          setPendingSentMessageEdit((current) =>
+            current?.operationId === session.operationId
+              ? { ...current, settled: true }
+              : current,
+          );
         })
         .catch((error) => {
+          if (optimistic) {
+            setPendingSentMessageEdit((current) =>
+              current?.operationId === session.operationId ? null : current,
+            );
+            setSentMessageEditHostElement(null);
+            setSentMessageEditSession(
+              (current) => current ?? { ...session, operationId: randomId() },
+            );
+          }
           showMutationErrorToast({
             error,
             fallbackMessage: "Failed to edit the message",
@@ -1197,7 +1321,12 @@ function ThreadDetailViewInternal(props: ThreadRoutePathArgs) {
           });
         });
     },
-    [activeSentMessageEditSession, closeSentMessageEdit, editMessage],
+    [
+      activeSentMessageEditSession,
+      closeSentMessageEdit,
+      editMessage,
+      timelineRows,
+    ],
   );
   const activeSentMessageEditTargetMessageId =
     activeSentMessageEditSession?.target.messageId ?? null;
@@ -1697,7 +1826,7 @@ function ThreadDetailViewInternal(props: ThreadRoutePathArgs) {
     if (!isFocused) {
       return;
     }
-    const desktopInfo = getBbDesktopInfo();
+    const desktopInfo = getRoomDesktopInfo();
     if (
       desktopInfo === null ||
       desktopInfo.onAppCommand !== undefined ||
@@ -1824,7 +1953,7 @@ function ThreadDetailViewInternal(props: ThreadRoutePathArgs) {
     if (!isFocused) {
       return;
     }
-    const desktopInfo = getBbDesktopInfo();
+    const desktopInfo = getRoomDesktopInfo();
     if (
       desktopInfo === null ||
       desktopInfo.onCloseWindowRequest === undefined
@@ -2040,69 +2169,53 @@ function ThreadDetailViewInternal(props: ThreadRoutePathArgs) {
     enabled: threadOpenContext !== null,
     ...(threadOpenContext ? { openContext: threadOpenContext } : {}),
   });
-  const parentBannerDismissKey = `cloudroom.parentBanner.dismissed.${thread?.id}`;
-  const [, rerenderParentBanner] = useReducer((count: number) => count + 1, 0);
-  const dismissParentBanner = useCallback(() => {
-    withLocalStorage(
-      (storage) => storage.setItem(parentBannerDismissKey, "1"),
-      undefined,
-    );
-    rerenderParentBanner();
-  }, [parentBannerDismissKey]);
-  const parentBannerDismissed = withLocalStorage(
-    (storage) => storage.getItem(parentBannerDismissKey) === "1",
-    false,
-  );
-  const parentThreadSection: ThreadPromptParentThreadSection | null =
-    useMemo(() => {
-      const relatedThreadId =
-        threadOriginKind !== null
-          ? threadSourceThreadId
-          : thread?.parentThreadId;
-      if (!thread || !relatedThreadId || parentBannerDismissed) return null;
-      const relationship = isSideChatThread
-        ? "side-chat"
-        : threadOriginKind === "fork"
-          ? "fork"
-          : "parent";
-      const relatedThread =
-        relationship === "parent" ? parentThread : sourceThread;
-      const href = getThreadRoutePath({
-        projectId: relatedThread?.projectId ?? thread.projectId,
-        threadId: relatedThreadId,
-      });
-      if (relatedThread === undefined) {
-        return {
-          parentThreadTitle: relatedThreadId.slice(0, 8),
-          href,
-          relationship,
-          onDismiss: dismissParentBanner,
-        };
-      }
-      if (
-        relatedThread.archivedAt !== null ||
-        relatedThread.deletedAt !== null ||
-        (relationship !== "parent" &&
-          relatedThread.projectId !== thread.projectId)
-      ) {
-        return null;
-      }
-      return {
-        parentThreadTitle: getThreadDisplayTitle(relatedThread),
-        href,
-        relationship,
-        onDismiss: dismissParentBanner,
-      };
-    }, [
-      dismissParentBanner,
-      isSideChatThread,
-      parentBannerDismissed,
-      parentThread,
-      sourceThread,
-      thread,
-      threadOriginKind,
-      threadSourceThreadId,
-    ]);
+  const threadOrigin: ThreadOrigin | null = useMemo(() => {
+    const relatedThreadId =
+      threadOriginKind !== null ? threadSourceThreadId : thread?.parentThreadId;
+    if (!thread || !relatedThreadId) return null;
+    // Show the marker only at the real start of the timeline. Skip it when the
+    // first message came from the related thread: that message already names it.
+    if (
+      hasOlderTimelineRows ||
+      (timelineLoading && timelineRows.length === 0) ||
+      findFirstUserRow(timelineRows)?.senderThreadId === relatedThreadId
+    ) {
+      return null;
+    }
+    const relationship = isSideChatThread
+      ? "side-chat"
+      : threadOriginKind === "fork"
+        ? "fork"
+        : "parent";
+    const relatedThread =
+      relationship === "parent" ? parentThread : sourceThread;
+    const href = getThreadRoutePath({
+      projectId: relatedThread?.projectId ?? thread.projectId,
+      threadId: relatedThreadId,
+    });
+    if (relatedThread === undefined) {
+      return { title: relatedThreadId.slice(0, 8), href, relationship };
+    }
+    if (
+      relatedThread.archivedAt !== null ||
+      relatedThread.deletedAt !== null ||
+      (relationship !== "parent" &&
+        relatedThread.projectId !== thread.projectId)
+    ) {
+      return null;
+    }
+    return { title: getThreadDisplayTitle(relatedThread), href, relationship };
+  }, [
+    hasOlderTimelineRows,
+    isSideChatThread,
+    parentThread,
+    sourceThread,
+    thread,
+    threadOriginKind,
+    threadSourceThreadId,
+    timelineLoading,
+    timelineRows,
+  ]);
   const pendingChildThreads: readonly ChildThreadPendingAttentionSource[] =
     useMemo(
       () =>
@@ -2625,6 +2738,7 @@ function ThreadDetailViewInternal(props: ThreadRoutePathArgs) {
         hasMultipleMachines,
         host: resolvedThreadEnvironmentHost,
         machineProviders: registeredMachineProviders,
+        isWorktree: environment?.isWorktree,
       })
     : undefined;
   const isThreadOnReusableEnvironment =
@@ -2811,7 +2925,6 @@ function ThreadDetailViewInternal(props: ThreadRoutePathArgs) {
       modelFallback={modelFallback}
       activeWorkflows={activeWorkflows}
       activeBackgroundCommands={activeBackgroundCommands}
-      parentThreadSection={parentThreadSection}
       childPendingInteractions={childPendingInteractions}
       pullRequest={pullRequest}
       thread={thread}
@@ -3198,13 +3311,20 @@ function ThreadDetailViewInternal(props: ThreadRoutePathArgs) {
               threadOriginKind,
               hasOlderTimelineRows,
               hostConnectionNotice,
+              leadingContent: threadOrigin ? (
+                <ThreadOriginMarker origin={threadOrigin} />
+              ) : undefined,
               isLoadingOlderTimelineRows,
               isThreadTimelinePending,
               timelineError: Boolean(timelineError),
               onForkMessage: isForkAvailable ? handleForkMessage : undefined,
-              onEditMessage: canEditSentMessages
+              onEditMessage: canOfferSentMessageEdit
                 ? handleEditSentMessage
                 : undefined,
+              editMessageBlockedReason:
+                canOfferSentMessageEdit && sentMessageEditWaitsForBackgroundWork
+                  ? "Wait for background work to finish to edit"
+                  : undefined,
               inlineMessageEditor,
               onMessageAddToChat: handleSelectionAddToChat,
               onSendToMainMessage: handleSendToMainMessage,
@@ -3217,18 +3337,21 @@ function ThreadDetailViewInternal(props: ThreadRoutePathArgs) {
               projectId,
               resolveMentionLink,
               showOngoingIndicator:
-                thread.status !== "stopping" &&
-                !hasPendingInteraction &&
-                isRunningThreadRuntimeDisplayStatus(
-                  thread.runtime.displayStatus,
-                ) &&
+                (activePendingSentMessageEdit !== null ||
+                  (thread.status !== "stopping" &&
+                    !hasPendingInteraction &&
+                    isRunningThreadRuntimeDisplayStatus(
+                      thread.runtime.displayStatus,
+                    ))) &&
                 !isThreadTimelinePending,
               ongoingIndicatorLabel:
                 thread.runtime.displayStatus === "host-reconnecting"
                   ? "Waiting for reconnection"
                   : undefined,
-              timelineRows,
-              isStopping: thread.status === "stopping",
+              timelineRows: displayedTimelineRows,
+              isStopping:
+                thread.status === "stopping" &&
+                activePendingSentMessageEdit === null,
               stoppingAnchorAt: thread.updatedAt,
               threadId: thread.id,
               threadRuntimeDisplayStatus: thread.runtime.displayStatus,

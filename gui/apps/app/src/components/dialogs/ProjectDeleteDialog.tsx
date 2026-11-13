@@ -1,3 +1,4 @@
+import { useThreads } from "@/hooks/queries/thread-queries";
 import {
   ConfirmDeleteDialog,
   ConfirmDeleteDialogContent,
@@ -45,10 +46,18 @@ export function ProjectDeleteDialogContent({
   pending,
   onDelete,
 }: ProjectDeleteDialogContentProps) {
+  // Every computer follows a Cloud thread (#237): deleting the project here archives its Cloud threads everywhere.
+  const cloud =
+    useThreads({ projectId: target.id, archived: false }).data?.filter(
+      (thread) => thread.executionTarget === "cloud",
+    ).length ?? 0;
+  const everywhere = cloud
+    ? ` Archives ${cloud} Cloud thread${cloud === 1 ? "" : "s"} on every computer and stops their running work.`
+    : "";
   return (
     <ConfirmDeleteDialogContent
       title="Delete project?"
-      description={`Delete "${target.name}" and all of its threads, including archived ones? Your project folder on disk is not touched. This cannot be undone.`}
+      description={`Delete "${target.name}" and all of its threads, including archived ones? Your project folder on disk is not touched.${everywhere} This cannot be undone.`}
       confirmLabel="Delete project"
       pending={pending}
       onConfirm={() => onDelete(target.id)}

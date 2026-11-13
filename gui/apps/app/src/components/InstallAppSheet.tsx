@@ -1,7 +1,7 @@
 import { type ReactNode, useEffect, useState, useSyncExternalStore } from "react";
 import { Button } from "@cloudroom/shared-ui/button";
 import { useMediaQuery } from "@cloudroom/shared-ui/hooks/use-media-query";
-import { BbLogo } from "@/components/ui/bb-logo";
+import { RoomLogo } from "@/components/ui/cloudroom-logo";
 import { getAppSurface } from "@/lib/app-surface";
 import { usePopup } from "@/lib/popups";
 
@@ -76,7 +76,7 @@ export function InstallAppSheet() {
       <div onClick={(event) => event.stopPropagation()}
         className="w-full rounded-t-xl border-t bg-background px-5 pt-5 pb-[calc(env(safe-area-inset-bottom)+20px)] duration-300 animate-in slide-in-from-bottom">
         <div className="flex items-center gap-3">
-          <BbLogo className="size-10 shrink-0" />
+          <RoomLogo className="size-10 shrink-0" />
           <div>
             <h2 className="text-base font-semibold">Add Cloudroom to your home screen</h2>
             <p className="text-sm text-muted-foreground">It opens full screen, like a normal app.</p>

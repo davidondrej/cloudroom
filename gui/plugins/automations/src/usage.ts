@@ -1,6 +1,7 @@
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import { CronExpressionParser } from "cron-parser";
 import { getAutomation, type Db } from "./data.js";
+import { LOOP_TEMPLATES } from "../templates.js";
 
 // Usage estimates (docs/scopes/loops.md): roughly what share of the weekly Claude or Codex limit a loop uses on each
 // schedule. The loop's runs in the last 7 days used a share of the provider's tokens since the limit reset; that share
@@ -12,6 +13,7 @@ const LIMIT_NAMES: Record<string, string> = { "claude-code": "Claude", codex: "C
 type Sdk = Pick<BbPluginApi["sdk"], "cloudroom" | "system" | "threads">;
 type Week = { usedPercent: number; start: number };
 export type LoopUsage = { limit: string; percents: Record<string, number> } | null;
+export type TemplateUsage = Record<string, { limit: string; percent: number }>;
 
 /** How many times a cron fires from `from` to `to`; 0 for a cron that can't be read. */
 function runsBetween(cron: string, timezone: string, from: number, to: number): number {
@@ -105,4 +107,35 @@ export async function cloudLoopUsage(sdk: Sdk, id: string, crons: string[]): Pro
     timezone: loop.timezone,
     runThreadIds,
   }, crons);
+}
+
+// Below this the weekly % is too coarse to price a token: 1% could be half or twice the truth.
+const MIN_WEEK_PERCENT = 3;
+const templateUsages = { at: 0, usage: {} as TemplateUsage };
+
+/** Each template's rough share of the weekly limit on its own schedule: its measured tokens per run, at what a token
+ *  costs this account (the weekly % over the provider's tokens since the reset). Templates it can't price are left out. */
+export async function templateUsage(sdk: Sdk): Promise<TemplateUsage> {
+  const now = Date.now();
+  if (now - templateUsages.at < 10 * 60_000) return templateUsages.usage;
+  const percentPerToken = new Map<string, number | null>();
+  const usage: TemplateUsage = {};
+  for (const template of LOOP_TEMPLATES) {
+    const limit = LIMIT_NAMES[template.providerId];
+    if (!limit || !template.tokensPerRun) continue;
+    if (!percentPerToken.has(template.providerId)) {
+      const week = await weeklyLimit(sdk, template.providerId);
+      const total =
+        week && week.usedPercent >= MIN_WEEK_PERCENT
+          ? (await sdk.cloudroom.tokenUsage({ providerId: template.providerId, threadIds: [], threadsSince: now, totalSince: Math.max(week.start, now - WEEK_MS) })).total
+          : 0;
+      percentPerToken.set(template.providerId, week && total > 0 ? week.usedPercent / total : null);
+    }
+    const rate = percentPerToken.get(template.providerId);
+    if (rate == null) continue;
+    usage[template.id] = { limit, percent: template.tokensPerRun * runsBetween(template.cron, "UTC", now, now + WEEK_MS) * rate };
+  }
+  templateUsages.at = now;
+  templateUsages.usage = usage;
+  return usage;
 }

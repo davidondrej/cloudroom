@@ -1,7 +1,8 @@
 import type { ThreadListEntry, ThreadWithRuntime } from "@cloudroom/domain";
 import { makeThreadWithRuntime as makeThreadWithRuntimeFixture } from "@cloudroom/test-helpers/domain-fixtures";
 import type { SidebarBootstrapResponse } from "@cloudroom/server-contract";
-import { describe, expect, it } from "vitest";
+import { QueryObserver } from "@tanstack/react-query";
+import { describe, expect, it, vi } from "vitest";
 import { createQueryClientTestHarness } from "@/test/queryClientTestHarness";
 import { makeThreadListEntry as makeThreadListEntryFixture } from "@cloudroom/test-helpers/domain-fixtures";
 import {
@@ -286,6 +287,43 @@ describe("thread state cache owner", () => {
         sidebarNavigationQueryKey(),
       )?.projects[0]?.threads[0]?.lastReadAt,
     ).toBe(10);
+  });
+
+  it("fetches the sidebar once more when a change ran during its first fetch (#1347)", async () => {
+    const { queryClient } = createQueryClientTestHarness();
+    const entry = (lastReadAt: number) =>
+      makeSidebarNavigation([makeThreadListEntry({ lastReadAt })]);
+    let answerFirst = () => {};
+    const queryFn = vi
+      .fn()
+      .mockReturnValueOnce(
+        new Promise((resolve) => (answerFirst = () => resolve(entry(10)))),
+      )
+      .mockResolvedValue(entry(100));
+    const unsubscribe = new QueryObserver(queryClient, {
+      queryKey: sidebarNavigationQueryKey(),
+      queryFn,
+      staleTime: Infinity,
+    }).subscribe(() => {});
+    const markRead = () =>
+      beginThreadReadStateTransaction({
+        lastReadAt: 100,
+        queryClient,
+        threadId: "thread-1",
+      });
+    await markRead();
+    await markRead();
+    answerFirst();
+    await vi.waitFor(() =>
+      expect(
+        queryClient.getQueryData<SidebarBootstrapResponse>(
+          sidebarNavigationQueryKey(),
+        )?.projects[0]?.threads[0]?.lastReadAt,
+      ).toBe(100),
+    );
+    await markRead();
+    expect(queryFn).toHaveBeenCalledTimes(2);
+    unsubscribe();
   });
 });
 

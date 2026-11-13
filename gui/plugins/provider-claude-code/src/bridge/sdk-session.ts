@@ -3,6 +3,7 @@ import { join } from "node:path";
 import {
   query,
   type CanUseTool,
+  type HookCallbackMatcher,
   type McpSdkServerConfigWithInstance,
   type OnElicitation,
   type Options,
@@ -20,8 +21,7 @@ import {
 } from "@get-bb/plugin-sdk/provider-bridge";
 import type { ClaudePermissionMode } from "../interactive-contract.js";
 import {
-  isMissingClaudeCliMessage,
-  missingClaudeCliGuidance,
+  claudeCliGuidance,
   translateMissingClaudeCliError,
 } from "./missing-cli-error.js";
 
@@ -109,9 +109,7 @@ function appendBoundedText(args: AppendBoundedTextArgs): string {
 
 function getErrorMessage(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
-  return isMissingClaudeCliMessage(message)
-    ? missingClaudeCliGuidance()
-    : message;
+  return claudeCliGuidance(message) ?? message;
 }
 
 function buildSdkDoneErrorMessage(args: BuildSdkDoneErrorMessageArgs): string {
@@ -327,6 +325,8 @@ export class SdkSession {
     private readonly options: SdkSessionOptions,
     private readonly onMessage: SdkSessionMessageHandler,
     private readonly onDone: SdkSessionDoneHandler,
+    /** This session's own PreToolUse hook, run before the shared ones. */
+    private readonly preToolUse?: HookCallbackMatcher,
   ) {
     this.completion = new Promise((resolve) => {
       this.complete = resolve;
@@ -363,7 +363,8 @@ export class SdkSession {
     this.options.model = model;
   }
 
-  async reconnectFailedMcpServers(): Promise<void> {
+  /** Retries `failed` and `needs-auth` servers, so a sign-in made after the thread started connects (#661). */
+  async reconnectMcpServers(): Promise<void> {
     const q = this.query;
     if (!q || this.mcpReconnecting) return;
     this.mcpReconnecting = true;
@@ -373,7 +374,7 @@ export class SdkSession {
       reconnects = (await q.mcpServerStatus())
         .filter(
           (server) =>
-            server.status === "failed" &&
+            (server.status === "failed" || server.status === "needs-auth") &&
             now >= (this.mcpRetryAt.get(server.name) ?? 0),
         )
         .map((server) => this.reconnectMcpServer(q, server.name));
@@ -470,7 +471,19 @@ export class SdkSession {
         ? { onElicitation: this.options.onElicitation }
         : {}),
       ...(this.options.sandbox ? { sandbox: this.options.sandbox } : {}),
-      ...(this.options.hooks ? { hooks: this.options.hooks } : {}),
+      ...(this.preToolUse
+        ? {
+            hooks: {
+              ...this.options.hooks,
+              PreToolUse: [
+                this.preToolUse,
+                ...(this.options.hooks?.PreToolUse ?? []),
+              ],
+            },
+          }
+        : this.options.hooks
+          ? { hooks: this.options.hooks }
+          : {}),
       ...(resumeSessionId ? { resume: resumeSessionId } : {}),
       ...(!resumeSessionId && this.options.sessionId
         ? { sessionId: this.options.sessionId }
@@ -620,6 +633,22 @@ export class SdkSession {
     this.abortController.abort();
     this.query?.close();
     this.query = undefined;
+  }
+
+  /**
+   * Ends the running turn and keeps Claude alive. False when Claude still
+   * holds a message that would start a turn of its own afterwards, or is too
+   * old to say.
+   */
+  async interrupt(): Promise<boolean> {
+    this.rejectQueuedInputs("Claude turn stopped before input consumed");
+    const receipt = await this.query?.interrupt();
+    return receipt !== undefined && receipt.still_queued.length === 0;
+  }
+
+  /** Ends one command, agent, or workflow Claude runs. Fine if it already ended. */
+  async stopTask(taskId: string): Promise<void> {
+    await this.query?.stopTask(taskId);
   }
 
   async closeGracefully(timeoutMs: number): Promise<void> {

@@ -123,7 +123,7 @@
       "outputs": ["dist/**"],
       "inputs": [
         "$TURBO_DEFAULT$",
-        "$TURBO_ROOT$/plugins/bb-guide/skills/**",
+        "$TURBO_ROOT$/plugins/cloudroom-guide/skills/**",
         "$TURBO_ROOT$/package.json",
         "$TURBO_ROOT$/packages/tsconfig/*.json",
         "$TURBO_ROOT$/pnpm-lock.yaml",
@@ -146,13 +146,19 @@
     },
     "prepare:bundled": {
       "dependsOn": ["topo", "^build"],
-      "inputs": ["$TURBO_DEFAULT$", "!dist/**", "!.bundled-runtime/**"],
+      "inputs": [
+        "$TURBO_DEFAULT$",
+        "!dist/**",
+        "!.bundled-runtime/**",
+        "$TURBO_ROOT$/package.json",
+        "$TURBO_ROOT$/apps/server/package.json"
+      ],
       "outputs": [".bundled-runtime/**"]
     },
     "@cloudroom/bundled-plugins#build": {
       "dependsOn": [
         "^prepare:bundled",
-        "@cloudroom/server#generate:bb-official-marketplace"
+        "@cloudroom/server#generate:official-marketplace"
       ],
       "inputs": [
         "$TURBO_DEFAULT$",
@@ -336,7 +342,7 @@
       // `@get-bb/plugin-sdk/provider-bridge` entry from the SDK dist, so a
       // clean worktree must build that runtime before the server starts.
       "dependsOn": [
-        "@cloudroom/server#generate:bb-official-marketplace",
+        "@cloudroom/server#generate:official-marketplace",
         "@cloudroom/templates#generate:templates",
         "@cloudroom/plugin-build#generate",
         "@get-bb/plugin-sdk#build:runtime"
@@ -408,7 +414,7 @@
       "dependsOn": ["^topo", "@cloudroom/plugin-build#generate"]
     },
     "@cloudroom/server#topo": {
-      "dependsOn": ["^topo", "@cloudroom/server#generate:bb-official-marketplace"],
+      "dependsOn": ["^topo", "@cloudroom/server#generate:official-marketplace"],
       "inputs": ["$TURBO_DEFAULT$", "$TURBO_ROOT$/../core/integrations/bb/client.ts"]
     },
     // The SDK imports Core's Command Guard, so every task that resolves the SDK's
@@ -417,10 +423,10 @@
       "dependsOn": ["^topo"],
       "inputs": ["$TURBO_DEFAULT$", "$TURBO_ROOT$/../core/src/runtime/command-guard.mjs", "$TURBO_ROOT$/../core/src/runtime/command-guard.d.mts"]
     },
-    "@cloudroom/server#generate:bb-official-marketplace": {
+    "@cloudroom/server#generate:official-marketplace": {
       "dependsOn": [],
       "inputs": [
-        "scripts/generate-bb-official-marketplace.ts",
+        "scripts/generate-official-marketplace.ts",
         "src/services/plugin-catalog/bundled-marketplace-paths.ts",
         "src/services/plugins/builtin-registry.ts",
         "$TURBO_ROOT$/packages/domain/src/plugin-catalog-category.ts",
@@ -510,7 +516,7 @@
       ],
       "inputs": [
         "$TURBO_DEFAULT$",
-        "$TURBO_ROOT$/plugins/bb-guide/skills/room-cli/**",
+        "$TURBO_ROOT$/plugins/cloudroom-guide/skills/room-cli/**",
         "$TURBO_ROOT$/vitest.shared.ts"
       ]
     },
@@ -698,11 +704,6 @@
       ],
       "inputs": ["$TURBO_DEFAULT$", "$TURBO_ROOT$/vitest.shared.ts"]
     },
-    "smoke:tarball": {
-      "dependsOn": ["build"],
-      "cache": false,
-      "outputs": []
-    },
     "smoke:boot": {
       "dependsOn": ["build", "//#ensure-native-modules"],
       "cache": false,
@@ -868,19 +869,13 @@
     "bb-plugin-environment-personal-workspace#typecheck": {
       "dependsOn": ["@get-bb/plugin-sdk#build:types", "topo"]
     },
-    "bb-plugin-environment-modal-sandbox#typecheck": {
-      "dependsOn": ["@get-bb/plugin-sdk#build:types", "topo"]
-    },
     "bb-plugin-connect#typecheck": {
       "dependsOn": ["@get-bb/plugin-sdk#build:types", "topo"]
     },
-    "bb-plugin-bb-guide#typecheck": {
+    "bb-plugin-cloudroom-guide#typecheck": {
       "dependsOn": ["@get-bb/plugin-sdk#build:types", "topo"]
     },
     "bb-plugin-custom-instructions#typecheck": {
-      "dependsOn": ["@get-bb/plugin-sdk#build:types", "topo"]
-    },
-    "bb-plugin-simple-notes#typecheck": {
       "dependsOn": ["@get-bb/plugin-sdk#build:types", "topo"]
     },
     "bb-plugin-github#typecheck": {
@@ -902,9 +897,6 @@
       "dependsOn": ["@get-bb/plugin-sdk#build:types", "topo"]
     },
     "bb-plugin-machine-ssh#typecheck": {
-      "dependsOn": ["@get-bb/plugin-sdk#build:types", "topo"]
-    },
-    "bb-plugin-memory#typecheck": {
       "dependsOn": ["@get-bb/plugin-sdk#build:types", "topo"]
     },
     "bb-plugin-monaco-editor#typecheck": {
@@ -934,10 +926,16 @@
     "bb-plugin-provider-retry#typecheck": {
       "dependsOn": ["@get-bb/plugin-sdk#build:types", "topo"]
     },
+    "bb-plugin-internet-watch#typecheck": {
+      "dependsOn": ["@get-bb/plugin-sdk#build:types", "topo"]
+    },
     "bb-plugin-organization#typecheck": {
       "dependsOn": ["@get-bb/plugin-sdk#build:types", "topo"]
     },
     "bb-plugin-time-in-cloudroom#typecheck": {
+      "dependsOn": ["@get-bb/plugin-sdk#build:types", "topo"]
+    },
+    "bb-plugin-wallpaper#typecheck": {
       "dependsOn": ["@get-bb/plugin-sdk#build:types", "topo"]
     },
     "bb-plugin-secrets#typecheck": {

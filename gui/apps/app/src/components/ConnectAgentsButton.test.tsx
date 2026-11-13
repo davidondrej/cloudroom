@@ -4,6 +4,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, expect, it, vi } from "vitest";
 import { sdk } from "@/lib/sdk";
+import { openUrlInExternalBrowser } from "@/lib/url-open-routing";
 import { ConnectAgentsButton } from "./ConnectAgentsButton";
 
 let localStates: { providerId: string; displayName: string; status: string; loginCommand: string | null }[] = [];
@@ -13,6 +14,15 @@ vi.mock("@/lib/sdk", () => ({ sdk: {
   terminals: { create: vi.fn(), close: vi.fn() },
   providers: { restartModelDiscovery: vi.fn() },
 } }));
+vi.mock("@/lib/url-open-routing", () => ({
+  openUrlInExternalBrowser: vi.fn(),
+}));
+vi.mock(import("@/lib/system-config-atoms"), async (original) => ({
+  ...(await original()),
+  localHostDaemonHostIdAtom: (await import("jotai")).atom(
+    Promise.resolve<string | null>("host_mac"),
+  ),
+}));
 vi.mock("@/hooks/queries/cloudroom-queries", () => ({ useCloudroomAccount: () => ({ data: { ready: true, account: { id: "m" } } }), cloudCanRunHarness: () => true }));
 vi.mock("@/hooks/queries/environment-queries", () => ({ useEnvironment: (id: string | null) => ({ data: id ? { hostId: "host_env" } : undefined }) }));
 vi.mock("@/hooks/queries/system-queries", () => ({
@@ -113,4 +123,30 @@ it("closing the Claude panel reopens on the agent menu", async () => {
   fireEvent.click(await button());
   expect(await screen.findByRole("button", { name: "Hide" })).toBeTruthy();
   expect(screen.queryByRole("button", { name: "Sign in with Claude" })).toBeNull();
+});
+
+it("Claude on another machine than this browser's signs in with a one-time code (#1510)", async () => {
+  const link = (redirect: string) =>
+    `https://claude.com/cai/oauth/authorize?redirect_uri=${encodeURIComponent(redirect)}&state=s`;
+  const waiting = {
+    state: "waiting",
+    message: null,
+    login_id: "l",
+    verification_url: link("http://localhost:1/callback"),
+    manual_url: link("https://platform.claude.com/oauth/code/callback"),
+    host_id: "host_ssh",
+  };
+  vi.mocked(sdk.plugins.callRpc)
+    .mockResolvedValueOnce({ ...claude("missing"), host_id: "host_ssh" })
+    .mockResolvedValue(waiting);
+  mount({ target: "local", selected: "claude-code" });
+  fireEvent.click(await button());
+  fireEvent.click(screen.getByRole("button", { name: /Claude Code/ }));
+  fireEvent.click(
+    await screen.findByRole("button", { name: "Sign in with Claude" }),
+  );
+  expect(await screen.findByLabelText("One-time sign-in code")).toBeTruthy();
+  expect(openUrlInExternalBrowser).toHaveBeenCalledExactlyOnceWith(
+    waiting.manual_url,
+  );
 });

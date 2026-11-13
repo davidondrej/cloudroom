@@ -1,4 +1,4 @@
-Let agents rent a GPU when a task needs heavy GPU work: training, fine-tuning, inference, or 3D rendering. Beta, for paid plans (Pro and up).
+Let agents rent a GPU when a task needs heavy GPU work: training, fine-tuning, inference, or 3D rendering. Beta, on every plan: Free's Cloud Credits cover a short trial.
 
 ## What you get
 
@@ -7,4 +7,4 @@ Let agents rent a GPU when a task needs heavy GPU work: training, fine-tuning, i
 
 ## How it works
 
-The Cloudroom website starts a GPU box for each approved session and charges Cloud Credits by the minute. The box is deleted when the session stops: at its time or spending limit, after 15 idle minutes, or when the agent stops it.
+The Cloudroom website starts a GPU box for each approved session and charges Cloud Credits by the minute. The box is deleted when the session stops: at its time or spending limit, when it sits idle (5 minutes on Free, 15 on paid plans), or when the agent stops it.

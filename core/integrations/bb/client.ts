@@ -63,6 +63,10 @@ export type Session = {
   last_sequence: number;
   queue: string[];
   receipts: { [id: string]: Receipt };
+  /** Cores with `cloud_threads` (#237): the newest app prompt, and the session this one continues. */
+  last_app_prompt?: { request_id: string; sequence: number } | null;
+  continued?: { from?: string; history?: string | null } | null;
+  title?: string | null;
 };
 export type SessionSummary = {
   session_id: string;
@@ -76,19 +80,24 @@ export type SessionSummary = {
   queued: number;
   last_sequence: number;
   last_activity_ms: number | null;
+  /** Cores with `cloud_threads` (#237). */
+  title?: string | null;
+  archived?: boolean;
+  parent_thread?: string | null;
+  last_app_prompt?: { request_id: string; sequence: number } | null;
 };
 
 const rejectionMessages: Record<string, string> = {
   cursor_auth_required: "Connect your Cursor account to use Cursor in Cloud. Your prompt is saved.",
-  cursor_auth_unavailable: "Could not verify the cloud Cursor account. Check the connection and try again.",
+  cursor_auth_unavailable: "Cursor in Cloud didn't answer the login check. Cloudroom tries again by itself.",
   cursor_auth_busy: "Close Cursor sessions before changing the cloud login. Existing threads were not changed.",
   teleport_rejected: "Teleport could not validate its saved conversation or files. The source is preserved. Check the transfer details and core logs before retrying.",
   teleport_cancelled: "This transfer was cancelled. Local history is preserved.",
   teleport_running: "Cloud execution already owns this transfer. Use Stop instead of Cancel.",
   codex_auth_required: "Connect your ChatGPT subscription to use Codex in Cloud. Your prompt is saved.",
   claude_auth_required: "Connect your Claude subscription to use Claude Code in Cloud. Your prompt is saved.",
-  claude_auth_unavailable: "Could not verify the cloud Claude account. Check the CLI installation and native login, then retry.",
-  codex_auth_unavailable: "Could not verify the cloud Codex account. Check the connection and try again.",
+  claude_auth_unavailable: "Claude Code in Cloud didn't answer the login check. Cloudroom tries again by itself.",
+  codex_auth_unavailable: "Codex in Cloud didn't answer the login check. Cloudroom tries again by itself.",
   codex_usage_limit: "Your Codex usage limit is reached. Sign in with another ChatGPT account to keep working, or wait for it to reset.",
   codex_auth_busy: "Finish active Codex work before signing in. Running threads were not changed.",
   invalid_provider: "Select a valid inference provider for Pi.",
@@ -106,9 +115,14 @@ const rejectionMessages: Record<string, string> = {
   invalid_attachment: "The attachment could not be stored on Cloud.",
   attachment_permission_denied: "Cloud folder permission denied",
   attachment_too_large: "The attachment exceeds the Cloud size limit (10 MiB per image, 100 MiB per file).",
+  // Another computer holds the thread (#237): the send fails, so it isn't sent later into a session that's gone.
+  moving: "This thread is moving to a computer. Send it again when that's done.",
+  switching: "This thread is switching agents. Send it again in a moment.",
 };
 // Thread errors with these messages ask the user to connect an account, not retry blindly.
 export const authRequiredMessages = new Set([rejectionMessages.codex_auth_required, rejectionMessages.cursor_auth_required, rejectionMessages.claude_auth_required]);
+// Why Core could not check the Claude login (core/src/session/mod.rs, #1222). Only these exact causes are shown.
+const claudeCheckCauses = ["the login check timed out", "the Claude CLI could not run", "the Claude CLI exited with an error", "the Claude CLI gave an unreadable answer"];
 const transientRejections = new Set(["storage_blocked", "service_stopping", "service_draining", "session_waking", "model_catalog_unavailable", "codex_auth_unavailable", "claude_auth_unavailable", "cursor_auth_unavailable"]);
 
 export class CloudroomError extends Error {
@@ -154,6 +168,8 @@ async function rejection(response: Response): Promise<{ code: string | null; err
   const legacy: Record<string, string> = {
     "invalid reasoning effort": "invalid_reasoning_effort", "invalid model": "invalid_model",
     "storage unsafe; new execution is blocked": "storage_blocked", "service is stopping": "service_stopping", "service is draining": "service_draining",
+    // Core 0.1.100 and older also says this while a sandbox stops. Retried, so a message with an image is not lost.
+    "storage unsafe; uploads are blocked": "storage_blocked",
   };
   return { code: error !== null && Object.hasOwn(legacy, error) ? legacy[error] : null, error };
 }
@@ -189,7 +205,7 @@ async function uncompressed(response: Response): Promise<void> {
 
 /** JSON values in `text`, counted without parsing it as in web/lib/history.ts, and only until the count passes `limit`.
  *  Parsing tiny values (`[{},{},...]`) takes about 30 times their bytes in memory, so a byte limit alone doesn't bound it. */
-function values(text: string, limit: number): number {
+export function values(text: string, limit: number): number {
   let count = 1;
   for (let i = 0; i < text.length && count <= limit; i++) {
     const char = text.charCodeAt(i);
@@ -307,7 +323,7 @@ const REPLAY_VALUES = 1024 * 1024;
 /** JSON values per answer. At 16 bytes a value, the byte limits bind first for any real answer. */
 const ANSWER_VALUES = 1024 * 1024;
 /** JSON values per record, as in saved history and the phone's stream (web/lib/history.ts). */
-const RECORD_VALUES = 256 * 1024;
+export const RECORD_VALUES = 256 * 1024;
 const STREAM_SILENCE_MS = 45_000;
 /** The most one upload request may carry: some sandbox proxies drop requests over about 8 MB. */
 export const UPLOAD_PART = 4 * 1024 * 1024;
@@ -476,7 +492,8 @@ export class CloudroomClient {
       await response.body?.cancel().catch(() => {});
       // Only 400/409 codes steer retry decisions; other statuses keep status-based rules.
       const code = response.status === 400 || response.status === 409 ? known : null;
-      const message = code ? rejectionMessages[code] : `Cloudroom rejected the request (HTTP ${response.status})${error ? `: ${error}` : ""}`;
+      const cause = code === "claude_auth_unavailable" ? claudeCheckCauses.find((c) => error === `Claude account could not be verified: ${c}`) : undefined;
+      const message = code ? `${rejectionMessages[code]}${cause ? ` Cause: ${cause}.` : ""}` : `Cloudroom rejected the request (HTTP ${response.status})${error ? `: ${error}` : ""}`;
       throw new CloudroomError(message, response.status, code);
     }
     return response;
@@ -623,10 +640,21 @@ export class CloudroomClient {
     }
   }
 
-  start(id: string, harness: Harness = "codex", options: { model?: string; reasoning?: string; workspace?: string; workspace_name?: string; provider?: string; command_guard_enabled?: boolean; strip_ai_co_authors?: boolean; system_prompt?: string; parent_session?: string; parent_thread?: string; prompt?: string; title?: string; fork?: { session: string; fresh?: boolean; before?: string; last_turn_id?: string } } = {}) {
+  start(id: string, harness: Harness = "codex", options: { model?: string; reasoning?: string; workspace?: string; workspace_name?: string; provider?: string; command_guard_enabled?: boolean; strip_ai_co_authors?: boolean; system_prompt?: string; parent_session?: string; parent_thread?: string; prompt?: string; title?: string; fork?: { session: string; fresh?: boolean; before?: string; last_turn_id?: string }; continue_from?: string } = {}) {
     if (harness !== "codex" && harness !== "pi" && harness !== "cursor" && harness !== "claude-code" && harness !== "fx" && harness !== "opencode" && harness !== "hermes" && harness !== "devin" && harness !== "droid" && harness !== "kimi" && harness !== "openclaw")
       throw new CloudroomError("Unsupported Cloudroom harness");
     return this.#command("/v1/sessions", "start", { request_id: id, harness, ...options });
+  }
+
+  /** An agent switch or project move through Core (`cloud_threads`, #237): a new session that continues `from` with Core's
+   *  own history. `pending`: the website hasn't confirmed it yet; Core keeps trying. */
+  async continueSession(id: string, harness: Harness, from: string, options: { model?: string; reasoning?: string; workspace?: string; workspace_name?: string; provider?: string } = {}): Promise<Acceptance & { pending: boolean }> {
+    requestId(id);
+    // Core answers within about 2 minutes: up to 60 s for the new agent to start, then 60 s for the website.
+    const value = await this.#json("/v1/sessions", { request_id: id, harness, continue_from: from, ...options }, undefined, undefined, 150_000);
+    const accepted = { session_id: text(value.session_id), receipt: receipt(value.receipt), saving: json(value.saving), pending: value.pending === true };
+    if (accepted.receipt.request_id !== id || accepted.receipt.command !== "start") throw new CloudroomError("Cloudroom acceptance does not match the command");
+    return accepted;
   }
 
   prompt(
@@ -690,6 +718,16 @@ export class CloudroomClient {
       `${sessionPath(sessionId)}/reorder`,
       "reorder",
       { request_id: id, order: order.map(requestId) },
+      sessionId,
+    );
+  }
+
+  /** The user's model pick (`set_model`): the session runs it, with this effort, from its next turn. */
+  setModel(sessionId: string, id: string, model: string, reasoning?: string) {
+    return this.#command(
+      `${sessionPath(sessionId)}/model`,
+      "model",
+      { request_id: id, model, ...(reasoning ? { reasoning } : {}) },
       sessionId,
     );
   }
@@ -787,8 +825,27 @@ export class CloudroomClient {
     );
   }
 
-  stop(sessionId: string, id: string) {
-    return this.#command(`${sessionPath(sessionId)}/stop`, "stop", { request_id: id }, sessionId);
+  /** `after`: a Stop held while the sandbox slept stops only that turn (Cores with `cloud_threads`, #237). Its receipt
+   *  says `ignored` when another turn runs. */
+  stop(sessionId: string, id: string, after?: string) {
+    return this.#command(`${sessionPath(sessionId)}/stop`, "stop", { request_id: id, ...(after ? { after } : {}) }, sessionId);
+  }
+
+  /** Holds the session for Teleport to Local (#237): until `release`, a close, or 5 minutes without renewal, Core refuses
+   *  every other client's change with code `moving`. */
+  async freeze(sessionId: string, id: string, release = false): Promise<void> {
+    requestId(id);
+    await this.#json(`${sessionPath(sessionId)}/freeze`, { request_id: id, ...(release ? { release: true } : {}) });
+  }
+
+  /** The user's rename and archive or restore of a session Core keeps them for: one sharing another thread's sandbox (#237). */
+  async renameSession(sessionId: string, id: string, title: string): Promise<void> {
+    requestId(id);
+    await this.#json(`${sessionPath(sessionId)}/title`, { request_id: id, title });
+  }
+  async archiveSession(sessionId: string, id: string, archived: boolean): Promise<void> {
+    requestId(id);
+    await this.#json(`${sessionPath(sessionId)}/archive`, { request_id: id, archived });
   }
 
   resume(sessionId: string, id: string, keepPaused = false) {
@@ -823,11 +880,12 @@ export class CloudroomClient {
     await this.#json(`${sessionPath(sessionId)}/children/${encodeURIComponent(id)}`, answer);
   }
 
-  close(sessionId: string, id: string) {
+  /** `freeze`: Teleport to Local's, so the close happens only while it still holds (#237). */
+  close(sessionId: string, id: string, freeze?: string) {
     return this.#command(
       `${sessionPath(sessionId)}/close`,
       "close",
-      { request_id: id },
+      { request_id: id, ...(freeze ? { freeze } : {}) },
       sessionId,
     );
   }
@@ -870,6 +928,9 @@ export class CloudroomClient {
           receipt(item),
         ]),
       ),
+      ...(value.last_app_prompt && typeof value.last_app_prompt === "object" ? { last_app_prompt: value.last_app_prompt as Session["last_app_prompt"] } : {}),
+      ...(value.continued && typeof value.continued === "object" ? { continued: value.continued as Session["continued"] } : {}),
+      ...(typeof value.title === "string" ? { title: value.title } : {}),
     };
   }
 

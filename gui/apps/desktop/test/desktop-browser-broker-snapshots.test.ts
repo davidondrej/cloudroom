@@ -146,3 +146,27 @@ describe("desktop browser broker window cleanup", () => {
     broker.dispose();
   });
 });
+
+describe("desktop browser broker cleanup of gone resources", () => {
+  it.each([
+    ["release_control", "mine", { ok: true }],
+    ["close_tab", "mine", { ok: true }],
+    ["close_tab", "theirs", "Browser tab is outside the requested thread"],
+  ] as const)("%s %s", async (action, id, expected) => {
+    let tabs = [nativeTab("mine", THREAD_ID), nativeTab("theirs", "thr_other")];
+    const subscribeAutomationTabs = vi.fn((_: () => void) => () => undefined);
+    const listTabs = ({ threadId }: { threadId: string | null }) =>
+      tabs.filter((tab) => threadId === null || tab.threadId === threadId);
+    const manager = { listTabs, subscribeAutomationTabs, closeTab: vi.fn() };
+    const broker = createDesktopBrowserBroker({ manager: manager as never, product: "Chrome/1" });
+    broker.registerWindow(createFakeWindow() as never);
+    const base = { ...broker.listInstances()[0]!, threadId: THREAD_ID, tabId: id, leaseId: "mine" };
+    const lease = { tabIds: ["mine"], controllerLabel: "T", expiresAt: Date.now() + 9e4 };
+    await broker.execute({ ...base, ...lease, type: "desktop.browser.acquire_control" });
+    tabs = tabs.slice(1);
+    subscribeAutomationTabs.mock.calls[0]![0](); // tab gone: lease revoked
+    const run = broker.execute({ ...base, type: `desktop.browser.${action}` } as never);
+    expect(await run.catch((error: Error) => error.message)).toEqual(expected);
+    expect(manager.closeTab).not.toHaveBeenCalled();
+  });
+});

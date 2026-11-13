@@ -20,13 +20,14 @@ Plugin state lives under `<bb-data-dir>/plugins/<id>/` (per-plugin SQLite file,
 secrets, logs).
 
 The builtin Custom instructions plugin adds a multiline editor under Settings
-→ Custom instructions. Saved text is appended to each new Local and Cloud message,
-not the session's startup instructions. Blank text or disabling the plugin stops
-future additions; existing conversation history stays unchanged. Cloud messages
-capture the setting when submitted, so queued messages and retries keep that copy.
-Control commands such as `/compact` stay unchanged; the next message includes the
-instructions again. After upgrading, resume Local sessions after an idle app restart
-to clear the old startup copy.
+→ Custom instructions. Saved text is appended to a Local or Cloud message, not the
+session's startup instructions, and only when the thread needs it: on its first
+message, after the text changes, after its context is compacted or cleared, and
+every 20 messages. Blank text or disabling the plugin stops future additions and
+tells the thread once that the earlier text no longer applies; existing
+conversation history stays unchanged. Cloud messages capture the setting when
+submitted, so queued messages and retries keep that copy. Control commands such
+as `/compact` stay unchanged. A thread whose copy may be lost (a cancelled or failed message, a new agent session) gets it again.
 
 The builtin Accounts plugin is always on. It lets one user connect up to 10
 Claude Code and up to 10 Codex subscriptions. Add them at the top of Settings →
@@ -102,52 +103,6 @@ remote hosts without granting the plugin arbitrary filesystem access. Use `room-
 provider list --environment "$ROOM_ENVIRONMENT_ID" --json` and then `room-cli provider
 models <provider-id> --environment "$ROOM_ENVIRONMENT_ID" --json` before writing
 an explicit selection; never guess ACP model IDs.
-
-The Memory plugin is an opt-in install, bundled with the app:
-`room-cli plugin install memory`. Once installed, it injects a compact global and
-current-project memory index into agent context and progressively discloses
-full records through CLI-only commands. Because its store works across
-providers, we recommend disabling provider-native memory under Settings →
-Providers to avoid duplicate or conflicting stores. Settings → Memory lists
-every global and project memory and supports version-checked edits and soft
-deletion.
-
-  room-cli memory catalog [--scope project|global|all] [--json]
-  room-cli memory search <query> [--scope project|global|all] [--json]
-  room-cli memory get <id> [--scope project|global|all] [--json]
-  room-cli memory add --scope project|global --name <name> --summary <text>
-                --details <text> --reason <text> [--kind <kind>]
-                [--tag <tag>]... [--importance <0-100>] [--pinned] [--json]
-  room-cli memory update <id> --expected-version <n> [fields...] [--json]
-  room-cli memory forget <id> --expected-version <n> --reason <text> [--json]
-  room-cli memory history <id> [--scope project|global|all] [--limit 1-100] [--json]
-
-Project writes use the invoking CLI's current project. Global writes require
-the explicit `--scope global` flag.
-
-The Docs plugin is an opt-in official plugin bundled with the app:
-`room-cli plugin install docs`. Read-only discovery remains direct, while edits use
-a manifest-backed local workspace:
-
-  room-cli docs vaults [--json]
-  room-cli docs list [--vault <id>] [--json]
-  room-cli docs read <path> [--vault <id>]
-  room-cli docs pull <path> [--folder] [--vault <id>] [--into <dir>]
-  room-cli docs pull --all [--vault <id>] [--into <dir>]
-  room-cli docs status [workspace-dir] [--delete] [--diff] [--json]
-  room-cli docs push [workspace-dir] [--delete] [--dry-run] [--diff] [--json]
-
-Pull preserves vault-relative paths and writes `.bb-docs-state.json`; edit the
-ordinary files and leave that state file untouched. Push uses pulled SHA-256
-versions as compare-and-swap guards. Concurrent changes stop with exit 3.
-Status exits 0 when no changes exist and exits 4 when changes exist. Exit 4 is
-a successful result. Review its output, then run push separately. Do not
-connect status and push with `&&`.
-Local file and empty-directory deletions are warnings unless `--delete` is
-explicit; a pulled folder root is retained, so pull its parent or the whole
-vault to remove that folder. Use `--workspace-host <id>` when a standalone
-CLI's working directory is on a non-primary host. Direct `write`, `mkdir`,
-`move`, and `remove` remain only as deprecated compatibility commands.
 
 The Tasks plugin is an opt-in official plugin bundled with the app:
 `room-cli plugin install tasks`. It adds a task tracker, agent delegation,
@@ -368,7 +323,7 @@ first. You cannot add or remove it.
 The plugins appear in the first Browse shelf, Cloudroom Official. They also appear in
 their category shelves. Install a plugin by its bare name or its qualified name.
 For example, use
-`room-cli plugin install docs` or `room-cli plugin install docs@bb-official`. cloudroom copies the
+`room-cli plugin install tasks` or `room-cli plugin install tasks@bb-official`. cloudroom copies the
 plugin from the app bundle. An app update also updates the bundled copy.
 
 The BB Marketplace has the reserved name `bb-community`. It lists
@@ -815,31 +770,22 @@ tw-animate-css utilities compile in plugin builds).
 For the complete authoring reference — exact signatures, working snippets
 for every surface, the reload lifecycle, testing tips, and gotchas — use
 the built-in `plugin-authoring` skill (agents: it loads on demand;
-humans: plugins/bb-guide/skills/plugin-authoring/
+humans: plugins/cloudroom-guide/skills/plugin-authoring/
 in a checkout). The builtin `inline-vis` plugin renders
 `::inline-vis{file="demo.html" height="480"}` through the sidebar's
 path-shaped, sandboxed worktree HTML iframe preview; `height` is optional.
 Its card header includes an open-in-sidebar action for the source HTML file.
 The `plugins/` directory contains every bundled plugin: the auto-installed
-builtins and the store-only Cloudroom Official GitHub, Docs, Memory, and Tasks
+builtins and the store-only Cloudroom Official GitHub and Tasks
 plugins. The `examples/plugins/` reference plugins cover slack-bot (webhook
 bot), agent-enrichment (agent surfaces), and composer-customization (all
 composer regions). Thread Hover
 Cards installs from the BB Marketplace (source: the bb-plugins
 repo).
 
-Modal setup uses `room-cli modal account inspect --json` to check credentials, then
-`room-cli machine create --provider modal-sandbox --json` to create a
-machine. Settings edits its shared Dockerfile; `room-cli modal image set --file PATH [--json]` saves it and `room-cli modal image reset [--json]` restores the bundled default for future machines; `room-cli modal image show [--json]`
-reads the same file without cloud access. The image builds automatically and is reused across projects;
-core installs the daemon on demand. Project dependencies and services belong in
-`.bb-env-setup.sh`. Read the plugin's skill for connection and lifecycle details.
-
 Contributed commands may accept `--stdin`: the calling CLI transfers up to
 256 KiB of multiline text as `--input-text`, without reading server-local files.
 The existing `--<flag>-stdin` form still accepts one line.
-
-Modal image debugging: `room-cli modal image build [--json]` prepares the saved image; `room-cli modal sandbox run [--json]` starts a 30-minute standalone sandbox; `room-cli modal sandbox exec ID [--json] -- COMMAND...` runs a command (60-second timeout); `room-cli modal sandbox stop ID [--json]` cleans up. These debug sandboxes skip Cloudroom enrollment, clone and setup. Logs are returned after the build finishes.
 
 ## Inspect plugin RPC
 

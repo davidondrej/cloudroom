@@ -83,6 +83,8 @@ describe("room-cli thread interactions command output", () => {
       "  Cwd: /tmp/project",
       "  Prompt: Approve command",
       "  Decisions: allow_once, allow_for_session, deny",
+      "  Answer: room-cli thread interactions approve int-show thread-show-interaction",
+      "      or: room-cli thread interactions deny int-show thread-show-interaction",
     ]);
   });
 
@@ -126,6 +128,8 @@ describe("room-cli thread interactions command output", () => {
       "  get-bb/bb#42",
       "  Opens a bug issue",
       "  Decisions: allow_once, deny",
+      "  Answer: room-cli thread interactions approve int-tool-use thread-tool-use",
+      "      or: room-cli thread interactions deny int-tool-use thread-tool-use",
     ]);
   });
 

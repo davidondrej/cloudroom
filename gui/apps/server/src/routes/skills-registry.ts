@@ -157,6 +157,7 @@ export function registerSkillsRegistryRoutes(app: Hono, deps: AppDeps): void {
       body.data.registrySkillId,
     );
     const result = await installServerRegistrySkill({
+      dataDir: deps.config.dataDir,
       userSkillsRootPath: deps.config.userSkillsRootPath,
       packageRef: packageRefForSource(registrySkill.source),
       registrySkillId: registrySkill.id,

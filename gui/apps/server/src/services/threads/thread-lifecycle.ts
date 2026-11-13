@@ -87,6 +87,10 @@ import {
   type ThreadStartCommandArgs,
   type ThreadStopCommandArgs,
 } from "./thread-commands.js";
+import {
+  carriesCustomInstructions,
+  markCustomInstructionsLost,
+} from "./custom-instructions.js";
 import { ApiError } from "../../errors.js";
 import { ensureHostSessionReadyForWork } from "../hosts/host-lifecycle.js";
 import {
@@ -317,6 +321,7 @@ interface ThreadCommandResultSettlementDeps {
   db: DbTransaction;
   hub: DbNotifier;
   logger: AppDeps["logger"];
+  providerRegistry: AppDeps["providerRegistry"];
 }
 
 interface SettleThreadCommandFailureArgs {
@@ -327,7 +332,8 @@ interface SettleThreadCommandFailureArgs {
 
 interface SettleThreadStartCommandResultArgs {
   command: ThreadStartCommand;
-  deps: FinalizeStoppedThreadTransactionDeps;
+  deps: FinalizeStoppedThreadTransactionDeps &
+    Pick<AppDeps, "providerRegistry">;
   execution: HostDaemonCommandExecutionRecord;
   report: ThreadStartCommandResultReport;
 }
@@ -811,6 +817,24 @@ function recordEmptyThreadStartProviderSessionInTransaction(
   });
 }
 
+/** Grok's own auth errors name no fix (#1160); other providers keep theirs. */
+export const GROK_PROVIDER_ID = "acp-grok";
+
+/** A signed-out Grok's failure gains its sign-in hint, e.g. `grok login`. */
+function threadFailureMessage(
+  deps: ThreadCommandResultSettlementDeps,
+  providerId: string,
+  report: ThreadFailureResultReport,
+): string {
+  const hint =
+    providerId === GROK_PROVIDER_ID && report.errorCode === "auth_required"
+      ? deps.providerRegistry.get(providerId)?.info.strings?.signInHint
+      : undefined;
+  return hint === undefined
+    ? report.errorMessage
+    : `${report.errorMessage.replace(/\.$/u, "")}. ${hint}`;
+}
+
 function settleThreadCommandFailure(
   args: SettleThreadCommandFailureArgs,
 ): CommandResultSideEffectsResult {
@@ -818,6 +842,15 @@ function settleThreadCommandFailure(
   const thread = getThread(args.deps.db, args.command.threadId);
   if (!thread || thread.deletedAt !== null) {
     return emptyCommandResultSideEffects();
+  }
+  const errorMessage = threadFailureMessage(
+    args.deps,
+    thread.providerId,
+    args.report,
+  );
+  // The failed message may never have reached the agent, so the next one carries the custom instructions again.
+  if (carriesCustomInstructions(args.command.input)) {
+    markCustomInstructionsLost(args.deps.db, thread.id);
   }
   if (
     args.command.type === "turn.submit" &&
@@ -837,7 +870,7 @@ function settleThreadCommandFailure(
       data: {
         requestId: args.command.requestId,
         reason: args.report.errorCode,
-        message: args.report.errorMessage,
+        message: errorMessage,
       },
     });
   }
@@ -849,7 +882,7 @@ function settleThreadCommandFailure(
     environmentId: thread.environmentId,
     code: "thread_command_failed",
     message: `Command ${args.report.type} failed`,
-    detail: args.report.errorMessage,
+    detail: errorMessage,
     scope: getThreadFailureCommandErrorScope(args.command),
   });
   const outcome = applyLoggedThreadLifecycleEventInTransaction(args.deps, {
@@ -1616,6 +1649,8 @@ export async function stopThreadForCurrentState(
     releaseMidTurn?: true;
     /** `room-cli thread stop` only: an idle thread's agent tree ends too (#607). */
     endProcesses?: true;
+    /** The user's Stop button: the turn ends, the agent stays up for the next message. */
+    keepSession?: true;
   },
 ): Promise<void> {
   // Work sent after the stop begins keeps its jobs (#607).
@@ -1632,7 +1667,20 @@ export async function stopThreadForCurrentState(
     ]);
     return;
   }
-  await revokeThreadDesktopBrowserControl(deps, thread.id);
+  await Promise.all([
+    stopLocalThreadRuntime(deps, thread, environment, release),
+    revokeThreadDesktopBrowserControl(deps, thread.id),
+  ]);
+}
+
+async function stopLocalThreadRuntime(
+  deps: RequestThreadStopForCurrentStateDeps,
+  thread: RequestThreadStopForCurrentStateThread,
+  environment: RequestThreadStopForCurrentStateEnvironment | null,
+  release: NonNullable<Parameters<typeof stopThreadForCurrentState>[3]> & {
+    startsSent: number;
+  },
+): Promise<void> {
   if (hasLiveThreadRuntime(deps, thread)) {
     if (environment === null) {
       return;
@@ -1645,8 +1693,12 @@ export async function stopThreadForCurrentState(
     };
     if (markThreadStopRequested(deps, args)) {
       await runAwaitedThreadStopCommand(deps, {
-        requireStopped: options?.requireStopped,
-        command: buildThreadStopCommand({ ...args, intent: "interrupt" }),
+        requireStopped: release.requireStopped,
+        command: buildThreadStopCommand({
+          ...args,
+          intent: "interrupt",
+          keepSession: release.keepSession,
+        }),
         hostId: args.hostId,
         threadId: thread.id,
       });

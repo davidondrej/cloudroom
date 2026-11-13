@@ -8,7 +8,7 @@ import {
   type ReactNode,
 } from "react";
 import { useNavigate } from "react-router-dom";
-import { useAtom, useAtomValue, useSetAtom } from "jotai";
+import { useAtom, useAtomValue, useSetAtom, useStore } from "jotai";
 import type {
   ProjectResponse,
   ThreadSectionResponse,
@@ -25,6 +25,12 @@ import {
 } from "@/hooks/queries/connection-aware-query-state";
 import { isTransientReadError } from "@/hooks/queries/query-helpers";
 import { stripProjectThreads } from "@/hooks/queries/project-queries";
+import {
+  reuseEqualObjects,
+  reuseSameItems,
+  reuseSameListsByKey,
+  useStableValue,
+} from "@/hooks/useStableValue";
 import { useSidebarNavigation } from "@/hooks/queries/sidebar-navigation-query";
 import {
   useSystemConfig,
@@ -120,6 +126,7 @@ import {
   sidebarCollapsedThreadSectionsAtom,
   sidebarCollapsedMachinesAtom,
   sidebarCollapsedHarnessesAtom,
+  revealedSelectedThreadKeyAtom,
   sidebarOrganizationModeAtom,
   type SidebarChronologicalSort,
   type CollapsibleSidebarSectionId,
@@ -301,18 +308,35 @@ const EMPTY_PROJECTS: readonly ProjectResponse[] = [];
 const EMPTY_THREAD_LIST: ThreadListEntry[] = [];
 const EMPTY_SECTION_DEFINITIONS: readonly ThreadSectionResponse[] = [];
 
+// Same threads array and pinned count → same state object, so memoized
+// project rows skip re-rendering when another project's thread changes.
+const readyStateByThreads = new WeakMap<
+  ThreadListEntry[],
+  Extract<ProjectThreadListState, { status: "ready" }>
+>();
+
 function getProjectThreadListState({
   status,
-  threads,
+  threads = EMPTY_THREAD_LIST,
   pinnedCount,
 }: ProjectThreadListStateArgs): ProjectThreadListState {
   switch (status) {
-    case "ready":
-      return {
-        status: "ready",
-        threads: threads ?? [],
+    case "ready": {
+      const cached = readyStateByThreads.get(threads);
+      if (
+        cached !== undefined &&
+        (cached.pinnedCount ?? 0) === (pinnedCount ?? 0)
+      ) {
+        return cached;
+      }
+      const state = {
+        status: "ready" as const,
+        threads,
         ...(pinnedCount ? { pinnedCount } : {}),
       };
+      readyStateByThreads.set(threads, state);
+      return state;
+    }
     case "unavailable":
       return { status: "unavailable" };
     case "loading":
@@ -824,13 +848,17 @@ function ProjectModeSections({
     }
     return { grouped, pinnedCounts };
   }, [effectivePinnedThreadIds, threads]);
+  const groupedThreads = useStableValue<ReadonlyMap<string, ThreadListEntry[]>>(
+    threadsByProject.grouped,
+    reuseSameListsByKey,
+  );
   const projectRows = useMemo<ProjectListRowModel[]>(
     () =>
       projects.map((project) => ({
         project,
         threadListState: getProjectThreadListState({
           status,
-          threads: threadsByProject.grouped.get(project.id),
+          threads: groupedThreads.get(project.id),
           pinnedCount: threadsByProject.pinnedCounts.get(project.id),
         }),
         isActive: false,
@@ -840,11 +868,12 @@ function ProjectModeSections({
         ),
       })),
     [
+      groupedThreads,
       localSourcePathsByProjectId,
       pathExistence,
       projects,
       status,
-      threadsByProject,
+      threadsByProject.pinnedCounts,
     ],
   );
   const projectSectionIds = useMemo(
@@ -863,10 +892,9 @@ function ProjectModeSections({
   }, [projectRows]);
   const personalThreads = useMemo(
     () =>
-      threadsByProject.grouped
-        .get(PERSONAL_PROJECT_ID)
-        ?.filter(isSidebarProjectThread) ?? EMPTY_THREAD_LIST,
-    [threadsByProject],
+      groupedThreads.get(PERSONAL_PROJECT_ID)?.filter(isSidebarProjectThread) ??
+      EMPTY_THREAD_LIST,
+    [groupedThreads],
   );
   const { onOrderChange, order, persistedOrder } = useSidebarModeSectionOrder({
     mode: "project",
@@ -876,10 +904,17 @@ function ProjectModeSections({
   });
   const reorderDisabled = order.length < 2;
   const compareThreads = compareThreadsForSection("threads");
-  const personalItems = useMemo(
-    () =>
-      buildProjectThreadGroups(personalThreads, compareThreads, draftThreadIds),
-    [compareThreads, draftThreadIds, personalThreads],
+  const personalItems = useStableValue(
+    useMemo(
+      () =>
+        buildProjectThreadGroups(
+          personalThreads,
+          compareThreads,
+          draftThreadIds,
+        ),
+      [compareThreads, draftThreadIds, personalThreads],
+    ),
+    reuseSameItems,
   );
   const projectGroups = useMemo(
     () =>
@@ -901,12 +936,17 @@ function ProjectModeSections({
       }),
     [compareThreadsForSection, draftThreadIds, projectRows],
   );
-  const projectItemsByProjectId = useMemo(
-    () =>
-      new Map(
-        projectGroups.map((group) => [group.group.id, group.group.items]),
-      ),
-    [projectGroups],
+  const projectItemsByProjectId = useStableValue<
+    ReadonlyMap<string, ProjectThreadItem[]>
+  >(
+    useMemo(
+      () =>
+        new Map(
+          projectGroups.map((group) => [group.group.id, group.group.items]),
+        ),
+      [projectGroups],
+    ),
+    reuseSameListsByKey,
   );
   const groupRootItems = useMemo<ProjectThreadItem[]>(
     () => [...personalItems, ...projectGroups],
@@ -1374,9 +1414,12 @@ function ProjectListComponent({
   const sidebarNavigationQuery = useSidebarNavigation();
   const sidebarNavigation = sidebarNavigationQuery.data;
   const sections = sidebarNavigation?.sections ?? EMPTY_SECTION_DEFINITIONS;
-  const projects = useMemo(
-    () => sidebarNavigation?.projects.map(stripProjectThreads),
-    [sidebarNavigation],
+  const projects = useStableValue<readonly ProjectResponse[] | undefined>(
+    useMemo(
+      () => sidebarNavigation?.projects.map(stripProjectThreads),
+      [sidebarNavigation],
+    ),
+    reuseEqualObjects,
   );
   const threads = useMemo(() => {
     if (!sidebarNavigation) {
@@ -1642,8 +1685,14 @@ function ProjectListComponent({
     [pinnedSidebarState.rootNodes],
   );
   const hasPinnedSection = pinnedSidebarState.rootNodes.length > 0;
+  const store = useStore();
+  const isPlaceholderNavigation = sidebarNavigationQuery.isPlaceholderData;
   useEffect(() => {
-    if (!selectedThreadId) {
+    if (!selectedThreadId || !uiPreferencesReady || isPlaceholderNavigation) {
+      return;
+    }
+    const revealKey = `${organizationMode}:${selectedThreadId}`;
+    if (store.get(revealedSelectedThreadKeyAtom) === revealKey) {
       return;
     }
 
@@ -1654,6 +1703,7 @@ function ProjectListComponent({
     if (selectedThread.visibility === "hidden") {
       return;
     }
+    store.set(revealedSelectedThreadKeyAtom, revealKey);
 
     const threadIdsToExpand: string[] = [];
     let currentThread: ThreadListEntry | undefined = selectedThread;
@@ -1722,7 +1772,10 @@ function ProjectListComponent({
     setCollapsedProjectIdList,
     setCollapsedSidebarSectionIdList,
     expandThreads,
+    isPlaceholderNavigation,
+    store,
     threadById,
+    uiPreferencesReady,
   ]);
   const toggleSidebarSectionCollapsed =
     useCallback<ToggleCollapsedSidebarSectionId>(

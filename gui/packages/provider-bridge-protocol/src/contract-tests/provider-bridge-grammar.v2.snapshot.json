@@ -299,6 +299,7 @@
     "approvalEnforcedBy": "default",
     "grammarVersions": "default",
     "steerMode": "default",
+    "stopsUnopenedTurns": "default",
     "skills": "default"
   },
   "recoveryNotification": {

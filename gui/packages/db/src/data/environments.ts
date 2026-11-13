@@ -567,6 +567,16 @@ export function findEnvironmentPathClaim(db: EnvironmentWriteConnection, hostId:
   )).limit(1).get() ?? null;
 }
 
+/** Another environment on the host whose folder, or claimed folder, is this one's: removing `owner` would delete its work (#1284). Two lookups, so each uses its (host, path) index. */
+export function findEnvironmentSharingPath(db: EnvironmentWriteConnection, owner: EnvironmentRow & { path: string }): EnvironmentRow | null {
+  return db.select().from(environments).where(and(
+    eq(environments.hostId, owner.hostId),
+    hostPathEquals(environments.path, owner.path),
+    ne(environments.id, owner.id),
+    ne(environments.status, "destroyed"),
+  )).limit(1).get() ?? findEnvironmentPathClaim(db, owner.hostId, owner.path, owner);
+}
+
 export function bindEnvironmentPath(db: DbConnection, provisioning: EnvironmentRow, path: string): EnvironmentRow {
   return db.transaction((tx) => {
     const current = getEnvironment(tx, provisioning.id);

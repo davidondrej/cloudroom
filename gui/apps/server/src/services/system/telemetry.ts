@@ -5,7 +5,6 @@ import { readOrCreateSecretFile } from "@cloudroom/secret-storage";
 import type { AppSurface, RequestAppSurface } from "@cloudroom/config/app-surface";
 import type { ServerLogger } from "../../types.js";
 
-const POSTHOG_INGESTION_URL = "https://us.i.posthog.com/capture/";
 export const TELEMETRY_ID_FILE_NAME = "telemetry-id";
 /** Events wait in memory and reach our own server through the website in batches (ADR 20261102-201050). */
 const BATCH_SIZE = 100, MAX_QUEUED = 1_000, FIRST_FLUSH_MS = 10_000, FLUSH_MS = 60_000;
@@ -16,10 +15,10 @@ const telemetryAppSurfaceStorage = new AsyncLocalStorage<RequestAppSurface>();
 export type TelemetryExecution = "local" | "cloud_sandbox" | "cloud_vm";
 
 /** The desktop app's first-run setup funnel: which step people see, act on, finish, skip, or leave. */
-export const SETUP_STEPS = ["account", "agent", "github", "project"] as const;
+export const SETUP_STEPS = ["account", "agent", "github", "project", "first_agent"] as const;
 export const SETUP_ACTIONS = ["viewed", "started", "done", "skipped", "closed", "detected", "waitlist"] as const;
 export const SETUP_AGENTS = ["pi", "opencode", "cursor", "hermes", "grok", "devin", "droid", "kimi", "fx", "openclaw"] as const;
-export const SETUP_DETAILS = ["github", "google", "email", "claude", "codex", "both", "none", "existing", "found", "folder", "recent_folder", "bb_import", "chat_import", "auto", "manual", ...SETUP_AGENTS] as const;
+export const SETUP_DETAILS = ["github", "google", "email", "claude", "codex", "both", "none", "existing", "found", "folder", "recent_folder", "bb_import", "chat_import", "auto", "manual", "cloud", "local", "blocked", "failed", ...SETUP_AGENTS] as const;
 
 export type TelemetryValue = string | number | boolean | null;
 
@@ -54,11 +53,15 @@ export type TelemetryEvent =
         is_child_thread: boolean;
         message_source: "queued_message" | "thread_create" | "thread_send";
         provider: string;
+        /** A message the user typed in the first agent's thread (services/system/first-agent.ts). */
+        first_agent?: true;
       };
     }
   | {
       name: "first_response";
       properties: {
+        /** The first agent's reply. */
+        first_agent?: true;
         execution: TelemetryExecution;
         is_child_thread: boolean;
         message_source: "queued_message" | "thread_create" | "thread_send";
@@ -97,6 +100,9 @@ export type TelemetryEvent =
     }
   | { name: "settings_search_no_results"; properties: { query: string } }
   | { name: "bug_report_clicked" }
+  /** Thread share links (docs/scopes/thread-share-links.md#tracking). `share_id` is a hash of the link's token, never
+   *  the token, and null while the thread has no link. */
+  | { name: "share"; properties: { action: ShareAction; share_id: string | null; provider?: string; execution?: TelemetryExecution } }
   | {
       name: "plugin_installed";
       properties: {
@@ -111,23 +117,32 @@ export type TelemetryEvent =
   | { name: "plugins_snapshot"; properties: { enabled: string; disabled: string } }
   | {
       name: "turn_failed";
-      properties: { execution: TelemetryExecution; is_child_thread: boolean; provider: string; error_category: string; error_message?: string | null };
+      properties: { execution: TelemetryExecution; is_child_thread: boolean; provider: string; error_category: string; error_message?: string | null; first_agent?: true };
     }
   | { name: "upgrade_prompt"; properties: { where: (typeof UPGRADE_PROMPTS)[number]; action: "viewed" | "clicked" } }
   | { name: "activation_step"; properties: { step: ActivationStep; action: "clicked" | "done" | "hidden" } }
   | { name: "starter_prompt"; properties: { starter: StarterPrompt } }
   | { name: "popup"; properties: { popup: Popup; action: "viewed" | "closed" | PopupDetail } }
+  /** Monthly Wrapped (docs/scopes/wrapped.md): the top-right card and the Story it opens. `month` is `2026-10`. */
+  | { name: "wrapped"; properties: { month: string; action: (typeof WRAPPED_ACTIONS)[number] } }
   | { name: "prompt_suggestion"; properties: { action: "shown" | "accepted"; provider: string } }
-  | { name: "cloud_choice"; properties: { action: (typeof CLOUD_CHOICE_ACTIONS)[number]; reason: (typeof CLOUD_CHOICE_REASONS)[number] | null } };
+  | { name: "cloud_choice"; properties: { action: (typeof CLOUD_CHOICE_ACTIONS)[number]; reason: (typeof CLOUD_CHOICE_REASONS)[number] | null } }
+  /** A Local message the queue failed or dropped (services/threads/queue-drain-failure.ts). */
+  | { name: "queue_delivery"; properties: { outcome: "failed" | "dropped"; message: string; waiting_on: string | null; thread_status: string | null; error: string | null; detail: string | null } };
 
+/** `opened` is a click on the Share button and `copied` one on Copy. The website adds what viewers do. */
+export const SHARE_CLICKS = ["opened", "copied"] as const;
+export type ShareAction = (typeof SHARE_CLICKS)[number] | "created" | "updated" | "stopped" | "continued";
+/** `viewed`: the card showed. `opened`: the Story opened. `closed`: the card's X. Then the Story's three buttons. */
+export const WRAPPED_ACTIONS = ["viewed", "opened", "closed", "saved", "copied", "shared"] as const;
 export const CLOUD_CHOICE_ACTIONS = ["picked_local", "cloud_blocked", "forced_local"] as const;
 export const CLOUD_CHOICE_REASONS = ["signed_out", "agent_unsupported", "agent_not_in_cloud", "queue", "region"] as const;
-export const UPGRADE_PROMPTS = ["limit_notice", "queue", "queue_badge", "plan_card", "free_tip", "auto_delete", "try_cloud", "new_thread_cloud", "og_letter", "limit_notice_pack", "mac_battery", "mac_load", "mac_disk", "mac_network"] as const;
+export const UPGRADE_PROMPTS = ["limit_notice", "queue", "queue_badge", "plan_card", "free_tip", "auto_delete", "try_cloud", "new_thread_cloud", "limit_notice_pack", "mac_battery", "mac_cpu", "mac_memory", "mac_heat", "mac_disk", "mac_network", "moment_slept", "moment_quit", "moment_crowded"] as const;
 export const ACTIVATION_STEPS = ["cloud", "subagents", "second", "phone", "loop"] as const;
 export type ActivationStep = (typeof ACTIVATION_STEPS)[number];
 export const STARTER_PROMPTS = ["security", "keys", "packages", "mac"] as const;
 export type StarterPrompt = (typeof STARTER_PROMPTS)[number];
-export const POPUPS = ["credits", "star", "install", "star_card"] as const;
+export const POPUPS = ["credits", "star", "install", "star_card", "cloud_card"] as const;
 export type Popup = (typeof POPUPS)[number];
 export const POPUP_DETAILS = ["starred", "opened", "already", "migrated"] as const;
 export type PopupDetail = (typeof POPUP_DETAILS)[number];
@@ -148,7 +163,6 @@ export interface TelemetryService {
 }
 
 interface CreateTelemetryServiceArgs {
-  apiKey: string;
   appSurface: AppSurface;
   appVersion: string;
   dataDir: string;
@@ -182,11 +196,7 @@ export function runWithTelemetryAppSurface<T>(
 export async function createTelemetryService(
   args: CreateTelemetryServiceArgs,
 ): Promise<TelemetryService> {
-  if (
-    !args.enabled ||
-    args.apiKey.length === 0 ||
-    args.appVersion === DEFAULTS.appVersion
-  ) {
+  if (!args.enabled || args.appVersion === DEFAULTS.appVersion) {
     return noopTelemetryService;
   }
   const distinctId = await readOrCreateSecretFile({
@@ -245,28 +255,8 @@ export async function createTelemetryService(
     };
     const timestamp = new Date().toISOString();
     if (queue.length >= MAX_QUEUED) queue.shift();
-    const id = randomUUID();
-    queue.push({ id, name, at: timestamp, properties });
+    queue.push({ id: randomUUID(), name, at: timestamp, properties });
     if (queue.length >= BATCH_SIZE) void flush();
-    const body = JSON.stringify({
-      api_key: args.apiKey,
-      distinct_id: distinctId,
-      event: name,
-      properties: { ...properties, dual_written: true },
-      timestamp,
-      // The same ID on both sides, so the import from PostHog can find exactly what never reached our server.
-      uuid: id,
-    });
-    fetch(POSTHOG_INGESTION_URL, {
-      body,
-      headers: { "content-type": "application/json" },
-      method: "POST",
-    }).catch((error: unknown) => {
-      args.logger.debug(
-        { app_surface: appSurface, err: error, event: name },
-        "Telemetry event send failed",
-      );
-    });
   };
   return {
     flush,

@@ -65,14 +65,6 @@ await buildNodeEsmEntry({
   packageRoot: hostPackageRoot,
   sourcemap: false,
 });
-await buildNodeEsmEntry({
-  cleanDist: false,
-  entryPoint: resolve(packageRoot, "src", "bin", "bb-host-daemon.ts"),
-  executable: true,
-  outfile: resolve(hostPackageRoot, "dist", "bb-host-daemon.js"),
-  packageRoot: hostPackageRoot,
-  sourcemap: false,
-});
 
 await mkdir(hostDaemonTarget, { recursive: true });
 await copyFile(
@@ -117,7 +109,6 @@ await writeFile(
       bin: {
         "room-cli": "dist/room-cli.js",
         "bb-app": "dist/bb-app.js",
-        "bb-host-daemon": "dist/bb-host-daemon.js",
       },
       files: ["dist", "host-daemon", "README.md"],
       engines: sourcePackageJson.engines,

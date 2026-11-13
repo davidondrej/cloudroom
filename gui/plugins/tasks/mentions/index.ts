@@ -31,7 +31,7 @@ interface AttachmentManifestRow {
 function searchTasks(
   database: PluginDatabase,
   query: string,
-  bbProjectId: string | null,
+  roomProjectId: string | null,
 ): PluginMentionItem[] {
   const normalizedQuery = query.trim();
   const search = `%${escapeLike(normalizedQuery)}%`;
@@ -61,7 +61,7 @@ function searchTasks(
         LIMIT ${SEARCH_LIMIT}
       `,
     )
-    .all({ bbProjectId, search });
+    .all({ bbProjectId: roomProjectId, search });
 
   return rows.map((row) => ({
     id: row.id,
@@ -188,10 +188,10 @@ You can act on this task with the room-cli tasks CLI. If you begin working on it
 `;
 }
 
-export function registerMentions(bb: BbPluginApi, store: TasksApiStore): void {
-  const database = bb.storage.database();
+export function registerMentions(room: BbPluginApi, store: TasksApiStore): void {
+  const database = room.storage.database();
 
-  bb.ui.registerMentionProvider({
+  room.ui.registerMentionProvider({
     id: "task",
     label: "Tasks",
     search({ query, projectId }) {

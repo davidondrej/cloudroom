@@ -1,10 +1,9 @@
 import { useState, type MouseEvent as ReactMouseEvent } from "react";
 import { AppSidebar } from "@/components/sidebar/AppSidebar";
 import { SettingsSidebar } from "@/components/settings/SettingsSidebar";
-import { ResourceSidebar } from "@/components/tools/ResourceSidebar";
 import { Sidebar, useSidebar } from "@/components/ui/sidebar.js";
 
-export type AppLayoutSidebarMode = "app" | "settings" | "skills";
+export type AppLayoutSidebarMode = "app" | "settings";
 
 interface AppLayoutSidebarProps {
   mode: AppLayoutSidebarMode;
@@ -12,7 +11,6 @@ interface AppLayoutSidebarProps {
   isResizing: boolean;
   appRoutePath: string;
   settingsRoutePath: string;
-  toolsBackRoutePath: string;
 }
 
 export function AppLayoutSidebar({
@@ -21,7 +19,6 @@ export function AppLayoutSidebar({
   isResizing,
   appRoutePath,
   settingsRoutePath,
-  toolsBackRoutePath,
 }: AppLayoutSidebarProps) {
   const { isCompactViewport, isMobileSidebarClosing } = useSidebar();
   const holdCurrentMode = isCompactViewport && isMobileSidebarClosing;
@@ -48,14 +45,6 @@ export function AppLayoutSidebar({
             mobileHosted
           />
         ) : null}
-        {renderedMode === "skills" ? (
-          <ResourceSidebar
-            onResizeMouseDown={onResizeMouseDown}
-            isResizing={isResizing}
-            appRoutePath={toolsBackRoutePath}
-            mobileHosted
-          />
-        ) : null}
       </Sidebar>
     );
   }
@@ -66,16 +55,6 @@ export function AppLayoutSidebar({
         onResizeMouseDown={onResizeMouseDown}
         isResizing={isResizing}
         appRoutePath={appRoutePath}
-      />
-    );
-  }
-
-  if (renderedMode === "skills") {
-    return (
-      <ResourceSidebar
-        onResizeMouseDown={onResizeMouseDown}
-        isResizing={isResizing}
-        appRoutePath={toolsBackRoutePath}
       />
     );
   }

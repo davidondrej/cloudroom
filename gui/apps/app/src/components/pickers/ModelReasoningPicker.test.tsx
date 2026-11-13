@@ -368,6 +368,21 @@ describe("ModelReasoningPicker", () => {
     expect(onReasoningChange).not.toHaveBeenCalled();
   });
 
+  it("steps effort one level from the hover arrows and stops at the ends", () => {
+    const { onReasoningChange } = renderPicker();
+    const stepButton = (name: string) =>
+      screen.getByRole("button", { name }) as HTMLButtonElement;
+    expect(stepButton("Lower reasoning effort").disabled).toBe(true);
+    fireEvent.click(stepButton("Raise reasoning effort"));
+    expect(onReasoningChange).toHaveBeenCalledExactlyOnceWith("high");
+    cleanup();
+    renderPicker({ reasoningValue: "high", onReasoningChange });
+    expect(stepButton("Raise reasoning effort").disabled).toBe(true);
+    fireEvent.click(stepButton("Lower reasoning effort"));
+    expect(onReasoningChange).toHaveBeenLastCalledWith("medium");
+    expect(screen.queryByRole("menu")).toBeNull();
+  });
+
   it("uses the lower-emphasis chrome token for the composer caret", () => {
     renderPicker({ muted: true });
 
@@ -378,7 +393,7 @@ describe("ModelReasoningPicker", () => {
       name: "Reasoning effort: Medium",
     });
     expect(
-      effort.querySelector('[data-icon="ChevronDown"]')?.classList,
+      screen.getByRole("button", { name: "Raise reasoning effort" }).classList,
     ).toContain("text-subtle-foreground/75");
     expect(trigger.classList).toContain("font-normal");
     expect(effort.classList).toContain("font-normal");

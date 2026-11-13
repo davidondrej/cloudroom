@@ -353,6 +353,12 @@ if [ -z "${HOME:-}" ]; then
   export HOME
 fi
 
+# The desktop app runs this installer without XDG_RUNTIME_DIR. systemctl --user
+# needs it; without it the daemon runs detached inside the app and dies with it.
+if [ "$platform" = linux ] && [ -z "${XDG_RUNTIME_DIR:-}" ] && [ -d "/run/user/$(id -u)" ]; then
+  export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+fi
+
 if [ -n "$lifecycle_action" ]; then
   run_lifecycle
   exit 0
@@ -379,6 +385,21 @@ legacy_service_slug=$(printf '%s' "$server_host" | tr '.' '-')
 # Each server gets its own data dir and daemon instance, so one machine can
 # serve several bb servers and a full local bb install keeps ~/.bb to itself.
 data_dir=${BB_DATA_DIR:-"$HOME/.bb-machines/$server_host"}
+# A join code enrolls at /internal/hosts/enroll. A Cloudroom Connect address
+# answers 404 there unless the caller has a machine relay key, which a join
+# code never carries. Check before installing anything (#1057).
+if [ -z "$bootstrap_env" ] && [ ! -f "$data_dir/auth.json" ]; then
+  enroll_status=$(curl --silent --output /dev/null --write-out '%{http_code}' \
+    --connect-timeout "$CURL_CONNECT_TIMEOUT_SECONDS" --max-time 30 \
+    -X POST -H 'content-type: application/json' --data '{}' \
+    "${server_url%/}/internal/hosts/enroll" </dev/null) || enroll_status=000
+  if [ "$enroll_status" = 404 ]; then
+    fail_step "$server_url does not accept join codes, so nothing was installed."
+    detail "Cloudroom Connect addresses only let in machines that have their own relay key." >&2
+    detail "On your Cloudroom computer, run room-cli machine create --provider manual (or Settings → Machines → Add a machine), then run the command it prints here." >&2
+    exit 1
+  fi
+fi
 mkdir -p "$HOME/.local/bin"
 if [ ! -e "$HOME/.local/bin/room-cli" ] && [ ! -L "$HOME/.local/bin/room-cli" ]; then
   shim_file=$(mktemp "$HOME/.local/bin/.bb-machine.XXXXXX")
@@ -544,7 +565,12 @@ complete_step "Using local host-daemon port $host_daemon_port"
 # Always install the server's own build. Never fall back to a bb-app on PATH
 # or on npm: that could be other people's software (ADR 0147).
 package_url="${server_url%/}/install/bb-app.tgz"
-package_dir=$(mktemp -d "${TMPDIR:-/tmp}/bb-app.XXXXXX")
+# npm runs this package's install scripts outside any sandbox, so it stays in
+# the data folder, never the OS temp folder, which Read-only Mac commands and
+# sandboxed agents can change. A stopped install removes it too.
+package_dir=$(mktemp -d "$canonical_data_dir/bb-app-download.XXXXXX")
+trap 'rm -rf "$package_dir"' EXIT
+trap 'exit 1' HUP INT TERM
 package_file="$package_dir/bb-app.tgz"
 # The server's access headers (a relay key) reach curl through a pipe, never a
 # file: Read-only Mac commands can read temp folders.
@@ -634,11 +660,19 @@ elif [ "$package_status" -ge 200 ] && [ "$package_status" -lt 300 ]; then
   bb_app_npm_prefix=$machine_npm_prefix
   complete_step "Installed the server's bb-app build"
 else
+  server_message=$(node -e '
+    try {
+      const message = JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8")).message;
+      if (typeof message === "string") process.stdout.write(message.split("\n")[0].slice(0, 300));
+    } catch {}
+  ' "$package_file" 2>/dev/null) || server_message=
   rm -rf "$package_dir"
   fail_step "Could not download the server's bb-app package from $package_url (HTTP $package_status). Check that the server is running and up to date, then rerun this command."
+  [ -z "$server_message" ] || detail "Server: $server_message" >&2
   exit 1
 fi
 rm -rf "$package_dir"
+trap - EXIT HUP INT TERM
 
 if [ -n "$bb_app_npm_prefix" ]; then
   bb_app="$bb_app_npm_prefix/bin/bb-app"
@@ -959,7 +993,8 @@ EOF
   ready_row "data" "$data_dir"
   ready_row "service" "$service_file"
   printf '\n'
-  if [ "$systemd_scope" = --system ]; then
+  # Linger starts the user's services at boot and keeps them after logout.
+  if [ "$systemd_scope" = --system ] || loginctl enable-linger "$(id -un)" >/dev/null 2>&1; then
     detail "Starts automatically when this machine boots."
   else
     detail "Starts with your systemd user session."

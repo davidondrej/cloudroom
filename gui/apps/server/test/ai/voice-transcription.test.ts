@@ -276,7 +276,7 @@ describe("voice transcription", () => {
     }
   });
 
-  it("uses the 10 second timeout budget for OpenAI transcription", async () => {
+  it("scales the OpenAI transcription timeout with the audio size", async () => {
     const harness = await createTestAppHarness({
       transcriptionModel: "openai/gpt-4o-transcribe",
     });
@@ -297,6 +297,10 @@ describe("voice transcription", () => {
         transcribeVoiceInput(harness.deps, { file: voiceFile() }),
       ).resolves.toBe("hello openai");
       expect(setTimeoutSpy).toHaveBeenCalledWith(expect.any(Function), 10_000);
+      // Longer recordings get 30 s more per MB (#1338).
+      const longFile = new File([Buffer.alloc(2 * 1024 * 1024)], "long.webm");
+      await transcribeVoiceInput(harness.deps, { file: longFile });
+      expect(setTimeoutSpy).toHaveBeenCalledWith(expect.any(Function), 70_000);
     } finally {
       vi.unstubAllGlobals();
       setTimeoutSpy.mockRestore();

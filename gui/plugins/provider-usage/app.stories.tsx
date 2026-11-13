@@ -132,7 +132,7 @@ const healthyPool = machine("source:account-pool", "Account Pooler", [
   provider(
     "team-claude",
     "claude-code",
-    measured("team@example.com", 97, "Max (20x)"),
+    measured("team@example.com", 97, "Ultra"),
   ),
 ]);
 const healthyMachine = machine("host-m4", "Michael-M4", [

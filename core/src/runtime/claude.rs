@@ -56,7 +56,7 @@ pub(super) fn command(
         command.args(["--settings", &settings]);
         command
     };
-    profile_env(&mut command, config, profile);
+    profile_env(&mut command, config, profile, false);
     command
         .args([
             "-p",
@@ -68,8 +68,8 @@ pub(super) fn command(
             "--include-partial-messages",
             "--replay-user-messages",
             "--dangerously-skip-permissions",
-            "--permission-prompts",
-            "none",
+            "--permission-prompt-tool",
+            "stdio",
             "--no-chrome",
         ])
         .args([
@@ -114,29 +114,61 @@ pub(super) fn key_path(config: &Config) -> PathBuf {
     config.state_dir.join("claude-api-key")
 }
 
-/// Fingerprint of the login files `profile_env` reads, so a running agent can tell its login changed.
+/// Fingerprint of the login files `profile_env` reads, so a running agent can tell its login changed. The
+/// ANTHROPIC_ lines of the Cloud environment count too: an idle agent then restarts without a removed key (#1340).
 pub(super) fn login(config: &Config) -> u64 {
     use std::hash::{DefaultHasher, Hash, Hasher};
     let mut hasher = DefaultHasher::new();
     fs::read(key_path(config)).ok().hash(&mut hasher);
     fs::read(token_path(config)).ok().hash(&mut hasher);
+    let environment = fs::read_to_string(config.state_dir.join("environment")).unwrap_or_default();
+    for line in environment
+        .lines()
+        .filter(|line| line.starts_with("ANTHROPIC_"))
+    {
+        line.hash(&mut hasher);
+    }
     hasher.finish()
 }
 
-pub(super) fn profile_env(command: &mut Command, config: &Config, profile: &HarnessConfig) {
+/// Fingerprint of the cloud MCP sign-ins the website wrote. Claude connects MCP servers only at start, so a new
+/// sign-in restarts an idle agent before its next prompt (#1175). Token refreshes never change it.
+pub(super) fn mcp_login(config: &Config) -> u64 {
+    use std::hash::{DefaultHasher, Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    fs::read(config.state_dir.join("claude-mcp-signins"))
+        .ok()
+        .hash(&mut hasher);
+    hasher.finish()
+}
+
+/// `shell` is a terminal: the user's own ANTHROPIC_ variables stay there for their apps.
+pub(super) fn profile_env(
+    command: &mut Command,
+    config: &Config,
+    profile: &HarnessConfig,
+    shell: bool,
+) {
     // Setting this even to ~/.claude relocates ~/.claude.json and hides native user settings.
     if profile.home != config.account_home.join(".claude") {
         command.env("CLAUDE_CONFIG_DIR", &profile.home);
     }
     // Cloudroom matches the Mac's Claude version (ADR 0133); Claude's own updater must not move it.
     command.env("DISABLE_AUTOUPDATER", "1");
-    // Claude prefers an API key over a subscription token, so pass only one.
+    // Claude prefers an API key over a subscription token, so pass only one. A key the user saved in Cloud
+    // environment settings for their app must not replace the login saved here either (#1340).
     let key = fs::read_to_string(key_path(config)).unwrap_or_default();
     if !key.trim().is_empty() {
+        if !shell {
+            hide_app_keys(command);
+        }
         command.env("ANTHROPIC_API_KEY", key.trim());
     } else if let Ok(saved) = fs::read_to_string(token_path(config)) {
         let mut lines = saved.lines().map(str::trim);
         if let Some(token) = lines.next().filter(|s| !s.is_empty()) {
+            if !shell {
+                hide_app_keys(command);
+            }
             command.env("CLAUDE_CODE_OAUTH_TOKEN", token);
         }
         // Without the plan, Claude hides plan-only models such as Opus 1M.
@@ -146,12 +178,53 @@ pub(super) fn profile_env(command: &mut Command, config: &Config, profile: &Harn
     }
 }
 
-pub(super) async fn auth_ready(config: &Config) -> io::Result<bool> {
-    let (code, value) = run_json(config, &["auth", "status", "--json"], 10).await?;
-    match (code, value["loggedIn"].as_bool()) {
+/// Claude bills an Anthropic key from its environment before the login saved here, so the user's own keys from
+/// Cloud environment settings move to CLOUDROOM_APP_ names Claude doesn't read. Core's agent-shell hook and its Node
+/// and Python preloads move them back in the commands and MCP servers Claude runs, so the user's app keeps its key
+/// (#1340). Without them (no helpers, or the user's own CLAUDE_ENV_FILE), nothing moves. CLAUDECODE marks Claude's
+/// children, so a CLAUDECODE from Cloud environment settings never reaches Claude itself.
+fn hide_app_keys(command: &mut Command) {
+    let get = |command: &Command, name: &str| {
+        let mut envs = command.as_std().get_envs();
+        envs.find(|(key, _)| *key == name)
+            .and_then(|(_, value)| value.map(ToOwned::to_owned))
+    };
+    // The helpers bring CLAUDE_ENV_FILE, NODE_OPTIONS and PYTHONPATH together. The user's own NODE_OPTIONS and
+    // PYTHONPATH keep Core's ahead (`super::command`); their own CLAUDE_ENV_FILE replaces Core's.
+    let hook = super::linux::agent_env()
+        .iter()
+        .find(|(name, _)| *name == "CLAUDE_ENV_FILE");
+    if hook.is_none_or(|(_, hook)| {
+        get(command, "CLAUDE_ENV_FILE").is_none_or(|own| own != hook.as_str())
+    }) {
+        return;
+    }
+    command.env_remove("CLAUDECODE");
+    for name in ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"] {
+        if let Some(value) = get(command, name) {
+            command
+                .env(format!("CLOUDROOM_APP_{name}"), value)
+                .env_remove(name);
+        }
+    }
+}
+
+/// Logged in or out, or why `auth status` gave no answer: a reason word, never Claude's own output (#1222).
+pub(super) async fn auth_ready(config: &Config) -> Result<bool, &'static str> {
+    let (code, bytes) = run_output(config, &["auth", "status", "--json"], 10)
+        .await
+        .map_err(|error| match error.kind() {
+            io::ErrorKind::TimedOut => "check_timeout",
+            _ => "check_failed",
+        })?;
+    let logged_in = serde_json::from_slice::<Value>(&bytes)
+        .ok()
+        .and_then(|value| value["loggedIn"].as_bool());
+    match (code, logged_in) {
         (Some(0), Some(true)) => Ok(true),
         (Some(1), Some(false)) => Ok(false),
-        _ => Err(io::Error::other("invalid Claude account response")),
+        (Some(0 | 1), _) => Err("check_bad_response"),
+        _ => Err("check_bad_exit"),
     }
 }
 
@@ -207,7 +280,7 @@ pub(super) async fn run_output(
         .get(&super::Kind::Claude)
         .ok_or_else(|| io::Error::other("Claude is not configured"))?;
     let mut command = super::command(&profile.binary, config);
-    profile_env(&mut command, config, profile);
+    profile_env(&mut command, config, profile, false);
     command.args(args).stderr(std::process::Stdio::null());
     let group = config
         .storage
@@ -285,19 +358,23 @@ pub(super) async fn start(handle: &Handle) -> io::Result<String> {
     // `none` runs any model without an effort override; a start picks it for a model without effort (#1059).
     if let Some(reasoning) = handle.reasoning.as_deref().filter(|r| *r != "none") {
         let models = model_catalog(&info)?;
-        super::supports(
-            super::Kind::Claude,
-            &models,
-            &handle.profile.model,
-            reasoning,
-        )
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
-        handle
-            .call(
-                "apply_flag_settings",
-                json!({"settings":{"effortLevel":reasoning,"fastMode":false}}),
-            )
-            .await?;
+        let model = &handle.profile.model;
+        let level = match super::supports(super::Kind::Claude, &models, model, reasoning) {
+            Ok(()) => Some(reasoning.to_owned()),
+            Err(error) if handle.resume.is_none() => {
+                return Err(io::Error::new(io::ErrorKind::InvalidInput, error));
+            }
+            // A resume never fails on an effort its model doesn't take: it runs the nearest one.
+            Err(_) => super::fit_reasoning(super::Kind::Claude, &models, model, reasoning),
+        };
+        if let Some(level) = level.filter(|level| level != "none") {
+            handle
+                .call(
+                    "apply_flag_settings",
+                    json!({"settings":{"effortLevel":level,"fastMode":false}}),
+                )
+                .await?;
+        }
     }
     handle
         .call(
@@ -337,6 +414,21 @@ pub(super) async fn send(handle: &Handle, request: &str, input: &Value) -> io::R
     if !warnings.is_empty() {
         crate::workspace::files::settle(&handle.repository, SKILL_WAIT).await;
         (text, warnings) = expand().await.map_err(io::Error::other)??;
+    }
+    // A model picked since the last prompt runs from this one on, in the same session, as Local's Claude does.
+    if let Some(model) = input["model"].as_str()
+        && model != handle.live_model()
+    {
+        handle
+            .call("set_model", json!({"model":model}))
+            .await
+            .map_err(|error| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("Claude could not switch to {model}: {error}"),
+                )
+            })?;
+        handle.set_live_model(model);
     }
     let mut settings = json!({"fastMode":false,"effortLevel":null});
     if let Some(reasoning) = input["reasoning"].as_str().or(handle.reasoning.as_deref()) {
@@ -806,6 +898,12 @@ impl Adapter for Protocol {
                     .push(Self::reply_control(id, json!({"continue":true})));
                 return Ok(events);
             }
+            // Full access, like a Local thread: allow what a Claude ask rule would prompt for. The Command Guard's hook denies first.
+            if value["request"]["subtype"] == "can_use_tool" {
+                let allow = json!({"behavior":"allow","updatedInput":value["request"]["input"]});
+                self.pending_frames.push(Self::reply_control(id, allow));
+                return Ok(events);
+            }
             let response = if value["request"]["subtype"] == "hook_callback" {
                 json!({"continue":false,"stopReason":"Native Claude subagents are disabled. Start a managed child thread with `room-cli thread spawn`."})
             } else {
@@ -901,6 +999,12 @@ impl Adapter for Protocol {
                 });
             }
         }
+        // Claude's whole list of background tasks, sent on each change. A count of processes can miss them (#1216).
+        if kind == "system" && value["subtype"] == "background_tasks_changed" {
+            let mut tasks = value["tasks"].as_array().into_iter().flatten();
+            let running = tasks.any(|task| task["task_type"] == "local_bash");
+            events.push(Event::Background { running });
+        }
         if kind == "system" && value["subtype"] == "compact_boundary" {
             self.compacted = true;
             self.context = value["compact_metadata"]["post_tokens"].as_u64();
@@ -926,6 +1030,24 @@ impl Adapter for Protocol {
             events.extend(state.started());
         }
         let request = self.active.as_ref().map(|(_, id)| id.clone());
+        // Claude's safeguards flagged a message and Claude retried on another model, kept for the rest of this run
+        // (`local`: this reply only). The thread's chosen model stays for its next run; this says which model answered.
+        if kind == "system"
+            && value["subtype"] == "model_refusal_fallback"
+            && let Some(model) = value["fallback_model"].as_str()
+        {
+            let span = if value["scope"] == "local" {
+                "this reply"
+            } else {
+                "the rest of this run"
+            };
+            events.push(Event::Record {
+                kind: "model_fallback",
+                data: json!({"harness":"claude-code","request_id":request,"original_model":value["original_model"],
+                    "fallback_model":model,"message":format!("Claude switched to {model} for {span}.")}),
+                native: None,
+            });
+        }
         let mut data = json!({"harness":"claude-code","type":kind,"request_id":request});
         let mut keep = true;
         let event_kind = if kind == "stream_event" {
@@ -1480,5 +1602,75 @@ mod tests {
         assert!(feed(child("other")).is_err());
         feed(json!({"type":"user","session_id":"s","parent_tool_use_id":null,"message":{"content":[{"type":"tool_result","tool_use_id":"skill","content":"done"}]}})).unwrap();
         assert!(feed(child("skill")).is_err());
+        // A project ask rule must not stall a Cloud thread: nobody can answer the prompt (#1077).
+        let ask =
+            json!({"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"git push"}});
+        feed(json!({"type":"control_request","request_id":"ask","request":ask})).unwrap();
+        assert_eq!(
+            claude.pending_frames[0]["response"]["response"],
+            json!({"behavior":"allow","updatedInput":{"command":"git push"}})
+        );
+    }
+
+    #[test]
+    fn a_refusal_fallback_records_the_model_that_answered() {
+        let profile = HarnessConfig {
+            binary: "claude".into(),
+            home: "/nonexistent".into(),
+            model: "claude-opus-5-5".into(),
+            provider: None,
+        };
+        let mut claude = Protocol::new(&profile, "s".into(), None, None).unwrap();
+        let mut state = Progress::default();
+        let fallback = |scope| json!({"type":"system","subtype":"model_refusal_fallback","scope":scope,"original_model":"claude-opus-5-5","fallback_model":"claude-opus-4-8"});
+        for (frame, expected) in [
+            (fallback("session"), Some("for the rest of this run.")),
+            (fallback("local"), Some("for this reply.")),
+            (json!({"type":"system","subtype":"status"}), None),
+        ] {
+            let events = claude.receive(&frame, frame.to_string(), &mut state);
+            let notice = events.unwrap().into_iter().find_map(|event| match event {
+                Event::Record {
+                    kind: "model_fallback",
+                    data,
+                    ..
+                } => Some(data),
+                _ => None,
+            });
+            let expected = expected.map(|span| {
+                json!([
+                    "claude-opus-4-8",
+                    format!("Claude switched to claude-opus-4-8 {span}")
+                ])
+            });
+            assert_eq!(
+                notice.map(|d| json!([d["fallback_model"], d["message"]])),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn only_listed_background_bash_keeps_the_agent_awake() {
+        let profile = HarnessConfig {
+            binary: "claude".into(),
+            home: "/nonexistent".into(),
+            model: "haiku".into(),
+            provider: None,
+        };
+        let mut claude = Protocol::new(&profile, "s".into(), None, None).unwrap();
+        for (tasks, running) in [
+            (json!([{"task_id":"b1","task_type":"local_bash"}]), true),
+            (json!([]), false),
+            (json!([{"task_id":"m1","task_type":"monitor"}]), false),
+        ] {
+            let frame = json!({"type":"system","subtype":"background_tasks_changed","tasks":tasks});
+            let events = claude.receive(&frame, frame.to_string(), &mut Progress::default());
+            let found = events.unwrap().into_iter().find_map(|event| match event {
+                Event::Background { running } => Some(running),
+                _ => None,
+            });
+            assert_eq!(found, Some(running), "{tasks}");
+        }
     }
 }

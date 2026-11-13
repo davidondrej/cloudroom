@@ -7,7 +7,7 @@ import type {
   SystemRestartModelDiscoveryRequest,
   SystemProvidersQuery,
 } from "@cloudroom/server-contract";
-import { type CustomProviderModel } from "@cloudroom/config/bb-app-managed-config";
+import { type CustomProviderModel } from "@cloudroom/config/app-managed-config";
 import {
   reasoningEffortsForLevels,
   type AvailableModel,
@@ -326,11 +326,20 @@ export async function resolveSystemProviderModels(
     provider,
     access: { kind: "validation", requiredModel: null },
   });
+  // No built-in fallback (Codex): a failed or slow listing reuses what this host listed last,
+  // even before an app update changed the catalog's fingerprint (#1399).
+  const code = result.modelLoadError?.code;
   const { models, selectedOnlyModels } = appendCustomModels(
     deps.providerRegistry,
     {
       customModels: deps.config.customModels,
-      models: result.models,
+      models:
+        result.models.length === 0 && (code === "timeout" || code === "failed")
+          ? deps.lifecycleDedupers.providerModelCatalogs.lastListedModels(
+              deps,
+              { cwd: args.cwd ?? null, hostId: args.hostId, provider },
+            )
+          : result.models,
       providerId: provider.id,
       selectedOnlyModels: result.selectedOnlyModels,
     },
@@ -466,6 +475,10 @@ async function resolveExecutionOptions(
       : (requireEnvironment(deps.db, query.environmentId).path ?? undefined);
   const { hostId, hostLookupError, providersPromise } =
     resolveSystemProviderInfosPlan(deps, query);
+  // Validation tells an offline host apart from a failed discovery (#1291).
+  if (access.kind === "validation" && hostLookupError !== null) {
+    throw hostLookupError;
+  }
   const configuredRequestedProvider = query.providerId
     ? includeRequestedRegisteredProvider(
         deps,
@@ -561,6 +574,15 @@ async function resolveExecutionOptions(
           access,
         });
 
+  // A host that dropped mid-listing is offline, not a failed or slow discovery (#1291).
+  if (
+    access.kind === "validation" &&
+    (modelResult.modelLoadError?.code === "failed" ||
+      modelResult.modelLoadError?.code === "timeout")
+  ) {
+    requireConnectedHostSession(deps, hostId);
+  }
+
   const { models, selectedOnlyModels } = appendCustomModels(
     deps.providerRegistry,
     {
@@ -640,6 +662,34 @@ function listFallbackModelsForLoadError(
       (effort) => ({ ...effort }),
     ),
   }));
+}
+
+/** A provider CLI that is missing (#907) or signed out (#1160) on the host; retrying can't fix it. */
+export function providerSetupError(
+  deps: Pick<LoggedWorkSessionDeps, "providerRegistry">,
+  error: SystemExecutionOptionsModelLoadError,
+): ApiError | null {
+  const info = deps.providerRegistry.get(error.providerId)?.info;
+  const name = info?.displayName ?? error.providerId;
+  const options = { details: error, retryable: false };
+  if (error.code === "missing_executable") {
+    const installUrl = info?.strings?.installUrl;
+    return new ApiError(
+      409,
+      "provider_cli_missing",
+      `${name} can't start on this host: its CLI, or a file it needs, is missing. Reinstall ${name}${installUrl ? ` (${installUrl})` : ""}, then try again.`,
+      options,
+    );
+  }
+  if (error.code === "auth_required") {
+    return new ApiError(
+      409,
+      "provider_auth_required",
+      `${name} is not signed in on this host. ${info?.strings?.signInHint ?? `Sign in to ${name} on the machine.`} Then try again.`,
+      options,
+    );
+  }
+  return null;
 }
 
 function buildModelLoadError({

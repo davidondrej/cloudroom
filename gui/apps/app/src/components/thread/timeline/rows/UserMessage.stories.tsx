@@ -425,7 +425,7 @@ const parentChildSystemMessageFixtures = [
 
 const longSystemMessage = buildMessage(
   [
-    "[bb system]",
+    "[system]",
     "",
     "@thread:thr_cpf5sq7pyr completed:",
     "",

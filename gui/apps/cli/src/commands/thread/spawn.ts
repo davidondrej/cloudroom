@@ -16,7 +16,7 @@ import {
   DEFAULT_BB_REQUEST_TIMEOUT_MS,
 } from "@cloudroom/sdk/node";
 import { action } from "../../action.js";
-import { CLI_READ_TIMEOUT_MS, createCliBbSdk } from "../../client.js";
+import { CLI_READ_TIMEOUT_MS, createCliRoomSdk } from "../../client.js";
 import {
   resolveExplicitIdFlag,
   resolveContextThreadId,
@@ -107,7 +107,7 @@ export function resolveSpawnEnvironmentValue(
 // Agents copy the short Claude ID from their system prompt (claude-opus-5-5),
 // which silently picks the 200K model. Keep the caller's exact 1M variant.
 async function preferCallerModel(
-  sdk: ReturnType<typeof createCliBbSdk>,
+  sdk: ReturnType<typeof createCliRoomSdk>,
   model: string,
 ): Promise<string> {
   const threadId = resolveContextThreadId();
@@ -245,7 +245,7 @@ async function buildProviderSpawnEnvironment(args: {
     );
   }
   const requested = args.environmentProvider.trim();
-  const providers = await createCliBbSdk(
+  const providers = await createCliRoomSdk(
     args.serverUrl,
     CLI_READ_TIMEOUT_MS,
   ).environments.listProviders({ projectId: args.projectId });
@@ -469,7 +469,7 @@ export function registerSpawnCommand(
         }
         const machineProvider = opts.newMachine
           ? (
-              await createCliBbSdk(
+              await createCliRoomSdk(
                 getUrl(),
                 CLI_READ_TIMEOUT_MS,
               ).hosts.experimental_listProviders()
@@ -590,11 +590,13 @@ export function registerSpawnCommand(
             ? { initiator: "agent" as const, senderThreadId: parentThreadId }
             : null;
 
+        // The calling agent, so the website can tell which agent starts Cloud threads (docs/scopes/credit-burn.md).
+        const launcherThreadId = resolveContextThreadId();
         // Sent on every spawn, so an unanswered one can be retried without a duplicate.
         const requestId = opts.requestId ?? randomUUID();
         let thread: Thread;
         try {
-          const sdk = createCliBbSdk(getUrl(), DEFAULT_BB_REQUEST_TIMEOUT_MS);
+          const sdk = createCliRoomSdk(getUrl(), DEFAULT_BB_REQUEST_TIMEOUT_MS);
           const model = opts.model && (await preferCallerModel(sdk, opts.model));
           const input = await uploadClientAttachmentInputs({
             input: buildPromptInputs({
@@ -628,6 +630,7 @@ export function registerSpawnCommand(
             ...(visibility ? { visibility } : {}),
             environment,
             startedOnBehalfOf,
+            ...(launcherThreadId && /^thr_[a-z0-9]{1,40}$/.test(launcherThreadId) ? { launcherThreadId } : {}),
             originKind: opts.originKind ?? null,
             ...(parentThreadId ? { parentThreadId } : {}),
             ...(opts.section ? { sectionId: opts.section } : {}),

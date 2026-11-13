@@ -5,7 +5,9 @@ import {
   isStandaloneBuiltinTeleportCommand,
   type PromptInput,
 } from "@cloudroom/domain";
-import { getAppSettings, type DbConnection } from "@cloudroom/db";
+import { createHash } from "node:crypto";
+import { eq } from "drizzle-orm";
+import { getAppSettings, latestContextResetSequence, threadCustomInstructions as sent, type DbConnection, type DbQueryConnection } from "@cloudroom/db";
 import { renderTemplate } from "@cloudroom/templates";
 import { ApiError } from "../../errors.js";
 import { listPluginInstructionContributions } from "../plugins/plugin-agent-contributions.js";
@@ -18,11 +20,16 @@ export const pluginInstructionMaxChars = (pluginId: string) => (pluginId === "or
 
 type Context = { threadId: string; projectId: string };
 
-/** `vps`: the account has its own VPS connected (ADR 0319), so its Cloud threads may run there. */
-export function cloudroomSystemPrompt(db: DbConnection, options: { vps?: boolean } = {}): string | undefined {
+/**
+ * The system prompt for a Local or a Cloud thread: the shared lines plus that kind's own.
+ * `vps`: the account has its own VPS connected (ADR 0319), so its Cloud threads may run there.
+ */
+export function cloudroomSystemPrompt(db: DbConnection, kind: "local" | "cloud", options: { vps?: boolean } = {}): string | undefined {
   const settings = getAppSettings(db);
   return settings.systemPromptEnabled
     ? renderTemplate("standardAgentAppendInstructions", {
+        local: kind === "local" ? "on" : "",
+        cloud: kind === "cloud" ? "on" : "",
         bugReports: settings.bugReportsEnabled ? "on" : "",
         mac: process.platform === "win32" ? "" : "on",
         windows: process.platform === "win32" ? "on" : "",
@@ -61,36 +68,83 @@ export function resolveCustomInstructions(context: Context): string {
   return text.trim();
 }
 
+/** A thread gets its instructions again after this many messages, in case its agent drifted. */
+const RESEND_AFTER_MESSAGES = 20;
+const REMOVED = "None now. The user removed them, so the earlier ones no longer apply.";
+const BLOCK = "<cloudroom_custom_instructions>";
+const hashOf = (text: string) => (text ? createHash("sha256").update(text).digest("hex").slice(0, 16) : "");
+
+/**
+ * The custom instructions this message must carry, or "" while the thread's agent still has the current ones.
+ * A thread gets them on its first message, after they change, after its context is compacted or cleared, after the
+ * copy it had may be lost (markCustomInstructionsLost), and every RESEND_AFTER_MESSAGES messages.
+ * `fresh`: earlier messages may be gone (a new agent session, a rewind, an edited message), so send them again.
+ * A thread that once had instructions and now has none is told so, the same way.
+ */
+export function dueCustomInstructions(db: DbQueryConnection, context: Context, fresh = false): string {
+  const text = resolveCustomInstructions(context);
+  const last = db.select().from(sent).where(eq(sent.threadId, context.threadId)).get();
+  if (!text && !last) return "";
+  const hash = hashOf(text);
+  const resetAt = latestContextResetSequence(db, context.threadId);
+  const has = last && !fresh && !last.resend && last.resetAt === resetAt && last.hash === hash;
+  if (has && (!text || last.messages < RESEND_AFTER_MESSAGES)) {
+    db.update(sent).set({ messages: last.messages + 1 }).where(eq(sent.threadId, context.threadId)).run();
+    return "";
+  }
+  const row = { hash, resetAt, messages: 1, resend: false };
+  db.insert(sent).values({ threadId: context.threadId, ...row }).onConflictDoUpdate({ target: sent.threadId, set: row }).run();
+  return text || REMOVED;
+}
+
+/** The thread's copy may be gone: its message was cancelled or failed, or its agent got a new session. The next message carries one. */
+export function markCustomInstructionsLost(db: DbQueryConnection, threadId: string): void {
+  db.update(sent).set({ resend: true }).where(eq(sent.threadId, threadId)).run();
+}
+
+/** Whether a message carries the instructions block. */
+export function carriesCustomInstructions(input: readonly PromptInput[]): boolean {
+  return input.some((part) => part.type === "text" && part.text.includes(BLOCK));
+}
+
+/** Commands and empty messages never reach the agent as a message, so they carry no instructions. */
+function takesInstructions(input: PromptInput[]): boolean {
+  return input.length > 0 &&
+    !isStandaloneBuiltinCompactCommand(input) &&
+    !isStandaloneBuiltinClearCommand(input) &&
+    !isStandaloneBuiltinTeleportCommand(input) &&
+    !isStandaloneBuiltinContextCommand(input);
+}
+
 export function appendCustomInstructions(
   input: PromptInput[],
   instructions: string,
 ): PromptInput[] {
-  if (
-    !instructions ||
-    input.length === 0 ||
-    isStandaloneBuiltinCompactCommand(input) ||
-    isStandaloneBuiltinClearCommand(input) ||
-    isStandaloneBuiltinTeleportCommand(input) ||
-    isStandaloneBuiltinContextCommand(input)
-  )
-    return input;
+  if (!instructions || !takesInstructions(input)) return input;
   return [
     ...input,
     {
       type: "text",
-      text: `\n<cloudroom_custom_instructions>\nThe user's current custom instructions for this message:\n${instructions}\n</cloudroom_custom_instructions>`,
+      text: `\n${BLOCK}\nThe user's custom instructions. They apply to this whole thread until replaced:\n${instructions}\n</cloudroom_custom_instructions>`,
       mentions: [],
       visibility: "agent-only",
     },
   ];
 }
 
+/** `fresh`: this message starts a new agent session, which may have nothing from before. */
 export function prepareCustomInstructionInput(
+  db: DbQueryConnection,
   context: Context,
   original: Input,
+  fresh = false,
 ): Input {
-  const instructions = resolveCustomInstructions(context);
-  const input = appendCustomInstructions(original.input, instructions);
+  const takes = takesInstructions(original.input);
+  // A new session that starts without a message gets them with its first one.
+  if (fresh && !takes) markCustomInstructionsLost(db, context.threadId);
+  const input = takes
+    ? appendCustomInstructions(original.input, dueCustomInstructions(db, context, fresh))
+    : original.input;
   const groups = original.inputGroups;
   if (input === original.input) {
     return { input, ...(groups === undefined ? {} : { inputGroups: groups }) };

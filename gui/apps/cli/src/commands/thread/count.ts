@@ -11,7 +11,7 @@ import {
 } from "@cloudroom/server-contract";
 import type { ThreadCountResult } from "@cloudroom/sdk";
 import { action } from "../../action.js";
-import { createCliBbSdk } from "../../client.js";
+import { createCliRoomSdk } from "../../client.js";
 import { columnWidths, printBorderlessTable } from "../../table.js";
 import { joinValues, outputJson } from "../helpers.js";
 
@@ -56,7 +56,7 @@ export function registerCountCommand(
     .action(
       action(async (opts: ThreadCountCommandOptions) => {
         const groupBy = parseGroupBy(opts.by);
-        const result = await createCliBbSdk(getUrl()).threads.count({
+        const result = await createCliRoomSdk(getUrl()).threads.count({
           ...(opts.status ? { status: parseStatus(opts.status) } : {}),
           ...(opts.host ? { hostId: opts.host } : {}),
           ...(opts.provider ? { providerId: opts.provider } : {}),
@@ -118,7 +118,7 @@ function compareGroupKeys(left: string | null, right: string | null): number {
   return left.localeCompare(right);
 }
 
-function parseStatus(value: string): ThreadStatus {
+export function parseStatus(value: string): ThreadStatus {
   const parsed = threadStatusSchema.safeParse(value.trim());
   if (parsed.success) return parsed.data;
   throw new Error(

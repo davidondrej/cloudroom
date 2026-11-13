@@ -7,7 +7,7 @@
   },
   "afterPack": "scripts/prepare-native-modules.cjs",
   "asar": true,
-  "asarUnpack": ["dist/bb-app-bridge.mjs", "node_modules/**", "!node_modules/npm/**", "!node_modules/bb-app/node_modules/npm/**", "!node_modules/bb-app/app/dist/**"],
+  "asarUnpack": ["dist/launcher-bridge.mjs", "node_modules/**", "!node_modules/npm/**", "!node_modules/bb-app/node_modules/npm/**", "!node_modules/bb-app/app/dist/**"],
   "directories": {
     "buildResources": "assets",
     "output": "release.noindex"

@@ -33,6 +33,8 @@ export interface AcpAgentDefinition {
   installer?:
     | { scriptUrl: string; args?: readonly string[] }
     | { npmPackage: string };
+  /** Older versions cannot run the ACP launch; thread start asks for an update. */
+  minimumVersion?: string;
   nativeRootsResolver?: AcpNativeRootsResolver;
 }
 

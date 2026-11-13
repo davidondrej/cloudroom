@@ -10,8 +10,8 @@ const customInstructionsSchema = z
     `Custom instructions must be at most ${MAX_CUSTOM_INSTRUCTIONS_LENGTH} characters`,
   );
 
-export default async function plugin(bb: BbPluginApi) {
-  const settings = bb.settings.define({
+export default async function plugin(room: BbPluginApi) {
+  const settings = room.settings.define({
     instructions: {
       type: "string",
       label: "Custom instructions",
@@ -24,12 +24,12 @@ export default async function plugin(bb: BbPluginApi) {
   });
 
   let current = await settings.get();
-  const legacy = await bb.storage.kv.get<string>(STORAGE_KEY);
+  const legacy = await room.storage.kv.get<string>(STORAGE_KEY);
   if (legacy !== undefined) {
     if (current.instructions.length === 0 && legacy.length > 0) {
       current = await settings.experimental_set({ instructions: legacy });
     }
-    await bb.storage.kv.delete(STORAGE_KEY);
+    await room.storage.kv.delete(STORAGE_KEY);
   }
   let customInstructions = current.instructions;
 
@@ -37,11 +37,11 @@ export default async function plugin(bb: BbPluginApi) {
     customInstructions = next.instructions;
   });
 
-  bb.agents.contributeInstructions(() =>
+  room.agents.contributeInstructions(() =>
     customInstructions.trim().length > 0 ? customInstructions : null,
   );
 
-  bb.cli.register({
+  room.cli.register({
     name: "instructions",
     summary: "Read and update the custom instructions injected into agents",
     commands: [

@@ -1,6 +1,7 @@
 ---
 name: share-server-links
 description: "Expose a local HTTP server through Cloudroom Connect and give the user its remotely accessible URL."
+disable-model-invocation: true
 ---
 
 # Share local server links via cloudroom connect

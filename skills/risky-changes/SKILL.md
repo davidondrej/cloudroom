@@ -1,6 +1,6 @@
 ---
 name: risky-changes
-description: 'Verify assumptions before implementing large or risky changes to APIs, provider data, billing, pricing, quotas, or defaults. Use when a mistake could affect customers or the user asks if a change is safe to ship. Checks real-world impact beyond passing tests.'
+description: Verify assumptions before risky changes to APIs, billing, pricing, quotas, or defaults. Use when a mistake could affect customers.
 ---
 
 # Risky Changes

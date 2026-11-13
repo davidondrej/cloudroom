@@ -2,6 +2,7 @@ import type {
   SidebarChronologicalSort,
   SidebarOrganizationMode,
 } from "@cloudroom/domain";
+import { atom } from "jotai";
 import { createSyncedPreferenceAtom } from "@/lib/ui-preferences/synced-preference-atom";
 
 export type {
@@ -74,3 +75,5 @@ export const sidebarCollapsedMachinesAtom = createSyncedPreferenceAtom(
 export const sidebarCollapsedHarnessesAtom = createSyncedPreferenceAtom(
   "sidebar.collapsedHarnesses",
 );
+
+export const revealedSelectedThreadKeyAtom = atom<string | null>(null);

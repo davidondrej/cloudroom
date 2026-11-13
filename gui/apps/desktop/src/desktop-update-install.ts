@@ -5,11 +5,14 @@ import { dirname } from "node:path";
 
 export const IDLE_INSTALL_AFTER_MS = 10 * 60_000;
 const IDLE_CHECK_MS = 15_000;
+const BACKGROUND_WAIT_MAX_MS = 24 * 60 * 60_000;
 
 export interface IdleInstallArgs {
   isUpdateDownloaded(): boolean;
   systemIdleSeconds(): number;
   hasRunningThreads(): Promise<boolean>;
+  /** Idle Local threads still waiting on a background command, agent or workflow. */
+  hasBackgroundWork?(): Promise<boolean>;
   /** False: never install by itself, only when a window asks (`report` returns true). */
   autoInstall?: boolean;
   report?(installAt: number | null): Promise<boolean>;
@@ -23,6 +26,10 @@ export function startIdleInstall(args: IdleInstallArgs): {
 } {
   const now = args.now ?? Date.now;
   let busyAt = now();
+  // Background work (#1114): the 24 h cap counts from the first wait and is never restarted.
+  let waitingSince: number | null = null;
+  let backgroundOpen = false;
+  let backgroundEndedAt = -Infinity;
   let installing = false;
   // A slow server can make a check outlast the 15 s interval; overlapping checks would install twice.
   let checking = false;
@@ -36,11 +43,28 @@ export function startIdleInstall(args: IdleInstallArgs): {
       }
       const running = await args.hasRunningThreads().catch(() => true);
       if (running) busyAt = now();
-      const installAt =
+      const capped = waitingSince !== null && now() - waitingSince >= BACKGROUND_WAIT_MAX_MS;
+      let installAt =
         running || args.autoInstall === false
           ? null
-          : Math.max(busyAt, now() - args.systemIdleSeconds() * 1000) +
+          : Math.max(busyAt, capped ? -Infinity : backgroundEndedAt, now() - args.systemIdleSeconds() * 1000) +
             IDLE_INSTALL_AFTER_MS;
+      // The restart would end that work and the thread would never wake (#1114). Asked when due, then on every check
+      // while work runs and through the 10 minutes after it ends (it lists every thread). A failed check counts as none.
+      const watching = backgroundOpen || now() < backgroundEndedAt + IDLE_INSTALL_AFTER_MS;
+      if (installAt !== null && !capped && (watching || now() >= installAt)) {
+        const background = (await args.hasBackgroundWork?.().catch(() => false)) ?? false;
+        if (background) {
+          waitingSince ??= now();
+          backgroundOpen = true;
+          installAt = null;
+        } else if (backgroundOpen) {
+          // The completion notice and the agent's next turn get the same 10 minutes as a finished turn.
+          backgroundOpen = false;
+          backgroundEndedAt = now();
+          installAt = Math.max(installAt, backgroundEndedAt + IDLE_INSTALL_AFTER_MS);
+        }
+      }
       const requested = (await args.report?.(installAt).catch(() => false)) ?? false;
       if (!requested && (installAt === null || now() < installAt)) return;
       installing = true;

@@ -24,12 +24,12 @@ export function providerRoutingForEnvironment(
 }
 
 export async function resolvePermissionMode(
-  bb: ProviderPermissionApi,
+  room: ProviderPermissionApi,
   providerId: string,
   requested: PermissionMode | undefined,
   routing: ProviderRouting = {},
 ): Promise<PermissionMode> {
-  const providers = await bb.sdk.providers.list(routing);
+  const providers = await room.sdk.providers.list(routing);
   const provider = providers.find((candidate) => candidate.id === providerId);
   if (provider === undefined || provider.available === false) {
     throw new Error(`Provider ${providerId} is not available.`);
@@ -43,11 +43,12 @@ export async function resolvePermissionMode(
     );
   }
   if (requested !== undefined) return requested;
-  if (provider.capabilities.permissionModes.includes("auto")) {
-    return "auto";
-  }
+  // Loops run unattended, so they default to Full like new threads do.
   if (provider.capabilities.permissionModes.includes("full")) {
     return "full";
+  }
+  if (provider.capabilities.permissionModes.includes("auto")) {
+    return "auto";
   }
   throw new Error(
     `Provider ${providerId} has no supported default permission mode.`,
@@ -55,12 +56,12 @@ export async function resolvePermissionMode(
 }
 
 export async function requireReasoningLevel(
-  bb: ProviderPermissionApi,
+  room: ProviderPermissionApi,
   providerId: string,
   reasoningLevel: string,
   routing: ProviderRouting = {},
 ): Promise<void> {
-  const providers = await bb.sdk.providers.list(routing);
+  const providers = await room.sdk.providers.list(routing);
   const supported =
     providers
       .find((candidate) => candidate.id === providerId)
@@ -73,13 +74,13 @@ export async function requireReasoningLevel(
 }
 
 export async function requireServiceTier(
-  bb: ProviderPermissionApi,
+  room: ProviderPermissionApi,
   providerId: string,
   serviceTier: string | undefined,
   routing: ProviderRouting = {},
 ): Promise<void> {
   if (serviceTier === undefined || serviceTier === "default") return;
-  const providers = await bb.sdk.providers.list(routing);
+  const providers = await room.sdk.providers.list(routing);
   const provider = providers.find((candidate) => candidate.id === providerId);
   if (provider?.capabilities.supportsServiceTier === false) {
     throw new Error(

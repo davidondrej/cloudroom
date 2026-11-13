@@ -1,5 +1,9 @@
 import { cloudExecution, cloudroom, isCloudThread } from "../cloudroom/commands.js";
-import { isStandaloneBuiltinClearCommand, type Thread } from "@cloudroom/domain";
+import {
+  createStandaloneBuiltinCompactCommandInput,
+  isStandaloneBuiltinClearCommand,
+  type Thread,
+} from "@cloudroom/domain";
 import type {
   SendMessageRequest,
   SendMessageResponse,
@@ -22,6 +26,23 @@ export async function acceptThreadSendRequest(
   deps: LoggedPendingInteractionWorkSessionDeps,
   args: AcceptThreadSendRequestArgs,
 ): Promise<SendMessageResponse> {
+  // A bare `/compact` from the CLI, a paste, or the queue has no command chip; compact as the chip would (#913).
+  const [only, ...rest] = args.payload.input;
+  if (
+    only?.type === "text" &&
+    rest.length === 0 &&
+    only.mentions.length === 0 &&
+    only.text.trim() === "/compact" &&
+    deps.providerRegistry.supportsManualCompaction(args.thread.providerId)
+  ) {
+    args = {
+      ...args,
+      payload: {
+        ...args.payload,
+        input: createStandaloneBuiltinCompactCommandInput(),
+      },
+    };
+  }
   if (isCloudThread(args.thread)) {
     const sentAt = Date.now();
     const response = await cloudroom(deps).send(args.thread, args.payload);

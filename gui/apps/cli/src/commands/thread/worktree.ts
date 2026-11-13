@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { Command } from "commander";
 import { action } from "../../action.js";
-import { createCliBbSdk } from "../../client.js";
+import { createCliRoomSdk } from "../../client.js";
 import { resolveContextThreadId, resolveExplicitIdFlag } from "../../context-env.js";
 import { resolveLocalHostId } from "../../daemon.js";
 import { outputJson } from "../helpers.js";
@@ -46,7 +46,7 @@ export function registerWorktreeCommand(parent: Command, getUrl: () => string): 
           const threadId =
             resolveExplicitIdFlag({ flagName: "thread ID", value: threadIdValue }) ?? resolveContextThreadId();
           if (!threadId) throw new Error("Pass a thread ID, or run this inside a Cloudroom thread.");
-          const sdk = createCliBbSdk(getUrl());
+          const sdk = createCliRoomSdk(getUrl());
           const source = await sdk.threads.get({ threadId });
           if (source.executionTarget === "cloud")
             throw new Error("Cloud threads already run in their own sandbox.");

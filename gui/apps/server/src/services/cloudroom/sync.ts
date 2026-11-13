@@ -82,8 +82,10 @@ export const skillInCloud = (choice: CloudSkillChoice) => (name: string) => choi
 
 export async function setupSync(deps: Deps): Promise<void> {
   const choice = await copyLogins(deps);
+  // Vitest sets VITEST in every test run, so tests never install a real LaunchAgent or systemd unit for a temp data folder (#842).
+  const noStart = process.env.VITEST ? ["--no-start"] : [];
   try {
-    await promisify(execFile)(CLOUDROOM_PYTHON_PATH, ["-B", "-E", "-s", script, "configure", folder(deps), "--connection", join(deps.config.dataDir, "cloudroom.json"), ...(choice === null ? [] : ["--copy-logins", choice ? "on" : "off"])], { timeout: 30_000, maxBuffer: 64 * 1024 });
+    await promisify(execFile)(CLOUDROOM_PYTHON_PATH, ["-B", "-E", "-s", script, "configure", folder(deps), "--connection", join(deps.config.dataDir, "cloudroom.json"), ...noStart, ...(choice === null ? [] : ["--copy-logins", choice ? "on" : "off"])], { timeout: 30_000, maxBuffer: 64 * 1024 });
   } catch (error) { throw new ApiError(503, "cloudroom_sync_setup", `Skills and settings sync could not start. Cloud sessions are unaffected. Cause: ${errorMessage(error)}`); }
 }
 

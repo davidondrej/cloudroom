@@ -29,6 +29,7 @@ export function ComposerEditorSlot({
   isCompactLayout,
   placeholder,
   placeholderHint,
+  onPlaceholderHintClick,
   minHeight,
   layout,
   resolveMentionLink,
@@ -39,6 +40,7 @@ export function ComposerEditorSlot({
   isCompactLayout: boolean;
   placeholder: string;
   placeholderHint: string | undefined;
+  onPlaceholderHintClick?: () => void;
   minHeight: number;
   layout: ComposerEditorLayout;
   resolveMentionLink: PromptMentionLinkResolver | undefined;
@@ -52,6 +54,8 @@ export function ComposerEditorSlot({
         "relative w-full overflow-y-auto bg-transparent px-4 pb-1 pr-14 pt-3 outline-none",
         COARSE_POINTER_TEXT_BASE_CLASS,
         "leading-relaxed",
+        // The hint shares the editor's grid cell, so a long suggestion grows the box.
+        !isCompactLayout && "grid grid-cols-[minmax(0,1fr)]",
         isCompactLayout && "h-12 overflow-hidden pb-0 pr-14 pt-0",
       )}
       style={{
@@ -64,14 +68,28 @@ export function ComposerEditorSlot({
     >
       {placeholderHint ? (
         <div
-          aria-hidden
+          aria-hidden={onPlaceholderHintClick ? undefined : true}
           data-promptbox-placeholder-hint=""
-          className="pointer-events-none absolute left-4 right-14 top-3 select-none whitespace-pre-wrap break-words font-light leading-[1.7]"
+          className="pointer-events-none relative z-10 col-start-1 row-start-1 overflow-clip select-none whitespace-pre-wrap break-words font-light leading-[1.7]"
         >
-          <span className="invisible">{placeholder}</span>
-          <span className="ml-3 text-subtle-foreground opacity-50 dark:opacity-40">
-            {placeholderHint}
+          <span aria-hidden className="invisible">
+            {placeholder}
           </span>
+          {onPlaceholderHintClick ? (
+            <button
+              type="button"
+              // Keep editor focus/selection stable; the click handler focuses it.
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={onPlaceholderHintClick}
+              className="pointer-events-auto relative ml-3 rounded-full border border-border px-2 py-0.5 text-sm text-muted-foreground before:absolute before:-inset-x-2 before:-inset-y-3 before:content-['']"
+            >
+              {placeholderHint}
+            </button>
+          ) : (
+            <span className="ml-3 text-subtle-foreground opacity-50 dark:opacity-40">
+              {placeholderHint}
+            </span>
+          )}
         </div>
       ) : null}
       <PromptMentionLinkContext.Provider value={resolveMentionLink ?? null}>
@@ -86,7 +104,7 @@ export function ComposerEditorSlot({
           data-promptbox-editor-content=""
           data-promptbox-compact-content={isCompactLayout ? "" : undefined}
           className={cn(
-            "h-full min-h-full",
+            "col-start-1 row-start-1 h-full min-h-full",
             isCompactLayout && "flex items-center",
             "[&_.ProseMirror]:min-h-full [&_.ProseMirror]:leading-[1.7] [&_.ProseMirror]:outline-none",
             "[&_.ProseMirror_p]:m-0",

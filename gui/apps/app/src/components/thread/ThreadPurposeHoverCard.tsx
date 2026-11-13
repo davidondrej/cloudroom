@@ -1,5 +1,11 @@
-import { useState, type FocusEvent, type ReactNode } from "react";
-import { atom, useAtom } from "jotai";
+import {
+  useEffect,
+  useMemo,
+  useState,
+  type FocusEvent,
+  type ReactNode,
+} from "react";
+import { atom, useAtom, useAtomValue, useStore } from "jotai";
 import {
   HoverCard,
   HoverCardContent,
@@ -65,8 +71,15 @@ export function ThreadPurposeHoverCard({
 const SIDEBAR_PURPOSE_OPEN_DELAY_MS = 1500;
 const SIDEBAR_PURPOSE_WARM_MS = 400;
 const sidebarPurposeWarmAtom = atom(false);
-let openSidebarPurposeThreadId: string | null = null;
+// One shared open id, so only one sidebar card is ever open.
+const openSidebarPurposeThreadIdAtom = atom<string | null>(null);
 let coolSidebarPurposeTimer: number | undefined;
+
+// Leaving or scrolling the thread list closes the card and restores the 1.5s delay.
+export const closeSidebarPurposeCardAtom = atom(null, (_get, set) => {
+  set(openSidebarPurposeThreadIdAtom, null);
+  set(sidebarPurposeWarmAtom, false);
+});
 
 export const preventPurposeOpenOnFocus = (event: FocusEvent) =>
   event.preventDefault();
@@ -80,22 +93,42 @@ export function SidebarThreadPurposeHoverCard({
   purpose: ThreadPurpose | null;
   threadId: string;
 }) {
+  const store = useStore();
   const [isWarm, setIsWarm] = useAtom(sidebarPurposeWarmAtom);
-  const [open, setOpen] = useState(false);
+  const isOpenThread = useAtomValue(
+    useMemo(
+      () => atom((get) => get(openSidebarPurposeThreadIdAtom) === threadId),
+      [threadId],
+    ),
+  );
+  // A freshly mounted row never shows a card without its own new hover.
+  const [openedHere, setOpenedHere] = useState(false);
+  const open = openedHere && isOpenThread;
   const [openedWarm, setOpenedWarm] = useState(false);
+  // An unmounting card gives up the shared open id, so it can't come back.
+  useEffect(
+    () => () => {
+      if (store.get(openSidebarPurposeThreadIdAtom) === threadId) {
+        store.set(closeSidebarPurposeCardAtom);
+      }
+    },
+    [store, threadId],
+  );
   const handleOpenChange = (next: boolean) => {
     if (next && !purpose) return;
-    setOpen(next);
+    setOpenedHere(next);
     window.clearTimeout(coolSidebarPurposeTimer);
     if (next) {
       setOpenedWarm(isWarm);
-      openSidebarPurposeThreadId = threadId;
+      store.set(openSidebarPurposeThreadIdAtom, threadId);
       setIsWarm(true);
       return;
     }
-    if (openSidebarPurposeThreadId === threadId) openSidebarPurposeThreadId = null;
+    if (store.get(openSidebarPurposeThreadIdAtom) === threadId) {
+      store.set(openSidebarPurposeThreadIdAtom, null);
+    }
     coolSidebarPurposeTimer = window.setTimeout(() => {
-      if (openSidebarPurposeThreadId === null) setIsWarm(false);
+      if (store.get(openSidebarPurposeThreadIdAtom) === null) setIsWarm(false);
     }, SIDEBAR_PURPOSE_WARM_MS);
   };
   return (

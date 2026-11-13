@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { ensureDataTempDir } from "./plugin-process-paths.js";
 
 const TOKEN = /(sk-ant-oat[A-Za-z0-9_-]{20,})[^A-Za-z0-9_-]/;
 
@@ -48,12 +49,17 @@ export function screenText(output: string, conpty = false): string {
 export const readClaudeToken = (output: string, conpty = false): string | undefined =>
   (screenText(output, conpty).match(TOKEN) ?? output.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "").match(TOKEN))?.[1];
 
-export function writeBrowserOpener(dir: string, windows = process.platform === "win32"): string {
+/**
+ * Claude's sign-in opener (`BROWSER`), which saves the link to `open.url` beside it, in a fresh folder in the data
+ * folder (`ensureDataTempDir`). Claude runs it outside any sandbox, so it never goes in the OS temp folder.
+ */
+export function createBrowserOpener(dataDir: string, windows = process.platform === "win32"): { dir: string; browser: string } {
+  const dir = mkdtempSync(join(ensureDataTempDir(dataDir), "cloudroom-claude-"));
   const browser = join(dir, windows ? "open.cmd" : "open");
   writeFileSync(browser, windows
     ? '@echo off\r\nsetlocal EnableDelayedExpansion\r\n>"%~dp0open.url" echo(!cmdcmdline!\r\n'
     : "#!/bin/sh\nprintf '%s' \"$1\" > \"$0.url\"\n", { mode: 0o700 });
-  return browser;
+  return { dir, browser };
 }
 
 export function readOpenedUrl(dir: string): string | null {

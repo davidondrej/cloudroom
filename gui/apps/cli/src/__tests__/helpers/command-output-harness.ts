@@ -14,7 +14,7 @@ const serverClientState = vi.hoisted(() => ({
 vi.mock("../../client.js", async () => {
   const { CLI_READ_TIMEOUT_MS, cliFetch } =
     await vi.importActual<typeof import("../../client.js")>("../../client.js");
-  const { createBbSdk } =
+  const { createRoomSdk } =
     await vi.importActual<typeof import("@cloudroom/sdk/core")>("@cloudroom/sdk/core");
   const { createHttpTransport } =
     await vi.importActual<typeof import("@cloudroom/sdk/node")>("@cloudroom/sdk/node");
@@ -25,9 +25,9 @@ vi.mock("../../client.js", async () => {
           status: 200,
           headers: { "Content-Type": "application/json" },
         });
-  const createCliBbSdk = vi.fn((baseUrl: string) => {
+  const createCliRoomSdk = vi.fn((baseUrl: string) => {
     const realTransport = createHttpTransport({ baseUrl, runtime: "node" });
-    return createBbSdk({
+    return createRoomSdk({
       transport: {
         ...realTransport,
         api: serverClientState.createClient(baseUrl)?.api ?? {},
@@ -38,7 +38,7 @@ vi.mock("../../client.js", async () => {
       },
     });
   });
-  return { CLI_READ_TIMEOUT_MS, cliFetch, createCliBbSdk };
+  return { CLI_READ_TIMEOUT_MS, cliFetch, createCliRoomSdk };
 });
 
 vi.mock("node:readline/promises", () => ({

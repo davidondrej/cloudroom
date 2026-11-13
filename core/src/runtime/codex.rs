@@ -20,7 +20,7 @@ pub(super) fn command(config: &Config, profile: &HarnessConfig) -> Command {
     command
 }
 
-async fn initialize(handle: &Handle) -> io::Result<()> {
+pub(super) async fn initialize(handle: &Handle) -> io::Result<()> {
     handle.call("initialize",json!({"clientInfo":{"name":"cloudroom","version":env!("CARGO_PKG_VERSION")},"capabilities":{"experimentalApi":true}})).await?;
     handle.process.notify("initialized").await
 }

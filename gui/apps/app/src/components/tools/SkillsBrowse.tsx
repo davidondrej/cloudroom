@@ -3,6 +3,12 @@ import type { SkillSummary } from "@cloudroom/server-contract";
 import { ResourceInfiniteScrollSentinel } from "@cloudroom/shared-ui/resource-pagination";
 import { Skeleton } from "@cloudroom/shared-ui/skeleton";
 import {
+  Avatar,
+  AvatarFallback,
+  AvatarImage,
+} from "@cloudroom/shared-ui/avatar";
+import { Icon, type BuiltinIconName } from "@cloudroom/shared-ui/icon";
+import {
   ResourceBrowseCard,
   ResourceBrowseGrid,
   ResourceCardStat,
@@ -10,6 +16,7 @@ import {
   ResourceInstallControl,
   ResourceListState,
   ResourceOverflowMenu,
+  ResourceSourceShelf,
   ResourceToolbar,
 } from "@cloudroom/shared-ui/resource-list";
 import {
@@ -27,10 +34,12 @@ function RegistrySkillActions({
   skillName,
   onFork,
   presentation = "label",
+  featured = false,
 }: {
   skillName: string;
   onFork: () => void;
   presentation?: "label" | "icon";
+  featured?: boolean;
 }) {
   return (
     <ResourceInstallControl
@@ -39,10 +48,61 @@ function RegistrySkillActions({
       icon="Fork"
       presentation={presentation}
       tooltip={`Fork ${skillName}`}
+      className={cn(
+        presentation === "label" && "min-w-0",
+        featured &&
+          "border-ring bg-primary text-primary-foreground hover:bg-primary/90 hover:text-primary-foreground",
+      )}
       onAction={onFork}
     />
   );
 }
+
+// David's own skills, pinned above the skills.sh list (David, 2026-11-11).
+export const FEATURED_SKILLS_REPOSITORY = "davidondrej/skills";
+export const FEATURED_SKILLS: readonly {
+  id: string;
+  icon: BuiltinIconName;
+}[] = [
+  { id: "davidondrej/skills/designs", icon: "Palette" },
+  { id: "davidondrej/skills/deepapi", icon: "Globe" },
+  { id: "davidondrej/skills/4x4", icon: "GridView" },
+  { id: "davidondrej/skills/total-review", icon: "SecurityCheck" },
+];
+
+function RegistryOwnerAvatar({
+  source,
+  className,
+}: {
+  source: string;
+  className?: string;
+}) {
+  const owner = formatRegistrySource(source).split("/")[0] ?? "";
+  return (
+    <Avatar
+      className={cn(
+        "size-8 rounded-md border border-border bg-muted",
+        className,
+      )}
+    >
+      <AvatarImage
+        src={`https://github.com/${encodeURIComponent(owner)}.png?size=64`}
+        alt=""
+        loading="lazy"
+        referrerPolicy="no-referrer"
+      />
+      <AvatarFallback
+        aria-hidden
+        className="rounded-[inherit] text-xs font-semibold text-subtle-foreground"
+      >
+        {owner.charAt(0).toLocaleUpperCase()}
+      </AvatarFallback>
+    </Avatar>
+  );
+}
+
+const SKILLS_SH_LINK_CLASS =
+  "rounded-sm underline underline-offset-2 hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring";
 
 function RegistrySkillSocialProof({
   skill,
@@ -80,18 +140,33 @@ function RegistrySkillSocialProof({
 function RegistrySkillSourceItem({
   skill,
   installsKnown,
+  featuredIcon,
   onFork,
   onSelect,
 }: {
   skill: RegistrySkill;
   installsKnown: boolean;
+  featuredIcon?: BuiltinIconName;
   onFork: (skill: RegistrySkill) => void;
   onSelect: (skill: RegistrySkill) => void;
 }) {
   return (
     <ResourceBrowseCard
+      className={
+        featuredIcon ? "border-primary/45 bg-primary/[0.05]" : undefined
+      }
+      leading={
+        featuredIcon ? (
+          <span className="flex size-8 items-center justify-center rounded-md border border-primary/40 bg-primary/10 text-primary">
+            <Icon name={featuredIcon} className="size-4" aria-hidden />
+          </span>
+        ) : (
+          <RegistryOwnerAvatar source={skill.source} />
+        )
+      }
+      leadingClassName="size-8"
       title={skill.name}
-      byline={`by ${formatRegistrySource(skill.source)}`}
+      byline={formatRegistrySource(skill.source)}
       description={skill.summary ?? undefined}
       openLabel={`View details for ${skill.name}`}
       onOpen={() => onSelect(skill)}
@@ -99,7 +174,8 @@ function RegistrySkillSourceItem({
         <RegistrySkillActions
           skillName={skill.name}
           onFork={() => onFork(skill)}
-          presentation="icon"
+          presentation={featuredIcon ? "icon" : "label"}
+          featured={featuredIcon !== undefined}
         />
       }
       footerMeta={
@@ -117,8 +193,11 @@ function RegistrySkillSourceItemSkeleton({ skillName }: { skillName: string }) {
       className="grid min-h-28 w-full grid-cols-[minmax(0,1fr)_auto] grid-rows-[auto_1fr_auto] gap-2 rounded-lg border border-border bg-card p-3"
     >
       <span className="sr-only">Loading {skillName}</span>
-      <Skeleton className="h-3.5 w-32 max-w-full self-center" />
-      <Skeleton className="size-7 rounded-md" />
+      <span className="flex min-w-0 items-center gap-3 self-center">
+        <Skeleton className="size-8 shrink-0 rounded-md" />
+        <Skeleton className="h-3.5 w-32 max-w-full" />
+      </span>
+      <Skeleton className="h-7 w-16 rounded-md" />
       <span className="col-span-2 row-start-2 space-y-1.5 self-center">
         <Skeleton className="h-3 w-full" />
         <Skeleton className="h-3 w-4/5" />
@@ -129,8 +208,15 @@ function RegistrySkillSourceItemSkeleton({ skillName }: { skillName: string }) {
   );
 }
 
+const TRENDING_GRID_CLASS =
+  "grid-cols-[repeat(auto-fill,minmax(min(100%,17rem),1fr))]";
+const FEATURED_GRID_CLASS =
+  "grid-cols-[repeat(auto-fill,minmax(min(100%,13rem),1fr))]";
+
 export function RegistrySkillsBrowsePage({
   skills,
+  featuredSkills = [],
+  featuredStars = null,
   pendingSkillIds,
   unknownInstallSkillIds,
   isLoading,
@@ -138,6 +224,7 @@ export function RegistrySkillsBrowsePage({
   hasMore,
   hasError,
   query,
+  leading,
   action,
   onRetry,
   onQueryChange,
@@ -146,6 +233,8 @@ export function RegistrySkillsBrowsePage({
   onSelect,
 }: {
   skills: readonly RegistrySkill[];
+  featuredSkills?: readonly { skill: RegistrySkill; icon: BuiltinIconName }[];
+  featuredStars?: number | null;
   pendingSkillIds: ReadonlySet<string>;
   unknownInstallSkillIds: ReadonlySet<string>;
   isLoading: boolean;
@@ -153,6 +242,7 @@ export function RegistrySkillsBrowsePage({
   hasMore: boolean;
   hasError: boolean;
   query: string;
+  leading?: ReactNode;
   action?: ReactNode;
   onRetry?: () => void;
   onQueryChange: (query: string) => void;
@@ -160,6 +250,7 @@ export function RegistrySkillsBrowsePage({
   onFork: (skill: RegistrySkill) => void;
   onSelect: (skill: RegistrySkill) => void;
 }) {
+  const isSearching = query.trim().length > 0;
   return (
     <ResourceCollectionViewport
       scrollId="skills-browse-results"
@@ -169,11 +260,67 @@ export function RegistrySkillsBrowsePage({
           searchValue={query}
           searchPlaceholder="Search skills"
           onSearchChange={onQueryChange}
+          leading={leading}
           action={action}
         />
       }
     >
-      <div className={cn("space-y-4", TOOLS_PAGE_BAND_CLASSES)}>
+      <div className={cn("space-y-6", TOOLS_PAGE_BAND_CLASSES)}>
+        {!isSearching && featuredSkills.length > 0 ? (
+          <ResourceSourceShelf
+            label={
+              <span className="inline-flex items-center gap-1.5">
+                <span className="font-medium text-primary-text">Featured</span>
+                <span aria-hidden className="text-subtle-foreground">
+                  ·
+                </span>
+                <span className="text-foreground">David Ondrej</span>
+                {featuredStars !== null ? (
+                  <>
+                    <span aria-hidden className="text-subtle-foreground">
+                      ·
+                    </span>
+                    <Icon
+                      name="Star"
+                      className="size-3 fill-attention/20 text-attention"
+                      aria-hidden
+                    />
+                    <span>{formatInstallCount(featuredStars)}</span>
+                  </>
+                ) : null}
+              </span>
+            }
+            leading={
+              <RegistryOwnerAvatar
+                source={FEATURED_SKILLS_REPOSITORY}
+                className="size-4 rounded-full"
+              />
+            }
+            browseAction={
+              <a
+                href={`https://github.com/${FEATURED_SKILLS_REPOSITORY}`}
+                target="_blank"
+                rel="noreferrer"
+                className="rounded-md px-[var(--resource-source-shelf-action-inline)] py-[var(--resource-source-shelf-action-block)] text-xs text-muted-foreground hover:bg-state-hover hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+              >
+                See all
+              </a>
+            }
+          >
+            <ResourceBrowseGrid className={FEATURED_GRID_CLASS}>
+              {featuredSkills.map(({ skill, icon }) => (
+                <RegistrySkillSourceItem
+                  key={skill.id}
+                  skill={skill}
+                  installsKnown
+                  featuredIcon={icon}
+                  onFork={onFork}
+                  onSelect={onSelect}
+                />
+              ))}
+            </ResourceBrowseGrid>
+          </ResourceSourceShelf>
+        ) : null}
         {hasError && skills.length === 0 ? (
           <ResourceListState
             state="error"
@@ -190,14 +337,28 @@ export function RegistrySkillsBrowsePage({
           <ResourceListState
             state="empty"
             message={
-              query.trim().length === 0
-                ? "No skills.sh resources available."
-                : `No skills.sh resources match "${query}"`
+              isSearching
+                ? `No skills.sh resources match "${query}"`
+                : "No skills.sh resources available."
             }
           />
         ) : (
-          <>
-            <ResourceBrowseGrid>
+          <ResourceSourceShelf
+            label={
+              <>
+                {isSearching ? "Results from " : "Trending on "}
+                <a
+                  href="https://skills.sh"
+                  target="_blank"
+                  rel="noreferrer"
+                  className={SKILLS_SH_LINK_CLASS}
+                >
+                  skills.sh
+                </a>
+              </>
+            }
+          >
+            <ResourceBrowseGrid className={TRENDING_GRID_CLASS}>
               {skills.map((skill) =>
                 pendingSkillIds.has(skill.id) ? (
                   <RegistrySkillSourceItemSkeleton
@@ -222,7 +383,7 @@ export function RegistrySkillsBrowsePage({
                 onRetry={onRetry}
               />
             ) : null}
-          </>
+          </ResourceSourceShelf>
         )}
         {hasError || isLoading ? null : (
           <ResourceInfiniteScrollSentinel

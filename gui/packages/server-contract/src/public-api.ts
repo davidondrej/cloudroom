@@ -5,6 +5,9 @@ import {
   systemSkillUsageQuerySchema,
   type SystemSkillUsageQuery,
   type SystemSkillUsageResponse,
+  systemUsageAnalyticsQuerySchema,
+  type SystemUsageAnalyticsQuery,
+  type SystemUsageAnalyticsResponse,
   type SystemWorktreeStorageResponse,
 } from "./api/system.js";
 import {
@@ -1781,6 +1784,14 @@ export const publicApiRoutes = {
         systemSkillUsageQuerySchema,
       ),
       response: jsonResponse<SystemSkillUsageResponse>(),
+    }),
+    usageAnalytics: defineRoute({
+      path: "/system/usage-analytics",
+      method: "get",
+      request: queryRequest<EmptyInput, SystemUsageAnalyticsQuery>(
+        systemUsageAnalyticsQuerySchema,
+      ),
+      response: jsonResponse<SystemUsageAnalyticsResponse>(),
     }),
     worktreeStorage: defineRoute({
       path: "/system/worktree-storage",

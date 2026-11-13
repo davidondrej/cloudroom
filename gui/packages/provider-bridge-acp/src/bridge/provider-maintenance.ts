@@ -16,11 +16,14 @@ import type {
 } from "@cloudroom/provider-bridge-protocol";
 import {
   clampPercent,
+  compareVersions,
   downloadedInstallerCommand,
   formatCommand,
+  installationRunUnavailable,
   npmGlobalInstallCommand,
   readCliVersion,
   resolveExecutablePath,
+  versionFrom,
 } from "@cloudroom/provider-bridge-protocol/bridge-kit";
 import { z } from "zod";
 
@@ -134,6 +137,8 @@ function readAccountEmail(): string | null {
 export interface AcpMaintenanceDialect {
   loginCommand: string;
   installer(): ProviderInstallationCommand;
+  /** The newest released version, when the agent publishes one. */
+  latestVersion?(): Promise<string | null>;
   readAccount(): Promise<{ email: string | null } | null>;
   readUsage(): Promise<ProviderUsageResult>;
 }
@@ -179,6 +184,20 @@ export interface AcpMaintenanceTarget {
   maintenance: AcpMaintenanceDialect | undefined;
   installer: (() => ProviderInstallationCommand) | undefined;
   command: string | null;
+  /** Older CLIs lack the ACP launch (legacy Kilo 0.x has no `kilo acp`, #1156). */
+  minimumVersion?: string;
+}
+
+/** Only a version Cloudroom could read can be too old. */
+function versionUnsupported(
+  version: string | null,
+  minimumVersion: string | undefined,
+): boolean {
+  return (
+    version !== null &&
+    minimumVersion !== undefined &&
+    compareVersions(version, minimumVersion) < 0
+  );
 }
 
 function loginCommandFor(target: AcpMaintenanceTarget): string | null {
@@ -198,7 +217,12 @@ function loginCommandFor(target: AcpMaintenanceTarget): string | null {
 
 function healthResult(args: {
   target: AcpMaintenanceTarget;
-  status: "ready" | "not_installed" | "unauthenticated" | "unknown";
+  status:
+    | "ready"
+    | "not_installed"
+    | "unauthenticated"
+    | "unsupported_version"
+    | "unknown";
   accountEmail?: string | null;
   installedVersion?: string | null;
   statusMessage?: string | null;
@@ -212,7 +236,7 @@ function healthResult(args: {
       accountEmail: args.accountEmail ?? null,
       planLabel: null,
       installedVersion: args.installedVersion ?? null,
-      minimumSupportedVersion: null,
+      minimumSupportedVersion: args.target.minimumVersion ?? null,
       canInstall: installer !== undefined,
       canUpdate: maintenance !== undefined && args.status !== "not_installed",
       loginCommand: loginCommandFor(args.target),
@@ -247,6 +271,14 @@ export async function getAcpProviderHealth(
     return healthResult({ target, status: "not_installed" });
   }
   const version = await readAcpCliVersion(command);
+  if (versionUnsupported(version, target.minimumVersion)) {
+    return healthResult({
+      target,
+      status: "unsupported_version",
+      installedVersion: version,
+      statusMessage: `${command} ${version} is too old for ACP. Update it to ${target.minimumVersion} or newer.`,
+    });
+  }
   if (maintenance === undefined) {
     return healthResult({
       target,
@@ -283,27 +315,44 @@ export async function getAcpProviderInstallationStatus(
     installed && args.command !== null
       ? await readAcpCliVersion(args.command)
       : null;
+  const unsupported = versionUnsupported(currentVersion, args.minimumVersion);
+  const latestVersion =
+    currentVersion === null
+      ? null
+      : ((await args.maintenance?.latestVersion?.()) ?? null);
+  const needsUpdate =
+    currentVersion !== null &&
+    latestVersion !== null &&
+    compareVersions(latestVersion, currentVersion) > 0;
+  // A too-old or outdated CLI gets its installer again as an Update (#1156).
   const installAction =
-    args.installer !== undefined && !installed
-      ? {
-          kind: "install" as const,
-          label: "Install" as const,
-          command: args.installer().displayCommand,
-        }
-      : null;
+    args.installer === undefined ||
+    (installed && !unsupported && !needsUpdate)
+      ? null
+      : installed
+        ? {
+            kind: "update" as const,
+            label: "Update" as const,
+            command: args.installer().displayCommand,
+          }
+        : {
+            kind: "install" as const,
+            label: "Install" as const,
+            command: args.installer().displayCommand,
+          };
   return {
     executableName,
     executablePath: resolvedExecutable,
     installed,
     installSource: installed ? "external" : "notInstalled",
     currentVersion,
-    latestVersion: null,
-    minimumSupportedVersion: null,
+    latestVersion,
+    minimumSupportedVersion: args.minimumVersion ?? null,
     npmPackageName: null,
     npmGlobalPackageVersion: null,
     installAction,
-    needsUpdate: false,
-    versionUnsupported: false,
+    needsUpdate,
+    versionUnsupported: unsupported,
   };
 }
 
@@ -316,7 +365,10 @@ export async function getAcpProviderInstallationRun(
 
 function buildAcpProviderInstallationRun(
   status: ProviderInstallationStatus,
-  args: Pick<AcpMaintenanceTarget, "command" | "installer"> & {
+  args: Pick<
+    AcpMaintenanceTarget,
+    "command" | "installer" | "minimumVersion"
+  > & {
     action: "install" | "update";
   },
 ): ProviderInstallationRunResult {
@@ -324,15 +376,21 @@ function buildAcpProviderInstallationRun(
     status.installAction?.kind !== args.action ||
     args.installer === undefined
   ) {
-    return {
-      available: false,
-      message: `${args.command ?? "This ACP agent"} ${args.action} is not available on this host.`,
-    };
+    return installationRunUnavailable(
+      args.command === null ? "This ACP agent" : path.basename(args.command),
+      args.action,
+      status,
+    );
   }
   return {
     available: true,
     command: args.installer(),
-    verification: { kind: "installed" },
+    verification:
+      args.action === "update" && status.needsUpdate && status.latestVersion
+        ? { kind: "version_at_least", version: status.latestVersion }
+        : args.action === "update" && args.minimumVersion !== undefined
+          ? { kind: "version_at_least", version: args.minimumVersion }
+          : { kind: "installed" },
   };
 }
 
@@ -452,9 +510,40 @@ export async function getAcpProviderUsage(
   return args.maintenance.readUsage();
 }
 
+const CURSOR_LATEST_VERSION_TTL_MS = 60 * 60_000;
+let cursorLatestVersion: { version: string | null; expiresAt: number } | null =
+  null;
+
+/** Cursor's install script names the version it installs. Read at most once an hour. */
+async function readCursorLatestVersion(): Promise<string | null> {
+  if (cursorLatestVersion && cursorLatestVersion.expiresAt > Date.now()) {
+    return cursorLatestVersion.version;
+  }
+  let version: string | null = null;
+  try {
+    const response = await fetch(CURSOR_INSTALL_SCRIPT_URL, {
+      signal: AbortSignal.timeout(USAGE_FETCH_TIMEOUT_MS),
+    });
+    if (response.ok) {
+      version = versionFrom(
+        (await response.text()).match(/\/lab\/([0-9A-Za-z.-]+)\//u)?.[1] ??
+          null,
+      );
+    }
+  } catch {
+    version = null;
+  }
+  cursorLatestVersion = {
+    version,
+    expiresAt: Date.now() + CURSOR_LATEST_VERSION_TTL_MS,
+  };
+  return version;
+}
+
 export const CURSOR_ACP_MAINTENANCE: AcpMaintenanceDialect = {
   loginCommand: "cursor-agent login",
   installer: () => downloadedInstallerCommand(CURSOR_INSTALL_SCRIPT_URL),
+  latestVersion: readCursorLatestVersion,
   readAccount: async () => {
     const accessToken = await readAccessToken();
     return accessToken === null ? null : { email: readAccountEmail() };

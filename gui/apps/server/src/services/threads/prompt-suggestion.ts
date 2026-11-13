@@ -102,7 +102,7 @@ async function suggest(
   const userMessage = lastUserMessage(deps.db, threadId);
   const reply = getLastThreadOutput(deps.db, threadId, turnId);
   if (!userMessage || !reply) return null;
-  const models = await purposeModels(null);
+  const models = await purposeModels(deps, null);
   if (!models) return null;
   const result = await inferenceCompleteWithFallback(deps, {
     fallbackOnAnyError: true,
@@ -112,6 +112,7 @@ async function suggest(
     primaryModel: models.primary,
     fallbackModel: models.fallback,
     prompt: renderTemplate("generatePromptSuggestion", {
+      instructions: readUiPreferences(deps)["promptSuggestions.prompt"].value,
       userMessage,
       agentReply: tail(reply, MAX_REPLY_LENGTH),
       purpose: getThread(deps.db, threadId)?.purpose?.text ?? "",

@@ -84,7 +84,7 @@ environment variables to that provider. The resolver receives an
 
 **What it does.** Registers one resolver per provider per plugin. The server
 calls it for each matching session and turn with the thread, project, and host
-ids, validates at most 32 environment entries, resolves registration conflicts
+ids, and with only the host id for helper inference (thread naming, purposes), validates at most 32 environment entries, resolves registration conflicts
 in plugin load order, and sends the winning values to the host. A value may be
 a literal string or a server-relative path that the host expands against its
 authenticated `BB_SERVER_URL`. Contributions override the shell environment and
@@ -1092,7 +1092,7 @@ whether `retryable` should be per kind (only `sessionArchived` and
 `rateLimited` read it today) and whether the runtime should bound the
 `rateLimited` ladder from the hint rather than from a constant.
 
-## Provider maintenance toolkit (`experimental_findCliExecutable`, `experimental_findBrokenCliLink`, `experimental_resolveExecutablePath`, `experimental_readCliVersion`, `experimental_probeCliVersion`, `experimental_commandOutput`, `experimental_versionFrom`, `experimental_compareVersions`, `experimental_formatCommand`, `experimental_npmCommand`, `experimental_npmGlobalInstallCommand`, `experimental_npmLatestVersion`, `experimental_probeNpmGlobalPackage`, `experimental_npmGlobalInstallSource`, `experimental_installationVerification`, `experimental_downloadedInstallerCommand`, `experimental_clampPercent`) (`@get-bb/plugin-sdk/provider-bridge`)
+## Provider maintenance toolkit (`experimental_findCliExecutable`, `experimental_findBrokenCliLink`, `experimental_isClaudeNpmPlaceholder`, `experimental_resolveExecutablePath`, `experimental_readCliVersion`, `experimental_probeCliVersion`, `experimental_commandOutput`, `experimental_versionFrom`, `experimental_compareVersions`, `experimental_formatCommand`, `experimental_npmCommand`, `experimental_npmGlobalInstallCommand`, `experimental_npmLatestVersion`, `experimental_probeNpmGlobalPackage`, `experimental_npmGlobalInstallSource`, `experimental_installationVerification`, `experimental_installationRunUnavailable`, `experimental_downloadedInstallerCommand`, `experimental_clampPercent`) (`@get-bb/plugin-sdk/provider-bridge`)
 
 **What it does.** The host-local probes and install-action plumbing behind a
 bridge's `provider/health`, `provider/usage` and `provider/installation/*`
@@ -1102,6 +1102,9 @@ on PATH, then in common install folders, the Codex standalone package and,
 on macOS, the ChatGPT and Codex app bundles, old and new layout; null when
 absent), `experimental_findBrokenCliLink` (a PATH entry for that CLI whose
 symlink target is gone, for the "not installed" message),
+`experimental_isClaudeNpmPlaceholder` (true for npm's unfinished Claude Code
+`bin/claude.exe` stub, directly or behind its Windows `.cmd` shim; what
+`experimental_findCliExecutable` skips),
 `experimental_resolveExecutablePath` (the command's absolute path — the path
 itself when given absolute and executable, else the first `which`/`where`
 hit, null when absent; 5 s), `experimental_readCliVersion` (`<command>
@@ -1110,7 +1113,7 @@ flags exit instead of hitting the timeout; the first version token on stdout
 or stderr, or null if it is invalid SemVer; 5 s),
 `experimental_probeCliVersion` (the same probe, plus the output of a
 `--version` that exited non-zero, so a bridge can tell a broken install
-from a slow one; null on a timeout and on Windows),
+from a slow one; null on a timeout),
 `experimental_commandOutput` (any command's trimmed stdout+stderr or null on
 failure; 15 s), `experimental_versionFrom` (the first version token in a
 banner, or null if it is invalid SemVer), `experimental_npmLatestVersion` (`npm view <package> version`) and
@@ -1121,7 +1124,10 @@ metadata; throws `TypeError` for invalid inputs), `experimental_npmGlobalInstall
 the executable sits inside npm's global bin, `external` otherwise,
 `notInstalled` when absent) and `experimental_installationVerification` (an
 install verifies by existence; an update by reaching the latest version the
-status saw, or by any change when the registry was unreachable). The
+status saw, or by any change when the registry was unreachable) and
+`experimental_installationRunUnavailable` (refuses an install or update the
+fresh status no longer offers, naming the installed version and the action
+it does offer). The
 actions: `experimental_npmGlobalInstallCommand` (`npm install -g
 <package>@latest` with its display string), `experimental_downloadedInstallerCommand`
 (a vendor's `curl | bash` script run from a temp file),
@@ -1151,7 +1157,10 @@ dist-tag and `doctor` parsing) beside them.
    enum should grow before it is relied on.
 4. **`downloadedInstallerCommand` is POSIX.** `sh -c` with `mktemp`, `curl`
    and `bash`; there is no Windows form. Decide whether it should refuse on
-   win32 rather than hand the daemon a command that cannot run.
+   win32 rather than hand the daemon a command that cannot run. Its script
+   waits in `${TMPDIR:-/tmp}`, which the daemon points at a private folder
+   (macOS, Linux). A plugin's own plan that hard-codes `/tmp` gets no such
+   protection.
 
 ## Presentation builders (`experimental_presentationTitle`, `experimental_presentationDetail`, `experimental_withTitle`, `experimental_presentationFileName`, `experimental_COMPACTION_PRESENTATION`, `experimental_REASONING_PRESENTATION`, `experimental_fileReadPresentation`, `experimental_searchPresentation`, `experimental_webSearchPresentation`, `experimental_webFetchPresentation`, `experimental_planStepsPresentation`, `experimental_toolPresentation`) (`@get-bb/plugin-sdk/provider-bridge`)
 
@@ -2328,7 +2337,7 @@ one toast.
 
 **What it does.** Lets a plugin serve bb's own AI services — server-side
 helper inference (thread titles, thread purposes, commit messages: prompt + JSON Schema in,
-structured value out; `reasoningEffort` is `none`, `low`, `medium`, or `high`, widened from `none` on 2026-10-13 for thread purposes) and voice transcription — from its `bb.host` entry.
+structured value out; `reasoningEffort` is `none`, `low`, `medium`, or `high`, widened from `none` on 2026-10-13 for thread purposes; an optional `env` carries the login of the provider with the same id, added 2026-11-11) and voice transcription — from its `bb.host` entry.
 `bb.experimental_aiServices.register({ id, displayName, kinds })` stages the
 service during the factory and lands it when the load commits; the host entry
 implements `experimental_aiServicesHostContract` (`ai.inference.complete`,
@@ -3104,7 +3113,7 @@ dedicated side-chat create call.
 
 ## `bb.experimental_telemetry.capture`
 
-`capture(name, properties)` sends one PostHog event through the server's own
+`capture(name, properties)` sends one usage event through the server's own
 telemetry service, tagged with `plugin_id`. Only built-in plugins get a working
 call; for others it is a silent no-op. It does nothing when the user turned
 telemetry off. Names must be snake_case (at most 64 characters); at most 32

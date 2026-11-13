@@ -51,6 +51,7 @@ type ExecutionOptionsRequest = ExistingThreadExecutionInputRequest;
 
 export interface ThreadStopCommandArgs {
   immediate?: boolean;
+  keepSession?: boolean;
   environmentId: string;
   hostId: string;
   intent: ThreadStopIntent;
@@ -284,8 +285,10 @@ export async function buildThreadStartCommand(
     bridgeLaunch,
     requestId: args.requestId,
     ...prepareCustomInstructionInput(
+      deps.db,
       { threadId: args.thread.id, projectId: args.projectId },
       args,
+      true,
     ),
     options: toRuntimeExecutionOptions({
       ...args,
@@ -318,6 +321,7 @@ function buildPreparedTurnSubmitCommandPayload(
     threadId: args.threadId,
     bridgeLaunch,
     ...prepareCustomInstructionInput(
+      args.deps.db,
       { threadId: args.threadId, projectId: args.runtimeContext.projectId },
       args,
     ),
@@ -690,6 +694,7 @@ export function buildThreadStopCommand(
     intent: args.intent,
     threadId: args.threadId,
     ...(args.immediate ? { immediate: true } : {}),
+    ...(args.keepSession && !args.immediate ? { keepSession: true } : {}),
   };
 }
 

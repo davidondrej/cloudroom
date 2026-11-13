@@ -142,6 +142,7 @@ export function assembleSkillList(
         filePath: skill.filePath,
         manageable: mapped.manageable && !skill.linked,
         registrySkillId: null,
+        realDirectoryPath: skill.realDirectoryPath,
       });
     }
   }
@@ -184,7 +185,7 @@ function listServerOwnedSkills(deps: AppDeps): SkillSummary[] {
     .sort(compareSkillSummaries);
 }
 
-function listBbPluginSkills(deps: AppDeps): SkillSummary[] {
+function listRoomPluginSkills(deps: AppDeps): SkillSummary[] {
   return resolveSkillCatalog(deps)
     .map(({ provenance, runtimeSource }): SkillSummary | null => {
       if (
@@ -247,7 +248,7 @@ export async function listProjectSkills(
     ...assembleSkillList(perProvider),
     ...sharedSkills.summaries,
     ...listServerOwnedSkills(deps),
-    ...listBbPluginSkills(deps),
+    ...listRoomPluginSkills(deps),
   ].sort(compareSkillSummaries);
 }
 
@@ -394,7 +395,7 @@ export async function listProjectSkillFiles(
   if (isServerOwnedSkill(deps, skill)) {
     return listServerSkillFiles(skill);
   }
-  const rootPath = hostPathDirname(skill.filePath);
+  const rootPath = skill.realDirectoryPath ?? hostPathDirname(skill.filePath);
   const result = await callHostRetryableOnlineRpc(deps, {
     hostId: args.workspace.hostId,
     timeoutMs: COMMAND_TIMEOUT_MS,
@@ -438,7 +439,7 @@ export async function readProjectSkill(
       revision: createHash("sha256").update(contents).digest("hex"),
     };
   }
-  const rootPath = hostPathDirname(skill.filePath);
+  const rootPath = skill.realDirectoryPath ?? hostPathDirname(skill.filePath);
   const result = await callHostRetryableOnlineRpc(deps, {
     hostId: args.workspace.hostId,
     timeoutMs: COMMAND_TIMEOUT_MS,

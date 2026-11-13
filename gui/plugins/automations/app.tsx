@@ -64,6 +64,7 @@ import {
 } from "@cloudroom/shared-ui/dialog";
 import { ResourceListState } from "@cloudroom/shared-ui/resource-list";
 import { cn } from "@cloudroom/shared-ui/lib/utils";
+import type { TemplateUsage } from "./src/usage.js";
 
 const PANEL_PATH = "automations";
 type OverviewEntry = AutomationsOverviewResponse["automations"][number];
@@ -73,7 +74,8 @@ const lastLoaded: {
   review: ReviewResponse | null;
   plan: string | null | undefined;
   projects: TemplateProject[] | null;
-} = { entries: null, review: null, plan: undefined, projects: null };
+  usage: TemplateUsage | undefined;
+} = { entries: null, review: null, plan: undefined, projects: null, usage: undefined };
 
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -461,6 +463,23 @@ function useTemplates(onAdded: () => void): LoopTemplatesState {
   const { providers } = useProviders();
   const [projects, setProjects] = useState(lastLoaded.projects);
   const [plan, setPlan] = useState(lastLoaded.plan);
+  const [usage, setUsage] = useState(lastLoaded.usage);
+  const paid = plan !== undefined && plan !== "free";
+  // Free never sees the templates, so it never pays for the estimate.
+  useEffect(() => {
+    if (!paid) return;
+    let cancelled = false;
+    rpc.call("templates_usage", null).then(
+      (result) => {
+        lastLoaded.usage = result;
+        if (!cancelled) setUsage(result);
+      },
+      () => {},
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [rpc, paid]);
   useEffect(() => {
     let cancelled = false;
     rpc.call("account_plan", null).then(
@@ -543,7 +562,7 @@ function useTemplates(onAdded: () => void): LoopTemplatesState {
               providerId: agent.providerId,
               model: agent.model,
               reasoningLevel: agent.reasoningLevel,
-              permissionMode: defaults?.permissionMode ?? "auto",
+              permissionMode: defaults?.permissionMode ?? "full",
               environment: { type: "project-default" },
             },
           });
@@ -574,6 +593,7 @@ function useTemplates(onAdded: () => void): LoopTemplatesState {
     onAdd,
     locked: plan === undefined ? null : plan === "free",
     onUpgrade,
+    usage,
   };
 }
 

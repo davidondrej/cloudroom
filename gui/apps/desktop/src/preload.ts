@@ -6,123 +6,123 @@ import {
 } from "@cloudroom/host-daemon-contract";
 import { z } from "zod";
 import {
-  bbDesktopBrowserFindResultSchema,
-  bbDesktopBrowserOpenTabRequestSchema,
-  bbDesktopBrowserScopedOpenTabRequestSchema,
-  bbDesktopBrowserTabRefSchema,
-  bbDesktopBrowserSnapshotSchema,
-  bbDesktopBrowserStateSchema,
-  bbDesktopBrowserTargetSchema,
-  bbDesktopBrowserControlStateSchema,
-  bbDesktopBrowserRevealRequestSchema,
-  type BbDesktopBrowserControlState,
-  type BbDesktopBrowserRevealRequest,
-  bbDesktopInfoSchema,
-  bbDesktopWindowStateSchema,
+  roomDesktopBrowserFindResultSchema,
+  roomDesktopBrowserOpenTabRequestSchema,
+  roomDesktopBrowserScopedOpenTabRequestSchema,
+  roomDesktopBrowserTabRefSchema,
+  roomDesktopBrowserSnapshotSchema,
+  roomDesktopBrowserStateSchema,
+  roomDesktopBrowserTargetSchema,
+  roomDesktopBrowserControlStateSchema,
+  roomDesktopBrowserRevealRequestSchema,
+  type RoomDesktopBrowserControlState,
+  type RoomDesktopBrowserRevealRequest,
+  roomDesktopInfoSchema,
+  roomDesktopWindowStateSchema,
   type BbDesktopApi,
-  type BbDesktopAppCommandHandler,
-  type BbDesktopBrowserApi,
-  type BbDesktopBrowserFindResultHandler,
-  type BbDesktopBrowserOpenTabHandler,
-  type BbDesktopBrowserScopedOpenTabHandler,
-  type BbDesktopBrowserFocusHandler,
-  type BbDesktopBrowserSnapshotHandler,
-  type BbDesktopBrowserStateHandler,
-  type BbDesktopBrowserUnsubscribe,
-  type BbDesktopBrowserViewBounds,
-  type BbDesktopCloseWindowRequestHandler,
-  type BbDesktopInfo,
-  type BbDesktopInfoChangeHandler,
-  type BbDesktopInfoUnsubscribe,
-  type BbDesktopOpenLinkHandler,
-  type BbDesktopOpenNewTabHandler,
-  type BbDesktopTheme,
-  type BbDesktopWindowState,
-  type BbDesktopWindowStateChangeHandler,
+  type RoomDesktopAppCommandHandler,
+  type RoomDesktopBrowserApi,
+  type RoomDesktopBrowserFindResultHandler,
+  type RoomDesktopBrowserOpenTabHandler,
+  type RoomDesktopBrowserScopedOpenTabHandler,
+  type RoomDesktopBrowserFocusHandler,
+  type RoomDesktopBrowserSnapshotHandler,
+  type RoomDesktopBrowserStateHandler,
+  type RoomDesktopBrowserUnsubscribe,
+  type RoomDesktopBrowserViewBounds,
+  type RoomDesktopCloseWindowRequestHandler,
+  type RoomDesktopInfo,
+  type RoomDesktopInfoChangeHandler,
+  type RoomDesktopInfoUnsubscribe,
+  type RoomDesktopOpenLinkHandler,
+  type RoomDesktopOpenNewTabHandler,
+  type RoomDesktopTheme,
+  type RoomDesktopWindowState,
+  type RoomDesktopWindowStateChangeHandler,
 } from "@cloudroom/desktop-contract";
 import {
-  BB_DESKTOP_CHECK_FOR_UPDATES_CHANNEL,
-  BB_DESKTOP_GET_INFO_CHANNEL,
-  BB_DESKTOP_INFO_CHANGED_CHANNEL,
-  BB_DESKTOP_INSTALL_UPDATE_CHANNEL,
-  BB_DESKTOP_MOVE_TO_APPLICATIONS_CHANNEL,
-  BB_DESKTOP_OPEN_EXTERNAL_URL_CHANNEL,
-  BB_DESKTOP_SET_THEME_CHANNEL,
-  BB_DESKTOP_FOCUS_WINDOW_CHANNEL,
-  BB_DESKTOP_SET_BADGE_COUNT_CHANNEL,
+  ROOM_DESKTOP_CHECK_FOR_UPDATES_CHANNEL,
+  ROOM_DESKTOP_GET_INFO_CHANNEL,
+  ROOM_DESKTOP_INFO_CHANGED_CHANNEL,
+  ROOM_DESKTOP_INSTALL_UPDATE_CHANNEL,
+  ROOM_DESKTOP_MOVE_TO_APPLICATIONS_CHANNEL,
+  ROOM_DESKTOP_OPEN_EXTERNAL_URL_CHANNEL,
+  ROOM_DESKTOP_SET_THEME_CHANNEL,
+  ROOM_DESKTOP_FOCUS_WINDOW_CHANNEL,
+  ROOM_DESKTOP_SET_BADGE_COUNT_CHANNEL,
 } from "./desktop-update-ipc.js";
 import {
-  BB_DESKTOP_BROWSER_ATTACH_CHANNEL,
-  BB_DESKTOP_BROWSER_TARGET_CHANNEL,
-  BB_DESKTOP_BROWSER_GET_CONTROL_CHANNEL,
-  BB_DESKTOP_BROWSER_CONTROL_CHANNEL,
-  BB_DESKTOP_BROWSER_RELEASE_CONTROL_CHANNEL,
-  BB_DESKTOP_BROWSER_REVEAL_CHANNEL,
-  BB_DESKTOP_BROWSER_DETACH_CHANNEL,
-  BB_DESKTOP_BROWSER_FOCUS_CHANNEL,
-  BB_DESKTOP_BROWSER_FOCUSED_CHANNEL,
-  BB_DESKTOP_BROWSER_FIND_IN_PAGE_CHANNEL,
-  BB_DESKTOP_BROWSER_FIND_RESULT_CHANNEL,
-  BB_DESKTOP_BROWSER_GO_BACK_CHANNEL,
-  BB_DESKTOP_BROWSER_GO_FORWARD_CHANNEL,
-  BB_DESKTOP_BROWSER_NAVIGATE_CHANNEL,
-  BB_DESKTOP_BROWSER_OPEN_TAB_CHANNEL,
-  BB_DESKTOP_BROWSER_RELOAD_CHANNEL,
-  BB_DESKTOP_BROWSER_SCOPED_OPEN_TAB_CHANNEL,
-  BB_DESKTOP_BROWSER_SET_BOUNDS_CHANNEL,
-  BB_DESKTOP_BROWSER_SET_VISIBLE_CHANNEL,
-  BB_DESKTOP_BROWSER_SET_VISIBLE_WITHOUT_FOCUS_CHANNEL,
-  BB_DESKTOP_BROWSER_SNAPSHOT_CHANNEL,
-  BB_DESKTOP_BROWSER_STATE_CHANNEL,
-  BB_DESKTOP_BROWSER_STOP_CHANNEL,
-  BB_DESKTOP_BROWSER_STOP_FIND_IN_PAGE_CHANNEL,
-  BB_DESKTOP_BROWSER_LIST_IMPORT_SOURCES_CHANNEL,
-  BB_DESKTOP_BROWSER_IMPORT_COOKIES_CHANNEL,
-  BB_DESKTOP_BROWSER_OPEN_FULL_DISK_ACCESS_SETTINGS_CHANNEL,
+  ROOM_DESKTOP_BROWSER_ATTACH_CHANNEL,
+  ROOM_DESKTOP_BROWSER_TARGET_CHANNEL,
+  ROOM_DESKTOP_BROWSER_GET_CONTROL_CHANNEL,
+  ROOM_DESKTOP_BROWSER_CONTROL_CHANNEL,
+  ROOM_DESKTOP_BROWSER_RELEASE_CONTROL_CHANNEL,
+  ROOM_DESKTOP_BROWSER_REVEAL_CHANNEL,
+  ROOM_DESKTOP_BROWSER_DETACH_CHANNEL,
+  ROOM_DESKTOP_BROWSER_FOCUS_CHANNEL,
+  ROOM_DESKTOP_BROWSER_FOCUSED_CHANNEL,
+  ROOM_DESKTOP_BROWSER_FIND_IN_PAGE_CHANNEL,
+  ROOM_DESKTOP_BROWSER_FIND_RESULT_CHANNEL,
+  ROOM_DESKTOP_BROWSER_GO_BACK_CHANNEL,
+  ROOM_DESKTOP_BROWSER_GO_FORWARD_CHANNEL,
+  ROOM_DESKTOP_BROWSER_NAVIGATE_CHANNEL,
+  ROOM_DESKTOP_BROWSER_OPEN_TAB_CHANNEL,
+  ROOM_DESKTOP_BROWSER_RELOAD_CHANNEL,
+  ROOM_DESKTOP_BROWSER_SCOPED_OPEN_TAB_CHANNEL,
+  ROOM_DESKTOP_BROWSER_SET_BOUNDS_CHANNEL,
+  ROOM_DESKTOP_BROWSER_SET_VISIBLE_CHANNEL,
+  ROOM_DESKTOP_BROWSER_SET_VISIBLE_WITHOUT_FOCUS_CHANNEL,
+  ROOM_DESKTOP_BROWSER_SNAPSHOT_CHANNEL,
+  ROOM_DESKTOP_BROWSER_STATE_CHANNEL,
+  ROOM_DESKTOP_BROWSER_STOP_CHANNEL,
+  ROOM_DESKTOP_BROWSER_STOP_FIND_IN_PAGE_CHANNEL,
+  ROOM_DESKTOP_BROWSER_LIST_IMPORT_SOURCES_CHANNEL,
+  ROOM_DESKTOP_BROWSER_IMPORT_COOKIES_CHANNEL,
+  ROOM_DESKTOP_BROWSER_OPEN_FULL_DISK_ACCESS_SETTINGS_CHANNEL,
 } from "./desktop-browser-ipc.js";
 import {
-  BB_DESKTOP_ADD_IMAGE_TO_CHAT_CHANNEL,
-  BB_DESKTOP_APP_COMMAND_CHANNEL,
-  BB_DESKTOP_CLOSE_WINDOW_REQUEST_CHANNEL,
-  BB_DESKTOP_CLOSE_WINDOW_RESPONSE_CHANNEL,
-  BB_DESKTOP_GET_WINDOW_STATE_CHANNEL,
-  BB_DESKTOP_OPEN_LINK_CHANNEL,
-  BB_DESKTOP_TOP_RIGHT_DRAG_CHANNEL,
-  BB_DESKTOP_OPEN_NEW_TAB_CHANNEL,
-  BB_DESKTOP_OPEN_COMPUTER_CHANNEL,
-  BB_DESKTOP_RECONNECT_COMPUTER_CHANNEL,
-  BB_DESKTOP_REFRESH_COMPUTERS_CHANNEL,
-  BB_DESKTOP_OPEN_SERVER_DAEMON_LOGS_CHANNEL,
-  BB_DESKTOP_WINDOW_STATE_CHANGED_CHANNEL,
+  ROOM_DESKTOP_ADD_IMAGE_TO_CHAT_CHANNEL,
+  ROOM_DESKTOP_APP_COMMAND_CHANNEL,
+  ROOM_DESKTOP_CLOSE_WINDOW_REQUEST_CHANNEL,
+  ROOM_DESKTOP_CLOSE_WINDOW_RESPONSE_CHANNEL,
+  ROOM_DESKTOP_GET_WINDOW_STATE_CHANNEL,
+  ROOM_DESKTOP_OPEN_LINK_CHANNEL,
+  ROOM_DESKTOP_TOP_RIGHT_DRAG_CHANNEL,
+  ROOM_DESKTOP_OPEN_NEW_TAB_CHANNEL,
+  ROOM_DESKTOP_OPEN_COMPUTER_CHANNEL,
+  ROOM_DESKTOP_SHOW_THIS_COMPUTER_CHANNEL,
+  ROOM_DESKTOP_REFRESH_COMPUTERS_CHANNEL,
+  ROOM_DESKTOP_OPEN_SERVER_DAEMON_LOGS_CHANNEL,
+  ROOM_DESKTOP_WINDOW_STATE_CHANGED_CHANNEL,
 } from "./desktop-window-command-ipc.js";
 import {
   getDesktopVersion,
-  resolveBbDesktopPlatform,
+  resolveRoomDesktopPlatform,
 } from "./desktop-platform.js";
 import { STARTUP_RETRY_CHANNEL } from "./local-view.js";
 
-function createInitialDesktopInfo(): BbDesktopInfo {
+function createInitialDesktopInfo(): RoomDesktopInfo {
   return {
     downloadState: "idle",
     lastCheckedAt: null,
     latestVersion: null,
     pendingVersion: null,
-    platform: resolveBbDesktopPlatform(process.platform),
+    platform: resolveRoomDesktopPlatform(process.platform),
     updateAvailable: false,
     updateDownloaded: false,
     version: getDesktopVersion(process.env.BB_DESKTOP_VERSION),
   };
 }
 
-function createInitialDesktopWindowState(): BbDesktopWindowState {
+function createInitialDesktopWindowState(): RoomDesktopWindowState {
   return {
     isFullScreen: false,
   };
 }
 
-const listeners = new Set<BbDesktopInfoChangeHandler>();
-const appCommandListeners = new Set<BbDesktopAppCommandHandler>();
-const windowStateListeners = new Set<BbDesktopWindowStateChangeHandler>();
+const listeners = new Set<RoomDesktopInfoChangeHandler>();
+const appCommandListeners = new Set<RoomDesktopAppCommandHandler>();
+const windowStateListeners = new Set<RoomDesktopWindowStateChangeHandler>();
 let currentInfo = createInitialDesktopInfo();
 let currentWindowState = createInitialDesktopWindowState();
 // Bumped by every snapshot request and state event, so a snapshot reply that
@@ -141,8 +141,8 @@ function notifyWindowStateListeners(): void {
   }
 }
 
-function applyDesktopInfoPayload(payload: unknown): BbDesktopInfo | null {
-  const parsed = bbDesktopInfoSchema.safeParse(payload);
+function applyDesktopInfoPayload(payload: unknown): RoomDesktopInfo | null {
+  const parsed = roomDesktopInfoSchema.safeParse(payload);
   if (!parsed.success) {
     return null;
   }
@@ -153,8 +153,8 @@ function applyDesktopInfoPayload(payload: unknown): BbDesktopInfo | null {
 
 function applyDesktopWindowStatePayload(
   payload: unknown,
-): BbDesktopWindowState | null {
-  const parsed = bbDesktopWindowStateSchema.safeParse(payload);
+): RoomDesktopWindowState | null {
+  const parsed = roomDesktopWindowStateSchema.safeParse(payload);
   if (!parsed.success) {
     return null;
   }
@@ -163,7 +163,7 @@ function applyDesktopWindowStatePayload(
   return currentWindowState;
 }
 
-async function invokeDesktopInfo(channel: string): Promise<BbDesktopInfo> {
+async function invokeDesktopInfo(channel: string): Promise<RoomDesktopInfo> {
   try {
     const payload: unknown = await ipcRenderer.invoke(channel);
     return applyDesktopInfoPayload(payload) ?? currentInfo;
@@ -172,11 +172,11 @@ async function invokeDesktopInfo(channel: string): Promise<BbDesktopInfo> {
   }
 }
 
-async function invokeDesktopWindowState(): Promise<BbDesktopWindowState> {
+async function invokeDesktopWindowState(): Promise<RoomDesktopWindowState> {
   const revision = ++windowStateRevision;
   try {
     const payload: unknown = await ipcRenderer.invoke(
-      BB_DESKTOP_GET_WINDOW_STATE_CHANNEL,
+      ROOM_DESKTOP_GET_WINDOW_STATE_CHANNEL,
     );
     if (revision !== windowStateRevision) return currentWindowState;
     return applyDesktopWindowStatePayload(payload) ?? currentWindowState;
@@ -187,30 +187,30 @@ async function invokeDesktopWindowState(): Promise<BbDesktopWindowState> {
 
 async function invokeInstallUpdate(): Promise<void> {
   try {
-    await ipcRenderer.invoke(BB_DESKTOP_INSTALL_UPDATE_CHANNEL);
+    await ipcRenderer.invoke(ROOM_DESKTOP_INSTALL_UPDATE_CHANNEL);
   } catch {
     return;
   }
 }
 
-const browserStateListeners = new Set<BbDesktopBrowserStateHandler>();
+const browserStateListeners = new Set<RoomDesktopBrowserStateHandler>();
 const browserControlListeners = new Set<
-  (state: BbDesktopBrowserControlState) => void
+  (state: RoomDesktopBrowserControlState) => void
 >();
 const browserRevealListeners = new Set<
-  (request: BbDesktopBrowserRevealRequest) => void
+  (request: RoomDesktopBrowserRevealRequest) => void
 >();
-const browserOpenTabListeners = new Set<BbDesktopBrowserOpenTabHandler>();
+const browserOpenTabListeners = new Set<RoomDesktopBrowserOpenTabHandler>();
 const browserScopedOpenTabListeners =
-  new Set<BbDesktopBrowserScopedOpenTabHandler>();
-const browserFocusListeners = new Set<BbDesktopBrowserFocusHandler>();
-const browserSnapshotListeners = new Set<BbDesktopBrowserSnapshotHandler>();
-const browserFindResultListeners = new Set<BbDesktopBrowserFindResultHandler>();
+  new Set<RoomDesktopBrowserScopedOpenTabHandler>();
+const browserFocusListeners = new Set<RoomDesktopBrowserFocusHandler>();
+const browserSnapshotListeners = new Set<RoomDesktopBrowserSnapshotHandler>();
+const browserFindResultListeners = new Set<RoomDesktopBrowserFindResultHandler>();
 const closeWindowRequestListeners =
-  new Set<BbDesktopCloseWindowRequestHandler>();
-const openNewTabListeners = new Set<BbDesktopOpenNewTabHandler>();
+  new Set<RoomDesktopCloseWindowRequestHandler>();
+const openNewTabListeners = new Set<RoomDesktopOpenNewTabHandler>();
 const addImageToChatListeners = new Set<(imageUrl: string) => void>();
-const openLinkListeners = new Set<BbDesktopOpenLinkHandler>();
+const openLinkListeners = new Set<RoomDesktopOpenLinkHandler>();
 const pendingOpenLinks: string[] = [];
 
 function addListener<T>(listeners: Set<T>, listener: T): () => void {
@@ -237,8 +237,8 @@ function forwardParsed<T>(
 }
 
 function browserViewBoundsAtWindowScale(
-  bounds: BbDesktopBrowserViewBounds,
-): BbDesktopBrowserViewBounds {
+  bounds: RoomDesktopBrowserViewBounds,
+): RoomDesktopBrowserViewBounds {
   const zoomFactor = webFrame.getZoomFactor();
   if (zoomFactor === 1) {
     return bounds;
@@ -256,21 +256,21 @@ function browserViewBoundsAtWindowScale(
   };
 }
 
-const bbBrowserApi: BbDesktopBrowserApi = {
+const roomBrowserApi: RoomDesktopBrowserApi = {
   async getTarget() {
-    return bbDesktopBrowserTargetSchema
+    return roomDesktopBrowserTargetSchema
       .nullable()
-      .parse(await ipcRenderer.invoke(BB_DESKTOP_BROWSER_TARGET_CHANNEL));
+      .parse(await ipcRenderer.invoke(ROOM_DESKTOP_BROWSER_TARGET_CHANNEL));
   },
   async getControl(tabId) {
-    return bbDesktopBrowserControlStateSchema.nullable().parse(
-      await ipcRenderer.invoke(BB_DESKTOP_BROWSER_GET_CONTROL_CHANNEL, {
+    return roomDesktopBrowserControlStateSchema.nullable().parse(
+      await ipcRenderer.invoke(ROOM_DESKTOP_BROWSER_GET_CONTROL_CHANNEL, {
         tabId,
       }),
     );
   },
   releaseControl(tabId) {
-    ipcRenderer.send(BB_DESKTOP_BROWSER_RELEASE_CONTROL_CHANNEL, { tabId });
+    ipcRenderer.send(ROOM_DESKTOP_BROWSER_RELEASE_CONTROL_CHANNEL, { tabId });
   },
   onControl(listener) {
     return addListener(browserControlListeners, listener);
@@ -279,82 +279,82 @@ const bbBrowserApi: BbDesktopBrowserApi = {
     return addListener(browserRevealListeners, listener);
   },
   attach(request): void {
-    ipcRenderer.send(BB_DESKTOP_BROWSER_ATTACH_CHANNEL, {
+    ipcRenderer.send(ROOM_DESKTOP_BROWSER_ATTACH_CHANNEL, {
       ...request,
       bounds: browserViewBoundsAtWindowScale(request.bounds),
     });
   },
   detach(tabId): void {
-    ipcRenderer.send(BB_DESKTOP_BROWSER_DETACH_CHANNEL, { tabId });
+    ipcRenderer.send(ROOM_DESKTOP_BROWSER_DETACH_CHANNEL, { tabId });
   },
   navigate(request): void {
-    ipcRenderer.send(BB_DESKTOP_BROWSER_NAVIGATE_CHANNEL, request);
+    ipcRenderer.send(ROOM_DESKTOP_BROWSER_NAVIGATE_CHANNEL, request);
   },
   goBack(tabId): void {
-    ipcRenderer.send(BB_DESKTOP_BROWSER_GO_BACK_CHANNEL, { tabId });
+    ipcRenderer.send(ROOM_DESKTOP_BROWSER_GO_BACK_CHANNEL, { tabId });
   },
   goForward(tabId): void {
-    ipcRenderer.send(BB_DESKTOP_BROWSER_GO_FORWARD_CHANNEL, { tabId });
+    ipcRenderer.send(ROOM_DESKTOP_BROWSER_GO_FORWARD_CHANNEL, { tabId });
   },
   reload(tabId): void {
-    ipcRenderer.send(BB_DESKTOP_BROWSER_RELOAD_CHANNEL, { tabId });
+    ipcRenderer.send(ROOM_DESKTOP_BROWSER_RELOAD_CHANNEL, { tabId });
   },
   stop(tabId): void {
-    ipcRenderer.send(BB_DESKTOP_BROWSER_STOP_CHANNEL, { tabId });
+    ipcRenderer.send(ROOM_DESKTOP_BROWSER_STOP_CHANNEL, { tabId });
   },
   focus(tabId): void {
-    ipcRenderer.send(BB_DESKTOP_BROWSER_FOCUS_CHANNEL, { tabId });
+    ipcRenderer.send(ROOM_DESKTOP_BROWSER_FOCUS_CHANNEL, { tabId });
   },
   setBounds(request): void {
-    ipcRenderer.send(BB_DESKTOP_BROWSER_SET_BOUNDS_CHANNEL, {
+    ipcRenderer.send(ROOM_DESKTOP_BROWSER_SET_BOUNDS_CHANNEL, {
       ...request,
       bounds: browserViewBoundsAtWindowScale(request.bounds),
     });
   },
   setVisible(request): void {
-    ipcRenderer.send(BB_DESKTOP_BROWSER_SET_VISIBLE_CHANNEL, request);
+    ipcRenderer.send(ROOM_DESKTOP_BROWSER_SET_VISIBLE_CHANNEL, request);
   },
   setVisibleWithoutFocus(request): void {
     ipcRenderer.send(
-      BB_DESKTOP_BROWSER_SET_VISIBLE_WITHOUT_FOCUS_CHANNEL,
+      ROOM_DESKTOP_BROWSER_SET_VISIBLE_WITHOUT_FOCUS_CHANNEL,
       request,
     );
   },
-  onState(listener): BbDesktopBrowserUnsubscribe {
+  onState(listener): RoomDesktopBrowserUnsubscribe {
     return addListener(browserStateListeners, listener);
   },
-  onOpenTab(listener): BbDesktopBrowserUnsubscribe {
+  onOpenTab(listener): RoomDesktopBrowserUnsubscribe {
     return addListener(browserOpenTabListeners, listener);
   },
-  onScopedOpenTab(listener): BbDesktopBrowserUnsubscribe {
+  onScopedOpenTab(listener): RoomDesktopBrowserUnsubscribe {
     return addListener(browserScopedOpenTabListeners, listener);
   },
-  onFocus(listener): BbDesktopBrowserUnsubscribe {
+  onFocus(listener): RoomDesktopBrowserUnsubscribe {
     return addListener(browserFocusListeners, listener);
   },
-  onSnapshot(listener): BbDesktopBrowserUnsubscribe {
+  onSnapshot(listener): RoomDesktopBrowserUnsubscribe {
     return addListener(browserSnapshotListeners, listener);
   },
   findInPage(request): void {
-    ipcRenderer.send(BB_DESKTOP_BROWSER_FIND_IN_PAGE_CHANNEL, request);
+    ipcRenderer.send(ROOM_DESKTOP_BROWSER_FIND_IN_PAGE_CHANNEL, request);
   },
   stopFindInPage(request): void {
-    ipcRenderer.send(BB_DESKTOP_BROWSER_STOP_FIND_IN_PAGE_CHANNEL, request);
+    ipcRenderer.send(ROOM_DESKTOP_BROWSER_STOP_FIND_IN_PAGE_CHANNEL, request);
   },
-  onFindResult(listener): BbDesktopBrowserUnsubscribe {
+  onFindResult(listener): RoomDesktopBrowserUnsubscribe {
     return addListener(browserFindResultListeners, listener);
   },
   ...(process.platform === "win32" ? {} : browserImportApi()),
 };
 
 function browserImportApi(): Pick<
-  BbDesktopBrowserApi,
+  RoomDesktopBrowserApi,
   "listImportSources" | "importCookies" | "openFullDiskAccessSettings"
 > {
   return {
     async listImportSources() {
       const payload: unknown = await ipcRenderer.invoke(
-        BB_DESKTOP_BROWSER_LIST_IMPORT_SOURCES_CHANNEL,
+        ROOM_DESKTOP_BROWSER_LIST_IMPORT_SOURCES_CHANNEL,
       );
       return z
         .object({ sources: z.array(desktopBrowserImportSourceSchema) })
@@ -362,21 +362,21 @@ function browserImportApi(): Pick<
     },
     async importCookies(request) {
       const payload: unknown = await ipcRenderer.invoke(
-        BB_DESKTOP_BROWSER_IMPORT_COOKIES_CHANNEL,
+        ROOM_DESKTOP_BROWSER_IMPORT_COOKIES_CHANNEL,
         request,
       );
       return desktopBrowserImportOutcomeSchema.parse(payload);
     },
     openFullDiskAccessSettings() {
       ipcRenderer.send(
-        BB_DESKTOP_BROWSER_OPEN_FULL_DISK_ACCESS_SETTINGS_CHANNEL,
+        ROOM_DESKTOP_BROWSER_OPEN_FULL_DISK_ACCESS_SETTINGS_CHANNEL,
       );
     },
   };
 }
 
-const bbDesktopApi: BbDesktopApi = {
-  browser: bbBrowserApi,
+const roomDesktopApi: BbDesktopApi = {
+  browser: roomBrowserApi,
   get lastCheckedAt() {
     return currentInfo.lastCheckedAt;
   },
@@ -386,7 +386,7 @@ const bbDesktopApi: BbDesktopApi = {
   get pendingVersion() {
     return currentInfo.pendingVersion;
   },
-  platform: resolveBbDesktopPlatform(process.platform),
+  platform: resolveRoomDesktopPlatform(process.platform),
   get serverDaemonLogsAvailable() {
     return currentInfo.serverDaemonLogsAvailable;
   },
@@ -398,10 +398,10 @@ const bbDesktopApi: BbDesktopApi = {
   },
   version: currentInfo.version,
   checkForUpdates() {
-    return invokeDesktopInfo(BB_DESKTOP_CHECK_FOR_UPDATES_CHANNEL);
+    return invokeDesktopInfo(ROOM_DESKTOP_CHECK_FOR_UPDATES_CHANNEL);
   },
   getInfo() {
-    return invokeDesktopInfo(BB_DESKTOP_GET_INFO_CHANNEL);
+    return invokeDesktopInfo(ROOM_DESKTOP_GET_INFO_CHANNEL);
   },
   getWindowState() {
     return invokeDesktopWindowState();
@@ -414,135 +414,135 @@ const bbDesktopApi: BbDesktopApi = {
   },
   moveToApplications() {
     return ipcRenderer
-      .invoke(BB_DESKTOP_MOVE_TO_APPLICATIONS_CHANNEL)
+      .invoke(ROOM_DESKTOP_MOVE_TO_APPLICATIONS_CHANNEL)
       .then((moved: unknown) => moved === true, () => false);
   },
-  onChange(listener: BbDesktopInfoChangeHandler): BbDesktopInfoUnsubscribe {
+  onChange(listener: RoomDesktopInfoChangeHandler): RoomDesktopInfoUnsubscribe {
     return addListener(listeners, listener);
   },
   onWindowStateChange(
-    listener: BbDesktopWindowStateChangeHandler,
-  ): BbDesktopInfoUnsubscribe {
+    listener: RoomDesktopWindowStateChangeHandler,
+  ): RoomDesktopInfoUnsubscribe {
     return addListener(windowStateListeners, listener);
   },
-  onOpenNewTab(listener): BbDesktopInfoUnsubscribe {
+  onOpenNewTab(listener): RoomDesktopInfoUnsubscribe {
     return addListener(openNewTabListeners, listener);
   },
-  onOpenLink(listener): BbDesktopInfoUnsubscribe {
+  onOpenLink(listener): RoomDesktopInfoUnsubscribe {
     const unsubscribe = addListener(openLinkListeners, listener);
     for (const url of pendingOpenLinks.splice(0)) listener(url);
     return unsubscribe;
   },
-  onTopRightWindowDrag(listener): BbDesktopInfoUnsubscribe {
+  onTopRightWindowDrag(listener): RoomDesktopInfoUnsubscribe {
     const handler = (_event: unknown, position: unknown) => {
       if (typeof position === "string") listener(position);
     };
-    ipcRenderer.on(BB_DESKTOP_TOP_RIGHT_DRAG_CHANNEL, handler);
+    ipcRenderer.on(ROOM_DESKTOP_TOP_RIGHT_DRAG_CHANNEL, handler);
     return () => {
-      ipcRenderer.removeListener(BB_DESKTOP_TOP_RIGHT_DRAG_CHANNEL, handler);
+      ipcRenderer.removeListener(ROOM_DESKTOP_TOP_RIGHT_DRAG_CHANNEL, handler);
     };
   },
-  onAppCommand(listener): BbDesktopInfoUnsubscribe {
+  onAppCommand(listener): RoomDesktopInfoUnsubscribe {
     return addListener(appCommandListeners, listener);
   },
-  onAddImageToChat(listener): BbDesktopInfoUnsubscribe {
+  onAddImageToChat(listener): RoomDesktopInfoUnsubscribe {
     return addListener(addImageToChatListeners, listener);
   },
-  onCloseWindowRequest(listener): BbDesktopInfoUnsubscribe {
+  onCloseWindowRequest(listener): RoomDesktopInfoUnsubscribe {
     return addListener(closeWindowRequestListeners, listener);
   },
   openExternalUrl(url: string): void {
-    ipcRenderer.send(BB_DESKTOP_OPEN_EXTERNAL_URL_CHANNEL, url);
+    ipcRenderer.send(ROOM_DESKTOP_OPEN_EXTERNAL_URL_CHANNEL, url);
   },
   async openComputer(handle: string | null): Promise<void> {
-    await ipcRenderer.invoke(BB_DESKTOP_OPEN_COMPUTER_CHANNEL, handle);
+    await ipcRenderer.invoke(ROOM_DESKTOP_OPEN_COMPUTER_CHANNEL, handle);
   },
-  async reconnectComputer(keepTrying: boolean): Promise<void> {
-    await ipcRenderer.invoke(BB_DESKTOP_RECONNECT_COMPUTER_CHANNEL, keepTrying);
+  async showThisComputer(): Promise<void> {
+    await ipcRenderer.invoke(ROOM_DESKTOP_SHOW_THIS_COMPUTER_CHANNEL);
   },
   refreshComputers(): void {
-    ipcRenderer.send(BB_DESKTOP_REFRESH_COMPUTERS_CHANNEL);
+    ipcRenderer.send(ROOM_DESKTOP_REFRESH_COMPUTERS_CHANNEL);
   },
   async openServerDaemonLogs(): Promise<void> {
-    await ipcRenderer.invoke(BB_DESKTOP_OPEN_SERVER_DAEMON_LOGS_CHANNEL);
+    await ipcRenderer.invoke(ROOM_DESKTOP_OPEN_SERVER_DAEMON_LOGS_CHANNEL);
   },
-  setTheme(theme: BbDesktopTheme): void {
-    ipcRenderer.send(BB_DESKTOP_SET_THEME_CHANNEL, theme);
+  setTheme(theme: RoomDesktopTheme): void {
+    ipcRenderer.send(ROOM_DESKTOP_SET_THEME_CHANNEL, theme);
   },
   setBadgeCount(count: number): void {
-    ipcRenderer.send(BB_DESKTOP_SET_BADGE_COUNT_CHANNEL, count);
+    ipcRenderer.send(ROOM_DESKTOP_SET_BADGE_COUNT_CHANNEL, count);
   },
   focusWindow(): void {
-    ipcRenderer.send(BB_DESKTOP_FOCUS_WINDOW_CHANNEL);
+    ipcRenderer.send(ROOM_DESKTOP_FOCUS_WINDOW_CHANNEL);
   },
 };
 
-ipcRenderer.on(BB_DESKTOP_INFO_CHANGED_CHANNEL, (_event, payload: unknown) => {
+ipcRenderer.on(ROOM_DESKTOP_INFO_CHANGED_CHANNEL, (_event, payload: unknown) => {
   applyDesktopInfoPayload(payload);
 });
 
 ipcRenderer.on(
-  BB_DESKTOP_WINDOW_STATE_CHANGED_CHANNEL,
+  ROOM_DESKTOP_WINDOW_STATE_CHANGED_CHANNEL,
   (_event, payload: unknown) => {
     windowStateRevision += 1;
     applyDesktopWindowStatePayload(payload);
   },
 );
 
-ipcRenderer.on(BB_DESKTOP_OPEN_LINK_CHANNEL, (_event, payload: unknown) => {
+ipcRenderer.on(ROOM_DESKTOP_OPEN_LINK_CHANNEL, (_event, payload: unknown) => {
   if (typeof payload !== "string") return;
   if (openLinkListeners.size === 0) pendingOpenLinks.push(payload);
   for (const listener of openLinkListeners) listener(payload);
 });
 
-ipcRenderer.on(BB_DESKTOP_OPEN_NEW_TAB_CHANNEL, () => {
+ipcRenderer.on(ROOM_DESKTOP_OPEN_NEW_TAB_CHANNEL, () => {
   for (const listener of openNewTabListeners) {
     listener();
   }
 });
 
 forwardParsed(
-  BB_DESKTOP_APP_COMMAND_CHANNEL,
+  ROOM_DESKTOP_APP_COMMAND_CHANNEL,
   z.union([appCommandIdSchema, appShortcutInputSchema]),
   appCommandListeners,
 );
 
 forwardParsed(
-  BB_DESKTOP_ADD_IMAGE_TO_CHAT_CHANNEL,
+  ROOM_DESKTOP_ADD_IMAGE_TO_CHAT_CHANNEL,
   z.string().min(1),
   addImageToChatListeners,
 );
 
-ipcRenderer.on(BB_DESKTOP_CLOSE_WINDOW_REQUEST_CHANNEL, () => {
+ipcRenderer.on(ROOM_DESKTOP_CLOSE_WINDOW_REQUEST_CHANNEL, () => {
   let handled = false;
   for (const listener of closeWindowRequestListeners) {
     handled = listener() || handled;
   }
-  ipcRenderer.send(BB_DESKTOP_CLOSE_WINDOW_RESPONSE_CHANNEL, handled);
+  ipcRenderer.send(ROOM_DESKTOP_CLOSE_WINDOW_RESPONSE_CHANNEL, handled);
 });
 
 forwardParsed(
-  BB_DESKTOP_BROWSER_STATE_CHANNEL,
-  bbDesktopBrowserStateSchema,
+  ROOM_DESKTOP_BROWSER_STATE_CHANNEL,
+  roomDesktopBrowserStateSchema,
   browserStateListeners,
 );
 
 forwardParsed(
-  BB_DESKTOP_BROWSER_CONTROL_CHANNEL,
-  bbDesktopBrowserControlStateSchema,
+  ROOM_DESKTOP_BROWSER_CONTROL_CHANNEL,
+  roomDesktopBrowserControlStateSchema,
   browserControlListeners,
 );
 
 forwardParsed(
-  BB_DESKTOP_BROWSER_REVEAL_CHANNEL,
-  bbDesktopBrowserRevealRequestSchema,
+  ROOM_DESKTOP_BROWSER_REVEAL_CHANNEL,
+  roomDesktopBrowserRevealRequestSchema,
   browserRevealListeners,
 );
 
 ipcRenderer.on(
-  BB_DESKTOP_BROWSER_FOCUSED_CHANNEL,
+  ROOM_DESKTOP_BROWSER_FOCUSED_CHANNEL,
   (_event, payload: unknown) => {
-    const parsed = bbDesktopBrowserTabRefSchema.safeParse(payload);
+    const parsed = roomDesktopBrowserTabRefSchema.safeParse(payload);
     if (!parsed.success) {
       return;
     }
@@ -553,26 +553,26 @@ ipcRenderer.on(
 );
 
 forwardParsed(
-  BB_DESKTOP_BROWSER_OPEN_TAB_CHANNEL,
-  bbDesktopBrowserOpenTabRequestSchema,
+  ROOM_DESKTOP_BROWSER_OPEN_TAB_CHANNEL,
+  roomDesktopBrowserOpenTabRequestSchema,
   browserOpenTabListeners,
 );
 
 forwardParsed(
-  BB_DESKTOP_BROWSER_SCOPED_OPEN_TAB_CHANNEL,
-  bbDesktopBrowserScopedOpenTabRequestSchema,
+  ROOM_DESKTOP_BROWSER_SCOPED_OPEN_TAB_CHANNEL,
+  roomDesktopBrowserScopedOpenTabRequestSchema,
   browserScopedOpenTabListeners,
 );
 
 forwardParsed(
-  BB_DESKTOP_BROWSER_SNAPSHOT_CHANNEL,
-  bbDesktopBrowserSnapshotSchema,
+  ROOM_DESKTOP_BROWSER_SNAPSHOT_CHANNEL,
+  roomDesktopBrowserSnapshotSchema,
   browserSnapshotListeners,
 );
 
 forwardParsed(
-  BB_DESKTOP_BROWSER_FIND_RESULT_CHANNEL,
-  bbDesktopBrowserFindResultSchema,
+  ROOM_DESKTOP_BROWSER_FIND_RESULT_CHANNEL,
+  roomDesktopBrowserFindResultSchema,
   browserFindResultListeners,
 );
 
@@ -586,7 +586,7 @@ if (typeof window !== "undefined" && typeof document !== "undefined") {
   });
 }
 
-void invokeDesktopInfo(BB_DESKTOP_GET_INFO_CHANNEL);
+void invokeDesktopInfo(ROOM_DESKTOP_GET_INFO_CHANNEL);
 void invokeDesktopWindowState();
 
-contextBridge.exposeInMainWorld("bbDesktop", bbDesktopApi);
+contextBridge.exposeInMainWorld("bbDesktop", roomDesktopApi);

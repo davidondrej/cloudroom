@@ -31,8 +31,8 @@ function textQueuedRetry(queued: QueuedRetry): string {
  * schedule, and this reads and acts on it. `retry` is a Send-now and `cancel`
  * is a cancel, so both do exactly what the queued card's buttons do.
  */
-export function registerProviderRetryCli(bb: BbPluginApi): void {
-  bb.cli.register({
+export function registerProviderRetryCli(room: BbPluginApi): void {
+  room.cli.register({
     name: "provider-retry",
     summary: "Manage pending automatic provider retries",
     commands: [
@@ -66,7 +66,7 @@ export function registerProviderRetryCli(bb: BbPluginApi): void {
 
       if (command === "status") {
         const queued = await listQueuedRetries(
-          bb,
+          room,
           threadId === null ? undefined : threadId,
         );
         if (json) {
@@ -90,7 +90,7 @@ export function registerProviderRetryCli(bb: BbPluginApi): void {
           stderr: `A thread id is required: bb provider-retry ${command} <thread-id>\n`,
         };
       }
-      const queued = await findQueuedRetry(bb, threadId);
+      const queued = await findQueuedRetry(room, threadId);
       if (queued === null) {
         return json
           ? {
@@ -103,14 +103,14 @@ export function registerProviderRetryCli(bb: BbPluginApi): void {
             };
       }
       if (command === "cancel") {
-        await bb.sdk.threads.queuedMessages.delete({
+        await room.sdk.threads.queuedMessages.delete({
           threadId: queued.threadId,
           queuedMessageId: queued.id,
         });
       } else {
         // Send now: bypasses this plugin's own wait and the row's schedule,
         // which is exactly what "retry it now" means.
-        await bb.sdk.threads.queuedMessages.send({
+        await room.sdk.threads.queuedMessages.send({
           threadId: queued.threadId,
           queuedMessageId: queued.id,
           mode: "auto",

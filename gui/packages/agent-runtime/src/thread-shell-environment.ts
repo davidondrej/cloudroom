@@ -1,7 +1,11 @@
+import { lstatSync, readlinkSync, symlinkSync } from "node:fs";
 import type {
   AgentRuntimeContributedEnvEntry,
   AgentRuntimeShellEnvironment,
 } from "./types.js";
+
+/** fnm's per-shell link to the selected Node, as a PATH entry. */
+export const FNM_SHELL_LINK = /[^:]*fnm_multishells\/[^/:]+/gu;
 
 interface ThreadShellEnvironmentArgs {
   environmentId: string;
@@ -14,11 +18,33 @@ interface BuildThreadShellEnvironmentArgs extends ThreadShellEnvironmentArgs {
   baseShellEnv: AgentRuntimeShellEnvironment | undefined;
 }
 
+/**
+ * fnm gives every shell its own link to the selected Node, so `fnm use`
+ * changes only that shell. Each thread gets its own link the same way (#1026).
+ */
+function threadFnmEnv(
+  path: string | undefined,
+  threadId: string,
+): Record<string, string> {
+  const shared = path?.match(FNM_SHELL_LINK)?.[0];
+  if (path === undefined || shared === undefined) return {};
+  const own = `${shared}_${threadId}`;
+  try {
+    if (!lstatSync(own, { throwIfNoEntry: false })) {
+      symlinkSync(readlinkSync(shared), own);
+    }
+  } catch {
+    return {};
+  }
+  return { PATH: path.replace(shared, own), FNM_MULTISHELL_PATH: own };
+}
+
 export function buildThreadShellEnvironment(
   args: BuildThreadShellEnvironmentArgs,
 ): Record<string, string> {
   return {
     ...(args.baseShellEnv ?? {}),
+    ...threadFnmEnv(args.baseShellEnv?.PATH, args.threadId),
     ...(args.projectId ? { ROOM_PROJECT_ID: args.projectId } : {}),
     ...(args.threadStoragePath
       ? { ROOM_THREAD_STORAGE: args.threadStoragePath }

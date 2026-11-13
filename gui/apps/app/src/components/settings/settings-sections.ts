@@ -27,6 +27,7 @@ export const SETTINGS_NAV_SECTIONS = [
   { icon: "Puzzle", id: "marketplaces", label: "Plugin marketplaces" },
   { icon: "Lock", id: "command-guard", label: "Command Guard" },
   { icon: "Bot", id: "system-prompt", label: "System prompt" },
+  { icon: "Edit", id: "feature-prompts", label: "Feature prompts" },
   { icon: "Beaker", id: "experiments", label: "Experiments" },
   { icon: "MessageSquare", id: "community", label: "Community" },
   { icon: "Archive", id: "archived", label: "Archived threads" },
@@ -115,16 +116,18 @@ export const SETTINGS_NAV_GROUPS: readonly SettingsNavGroup[] = [
       plugin("provider-acp", "ACP"),
       plugin("provider-usage", "Usage"),
       plugin("provider-retry", "Retry"),
+      plugin("internet-watch", "Internet"),
     ],
   },
   {
     icon: "Edit",
     id: "instructions",
-    label: "Instructions",
+    label: "Prompts",
     members: [
       plugin("custom-instructions", "Custom instructions"),
       section("system-prompt"),
-      plugin("bb-guide", "Cloudroom guide"),
+      section("feature-prompts"),
+      plugin("cloudroom-guide", "Cloudroom guide"),
     ],
   },
   {

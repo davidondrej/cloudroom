@@ -82,6 +82,10 @@
     "category": "agents-and-providers",
     "screenshots": []
   },
+  "internet-watch": {
+    "category": "agents-and-providers",
+    "screenshots": []
+  },
   "provider-usage": {
     "category": "agents-and-providers",
     "screenshots": []
@@ -92,6 +96,10 @@
   },
   "time-in-cloudroom": {
     "category": "utilities",
+    "screenshots": []
+  },
+  "wallpaper": {
+    "category": "themes-and-appearance",
     "screenshots": []
   },
   "secrets": {
@@ -118,14 +126,6 @@
     "category": "code-and-reviews",
     "screenshots": []
   },
-  "docs": {
-    "category": "file-viewers-and-editors",
-    "screenshots": []
-  },
-  "memory": {
-    "category": "memory-and-context",
-    "screenshots": []
-  },
   "tasks": {
     "category": "tasks-and-workflows",
     "screenshots": []
@@ -150,12 +150,8 @@
     "category": "environments",
     "screenshots": []
   },
-  "bb-guide": {
+  "cloudroom-guide": {
     "category": "memory-and-context",
-    "screenshots": []
-  },
-  "environment-modal-sandbox": {
-    "category": "environments",
     "screenshots": []
   }
 }

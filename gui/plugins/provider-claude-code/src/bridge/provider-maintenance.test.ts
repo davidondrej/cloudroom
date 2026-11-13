@@ -1,5 +1,9 @@
-import { describe, expect, it } from "vitest";
-import { __testing } from "./provider-maintenance.js";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { describe, expect, it, vi } from "vitest";
+import { __testing, getClaudeProviderHealth } from "./provider-maintenance.js";
+import { resolveClaudeCodeExecutable } from "./session-options.js";
 
 function missingInstallationStatus() {
   return {
@@ -56,7 +60,7 @@ describe("Claude Code provider maintenance", () => {
     ).toMatchObject({
       status: "ok",
       accountEmail: "claude@example.com",
-      planLabel: "Max (5x)",
+      planLabel: "Max",
       windows: [
         { label: "Current session", usedPercent: 12 },
         { label: "Weekly limit", usedPercent: 55 },
@@ -79,5 +83,26 @@ describe("Claude Code provider maintenance", () => {
     expect(run.available && run.command.args[1]).toContain(
       "https://claude.ai/install.sh",
     );
+  });
+
+  it("reports npm's unfinished placeholder as not installed (#1148)", async () => {
+    const stub = join(mkdtempSync(join(tmpdir(), "claude-stub-")), "claude");
+    writeFileSync(
+      stub,
+      'echo "Error: claude native binary not installed." >&2\nexit 1\n',
+      { mode: 0o755 },
+    );
+    vi.stubEnv("BB_CLAUDE_CODE_EXECUTABLE", stub);
+    try {
+      expect(await getClaudeProviderHealth()).toMatchObject({
+        health: { status: "not_installed" },
+      });
+      // An explicit override can't fall back, so the start names the variable.
+      expect(() => resolveClaudeCodeExecutable({ env: process.env })).toThrow(
+        "BB_CLAUDE_CODE_EXECUTABLE points to npm's unfinished Claude Code placeholder",
+      );
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 });

@@ -111,7 +111,7 @@ const CLAUDE_FILE_PERMISSION_KIND_BY_TOOL_NAME = new Map<
   ["Bash", "read_write"],
 ]);
 
-const CLAUDE_SANDBOX_NETWORK_TOOL_NAME = "SandboxNetworkAccess";
+export const CLAUDE_SANDBOX_NETWORK_TOOL_NAME = "SandboxNetworkAccess";
 
 const CLAUDE_NETWORK_PERMISSION_TOOL_NAMES = new Set([
   "WebFetch",
@@ -183,23 +183,6 @@ export function toPendingInteractionPermissionProfile(
     network,
     fileSystem,
   };
-}
-
-interface ShouldRequestClaudePermissionApprovalArgs {
-  blockedPath: string | undefined;
-  decisionReason: string | undefined;
-  suggestions: ClaudeSuggestedPermissionUpdate[] | undefined;
-  toolName: string;
-}
-
-export function shouldRequestClaudePermissionApproval(
-  args: ShouldRequestClaudePermissionApprovalArgs,
-): boolean {
-  return (
-    args.blockedPath !== undefined ||
-    args.decisionReason !== undefined ||
-    (args.suggestions?.length ?? 0) > 0
-  );
 }
 
 export interface ClaudePermissionRequestApprovalParams {

@@ -34,8 +34,8 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-export default async function checkoutPlugin(bb: BbPluginApi): Promise<void> {
-  const host = bb.hosts.experimental_client({
+export default async function checkoutPlugin(room: BbPluginApi): Promise<void> {
+  const host = room.hosts.experimental_client({
     contract: checkoutHostContract,
     experimental_signals: checkoutHostSignals,
   });
@@ -51,12 +51,12 @@ export default async function checkoutPlugin(bb: BbPluginApi): Promise<void> {
     path: string;
     threadId: string | null;
   }): Promise<boolean> {
-    const rows = await bb.sdk.environments.list({
+    const rows = await room.sdk.environments.list({
       hostId: args.hostId,
       path: args.path,
     });
     for (const row of rows) {
-      const threads = await bb.sdk.threads.list({
+      const threads = await room.sdk.threads.list({
         environmentId: row.id,
         archived: false,
       });
@@ -125,7 +125,7 @@ export default async function checkoutPlugin(bb: BbPluginApi): Promise<void> {
     hostId: string;
     path: string;
   }): Promise<string | null> {
-    const rows = await bb.sdk.environments.list({
+    const rows = await room.sdk.environments.list({
       hostId: args.hostId,
       path: args.path,
     });
@@ -138,7 +138,7 @@ export default async function checkoutPlugin(bb: BbPluginApi): Promise<void> {
     return environment?.id ?? null;
   }
 
-  bb.experimental_environments.register({
+  room.experimental_environments.register({
     id: PROJECT_CHECKOUT_ENVIRONMENT_PROVIDER_ID,
     displayName: "Project checkout",
     description: "Work in a project checkout on this machine.",

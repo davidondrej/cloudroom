@@ -8,7 +8,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 const SKILL_ROOT = fileURLToPath(
   new URL(
-    "../../../../../plugins/bb-guide/skills/plugin-authoring/",
+    "../../../../../plugins/cloudroom-guide/skills/plugin-authoring/",
     import.meta.url,
   ),
 );

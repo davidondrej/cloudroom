@@ -13,7 +13,7 @@ import {
 import { SettingsSidebarContent } from "./SettingsSidebar";
 
 const pluginEntries = [
-  "bb-guide",
+  "cloudroom-guide",
   "connect",
   "custom-instructions",
   "keep-awake",
@@ -86,7 +86,7 @@ describe("SettingsSidebarContent navigation", () => {
       "Account",
       "General",
       "Agents",
-      "Instructions",
+      "Prompts",
       "Cloud",
       "Machines",
       "Projects",
@@ -96,7 +96,7 @@ describe("SettingsSidebarContent navigation", () => {
       "Updates",
     ]);
     expect(
-      screen.getByRole("link", { name: "Instructions" }).getAttribute("href"),
+      screen.getByRole("link", { name: "Prompts" }).getAttribute("href"),
     ).toBe("/settings/plugins/custom-instructions");
   });
 
@@ -138,7 +138,7 @@ describe("SettingsSidebarContent navigation", () => {
       sections: SETTINGS_NAV_SECTIONS.filter(({ id }) => id !== "files"),
     });
     expect(
-      screen.getByRole("link", { name: "Instructions" }).getAttribute("href"),
+      screen.getByRole("link", { name: "Prompts" }).getAttribute("href"),
     ).toBe("/settings/system-prompt");
   });
 

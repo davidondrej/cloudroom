@@ -17,15 +17,18 @@ it("Teleport to Cloud copies staged, unstaged, and untracked work plus ignored .
   try {
     git("init", "-q");
     writeFileSync(join(root, ".gitignore"), "node_modules\n.env\n");
-    ["staged.txt", "unstaged.txt", "clean.txt"].forEach(write("old"));
+    ["staged.txt", "unstaged.txt", "clean.txt", ".env.example", "env.template"].forEach(write("old"));
     git("add", ".");
     git("commit", "-qm", "init");
-    ["staged.txt", "added.txt", "unstaged.txt", "untracked.txt", ".env", "apps/web/.env", "node_modules/pkg/index.js"].forEach(write("new"));
-    git("add", "staged.txt", "added.txt");
+    ["staged.txt", "added.txt", "unstaged.txt", "untracked.txt", ".env", ".env.example", ".env.test", "apps/web/.env", ".env.ita", "node_modules/pkg/index.js"].forEach(write("new"));
+    git("add", "staged.txt", "added.txt", ".env.test");
+    git("mv", "env.template", ".env.local");
+    git("add", "-N", ".env.ita");
 
-    expect((await localFiles(root, "changed")).sort()).toEqual([".env", "added.txt", "apps/web/.env", "staged.txt", "unstaged.txt", "untracked.txt"]);
+    expect((await localFiles(root, "changed")).sort()).toEqual([".env", ".env.example", ".env.ita", ".env.local", ".env.test", "added.txt", "apps/web/.env", "staged.txt", "unstaged.txt", "untracked.txt"]);
     // Decision (#140): a project at a repo root keeps its ignored `.env` files at any depth, since monorepo apps need theirs.
-    expect((await localFiles(root, "env")).sort()).toEqual([".env", "apps/web/.env"]);
+    // A committed `.env.example` comes from the clone, so its edit stays here (#1405); staged new, renamed and intent-to-add ones are sent.
+    expect((await localFiles(root, "env")).sort()).toEqual([".env", ".env.ita", ".env.local", ".env.test", "apps/web/.env"]);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

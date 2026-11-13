@@ -28,6 +28,8 @@ const CAPACITY: usize = 1024;
 const LOCAL_BYTES: u64 = 8 * 1024 * 1024;
 const SUMMARY_INTERVAL: Duration = Duration::from_secs(60);
 const CPU_INTERVAL: Duration = Duration::from_secs(60);
+/// How often the sampler glances at `/proc` between CPU minutes, so short commands keep their names.
+const GLANCE_INTERVAL: Duration = Duration::from_secs(2);
 const SLOW_API_MS: u64 = 1000;
 const STDERR_CAPACITY: usize = 32;
 const STDERR_BATCH: usize = 8;
@@ -275,7 +277,9 @@ impl Observability {
         let mut pending = VecDeque::new();
         let mut sampler = system::Sampler::default();
         let mut sample_at = Instant::now();
+        let mut glance_at = Instant::now();
         let (mut cpu_at, mut cpu_since_ms, mut busy) = (Instant::now(), now_ms(), false);
+        let mut idle_minutes = 0;
         let mut summaries = BTreeMap::new();
         let mut summary_at = Instant::now() + SUMMARY_INTERVAL;
         let mut upload_at = Instant::now() + config.diagnostic_upload;
@@ -296,6 +300,10 @@ impl Observability {
                     Err(_) => break,
                 }
             }
+            if !stopping && Instant::now() >= glance_at {
+                sampler.glance();
+                glance_at = Instant::now() + GLANCE_INTERVAL;
+            }
             if !stopping && Instant::now() >= sample_at {
                 let mut resources = sampler.sample(&config).await;
                 let counts = agents();
@@ -304,7 +312,10 @@ impl Observability {
                     || counts.queued > 0
                     || counts.last_activity.is_some_and(|at| at >= cpu_since_ms);
                 if Instant::now() >= cpu_at {
-                    resources.cpu_minute = sampler.minute(busy);
+                    resources.cpu_minute = sampler.minute(busy).map(Box::new);
+                    idle_minutes = resources.cpu_minute.as_mut().map_or(0, |minute| {
+                        minute.idle(idle_minutes, &config, counts.preview_at)
+                    });
                     let directory = config.state_dir.clone();
                     resources.journal_bytes =
                         tokio::task::spawn_blocking(move || system::journal_bytes(&directory))

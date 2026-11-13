@@ -18,8 +18,8 @@ import {
   StoryStates as Story,
 } from "../../../.ladle/story-states";
 import {
-  BbAppUpdateRows,
-  BbDaemonUpdateRow,
+  RoomAppUpdateRows,
+  RoomDaemonUpdateRow,
   ChangelogPreviewCard,
   MachineUpdatesFleetSection,
   MachineUpdatesRows,
@@ -159,7 +159,7 @@ function StoryMachineSection({
   return (
     <MachineUpdatesSection machine={machine} isThisMachine={false}>
       {app ? (
-        <BbAppUpdateRows
+        <RoomAppUpdateRows
           systemVersion={appUpdate ? undefined : NPM_VERSION}
           desktopInfo={appUpdate ? DESKTOP_UPDATE : null}
           isDesktop={appUpdate}
@@ -168,7 +168,7 @@ function StoryMachineSection({
         />
       ) : null}
       {showDaemon ? (
-        <BbDaemonUpdateRow
+        <RoomDaemonUpdateRow
           machine={machine}
           now={STORY_NOW}
           retryUpdatePending={false}
@@ -336,7 +336,7 @@ export function UpdateStates() {
           note="Nothing to do. The settled state stays visually quiet."
         >
           <StoryAppState>
-            <BbAppUpdateRows
+            <RoomAppUpdateRows
               systemVersion={NPM_VERSION}
               desktopInfo={null}
               isDesktop={false}
@@ -351,7 +351,7 @@ export function UpdateStates() {
           note="The app version check is still in progress."
         >
           <StoryAppState>
-            <BbAppUpdateRows
+            <RoomAppUpdateRows
               systemVersion={undefined}
               desktopInfo={null}
               isDesktop={false}
@@ -366,7 +366,7 @@ export function UpdateStates() {
           note="A web install cannot replace itself, so its action copies the upgrade command."
         >
           <StoryAppState>
-            <BbAppUpdateRows
+            <RoomAppUpdateRows
               systemVersion={{
                 ...NPM_VERSION,
                 latestVersion: "0.39.0",
@@ -385,7 +385,7 @@ export function UpdateStates() {
           note="The desktop shell is fetching the update automatically."
         >
           <StoryAppState>
-            <BbAppUpdateRows
+            <RoomAppUpdateRows
               systemVersion={undefined}
               desktopInfo={{
                 ...DESKTOP_UPDATE,
@@ -405,7 +405,7 @@ export function UpdateStates() {
           note="The update is ready and needs one explicit relaunch."
         >
           <StoryAppState>
-            <BbAppUpdateRows
+            <RoomAppUpdateRows
               systemVersion={undefined}
               desktopInfo={DESKTOP_UPDATE}
               isDesktop
@@ -420,7 +420,7 @@ export function UpdateStates() {
           note="The red caption states the failure; the neutral Retry button is the recovery."
         >
           <StoryAppState>
-            <BbAppUpdateRows
+            <RoomAppUpdateRows
               systemVersion={undefined}
               desktopInfo={{
                 ...DESKTOP_UPDATE,

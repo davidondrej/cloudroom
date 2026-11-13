@@ -37,6 +37,6 @@ jobs:
         run: pnpm exec turbo run test --filter=@cloudroom/config --concurrency=2
       - name: Machine enrollment regressions
         run: |
-          pnpm --filter @cloudroom/server exec vitest run test/app/bb-app-artifact.test.ts test/app/install-machine-script.test.ts --maxWorkers=2
+          pnpm --filter @cloudroom/server exec vitest run test/app/host-artifact.test.ts test/app/install-machine-script.test.ts --maxWorkers=2
           pnpm --filter @cloudroom/host-daemon exec vitest run src/protocol-self-update.test.ts --maxWorkers=2
           pnpm --filter bb-app exec vitest run --maxWorkers=2

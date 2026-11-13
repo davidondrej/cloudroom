@@ -37,7 +37,7 @@ export async function projectLoopSettings(deps: Deps, projectId: string, vps: bo
   if (!project) throw new ApiError(404, "cloud_automation", "Project not found.");
   const repository = githubRepository(project.gitRemoteUrl);
   if (!repository) throw new ApiError(400, "cloud_automation", "This project is not on GitHub. Create its Cloud loop from a Cloud thread in it instead.");
-  const settings = getAppSettings(deps.db), systemPrompt = cloudroomSystemPrompt(deps.db, { vps });
+  const settings = getAppSettings(deps.db), systemPrompt = cloudroomSystemPrompt(deps.db, "cloud", { vps });
   const env = await packedEnv(localProjectPath(deps, project.id), repository);
   return {
     repository, workspace: workspaceId(project.id), folder: workspaceName(project.name), project_name: project.name,

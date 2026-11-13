@@ -163,14 +163,14 @@ function macExecutor(phone: PhoneRelay, handle: string): MachineExecutor {
   };
 }
 
-export function registerMacs(bb: BbPluginApi, phone: PhoneRelay) {
+export function registerMacs(room: BbPluginApi, phone: PhoneRelay) {
   let queue = Promise.resolve();
   function updateLinks(change: (links: Links) => void): Promise<void> {
     const next = queue.then(async () => {
-      const parsed = linksSchema.safeParse(await bb.storage.kv.get<unknown>(LINKS_KV_KEY));
+      const parsed = linksSchema.safeParse(await room.storage.kv.get<unknown>(LINKS_KV_KEY));
       const links = parsed.success ? parsed.data : {};
       change(links);
-      await bb.storage.kv.set(LINKS_KV_KEY, links);
+      await room.storage.kv.set(LINKS_KV_KEY, links);
     });
     queue = next.catch(() => undefined);
     return next;
@@ -178,7 +178,7 @@ export function registerMacs(bb: BbPluginApi, phone: PhoneRelay) {
 
   async function list(): Promise<Mac[]> {
     const { selfHandle, computers } = computersSchema.parse(await phone.call("/api/computers", {}));
-    const parsed = linksSchema.safeParse(await bb.storage.kv.get<unknown>(LINKS_KV_KEY));
+    const parsed = linksSchema.safeParse(await room.storage.kv.get<unknown>(LINKS_KV_KEY));
     const links = parsed.success ? parsed.data : {};
     return computers.map((computer) => {
       const link = links[computer.handle];
@@ -193,7 +193,7 @@ export function registerMacs(bb: BbPluginApi, phone: PhoneRelay) {
     });
   }
 
-  bb.experimental_machines.register({
+  room.experimental_machines.register({
     id: "mac",
     displayName: "Your Mac",
     description: "Run threads on another Mac signed in to your Cloudroom account.",
@@ -228,7 +228,7 @@ export function registerMacs(bb: BbPluginApi, phone: PhoneRelay) {
         });
         if (exitCode !== 0) throw new Error(`${mac.name}: ${output.trim().slice(-2_000)}`);
         await context.checkpoint({ handle });
-        const { hostId } = await bb.experimental_machines.bootstrap({
+        const { hostId } = await room.experimental_machines.bootstrap({
           key: context.key,
           executor,
           report: context.report,

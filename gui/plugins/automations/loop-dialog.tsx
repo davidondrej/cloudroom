@@ -50,7 +50,7 @@ import {
   isCloudWebhook,
 } from "./lib/format-schedule.js";
 import { SecretsPicker } from "./secrets-picker.js";
-import { LOOP_PRIORITY_STYLE } from "./templates-view.js";
+import { LOOP_PRIORITY_STYLE, shareLabel } from "./templates-view.js";
 import type { ReviewItemStatus } from "./src/rpc-types.js";
 import type { automationRpcContract } from "./src/rpc.js";
 import type { LoopUsage } from "./src/usage.js";
@@ -159,11 +159,6 @@ function useLoopUsage(
     };
   }, [rpc, request]);
   return usage;
-}
-
-function shareLabel(percent: number | undefined): string | null {
-  if (percent === undefined) return null;
-  return percent < 1 ? "<1%" : `~${Math.round(percent)}%`;
 }
 
 function cloudAgentValue(

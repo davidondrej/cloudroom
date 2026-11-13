@@ -19,8 +19,8 @@ function errorResult(message: string): PluginAgentToolResult {
   return { content: [{ type: "text", text: message }], isError: true };
 }
 
-export default function plugin(bb: BbPluginApi) {
-  bb.agents.registerTool({
+export default function plugin(room: BbPluginApi) {
+  room.agents.registerTool({
     name: TOOL_NAME,
     description: TOOL_DESCRIPTION,
     presentation: {
@@ -45,7 +45,7 @@ export default function plugin(bb: BbPluginApi) {
       const askedAt = Date.now();
       let result;
       try {
-        result = await bb.ui.requestInput(
+        result = await room.ui.requestInput(
           {
             threadId: ctx.threadId,
             rendererId: ASK_USER_QUESTION_RENDERER_ID,
@@ -84,7 +84,7 @@ export default function plugin(bb: BbPluginApi) {
     },
   });
 
-  bb.agents.configure((context) => {
+  room.agents.configure((context) => {
     if (context.provider.capabilities.supportsNativeUserQuestion) {
       return { tools: [], skills: [] };
     }

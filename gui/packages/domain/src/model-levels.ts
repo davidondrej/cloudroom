@@ -10,7 +10,7 @@ export const MODEL_LEVELS: readonly {
 }[] = [
   {
     claude: "fable",
-    claudeModel: "claude-fable-5-1",
+    claudeModel: "claude-fable-5-2",
     claudeEfforts: ["low", "medium", "high", "xhigh", "max"],
     codex: "astra",
     codexModel: "gpt-6-astra",

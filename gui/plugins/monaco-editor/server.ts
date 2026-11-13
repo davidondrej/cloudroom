@@ -123,7 +123,7 @@ async function ensureMonacoBundleDir(
   return staged;
 }
 
-export default async function plugin(bb: BbPluginApi) {
+export default async function plugin(room: BbPluginApi) {
   let assetLease: { baseUrl: string; expiresAtMs: number } | null = null;
 
   async function assets() {
@@ -133,9 +133,9 @@ export default async function plugin(bb: BbPluginApi) {
       assetLease.expiresAtMs - now < ASSET_LEASE_REFRESH_MARGIN_MS
     ) {
       const bundleDir = await ensureMonacoBundleDir((message) =>
-        bb.log.info(message),
+        room.log.info(message),
       );
-      assetLease = await bb.sdk.files.createPreview({
+      assetLease = await room.sdk.files.createPreview({
         rootPath: bundleDir,
         ttlMs: ASSET_LEASE_TTL_MS,
       });
@@ -151,7 +151,7 @@ export default async function plugin(bb: BbPluginApi) {
       if (source.threadId === null) {
         throw new Error("This thread-storage file has no thread");
       }
-      const { hostId, storageRootPath } = await bb.sdk.threads.storageLocation({
+      const { hostId, storageRootPath } = await room.sdk.threads.storageLocation({
         threadId: source.threadId,
       });
       return {
@@ -164,7 +164,7 @@ export default async function plugin(bb: BbPluginApi) {
       if (source.projectId === null) {
         throw new Error("This file has no environment or project");
       }
-      const project = await bb.sdk.projects.get({
+      const project = await room.sdk.projects.get({
         projectId: source.projectId,
       });
       const sources = project.sources;
@@ -186,7 +186,7 @@ export default async function plugin(bb: BbPluginApi) {
     if (source.environmentId === null) {
       throw new Error("This file has no environment to resolve it against");
     }
-    const environment = await bb.sdk.environments.get({
+    const environment = await room.sdk.environments.get({
       environmentId: source.environmentId,
     });
 
@@ -213,7 +213,7 @@ export default async function plugin(bb: BbPluginApi) {
     source: z.infer<typeof sourceSchema>,
   ): Promise<boolean> {
     if (source.threadId === null) return false;
-    const thread = await bb.sdk.threads.get({ threadId: source.threadId });
+    const thread = await room.sdk.threads.get({ threadId: source.threadId });
     return thread.executionTarget === "cloud";
   }
 
@@ -222,7 +222,7 @@ export default async function plugin(bb: BbPluginApi) {
     return api.relative(root, target) || api.basename(target);
   }
 
-  bb.rpc.register(rpcContract, {
+  room.rpc.register(rpcContract, {
     assets: () => assets(),
 
     async read({ path: filePath, source }) {
@@ -233,7 +233,7 @@ export default async function plugin(bb: BbPluginApi) {
         };
       }
       const target = await resolveTarget(source, filePath);
-      const file = await bb.sdk.files.read(target);
+      const file = await room.sdk.files.read(target);
 
       if (file.contentEncoding !== "utf8") {
         return {
@@ -258,7 +258,7 @@ export default async function plugin(bb: BbPluginApi) {
 
     async tree({ source }) {
       const target = await resolveTarget(source, ".");
-      const result = await bb.sdk.files.listPaths({
+      const result = await room.sdk.files.listPaths({
         path: target.rootPath,
         includeFiles: true,
         includeDirectories: true,
@@ -281,7 +281,7 @@ export default async function plugin(bb: BbPluginApi) {
         throw new Error("Cloud thread files cannot be edited yet");
       }
       const target = await resolveTarget(source, filePath);
-      const result = await bb.sdk.files.write({
+      const result = await room.sdk.files.write({
         ...target,
         content,
         contentEncoding: "utf8",

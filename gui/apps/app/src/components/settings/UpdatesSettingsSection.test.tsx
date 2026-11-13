@@ -14,7 +14,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Host } from "@cloudroom/domain";
 import { makeHost as makeHostFixture } from "@cloudroom/test-helpers/domain-fixtures";
-import type { BbDesktopApi, BbDesktopInfo } from "@cloudroom/desktop-contract";
+import type { BbDesktopApi, RoomDesktopInfo } from "@cloudroom/desktop-contract";
 import {
   HOST_DAEMON_PROTOCOL_VERSION,
   type ProviderCliKey,
@@ -1400,7 +1400,7 @@ The canonical release summary.
   });
 
   it("checks for desktop updates through the desktop bridge", async () => {
-    const desktopInfo: BbDesktopInfo = {
+    const desktopInfo: RoomDesktopInfo = {
       downloadState: "downloaded",
       lastCheckedAt: null,
       latestVersion: "0.0.6",
@@ -1442,7 +1442,7 @@ The canonical release summary.
   });
 
   it("does not claim a legacy desktop shell is downloading an available update", () => {
-    const desktopInfo: BbDesktopInfo = {
+    const desktopInfo: RoomDesktopInfo = {
       lastCheckedAt: null,
       latestVersion: "0.0.6",
       pendingVersion: null,
@@ -1472,7 +1472,7 @@ The canonical release summary.
   });
 
   it("retries a failed desktop download through the desktop bridge", async () => {
-    const desktopInfo: BbDesktopInfo = {
+    const desktopInfo: RoomDesktopInfo = {
       downloadState: "failed",
       lastCheckedAt: null,
       latestVersion: "0.0.6",

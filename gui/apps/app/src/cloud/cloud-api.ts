@@ -7,6 +7,8 @@ export interface CloudThreadSummary {
   project_name: string | null;
   state: string;
   woke_at: string | null;
+  /** Missing from older websites and from create replies. */
+  parent_thread_id?: string | null;
 }
 
 export interface CloudHistory {

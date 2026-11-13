@@ -1,0 +1,1 @@
+CREATE INDEX `threads_execution_target_updated_idx` ON `threads` (`execution_target`,`updated_at`,`created_at`);

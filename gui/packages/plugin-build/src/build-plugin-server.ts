@@ -25,6 +25,26 @@ export const PLUGIN_SERVER_EXTERNALS: readonly string[] = [
   "better-sqlite3",
 ];
 
+/**
+ * What a built-in plugin's server bundle imports instead of its own copy of
+ * zod. The server's resolve hook (plugin-runtime.ts) points it at the one
+ * `zod-runtime.js` the app ships, so 30+ plugins share a single zod instead of
+ * each loading 500 KB of it.
+ */
+export const HOST_ZOD_SPECIFIER = "cloudroom:zod";
+const HOST_ZOD_RESOLVE_MARK = "bb-server-host-zod";
+
+export interface PluginServerBuildOptions {
+  /**
+   * Folder of the package whose zod the host serves as `zod-runtime.js` (the
+   * app's server). An import that resolves to that same zod becomes
+   * {@link HOST_ZOD_SPECIFIER}; any other zod (another version a dependency
+   * brings) stays in the bundle. Only for plugins that ship inside the app:
+   * they can never meet a different host.
+   */
+  shareZodWith?: string;
+}
+
 const PLUGIN_SDK_ROOT_FILTER = /^@get-bb\/plugin-sdk$|^@bb\/plugin-sdk$/;
 const PLUGIN_SDK_SUBPATH_FILTER = /^@get-bb\/plugin-sdk\//;
 const PLUGIN_SDK_SUBPATH_RESOLVE_MARK = "bb-server-sdk-subpath";
@@ -70,9 +90,11 @@ interface PluginServerBuildResult {
 
 export async function buildPluginServer(
   rootDir: string,
-  bbVersion: string,
+  roomVersion: string,
   toolchain: PluginBuildToolchain,
+  options: PluginServerBuildOptions = {},
 ): Promise<PluginServerBuildResult> {
+  const { shareZodWith } = options;
   const { serverEntry, packageName, pluginVersion } =
     await readPluginServerConfig(rootDir);
   const distDir = join(rootDir, "dist");
@@ -109,6 +131,28 @@ export async function buildPluginServer(
               path: args.path,
               external: true,
             }));
+            if (shareZodWith !== undefined) {
+              let hostZod: Promise<string> | undefined;
+              build.onResolve({ filter: /^zod$/ }, async (args) => {
+                if (
+                  args.kind !== "import-statement" ||
+                  args.pluginData === HOST_ZOD_RESOLVE_MARK
+                ) {
+                  return undefined;
+                }
+                const resolveFrom = (resolveDir: string) =>
+                  build.resolve(args.path, {
+                    resolveDir,
+                    kind: args.kind,
+                    pluginData: HOST_ZOD_RESOLVE_MARK,
+                  });
+                hostZod ??= resolveFrom(shareZodWith).then(({ path }) => path);
+                const installed = await resolveFrom(args.resolveDir);
+                return installed.path !== "" && installed.path === (await hostZod)
+                  ? { path: HOST_ZOD_SPECIFIER, external: true }
+                  : installed;
+              });
+            }
             build.onResolve(
               { filter: PLUGIN_SDK_SUBPATH_FILTER },
               async (args) => {
@@ -146,7 +190,7 @@ export async function buildPluginServer(
     await writeFile(
       stagedMetaPath,
       JSON.stringify(
-        createPluginArtifactMeta({ packageName, pluginVersion, bbVersion }),
+        createPluginArtifactMeta({ packageName, pluginVersion, bbVersion: roomVersion }),
         null,
         2,
       ) + "\n",

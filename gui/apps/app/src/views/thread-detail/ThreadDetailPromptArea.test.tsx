@@ -555,6 +555,7 @@ vi.mock("@/hooks/useCommandSuggestions", () => ({
 }));
 
 vi.mock("@/hooks/usePromptDraftStorage", () => ({
+  flushPromptDraftNotifies: () => false,
   usePromptDraftStorage: () => mocks.promptDraft,
 }));
 
@@ -694,6 +695,11 @@ vi.mock("@/hooks/mutations/thread-state-mutations", () => ({
 
 vi.mock("@/hooks/queries/sidebar-navigation-query", () => ({
   useProjectDisplayName: () => "CEO",
+  // The update card above the composer asks whether any thread is busy.
+  useSidebarNavigationThreadSelection: () => ({
+    data: undefined,
+    isBootstrapPending: false,
+  }),
 }));
 
 vi.mock("@/hooks/queries/thread-default-execution-options-query", () => ({
@@ -859,7 +865,6 @@ function buildPromptAreaElement({
         modelFallback={modelFallback}
         isEnvironmentActionPending={false}
         onChangedFileClick={vi.fn()}
-        parentThreadSection={null}
         pendingInteractions={pendingInteractions}
         pendingInteractionsInitialLoading={pendingInteractionsInitialLoading}
         queuedMessageCount={queuedMessageCount}

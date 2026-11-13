@@ -21,8 +21,8 @@ import {
 } from "../list/lib.js";
 import { DispatchControl } from "./threads.js";
 import { DEFAULT_COLOR } from "../manage/shared.js";
-import { BbProjectLinkPicker } from "../manage/bb-project-link.js";
-import type { BbProjectOption } from "../../shared/contract.js";
+import { RoomProjectLinkPicker } from "../manage/project-link.js";
+import type { RoomProjectOption } from "../../shared/contract.js";
 import { Button } from "@cloudroom/shared-ui/button";
 import {
   DropdownMenu,
@@ -315,7 +315,7 @@ function DispatchTargetMenu({
   triggerClassName,
 }: {
   project: Project;
-  bbProjects: readonly BbProjectOption[];
+  bbProjects: readonly RoomProjectOption[];
   onError: (message: string) => void;
   triggerClassName: string;
 }) {
@@ -323,9 +323,9 @@ function DispatchTargetMenu({
   const [open, setOpen] = useState(false);
   const [selection, setSelection] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
-  const linkedBbProjectId = project.linkedBbProjectId;
+  const linkedRoomProjectId = project.linkedBbProjectId;
   const linkedName = bbProjects.find(
-    (candidate) => candidate.id === linkedBbProjectId,
+    (candidate) => candidate.id === linkedRoomProjectId,
   )?.name;
 
   const save = async (linkedId: string | null) => {
@@ -348,7 +348,7 @@ function DispatchTargetMenu({
     <Popover
       open={open}
       onOpenChange={(next) => {
-        if (next) setSelection(linkedBbProjectId);
+        if (next) setSelection(linkedRoomProjectId);
         setOpen(next);
       }}
     >
@@ -359,9 +359,9 @@ function DispatchTargetMenu({
           className={triggerClassName}
         >
           <Icon name="ArrowUpRight" className="size-3.5 shrink-0" />
-          {linkedBbProjectId !== null ? (
-            <span className="truncate" title={linkedBbProjectId}>
-              {linkedName ?? linkedBbProjectId}
+          {linkedRoomProjectId !== null ? (
+            <span className="truncate" title={linkedRoomProjectId}>
+              {linkedName ?? linkedRoomProjectId}
             </span>
           ) : (
             <span className="truncate text-muted-foreground">
@@ -371,14 +371,14 @@ function DispatchTargetMenu({
         </button>
       </PopoverTrigger>
       <PopoverContent align="start" className="w-64 p-3">
-        <BbProjectLinkPicker
+        <RoomProjectLinkPicker
           value={selection}
           onChange={setSelection}
           bbProjects={bbProjects}
-          noneLabel={linkedBbProjectId !== null ? "Unlink" : "Not linked"}
+          noneLabel={linkedRoomProjectId !== null ? "Unlink" : "Not linked"}
         />
         <div className="mt-2.5 flex items-center justify-between gap-2">
-          {linkedBbProjectId !== null ? (
+          {linkedRoomProjectId !== null ? (
             <Button
               variant="ghost"
               size="sm"
@@ -427,7 +427,7 @@ export function PropertiesRail({
     task.labelIds.includes(label.id),
   );
   const active = threads.filter(isActiveThread);
-  const bbProjects = useTasksQuery(
+  const roomProjects = useTasksQuery(
     async (query) => (await query.call("listBbProjects")).bbProjects,
     ["projects:changed"],
   );
@@ -488,7 +488,7 @@ export function PropertiesRail({
       {project !== undefined ? (
         <DispatchTargetMenu
           project={project}
-          bbProjects={bbProjects.data ?? []}
+          bbProjects={roomProjects.data ?? []}
           onError={onError}
           triggerClassName={RAIL_ROW_CLASS}
         />

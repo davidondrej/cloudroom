@@ -5,6 +5,7 @@ export {
 } from "./build-plugin-app.js";
 export {
   buildPluginServer,
+  HOST_ZOD_SPECIFIER,
   PLUGIN_SERVER_EXTERNALS,
 } from "./build-plugin-server.js";
 export { buildPluginHost } from "./build-plugin-host.js";

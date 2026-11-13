@@ -328,6 +328,50 @@ async fn workload_cleanup_requires_confirmed_empty_group() {
 }
 
 #[tokio::test]
+async fn a_cloud_app_key_never_replaces_the_saved_claude_login() {
+    let (dir, mut config) = fixture();
+    // Like Claude: bills an Anthropic key in its environment before the plan's token, its commands (CLAUDECODE=1)
+    // source CLAUDE_ENV_FILE, and it starts MCP servers (Python here) without a shell. With Core's agent helpers, CPU
+    // quota or not, Claude bills the plan, its commands and MCP servers keep the app key, and a server's own key stays
+    // (#1340). Without them (no /run/cloudroom/agent), nothing changes.
+    let claude = dir.0.join("claude");
+    let script = r#"tool=$(CLAUDECODE=1 bash -c '. "${CLAUDE_ENV_FILE:-/dev/null}"; printf %s "$ANTHROPIC_API_KEY"')
+key='import os; print(os.environ.get("ANTHROPIC_API_KEY", ""))'
+mcp=$(CLAUDECODE=1 python3 -c "$key") own=$(CLAUDECODE=1 ANTHROPIC_API_KEY=mine python3 -c "$key")
+case "${CLAUDE_ENV_FILE:+hook}|$ANTHROPIC_AUTH_TOKEN|$ANTHROPIC_API_KEY|$CLAUDE_CODE_OAUTH_TOKEN|$tool|$mcp|$own" in
+"hook|||plan|app|app|mine"|"|app|app|plan|app|app|mine") echo '{"is_error":false}' ;; *) echo '{"is_error":true}' ;; esac"#;
+    fs::write(&claude, format!("#!/bin/sh\n{script}\n")).unwrap();
+    fs::set_permissions(&claude, fs::Permissions::from_mode(0o755)).unwrap();
+    config.harnesses.insert(
+        runtime::Kind::Claude,
+        cloudroom::config::HarnessConfig {
+            binary: claude,
+            home: dir.0.join(".claude"),
+            model: "haiku".into(),
+            provider: None,
+        },
+    );
+    let state = &config.state_dir;
+    fs::create_dir_all(state).unwrap();
+    fs::write(
+        state.join("environment"),
+        "ANTHROPIC_API_KEY=app\nANTHROPIC_AUTH_TOKEN=app\n",
+    )
+    .unwrap();
+    fs::write(state.join("claude-oauth-token"), "plan\nmax\n").unwrap();
+    runtime::probe(&config, runtime::Kind::Claude, "haiku", None)
+        .await
+        .unwrap();
+    // Removing the app key restarts an idle agent that started with it.
+    let (handle, _events) =
+        runtime::Handle::spawn_guarded(&config, runtime::Kind::Claude, None, false, false, None)
+            .unwrap();
+    fs::write(state.join("environment"), "").unwrap();
+    assert!(handle.login_changed(&config));
+    handle.request_shutdown();
+}
+
+#[tokio::test]
 async fn unresponsive_harness_is_not_reported_as_cleanly_closed() {
     let (_dir, config) = fixture();
     let (handle, mut events) = runtime::Handle::spawn(&config, runtime::Kind::Codex, None).unwrap();

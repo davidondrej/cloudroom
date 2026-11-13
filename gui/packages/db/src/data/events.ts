@@ -125,6 +125,9 @@ const isNotNestedTurnUsageEvent = sql`NOT EXISTS (
     AND nested_turn_started.parent_tool_call_id IS NOT NULL
 )`;
 
+/** Harnesses report a compaction as an event or, like Codex, as a finished item. */
+const isContextCompaction = sql`(${events.type} = 'thread/compacted' OR (${events.type} = 'item/completed' AND ${events.itemKind} = 'contextCompaction'))`;
+
 const isNotSupersededBackgroundTaskProgress = sql`NOT (
   ${events.type} = 'item/backgroundTask/progress'
   AND EXISTS (
@@ -1346,6 +1349,8 @@ export interface PruneTokenUsageEventsBeforeSequenceArgs {
 }
 
 export interface PruneResolvedItemDeltasArgs {
+  /** Rows deleted at most. Defaults to one full batch. */
+  limit?: number;
   threadId: string;
 }
 
@@ -3293,10 +3298,34 @@ export function countContextCompactions(
           gte(events.sequence, args.sequenceStart),
           sql`${events.parentToolCallId} IS NULL`,
           isNotNestedTurnUsageEvent,
-          sql`(${events.type} = 'thread/compacted' OR (${events.type} = 'item/completed' AND ${events.itemKind} = 'contextCompaction'))`,
+          isContextCompaction,
         ),
       )
       .get()?.count ?? 0
+  );
+}
+
+/** The newest point where the agent lost its earlier messages: a compaction or a clear. 0 when there is none. */
+export function latestContextResetSequence(
+  db: DbQueryConnection,
+  threadId: string,
+): number {
+  const compacted =
+    db
+      .select({ sequence: max(events.sequence) })
+      .from(events)
+      .where(
+        and(
+          eq(events.threadId, threadId),
+          sql`${events.parentToolCallId} IS NULL`,
+          isNotNestedTurnUsageEvent,
+          sql`(${isContextCompaction} OR ${events.type} = 'thread/context/cleared')`,
+        ),
+      )
+      .get()?.sequence ?? 0;
+  return Math.max(
+    compacted,
+    getLatestCompletedThreadContextClearSequence(db, { threadId }) ?? 0,
   );
 }
 
@@ -3668,6 +3697,62 @@ export function getLastStoredTurnRequestEvent(
   );
 }
 
+export function isErrorQueueReleaseHeld(
+  db: DbQueryConnection,
+  args: { graceMs: number; now: number; threadId: string },
+): boolean {
+  const failure = db
+    .select({ createdAt: events.createdAt })
+    .from(events)
+    .where(
+      sql`${events.threadId} = ${args.threadId}
+      AND ${events.type} IN ('turn/completed', 'system/error')`,
+    )
+    .orderBy(sql`${events.sequence} DESC`)
+    .limit(1)
+    .get();
+  if (failure && args.now - failure.createdAt < args.graceMs) return true;
+  const settled = db
+    .select({ sequence: events.sequence })
+    .from(events)
+    .where(
+      sql`${events.threadId} = ${args.threadId}
+      AND ${events.type} = 'turn/completed'
+      AND json_extract(${events.data}, '$.status') IN ('completed', 'interrupted')
+      AND EXISTS (
+        SELECT 1 FROM events AS settled_start
+        WHERE settled_start.thread_id = ${events.threadId}
+          AND settled_start.turn_id = ${events.turnId}
+          AND settled_start.type = 'turn/started'
+          AND settled_start.parent_tool_call_id IS NULL
+      )`,
+    )
+    .orderBy(sql`${events.sequence} DESC`)
+    .limit(1)
+    .get();
+  const runs = db
+    .select({
+      // Queue drains and system notices are automatic; only other runs re-arm.
+      automatic: sql<number>`COALESCE(json_extract(${events.data}, '$.queueDelivered'), 0) = 1
+        OR json_extract(${events.data}, '$.initiator') = 'system'`,
+    })
+    .from(events)
+    .where(
+      sql`${events.threadId} = ${args.threadId}
+      AND ${events.type} = 'client/turn/requested'
+      AND ${events.sequence} > ${settled?.sequence ?? 0}
+      AND COALESCE(json_extract(${events.data}, '$.target.kind'), 'new-turn') != 'steer'
+      AND NOT (
+        json_extract(${events.data}, '$.target.kind') = 'auto'
+        AND json_extract(${events.data}, '$.target.expectedTurnId') IS NOT NULL
+      )`,
+    )
+    .orderBy(sql`${events.sequence} DESC`)
+    .limit(2)
+    .all();
+  return runs.length === 2 && runs[0]?.automatic === 1;
+}
+
 export function pruneThreadEventsBeforeSequence(
   db: DbConnection,
   args: PruneThreadEventsBeforeSequenceArgs,
@@ -3846,7 +3931,7 @@ export function pruneResolvedItemDeltas(
               AND earlier_delta.parent_tool_call_id IS candidate.parent_tool_call_id
               AND earlier_delta.sequence < candidate.sequence
           )
-          LIMIT ${RESOLVED_ITEM_DELTA_PRUNE_BATCH_SIZE}
+          LIMIT ${args.limit ?? RESOLVED_ITEM_DELTA_PRUNE_BATCH_SIZE}
         )`,
   );
 

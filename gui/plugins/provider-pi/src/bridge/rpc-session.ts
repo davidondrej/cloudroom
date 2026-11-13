@@ -204,7 +204,7 @@ export class PiRpcSession {
       this.options.scratchDir,
       `pi-tools-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}.json`,
     );
-    mkdirSync(dirname(toolsFilePath), { recursive: true });
+    mkdirSync(dirname(toolsFilePath), { recursive: true, mode: 0o700 });
     writeFileSync(
       toolsFilePath,
       JSON.stringify({ tools: this.options.dynamicTools ?? [], commandGuardEnabled: this.options.commandGuardEnabled !== false }),

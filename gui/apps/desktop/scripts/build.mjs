@@ -136,10 +136,10 @@ await Promise.all([
   }),
   build({
     ...commonOptions,
-    entryPoints: [resolve(packageRoot, "src", "bb-app-bridge.ts")],
+    entryPoints: [resolve(packageRoot, "src", "launcher-bridge.ts")],
     external: ["bb-app", "bb-app/*"],
     format: "esm",
-    outfile: resolve(distDir, "bb-app-bridge.mjs"),
+    outfile: resolve(distDir, "launcher-bridge.mjs"),
   }),
 ]);
 

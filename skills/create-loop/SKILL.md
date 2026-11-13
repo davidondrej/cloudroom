@@ -1,6 +1,6 @@
 ---
 name: create-loop
-description: Create a recurring Cloudroom Loop that starts an agent to check one thing, archives its thread when all is fine, and reports only when something needs the user. Use for "create loop", "create-loop", "create automation", or any "every N hours, have an agent check X" request.
+description: 'Create a recurring Loop where an agent checks one thing and reports only when needed. Use for "create loop" or "every N hours, check X" requests.'
 ---
 
 # Create loop

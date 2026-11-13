@@ -1,9 +1,9 @@
 import { resolveEnvLoader, type EnvLoaderArgs } from "./env.js";
 import { validateRequiredUrl } from "./public-url.js";
 import {
-  BB_LOOPBACK_HOST,
-  BB_PROD_HOST_DAEMON_PORT,
-  BB_PROD_SERVER_PORT,
+  ROOM_LOOPBACK_HOST,
+  ROOM_PROD_HOST_DAEMON_PORT,
+  ROOM_PROD_SERVER_PORT,
   parsePortValue,
   resolveDevInstanceConfig,
 } from "./runtime.js";
@@ -31,11 +31,11 @@ export function loadCliConfig(args: LoadCliConfigArgs = {}): CliConfig {
       "ROOM_SERVER_URL",
       env.ROOM_SERVER_URL ??
         dev?.serverUrl ??
-        `http://${BB_LOOPBACK_HOST}:${BB_PROD_SERVER_PORT}`,
+        `http://${ROOM_LOOPBACK_HOST}:${ROOM_PROD_SERVER_PORT}`,
     ),
     ROOM_HOST_DAEMON_PORT:
       env.ROOM_HOST_DAEMON_PORT === undefined
-        ? (dev?.ports.hostDaemonPort ?? BB_PROD_HOST_DAEMON_PORT)
+        ? (dev?.ports.hostDaemonPort ?? ROOM_PROD_HOST_DAEMON_PORT)
         : parsePortValue({
             name: "ROOM_HOST_DAEMON_PORT",
             rawPort: env.ROOM_HOST_DAEMON_PORT,

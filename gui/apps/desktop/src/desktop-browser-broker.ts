@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type {
-  BbDesktopBrowserControlState,
-  BbDesktopBrowserTarget,
+  RoomDesktopBrowserControlState,
+  RoomDesktopBrowserTarget,
 } from "@cloudroom/desktop-contract";
 import { isRawThreadId } from "@cloudroom/domain";
 import type {
@@ -18,8 +18,8 @@ import {
 } from "./desktop-browser-cdp.js";
 import { createDesktopBrowserCdpAdapter } from "./desktop-browser-cdp-adapter.js";
 import {
-  BB_DESKTOP_BROWSER_CONTROL_CHANNEL,
-  BB_DESKTOP_BROWSER_REVEAL_CHANNEL,
+  ROOM_DESKTOP_BROWSER_CONTROL_CHANNEL,
+  ROOM_DESKTOP_BROWSER_REVEAL_CHANNEL,
 } from "./desktop-browser-ipc.js";
 import type {
   DesktopBrowserHostWindow,
@@ -121,7 +121,7 @@ export function createDesktopBrowserBroker(args: {
     )
       return;
     for (const tab of tabs) {
-      instance.window.webContents.send(BB_DESKTOP_BROWSER_CONTROL_CHANNEL, {
+      instance.window.webContents.send(ROOM_DESKTOP_BROWSER_CONTROL_CHANNEL, {
         tabId: tab.tabId,
         threadId,
         control: tab.control,
@@ -192,7 +192,7 @@ export function createDesktopBrowserBroker(args: {
     requireTab(instance, threadId, tabId);
     if (hostId === null)
       throw new Error("Desktop is not connected to its host daemon");
-    instance.window.webContents.send(BB_DESKTOP_BROWSER_REVEAL_CHANNEL, {
+    instance.window.webContents.send(ROOM_DESKTOP_BROWSER_REVEAL_CHANNEL, {
       tabId,
       threadId,
       desktopTarget: {
@@ -338,7 +338,7 @@ export function createDesktopBrowserBroker(args: {
       }
       snapshots.clear();
     },
-    getTarget(webContentsId: number): BbDesktopBrowserTarget | null {
+    getTarget(webContentsId: number): RoomDesktopBrowserTarget | null {
       const instance = instanceForWindow(webContentsId);
       return instance && hostId !== null
         ? {
@@ -351,7 +351,7 @@ export function createDesktopBrowserBroker(args: {
     getControl(
       webContentsId: number,
       tabId: string,
-    ): BbDesktopBrowserControlState | null {
+    ): RoomDesktopBrowserControlState | null {
       const instance = instanceForWindow(webContentsId);
       const tab =
         instance &&
@@ -430,6 +430,10 @@ export function createDesktopBrowserBroker(args: {
           reveal(instance, command.threadId, command.tabId);
           return { ok: true };
         case "desktop.browser.close_tab": {
+          // Already closed (any thread) is success; another thread's live tab stays an error.
+          const all = args.manager.listTabs({ ...scope, threadId: null });
+          if (!all.some((tab) => tab.tabId === command.tabId))
+            return { ok: true };
           const tab = requireTab(instance, command.threadId, command.tabId);
           args.manager.closeTab({
             ...scope,
@@ -495,6 +499,9 @@ export function createDesktopBrowserBroker(args: {
         case "desktop.browser.open_connection":
         case "desktop.browser.release_control": {
           const lease = leases.get(command.leaseId);
+          // A lease that expired or was revoked (tab gone) is already released.
+          if (!lease && command.type === "desktop.browser.release_control")
+            return { ok: true };
           if (
             !lease ||
             lease.instance !== instance ||

@@ -4,6 +4,7 @@ import { resolveHostEnvironment } from "../hosts/host-environment.js";
 import { randomUUID } from "node:crypto";
 import {
   createTerminalSession,
+  getHost,
   getTerminalSession,
   listTerminalSessions,
   updateTerminalSession,
@@ -43,6 +44,7 @@ import {
   requireReadyEnvironment,
 } from "../lib/entity-lookup.js";
 import {
+  isSuspendedHostUnavailableError,
   threadEnvironmentUnavailableDetails,
   throwThreadEnvironmentUnavailable,
 } from "../lib/lifecycle-api-errors.js";
@@ -676,10 +678,7 @@ export class TerminalSessionLifecycle {
     args: CreateTerminalForTargetArgs,
   ): Promise<TerminalSession> {
     const launchTarget = await this.resolveTerminalLaunchTarget(args.target);
-    const daemonSession = requireConnectedHostSession(
-      this.options,
-      launchTarget.hostId,
-    );
+    const daemonSession = this.requireTerminalHostSession(launchTarget.hostId);
     const start = args.payload.start ?? DEFAULT_TERMINAL_START;
     const startingSession = createTerminalSession(this.options.db, {
       cols: args.payload.cols,
@@ -783,6 +782,21 @@ export class TerminalSessionLifecycle {
           terminalId: startingSession.id,
           reason: "open-timeout",
         });
+        this.options.logger.warn(
+          {
+            hostId: launchTarget.hostId,
+            requestId,
+            terminalId: startingSession.id,
+          },
+          "Terminal open timed out",
+        );
+        if (local) {
+          throw new ApiError(
+            504,
+            "terminal_open_timeout",
+            `${this.hostName(launchTarget.hostId)} did not answer in time while opening the terminal. Check that it is awake and online, then try again.`,
+          );
+        }
       } else if (
         !(error instanceof ApiError) ||
         error.body.code !== "host_disconnected"
@@ -828,6 +842,32 @@ export class TerminalSessionLifecycle {
     }
     this.notifyTerminalSessionChanged(runningSession);
     return toTerminalSession(runningSession);
+  }
+
+  // Names the machine, so the user knows which one is offline (#1277).
+  private requireTerminalHostSession(hostId: string) {
+    try {
+      return requireConnectedHostSession(this.options, hostId);
+    } catch (error) {
+      if (
+        error instanceof ApiError &&
+        error.body.code === "host_unavailable" &&
+        error.status === 502 &&
+        !isSuspendedHostUnavailableError(error)
+      ) {
+        throw new ApiError(
+          502,
+          "host_unavailable",
+          `${this.hostName(hostId)} is not connected`,
+          { details: error.body.details },
+        );
+      }
+      throw error;
+    }
+  }
+
+  private hostName(hostId: string): string {
+    return getHost(this.options.db, hostId)?.name ?? "The machine";
   }
 
   private async resolveTerminalLaunchTarget(

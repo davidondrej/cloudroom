@@ -444,9 +444,9 @@ function McpCard({ inCloud, onSaved }: { inCloud: string[]; onSaved: (data: Clou
   const signIn = useMcpSignIn();
   const change = useMutation({ mutationFn: (change: { names: string[]; cloud: boolean }) => sdk.cloudroom.setCloudMcp(change), onSuccess: onSaved });
   const found = mac.data?.servers ?? [];
-  // A server removed from this Mac stays listed while it is in the cloud, so it can be removed there too.
+  // A server removed from this Mac, or now Mac only, stays a button while it is in the cloud, so it can be removed there too.
   const servers = [...found, ...inCloud.filter((name) => !found.some((server) => server.name === name)).map((name) => ({ name, macOnly: false }))]
-    .map((server) => ({ ...server, cloud: inCloud.includes(server.name) }))
+    .map((server) => ({ ...server, cloud: inCloud.includes(server.name), macOnly: server.macOnly && !inCloud.includes(server.name) }))
     .sort((a, b) => Number(a.macOnly) - Number(b.macOnly) || a.name.localeCompare(b.name));
   const usable = servers.filter((server) => !server.macOnly);
   const needSignIn = servers.filter((server) => server.cloud && "signIn" in server && server.signIn === "needed");

@@ -158,7 +158,7 @@ const defaultRunProcess: SelfUpdateProcessRunner = async (
   await execFileAsync(command, args, options);
 };
 
-const BB_APP_ALLOW_SCRIPTS_ARG =
+const ROOM_APP_ALLOW_SCRIPTS_ARG =
   "--allow-scripts=better-sqlite3,node-pty,@parcel/watcher";
 
 async function ensureInstalledCliExecutable(digestPath: string): Promise<void> {
@@ -198,7 +198,7 @@ async function defaultInstallTarball(
     configuredPrefix === undefined ? [] : ["--prefix", configuredPrefix];
   await runProcess(
     "npm",
-    ["install", "-g", BB_APP_ALLOW_SCRIPTS_ARG, ...prefixArgs, tarballPath],
+    ["install", "-g", ROOM_APP_ALLOW_SCRIPTS_ARG, ...prefixArgs, tarballPath],
     {
       env: { ...process.env, PATH: path },
     },

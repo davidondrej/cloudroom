@@ -52,6 +52,7 @@ describe("usePromptVoice", () => {
       current: {
         attachFiles: vi.fn(),
         captureHeightForLayoutChange: vi.fn(),
+        focus: vi.fn(),
         focusEnd: vi.fn(),
         getTextBeforeCursor: vi.fn(),
         insertTextAtCursor,

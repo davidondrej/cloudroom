@@ -4,9 +4,9 @@
   "type": "module",
   "private": true,
   "bin": {
-    "bb-script-archive-codex-tmp-bb-sessions": "./dist/commands/archive-codex-tmp-bb-sessions.js",
+    "bb-script-archive-codex-tmp-bb-sessions": "./dist/commands/archive-codex-tmp-sessions.js",
     "bb-script-request-dev-restart": "./dist/commands/request-dev-restart.js",
-    "bb-script-reset-bb-data": "./dist/commands/reset-bb-data.js",
+    "bb-script-reset-bb-data": "./dist/commands/reset-data.js",
     "bb-script-run-cli": "./dist/commands/run-cli.js",
     "bb-script-run-host-daemon": "./dist/commands/run-host-daemon.js",
     "bb-script-seed-perf-db": "./dist/commands/seed-perf-db.js"
@@ -31,8 +31,8 @@
     "dev:restart": "node dist/commands/request-dev-restart.js both",
     "dev:restart-host-daemon": "node dist/commands/request-dev-restart.js host-daemon",
     "dev:restart-server": "node dist/commands/request-dev-restart.js server",
-    "reset": "node dist/commands/reset-bb-data.js",
-    "codex:archive-tmp-bb-sessions": "node dist/commands/archive-codex-tmp-bb-sessions.js"
+    "reset": "node dist/commands/reset-data.js",
+    "codex:archive-tmp-sessions": "node dist/commands/archive-codex-tmp-sessions.js"
   },
   "dependencies": {
     "@cloudroom/config": "workspace:*",

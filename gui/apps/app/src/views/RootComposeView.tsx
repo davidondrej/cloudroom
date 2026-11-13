@@ -63,6 +63,7 @@ import { Icon } from "@cloudroom/shared-ui/icon";
 import { PageShell } from "@/components/ui/page-shell.js";
 import { RouteLoadingSkeleton } from "@/components/ui/route-loading-skeleton";
 import { Button } from "@cloudroom/shared-ui/button";
+import { useSidebarNavigation } from "@/hooks/queries/sidebar-navigation-query";
 import { useIsCompactViewport } from "@cloudroom/shared-ui/hooks/use-compact-viewport";
 import { usePointerCoarse } from "@cloudroom/shared-ui/hooks/use-pointer-coarse";
 import { COARSE_POINTER_COMPACT_ICON_SIZE_CLASS } from "@cloudroom/shared-ui/coarse-pointer-sizing";
@@ -110,7 +111,7 @@ import { getBrowserUrlHost } from "@/lib/browser-url";
 import {
   getDesktopBrowserApi,
   isDesktopBrowserAvailable,
-} from "@/lib/bb-desktop";
+} from "@/lib/room-desktop";
 import {
   useFixedPanelTabsState,
   useFixedPanelTabsStorageMaintenance,
@@ -149,7 +150,10 @@ import {
   ROOT_COMPOSE_PINNED_PANEL_TOGGLE_POSITION_CLASS,
   RootComposeSecondaryContent,
 } from "./RootComposeSecondaryContent";
+import { prefetchThreadTimeline } from "@/hooks/queries/thread-queries";
+import { useCommittedRef } from "@/hooks/useLatestRef";
 import { RootComposeMobileRecents } from "./RootComposeMobileRecents";
+import { StartingThread, type StartingThreadMessage } from "./StartingThread";
 import {
   shouldLoadThreadStorageFileList,
   useThreadStorageViewer,
@@ -196,6 +200,8 @@ import {
 } from "./RootComposePanelTabContent";
 
 const ROOT_COMPOSE_SIDEBAR_ACTION_ALIGNED_TOP_PADDING_CLASS = "pt-14";
+// How long a new thread waits for its messages before it opens without them.
+const STARTING_THREAD_MESSAGES_WAIT_MS = 1500;
 
 const EMPTY_TERMINAL_SESSIONS: readonly TerminalSession[] = [];
 
@@ -504,6 +510,27 @@ export function LegacyProjectComposeRedirect({
   return <RouteLoadingSkeleton isBoundedPane={false} />;
 }
 
+function ProjectsLoadError() {
+  const { refetch, isFetching } = useSidebarNavigation();
+  return (
+    <PageShell contentClassName="min-h-full items-center justify-center">
+      <div className="flex flex-col items-center gap-3 py-12">
+        <p className="text-center text-sm text-destructive">
+          Failed to load projects.
+        </p>
+        <Button
+          variant="outline"
+          size="sm"
+          disabled={isFetching}
+          onClick={() => void refetch()}
+        >
+          Retry
+        </Button>
+      </div>
+    </PageShell>
+  );
+}
+
 export function RootComposeView() {
   const [rootComposeProjectId, setRootComposeProjectId] =
     useRootComposeProjectId();
@@ -523,6 +550,13 @@ export function RootComposeView() {
   );
   const [navigateToThreadAfterCreate] =
     useNavigateToThreadAfterCreatePreference();
+  const isCompactViewport = useIsCompactViewport();
+  // The starting screen belongs to the visit that sent the message. Going
+  // anywhere else, even "New thread" at this same address, puts it away.
+  const [startingThread, setStartingThread] = useState<
+    (StartingThreadMessage & { visit: string }) | null
+  >(null);
+  const latestVisit = useCommittedRef(location.key);
   const [forkSeed, setForkSeed] = useState<ForkThreadCreateSeed | null>(() =>
     readForkThreadCreateSeedFromLocationState(location.state),
   );
@@ -574,30 +608,69 @@ export function RootComposeView() {
             });
       if (createRequest === null)
         throw new Error(`This agent can't fork on this ${COMPUTER}. Pick Cloud instead.`);
-      const thread = await createThread.mutateAsync(
-        sendAt === undefined
-          ? createRequest
-          : {
-              ...createRequest,
-              ...(sendAt === undefined ? {} : { sendAt }),
-            },
-      );
-      pinIfRequested(thread.id);
-      setLastCreatedThreadId(thread.id);
-      setForkSeed(null);
-      setRootComposeSectionId(null);
-      if (shouldNavigateToCreatedThread) {
-        navigate(
-          getThreadRoutePath({
-            projectId: thread.projectId,
-            threadId: thread.id,
-          }),
+      // A phone shows the message in a thread at once, instead of a spinner on Send.
+      // Forks, scheduled sends, and plugin sends open on something else, so they wait as before.
+      const showsStartingThread =
+        shouldNavigateToCreatedThread &&
+        isCompactViewport &&
+        forkSeed === null &&
+        sendAt === undefined &&
+        request.pluginSubmission === undefined;
+      const visit = location.key;
+      if (showsStartingThread) {
+        setStartingThread({
+          input: request.input,
+          projectId: request.projectId,
+          sentAt: Date.now(),
+          visit,
+        });
+      }
+      try {
+        const thread = await createThread.mutateAsync(
+          sendAt === undefined
+            ? createRequest
+            : {
+                ...createRequest,
+                ...(sendAt === undefined ? {} : { sendAt }),
+              },
         );
+        pinIfRequested(thread.id);
+        setLastCreatedThreadId(thread.id);
+        setForkSeed(null);
+        setRootComposeSectionId(null);
+        // Whoever left the starting screen stays where they went; the thread is in Recent.
+        const leftStartingThread =
+          showsStartingThread && latestVisit.current !== visit;
+        if (shouldNavigateToCreatedThread && !leftStartingThread) {
+          // The thread opens with its messages loaded, so the message never blinks out.
+          if (showsStartingThread) {
+            await Promise.race([
+              prefetchThreadTimeline(queryClient, thread.id),
+              new Promise((resolve) =>
+                setTimeout(resolve, STARTING_THREAD_MESSAGES_WAIT_MS),
+              ),
+            ]);
+          }
+          navigate(
+            getThreadRoutePath({
+              projectId: thread.projectId,
+              threadId: thread.id,
+            }),
+          );
+        }
+      } catch (error) {
+        // The composer comes back, with the prompt still in it. A thread that
+        // was made keeps this screen up until its own replaces it.
+        setStartingThread(null);
+        throw error;
       }
     },
     [
       createThread,
       forkSeed,
+      isCompactViewport,
+      latestVisit,
+      location.key,
       queryClient,
       navigate,
       navigateToThreadAfterCreate,
@@ -641,19 +714,27 @@ export function RootComposeView() {
       preferReadyProviderWhenUnset={forkSeed === null}
       onSubmit={handleSubmit}
     >
-      {(composer) => (
-        <RootComposeSurface
-          composer={composer}
-          forkSeed={forkSeed}
-          lastCreatedThreadId={lastCreatedThreadId}
-          rootComposeProjectId={rootComposeProjectId}
-          setForkSeed={setForkSeed}
-          setRootComposeProjectId={setRootComposeProjectId}
-          setRootComposeSectionId={setRootComposeSectionId}
-          setStartedComposing={setStartedComposing}
-          startedComposing={startedComposing}
-        />
-      )}
+      {(composer) =>
+        startingThread?.visit === location.key ? (
+          <StartingThread
+            input={startingThread.input}
+            projectId={startingThread.projectId}
+            sentAt={startingThread.sentAt}
+          />
+        ) : (
+          <RootComposeSurface
+            composer={composer}
+            forkSeed={forkSeed}
+            lastCreatedThreadId={lastCreatedThreadId}
+            rootComposeProjectId={rootComposeProjectId}
+            setForkSeed={setForkSeed}
+            setRootComposeProjectId={setRootComposeProjectId}
+            setRootComposeSectionId={setRootComposeSectionId}
+            setStartedComposing={setStartedComposing}
+            startedComposing={startedComposing}
+          />
+        )
+      }
     </NewThreadComposer>
   );
 }
@@ -830,9 +911,14 @@ function RootComposeSurface({
     } else {
       restorePromptDraftIfEmpty(nextDraft);
     }
+    // Carry a section target along, or the next pass reads focusPrompt alone as "clear the section".
+    const state = location.state as { sectionId?: unknown };
     navigate(getRootComposeRoutePath() + location.search, {
       replace: true,
-      state: { focusPrompt: true },
+      state: {
+        focusPrompt: true,
+        ...("sectionId" in state ? { sectionId: state.sectionId } : {}),
+      },
     });
   }, [
     location.search,
@@ -1936,13 +2022,7 @@ function RootComposeSurface({
   ]);
 
   if (!projects && sidebarNavigationError) {
-    return (
-      <PageShell contentClassName="min-h-full items-center justify-center">
-        <p className="py-12 text-center text-sm text-destructive">
-          Failed to load projects.
-        </p>
-      </PageShell>
-    );
+    return <ProjectsLoadError />;
   }
 
   const machineSetupDialog = (

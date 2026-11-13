@@ -226,8 +226,7 @@ BB remains unowned and runs neither hook.
 
 Fresh machine clones do not apply `.worktreeinclude`: no local source checkout
 exists on the new host. Supply local files and secrets through core Machine
-environment settings. Keep the repo hook's cache/no-op logic in the repository;
-Modal's stored Dockerfile recipe contains image-build instructions only.
+environment settings. Keep the repo hook's cache/no-op logic in the repository.
 
 Restoring a machine filesystem does not rerun `.bb-env-setup.sh`. Setup runs when core first creates an owned environment. Fresh machine clones do not apply `.worktreeinclude`; supply local files and secrets through Machine environment settings.
 

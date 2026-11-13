@@ -41,6 +41,7 @@ const rpcMethods = [
   "cloud_automations",
   "cloud_keys",
   "cloud_template_add",
+  "templates_usage",
   "account_plan",
   "paused_loops",
   "scans_agent_sessions",
@@ -536,11 +537,11 @@ describe("automations server plugin harness", () => {
   it.each([
     {
       supported: ["accept-edits", "auto", "full"] as const,
-      expected: "auto",
+      expected: "full",
     },
     {
-      supported: ["accept-edits", "full"] as const,
-      expected: "full",
+      supported: ["accept-edits", "auto"] as const,
+      expected: "auto",
     },
   ])(
     "defaults agent automations to $expected for provider capabilities",

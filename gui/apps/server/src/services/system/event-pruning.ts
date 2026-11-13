@@ -7,10 +7,13 @@ import {
   pruneResolvedItemDeltas,
   pruneTokenUsageEventsBeforeSequence,
   pruneThreadEventsBeforeSequence,
+  threads,
 } from "@cloudroom/db";
+import type { DbConnection } from "@cloudroom/db";
 import type { ThreadEventType } from "@cloudroom/domain";
 import { roundDurationMs } from "@cloudroom/process-utils";
 import type { AppDeps } from "../../types.js";
+import { runEventLoopWorkSync } from "./event-loop-work.js";
 
 type ThreadEventPruningMode = "active" | "archived" | "idle";
 
@@ -62,6 +65,32 @@ const ARCHIVED_THREAD_EVENT_KEEP_RECENT = 120;
 const ACTIVE_THREAD_EVENT_PRUNE_MIN_SEQUENCE_DELTA = 250;
 const ACTIVE_THREAD_EVENT_PRUNE_MIN_INTERVAL_MS = 30_000;
 const SLOW_THREAD_EVENT_PRUNE_LOG_THRESHOLD_MS = 1_000;
+// The sweep that deletes leftover streamed pieces: how long one tick may work, how many rows one step deletes,
+// and how slow a step may be before the tick stops. Old rows sit cold on disk, where a large delete would freeze
+// the server for a moment, so steps are small and a slow one ends the tick.
+const LEFTOVER_STREAM_PIECE_SWEEP_BUDGET_MS = 250;
+const LEFTOVER_STREAM_PIECE_SWEEP_BATCH_SIZE = 100;
+const LEFTOVER_STREAM_PIECE_SWEEP_SLOW_STEP_MS = 50;
+
+// Threads that may still hold streamed pieces of finished items. One prune deletes one bounded batch, so a long
+// turn leaves pieces behind, and so did every Cloud thread from before Cloud turns pruned at all.
+interface LeftoverStreamPieceQueue {
+  backlogQueued: boolean;
+  threadIds: Set<string>;
+}
+const leftoverStreamPieceQueues = new WeakMap<
+  DbConnection,
+  LeftoverStreamPieceQueue
+>();
+
+function leftoverStreamPieceQueue(db: DbConnection): LeftoverStreamPieceQueue {
+  let queue = leftoverStreamPieceQueues.get(db);
+  if (!queue) {
+    queue = { backlogQueued: false, threadIds: new Set() };
+    leftoverStreamPieceQueues.set(db, queue);
+  }
+  return queue;
+}
 
 const AGE_PRUNABLE_THREAD_EVENT_TYPES: readonly ThreadEventType[] = [
   "thread/contextWindowUsage/updated",
@@ -158,6 +187,10 @@ export function pruneThreadEventHistory(
         threadId: args.threadId,
       }),
   );
+  // A batch that deleted pieces may have left more: the sweep below deletes the rest.
+  if (removedResolvedItemDeltas > 0) {
+    leftoverStreamPieceQueue(deps.db).threadIds.add(args.threadId);
+  }
   const removedBackgroundTaskProgressEvents = runThreadEventPruningStep(
     "prune_background_task_progress",
     () =>
@@ -252,6 +285,65 @@ export function maybePruneActiveThreadEventHistory(
     mode: thread.status === "active" ? "active" : "idle",
     threadId: args.threadId,
   });
+}
+
+/**
+ * Deletes leftover streamed pieces of finished items, a small batch at a time, for a short slice of each sweep
+ * tick. The first run after startup queues every thread once: a thread with nothing to delete costs one indexed
+ * lookup, and this is what cleans up Cloud threads from before their turns pruned.
+ */
+export async function runLeftoverStreamPiecePruneSweep(
+  deps: Pick<AppDeps, "db" | "logger">,
+): Promise<void> {
+  const queue = leftoverStreamPieceQueue(deps.db);
+  if (!queue.backlogQueued) {
+    for (const thread of deps.db
+      .select({ id: threads.id })
+      .from(threads)
+      .all()) {
+      queue.threadIds.add(thread.id);
+    }
+    queue.backlogQueued = true;
+  }
+
+  const deadline = performance.now() + LEFTOVER_STREAM_PIECE_SWEEP_BUDGET_MS;
+  while (performance.now() < deadline) {
+    const [threadId] = queue.threadIds;
+    if (threadId === undefined) {
+      return;
+    }
+    const startedAt = performance.now();
+    let removed: number;
+    try {
+      removed = runEventLoopWorkSync(
+        "sweep:leftover-stream-pieces:advance",
+        () =>
+          pruneResolvedItemDeltas(deps.db, {
+            limit: LEFTOVER_STREAM_PIECE_SWEEP_BATCH_SIZE,
+            threadId,
+          }),
+      );
+    } catch (error) {
+      deps.logger.warn(
+        { err: error, threadId },
+        "Failed to prune leftover stream pieces",
+      );
+      // Try this thread again after the others, on a later tick.
+      queue.threadIds.delete(threadId);
+      queue.threadIds.add(threadId);
+      return;
+    }
+    if (removed < LEFTOVER_STREAM_PIECE_SWEEP_BATCH_SIZE) {
+      queue.threadIds.delete(threadId);
+    }
+    if (
+      performance.now() - startedAt >=
+      LEFTOVER_STREAM_PIECE_SWEEP_SLOW_STEP_MS
+    ) {
+      return;
+    }
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
 }
 
 export function resetActiveThreadEventPruningState(threadId: string): void {

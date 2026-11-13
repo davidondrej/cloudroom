@@ -1,4 +1,4 @@
-import { useIsMutating, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useIsMutating, useMutation, useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
 import { z } from "zod";
 import { COMPUTER_TITLE, deriveProjectNameFromPath, reasoningLevelSchema, serviceTierSchema, type ReasoningLevel, type Thread } from "@cloudroom/domain";
 import type { MacAccessLevel, NativeSession, RepoSuggestion, SessionImportResult } from "@cloudroom/sdk/browser";
@@ -37,7 +37,8 @@ export const cloudroomStatusSchema = z.object({
   cloudQueue: z.object({ position: z.number(), total: z.number(), regionBlocked: z.boolean() }).nullable().default(null),
   usedCloud: z.boolean().default(true),
   lastCloudAt: z.number().nullable().optional(),
-  lastNewCloudAt: z.number().nullable().optional(),
+  /** Threads the user started in the last 30 days, by where they run (ADR 20261111-222458). */
+  recentThreads: z.object({ local: z.number(), cloud: z.number() }).optional(),
   harnesses: z.array(z.object({
     id: z.string(),
     provider: z.string().nullable().optional(),
@@ -123,9 +124,13 @@ export function useCloudroomSignIn() {
   });
 }
 
+const cloudroomConnectionQuery = { queryKey: ["cloudroom-connection"], queryFn: async ({ signal }: { signal: AbortSignal }) => cloudroomStatusSchema.parse(await (await fetchWithAppSurface("/api/v1/cloudroom", { signal })).json()) };
 export function useCloudroomConnection() {
-  return useQuery({ queryKey: ["cloudroom-connection"], queryFn: async ({ signal }) => cloudroomStatusSchema.parse(await (await fetchWithAppSurface("/api/v1/cloudroom", { signal })).json()), refetchInterval: 10000 });
+  return useQuery({ ...cloudroomConnectionQuery, refetchInterval: 10000 });
 }
+/** The Cloud status right now, for code that asks at one moment instead of watching. Always fresh: a copy up to 10
+ *  seconds old could miss a region block or the cloud queue. */
+export const fetchCloudroomConnection = (queryClient: QueryClient) => queryClient.fetchQuery({ ...cloudroomConnectionQuery, staleTime: 0 });
 
 export function useMacAgents(enabled = true) {
   return useQuery({
@@ -178,6 +183,13 @@ export type HostDesktopUpdate = NonNullable<ReturnType<typeof useHostDesktopUpda
 
 export function useCloudroomThread(threadId: string, enabled: boolean) {
   return useQuery({ queryKey: ["cloudroom-thread", threadId], enabled, queryFn: async ({ signal }) => threadStatusSchema.parse(await (await fetchWithAppSurface(`/api/v1/cloudroom/threads/${encodeURIComponent(threadId)}`, { signal })).json()), refetchInterval: 1500 });
+}
+
+const cloudLoginsSchema = z.object({ issues: z.array(z.object({ provider: z.enum(["codex", "claude-code", "acp-cursor"]), threads: z.number(), loops: z.number() })) });
+/** Agents Cloud refused for their login, with the threads and loops waiting on each. A local call; the server reads the
+ *  website's loops at most every 15 minutes. */
+export function useCloudLogins(enabled: boolean) {
+  return useQuery({ queryKey: ["cloud-logins"], enabled, queryFn: async ({ signal }) => cloudLoginsSchema.parse(await (await fetchWithAppSurface("/api/v1/cloudroom/cloud-logins", { signal })).json()).issues, refetchInterval: 60_000 });
 }
 
 export function useSetCloudReasoning(threadId: string) {
@@ -291,7 +303,7 @@ export function useSetCopyLogins() {
   });
 }
 
-export function useImportBb() {
+export function useImportRoom() {
   const client = useQueryClient();
   return useMutation({
     mutationFn: (hostId: string) => sdk.cloudroom.importBb(hostId),
@@ -350,6 +362,19 @@ export function useImportSessions() {
         onProgress?.(Math.min(index + 20, sessions.length));
       }
       return result;
+    },
+    onSettled: () => client.invalidateQueries(),
+  });
+}
+
+export function useImportConductorExport() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: async ({ hostId, clientHostId, onPicked }: { hostId: string; clientHostId: string; onPicked?: () => void }) => {
+      const { path } = await sdk.hosts.pickFolder({ hostId, clientHostId });
+      if (!path) return null;
+      onPicked?.();
+      return sdk.cloudroom.importConductorExport(hostId, path);
     },
     onSettled: () => client.invalidateQueries(),
   });

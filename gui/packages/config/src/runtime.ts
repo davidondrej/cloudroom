@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { homedir } from "node:os";
 import { delimiter, isAbsolute, join, relative, resolve } from "node:path";
 
-export type BbRuntimeMode = "dev" | "prod";
+export type RoomRuntimeMode = "dev" | "prod";
 
 interface DevPortSet {
   appPort: number;
@@ -54,7 +54,7 @@ interface ResolveProdDataDirArgs {
 interface ResolveRuntimeDataDirArgs {
   env: NodeJS.ProcessEnv;
   homeDir: string;
-  mode: BbRuntimeMode;
+  mode: RoomRuntimeMode;
   repoRoot?: string;
 }
 
@@ -78,12 +78,12 @@ interface ResolvePortFromEnvArgs {
   name: string;
 }
 
-const BB_PROD_DATA_DIR_NAME = ".gui-cloudroom";
-const BB_DEV_DATA_ROOT_DIR = ".gui-cloudroom-dev";
-export const BB_PROD_SERVER_PORT = 39886;
-export const BB_PROD_HOST_DAEMON_PORT = 39887;
-export const BB_LOOPBACK_HOST = "127.0.0.1";
-const BB_SQLITE_DATABASE_FILE_NAME = "bb.db";
+const ROOM_PROD_DATA_DIR_NAME = ".gui-cloudroom";
+const ROOM_DEV_DATA_ROOT_DIR = ".gui-cloudroom-dev";
+export const ROOM_PROD_SERVER_PORT = 39886;
+export const ROOM_PROD_HOST_DAEMON_PORT = 39887;
+export const ROOM_LOOPBACK_HOST = "127.0.0.1";
+const ROOM_SQLITE_DATABASE_FILE_NAME = "bb.db";
 
 const DEV_HASH_LENGTH = 12;
 const DEV_PORT_BUCKETS = 8_000;
@@ -143,8 +143,8 @@ function resolvePortOffset(repoRootPath: string): number {
 }
 
 function reservePackagedAppPorts(port: number): number {
-  if (port === BB_PROD_SERVER_PORT) return 59_000;
-  if (port === BB_PROD_HOST_DAEMON_PORT) return 59_001;
+  if (port === ROOM_PROD_SERVER_PORT) return 59_000;
+  if (port === ROOM_PROD_HOST_DAEMON_PORT) return 59_001;
   if (port === 38_886) return 59_002;
   if (port === 38_887) return 59_003;
   return port;
@@ -178,12 +178,12 @@ function expandHomeDirectory(pathValue: string, homeDir: string): string {
 
 export function resolveRuntimeMode(
   nodeEnv: string | undefined = process.env.NODE_ENV,
-): BbRuntimeMode {
+): RoomRuntimeMode {
   return nodeEnv === "production" ? "prod" : "dev";
 }
 
 export function resolveProdDataDir(args: ResolveProdDataDirArgs): string {
-  return join(args.homeDir, BB_PROD_DATA_DIR_NAME);
+  return join(args.homeDir, ROOM_PROD_DATA_DIR_NAME);
 }
 
 export function applyPackagedDesktopRuntimeEnv(args: {
@@ -194,11 +194,11 @@ export function applyPackagedDesktopRuntimeEnv(args: {
   const settings = args.settingsEnv ?? args.env;
   const serverUrl = new URL(
     settings.ROOM_SERVER_URL ??
-      `http://${BB_LOOPBACK_HOST}:${BB_PROD_SERVER_PORT}`,
+      `http://${ROOM_LOOPBACK_HOST}:${ROOM_PROD_SERVER_PORT}`,
   );
   if (
     serverUrl.protocol !== "http:" ||
-    ![BB_LOOPBACK_HOST, "localhost"].includes(serverUrl.hostname) ||
+    ![ROOM_LOOPBACK_HOST, "localhost"].includes(serverUrl.hostname) ||
     serverUrl.username ||
     serverUrl.password ||
     serverUrl.pathname !== "/" ||
@@ -211,7 +211,7 @@ export function applyPackagedDesktopRuntimeEnv(args: {
   }
   const serverPort = serverUrl.port || "80";
   const daemonPort = resolvePortFromEnv({
-    defaultPort: BB_PROD_HOST_DAEMON_PORT,
+    defaultPort: ROOM_PROD_HOST_DAEMON_PORT,
     env: settings,
     name: "ROOM_HOST_DAEMON_PORT",
   });
@@ -239,9 +239,9 @@ export function applyPackagedDesktopRuntimeEnv(args: {
     BB_DATA_DIR: dataDir,
     ROOM_DATA_DIR: dataDir,
     BB_SERVER_PORT: serverPort,
-    BB_SERVER_URL: `http://${BB_LOOPBACK_HOST}:${serverPort}`,
-    ROOM_SERVER_URL: `http://${BB_LOOPBACK_HOST}:${serverPort}`,
-    BB_SERVER_BIND_HOST: BB_LOOPBACK_HOST,
+    BB_SERVER_URL: `http://${ROOM_LOOPBACK_HOST}:${serverPort}`,
+    ROOM_SERVER_URL: `http://${ROOM_LOOPBACK_HOST}:${serverPort}`,
+    BB_SERVER_BIND_HOST: ROOM_LOOPBACK_HOST,
     BB_HOST_DAEMON_PORT: String(daemonPort),
     ROOM_HOST_DAEMON_PORT: String(daemonPort),
   });
@@ -274,9 +274,9 @@ export function resolveDevInstanceConfig(
   args: ResolveDevInstanceConfigArgs,
 ): DevInstanceConfig {
   const instanceId = resolveInstanceId(args);
-  const dataDir = join(args.homeDir, BB_DEV_DATA_ROOT_DIR, instanceId);
+  const dataDir = join(args.homeDir, ROOM_DEV_DATA_ROOT_DIR, instanceId);
   const ports = resolvePorts(args.repoRoot);
-  const serverUrl = `http://${BB_LOOPBACK_HOST}:${ports.serverPort}`;
+  const serverUrl = `http://${ROOM_LOOPBACK_HOST}:${ports.serverPort}`;
   return {
     dataDir,
     homeDir: args.homeDir,
@@ -295,10 +295,10 @@ export function resolveSharedDevInstanceConfig(
     dataDir: resolveProdDataDir({ homeDir: config.homeDir }),
     ports: {
       ...config.ports,
-      serverPort: BB_PROD_SERVER_PORT,
-      hostDaemonPort: BB_PROD_HOST_DAEMON_PORT,
+      serverPort: ROOM_PROD_SERVER_PORT,
+      hostDaemonPort: ROOM_PROD_HOST_DAEMON_PORT,
     },
-    serverUrl: `http://${BB_LOOPBACK_HOST}:${BB_PROD_SERVER_PORT}`,
+    serverUrl: `http://${ROOM_LOOPBACK_HOST}:${ROOM_PROD_SERVER_PORT}`,
   };
 }
 
@@ -354,7 +354,7 @@ export function resolveRuntimeDataDir(args: ResolveRuntimeDataDirArgs): string {
 export function resolveDataDirDatabasePath(
   args: ResolveDataDirDatabasePathArgs,
 ): string {
-  return join(args.dataDir, BB_SQLITE_DATABASE_FILE_NAME);
+  return join(args.dataDir, ROOM_SQLITE_DATABASE_FILE_NAME);
 }
 
 export function parsePortValue(args: ParsePortValueArgs): number {

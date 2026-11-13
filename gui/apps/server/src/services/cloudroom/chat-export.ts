@@ -40,9 +40,13 @@ export function exportableChats(deps: Pick<AppDeps, "db">): { target: "local" | 
   return exportedThreads(deps, { scope: "all", days: null }).map(({ target, updatedAt }) => ({ target, updatedAt }));
 }
 
+/** A Cloud thread another computer started, never opened here: its history isn't on this computer (#237). */
+const downloaded = (deps: Pick<AppDeps, "db">, thread: ExportedThread) => thread.target !== "cloud" || Boolean(deps.db.select({ id: events.id }).from(events).where(eq(events.threadId, thread.id)).limit(1).get());
+
 function markdown(deps: Pick<AppDeps, "db">, thread: ExportedThread, title: string): string {
   const info = `${thread.project ?? "No project"} · ${thread.target === "cloud" ? "Cloud" : "Local"} thread · ${thread.harness} · ${day(thread.createdAt)}`;
   const messages = threadMessages(deps.db, thread.id).map((message) => `## ${message.role === "user" ? "You" : "Agent"}\n\n${message.text}`);
+  if (!downloaded(deps, thread)) messages.push("Not downloaded on this computer: open it, then export again.");
   return `${[`# ${title}`, info, ...messages].join("\n\n")}\n`;
 }
 
@@ -50,7 +54,7 @@ function markdown(deps: Pick<AppDeps, "db">, thread: ExportedThread, title: stri
 function json(deps: Pick<AppDeps, "db">, thread: ExportedThread, title: string): string {
   const history = deps.db.select({ type: events.type, itemKind: events.itemKind, data: events.data, createdAt: events.createdAt }).from(events)
     .where(and(eq(events.threadId, thread.id), notLike(events.type, "%delta"))).orderBy(asc(events.sequence)).all();
-  return JSON.stringify({ ...thread, title, events: history.map((event) => ({ ...event, data: JSON.parse(event.data) as unknown })) }, null, 2);
+  return JSON.stringify({ ...thread, title, ...(downloaded(deps, thread) ? {} : { downloaded: false }), events: history.map((event) => ({ ...event, data: JSON.parse(event.data) as unknown })) }, null, 2);
 }
 
 /** Writes one file per thread into a new folder in ~/Downloads, one subfolder per project, then opens it. */

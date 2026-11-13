@@ -8,7 +8,10 @@ import {
   type ReactNode,
 } from "react";
 import { defaultAppSettings, type PromptInput } from "@cloudroom/domain";
-import type { SendMessageDelivery } from "@cloudroom/server-contract";
+import type {
+  SendMessageDelivery,
+  ThreadTimelineResponse,
+} from "@cloudroom/server-contract";
 import type {
   AttachmentsConfig,
   HistoryConfig,
@@ -52,6 +55,7 @@ import {
   useThread,
   useThreadPendingInteractions,
   useThreadQueuedMessages,
+  useThreadTimeline,
 } from "@/hooks/queries/thread-queries";
 import { useThreadDefaultExecutionOptions } from "@/hooks/queries/thread-default-execution-options-query";
 import { useSystemConfig } from "@/hooks/queries/system-queries";
@@ -78,6 +82,9 @@ import { useComposerTypeahead } from "./useComposerTypeahead";
 import { useCopyCommand } from "@/hooks/useCopyCommand";
 import { useInlineQueuedMessageEditing } from "./useInlineQueuedMessageEditing";
 import { useQueuedMessageActions } from "./useQueuedMessageActions";
+
+const selectContextWindowUsage = (timeline: ThreadTimelineResponse) =>
+  timeline.contextWindowUsage ?? null;
 
 function reportQueuedSendDelivery(delivery: SendMessageDelivery): void {
   if (delivery !== "queued") {
@@ -196,6 +203,7 @@ function EmbeddedThreadChatHostedFooter({
   return (
     <div
       data-thread-window=""
+      data-wallpaper="thread"
       className="flex h-full min-h-0 min-w-0 flex-col overflow-clip"
     >
       <PageShell
@@ -241,6 +249,10 @@ function EmbeddedThreadChatWithComposer({
   const sendThreadMessage = useSendThreadMessage();
   const createQueuedMessage = useCreateThreadQueuedMessage();
   const threadQuery = useThread(threadId);
+  // Shares the timeline query the panel already loads; no extra request.
+  const contextWindowUsage =
+    useThreadTimeline(threadId, { select: selectContextWindowUsage }).data ??
+    null;
   const pendingInteractionsQuery = useThreadPendingInteractions(threadId);
   const activePendingInteraction = getLatestPendingInteraction(
     pendingInteractionsQuery.data,
@@ -699,6 +711,7 @@ function EmbeddedThreadChatWithComposer({
     inlineEditingQueuedMessage?.draft ?? null,
   );
   const setStoredPromptDraft = promptDraft.setDraft;
+  const getStoredPromptDraft = promptDraft.getCurrent;
   const bottomPluginComposerHost = useMemo<PluginComposerHost | null>(() => {
     if (bottomScope === null) return null;
     const identity = bottomComposerHostIdentity;
@@ -706,9 +719,10 @@ function EmbeddedThreadChatWithComposer({
     return {
       scope: bottomScope,
       textEffectKey: identity,
+      // The store, not the last render: typing reaches React only after paint.
       getCurrent: () =>
         activeBottomComposerIdentityRef.current === identity
-          ? currentPromptDraftRef.current
+          ? getStoredPromptDraft()
           : initialDraft,
       subscribeDraft: subscribeBottomDraft,
       setDraft: (draft) => {
@@ -725,6 +739,7 @@ function EmbeddedThreadChatWithComposer({
   }, [
     bottomComposerHostIdentity,
     bottomScope,
+    getStoredPromptDraft,
     setStoredPromptDraft,
     subscribeBottomDraft,
   ]);
@@ -1156,7 +1171,7 @@ function EmbeddedThreadChatWithComposer({
           pluginComposerScope={bottomPluginComposerHost?.scope ?? null}
           textEffects={bottomComposerTextEffects}
           environmentSummary={composer.environmentSummary}
-          contextWindowUsage={null}
+          contextWindowUsage={contextWindowUsage}
           execution={bottomExecutionConfig}
           permission={
             isCloud

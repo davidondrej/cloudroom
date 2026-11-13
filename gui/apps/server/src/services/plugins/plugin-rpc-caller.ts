@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from "node:crypto";
 import {
-  createNodeBbSdk,
+  createNodeRoomSdk,
   createRequestTimeoutFetch,
   DEFAULT_BB_REQUEST_TIMEOUT_MS,
   type BbSdk,
@@ -59,7 +59,7 @@ export function createPluginRpcCallerSdk(args: {
   const timeoutFetch = createRequestTimeoutFetch({
     timeoutMs: DEFAULT_BB_REQUEST_TIMEOUT_MS,
   });
-  return createNodeBbSdk({
+  return createNodeRoomSdk({
     baseUrl: args.baseUrl,
     callerToken: args.callerToken,
     fetch: (input, init) => {

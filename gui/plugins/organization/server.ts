@@ -18,34 +18,34 @@ export function takeoverInput(handoff: z.infer<typeof handoffSchema>) {
   ];
 }
 
-export default async function plugin(bb: BbPluginApi) {
+export default async function plugin(room: BbPluginApi) {
   let state: OrgState | null = null;
   let changes = 0;
   let error: string | null = null;
   let repos = new Map<string, string>();
   let wake: (() => void) | null = null;
   const archived = new Set<string>(), checked = new Set<string>();
-  const website = (input: { action: string } & Record<string, unknown>) => bb.sdk.cloudroom.org(input);
-  const publish = () => bb.realtime.publish(STATE_CHANNEL, { at: Date.now() });
-  const save = () => { if (state?.account) void bb.storage.kv.set(SAVED, { account: state.account, state }).catch(() => {}); };
+  const website = (input: { action: string } & Record<string, unknown>) => room.sdk.cloudroom.org(input);
+  const publish = () => room.realtime.publish(STATE_CHANNEL, { at: Date.now() });
+  const save = () => { if (state?.account) void room.storage.kv.set(SAVED, { account: state.account, state }).catch(() => {}); };
   const apply = (next: OrgState) => { changes++; state = next; save(); publish(); };
   const inOrg = (projectId: string) => {
     const repo = repos.get(projectId);
     return repo && state?.org?.repos.includes(repo) ? repo : null;
   };
-  const account = async () => (await bb.sdk.cloudroom.status().catch(() => null))?.account?.id ?? null;
+  const account = async () => (await room.sdk.cloudroom.status().catch(() => null))?.account?.id ?? null;
 
   // Each project's GitHub repo. A project the plugin hasn't seen yet triggers a reload, once.
   let loadingProjects: Promise<void> | null = null;
   const asked = new Set<string>();
-  const loadProjects = () => (loadingProjects ??= bb.sdk.projects.list()
+  const loadProjects = () => (loadingProjects ??= room.sdk.projects.list()
     .then((projects) => { repos = new Map(projects.flatMap((project) => { const repo = repoKey(project.gitRemoteUrl); return repo ? [[project.id, repo] as const] : []; })); })
-    .catch((failure) => bb.log.warn(`Could not load projects: ${message(failure)}`))
+    .catch((failure) => room.log.warn(`Could not load projects: ${message(failure)}`))
     .finally(() => { loadingProjects = null; }));
 
   // The last answer is saved for its account, so rules are there the moment the app starts (ADR 0277).
   async function loadSaved() {
-    const saved = await bb.storage.kv.get<{ account?: string; state: unknown }>(SAVED).catch(() => undefined);
+    const saved = await room.storage.kv.get<{ account?: string; state: unknown }>(SAVED).catch(() => undefined);
     const parsed = saved?.account && saved.account === await account() ? stateSchema.safeParse(saved.state) : null;
     if (!parsed?.success || state) return;
     state = parsed.data;
@@ -77,11 +77,11 @@ export default async function plugin(bb: BbPluginApi) {
   async function archiveTaken(threadId: string) {
     if (archived.has(threadId)) return;
     archived.add(threadId);
-    const thread = await bb.sdk.threads.get({ threadId }).catch(() => null);
-    if (thread && !thread.archivedAt) await bb.sdk.threads.archive({ threadId }).catch((failure) => bb.log.warn(`Could not archive taken-over thread ${threadId}: ${message(failure)}`));
+    const thread = await room.sdk.threads.get({ threadId }).catch(() => null);
+    if (thread && !thread.archivedAt) await room.sdk.threads.archive({ threadId }).catch((failure) => room.log.warn(`Could not archive taken-over thread ${threadId}: ${message(failure)}`));
   }
 
-  bb.background.service("poll", {
+  room.background.service("poll", {
     async start(signal) {
       await loadSaved();
       while (!signal.aborted) {
@@ -99,7 +99,7 @@ export default async function plugin(bb: BbPluginApi) {
 
   // Team rules and a repo's own rules reach threads in the team's repos only, Local and Cloud; personal work never gets
   // them (ADR 0277, David 2026-10-22).
-  bb.agents.contributeInstructions(({ projectId }) => {
+  room.agents.contributeInstructions(({ projectId }) => {
     const org = state?.org;
     if (!org) return null;
     if (!repos.has(projectId) && !asked.has(projectId)) { asked.add(projectId); void loadProjects(); }
@@ -114,7 +114,7 @@ export default async function plugin(bb: BbPluginApi) {
   });
 
   // After a new Cloud thread's first reply, the website asks Jev whether its owner's rule shares it. Once per thread.
-  bb.events.on("thread.idle", async ({ thread, lastAssistantText }) => {
+  room.events.on("thread.idle", async ({ thread, lastAssistantText }) => {
     if (!state?.org || thread.executionTarget !== "cloud" || thread.parentThreadId || thread.archivedAt) return;
     const repo = inOrg(thread.projectId);
     if (!repo || checked.has(thread.id) || state.mine.some((row) => row.thread === thread.id)) return;
@@ -127,23 +127,23 @@ export default async function plugin(bb: BbPluginApi) {
       publish();
     } catch (failure) {
       checked.delete(thread.id);
-      bb.log.warn(`Sharing check failed for ${thread.id}: ${message(failure)}`);
+      room.log.warn(`Sharing check failed for ${thread.id}: ${message(failure)}`);
     }
   });
 
   async function takeover(owner: string, thread: string) {
     const handoff = handoffSchema.parse(await website({ action: "takeover", owner, thread }));
-    const projects = await bb.sdk.projects.list();
-    const projectId = projects.find((project) => repoKey(project.gitRemoteUrl) === handoff.repo)?.id ?? (await bb.sdk.cloudroom.addGithubRepo({ repo: handoff.repo })).projectId;
+    const projects = await room.sdk.projects.list();
+    const projectId = projects.find((project) => repoKey(project.gitRemoteUrl) === handoff.repo)?.id ?? (await room.sdk.cloudroom.addGithubRepo({ repo: handoff.repo })).projectId;
     const base = { projectId, executionTarget: "cloud" as const, baseBranch: handoff.branch, environment: { type: "project-default" as const }, title: handoff.title, input: takeoverInput(handoff) };
     const harness = handoff.harness && PROVIDERS.has(handoff.harness) ? handoff.harness : null;
     // Their agent if this account can run it, else this account's default.
-    const created = harness ? await bb.sdk.threads.spawn({ ...base, providerId: harness }).catch(() => bb.sdk.threads.spawn(base)) : await bb.sdk.threads.spawn(base);
+    const created = harness ? await room.sdk.threads.spawn({ ...base, providerId: harness }).catch(() => room.sdk.threads.spawn(base)) : await room.sdk.threads.spawn(base);
     wake?.();
     return { threadId: created.id };
   }
 
-  bb.rpc.register(orgRpcContract, {
+  room.rpc.register(orgRpcContract, {
     state: async () => ({ state, error }),
     list: async () => z.object({ threads: z.array(sharedThreadSchema) }).parse(await website({ action: "list" })),
     view: async ({ owner, thread }) => z.object({ title: z.string(), messages: z.array(messageSchema) }).parse(await website({ action: "view", owner, thread })),
@@ -151,14 +151,14 @@ export default async function plugin(bb: BbPluginApi) {
     thread: async ({ threadId }) => {
       const org = state?.org, adminsSee = org?.admins_see_locked ?? true;
       if (!org || org.member_view === "none") return { eligible: false, shared: false, adminsSee };
-      const thread = await bb.sdk.threads.get({ threadId }).catch(() => null);
+      const thread = await room.sdk.threads.get({ threadId }).catch(() => null);
       const eligible = Boolean(thread && thread.executionTarget === "cloud" && !thread.parentThreadId && !thread.archivedAt && inOrg(thread.projectId));
       // Whether teammates see it: shared, or with "all team threads" unless its owner locked it.
       const row = state?.mine.find((item) => item.thread === threadId);
       return { eligible, shared: eligible && Boolean(row) && (org.member_view === "all" ? !row?.locked : Boolean(row?.shared)), adminsSee };
     },
     share: async ({ threadId, shared }) => {
-      const thread = await bb.sdk.threads.get({ threadId });
+      const thread = await room.sdk.threads.get({ threadId });
       const repo = inOrg(thread.projectId);
       if (!repo) throw new Error("Only threads in your organization's repos can be shared.");
       const result = z.object({ shared: z.boolean() }).parse(await website({ action: "share", thread: threadId, repo, shared }));
@@ -186,7 +186,7 @@ export default async function plugin(bb: BbPluginApi) {
       return result;
     },
     githubRepos: async () => {
-      const github = await bb.sdk.cloudroom.updateEnvironment({ action: "githubRepos" });
+      const github = await room.sdk.cloudroom.updateEnvironment({ action: "githubRepos" });
       return { login: github.login ?? null, repos: github.available ?? [] };
     },
   });

@@ -1011,7 +1011,7 @@ describe("core environment orchestration", () => {
       });
       const module = z
         .object({
-          default: z.custom<(bb: BbPluginApi) => Promise<void>>(
+          default: z.custom<(room: BbPluginApi) => Promise<void>>(
             (value) => typeof value === "function",
           ),
         })
@@ -1073,7 +1073,7 @@ describe("core environment orchestration", () => {
       });
       const module = z
         .object({
-          default: z.custom<(bb: BbPluginApi) => Promise<void>>(
+          default: z.custom<(room: BbPluginApi) => Promise<void>>(
             (value) => typeof value === "function",
           ),
         })
@@ -1213,6 +1213,7 @@ describe("core environment orchestration", () => {
           ownerThreadId: second.id,
           environmentProviderInstanceKey: second.id,
           path: "/tmp/second",
+          claimPath: null,
         });
         if (kind === "removal") {
           fixture.attach();
@@ -2039,7 +2040,7 @@ it("serializes concurrent branchless checkout attaches until the first thread is
     try {
       const module = z
         .object({
-          default: z.custom<(bb: BbPluginApi) => Promise<void>>(
+          default: z.custom<(room: BbPluginApi) => Promise<void>>(
             (value) => typeof value === "function",
           ),
         })
