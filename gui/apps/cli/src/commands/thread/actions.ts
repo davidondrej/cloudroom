@@ -548,7 +548,7 @@ export function registerActionsCommands(
       "--model <model>",
       "Model ID for this message. Cloud threads keep their model: switch with thread update --model first",
     )
-    .option("--service-tier <tier>", "Service tier: fast or default")
+    .option("--service-tier <tier>", "Service tier: default, fast, or ultrafast (Local Codex)")
     .option(
       "--reasoning-level <level>",
       "Reasoning level: low, medium, high, xhigh, max (provider-dependent)",

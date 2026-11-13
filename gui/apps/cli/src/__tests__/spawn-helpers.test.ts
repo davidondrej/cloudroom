@@ -309,6 +309,9 @@ describe("parseThreadWaitPollIntervalMs", () => {
 });
 
 describe("parseServiceTier", () => {
+  it("accepts the Local Codex Ultrafast tier", () => {
+    expect(parseServiceTier("ultrafast")).toBe("ultrafast");
+  });
   it("throws for invalid tier", () => {
     expect(() => parseServiceTier("turbo")).toThrow("Invalid service tier");
   });

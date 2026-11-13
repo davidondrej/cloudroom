@@ -381,7 +381,7 @@ export function registerSpawnCommand(
       "Reasoning level: low, medium, high, xhigh, max (provider-dependent)",
     )
     .option("--title <title>", "Thread title")
-    .option("--service-tier <tier>", "Service tier: fast or default")
+    .option("--service-tier <tier>", "Service tier: default, fast, or ultrafast (Local Codex)")
     .option("--permission-mode <mode>", PERMISSION_MODE_HELP)
     .option("--plan", PLAN_HELP)
     .option(
