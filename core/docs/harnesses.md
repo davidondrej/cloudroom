@@ -158,6 +158,16 @@ A browser login can't run in a sandbox: Droid signs in with `FACTORY_API_KEY` fr
 
 Hosted sandboxes copy the Mac's `config.toml` and every token in `credentials/` (one per region: `kimi-code.json` for kimi.com, `kimi-code-env-<hash>.json` for kimi.ai) at wake, and save the sandbox's renewed copies before sleep. Kimi rotates refresh tokens, so the Mac and a sandbox may sign each other out (ADR 20261107-081737). Without a login, a start fails with a message to run `kimi login` on the Mac.
 
+## Antigravity
+
+`src/runtime/antigravity.rs` runs Google's `agy acp` over the shared ACP protocol. Core discovers `agy` in the agent account's `.local/bin` or `/usr/local/bin` once `~/.gemini` exists (the CLI creates it on its first run), and starts it with telemetry off. Use `harness: "antigravity"` in the API; the GUI provider is also `antigravity`, a provider of its own rather than one of the `acp-` agents. No Cloudroom service variables are needed.
+
+Sessions stay in Antigravity's default mode, which asks before each edit and command; the shared ACP protocol approves every request, so the agent has full access (ADR 0045). The model and `thought_level` are session options: models are Antigravity's own names from the signed-in Google AI plan (`gemini-4-carbon`, `claude-opus-5-5`), and a thinking level the model does not offer is skipped. Antigravity keeps each conversation in `~/.gemini/antigravity-cli/conversations/<id>.db`; resume uses `session/resume`, which replays nothing, and Core stores only the ACP stream. Compaction, rewind, Fast, subagents, context-only notices, and Command Guard are not advertised.
+
+Sign in with Google as the agent account: `agy acp --login` prints a link and takes the authorization code Google shows. On Linux the CLI keeps the login in the system keyring when one is running, else in its own secrets file. Without a login, a start fails with a message that names that command. Hosted sandboxes do not have the CLI yet, and nothing copies a Mac's Google login to Cloud.
+
+Tested on macOS with Antigravity CLI 1.5.8 and a Google AI Ultra plan: discovery, a refused thinking level, start with a model and level, an edit and a shell command, and resume after a Core restart. Not tested on Linux.
+
 ## Queue, completion and recovery
 
 There is one durable Cloudroom queue. Pi's memory-only steering/follow-up queue is not used for that backlog. RPC acknowledgement means acceptance, not completion. Pi requests settle only after its full run, including internal retries and compaction; an additional state check guards premature settled signals. Handled extension commands with no agent run are reconciled separately. Interrupt intent is correlated to the active request even when Pi aborts inside a tool without emitting a new assistant message. Interrupt clears Pi's internal continuations first, but preserves Cloudroom's durable future requests.

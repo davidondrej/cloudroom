@@ -61,6 +61,8 @@ import {
 import { RowStateControl, RowVersions } from "./UpdatesSettingsSection";
 import {
   cloudCanRunHarness,
+  cloudHarness,
+  useCloudroomConnection,
   useCloudroomAccount,
 } from "@/hooks/queries/cloudroom-queries";
 import {
@@ -355,9 +357,20 @@ function CodexCloudLogin() {
   );
 }
 
+/** Antigravity runs in Cloud only where the Cloud machine has its CLI, signed in there with Google. */
+function AntigravityCloud() {
+  const offered = cloudHarness(useCloudroomConnection().data, "antigravity") !== undefined;
+  return offered ? (
+    <Check label="Antigravity is set up on your Cloud machine" />
+  ) : (
+    MAC_ONLY
+  );
+}
+
 function CloudLogin({ provider }: { provider: ProviderInfo }) {
   if (provider.id === "claude-code") return <ClaudeCloudLogin />;
   if (provider.id === "codex") return <CodexCloudLogin />;
+  if (provider.id === "antigravity") return <AntigravityCloud />;
   // Pi, opencode, Hermes, fx, and Devin have no Cloud sign-in: the Cloud reuses this Mac's login (ADR 0130).
   // Cursor (ADR 0161) and the rest can't run in Cloud.
   return cloudCanRunHarness(provider.id) ? (

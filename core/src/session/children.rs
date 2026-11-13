@@ -136,7 +136,7 @@ impl Manager {
 }
 
 /// Harnesses a child sharing its parent's sandbox may run. Cursor and fx children run in sandboxes of their own.
-const CHILD_HARNESSES: [runtime::Kind; 9] = [
+const CHILD_HARNESSES: [runtime::Kind; 10] = [
     runtime::Kind::Codex,
     runtime::Kind::Claude,
     runtime::Kind::Pi,
@@ -145,6 +145,7 @@ const CHILD_HARNESSES: [runtime::Kind; 9] = [
     runtime::Kind::Devin,
     runtime::Kind::Droid,
     runtime::Kind::Kimi,
+    runtime::Kind::Antigravity,
     runtime::Kind::OpenClaw,
 ];
 pub(super) const FINISHED: [&str; 5] = [
@@ -478,7 +479,7 @@ impl Manager {
             let kind = spawn.harness.unwrap_or(p.harness);
             if !CHILD_HARNESSES.contains(&kind) {
                 return Err(Error::Conflict(
-                    "Only codex, claude-code, pi, opencode, hermes, devin, droid, kimi and openclaw children can share this sandbox. Omit --shared-sandbox to start it in a sandbox of its own.",
+                    "Only codex, claude-code, pi, opencode, hermes, devin, droid, kimi, antigravity and openclaw children can share this sandbox. Omit --shared-sandbox to start it in a sandbox of its own.",
                 ));
             }
             let same = kind == p.harness;

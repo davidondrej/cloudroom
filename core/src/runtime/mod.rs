@@ -10,6 +10,7 @@ use std::{
     time::Duration,
 };
 use tokio::{process::Command, sync::mpsc};
+mod antigravity;
 pub(crate) mod auth;
 mod claude;
 pub(crate) mod claude_auth;
@@ -58,6 +59,7 @@ pub enum Kind {
     Kimi,
     #[serde(rename = "openclaw")]
     OpenClaw,
+    Antigravity,
 }
 impl Kind {
     /// A harness as Core or the app names it: `cursor` or `acp-cursor`, `hermes` or `acp-hermes-agent`.
@@ -141,6 +143,7 @@ pub const PI_REASONING_LEVELS: &[&str] = &["none", "minimal", "low", "medium", "
 pub fn pi_reasoning_accepted(level: &str) -> bool {
     level == "max" || PI_REASONING_LEVELS.contains(&level)
 }
+pub use antigravity::REASONING_LEVELS as ANTIGRAVITY_REASONING_LEVELS;
 pub use devin::REASONING_LEVELS as DEVIN_REASONING_LEVELS;
 pub use droid::REASONING_LEVELS as DROID_REASONING_LEVELS;
 pub use hermes::REASONING_LEVELS as HERMES_REASONING_LEVELS;
@@ -657,6 +660,16 @@ impl Handle {
                 None,
                 None,
             ),
+            Kind::Antigravity => (
+                antigravity::command(config, &profile)?,
+                Box::new(cursor::Protocol::new(
+                    &profile,
+                    resume.as_ref(),
+                    antigravity::ANTIGRAVITY,
+                )),
+                None,
+                None,
+            ),
             Kind::OpenClaw => (
                 openclaw::command(config, &profile)?,
                 Box::new(cursor::Protocol::new(
@@ -786,6 +799,7 @@ impl Handle {
                 | Kind::Devin
                 | Kind::Droid
                 | Kind::Kimi
+                | Kind::Antigravity
                 | Kind::OpenClaw
         ) {
             return cursor::capabilities(self.kind);
@@ -808,6 +822,7 @@ impl Handle {
             Kind::Devin => devin::start(&startup).await,
             Kind::Droid => droid::start(&startup).await,
             Kind::Kimi => kimi::start(&startup).await,
+            Kind::Antigravity => antigravity::start(&startup).await,
             Kind::OpenClaw => openclaw::start(&startup).await,
         }
     }
@@ -853,6 +868,7 @@ impl Handle {
             | Kind::Devin
             | Kind::Droid
             | Kind::Kimi
+            | Kind::Antigravity
             | Kind::OpenClaw => cursor::send(self, request, input)
                 .await
                 .map(|()| Vec::new()),
@@ -877,6 +893,7 @@ impl Handle {
             | Kind::Devin
             | Kind::Droid
             | Kind::Kimi
+            | Kind::Antigravity
             | Kind::OpenClaw => cursor::steer(self, request, text).await,
             Kind::Fx => fx::steer(self, request, text).await,
         }
@@ -893,6 +910,7 @@ impl Handle {
             | Kind::Devin
             | Kind::Droid
             | Kind::Kimi
+            | Kind::Antigravity
             | Kind::OpenClaw => Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "ACP compaction is not supported",
@@ -923,6 +941,7 @@ impl Handle {
             | Kind::Devin
             | Kind::Droid
             | Kind::Kimi
+            | Kind::Antigravity
             | Kind::OpenClaw => Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "ACP rewind is not supported",
@@ -1012,6 +1031,7 @@ impl Handle {
             | Kind::Devin
             | Kind::Droid
             | Kind::Kimi
+            | Kind::Antigravity
             | Kind::OpenClaw => Ok(None),
         }
     }
@@ -1034,6 +1054,7 @@ impl Handle {
             | Kind::Devin
             | Kind::Droid
             | Kind::Kimi
+            | Kind::Antigravity
             | Kind::OpenClaw => cursor::interrupt(self, state).await,
         }
     }
@@ -1049,6 +1070,7 @@ impl Handle {
             | Kind::Devin
             | Kind::Droid
             | Kind::Kimi
+            | Kind::Antigravity
             | Kind::OpenClaw => Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 "ACP context-only notices are unavailable",
@@ -1095,6 +1117,7 @@ pub fn check_resume_history(
         Kind::Devin => return devin::validate(profile, saved, identity),
         Kind::Droid => return droid::validate(profile, saved, identity),
         Kind::Kimi => return kimi::validate(profile, saved, identity),
+        Kind::Antigravity => return antigravity::validate(profile, saved, identity),
         Kind::OpenClaw => return openclaw::validate(profile, saved, identity),
         _ => {}
     }
@@ -1139,6 +1162,9 @@ pub fn recover_records(
         Kind::Devin => devin::validate(profile, saved, policy.map(|p| (p.agent_uid, p.agent_gid))),
         Kind::Droid => droid::validate(profile, saved, policy.map(|p| (p.agent_uid, p.agent_gid))),
         Kind::Kimi => kimi::validate(profile, saved, policy.map(|p| (p.agent_uid, p.agent_gid))),
+        Kind::Antigravity => {
+            antigravity::validate(profile, saved, policy.map(|p| (p.agent_uid, p.agent_gid)))
+        }
         Kind::OpenClaw => {
             openclaw::validate(profile, saved, policy.map(|p| (p.agent_uid, p.agent_gid)))
         }
@@ -1211,6 +1237,7 @@ pub fn checkpoint(
         | Kind::Devin
         | Kind::Droid
         | Kind::Kimi
+        | Kind::Antigravity
         | Kind::OpenClaw => Err(io::Error::other("ACP stream has no native records")),
     }
 }
