@@ -1,6 +1,7 @@
 import { useMutation } from "@tanstack/react-query";
 import { useState } from "react";
 import { Button } from "@cloudroom/shared-ui/button";
+import { AntigravitySignIn, useAntigravityConnection } from "@/components/AntigravityConnection";
 import { ClaudeSignIn, useClaudeConnection, useInstallPercent } from "@/components/ClaudeConnection";
 import { PromptStackCard } from "@/components/promptbox/banner/PromptStackCard";
 import { sdk } from "@/lib/sdk";
@@ -74,7 +75,9 @@ export function LocalSignInNotice({
   const retry = useMutation({
     mutationFn: () => sdk.threads.retry({ threadId, reason: "Signed in again" }),
   });
-  const signedOut = claude && !started && auth.data?.state === "missing";
+  const antigravity = providerId === "antigravity";
+  const google = useAntigravityConnection({ hostId, environmentId }, antigravity && !started);
+  const signedOut = !started && ((claude && auth.data?.state === "missing") || (antigravity && google.data?.state === "missing"));
   if (!authFailed && !signedOut) return null;
   const command = loginCommands[providerId];
   return (
@@ -82,6 +85,12 @@ export function LocalSignInNotice({
       {claude ? (
         <ClaudeSignIn
           target={target}
+          onContinue={authFailed ? () => retry.mutate() : undefined}
+          continuing={retry.isPending}
+        />
+      ) : antigravity ? (
+        <AntigravitySignIn
+          target={{ hostId, environmentId }}
           onContinue={authFailed ? () => retry.mutate() : undefined}
           continuing={retry.isPending}
         />

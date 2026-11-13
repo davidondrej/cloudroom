@@ -4,6 +4,7 @@ import type { ProviderInfo } from "@cloudroom/domain";
 import { Button } from "@cloudroom/shared-ui/button";
 import { Icon } from "@cloudroom/shared-ui/icon";
 import { Popover, PopoverContent, PopoverTrigger } from "@cloudroom/shared-ui/popover";
+import { AntigravityConnectionPanel, useAntigravityConnection } from "@/components/AntigravityConnection";
 import { ClaudeConnectionPanel, useClaudeConnection, useRefreshOnClaudeConnect, type ClaudeConnectionTarget } from "@/components/ClaudeConnection";
 import { openCodexConnection, openCursorConnection, useCloudLogin } from "@/components/CodexConnectionPanel";
 import { restartProviderModels } from "@/components/pickers/ModelUnavailable";
@@ -15,8 +16,10 @@ import { getLocalStorage } from "@/lib/browser-storage";
 import { getProviderIconInfo, getProviderIconTintStyle } from "@/lib/provider-icon";
 
 const HIDDEN_KEY = "cloudroom.connectAgents.hidden";
-export const CONNECT_AGENT_IDS = ["claude-code", "codex", "acp-cursor"];
-const NAMES: Record<string, string> = { "claude-code": "Claude Code", codex: "Codex", "acp-cursor": "Cursor" };
+export const CONNECT_AGENT_IDS = ["claude-code", "codex", "antigravity", "acp-cursor"];
+const NAMES: Record<string, string> = { "claude-code": "Claude Code", codex: "Codex", antigravity: "Antigravity", "acp-cursor": "Cursor" };
+/** Agents that sign in inside this menu, in their own panel. The others open a sign-in elsewhere. */
+const PANEL_AGENT_IDS = new Set(["claude-code", "antigravity"]);
 type Agent = { id: string; connected: boolean; provider: ProviderInfo | undefined };
 
 /** The quiet "Connect agents" button under the new-thread prompt box. It shows only while the picked agent
@@ -38,6 +41,8 @@ export function ConnectAgentsButton({
   const claude = useClaudeConnection(claudeTarget, active && ids.includes("claude-code"));
   const codex = useCloudLogin("codex", active && cloud && ids.includes("codex"));
   const cursor = useCloudLogin("cursor", active && cloud && ids.includes("acp-cursor"));
+  // Antigravity signs in with Google on the machine itself, so its own check answers, not the provider states.
+  const antigravity = useAntigravityConnection({ hostId, environmentId }, active && !cloud && ids.includes("antigravity"));
   const local = useSystemProviderStates({ hostId: hostId ?? undefined, environmentId: environmentId ?? undefined, enabled: active && !cloud, poll: false });
   // Local logins run on the machine the status came from: a reused environment's own host, not the primary one.
   const environment = useEnvironment(environmentId, { enabled: active && !cloud });
@@ -49,6 +54,11 @@ export function ConnectAgentsButton({
   // so the row still opens a sign-in with its own "Check again".
   const status = (id: string): boolean | null => {
     if (id === "claude-code") return claude.data ? claudeConnected : claude.isError ? false : null;
+    if (id === "antigravity" && !cloud) {
+      const state = antigravity.data?.state;
+      // Not installed is left out: there is nothing to sign in to yet.
+      return state === undefined ? (antigravity.isError ? false : null) : state === "unavailable" ? null : state === "connected";
+    }
     if (cloud) {
       const query = id === "codex" ? codex : cursor;
       const state = query.data?.state;
@@ -102,10 +112,10 @@ function AgentsMenu({ agents, claudeTarget, onConnect, onHide }: {
   onHide: () => void;
 }) {
   const [open, setOpen] = useState(false);
-  const [claudeOpen, setClaudeOpen] = useState(false);
-  const close = () => { setOpen(false); setClaudeOpen(false); };
+  const [panel, setPanel] = useState<string | null>(null);
+  const close = () => { setOpen(false); setPanel(null); };
   const choose = (id: string) => {
-    if (id === "claude-code") return setClaudeOpen(true);
+    if (PANEL_AGENT_IDS.has(id)) return setPanel(id);
     close();
     onConnect(id);
   };
@@ -113,7 +123,8 @@ function AgentsMenu({ agents, claudeTarget, onConnect, onHide }: {
   const others = agents.filter((agent) => agent.id !== "claude-code");
   const claude = agents.find((agent) => agent.id === "claude-code");
   const stack = claude ? [...others.slice(0, 1), claude, ...others.slice(1)] : others;
-  const showClaude = claudeOpen && claude?.connected === false;
+  // The panel closes back to the list once its agent connects.
+  const shown = panel !== null && agents.find((agent) => agent.id === panel)?.connected === false ? panel : null;
 
   return (
     <Popover open={open} onOpenChange={(next) => (next ? setOpen(true) : close())}>
@@ -130,9 +141,11 @@ function AgentsMenu({ agents, claudeTarget, onConnect, onHide }: {
           Connect agents
         </Button>
       </PopoverTrigger>
-      <PopoverContent side="top" align="center" sideOffset={6} mobileTitle="Connect agents" className={showClaude ? "w-72 p-3" : "w-56 p-1"}>
-        {showClaude ? (
+      <PopoverContent side="top" align="center" sideOffset={6} mobileTitle="Connect agents" className={shown ? "w-72 p-3" : "w-56 p-1"}>
+        {shown === "claude-code" ? (
           <ClaudeConnectionPanel target={claudeTarget} onClose={close} />
+        ) : shown === "antigravity" ? (
+          <AntigravityConnectionPanel target={{ hostId: claudeTarget.hostId, environmentId: claudeTarget.environmentId }} onClose={close} />
         ) : (
           <div className="text-sm">
             {agents.map((agent) => agent.connected ? (

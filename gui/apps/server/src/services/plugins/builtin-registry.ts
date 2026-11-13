@@ -122,6 +122,11 @@ export const BUILTIN_PLUGINS = [
     defaultEnabled: true,
   },
   {
+    name: "provider-antigravity",
+    pluginId: "provider-antigravity",
+    defaultEnabled: true,
+  },
+  {
     name: "provider-pi",
     pluginId: "provider-pi",
     defaultEnabled: true,
