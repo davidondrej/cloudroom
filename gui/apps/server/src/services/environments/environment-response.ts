@@ -71,7 +71,9 @@ export function toEnvironmentResponse(row: EnvironmentRow): Environment {
             ? "teardown"
             : row.retireAt !== null
               ? "retiring"
-              : "active",
+              : row.parkedAt !== null
+                ? "parked"
+                : "active",
       retireAt: row.retireAt,
       teardown:
         row.teardownStatus === null

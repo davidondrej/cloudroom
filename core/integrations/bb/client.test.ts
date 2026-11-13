@@ -302,10 +302,13 @@ test("routes commands, preserves caller request IDs, and never treats acceptance
   ]);
 });
 
-test("posts edit, cancel, steer, compact, and rewind commands", async (t) => {
+test("posts edit, cancel, steer, compact, rewind, and freeze commands", async (t) => {
   const bodies: object[] = [];
   const service = await fixture((req, res, body) => {
     bodies.push({ url: req.url, ...body });
+    // Core answers a freeze with 200, not a command's 202 (#1554).
+    if (req.url?.endsWith("/freeze"))
+      return sendJson(res, { frozen: true }, 200);
     sendJson(res, {
       session_id: "s1",
       receipt: { request_id: body.request_id, command: String(req.url).split("/").pop(), input: body, state: "accepted" },
@@ -318,12 +321,14 @@ test("posts edit, cancel, steer, compact, and rewind commands", async (t) => {
   await service.client.steer("s1", "s1-steer", "p1", "turn left");
   await service.client.compact("s1", "k1");
   await service.client.rewind("s1", "r1", "turn-1");
+  await service.client.freeze("s1", "f1");
   assert.deepEqual(service.requests, [
     "POST /v1/sessions/s1/edit",
     "POST /v1/sessions/s1/cancel",
     "POST /v1/sessions/s1/steer",
     "POST /v1/sessions/s1/compact",
     "POST /v1/sessions/s1/rewind",
+    "POST /v1/sessions/s1/freeze",
   ]);
   assert.equal((bodies[0] as { expected_revision?: number }).expected_revision, 1);
   assert.equal((bodies[2] as { text?: string }).text, "turn left");

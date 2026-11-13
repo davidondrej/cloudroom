@@ -10,6 +10,7 @@ import {
   type ThreadEventType,
   type QueuedMessageWaitHolder,
   type ThreadQueuedMessage,
+  type SystemThreadInterruptedEventData,
   type ThreadStatus,
   validatePluginMetadata,
 } from "@cloudroom/domain";
@@ -177,6 +178,8 @@ export interface ThreadOutputResponse {
   output: string | null;
   /** Why the thread failed; null unless its status is `error`. */
   error?: string | null;
+  /** The recorded stop, when the last turn was interrupted (#1159). */
+  interruption?: SystemThreadInterruptedEventData | null;
 }
 export type ThreadMutationResult = ThreadResponse;
 export type ThreadPluginMetadataResult = ThreadPluginMetadataResponse;

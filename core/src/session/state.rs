@@ -144,6 +144,12 @@ struct Derived {
     guarded_turn: bool,
     #[serde(default)]
     replies: Vec<(String, String)>,
+    #[serde(default)]
+    tokens: tokens::Tokens,
+    /// Missing in snapshots from before token counting: their base is unknown, so a Codex or Pi session's next
+    /// reading only sets it.
+    #[serde(default)]
+    tokens_restored: Option<bool>,
 }
 
 impl Derived {
@@ -169,6 +175,8 @@ impl Derived {
             limit_resumes: s.limit_resumes,
             resume_refused: s.resume_refused,
             replies: s.replies.clone(),
+            tokens: s.tokens,
+            tokens_restored: Some(s.tokens_restored),
         }
     }
 
@@ -193,6 +201,10 @@ impl Derived {
         s.resume_plan_only = self.resume_plan_only;
         s.guarded_turn = self.guarded_turn;
         s.replies = self.replies;
+        s.tokens = self.tokens;
+        s.tokens_restored = self
+            .tokens_restored
+            .unwrap_or(s.harness != runtime::Kind::Claude);
     }
 }
 
@@ -378,6 +390,7 @@ impl Local {
                 session.native_offset = cursor["offset"].as_u64().unwrap_or(0);
             }
             session.state = SessionState::Suspended;
+            session.tokens_restored = session.harness != runtime::Kind::Claude;
             let sequences = self.sequences.entry(record.session_id.clone()).or_default();
             sequences.truncate(before);
             sequences.push(record.sequence);
@@ -726,6 +739,7 @@ impl Local {
                 session.native_cursor = record.data["cursor"].clone();
                 session.native_offset = session.native_cursor["offset"].as_u64().unwrap_or(0);
                 session.checkpoint = None;
+                session.tokens_restored = session.harness != runtime::Kind::Claude;
                 session.rewind_request = None;
                 session.state = SessionState::Idle;
                 if let Some(request) = record.data["request_id"].as_str()
@@ -780,6 +794,7 @@ impl Local {
             "continuing" => session.continuing = record.data["session"].as_str().map(str::to_owned),
             "continued" => {
                 session.continued = Some(record.data.clone());
+                session.tokens_restored = session.harness != runtime::Kind::Claude;
                 if session.last_app_prompt.is_none() && !record.data["last_app_prompt"].is_null() {
                     session.last_app_prompt = Some(record.data["last_app_prompt"].clone());
                 }
@@ -886,6 +901,12 @@ impl Local {
                 }
                 if record.data["failed"].is_string() && current {
                     session.resume_refused = true;
+                }
+            }
+            "usage" => {
+                if let Some(totals) = tokens::Tokens::of(&record.data, session.harness) {
+                    session.tokens = totals;
+                    session.tokens_restored = false;
                 }
             }
             "storage_warning" => session.storage_warned = true,

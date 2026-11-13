@@ -10,6 +10,8 @@ export const desktopBrowserInstanceSchema = z.object({
   instanceId: id,
   generation: id,
   label: z.string().min(1).max(256),
+  /** Honors release_control's closeOpenedPages; older daemons strip it (#1383). */
+  closesOpenedPages: z.literal(true).optional(),
 });
 export const desktopBrowserProfileSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("automation"), id }),
@@ -100,6 +102,8 @@ export const desktopBrowserCommandSchemas = {
     .object({
       type: z.literal("desktop.browser.release_control"),
       ...leaseTarget,
+      /** Also close pages the lease opened over CDP; Stop omits it (#1383). */
+      closeOpenedPages: z.literal(true).optional(),
     })
     .strict(),
   "desktop.browser.list_import_sources": z

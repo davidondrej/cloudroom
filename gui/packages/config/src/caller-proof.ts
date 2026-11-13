@@ -553,6 +553,18 @@ export interface ProveLocalCallerArgs {
   signal?: AbortSignal;
 }
 
+// A machine daemon's agent proxy listens on a new port each start. It writes
+// that URL here so room-cli in a plain shell, cron or launchd job finds it
+// without thread env (#1564).
+export const MACHINE_PROXY_URL_FILE_NAME = "machine-proxy-url";
+
+export function readMachineProxyUrl(dataDir: string): string | null {
+  const raw = readProofFile(join(dataDir, MACHINE_PROXY_URL_FILE_NAME))?.trim();
+  return raw !== undefined && isLocalCallerProofTarget(raw)
+    ? new URL(raw).origin
+    : null;
+}
+
 export function isLocalCallerProofTarget(baseUrl: string): boolean {
   try {
     const url = new URL(baseUrl);

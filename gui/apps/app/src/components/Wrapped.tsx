@@ -100,7 +100,9 @@ function Story({ wrapped, onClose }: { wrapped: Month; onClose: () => void }) {
   };
   return (
     <Dialog open onOpenChange={(open) => { if (!open) onClose(); }}>
-      <DialogContent aria-describedby={undefined} className="max-w-[min(1168px,calc(100vw-48px))] gap-0 overflow-hidden p-0">
+      {/* Sized by the window's height too: zoomed in (Cmd+=), a short window cut off the title and the buttons.
+          184px = 54 title + 80 buttons + 2 border + 48 margin. The scroll is only for a window too short even for that. */}
+      <DialogContent aria-describedby={undefined} className="max-h-[calc(100vh_-_24px)] max-w-[min(1168px,calc(100vw_-_48px),calc((100vh_-_184px)_*_16_/_9))] gap-0 overflow-x-hidden overflow-y-auto p-0">
         <div className="flex h-[54px] items-center px-6">
           <DialogTitle className="text-[15px] font-semibold">Your {name} in Cloudroom</DialogTitle>
         </div>
@@ -206,15 +208,43 @@ export function Wrapped() {
   );
 }
 
-/** Settings → Analytics: opens last month's Wrapped again. Shows once that month has been worked out. */
-export function WrappedButton() {
+/** Last month's Wrapped and how to open it, once that month has been worked out. */
+function useOpenWrapped() {
   const wrapped = useAtomValue(wrappedAtom);
   const answer = useSetAtom(answerAtom);
+  return wrapped && { wrapped, open: () => { report(wrapped.month, "opened"); answer({ month: wrapped.month, open: true }); } };
+}
+
+/** Settings → Analytics: opens last month's Wrapped again. */
+export function WrappedButton() {
+  const wrapped = useOpenWrapped();
   if (!wrapped) return null;
   return (
-    <button type="button" onClick={() => { report(wrapped.month, "opened"); answer({ month: wrapped.month, open: true }); }}
-      className="shrink-0 rounded-md px-2.5 py-1 text-sm text-primary-text hover:bg-accent">
-      {wrappedMonthName(wrapped.month)} Wrapped
+    <button type="button" onClick={wrapped.open} className="shrink-0 rounded-md px-2.5 py-1 text-sm text-primary-text hover:bg-accent">
+      {wrappedMonthName(wrapped.wrapped.month)} Wrapped
     </button>
+  );
+}
+
+/** Settings → Account: a small copy of the card at the bottom, to open last month's Wrapped any time. */
+export function WrappedCover() {
+  const wrapped = useOpenWrapped();
+  const answered = useAtomValue(answeredAtom);
+  if (!wrapped) return null;
+  const { month, agents } = wrapped.wrapped;
+  return (
+    <div className="flex justify-center pt-1">
+      <button type="button" onClick={wrapped.open}
+        className="relative flex h-[58px] w-[300px] cursor-pointer flex-col overflow-hidden rounded-[9px] bg-[#BFFF00] px-3.5 pt-2.5 text-left text-[#0a0a0a] outline-none focus-visible:ring-2 focus-visible:ring-ring">
+        <span className="flex w-[150px] gap-[3px]">
+          {[0, 1, 2].map((step) => <span key={step} className={step === 0 ? "h-[2px] flex-1 bg-[#0a0a0a]" : "h-[2px] flex-1 bg-[#0a0a0a]/20"} />)}
+        </span>
+        <span className="mt-[7px] block font-mono text-[9px] tracking-[0.16em] uppercase">{wrappedMonthName(month)} · Wrapped</span>
+        <span className="mt-0.5 block text-[15px] leading-tight font-extrabold tracking-[-0.03em]">
+          {agents.toLocaleString("en-US")} agents. {answered === month ? "Open it again" : "Open it"}
+        </span>
+        <img src={cloudUrl} alt="" aria-hidden="true" className="absolute -right-[14px] -bottom-[18px] w-[72px] max-w-none -rotate-[14deg]" />
+      </button>
+    </div>
   );
 }

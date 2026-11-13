@@ -615,14 +615,21 @@ export class SdkSession {
       ...leftovers,
       ...roots.flatMap((parent) => descendantsOf(processes, parent)),
     ];
+    // Once Claude has exited, a failed list loses nothing already tracked:
+    // keep it, and the next retry lists those PIDs again.
     this.windowsLeftovers =
-      before === null || after === null || this.windowsLeftovers === null
-        ? null
-        : after.filter((now) =>
-            found.some(
-              (left) => now.pid === left.pid && now.startedAt === left.startedAt,
-            ),
-          );
+      before === null || after === null
+        ? roots.includes(root)
+          ? null
+          : this.windowsLeftovers
+        : this.windowsLeftovers === null
+          ? null
+          : after.filter((now) =>
+              found.some(
+                (left) =>
+                  now.pid === left.pid && now.startedAt === left.startedAt,
+              ),
+            );
     return !this.isRunning() && this.windowsLeftovers?.length === 0;
   }
 

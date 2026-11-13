@@ -20,6 +20,8 @@ export interface CreateBridgeAdapterOptions {
   bridgeBundleDir?: string;
   bridgeNodeEnv?: Record<string, string>;
   bridgeNodeExecutablePath?: string;
+  /** The bridge's temp folder, which the runtime removes after it exits. */
+  bridgeTempDir?: string;
 }
 
 export type ProviderExecutionContext = {

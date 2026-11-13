@@ -778,8 +778,11 @@ export function sanitizeInheritedChildProcessEnv(
     if (value === undefined) {
       continue;
     }
+    // The AppImage runtime exports ARGV0, and zsh launches every command under
+    // that name, so rustup's cargo fails as "unknown proxy name" (#1640).
     if (
       key === "NODE_ENV" ||
+      key === "ARGV0" ||
       key.startsWith("BB_") ||
       key.startsWith("ROOM_")
     ) {

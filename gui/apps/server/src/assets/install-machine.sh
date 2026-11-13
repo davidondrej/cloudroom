@@ -993,3 +993,4 @@ EOF
   fi
   detail "Uninstall: systemctl $systemd_scope disable --now $service_name.service && rm '$service_file' && systemctl $systemd_scope daemon-reload"
 fi
+# end of install.sh

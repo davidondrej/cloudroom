@@ -140,10 +140,27 @@ describe("machine enroll", () => {
     const h = await harness();
     h.fetchFn.mockRejectedValueOnce(new Error("private-bootstrap"));
     await expect(h.run()).rejects.toThrow(
-      /^Could not exchange machine enrollment credential$/,
+      /^Could not exchange machine enrollment credential: network error$/,
     );
     h.bundle = JSON.stringify(bundle());
     await expect(h.run()).resolves.toEqual({ hostId: "host_test" });
+  });
+
+  const secret = { code: "private-bootstrap", message: "private-bootstrap" };
+  it.each([
+    [Response.json(secret, { status: 401 }), "HTTP 401"],
+    [Response.json({ code: "private_proxy_token" }, { status: 403 }), "HTTP 403"],
+    [Response.json({ code: "connect_machine_id_mismatch", message: "private-bootstrap" }, { status: 403 }), "HTTP 403 (connect_machine_id_mismatch)"],
+    [new Response("private-bootstrap", { status: 502 }), "HTTP 502"],
+    [Object.assign(new TypeError("private-bootstrap"), { cause: { code: "ECONNREFUSED" } }), "network error (ECONNREFUSED)"],
+    [Object.assign(new TypeError("fetch failed"), { cause: { code: "PRIVATE_PROXY_TOKEN" } }), "network error"],
+    [Response.json(secret, { status: 201 }), "unexpected server response"],
+  ])("names the safe failure kind without echoing the response %#", async (result, reason) => {
+    const h = await harness();
+    if (result instanceof Response) h.fetchFn.mockResolvedValueOnce(result);
+    else h.fetchFn.mockRejectedValueOnce(result);
+    const error = await h.run().catch((caught: Error) => caught);
+    expect(String(error)).toBe(`Error: Could not exchange machine enrollment credential: ${reason}`);
   });
 
   it("persists provider headers and sends them directly on enrollment without redemption", async () => {

@@ -16,6 +16,7 @@ import {
   combineWorkspaceWriteRoots,
   gitWritableRootsForWorkspace,
   keepShellEnvironmentSetKeys,
+  shareThreadIdentityWithMcpServers,
   resolveCodexInstructionOverrides,
   toCodexDynamicTools,
   toCodexPermissionSettings,
@@ -755,6 +756,25 @@ describe("buildCodexConfig", () => {
     expect(
       keepShellEnvironmentSetKeys(config, { filters: { "AWS_*": "exclude" } }),
     ).toEqual({});
+  });
+
+  it("gives stdio MCP servers the thread identity, not URL servers or other keys", () => {
+    const config = configFor({
+      ...FULL_OPTIONS,
+      envVars: { ROOM_THREAD_STORAGE: "/s", PATH: "/bin" },
+    })!;
+    expect(
+      shareThreadIdentityWithMcpServers(config, {
+        ctx: { command: "node" },
+        web: { command: null },
+        "bad.name": { command: "x" },
+        own: { command: "x", env: { ROOM_THREAD_ID: "mine" } },
+      }),
+    ).toEqual({
+      "mcp_servers.ctx.env.ROOM_THREAD_ID": "bb-thread-1",
+      "mcp_servers.ctx.env.ROOM_THREAD_STORAGE": "/s",
+      "mcp_servers.own.env.ROOM_THREAD_STORAGE": "/s",
+    });
   });
 
   it("maps the reasoning level onto model_reasoning_effort", () => {

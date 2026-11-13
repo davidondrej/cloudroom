@@ -169,6 +169,10 @@ it("parks an archived thread's worktree and brings it back with its unfinished w
       path: tree,
       parkedAt: expect.any(Number),
     });
+    const parked = await h.app.request(
+      `/api/v1/environments/${environment.id}`,
+    );
+    expect((await parked.json()).lifecycle.phase).toBe("parked");
     await sweepProviderLifecycles(h.deps);
     expect(getEnvironment(h.db, environment.id)?.parkedAt).not.toBeNull();
 

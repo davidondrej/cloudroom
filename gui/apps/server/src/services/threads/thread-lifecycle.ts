@@ -1656,7 +1656,11 @@ export async function stopThreadForCurrentState(
   // Work sent after the stop begins keeps its jobs (#607).
   const release = { ...options, startsSent: countThreadStartsSent(thread.id) };
   const target = getThread(deps.db, thread.id);
-  if (target && isCloudThread(target)) return cloudroom(deps).control(thread.id, "stop");
+  if (target && isCloudThread(target)) {
+    // Like local Stop: end browser control without closing the agent's pages (#1383).
+    await Promise.all([cloudroom(deps).control(thread.id, "stop"), revokeThreadDesktopBrowserControl(deps, thread.id)]);
+    return;
+  }
   if (options?.immediate) {
     if (!environment) throw new Error("Cannot confirm local stop without its environment");
     const args: RequestThreadStopArgs = { threadId: thread.id, environmentId: environment.id, hostId: environment.hostId, interruptionReason: "manual-stop", immediate: true };

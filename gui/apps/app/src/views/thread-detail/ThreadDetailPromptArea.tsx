@@ -26,7 +26,7 @@ import { createPortal } from "react-dom";
 import { useIsMutating, useQueryClient } from "@tanstack/react-query";
 import { Icon, type IconName } from "@cloudroom/shared-ui/icon";
 import { PromptStackCard } from "@/components/promptbox/banner/PromptStackCard";
-import { CloudDiskNotice, CloudUsageLimitNotice } from "@/components/CloudUsageLimitNotice";
+import { CloudDiskNotice, CloudUsageLimitNotice, ContinueFromCopyButton } from "@/components/CloudUsageLimitNotice";
 import { VpsThreadNotice } from "@/components/VpsThreadNotice";
 import type { PromptMentionLinkResolver } from "@/components/promptbox/editor/prompt-mention-link";
 import {
@@ -61,7 +61,7 @@ import type {
 import type { ExperimentalComposerSubmitOptions } from "@get-bb/plugin-sdk";
 import type { ChildThreadPendingAttention } from "@/hooks/queries/child-thread-pending-interactions";
 import { ThreadPendingInteractionBanner } from "@/components/thread/pending-interactions/ThreadPendingInteractionBanner";
-import { isModalPluginInteraction } from "@/lib/plugin-slot-resolvers";
+import { isChatCardPluginInteraction } from "@/lib/plugin-slot-resolvers";
 import {
   type PluginComposerHost,
   useComposerHostDraftNotifier,
@@ -1352,7 +1352,7 @@ export function ThreadDetailPromptArea({
   const handleInlineComposerSubmit = useCallback(() => {
     void handleSaveInlineQueuedMessage();
   }, [handleSaveInlineQueuedMessage]);
-  const wakeCloudThread = useCloudThreadWake(thread.id, isCloud);
+  const wakeCloudThread = useCloudThreadWake(thread.id, isCloud, Boolean(cloudState.data?.waiting));
   const setBottomComposerText = promptDraft.setTextAndMentions;
   const handleBottomComposerMessageChange = useCallback<FollowUpComposerProps["onChangeMessage"]>(
     (text, mentions) => {
@@ -2179,10 +2179,10 @@ export function ThreadDetailPromptArea({
       />
     );
   }, [activePendingInteraction, shouldHideComposer, thread.id]);
-  // A pop-up request (a GPU) floats over the app and leaves the composer in place.
-  const pendingInteractionIsModal =
+  // A chat-card request (a GPU) shows at the end of the chat (ThreadDetailView) and leaves the composer in place.
+  const pendingInteractionInChat =
     activePendingInteraction?.origin?.kind === "plugin" &&
-    isModalPluginInteraction(activePendingInteraction.origin.pluginId);
+    isChatCardPluginInteraction(activePendingInteraction.origin.pluginId);
   const pendingInteractionStack = useMemo(
     () => (
       <>
@@ -2210,7 +2210,9 @@ export function ThreadDetailPromptArea({
     const timer = window.setTimeout(() => setCloudReconnectingLong(true), CLOUD_RECONNECTING_GRACE_MS);
     return () => { window.clearTimeout(timer); setCloudReconnectingLong(false); };
   }, [cloudReconnectingNow]);
-  const cloudReconnecting = cloudReconnectingNow && cloudReconnectingLong;
+  // A server restarting (or full) shows the website's words at once: the thread waits, nothing failed.
+  const cloudWaiting = cloudError ? null : cloudState.data?.waiting ?? null;
+  const cloudReconnecting = Boolean(cloudWaiting) || (cloudReconnectingNow && cloudReconnectingLong);
   const vpsNotice = cloudState.data?.vps || cloudState.data?.move ? <VpsThreadNotice threadId={thread.id} move={cloudState.data.move} outOfMemory={cloudState.data.outOfMemory} /> : null;
   const cloudLimitNotice = isCloud && !shouldHideComposer ? cloudState.data?.usageLimit ? <CloudUsageLimitNotice /> : cloudState.data?.disk ? <><CloudDiskNotice threadId={thread.id} disk={cloudState.data.disk} />{vpsNotice}</> : vpsNotice : null;
   const cloudFixPrompt = cloudError || cloudState.data?.failedStart ? cloudThreadFixPrompt(thread.id, thread.providerId, cloudError) : null;
@@ -2223,11 +2225,12 @@ export function ThreadDetailPromptArea({
     </PromptStackCard>
   ) : null;
   const cloudReconnectingPill = cloudReconnecting ? (
-    <div className="flex items-center gap-2 justify-self-center rounded-full border border-border bg-background px-3 py-1 text-xs text-muted-foreground">
+    <div className="flex min-w-0 max-w-full items-center gap-2 justify-self-center rounded-full border border-border bg-background px-3 py-1 text-xs text-muted-foreground">
       <span aria-hidden className="size-1.5 shrink-0 rounded-full bg-warning" />
-      <span role="status" className="flex items-center gap-2">{cloudOffline && <><span className="text-foreground">Offline</span><span aria-hidden>·</span></>}<span>Reconnecting…</span></span>
-      <span aria-hidden>·</span>
-      <button type="button" className="underline underline-offset-2 hover:text-foreground disabled:opacity-50" disabled={cloudState.isFetching} onClick={() => void cloudState.refetch()}>Retry</button>
+      <span role="status" className="flex min-w-0 items-center gap-2">{cloudOffline && <><span className="text-foreground">Offline</span><span aria-hidden>·</span></>}<span className="truncate" title={cloudWaiting ?? undefined}>{cloudWaiting ?? "Reconnecting…"}</span></span>
+      {!cloudWaiting && <><span aria-hidden>·</span>
+      <button type="button" className="underline underline-offset-2 hover:text-foreground disabled:opacity-50" disabled={cloudState.isFetching} onClick={() => void cloudState.refetch()}>Retry</button></>}
+      {cloudWaiting && cloudState.data?.fromCopy && <><span aria-hidden>·</span><ContinueFromCopyButton threadId={thread.id} /></>}
     </div>
   ) : null;
   const cloudNotice = cloudAuthNotice ?? cloudLimitNotice ?? (isCloud && !shouldHideComposer && !loginRow && (cloudError || cloudReconnecting || cloudState.data?.failedStart) ? (<>
@@ -2258,8 +2261,8 @@ export function ThreadDetailPromptArea({
     <FollowUpPromptBox
       id={THREAD_DETAIL_COMPOSER_TEXTAREA_ID}
       attachments={bottomAttachmentsConfig}
-      stack={<>{!isCloud && !teleporting && <TeleportCheckCard error={teleport.error} models={[...modelOptions, ...moreModelOptions]} reasoning={reasoningLevel} usedTokens={contextWindowUsage?.usedTokens ?? null} levelsFor={(model) => cloudReasoningLevels(cloudConnection.data, thread.providerId, model)} onTeleport={(choice) => teleport.mutate(choice)} onDismiss={teleport.reset} />}{slotCards}{thread.teleport && !movingToLocal && <TeleportNotice thread={thread} pendingDelivery={cloudState.data?.pendingDelivery} paused={cloudState.data?.paused} sending={sendMessage.isPending} />}{movingToLocal && <TeleportLocalNotice step={thread.teleportLocalStep} />}{thread.projectCopy && <ProjectCopyNotice thread={thread} />}{cloudNotice}{isCloud && claudeThread && !shouldHideComposer && <CloudMcpSignInNotice />}{!isCloud && !shouldHideComposer && <LocalSignInNotice threadId={thread.id} providerId={thread.providerId} hostId={environmentHostId} environmentId={thread.environmentId} authFailed={providerAuthFailed} started={thread.status !== "pending"} />}{pendingInteractionNode && !pendingInteractionIsModal ? pendingInteractionStack : promptStack}{pendingInteractionIsModal && pendingInteractionNode}</>}
-      pendingInteraction={pendingInteractionIsModal ? undefined : pendingInteractionNode}
+      stack={<>{!isCloud && !teleporting && <TeleportCheckCard error={teleport.error} models={[...modelOptions, ...moreModelOptions]} reasoning={reasoningLevel} usedTokens={contextWindowUsage?.usedTokens ?? null} levelsFor={(model) => cloudReasoningLevels(cloudConnection.data, thread.providerId, model)} onTeleport={(choice) => teleport.mutate(choice)} onDismiss={teleport.reset} />}{slotCards}{thread.teleport && !movingToLocal && <TeleportNotice thread={thread} pendingDelivery={cloudState.data?.pendingDelivery} paused={cloudState.data?.paused} sending={sendMessage.isPending} />}{movingToLocal && <TeleportLocalNotice step={thread.teleportLocalStep} />}{thread.projectCopy && <ProjectCopyNotice thread={thread} />}{cloudNotice}{isCloud && claudeThread && !shouldHideComposer && <CloudMcpSignInNotice />}{!isCloud && !shouldHideComposer && <LocalSignInNotice threadId={thread.id} providerId={thread.providerId} hostId={environmentHostId} environmentId={thread.environmentId} authFailed={providerAuthFailed} started={thread.status !== "pending"} />}{pendingInteractionNode && !pendingInteractionInChat ? pendingInteractionStack : promptStack}</>}
+      pendingInteraction={pendingInteractionInChat ? undefined : pendingInteractionNode}
       activePromptMode={activePromptMode}
       composer={shouldHideComposer || (teleporting && !movingToLocal) || transferredChild ? null : bottomComposerConfig}
       pluginComposerHost={normalPluginComposerHost}

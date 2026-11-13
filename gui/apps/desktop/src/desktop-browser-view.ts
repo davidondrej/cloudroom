@@ -1,4 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
+import { readdirSync } from "node:fs";
+import { rm } from "node:fs/promises";
+import { join } from "node:path";
 import { captureDesktopBrowserPage } from "./desktop-browser-capture.js";
 import {
   BrowserWindow,
@@ -135,6 +138,7 @@ function guardMainFrameNavigation(
 }
 
 const ROOM_BROWSER_PARTITION = "persist:bb-browser";
+const AUTOMATION_PARTITION_PREFIX = "bb-browser-automation-";
 
 const ERR_ABORTED = -3;
 
@@ -222,6 +226,8 @@ export interface CreateDesktopBrowserViewManagerArgs {
   ) => DesktopBrowserShortcut | null;
   focusHostWebContents: (hostWebContentsId: number) => void;
   partition?: string;
+  /** Electron's sessionData path; when set, automation partitions left by earlier runs are deleted. */
+  sessionDataPath?: string;
 }
 
 interface HostScopedRequestArgs<TRequest> {
@@ -389,6 +395,24 @@ export function createDesktopBrowserViewManager(
   const popupWindows = new Set<BrowserWindow>();
   const resizingHostIds = new Set<number>();
   const hardenedSessions = new Map<string, Session>();
+  // Automation profile ids are random per created tab and never stored, so a partition can't be
+  // reopened once its last tab closes or the app restarts. Listed before this run makes any (#1672).
+  if (args.sessionDataPath !== undefined) {
+    const root = join(args.sessionDataPath, "Partitions");
+    let stale: string[] = [];
+    try {
+      stale = readdirSync(root).filter((name) =>
+        name.startsWith(AUTOMATION_PARTITION_PREFIX),
+      );
+    } catch {}
+    void (async () => {
+      for (const name of stale) {
+        await rm(join(root, name), { recursive: true, force: true }).catch(
+          () => {},
+        );
+      }
+    })();
+  }
 
   function notifyAutomationTabs(): void {
     for (const listener of automationTabListeners) {
@@ -495,7 +519,7 @@ export function createDesktopBrowserViewManager(
   function partitionForProfile(profile: DesktopBrowserTabProfile): string {
     return profile.kind === "personal"
       ? partition
-      : `persist:bb-browser-automation-${createHash("sha256").update(profile.id).digest("hex")}`;
+      : `persist:${AUTOMATION_PARTITION_PREFIX}${createHash("sha256").update(profile.id).digest("hex")}`;
   }
 
   function ensureHardenedSession(tabPartition: string): Session {
@@ -842,6 +866,20 @@ export function createDesktopBrowserViewManager(
     entry.popupWindows.clear();
     if (!entry.webContents.isDestroyed()) {
       entry.webContents.close();
+    }
+    const browserSession = hardenedSessions.get(entry.partition);
+    if (
+      entry.profile.kind === "automation" &&
+      browserSession !== undefined &&
+      ![...entries.values()].some(
+        (other) => other.partition === entry.partition,
+      )
+    ) {
+      // Its last tab is gone, so nothing can reopen it: free its disk now (#1672).
+      void Promise.all([
+        browserSession.clearCache(),
+        browserSession.clearStorageData(),
+      ]).catch(() => {});
     }
     notifyAutomationTabs();
   }

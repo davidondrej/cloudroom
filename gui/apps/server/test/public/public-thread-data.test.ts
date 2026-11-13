@@ -2108,6 +2108,7 @@ describe("public thread data routes", () => {
       await expect(readJson(outputResponse)).resolves.toEqual({
         output: "Last assistant reply",
         error: null,
+        interruption: null,
       });
 
       const defaultsResponse = await harness.app.request(
@@ -2164,6 +2165,7 @@ describe("public thread data routes", () => {
       await expect(readJson(outputResponse)).resolves.toEqual({
         output: "Visible system update",
         error: null,
+        interruption: null,
       });
     });
   });
@@ -2211,6 +2213,7 @@ describe("public thread data routes", () => {
       await expect(readJson(response)).resolves.toEqual({
         output: "Earlier assistant reply",
         error: null,
+        interruption: null,
       });
     });
   });

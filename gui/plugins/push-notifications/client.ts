@@ -28,6 +28,22 @@ function isMacDesktop(): boolean {
   );
 }
 
+// Windows ignores renderer focus for a background or minimized window; the desktop
+// app's native focus restores and foregrounds it.
+function focusWindowsDesktop(): void {
+  const desktop = (
+    window as { bbDesktop?: { platform?: unknown; focusWindow?: unknown } }
+  ).bbDesktop;
+  if (desktop?.platform === "windows" && typeof desktop.focusWindow === "function") {
+    // Best effort: a failing bridge must not block navigation or cleanup.
+    try {
+      void Promise.resolve(desktop.focusWindow()).catch(() => undefined);
+    } catch {
+      return;
+    }
+  }
+}
+
 function readSeenIds(key: string): string[] {
   try {
     const stored: unknown = JSON.parse(localStorage.getItem(key) ?? "[]");
@@ -69,6 +85,7 @@ export function createClientDelivery(navigate: (threadId: string) => void) {
     notification.onclick = () => {
       if (disposed) return;
       window.focus();
+      focusWindowsDesktop();
       if (message.threadId !== null) navigate(message.threadId);
       notification.close();
       active.delete(notification);

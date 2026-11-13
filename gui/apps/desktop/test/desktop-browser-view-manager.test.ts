@@ -1,6 +1,6 @@
 import type { RenderProcessGoneDetails, WebContentsView } from "electron";
 import { once } from "node:events";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { WebSocket, WebSocketServer } from "ws";
@@ -708,6 +708,13 @@ const electronMock = vi.hoisted(() => {
     public readonly willDownloadListeners: FakeSessionListener[] = [];
     public permissionCheckHandler: FakePermissionCheckHandler | null = null;
     public permissionRequestHandler: FakePermissionRequestHandler | null = null;
+    public clears = 0;
+    async clearCache(): Promise<void> {
+      this.clears += 1;
+    }
+    async clearStorageData(): Promise<void> {
+      this.clears += 1;
+    }
     on(eventName: "will-download", listener: FakeSessionListener): void {
       this.willDownloadListeners.push(listener);
     }
@@ -1797,7 +1804,7 @@ describe("DesktopBrowserViewManager", () => {
     }
   });
 
-  it("creates hidden automation tabs in isolated hardened profiles and preserves them on presentation attach", () => {
+  it("creates hidden automation tabs in isolated hardened profiles and preserves them on presentation attach", async () => {
     const { manager, hostWindow } = createRendererRecoveryFixture(91);
     const create = (tabId: string, profileId: string) =>
       manager.createTab({
@@ -1880,6 +1887,29 @@ describe("DesktopBrowserViewManager", () => {
         .listTabs({ hostWebContentsId: 91, threadId: "thread-1" })
         .some((tab) => tab.tabId === first.tabId),
     ).toBe(false);
+    // #1672: a profile's data is cleared only after its last tab closes, never the personal one.
+    expect(electronMock.fakeSessions.map((s) => s.clears)).toEqual([0, 0, 0]);
+    const same = manager
+      .listTabs({ hostWebContentsId: 91, threadId: "thread-1" })
+      .find((tab) => tab.tabId === "automation:same");
+    if (same === undefined) throw new Error("Expected shared-profile tab");
+    manager.closeTab({
+      hostWebContentsId: 91,
+      threadId: "thread-1",
+      tabId: same.tabId,
+      generation: same.generation,
+    });
+    expect(electronMock.fakeSessions.map((s) => s.clears)).toEqual([0, 2, 0]);
+    const root = await mkdtemp(join(tmpdir(), "bb-partitions-"));
+    await mkdir(join(root, "Partitions", "bb-browser-automation-old"), {
+      recursive: true,
+    });
+    await mkdir(join(root, "Partitions", "bb-browser"));
+    createDesktopBrowserViewManager({ sessionDataPath: root });
+    await vi.waitFor(async () =>
+      expect(await readdir(join(root, "Partitions"))).toEqual(["bb-browser"]),
+    );
+    await rm(root, { recursive: true, force: true });
   });
 
   it("captures bounded hidden pages without focus and rejects a removed target during capture", async () => {

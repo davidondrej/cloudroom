@@ -21,6 +21,7 @@ type Deps = Pick<AppDeps, "telemetry" | "config" | "logger" | "db"> & { sandboxe
 let deps: Deps | null = null;
 let firstLaunchAt = Date.now();
 let failureSnapshotSent = false;
+let cloudFailureSnapshotSent = false;
 type UpdateAttempt = { from: string; to: string; at: number; location?: string; needs_password?: boolean; quit_timeout?: boolean; updater_error?: string; yielded?: boolean };
 let updateAttempt: Promise<UpdateAttempt | null> = Promise.resolve(null);
 let appReadySeen = false;
@@ -45,13 +46,24 @@ export function startSetupTelemetry(appDeps: Deps): void {
   }, 5_000).unref();
 }
 
-/** One Connect attempt in setup or Settings. The first failure of each app run also sends a fresh snapshot. */
-export function reportAgentConnect(agent: "claude" | "codex", outcome: "ok" | "failed" | "cancelled", details: { code?: string | null; message?: string | null; ms?: number | null; cliVersion?: string | null; cliPlace?: string | null } = {}): void {
-  capture("agent_connect", () => ({ agent, outcome, code: details.code ?? null, message: scrub(details.message), ms: details.ms ?? null, cli_version: details.cliVersion ?? null, cli_place: details.cliPlace ?? null }));
+/** One Connect attempt in setup or Settings. The first failure of each app run also sends a fresh snapshot.
+ *  Claude only: `linkMs` is when its CLI printed the sign-in link, `uiSeenAgoS` how long ago a screen last watched it. */
+export function reportAgentConnect(agent: "claude" | "codex", outcome: "ok" | "failed" | "cancelled", details: { code?: string | null; message?: string | null; ms?: number | null; cliVersion?: string | null; cliPlace?: string | null; linkMs?: number | null; uiSeenAgoS?: number | null } = {}): void {
+  capture("agent_connect", () => ({
+    agent, outcome, code: details.code ?? null, message: scrub(details.message), ms: details.ms ?? null, cli_version: details.cliVersion ?? null, cli_place: details.cliPlace ?? null,
+    link_after_ms: details.linkMs ?? null, ui_seen_ago_s: details.uiSeenAgoS ?? null,
+  }));
   if (outcome === "failed" && !failureSnapshotSent) {
     failureSnapshotSent = true;
     void sendSnapshot("connect_failed").catch(() => {});
   }
+}
+
+/** Cloud refused a thread's start. The first time each app run, a snapshot with a network check, saved with the account. */
+export function reportCloudFailure(): void {
+  if (cloudFailureSnapshotSent) return;
+  cloudFailureSnapshotSent = true;
+  void sendSnapshot("cloud_failed").catch(() => {});
 }
 
 export function reportCliInstall(cli: KnownCli, trigger: "claude_connect" | "codex_connect" | "local_thread" | "repair", outcome: "ok" | "failed", ms: number, message?: string | null): void {
@@ -62,10 +74,18 @@ export function reportSignInFailed(message: string): void {
   capture("account_sign_in_failed", () => ({ message: scrub(message) }));
 }
 
-/** Drops tokens, keys, emails, URL queries, long random strings, and home paths; keeps the last 300 characters. */
+/** A file path: `~/…`, `C:\…` (with `Program Files`), or `/…` not inside a URL or a word like `and/or`. */
+const PATH = /(?:~|(?<!\w)[A-Za-z]:|(?<![\w.:/\\~-]))[\\/](?:Program Files(?: \(x86\))?[\\/])?[^\s"'`<>|,;()]+/g;
+/** Tool and system folders: they say which install ran and name nothing of the user's. Any other path may name a project. */
+const TOOL_PATH = /^(?:~[\\/](?:\.|AppData|Library)|[A-Za-z]:[\\/](?:Program Files|ProgramData|Windows)|\/(?:usr|opt|bin|sbin|etc|nix|snap|Applications|System|Library)(?:\/|$))/i;
+
+/** Drops tokens, keys, credentials, emails, URL queries, long random strings, and every path outside tool and system
+ *  folders (ADR 0198); keeps the last 300 characters. */
 export function scrub(text: string | null | undefined): string | null {
   if (!text) return null;
   return text
+    .replace(/\bBearer\s+[^\s"',;]+|\bBasic\s+[A-Za-z0-9+/=]{8,}/g, match => `${match.split(/\s/)[0]} ***`)
+    .replace(/\b((?:api[_-]?)?key|(?:access[_-]?|refresh[_-]?)?token|(?:client[_-]?)?secret|password|passwd|authorization)(["']?\s*[:=]\s*["']?)[^\s"',;&]+/gi, "$1$2***")
     .replace(/sk-[A-Za-z0-9_-]{8,}/g, "sk-***")
     .replace(/\b(?:ey[A-Za-z0-9_-]{10,}\.){2}[A-Za-z0-9_-]+/g, "jwt-***")
     .replace(/[\w.+-]+@[\w-]+\.[\w.]+/g, "email-***")
@@ -73,6 +93,9 @@ export function scrub(text: string | null | undefined): string | null {
     .replace(/[A-Za-z0-9_-]{30,}/g, "***")
     .replaceAll(homedir(), "~")
     .replace(/[A-Za-z]:[\\/]+Users[\\/]+[^\\/\s"':]+/gi, "~")
+    .replace(/file:\/\/\S+/gi, "<path>")
+    // One segment from the root is a slash command, like Claude's `/login`.
+    .replace(PATH, path => TOOL_PATH.test(path) || /^\/[^/\\]+$/.test(path) ? path : "<path>")
     .replace(/\s+/g, " ")
     .trim()
     .slice(-300) || null;
@@ -136,12 +159,13 @@ async function reportCrashes(dataDir: string): Promise<void> {
   const text = await readFile(file, "utf8").catch(() => null);
   if (text === null) return;
   await rm(file, { force: true });
-  const crashes = JSON.parse(text) as { what: string; reason: string; exit_code: number | null; logs?: string; version: string; at: number }[];
+  const crashes = JSON.parse(text) as { what: string; reason: string; exit_code: number | null; logs?: string; attempt?: number; version: string; at: number }[];
   for (const crash of crashes) {
     capture("app_crash", () => ({
-      what: crash.what, reason: crash.reason, exit_code: crash.exit_code, version: crash.version,
+      what: crash.what, reason: crash.reason, exit_code: crash.exit_code, version: crash.version, attempt: crash.attempt ?? null,
       minutes_ago: Math.round((Date.now() - crash.at) / 60_000),
-      logs: crash.logs?.split("\n").map(line => scrub(line)).filter(Boolean).join("\n") || null,
+      // The newest 8,000 characters: the events endpoint drops an event whose properties pass 16 KB as JSON.
+      logs: crash.logs?.split("\n").map(line => scrub(line)).filter(Boolean).join("\n").slice(-8_000) || null,
     }));
   }
 }
@@ -191,7 +215,7 @@ function capture(name: "setup_snapshot" | "agent_connect" | "cli_install" | "acc
   try {
     const event: Record<string, TelemetryValue> = { ...properties(), seconds_since_first_launch: secondsSinceFirstLaunch() };
     deps?.telemetry.capture({ name, properties: { ...event, ...eventOnly } });
-    if (event.outcome === "failed" || event.reason === "connect_failed") void save(name, event);
+    if (event.outcome === "failed" || event.reason === "connect_failed" || event.reason === "cloud_failed") void save(name, event);
   } catch (error) { deps?.logger.debug({ err: error, event: name }, "Setup telemetry failed"); }
 }
 
@@ -249,10 +273,47 @@ async function codexLogin(): Promise<Record<string, TelemetryValue>> {
   } catch { return { codex_login: "unreadable", codex_plan: null, codex_token_expired: null }; }
 }
 
-async function sendSnapshot(reason: "first_launch" | "connect_failed"): Promise<void> {
+/** Which agents are signed in on this computer: `claude`, `codex`, `both`, or `none`. */
+export async function localLogins(): Promise<string> {
+  const [claude, codex] = await Promise.all([claudeAuthStatus().catch(() => null), codexLogin()]);
+  const claudeIn = claude?.loggedIn === true, codexIn = codex.codex_login === "chatgpt" || codex.codex_login === "api_key";
+  return claudeIn && codexIn ? "both" : claudeIn ? "claude" : codexIn ? "codex" : "none";
+}
+
+/** Our website and the Claude and ChatGPT sign-in hosts, reached the way this app and the agent CLIs reach them, not the
+ *  browser. Any HTTP answer counts: `<name>_ms`, or `<name>_error` when none came. */
+const NETWORK_HOSTS = { website: "https://www.cloudroom.dev", claude: "https://platform.claude.com", openai: "https://auth.openai.com" };
+async function networkCheck(): Promise<Record<string, TelemetryValue>> {
+  const results = await Promise.all(Object.entries(NETWORK_HOSTS).map(async ([name, url]) => {
+    const started = Date.now();
+    const error = await fetch(url, { method: "HEAD", redirect: "manual", signal: AbortSignal.timeout(5_000) }).then(() => null, networkError);
+    return { [`${name}_ms`]: error ? null : Date.now() - started, [`${name}_error`]: error };
+  }));
+  return Object.assign({}, ...results);
+}
+/** fetch() keeps the network's own code (ENOTFOUND, ECONNRESET, CERT_HAS_EXPIRED) in `error.cause`. */
+function networkError(error: unknown): string {
+  if ((error as { name?: unknown } | null)?.name === "TimeoutError") return "timeout";
+  const code = String((error as { cause?: { code?: unknown } } | null)?.cause?.code ?? "");
+  return /ENOTFOUND|EAI_AGAIN/.test(code) ? "dns"
+    : /CERT|SSL|TLS|SELF_SIGNED|UNABLE_TO/.test(code) ? "tls"
+    : /TIMEDOUT|CONNECT_TIMEOUT/.test(code) ? "timeout"
+    : /UNREACH|ENETDOWN/.test(code) ? "unreachable"
+    : code === "ECONNREFUSED" ? "refused"
+    : /ECONNRESET|EPIPE|SOCKET/.test(code) ? "reset"
+    : "other";
+}
+/** The system proxy settings: macOS's `scutil --proxy`, or Windows' Internet Settings (ProxyEnable, AutoConfigURL). */
+const proxySettings = () => process.platform === "darwin" ? run("/usr/sbin/scutil", ["--proxy"])
+  : process.platform === "win32" ? run(join(process.env.SystemRoot ?? "C:\\Windows", "System32", "reg.exe"), ["query", "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings"])
+  : Promise.resolve("");
+
+async function sendSnapshot(reason: "first_launch" | "connect_failed" | "cloud_failed"): Promise<void> {
   if (!deps) return;
   const claude = claudeBinary() ?? null, codex = findCliExecutable("codex") ?? null;
-  const [osVersion, claudeVersion, codexVersion, claudeStatus, codexAuth, claudeApp, codexApp, chatgptApp, proxy, logins, access] = await Promise.all([
+  // A failure's snapshot also checks the network, unless sharing is off: then nothing would be sent anyway.
+  const network = reason !== "first_launch" && deps.telemetryAllowed && getAppSettings(deps.db).telemetryEnabled ? networkCheck() : {};
+  const [osVersion, claudeVersion, codexVersion, claudeStatus, codexAuth, claudeApp, codexApp, chatgptApp, proxy, logins, access, reach] = await Promise.all([
     process.platform === "darwin" ? run("/usr/bin/sw_vers", ["-productVersion"]) : Promise.resolve(release()),
     claude ? run(claude, ["--version"]).then(version) : null,
     codex ? run(codex, ["--version"]).then(version) : null,
@@ -261,9 +322,10 @@ async function sendSnapshot(reason: "first_launch" | "connect_failed"): Promise<
     appVersion("Claude.app"),
     appVersion("Codex.app"),
     appVersion("ChatGPT.app"),
-    process.platform === "darwin" ? run("/usr/sbin/scutil", ["--proxy"]) : Promise.resolve(""),
+    proxySettings(),
     copyLogins(deps),
     macAccess(deps),
+    network,
   ]);
   let diskFreeGb: number | null = null;
   try { const disk = statfsSync(homedir()); diskFreeGb = Math.round((disk.bavail * disk.bsize) / 1e9); } catch { /* unknown */ }
@@ -293,8 +355,9 @@ async function sendSnapshot(reason: "first_launch" | "connect_failed"): Promise<
     old_bb_data: existsSync(home(".bb")),
     dev_build_data: existsSync(home(".gui-cloudroom-dev")),
     env_proxy: ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"].some(name => Boolean(process.env[name])),
-    system_proxy: /(HTTPS|HTTP|ProxyAutoConfig|ProxyAutoDiscovery)Enable\s*:\s*1/.test(proxy),
+    system_proxy: /(HTTPS|HTTP|ProxyAutoConfig|ProxyAutoDiscovery)Enable\s*:\s*1|ProxyEnable\s+REG_DWORD\s+0x1\b|AutoConfigURL\s+REG_SZ\s+\S/.test(proxy),
     copy_logins: logins,
     mac_access: access,
+    ...reach,
   }));
 }

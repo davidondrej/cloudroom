@@ -446,7 +446,9 @@ export function projectRecords(
       if (status === null) console.warn(`Cloud thread ${threadId}: unknown Core state "${state}"; its status stays as it was.`);
       else {
         const waiting = status !== "error" && status !== "stopping" && !saved.queuePaused && unstartedTurn(tx, threadId);
-        saveStatus(tx, threadId, waiting ? "active" : status, status === "error" ? coreFailure(state, data) : undefined);
+        // A wake restarts an idle thread's agent (`resuming`) with nothing to run: it stays idle, so its row neither spins nor jumps up.
+        const wake = state === "resuming" && !waiting && getThread(tx, threadId)?.status === "idle";
+        if (!wake) saveStatus(tx, threadId, waiting ? "active" : status, status === "error" ? coreFailure(state, data) : undefined);
       }
       if (status === "error") emit({
         type: "system/error", scope: threadScope(), threadId,

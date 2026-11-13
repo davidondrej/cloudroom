@@ -42,6 +42,9 @@ export function createProviderForId(
         bridgeLaunch.source.artifactPath,
         bridgeLaunch.pluginId,
         bridgeLaunch.dataDir,
+        ...(adapterOptions.bridgeTempDir === undefined
+          ? []
+          : [adapterOptions.bridgeTempDir]),
       ],
       env: {
         ...pickDeclaredEnv(process.env, bridgeLaunch.envPassthrough),

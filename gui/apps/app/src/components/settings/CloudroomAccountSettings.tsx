@@ -14,6 +14,7 @@ import { ConfirmDeleteDialog, ConfirmDeleteDialogContent } from "@/components/di
 import { cloudUnavailableFixPrompt, plainError, syncFixPrompt } from "@/lib/fix-prompts";
 import { AccountOverview, StatusPill } from "./AccountOverview";
 import { SelfHostedCoreForm } from "./SelfHostedCoreForm";
+import { WrappedCover } from "@/components/Wrapped";
 
 function useRefreshCloudroom() {
   const queryClient = useQueryClient();
@@ -83,8 +84,8 @@ export function CloudroomAccountSettings() {
         {previews && <StatusPill ok={previews.state === "connected"} title={previews.issue ?? previews.message ?? undefined}>{previews.state === "connected" ? "Previews ready" : "Previews reconnecting"}</StatusPill>}
         {sync && <StatusPill ok={sync.state === "synced"} title="Skills and portable agent settings sync automatically.">{sync.state === "synced" ? "Synced" : `Sync: ${sync.state}`}</StatusPill>}
         {!ready ? <FixPrompt prompt={cloudUnavailableFixPrompt(status.data?.error)} /> : sync && syncBroken && <FixPrompt prompt={syncFixPrompt(sync.state, sync.issue)} />}
-        <Button variant="link" className="h-auto gap-1 p-0 text-xs font-normal text-muted-foreground hover:text-foreground" onClick={() => openUrlInExternalBrowser("https://www.cloudroom.dev/settings")}>Delete account<Icon name="ExternalLink" className="size-3" aria-hidden /></Button>
       </div>
+      <WrappedCover />
       <SignOutDialog open={signOutOpen} onOpenChange={setSignOutOpen} />
     </section> : <SettingsSection title="Cloudroom account" description="Sign in to connect your existing cloud VM. Local execution stays available.">
       <div className="space-y-3 text-sm">

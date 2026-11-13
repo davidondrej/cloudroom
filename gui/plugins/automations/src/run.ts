@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
@@ -14,6 +15,7 @@ import {
   parseAutomationTrigger,
   markAutomationThread,
   setAutomationEnabled,
+  setAutomationRunSentId,
   setAutomationRunThread,
   THREAD_ARCHIVED_ERROR,
   type AutomationRow,
@@ -22,6 +24,7 @@ import {
 } from "./data.js";
 import { loopAgent, type FallbackSdk } from "./fallback.js";
 import { publishAutomationChange } from "./realtime.js";
+import { savedReports } from "./review.js";
 import { executeStoredScript, mapScriptResultToRun } from "./script-runner.js";
 import { computeNextScheduledTime } from "./schedule-helpers.js";
 import type { AutomationExecution } from "./rpc-types.js";
@@ -377,7 +380,7 @@ async function reuseTargetThreadForRun(
     runId: args.run.id,
     threadId: args.targetThreadId,
   });
-  await room.sdk.threads.send({
+  const sent = (await room.sdk.threads.send({
     threadId: args.targetThreadId,
     mode: "steer-if-active",
     input: [
@@ -390,7 +393,12 @@ async function reuseTargetThreadForRun(
         mentions: [],
       },
     ],
-  });
+  })) as { requestId?: string; queuedMessage?: { id?: string; content?: unknown[] } } | undefined;
+  // Core's ID for what it took: the turn request, or the queued row it sends later with the content Core queued, so
+  // any edit of the row no longer matches (#1100).
+  const queued = sent?.queuedMessage;
+  const sentId = sent?.requestId ?? (queued?.id && queued.content ? queuedSentId(queued.id, queued.content) : null);
+  if (sentId) setAutomationRunSentId(db, args.run.id, sentId);
 }
 
 function closeRunForUnusableTargetThread(
@@ -505,7 +513,7 @@ export async function closeAutomationRunForSettledThread(
   for (const run of runs) {
     const stopped =
       args.status === "idle" &&
-      (await stoppedRunSkip(room, run, args.threadId, args.threadCreatedAt));
+      (await stoppedRunSkip(room, run, args.threadId, args.threadCreatedAt, true));
     // A plan limit is the agent's account, not the loop: skip the run, so it never counts toward a pause.
     const closed = stopped
       ? closeAutomationRun(db, {
@@ -543,9 +551,57 @@ export async function closeAutomationRunForSettledThread(
 
 type TurnEvent = {
   type: string;
+  createdAt?: number;
   scope: { turnId?: string };
-  data: { status?: string; reason?: string; parentToolCallId?: string };
+  data: {
+    status?: string;
+    reason?: string;
+    parentToolCallId?: string;
+    clientRequestId?: string;
+    requestId?: string;
+    queuedMessageId?: string;
+    input?: unknown[];
+  };
 };
+
+/** A queued row's ID with a hash of its whole content, every block in order (keys sorted, so order can't differ). */
+const queuedSentId = (id: string, content: unknown[]) => {
+  const sorted = (_: string, v: unknown) =>
+    v && typeof v === "object" && !Array.isArray(v) ? Object.fromEntries(Object.entries(v).sort()) : v;
+  return `${id}#${createHash("sha256").update(JSON.stringify(content, sorted)).digest("hex")}`;
+};
+
+/** The IDs of what the thread's current root turn took: each request Core accepted into it, and the queued row it
+ *  delivered with the content it carried (#1100). A loop stores one per run, so the turn its message started reports. */
+export async function currentTurnSentIds(
+  room: AgentRunApi,
+  threadId: string,
+): Promise<string[]> {
+  const events = (await room.sdk.threads.events
+    ?.list({
+      threadId,
+      types: ["turn/started", "turn/completed", "turn/input/accepted", "client/turn/requested"],
+      order: "desc",
+      limit: "100",
+    })
+    .catch(() => [])) as TurnEvent[] | undefined;
+  if (!events) return [];
+  const kids = new Set(events.filter((e) => e.data.parentToolCallId).map((e) => e.scope.turnId));
+  const turn = events.find((e) => e.type === "turn/started" && !kids.has(e.scope.turnId))?.scope.turnId;
+  if (!turn || events.some((e) => e.type === "turn/completed" && e.scope.turnId === turn)) return [];
+  const took = events.flatMap((e) =>
+    e.type === "turn/input/accepted" && e.scope.turnId === turn && e.data.clientRequestId ? [e.data.clientRequestId] : [],
+  );
+  const requests = new Map(
+    events.flatMap((e) => (e.type === "client/turn/requested" ? [[e.data.requestId, e.data] as const] : [])),
+  );
+  // A request read without its record could map to another run: incomplete evidence reports nothing.
+  if (took.some((id) => !requests.has(id))) return [];
+  return took.flatMap((id) => {
+    const { queuedMessageId, input = [] } = requests.get(id)!;
+    return queuedMessageId ? [id, queuedSentId(queuedMessageId, input)] : [id];
+  });
+}
 
 // Idle is not success when the user stopped the run (#911). Only on a thread
 // the run spawned is the newest root turn the run's own. One-way: this can
@@ -555,6 +611,7 @@ async function stoppedRunSkip(
   run: AutomationRunRow,
   threadId: string,
   threadCreatedAt: number | undefined,
+  live = false,
 ): Promise<ReconcileOutcome | null> {
   if ((threadCreatedAt ?? 0) < run.startedAt) return null;
   try {
@@ -572,6 +629,10 @@ async function stoppedRunSkip(
     const reason =
       end?.data.status === "interrupted" ? stop?.data.reason : null;
     if (reason !== "manual-stop" && reason !== "memory-limit") return null;
+    const archived =
+      live && reason === "manual-stop" &&
+      (await archiveAfterReport(room, run.id, threadId, stop?.createdAt));
+    if (archived) return null;
     return {
       status: "skipped",
       skipReason: `interrupted: ${reason}`,
@@ -580,6 +641,29 @@ async function stoppedRunSkip(
   } catch (error) {
     const skipReason = `outcome unavailable: ${errorMessage(error)}`;
     return { status: "skipped", skipReason, keepFailureStreak: true };
+  }
+}
+
+/** The stop came from archiving the thread (#1561): archive marks it archived, then stops it, so `archivedAt` is at
+ *  or before the stop. And the run's own report (ADR 0298) is saved, by run ID. Unreadable or over 3 s: false. */
+async function archiveAfterReport(
+  room: AgentRunApi,
+  runId: string,
+  threadId: string,
+  stoppedAt: number | undefined,
+): Promise<boolean> {
+  const check = async () => {
+    const thread = sdkThreadSchema.parse(await room.sdk.threads.get({ threadId }));
+    if (thread.deletedAt !== null || thread.archivedAt === null) return false;
+    if (stoppedAt === undefined || thread.archivedAt > stoppedAt) return false;
+    return (await savedReports(room, [runId], [])).runs.has(runId);
+  };
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const late = new Promise<false>((resolve) => (timer = setTimeout(resolve, 3_000, false)));
+  try {
+    return await Promise.race([check().catch(() => false), late]);
+  } finally {
+    clearTimeout(timer);
   }
 }
 

@@ -158,6 +158,9 @@ if all(lines.count(a) == 1 for a in anchors):
 PY
 fi
 
+# 0.1.13 reads BU_CDP_URL as an HTTP address and polls its /json/version, so a WebSocket address there, such as a
+# built-in browser lease's endpoint, failed after 30 s (#1335). Pass a ws:// or wss:// one on as BU_CDP_WS.
+case "$BU_CDP_URL" in ws://* | wss://*) [ -n "$BU_CDP_WS" ] || BU_CDP_WS=$BU_CDP_URL; export BU_CDP_WS; unset BU_CDP_URL ;; esac
 # Use the user's default browser: tell the daemon its profile folder, so it wins over other open
 # browsers, and when it is Chromium-based and closed, open it in the background. Prints
 # "profile|bundle id to open". Safari and Firefox have no DevTools protocol.

@@ -24,6 +24,7 @@ import {
   pruneThreadEventHistoryBestEffort,
   resetActiveThreadEventPruningState,
 } from "../system/event-pruning.js";
+import { revokeThreadDesktopBrowserControl } from "../desktop-browsers.js";
 import { emitPluginThreadArchived } from "../plugins/plugin-thread-events.js";
 import {
   dispatchSettledArchivedThreadProviderArchiveCommand,
@@ -108,6 +109,8 @@ function archiveThreadWithLifecycleEffects(
     return null;
   }
   teleports(deps).abandon(archivedThread.id);
+  // Archived threads give up browser control; the release closes pages the lease opened (#1383).
+  void revokeThreadDesktopBrowserControl(deps, archivedThread.id, true);
 
   deps.terminalSessions.closeArchivedThreadTerminals({
     threadId: archivedThread.id,

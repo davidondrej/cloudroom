@@ -572,35 +572,62 @@ describe("retrying a failed turn", () => {
     });
   });
 
-  it("replays the failed attempt's execution instead of re-resolving today's", async () => {
-    await withTestHarness(async (harness) => {
-      const { requestId, thread } = seedFailableThread(harness, "host-exec");
-      failThread(harness, thread.id);
-      // The user moved the thread's sticky model AFTER the failure. The retry
-      // re-runs a turn that was already composed against gpt-5, so the new
-      // override must not silently swap the model under it — and replaying the
-      // tuple must not overwrite the override the user just set, either.
-      setThreadExecutionOverride(harness.db, {
-        threadId: thread.id,
-        modelOverride: "gpt-6-pro",
-        reasoningLevelOverride: "max",
-      });
+  it.each([
+    // The user moved the thread's sticky model AFTER the failure. The retry
+    // re-runs a turn that was already composed against gpt-5, so the new
+    // override must not silently swap the model under it — and replaying the
+    // tuple must not overwrite the override the user just set, either.
+    { switchedFrom: null, model: "gpt-5" },
+    // After a switch from another provider, the old model would be rejected (#1571).
+    { switchedFrom: "grok", model: "gpt-6-pro" },
+  ])(
+    "replays the failed attempt's execution unless the provider changed (from $switchedFrom)",
+    async ({ switchedFrom, model }) => {
+      await withTestHarness(async (harness) => {
+        const { requestId, thread } = seedFailableThread(harness, "host-exec");
+        failThread(harness, thread.id);
+        setThreadExecutionOverride(harness.db, {
+          threadId: thread.id,
+          modelOverride: "gpt-6-pro",
+          reasoningLevelOverride: "max",
+        });
+        if (switchedFrom !== null) {
+          seedEvent(harness.deps, {
+            threadId: thread.id,
+            environmentId: thread.environmentId,
+            sequence:
+              getLatestThreadSequence(harness.db, { threadId: thread.id }) + 1,
+            type: "system/operation",
+            scope: { kind: "thread" },
+            data: {
+              operation: "harness_switch",
+              operationId: "op-switch",
+              status: "completed",
+              message: "Switched",
+              metadata: { from: switchedFrom, to: thread.providerId },
+            },
+          });
+        }
 
-      await retryFailedTurn(harness.deps, {
-        thread: requireThread(harness, thread.id),
-        request: { turnRequestId: requestId, sendAt: null, reason: "Retry" },
-      });
+        await retryFailedTurn(harness.deps, {
+          thread: requireThread(harness, thread.id),
+          request: { turnRequestId: requestId, sendAt: null, reason: "Retry" },
+        });
 
-      const requests = turnRequests(harness, thread.id);
-      const retryRequest = requests[1];
-      if (retryRequest === undefined) throw new Error("expected a retry turn");
-      expect(turnRequestData(retryRequest).execution.model).toBe("gpt-5");
-      expect(requireThread(harness, thread.id).modelOverride).toBe("gpt-6-pro");
-      expect(requireThread(harness, thread.id).reasoningLevelOverride).toBe(
-        "max",
-      );
-    });
-  });
+        const requests = turnRequests(harness, thread.id);
+        const retryRequest = requests[1];
+        if (retryRequest === undefined)
+          throw new Error("expected a retry turn");
+        expect(turnRequestData(retryRequest).execution.model).toBe(model);
+        expect(requireThread(harness, thread.id).modelOverride).toBe(
+          "gpt-6-pro",
+        );
+        expect(requireThread(harness, thread.id).reasoningLevelOverride).toBe(
+          "max",
+        );
+      });
+    },
+  );
 
   it("refuses the second of two concurrent retries of one failure", async () => {
     await withTestHarness(async (harness) => {
@@ -940,6 +967,25 @@ describe("retrying a failed turn", () => {
       failThread(harness, thread.id);
 
       expect(resolveDeferredFirstTurnContext(harness.db, thread.id)).toBeNull();
+    });
+  });
+
+  it("re-sends the message once when a retry of a retry fires (#1153)", async () => {
+    await withTestHarness(async (harness) => {
+      const { thread } = seedFailableThread(harness, "host-twice");
+      const retry = async () => {
+        failThread(harness, thread.id);
+        await retryFailedTurn(harness.deps, {
+          thread: requireThread(harness, thread.id),
+          request: { turnRequestId: null, sendAt: null, reason: "Retry" },
+        });
+      };
+      await retry();
+      await retry();
+
+      const last = lastTurnRequest(harness, thread.id);
+      expect(last.retryAttempt).toBe(3);
+      expect(last.input.map(({ text }) => text)).toEqual(["Do the thing"]);
     });
   });
 });

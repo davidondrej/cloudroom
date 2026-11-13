@@ -31,6 +31,52 @@ const RESOLVE: &str = "case $p in */) [ -L \"${p%/}\" ] && p=$p.;; esac; \
      case $(basename -- \"$p\") in .|..) p=$(cd -P -- \"$p\" >/dev/null && pwd -P) || exit 1;; esac; n=$(basename -- \"$p\");";
 
 pub(super) async fn pull(socket: &str, source: &str, target: &str) -> io::Result<i32> {
+    // A pull's data follows its own line with a fresh random mark: a login shell's startup text can come first, or
+    // a logout's after (#1012). The Mac temp folder is named after the same mark, so cleanup never trusts the output.
+    let mut random = [0; 8];
+    fs::File::open("/dev/urandom")?.read_exact(&mut random)?;
+    let mark = format!("cloudroom-copy-{}", hex(&random));
+    let dir = format!("/tmp/{mark}");
+    let copy = copy_in(socket, source, target, &mark, &dir);
+    stoppable(socket, Some(&dir), copy).await
+}
+
+/// Runs a copy until it ends or `kill` stops room-cli (SIGTERM, #1274). Stopping drops the copy: its VM temp files go,
+/// and Core stops its Mac job. A pull's Mac temp folder (`dir`) goes too, within 10 s; a second SIGTERM skips that.
+/// SIGINT and SIGHUP stay as they are: a shell's `&` or `nohup` may ignore them, and a handler would undo that.
+pub(super) async fn stoppable(
+    socket: &str,
+    dir: Option<&str>,
+    copy: impl Future<Output = io::Result<i32>>,
+) -> io::Result<i32> {
+    use tokio::signal::unix::{SignalKind, signal};
+    let Ok(mut term) = signal(SignalKind::terminate()) else {
+        return copy.await;
+    };
+    tokio::select! {
+        copied = copy => return copied,
+        _ = term.recv() => {},
+    }
+    if let Some(dir) = dir {
+        let clean = tokio::time::timeout(
+            Duration::from_secs(10),
+            job(socket, format!("rm -rf {dir}"), &[], false),
+        );
+        tokio::select! {
+            _ = clean => {},
+            _ = term.recv() => {},
+        }
+    }
+    Ok(143)
+}
+
+async fn copy_in(
+    socket: &str,
+    source: &str,
+    target: &str,
+    mark: &str,
+    dir: &str,
+) -> io::Result<i32> {
     // cp rules (#222): an existing folder, or a path ending in `/`, gets the copy inside it. Any other path is
     // the copy's new name: it unpacks in a temp folder next to it, then moves into place, never replacing anything.
     let path = Path::new(target);
@@ -46,12 +92,6 @@ pub(super) async fn pull(socket: &str, source: &str, target: &str) -> io::Result
     // `head` stops the archive one byte past the limit, so an oversized pull never fills the Mac's disk. A source
     // like `.` or `dir/..` becomes the folder it names, so the archive always holds one named entry; its name
     // comes back on stderr for "to".
-    // A pull's data follows its own line with a fresh random mark: a login shell's startup text can come first, or
-    // a logout's after (#1012). The Mac temp folder is named after the same mark, so cleanup never trusts the output.
-    let mut random = [0; 8];
-    fs::File::open("/dev/urandom")?.read_exact(&mut random)?;
-    let mark = format!("cloudroom-copy-{}", hex(&random));
-    let dir = format!("/tmp/{mark}");
     // macOS tar packs a file at the size it had when tar started and still succeeds, so a file that grows or shrinks
     // meanwhile arrives cut short or padded: its size before and after must match (#1104). tar stores a link as itself,
     // so only a regular file is measured; anything else passes, since a login profile may set errexit.
@@ -73,7 +113,7 @@ pub(super) async fn pull(socket: &str, source: &str, target: &str) -> io::Result
     let archive = Temp::file("pull")?;
     let name = match run(socket, pack, &[], false, Value::Null).await? {
         (Some(0), stdout, stderr) => {
-            let (size, data) = framed(&stdout, &mark)?;
+            let (size, data) = framed(&stdout, mark)?;
             let Some(data) = size.parse().ok().and_then(|size| data.get(..size)) else {
                 return Err(invalid());
             };
@@ -81,8 +121,8 @@ pub(super) async fn pull(socket: &str, source: &str, target: &str) -> io::Result
             stderr
         }
         (Some(STAGED), stdout, stderr) => {
-            let fetched = match framed(&stdout, &mark).map(|(head, _)| head.split_once(' ')) {
-                Ok(Some((size, sha))) => fetch(socket, &dir, &mark, size, sha, &archive.0).await,
+            let fetched = match framed(&stdout, mark).map(|(head, _)| head.split_once(' ')) {
+                Ok(Some((size, sha))) => fetch(socket, dir, mark, size, sha, &archive.0).await,
                 Ok(None) => Err(invalid()),
                 Err(error) => Err(error),
             };

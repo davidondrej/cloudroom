@@ -308,6 +308,16 @@ async fn pi_names_a_model_it_does_not_know() {
         "This Pi doesn't know the selected model. Pick another model"
     );
     handle.request_shutdown();
+    // #1580: a model Pi lists as text-only would get a placeholder instead of the image.
+    fixture.config.harnesses.get_mut(&Kind::Pi).unwrap().model = "text-only".into();
+    fs::write(fixture.root.join("shot.png"), b"png").unwrap();
+    let (handle, _events) = runtime::Handle::spawn(&fixture.config, Kind::Pi, None).unwrap();
+    handle.start_session().await.unwrap();
+    let input =
+        serde_json::json!({"text":"see","attachments":[{"kind":"image","path":"shot.png"}]});
+    let error = handle.send_prompt("image", &input).await.unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    handle.request_shutdown();
 }
 
 #[tokio::test]

@@ -6,6 +6,7 @@ import {
   readdir,
   readFile,
   rm,
+  utimes,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -590,4 +591,53 @@ describe("worktree host entry", () => {
     expect(await git(fallback, "status", "--porcelain")).toBe("");
     await harness.experimental_dispose();
   }, 30_000);
+
+  it("skips a recent fetch, and starts from the last fetched copy when offline", async () => {
+    const {
+      root,
+      sourcePath: origin,
+      dataDir,
+    } = await createSourceRepository("origin");
+    const sourcePath = join(root, "repo");
+    await git(root, "clone", origin, sourcePath);
+    // Counts fetches, and fails like a laptop with no network while "offline" exists.
+    const fetches = join(root, "fetches");
+    const offline = join(root, "offline");
+    await writeFile(
+      join(root, "upload-pack"),
+      `#!/bin/sh\necho x >> "${fetches}"\n[ -e "${offline}" ] && { echo "fatal: Could not resolve host" >&2; exit 128; }\nexec git upload-pack "$@"\n`,
+      { mode: 0o755 },
+    );
+    await git(
+      sourcePath,
+      "config",
+      "remote.origin.uploadpack",
+      join(root, "upload-pack"),
+    );
+    const harness = createHarness(dataDir);
+    const create = (name: string) =>
+      harness.experimental_call(
+        "create",
+        createInput({
+          operationId: `create-${name}`,
+          sourcePath,
+          pathKey: name,
+          branchName: `bb/${name}`,
+        }),
+      );
+
+    // A clone writes no FETCH_HEAD, so the first create fetches; the next one doesn't.
+    expect(await create("first")).toMatchObject({ status: "created" });
+    expect(await create("second")).toMatchObject({ status: "created" });
+    expect(await readFile(fetches, "utf8")).toBe("x\n");
+
+    const anHourAgo = new Date(Date.now() - 60 * 60_000);
+    await utimes(join(sourcePath, ".git", "FETCH_HEAD"), anHourAgo, anHourAgo);
+    await writeFile(offline, "");
+    expect(await create("offline")).toMatchObject({ status: "created" });
+    expect(progressText(harness)).toContain(
+      "Couldn't fetch origin/main, so this starts from the copy fetched 1 hour ago",
+    );
+    await harness.experimental_dispose();
+  });
 });

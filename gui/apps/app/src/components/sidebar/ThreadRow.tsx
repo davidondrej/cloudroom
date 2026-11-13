@@ -10,7 +10,11 @@ import {
   useRef,
 } from "react";
 import { useAtomValue, useSetAtom } from "jotai";
-import type { ThreadListEntry } from "@cloudroom/domain";
+import {
+  isPluginPendingInteraction,
+  type PendingInteraction,
+  type ThreadListEntry,
+} from "@cloudroom/domain";
 import type { PluginComposerThreadRowStatus } from "@get-bb/plugin-sdk";
 import { getThreadConversationCollapsedAtom } from "@/components/secondary-panel/threadSecondaryPanelAtoms";
 import { Icon, type IconName } from "@cloudroom/shared-ui/icon";
@@ -25,7 +29,11 @@ import {
 } from "@/components/thread/ThreadActionsMenu";
 import { useThreadActions } from "@/components/thread/ThreadActionsProvider";
 import { useTeleportDirection } from "@/hooks/queries/cloudroom-queries";
+import { useQuery } from "@tanstack/react-query";
 import { usePrefetchThreadOnHover } from "@/hooks/queries/thread-queries";
+import { threadPendingInteractionsQueryKey } from "@/hooks/queries/query-keys";
+import { REALTIME_OWNED_NO_FOCUS_QUERY_POLICY } from "@/hooks/queries/query-policies";
+import { sdk } from "@/lib/sdk";
 import { useInlineThreadTitle } from "@/components/thread/InlineThreadTitle";
 import {
   preventPurposeOpenOnFocus,
@@ -199,6 +207,23 @@ const WAITING_ICONS = {
   "waiting-for-input": "CircleQuestion",
   "queued-waiting": "Clock",
 } satisfies Partial<Record<ThreadListIndicatorKind, IconName>>;
+
+interface WaitingRequest {
+  label: string;
+  action: string;
+  icon: IconName;
+}
+
+/** A pending GPU approval card turns the row red (David, 2026-11-13). Other cards keep the grey "?". */
+const GPU_WAITING: WaitingRequest = {
+  label: "Agent wants a GPU",
+  action: "Approve",
+  icon: "Cpu",
+};
+
+const isGpuCard = (interaction: PendingInteraction) =>
+  isPluginPendingInteraction(interaction) &&
+  interaction.origin.pluginId === "gpu";
 
 function ThreadDraftIndicator({
   hideIdleLabel = false,
@@ -544,7 +569,8 @@ function ThreadRowComponent({
   hasComposerDraft,
   onProjectSelect,
   options,
-}: ThreadRowProps) {
+  waiting,
+}: ThreadRowProps & { waiting: WaitingRequest | null }) {
   const [isDropdownActionsOpen, setIsDropdownActionsOpen] = useState(false);
   const [isContextActionsOpen, setIsContextActionsOpen] = useState(false);
   const { renameThread } = useThreadActions();
@@ -617,6 +643,8 @@ function ThreadRowComponent({
     parentOptions?.childActivity ?? NO_COLLAPSED_CHILD_ACTIVITY;
   const hasChildren = childCount > 0;
   const hasHiddenChildren = isParentRow && isParentCollapsed && hasChildren;
+  // A two-line waiting row would break the pinned stack, so it scrolls like a normal row.
+  const stickyLevel = waiting ? undefined : parentOptions?.stickyLevel;
   const trailingIndicatorState: ThreadListIndicatorState = {
     hasPendingInteraction:
       hasPendingInteraction || (hasHiddenChildren && childActivity.pending),
@@ -642,6 +670,11 @@ function ThreadRowComponent({
     isWorkflowActive:
       threadWorkflowActive || (hasHiddenChildren && childActivity.workflow),
   };
+  // Any other wait (question, approval, API key form, a folded subagent) gets a soft yellow row
+  // with a "Needs you" chip instead of the grey "?" (David, 2026-11-13, design Y3). One line, so it still pins.
+  const needsYou =
+    !waiting && !showActive && trailingIndicatorState.hasPendingInteraction;
+  const flagged = waiting !== null || needsYou;
   const trailingIndicatorResolution = resolveThreadTrailingIndicatorStatus(
     trailingIndicatorState,
     pluginThreadRowStatus,
@@ -654,9 +687,13 @@ function ThreadRowComponent({
   const splitIndicatorLabel = trailingIndicatorResolution.accessibleLabel
     ? `${labelTitle} — open in split; ${trailingIndicatorResolution.accessibleLabel}`
     : `${labelTitle} — open in split`;
-  const linkLabel = hasComposerDraft
-    ? `Open ${labelTitle} (unsubmitted draft)`
-    : `Open ${labelTitle}`;
+  const linkLabel = waiting
+    ? `Open ${labelTitle} (${waiting.label})`
+    : needsYou
+      ? `Open ${labelTitle} (needs you)`
+      : hasComposerDraft
+      ? `Open ${labelTitle} (unsubmitted draft)`
+        : `Open ${labelTitle}`;
   const rowDragBindings = options.dragBindings;
   const nestTargetState = options.nestDrop?.state ?? null;
   const reorderPlacement = options.nestDrop?.reorderPlacement ?? null;
@@ -669,20 +706,27 @@ function ThreadRowComponent({
     "group/thread-row",
     SIDEBAR_ROW_BASE_CLASS,
     LIST_HOVER_TRANSITION,
-    parentOptions?.stickyLevel === undefined && "relative",
+    stickyLevel === undefined && "relative",
     options.isCompact
       ? COARSE_POINTER_COMPACT_ROW_HEIGHT_CLASS
       : COARSE_POINTER_ROW_HEIGHT_CLASS,
     showActive
       ? SIDEBAR_ROW_SELECTED_STATE_CLASS
       : SIDEBAR_ROW_INTERACTIVE_STATE_CLASS,
+    // A waiting row's red or yellow wins over the quiet split tint, which would paint over it when pinned.
     !showActive &&
+      !flagged &&
       splitIndicator.isOpenInSplit &&
       SIDEBAR_ROW_OPEN_IN_SPLIT_STATE_CLASS,
     !showActive && "has-[[data-state=open]]:bg-sidebar-accent",
     rowDragBindings && !rowDragBindings.disabled && "select-none",
     nestTargetState && NEST_TARGET_STATE_CLASS[nestTargetState],
     reorderPlacement && REORDER_PLACEMENT_CLASS[reorderPlacement],
+    waiting &&
+      "h-auto py-1.5 max-md:pointer-coarse:h-auto bg-destructive/20 hover:bg-destructive/25 shadow-[inset_3px_0_0_var(--destructive)]",
+    // Opaque, so a pinned row never shows rows scrolling under it.
+    needsYou &&
+      "bg-[color-mix(in_oklab,var(--attention)_10%,var(--sidebar))] hover:bg-[color-mix(in_oklab,var(--attention)_15%,var(--sidebar))]",
   );
   const rowStyle = getThreadRowStyle(options.depth);
   const isActionsOpen = isDropdownActionsOpen || isContextActionsOpen;
@@ -787,23 +831,46 @@ function ThreadRowComponent({
         className={cn(
           "flex min-w-0 flex-1 items-center gap-1.5",
           !shortcut &&
+            !flagged &&
             (parentOptions && hasChildren
               ? "pr-7.5 max-md:pointer-coarse:pr-9"
               : SIDEBAR_HOVER_ACTIONS_INSET_CLASS),
         )}
       >
-        {leadingIcon}
+        {waiting ? (
+          <Icon
+            name={waiting.icon}
+            aria-hidden
+            className="pointer-events-none size-3.5 shrink-0 text-destructive"
+          />
+        ) : (
+          leadingIcon
+        )}
         {isEditing ? (
           <span className="relative z-10 min-w-0 flex-1 overflow-visible">
             {editor}
           </span>
         ) : (
           <span
-            className="bb-thread-title"
+            className={cn(
+              "bb-thread-title",
+              waiting && "flex-col font-semibold text-foreground",
+            )}
             title={sidebarPurpose ? undefined : labelTitle}
             onDoubleClick={startTitleEditing}
           >
-            <ThreadTitleMentions title={threadTitle} />
+            {waiting ? (
+              <>
+                <span className="flex min-w-0 max-w-full">
+                  <ThreadTitleMentions title={threadTitle} />
+                </span>
+                <span className="max-w-full truncate text-xs font-semibold text-destructive">
+                  {waiting.label}
+                </span>
+              </>
+            ) : (
+              <ThreadTitleMentions title={threadTitle} />
+            )}
           </span>
         )}
         {crossProjectLabel !== null ? (
@@ -837,6 +904,20 @@ function ThreadRowComponent({
         ) : null}
       </span>
       <span className="flex shrink-0 items-center gap-0.5">
+        {flagged && !shortcut ? (
+          // Opens the thread, where the card waits. Desktop rows hide the hover buttons, so the pill never moves.
+          <span
+            aria-hidden
+            className={cn(
+              "pointer-events-none -mr-6 max-md:pointer-coarse:mr-0",
+              waiting
+                ? "inline-flex h-6 items-center rounded-[6px] bg-destructive px-2.5 text-xs font-bold text-white"
+                : "rounded-full border border-attention/55 px-2 text-[11.5px] leading-[18px] font-semibold text-attention",
+            )}
+          >
+            {waiting ? waiting.action : "Needs you"}
+          </span>
+        ) : null}
         {shortcut ? (
           <AppCommandShortcutPill shortcut={shortcut} />
         ) : (
@@ -862,7 +943,7 @@ function ThreadRowComponent({
                   "absolute inset-0 flex items-center justify-center max-md:pointer-coarse:-translate-x-full",
                 )}
               >
-                {splitIndicator.miniMap ? (
+                {flagged ? null : splitIndicator.miniMap ? (
                   <span
                     data-sidebar-thread-trailing-indicator=""
                     className={cn(
@@ -896,6 +977,7 @@ function ThreadRowComponent({
                 className={cn(
                   SIDEBAR_HOVER_ACTIONS_CLASS,
                   "absolute inset-y-0 right-0 z-10 flex items-center justify-end",
+                  flagged && "hidden max-md:pointer-coarse:flex",
                 )}
               >
                 <SidebarRowControls
@@ -938,7 +1020,7 @@ function ThreadRowComponent({
       ? handleRowClickCapture
       : undefined,
     onSplitDragPointerDown,
-    stickyLevel: parentOptions?.stickyLevel,
+    stickyLevel,
     style: rowStyle,
   });
 
@@ -960,12 +1042,40 @@ function ThreadRowComponent({
   );
 }
 
+/**
+ * Only rows with a pending card fetch it, to check for a GPU card. A plain query, like
+ * useChildThreadPendingAttention: the thread list's interactions-changed message keeps it
+ * fresh, and no thread-detail subscription tells the server the thread is open.
+ */
+function WaitingThreadRow(props: ThreadRowProps) {
+  const threadId = props.thread.id;
+  const { data } = useQuery({
+    queryKey: threadPendingInteractionsQueryKey(threadId),
+    queryFn: ({ signal }) => sdk.threads.interactions.list({ threadId, signal }),
+    refetchOnMount: true,
+    ...REALTIME_OWNED_NO_FOCUS_QUERY_POLICY,
+  });
+  return (
+    <ThreadRowComponent
+      {...props}
+      waiting={data?.some(isGpuCard) ? GPU_WAITING : null}
+    />
+  );
+}
+
 function ThreadRowWithChildProgress(props: ThreadRowProps) {
   const cells = useHiddenChildCells(props.thread);
-  if (!cells) return <ThreadRowComponent {...props} />;
+  // The open thread shows its own card, so its row stays normal (docs/scopes/sidebar.md).
+  const row =
+    props.thread.hasPendingInteraction && !props.isActive ? (
+      <WaitingThreadRow {...props} />
+    ) : (
+      <ThreadRowComponent {...props} waiting={null} />
+    );
+  if (!cells) return row;
   return (
     <div>
-      <ThreadRowComponent {...props} />
+      {row}
       <ChildProgressGrid
         cells={cells}
         paddingLeft={getSidebarThreadRowPaddingLeft(props.options.depth) + 22}

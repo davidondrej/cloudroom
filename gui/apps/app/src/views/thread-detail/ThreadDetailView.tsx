@@ -226,7 +226,8 @@ import {
 } from "@/components/plugin/plugin-thread-panel-navigation";
 import { ThreadTimelineNavigationProvider } from "@/components/thread/timeline/ThreadTimelineNavigationContext";
 import { usePluginSlots } from "@/lib/plugin-slots";
-import { getFileExtension } from "@/lib/plugin-slot-resolvers";
+import { getFileExtension, isChatCardPluginInteraction } from "@/lib/plugin-slot-resolvers";
+import { ThreadPendingInteractionBanner } from "@/components/thread/pending-interactions/ThreadPendingInteractionBanner";
 import { Button } from "@cloudroom/shared-ui/button";
 import { Icon } from "@cloudroom/shared-ui/icon";
 import {
@@ -733,8 +734,14 @@ function ThreadDetailViewInternal(props: ThreadRoutePathArgs) {
     pendingInteractionsQuery.data,
     pendingInteractionsQuery.isFetching,
   );
-  const hasPendingInteraction =
-    getLatestPendingInteraction(pendingInteractions) !== null;
+  const latestPendingInteraction = getLatestPendingInteraction(pendingInteractions);
+  const hasPendingInteraction = latestPendingInteraction !== null;
+  // A GPU request is a card at the end of the chat, not a form in place of the composer.
+  const chatCardInteraction =
+    latestPendingInteraction?.origin?.kind === "plugin" &&
+    isChatCardPluginInteraction(latestPendingInteraction.origin.pluginId)
+      ? latestPendingInteraction
+      : null;
   const { data: queuedMessagesForEditEligibility = [] } =
     useThreadQueuedMessages(thread?.id ?? "", {
       enabled: threadQueryState.status === "ready" && Boolean(thread?.id),
@@ -3314,6 +3321,15 @@ function ThreadDetailViewInternal(props: ThreadRoutePathArgs) {
               leadingContent: threadOrigin ? (
                 <ThreadOriginMarker origin={threadOrigin} />
               ) : undefined,
+              trailingContent:
+                chatCardInteraction ? (
+                  <div className="pt-2">
+                    <ThreadPendingInteractionBanner
+                      interaction={chatCardInteraction}
+                      threadId={thread.id}
+                    />
+                  </div>
+                ) : undefined,
               isLoadingOlderTimelineRows,
               isThreadTimelinePending,
               timelineError: Boolean(timelineError),

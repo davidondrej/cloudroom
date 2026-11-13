@@ -6,7 +6,8 @@ import {
   useState,
 } from "react";
 import { cn } from "@cloudroom/shared-ui/lib/utils";
-import { Link, useNavigate } from "react-router-dom";
+import { Link, useLocation, useNavigate } from "react-router-dom";
+import { isSettingsRoutePath } from "@/hooks/useAppSettingsRouteMemory";
 import { Icon } from "@cloudroom/shared-ui/icon";
 import { Input } from "@cloudroom/shared-ui/input";
 import {
@@ -29,6 +30,9 @@ import {
   usePluginSettingsSearchEntries,
   useReportSettingsSearchMiss,
 } from "./settings-search";
+
+// Last tab per group, so returning to a group reopens it. Resets on restart.
+const lastTabByGroup = new Map<string, string>();
 
 const RESULTS_ID = "settings-search-results";
 const optionId = (index: number) => `settings-search-option-${index}`;
@@ -63,6 +67,7 @@ export function SettingsSidebarContent({
   testIdPrefix = "settings",
 }: SettingsSidebarContentProps) {
   const navigate = useNavigate();
+  const { pathname } = useLocation();
   const closeOnMobile = useCloseMobileSidebar();
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState(0);
@@ -71,6 +76,12 @@ export function SettingsSidebarContent({
     navigation.activeSection,
     navigation.activePluginId,
   );
+  const activeTab = getSettingsGroupLinks(activeGroup, navigation).find(
+    (link) => link.active,
+  );
+  // The mobile drawer keeps this sidebar mounted briefly after leaving Settings.
+  if (activeTab && isSettingsRoutePath(pathname))
+    lastTabByGroup.set(activeGroup.id, activeTab.key);
   const searching = query.trim() !== "";
   const pluginSearchEntries = usePluginSettingsSearchEntries(
     navigation.pluginEntries.map((entry) => entry.id),
@@ -105,7 +116,9 @@ export function SettingsSidebarContent({
   }, []);
   const rows = SETTINGS_NAV_GROUPS.flatMap((group) => {
     const links = getSettingsGroupLinks(group, navigation);
-    return links.length > 0 ? [{ group, to: links[0]!.to }] : [];
+    const saved = lastTabByGroup.get(group.id);
+    const target = links.find((link) => link.key === saved) ?? links[0];
+    return target ? [{ group, to: target.to }] : [];
   });
 
   const footer = <div className="space-y-2">{account}</div>;

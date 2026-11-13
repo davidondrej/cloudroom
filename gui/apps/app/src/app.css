@@ -869,6 +869,31 @@
 
 /* Briefly highlight a conversation message that a thread-search result
  * deep-links to, then fade back to transparent. */
+/* A ```draft field: a blinking caret after the last letter says "you can type here". The real caret takes over on focus. */
+.draft-caret:not(:focus)::after {
+  content: "";
+  display: inline-block;
+  width: 1.5px;
+  height: 1.2em;
+  margin-left: 1px;
+  vertical-align: -0.22em;
+  background: var(--foreground);
+  pointer-events: none;
+  animation: draft-caret-blink 1.06s step-end infinite;
+}
+
+@keyframes draft-caret-blink {
+  50% {
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .draft-caret:not(:focus)::after {
+    animation: none;
+  }
+}
+
 @keyframes bb-search-flash {
   from {
     background-color: color-mix(in oklch, var(--ring) 22%, transparent);

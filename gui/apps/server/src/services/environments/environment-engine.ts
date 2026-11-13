@@ -87,6 +87,7 @@ import {
 } from "./lifecycle-outcome.js";
 import { buildEnvironmentProvisionCommand } from "../threads/thread-create-helpers.js";
 import { recordProvisionedEnvironmentWorkspace } from "@cloudroom/db/internal-environment-lifecycle";
+import { noteWorkspaceCreated } from "../system/first-response-telemetry.js";
 import { ApiError } from "../../errors.js";
 import { type AppDeps } from "../../types.js";
 import {
@@ -381,11 +382,13 @@ async function runCreate(
       context.environment === null
         ? null
         : getEnvironment(deps.db, context.environment.id);
+    const reusedPath = provisioning.providerOwnsPath ? provisioning.path : null;
+    const createStartedAt = Date.now();
     let result =
-      provisioning.providerOwnsPath && provisioning.path !== null
+      reusedPath !== null
         ? {
             status: "created" as const,
-            path: provisioning.path,
+            path: reusedPath,
             ownsPath: true,
             mergeBaseBranch: provisioning.mergeBaseBranch ?? undefined,
             resource: provisioning.resource ?? undefined,
@@ -429,6 +432,8 @@ async function runCreate(
             report: provisioningReporter(deps, provisioning),
             signal: signal,
           });
+    if (reusedPath === null && result.status === "created")
+      noteWorkspaceCreated(context.thread.id, Date.now() - createStartedAt);
     if (result.status === "created") {
       try {
         if (flavor === "windows" && !isAbsoluteHostPath(result.path, flavor))

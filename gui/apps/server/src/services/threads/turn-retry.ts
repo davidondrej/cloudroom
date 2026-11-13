@@ -1,13 +1,16 @@
+import { and, eq, gt, sql } from "drizzle-orm";
 import {
   createEventId,
   deleteQueuedThreadMessage,
   deleteQueuedThreadRetries,
+  events,
   getLatestThreadSequence,
   hasQueuedRetryOfTurnRequest,
 } from "@cloudroom/db";
 import {
   permissionModeSchema,
   THREAD_ACCOUNT_SWITCH_OPERATION,
+  THREAD_HARNESS_SWITCH_OPERATION,
   threadScope,
 } from "@cloudroom/domain";
 import type {
@@ -147,6 +150,28 @@ function retryInput(
   };
 }
 
+/** Whether the thread moved to another provider after the failed request (ADR 0211). */
+function switchedProviderSince(
+  deps: Pick<TurnRetryDeps, "db">,
+  args: { threadId: string; failed: FailedTurnRecord },
+): boolean {
+  const row = deps.db
+    .select({ sequence: events.sequence })
+    .from(events)
+    .where(
+      and(
+        eq(events.threadId, args.threadId),
+        eq(events.type, "system/operation"),
+        gt(events.sequence, args.failed.requestSequence),
+        sql`json_extract(${events.data}, '$.operation') = ${THREAD_HARNESS_SWITCH_OPERATION}`,
+        sql`json_extract(${events.data}, '$.metadata.from') IS NOT json_extract(${events.data}, '$.metadata.to')`,
+      ),
+    )
+    .limit(1)
+    .get();
+  return row !== undefined;
+}
+
 /**
  * The failed attempt's own execution tuple, replayed explicitly.
  *
@@ -156,14 +181,22 @@ function retryInput(
  * retry would silently swap the model under a turn nobody re-composed. A
  * legacy-recorded permission mode that the request schema no longer accepts
  * is the one field left to re-resolution.
+ *
+ * After a switch to another provider the old tuple names the old provider's
+ * model, which the new one rejects (#1571), so the retry resolves the thread's
+ * current settings, as a new message would.
  */
-function retryExecution(failed: FailedTurnRecord): {
-  model: string;
-  reasoningLevel: SendMessageRequest["reasoningLevel"];
-  serviceTier: SendMessageRequest["serviceTier"];
+function retryExecution(
+  deps: Pick<TurnRetryDeps, "db">,
+  args: { threadId: string; failed: FailedTurnRecord },
+): {
+  model?: string;
+  reasoningLevel?: SendMessageRequest["reasoningLevel"];
+  serviceTier?: SendMessageRequest["serviceTier"];
   permissionMode?: PermissionMode;
 } {
-  const { execution } = failed.request;
+  if (switchedProviderSince(deps, args)) return {};
+  const { execution } = args.failed.request;
   const permissionMode = permissionModeSchema.safeParse(
     execution.permissionMode,
   ).data;
@@ -282,7 +315,7 @@ export async function retryFailedTurn(
         // again is something to wait behind rather than to interrupt.
         mode: "queue-if-active",
         ...retryInput(deps, { threadId: thread.id, failed }),
-        ...retryExecution(failed),
+        ...retryExecution(deps, { threadId: thread.id, failed }),
         ...(request.sendAt === null ? {} : { sendAt: request.sendAt }),
       },
       source: { kind: "inline" },

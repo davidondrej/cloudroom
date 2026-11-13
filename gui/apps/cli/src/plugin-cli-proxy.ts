@@ -9,7 +9,7 @@ import {
   setGlobalDispatcher,
   type Dispatcher,
 } from "undici";
-import { cliFetch } from "./client.js";
+import { CLI_READ_TIMEOUT_MS, cliFetch } from "./client.js";
 
 export interface PluginCliContributionEntry {
   pluginId: string;
@@ -21,7 +21,6 @@ export interface PluginCliContributionEntry {
 
 const CONTRIBUTIONS_TIMEOUT_MS = 2000;
 
-const CONTRIBUTIONS_TIMEOUT_MULTIPLIERS = [1, 2, 2] as const;
 const CONTRIBUTIONS_RETRY_DELAYS_MS = [150, 500] as const;
 
 const RETRYABLE_CODES = new Set([
@@ -42,7 +41,9 @@ type PluginCliContributionsResult =
       attempts: number;
       lastTimeoutMs: number;
     }
-  | { outcome: "invalid" };
+  | { outcome: "invalid"; detail: string };
+
+const MALFORMED_CONTRIBUTIONS = "sent a malformed plugin command list";
 
 interface UnreachableDiagnosis {
   blockedCode: "EPERM" | "EACCES" | undefined;
@@ -162,6 +163,12 @@ export function describeUnreachableServer(
 
 interface FetchPluginCliContributionsOptions {
   sleep?: (ms: number) => Promise<void>;
+  /**
+   * The last try's window. By default as long as a core read: the command can't
+   * run without this list, and a server too busy to answer in 4 s still answered
+   * `room-cli status` while every `room-cli tasks` failed here (#1533).
+   */
+  lastWindowMs?: number;
 }
 
 const defaultSleep = (ms: number): Promise<void> =>
@@ -173,12 +180,13 @@ export async function fetchPluginCliContributions(
   options: FetchPluginCliContributionsOptions = {},
 ): Promise<PluginCliContributionsResult> {
   const sleep = options.sleep ?? defaultSleep;
-  for (
-    let attempt = 0;
-    attempt < CONTRIBUTIONS_TIMEOUT_MULTIPLIERS.length;
-    attempt += 1
-  ) {
-    const window = timeoutMs * CONTRIBUTIONS_TIMEOUT_MULTIPLIERS[attempt]!;
+  const windows = [
+    timeoutMs,
+    timeoutMs * 2,
+    options.lastWindowMs ?? CLI_READ_TIMEOUT_MS,
+  ];
+  for (let attempt = 0; attempt < windows.length; attempt += 1) {
+    const window = windows[attempt]!;
     try {
       const response = await cliFetch(
         `${baseUrl}/api/v1/plugins/contributions`,
@@ -186,7 +194,23 @@ export async function fetchPluginCliContributions(
           signal: AbortSignal.timeout(window),
         },
       );
-      if (!response.ok) return { outcome: "invalid" };
+      if (!response.ok) {
+        // Same `{ error }` / `{ code, message }` shapes runPluginCliCommand reports (e.g. caller proof).
+        const body = (await response.json().catch(() => null)) as {
+          error?: unknown;
+          code?: unknown;
+          message?: unknown;
+        } | null;
+        const code = typeof body?.code === "string" ? ` ${body.code}` : "";
+        const message =
+          typeof body?.message === "string" ? body.message : body?.error;
+        return {
+          outcome: "invalid",
+          detail: `did not return the plugin command list (HTTP ${response.status}${code})${
+            typeof message === "string" ? `: ${message.slice(0, 300)}` : ""
+          }`,
+        };
+      }
       let parsed: { cliCommands?: unknown } | null;
       try {
         parsed = (await response.json()) as {
@@ -194,12 +218,14 @@ export async function fetchPluginCliContributions(
         } | null;
       } catch (error) {
         if (!diagnoseUnreachableServer(error).retryable) {
-          return { outcome: "invalid" };
+          return { outcome: "invalid", detail: MALFORMED_CONTRIBUTIONS };
         }
         throw error;
       }
       const cliCommands = parsed?.cliCommands;
-      if (!Array.isArray(cliCommands)) return { outcome: "invalid" };
+      if (!Array.isArray(cliCommands)) {
+        return { outcome: "invalid", detail: MALFORMED_CONTRIBUTIONS };
+      }
       return {
         outcome: "ok",
         contributions: cliCommands.filter(
@@ -211,8 +237,7 @@ export async function fetchPluginCliContributions(
         ),
       };
     } catch (error) {
-      const isLastAttempt =
-        attempt === CONTRIBUTIONS_TIMEOUT_MULTIPLIERS.length - 1;
+      const isLastAttempt = attempt === windows.length - 1;
       if (isLastAttempt || !diagnoseUnreachableServer(error).retryable) {
         return {
           outcome: "unreachable",
@@ -224,7 +249,7 @@ export async function fetchPluginCliContributions(
       await sleep(CONTRIBUTIONS_RETRY_DELAYS_MS[attempt]!);
     }
   }
-  return { outcome: "invalid" };
+  return { outcome: "invalid", detail: MALFORMED_CONTRIBUTIONS };
 }
 
 export async function findDisabledPluginForCommand(

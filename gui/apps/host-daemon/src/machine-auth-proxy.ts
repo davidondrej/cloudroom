@@ -6,8 +6,11 @@ import {
   type CallerProofIssuer,
   createCallerProofIssuer,
   isOpenWithoutCallerProof,
+  MACHINE_PROXY_URL_FILE_NAME,
   SERVER_CALLER_PROOF_PATH,
 } from "@cloudroom/config/caller-proof";
+import { randomUUID } from "node:crypto";
+import { rename, rm, writeFile } from "node:fs/promises";
 import http, {
   type IncomingHttpHeaders,
   type IncomingMessage,
@@ -15,6 +18,7 @@ import http, {
 } from "node:http";
 import https from "node:https";
 import type { AddressInfo, Socket } from "node:net";
+import { join } from "node:path";
 import type { Duplex } from "node:stream";
 
 const LOOPBACK_HOST = "127.0.0.1";
@@ -411,6 +415,18 @@ async function proxyUpgrade(args: {
   upstreamRequest.end();
 }
 
+// Best effort and owner-only: without the file, room-cli outside a thread
+// behaves as before.
+async function publishProxyUrl(path: string, url: string): Promise<void> {
+  const temporary = `${path}.${randomUUID()}.tmp`;
+  try {
+    await writeFile(temporary, `${url}\n`, { flag: "wx", mode: 0o600 });
+    await rename(temporary, path);
+  } catch {
+    await rm(temporary, { force: true }).catch(() => undefined);
+  }
+}
+
 export async function startMachineAuthProxy(
   options: StartMachineAuthProxyOptions,
 ): Promise<MachineAuthProxy> {
@@ -471,9 +487,13 @@ export async function startMachineAuthProxy(
 
   const address = server.address() as AddressInfo;
   boundPort = address.port;
+  const serverUrl = `http://${LOOPBACK_HOST}:${address.port}`;
+  const urlFile = join(options.dataDir, MACHINE_PROXY_URL_FILE_NAME);
+  await publishProxyUrl(urlFile, serverUrl);
   return {
-    serverUrl: `http://${LOOPBACK_HOST}:${address.port}`,
+    serverUrl,
     async close(): Promise<void> {
+      await rm(urlFile, { force: true }).catch(() => undefined);
       await new Promise<void>((resolve, reject) => {
         server.close((error) => (error ? reject(error) : resolve()));
         for (const socket of sockets) socket.destroy();

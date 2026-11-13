@@ -80,7 +80,7 @@ export function CreditsBar({ plan, limit, extra, extraTotal, className, planClas
 /** Free accounts always see their Cloud Credits left (ADR 0307). The chevron shrinks the card to the one-line meter for
  *  72 hours on this Mac, then it opens again. It also opens once credits run low (80% used, no extra credits): a shrink
  *  from before then doesn't count, but one made while low survives a refill. Extra credits (ADR 0328) count like
- *  Settings. Paid plans see the meter once 75% are used, and while on pack credits. */
+ *  Settings. Paid plans see the meter once plan + extra credits left drop under 25% of the plan, so a big pack hides it. */
 const SHRUNK_KEY = "cloudroom.planCard.shrunkUntil", SHRUNK_LOW_KEY = "cloudroom.planCard.shrunkLowUntil";
 const SHRINK_MS = 72 * 3_600_000;
 
@@ -89,7 +89,7 @@ export function PlanCard() {
   const calmShrink = useHiddenUntil(SHRUNK_KEY), lowShrink = useHiddenUntil(SHRUNK_LOW_KEY);
   const used = usage?.credits ?? null, limit = usage?.creditsLimit ?? 0;
   const free = usage?.plan === "free";
-  const hidden = !usage || used === null || (!free && share(used, limit) < 0.75);
+  const hidden = !usage || used === null || (!free && Math.max(0, limit - used) + Math.max(0, usage.extraCredits ?? 0) > 0.25 * limit);
   useUpgradePromptViewed(hidden ? null : "plan_card");
   if (!usage || used === null || hidden) return null;
   if (!free) return <PlanMeter plan={usage.plan} used={used} limit={limit} extra={usage.extraCredits ?? 0} extraTotal={usage.extraCreditsTotal ?? 0} />;

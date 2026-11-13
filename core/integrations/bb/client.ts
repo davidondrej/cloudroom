@@ -835,7 +835,13 @@ export class CloudroomClient {
    *  every other client's change with code `moving`. */
   async freeze(sessionId: string, id: string, release = false): Promise<void> {
     requestId(id);
-    await this.#json(`${sessionPath(sessionId)}/freeze`, { request_id: id, ...(release ? { release: true } : {}) });
+    // Core answers 200, not a command's 202, so any success counts (#1554).
+    const response = await this.#request(
+      `${sessionPath(sessionId)}/freeze`,
+      { request_id: id, ...(release ? { release: true } : {}) },
+      AbortSignal.timeout(this.#timeoutMs),
+    );
+    await response.body?.cancel();
   }
 
   /** The user's rename and archive or restore of a session Core keeps them for: one sharing another thread's sandbox (#237). */

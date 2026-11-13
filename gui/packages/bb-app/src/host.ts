@@ -3,9 +3,12 @@
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
+import { connect } from "node:net";
 import { homedir } from "node:os";
-import { join, win32 } from "node:path";
+import { basename, dirname, join, resolve, win32 } from "node:path";
+import { fileURLToPath } from "node:url";
 import { formatRoomAppConfigPath } from "@cloudroom/config/app-managed-config";
+import { readMachineProxyUrl } from "@cloudroom/config/caller-proof";
 import { waitForProcessExit } from "@cloudroom/config/child-process-exit";
 import { mutateManagedJsonFile } from "@cloudroom/config/managed-json-file";
 import { validateOptionalUrl } from "@cloudroom/config/public-url";
@@ -137,15 +140,41 @@ export function resolveBundledCliLaunch(args: { args: string[]; cliPath: string;
     : { command: args.cliPath, args: args.args };
 }
 
+/** install-machine.sh puts bb-app in <dataDir>/npm; that machine's daemon publishes its agent proxy there (#1564). */
+function installedMachineProxyUrl(): string | null {
+  const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+  const npmPrefix = resolve(packageRoot, "../../..");
+  const installed = basename(npmPrefix) === "npm" && packageRoot === join(npmPrefix, "lib", "node_modules", "bb-app");
+  return installed ? readMachineProxyUrl(dirname(npmPrefix)) : null;
+}
+
+/** Only a server that refuses the connection is replaced, so a running desktop app keeps its CLI. */
+async function refusesConnection(serverUrl: string): Promise<boolean> {
+  const url = URL.parse(serverUrl);
+  if (url === null) return true;
+  const port = Number(url.port || (url.protocol === "https:" ? 443 : 80));
+  return new Promise((resolve) => {
+    const socket = connect({ host: url.hostname.replace(/^\[|\]$/gu, ""), port, timeout: 1_000 });
+    const done = (refused: boolean) => {
+      socket.destroy();
+      resolve(refused);
+    };
+    socket.once("connect", () => done(false)).once("timeout", () => done(false)).once("error", () => done(true));
+  });
+}
+
 /** The `room-cli` bin of an installed package: finds this machine's server, then runs the bundled CLI. */
 export async function runRoomCli(cliArgs: string[] = process.argv.slice(2)): Promise<void> {
   const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("BB_")));
+  const proxyUrl = env.ROOM_SERVER_URL === undefined && env.ROOM_DATA_DIR === undefined ? installedMachineProxyUrl() : null;
   if (env.ROOM_DATA_DIR !== undefined) env.BB_DATA_DIR = env.ROOM_DATA_DIR;
   if (env.ROOM_HOST_DAEMON_PORT !== undefined) env.BB_HOST_DAEMON_PORT = env.ROOM_HOST_DAEMON_PORT;
   if (env.ROOM_SERVER_URL !== undefined) env.BB_SERVER_URL = env.ROOM_SERVER_URL;
   const runtime = await resolveRuntime({ entrypointUrl: import.meta.url, env, homeDir: homedir(), options: {}, mode: "remote" });
   const { context } = runtime;
   assertArtifacts(context, "host");
+  let serverUrl = runtime.env.ROOM_SERVER_URL ?? context.serverUrl;
+  if (proxyUrl !== null && (await refusesConnection(serverUrl))) serverUrl = proxyUrl;
   const launch = resolveBundledCliLaunch({
     args: cliArgs,
     cliPath: toOptionalString(runtime.env.ROOM_CLI) ?? join(context.daemonBundleDir, "room-cli"),
@@ -160,7 +189,7 @@ export async function runRoomCli(cliArgs: string[] = process.argv.slice(2)): Pro
       BB_APP_VERSION: context.appVersion,
       ROOM_HOST_DAEMON_PORT: runtime.env.ROOM_HOST_DAEMON_PORT ?? String(context.daemonPort),
       ROOM_DATA_DIR: runtime.env.ROOM_DATA_DIR ?? context.dataDir,
-      ROOM_SERVER_URL: runtime.env.ROOM_SERVER_URL ?? context.serverUrl,
+      ROOM_SERVER_URL: serverUrl,
       NODE_ENV: "production",
     },
   });

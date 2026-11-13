@@ -16,6 +16,8 @@ export const approvalPayloadSchema = z.object({
   credits_per_hour: z.number(),
   max_credits: z.number(),
   credits_left: z.number().nullable(),
+  /** What else approving allows: the thread's GPU budget (ADR 20261113-210000). */
+  note: z.string().max(300).optional(),
 });
 export type ApprovalPayload = z.infer<typeof approvalPayloadSchema>;
 export const decisionSchema = z.object({ approve: z.boolean() });

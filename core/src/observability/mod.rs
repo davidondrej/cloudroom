@@ -103,6 +103,14 @@ pub(crate) enum Signal {
         effect: Option<String>,
         duration_ms: u64,
     },
+    /// Tokens one session spent since its last usage reading, about once a turn (session/tokens.rs). Counts only.
+    Tokens {
+        harness: Kind,
+        model: Option<String>,
+        child: bool,
+        #[serde(flatten)]
+        tokens: crate::session::Tokens,
+    },
     Diagnostics {
         dropped: u64,
         local_write_failures: u64,

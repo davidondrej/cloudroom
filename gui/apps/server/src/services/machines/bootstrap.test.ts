@@ -92,9 +92,11 @@ describe("machine bootstrap", () => {
         "node",
         `#!/bin/sh\nif env | grep -q private-relay-key; then echo "$*" >>"${dir}/node-env-leaks"; fi\nexec "${process.execPath}" "$@"\n`,
       );
+      write("sleep", "#!/bin/sh\n");
+      // The first download is cut off without a curl error: it must be retried, never run.
       write(
         "curl",
-        `#!/bin/sh\ncat >"${dir}/curl-config"\ncat <<'EOF'\nprintf '%s %s' "$BB_ENROLLMENT" "$*" >"${dir}/installer-input"\nprintf '%s' "$0" >"${dir}/installer-path"\nEOF\n`,
+        `#!/bin/sh\ncat >"${dir}/curl-config"\nwhile [ "$1" != --output ]; do shift; done\nif [ ! -e "${dir}/cut" ]; then touch "${dir}/cut"; echo 'touch "${dir}/ran-partial"' >"$2"; exit 0; fi\ncat >"$2" <<'EOF'\nprintf '%s %s' "$BB_ENROLLMENT" "$*" >"${dir}/installer-input"\nprintf '%s' "$0" >"${dir}/installer-path"\n# end of install.sh\nEOF\n`,
       );
       const result = spawnSync(command[0]!, command.slice(1), {
         input: stdin,
@@ -109,6 +111,7 @@ describe("machine bootstrap", () => {
         `${stdin} --bootstrap-env BB_ENROLLMENT`,
       );
       expect(existsSync(join(dir, "node-env-leaks"))).toBe(false);
+      expect(existsSync(join(dir, "ran-partial"))).toBe(false);
       // sh runs the installer outside any sandbox, so it waits in the home
       // folder (found without HOME here), never the OS temp folder, and is
       // gone afterwards.

@@ -87,6 +87,8 @@ export const turnRequestEventDataSchema = z.object({
   /** Which attempt this is: 2 is the first retry of the original request. */
   retryAttempt: z.number().int().min(2).optional(),
   queueDelivered: z.literal(true).optional(),
+  /** The queued row this request delivered; older events lack it. */
+  queuedMessageId: z.string().optional(),
   source: z.enum(["spawn", "tell"]),
   initiator: threadTurnInitiatorSchema,
   senderThreadId: z.string().nullable(),
@@ -291,6 +293,22 @@ export const systemThreadInterruptedEventDataSchema = z.object({
   reason: systemThreadInterruptedReasonSchema,
   cause: z.literal("host-connection-lost").optional(),
 });
+export type SystemThreadInterruptedEventData = z.infer<
+  typeof systemThreadInterruptedEventDataSchema
+>;
+
+/** Plain words for a recorded stop, for parent notices and `thread show` (#1159). */
+export function describeThreadInterruption(
+  stop: SystemThreadInterruptedEventData,
+): string {
+  if (stop.cause === "host-connection-lost") return "host connection lost";
+  return {
+    "manual-stop": "stopped by the user or an agent",
+    "host-daemon-restarted": "host restarted",
+    "provider-turn-idle": "provider went silent",
+    "memory-limit": "memory protection",
+  }[stop.reason];
+}
 
 export const WORKSPACE_PROVISIONING_STEP_KEYS = {
   workspacePath: "workspace-path",

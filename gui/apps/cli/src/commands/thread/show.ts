@@ -5,8 +5,10 @@ import {
   type ThreadTimelineTextFormat,
 } from "@cloudroom/thread-view";
 import {
+  describeThreadInterruption,
   resolveEnvironmentMergeBaseBranch,
   type Environment,
+  type SystemThreadInterruptedEventData,
   type Thread,
   type ThreadEventRow,
   type ThreadGitDiffResponse,
@@ -56,6 +58,7 @@ interface ThreadLogCommandOptions {
 }
 
 const THREAD_LOG_DEFAULT_EVENT_LIMIT = 100;
+const THREAD_SHOW_INTERRUPTION_TIMEOUT_MS = 3_000;
 const THREAD_LOG_TIMELINE_SEGMENT_LIMIT_MAX = 100;
 
 interface ThreadOutputCommandOptions {
@@ -82,6 +85,8 @@ interface ThreadShowJsonPayload extends ThreadStatusPayload {
   workStatus?: WorkspaceStatus | null;
   gitDiff?: ThreadGitDiffResponse | null;
   lastError?: string | null;
+  /** The recorded stop, when the last turn was interrupted (#1159). */
+  lastInterruption?: SystemThreadInterruptedEventData;
 }
 
 interface ThreadShowPullRequestPayload {
@@ -327,7 +332,7 @@ export function registerShowCommand(
         }
 
         const environmentId = thread.environmentId;
-        const [fetchedPullRequest, environmentInfo, pendingTodos, { execution, cloud }] =
+        const [fetchedPullRequest, environmentInfo, pendingTodos, { execution, cloud }, idleOutput] =
           await Promise.all([
             !environmentId
               ? null
@@ -337,11 +342,17 @@ export function registerShowCommand(
             environmentId ? fetchEnvironmentInfo({ environmentId, sdk }) : null,
             fetchThreadPendingTodos({ sdk, threadId }),
             fetchExecution(sdk, thread),
+            // Why an idle thread was stopped: optional, so it never slows or fails `show` (#1159).
+            thread.status === "idle"
+              ? sdk.threads
+                  .output({ threadId, signal: AbortSignal.timeout(THREAD_SHOW_INTERRUPTION_TIMEOUT_MS) })
+                  .catch(() => null)
+              : null,
           ]);
-        const lastError =
-          thread.status === "error"
-            ? ((await sdk.threads.output({ threadId })).error ?? null)
-            : null;
+        const output =
+          thread.status === "error" ? await sdk.threads.output({ threadId }) : idleOutput;
+        const lastError = thread.status === "error" ? (output?.error ?? null) : null;
+        const lastInterruption = output?.interruption ?? null;
 
         if (opts.json) {
           const environment = await getEnvironment();
@@ -355,6 +366,7 @@ export function registerShowCommand(
             ),
             pendingTodos,
             ...(thread.status === "error" ? { lastError } : {}),
+            ...(lastInterruption ? { lastInterruption } : {}),
           };
           if (fetchedWorkStatus !== undefined) {
             jsonPayload.workStatus = fetchedWorkStatus.available
@@ -374,6 +386,7 @@ export function registerShowCommand(
         const cloudNote = cloudIssueText(cloud && thread.status === "error" ? { ...cloud, error: null } : cloud);
         printThreadStatus(statusPayload, execution, environmentInfo, fetchedPullRequest, cloudNote);
         if (lastError) console.log(`  Error: ${lastError}`);
+        if (lastInterruption) console.log(`  Interrupted: ${describeThreadInterruption(lastInterruption)}`);
 
         printPendingTodos(pendingTodos);
 

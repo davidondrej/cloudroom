@@ -372,6 +372,38 @@ case "${CLAUDE_ENV_FILE:+hook}|$ANTHROPIC_AUTH_TOKEN|$ANTHROPIC_API_KEY|$CLAUDE_
 }
 
 #[tokio::test]
+async fn internal_claude_probes_skip_user_hooks_but_sessions_keep_them() {
+    // #1014: model-list and Teleport probes ran the user's SessionStart/SessionEnd hooks.
+    let (dir, mut config) = fixture();
+    let (claude, log) = (dir.0.join("claude"), dir.0.join("args"));
+    let script = format!("#!/bin/sh\necho \"$*\" >> '{}'\n", log.display());
+    fs::write(&claude, script).unwrap();
+    fs::set_permissions(&claude, fs::Permissions::from_mode(0o755)).unwrap();
+    let profile = cloudroom::config::HarnessConfig {
+        binary: claude,
+        home: dir.0.join(".claude"),
+        model: "haiku".into(),
+        provider: None,
+    };
+    config.harnesses.insert(runtime::Kind::Claude, profile);
+    let _ = runtime::models(&config, runtime::Kind::Claude).await;
+    let _ = runtime::probe(&config, runtime::Kind::Claude, "haiku", None).await;
+    let (_handle, mut events) =
+        runtime::Handle::spawn_guarded(&config, runtime::Kind::Claude, None, false, false, None)
+            .unwrap();
+    while !matches!(
+        events.recv().await,
+        Some(runtime::Event::Exited { .. }) | None
+    ) {}
+    let runs = fs::read_to_string(&log).unwrap();
+    let hooks_off: Vec<_> = runs
+        .lines()
+        .map(|run| run.contains(r#""disableAllHooks":true"#))
+        .collect();
+    assert_eq!(hooks_off, [true, true, false], "{runs}");
+}
+
+#[tokio::test]
 async fn unresponsive_harness_is_not_reported_as_cleanly_closed() {
     let (_dir, config) = fixture();
     let (handle, mut events) = runtime::Handle::spawn(&config, runtime::Kind::Codex, None).unwrap();

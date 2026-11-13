@@ -755,6 +755,44 @@ export function keepShellEnvironmentSetKeys(
     : {};
 }
 
+const THREAD_IDENTITY_ENV_KEYS = [
+  "ROOM_THREAD_ID",
+  "ROOM_THREAD_STORAGE",
+  "ROOM_PROJECT_ID",
+  "ROOM_ENVIRONMENT_ID",
+] as const;
+
+/**
+ * Codex starts stdio MCP servers with only a few of its own variables, so tool
+ * hosts with a shell tool (such as ctx_shell) never saw the thread identity
+ * (#1532). Gives each configured stdio server the identity keys this config
+ * sets for shells. A key the server's own `env` already sets is left alone.
+ */
+export function shareThreadIdentityWithMcpServers(
+  config: { [key in string]?: JsonValue },
+  servers:
+    | Record<
+        string,
+        { command?: string | null; env?: Record<string, string> | null }
+      >
+    | null
+    | undefined,
+): Record<string, string> {
+  const env = THREAD_IDENTITY_ENV_KEYS.flatMap((key) => {
+    const value = config[`shell_environment_policy.set.${key}`];
+    return typeof value === "string" ? [[key, value] as const] : [];
+  });
+  const result: Record<string, string> = {};
+  for (const [name, server] of Object.entries(servers ?? {})) {
+    if (!/^[\w-]+$/u.test(name) || typeof server.command !== "string") continue;
+    for (const [key, value] of env) {
+      if (server.env?.[key] !== undefined) continue;
+      result[`mcp_servers.${name}.env.${key}`] = value;
+    }
+  }
+  return result;
+}
+
 export function buildCodexConfig(
   args: BuildCodexConfigArgs,
 ): { [key in string]?: JsonValue } | undefined {

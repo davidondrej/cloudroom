@@ -12,7 +12,9 @@ const PRELOAD_MAX_WAIT_MS = 3_000;
 const PRELOAD_MAX_THREADS = 50;
 const lastWakeAt = new Map<string, number>();
 
-export function useCloudThreadWake(threadId: string, isCloud: boolean): (reason: CloudWakeReason) => void {
+/** `retry`: the website holds this thread's wake while its server restarts, so the open thread asks again each
+ *  minute and continues once the server is back. */
+export function useCloudThreadWake(threadId: string, isCloud: boolean, retry = false): (reason: CloudWakeReason) => void {
   const wake = useCallback((reason: CloudWakeReason) => {
     if (!isCloud || Date.now() - (lastWakeAt.get(threadId) ?? 0) < WAKE_INTERVAL_MS) return;
     lastWakeAt.set(threadId, Date.now());
@@ -26,6 +28,11 @@ export function useCloudThreadWake(threadId: string, isCloud: boolean): (reason:
     const timer = setTimeout(() => wake("view"), VIEW_DELAY_MS);
     return () => clearTimeout(timer);
   }, [isCloud, visibility, wake]);
+  useEffect(() => {
+    if (!isCloud || !retry) return;
+    const timer = setInterval(() => { if (isDocumentVisible()) wake("view"); }, WAKE_INTERVAL_MS);
+    return () => clearInterval(timer);
+  }, [isCloud, retry, wake]);
   return wake;
 }
 

@@ -239,7 +239,8 @@ export interface DispatchAttemptArgs {
   pluginSubmission: MessageDispatchHookContext["experimental_submission"];
   /** Retry provenance, when this attempt re-submits a failed turn. */
   retryOf?: TurnRequestRetryMarker;
-  beforeDispatch?: () => void;
+  /** Gets the turn request's ID when this dispatch creates one. */
+  beforeDispatch?: (requestId?: string) => void;
   origin: ThreadCreateOrigin | null;
   originPluginId: string | null;
   startedOnBehalfOf: StartedOnBehalfOf | null;
@@ -691,10 +692,10 @@ async function runDispatchAttempt(
       trigger: args.trigger,
       onStartSettled: args.onStartSettled,
       ...(args.retryOf !== undefined ? { retryOf: args.retryOf } : {}),
-      ...(claimed !== null && !sendNow ? { queueDelivered: true } : {}),
-      beforeAppendInTransaction: ({ tx }) => {
+      ...(claimed !== null && !sendNow ? { queueDelivered: claimed.id } : {}),
+      beforeAppendInTransaction: ({ tx, requestId }) => {
         saving = true;
-        args.beforeDispatch?.();
+        args.beforeDispatch?.(requestId);
         if (getThread(tx, thread.id)?.status !== thread.status) {
           throw new DispatchThreadStatusChangedError();
         }

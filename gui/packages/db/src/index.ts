@@ -18,6 +18,7 @@ export {
 export { migrate } from "./migrate.js";
 export {
   isSqliteForeignKeyConstraint,
+  isSqliteFullError,
   isSqliteUniqueConstraintOnColumns,
 } from "./sqlite-errors.js";
 export type { MigrationWarningLogger } from "./migrate.js";

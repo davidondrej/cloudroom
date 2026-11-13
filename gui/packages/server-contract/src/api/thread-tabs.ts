@@ -61,12 +61,9 @@ export const threadTabFileOpenerOwnerSchema = z.discriminatedUnion("kind", [
       threadId: z.string().min(1).nullable().default(null),
     })
     .strict()
-    .refine(
-      (owner) =>
-        owner.hostId !== null ||
-        (owner.environmentId !== null && owner.threadId !== null),
-      { message: "hostId or threadId/environmentId is required" },
-    ),
+    .refine((owner) => owner.hostId !== null || owner.threadId !== null, {
+      message: "hostId or threadId is required",
+    }),
   z
     .object({
       environmentId: z.string().min(1).nullable(),

@@ -2951,6 +2951,7 @@ describe("bridge", () => {
           instructions: "test",
           providerOptions: {
             workflowsEnabled: false,
+            providerSubagentsEnabled: false,
           },
         },
       });
@@ -2958,6 +2959,7 @@ describe("bridge", () => {
 
       const queryOptions = getLatestQueryOptions();
       expect(queryOptions.env?.HOME).toBe("/Users/test-bb");
+      expect(queryOptions.env?.CLAUDE_CODE_WEB_FETCH_AGENT).toBe("0");
       expect(queryOptions.env?.CLAUDE_CODE_ENTRYPOINT).toBe("cli");
       expect(queryOptions.env?.CLAUDE_AGENT_SDK_CLIENT_APP).toBeUndefined();
       expect(queryOptions.settingSources).toEqual(["user", "project", "local"]);
@@ -3583,6 +3585,7 @@ describe("bridge", () => {
       if (!query || !hooks) {
         throw new Error("Expected live Claude query and hooks");
       }
+      expect(call.options.env?.CLAUDE_CODE_WEB_FETCH_AGENT).toBeUndefined();
 
       bridge.sendRequest(2, "turn/start", {
         threadId,
@@ -4524,6 +4527,14 @@ describe("bridge", () => {
         },
       ]);
 
+      // The new Claude, still starting or stuck, never answers its MCP check (#1574).
+      queryMock.mockImplementationOnce(() => {
+        const query = createControlledClaudeQuery();
+        query.mcpServerStatus.mockReturnValue(new Promise(() => {}));
+        queries.push(query);
+        return query;
+      });
+      vi.useFakeTimers();
       bridge.sendRequest(
         3,
         "turn/start",
@@ -4533,7 +4544,8 @@ describe("bridge", () => {
           input: [{ type: "text", text: "after reauthentication" }],
         }),
       );
-      await bridge.flushWork();
+      await vi.advanceTimersByTimeAsync(10_000);
+      vi.useRealTimers();
 
       expect(queries).toHaveLength(2);
       expect(queries[0]?.close).toHaveBeenCalledOnce();
@@ -4555,6 +4567,7 @@ describe("bridge", () => {
       queries[1]?.finish();
       await bridge.waitForResponse(4);
     } finally {
+      vi.useRealTimers();
       queries.forEach((query) => query.finish());
       bridge.restore();
     }

@@ -81,7 +81,7 @@ describe("thread tab file-opener owner", () => {
     const result = threadTabsSchema.safeParse([
       {
         ...OPENER_TAB_BASE,
-        fileOpenerOwner: { ...OWNERS[1], environmentId: null },
+        fileOpenerOwner: { ...OWNERS[1], threadId: null },
       },
     ]);
 

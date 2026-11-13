@@ -930,7 +930,8 @@ else under that new name, which must not exist yet.";
             transfer::pull(&socket, source, rest.first().map_or(".", String::as_str)).await
         }
         ("push", [source, rest @ ..]) if rest.len() <= 1 => {
-            transfer::push(&socket, source, rest.first().map_or("~", String::as_str)).await
+            let to = rest.first().map_or("~", String::as_str);
+            transfer::stoppable(&socket, None, transfer::push(&socket, source, to)).await
         }
         _ => {
             println!("{usage}");

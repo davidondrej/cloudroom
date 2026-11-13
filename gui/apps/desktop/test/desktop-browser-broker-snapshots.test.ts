@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { WebSocket } from "ws";
 import type { Session } from "electron";
 import type { DesktopBrowserChanged } from "@cloudroom/host-daemon-contract";
 
@@ -168,5 +169,45 @@ describe("desktop browser broker cleanup of gone resources", () => {
     const run = broker.execute({ ...base, type: `desktop.browser.${action}` } as never);
     expect(await run.catch((error: Error) => error.message)).toEqual(expected);
     expect(manager.closeTab).not.toHaveBeenCalled();
+  });
+});
+
+describe("desktop browser broker pages a lease opened over CDP (#1383)", () => {
+  it.each([
+    ["release_control", ["agent-page"]],
+    ["stop", []],
+    ["takeOver", []],
+    ["expiry", ["agent-page"]],
+  ] as const)("%s: closes only the expected CDP-opened pages", async (end, closed) => {
+    const automation = { kind: "automation", id: "a" } as const;
+    let tabs = [{ ...nativeTab("mine", THREAD_ID), profile: automation }, nativeTab("users-own", THREAD_ID)];
+    const views = new Map<string, object>();
+    const view = (tabId: string) => views.get(tabId) ?? views.set(tabId, { isDestroyed: () => false, getURL: () => "about:blank", getTitle: () => "", debugger: { on() {}, off() {}, isAttached: () => false } }).get(tabId)!;
+    const manager = {
+      listTabs: ({ threadId }: { threadId: string | null }) => tabs.filter((tab) => threadId === null || tab.threadId === threadId),
+      getAutomationTabs: () => tabs.map((tab) => ({ tabId: tab.tabId, webContents: view(tab.tabId) })),
+      subscribeAutomationTabs: () => () => undefined,
+      createTab: () => tabs[tabs.push({ ...nativeTab("agent-page", THREAD_ID), profile: automation }) - 1]!,
+      closeTab: vi.fn(({ tabId }: { tabId: string }) => void (tabs = tabs.filter((tab) => tab.tabId !== tabId))),
+    };
+    const broker = createDesktopBrowserBroker({ manager: manager as never, product: "Chrome/1" });
+    const window = createFakeWindow();
+    broker.registerWindow(window as never);
+    broker.setHostId("host_local");
+    const base = { ...broker.listInstances()[0]!, threadId: THREAD_ID, leaseId: "lease" };
+    await broker.execute({ ...base, type: "desktop.browser.acquire_control", tabIds: ["mine"], controllerLabel: "T", expiresAt: Date.now() + (end === "expiry" ? 400 : 9e4) });
+    const { wsEndpoint } = (await broker.execute({ ...base, type: "desktop.browser.open_connection", tabIds: ["mine"] })) as { wsEndpoint: string };
+    const socket = new WebSocket(wsEndpoint);
+    await new Promise((resolve) => socket.once("open", resolve));
+    const reply = new Promise((resolve) => socket.once("message", resolve));
+    socket.send(JSON.stringify({ id: 1, method: "Target.createTarget", params: { url: "about:blank" } }));
+    expect(String(await reply)).toContain("targetId");
+    if (end === "takeOver") broker.takeOver(window.webContents.id, "agent-page");
+    if (end === "expiry") await new Promise((resolve) => setTimeout(resolve, 500));
+    const close = end === "release_control" ? { closeOpenedPages: true as const } : {};
+    await broker.execute({ ...base, type: "desktop.browser.release_control", ...close });
+    expect(manager.closeTab.mock.calls.map(([ref]) => ref.tabId)).toEqual(closed);
+    socket.terminate();
+    broker.dispose();
   });
 });

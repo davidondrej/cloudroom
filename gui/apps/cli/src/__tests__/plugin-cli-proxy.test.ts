@@ -9,6 +9,7 @@ import {
 } from "@cloudroom/config/caller-proof";
 import { RESERVED_BB_CLI_COMMANDS } from "@cloudroom/domain/plugin-cli";
 
+import { CLI_READ_TIMEOUT_MS } from "../client.js";
 import {
   CORE_COMMAND_GROUPS,
   pluginProxyCandidate,
@@ -79,6 +80,28 @@ describe("fetchPluginCliContributions", () => {
       fetchPluginCliContributions("http://localhost"),
     ).resolves.toEqual({
       outcome: "invalid",
+      detail: "did not return the plugin command list (HTTP 404)",
+    });
+
+    // A refused discovery says why, instead of "unknown command" (#1494).
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              code: CALLER_PROOF_REQUIRED_CODE,
+              message: CALLER_PROOF_REQUIRED_MESSAGE,
+            }),
+            { status: 401 },
+          ),
+      ),
+    );
+    await expect(
+      fetchPluginCliContributions("http://localhost"),
+    ).resolves.toEqual({
+      outcome: "invalid",
+      detail: `did not return the plugin command list (HTTP 401 ${CALLER_PROOF_REQUIRED_CODE}): ${CALLER_PROOF_REQUIRED_MESSAGE}`,
     });
   });
 
@@ -194,7 +217,10 @@ describe("fetchPluginCliContributions retries", () => {
 
     await expect(
       fetchPluginCliContributions("http://localhost", 2000, { sleep }),
-    ).resolves.toEqual({ outcome: "invalid" });
+    ).resolves.toEqual({
+      outcome: "invalid",
+      detail: "sent a malformed plugin command list",
+    });
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(slept).toEqual([]);
   });
@@ -207,10 +233,11 @@ describe("fetchPluginCliContributions retries", () => {
     const result = await fetchPluginCliContributions("http://localhost", 2000, {
       sleep,
     });
+    // The last try waits as long as a core read (#1533).
     expect(result).toMatchObject({
       outcome: "unreachable",
       attempts: 3,
-      lastTimeoutMs: 4000,
+      lastTimeoutMs: CLI_READ_TIMEOUT_MS,
     });
     expect(fetchMock).toHaveBeenCalledTimes(3);
     expect(slept).toEqual([150, 500]);

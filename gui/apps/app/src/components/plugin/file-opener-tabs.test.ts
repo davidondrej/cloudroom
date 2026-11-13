@@ -51,15 +51,19 @@ const REQUESTS: readonly {
 ];
 
 describe("createFileOpenerTabForRequest thread-tabs contract", () => {
-  it.each(REQUESTS.map(({ label, request }) => [label, request] as const))(
-    "produces a %s tab the thread-tabs contract accepts",
-    (_label, request) => {
+  it.each(
+    REQUESTS.flatMap(({ label, request }) =>
+      ["env_docs", null].map((env) => [label, env, request] as const),
+    ),
+  )(
+    "produces a %s tab the thread-tabs contract accepts (environment %s)",
+    (_label, resolvedEnvironmentId, request) => {
       const tab = createFileOpenerTabForRequest({
         fileOpeners: [MARKDOWN_OPENER],
         preference: {},
         projectId: null,
         request,
-        resolvedEnvironmentId: "env_docs",
+        resolvedEnvironmentId,
         threadId: "thr_docs",
       });
 

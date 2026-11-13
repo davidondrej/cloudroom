@@ -2,6 +2,20 @@
 
 Also on [cloudroom.dev/changelog](https://www.cloudroom.dev/changelog).
 
+## 153
+
+See which chats need you (2026-11-13)
+
+### Changes
+
+- Chats waiting on you stand out in the sidebar: GPU requests in red with an Approve button, everything else in yellow.
+- GPU approvals are a card in the chat instead of a full-screen pop-up, and one approval covers the thread for 24 hours.
+- New Local worktrees no longer wait on the network, so threads start sooner.
+- Settings reopens the last tab you used in each section.
+- With two Macs, the app stays on the Mac you picked and shows which one you are viewing.
+- Opening a sleeping Cloud thread no longer moves it up the sidebar.
+- Security fixes.
+
 ## 152
 
 Search deeper from Cmd+K (2026-11-13)

@@ -1,5 +1,6 @@
 import { rmSync } from "node:fs";
-import { isAbsolute } from "node:path";
+import { realpath } from "node:fs/promises";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createPluginProcessTempDir } from "@cloudroom/process-utils";
 import { readBoundedLines } from "./bridge-kit/bounded-line-reader.js";
@@ -13,7 +14,8 @@ import {
   type ProviderBridgeEntry,
 } from "./bridge-kit/provider-bridge-entry.js";
 
-const [bridgeModulePath, pluginId, dataDir] = process.argv.slice(2);
+const [bridgeModulePath, pluginId, dataDir, runtimeTempDir] =
+  process.argv.slice(2);
 
 function fail(message: string): never {
   process.stderr.write(`${message}\n`);
@@ -29,14 +31,27 @@ if (
   !isAbsolute(dataDir)
 ) {
   fail(
-    "provider bridge bootstrap usage: <bridgeModulePath> <pluginId> <pluginDataDir> (absolute paths)",
+    "provider bridge bootstrap usage: <bridgeModulePath> <pluginId> <pluginDataDir> [<tempDir>] (absolute paths)",
   );
 }
 
-const tempDir = await createPluginProcessTempDir({
-  prefix: "bb-provider-bridge",
-  dataDir,
-});
+// The runtime makes the folder. On Windows it removes it once this process and
+// its children are gone: a Windows stop (TerminateProcess) skips all the
+// cleanup below (#1578). The cleanup removes it too, so only a bridge folder in this
+// plugin's own `.cloudroom-tmp` is taken; otherwise the bridge makes its own.
+const givenTempDir =
+  runtimeTempDir !== undefined && isAbsolute(runtimeTempDir)
+    ? resolve(runtimeTempDir)
+    : undefined;
+const tempDir =
+  givenTempDir !== undefined &&
+  basename(givenTempDir).startsWith("bb-provider-bridge-") &&
+  dirname(givenTempDir) === join(await realpath(dataDir), ".cloudroom-tmp")
+    ? givenTempDir
+    : await createPluginProcessTempDir({
+        prefix: "bb-provider-bridge",
+        dataDir,
+      });
 
 // Runs on stdin close and again at exit: async shutdown may still write here.
 function removeTempDir(): void {

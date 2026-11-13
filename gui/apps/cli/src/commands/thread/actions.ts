@@ -941,9 +941,9 @@ export function describeThreadTellOutcome(
       ? `${queued}; it dispatches at that time on its own. Do not run ${send}: it sends the message now.`
       : `${queued}; it dispatches when that clears unless Stop pauses the queue, then run ${send}`;
   }
-  return response.mode === "steer"
-    ? `Thread ${threadId} steered`
-    : `Thread ${threadId} updated`;
+  // "sent" means saved and handed to the agent, not accepted: a rejection
+  // lands later and puts the thread in `error` (#1536).
+  return `Thread ${threadId} message sent; the agent has not confirmed it yet. If it fails, \`room-cli thread show ${threadId}\` shows status error and why.`;
 }
 
 /**
@@ -1003,7 +1003,9 @@ export function describeQueueWait(row: {
   }
 }
 
-function resolveSenderThreadId(targetThreadId: string): string | undefined {
+export function resolveSenderThreadId(
+  targetThreadId: string,
+): string | undefined {
   const senderThreadId = resolveContextThreadId();
   if (!senderThreadId || senderThreadId === targetThreadId) {
     return undefined;

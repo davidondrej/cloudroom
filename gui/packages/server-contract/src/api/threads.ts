@@ -302,7 +302,12 @@ export type SendMessageDelivery = z.infer<typeof sendMessageDeliverySchema>;
  * for now" would invite every caller to check fields that cannot exist.
  */
 export const sendMessageResponseSchema = z.discriminatedUnion("delivery", [
-  z.object({ ok: z.literal(true), delivery: z.literal("sent") }),
+  z.object({
+    ok: z.literal(true),
+    delivery: z.literal("sent"),
+    /** The turn request this send created, when it created one. */
+    requestId: z.string().optional(),
+  }),
   z.object({
     ok: z.literal(true),
     delivery: z.literal("queued"),

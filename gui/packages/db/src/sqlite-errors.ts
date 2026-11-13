@@ -36,3 +36,8 @@ export function isSqliteForeignKeyConstraint(error: Error): boolean {
     error.message.includes("FOREIGN KEY constraint failed")
   );
 }
+
+/** SQLite refused the write for space and rolled it back. */
+export function isSqliteFullError(error: unknown): boolean {
+  return error instanceof Error && getSqliteErrorCode(error) === "SQLITE_FULL";
+}

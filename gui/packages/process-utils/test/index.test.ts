@@ -310,6 +310,7 @@ describe("process utils", () => {
       ROOM_SERVER_URL: "http://127.0.0.1:39886",
       ROOM_THREAD_ID: "parent_thread",
       ROOM_CLI_REEXEC: "1",
+      ARGV0: "/home/u/Applications/Cloudroom.AppImage",
       NODE_ENV: "development",
       NODE_OPTIONS: "--enable-source-maps",
       OPENAI_API_KEY: "external-secret",

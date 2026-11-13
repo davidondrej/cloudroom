@@ -75,7 +75,13 @@ async function tryPluginCommandProxy(
     );
     return 1;
   }
-  if (result.outcome === "invalid") return;
+  if (result.outcome === "invalid") {
+    // Not "unknown command": the command may exist, but discovery failed (#1494).
+    console.error(
+      `Cannot run room-cli ${candidate}: Cloudroom at ${getUrl()} ${result.detail}`,
+    );
+    return 1;
+  }
   const match = proxy.findPluginCliCommand(result.contributions, candidate);
   if (match === undefined) {
     const disabledId = await proxy.findDisabledPluginForCommand(

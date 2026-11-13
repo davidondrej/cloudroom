@@ -1,5 +1,5 @@
 import { and, eq, getTableColumns, inArray, isNull, sql } from "drizzle-orm";
-import { cloudroomCommands, cloudroomThreads, threads, threadPluginMetadata, type DbQueryConnection } from "@cloudroom/db";
+import { cloudroomCommands, cloudroomThreads, statusTransitionNeedsAttention, threads, threadPluginMetadata, type DbQueryConnection } from "@cloudroom/db";
 import type { ProjectCopyProgress, TeleportLocalStep } from "@cloudroom/domain";
 import { cloudTurnsElsewhere, emitPluginThreadStatusEntered } from "../plugins/plugin-thread-events.js";
 import { noteTurnFailed, type CloudFailure } from "../system/auth-failure-telemetry.js";
@@ -166,10 +166,11 @@ export function unstartedTurn(db: DbQueryConnection, threadId: string): Command 
   return turn?.command === "prompt" && (turn.state === "sending" || turn.state === "accepted") ? turn : null;
 }
 
-export function saveCommandState(db: DbQueryConnection, threadId: string, id: string, state: string): void {
+/** `refusal`: why Cloud refused a failed prompt, for its `turn_failed` event. */
+export function saveCommandState(db: DbQueryConnection, threadId: string, id: string, state: string, refusal?: Omit<CloudFailure, "category">): void {
   const unstarted = unstartedTurn(db, threadId)?.id === id;
   db.update(cloudroomCommands).set({ state }).where(and(eq(cloudroomCommands.id, id), eq(cloudroomCommands.threadId, threadId))).run();
-  if (unstarted && !["sending", "accepted", "running", "delivered"].includes(state)) saveStatus(db, threadId, ["failed", "unknown", "unknown_after_restart"].includes(state) ? "error" : "idle", { category: `prompt-${state.replaceAll("_", "-")}` });
+  if (unstarted && !["sending", "accepted", "running", "delivered"].includes(state)) saveStatus(db, threadId, ["failed", "unknown", "unknown_after_restart"].includes(state) ? "error" : "idle", { category: `prompt-${state.replaceAll("_", "-")}`, ...refusal });
 }
 
 export function effectivePrompt(db: DbQueryConnection, threadId: string, id: string, pending = false): Record<string, unknown> {
@@ -193,8 +194,14 @@ export function effectivePrompt(db: DbQueryConnection, threadId: string, id: str
 /** Threads whose earlier sessions' history is being shown (#237, `projectEarlier`): their old turns tell no plugin. */
 export const showingEarlier = new Set<string>();
 
+/** A status change is new activity only as on Local: a turn ended, or anything failed (a start that never ran needs the user too).
+ *  A wake (starting, then idle) or a stop moves nothing in the sidebar and shows no unread dot. */
 export function saveStatus(db: DbQueryConnection, threadId: string, status: typeof threads.$inferSelect["status"], cloud?: CloudFailure): void {
-  const thread = db.update(threads).set({ status, updatedAt: Date.now(), latestAttentionAt: Date.now() }).where(and(eq(threads.id, threadId), sql`${threads.status} != ${status}`)).returning().get();
+  const before = db.select({ status: threads.status }).from(threads).where(eq(threads.id, threadId)).get();
+  if (!before || before.status === status) return;
+  const now = Date.now(), attention = status === "error" || statusTransitionNeedsAttention({ currentStatus: before.status, newStatus: status });
+  const thread = db.update(threads).set({ status, updatedAt: now, ...(attention ? { latestAttentionAt: now } : {}) })
+    .where(and(eq(threads.id, threadId), eq(threads.status, before.status))).returning().get();
   if (!thread || showingEarlier.has(thread.id)) return;
   emitPluginThreadStatusEntered(thread);
   if (thread.status === "error" && !cloudTurnsElsewhere.has(thread.id)) noteTurnFailed(thread.id, cloud);

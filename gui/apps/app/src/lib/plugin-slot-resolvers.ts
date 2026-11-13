@@ -327,7 +327,7 @@ export function resolveFileOpenerReplacement(args: {
   );
 }
 
-/** Plugins whose requests open as a centered pop-up over a blurred app instead of a card in place of the composer:
- *  paid GPU sessions (docs/scopes/gpus.md). The chat box stays where it is. */
-const MODAL_PLUGINS = new Set(["gpu"]);
-export const isModalPluginInteraction = (pluginId: string | undefined) => pluginId !== undefined && MODAL_PLUGINS.has(pluginId);
+/** Plugins whose requests show as a card at the end of the chat instead of in place of the composer: paid GPU
+ *  sessions (docs/scopes/gpus.md). The chat box stays where it is. */
+const CHAT_CARD_PLUGINS = new Set(["gpu"]);
+export const isChatCardPluginInteraction = (pluginId: string | undefined) => pluginId !== undefined && CHAT_CARD_PLUGINS.has(pluginId);

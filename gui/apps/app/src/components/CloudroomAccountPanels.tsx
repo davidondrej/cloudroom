@@ -14,6 +14,8 @@ export function CloudroomAccountPanels() {
     else if (wasSigningIn.current && accountId) {
       wasSigningIn.current = false;
       getRoomDesktopInfo()?.focusWindow?.();
+      // Signed in again: look for the picked Mac now, not at the next minute's check (ADR 20261113-210101).
+      getRoomDesktopInfo()?.refreshComputers?.();
     }
   }, [signingIn, accountId]);
   if (!accountId) return null;

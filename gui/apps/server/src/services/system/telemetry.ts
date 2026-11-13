@@ -74,6 +74,10 @@ export type TelemetryEvent =
         reasoning_level?: string | null;
         service_tier?: string | null;
         harness_version?: string | null;
+        /** Local threads: the environment provider, like `git-worktree` for Local Worktree. */
+        environment_provider?: string | null;
+        /** How long the provider took to create the workspace, on the message whose send created it. */
+        workspace_create_ms?: number | null;
         seconds_since_first_launch?: number;
       };
     }
@@ -115,9 +119,18 @@ export type TelemetryEvent =
   /** Plugin use counts and which plugins are on; built in services/plugins/plugin-usage-telemetry.ts. */
   | { name: "plugin_usage"; properties: { plugin_id: string; tool: number; cli: number; mention: number; ui: number } }
   | { name: "plugins_snapshot"; properties: { enabled: string; disabled: string } }
+  /** Local threads' tokens per UTC `day`, agent and model; built in token-telemetry.ts. `input` excludes cache reads. */
+  | {
+      name: "token_usage";
+      properties: { day: string; provider: string; model: string; is_child_thread: boolean; input: number; cached: number; cache_write: number; output: number; turns: number };
+    }
   | {
       name: "turn_failed";
-      properties: { execution: TelemetryExecution; is_child_thread: boolean; provider: string; error_category: string; error_message?: string | null; first_agent?: true };
+      properties: {
+        execution: TelemetryExecution; is_child_thread: boolean; provider: string; error_category: string; error_message?: string | null; first_agent?: true;
+        /** A Cloud prompt Cloud refused (auth-failure-telemetry.ts): Core's code, this computer's logins, and the default agent. */
+        cloud_code?: string | null; local_logins?: string; default_agent?: string;
+      };
     }
   | { name: "upgrade_prompt"; properties: { where: (typeof UPGRADE_PROMPTS)[number]; action: "viewed" | "clicked" } }
   | { name: "activation_step"; properties: { step: ActivationStep; action: "clicked" | "done" | "hidden" } }

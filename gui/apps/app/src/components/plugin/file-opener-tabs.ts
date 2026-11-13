@@ -229,7 +229,7 @@ function ownerRequestForOpenRequest({
           threadId: null,
         };
       }
-      if (!threadId || !resolvedEnvironmentId) return null;
+      if (!threadId || resolvedEnvironmentId === undefined) return null;
       return {
         kind: request.kind,
         environmentId: resolvedEnvironmentId,

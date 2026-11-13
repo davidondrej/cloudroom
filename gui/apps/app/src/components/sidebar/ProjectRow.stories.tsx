@@ -433,7 +433,7 @@ export function Overview() {
       </StoryRow>
       <StoryRow
         label="collapsed parent — child needs input"
-        hint="trailing grey question icon surfaces a hidden child blocked on the user"
+        hint="a soft yellow row and 'Needs you' chip surface a hidden child blocked on the user"
       >
         {singleProject({
           initialCollapsedThreadIds: new Set([parentThread.id]),
@@ -449,7 +449,7 @@ export function Overview() {
       </StoryRow>
       <StoryRow
         label="collapsed parent — needs input + working"
-        hint="one child blocked, another running: input needed wins, trailing slot shows the grey question icon"
+        hint="one child blocked, another running: input needed wins and the 'Needs you' chip shows"
       >
         {singleProject({
           initialCollapsedThreadIds: new Set([parentThread.id]),

@@ -50,6 +50,8 @@ export interface ThreadTimelineSurfaceProps {
   timelineError: boolean;
   loadingContent?: ReactNode;
   leadingContent?: ReactNode;
+  /** Shown right after the last message, like a card the agent posted. */
+  trailingContent?: ReactNode;
   onForkMessage?: ThreadTimelineForkMessageHandler;
   onEditMessage?: ThreadTimelineEditMessageHandler;
   editMessageBlockedReason?: string;
@@ -154,6 +156,7 @@ export function ThreadTimelineSurface({
   timelineError,
   loadingContent,
   leadingContent,
+  trailingContent,
   onForkMessage,
   onEditMessage,
   editMessageBlockedReason,
@@ -265,6 +268,7 @@ export function ThreadTimelineSurface({
             />
           </MessageEditBlockedContext.Provider>
         ) : null}
+        {isThreadTimelinePending || timelineError ? null : trailingContent}
         {hostConnectionNotice ? (
           <TimelineStatusIndicator
             label={hostConnectionNotice.label}

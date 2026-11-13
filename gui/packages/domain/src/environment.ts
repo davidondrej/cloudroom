@@ -64,7 +64,8 @@ export type DiscoveredWorkspaceProperties = z.infer<
 >;
 
 export const environmentLifecycleSchema = z.object({
-  phase: z.enum(["active", "retiring", "teardown", "destroyed"]),
+  // "parked": the checkout folder was removed after archiving; `path` is where it comes back on restore.
+  phase: z.enum(["active", "parked", "retiring", "teardown", "destroyed"]),
   retireAt: z.number().nullable(),
   teardown: z
     .object({

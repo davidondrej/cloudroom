@@ -14,7 +14,9 @@ pub(crate) mod relay;
 pub mod report;
 mod sleep;
 mod state;
+mod tokens;
 pub use state::SessionState;
+pub(crate) use tokens::Tokens;
 pub mod thread;
 
 use crate::{
@@ -253,6 +255,13 @@ pub struct Session {
     // A child's latest completed replies by request, so a queued turn cannot hide them from its parent.
     #[serde(skip)]
     replies: Vec<(String, String)>,
+    // The running totals of the last `usage` reading (tokens.rs).
+    #[serde(skip)]
+    tokens: tokens::Tokens,
+    // A copied-in history (teleport, move, rewind): Codex and Pi bring back its old totals, so the next reading only
+    // sets the base.
+    #[serde(skip)]
+    tokens_restored: bool,
     // Teleport to Local holds the session (its request ID, until when in ms), so no other client changes it (#237).
     // Memory only: a restart lifts it, and the teleporting app renews it every 2 minutes.
     #[serde(skip)]
@@ -2737,8 +2746,30 @@ impl Manager {
             {
                 return;
             }
-            let _ = local.append(&id, "usage", usage, None);
+            self.append_usage(&mut local, &id, usage);
         });
+    }
+
+    /// Saves a `usage` reading and records the tokens spent since the last one (`tokens` diagnostics).
+    fn append_usage(&self, local: &mut Local, id: &str, usage: Value) {
+        let spent = local
+            .sessions
+            .get(id)
+            .filter(|session| !session.tokens_restored)
+            .and_then(|session| {
+                let spent = tokens::Tokens::of(&usage, session.harness)?.since(session.tokens);
+                (spent != tokens::Tokens::default()).then(|| Signal::Tokens {
+                    harness: session.harness,
+                    model: session.model.clone(),
+                    child: session.parent_session.is_some(),
+                    tokens: spent,
+                })
+            });
+        if local.append(id, "usage", usage, None).is_ok()
+            && let Some(spent) = spent
+        {
+            self.observability.record(spent);
+        }
     }
 
     /// Forward native events into the record path, shutting the harness if recording fails.
@@ -3108,7 +3139,7 @@ impl Manager {
                 }
                 local.append(id, kind, data, native)?;
                 if let Some(usage) = usage {
-                    let _ = local.append(id, "usage", usage, None);
+                    self.append_usage(&mut local, id, usage);
                 }
             }
             runtime::Event::Background { running } => {
@@ -3262,6 +3293,15 @@ impl Manager {
                     expected,
                     details,
                 );
+                // An unconfirmed steer dies with its agent: its late answer is dropped (`same_process`). Settling it
+                // lets a child notice it carried fall back to the queue, even across a rewind (#1579).
+                let steers: Vec<_> = (local.sessions[id].receipts.values())
+                    .filter(|r| r.command == "steer" && r.state == "accepted")
+                    .map(|r| r.request_id.clone())
+                    .collect();
+                for request in steers {
+                    local.finish_receipt(id, &request, "unknown_after_restart")?;
+                }
                 if expected && cleaned_up && local.sessions[id].rewind_request.is_some() {
                     let session = local.sessions.get_mut(id).ok_or(Error::NotFound)?;
                     session.handle = None;

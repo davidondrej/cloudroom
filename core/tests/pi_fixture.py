@@ -59,7 +59,7 @@ try:
     for line in sys.stdin:
         v = json.loads(line); kind = v['type']; ident = v.get('id'); data = None
         if kind == 'get_state':
-            data = {'sessionId':native,'sessionFile':str(path),'model':{'id':model,'provider':provider},'thinkingLevel':thinking,'isStreaming':running,'isCompacting':compacting,'pendingMessageCount':int(native_queue)}
+            data = {'sessionId':native,'sessionFile':str(path),'model':{'id':model,'provider':provider,**({'input':['text']} if model == 'text-only' else {})},'thinkingLevel':thinking,'isStreaming':running,'isCompacting':compacting,'pendingMessageCount':int(native_queue)}
         elif kind == 'get_available_thinking_levels':
             data = {'levels':['off','medium','high']}
         elif kind == 'set_thinking_level':

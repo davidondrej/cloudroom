@@ -1,4 +1,4 @@
-import { cloudroomCommands, cloudroomThreads, events, threads, type DbConnection } from "@cloudroom/db";
+import { cloudroomCommands, cloudroomThreads, environments, events, threads, type DbConnection } from "@cloudroom/db";
 import type { ThreadEventType } from "@cloudroom/domain";
 import { and, desc, eq, gt, inArray, isNull, ne, or, sql } from "drizzle-orm";
 import type { NotificationHub } from "../../ws/hub.js";
@@ -38,6 +38,15 @@ interface Tracker {
 }
 
 let tracker: Tracker | null = null;
+/** How long each thread's workspace took to create, kept until its first reply. */
+const workspaceCreates = new Map<string, { ms: number; at: number }>();
+
+/** Records how long an environment provider took to create a thread's workspace, such as a worktree. */
+export function noteWorkspaceCreated(threadId: string, ms: number): void {
+  const now = Date.now();
+  for (const [id, entry] of workspaceCreates) if (now - entry.at > MAX_WAIT_MS) workspaceCreates.delete(id);
+  workspaceCreates.set(threadId, { ms, at: now });
+}
 
 export function installFirstResponseTelemetry(
   deps: { db: DbConnection; hub: NotificationHub; telemetry: TelemetryService },
@@ -57,6 +66,9 @@ export function installFirstResponseTelemetry(
       if (ms > MAX_WAIT_MS) return;
       const startup = sent.execution === "cloud_sandbox" ? current.startupSince(message.id, sent.sentAt) : null;
       const turn = sent.execution === "local" ? latestTurnExecution(current.db, message.id) : undefined;
+      // Only a workspace created after this message was sent counts toward it.
+      const created = workspaceCreates.get(message.id);
+      workspaceCreates.delete(message.id);
       current.telemetry.capture({
         name: "first_response",
         properties: {
@@ -72,6 +84,8 @@ export function installFirstResponseTelemetry(
           reasoning_level: turn?.reasoning ?? sent.reasoningLevel ?? null,
           service_tier: sent.serviceTier ?? null,
           harness_version: sent.provider === "codex" ? startup?.versions?.codex ?? null : sent.provider === "claude-code" ? startup?.versions?.claude ?? null : null,
+          environment_provider: sent.execution === "local" ? environmentProviderOf(current.db, message.id) : null,
+          workspace_create_ms: created !== undefined && created.at >= sent.sentAt ? created.ms : null,
           seconds_since_first_launch: secondsSinceFirstLaunch(),
           ...firstAgentTag(current.db, message.id),
         },
@@ -119,6 +133,15 @@ export function noteMessageSent(
   }
   tracker.pending.set(threadId, { ...message, model: cloud?.model ?? local?.model ?? null, reasoningLevel: cloud?.reasoning ?? local?.reasoning ?? null,
     serviceTier, afterSequence: latest?.sequence ?? 0, sentAt });
+}
+
+function environmentProviderOf(db: DbConnection, threadId: string): string | null {
+  return db
+    .select({ provider: environments.environmentProviderId })
+    .from(threads)
+    .innerJoin(environments, eq(environments.id, threads.environmentId))
+    .where(eq(threads.id, threadId))
+    .get()?.provider ?? null;
 }
 
 function latestTurnExecution(db: DbConnection, threadId: string): { model: string | null; reasoning: string | null } | undefined {

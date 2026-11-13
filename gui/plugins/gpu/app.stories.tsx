@@ -28,6 +28,7 @@ export function Approval() {
             gpu: "1x H100 80 GB", name: "H100", count: 1, cpu: 8, memory: 48, disk: 100, hours: 2,
             purpose: "Fine-tune the support-ticket classifier on data/tickets.csv. About 40 minutes.",
             credits_per_hour: 10_261, max_credits: 20_522, credits_left: 131_400,
+            note: "Also covers new GPU sessions in this thread for 24 hours, within these credits.",
           },
         }}
       />

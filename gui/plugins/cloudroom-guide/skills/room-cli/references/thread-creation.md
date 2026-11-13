@@ -104,6 +104,10 @@ worktree` only; a provider takes its branch through `--environment-inputs`.
   with optional `--json`. Native machines take precedence over matching VPS names.
   `machine list --json` stays a native-host list. Start VPS threads from the app's
   new-thread picker; `thread spawn --machine vps` is not supported yet.
+  `room-cli cloud status` shows it too (`vps` in `--json`, null without one):
+  `health.disk` is the whole VPS's disk, shared by all its threads. Over 95% CPU,
+  85% memory or 90% disk, `busy` names the limit and new threads start in Cloud,
+  or fail while `fallback` is false.
 - Each machine carries a permission limit (`maxPermissionMode`, default
   `full`): the highest permission mode a thread on that machine may run with.
   The server resolves any higher request down to it, and refuses a provider

@@ -540,7 +540,8 @@ receive previous.environment and previous.resource, null after completed
 removal. The six policy defaults are 5 minutes/60 seconds/30 seconds/3/
 per-thread/null; nullable retirement and create timeout disable those policies.
 EnvironmentStatus remains provisioning/ready/error/destroyed;
-retiring and teardown are lifecycle phases, not restored statuses.
+retiring and teardown are lifecycle phases, not restored statuses. A ready
+worktree whose folder was removed after archiving reports the parked phase.
 Audit availability message ownership, create-time error presentation, the
 interaction between the `requires` floor and provider decisions, and whether
 the current decision timeout is appropriate before stabilizing it.

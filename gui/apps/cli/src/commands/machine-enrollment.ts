@@ -209,9 +209,19 @@ export async function enrollMachine(
   });
   await atomicWrite(join(dataDir, "host-id"), `${bootstrap.hostId}\n`);
   await prepareRuntime();
-  let enrolled: z.infer<typeof authSchema>;
+  // Name only safe facts: status, a code our enroll route returns, or a system
+  // error code. Never bodies, headers, credentials, or error messages.
+  const knownCodes = [
+    "unauthorized",
+    "connect_machine_id_mismatch",
+    "caller_proof_required",
+    "invalid_request",
+  ];
+  const failed = (reason: string) =>
+    new Error(`Could not exchange machine enrollment credential: ${reason}`);
+  let response: Response;
   try {
-    const response = await fetchFn(
+    response = await fetchFn(
       new URL("/internal/hosts/enroll", serverUrl),
       {
         method: "POST",
@@ -227,10 +237,51 @@ export async function enrollMachine(
         signal,
       },
     );
-    if (response.status !== 201) throw new Error();
+  } catch (error) {
+    // Common OS, TLS and Undici failures; print our own constant, never theirs.
+    const code = [
+      "ECONNREFUSED",
+      "ECONNRESET",
+      "ENOTFOUND",
+      "EAI_AGAIN",
+      "ETIMEDOUT",
+      "EHOSTUNREACH",
+      "ENETUNREACH",
+      "EPIPE",
+      "ECONNABORTED",
+      "CERT_HAS_EXPIRED",
+      "UNABLE_TO_VERIFY_LEAF_SIGNATURE",
+      "SELF_SIGNED_CERT_IN_CHAIN",
+      "DEPTH_ZERO_SELF_SIGNED_CERT",
+      "ERR_TLS_CERT_ALTNAME_INVALID",
+      "UND_ERR_CONNECT_TIMEOUT",
+      "UND_ERR_SOCKET",
+      "UND_ERR_HEADERS_TIMEOUT",
+    ].find(
+      (known) =>
+        known === (error as { cause?: { code?: unknown } })?.cause?.code,
+    );
+    throw failed(
+      signal.aborted
+        ? "timed out after 60s"
+        : `network error${code ? ` (${code})` : ""}`,
+    );
+  }
+  if (response.status !== 201) {
+    const body: unknown = await response.json().catch(() => null);
+    // Print our own constant, never the server's string.
+    const code = knownCodes.find(
+      (known) => known === (body as { code?: unknown } | null)?.code,
+    );
+    throw failed(`HTTP ${response.status}${code ? ` (${code})` : ""}`);
+  }
+  let enrolled: z.infer<typeof authSchema>;
+  try {
     enrolled = authSchema.parse(await response.json());
   } catch {
-    throw new Error("Could not exchange machine enrollment credential");
+    throw failed(
+      signal.aborted ? "timed out after 60s" : "unexpected server response",
+    );
   }
   if (enrolled.hostId !== bootstrap.hostId)
     throw new Error("Enrollment returned a different machine identity");

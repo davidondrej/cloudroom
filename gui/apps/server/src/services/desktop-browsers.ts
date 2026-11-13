@@ -143,12 +143,30 @@ function assertTabsInThread(
   }
 }
 
-function sendReleaseControl(
+async function sendReleaseControl(
   call: typeof callHostOnlineRpc,
   deps: WorkSessionDeps,
   input: ExperimentalDesktopBrowserScope,
   leaseId: string,
+  closeOpenedPages = false,
 ) {
+  // Only an instance that advertises the flag gets it; older daemons and desktops reject it (#1383).
+  const close =
+    closeOpenedPages &&
+    (await callHostOnlineRpc(deps, {
+      hostId: input.hostId,
+      timeoutMs: 10000,
+      command: { type: "desktop.browser.list_instances" },
+    })
+      .then(({ instances }) =>
+        instances.some(
+          (instance) =>
+            instance.instanceId === input.instanceId &&
+            instance.generation === input.generation &&
+            instance.closesOpenedPages === true,
+        ),
+      )
+      .catch(() => false));
   return call(deps, {
     hostId: input.hostId,
     timeoutMs: 10000,
@@ -156,6 +174,7 @@ function sendReleaseControl(
       type: "desktop.browser.release_control",
       ...scopeCommand(input),
       leaseId,
+      ...(close ? { closeOpenedPages: true as const } : {}),
     },
   });
 }
@@ -262,6 +281,7 @@ export async function createDesktopBrowserTab(
 export async function releaseDesktopBrowserControl(
   deps: WorkSessionDeps,
   input: ExperimentalDesktopBrowserLeaseRequest,
+  closeOpenedPages = false,
 ) {
   const entry = registry(deps).get(input.leaseId);
   if (!entry) return { ok: true as const };
@@ -279,6 +299,7 @@ export async function releaseDesktopBrowserControl(
     deps,
     input,
     input.leaseId,
+    closeOpenedPages,
   );
   return { ok: true as const };
 }
@@ -291,7 +312,7 @@ async function releaseExpiredDesktopBrowserControl(
   if (!entry || !sameScope(entry.lease, input)) return;
   entry.active = false;
   registry(deps).delete(input.leaseId);
-  await sendReleaseControl(callHostOnlineRpc, deps, input, input.leaseId);
+  await sendReleaseControl(callHostOnlineRpc, deps, input, input.leaseId, true);
 }
 
 export async function acquireDesktopBrowserControl(
@@ -492,12 +513,15 @@ export async function importDesktopBrowserCookies(
 export async function revokeThreadDesktopBrowserControl(
   deps: WorkSessionDeps,
   threadId: string,
+  closeOpenedPages = false,
 ) {
   const leases = [...registry(deps).values()].filter(
     (entry) => entry.lease.threadId === threadId,
   );
   await Promise.allSettled(
-    leases.map((entry) => releaseDesktopBrowserControl(deps, entry.lease)),
+    leases.map((entry) =>
+      releaseDesktopBrowserControl(deps, entry.lease, closeOpenedPages),
+    ),
   );
 }
 

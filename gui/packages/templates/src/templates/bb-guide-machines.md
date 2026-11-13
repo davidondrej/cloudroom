@@ -100,6 +100,10 @@ Inspect it with `room-cli machine show vps` (or its hostname or short name),
 with optional `--json`. Native machines take precedence over matching VPS names.
 `machine list --json` stays a native-host list. Start VPS threads from the app's
 new-thread picker; `thread spawn --machine vps` is not supported yet.
+`room-cli cloud status` shows it too (`vps` in `--json`, null without one):
+`health.disk` is the whole VPS's disk, shared by all its threads. Over 95% CPU,
+85% memory or 90% disk, `busy` names the limit and new threads start in Cloud,
+or fail while `fallback` is false.
 
 Each machine has a permission limit: the highest permission mode any thread on
 that machine can run with. The default is Full Access. A thread that asks for

@@ -15,7 +15,7 @@ export interface CloudroomStorage {
 /** Mac access levels (ADR 0186). */
 export type MacAccessLevel = "off" | "read-only" | "ask" | "full";
 
-export type CloudroomThreadStatus = { model: string; reasoning: string; error?: string | null; reconnecting?: boolean };
+export type CloudroomThreadStatus = { model: string; reasoning: string; error?: string | null; reconnecting?: boolean; waiting?: string | null };
 
 export interface CloudroomStatus {
   storage?: CloudroomStorage | null;
@@ -338,13 +338,16 @@ export interface CloudroomArea {
   logout(): Promise<void>;
   threadWorkspace(threadId: string, signal?: AbortSignal): Promise<CloudroomThreadWorkspace | null>;
   /** A Cloud thread's model and current effort, or null when it has no cloud session. `error` and `reconnecting`
-   *  say why its start or messages aren't going through yet (older apps send neither). */
+   *  say why its start or messages aren't going through yet (older apps send neither); `waiting` is the website's
+   *  words while its sandbox's server restarts or is full. */
   threadStatus(threadId: string, signal?: AbortSignal): Promise<CloudroomThreadStatus | null>;
   retryStart(threadId: string): Promise<void>;
   /** Clears package caches and Git-ignored dependency and build folders on a Cloud thread's sandbox, even while a full disk pauses its agent. */
   clearDisk(threadId: string): Promise<{ freedBytes: number }>;
   /** Copies a Cloud thread's project into its folder again after the copy failed. */
   retryCopy(threadId: string): Promise<void>;
+  /** During an outage, continues a Cloud thread from its older copy instead of waiting; newer work is lost. */
+  continueFromCopy(threadId: string): Promise<void>;
   /** `choice` runs the cloud thread on another model when the cloud cannot offer the local one. */
   teleport(threadId: string, action?: "start" | "cancel", choice?: { model: string; reasoning: string }): Promise<TeleportProgress>;
   teleportStatus(threadId: string, signal?: AbortSignal): Promise<TeleportProgress | null>;
@@ -494,6 +497,7 @@ export function createCloudroomArea({ transport }: CreateSdkAreaArgs): Cloudroom
     exportChats: (input) => transport.readJson(transport.fetch(`${transport.baseUrl}/api/v1/cloudroom/export`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(input) })) as Promise<{ folder: string; count: number }>,
     reportBug: (input) => transport.readJson(transport.fetch(`${transport.baseUrl}/api/v1/cloudroom/bug-reports`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(input) })) as Promise<{ sent: boolean }>,
     retryCopy: (threadId) => transport.readVoid(transport.fetch(`${transport.baseUrl}/api/v1/cloudroom/threads/${encodeURIComponent(threadId)}/retry-copy`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" })),
+    continueFromCopy: (threadId) => transport.readVoid(transport.fetch(`${transport.baseUrl}/api/v1/cloudroom/threads/${encodeURIComponent(threadId)}/from-copy`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" })),
     threadShare: (threadId, signal, fresh) => transport.readJson(transport.fetch(`${transport.baseUrl}/api/v1/cloudroom/threads/${encodeURIComponent(threadId)}/share${fresh ? "?fresh=1" : ""}`, { signal })) as Promise<ThreadShare | null>,
     shareThread: (threadId) => transport.readJson(transport.fetch(`${transport.baseUrl}/api/v1/cloudroom/threads/${encodeURIComponent(threadId)}/share`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "save" }) })) as Promise<ThreadShare>,
     stopSharingThread: (threadId) => transport.readVoid(transport.fetch(`${transport.baseUrl}/api/v1/cloudroom/threads/${encodeURIComponent(threadId)}/share`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "stop" }) })),

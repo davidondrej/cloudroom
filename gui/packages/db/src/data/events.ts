@@ -21,6 +21,7 @@ import type {
   PromptInput,
   ThreadEvent,
   StoredThreadEventDataForType,
+  SystemThreadInterruptedEventData,
   SystemThreadInterruptedReason,
   ThreadEventItemType,
   ThreadEventScope,
@@ -37,6 +38,7 @@ import {
   clientTurnRequestIdSchema,
   getThreadEventScopeTurnId,
   parseStoredThreadEvent,
+  systemThreadInterruptedEventDataSchema,
   systemThreadInterruptedReasonSchema,
   threadEventTypeValues,
 } from "@cloudroom/domain";
@@ -1318,6 +1320,8 @@ export interface GetLatestThreadOutputEventRowArgs {
   threadId: string;
   /** Only look inside this turn; omitted means the whole thread. */
   turnId?: string;
+  /** Also match an empty assistant message, so a turn that ended on one has no output (#1670). */
+  includeEmpty?: boolean;
 }
 
 export interface GetLatestThreadSystemErrorEventRowArgs {
@@ -2145,6 +2149,70 @@ export function getLatestThreadInterruptedReason(
     return null;
   }
   return systemThreadInterruptedReasonSchema.parse(row.reason);
+}
+
+/**
+ * The stop that ended a root turn that completed `interrupted` (#1159); the
+ * last root turn when no turnId is given. Stops carry no turn ID, so this
+ * answers only when ownership is certain: no other root turn overlaps this
+ * one (none still open when it started, none started before it ended), and exactly one stop was recorded between its start and the next
+ * root turn's. Null otherwise, or when the stored data is invalid.
+ */
+export function getRootTurnInterruption(
+  db: DbQueryConnection,
+  args: { threadId: string; turnId?: string },
+): SystemThreadInterruptedEventData | null {
+  const ofThread = (type: ThreadEventType) =>
+    and(eq(events.threadId, args.threadId), eq(events.type, type));
+  const rootStart = (where: SQL | undefined, latest: boolean) =>
+    db
+      .select({ sequence: events.sequence, turnId: events.turnId })
+      .from(events)
+      .where(and(ofThread("turn/started"), isRootTurnStartedEventData, where))
+      .orderBy(latest ? desc(events.sequence) : events.sequence)
+      .limit(1)
+      .get();
+  const firstCompletion = (turnId: string) =>
+    db
+      .select({ sequence: events.sequence, status: sql<string | null>`json_extract(${events.data}, '$.status')` })
+      .from(events)
+      .where(and(ofThread("turn/completed"), eq(events.turnId, turnId)))
+      .orderBy(events.sequence)
+      .limit(1)
+      .get();
+  const started = rootStart(args.turnId === undefined ? undefined : eq(events.turnId, args.turnId), true);
+  if (!started?.turnId) return null;
+  const completed = firstCompletion(started.turnId);
+  if (completed?.status !== "interrupted") return null;
+  const next = rootStart(gt(events.sequence, started.sequence), false);
+  if (next && next.sequence < completed.sequence) return null;
+  const earlierEnd = alias(events, "earlier_turn_end");
+  const openEarlier = rootStart(
+    and(
+      lt(events.sequence, started.sequence),
+      notExists(
+        db
+          .select({ sequence: earlierEnd.sequence })
+          .from(earlierEnd)
+          .where(and(eq(earlierEnd.threadId, events.threadId), eq(earlierEnd.type, "turn/completed"), eq(earlierEnd.turnId, events.turnId), lt(earlierEnd.sequence, started.sequence))),
+      ),
+    ),
+    true,
+  );
+  if (openEarlier) return null;
+  const stops = db
+    .select({ data: events.data })
+    .from(events)
+    .where(and(ofThread("system/thread/interrupted"), gt(events.sequence, started.sequence), next ? lt(events.sequence, next.sequence) : undefined))
+    .limit(2)
+    .all();
+  if (stops.length !== 1) return null;
+  try {
+    const parsed = systemThreadInterruptedEventDataSchema.safeParse(JSON.parse(stops[0]!.data));
+    return parsed.success ? parsed.data : null;
+  } catch {
+    return null;
+  }
 }
 
 export function listStoredTurnStartedRowsByTurnIdsUpToSequence(
@@ -3346,7 +3414,7 @@ export function getLatestThreadOutputEventRow(
         OR (
           ${events.type} = 'item/completed'
           AND ${events.itemKind} = 'agentMessage'
-          AND COALESCE(json_extract(${events.data}, '$.item.text'), '') <> ''
+          ${args.includeEmpty === true ? sql`` : sql`AND COALESCE(json_extract(${events.data}, '$.item.text'), '') <> ''`}
         )
       )`,
       )

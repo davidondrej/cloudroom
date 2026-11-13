@@ -22,7 +22,6 @@ const NO_WATCHER = ["-c", "core.fsmonitor=false"];
 
 /** Spares being claimed, built, or removed. Nobody waits: a busy spare is skipped. */
 const busy = new Set<string>();
-const builds = new Set<Promise<void>>();
 
 async function exists(target: string): Promise<boolean> {
   return fs.access(target).then(
@@ -246,14 +245,5 @@ interface BuildSpareArgs {
  * leaves no ready marker, and the next create builds its worktree as usual.
  */
 export function buildSpareWorktree(args: BuildSpareArgs): Promise<void> {
-  const run = build(args)
-    .catch(() => undefined)
-    .finally(() => builds.delete(run));
-  builds.add(run);
-  return run;
-}
-
-/** Resolves once no build is running; a stopping worker waits on this. */
-export async function settleSpareBuilds(): Promise<void> {
-  await Promise.all(builds);
+  return build(args).catch(() => undefined);
 }

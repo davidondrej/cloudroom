@@ -35,9 +35,9 @@ pub(super) fn command(
     profile: &HarnessConfig,
     saved: Option<&Resume>,
     fork: Option<&str>,
-    guarded: bool,
-    strip_ai_co_authors: bool,
+    (guarded, strip_ai_co_authors): (bool, bool),
     system_prompt: Option<&str>,
+    probe: bool,
 ) -> io::Result<(Command, String)> {
     let id = match saved.filter(|_| fork.is_none()) {
         Some(saved) => saved.id.clone(),
@@ -48,8 +48,12 @@ pub(super) fn command(
     if strip_ai_co_authors {
         settings["attribution"] = json!({"commit": "", "pr": ""});
     }
+    // A model-list probe runs no turn, so the user's SessionStart/SessionEnd hooks must not see it (#1014).
+    if probe {
+        settings["disableAllHooks"] = json!(true);
+    }
     let settings = settings.to_string();
-    let mut command = if guarded {
+    let mut command = if guarded && !probe {
         super::command_guard::claude_command(config, profile, &settings)
     } else {
         let mut command = super::command(&profile.binary, config);
@@ -242,6 +246,8 @@ pub(super) async fn probe(config: &Config, model: &str, reasoning: Option<&str>)
         "--no-session-persistence",
         "--tools",
         "",
+        "--settings",
+        r#"{"disableAllHooks":true}"#,
     ];
     if let Some(effort) = reasoning.filter(|effort| *effort != "none") {
         args.extend(["--effort", effort]);

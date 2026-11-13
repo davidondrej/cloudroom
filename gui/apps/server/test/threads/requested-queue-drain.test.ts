@@ -202,7 +202,7 @@ describe("the requested queue drain", () => {
       });
 
       // Queued inline, so the re-queue pacing window never opens.
-      await acceptThreadSendRequest(harness.deps, {
+      const sent = await acceptThreadSendRequest(harness.deps, {
         payload: { input: textInput("held work"), mode: "auto" },
         thread,
       });
@@ -214,6 +214,10 @@ describe("the requested queue drain", () => {
 
       expect(listQueuedThreadMessages(harness.db, thread.id)).toHaveLength(0);
       expect(turnRequests(harness, thread.id)).toHaveLength(turnsBefore + 1);
+      // The request names the row it delivered, with its text, so the sender can find its turn (#1100).
+      const request = JSON.parse(turnRequests(harness, thread.id).at(-1)!.data);
+      expect(sent.delivery === "queued" && sent.queuedMessage.id).toBe(request.queuedMessageId);
+      expect(sent.delivery === "queued" && sent.queuedMessage.content).toEqual(request.input);
     });
   });
 

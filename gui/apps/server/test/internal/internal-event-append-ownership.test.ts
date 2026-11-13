@@ -2,6 +2,7 @@ import { eq, sql } from "drizzle-orm";
 import {
   createQueuedThreadMessage,
   events,
+  getLatestThreadSequence,
   getThread,
   listEvents,
   listQueuedThreadMessages,
@@ -1204,6 +1205,52 @@ describe("internal event append ownership", () => {
           },
         },
       ]);
+    } finally {
+      await harness.cleanup();
+    }
+  });
+
+  // #1159: the parent hears why a child's turn was interrupted, only from a stop that is surely that turn's.
+  it.each([
+    ["memory-limit", "during", "was interrupted (memory protection)."],
+    ["host-daemon-restarted", "after", "was interrupted (host restarted)."],
+    ["manual-stop", "before", "was interrupted."],
+    ["memory-limit", "overlap", "was interrupted."],
+    ["memory-limit", "open-earlier", "was interrupted."],
+    [null, null, "was interrupted."],
+  ] as const)("reports a child's %s stop recorded %s its turn", async (reason, when, expected) => {
+    const { environment, harness, project, session } = await setupEventRoute();
+    const parentThread = seedThread(harness.deps, { environmentId: environment.id, projectId: project.id, status: "idle" });
+    seedThreadRuntimeState(harness.deps, { environmentId: environment.id, inputText: "Coordinate", providerThreadId: "provider-parent-stop", threadId: parentThread.id });
+    const childThread = seedThread(harness.deps, { environmentId: environment.id, parentThreadId: parentThread.id, projectId: project.id, status: "active" });
+    const seedStop = () =>
+      reason !== null &&
+      seedEvent(harness.deps, { threadId: childThread.id, sequence: getLatestThreadSequence(harness.db, { threadId: childThread.id }) + 1, type: "system/thread/interrupted", scope: threadScope(), data: { reason } });
+    try {
+      if (when === "before") seedStop();
+      // An earlier turn still open: the stop could be either turn's.
+      if (when === "overlap" || when === "open-earlier") seedTurnStarted(harness.deps, { threadId: childThread.id, turnId: "turn-open" });
+      // A finished turn in between must not hide the open one.
+      if (when === "open-earlier") {
+        seedTurnStarted(harness.deps, { threadId: childThread.id, turnId: "turn-done" });
+        seedEvent(harness.deps, { threadId: childThread.id, sequence: getLatestThreadSequence(harness.db, { threadId: childThread.id }) + 1, type: "turn/completed", scope: turnScope("turn-done"), data: { providerThreadId: null, status: "completed" } });
+      }
+      seedTurnStarted(harness.deps, { threadId: childThread.id, turnId: "turn-stopped" });
+      if (when === "during" || when === "overlap" || when === "open-earlier") seedStop();
+      const response = await postEventBatch({
+        harness,
+        sessionId: session.id,
+        events: [{ threadId: childThread.id, event: { type: "turn/completed", threadId: childThread.id, providerThreadId: "provider-turn-stopped", scope: turnScope("turn-stopped"), status: "interrupted" } }],
+      });
+      expect(response.status).toBe(200);
+      // Recorded after the notice was queued, before its 2 s flush.
+      if (when === "after") {
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        seedStop();
+      }
+      const { command } = await waitForQueuedCommand(harness, ({ command }) => command.type === "turn.submit" && command.threadId === parentThread.id, 5_000);
+      const input = command.type === "turn.submit" ? command.input[0] : undefined;
+      expect(input?.type === "text" ? input.text : "").toContain(`@thread:${childThread.id} ${expected}\n`);
     } finally {
       await harness.cleanup();
     }

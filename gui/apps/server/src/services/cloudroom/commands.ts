@@ -423,6 +423,12 @@ function publicError(error: unknown): string {
   return error instanceof Error ? `${connectionOrReplayFailed}: ${error.message}` : connectionOrReplayFailed;
 }
 
+/** Why Cloud refused a prompt, for its `turn_failed` event: Core's code, or the HTTP status when the app knows no code. */
+function refusal(error: unknown): { code: string | null; message: string } {
+  const code = error instanceof CloudroomError ? error.code ?? (error.status === null ? null : `http_${error.status}`) : error instanceof ApiError ? error.body.code : null;
+  return { code, message: publicError(error) };
+}
+
 /** A sandbox put to sleep or stopped answers at its saved address with a 404 (Upstash, Vercel removed) or 410 (Vercel
  *  stopped) and no Cloudroom code: the address is stale, not a refusal (feedback #596). */
 function staleSandboxAddress(error: unknown): boolean {
@@ -1999,7 +2005,7 @@ class CloudroomService {
     const serviceTier = input.service_tier === "fast" ? "fast" : "default";
     const initial = prompts.find(item => item.id === `first_${threadId}`);
     const issues = Object.values(this.connectionIssues.get(threadId) ?? {});
-    return { authRequired: !saved.sessionId && authRequiredMessages.has(saved.error ?? ""), starting: !saved.queuePaused && Boolean(initial && ["sending", "accepted"].includes(initial.state)), sessionId: saved.sessionId, paused: saved.queuePaused, failedStart: !saved.sessionId && initial?.state === "failed", model: saved.model, reasoning, serviceTier, error: saved.error ?? issues.find(issue => !issue.reconnecting)?.message ?? null, reconnecting: issues.some(issue => issue.reconnecting), usageLimit: Boolean(sandboxThread(saved.coreUrl)) && (this.sandboxes.usageLimited() || this.sandboxes.agentLimited(sandboxThread(saved.coreUrl) ?? "")), disk: this.disk.get(threadId) ?? null, awake: !sandboxThread(saved.coreUrl) || this.sandboxes.isAwake(sandboxThread(saved.coreUrl) ?? ""), vps: this.sandboxes.onVps(sandboxThread(saved.coreUrl) ?? ""), move: this.sandboxes.moveState(sandboxThread(saved.coreUrl) ?? ""), outOfMemory: this.outOfMemory.has(threadId), pendingDelivery: commands(this.deps.db, threadId).filter((c) => c.state === "sending").length };
+    return { authRequired: !saved.sessionId && authRequiredMessages.has(saved.error ?? ""), starting: !saved.queuePaused && Boolean(initial && ["sending", "accepted"].includes(initial.state)), sessionId: saved.sessionId, paused: saved.queuePaused, failedStart: !saved.sessionId && initial?.state === "failed", model: saved.model, reasoning, serviceTier, error: saved.error ?? issues.find(issue => !issue.reconnecting)?.message ?? null, reconnecting: issues.some(issue => issue.reconnecting), usageLimit: Boolean(sandboxThread(saved.coreUrl)) && (this.sandboxes.usageLimited() || this.sandboxes.agentLimited(sandboxThread(saved.coreUrl) ?? "")), disk: this.disk.get(threadId) ?? null, awake: !sandboxThread(saved.coreUrl) || this.sandboxes.isAwake(sandboxThread(saved.coreUrl) ?? ""), vps: this.sandboxes.onVps(sandboxThread(saved.coreUrl) ?? ""), move: this.sandboxes.moveState(sandboxThread(saved.coreUrl) ?? ""), waiting: this.sandboxes.waitNotice(sandboxThread(saved.coreUrl) ?? ""), fromCopy: this.sandboxes.copyChoice(sandboxThread(saved.coreUrl) ?? ""), outOfMemory: this.outOfMemory.has(threadId), pendingDelivery: commands(this.deps.db, threadId).filter((c) => c.state === "sending").length };
   }
 
   async create(request: CreateThreadRequest, awaitingCore = false, fork?: { sourceThreadId: string; endSequence: number }): Promise<Thread> {
@@ -2629,7 +2635,11 @@ class CloudroomService {
   async freezeForTeleport(threadId: string, client: CloudroomClient, session: string): Promise<{ id: string; check: () => Promise<void>; end: (release: boolean) => void } | null> {
     if (!feature(await this.capabilities(client), "cloud_threads")) return null;
     const id = randomUUID();
-    await client.freeze(session, id);
+    await client.freeze(session, id).catch((error: unknown) => {
+      // Core may have applied it before the reply failed: let go now, or every try is `moving` for 5 minutes (#1554).
+      void client.freeze(session, id, true).catch(() => {});
+      throw error;
+    });
     const renew = setInterval(() => void client.freeze(session, id).catch((error: unknown) => this.warn("Teleport's freeze could not be renewed", error, { threadId })), 120_000);
     renew.unref();
     const check = async () => {
@@ -3071,7 +3081,7 @@ class CloudroomService {
     // Cloud refused Codex's login: resend this Mac's working one before anyone has to click.
     if (cloudLoginProvider(message) === "codex" && authRequiredMessages.has(message)) this.healCodex();
     this.deps.db.transaction((tx) => {
-      saveCommandState(tx, threadId, `first_${threadId}`, "failed");
+      saveCommandState(tx, threadId, `first_${threadId}`, "failed", { code: refusal(cause).code, message });
       saveBinding(tx, threadId, { error: message });
       saveStatus(tx, threadId, "error");
       appendStartProgress(tx, threadId, [{ key: "error", text: message, status: "failed" }], "failed");
@@ -3494,7 +3504,7 @@ class CloudroomService {
               this.keepModel(threadId, pending);
               continue;
             }
-            saveCommandState(this.deps.db, threadId, pending.id, "failed");
+            saveCommandState(this.deps.db, threadId, pending.id, "failed", refusal(error));
             if (["edit", "cancel"].includes(pending.command) && error instanceof CloudroomError && /queued message is (no longer pending|already being sent)/.test(error.message)) continue;
             rejectedCommand = true;
           }
@@ -4156,6 +4166,13 @@ class CloudroomService {
   }
 
   /** "Try again" on a failed project copy: plans it again from the thread's first message, so it also works after a restart. */
+  /** During an outage, continues a Cloud thread from its older copy instead of waiting (ADR 20261113-202742). */
+  async continueFromCopy(threadId: string): Promise<void> {
+    const sandbox = sandboxThread(binding(this.deps.db, threadId)?.coreUrl ?? "");
+    if (!sandbox) throw new ApiError(409, "cloudroom_unsupported", "Only Cloud threads have a copy.");
+    await this.sandboxes.continueFromCopy(sandbox);
+  }
+
   /** Moves a VPS thread to Cloud (ADR 0319), when its VPS runs low. */
   async moveToCloud(threadId: string): Promise<void> {
     const sandbox = sandboxThread(binding(this.deps.db, threadId)?.coreUrl ?? "");

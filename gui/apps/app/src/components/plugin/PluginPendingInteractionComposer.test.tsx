@@ -277,7 +277,7 @@ describe("PluginPendingInteractionComposer", () => {
     expect(screen.getByRole("button", { name: "Cancel" })).toBeDefined();
   });
 
-  it("opens a pop-up request with focus on the pop-up, not on a choice", () => {
+  it("shows a GPU request as a bare card, with no pop-up and no choice focused", () => {
     function Approval() {
       return (
         <>
@@ -302,6 +302,8 @@ describe("PluginPendingInteractionComposer", () => {
         dismissal="cancel"
       />,
     );
-    expect(document.activeElement).toBe(screen.getByRole("dialog"));
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(screen.getByRole("region", { name: "Use a GPU?" })).toBeDefined();
+    expect(document.activeElement).toBe(document.body);
   });
 });

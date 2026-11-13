@@ -9,7 +9,8 @@ import {
   groupHostDaemonEvents,
   type HostDaemonEventEnvelope,
 } from "@cloudroom/host-daemon-contract";
-import { describe, expect, it } from "vitest";
+import Database from "better-sqlite3";
+import { describe, expect, it, vi } from "vitest";
 import { queueChildThreadTurnNotificationBestEffort } from "../../../src/services/threads/child-thread-notifications.js";
 import { sendThreadMessage } from "../../../src/services/threads/thread-send.js";
 import {
@@ -200,6 +201,86 @@ describe("child outcome reconciliation", () => {
       ]);
     });
   });
+
+  // full/free: writes fail with SQLITE_FULL or work; stall/pass: deliveries
+  // stall on a gate or run; open: reopens gates oldest first; held: notices
+  // queue behind a pending interaction (#1542).
+  it.each([
+    [
+      ["full", "stall", "failed", "pass", "open", "free", "wait"],
+      "child-failed",
+    ],
+    [
+      ["full", "stall", "failed", "completed", "pass", "open", "free", "wait"],
+      "child-completed",
+    ],
+    [
+      ["full", "failed", "free", "stall", "wait", "pass", "completed", "open"],
+      "child-completed",
+    ],
+    [
+      ["full", "failed", "free", "held", "wait", "completed"],
+      "child-completed",
+    ],
+  ] as const)(
+    "after %j the parent gets one %s",
+    async (steps, expected) => {
+      await withTestHarness(async (harness) => {
+        const fixture = seedFamily(harness, "disk-full");
+        const sleep = (ms: number) =>
+          new Promise((resolve) => setTimeout(resolve, ms));
+        const gates: (() => void)[] = [];
+        let full: { mockRestore(): void } | undefined;
+        let stall: { mockRestore(): void } | undefined;
+        for (const step of steps) {
+          if (step === "full") {
+            full = vi
+              .spyOn(harness.db, "transaction")
+              .mockImplementation(() => {
+                throw new Database.SqliteError(
+                  "database or disk is full",
+                  "SQLITE_FULL",
+                );
+              });
+          } else if (step === "free") full?.mockRestore();
+          else if (step === "held") {
+            vi.spyOn(
+              harness.deps.pendingInteractions,
+              "hasPendingThreadInteraction",
+            ).mockReturnValue(true);
+          } else if (step === "stall") {
+            stall = vi
+              .spyOn(harness.deps.providerRegistry, "whenRegistrationsSettled")
+              .mockImplementation(
+                () => new Promise<void>((resolve) => gates.push(resolve)),
+              );
+          } else if (step === "pass") stall?.mockRestore();
+          else if (step === "open") {
+            for (const open of gates.splice(0)) {
+              open();
+              await sleep(500);
+            }
+          } else if (step === "wait") await sleep(5_500);
+          else {
+            await queueChildThreadTurnNotificationBestEffort(harness.deps, {
+              childThread: fixture.child,
+              parentThreadId: fixture.parent.id,
+              turnStatus: step,
+            });
+            await sleep(2_100);
+          }
+        }
+
+        // Sent or queued, the parent hears of the child exactly once.
+        const queued = listQueuedThreadMessages(harness.db, fixture.parent.id);
+        expect([
+          ...parentSystemMessageKinds(harness, fixture.parent.id),
+          ...queued.map((row) => JSON.parse(row.systemNotice ?? "{}").kind),
+        ]).toEqual([expected]);
+      });
+    },
+    20_000,
+  );
 
   it("reports a waiting child again only once a background command finished, not every turn it wakes itself (#862)", async () => {
     await withTestHarness(async (harness) => {

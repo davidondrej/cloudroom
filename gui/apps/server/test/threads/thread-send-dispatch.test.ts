@@ -607,7 +607,11 @@ describe("startup queue waits", () => {
           },
           thread,
         }),
-      ).resolves.toEqual({ ok: true, delivery: "sent" });
+      ).resolves.toEqual({
+        ok: true,
+        delivery: "sent",
+        requestId: expect.any(String),
+      });
       expect(
         listQueuedThreadCommands(harness, "turn.submit", thread.id),
       ).toEqual([
@@ -736,19 +740,26 @@ describe("startup queue waits", () => {
       ).toEqual({ kind: "thread-busy" });
 
       vi.spyOn(threadEvents, "getActiveTurnId").mockReturnValueOnce(null);
-      await expect(
-        acceptThreadSendRequest(harness.deps, {
-          payload: {
-            input: textInput("send after the wake scan"),
-            mode: "steer",
-            model: "gpt-5",
-            permissionMode: "full",
-            reasoningLevel: "medium",
-            serviceTier: "default",
-          },
-          thread,
-        }),
-      ).resolves.toEqual({ ok: true, delivery: "sent" });
+      const sent = await acceptThreadSendRequest(harness.deps, {
+        payload: {
+          input: textInput("send after the wake scan"),
+          mode: "steer",
+          model: "gpt-5",
+          permissionMode: "full",
+          reasoningLevel: "medium",
+          serviceTier: "default",
+        },
+        thread,
+      });
+      // The send returns the ID of the request Core recorded (#1100).
+      const request = listEvents(harness.db, { threadId: thread.id })
+        .filter((event) => event.type === "client/turn/requested")
+        .at(-1)!;
+      expect(sent).toEqual({
+        ok: true,
+        delivery: "sent",
+        requestId: JSON.parse(request.data).requestId,
+      });
     });
   });
 
@@ -851,6 +862,33 @@ describe("startup queue waits", () => {
       ).toMatchObject({
         target: { mode: "auto", expectedTurnId: "turn-system-notice-ready" },
       });
+    });
+  });
+
+  it("parks a second notice while the first starts a fresh session (#1584)", async () => {
+    await withTestHarness(async (harness) => {
+      const { thread } = seedProviderThreadFixture({ harness, value: 1584 });
+      // As after a context clear: no provider session, so a notice starts one.
+      vi.spyOn(threadEvents, "getLastProviderThreadId").mockReturnValue(null);
+      for (const text of ["child A assigned", "child B assigned"]) {
+        await queueParentSystemMessage(harness.deps, {
+          input: textInput(text),
+          parentThreadId: thread.id,
+          systemMessageKind: "ownership-assigned",
+          systemMessageSubject: null,
+        });
+      }
+
+      // Before, the second sent a competing `thread.start` the host refused.
+      expect(
+        listQueuedThreadCommands(harness, "thread.start", thread.id),
+      ).toHaveLength(1);
+      expect(getThread(harness.db, thread.id)?.status).toBe("active");
+      expect(
+        listQueuedThreadMessages(harness.db, thread.id).map((row) =>
+          JSON.parse(row.waitingOn!),
+        ),
+      ).toEqual([{ kind: "turn-starting" }]);
     });
   });
 

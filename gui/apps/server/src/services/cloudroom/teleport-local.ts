@@ -35,6 +35,8 @@ import { ensureProjectCheckoutForThread } from "../projects/project-source-setup
 import { resolveStableThreadRequestEnvironment } from "../threads/thread-request-eligibility.js";
 import { DEFAULT_ENVIRONMENT_PROVIDER_ID } from "../environments/environment-provider-ids.js";
 import { requestQueuedMessageDispatch } from "../threads/queued-message-dispatch.js";
+import { settleDanglingBackgroundTasksForStoppedThreadInTransaction } from "../threads/background-task-reconciliation.js";
+import { NotificationBuffer } from "../lib/notification-buffer.js";
 import { requireThreadStoragePath } from "../threads/thread-storage.js";
 import { cloudroom } from "./commands.js";
 import { RECORD_VALUES, values, type CloudroomClient } from "./client.js";
@@ -151,7 +153,13 @@ async function run(deps: AppDeps, threadId: string, step: (value: TeleportLocalS
   step("switching");
 
   const queued = cloudroom(deps).queue(threadId);
+  const hub = new NotificationBuffer();
   deps.db.transaction((tx) => {
+    // Background tasks still open died with the Cloud agent; the Mac would never close them (#1554).
+    settleDanglingBackgroundTasksForStoppedThreadInTransaction(
+      { db: tx, hub, logger: deps.logger },
+      { threadId },
+    );
     for (const message of queued)
       createQueuedThreadMessageInTransaction(tx, {
         threadId, content: message.content, model: message.model, reasoningLevel: message.reasoningLevel,
@@ -163,6 +171,7 @@ async function run(deps: AppDeps, threadId: string, step: (value: TeleportLocalS
     tx.delete(threadPluginMetadata).where(and(eq(threadPluginMetadata.threadId, threadId), inArray(threadPluginMetadata.pluginId, ["cloudroom.teleport", "cloudroom.project-copy"]))).run();
     tx.update(threads).set({ executionTarget: "local", environmentId: environment.id, status: "idle", updatedAt: Date.now() }).where(eq(threads.id, threadId)).run();
   });
+  hub.flushInto(deps.hub);
   cloudroom(deps).detach(threadId);
   cloudroom(deps).threadStates.set(threadId, null);
   deps.hub.notifyThread(threadId, ["status-changed", "queue-changed"]);

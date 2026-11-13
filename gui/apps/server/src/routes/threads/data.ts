@@ -16,6 +16,7 @@ import {
   getLatestThreadSequence,
   getLatestStoredConversationOutlineSequence,
   listQueuedThreadMessages,
+  getRootTurnInterruption,
 } from "@cloudroom/db";
 import type { Hono } from "hono";
 import {
@@ -578,6 +579,8 @@ export function registerThreadDataRoutes(app: Hono, deps: AppDeps): void {
       // `thread show` reports why a thread failed (feedback #571, #390).
       error:
         thread.status === "error" ? getTurnErrorText(deps.db, thread.id) : null,
+      // The recorded stop, when the last turn was interrupted (#1159).
+      interruption: getRootTurnInterruption(deps.db, { threadId: thread.id }),
     });
   });
 

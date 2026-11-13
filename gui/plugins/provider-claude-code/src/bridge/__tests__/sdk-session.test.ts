@@ -205,6 +205,9 @@ describe("SdkSession", () => {
     try {
       await expect(session.stop()).rejects.toThrow("could not confirm");
       await expect(session.stop()).rejects.toThrow("could not confirm");
+      // A failed list (no rows) keeps tracking tool 200 for the next retry.
+      processes = "";
+      await expect(session.stop()).rejects.toThrow("could not confirm");
       processes = "4 0 1000\r\n";
       await expect(session.stop()).resolves.toBeUndefined();
 
@@ -219,6 +222,17 @@ describe("SdkSession", () => {
       Object.assign(late, { windowsChild: running, windowsSpawnedAt: 2000 });
       onTaskkill = () => (processes += "400 300 6000\r\n");
       await expect(late.stop()).rejects.toThrow("could not confirm");
+
+      // Never listed while Claude ran: its tree is unknown, so it stays blocked.
+      const unlisted = new SdkSession(defaultOptions, vi.fn(), vi.fn());
+      Object.assign(unlisted, {
+        windowsChild: running,
+        windowsSpawnedAt: 2000,
+      });
+      [running.exitCode, processes, onTaskkill] = [null, "", () => {}];
+      await expect(unlisted.stop()).rejects.toThrow("could not confirm");
+      processes = "4 0 1000\r\n";
+      await expect(unlisted.stop()).rejects.toThrow("could not confirm");
     } finally {
       Object.defineProperty(process, "platform", platform);
     }

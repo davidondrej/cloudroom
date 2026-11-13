@@ -75,6 +75,21 @@ function fail(code: string, message: string, exitCode = 1): PluginCliResult {
   return { exitCode, stdout: `${JSON.stringify({ error: code, message })}\n` };
 }
 
+// Cloudroom starts Cua Driver without --grant existing-profile, so it refuses the user's own browser profile (#1555).
+const CONSENT_HINT =
+  "Cloudroom doesn't let Cua Driver attach to the user's own browser profile. For the user's logged-in browser use browser-harness. For a separate browser, call browser_prepare with \"allow_launch\":true and \"profile\":{\"mode\":\"isolated_new\"}.";
+
+function withConsentHint(stdout: string) {
+  if (!stdout.includes("browser_consent_required")) return stdout;
+  try {
+    const parsed = JSON.parse(stdout) as { refusal?: { code?: unknown } };
+    if (parsed.refusal?.code !== "browser_consent_required") return stdout;
+    return `${JSON.stringify({ ...parsed, hint: CONSENT_HINT }, null, 2)}\n`;
+  } catch {
+    return stdout;
+  }
+}
+
 export function outcomeOf(result: PluginCliResult): { outcome: string; effect: string | null } {
   const fallback = result.exitCode === 0 ? "ok" : "error";
   try {
@@ -85,6 +100,68 @@ export function outcomeOf(result: PluginCliResult): { outcome: string; effect: s
     return { outcome: parsed.error ?? parsed.code ?? fallback, effect: parsed.effect ?? null };
   } catch {
     return { outcome: fallback, effect: null };
+  }
+}
+
+// Cua Driver 0.35.2 calls an exact bring_to_front unverified whenever a same-app window sits above
+// the target, even an untitled 41 px Chrome helper (#1506). When the driver's own fields prove the
+// target is the front process's focused, visible ordinary window, and every on-screen window of
+// that app above it is an untitled helper under 100 px, report it as activated.
+// Like the driver's own verified result, this is a snapshot: another app's window may sit above
+// the target, and focus can change after the driver's check.
+const focusedWindowSchema = z
+  .object({
+    code: z.literal("bring_to_front_exact_window_unverified"),
+    pid: z.number(),
+    window_id: z.number(),
+    process_activated: z.literal(true),
+    exact_window_effect: z.object({ focused: z.literal(true), target_visible_ordinary: z.literal(true) }).passthrough(),
+    observed: z
+      .object({
+        front_process_matches_target: z.literal(true),
+        focused_window_id: z.number(),
+        process_front_window_on_display: z.number(),
+      })
+      .passthrough(),
+  })
+  .passthrough();
+const listedWindowsSchema = z.object({
+  windows: z.array(
+    z.object({
+      window_id: z.number(),
+      pid: z.number(),
+      title: z.string(),
+      z_index: z.number(),
+      is_on_screen: z.boolean().optional(),
+      bounds: z.object({ width: z.number(), height: z.number() }),
+    }),
+  ),
+});
+
+export async function acceptFocusedWindow(
+  tool: string,
+  input: Record<string, unknown>,
+  result: PluginCliResult,
+  listWindows: (pid: number) => Promise<PluginCliResult>,
+): Promise<PluginCliResult> {
+  if (tool !== "bring_to_front" || result.exitCode === 0 || typeof input.window_id !== "number") return result;
+  try {
+    const parsed = focusedWindowSchema.parse(JSON.parse(result.stdout ?? ""));
+    if (parsed.pid !== input.pid || parsed.window_id !== input.window_id || parsed.observed.focused_window_id !== input.window_id)
+      return result;
+    const listed = await listWindows(parsed.pid);
+    if (listed.exitCode !== 0) return result;
+    const { windows } = listedWindowsSchema.parse(JSON.parse(listed.stdout ?? ""));
+    const target = windows.find((w) => w.window_id === parsed.window_id && w.pid === parsed.pid);
+    if (target?.is_on_screen !== true) return result;
+    const above = windows.filter((w) => w.pid === parsed.pid && w.is_on_screen !== false && w.z_index > target.z_index);
+    const helper = (w: (typeof windows)[number]) => !w.title && Math.min(w.bounds.width, w.bounds.height) < 100;
+    if (!above.some((w) => w.window_id === parsed.observed.process_front_window_on_display) || !above.every(helper))
+      return result;
+    const accepted = { ...parsed, status: "activated", activated: true, code: "bring_to_front_exact_window_focused" };
+    return { ...result, exitCode: 0, stdout: `${JSON.stringify(accepted, null, 2)}\n` };
+  } catch {
+    return result;
   }
 }
 
@@ -256,18 +333,17 @@ export default async function computerUsePlugin(room: BbPluginApi) {
         "Cloudroom needs macOS Accessibility permission. Ask the user to grant it in Settings > Plugins > Computer Use (or run `room-cli computer-use setup` while they watch), then retry.",
       );
     active.set(threadId, hostId);
+    const session = sessionFor(threadId);
+    const shotsKey = threadId.replace(/[^A-Za-z0-9_-]/g, "_");
     const result = await host.call(
       "call",
-      {
-        tool,
-        args: input,
-        session: sessionFor(threadId),
-        shotsKey: threadId.replace(/[^A-Za-z0-9_-]/g, "_"),
-      },
+      { tool, args: input, session, shotsKey },
       { hostId, timeoutMs: 150_000, ...(ctx.signal ? { signal: ctx.signal } : {}) },
     );
     if (result.driverExits > 0) track("computer_use_crash", { component: "driver", count: result.driverExits });
-    return { exitCode: result.exitCode, stdout: result.stdout, stderr: result.stderr };
+    const listWindows = (pid: number) =>
+      host.call("call", { tool: "list_windows", args: { pid }, session, shotsKey }, { hostId, timeoutMs: 30_000 });
+    return acceptFocusedWindow(tool, input, { exitCode: result.exitCode, stdout: withConsentHint(result.stdout), stderr: result.stderr }, listWindows);
   }
 
   async function trackedCall(argv: string[], ctx: PluginCliContext, threadId: string, hostId: string, provider: string | null) {

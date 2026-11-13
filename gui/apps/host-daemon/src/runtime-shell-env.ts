@@ -366,6 +366,8 @@ function parseUserShellEnv(stdout: string): Record<string, string> | null {
 // login shell (API keys, tool config) reaches provider processes, the same as
 // when the user runs those CLIs in their terminal.
 const NON_PROVIDER_SHELL_ENV_KEYS = new Set([
+  // The AppImage runtime's own name; zsh would run every command under it (#1640).
+  "ARGV0",
   "NODE_ENV",
   "NODE_OPTIONS",
   "OLDPWD",

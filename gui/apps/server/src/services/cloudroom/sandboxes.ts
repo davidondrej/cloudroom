@@ -82,7 +82,12 @@ const AGENT_LIMIT = "cloud_agent_limit";
 /** Free's shared daily budget is spent: like the limits above, the website refused before starting the sandbox. */
 export const BUDGET_LIMIT = "cloud_budget_limit";
 const CLOUD_QUEUE = "cloud_queue";
+/** An outage holds the thread, and it has an older copy it can continue from instead (ADR 20261113-202742). */
+const OUTAGE_CHOICE = "sandbox_outage";
 export const CLOUD_REGION = "cloud_region";
+/** A wake the website holds until the sandbox's server can take it (web/lib/sandboxes.ts): restarting, restoring,
+ *  repairing, full, or an outage. The thread shows the website's words as a notice, never an error, and tries again each minute. */
+const WAIT_CODES = new Set(["sandbox_restarting", "sandbox_restoring", "sandbox_repairing", "sandbox_full", OUTAGE_CHOICE]);
 /** The website no longer has this sign-in's token: it was signed out there, or the password was reset. */
 const SIGNED_OUT = "desktop_signed_out";
 export const startRefused = (error: unknown): error is CloudroomError & { code: string } => error instanceof CloudroomError && [USAGE_LIMIT, AGENT_LIMIT, CLOUD_QUEUE, CLOUD_REGION].includes(error.code ?? "");
@@ -815,7 +820,9 @@ export class SandboxDirectory {
         const quick = tries <= 3 && error instanceof CloudroomError && error.status === null;
         // A thread moving to Cloud continues there in about a minute: keep checking.
         const moving = error instanceof CloudroomError && error.code === "sandbox_moving";
-        const delay = quick ? 2_000 : moving ? 5_000 : Math.min(Math.max(previous?.delay ?? 0, 2_500) * 2, 300_000);
+        // A server back from a restart takes it within a minute, not up to 5.
+        const wait = error instanceof CloudroomError && WAIT_CODES.has(error.code ?? "");
+        const delay = quick ? 2_000 : moving ? 5_000 : Math.min(Math.max(previous?.delay ?? 0, 2_500) * 2, wait ? 60_000 : 300_000);
         // Out of Cloud Credits: wait until the minute mode check sees credits again (checkMode clears it), not every 5 minutes.
         const held = error instanceof CloudroomError && error.code === USAGE_LIMIT;
         this.backoff.set(thread, { until: held ? Infinity : Date.now() + delay, delay, tries, refusal: error instanceof CloudroomError && error.status !== null ? error : null });
@@ -1019,6 +1026,14 @@ export class SandboxDirectory {
   /** A VPS thread's move to Cloud: under way, or failed (the copy didn't finish, so it stayed on the VPS). */
   private moves = new Map<string, "moving" | "failed">();
   moveState(thread: string): "moving" | "failed" | null { return this.moves.get(thread) ?? null; }
+  /** True while an outage holds the thread and the user may continue from its older copy instead. */
+  copyChoice(thread: string): boolean { return this.backoff.get(thread)?.refusal?.code === OUTAGE_CHOICE && !this.isAwake(thread); }
+  /** The user's pick during an outage: the website restores the thread from its copy on the backup at its next wake,
+   *  which goes right away. Newer work in the old sandbox is lost. */
+  async continueFromCopy(thread: string): Promise<void> {
+    await this.call({ action: "from_copy", thread });
+    this.backoff.delete(thread);
+  }
   /** Moves a VPS thread to Cloud: the website copies it off the VPS, and its next wake starts it in Cloud. Looks it up
    *  every 5 s (a lookup never wakes) until it lands in Cloud or the copy fails, for up to 35 minutes. */
   async move(thread: string): Promise<void> {
@@ -1039,6 +1054,12 @@ export class SandboxDirectory {
     setTimeout(check, 5_000).unref();
   }
   coolingDown(thread: string | null): boolean { return Boolean(thread && (this.backoff.get(thread)?.until ?? 0) > Date.now()); }
+  /** The website's words for a wake that waits on its server ("The server running this thread is restarting…"), until
+   *  a wake gets through or the sandbox is seen awake. Null otherwise. */
+  waitNotice(thread: string): string | null {
+    const refusal = this.backoff.get(thread)?.refusal;
+    return refusal && WAIT_CODES.has(refusal.code ?? "") && !this.isAwake(thread) ? refusal.message : null;
+  }
 
   /** Saves a thread's title, project name, harness, model, Core session ID, and the thread that started it on the
    *  website (ADR 0182, 0239, 0256). A `v: 2` label (#237) changes only the fields it sends, and its session only fills

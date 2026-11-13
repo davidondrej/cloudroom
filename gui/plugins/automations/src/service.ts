@@ -15,6 +15,7 @@ import {
   listAllAutomations,
   listAutomationRuns,
   listAutomationsForProject,
+  getSentRun,
   getThreadReportRun,
   linkRunThread,
   recoverFailedRun,
@@ -71,7 +72,7 @@ import {
   scriptAgents,
   writeInlineAutomationScript,
 } from "./script-files.js";
-import { errorMessage, executeAgentRun, executeScriptRun, signedOut } from "./run.js";
+import { currentTurnSentIds, errorMessage, executeAgentRun, executeScriptRun, signedOut } from "./run.js";
 import { listLiveProjects } from "./sweep.js";
 
 type ServiceApi = Pick<BbPluginApi, "realtime" | "log"> & {
@@ -1087,7 +1088,10 @@ export function createAutomationService(args: {
     },
 
     async report(input) {
-      const run = getThreadReportRun(db, input.threadId);
+      // Else the run whose message Core put in this turn, though the turn before it closed the run (#1100).
+      const run =
+        getThreadReportRun(db, input.threadId) ??
+        getSentRun(db, input.threadId, await currentTurnSentIds(bb, input.threadId));
       const automation = run ? getAutomation(db, run.automationId) : null;
       if (!run || !automation)
         throw new Error(

@@ -368,6 +368,8 @@ function requireSkillPluginsRoot(): string {
 
 const THREAD_STOP_CLOSE_TIMEOUT_MS = 4_000;
 const TURN_INTERRUPT_TIMEOUT_MS = 2_000;
+/** How long a new turn waits on its MCP check before Claude gets the prompt. */
+const MCP_CHECK_WAIT_MS = 10_000;
 const THREAD_STOPPED_MESSAGE =
   "Thread stopped while awaiting permission approval";
 const CLAUDE_CHROME_SETTING_RESTART_REASON = "Claude in Chrome setting changed";
@@ -1689,12 +1691,16 @@ async function closeClaudeThreadSession(
 
 function buildSessionEnv(
   envOverrides: Record<string, string>,
+  providerSubagentsEnabled: boolean,
 ): NodeJS.ProcessEnv {
   const sessionEnv: NodeJS.ProcessEnv = {
     ...withoutBridgeRuntimeEnv(process.env),
     ...envOverrides,
     CLAUDE_CODE_ENTRYPOINT: "cli",
   };
+  // Claude can swap WebFetch for a `web-fetch` subagent, which the disabled-
+  // subagents hook denies; keep the direct WebFetch tool instead (#1489).
+  if (!providerSubagentsEnabled) sessionEnv.CLAUDE_CODE_WEB_FETCH_AGENT ??= "0";
   delete sessionEnv.CLAUDE_AGENT_SDK_CLIENT_APP;
   return withoutBlankAccountEnv(sessionEnv);
 }
@@ -1754,7 +1760,10 @@ function applyTurnEnvironment(
     ...attachment.sessionConstructionConfig,
     config,
   };
-  attachment.sessionOptions.env = buildSessionEnv(envOverrides);
+  attachment.sessionOptions.env = buildSessionEnv(
+    envOverrides,
+    attachment.liveSettings.providerSubagentsEnabled,
+  );
   if (attachment.residentSession) {
     attachment.residentSession.restartBeforeNextTurn = {
       reason: accountOnly
@@ -2379,7 +2388,10 @@ function attachThreadSession(
   resume: boolean,
 ): void {
   const threadIdRef = { current: params.threadId };
-  const env = buildSessionEnv(readConfigEnvOverrides(params.config));
+  const env = buildSessionEnv(
+    readConfigEnvOverrides(params.config),
+    params.providerSubagentsEnabled ?? true,
+  );
   const sessionOptions = buildTrackedSessionOptions(params, env, threadIdRef);
   if (!resume) {
     sessionOptions.sessionId = providerThreadId;
@@ -2606,11 +2618,19 @@ async function runTurnInput(
     if (stopped) return text;
     await enterPlanModeIfRequested(threadSession, params);
     if (intent === "new-turn") {
-      await threadSession.session.reconnectMcpServers().catch((error) => {
-        logBridgeError(
-          `Failed to check MCP servers: ${error instanceof Error ? error.message : String(error)}`,
-        );
-      });
+      // Best effort. Claude still starting, or stuck, must not hold the turn
+      // past the host's wait for turn/start (#1574).
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      await Promise.race([
+        threadSession.session.reconnectMcpServers().catch((error) => {
+          logBridgeError(
+            `Failed to check MCP servers: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }),
+        new Promise((resolve) => {
+          timer = setTimeout(resolve, MCP_CHECK_WAIT_MS);
+        }),
+      ]).finally(() => clearTimeout(timer));
     }
     return text;
   });

@@ -15,7 +15,19 @@ home=\${HOME:-}
 [ -n "$home" ] || home=$(node -e 'const home = require("node:os").homedir(); if (!require("node:path").isAbsolute(home)) process.exit(1); process.stdout.write(home);')
 installer_file=$(mktemp "$home/.bb-machine-install.XXXXXX")
 trap 'rm -f "$installer_file"' EXIT HUP INT TERM
-printf '%s' "$bundle" | node -e 'for (const [name,value] of Object.entries(JSON.parse(require("node:fs").readFileSync(0, "utf8")).headers ?? {})) console.log("header = " + JSON.stringify(name + ": " + value))' | curl --config - --fail --silent --show-error --location --connect-timeout 10 --max-time 60 "$installer_url" > "$installer_file"
+# A stalled or cut download is retried. Run it only when complete: --output lets
+# curl overwrite a partial file, and the end marker catches a body cut without error.
+attempt=1
+until printf '%s' "$bundle" | node -e 'for (const [name,value] of Object.entries(JSON.parse(require("node:fs").readFileSync(0, "utf8")).headers ?? {})) console.log("header = " + JSON.stringify(name + ": " + value))' | curl --config - --fail --silent --show-error --location --connect-timeout 10 --max-time 30 --output "$installer_file" "$installer_url" &&
+  [ "$(tail -n 1 "$installer_file")" = "# end of install.sh" ]; do
+  if [ "$attempt" -ge 4 ]; then
+    echo "The installer download failed or was cut off 4 times" >&2
+    exit 1
+  fi
+  attempt=$((attempt + 1))
+  echo "Retrying the installer download (attempt $attempt of 4)" >&2
+  sleep 2
+done
 BB_ENROLLMENT=$bundle sh "$installer_file" --bootstrap-env BB_ENROLLMENT
 `;
 

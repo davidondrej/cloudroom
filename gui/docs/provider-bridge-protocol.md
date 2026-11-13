@@ -32,7 +32,9 @@ everything outside the protocol: argv, the plugin-scoped `dataDir`/`tempDir`
 above, the bounded stdin framing, and the signals. Nothing less trusted than
 Cloudroom can write to `tempDir`: it is in `<dataDir>/.cloudroom-tmp`, never
 the OS temp folder, which other accounts (Linux's `/tmp`), Read-only Mac
-commands and agent sandboxes can write. A bridge that started
+commands and agent sandboxes can write. The runtime makes `tempDir`. On
+Windows, where a stop skips the bridge's own cleanup, it removes it once
+`taskkill /T` ended the bridge and its children. A bridge that started
 itself could not be imported by a test, and could not share an artifact with a
 host RPC entry. First-party bridges use exactly this path —
 `plugins/provider-codex/src/bridge/bridge.ts` is the largest worked example,

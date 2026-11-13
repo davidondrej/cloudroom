@@ -348,7 +348,8 @@ export class TunnelDO {
     this.signalPending = false;
     this.signalAt = Date.now();
     const url = new URL(`https://${tunnelInfo(tunnel).mac ?? "mac"}.${this.env.BASE_DOMAIN}${SIGNAL_PATH}`);
-    void Promise.resolve(this.relay(new Request(url, { method: "POST", headers: { [RELAY_SIGNAL_HEADER]: "threads" } }), url, tunnel))
+    // The JSON content type is required: the app answers 415 to any other POST under /api/v1/cloudroom.
+    void Promise.resolve(this.relay(new Request(url, { method: "POST", headers: { [RELAY_SIGNAL_HEADER]: "threads", "content-type": "application/json" } }), url, tunnel))
       .then((response) => response.body?.cancel(), () => {});
   }
 

@@ -102,3 +102,42 @@ it.skipIf(!supported)(
     expect(readdirSync(run.home)).toEqual([]);
   },
 );
+
+// #1335: a lease's ws:// endpoint in BU_CDP_URL made 0.1.13 poll /json/version for 30 s and fail.
+it.skipIf(!supported).each([
+  ["ws://127.0.0.1:1/cdp/a", "", "ws://127.0.0.1:1/cdp/a|"],
+  ["wss://host/x", "ws://explicit", "ws://explicit|"],
+  ["http://127.0.0.1:9333", "", "|http://127.0.0.1:9333"],
+])(
+  "passes BU_CDP_URL=%s on as BU_CDP_WS only when it is a WebSocket",
+  async (url, ws, expected) => {
+    const root = mkdtempSync(join(tmpdir(), "browser-harness-"));
+    roots.push(root);
+    const bin = await installBrowserHarnessShim(root);
+    const venv = join(root, "browser-harness", "0.1.13");
+    mkdirSync(join(venv, "bin"), { recursive: true });
+    writeFileSync(join(venv, ".ready"), "");
+    writeFileSync(
+      join(venv, "bin", "browser-harness"),
+      '#!/bin/sh\nprintf %s "$BU_CDP_WS|$BU_CDP_URL"\n',
+    );
+    chmodSync(join(venv, "bin", "browser-harness"), 0o755);
+
+    const result = spawnSync(
+      join(bin ?? "", "browser-harness"),
+      ["--version"],
+      {
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          BU_CDP_URL: url,
+          BU_CDP_WS: ws,
+          BU_NAME: "test",
+          ROOM_THREAD_ID: "",
+        },
+      },
+    );
+
+    expect(result.stdout).toBe(expected);
+  },
+);

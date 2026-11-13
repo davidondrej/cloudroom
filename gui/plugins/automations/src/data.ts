@@ -243,6 +243,8 @@ export const migrations = [
      ON automation_runs(started_at);`,
   `ALTER TABLE automations
      ADD COLUMN priority INTEGER NOT NULL DEFAULT 3;`,
+  // Core's ID for a same-thread run's message: its turn request, or queued row and content (#1100). Null keeps today's reports.
+  `ALTER TABLE automation_runs ADD COLUMN sent_id TEXT;`,
 ];
 
 export const REVIEW_RETENTION_MS = 30 * 24 * 60 * 60_000;
@@ -1105,6 +1107,21 @@ export function setAutomationRunThread(
     args.runId,
   );
   return getAutomationRun(db, args.runId);
+}
+
+export function setAutomationRunSentId(db: Db, runId: string, sentId: string): void {
+  db.prepare(`UPDATE automation_runs SET sent_id = ? WHERE id = ?`).run(sentId, runId);
+}
+
+/** The thread's one run whose message Core took under one of these IDs; none or several stay unreported (#1100). */
+export function getSentRun(db: Db, threadId: string, ids: string[]): AutomationRunRow | null {
+  const rows = db
+    .prepare(
+      `SELECT ${AUTOMATION_RUN_COLUMNS} FROM automation_runs
+       WHERE thread_id = ? AND sent_id IN (SELECT value FROM json_each(?))`,
+    )
+    .all(threadId, JSON.stringify(ids));
+  return rows.length === 1 ? requiredRunRow(rows[0]) : null;
 }
 
 export function markAutomationThread(

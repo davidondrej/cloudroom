@@ -226,10 +226,11 @@ pub async fn probe(
 }
 
 pub async fn models(config: &Config, kind: Kind) -> (io::Result<Vec<Model>>, Option<Event>) {
-    let (handle, mut events) = match Handle::spawn(config, kind, None) {
-        Ok(spawned) => spawned,
-        Err(error) => return (Err(error), None),
-    };
+    let (handle, mut events) =
+        match Handle::spawn_inner(config, kind, None, (true, true), None, None, true) {
+            Ok(spawned) => spawned,
+            Err(error) => return (Err(error), None),
+        };
     let drain = tokio::spawn(async move {
         while let Some(event) = events.recv().await {
             if matches!(event, Event::Exited { .. }) {
@@ -492,6 +493,7 @@ impl Handle {
             (command_guard_enabled, strip_ai_co_authors),
             system_prompt,
             None,
+            false,
         )
     }
 
@@ -532,6 +534,7 @@ impl Handle {
             (command_guard_enabled, strip_ai_co_authors),
             system_prompt,
             Some(&at),
+            false,
         )
     }
 
@@ -542,6 +545,7 @@ impl Handle {
         (command_guard_enabled, strip_ai_co_authors): (bool, bool),
         system_prompt: Option<String>,
         fork: Option<&str>,
+        probe: bool,
     ) -> io::Result<(Self, mpsc::Receiver<Event>)> {
         let mut profile = config
             .harnesses
@@ -569,9 +573,9 @@ impl Handle {
                     &profile,
                     resume.as_ref(),
                     fork,
-                    command_guard_enabled,
-                    strip_ai_co_authors,
+                    (command_guard_enabled, strip_ai_co_authors),
                     system_prompt.as_deref(),
+                    probe,
                 )?;
                 let saved = resume.as_ref().filter(|_| fork.is_none());
                 (
@@ -954,6 +958,7 @@ impl Handle {
             (self.command_guard_enabled, self.strip_ai_co_authors),
             self.system_prompt.clone(),
             Some(&parent),
+            false,
         )
         .map(|(handle, events)| Some((handle.with_reasoning(self.reasoning.clone()), events)))
     }

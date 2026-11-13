@@ -69,3 +69,34 @@ it("answers a Local thread's card with that card's limit, and a dismissal denies
   await vi.waitFor(() => expect(dismissed.calls).toEqual([{ decide: { id, approve: false, max_credits: 9_000 } }]));
   expect(dismissed.shown).toEqual([card(9_000).payload]);
 });
+
+it("closes a card whose request stopped waiting, never as a Deny, and keeps it through an outage", async () => {
+  // The card stays open until something aborts it, like the app's real card.
+  const calls: Record<string, unknown>[] = [];
+  let pending: unknown = true;
+  const requestPluginInteraction = (args: { signal?: AbortSignal }) => new Promise<PluginInteractionResult>((resolve) =>
+    args.signal?.addEventListener("abort", () => resolve({ outcome: "cancelled", reason: "request-aborted" })));
+  const approvals = new GpuApprovals({ pendingInteractions: { requestPluginInteraction } as never }, async (body) => {
+    calls.push(body);
+    if (pending instanceof Error) throw pending;
+    return { pending };
+  });
+  vi.useFakeTimers();
+  try {
+    approvals.show("thr_local", card(9_000));
+    await vi.advanceTimersByTimeAsync(0);
+    // Another thread's stop leaves this card alone, and a website outage keeps it.
+    await approvals.recheck("thr_other");
+    pending = new Error("offline");
+    await approvals.recheck("thr_local");
+    expect(calls).toEqual([{ card: id, check: true }]);
+    // The agent cancelled it: the minute's re-check closes the card, and nothing answers it.
+    pending = false;
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(calls).toEqual([{ card: id, check: true }, { card: id, check: true }]);
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(calls).toHaveLength(2);
+  } finally {
+    vi.useRealTimers();
+  }
+});

@@ -9,8 +9,11 @@ import {
   DropdownMenuTrigger,
 } from "@cloudroom/shared-ui/dropdown-menu";
 import { Icon } from "@cloudroom/shared-ui/icon";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@cloudroom/shared-ui/tooltip";
 import { cn } from "@cloudroom/shared-ui/lib/utils";
+import type { RoomDesktopInfo } from "@cloudroom/desktop-contract";
 import { SETTINGS_CARD_ROW_CLASS } from "@/components/ui/settings-section";
+import { SidebarMenu, SidebarMenuItem } from "@/components/ui/sidebar";
 import { appToast } from "@/components/ui/app-toast";
 import { DESKTOP_DOWNLOAD_URL, useDesktopUpdateInfo } from "@/hooks/useDesktopUpdateInfo";
 import { OsTile } from "@/components/machines/OsTile";
@@ -19,6 +22,7 @@ import { callPluginRpc } from "@/lib/plugin-sdk-hooks";
 import { getMutationErrorMessage } from "@/lib/mutation-errors";
 import { sdk } from "@/lib/sdk";
 import { isPhoneApp, openMacOnPhone } from "@/cloud/cloud-mode";
+import { useCloudroomAccount } from "@/hooks/queries/cloudroom-queries";
 
 export interface YourMac {
   handle: string;
@@ -191,7 +195,6 @@ export function ViewingMacCard() {
   const macs = withoutOldCopies(computers.list);
   const self = computers.list.find((mac) => mac.self);
   const selfName = self?.name ?? `This ${COMPUTER}`;
-  const onScreen = computers.viewing ?? self?.handle ?? null;
   const viewed = computers.list.find((mac) => !mac.self && mac.handle === computers.viewing);
   const others = macs.filter((mac) => !mac.self);
   const fallback = computers.fallback;
@@ -213,36 +216,7 @@ export function ViewingMacCard() {
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="w-80 p-1.5">
-        {macs.map((mac) => {
-          const here = mac.handle === onScreen;
-          const canOpen = !here && (mac.self || mac.online);
-          return (
-            <DropdownMenuItem
-              key={mac.handle}
-              disabled={!here && !canOpen}
-              className="gap-2.5 px-2.5 py-2"
-              onSelect={() => {
-                if (canOpen) open(mac.self ? null : mac.handle, mac.name);
-              }}
-            >
-              <OsTile os={MAC_OS} className={cn(!here && !canOpen && "opacity-55")} />
-              <span className={cn("min-w-0 flex-1", !here && !canOpen && "opacity-55")}>
-                <span className="block truncate text-sm text-foreground">{mac.name}</span>
-                <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                  {!here && !mac.self ? <StatusDot online={mac.online} /> : null}
-                  {here ? "Showing now" : mac.self ? `This ${COMPUTER}` : mac.online ? "Online" : "Offline"}
-                </span>
-              </span>
-              {here ? (
-                <Icon name="Check" className="text-primary" aria-hidden />
-              ) : canOpen ? (
-                <span className="rounded-md bg-primary px-2.5 py-1 text-xs font-medium text-primary-foreground">
-                  Open
-                </span>
-              ) : null}
-            </DropdownMenuItem>
-          );
-        })}
+        <MacSwitchItems computers={computers} open={open} />
       </DropdownMenuContent>
     </DropdownMenu>
   );
@@ -340,6 +314,121 @@ export function ViewingMacCard() {
       </div>
       {actions ? <div className="flex shrink-0 items-center gap-2">{actions}</div> : null}
     </div>
+  );
+}
+
+type DesktopComputers = NonNullable<RoomDesktopInfo["computers"]>;
+
+/** Your Macs, with Open on the ones this window can switch to. Settings → Machines and the sidebar chip share it. */
+function MacSwitchItems({
+  computers,
+  open,
+  hideSelf = false,
+}: {
+  computers: DesktopComputers;
+  open: (handle: string | null, name: string) => void;
+  /** The chip shows "Stay on this Mac" instead of this Mac's own row while it stands in. */
+  hideSelf?: boolean;
+}) {
+  const onScreen = computers.viewing ?? computers.list.find((mac) => mac.self)?.handle ?? null;
+  const macs = withoutOldCopies(computers.list).filter((mac) => !(hideSelf && mac.self));
+  return macs.map((mac) => {
+    const here = mac.handle === onScreen;
+    const canOpen = !here && (mac.self || mac.online);
+    return (
+      <DropdownMenuItem
+        key={mac.handle}
+        disabled={!here && !canOpen}
+        className="gap-2.5 px-2.5 py-2"
+        onSelect={() => {
+          if (canOpen) open(mac.self ? null : mac.handle, mac.name);
+        }}
+      >
+        <OsTile os={MAC_OS} className={cn(!here && !canOpen && "opacity-55")} />
+        <span className={cn("min-w-0 flex-1", !here && !canOpen && "opacity-55")}>
+          <span className="block truncate text-sm text-foreground">{mac.name}</span>
+          <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
+            {!here && !mac.self ? <StatusDot online={mac.online} /> : null}
+            {here ? "Showing now" : mac.self ? `This ${COMPUTER}` : mac.online ? "Online" : "Offline"}
+          </span>
+        </span>
+        {here ? (
+          <Icon name="Check" className="text-primary" aria-hidden />
+        ) : canOpen ? (
+          <span className="rounded-md bg-primary px-2.5 py-1 text-xs font-medium text-primary-foreground">
+            Open
+          </span>
+        ) : null}
+      </DropdownMenuItem>
+    );
+  });
+}
+
+/**
+ * The top of the sidebar during Mac to Mac: which Mac this window shows, and a switch to the others
+ * (ADRs 20261113-210102, 20261113-224406). It shows while the window shows another Mac, or this Mac stands in for one.
+ * Never on a single computer.
+ */
+export function ViewingMacBar() {
+  const { desktopApi, desktopInfo } = useDesktopUpdateInfo();
+  const signedOut = useCloudroomAccount().data?.account === null;
+  const computers = desktopInfo?.computers;
+  const openComputer = desktopApi?.openComputer;
+  const refreshComputers = desktopApi?.refreshComputers;
+  if (isPhoneApp() || !computers || !openComputer) return null;
+  const viewed = computers.list.find((mac) => !mac.self && mac.handle === computers.viewing);
+  const fallback = computers.fallback;
+  if (!viewed && !fallback) return null;
+
+  const selfName = computers.list.find((mac) => mac.self)?.name ?? `this ${COMPUTER}`;
+  const name = viewed?.name ?? `this ${COMPUTER}`;
+  const hint = viewed
+    ? `Showing ${viewed.name}. You’re sitting at ${selfName}.`
+    : signedOut
+      ? `Showing this ${COMPUTER}. Sign in to reach ${fallback?.name}.`
+      : fallback?.back
+        ? `Showing this ${COMPUTER}. ${fallback.name} is back online.`
+        : `Showing this ${COMPUTER}: ${fallback?.name} didn’t answer.`;
+  const open = (handle: string | null, macName: string) =>
+    void openComputer(handle).catch((error: unknown) =>
+      appToast.error(getMutationErrorMessage({ error, fallbackMessage: `Couldn't open ${macName}.` })),
+    );
+  return (
+    <SidebarMenu className="px-2 pb-1">
+      <SidebarMenuItem data-sidebar-item="viewing-mac">
+        <DropdownMenu onOpenChange={(isOpen) => isOpen && refreshComputers?.()}>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  variant="ghost"
+                  aria-label={hint}
+                  className="h-8 w-full justify-start gap-2 rounded-lg bg-foreground/[0.04] px-2.5 text-left text-[13px] font-normal text-muted-foreground hover:bg-foreground/[0.07] data-[state=open]:bg-foreground/[0.07]"
+                >
+                  {/* Amber while this Mac stands in for the picked one. */}
+                  <Icon name="Laptop" className={cn("size-3.5 shrink-0", !viewed && "text-warning")} aria-hidden />
+                  <span className="min-w-0 flex-1 truncate">
+                    Viewing <span className="text-foreground">{name}</span>
+                  </span>
+                  <span className="shrink-0 text-xs">Switch</span>
+                </Button>
+              </DropdownMenuTrigger>
+            </TooltipTrigger>
+            <TooltipContent side="bottom">{hint}</TooltipContent>
+          </Tooltip>
+          <DropdownMenuContent side="bottom" align="start" sideOffset={6} mobileTitle={`Switch ${COMPUTER}`} className="w-80 p-1.5">
+            {fallback ? (
+              // Standing in: keep this Mac, so the picked Mac never takes the window back by itself.
+              <DropdownMenuItem className="gap-2.5 px-2.5 py-2" onSelect={() => open(null, selfName)}>
+                <Icon name="Laptop" className="text-muted-foreground" aria-hidden />
+                <span className="min-w-0 flex-1 text-sm text-foreground">Stay on this {COMPUTER}</span>
+              </DropdownMenuItem>
+            ) : null}
+            <MacSwitchItems computers={computers} open={open} hideSelf={fallback !== null} />
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </SidebarMenuItem>
+    </SidebarMenu>
   );
 }
 

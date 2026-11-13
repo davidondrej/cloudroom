@@ -89,6 +89,7 @@ export const EXTENDED_ICON_NAMES = [
   "LogOut",
   "Mail",
   "Memory",
+  "Cpu",
   "MailOpen",
   "Maximize2",
   "Mic",

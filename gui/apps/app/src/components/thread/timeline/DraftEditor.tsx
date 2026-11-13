@@ -260,7 +260,7 @@ function ToolbarButton({
   );
 }
 
-function HeaderButton({
+function ActionButton({
   children,
   onClick,
   label,
@@ -277,7 +277,7 @@ function HeaderButton({
       aria-label={label}
       onClick={onClick}
       className={cn(
-        "flex cursor-pointer items-center gap-1.5 rounded-md px-2 py-1 text-xs text-muted-foreground transition-colors hover:bg-state-hover hover:text-foreground",
+        "grid size-7 cursor-pointer place-items-center rounded-md text-muted-foreground transition-colors hover:bg-state-hover hover:text-foreground",
         className,
       )}
     >
@@ -647,43 +647,10 @@ export function DraftEditor({
   return (
     <div
       ref={cardRef}
-      className="relative my-3 rounded-xl border border-foreground/10 bg-surface-raised-solid shadow-message"
+      className="relative my-3 flex min-h-[88px] items-start gap-1 rounded-lg border border-foreground/10 bg-surface-recessed py-2 pl-4 pr-2"
     >
-      <div className="flex items-center gap-2 border-b border-foreground/10 py-1.5 pl-4 pr-2 text-[13px] text-muted-foreground">
-        <Icon
-          name={"Mail" as "Zap"}
-          fallback="Edit"
-          className="size-4 text-primary-text"
-        />
-        <span className="font-medium text-foreground">Draft</span>
-        {streaming ? (
-          <span className="text-subtle-foreground">Writing…</span>
-        ) : null}
-        <div className="ml-auto flex items-center gap-1">
-          {edited ? (
-            <>
-              <HeaderButton label="Undo all my edits" onClick={reset}>
-                <Icon
-                  name={"ArrowTurnBackward" as "Zap"}
-                  fallback="X"
-                  className="size-3.5"
-                />
-                Reset
-              </HeaderButton>
-            </>
-          ) : null}
-          <HeaderButton
-            label="Copy the draft"
-            onClick={() => void copy()}
-            className={copied ? "text-success hover:text-success" : undefined}
-          >
-            <Icon name={copied ? "Check" : "Copy"} className="size-3.5" />
-            {copied ? "Copied" : "Copy"}
-          </HeaderButton>
-        </div>
-      </div>
       {streaming ? (
-        <div className="whitespace-pre-wrap break-words px-[18px] py-3.5 text-foreground">
+        <div className="min-w-0 flex-1 whitespace-pre-wrap break-words py-1.5 text-foreground">
           {original}
         </div>
       ) : (
@@ -698,9 +665,27 @@ export function DraftEditor({
           onInput={onInput}
           onKeyDown={onKeyDown}
           onDrop={(event) => event.preventDefault()}
-          className="cursor-text whitespace-pre-wrap break-words rounded-b-xl px-[18px] py-3.5 text-foreground outline-none selection:bg-timeline-accent/40"
+          className="draft-caret min-w-0 flex-1 cursor-text whitespace-pre-wrap break-words py-1.5 text-foreground outline-none selection:bg-timeline-accent/40"
         />
       )}
+      <div className="flex shrink-0 items-center gap-0.5 pt-0.5">
+        {edited ? (
+          <ActionButton label="Undo all my edits" onClick={reset}>
+            <Icon
+              name={"ArrowTurnBackward" as "Zap"}
+              fallback="X"
+              className="size-3.5"
+            />
+          </ActionButton>
+        ) : null}
+        <ActionButton
+          label={copied ? "Copied" : "Copy the draft"}
+          onClick={() => void copy()}
+          className={copied ? "text-success hover:text-success" : undefined}
+        >
+          <Icon name={copied ? "Check" : "Copy"} className="size-3.5" />
+        </ActionButton>
+      </div>
       {selected !== null && choices === null && preview === null ? (
         <div
           className="absolute z-20 flex items-center gap-0.5 rounded-[10px] border border-foreground/10 bg-popover p-1 text-[13px] shadow-lg"

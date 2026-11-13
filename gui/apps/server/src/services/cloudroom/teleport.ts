@@ -27,6 +27,8 @@ import {
 } from "../threads/thread-events.js";
 import { pendingImportFork } from "../threads/thread-fork-history.js";
 import { stopThreadForCurrentState } from "../threads/thread-lifecycle.js";
+import { settleDanglingBackgroundTasksForStoppedThreadInTransaction } from "../threads/background-task-reconciliation.js";
+import { NotificationBuffer } from "../lib/notification-buffer.js";
 import { resolveThreadRuntimeCommandConfig } from "../threads/thread-runtime-config.js";
 import { cloudroomSystemPrompt } from "../threads/custom-instructions.js";
 import { cloudPromptLimit, cloudroom, promptPayload } from "./commands.js";
@@ -712,6 +714,8 @@ class Teleport {
       await Promise.all(
         state.sessions.map((source) => {
           const thread = getThread(this.deps.db, source.threadId);
+          // An archived child runs nothing; its trace still goes (#1554).
+          if (thread?.parentThreadId && thread.archivedAt) return;
           const environment = getEnvironment(
             this.deps.db,
             source.environmentId,
@@ -1177,7 +1181,13 @@ class Teleport {
     const latest = this.load(state.id);
     if (latest.cancelRequested)
       this.save({ ...latest, cancelRequested: false });
+    const hub = new NotificationBuffer();
     this.deps.db.transaction((tx) => {
+      // Background tasks still open died with the Mac's agent; Cloud would never close them (#1554).
+      settleDanglingBackgroundTasksForStoppedThreadInTransaction(
+        { db: tx, hub, logger: this.deps.logger },
+        { threadId: state.threadId },
+      );
       if (!binding(tx, state.threadId))
         tx.insert(cloudroomThreads)
           .values({
@@ -1229,6 +1239,7 @@ class Teleport {
         total: remote.files.length,
       });
     });
+    hub.flushInto(this.deps.hub);
     this.notify(state.threadId);
     if (getThread(this.deps.db, state.threadId)?.archivedAt) {
       cloudroom(this.deps).archive(state.threadId);

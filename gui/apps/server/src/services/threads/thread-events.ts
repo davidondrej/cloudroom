@@ -79,7 +79,8 @@ interface ClientTurnRequestedEventArgs {
    * asked for.
    */
   retryOf?: TurnRequestRetryMarker;
-  queueDelivered?: true;
+  /** The queued row's ID when the queue delivered this request. */
+  queueDelivered?: string;
   environmentId: string | null;
   execution: ResolvedThreadExecutionOptions;
   initiator: ThreadTurnInitiator;
@@ -209,7 +210,9 @@ function buildClientTurnRequestedEventData(
           retryAttempt: args.retryOf.attempt,
         }
       : {}),
-    ...(args.queueDelivered ? { queueDelivered: true } : {}),
+    ...(args.queueDelivered
+      ? { queueDelivered: true, queuedMessageId: args.queueDelivered }
+      : {}),
     senderThreadId: args.senderThreadId,
     ...(args.systemMessageKind !== undefined
       ? { systemMessageKind: args.systemMessageKind }

@@ -166,9 +166,11 @@ export function getLastThreadOutput(
   db: DbConnection,
   threadId: string,
   turnId?: string,
+  includeEmpty = false,
 ): string | null {
   const row = getLatestThreadOutputEventRow(db, {
     threadId,
+    includeEmpty,
     ...(turnId === undefined ? {} : { turnId }),
   });
 

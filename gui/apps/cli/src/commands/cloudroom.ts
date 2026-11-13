@@ -11,6 +11,7 @@ import { createCliRoomSdk } from "../client.js";
 import { resolveContextThreadId } from "../context-env.js";
 import { resolveLocalHostId } from "../daemon.js";
 import { outputJson, type JsonOutputOptions } from "./helpers.js";
+import { VPS_HINT_TIMEOUT_MS, vpsDiskLine } from "./machine.js";
 
 /** VM paths may start with ~ (the agent home); everything else stays literal. */
 function quote(path: string): string {
@@ -276,8 +277,12 @@ export function registerFeedbackCommand(program: Command, getUrl: () => string, 
 export function registerCloudCommands(program: Command, getUrl: () => string): void {
   const group = program.command("cloud").description("Connect this app to your Cloudroom account and VM");
   group.command("status").option("--json", "Print JSON").action(action(async (options: JsonOutputOptions) => {
-    const status = await createCliRoomSdk(getUrl()).cloudroom.status();
-    if (!outputJson(options, status)) console.log(`${status.account?.email ?? "Signed out"}\n${status.signingIn ? "Waiting for browser confirmation" : status.ready ? "Cloud connected" : status.error ?? "Cloud unavailable"}${status.signInError ? `\n${status.signInError}` : ""}${status.previews?.explained && status.previews.state === "offline" && status.previews.message ? `\nMac access and previews can't connect: ${status.previews.message}` : ""}`);
+    // Sandbox `storage` is null; the account's own VPS has one disk for all its threads, so status shows it (#1512).
+    const [status, vps] = await Promise.all([
+      createCliRoomSdk(getUrl()).cloudroom.status(),
+      createCliRoomSdk(getUrl(), VPS_HINT_TIMEOUT_MS).cloudroom.vps().then((found) => (found.connected ? found : null), () => null),
+    ]);
+    if (!outputJson(options, { ...status, vps })) console.log(`${status.account?.email ?? "Signed out"}\n${status.signingIn ? "Waiting for browser confirmation" : status.ready ? "Cloud connected" : status.error ?? "Cloud unavailable"}${status.signInError ? `\n${status.signInError}` : ""}${status.previews?.explained && status.previews.state === "offline" && status.previews.message ? `\nMac access and previews can't connect: ${status.previews.message}` : ""}${vps ? `\n${vpsDiskLine(vps)}` : ""}`);
   }));
   group.command("check").description("Make Mac access and previews check their connection to Cloudroom now").option("--json", "Print JSON").action(action(async (options: JsonOutputOptions) => {
     await createCliRoomSdk(getUrl()).cloudroom.checkPreviews();

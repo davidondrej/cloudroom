@@ -1,4 +1,5 @@
-import { getStoredThreadTabs, markThreadDeleted } from "@cloudroom/db";
+import { getStoredThreadTabs, getThread, markThreadDeleted, threads } from "@cloudroom/db";
+import { eq } from "drizzle-orm";
 import {
   desktopBrowserLeaseSchema,
   desktopBrowserResultSchemas,
@@ -12,6 +13,9 @@ import {
 import { z } from "zod";
 import { describe, expect, it, vi } from "vitest";
 import { revokeThreadDesktopBrowserControl } from "../src/services/desktop-browsers.js";
+import { cloudroom } from "../src/services/cloudroom/commands.js";
+import { archiveThreadAndChildren } from "../src/services/threads/thread-archive.js";
+import { stopThreadForCurrentState } from "../src/services/threads/thread-lifecycle.js";
 import { onDaemonSocketMessage } from "../src/ws/daemon-protocol.js";
 import {
   registerHostRpcResponder,
@@ -77,6 +81,7 @@ function fixture(harness: TestAppHarness) {
                   instanceId: scope.instanceId,
                   generation: scope.generation,
                   label: "Desktop",
+                  closesOpenedPages: true,
                 },
               ],
             },
@@ -703,18 +708,20 @@ describe("desktop browser public API", () => {
       expect(
         test.responder.requests.slice(before).map(({ command }) => command),
       ).toEqual([
+        { type: "desktop.browser.list_instances" },
         {
           type: "desktop.browser.release_control",
           instanceId: test.scope.instanceId,
           generation: test.scope.generation,
           threadId: test.scope.threadId,
           leaseId: lease.leaseId,
+          closeOpenedPages: true,
         },
       ]);
       expect(
         (await test.post("release", test.leaseRequest(lease.leaseId))).status,
       ).toBe(200);
-      expect(test.responder.requests).toHaveLength(before + 1);
+      expect(test.responder.requests).toHaveLength(before + 2);
     });
   });
 
@@ -742,6 +749,36 @@ describe("desktop browser public API", () => {
           ({ command }) => command.type === "desktop.browser.open_connection",
         ),
       ).toBe(false);
+    });
+  });
+
+  it.each([
+    ["release", true],
+    ["legacy instance release", undefined],
+    ["stop", undefined],
+    ["cloud stop", undefined],
+    ["archive", true],
+  ] as const)("%s ends control; closeOpenedPages=%s (#1383)", async (how, flag) => {
+    await withBrowserTest(async (test, harness) => {
+      const lease = await test.acquire();
+      const thread = () => getThread(harness.db, test.scope.threadId)!;
+      if (how === "legacy instance release")
+        test.intercept(({ command }) => command.type !== "desktop.browser.list_instances" ? null
+          : { ok: true, result: { instances: [{ instanceId: test.scope.instanceId, generation: test.scope.generation, label: "Old" }] } });
+      if (how.endsWith("release"))
+        expect((await test.post("release", test.leaseRequest(lease.leaseId))).status).toBe(200);
+      if (how === "stop") expect((await test.stop()).status).toBe(200);
+      if (how === "cloud stop") {
+        harness.db.update(threads).set({ executionTarget: "cloud" }).where(eq(threads.id, test.scope.threadId)).run();
+        vi.spyOn(cloudroom(harness.deps), "control").mockResolvedValue();
+        await stopThreadForCurrentState(harness.deps, thread(), null);
+      }
+      if (how === "archive") archiveThreadAndChildren(harness.deps, { parentThread: thread(), includeLive: true });
+      const releases = () => test.responder.requests.flatMap(({ command }) =>
+        command.type === "desktop.browser.release_control" && command.leaseId === lease.leaseId ? [command] : []);
+      await vi.waitFor(() => expect(releases()).toHaveLength(1));
+      expect(releases()[0]!.closeOpenedPages).toBe(flag);
+      expect((await test.post("connection", test.leaseRequest(lease.leaseId))).status).toBe(409);
     });
   });
 

@@ -1398,6 +1398,12 @@ describe("events", () => {
       sequence: 1,
       type: "system/manager/user_message",
     });
+    expect(
+      getLatestThreadOutputEventRow(db, {
+        threadId: thread.id,
+        includeEmpty: true,
+      }),
+    ).toMatchObject({ sequence: 2, itemKind: "agentMessage" });
   });
 
   it("lists stored event rows by range and exclusion filters", () => {

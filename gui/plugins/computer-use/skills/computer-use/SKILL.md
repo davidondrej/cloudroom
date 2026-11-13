@@ -14,6 +14,7 @@ In Cloud threads, use `room-cli computer-use` instead; that skill is `cloud-comp
 ## When to use it
 
 - Prefer APIs, CLIs, files, and `browser-harness` for web pages. Use the GUI only when those don't fit, or the user asks.
+- For the user's logged-in browser, use `browser-harness`. Cua's `browser_*` tools work only on a separate browser (`browser_prepare` with `"allow_launch":true,"profile":{"mode":"isolated_new"}`); Cloudroom doesn't grant `existing_profile`.
 - Work on one app at a time. Several agents share one screen, keyboard, and focus.
 
 ## Commands

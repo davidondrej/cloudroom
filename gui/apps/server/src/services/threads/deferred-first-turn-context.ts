@@ -13,6 +13,8 @@ import { pendingHarnessSwitchSeed } from "./thread-transcript.js";
 export interface DeferredFirstTurnContext {
   input: PromptInput[];
   requestSequence: number;
+  /** The retry chain of the request this was saved on (its original request id). */
+  retryChainRequestId?: string;
 }
 
 export interface PromptWithGroups {
@@ -39,17 +41,22 @@ export function getLeadingAgentOnlyInput(input: PromptInput[]): PromptInput[] {
 export function resolveDeferredFirstTurnContext(
   db: DbQueryConnection,
   threadId: string,
+  retryOfRequestId?: string,
 ): DeferredFirstTurnContext | null {
   const cleared =
     getLatestCompletedThreadContextClearSequence(db, { threadId }) ?? 0;
-  return (
+  const context =
     [spawnSeedContext(db, threadId), pendingHarnessSwitchSeed(db, threadId)]
       .filter(
         (context): context is DeferredFirstTurnContext =>
           context !== null && context.requestSequence > cleared,
       )
-      .sort((a, b) => b.requestSequence - a.requestSequence)[0] ?? null
-  );
+      .sort((a, b) => b.requestSequence - a.requestSequence)[0] ?? null;
+  // A retry re-sends its failed request's input, which already holds what that request carried (#1153).
+  return retryOfRequestId !== undefined &&
+    context?.retryChainRequestId === retryOfRequestId
+    ? null
+    : context;
 }
 
 function spawnSeedContext(
@@ -91,7 +98,11 @@ function spawnSeedContext(
   ) {
     return null;
   }
-  return { input: context, requestSequence: row.sequence };
+  return {
+    input: context,
+    requestSequence: row.sequence,
+    retryChainRequestId: request.retryOfRequestId ?? request.requestId,
+  };
 }
 
 export function prependDeferredFirstTurnContext(

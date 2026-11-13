@@ -25,9 +25,11 @@ import {
   reportQueuedCommandSuccess,
   waitForQueuedCommand,
 } from "../helpers/commands.js";
+import { installFakeGitWorktreeProvider } from "../helpers/environment-provider.js";
 import {
   seedEnvironment,
   seedHostSession,
+  seedPrimaryHost,
   seedProjectWithSource,
   seedStoredEvent,
   seedThread,
@@ -359,6 +361,48 @@ describe("thread move", () => {
 
       expect(moveProject).not.toHaveBeenCalled();
       expect(refusedMoves(harness, thread.id)).toHaveLength(1);
+    });
+  });
+});
+
+describe("thread worktree", () => {
+  it("moves a thread on another computer only without --carry, reading HEAD on that computer (#1572)", async () => {
+    await withTestHarness(async (harness) => {
+      const worktrees = installFakeGitWorktreeProvider(() => ({ action: "reject", message: "stop here" }));
+      seedPrimaryHost(harness.deps, seedHostSession(harness.deps, { id: "host-primary" }).host.id);
+      const { host } = seedHostSession(harness.deps, { id: "host-enrolled" });
+      const { project } = seedProjectWithSource(harness.deps, { hostId: host.id, path: "/tmp/enrolled-checkout" });
+      const folder = seedEnvironment(harness.deps, { hostId: host.id, projectId: project.id, path: "/tmp/enrolled-checkout" });
+      const thread = seedThread(harness.deps, { projectId: project.id, environmentId: folder.id });
+      const request = (carry: string[]) =>
+        harness.app.request(`/api/v1/threads/${thread.id}/worktree`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ carry }),
+        });
+
+      expect((await request(["notes.md"])).status).toBe(409);
+      expect((await request([])).status).toBe(200);
+      const status = await waitForQueuedCommand(
+        harness,
+        ({ row, command }) => row.hostId === host.id && command.type === "workspace.status" && command.environmentId === folder.id,
+      );
+      await reportQueuedCommandSuccess(harness, status, {
+        outcome: "available",
+        workspaceStatus: {
+          workingTree: { insertions: 0, deletions: 0, lineStatsComplete: true, files: [], hasUncommittedChanges: false, state: "clean" },
+          branch: { currentBranch: "main", defaultBranch: "main" },
+          checkout: { kind: "branch", branchName: "main", headSha: "abc123" },
+          mergeBase: null,
+        },
+      });
+      // The worktree starts from the enrolled host's HEAD; the move then fails and the thread stays put.
+      expect((await worktrees.waitForProvision()).inputs).toMatchObject({ branch: { kind: "named", name: "abc123" } });
+      await vi.waitFor(() =>
+        expect(listEvents(harness.db, { threadId: thread.id }).map((event) => JSON.parse(event.data))).toContainEqual(
+          expect.objectContaining({ operation: "thread_worktree_move", status: "failed" }),
+        ), { timeout: 5000 });
+      expect(getThread(harness.db, thread.id)?.environmentId).toBe(folder.id);
     });
   });
 });

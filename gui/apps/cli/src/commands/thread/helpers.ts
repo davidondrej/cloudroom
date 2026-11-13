@@ -212,10 +212,13 @@ export function parsePermissionMode(
 }
 
 /** Why a Cloud thread's start or messages aren't going through yet, from the app's own delivery state (#1273). */
-export type CloudIssue = { error: string | null; reconnecting: boolean };
+/** `waiting`: the website's words while the sandbox's server restarts or is full; the thread continues by itself. */
+export type CloudIssue = { error: string | null; reconnecting: boolean; waiting?: string };
 /** Null unless something is wrong, so a healthy thread's JSON gains no key. */
-export const cloudIssue = (status: { error?: string | null; reconnecting?: boolean } | null): CloudIssue | null =>
-  status?.error || status?.reconnecting ? { error: status.error ?? null, reconnecting: status.reconnecting === true } : null;
-/** One line for a parent: the error, or that the app keeps reconnecting. Null when nothing is wrong. */
+export const cloudIssue = (status: { error?: string | null; reconnecting?: boolean; waiting?: string | null } | null): CloudIssue | null =>
+  status?.error || status?.reconnecting || status?.waiting
+    ? { error: status.error ?? null, reconnecting: status.reconnecting === true, ...(status.waiting ? { waiting: status.waiting } : {}) }
+    : null;
+/** One line for a parent: the error, the server it waits on, or that the app keeps reconnecting. Null when nothing is wrong. */
 export const cloudIssueText = (issue: CloudIssue | null): string | null =>
-  issue?.error ?? (issue?.reconnecting ? "Cloudroom can't reach this thread's cloud right now and retries by itself" : null);
+  issue?.error ?? issue?.waiting ?? (issue?.reconnecting ? "Cloudroom can't reach this thread's cloud right now and retries by itself" : null);

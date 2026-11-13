@@ -71,6 +71,7 @@ import { macOsPermissionPresentation } from "../presentation.js";
 import {
   codexManagedPolicyError,
   keepShellEnvironmentSetKeys,
+  shareThreadIdentityWithMcpServers,
   resolveCodexInstructionOverrides,
   toCodexDynamicTools,
   toCodexPermissionSettings,
@@ -314,6 +315,10 @@ const CODEX_INITIALIZE_PARAMS = {
 };
 
 const CHILD_REQUEST_TIMEOUT_MS = 60_000;
+// A new session gets the runtime's 2-minute creation budget, since on a busy
+// Mac thread/start alone can pass 60 s (#1618). Ending 10 s early lets this
+// error, which names the step that hung, beat the runtime's generic timeout.
+const THREAD_CREATION_BUDGET_MS = 110_000;
 const MANAGED_REQUIREMENTS_TIMEOUT_MS = 3_000;
 const INTERRUPT_SETTLEMENT_TIMEOUT_MS = 5_000;
 const CODEX_ARCHIVED_SESSION_ERROR_PATTERN =
@@ -976,6 +981,18 @@ const codexConfigReadResultSchema = z
           })
           .nullish()
           .catch(null),
+        mcp_servers: z
+          .record(
+            z.string(),
+            z
+              .object({
+                command: z.string().nullish(),
+                env: z.record(z.string(), z.string()).nullish(),
+              })
+              .passthrough(),
+          )
+          .nullish()
+          .catch(null),
       })
       .optional(),
   })
@@ -1022,6 +1039,7 @@ interface ConstructedCodexSession {
 async function constructThreadSession(
   args: ConstructThreadSessionArgs,
 ): Promise<ConstructedCodexSession> {
+  const creationDeadline = Date.now() + THREAD_CREATION_BUDGET_MS;
   const existing = sessionsByRoomThreadId.get(args.threadId);
   const decoded = decodeCodexOptions(args.options);
   sessionSerialCounter += 1;
@@ -1176,6 +1194,10 @@ async function constructThreadSession(
           preparedGitRoots.config ?? {},
           settings?.config?.shell_environment_policy,
         ),
+        ...shareThreadIdentityWithMcpServers(
+          preparedGitRoots.config ?? {},
+          settings?.config?.mcp_servers,
+        ),
         ...(commandGuardEnabled ? prepareCodexGuard(commandGuardDir()) : {}),
       },
       ...(dynamicTools && dynamicTools.length > 0 ? { dynamicTools } : {}),
@@ -1229,7 +1251,13 @@ async function constructThreadSession(
           method,
           params,
           resultSchema: codexThreadIdentityResultSchema,
-          timeoutMs: CHILD_REQUEST_TIMEOUT_MS,
+          timeoutMs:
+            args.request.kind === "resume"
+              ? CHILD_REQUEST_TIMEOUT_MS
+              : Math.max(
+                  CHILD_REQUEST_TIMEOUT_MS,
+                  creationDeadline - Date.now(),
+                ),
         }),
       CODEX_ACTIVE_WRITER_ERROR_PATTERN,
       args.request.kind === "resume" ? CODEX_ACTIVE_WRITER_RETRY_DELAYS_MS : [],

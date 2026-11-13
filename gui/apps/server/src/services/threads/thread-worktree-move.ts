@@ -20,6 +20,8 @@ import {
 } from "../environments/environment-engine.js";
 import { ENVIRONMENT_HOOK_TIMEOUT_MS } from "../environments/environment-hooks.js";
 import { DEFAULT_ENVIRONMENT_PROVIDER_ID } from "../environments/environment-provider-ids.js";
+import { requireWorkspaceCommandTarget } from "../environments/workspace-command-target.js";
+import { callEnvironmentWorkspaceStatusForWork } from "../environments/workspace-status.js";
 import { runLiveHostCommand } from "../hosts/live-command.js";
 import { resolvePrimaryHostId } from "../hosts/primary-host.js";
 import { getEnvironmentProvider } from "../plugins/plugin-environment-provider-registry.js";
@@ -54,7 +56,7 @@ export function requestThreadWorktreeMove(
   threadId: string,
   carry: readonly string[],
 ): { previousPath: string } {
-  const { thread, folder } = movable(deps, threadId);
+  const { thread, folder } = movable(deps, threadId, carry);
   for (const path of carry) carriedPath(folder.path, path);
   if (pending.has(thread.id) || moving.has(thread.id))
     throw new ApiError(409, "thread_busy", "This thread is already moving to a new worktree.");
@@ -104,14 +106,12 @@ export function watchFailedTurnsForWorktreeMoves(deps: AppDeps): void {
 }
 
 async function moveToNewWorktree(deps: AppDeps, threadId: string, carry: readonly string[]): Promise<{ from: string; to: string }> {
-  const { thread, folder } = movable(deps, threadId);
+  const { thread, folder, local } = movable(deps, threadId, carry);
   const record = getEnvironmentProvider(DEFAULT_ENVIRONMENT_PROVIDER_ID.gitWorktree);
   if (!record) throw new ApiError(409, "worktree_plugin_off", "Turn on the Worktree plugin in Settings → Plugins.");
-  const head = await exec("git", ["-C", folder.path, "rev-parse", "HEAD"]).then(
-    ({ stdout }) => stdout.trim(),
-    () => { throw new ApiError(409, "not_a_git_checkout", `${folder.path} is not a Git checkout with commits.`); },
-  );
-  const files = await carriedFiles(folder.path, carry);
+  const head = await (local ? localHead(folder.path) : remoteHead(deps, folder));
+  if (!head) throw new ApiError(409, "not_a_git_checkout", `${folder.path} is not a Git checkout with commits.`);
+  const files = local ? await carriedFiles(folder.path, carry) : [];
   // The fork's rule picks the source repo, so a thread in a nested repo gets a worktree of that repo (#971).
   const requested = {
     type: "provider" as const,
@@ -167,7 +167,24 @@ async function createWorktree(
   }
 }
 
-function movable(deps: AppDeps, threadId: string): { thread: Thread; folder: EnvironmentRow & { path: string } } {
+const localHead = (path: string) =>
+  exec("git", ["-C", path, "rev-parse", "HEAD"]).then(({ stdout }) => stdout.trim(), () => null);
+
+/** Another computer's HEAD comes from its own host daemon; this process can't read its folders. */
+async function remoteHead(deps: AppDeps, folder: EnvironmentRow): Promise<string | null> {
+  const result = await callEnvironmentWorkspaceStatusForWork(deps, {
+    environment: folder,
+    target: requireWorkspaceCommandTarget(folder),
+  });
+  const checkout = result.outcome === "available" ? result.workspaceStatus.checkout : null;
+  return checkout && "headSha" in checkout ? checkout.headSha : null;
+}
+
+function movable(
+  deps: AppDeps,
+  threadId: string,
+  carry: readonly string[],
+): { thread: Thread; folder: EnvironmentRow & { path: string }; local: boolean } {
   const thread = getThread(deps.db, threadId);
   if (!thread || thread.deletedAt !== null) throw new ApiError(404, "thread_not_found", "Thread not found");
   if (thread.archivedAt !== null) throw new ApiError(409, "thread_not_writable", "Unarchive the thread, then move it.");
@@ -179,11 +196,13 @@ function movable(deps: AppDeps, threadId: string): { thread: Thread; folder: Env
     throw new ApiError(409, "provider_cannot_move", "Only Claude Code and Codex threads can move into a worktree. Fork instead: `room-cli thread fork --new-environment worktree`.");
   const folder = thread.environmentId ? getEnvironment(deps.db, thread.environmentId) : null;
   if (!folder?.path) throw new ApiError(409, "no_folder", "This thread has no folder yet.");
-  if (folder.hostId !== resolvePrimaryHostId(deps))
-    throw new ApiError(409, "other_machine", "This thread runs on another computer.");
+  // Another computer's thread moves without carried files: copying them would need its own file access.
+  const local = folder.hostId === resolvePrimaryHostId(deps);
+  if (!local && carry.length > 0)
+    throw new ApiError(409, "other_machine", "This thread runs on another computer, so it can move only without --carry. Commit the files first.");
   if (folder.environmentProviderId === DEFAULT_ENVIRONMENT_PROVIDER_ID.gitWorktree)
     throw new ApiError(409, "already_worktree", "This thread already has its own worktree.");
-  return { thread, folder: { ...folder, path: folder.path } };
+  return { thread, folder: { ...folder, path: folder.path }, local };
 }
 
 function settled(deps: AppDeps, thread: Thread): boolean {

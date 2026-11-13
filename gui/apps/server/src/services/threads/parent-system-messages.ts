@@ -68,6 +68,22 @@ export interface ParentSystemMessageTaxonomy {
   systemMessageSubject: SystemMessageSubject | null;
   /** Kept with the notice wherever it queues, for its late-delivery line (#1208). */
   childReport?: QueuedMessageSystemNotice["childReport"];
+  /**
+   * Set only for a notice a full disk refused: checked right before each
+   * write, and the notice is never queued, so its retry stays in memory (#1542).
+   */
+  stillCurrent?: () => boolean;
+}
+
+/** Nothing was sent or queued: the retried notice went stale or would queue. */
+export class UnsentParentSystemMessageError extends Error {}
+
+function throwIfStale(
+  args: Pick<ParentSystemMessageTaxonomy, "stillCurrent">,
+  queues = false,
+) {
+  if (args.stillCurrent && (queues || !args.stillCurrent()))
+    throw new UnsentParentSystemMessageError();
 }
 
 interface QueueParentSystemMessageArgs extends ParentSystemMessageTaxonomy {
@@ -136,6 +152,7 @@ function throwIfStopHoldsNotice(
   args: QueueReadyParentSystemMessageArgs,
   current: Thread | null,
 ): void {
+  throwIfStale(args);
   if (args.sendNow || current === null) return;
   if (
     current.status === "stopping" ||
@@ -289,6 +306,7 @@ async function queueActiveParentSystemMessage(
 ): Promise<boolean> {
   const expectedSteerTurnId = getActiveTurnId(deps, args.thread.id);
   if (expectedSteerTurnId === null) {
+    throwIfStale(args, true);
     const outcome = queueInputForStartingTurn(deps, {
       claimed: null,
       input: {
@@ -451,8 +469,14 @@ async function queueReadyParentSystemMessage(
         target: { kind: "new-turn" },
         requestId,
       });
-      const dispatchKind = command.mode;
-      if (dispatchKind !== "turn.submit") {
+      // Like a user's send, a fresh session's start marks the thread active,
+      // so a second notice joins the starting turn instead of sending a
+      // competing `thread.start` the host refuses (#1584).
+      if (
+        command.mode !== "turn.submit" &&
+        current.status !== "idle" &&
+        current.status !== "error"
+      ) {
         return { activeThread: null };
       }
       return {
@@ -533,6 +557,7 @@ export async function queueParentSystemMessage(
         childReport: args.childReport,
         input: args.input,
         parentThread,
+        stillCurrent: args.stillCurrent,
         systemMessageKind: args.systemMessageKind,
         systemMessageSubject: args.systemMessageSubject,
       });
@@ -556,6 +581,7 @@ export async function queueParentSystemMessage(
       }
       return delivered;
     } catch (error) {
+      if (error instanceof UnsentParentSystemMessageError) throw error;
       heldByStop = isQueuedMessageAutoSendPausedError(error);
       failed =
         !heldByStop && !(error instanceof ThreadContextClearInProgressError);
@@ -578,6 +604,7 @@ export async function queueParentSystemMessage(
       threadId: parentThread.id,
     },
   );
+  throwIfStale(args, true);
   createQueuedThreadMessage(deps.db, deps.hub, {
     threadId: parentThread.id,
     content: args.input,
@@ -659,6 +686,7 @@ async function deliverParentSystemMessageWithContextGuard(
   );
   if (
     await dispatchTurnDuringReprovision({
+      beforeRequestAppendInTransaction: () => throwIfStale(args),
       deps,
       environment,
       execution,
@@ -683,6 +711,7 @@ async function deliverParentSystemMessageWithContextGuard(
     execution,
     environment: readyEnvironment,
     sendNow: args.sendNow,
+    stillCurrent: args.stillCurrent,
     systemMessageKind: args.systemMessageKind,
     systemMessageSubject: args.systemMessageSubject,
   });

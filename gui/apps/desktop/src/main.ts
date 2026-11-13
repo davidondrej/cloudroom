@@ -109,7 +109,9 @@ import {
 import { openServerUrlDialog } from "./server-url-dialog.js";
 import {
   computerName,
+  BACK_CHECK_MS,
   createComputersSync,
+  createReturnWatch,
   fetchRelayCredential,
   isRelayUrl,
   listComputers,
@@ -309,10 +311,15 @@ interface CreateApplicationWindowArgs {
 }
 
 interface StartOwnedRuntimeArgs {
+  attempt?: number;
   bridgePath: string;
   serverUrl: string;
   userDataPath: string;
 }
+
+// Windows: the first launch after an update can find some backend files missing (ERR_MODULE_NOT_FOUND),
+// and the next launch works. Wait and start it again before showing an error.
+const MISSING_FILE_RETRY_DELAYS_MS = [5_000, 15_000];
 
 interface SendLogViewerSnapshotArgs {
   browserWindow: BrowserWindow;
@@ -421,9 +428,10 @@ let computerList: ComputerList | null = null;
 let computersSkipReason: ComputersFailure | null = null;
 let relayCredentialCache: ConnectCredentialCache | null = null;
 let relayCredential: ConnectCredential | null = null;
-// Set while this Mac stands in for the chosen Mac: it didn't answer at launch, or the user picked "Use this Mac".
-// `back` turns true once that Mac is online again, so the app can offer to switch.
-let computerFallback: { handle: string; name: string; back: boolean } | null = null;
+// Set while this Mac stands in for the chosen Mac: it didn't answer, or the user picked "Use this Mac" (`chosen`).
+// Once that Mac is online again, the app goes back to it by itself (ADR 20261113-210101). After "Use this Mac",
+// `back` turns true instead, so the app only offers to switch.
+let computerFallback: { handle: string; name: string; back: boolean; chosen: boolean } | null = null;
 let thisComputerName = BUILTIN_SERVER_NAME;
 let builtinServerUrl: string = DEFAULT_ROOM_SERVER_URL;
 let desktopBridgePath: string | null = null;
@@ -546,13 +554,17 @@ function describeComputers(): RoomDesktopInfo["computers"] {
     computerFallback === null && target?.kind === "connect" && isRelayUrl(target.server.url)
       ? target.server.handle
       : null;
-  return {
-    list: (computerList?.computers ?? []).map((computer) => ({
+  // Until the relay's list arrives, the picked Mac still has its name, so the chip and Settings can say which Mac this is.
+  const picked = target?.kind === "connect" ? target.server : null;
+  const list =
+    computerList?.computers.map((computer) => ({
       handle: computer.handle,
       name: computer.name,
       online: computer.live,
       self: computer.handle === computerList?.selfHandle,
-    })),
+    })) ?? (picked ? [{ handle: picked.handle, name: picked.name, online: viewing !== null, self: false }] : []);
+  return {
+    list,
     viewing,
     fallback: computerFallback && { ...computerFallback },
   };
@@ -1354,7 +1366,7 @@ async function applyServerTarget({ useThisMac = false }: { useThisMac?: boolean 
           ? `[desktop] leaving ${target.server.name} for ${BUILTIN_SERVER_NAME} (the user asked)`
           : `[desktop] ${target.server.name} did not answer — opening ${BUILTIN_SERVER_NAME}`,
       );
-      setComputerFallback({ handle: target.server.handle, name: target.server.name, back: false });
+      setComputerFallback({ handle: target.server.handle, name: target.server.name, back: false, chosen: useThisMac });
     }
   }
 
@@ -1401,6 +1413,7 @@ function setComputerFallback(fallback: typeof computerFallback): void {
   if (fallback === null && computerFallback === null) return;
   const switched = (fallback === null) !== (computerFallback === null);
   computerFallback = fallback;
+  returnWatch.reset();
   if (switched) {
     computersSync?.setFallback(fallback !== null);
     desktopBrowserBrokerClient?.reconnect();
@@ -1418,28 +1431,73 @@ async function getRelayCredential(startLocal: boolean): Promise<ConnectCredentia
   return relayCredential;
 }
 
-/** Signed out (no key) or signed in to another account (a new address): also forget that account's other Macs. */
+/** Signed out (no key) or signed in again (a new address): sign this app out of the other Macs. */
 async function setRelayCredential(next: ConnectCredential | null): Promise<void> {
   const previous = relayCredential;
   relayCredential = next;
   if (next === null) await relayCredentialCache?.clear();
   else if (next.credential !== previous?.credential) await relayCredentialCache?.write(next);
-  if (next === null || (previous !== null && previous.handle !== next.handle)) await forgetOtherMacs();
+  if (next === null || (previous !== null && previous.handle !== next.handle)) await signOutOfOtherMacs();
 }
 
-/** Drops the other Macs from the menus, signs this app out of them, deletes their saved data, and shows this Mac. */
-async function forgetOtherMacs(): Promise<void> {
+/**
+ * Drops the other Macs from the menus, signs this app out of them, and deletes their saved data. The picked Mac stays
+ * the pick (ADR 20261113-210101): after the next sign-in the app goes back to it, and a Mac list without it forgets it.
+ */
+async function signOutOfOtherMacs(): Promise<void> {
   const origins = new Set(await relayCookieOrigins(session.defaultSession.cookies));
   for (const computer of computerList?.computers ?? []) origins.add(new URL(computer.url).origin);
+  if (origins.size === 0 && computerList === null) return;
   const remembered = serverTargetStore?.getConnectServer();
   if (remembered) origins.add(new URL(remembered.url).origin);
-  if (origins.size === 0 && computerList === null && !remembered) return;
   computerList = null;
   relaySessionKeeper?.clear();
+  if (computerFallback?.back) computerFallback = { ...computerFallback, back: false };
   await Promise.all([...origins].map((origin) => session.defaultSession.clearStorageData({ origin }).catch(() => {})));
-  if (await serverTargetStore?.forgetConnectServer()) void applyServerTarget();
+  // Signed out, the window can't show that Mac: this Mac stands in until it can.
+  if (serverTargetStore?.getTarget().kind === "connect" && computerFallback === null) void applyServerTarget();
   refreshApplicationMenu();
   sendDesktopInfoChanged();
+}
+
+const returnWatch = createReturnWatch();
+let returningToPickedMac = false;
+
+/** A Mac list while this Mac stands in for the picked Mac: go back to it once it has stayed online (ADR 20261113-210101). */
+function watchPickedMac(fallback: NonNullable<typeof computerFallback>, live: boolean): void {
+  if (fallback.back || returningToPickedMac) return;
+  if (fallback.chosen) {
+    // After "Use this Mac" or a failed try, only offer to switch.
+    if (live) computerFallback = { ...fallback, back: true };
+    return;
+  }
+  const step = returnWatch.next(live);
+  if (step === "check-again") setTimeout(() => void computersSync?.syncNow(), BACK_CHECK_MS + 1_000).unref();
+  if (step === "return") void returnToPickedMac(fallback.handle);
+}
+
+/** Shows the picked Mac again. A try that fails leaves this Mac on screen and stops trying by itself. */
+async function returnToPickedMac(handle: string): Promise<void> {
+  returningToPickedMac = true;
+  try {
+    // Open it on the relay first, so a Mac that went offline again never reloads this Mac's page.
+    const opened = await openOnRelay(handle);
+    if (!opened.ok || computerFallback?.handle !== handle || computerFallback.chosen) return;
+    desktopLogger.info(`[desktop] ${computerFallback.name} is back — showing it again`);
+    await applyServerTarget();
+    // Back on this Mac: the page didn't load. The Switch toast takes over, so this Mac reloads at most once.
+    if (computerFallback !== null) computerFallback = { ...computerFallback, chosen: true };
+  } finally {
+    returnWatch.reset();
+    returningToPickedMac = false;
+  }
+}
+
+/** The pick is now this Mac. While this Mac already stands in, its page stays on screen: no reload. */
+async function settleOnThisMac(): Promise<void> {
+  if (computerFallback === null) return applyServerTarget();
+  setComputerFallback(null);
+  refreshApplicationMenu();
 }
 
 async function clearRelayCredential(): Promise<void> {
@@ -1490,11 +1548,11 @@ async function openComputerTarget(handle: string | null): Promise<void> {
   if (serverTargetStore === null) return;
   if (handle === null || handle === computerList?.selfHandle) {
     await serverTargetStore.setTarget("builtin");
-  } else {
-    const computer = listMenuConnectServers().find((candidate) => candidate.handle === handle);
-    if (computer === undefined) return;
-    await serverTargetStore.setConnectServer(computer);
+    return settleOnThisMac();
   }
+  const computer = listMenuConnectServers().find((candidate) => candidate.handle === handle);
+  if (computer === undefined) return;
+  await serverTargetStore.setConnectServer(computer);
   await applyServerTarget();
 }
 
@@ -2346,6 +2404,8 @@ async function startOwnedRuntime(
     userDataPath: args.userDataPath,
   });
   setCurrentRuntime(runtime);
+  const attempt = args.attempt ?? 1;
+  let ready = false;
 
   void roomProcess.exit.then((exit) => {
     void clearOwnedRuntimePidFile({ userDataPath: args.userDataPath });
@@ -2353,7 +2413,9 @@ async function startOwnedRuntime(
       return;
     }
     setCurrentRuntime(null);
-    saveCrash({ what: "backend", reason: formatExitResult(exit), exit_code: exit.code, logs: roomProcess.logs.text().split("\n").slice(-20).join("\n") });
+    saveCrash({ what: "backend", reason: formatExitResult(exit), exit_code: exit.code, logs: roomProcess.logs.text().split("\n").slice(-50).join("\n"), attempt });
+    // Before it was ready, the start below shows the error or tries again.
+    if (!ready) return;
     void loadStartupError({
       details: `The Cloudroom backend stopped with ${formatExitResult(
         exit,
@@ -2380,6 +2442,12 @@ async function startOwnedRuntime(
   ]);
 
   if (raceResult.kind === "process-exited") {
+    const retryDelayMs = MISSING_FILE_RETRY_DELAYS_MS[attempt - 1];
+    if (process.platform === "win32" && retryDelayMs !== undefined && /ERR_MODULE_NOT_FOUND|Cannot find (module|package)/.test(roomProcess.logs.text())) {
+      desktopLogger.warn(`The Cloudroom backend is missing a file; starting it again in ${retryDelayMs / 1000} s.`);
+      await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
+      return quitting ? null : startOwnedRuntime({ ...args, attempt: attempt + 1 });
+    }
     await loadStartupError({
       details: `The Cloudroom backend exited before it was ready with ${formatExitResult(
         raceResult.exit,
@@ -2393,6 +2461,7 @@ async function startOwnedRuntime(
   }
 
   if (raceResult.result.kind === "compatible") {
+    ready = true;
     void resumeThreadsAfterUpdate({
       logger: desktopLogger,
       serverUrl: runtime.serverUrl,
@@ -2941,14 +3010,15 @@ async function runDesktopApp(): Promise<void> {
             name: synced.name,
             url: synced.url,
           });
+        } else if (selected !== null) {
+          // This account has no such Mac: it belonged to another account, or was removed (ADR 20261113-210101).
+          desktopLogger.info(`[desktop] ${selected.name} is not on this account — forgetting it`);
+          void serverTargetStore?.forgetConnectServer().then((shown) => {
+            if (shown) void settleOnThisMac();
+          });
         }
         const fallback = computerFallback;
-        if (fallback !== null && !fallback.back) {
-          const back = result.value.computers.some(
-            (computer) => computer.handle === fallback.handle && computer.live,
-          );
-          if (back) computerFallback = { ...fallback, back };
-        }
+        if (fallback !== null) watchPickedMac(fallback, synced?.handle === fallback.handle && synced.live);
       }
       refreshApplicationMenu();
       sendDesktopInfoChanged();
@@ -3046,6 +3116,7 @@ async function runDesktopApp(): Promise<void> {
     }, { working: async () => (currentRuntime ? runningLocalThreadIds(currentRuntime.serverUrl) : []), quitFile: quitFile() });
   }
   desktopBrowserViewManager = createDesktopBrowserViewManager({
+    sessionDataPath: app.getPath("sessionData"),
     dispatchAppShortcut(target) {
       const browserWindow = BrowserWindow.getAllWindows().find(
         (candidate) => candidate.webContents.id === target.hostWebContentsId,
@@ -3189,7 +3260,7 @@ async function runDesktopApp(): Promise<void> {
       const window = new BrowserWindow(options);
       // Install before the factory loads the first URL, so no window is ever unguarded.
       installAppWindowNavigationGuard(window.webContents);
-      watchWindowCrashes(window.webContents);
+      watchWindowCrashes(window);
       return window;
     },
   };

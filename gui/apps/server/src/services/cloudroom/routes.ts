@@ -403,6 +403,8 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: Plugin
       throw new ApiError(status === 403 || status === 404 || status === 409 ? status : status ? 400 : 503, "cloud_gpu", error instanceof Error ? error.message : String(error));
     }) as Record<string, unknown>;
     if (body.thread && reply.approval) service.gpuApprovals.show(body.thread, reply.approval);
+    // A stop cancels a request that may still have its card open: close it now, not at the next minute's re-check.
+    else if (body.thread && body.argv[0] === "stop") void service.gpuApprovals.recheck(body.thread);
     return context.json(reply);
   });
   // Import from this Mac: the list shows names only, and values go straight to the website.
@@ -694,6 +696,12 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: Plugin
     const problem = browserRequestProblem(context, deps, { requireJsonForMutation: true });
     if (problem) return context.json({ message: "Use the local Cloudroom app or CLI." }, problem.status);
     await cloudroom(deps).moveToCloud(context.req.param("id"));
+    return context.json({ ok: true });
+  });
+  app.post("/api/v1/cloudroom/threads/:id/from-copy", async (context) => {
+    const problem = browserRequestProblem(context, deps, { requireJsonForMutation: true });
+    if (problem) return context.json({ message: "Use the local Cloudroom app or CLI." }, problem.status);
+    await cloudroom(deps).continueFromCopy(context.req.param("id"));
     return context.json({ ok: true });
   });
   app.post("/api/v1/cloudroom/threads/:id/retry-copy", async (context) => {

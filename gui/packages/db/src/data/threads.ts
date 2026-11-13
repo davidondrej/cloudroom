@@ -659,7 +659,8 @@ interface StatusTransition {
   newStatus: ThreadStatus;
 }
 
-function statusTransitionNeedsAttention(args: StatusTransition): boolean {
+/** Whether a status change is new activity: it orders the sidebar and shows the unread dot. Only a turn that ended or failed is. */
+export function statusTransitionNeedsAttention(args: StatusTransition): boolean {
   if (args.currentStatus === "active" && args.newStatus === "idle") {
     return true;
   }

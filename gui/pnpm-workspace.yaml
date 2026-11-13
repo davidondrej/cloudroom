@@ -11,10 +11,6 @@ packages:
 
 # Supply-chain rule (ADR 20261101-000509): resolve only versions at least 48 hours old.
 minimumReleaseAge: 2880
-# One-version hotfix exceptions, approved by David. Remove each after its date.
-minimumReleaseAgeExclude:
-  # CVE-2026-125350 (exploited Chromium bug), approved by David 2026-11-11; remove after 2026-11-13T01:57:01Z.
-  - "electron@44.11.1"
 # pnpm 10 runs no dependency install scripts by default. These are the ones pnpm 9 ran; a new one needs review.
 onlyBuiltDependencies:
   - "@google/genai"

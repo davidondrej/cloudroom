@@ -190,6 +190,10 @@ def codex():
                 if params.get("expectedTurnId") != turn:
                     send({"id": message["id"], "error": {"code": -32602, "message": "steer target is no longer active"}})
                     continue
+                if Path("steer-late").exists():
+                    # The turn ends before the agent confirms the steer (#1579).
+                    event("turn/completed", turn={"id": turn, "status": "completed"})
+                    time.sleep(.3)
             elif method == "thread/compact/start":
                 mode = Path('compact-mode').read_text() if Path('compact-mode').exists() else 'legacy'
                 if mode == 'reject':
@@ -1086,8 +1090,13 @@ class RecoveryTests(unittest.TestCase):
         self.wait(lambda: receipts().get("notice_cr_child_kid_task_kid_steer", {}).get("state") == "completed", "steered notice")
         self.assertIn("completed", receipts()["notice_cr_child_kid_task_kid_steer"]["input"]["text"])
         self.assertNotIn("notice_cr_child_kid_task_kid", receipts())
-        self.service.request("POST", "/v1/sessions/cr_seed/interrupt", {"request_id": "halt", "target_request_id": "running"}, 202)
+        # #1579: a steer confirmed after its turn ended still counts; the notice is never queued a second time.
+        (self.repo / "steer-late").touch()
+        self.service.request("POST", "/v1/sessions/cr_child_kid/prompts", {"request_id": "late", "text": "hello"}, 202)
+        self.wait(lambda: receipts().get("notice_cr_child_kid_late_steer", {}).get("state") == "completed", "late steer")
         self.ready()
+        self.assertNotIn("notice_cr_child_kid_late", receipts())
+        (self.repo / "steer-late").unlink()
         self.service.request("POST", "/v1/sessions/cr_child_kid/prompts", {"request_id": "again", "text": "hello"}, 202)
         self.wait(lambda: receipts().get("notice_cr_child_kid_again", {}).get("state") == "completed", "queued notice")
         self.assertNotIn("notice_cr_child_kid_again_steer", receipts())

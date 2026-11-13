@@ -64,6 +64,8 @@ export async function acceptThreadSendRequest(
     return { ok: true, delivery: "sent" };
   }
 
+  // The last attempt's request: a rolled-back one never reaches a turn.
+  let requestId: string | undefined;
   const outcome = await attemptDispatch(deps, {
     thread: args.thread,
     payload: args.payload,
@@ -75,10 +77,13 @@ export async function acceptThreadSendRequest(
     startedOnBehalfOf: null,
     trigger: "user",
     onStartSettled: args.onStartSettled,
-    beforeDispatch: args.beforeDispatch,
+    beforeDispatch: (id) => {
+      requestId = id;
+      args.beforeDispatch?.();
+    },
   });
   if (outcome.kind === "dispatched") {
-    return { ok: true, delivery: "sent" };
+    return { ok: true, delivery: "sent", ...(requestId ? { requestId } : {}) };
   }
   return {
     ok: true,

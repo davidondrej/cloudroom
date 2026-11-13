@@ -91,14 +91,14 @@ describe("room-cli thread tell command output", () => {
     },
   );
 
-  it("room-cli thread tell keeps the steered wording for servers that only report ok", async () => {
+  it("room-cli thread tell does not claim the agent accepted a sent message (#1536)", async () => {
     const post = vi.fn(async () => ({ ok: true }));
     stubTellApi({ "v1.threads.:id.send.$post": post });
 
     await runCommand(["thread", "tell", "thread-legacy", "hello"], register);
 
     expect(vi.mocked(console.log).mock.calls[0]?.[0]).toBe(
-      "Thread thread-legacy steered",
+      "Thread thread-legacy message sent; the agent has not confirmed it yet. If it fails, `room-cli thread show thread-legacy` shows status error and why.",
     );
   });
 

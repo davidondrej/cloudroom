@@ -96,3 +96,20 @@ export function CloudDiskNotice({ threadId, disk }: { threadId: string; disk: Cl
     </div>
   );
 }
+
+/** During an outage (ADR 20261113-202742): continue from the thread's older copy instead of waiting. It asks once more,
+ *  since newer work is lost. */
+export function ContinueFromCopyButton({ threadId }: { threadId: string }) {
+  const client = useQueryClient();
+  const [sure, setSure] = useState(false);
+  const pick = useMutation({
+    mutationFn: () => sdk.cloudroom.continueFromCopy(threadId),
+    onError: (error) => appToast.error(error.message),
+    onSettled: () => client.invalidateQueries({ queryKey: ["cloudroom-thread", threadId] }),
+  });
+  return (
+    <button type="button" disabled={pick.isPending} onClick={() => sure ? pick.mutate() : setSure(true)} className="shrink-0 cursor-pointer text-foreground underline underline-offset-2 disabled:opacity-50">
+      {pick.isPending ? "Moving…" : sure ? "Newer changes are lost. Continue?" : "Continue from copy"}
+    </button>
+  );
+}

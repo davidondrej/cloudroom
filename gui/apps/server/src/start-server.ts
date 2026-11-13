@@ -35,6 +35,7 @@ import {
 } from "./services/system/provider-auto-update.js";
 import { createProviderRegistryService } from "./services/providers/provider-registry.js";
 import { installFirstResponseTelemetry } from "./services/system/first-response-telemetry.js";
+import { installTokenTelemetry } from "./services/system/token-telemetry.js";
 import { startOrgPlugin } from "./services/cloudroom/org-plugin.js";
 import { startSetupTelemetry } from "./services/cloudroom/setup-telemetry.js";
 import { installTitleRecheck } from "./services/threads/title-recheck.js";
@@ -247,6 +248,7 @@ export async function runServer(serverConfig: ServerConfig): Promise<void> {
   });
   const stopFirstResponseTelemetry = installFirstResponseTelemetry({ db, hub, telemetry }, (threadId, at) => cloud.sandboxes.wokeSince(threadId, at), (threadId, at) => cloud.sandboxes.startupSince(threadId, at));
   const stopAuthFailureTelemetry = installAuthFailureTelemetry({ db, logger, telemetry });
+  const stopTokenTelemetry = installTokenTelemetry({ db, telemetry, dataDir: runtimeConfig.dataDir, logger });
 
   const sweepDeps = {
     config: runtimeConfig,
@@ -348,6 +350,7 @@ export async function runServer(serverConfig: ServerConfig): Promise<void> {
       cloud.stop();
       stopFirstResponseTelemetry();
       stopAuthFailureTelemetry();
+      stopTokenTelemetry();
       stopTitleRecheck();
       stopThreadPurpose();
       stopProjectSummaries();

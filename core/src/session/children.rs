@@ -856,13 +856,20 @@ impl Manager {
                         let (steer, queued) = notice_ids(&child, &r.request_id);
                         let legacy = legacy_notice_id(&child, &r.request_id);
                         let tried = p.receipts.get(&steer);
-                        let steered = |s: &Receipt| {
-                            s.state == "completed"
-                                || (s.state == "accepted"
-                                    && s.input["target_request_id"].as_str()
-                                        == p.current_request.as_deref())
+                        // A steer whose turn ends first may still reach the agent, so it settles before any queued
+                        // copy (#1579). Only one that failed, or whose agent was lost (its turn ended unknown, or
+                        // no agent runs), falls back to the queue.
+                        let lost = |s: &Receipt| {
+                            let target = s.input["target_request_id"].as_str();
+                            p.handle.is_none()
+                                || target
+                                    .and_then(|t| p.receipts.get(t))
+                                    .is_some_and(|t| t.state.starts_with("unknown"))
                         };
-                        // Delivered, or still being steered into the turn it targets.
+                        let steered = |s: &Receipt| {
+                            s.state == "completed" || (s.state == "accepted" && !lost(s))
+                        };
+                        // Delivered, or still being steered.
                         let settled = p.receipts.contains_key(&queued)
                             || p.receipts.contains_key(&legacy)
                             || tried.is_some_and(steered)
