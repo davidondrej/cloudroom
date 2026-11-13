@@ -909,6 +909,107 @@ impl Manager {
 mod tests {
     use super::*;
 
+    /// A fake website that has lost this sandbox's links: it lists no children and refuses every command for them,
+    /// as Cloud did after a Cloudroom restart. Answers `GET children` and `POST relay`.
+    async fn forgetful_website() -> String {
+        let app = Router::new()
+            .route(
+                "/api/core/children",
+                axum::routing::get(|| async { Json(json!({"children":[]})) }),
+            )
+            .route(
+                "/api/core/relay",
+                post(|| async {
+                    (
+                        StatusCode::FORBIDDEN,
+                        Json(json!({"error":"Not a subagent of this thread"})),
+                    )
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/api/core", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        url
+    }
+
+    /// A Core whose top-level thread `cr_parent` started `thr_kid` in a sandbox of its own (no longer `starting`),
+    /// reopened from its journal as after a restart.
+    async fn restarted_parent(name: &str) -> (Arc<Manager>, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("cloudroom-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut local = Local::open(&dir).unwrap();
+        for (kind, data) in [
+            (
+                "child_start",
+                json!({"request_id":"r1","body":{"prompt":"go"}}),
+            ),
+            (
+                "child_start_state",
+                json!({"request_id":"r1","child":"thr_kid","done":true}),
+            ),
+            ("child_state", json!({"child":"thr_kid","state":"idle"})),
+        ] {
+            local.append("cr_parent", kind, data, None).unwrap();
+        }
+        drop(local);
+        let config = crate::config::Config {
+            listen: "127.0.0.1:0".parse().unwrap(),
+            token: "t".repeat(32),
+            state_dir: dir.clone(),
+            repository: dir.clone(),
+            api_url: Some(forgetful_website().await),
+            store: "test".into(),
+            instance: None,
+            account_home: dir.clone(),
+            default_harness: crate::runtime::Kind::Codex,
+            harnesses: [(
+                crate::runtime::Kind::Codex,
+                crate::config::HarnessConfig {
+                    binary: "/bin/false".into(),
+                    home: dir.clone(),
+                    model: "fixture".into(),
+                    provider: None,
+                },
+            )]
+            .into(),
+            storage: None,
+            rpc_timeout: Duration::from_secs(30),
+            diagnostic_upload: Duration::from_secs(3600),
+        };
+        (Manager::open(config).unwrap(), dir)
+    }
+
+    /// `thread list` and `status` showed `childThreads: []` for a child this thread started itself, once the website
+    /// stopped listing it and it was no longer `starting`.
+    #[tokio::test]
+    async fn a_child_this_thread_started_stays_listed_when_the_website_forgets_it() {
+        let (m, dir) = restarted_parent("listed").await;
+        let mut answer = m.children("cr_parent", None, false).await;
+        own_children(&m, "cr_parent", false, &mut answer).await;
+        let ids: Vec<&str> = answer["children"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|c| c["id"].as_str())
+            .collect();
+        assert_eq!(ids, ["thr_kid"], "{answer}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// After a restart the website refused `archive` (and `stop`, `tell`) with "Not a subagent of this thread" while
+    /// the sidebar still showed the child under its parent, so nobody could clear it.
+    #[tokio::test]
+    async fn a_child_this_thread_started_can_be_archived_when_the_website_forgets_it() {
+        let (m, dir) = restarted_parent("archived").await;
+        let archived = command(&m, "cr_parent", "thr_kid", "archive", None, false, false).await;
+        assert!(
+            archived.is_ok(),
+            "archive was refused: {:?}",
+            archived.err().map(|f| format!("{f:?}"))
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     #[test]
     fn a_relayed_message_names_its_sender_with_or_without_bb() {
         for tag in ["[bb message from thread:", "[message from thread:"] {

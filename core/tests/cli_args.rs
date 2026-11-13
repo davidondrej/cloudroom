@@ -15,3 +15,15 @@ fn non_utf8_argument_is_a_clear_error() {
     assert!(stderr.contains("Argument 6 isn't valid UTF-8"), "{stderr}");
     assert!(!stderr.contains("panicked"), "{stderr}");
 }
+
+// Scripts written for Local threads pass `thread list --include-hidden`; Cloud refused it with exit 2 before
+// asking Core anything. Listing is read-only, so reaching a Core here changes nothing.
+#[test]
+fn cloud_thread_list_takes_include_hidden() {
+    let output = Command::new(env!("CARGO_BIN_EXE_cloudroom"))
+        .args(["thread", "list", "--include-hidden"])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stderr.contains("Unknown option"), "{stderr}");
+}
