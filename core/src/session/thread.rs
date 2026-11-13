@@ -31,7 +31,7 @@ room-cli thread move --self --project PROJECT
 room-cli thread stop --self
 room-cli thread spawn --provider codex|claude-code|cursor|pi|opencode|hermes|devin|droid|kimi|fx|openclaw [--model MODEL] [--reasoning-level LEVEL] [--service-tier default|fast] [--title TITLE] [--shared-sandbox|--top-level] --prompt TEXT|--prompt-file PATH
 room-cli thread fork [--provider codex|claude-code|cursor|pi|opencode|hermes|devin|droid|kimi|fx|openclaw] [--model MODEL] [--reasoning-level LEVEL] [--title TITLE] --prompt TEXT|--prompt-file PATH
-room-cli thread list [--include-archived]
+room-cli thread list [--include-archived] [--include-hidden]
 room-cli thread wait --children
 room-cli thread output CHILD_ID [--all]
 room-cli thread log CHILD_ID
@@ -39,7 +39,7 @@ room-cli thread tell THREAD_ID|--parent [--mode queue|steer|auto] TEXT|--message
 room-cli thread stop CHILD_ID
 room-cli thread archive CHILD_ID...
 Flags go in any order.";
-const ABOUT: &str = "Shows, renames, archives, moves or changes the effort of this cloud thread, or starts, checks, stops and archives its child threads. --top-level starts a top-level thread instead of a child, only when the user asks for one.";
+const ABOUT: &str = "Shows, renames, archives, moves or changes the effort of this cloud thread, or starts, checks, stops and archives its child threads. --top-level starts a top-level thread instead of a child, only when the user asks for one. `thread list --include-hidden` changes nothing here: it lists every child of this thread already.";
 /// `room-cli thread` commands only the app on the user's computer has.
 const LOCAL_ONLY: [&str; 28] = [
     "count",
@@ -906,6 +906,7 @@ async fn output(
         };
         let all = if query.all { "1" } else { "0" };
         let failed = start_error(&m, &parent, &id);
+        let known = relay::started_here(&m, &parent, &id);
         return match api.get("chat", &[("thread", &id), ("all", all)]).await {
             // The website may not know a child that just started yet, or has no chat of it yet (#317).
             Err(super::history::ApiError::Status(404, _))
@@ -918,6 +919,10 @@ async fn output(
             // Its start was refused: no chat, or only what came before. The same story as `thread list` (#1058).
             Err(super::history::ApiError::Status(404, _)) if failed.is_some() => {
                 Ok(json!({"id":id}))
+            }
+            // The website forgot the link to a child this thread started (#149): what Core knows of it, not an error.
+            Err(super::history::ApiError::Status(403 | 404, _)) if known.is_some() => {
+                Ok(json!({"id":id,"state":known,"note":relay::UNLINKED}))
             }
             answer => answer,
         }
@@ -1397,10 +1402,12 @@ pub async fn cli(args: &[String]) -> io::Result<i32> {
         "fork" => return fork_cli(rest).await,
         "list" => {
             // It lists only this thread's children, so a filter like --project is refused: an ignored one made an
-            // empty list read as "the project has no open threads".
-            if let Some(word) = unknown_word(rest, &[], &["--include-archived"]) {
+            // empty list read as "the project has no open threads". --include-hidden, which Local scripts pass,
+            // changes nothing here: every child of this thread shows (#149).
+            if let Some(word) = unknown_word(rest, &[], &["--include-archived", "--include-hidden"])
+            {
                 eprintln!(
-                    "Unknown option {word}. Cloud `thread list` shows only this thread's subagents, not the project's threads, and takes only --include-archived. In a loop, past runs are in the Loop notes in your prompt."
+                    "Unknown option {word}. Cloud `thread list` shows only this thread's subagents, not the project's threads, and takes only --include-archived (and --include-hidden, which changes nothing here). In a loop, past runs are in the Loop notes in your prompt."
                 );
                 return Ok(2);
             }
@@ -1434,7 +1441,10 @@ pub async fn cli(args: &[String]) -> io::Result<i32> {
                     let list = call("GET", "/children?include_archived=true", None).await?;
                     let active = |id: &str| {
                         let mut children = list["children"].as_array().into_iter().flatten();
-                        children.any(|c| c["id"] == id && c["status"] == "active")
+                        // One the website forgot is only what this thread last heard (#149): it has the last word.
+                        children.any(|c| {
+                            c["id"] == id && c["status"] == "active" && c["unlinked"] != true
+                        })
                     };
                     // A list without the website's part says nothing about them.
                     if !list["note"].is_string() {
