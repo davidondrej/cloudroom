@@ -73,6 +73,9 @@ fn model_format(kind: runtime::Kind) -> &'static str {
             "Models are Devin's own names, e.g. `claude-opus-5-5-medium` or `adaptive`."
         }
         runtime::Kind::Fx => "Models are AI Gateway IDs, e.g. `anthropic/claude-opus-5.5`.",
+        runtime::Kind::Antigravity => {
+            "Models are Antigravity's own names from the signed-in Google AI plan, e.g. `gemini-4-carbon` or `claude-opus-5-5`."
+        }
         _ => "Omit --model to use its default.",
     }
 }
