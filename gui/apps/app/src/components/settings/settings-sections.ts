@@ -113,6 +113,7 @@ export const SETTINGS_NAV_GROUPS: readonly SettingsNavGroup[] = [
       section("command-guard"),
       plugin("provider-claude-code", "Claude Code"),
       plugin("provider-codex", "Codex"),
+      plugin("provider-antigravity", "Antigravity"),
       plugin("provider-acp", "ACP"),
       plugin("provider-usage", "Usage"),
       plugin("provider-retry", "Retry"),

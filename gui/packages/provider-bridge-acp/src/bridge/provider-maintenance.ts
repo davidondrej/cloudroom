@@ -139,8 +139,9 @@ export interface AcpMaintenanceDialect {
   installer(): ProviderInstallationCommand;
   /** The newest released version, when the agent publishes one. */
   latestVersion?(): Promise<string | null>;
-  readAccount(): Promise<{ email: string | null } | null>;
-  readUsage(): Promise<ProviderUsageResult>;
+  /** `command` is the agent's resolved executable. */
+  readAccount(command: string): Promise<{ email: string | null } | null>;
+  readUsage(command: string): Promise<ProviderUsageResult>;
 }
 
 const installerUrlSchema = z
@@ -281,7 +282,8 @@ export async function getAcpProviderHealth(
       statusMessage: "The ACP provider has no launch command.",
     });
   }
-  if ((await resolveExecutablePath(command)) === null) {
+  const executable = await resolveExecutablePath(command);
+  if (executable === null) {
     return healthResult({ target, status: "not_installed" });
   }
   const version = await readAcpCliVersion(command);
@@ -301,7 +303,7 @@ export async function getAcpProviderHealth(
     });
   }
   try {
-    const account = await maintenance.readAccount();
+    const account = await maintenance.readAccount(executable);
     return healthResult({
       target,
       status: account === null ? "unauthenticated" : "ready",
@@ -515,13 +517,12 @@ export async function getAcpProviderUsage(
   args: AcpMaintenanceTarget,
 ): Promise<ProviderUsageResult> {
   if (args.maintenance === undefined) return { supported: false };
-  if (
-    args.command === null ||
-    (await resolveExecutablePath(args.command)) === null
-  ) {
+  const executable =
+    args.command === null ? null : await resolveExecutablePath(args.command);
+  if (executable === null) {
     return { supported: true, usage: { status: "not_installed" } };
   }
-  return args.maintenance.readUsage();
+  return args.maintenance.readUsage(executable);
 }
 
 const CURSOR_LATEST_VERSION_TTL_MS = 60 * 60_000;

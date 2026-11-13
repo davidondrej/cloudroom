@@ -98,6 +98,7 @@ describe("resolveCreateThreadExecutionDefaults", () => {
       executionDefaults: null,
       providerFallbackCandidates: [
         "claude-code",
+        "antigravity",
         "pi",
         "acp-cursor",
         "acp-opencode",
@@ -129,6 +130,7 @@ describe("resolveCreateThreadExecutionDefaults", () => {
       "pi",
       "claude-code",
       "codex",
+      "antigravity",
       "acp-cursor",
       "acp-opencode",
       "acp-omp",
@@ -179,6 +181,7 @@ describe("resolveCreateThreadExecutionDefaults", () => {
     ).toEqual([
       "pi",
       "claude-code",
+      "antigravity",
       "acp-cursor",
       "acp-opencode",
       "acp-omp",
@@ -258,6 +261,7 @@ describe("resolveCreateThreadExecutionDefaults", () => {
       providerId: "claude-code",
       executionDefaults: null,
       providerFallbackCandidates: [
+        "antigravity",
         "pi",
         "acp-cursor",
         "acp-opencode",

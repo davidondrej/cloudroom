@@ -1,5 +1,6 @@
 import { COMPUTER_TITLE } from "@cloudroom/domain/computer-name";
 import {
+  Fragment,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -768,6 +769,323 @@ function AccountsSection({ provider, name }: { provider: Provider; name: string 
   );
 }
 
+type AntigravityLogin = {
+  state: "missing" | "waiting" | "connected" | "unavailable" | "error" | "expired";
+  message: string | null;
+  login_id: string | null;
+  verification_url: string | null;
+  host_id?: string;
+};
+type AntigravityLimit = { label: string; usedPercent: number; resetsAt: number | null };
+/** One model group's limits, like "gemini" with its five-hour and weekly one. */
+type AntigravityGroup = { name: string; limits: AntigravityLimit[] };
+
+/** Calls the Antigravity provider plugin, which owns its CLI's Google sign-in and plan limits. */
+async function antigravityRpc<T>(method: string, input: object): Promise<T> {
+  const response = await fetch(
+    `/api/v1/plugins/provider-antigravity/rpc/${method}`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(input),
+    },
+  );
+  const body = (await response.json().catch(() => null)) as {
+    ok?: boolean;
+    result?: T;
+  } | null;
+  if (!response.ok || body?.ok !== true || body.result === undefined)
+    throw new Error("Antigravity could not be reached.");
+  return body.result;
+}
+
+/** The plan's limits on the machine the login is on: a five-hour and a weekly one per model group. */
+async function antigravityLimits(hostId: string | undefined): Promise<AntigravityGroup[]> {
+  const { resources } = await antigravityRpc<{
+    resources: { id: string; scope: { kind: string; hostId?: string } }[];
+  }>("provider-usage.v1.listResources", {});
+  const resource =
+    resources.find((entry) => entry.scope.hostId === hostId) ?? resources[0];
+  if (!resource) return [];
+  const { usage } = await antigravityRpc<{
+    usage: {
+      status: string;
+      windows?: {
+        kind?: string;
+        model?: string | null;
+        label: string;
+        usedPercent: number;
+        resetsAt: string | null;
+      }[];
+    };
+  }>("provider-usage.v1.getResource", { resourceId: resource.id, refresh: false });
+  if (usage.status !== "ok") return [];
+  const groups: AntigravityGroup[] = [];
+  for (const window of usage.windows ?? []) {
+    const name = window.model ?? "";
+    let group = groups.find((entry) => entry.name === name);
+    if (!group) groups.push((group = { name, limits: [] }));
+    group.limits.push({
+      label:
+        window.kind === "five-hour"
+          ? "5h"
+          : window.kind === "weekly"
+            ? "7d"
+            : window.kind === "daily"
+              ? "1d"
+              : window.label,
+      usedPercent: window.usedPercent,
+      resetsAt: window.resetsAt ? Date.parse(window.resetsAt) : null,
+    });
+  }
+  return groups;
+}
+
+/**
+ * Antigravity's Google account. Its CLI keeps one login, in the system
+ * keyring, so there are no accounts to add or switch: this section shows that
+ * login and its plan's limits, and signs in or out.
+ */
+function AntigravitySection() {
+  const { providers } = useProviders();
+  const navigate = useBbNavigate();
+  // undefined while loading; null when the Antigravity plugin is off.
+  const [login, setLogin] = useState<AntigravityLogin | null | undefined>(undefined);
+  const [limits, setLimits] = useState<AntigravityGroup[]>([]);
+  const [code, setCode] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const run = useCallback(
+    async (input: { action: string; requestId?: string; code?: string }) => {
+      setBusy(true);
+      setError(null);
+      try {
+        const next = await antigravityRpc<AntigravityLogin>("antigravityAccount", input);
+        setLogin(next);
+        if (next.state === "error") setError(next.message);
+        return next;
+      } catch (cause) {
+        setError(errorText(cause));
+        return null;
+      } finally {
+        setBusy(false);
+      }
+    },
+    [],
+  );
+  useEffect(() => {
+    let cancelled = false;
+    antigravityRpc<AntigravityLogin>("antigravityAccount", { action: "status" }).then(
+      (next) => {
+        if (!cancelled) setLogin(next);
+      },
+      () => {
+        if (!cancelled) setLogin(null);
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  const connected = login?.state === "connected";
+  const hostId = login?.host_id;
+  useEffect(() => {
+    if (!connected) return setLimits([]);
+    let cancelled = false;
+    antigravityLimits(hostId).then(
+      (next) => {
+        if (!cancelled) setLimits(next);
+      },
+      () => undefined,
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [connected, hostId]);
+
+  if (login === null) return null;
+  const waiting = login?.state === "waiting" && login.login_id ? login : null;
+  const signIn = async () => {
+    const next = await run({ action: "login", requestId: crypto.randomUUID() });
+    if (next?.state === "waiting" && next.verification_url)
+      navigate.openUrl(next.verification_url);
+  };
+  const now = Date.now();
+  return (
+    <section className="space-y-2">
+      <div className="flex items-center gap-2 pl-0.5">
+        <ProviderIcon
+          providerKind="agent"
+          provider={
+            providers.find((info) => info.id === "antigravity") ?? { id: "antigravity" }
+          }
+          fallback="Bot"
+          className="size-4 shrink-0"
+          aria-hidden
+        />
+        <h2 className="flex-1 text-sm font-semibold text-foreground">Antigravity</h2>
+      </div>
+      {login === undefined ? (
+        <p className="py-2.5 text-xs text-muted-foreground">Loading…</p>
+      ) : (
+        <div className="overflow-hidden rounded-lg border border-border">
+          <div
+            className={cn(
+              "flex flex-wrap items-center gap-x-3 gap-y-2 py-2.5 pl-3.5 pr-2 text-sm",
+              // The login in use is marked like the other agents' rows.
+              connected && "border-l-[3px] border-foreground bg-accent pl-[11px]",
+            )}
+          >
+            <span
+              aria-hidden
+              className={cn(
+                "grid size-4 shrink-0 place-items-center rounded-full border-[1.5px]",
+                connected ? "border-foreground" : "border-subtle-foreground/60",
+              )}
+            >
+              {connected ? <span className="size-2 rounded-full bg-foreground" /> : null}
+            </span>
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center gap-2 font-medium text-foreground">
+                <span className="truncate">This {COMPUTER_TITLE}</span>
+                {connected ? (
+                  <span className="shrink-0 rounded bg-foreground/10 px-1.5 text-xs font-semibold leading-4">
+                    In use
+                  </span>
+                ) : null}
+              </div>
+              <div className="truncate text-xs text-subtle-foreground">
+                {connected
+                  ? "Google account"
+                  : login.state === "unavailable"
+                    ? (login.message ?? "Could not check Antigravity.")
+                    : waiting
+                      ? "Signing in…"
+                      : "Signed out"}
+              </div>
+            </div>
+            {/* One line per model group, so the row stays as tall as the others. Hover a bar for its reset. */}
+            {limits.length > 0 ? (
+              <div className="order-last flex basis-full flex-col gap-y-1 pl-7 sm:order-none sm:basis-auto sm:pl-0">
+                {limits.map((group) => (
+                  <div key={group.name} className="flex items-center gap-x-5 sm:justify-end">
+                    <span className="text-xs text-subtle-foreground">{group.name}</span>
+                    {group.limits.map((limit) => (
+                      <span
+                        key={limit.label}
+                        title={
+                          limit.resetsAt !== null && limit.resetsAt > now
+                            ? `Resets in ${until(limit.resetsAt)}`
+                            : undefined
+                        }
+                      >
+                        <Meter label={limit.label} usedPercent={limit.usedPercent} />
+                      </span>
+                    ))}
+                  </div>
+                ))}
+              </div>
+            ) : null}
+            {connected ? (
+              <DropdownMenu modal={false}>
+                <DropdownMenuTrigger asChild disabled={busy}>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="size-7 shrink-0 text-muted-foreground"
+                    aria-label="Antigravity account actions"
+                  >
+                    <Icon name="MoreHorizontal" />
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end">
+                  <DropdownMenuItem onSelect={() => void run({ action: "logout" })}>
+                    <Icon name="LogOut" /> Sign out
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            ) : waiting ? null : login.state === "unavailable" ? (
+              <Button
+                variant="ghost"
+                size="sm"
+                disabled={busy}
+                onClick={() => void run({ action: "status" })}
+              >
+                Check again
+              </Button>
+            ) : (
+              <Button variant="outline" size="sm" disabled={busy} onClick={() => void signIn()}>
+                {busy ? "Opening sign-in…" : "Sign in with Google"}
+              </Button>
+            )}
+          </div>
+        </div>
+      )}
+      {waiting ? (
+        <form
+          className="flex flex-wrap items-center gap-2 rounded-lg border border-dashed border-border px-3.5 py-2 text-sm text-muted-foreground"
+          onSubmit={(event) => {
+            event.preventDefault();
+            const entered = code.trim();
+            setCode("");
+            if (entered)
+              void run({ action: "complete", requestId: waiting.login_id!, code: entered });
+          }}
+        >
+          <span className="min-w-0 flex-1">
+            Paste the code Google shows
+            {waiting.verification_url ? (
+              <>
+                {" · "}
+                <button
+                  type="button"
+                  className="text-primary-text hover:underline"
+                  onClick={() => {
+                    void navigator.clipboard.writeText(waiting.verification_url!);
+                    setCopied(true);
+                  }}
+                >
+                  {copied ? "Copied" : "Copy link"}
+                </button>
+              </>
+            ) : null}
+          </span>
+          <input
+            type="password"
+            maxLength={4096}
+            autoComplete="off"
+            spellCheck={false}
+            placeholder="Code from Google"
+            aria-label="Google sign-in code"
+            value={code}
+            onChange={(event) => setCode(event.target.value)}
+            className="h-7 w-44 rounded border border-border bg-transparent px-1.5 text-sm text-foreground outline-none focus:border-foreground/50"
+          />
+          <Button type="submit" size="sm" disabled={busy || !code.trim()}>
+            Connect
+          </Button>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            className="size-7 text-muted-foreground"
+            aria-label="Cancel"
+            onClick={() => void run({ action: "cancel", requestId: waiting.login_id! })}
+          >
+            <Icon name="X" />
+          </Button>
+        </form>
+      ) : null}
+      <p className="text-xs text-subtle-foreground">
+        Antigravity signs in with one Google account. One login covers it, so there's nothing to add here.
+      </p>
+      {error ? <p className="text-xs text-destructive-text">{error}</p> : null}
+    </section>
+  );
+}
+
 const AGENTS: readonly { provider: Provider; name: string }[] = [
   { provider: "claude-code", name: "Claude Code" },
   { provider: "codex", name: "Codex" },
@@ -792,7 +1110,11 @@ function AccountsPage() {
       </label>
       <div className="space-y-6">
         {AGENTS.map((agent) => (
-          <AccountsSection key={agent.provider} {...agent} />
+          <Fragment key={agent.provider}>
+            <AccountsSection {...agent} />
+            {/* Antigravity keeps one Google login, so it gets a section of its own after Codex. */}
+            {agent.provider === "codex" ? <AntigravitySection /> : null}
+          </Fragment>
         ))}
       </div>
     </div>
@@ -805,7 +1127,7 @@ export default definePluginApp((app) => {
     id: "accounts",
     // Not shown on the page (the tab names it). Settings search finds the page by these.
     title: "Agent accounts",
-    description: "Add and switch Claude Code, Codex, and Cursor subscriptions.",
+    description: "Add and switch Claude Code, Codex, and Cursor subscriptions, and sign in to Antigravity.",
     component: AccountsPage,
   });
 });

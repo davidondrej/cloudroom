@@ -46,7 +46,7 @@ export default async function acpProvidersPlugin(
 ): Promise<void> {
   registerUsageSource(room);
   // The ACP skill is only useful in ACP threads: every provider but the three with their own plugin.
-  room.agents.configure(({ provider }) => ({ tools: [], skills: ["claude-code", "codex", "pi"].includes(provider.id) ? [] : ["acp-provider"] }));
+  room.agents.configure(({ provider }) => ({ tools: [], skills: ["claude-code", "codex", "antigravity", "pi"].includes(provider.id) ? [] : ["acp-provider"] }));
   const host = room.hosts.experimental_client({ contract: acpHostContract });
   const settings = room.settings.define({
     customAgents: {
