@@ -89,6 +89,11 @@ type Harness = (typeof HARNESSES)[keyof typeof HARNESSES];
 function harnessOf(providerId: string): Harness | undefined {
   return HARNESSES[providerId as keyof typeof HARNESSES];
 }
+// Cloud runs Standard and Fast only, so Local Ultrafast teleports as Standard.
+// Core would otherwise reject it after the Local thread has already stopped.
+export function cloudServiceTier(tier: string | undefined): string {
+  return tier === undefined || tier === "ultrafast" ? "default" : tier;
+}
 const blocksTeleport = (deps: AppDeps, child: Thread) =>
   child.executionTarget === "cloud" &&
   !child.archivedAt &&
@@ -287,7 +292,7 @@ class Teleport {
     const execution = {
       model: choice?.model ?? last.model,
       reasoning: choice?.reasoning ?? last.reasoningLevel ?? "none",
-      serviceTier: last.serviceTier ?? "default",
+      serviceTier: cloudServiceTier(last.serviceTier),
     };
     const queuedRows = sessions.flatMap((source) =>
       listQueuedThreadMessages(this.deps.db, source.threadId),
@@ -458,7 +463,7 @@ class Teleport {
           )
           .join("\n"),
         reasoning: row.reasoningLevel,
-        service_tier: row.serviceTier,
+        service_tier: cloudServiceTier(row.serviceTier),
       };
     });
     const attachments = new Set<string>();
@@ -790,7 +795,7 @@ class Teleport {
             .filter(Boolean)
             .join("\n"),
           reasoning: row.reasoningLevel,
-          service_tier: row.serviceTier,
+          service_tier: cloudServiceTier(row.serviceTier),
         };
       });
       state.sessions = state.sessions.map((source) => ({

@@ -316,6 +316,7 @@ function EmbeddedThreadChatWithComposer({
     permissionModeOptions,
     supportsPermissionModeSelection,
     supportsServiceTier,
+    supportsUltrafast,
     serviceTierSupportByProvider,
     serviceTierFastLabel,
     isLoadingModels,
@@ -340,7 +341,13 @@ function EmbeddedThreadChatWithComposer({
             ...(isCloud ? {} : { model: selectedExecutionModel }),
             reasoningLevel,
             ...(selectedExecutionServiceTier
-              ? { serviceTier: selectedExecutionServiceTier }
+              ? {
+                  // Cloud runs Standard and Fast only.
+                  serviceTier:
+                    isCloud && selectedExecutionServiceTier === "ultrafast"
+                      ? "default"
+                      : selectedExecutionServiceTier,
+                }
               : {}),
           }
         : {}),
@@ -948,11 +955,12 @@ function EmbeddedThreadChatWithComposer({
         onChange: setSelectedModel,
       },
       serviceTier: {
-        value: serviceTier,
+        value: isCloud && serviceTier === "ultrafast" ? "default" : serviceTier,
         onChange: setServiceTier,
         supported: supportsServiceTier,
         supportByProvider: serviceTierSupportByProvider,
         fastLabel: serviceTierFastLabel,
+        ultrafastSupported: !isCloud && supportsUltrafast,
       },
       reasoning: {
         value: reasoningLevel,
@@ -981,6 +989,7 @@ function EmbeddedThreadChatWithComposer({
       setSelectedModel,
       setServiceTier,
       supportsServiceTier,
+      supportsUltrafast,
       serviceTierFastLabel,
     ],
   );
@@ -1000,6 +1009,7 @@ function EmbeddedThreadChatWithComposer({
               supported: supportsServiceTier,
               supportByProvider: serviceTierSupportByProvider,
               fastLabel: serviceTierFastLabel,
+              ultrafastSupported: !isCloud && supportsUltrafast,
             },
             reasoning: {
               ...bottomExecutionConfig.reasoning,
@@ -1010,9 +1020,11 @@ function EmbeddedThreadChatWithComposer({
     [
       bottomExecutionConfig,
       inlineEditingQueuedMessage,
+      isCloud,
       serviceTierSupportByProvider,
       setServiceTier,
       supportsServiceTier,
+      supportsUltrafast,
       serviceTierFastLabel,
     ],
   );

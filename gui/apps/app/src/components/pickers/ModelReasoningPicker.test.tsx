@@ -6,8 +6,13 @@ import {
   fireEvent,
   render,
   screen,
+  within,
 } from "@testing-library/react";
-import type { AvailableModel, ReasoningLevel } from "@cloudroom/domain";
+import type {
+  AvailableModel,
+  ReasoningLevel,
+  ServiceTier,
+} from "@cloudroom/domain";
 import type {
   SystemExecutionOptionsModelLoadError,
   SystemExecutionOptionsResponse,
@@ -174,6 +179,8 @@ function renderPicker({
   splitPane = false,
   muted = false,
   onSelectModel,
+  serviceTierValue,
+  onServiceTierChange,
 }: {
   onSelectedProviderChange?: ((value: string) => void) | null;
   onModelChange?: (value: string) => void;
@@ -193,6 +200,8 @@ function renderPicker({
   splitPane?: boolean;
   muted?: boolean;
   onSelectModel?: (selection: ModelReasoningPickerSelection) => void;
+  serviceTierValue?: ServiceTier;
+  onServiceTierChange?: (value: ServiceTier) => void;
 } = {}) {
   const { queryClient, wrapper } = createQueryClientTestHarness();
   queryClient.setQueryData(
@@ -229,9 +238,11 @@ function renderPicker({
         reasoningValue={reasoningValue}
         reasoningOptions={pickerReasoningOptions}
         onReasoningChange={onReasoningChange}
-        fastModeEnabled={false}
+        fastModeEnabled={serviceTierValue === "fast"}
         onFastModeChange={vi.fn()}
-        showFastModeToggle={false}
+        showFastModeToggle={onServiceTierChange !== undefined}
+        serviceTierValue={serviceTierValue}
+        onServiceTierChange={onServiceTierChange}
         muted={muted}
         modal={false}
         onSelectModel={onSelectModel}
@@ -267,6 +278,24 @@ afterEach(() => {
 });
 
 describe("ModelReasoningPicker", () => {
+  it.each([
+    ["default", "Ultrafast", "ultrafast"],
+    ["ultrafast", "Standard", "default"],
+    ["ultrafast", "Fast", "fast"],
+  ] as const)(
+    "changes speed from %s with the %s button",
+    async (current, label, next) => {
+      const onServiceTierChange = vi.fn();
+      renderPicker({ serviceTierValue: current, onServiceTierChange });
+      fireEvent.click(
+        screen.getByRole("button", { name: "Provider and model" }),
+      );
+      const speed = await screen.findByRole("group", { name: "Speed" });
+      fireEvent.click(within(speed).getByRole("button", { name: label }));
+      expect(onServiceTierChange).toHaveBeenCalledExactlyOnceWith(next);
+    },
+  );
+
   it.each([
     ["ArrowRight", "medium", "high"],
     ["ArrowLeft", "high", "medium"],
@@ -397,6 +426,62 @@ describe("ModelReasoningPicker", () => {
     ).toContain("text-subtle-foreground/75");
     expect(trigger.classList).toContain("font-normal");
     expect(effort.classList).toContain("font-normal");
+  });
+
+  it.each(["fast", "ultrafast"] as const)(
+    "keeps the provider logo and adds the %s bolt after the model",
+    (tier) => {
+      renderPicker({
+        pickerProviderOptions: [
+          { ...providerOptions[0], icon: ProviderMaskIcon },
+          providerOptions[1],
+        ],
+        serviceTierValue: tier,
+        onServiceTierChange: vi.fn(),
+      });
+      const trigger = screen.getByRole("button", {
+        name: "Provider and model",
+      });
+
+      expect(trigger.contains(screen.getByTestId("provider-mask-icon"))).toBe(
+        true,
+      );
+      const speed = trigger.querySelector(`[data-speed-tier="${tier}"]`);
+      expect(speed?.querySelectorAll('[data-icon="Zap"]')).toHaveLength(
+        tier === "ultrafast" ? 2 : 1,
+      );
+    },
+  );
+
+  it.each([
+    ["default", "Standard"],
+    ["fast", "Fast"],
+    ["ultrafast", "Ultrafast"],
+  ] as const)(
+    "marks the %s speed button pressed, with its icon",
+    async (tier, label) => {
+      renderPicker({ serviceTierValue: tier, onServiceTierChange: vi.fn() });
+      fireEvent.click(
+        screen.getByRole("button", { name: "Provider and model" }),
+      );
+      const speed = await screen.findByRole("group", { name: "Speed" });
+      const pressed = within(speed).getByRole("button", { pressed: true });
+
+      expect(pressed.textContent).toBe(label);
+      expect(pressed.querySelectorAll('[data-icon="Zap"]')).toHaveLength(
+        tier === "ultrafast" ? 2 : tier === "fast" ? 1 : 0,
+      );
+    },
+  );
+
+  it("shows no bolt at Standard speed", () => {
+    renderPicker({ serviceTierValue: "default", onServiceTierChange: vi.fn() });
+
+    expect(
+      screen
+        .getByRole("button", { name: "Provider and model" })
+        .querySelector("[data-speed-tier]"),
+    ).toBeNull();
   });
 
   it("gives a non-SVG provider mark the same 16px trigger size as button SVGs", () => {

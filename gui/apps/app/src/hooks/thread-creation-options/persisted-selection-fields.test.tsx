@@ -129,6 +129,15 @@ function seedSelections() {
 }
 
 describe("tab-local composer selections", () => {
+  it("restores Ultrafast after reloading the composer", () => {
+    seedSelections();
+    const first = renderSelections();
+    act(() => first.result.current.serviceTier.setValue("ultrafast"));
+    first.unmount();
+    const reloaded = renderSelections();
+    expect(reloaded.result.current.serviceTier.value).toBe("ultrafast");
+  });
+
   it.each(selections)(
     "ignores another tab changing $field and preserves the inherited value on reload",
     ({ field, key, initial, remote }) => {

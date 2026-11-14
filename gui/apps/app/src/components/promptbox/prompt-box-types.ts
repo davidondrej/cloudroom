@@ -196,10 +196,10 @@ export function promptFastModeCommand(
   serviceTier: ExecutionControlsProps["serviceTier"],
 ): PromptFastMode | undefined {
   if (!serviceTier?.supported) return undefined;
-  const enabled = serviceTier.value === "fast";
+  const enabled = serviceTier.value === "fast" || serviceTier.value === "ultrafast";
   return {
     enabled,
-    label: serviceTier.fastLabel?.trim() || "Fast",
+    label: serviceTier.value === "ultrafast" ? "Ultrafast" : serviceTier.fastLabel?.trim() || "Fast",
     onToggle: () => serviceTier.onChange(enabled ? "default" : "fast"),
   };
 }

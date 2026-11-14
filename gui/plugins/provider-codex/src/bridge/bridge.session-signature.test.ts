@@ -119,7 +119,7 @@ function recordedRequests() {
     .map((line) => schema.parse(JSON.parse(line)));
 }
 
-it("clears Fast for the next turn without replacing the session", async () => {
+it("switches Standard, Fast, and Ultrafast without replacing the session", async () => {
   harness.sendRequest(1, "thread/start", {
     threadId: THREAD_ID,
     cwd: workspaceDir,
@@ -132,7 +132,13 @@ it("clears Fast for the next turn without replacing the session", async () => {
     .object({ providerThreadId: z.string() })
     .parse(started.result);
 
-  for (const [index, serviceTier] of ["fast", "default", "fast"].entries()) {
+  for (const [index, serviceTier] of [
+    "fast",
+    "ultrafast",
+    "default",
+    "ultrafast",
+    "fast",
+  ].entries()) {
     const id = index + 2;
     harness.sendRequest(id, "turn/start", {
       threadId: THREAD_ID,
@@ -145,7 +151,7 @@ it("clears Fast for the next turn without replacing the session", async () => {
     expect(recordedRequests().at(-1)).toEqual({
       method: "turn/start",
       params: expect.objectContaining({
-        serviceTier: serviceTier === "default" ? null : "fast",
+        serviceTier: serviceTier === "default" ? null : serviceTier,
       }),
     });
   }
@@ -169,6 +175,28 @@ it.each(["start", "resume", "fork"] as const)(
     expect(recordedRequests()).toContainEqual({
       method: `thread/${kind}`,
       params: expect.objectContaining({ serviceTier: null }),
+    });
+  },
+  30_000,
+);
+
+it.each(["start", "resume", "fork"] as const)(
+  "passes Ultrafast through when constructing a %s session",
+  async (kind) => {
+    harness.sendRequest(1, `thread/${kind}`, {
+      threadId: THREAD_ID,
+      ...(kind === "resume" ? { providerThreadId: "provider-ultrafast" } : {}),
+      ...(kind === "fork"
+        ? { sourceProviderThreadId: "provider-ultrafast" }
+        : {}),
+      cwd: workspaceDir,
+      instructionMode: "append",
+      options: { ...FULL_ACCESS_SESSION_OPTIONS, serviceTier: "ultrafast" },
+    });
+    expect((await harness.waitForResponse(1)).error).toBeUndefined();
+    expect(recordedRequests()).toContainEqual({
+      method: `thread/${kind}`,
+      params: expect.objectContaining({ serviceTier: "ultrafast" }),
     });
   },
   30_000,

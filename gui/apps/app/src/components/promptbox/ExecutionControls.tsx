@@ -37,6 +37,8 @@ interface ExecutionServiceTierConfig {
   supported: boolean;
   supportByProvider?: Record<string, boolean>;
   fastLabel?: string;
+  // Cloud service tiers are validated by the separately deployed core.
+  ultrafastSupported?: boolean;
 }
 
 interface ExecutionReasoningConfig {
@@ -114,6 +116,12 @@ export const ExecutionControls = memo(function ExecutionControls({
           reasoningOptions={reasoning.options}
           onReasoningChange={reasoning.onChange}
           fastModeEnabled={serviceTier?.value === "fast"}
+          serviceTierValue={serviceTier?.value}
+          onServiceTierChange={
+            serviceTier?.ultrafastSupported
+              ? handleServiceTierChange
+              : undefined
+          }
           onFastModeChange={(enabled) =>
             handleServiceTierChange(enabled ? "fast" : "default")
           }

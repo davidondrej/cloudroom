@@ -870,6 +870,7 @@ export function NewThreadComposer({
     serviceTier,
     serviceTierSupportByProvider,
     serviceTierFastLabel,
+    supportsUltrafast,
     setEnvironmentSelectionValue: setCreationEnvironmentSelectionValue,
     setPermissionMode,
     setProviderModelReasoning,
@@ -1693,7 +1694,7 @@ export function NewThreadComposer({
         reasoningLevel: starterHigh && submittedDraft.text === starterRef.current ? "high" : reasoningLevel,
         permissionMode: executionTarget === "cloud" ? "full" : permissionMode,
         ...(executionTarget === "cloud"
-          ? { executionTarget, serviceTier: cloudFastSupported && serviceTier ? serviceTier : "default", ...(cloudBaseBranch ? { baseBranch: cloudBaseBranch } : {}), ...(vpsConnected ? { cloudTarget: wantedCloudTarget } : {}) }
+          ? { executionTarget, serviceTier: cloudFastSupported && serviceTier === "fast" ? "fast" : "default", ...(cloudBaseBranch ? { baseBranch: cloudBaseBranch } : {}), ...(vpsConnected ? { cloudTarget: wantedCloudTarget } : {}) }
           : supportsServiceTier && serviceTier
             ? { serviceTier }
             : {}),
@@ -2072,11 +2073,12 @@ export function NewThreadComposer({
               onChange: handleModelChange,
             },
             serviceTier: {
-              value: executionTarget === "cloud" && !cloudFastSupported ? "default" : serviceTier,
+              value: executionTarget === "cloud" && (!cloudFastSupported || serviceTier === "ultrafast") ? "default" : serviceTier,
               onChange: handleServiceTierChange,
               supported: executionTarget === "cloud" ? cloudFastSupported : supportsServiceTier,
               supportByProvider: serviceTierSupportByProvider,
               fastLabel: serviceTierFastLabel,
+              ultrafastSupported: executionTarget !== "cloud" && supportsUltrafast,
             },
             reasoning: {
               value: reasoningLevel,
@@ -2148,6 +2150,7 @@ export function NewThreadComposer({
       sidebarNavigationSettled,
       supportsPermissionModeSelection,
       supportsServiceTier,
+      supportsUltrafast,
       cloudFastSupported,
       submitDisabledReason,
       cloudBlockedReason,

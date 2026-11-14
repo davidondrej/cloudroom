@@ -734,6 +734,7 @@ export function ThreadDetailPromptArea({
     supportsServiceTier,
     serviceTierSupportByProvider,
     serviceTierFastLabel,
+    supportsUltrafast,
     executionInputSources,
   } = useThreadCreationOptions({
     enabled: thread.archivedAt === null,
@@ -759,6 +760,7 @@ export function ThreadDetailPromptArea({
     }).sort((a, b) => reasoningLevelSchema.options.indexOf(a.value) - reasoningLevelSchema.options.indexOf(b.value));
   }, [cloudConnection.data, cloudReasoning, cloudState.data?.model, thread.providerId]);
   const cloudFastSupported = isCloud && cloudServiceTierSupported(cloudConnection.data, thread.providerId);
+  const cloudServiceTier: "default" | "fast" = cloudFastSupported && serviceTier === "fast" ? "fast" : "default";
   const cloudProviderOptions = useMemo(() => providerOptions.filter((option) => cloudCanRunHarness(option.value)), [providerOptions]);
   const cloudSteerSupported = isCloud && cloudFeatureSupported(cloudConnection.data, thread.providerId, "steer");
   const fallbackIdentity = modelFallback
@@ -1023,7 +1025,7 @@ export function ThreadDetailPromptArea({
       model: cloudState.data.model,
       reasoningLevel: cloudReasoning,
       permissionMode: "full" as const,
-      serviceTier: cloudFastSupported && serviceTier ? serviceTier : "default" as const,
+      serviceTier: cloudServiceTier,
       mode: steer && thread.status === "active" ? "steer-if-active" as const : "queue-if-active" as const,
     };
     promptDraft.clearIfCurrentMatches(submittedDraft);
@@ -1035,7 +1037,7 @@ export function ThreadDetailPromptArea({
       promptDraft.restoreIfEmpty(submittedDraft);
       showMutationErrorToast({ error, fallbackMessage: "Cloud message was not confirmed", lifecycleOperation: "send_message" });
     }
-  }, [cloudFastSupported, cloudReasoning, cloudState.data, currentPromptDraft, currentPromptDraftInput, movingToLocal, promptDraft, sendMessage, serviceTier, thread.id, thread.status]);
+  }, [cloudServiceTier, cloudReasoning, cloudState.data, currentPromptDraft, currentPromptDraftInput, movingToLocal, promptDraft, sendMessage, thread.id, thread.status]);
 
   const handleSend = useCallback(async () => {
     if (isExecutionUpdatePending) return;
@@ -1449,7 +1451,7 @@ export function ThreadDetailPromptArea({
           model: cloudState.data.model,
           reasoningLevel: cloudReasoning,
           permissionMode: "full" as const,
-          serviceTier: cloudFastSupported ? serviceTier : ("default" as const),
+          serviceTier: cloudServiceTier,
           supportsServiceTier: cloudFastSupported,
           executionInputSources: {},
         }
@@ -1472,7 +1474,7 @@ export function ThreadDetailPromptArea({
     cloudState.data,
     cloudReasoning,
     cloudFastSupported,
-    serviceTier,
+    cloudServiceTier,
     followUpExecutionSelection,
     sentMessageReasoningChoice,
     sentMessageEdit?.operationId,
@@ -1545,6 +1547,7 @@ export function ThreadDetailPromptArea({
         supported: supportsServiceTier,
         supportByProvider: serviceTierSupportByProvider,
         fastLabel: serviceTierFastLabel,
+        ultrafastSupported: !isCloud && supportsUltrafast,
       },
       reasoning: {
         value: followUpReasoningLevel,
@@ -1576,8 +1579,10 @@ export function ThreadDetailPromptArea({
       serviceTierSupportByProvider,
       setServiceTier,
       supportsServiceTier,
+      supportsUltrafast,
       serviceTierFastLabel,
       thread.environmentId,
+      isCloud,
     ],
   );
   const compactExecutionConfig = useMemo(() => {
@@ -1613,7 +1618,7 @@ export function ThreadDetailPromptArea({
         options: isCloud ? cloudFollowUpReasoningOptions : reasoningOptions,
         onChange: chooseSentMessageReasoning,
       },
-      serviceTier: { ...compactExecutionConfig.serviceTier, supported: false },
+      serviceTier: { ...compactExecutionConfig.serviceTier, value: sentMessageExecutionSelection?.serviceTier, supported: false },
     }),
     [
       compactExecutionConfig,
@@ -2278,7 +2283,7 @@ export function ThreadDetailPromptArea({
         provider: { ...bottomExecutionConfig.provider, selectedId: thread.providerId, options: cloudProviderOptions, hasMultiple: cloudProviderOptions.length > 1 },
         model: { ...bottomExecutionConfig.model, active: cloudState.data ? { model: cloudState.data.model } : null, isLoading: !cloudState.data, options: [...modelOptions, ...moreModelOptions], moreOptions: [], loadFailed: false, loadError: null, onChange: (model: string) => handleSelectModel({ providerId: thread.providerId, model }) },
         reasoning: { ...bottomExecutionConfig.reasoning, value: cloudReasoning, options: cloudFollowUpReasoningOptions, onChange: handleReasoningChange },
-        serviceTier: { ...bottomExecutionConfig.serviceTier, value: cloudFastSupported ? serviceTier : "default", supported: cloudFastSupported },
+        serviceTier: { ...bottomExecutionConfig.serviceTier, value: cloudServiceTier, supported: cloudFastSupported },
       } : bottomExecutionConfig}
       permission={isCloud ? { ...bottomPermissionConfig, value: "full", supported: false } : bottomPermissionConfig}
       typeahead={typeaheadConfig}

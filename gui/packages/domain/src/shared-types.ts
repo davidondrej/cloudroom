@@ -14,7 +14,7 @@ export const reasoningLevelValues = [
 export const reasoningLevelSchema = z.enum(reasoningLevelValues);
 export type ReasoningLevel = z.infer<typeof reasoningLevelSchema>;
 
-export const serviceTierSchema = z.enum(["fast", "default"]);
+export const serviceTierSchema = z.enum(["fast", "default", "ultrafast"]);
 export type ServiceTier = z.infer<typeof serviceTierSchema>;
 
 export const instructionModeValues = ["append", "replace"] as const;

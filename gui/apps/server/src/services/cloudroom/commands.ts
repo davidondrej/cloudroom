@@ -2009,6 +2009,7 @@ class CloudroomService {
   }
 
   async create(request: CreateThreadRequest, awaitingCore = false, fork?: { sourceThreadId: string; endSequence: number }): Promise<Thread> {
+    if (request.serviceTier === "ultrafast") throw new ApiError(400, "cloudroom_unsupported", "Ultrafast is available for Local Codex threads. Cloud supports Standard and Fast.");
     if (request.originKind === "fork" && request.sourceThreadId && !fork) return this.createFork(request, request.sourceThreadId);
     const parentId = request.originKind || request.sourceThreadId ? undefined : request.parentThreadId;
     const parent = parentId ? getThread(this.deps.db, parentId) : null;
@@ -2453,6 +2454,7 @@ class CloudroomService {
   }
 
   async send(thread: Thread, payload: SendMessageRequest): Promise<SendMessageResponse> {
+    if (payload.serviceTier === "ultrafast") throw new ApiError(400, "cloudroom_unsupported", "Ultrafast is available for Local Codex threads. Cloud supports Standard and Fast.");
     if (this.switching.has(thread.id)) throw new ApiError(409, "thread_busy", "This thread is switching agents. Send again in a moment.");
     this.sends.set(thread.id, (this.sends.get(thread.id) ?? 0) + 1);
     try { return await this.sendNow(thread, payload); }
@@ -2996,6 +2998,7 @@ class CloudroomService {
   }
 
   async editMessage(thread: Thread, payload: EditMessageRequest): Promise<EditMessageResponse> {
+    if (payload.serviceTier === "ultrafast") throw new ApiError(400, "cloudroom_unsupported", "Ultrafast is available for Local Codex threads. Cloud supports Standard and Fast.");
     let saved = binding(this.deps.db, thread.id);
     if (!saved?.sessionId) throw new ApiError(409, "cloudroom_missing_binding", "Cloud session is unavailable");
     const editable = (capabilities: Capabilities) => feature(capabilities, "rewind") && harnessProfile(capabilities, thread.providerId)?.rewind !== false;
