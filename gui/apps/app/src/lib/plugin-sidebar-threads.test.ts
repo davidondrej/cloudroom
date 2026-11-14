@@ -168,3 +168,9 @@ describe("toPluginSidebarThread", () => {
     expect(toPluginSidebarThread(makeThread()).host).toBeNull();
   });
 });
+
+it("exposes unknown execution settings honestly instead of guessing from the provider", () => {
+  expect(toPluginSidebarThread(makeThread({ status: "active" }))).toMatchObject({
+    execution: { status: "active", source: "thread", freshness: "unknown", observedAt: null, model: null, effort: null },
+  });
+});
