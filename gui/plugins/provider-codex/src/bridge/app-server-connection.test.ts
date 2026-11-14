@@ -44,7 +44,8 @@ function childRequestLine(): string {
 }
 
 describe("codex app-server connection", () => {
-  it("preserves final output and exit details while stdio drains", async () => {
+  // Windows does not retain the descendant's inherited stdout pipe.
+  it.skipIf(process.platform === "win32")("preserves final output and exit details while stdio drains", async () => {
     const exited = deferred<CodexAppServerExitInfo>();
     const lateResponseLine = `${JSON.stringify({
       jsonrpc: "2.0",
@@ -100,6 +101,41 @@ describe("codex app-server connection", () => {
     }
   }, 30_000);
 
+  it("reads a real child's final response before its natural exit", async () => {
+    const exited = deferred<CodexAppServerExitInfo>();
+    const responseLine = `${JSON.stringify({ id: 1, result: { ok: true } })}\n`;
+    const connection = createCodexAppServerConnection({
+      command: process.execPath,
+      args: [
+        "-e",
+        `process.stdin.once("data", () => process.stdout.write(${JSON.stringify(responseLine)}, () => process.exit(7)));`,
+      ],
+      cwd: process.cwd(),
+      env: process.env,
+      recordThreadId: null,
+      onNotification: () => undefined,
+      onRequest: () => undefined,
+      onExit: exited.resolve,
+    });
+
+    try {
+      await expect(
+        connection.request({
+          method: "fixture/final-response",
+          resultSchema: z.object({ ok: z.boolean() }),
+        }),
+      ).resolves.toEqual({ ok: true });
+      await expect(exited.promise).resolves.toEqual({
+        code: 7,
+        signal: null,
+        stderrTail: "",
+        spawnFailed: false,
+      });
+    } finally {
+      await stopConnection(connection, exited.promise);
+    }
+  }, 30_000);
+
   it("preserves a natural exit status when EPIPE precedes exit", async () => {
     const exited = deferred<CodexAppServerExitInfo>();
     const connection = createCodexAppServerConnection({
@@ -135,7 +171,8 @@ describe("codex app-server connection", () => {
     }
   }, 30_000);
 
-  it("makes a broken child stdin immediately terminal", async () => {
+  // Windows closeSync(0) does not close Node's stdin pipe handle.
+  it.skipIf(process.platform === "win32")("makes a broken child stdin immediately terminal", async () => {
     const ready = deferred<void>();
     const exited = deferred<CodexAppServerExitInfo>();
     const connection = createCodexAppServerConnection({

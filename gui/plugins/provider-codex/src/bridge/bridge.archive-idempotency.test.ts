@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
@@ -6,6 +6,7 @@ import { experimental_createBridgeJsonRpcTestHarness as createBridgeJsonRpcTestH
 import { handleLine } from "./bridge.js";
 import {
   FULL_ACCESS_SESSION_OPTIONS,
+  expectFakeCodexAppServersExited,
   stubFakeCodexAppServer,
 } from "./fake-codex-app-server-harness.js";
 
@@ -46,12 +47,6 @@ function request(id: number, method: string) {
   return harness.waitForResponse(id);
 }
 
-function processStepCount(step: string): number {
-  return readFileSync(processLogPath, "utf8")
-    .split("\n")
-    .filter((line) => line.startsWith(`${step}:`)).length;
-}
-
 it("finishes each app-server handoff before acknowledging archive and unarchive", async () => {
   harness.sendRequest(1, "thread/resume", {
     threadId: THREAD_ID,
@@ -63,12 +58,10 @@ it("finishes each app-server handoff before acknowledging archive and unarchive"
   expect((await harness.waitForResponse(1)).error).toBeUndefined();
 
   expect((await request(2, "thread/archive")).result).toEqual({ ok: true });
-  expect(processStepCount("spawn")).toBe(1);
-  expect(processStepCount("exit")).toBe(1);
+  expectFakeCodexAppServersExited(processLogPath, 1);
 
   expect((await request(3, "thread/unarchive")).result).toEqual({ ok: true });
-  expect(processStepCount("spawn")).toBe(2);
-  expect(processStepCount("exit")).toBe(2);
+  expectFakeCodexAppServersExited(processLogPath, 2);
 }, 30_000);
 
 it("answers a repeated archive and a repeated unarchive as already done", async () => {

@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
@@ -7,6 +7,7 @@ import { experimental_createBridgeJsonRpcTestHarness as createBridgeJsonRpcTestH
 import { handleLine } from "./bridge.js";
 import {
   FULL_ACCESS_SESSION_OPTIONS,
+  expectFakeCodexAppServersExited,
   stubFakeCodexAppServer,
 } from "./fake-codex-app-server-harness.js";
 
@@ -66,7 +67,7 @@ it("preserves the archived-session error text verbatim on a rejected resume", as
       retryable: true,
     },
   });
-  expect(readFileSync(processLogPath, "utf8")).toContain("exit:");
+  expectFakeCodexAppServersExited(processLogPath, 1);
 }, 30_000);
 
 it("attaches the sessionArchived hint to a fork whose source is archived", async () => {
