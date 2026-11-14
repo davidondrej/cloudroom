@@ -49,6 +49,7 @@ fn unconfirmed(why: &str) -> String {
 const MOVED: &str = "This thread moved to the Mac.";
 const PARENT_MOVED: &str = "Not delivered: your parent moved to the user's Mac, and Cloud children can't message a Local parent yet. The app can still forward your completed-turn reply to your current Local parent while it is open.";
 const STARTING: &str = "This child is still starting in its own sandbox. Retry in a few seconds.";
+const LAST_KNOWN: &str = "This is the last known state from this thread; the website did not return this child. Its current state is unconfirmed.";
 /// A relayed `tell --mode queue` ends its request ID with this: the website passes on only the ID and text, and an
 /// older Core ignores it and steers, as before (#1517).
 const QUEUE: &str = "_queue";
@@ -446,7 +447,8 @@ fn next_report(local: &Local) -> Option<(String, String, Value)> {
 
 /// `thread list` also shows children in sandboxes of their own, at any depth, from the website's links (ADR 0256):
 /// what this thread last heard of each, or else its sandbox's state. Ones started in the last few minutes show as
-/// `starting` until their sandbox wakes, linked or not.
+/// `starting` until their sandbox wakes, linked or not. Durable starts omitted by the website show their last known
+/// state, after checking that the website did not hide them as archived (#149).
 pub(super) async fn own_children(m: &Manager, caller: &str, archived: bool, answer: &mut Value) {
     // The website links every child started here to this sandbox's thread: each session lists the ones it started,
     // and the sandbox's thread also those an older app started.
@@ -496,6 +498,10 @@ pub(super) async fn own_children(m: &Manager, caller: &str, archived: bool, answ
     let Some(list) = answer["children"].as_array_mut() else {
         return;
     };
+    let mut seen: HashSet<String> = list
+        .iter()
+        .filter_map(|c| c["id"].as_str().map(str::to_owned))
+        .collect();
     let recent = starting(m, caller, false);
     for child in found["children"].as_array().into_iter().flatten() {
         let id = child["id"].as_str().unwrap_or_default();
@@ -504,6 +510,10 @@ pub(super) async fn own_children(m: &Manager, caller: &str, archived: bool, answ
         } else {
             others.contains(id)
         } {
+            continue;
+        }
+        // Count even rows hidden below, so a stale local state cannot restore an archived child.
+        if !seen.insert(id.to_owned()) {
             continue;
         }
         let sandbox = child["state"].as_str().unwrap_or("unknown");
@@ -527,14 +537,45 @@ pub(super) async fn own_children(m: &Manager, caller: &str, archived: bool, answ
         }
         list.push(item);
     }
-    // Children the app just started that the website doesn't link to this thread yet (#317).
-    for id in recent {
-        let archived = known.get(&id).is_some_and(|s| s == "archived");
-        if !archived && !list.iter().any(|c| c["id"] == id.as_str()) {
-            list.push(
-                json!({"id":id,"title":null,"state":"starting","status":"active","sandbox":"own"}),
-            );
+    // Only durable starts establish ownership: child_states also remembers threads told by ID (#149).
+    // Keep the existing starting fallback too, including during website failures (#317).
+    let mut missing = mine;
+    missing.extend(recent.iter().cloned());
+    missing.retain(|id| !seen.contains(id) && (shared || !others.contains(id)));
+    if missing.is_empty() {
+        return;
+    }
+    // An omitted child may be archived on the website. Without that answer, keep only the starting fallback.
+    let all = if !archived && found["children"].is_array() {
+        api.get("children", &[("archived", "1")]).await.ok()
+    } else {
+        None
+    };
+    let all = all.as_ref().and_then(|all| all["children"].as_array());
+    let confirmed = found["children"].is_array() && (archived || all.is_some());
+    missing.retain(|id| {
+        (confirmed || recent.contains(id))
+            && !all.into_iter().flatten().any(|c| {
+                c["id"] == id.as_str()
+                    && matches!(c["state"].as_str(), Some("archived" | "deleted"))
+            })
+    });
+    for id in missing {
+        let state = known.get(&id).map(String::as_str).unwrap_or("unknown");
+        let state = if archiving.contains(&id) {
+            "archived"
+        } else {
+            state
+        };
+        if state == "archived" && !archived {
+            continue;
         }
+        let status = super::children::status(state, false);
+        let mut item = json!({"id":id,"title":null,"state":state,"status":status,"sandbox":"own","note":LAST_KNOWN});
+        if let Some(issue) = start_error(m, caller, &id).filter(|_| state == "error") {
+            item["issue"] = json!(issue);
+        }
+        list.push(item);
     }
 }
 
@@ -909,10 +950,12 @@ impl Manager {
 mod tests {
     use super::*;
 
+    type WebsiteChildren = Arc<Mutex<[(StatusCode, Value); 2]>>;
+
     struct ChildList {
         m: Arc<Manager>,
         dir: std::path::PathBuf,
-        website: Arc<Mutex<[(StatusCode, Value); 2]>>,
+        website: WebsiteChildren,
         server: tokio::task::JoinHandle<()>,
     }
 
@@ -933,7 +976,7 @@ mod tests {
                 .route(
                     "/children",
                     axum::routing::get(
-                        |State(website): State<Arc<Mutex<[(StatusCode, Value); 2]>>>,
+                        |State(website): State<WebsiteChildren>,
                          axum::extract::Query(query): axum::extract::Query<
                             std::collections::HashMap<String, String>,
                         >| async move {
@@ -1107,6 +1150,34 @@ mod tests {
         let answer = f.list("main", false).await;
         assert_eq!(answer["children"], json!([]));
         assert!(answer["note"].as_str().unwrap().contains("HTTP 503"));
+    }
+
+    #[tokio::test]
+    async fn child_list_keeps_pending_starts_during_outages_but_respects_website_archives() {
+        let f = ChildList::open("starting").await;
+        note_child(&f.m, "main", "thr_kid", "starting", &Value::Null);
+        f.website.lock().unwrap()[0].0 = StatusCode::SERVICE_UNAVAILABLE;
+        let answer = f.list("main", false).await;
+        assert_eq!(answer["children"].as_array().unwrap().len(), 1);
+        assert_eq!(answer["children"][0]["state"], "starting");
+        assert!(
+            answer["children"][0]["note"]
+                .as_str()
+                .unwrap()
+                .contains("last known")
+        );
+        f.found(json!([]));
+        f.website.lock().unwrap()[1].1 = json!({"children":[{"id":"thr_kid","state":"archived"}]});
+        assert_eq!(f.list("main", false).await["children"], json!([]));
+    }
+
+    #[tokio::test]
+    async fn child_list_keeps_a_child_present_only_in_the_archive_inclusive_response() {
+        let f = ChildList::open("second-response").await;
+        f.website.lock().unwrap()[1].1 = json!({"children":[{"id":"thr_kid","state":"running"}]});
+        let answer = f.list("main", false).await;
+        assert_eq!(answer["children"].as_array().unwrap().len(), 1, "{answer}");
+        assert_eq!(answer["children"][0]["id"], "thr_kid");
     }
 
     #[test]
