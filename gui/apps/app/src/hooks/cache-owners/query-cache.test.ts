@@ -96,3 +96,61 @@ describe("query cache thread list invalidation keys", () => {
     expect(queryKeys).not.toContainEqual(otherProjectArchivedKey);
   });
 });
+
+it("unions running rows once and removes settled rows from that inventory on a realtime patch", async () => {
+  const { makeThreadListEntry } =
+    await import("@cloudroom/test-helpers/domain-fixtures");
+  const { sidebarNavigationQueryKey } = await import("../queries/query-keys");
+  const {
+    listSidebarNavigationThreads,
+    updateCachedThreadListStatusState,
+    applyToCachedSidebarNavigationThreads,
+  } = await import("./query-cache");
+  const { queryClient } = createQueryClientTestHarness();
+  const running = makeThreadListEntry({
+    id: "running",
+    status: "active",
+    visibility: "hidden",
+    execution: {
+      status: "active",
+      source: "core",
+      freshness: "last-known",
+      observedAt: 100,
+      receivedAt: 100,
+      model: null,
+      effort: null,
+    },
+  });
+  const { makeProjectWithThreadsResponse } =
+    await import("@/test/fixtures/projects");
+  const project = makeProjectWithThreadsResponse({ threads: [running] });
+  const navigation = {
+    sections: [],
+    projects: [project],
+    personalProject: { ...project, id: "personal", threads: [] },
+    runningThreads: [running],
+  };
+  queryClient.setQueryData(sidebarNavigationQueryKey(), navigation);
+  expect(listSidebarNavigationThreads(navigation).map((t) => t.id)).toEqual([
+    "running",
+  ]);
+  applyToCachedSidebarNavigationThreads({
+    queryClient,
+    mapper: (threads) => threads,
+  });
+  expect(
+    queryClient.getQueryData<typeof navigation>(sidebarNavigationQueryKey())
+      ?.runningThreads,
+  ).toHaveLength(1);
+  updateCachedThreadListStatusState(queryClient, "running", {
+    status: "idle",
+    runtime: { displayStatus: "idle", hostReconnectGraceExpiresAt: null },
+    activity: running.activity,
+    updatedAt: 200,
+    latestAttentionAt: 200,
+  });
+  expect(
+    queryClient.getQueryData<typeof navigation>(sidebarNavigationQueryKey())
+      ?.runningThreads,
+  ).toEqual([]);
+});

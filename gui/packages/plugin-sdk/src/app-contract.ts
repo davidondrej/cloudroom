@@ -14,6 +14,7 @@ import type {
   SessionOptionSelections,
   EnvironmentWorkspaceDisplayKind,
   ThreadQueuedWork,
+  ThreadExecutionObservation,
   ThreadRuntimeDisplayStatus,
   ThreadStatus,
   WorkspaceGitOperation,
@@ -1023,6 +1024,8 @@ export interface PluginSidebarThreadActivity {
  * field. Timestamps are epoch milliseconds.
  */
 export interface PluginSidebarThread {
+  /** Last-known execution evidence; absent on older hosts. Unknown model/effort stay null. */
+  execution?: ThreadExecutionObservation;
   id: string;
   projectId: string;
   /** Null while a thread is still unnamed; pair with `titleFallback`. */
@@ -1225,6 +1228,10 @@ export interface PluginSidebarSection {
 }
 
 export interface PluginSidebarThreadsState {
+  /** Same uncapped running inventory as the built-in Running section; absent on older hosts. */
+  runningThreads?: readonly PluginSidebarThread[];
+  /** Children among the delivered inventory, keyed by parent ID even if that parent is not loaded. */
+  childrenByParentId?: Readonly<Record<string, readonly PluginSidebarThread[]>>;
   /** Null when archived threads were not requested. */
   experimental_archived: {
     status: "loading" | "ready" | "error";

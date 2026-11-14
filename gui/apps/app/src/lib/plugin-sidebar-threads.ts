@@ -31,7 +31,19 @@ export function toPluginSidebarThread(
     title: entry.title,
     titleFallback: entry.titleFallback,
     displayTitle: getThreadDisplayTitle(entry),
-    href: getThreadRoutePath({ projectId: entry.projectId, threadId: entry.id }),
+    href: getThreadRoutePath({
+      projectId: entry.projectId,
+      threadId: entry.id,
+    }),
+    execution: entry.execution ?? {
+      status: entry.status,
+      source: "thread",
+      freshness: "unknown",
+      observedAt: null,
+      receivedAt: null,
+      model: null,
+      effort: null,
+    },
     status: entry.status,
     runtimeStatus: entry.runtime.displayStatus,
     queuedWork: entry.queuedWork,
@@ -85,4 +97,17 @@ export function toPluginSidebarThread(
     lastReadAt: entry.lastReadAt,
     latestAttentionAt: entry.latestAttentionAt,
   };
+}
+
+export function groupPluginSidebarChildren(
+  threads: readonly PluginSidebarThread[],
+): Readonly<Record<string, readonly PluginSidebarThread[]>> {
+  const groups = new Map<string, PluginSidebarThread[]>();
+  for (const thread of threads) {
+    if (thread.parentThreadId === null) continue;
+    const group = groups.get(thread.parentThreadId) ?? [];
+    group.push(thread);
+    groups.set(thread.parentThreadId, group);
+  }
+  return Object.fromEntries(groups);
 }

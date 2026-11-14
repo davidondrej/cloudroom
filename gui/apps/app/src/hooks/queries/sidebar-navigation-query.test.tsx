@@ -110,6 +110,10 @@ describe("useSidebarNavigation", () => {
       );
       const large: SidebarBootstrapResponse = {
         ...BOOTSTRAP,
+        runningThreads: manyThreads.map((thread) => ({
+          ...thread,
+          status: "active",
+        })),
         projects: [{ ...BOOTSTRAP.projects[0]!, threads: manyThreads }],
         personalProject: { ...PERSONAL_PROJECT, threads: manyThreads },
       };
@@ -129,6 +133,10 @@ describe("useSidebarNavigation", () => {
       });
       const stored = sidebarBootstrapResponseSchema.parse(
         JSON.parse(window.localStorage.getItem(SIDEBAR_BOOTSTRAP_CACHE_KEY)!),
+      );
+      expect(stored.runningThreads).toEqual([]);
+      expect(warm.result.current.data?.runningThreads).toHaveLength(
+        manyThreads.length,
       );
       expect(stored.projects[0]!.threads).toHaveLength(
         MAX_CACHED_SIDEBAR_THREADS_PER_PROJECT,

@@ -8,6 +8,7 @@ import { LEGACY_CODEX_GOAL_EXTENSION_KIND, THREAD_ACCOUNT_SWITCH_OPERATION, clou
 import { z } from "zod";
 import { cloudAccountSwitch } from "./account-switches.js";
 import { CloudroomError, type SessionRecord } from "./client.js";
+import { observeCloudRecord } from "./inventory.js";
 import { codexErrorFields, codexErrorFrameFields, mentionsOpenAISide401 } from "./codex-errors.js";
 import { binding, command, coreFailure, queuedPrompts, saveBinding, saveCommandState, saveStatus, showingEarlier, effectivePrompt, statusOf, unstartedTurn, type Binding, type Command } from "./store.js";
 
@@ -289,6 +290,7 @@ export function projectRecords(
     if (!saved || record.sequence <= saved.cursor) return [];
     if (record.session_id !== saved.sessionId) throw new Error("Cloudroom session mismatch");
     const data = object.parse(record.data ?? {});
+    if (!showingEarlier.has(threadId)) observeCloudRecord(tx, threadId, record);
     const harness = getThread(tx, threadId)?.providerId;
     const projected: ThreadEvent[] = [];
     const emit = (event: unknown) => {

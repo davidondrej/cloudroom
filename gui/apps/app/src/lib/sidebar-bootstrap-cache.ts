@@ -35,6 +35,8 @@ function boundSidebarBootstrapForCache(
   response: SidebarBootstrapResponse,
 ): SidebarBootstrapResponse {
   return {
+    // Disk placeholders are not evidence that work is still running after a restart.
+    ...(response.runningThreads ? { runningThreads: [] } : {}),
     sections: response.sections,
     projects: response.projects.map(boundProject),
     personalProject: boundProject(response.personalProject),

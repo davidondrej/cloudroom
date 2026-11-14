@@ -473,7 +473,22 @@ export const threadQueuedWorkValues = ["none", "waiting", "failed"] as const;
 export const threadQueuedWorkSchema = z.enum(threadQueuedWorkValues);
 export type ThreadQueuedWork = z.infer<typeof threadQueuedWorkSchema>;
 
+/** Last execution evidence, never inferred from sandbox availability or configured defaults. */
+export const threadExecutionObservationSchema = z.object({
+  status: threadStatusSchema,
+  source: z.enum(["thread", "core"]),
+  freshness: z.enum(["unknown", "last-known"]),
+  observedAt: z.number().nullable(),
+  receivedAt: z.number().nullable(),
+  model: z.string().nullable(),
+  effort: z.string().nullable(),
+});
+export type ThreadExecutionObservation = z.infer<
+  typeof threadExecutionObservationSchema
+>;
+
 export const threadListEntrySchema = threadWithRuntimeSchema.extend({
+  execution: threadExecutionObservationSchema.optional(),
   activity: threadActivityStateSchema,
   queuedWork: threadQueuedWorkSchema,
   pinSortKey: z.string().nullable(),
@@ -487,3 +502,18 @@ export const threadListEntrySchema = threadWithRuntimeSchema.extend({
   environmentWorkspaceDisplayKind: environmentWorkspaceDisplayKindSchema,
 });
 export type ThreadListEntry = z.infer<typeof threadListEntrySchema>;
+
+/** Execution and background work that must remain discoverable outside collapsed navigation. */
+export function isRunningThread(
+  thread: Pick<ThreadListEntry, "status" | "activity" | "execution">,
+): boolean {
+  const status = thread.execution?.status ?? thread.status;
+  return (
+    status === "starting" ||
+    status === "active" ||
+    status === "stopping" ||
+    thread.activity.activeBackgroundAgentCount > 0 ||
+    thread.activity.activeBackgroundCommandCount > 0 ||
+    thread.activity.activeWorkflowCount > 0
+  );
+}
