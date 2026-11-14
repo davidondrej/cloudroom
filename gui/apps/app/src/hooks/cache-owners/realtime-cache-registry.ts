@@ -1,3 +1,4 @@
+import type { SidebarBootstrapResponse } from "@cloudroom/server-contract";
 import type { QueryClient, QueryKey } from "@tanstack/react-query";
 import type {
   EnvironmentChangeKind,
@@ -350,9 +351,8 @@ function forgetInFlightArchiveRemoval(
   queryClient: QueryClient,
   threadId: string,
 ): void {
-  for (const patches of listPatchesByFetchingQuery
-    .get(queryClient)
-    ?.values() ?? []) {
+  for (const patches of listPatchesByFetchingQuery.get(queryClient)?.values() ??
+    []) {
     if (patches.get(threadId) === ARCHIVED_THREAD_LIST_PATCH) {
       patches.delete(threadId);
     }
@@ -523,6 +523,7 @@ export const REALTIME_THREAD_CHANGE_REGISTRY = {
     flush: "immediate",
     dirty: [
       patchThreadListStatusState,
+      dirtyRunningInventoryQueries,
       dirtyThreadDetailQueries,
       dirtyThreadFileExistenceQueries,
     ],
@@ -902,6 +903,18 @@ function getCachedThreadListQueryKeysForProject({
     : getCachedThreadListQueryKeys(queryClient);
 }
 
+/** A status patch cannot add a row that visibility/project filtering never delivered. */
+function dirtyRunningInventoryQueries({
+  queryClient,
+}: ThreadRealtimeDirtyContext): QueryKey[] {
+  const navigation = queryClient.getQueryData<SidebarBootstrapResponse>(
+    sidebarNavigationQueryKey(),
+  );
+  return navigation?.runningThreads === undefined
+    ? []
+    : [sidebarNavigationQueryKey()];
+}
+
 function dirtyActiveThreadListQueries(
   context: ThreadRealtimeDirtyContext,
 ): QueryKey[] {
@@ -1200,11 +1213,7 @@ function patchThreadListArchivedState(
     return dirtyThreadListQueries(context);
   }
   removeLiveThreadFromCachedLists(queryClient, threadId);
-  keepPatchOverInFlightLists(
-    queryClient,
-    threadId,
-    ARCHIVED_THREAD_LIST_PATCH,
-  );
+  keepPatchOverInFlightLists(queryClient, threadId, ARCHIVED_THREAD_LIST_PATCH);
   for (const queryKey of getCachedThreadListQueryKeysForProject(context)) {
     if (isArchivedThreadListQueryKey(queryKey)) {
       invalidateListQueryKey(queryClient, queryKey, true);

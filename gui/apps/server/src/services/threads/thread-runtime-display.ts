@@ -267,7 +267,7 @@ export function buildThreadStatusChangeMetadata(
   deps: ThreadPromptBannerDeps,
   thread: Thread,
 ): ThreadChangeMetadata {
-  return toThreadStatusChangeMetadata({
+  const metadata = toThreadStatusChangeMetadata({
     activity:
       buildThreadActivityStateByThreadId(deps, [thread]).get(thread.id) ??
       EMPTY_THREAD_ACTIVITY,
@@ -277,6 +277,9 @@ export function buildThreadStatusChangeMetadata(
     }),
     thread,
   });
+  const execution = cloudExecutionObservation(deps.db, thread.id, thread.status);
+  if (execution && metadata.statusChange) metadata.statusChange.execution = execution;
+  return metadata;
 }
 
 export function buildThreadStatusChangeMetadataByThreadId(
@@ -346,6 +349,7 @@ function toThreadResponseWithHost(
 
 import { listThreadTransferProgress, localTeleports, projectCopyProgress, queuedPrompts as cloudQueuedPrompts, teleportProgress } from "../cloudroom/store.js";
 import { asleepSince } from "../cloudroom/cloud-sync.js";
+import { withCloudInventory, cloudExecutionObservation } from "../cloudroom/inventory.js";
 
 export function toThreadResponseFromThread(
   deps: ThreadRuntimeDisplayDeps,
@@ -586,7 +590,7 @@ export function toThreadListEntryResponses(
     deps.db,
     args.threads.map((thread) => thread.id),
   );
-  return args.threads.map((thread) => {
+  return withCloudInventory(deps.db, args.threads.map((thread) => {
     const response = toThreadListEntryResponseFromLatestSession({
       activity: activityByThreadId.get(thread.id) ?? EMPTY_THREAD_ACTIVITY,
       queuedWork: queuedWorkByThreadId.get(thread.id) ?? "none",
@@ -601,7 +605,7 @@ export function toThreadListEntryResponses(
       thread,
     });
     return { ...response, ...transferProgressByThreadId.get(thread.id) };
-  });
+  }));
 }
 
 function toThreadListEntryResponseFromLatestSession(

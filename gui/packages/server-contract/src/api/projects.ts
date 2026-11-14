@@ -449,6 +449,8 @@ export type ProjectWithThreadsResponse = z.infer<
 >;
 
 export const sidebarBootstrapResponseSchema = z.object({
+  /** Uncapped live inventory, independent of project/visibility/collapse preferences. */
+  runningThreads: z.array(threadListEntrySchema).optional(),
   sections: z.array(threadSectionSchema),
   projects: z.array(projectWithThreadsResponseSchema),
   personalProject: projectWithThreadsResponseSchema,

@@ -17,6 +17,7 @@ import { isCloudProvider } from "./events.js";
 import { githubRepository } from "./project-copy.js";
 import { SANDBOX_PREFIX, type SandboxDirectory, type ThreadChange } from "./sandboxes.js";
 import { binding, bindings, commands, coreInUse, saveBinding } from "./store.js";
+import { rememberCloudParent } from "./inventory.js";
 
 /** What the sync needs from the Cloud service (commands.ts). */
 export interface SyncHost {
@@ -265,7 +266,11 @@ export class CloudSync {
     const unsent = state.labels[thread.id]?.changes ?? [];
     if (row.title && row.title !== thread.title && !unsent.includes("title")) updateThread(this.deps.db, buffer, thread.id, { title: row.title });
     const parent = unsent.includes("parent") ? undefined : this.parentOf(row, thread);
+    if (!unsent.includes("parent")) rememberCloudParent(this.deps.db, thread.id, parent === undefined ? row.parent : null);
     if (parent !== undefined && parent !== thread.parentThreadId) updateThread(this.deps.db, buffer, thread.id, { parentThreadId: parent });
+    if (parent && known?.adopted && row.session.startsWith("cr_sub_") && known.home === ELSEWHERE) {
+      this.host.threadStates.set(thread.id, { ...known, home: null, from: parent });
+    }
     const project = unsent.includes("project") ? null : this.project(row, state);
     if (project && project !== thread.projectId) updateThread(this.deps.db, buffer, thread.id, { projectId: project });
     // Another computer's switch: follow the new session from here on, never back to one this thread left.
@@ -315,20 +320,18 @@ export class CloudSync {
     const all = this.deps.db.select().from(projects).where(isNull(projects.deletedAt)).all(), wanted = repo(row.repository);
     const found = (wanted && all.find((project) => repo(githubRepository(project.gitRemoteUrl)) === wanted))
       || all.find((project) => project.name === row.project_name && !githubRepository(project.gitRemoteUrl));
-    // A project is made only for a thread an app started: on a new computer's first sync, or from a row made or changed
-    // since a computer with threads first listed (main's deletes left their rows open, with no record of the delete).
-    // A loop run or launch shows only where its project is, as on main.
-    const allowed = state.newInstall === true || (!state.first && state.declined[row.thread] !== row.updated_at);
-    if (!found && !allowed) state.declined[row.thread] = row.updated_at;
-    const creates = !row.loop && !row.session.startsWith("cr_launch_") && allowed;
-    const project = found || (creates && row.repository && row.project_name ? createRemoteProject(this.deps.db, this.deps.hub, { name: row.project_name, gitRemoteUrl: row.repository }) : null);
+    // A remote identity needs no checkout. Keep its mapped local ID distinct: discovering a project must not
+    // make this installation the execution owner of a loop/launch that another computer started.
+    const project = found || createRemoteProject(this.deps.db, this.deps.hub, {
+      name: row.project_name ?? "Cloud project", ...(row.repository ? { gitRemoteUrl: row.repository } : {}),
+    });
     if (project) delete state.declined[row.thread];
     if (project) state.projects[row.project] = project.id;
     return project ? project.id : null;
   }
 
   /** `adoptThread`, the one path a Cloud thread from elsewhere takes: idle and read, with the row's title and dates,
-   *  no local commands and no title job. A child whose parent isn't here yet waits for it. */
+   *  no local commands and no title job. A missing parent is linked later without delaying the child. */
   private adopt(row: ThreadChange, state: SyncState, buffer: NotificationBuffer): void {
     // A launch (ADR 0267) this computer can't show says why, once per thread and app run (#1072).
     const skip = (why: string) => {
@@ -340,7 +343,7 @@ export class CloudSync {
     if (state.deletedProjects.includes(row.project)) return;
     if (this.deps.db.select().from(cloudroomThreads).where(eq(cloudroomThreads.sessionId, row.session)).get()) return;
     const parent = this.parentOf(row);
-    if (parent === undefined) { this.defer(row, state); return; }
+    if (parent === undefined) this.defer(row, state);
     const projectId = this.project(row, state);
     if (!projectId) return skip("its project isn't on this computer");
     const adopted = this.deps.db.transaction((tx) => {
@@ -350,13 +353,14 @@ export class CloudSync {
       return thread;
     });
     if (!adopted) return;
+    rememberCloudParent(this.deps.db, adopted.id, parent === undefined ? row.parent : null);
     state.efforts[row.thread] = row.reasoning ?? "";
     // A thread made in the last 10 minutes is live: its records are acted on from the start, as on main. An older
     // one's, or one adopted archived (a Restore must not replay its archive), are shown only, from Core's
     // `last_sequence` on. Who acts until a tagged prompt says (Who acts): a website child's parent's home; for a loop
     // run or launch, each computer with its project ID (main's rule); else not here.
     const child = row.session.startsWith("cr_sub_"), byId = (row.loop || row.session.startsWith("cr_launch_")) && projectId === row.project;
-    this.host.threadStates.set(row.thread, { session: row.session, actFrom: row.state === "open" && Date.now() - Date.parse(row.created_at) < FRESH_MS ? 0 : null, home: child ? null : byId && this.tag ? this.tag : ELSEWHERE, from: child ? parent : null, adopted: true });
+    this.host.threadStates.set(row.thread, { session: row.session, actFrom: row.state === "open" && Date.now() - Date.parse(row.created_at) < FRESH_MS ? 0 : null, home: child && parent !== undefined ? null : byId && this.tag ? this.tag : ELSEWHERE, from: child ? parent ?? null : null, adopted: true });
     this.host.adopted(row.thread, row.sandbox === "awake");
     emitPluginThreadCreated(adopted);
     const waiting = state.deferred[row.thread];
@@ -450,6 +454,18 @@ export class CloudSync {
     state.archived = state.archived.filter((id) => id !== threadId);
     delete state.labels[threadId];
     delete state.efforts[threadId];
+    await this.save();
+  }
+
+  /** A user's parent change supersedes an unresolved discovery link, including its deferred replay. */
+  async parentChangedHere(threadId: string): Promise<void> {
+    rememberCloudParent(this.deps.db, threadId, null);
+    const state = await this.state();
+    if (!state) return;
+    for (const [parent, rows] of Object.entries(state.deferred)) {
+      state.deferred[parent] = rows.filter(row => (row as ThreadChange).thread !== threadId);
+      if (!state.deferred[parent]!.length) delete state.deferred[parent];
+    }
     await this.save();
   }
 

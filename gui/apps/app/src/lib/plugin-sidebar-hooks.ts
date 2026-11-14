@@ -28,7 +28,11 @@ import {
 import { useSidebarNavigation } from "@/hooks/queries/sidebar-navigation-query";
 import { useUpdateThread } from "@/hooks/mutations/thread-state-mutations";
 import { useRouteNavigate } from "@/components/ui/app-route-anchor";
-import { toPluginSidebarThread } from "./plugin-sidebar-threads";
+import {
+  toPluginSidebarThread,
+  groupPluginSidebarChildren,
+} from "./plugin-sidebar-threads";
+import { listSidebarNavigationThreads } from "@/hooks/cache-owners/query-cache";
 import {
   pluginComposeRouteState,
   useSetRootComposeProjectId,
@@ -92,13 +96,15 @@ export function useSidebarThreads(): PluginSidebarThreadsState {
       };
     }
     const allProjects = [...data.projects, data.personalProject];
+    const threads = listSidebarNavigationThreads(data).map((thread) =>
+      toPluginSidebarThreadCached(thread, hostNamesById),
+    );
+    const runningIds = new Set(data.runningThreads?.map((thread) => thread.id));
     return {
       status: "ready",
-      threads: allProjects.flatMap((project) =>
-        project.threads.map((thread) =>
-          toPluginSidebarThreadCached(thread, hostNamesById),
-        ),
-      ),
+      threads,
+      runningThreads: threads.filter((thread) => runningIds.has(thread.id)),
+      childrenByParentId: groupPluginSidebarChildren(threads),
       projects: allProjects.map((project) => ({
         id: project.id,
         name: project.name,
@@ -117,9 +123,8 @@ function useThreadEntryMap(): ReadonlyMap<string, ThreadListEntry> {
   return useMemo(() => {
     if (data === undefined) return EMPTY_ENTRIES;
     const entries = new Map<string, ThreadListEntry>();
-    for (const project of [...data.projects, data.personalProject]) {
-      for (const thread of project.threads) entries.set(thread.id, thread);
-    }
+    for (const thread of listSidebarNavigationThreads(data))
+      entries.set(thread.id, thread);
     return entries;
   }, [data]);
 }
@@ -211,7 +216,10 @@ export function useSidebarThreadActions(): PluginSidebarThreadActions {
       },
       async experimental_archiveEnvironmentThreads(environmentId) {
         for (const entry of entriesById.values()) {
-          if (entry.environmentId !== environmentId || entry.archivedAt !== null)
+          if (
+            entry.environmentId !== environmentId ||
+            entry.archivedAt !== null
+          )
             continue;
           const parent =
             entry.parentThreadId === null

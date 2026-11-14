@@ -1,3 +1,4 @@
+import { observeCloudSnapshot } from "./inventory.js";
 import { createHash, randomUUID } from "node:crypto";
 import { readFile, writeFile, mkdir, stat, rename, rm } from "node:fs/promises";
 import { join, win32 } from "node:path";
@@ -925,7 +926,7 @@ class CloudroomService {
         if (error instanceof CloudroomError && !error.retryable && error.status !== null && !signIn) throw new ApiError(400, "cloudroom_parent_unsaved", publicError(error));
         throw new ApiError(503, "cloudroom_parent_unsaved", `Couldn't save the new parent to Cloud: ${(signIn ? "Sign in to Cloudroom to use cloud sandboxes" : publicError(error)).replace(/\.?$/, ".")} Try again.`);
       }
-      try { await apply(); }
+      try { await apply(); await this.sync.parentChangedHere(threadId); }
       finally { await this.saveLabel(threadId, "parent").catch((error: unknown) => this.warn("Cloud thread label not saved", error, { threadId })); }
     });
   }
@@ -3934,8 +3935,11 @@ class CloudroomService {
             if (controller.signal.aborted) return;
             // Earlier sessions come from a website that lists threads (its saved records); a Core without `continued` has none.
             const empty = !shared && saved.cursor === 0 && !this.shown(saved.threadId) && await this.sandboxes.followsThreads().catch(() => false);
+            const snapshot = await client.session(saved.sessionId!, controller.signal);
+            if (controller.signal.aborted) return;
+            observeCloudSnapshot(this.deps.db, saved.threadId, snapshot);
+            this.notify(saved.threadId);
             if (state().actFrom === null || empty) {
-              const snapshot = await client.session(saved.sessionId!, controller.signal);
               if (state().actFrom === null) {
                 this.threadStates.set(saved.threadId, { ...state(), actFrom: snapshot.last_sequence, home: tagOf(snapshot.last_app_prompt?.request_id) ?? state().home });
                 if (!shared) void this.listChildren(saved, client, snapshot.continued?.from).catch((error: unknown) => this.warn("Cloud child threads could not be listed", error, { threadId: saved.threadId }));
@@ -4076,7 +4080,7 @@ class CloudroomService {
             else if (data.state === "running") this.outOfMemory.delete(saved.threadId);
           }
           if (record.kind === "storage_warning" || record.kind === "storage_pause") this.noteDisk(saved.threadId, client, record.data);
-          this.notify(saved.threadId, eventTypes, ["state", "receipt", "native_identity", "storage_warning", "storage_pause", "storage_recovered"].includes(record.kind));
+          this.notify(saved.threadId, eventTypes, ["state", "receipt", "native_identity", "model_fallback", "reasoning", "launch_reasoning", "storage_warning", "storage_pause", "storage_recovered"].includes(record.kind));
         }
         projecting = true;
         saveWaiting();

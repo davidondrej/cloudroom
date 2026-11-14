@@ -1,3 +1,4 @@
+import { isRunningThread } from "@cloudroom/domain";
 import type { QueryClient, QueryKey } from "@tanstack/react-query";
 import type {
   Thread,
@@ -317,6 +318,14 @@ export function applyToCachedSidebarNavigationThreads({
         return currentNavigation;
       }
       return {
+        ...currentNavigation,
+        ...(currentNavigation.runningThreads
+          ? {
+              runningThreads: mapper(currentNavigation.runningThreads).filter(
+                isRunningThread,
+              ),
+            }
+          : {}),
         sections: currentNavigation.sections,
         projects: currentNavigation.projects.map((project) =>
           mapSidebarNavigationProjectThreads(project, mapper),
@@ -347,10 +356,15 @@ export function applyToCachedThreadListsAndSidebarNavigation(
 export function listSidebarNavigationThreads(
   navigation: SidebarBootstrapResponse,
 ): ThreadListEntry[] {
-  return [
+  const threads = new Map<string, ThreadListEntry>();
+  for (const thread of [
     ...navigation.projects.flatMap((project) => project.threads),
     ...navigation.personalProject.threads,
-  ];
+    ...(navigation.runningThreads ?? []),
+  ]) {
+    threads.set(thread.id, thread);
+  }
+  return [...threads.values()];
 }
 
 export function getCachedSidebarNavigationThreads(
@@ -647,6 +661,7 @@ export function optimisticallyInsertThread(
           ? mapSidebarNavigationProjectThreads(project, upsertThread)
           : project;
       return {
+        ...navigation,
         sections: navigation.sections,
         projects: navigation.projects.map(updateProject),
         personalProject: updateProject(navigation.personalProject),
@@ -744,9 +759,31 @@ export function updateCachedThreadListStatusState(
     if (!list.some(replaces)) {
       return list;
     }
-    return list.map((thread) =>
-      replaces(thread) ? { ...thread, ...statusChange } : thread,
-    );
+    return list.map((thread) => {
+      if (!replaces(thread)) return thread;
+      const execution =
+        statusChange.execution ??
+        (thread.execution
+          ? {
+              ...thread.execution,
+              status: statusChange.status,
+              source: "thread" as const,
+              freshness: "unknown" as const,
+              observedAt: null,
+              receivedAt: null,
+            }
+          : undefined);
+      return {
+        ...thread,
+        ...statusChange,
+        status: execution?.status ?? statusChange.status,
+        runtime:
+          execution?.source === "core"
+            ? { ...statusChange.runtime, displayStatus: execution.status }
+            : statusChange.runtime,
+        ...(execution ? { execution } : {}),
+      };
+    });
   });
 }
 
