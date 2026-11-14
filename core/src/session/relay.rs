@@ -909,6 +909,206 @@ impl Manager {
 mod tests {
     use super::*;
 
+    struct ChildList {
+        m: Arc<Manager>,
+        dir: std::path::PathBuf,
+        website: Arc<Mutex<[(StatusCode, Value); 2]>>,
+        server: tokio::task::JoinHandle<()>,
+    }
+
+    impl Drop for ChildList {
+        fn drop(&mut self) {
+            self.server.abort();
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    impl ChildList {
+        async fn open(name: &str) -> Self {
+            let website = Arc::new(Mutex::new([
+                (StatusCode::OK, json!({"children":[]})),
+                (StatusCode::OK, json!({"children":[]})),
+            ]));
+            let app = Router::new()
+                .route(
+                    "/children",
+                    axum::routing::get(
+                        |State(website): State<Arc<Mutex<[(StatusCode, Value); 2]>>>,
+                         axum::extract::Query(query): axum::extract::Query<
+                            std::collections::HashMap<String, String>,
+                        >| async move {
+                            let all = query.get("archived").is_some_and(|s| s == "1");
+                            let (status, body) = website.lock().unwrap()[usize::from(all)].clone();
+                            (status, Json(body))
+                        },
+                    ),
+                )
+                .with_state(website.clone());
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let api_url = format!("http://{}", listener.local_addr().unwrap());
+            let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let dir = std::env::temp_dir().join(format!(
+                "cloudroom-child-list-{name}-{}",
+                std::process::id()
+            ));
+            let mut local = Local::open(&dir).unwrap();
+            for (parent, child) in [("main", "thr_kid"), ("shared", "thr_peer")] {
+                for (kind, data) in [
+                    ("child_start", json!({"request_id":"r1","body":{}})),
+                    (
+                        "child_start_state",
+                        json!({"request_id":"r1","child":child,"done":true}),
+                    ),
+                    ("child_state", json!({"child":child,"state":"running"})),
+                    // Telling a thread by ID also records a state; it does not make it a child.
+                    (
+                        "child_state",
+                        json!({"child":"thr_stranger","state":"running"}),
+                    ),
+                ] {
+                    local.append(parent, kind, data, None).unwrap();
+                }
+            }
+            local.append("shared", "receipt", json!({"request_id":"s","command":"start","state":"completed","input":{"parent_session":"host"}}), None).unwrap();
+            drop(local);
+            // Reopen the journal, so every listing uses durable ownership and state.
+            let config = crate::config::Config {
+                listen: "127.0.0.1:0".parse().unwrap(),
+                token: "t".repeat(32),
+                state_dir: dir.clone(),
+                repository: dir.clone(),
+                api_url: Some(api_url),
+                store: "test".into(),
+                instance: None,
+                account_home: dir.clone(),
+                default_harness: crate::runtime::Kind::Codex,
+                harnesses: [(
+                    crate::runtime::Kind::Codex,
+                    crate::config::HarnessConfig {
+                        binary: "/bin/false".into(),
+                        home: dir.clone(),
+                        model: "fixture".into(),
+                        provider: None,
+                    },
+                )]
+                .into(),
+                storage: None,
+                rpc_timeout: Duration::from_secs(30),
+                diagnostic_upload: Duration::from_secs(3600),
+            };
+            Self {
+                m: Manager::open(config).unwrap(),
+                dir,
+                website,
+                server,
+            }
+        }
+
+        async fn list(&self, caller: &str, archived: bool) -> Value {
+            let mut answer = self.m.children(caller, None, archived).await;
+            own_children(&self.m, caller, archived, &mut answer).await;
+            answer
+        }
+
+        fn found(&self, children: Value) {
+            *self.website.lock().unwrap() = [
+                (StatusCode::OK, json!({"children":children})),
+                (StatusCode::OK, json!({"children":children})),
+            ];
+        }
+    }
+
+    #[tokio::test]
+    async fn child_list_keeps_a_durable_running_child_when_the_website_omits_it() {
+        let f = ChildList::open("running").await;
+        // Control: the same child appears when the website includes it.
+        f.found(json!([{"id":"thr_kid","state":"running","title":"Child","parent":"thr_parent"}]));
+        let listed = f.list("main", false).await;
+        assert_eq!(listed["children"].as_array().unwrap().len(), 1);
+        assert_eq!(listed["children"][0]["title"], "Child");
+        assert!(listed["children"][0]["note"].is_null());
+        f.found(json!([]));
+        let missing = f.list("main", false).await;
+        assert_eq!(
+            missing["children"].as_array().unwrap().len(),
+            1,
+            "{missing}"
+        );
+        let child = &missing["children"][0];
+        assert_eq!(child["id"], "thr_kid");
+        assert_eq!(child["state"], "running");
+        assert_eq!(child["sandbox"], "own");
+        assert!(child["note"].as_str().unwrap().contains("last known"));
+        assert!(child["note"].as_str().unwrap().contains("unconfirmed"));
+    }
+
+    #[tokio::test]
+    async fn child_list_keeps_started_children_without_guessing_their_state() {
+        let f = ChildList::open("unknown").await;
+        f.m.local
+            .lock()
+            .unwrap()
+            .sessions
+            .get_mut("main")
+            .unwrap()
+            .child_states
+            .remove("thr_kid");
+        let answer = f.list("main", false).await;
+        assert_eq!(answer["children"].as_array().unwrap().len(), 1, "{answer}");
+        assert_eq!(answer["children"][0]["state"], "unknown");
+    }
+
+    #[tokio::test]
+    async fn child_list_preserves_shared_sandbox_ownership_and_deduplicates_ids() {
+        let f = ChildList::open("ownership").await;
+        for (caller, id) in [("main", "thr_kid"), ("shared", "thr_peer")] {
+            let answer = f.list(caller, false).await;
+            assert_eq!(answer["children"].as_array().unwrap().len(), 1, "{answer}");
+            assert_eq!(answer["children"][0]["id"], id);
+        }
+        f.found(json!([
+            {"id":"thr_kid","state":"running"},
+            {"id":"thr_peer","state":"running"},
+            {"id":"thr_kid","state":"running"},
+            {"id":"thr_peer","state":"running"}
+        ]));
+        for (caller, id) in [("main", "thr_kid"), ("shared", "thr_peer")] {
+            let answer = f.list(caller, false).await;
+            assert_eq!(answer["children"].as_array().unwrap().len(), 1, "{answer}");
+            assert_eq!(answer["children"][0]["id"], id);
+        }
+    }
+
+    #[tokio::test]
+    async fn child_list_does_not_restore_archived_children_from_last_known_state() {
+        let f = ChildList::open("archived").await;
+        note_child(&f.m, "main", "thr_kid", "archived", &Value::Null);
+        assert_eq!(f.list("main", false).await["children"], json!([]));
+        let answer = f.list("main", true).await;
+        assert_eq!(answer["children"].as_array().unwrap().len(), 1, "{answer}");
+        assert_eq!(answer["children"][0]["state"], "archived");
+        // A stale running report must not resurrect an archive/deletion the website knows about.
+        note_child(&f.m, "main", "thr_kid", "running", &Value::Null);
+        for state in ["archived", "deleted"] {
+            f.website.lock().unwrap()[1].1 = json!({"children":[{"id":"thr_kid","state":state}]});
+            assert_eq!(f.list("main", false).await["children"], json!([]));
+            let answer = f.list("main", true).await;
+            assert_eq!(answer["children"].as_array().unwrap().len(), 1);
+            assert_eq!(answer["children"][0]["state"], "archived");
+        }
+    }
+
+    #[tokio::test]
+    async fn child_list_does_not_guess_when_the_archive_check_fails() {
+        let f = ChildList::open("unavailable").await;
+        f.website.lock().unwrap()[1].0 = StatusCode::SERVICE_UNAVAILABLE;
+        assert_eq!(f.list("main", false).await["children"], json!([]));
+        f.website.lock().unwrap()[0].0 = StatusCode::SERVICE_UNAVAILABLE;
+        let answer = f.list("main", false).await;
+        assert_eq!(answer["children"], json!([]));
+        assert!(answer["note"].as_str().unwrap().contains("HTTP 503"));
+    }
+
     #[test]
     fn a_relayed_message_names_its_sender_with_or_without_bb() {
         for tag in ["[bb message from thread:", "[message from thread:"] {
