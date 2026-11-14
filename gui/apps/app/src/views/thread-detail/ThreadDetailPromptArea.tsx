@@ -751,7 +751,7 @@ export function ThreadDetailPromptArea({
   });
   const cloudFollowUpReasoningOptions = useMemo(() => {
     // ACP harnesses keep their launch level, unless Cloud can switch it per turn (fx).
-    const fixed = thread.providerId.startsWith("acp-") && !cloudHarness(cloudConnection.data, thread.providerId)?.prompt_reasoning;
+    const fixed = (thread.providerId.startsWith("acp-") || thread.providerId === "antigravity") && !cloudHarness(cloudConnection.data, thread.providerId)?.prompt_reasoning;
     const levels = fixed ? [cloudReasoning] : cloudReasoningLevels(cloudConnection.data, thread.providerId, cloudState.data?.model);
     return [...new Set([cloudReasoning, ...levels])].flatMap((level) => {
       const parsed = reasoningLevelSchema.safeParse(level);

@@ -70,6 +70,7 @@ describe("getProviderStates", () => {
       expect(result.providers.map((provider) => provider.providerId)).toEqual([
         "codex",
         "claude-code",
+        "antigravity",
         "pi",
         "acp-cursor",
       ]);
@@ -185,6 +186,7 @@ describe("getProviderStates", () => {
       expect(result.providers.map((provider) => provider.providerId)).toEqual([
         "codex",
         "claude-code",
+        "antigravity",
         "pi",
         "acp-cursor",
         "acp-opencode",
@@ -341,7 +343,7 @@ describe("getProviderStates", () => {
         INSTALLED_ONLY_PROVIDER_IDS.size,
       );
       expect(healthCwds.filter((cwd) => cwd !== undefined)).toEqual(
-        Array(4).fill(environment.path),
+        Array(5).fill(environment.path),
       );
     });
   });

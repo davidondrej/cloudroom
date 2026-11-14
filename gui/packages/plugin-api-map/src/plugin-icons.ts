@@ -51,6 +51,7 @@ const FIRST_PARTY_PLUGINS: Record<string, FirstPartyPlugin> = {
   Tasks: { id: "tasks", icon: CheckListIcon },
   Workflows: { id: "workflows", icon: WorkflowCircle03Icon },
   "ACP providers": { id: "provider-acp", icon: SparklesIcon },
+  "Antigravity provider": { id: "provider-antigravity", icon: SparklesIcon },
   "Claude Code provider": { id: "provider-claude-code", icon: SparklesIcon },
   "Codex provider": { id: "provider-codex", icon: SparklesIcon },
   "Pi provider": { id: "provider-pi", icon: SparklesIcon },

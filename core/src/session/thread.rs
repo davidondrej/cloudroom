@@ -29,8 +29,8 @@ room-cli thread update --self [--title TITLE] [--reasoning-level LEVEL]
 room-cli thread archive --self
 room-cli thread move --self --project PROJECT
 room-cli thread stop --self
-room-cli thread spawn --provider codex|claude-code|cursor|pi|opencode|hermes|devin|droid|kimi|fx|openclaw [--model MODEL] [--reasoning-level LEVEL] [--service-tier default|fast] [--title TITLE] [--shared-sandbox|--top-level] --prompt TEXT|--prompt-file PATH
-room-cli thread fork [--provider codex|claude-code|cursor|pi|opencode|hermes|devin|droid|kimi|fx|openclaw] [--model MODEL] [--reasoning-level LEVEL] [--title TITLE] --prompt TEXT|--prompt-file PATH
+room-cli thread spawn --provider codex|claude-code|cursor|pi|opencode|hermes|devin|droid|kimi|antigravity|fx|openclaw [--model MODEL] [--reasoning-level LEVEL] [--service-tier default|fast] [--title TITLE] [--shared-sandbox|--top-level] --prompt TEXT|--prompt-file PATH
+room-cli thread fork [--provider codex|claude-code|cursor|pi|opencode|hermes|devin|droid|kimi|antigravity|fx|openclaw] [--model MODEL] [--reasoning-level LEVEL] [--title TITLE] --prompt TEXT|--prompt-file PATH
 room-cli thread list [--include-archived]
 room-cli thread wait --children
 room-cli thread output CHILD_ID [--all]
@@ -666,7 +666,7 @@ fn check_start(
     provider
         .map(|p| {
             crate::runtime::Kind::named(p).ok_or_else(|| {
-                bad("Use --provider codex, claude-code, cursor, pi, opencode, hermes, devin, droid, kimi, fx or openclaw")
+                bad("Use --provider codex, claude-code, cursor, pi, opencode, hermes, devin, droid, kimi, antigravity, fx or openclaw")
             })
         })
         .transpose()

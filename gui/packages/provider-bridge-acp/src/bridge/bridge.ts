@@ -853,6 +853,7 @@ async function loadSessionDiscoveredModels(
   agent: AcpAgentCommandParam,
   reasoningProbePriorityModelIds: readonly string[],
   parameterizedModelPicker: boolean,
+  requiresLogin: boolean,
 ): Promise<AvailableModel[] | null> {
   const key = JSON.stringify({
     agent,
@@ -954,6 +955,12 @@ async function loadSessionDiscoveredModels(
     };
     return models;
   } catch (error) {
+    const authRequired = requiresLogin
+      ? withAcpAuthRequiredRecovery(error)
+      : undefined;
+    if (authRequired instanceof AcpAuthRequiredError) {
+      throw authRequired;
+    }
     process.stderr.write(
       `acp bridge: ACP-native model discovery for "${agent.command}" failed: ${
         error instanceof Error ? error.message : String(error)
@@ -2689,6 +2696,10 @@ async function handleModelList(
           params.agent,
           params.reasoningProbePriorityModelIds,
           params.parameterizedModelPicker,
+          resolveAcpDialect({
+            ...(dialectId === undefined ? {} : { dialectId }),
+            command: params.agent.command,
+          }).modelDiscoveryRequiresLogin === true,
         )
       : null;
   if (sessionDiscoveredModels) {

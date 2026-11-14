@@ -19,6 +19,7 @@ const pluginEntries = [
   "keep-awake",
   "linear",
   "provider-acp",
+  "provider-antigravity",
   "provider-claude-code",
   "provider-codex",
   "provider-retry",
@@ -116,6 +117,10 @@ describe("SettingsSidebarContent navigation", () => {
     expect(currentRow()).toEqual(["General"]);
     cleanup();
     renderSidebar({ activeSection: null, activePluginId: "provider-codex" });
+    expect(currentRow()).toEqual(["Agents"]);
+    cleanup();
+    // Antigravity has its own tab under Agents, next to Claude Code and Codex.
+    renderSidebar({ activeSection: null, activePluginId: "provider-antigravity" });
     expect(currentRow()).toEqual(["Agents"]);
     cleanup();
     renderSidebar({ activeSection: "command-guard" });

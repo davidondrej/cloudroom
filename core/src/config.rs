@@ -86,6 +86,7 @@ impl Config {
             "devin" => Kind::Devin,
             "droid" => Kind::Droid,
             "kimi" => Kind::Kimi,
+            "antigravity" => Kind::Antigravity,
             "openclaw" => Kind::OpenClaw,
             _ => return Err(io::Error::other("unsupported CLOUDROOM_HARNESS")),
         };
@@ -157,6 +158,8 @@ impl Config {
             (Kind::Devin, "devin", ".local/share/devin"),
             (Kind::Droid, "droid", ".factory"),
             (Kind::Kimi, "kimi", ".kimi-code"),
+            // Google's installer names the Antigravity CLI `agy`; it keeps its home in ~/.gemini.
+            (Kind::Antigravity, "agy", ".gemini"),
         ] {
             let home = account_home.join(home);
             let binary = [

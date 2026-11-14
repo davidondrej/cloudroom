@@ -347,6 +347,11 @@ describe("buildPluginProviderRegistration", () => {
         icon: undefined,
       },
       {
+        id: "antigravity",
+        logoUrl: "/api/v1/system/providers/antigravity/logo",
+        icon: undefined,
+      },
+      {
         id: "pi",
         logoUrl: "/api/v1/system/providers/pi/logo",
         icon: undefined,
@@ -431,6 +436,7 @@ describe("buildPluginProviderRegistration", () => {
     expect(Object.fromEntries(projected)).toStrictEqual({
       codex: "collapse",
       "claude-code": "flat",
+      antigravity: "collapse",
       pi: "collapse",
       "acp-cursor": "collapse",
       "acp-opencode": "collapse",

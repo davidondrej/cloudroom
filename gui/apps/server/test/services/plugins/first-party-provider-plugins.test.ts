@@ -33,6 +33,19 @@ const FIRST_PARTY_PROVIDER_DECLARATIONS = [
     hasLogo: true,
   },
   {
+    builtinName: "provider-antigravity",
+    pluginId: "provider-antigravity",
+    providerId: "antigravity",
+    displayName: "Antigravity",
+    supportsThreadArchive: false,
+    supportsThreadRename: false,
+    fork: "none",
+    supportsManualCompaction: false,
+    supportsUsage: true,
+    visibility: "always",
+    hasLogo: true,
+  },
+  {
     builtinName: "provider-pi",
     pluginId: "provider-pi",
     providerId: "pi",
@@ -460,6 +473,7 @@ describe("first-party provider plugins", () => {
         expect(registry.list().map((entry) => entry.info.id)).toEqual([
           "codex",
           "claude-code",
+          "antigravity",
           "acp-cursor",
           "acp-opencode",
           "acp-omp",

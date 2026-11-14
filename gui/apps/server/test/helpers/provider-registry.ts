@@ -39,6 +39,7 @@ import type { PluginHostArtifactSnapshot } from "../../src/services/plugins/plug
 const FIRST_PARTY_PROVIDER_PLUGIN_IDS = [
   "provider-codex",
   "provider-claude-code",
+  "provider-antigravity",
   "provider-pi",
   "provider-acp",
 ] as const;

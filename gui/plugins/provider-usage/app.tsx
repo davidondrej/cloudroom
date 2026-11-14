@@ -15,6 +15,7 @@ import {
   type ExperimentalSidebarFooterDisclosureProps,
   UrlLink,
   useBbContext,
+  useBbNavigate,
 } from "@get-bb/plugin-sdk/app";
 import { Icon } from "@cloudroom/shared-ui/icon";
 import { Button } from "@cloudroom/shared-ui/button";
@@ -220,10 +221,16 @@ function UsageBlocks({ usedPercent }: { usedPercent: number }) {
   );
 }
 
-/** A row's short label. A model's weekly row ("Weekly · Fable") reads "7d fable"; narrow cards drop its "7d". */
+const MODEL_ROW_PREFIXES: Record<string, string> = {
+  Weekly: "7d",
+  "Five-hour limit": "5h",
+  "Daily limit": "1d",
+};
+
+/** A row's short label. A model's row ("Weekly · Fable", "Five-hour limit · Gemini") reads "7d fable" or "5h gemini"; narrow cards drop the "7d". */
 function rowLabel(label: string): { prefix: string | null; label: string } {
-  const model = /^Weekly · (.+)$/u.exec(label)?.[1];
-  if (model) return { prefix: "7d", label: model };
+  const model = /^(Weekly|Five-hour limit|Daily limit) · (.+)$/u.exec(label);
+  if (model) return { prefix: MODEL_ROW_PREFIXES[model[1]!]!, label: model[2]! };
   return {
     prefix: null,
     label: label
@@ -492,7 +499,83 @@ function CodexSignIn({ label, onSignedIn }: { label: string; onSignedIn: () => v
   );
 }
 
-function ProviderUsageBody({ provider, onCodexSignedIn }: { provider: UsageProvider; onCodexSignedIn?: () => void }) {
+type AntigravityLogin = { state: string; message: string | null; login_id: string | null; verification_url: string | null };
+
+/** Google sign-in for the Antigravity CLI on this computer, run by its plugin as `agy acp --login`. */
+async function antigravityAccount(input: { action: "login" | "complete" | "cancel"; requestId: string; code?: string }): Promise<AntigravityLogin> {
+  const response = await fetch("/api/v1/plugins/provider-antigravity/rpc/antigravityAccount", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  const body = (await response.json().catch(() => null)) as { ok?: boolean; result?: AntigravityLogin } | null;
+  if (!response.ok || body?.ok !== true || !body.result) throw new Error("Antigravity sign-in could not start.");
+  return body.result;
+}
+
+/** Sign in with Google instead of "run `agy acp --login` in a terminal": Google's page opens, then its code goes here. */
+function AntigravitySignIn({ label, onSignedIn }: { label: string; onSignedIn: () => void }) {
+  const navigate = useBbNavigate();
+  const [loginId, setLoginId] = useState<string | null>(null);
+  const [code, setCode] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const run = (input: Parameters<typeof antigravityAccount>[0]) => {
+    setBusy(true);
+    setError("");
+    antigravityAccount(input).then(
+      (result) => {
+        if (result.state === "connected") { setLoginId(null); return onSignedIn(); }
+        if (result.state === "waiting" && result.login_id) {
+          setLoginId(result.login_id);
+          if (input.action === "login" && result.verification_url) navigate.openUrl(result.verification_url);
+          return;
+        }
+        setLoginId(null);
+        setError(result.message ?? "Antigravity sign-in failed.");
+      },
+      (cause: unknown) => { setLoginId(null); setError(cause instanceof Error ? cause.message : String(cause)); },
+    ).finally(() => { setBusy(false); setCode(""); });
+  };
+  return (
+    <div>
+      {loginId === null ? (
+        <div className="flex items-center justify-between gap-2">
+          <UsageNote>{busy ? "opening google" : label}</UsageNote>
+          <Button type="button" size="sm" className="h-6 px-2.5 text-xs" disabled={busy} onClick={() => run({ action: "login", requestId: crypto.randomUUID() })}>
+            {busy ? "Waiting…" : "Sign in"}
+          </Button>
+        </div>
+      ) : (
+        <form
+          className="flex items-center gap-1.5"
+          onSubmit={(event) => {
+            event.preventDefault();
+            if (code.trim()) run({ action: "complete", requestId: loginId, code: code.trim() });
+          }}
+        >
+          <input
+            type="password"
+            maxLength={4096}
+            autoComplete="off"
+            spellCheck={false}
+            placeholder="Code from Google"
+            aria-label="Google sign-in code"
+            value={code}
+            onChange={(event) => setCode(event.target.value)}
+            className="h-6 min-w-0 flex-1 rounded-md border border-input bg-background px-2 text-xs"
+          />
+          <Button type="submit" size="sm" className="h-6 px-2.5 text-xs" disabled={busy || !code.trim()}>
+            {busy ? "…" : "Connect"}
+          </Button>
+        </form>
+      )}
+      {error ? <p role="alert" className="text-destructive">{error}</p> : null}
+    </div>
+  );
+}
+
+function ProviderUsageBody({ provider, onSignedIn }: { provider: UsageProvider; onSignedIn?: () => void }) {
   const usage = provider.usage;
   if (usage === null) return <UsageNote>Usage not reported.</UsageNote>;
   switch (usage.status) {
@@ -520,8 +603,10 @@ function ProviderUsageBody({ provider, onCodexSignedIn }: { provider: UsageProvi
     case "unauthenticated":
     case "expired": {
       const label = usage.status === "expired" ? "session expired" : "signed out";
-      if (provider.providerId === "codex" && onCodexSignedIn)
-        return <CodexSignIn label={label} onSignedIn={onCodexSignedIn} />;
+      if (provider.providerId === "codex" && onSignedIn)
+        return <CodexSignIn label={label} onSignedIn={onSignedIn} />;
+      if (provider.providerId === "antigravity" && onSignedIn)
+        return <AntigravitySignIn label={label} onSignedIn={onSignedIn} />;
       return <UsageNote>{usage.status === "expired" ? provider.expiredHint : provider.signInHint}</UsageNote>;
     }
     case "error":
@@ -1038,7 +1123,7 @@ export function ProviderUsageStatusContent({
                     ) : (
                       <ProviderUsageBody
                         provider={account}
-                        onCodexSignedIn={
+                        onSignedIn={
                           // Sign in runs on the computer running Cloudroom, so another machine keeps its hint.
                           !activeMachine?.primary ||
                           (account.accountId && account.accountId !== "local")

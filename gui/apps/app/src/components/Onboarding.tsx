@@ -6,6 +6,7 @@ import { useNavigate } from "react-router-dom";
 import { deriveProjectNameFromPath } from "@cloudroom/domain";
 import { Icon } from "@cloudroom/shared-ui/icon";
 import { cn } from "@cloudroom/shared-ui/lib/utils";
+import { AntigravityConnectionButton, useAntigravityConnection } from "@/components/AntigravityConnection";
 import { ClaudeConnectionButton, useClaudeConnection, useInstallPercent } from "@/components/ClaudeConnection";
 import { openCodexConnection } from "@/components/CodexConnectionPanel";
 import { selectCloudForNewThreads } from "@/components/promptbox/NewThreadComposer";
@@ -41,14 +42,14 @@ const signInGroupAtom = atomWithStorage<"auto" | "manual" | "auto_done" | null>(
 const STEPS = ["Sign in", "Connect an agent", "Connect GitHub", "Import your work"];
 const STEP_IDS = ["account", "agent", "github", "project"] as const;
 type SetupStepId = (typeof STEP_IDS)[number];
-type SetupDetail = "claude" | "codex" | "both" | "none" | "existing" | "found" | "folder" | "recent_folder" | "bb_import" | "chat_import" | "pi" | "opencode" | "cursor" | "hermes" | "grok" | "devin" | "droid" | "kimi" | "fx" | "openclaw" | "auto" | "manual";
+type SetupDetail = "claude" | "codex" | "both" | "none" | "existing" | "found" | "folder" | "recent_folder" | "bb_import" | "chat_import" | "pi" | "opencode" | "cursor" | "hermes" | "grok" | "devin" | "droid" | "kimi" | "antigravity" | "fx" | "openclaw" | "auto" | "manual";
 const agentDetail = (id: string) => id.replace(/^acp-/, "").replace(/-agent$/, "") as SetupDetail;
 function track(step: SetupStepId, action: "viewed" | "started" | "done" | "skipped" | "closed" | "detected", detail: SetupDetail | null = null, agents?: SetupDetail[]) {
   void fetchWithAppSurface("/api/v1/cloudroom/setup-step", {
     method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ step, action, detail, agents }),
   }).catch(() => {});
 }
-const LATER = ["Your Cloudroom account", "Claude Code or Codex", "For private repos", "Last step"];
+const LATER = ["Your Cloudroom account", "Claude Code, Codex or Antigravity", "For private repos", "Last step"];
 const PALETTE = {
   "--ob-bg": "#faf7ef", "--ob-rail": "#f2ecde", "--ob-card": "#fffdf7", "--ob-line": "#e2dac6", "--ob-dash": "#c9bfa6",
   "--ob-ink": "#29251e", "--ob-muted": "#7a7263", "--ob-lime": "#bfff00", "--ob-ok": "#4d6b00", "--ob-green": "#17803f", "--ob-error": "#b42318",
@@ -74,13 +75,16 @@ export function useSetupProgress() {
     retry: false,
     refetchInterval: (query) => (query.state.data?.state === "waiting" ? 1500 : false),
   });
+  // Antigravity signs in with Google on this computer; it has no Cloud login to connect.
+  const { localHostId } = useHostDaemon();
+  const antigravity = useAntigravityConnection({ hostId: localHostId }, Boolean(accountId));
   const defaultAgent = useSystemConfig().data?.generalSettings.defaultProviderId ?? null;
-  const extra = defaultAgent === "claude-code" || defaultAgent === "codex" ? null : defaultAgent;
+  const extra = defaultAgent === "claude-code" || defaultAgent === "codex" || defaultAgent === "antigravity" ? null : defaultAgent;
   const provider = useSystemProviders().data?.find((entry) => entry.id === extra);
   const signedIn = useMacAgents(extra !== null).data?.includes(extra ?? "") === true;
   const other = provider && signedIn ? provider.id : null;
-  const agents = { claude: claude.data?.state === "connected", codex: codex.data?.state === "connected", other, otherName: other && provider?.displayName };
-  const done = [Boolean(accountId), agents.claude || agents.codex || other !== null, github.data?.state === "connected"];
+  const agents = { claude: claude.data?.state === "connected", codex: codex.data?.state === "connected", antigravity: antigravity.data?.state === "connected", other, otherName: other && provider?.displayName };
+  const done = [Boolean(accountId), agents.claude || agents.codex || agents.antigravity || other !== null, github.data?.state === "connected"];
   return { account, ready, offline, agents, codex, github, done, complete: done.every(Boolean), checking: account.isPending };
 }
 
@@ -99,7 +103,7 @@ export function Onboarding() {
   const startFirstAgent = useStartFirstAgent();
   if (!visible) return null;
   // The first time setup closes on the desktop app, by any path, it starts the first agent (ADR 20261111-220912).
-  const close = (agents: { claude: boolean; codex: boolean }) => {
+  const close = (agents: { claude: boolean; codex: boolean; antigravity: boolean }) => {
     if (!dismissed && getRoomDesktopInfo() !== null) startFirstAgent(agents);
     setDismissed(true);
     setOpen(false);
@@ -107,7 +111,7 @@ export function Onboarding() {
   return <Setup locked={locked} fresh={projects?.length === 0} close={close} />;
 }
 
-function Setup({ locked, fresh, close: closeSetup }: { locked: boolean; fresh: boolean; close: (agents: { claude: boolean; codex: boolean }) => void }) {
+function Setup({ locked, fresh, close: closeSetup }: { locked: boolean; fresh: boolean; close: (agents: { claude: boolean; codex: boolean; antigravity: boolean }) => void }) {
   const progress = useSetupProgress();
   const close = () => closeSetup(progress.agents);
   const { done, account } = progress;
@@ -134,21 +138,21 @@ function Setup({ locked, fresh, close: closeSetup }: { locked: boolean; fresh: b
     wasSignedIn.current = signedIn;
   }, [signedIn, step, done]);
   // Stay on the agent step after one agent connects; only both connecting moves on by itself, after a countdown.
-  const { claude, codex } = progress.agents;
-  const hadAgents = useRef({ claude, codex });
+  const { claude, codex, antigravity } = progress.agents;
+  const hadAgents = useRef({ claude, codex, antigravity });
   const [stamped, setStamped] = useState(false);
   const [countdown, setCountdown] = useState<{ left: number; to: number } | null>(null);
   useEffect(() => {
     if (step === 1 && picked === null) setPicked(1);
     const had = hadAgents.current;
-    hadAgents.current = { claude, codex };
+    hadAgents.current = { claude, codex, antigravity };
     if (step !== 1) {
       setStamped(false);
       return setCountdown(null);
     }
-    if ((claude && !had.claude) || (codex && !had.codex)) setStamped(true);
+    if ((claude && !had.claude) || (codex && !had.codex) || (antigravity && !had.antigravity)) setStamped(true);
     if (claude && codex && !(had.claude && had.codex)) setCountdown({ left: AGENT_COUNTDOWN, to: nextStep(done, 1) });
-  }, [claude, codex, step, picked, done]);
+  }, [claude, codex, antigravity, step, picked, done]);
   useEffect(() => {
     if (!countdown) return;
     const timer = setTimeout(() => {
@@ -256,11 +260,11 @@ function useSetDefaultAgent() {
   };
 }
 
-function useFirstAgentDefault({ claude, codex }: { claude: boolean; codex: boolean }) {
+function useFirstAgentDefault({ claude, codex, antigravity }: { claude: boolean; codex: boolean; antigravity: boolean }) {
   const settings = useSystemConfig().data?.generalSettings;
   const setDefault = useSetDefaultAgent();
   const assigned = useRef(false);
-  const agent = claude ? "claude-code" : codex ? "codex" : null;
+  const agent = claude ? "claude-code" : codex ? "codex" : antigravity ? "antigravity" : null;
   useEffect(() => {
     if (assigned.current || !agent || !settings || settings.defaultProviderId !== null) return;
     assigned.current = true;
@@ -275,7 +279,7 @@ function nextStep(done: boolean[], from: number) {
 
 function doneMeta(index: number, progress: ReturnType<typeof useSetupProgress>) {
   if (index === 0) return progress.account.data?.account?.email ?? "Signed in";
-  if (index === 1) return [progress.agents.claude && "Claude Code", progress.agents.codex && "Codex", progress.agents.otherName].filter(Boolean).join(" + ");
+  if (index === 1) return [progress.agents.claude && "Claude Code", progress.agents.codex && "Codex", progress.agents.antigravity && "Antigravity", progress.agents.otherName].filter(Boolean).join(" + ");
   return progress.github.data?.email ?? "Connected";
 }
 
@@ -450,8 +454,8 @@ function AgentStep({ progress, next, stamped, left, choices, setChoices }: { pro
     track("agent", "started", agentDetail(agent));
     setDefault(agent);
   };
-  const startedAgents = useRef(new Set<"claude" | "codex">());
-  const started = (agent: "claude" | "codex") => {
+  const startedAgents = useRef(new Set<"claude" | "codex" | "antigravity">());
+  const started = (agent: "claude" | "codex" | "antigravity") => {
     if (startedAgents.current.has(agent)) return;
     startedAgents.current.add(agent);
     track("agent", "started", agent);
@@ -480,7 +484,7 @@ function AgentStep({ progress, next, stamped, left, choices, setChoices }: { pro
     onError: (error) => appToast.error(error.message),
     onSettled: () => client.invalidateQueries({ queryKey: ["cloudroom-codex-auth"] }),
   });
-  const finish = useMutation({ mutationFn: saveChoices, onSuccess: () => { track("agent", "done", agents.other ? agentDetail(agents.other) : agents.claude && agents.codex ? "both" : agents.claude ? "claude" : "codex"); next(); }, meta: { showErrorToast: false }, onError: (error) => appToast.error(error.message) });
+  const finish = useMutation({ mutationFn: saveChoices, onSuccess: () => { track("agent", "done", agents.other ? agentDetail(agents.other) : agents.claude && agents.codex ? "both" : agents.claude ? "claude" : agents.codex ? "codex" : "antigravity"); next(); }, meta: { showErrorToast: false }, onError: (error) => appToast.error(error.message) });
   const codexBrowser = codex.data?.state === "waiting" && !codex.data.user_code ? codex.data : null;
   // Connect installs a missing Codex first; the button shows it (ADR 20261111-123959).
   const codexInstalling = useInstallPercent(codexBrowser?.installing_since);
@@ -493,7 +497,8 @@ function AgentStep({ progress, next, stamped, left, choices, setChoices }: { pro
     codexWasWaiting.current = codexState === "waiting";
   }, [codexState, codexMessage]);
   const waiting = !account.data?.account ? "Log in first" : offline ? "Cloud unreachable" : !ready ? "Starting your cloud…" : null;
-  const connectedLead = agents.claude && agents.codex ? "Agents" : agents.claude ? "Claude Code" : "Codex";
+  const connectedNames = [agents.claude && "Claude Code", agents.codex && "Codex", agents.antigravity && "Antigravity"].filter((name) => name !== false);
+  const connectedLead = connectedNames.length === 1 ? connectedNames[0]! : "Agents";
   const action = (connected: boolean, button: ReactNode) => (connected ? <Connected /> : waiting ? <Note>{waiting}</Note> : button);
   return (
     <>
@@ -516,11 +521,14 @@ function AgentStep({ progress, next, stamped, left, choices, setChoices }: { pro
             <Outline className={cn(CONNECT, "tabular-nums")} disabled={connectCodex.isPending || codexInstalling !== null} onClick={() => { started("codex"); connectCodex.mutate(); }}>{codexInstalling !== null ? `Installing ${codexInstalling}%` : connectCodex.isPending ? "Connecting…" : "Connect"}</Outline>
           ))}
         </Card>
+        <Card on={agents.antigravity} isDefault={agents.antigravity && defaultAgent === "antigravity"} logo={<AgentLogo id="antigravity" className="bg-(--ob-rail)" />} name="Antigravity" detail={agents.antigravity ? `Found on ${here}` : "Uses your Google AI plan"}>
+          {agents.antigravity ? <Connected /> : !account.data?.account ? <Note>Log in first</Note> : <span onClickCapture={() => started("antigravity")}><AntigravityConnectionButton hostId={localHostId} className={CONNECT} /></span>}
+        </Card>
       </div>
       <MoreAgents agents={macAgents.data ?? []} picked={agents.other} pick={pick} />
       {offline && <CloudOffline />}
       {/* Hidden until an agent connects, so the choices don't distract from Connect. */}
-      {(agents.claude || agents.codex || agents.other) && (ask.mac || ask.logins) && (
+      {(agents.claude || agents.codex || agents.antigravity || agents.other) && (ask.mac || ask.logins) && (
         <div className="mt-4 flex gap-6 text-[12.5px] text-(--ob-muted) duration-300 animate-in fade-in-0">
           {ask.logins && <Choice checked={copyLogins} onChange={(value) => setChoices({ ...choices, copyLogins: value })} label="Copy logins to the cloud" detail="Agent logins, API keys, and model providers." />}
           {ask.mac && <Choice checked={macAccess} onChange={(value) => setChoices({ ...choices, macAccess: value })} label="Let cloud agents use this computer" detail="Far more powerful agents. Turn off anytime." />}
@@ -528,7 +536,7 @@ function AgentStep({ progress, next, stamped, left, choices, setChoices }: { pro
       )}
       <div className="mt-8 flex items-center gap-5">
         <Cta
-          disabled={!(agents.claude || agents.codex || agents.other) || finish.isPending}
+          disabled={!(agents.claude || agents.codex || agents.antigravity || agents.other) || finish.isPending}
           onClick={() => finish.mutate()}
           className={cn(left !== null && "min-w-[220px] bg-(--ob-lime) text-black shadow-[4px_4px_0_var(--ob-ink)] transition-[background-color,box-shadow] duration-300")}
         >
