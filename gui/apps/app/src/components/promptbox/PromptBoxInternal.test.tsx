@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 
+import { usePromptDraftStorage } from "@/hooks/usePromptDraftStorage";
 import type { PromptTextMention, ReasoningLevel } from "@cloudroom/domain";
 import { TextSelection } from "@tiptap/pm/state";
 import { EditorView } from "@tiptap/pm/view";
@@ -529,6 +530,120 @@ afterEach(async () => {
   resetAllCrashedPluginSlotsForTest();
   resetPluginThreadRowStatusesForTest();
   vi.clearAllMocks();
+});
+
+describe("PromptBoxInternal immediate dictation send", () => {
+  it.each([
+    { inputType: "insertCompositionText", duringPress: true, viaClick: false },
+    { inputType: "insertFromComposition", duringPress: true, viaClick: false },
+    { inputType: "insertText", duringPress: true, viaClick: false },
+    { inputType: "insertCompositionText", duringPress: true, viaClick: true },
+    { inputType: "insertText", duringPress: true, viaClick: true },
+    { inputType: "insertFromComposition", duringPress: false, viaClick: false },
+    { inputType: "insertText", duringPress: false, viaClick: false },
+  ])(
+    "clears $inputType (during press: $duringPress, click: $viaClick)",
+    async ({ inputType, duringPress, viaClick }) => {
+      const restorePointer = mockPointerCoarse(true);
+      const onSubmit = vi.fn();
+      const scope = {
+        kind: "plugin-new-thread",
+        key: `dictation-${inputType}-${duringPress}-${viaClick}`,
+      } as const;
+      const storageKey = `bb.promptbox.contents-plugin-draft-${scope.key}-3`;
+      function Harness() {
+        const draft = usePromptDraftStorage(scope);
+        return (
+          <PromptBoxInternal
+            {...createPromptBoxProps({
+              value: draft.text,
+              mentionRanges: draft.mentions,
+              onChange: draft.setTextAndMentions,
+              onSubmit: () => {
+                onSubmit(draft.text);
+                draft.clearIfCurrentMatches({
+                  text: draft.text,
+                  mentions: draft.mentions,
+                  attachments: draft.attachments,
+                  contexts: draft.contexts,
+                });
+              },
+            })}
+          />
+        );
+      }
+      try {
+        const view = render(<Harness />);
+        const editor = getPromptEditorElement();
+        pastePlainText("Dictated");
+        const submit = screen.getByRole("button", { name: "Submit (Enter)" });
+        await waitFor(() =>
+          expect(submit.hasAttribute("disabled")).toBe(false),
+        );
+        // Confirm unsent drafts still persist before exercising the send race.
+        await waitFor(() =>
+          expect(window.localStorage.getItem(storageKey)).toContain("Dictated"),
+        );
+        editor.focus();
+        vi.useFakeTimers();
+        const composing = inputType !== "insertText";
+        if (composing) fireEvent.compositionStart(editor);
+        const touch = {
+          pointerId: 1,
+          pointerType: "touch",
+          isPrimary: true,
+          button: 0,
+          clientX: 10,
+          clientY: 10,
+        };
+        if (duringPress) fireEvent.pointerDown(submit, touch);
+        if (inputType === "insertFromComposition")
+          fireEvent.compositionEnd(editor, { data: "Dictated message" });
+        editor.dispatchEvent(
+          new InputEvent("beforeinput", {
+            bubbles: true,
+            inputType,
+            data: " message",
+            isComposing: inputType === "insertCompositionText",
+          }),
+        );
+        editor.querySelector("p")!.firstChild!.textContent = "Dictated message";
+        fireEvent.input(editor, {
+          inputType,
+          data: " message",
+          isComposing: inputType === "insertCompositionText",
+        });
+        // Let ProseMirror observe the DOM edit without advancing the draft's
+        // after-paint notification or persistence timers.
+        await act(async () => {});
+        if (!duringPress) {
+          if (inputType === "insertCompositionText")
+            fireEvent.compositionEnd(editor, { data: "Dictated message" });
+          await act(async () => {
+            await vi.advanceTimersByTimeAsync(350);
+          });
+          fireEvent.pointerDown(submit, touch);
+        }
+        if (viaClick) fireEvent.click(submit);
+        else fireEvent.pointerUp(submit, touch);
+        // A delayed compositionend must not bring the submitted draft back.
+        if (inputType === "insertCompositionText")
+          fireEvent.compositionEnd(editor, { data: "Dictated message" });
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(350);
+        });
+        expect(editor.textContent).toBe("");
+        expect(onSubmit).toHaveBeenCalledExactlyOnceWith("Dictated message");
+        expect(window.localStorage.getItem(storageKey)).toBeNull();
+        view.unmount();
+        render(<Harness />);
+        expect(getPromptEditorElement().textContent).toBe("");
+      } finally {
+        vi.useRealTimers();
+        restorePointer();
+      }
+    },
+  );
 });
 
 describe("suppressPromptEditorAnchorActivation", () => {
