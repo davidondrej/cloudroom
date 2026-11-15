@@ -1,4 +1,5 @@
 import { useCallback, type ReactNode } from "react";
+import { SidebarThreadPanelNavigationProvider } from "@/components/plugin/plugin-thread-panel-navigation";
 import { PluginReplacementSlot } from "@/components/plugin/PluginReplacementSlot";
 import { deprecatedOriginalAlias } from "@/lib/plugin-sdk-deprecated-aliases";
 import { useSidebar } from "@/components/ui/sidebar.js";
@@ -44,15 +45,17 @@ export function PluginThreadList({
       onCrash={handleCrash}
     >
       {(slot, BoundOriginal) => (
-        <slot.component
-          activeThreadId={threadId ?? null}
-          activeProjectId={projectId ?? null}
-          isCompactViewport={isCompactViewport}
-          onNavigate={onNavigate}
-          searchQuery={searchQuery}
-          Original={BoundOriginal}
-          experimental_Original={deprecatedOriginalAlias(BoundOriginal)}
-        />
+        <SidebarThreadPanelNavigationProvider>
+          <slot.component
+            activeThreadId={threadId ?? null}
+            activeProjectId={projectId ?? null}
+            isCompactViewport={isCompactViewport}
+            onNavigate={onNavigate}
+            searchQuery={searchQuery}
+            Original={BoundOriginal}
+            experimental_Original={deprecatedOriginalAlias(BoundOriginal)}
+          />
+        </SidebarThreadPanelNavigationProvider>
       )}
     </PluginReplacementSlot>
   );

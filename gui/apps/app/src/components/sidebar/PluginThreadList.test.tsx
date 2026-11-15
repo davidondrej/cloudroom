@@ -247,7 +247,7 @@ describe("sidebar panel opener boundary", () => {
       </>
     );
     const views = render(panes(true));
-    renderList(pluginReplacement(OpenPanelProbe));
+    renderList(pluginReplacement(() => <OpenPanelProbe />));
     const button = clickOpenPanel();
     expect(button.textContent).toBe("true");
     expect(left).toHaveBeenCalledTimes(1);
@@ -264,7 +264,7 @@ describe("sidebar panel opener boundary", () => {
   it("catches guessed or disposed destinations: no focused view returns false", () => {
     const opener = vi.fn(() => true);
     const pane = render(<Pane opener={opener} focused={false} />);
-    renderList(pluginReplacement(OpenPanelProbe));
+    renderList(pluginReplacement(() => <OpenPanelProbe />));
     const button = clickOpenPanel();
     expect(button.textContent).toBe("false");
     expect(opener).not.toHaveBeenCalled();
