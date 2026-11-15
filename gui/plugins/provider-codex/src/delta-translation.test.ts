@@ -2105,15 +2105,26 @@ describe("codex error and warning translation", () => {
     );
   });
 
-  it("ignores MCP startup status updates", () => {
+  it("warns about a failed MCP startup with a fixed reason, never Codex's error text", () => {
     const harness = createHarness();
     const failedEvents = harness.translate({
       jsonrpc: "2.0",
       method: "mcpServer/startupStatus/updated",
       params: {
-        name: "codex_apps",
+        name: "timeout-tools",
         status: "failed",
-        error: "MCP client failed to start",
+        error:
+          'MCP client for `timeout-tools` failed to start: error sending request for url (https://user:pw@mcp.example.com/s/SECRET1/mcp): {"API_KEY":"SECRET2"} --token SECRET3 Cookie: a=SECRET4; b=SECRET5',
+        failureReason: null,
+      },
+    });
+    const unsafeEvents = harness.translate({
+      jsonrpc: "2.0",
+      method: "mcpServer/startupStatus/updated",
+      params: {
+        name: "https://user:SECRET6@example.com/mcp",
+        status: "failed",
+        error: { token: "SECRET7" },
       },
     });
     const readyEvents = harness.translate({
@@ -2126,7 +2137,23 @@ describe("codex error and warning translation", () => {
       },
     });
 
-    expect(failedEvents).toEqual([]);
+    expect(failedEvents).toEqual([
+      expect.objectContaining({
+        type: "provider/warning",
+        category: "general",
+        summary:
+          "MCP server timeout-tools did not start. Codex could not reach it.",
+      }),
+    ]);
+    expect(unsafeEvents).toEqual([
+      expect.objectContaining({
+        type: "provider/warning",
+        summary: "An MCP server did not start. Codex did not say why.",
+      }),
+    ]);
+    expect(JSON.stringify([...failedEvents, ...unsafeEvents])).not.toMatch(
+      /SECRET|pw@/,
+    );
     expect(readyEvents).toEqual([]);
   });
 });

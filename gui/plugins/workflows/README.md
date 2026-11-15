@@ -99,6 +99,10 @@ SDK `retryable` marker when available or conservative overload, rate-limit,
 provider 5xx, and network-error signatures. Authentication, configuration,
 schema, and other deterministic failures are not retried. Retry attempts are
 persisted on the call so a plugin restart cannot reset the retry budget.
+A failed or timed-out model listing is reread every 10 s. Each provider gets
+one 75 s window per run; its last reread can take one more listing (up to about
+30 s). Calls that fail after the window fail at once until a listing succeeds.
+Cancelling the run stops the wait.
 
 Worker output is either the final assistant text or an Ajv-validated value
 submitted through `bb_workflow_result`. Structured workers receive two

@@ -28,7 +28,8 @@ What lives here:
 - `src/declaration.ts` — one agent definition becomes one
   `bb.providers.register` declaration: ids, display names, icons,
   capabilities, and the bridge options it launches with (`acpLaunchSpec`,
-  `acpInstaller` for agents with an official install script, and `acpDialect`
+  `acpInstaller` for agents with an official install script (plus an optional
+  Windows PowerShell one, `powershellUrl`), and `acpDialect`
   for the agents whose vendor side channels the kit reads).
 - `src/legacy-config.ts` — reading the deprecated config array. Dies with the
   deprecation window.

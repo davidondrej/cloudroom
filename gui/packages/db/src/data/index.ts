@@ -80,6 +80,7 @@ export {
   listNonDeletedChildThreads,
   listThreadEnvironmentAssignmentsOnHost,
   listUnarchivedAssignedChildThreads,
+  listHiddenSourceThreads,
   listUnarchivedHiddenSourceThreads,
   listRunningThreads,
   listThreadsWithPendingInteractionState,

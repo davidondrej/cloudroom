@@ -1912,6 +1912,52 @@ describe("DesktopBrowserViewManager", () => {
     await rm(root, { recursive: true, force: true });
   });
 
+  it.each([
+    { attached: false, cdpFails: false, want: "native" },
+    { attached: true, cdpFails: false, want: "cdp" },
+    { attached: true, cdpFails: true, want: "native" },
+  ])(
+    "captures a controlled page with a fresh CDP frame before the composited one (%o)",
+    async ({ attached, cdpFails, want }) => {
+      const { manager, view } = createRendererRecoveryFixture(91);
+      const [tab] = manager.getAutomationTabs({
+        hostWebContentsId: 91,
+        threadId: "thread-1",
+      });
+      if (!tab) throw new Error("Expected native tab");
+      const nativeFrame = { ...electronMock.fakeCapturedImage };
+      const capture = vi
+        .spyOn(view.webContents, "capturePage")
+        .mockResolvedValue(nativeFrame);
+      const debuggerApi = view.webContents.debugger;
+      if (attached) debuggerApi.attach("1.3");
+      debuggerApi.sendCommand.mockImplementation(async () => {
+        if (cdpFails) throw new Error("cdp failed");
+        return { data: Buffer.from("jpeg").toString("base64") };
+      });
+      try {
+        await expect(captureDesktopBrowserPage(tab.webContents)).resolves.toBe(
+          want === "cdp" ? electronMock.fakeCapturedImage : nativeFrame,
+        );
+        expect(debuggerApi.sendCommand.mock.calls).toEqual(
+          attached
+            ? [
+                [
+                  "Page.captureScreenshot",
+                  { format: "png", captureBeyondViewport: false },
+                  undefined,
+                ],
+              ]
+            : [],
+        );
+        expect(debuggerApi.isAttached()).toBe(attached);
+      } finally {
+        capture.mockRestore();
+        manager.destroyAll();
+      }
+    },
+  );
+
   it("captures bounded hidden pages without focus and rejects a removed target during capture", async () => {
     const { manager, hostWindow, view } = createRendererRecoveryFixture(91);
     manager.setVisible({

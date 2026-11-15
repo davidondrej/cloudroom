@@ -1,12 +1,21 @@
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
+import { extract, list } from "tar";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   createRoomAppArtifactService,
+  packHostPackage,
   resolveRoomAppPackage,
   type RoomAppArtifactCommandRunner,
 } from "../../src/services/install/host-artifact.js";
@@ -44,7 +53,9 @@ function isRepoMode(mode: Mode): boolean {
 
 async function writeHostPackage(root: string, readme: string): Promise<void> {
   await mkdir(join(root, "dist"), { recursive: true });
-  await mkdir(join(root, "host-daemon/dist/room-cli-chunks"), { recursive: true });
+  await mkdir(join(root, "host-daemon/dist/room-cli-chunks"), {
+    recursive: true,
+  });
   await writeFile(join(root, "package.json"), JSON.stringify(packageJson));
   await writeFile(join(root, "dist/bb-app.js"), "#!/usr/bin/env node\n");
   await writeFile(join(root, "dist/room-cli.js"), "#!/usr/bin/env node\n");
@@ -94,6 +105,105 @@ afterEach(async () => {
   await Promise.all(
     roots.splice(0).map((root) => rm(root, { force: true, recursive: true })),
   );
+});
+
+async function packedEntries(
+  hostPackageRoot: string,
+): Promise<Record<string, string>> {
+  const file = join(dirname(hostPackageRoot), "packed.tgz");
+  await writeFile(file, await packHostPackage(hostPackageRoot));
+  const entries: Record<string, string> = {};
+  await list({
+    file,
+    onReadEntry: (entry) => {
+      entries[entry.path] = (entry.mode ?? 0).toString(8);
+    },
+  });
+  return entries;
+}
+
+async function packageRootFixture(): Promise<string> {
+  const root = await mkdtemp(join(tmpdir(), "bb-artifact-pack-"));
+  roots.push(root);
+  const hostPackageRoot = join(root, "host-package");
+  await writeHostPackage(hostPackageRoot, "fixture\n");
+  return hostPackageRoot;
+}
+
+describe("packHostPackage", () => {
+  it("sets executable modes that survive Windows", async () => {
+    const hostPackageRoot = await packageRootFixture();
+    for (const file of ["host-daemon/dist/room-cli", "dist/room-cli.js"]) {
+      await chmod(join(hostPackageRoot, file), 0o644);
+    }
+    expect(await packedEntries(hostPackageRoot)).toEqual({
+      "package/README.md": "644",
+      "package/dist/bb-app.js": "755",
+      "package/dist/room-cli.js": "755",
+      "package/host-daemon/dist/bb-parcel-watcher-child.mjs": "644",
+      "package/host-daemon/dist/bb-plugin-host-worker.mjs": "644",
+      "package/host-daemon/dist/bb-provider-bridge-worker.mjs": "644",
+      "package/host-daemon/dist/daemon-bundle.mjs": "644",
+      "package/host-daemon/dist/room-cli": "755",
+      "package/host-daemon/dist/room-cli-chunks/chunk-TEST.js": "644",
+      "package/package.json": "644",
+    });
+  });
+
+  it.each([
+    ["LICENSE", true],
+    ["README.txt", true],
+    ["host-daemon/dist/room-cli-chunks/secret", true],
+    ["CHANGELOG.md", false],
+    [".npmrc", false],
+    ["dist/.NPMRC", false],
+    ["dist/.git/HEAD", false],
+    ["dist/node_modules/dep/index.js", false],
+  ])("packs %s: %s", async (file, shipped) => {
+    const hostPackageRoot = await packageRootFixture();
+    await mkdir(dirname(join(hostPackageRoot, file)), { recursive: true });
+    await writeFile(join(hostPackageRoot, file), file);
+    expect(`package/${file}` in (await packedEntries(hostPackageRoot))).toBe(
+      shipped,
+    );
+  });
+
+  it.each(["dist/.npmignore", "host-daemon/dist/room-cli-chunks/.GITIGNORE"])(
+    "refuses the nested ignore file %s",
+    async (file) => {
+      const hostPackageRoot = await packageRootFixture();
+      await writeFile(join(hostPackageRoot, file), "secret\n");
+      await expect(packHostPackage(hostPackageRoot)).rejects.toThrow(
+        `unsupported ignore file: ${file}`,
+      );
+    },
+  );
+
+  it("packs long and UTF-8 paths", async () => {
+    const hostPackageRoot = await packageRootFixture();
+    const files = [
+      `host-daemon/dist/room-cli-chunks/${"n".repeat(120)}.js`,
+      `host-daemon/dist/room-cli-chunks/${"é".repeat(60)}.js`,
+      `host-daemon/dist/${"d".repeat(90)}/${"e".repeat(90)}/chunk.js`,
+    ];
+    for (const file of files) {
+      await mkdir(dirname(join(hostPackageRoot, file)), { recursive: true });
+      await writeFile(join(hostPackageRoot, file), file);
+    }
+    const entries = await packedEntries(hostPackageRoot);
+    const extracted = join(dirname(hostPackageRoot), "extracted");
+    await mkdir(extracted);
+    await extract({
+      cwd: extracted,
+      file: join(dirname(hostPackageRoot), "packed.tgz"),
+    });
+    for (const file of files) {
+      expect(entries[`package/${file}`]).toBe("644");
+      expect(await readFile(join(extracted, "package", file), "utf8")).toBe(
+        file,
+      );
+    }
+  });
 });
 
 describe("bb-app artifact service (desktop packaging)", () => {
@@ -247,7 +357,7 @@ describe.each(MODES)("bb-app artifact service (%s)", (mode) => {
         isRepoMode(mode) ? 1 : 0,
       );
       await expect(service.getArtifact()).resolves.toEqual(artifact);
-      expect(calls.filter((call) => call.command === "npm")).toHaveLength(1);
+      expect(calls.filter((call) => call.command === "npm")).toHaveLength(0);
     },
     ARTIFACT_LIFECYCLE_TIMEOUT_MS,
   );
@@ -287,7 +397,9 @@ describe.each(MODES)("bb-app artifact service (%s)", (mode) => {
           ])
         ).stdout,
       ).toBe("updated\n");
-      expect(calls.filter((call) => call.command === "npm")).toHaveLength(2);
+      expect(calls.filter((call) => call.command === "pnpm")).toHaveLength(
+        isRepoMode(mode) ? 2 : 0,
+      );
     },
     ARTIFACT_LIFECYCLE_TIMEOUT_MS,
   );
@@ -328,15 +440,19 @@ describe.each(MODES)("bb-app artifact service (%s)", (mode) => {
     "keeps the previous content-addressed artifact when a rebuild fails",
     async () => {
       const test = await fixture(mode);
-      let failNextPack = false;
+      let failNextBuild = false;
       const runner: RoomAppArtifactCommandRunner = async (command, args, cwd) => {
+        if (failNextBuild) throw new Error("host build exploded");
         if (command === "pnpm") {
           await test.refreshHostPackage();
           return "built";
         }
-        if (failNextPack) throw new Error("npm pack exploded");
         return (await execFileAsync(command, [...args], { cwd })).stdout;
       };
+      const runtimePath = join(
+        test.packageRoot,
+        "host-daemon/dist/daemon-bundle.mjs",
+      );
       const options = {
         dataDir: join(test.root, "data"),
         commandRunner: runner,
@@ -345,16 +461,20 @@ describe.each(MODES)("bb-app artifact service (%s)", (mode) => {
       };
 
       const first = await createRoomAppArtifactService(options).getArtifact();
-      failNextPack = true;
+      failNextBuild = isRepoMode(mode);
+      if (!isRepoMode(mode)) await rm(runtimePath);
       await writeFile(join(test.packageRoot, "README.md"), "updated\n");
       const service = createRoomAppArtifactService(options);
-      await expect(service.getArtifact()).rejects.toThrow("npm pack exploded");
+      await expect(service.getArtifact()).rejects.toThrow(
+        isRepoMode(mode) ? "host build exploded" : "ENOENT",
+      );
       expect(
         (await execFileAsync("tar", ["-xOzf", first.path, "package/README.md"]))
           .stdout,
       ).toBe("fixture\n");
 
-      failNextPack = false;
+      failNextBuild = false;
+      await writeFile(runtimePath, "daemon-bundle.mjs");
       const second = await service.getArtifact();
       expect(second.path).not.toBe(first.path);
       expect(

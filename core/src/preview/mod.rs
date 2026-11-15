@@ -33,6 +33,10 @@ use tokio::{
 
 const SOCKET: &str = "/run/cloudroom/preview.sock";
 const FRESH_SECONDS: u64 = 15;
+/// An open preview keeps a hosted sandbox's pairing while its helper reported within this long (#608). Helpers report
+/// every 10 s, one sandbox at a time with 5 s timeouts, so a slow sandbox can delay a report past FRESH_SECONDS. The
+/// app's `previewStatus` uses the same 45 s.
+const BROWSING_SECONDS: u64 = 45;
 const MAX_PAIRING_SEEN: usize = 16;
 pub const SKILL: &str = include_str!("cloud-preview/SKILL.md");
 
@@ -109,6 +113,14 @@ pub struct Previews {
     active: AtomicU64,
     /// Each device's last recorded pairing outcome and holder. Helpers retry every few seconds; only changes are recorded.
     pairing_seen: Mutex<BTreeMap<String, (&'static str, Option<String>)>>,
+    /// The paired device and when it last paired: an awake helper does once a minute, a sleeping Mac never.
+    checked_in: Mutex<Option<(String, Instant)>>,
+    /// A pairing just freed for a Mac that asked for jobs waits a few seconds for it, so the device that lost it
+    /// can't pair again first (#608).
+    reserved: Mutex<Option<(String, Instant)>>,
+    /// A hosted Cloud sandbox: the website names each one's Core `room-…` (CLOUDROOM_INSTANCE). Only these move their
+    /// pairing on their own; VMs and self-hosted servers, which may use tunnels too, keep theirs (#608).
+    sandbox: bool,
 }
 #[derive(Debug)]
 pub struct Failure(StatusCode, String);
@@ -215,6 +227,12 @@ impl Previews {
             core_port: config.listen.port(),
             active: AtomicU64::new(0),
             pairing_seen: Mutex::default(),
+            checked_in: Mutex::default(),
+            reserved: Mutex::default(),
+            sandbox: config
+                .instance
+                .as_deref()
+                .is_some_and(|name| name.starts_with("room-")),
         }))
     }
     /// Mac access shares the preview pairing and agent identity.
@@ -227,6 +245,61 @@ impl Previews {
     }
     pub(crate) fn paired(&self, device: &str) -> bool {
         self.saved.lock().unwrap().devices.contains_key(device)
+    }
+    /// Frees a hosted sandbox's pairing for `next`, a Mac that asked for jobs (#608), if the paired device has no
+    /// preview open and `may_free(device, when it last paired since Core started)` agrees. The registry stays locked
+    /// from check to revoke, as in `while_paired` and `track`, so a reconnect or new tunnel can't slip in between.
+    pub(crate) fn release_for(
+        &self,
+        next: &str,
+        may_free: impl FnOnce(&str, Option<Instant>) -> bool,
+    ) -> bool {
+        if !self.sandbox {
+            return false;
+        }
+        let mut saved = self.saved.lock().unwrap();
+        let Some(holder) = saved.devices.keys().next().cloned() else {
+            return false;
+        };
+        // Tunnels open per request, so an idle preview tab shows only as the helper's report, about every 10 s.
+        let browsing =
+            self.tunnels
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|live| live.device == holder && !live.task.is_finished())
+                || self.reports.lock().unwrap().values().any(|(at, r)| {
+                    r.device == holder && now().saturating_sub(*at) <= BROWSING_SECONDS
+                });
+        let checked_in = self
+            .checked_in
+            .lock()
+            .unwrap()
+            .as_ref()
+            .filter(|(device, _)| *device == holder)
+            .map(|(_, at)| *at);
+        if browsing || !may_free(&holder, checked_in) {
+            return false;
+        }
+        let mut after = saved.clone();
+        after.devices.remove(&holder);
+        if self.save(&after).is_err() {
+            return false;
+        }
+        *saved = after;
+        *self.reserved.lock().unwrap() = Some((next.to_owned(), Instant::now()));
+        self.reports.lock().unwrap().clear();
+        let _ = self.disconnect(|live| live.device == holder);
+        true
+    }
+    /// Runs `attach` only while `device` is paired, with the registry locked against `release_for`.
+    pub(crate) fn while_paired(&self, device: &str, attach: impl FnOnce()) -> bool {
+        let saved = self.saved.lock().unwrap();
+        let paired = saved.devices.contains_key(device);
+        if paired {
+            attach();
+        }
+        paired
     }
     /// The device that holds this sandbox's pairing, shortened for diagnostics.
     pub(crate) fn holder(&self) -> Option<String> {
@@ -426,16 +499,26 @@ impl Previews {
             return Err(conflict("This preview device already has a different key"));
         }
         if !saved.devices.contains_key(&device.device) {
-            if !saved.devices.is_empty() {
+            let reserved = self
+                .reserved
+                .lock()
+                .unwrap()
+                .as_ref()
+                .is_some_and(|(next, at)| {
+                    *next != device.device && at.elapsed() < Duration::from_secs(10)
+                });
+            if !saved.devices.is_empty() || reserved {
                 return Err(conflict(
                     "Previews are paired with another Mac; disconnect its previews first",
                 ));
             }
             let mut next = saved.clone();
-            next.devices.insert(device.device, device.public_key);
+            next.devices
+                .insert(device.device.clone(), device.public_key);
             self.save(&next)?;
             *saved = next;
         }
+        *self.checked_in.lock().unwrap() = Some((device.device, Instant::now()));
         if setup.tunnel {
             return Ok(json!({"tunnel":true}));
         }
@@ -664,13 +747,22 @@ async fn tunnel(
             }
         }
     });
-    let mut tunnels = m.previews.tunnels.lock().unwrap();
-    tunnels.retain(|live| !live.task.is_finished());
-    tunnels.push(Live {
+    let live = Live {
         port,
         device: input.device,
         task: task.abort_handle(),
-    });
+    };
+    // Registered with the registry locked, so `release_for` sees this tunnel or the tunnel sees the release (#608).
+    if !m.previews.while_paired(&live.device.clone(), || {
+        let mut tunnels = m.previews.tunnels.lock().unwrap();
+        tunnels.retain(|live| !live.task.is_finished());
+        tunnels.push(live);
+    }) {
+        task.abort();
+        return Err(conflict(
+            "Preview or device changed; refresh before connecting",
+        ));
+    }
     Ok(Response::builder()
         .status(StatusCode::SWITCHING_PROTOCOLS)
         .header(header::CONNECTION, "upgrade")

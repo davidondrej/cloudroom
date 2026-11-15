@@ -195,14 +195,16 @@ Listing:
     --host <id>                            Count threads whose environment is on this machine
     --provider <id>                        Count threads running on this provider
     --project <id>                         Count threads in this project
-    --parent <id|none>                     Count one thread's children, or 'none' for threads with no parent
+    --parent <id|none|any>                 Count one thread's children, 'none' for threads with no parent, or 'any' for every child thread
+    --archived                             Count archived threads only
     --by <dimension>                       Group the count by host, provider, or project
 
   Counting happens in the database, so use it instead of listing threads and
   counting rows: `room-cli thread list` pages a bounded window and would miscount.
-  Archived, deleted, and hidden threads are excluded. Without --by the command
-  prints one number; with --by it prints a count per group (threads with no
-  host/provider/project group under "-") followed by the total.
+  Deleted and hidden threads are excluded, and archived ones too unless
+  --archived. Without --by the command prints one number; with --by it prints
+  a count per group (threads with no host/provider/project group under "-")
+  followed by the total.
 
 Sections:
 
@@ -476,6 +478,7 @@ Lifecycle:
   room-cli thread unarchive [id]                 Unarchive a thread
     --self                                 Unarchive current thread
     --keep-parent                          Stay under the parent, even an archived one
+    --with-children                        Also unarchive the threads archived with it
 
   room-cli thread delete <id>                    Delete permanently
     --yes                                  Skip confirmation

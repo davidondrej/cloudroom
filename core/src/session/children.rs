@@ -154,6 +154,175 @@ pub(super) const FINISHED: [&str; 5] = [
     "unknown",
     "unknown_after_restart",
 ];
+/// How long a child stays quiet before its parent hears of the turns it began itself (#217).
+pub(super) const QUIET_MS: u64 = 2 * 60 * 1000;
+/// Self-started turns that ended before this (ms) report at once: the sandbox was about to sleep (`flush_held`).
+static FLUSH_BEFORE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// When a self-started turn that replied ended, which its receipt keeps (#217). A failed one reports at once.
+fn replied(r: &Receipt) -> Option<u64> {
+    (r.command == "auto" && r.input["replied"] == true && r.error.is_none())
+        .then(|| r.input["ended"].as_u64())
+        .flatten()
+}
+
+/// A child's finished turns its parent hasn't heard of (`told`), each with when it is due. A prompt's turn reports at
+/// once, and so does one the harness began itself (#217) that failed. One that replied waits until the child has been
+/// quiet for `QUIET_MS` (no turn running, none it began itself ending), so a child polling a job doesn't wake its
+/// parent on every check; then only the newest reports, and older ones count as told with it. An empty one never
+/// reports (F#427), nor one from an older Core, which lacks `report`: an update never sends them.
+pub(super) fn untold(s: &Session, told: impl Fn(&Receipt) -> bool) -> Vec<(&Receipt, u64)> {
+    let (told, owed): (Vec<_>, Vec<_>) = (s.receipts.values())
+        .filter(|r| FINISHED.contains(&r.state.as_str()))
+        .filter(|r| {
+            r.command == "prompt"
+                || (r.command == "auto"
+                    && r.input["report"] == true
+                    && (r.error.is_some() || replied(r).is_some()))
+        })
+        .partition(|r| told(r));
+    let last_told = told.into_iter().filter_map(replied).max();
+    let newest = owed.iter().filter_map(|r| replied(r)).max();
+    // A child that can start no more turns owes them at once; one running a turn isn't quiet.
+    let ended = (s.receipts.values()).filter(|r| r.command == "auto");
+    let quiet = if s.archived || s.close_request.is_some() || s.state == SessionState::Closed {
+        0
+    } else if s.current_request.is_some() {
+        u64::MAX
+    } else {
+        let last = ended.filter_map(|r| r.input["ended"].as_u64()).max();
+        let last = last.unwrap_or(0);
+        if last <= FLUSH_BEFORE.load(std::sync::atomic::Ordering::Relaxed) {
+            0
+        } else {
+            last.saturating_add(QUIET_MS)
+        }
+    };
+    let mut owed: Vec<_> = (owed.into_iter())
+        .filter_map(|r| match replied(r) {
+            None => Some((r, 0)),
+            Some(at) => (Some(at) == newest && Some(at) > last_told).then_some((r, quiet)),
+        })
+        .collect();
+    // Oldest first, as the turns ended, not by request ID (`auto_` sorts first): after a retry too, the parent's last
+    // word is the newest. Ones from an older Core, without `ended`, go first.
+    owed.sort_by_key(|(r, _)| r.input["ended"].as_u64().unwrap_or(0));
+    owed
+}
+
+/// A child's turns its parent hasn't heard of, if it tells one: in another sandbox through the website, or in this one
+/// (`true`), as long as that parent is open. A turn marked reported counts as heard of either way.
+fn owed_by<'a>(local: &'a Local, c: &'a Session) -> Option<(Vec<(&'a Receipt, u64)>, bool)> {
+    if c.parent_thread().is_some() {
+        return Some((untold(c, |r| c.reported.contains(&r.request_id)), false));
+    }
+    let p = (c.parent_session.as_ref())
+        .and_then(|p| local.sessions.get(p))
+        .filter(|p| p.close_request.is_none() && p.state != SessionState::Closed)?;
+    notifies(c).then(|| (untold(c, |r| notified(p, c, r)), true))
+}
+
+/// The reports children here hold until they are quiet (#217): whether one still waits, and whether one is due for a
+/// parent in this sandbox but its notice isn't queued yet (one for another sandbox is `report_pending`'s).
+fn holding(local: &Local) -> (bool, bool) {
+    let now = now_ms();
+    let (mut held, mut unqueued) = (false, false);
+    for c in local.sessions.values() {
+        let Some((owed, here)) = owed_by(local, c) else {
+            continue;
+        };
+        for (_, at) in owed
+            .iter()
+            .filter(|(r, at)| replied(r).is_some() && *at != u64::MAX)
+        {
+            held |= *at > now;
+            unqueued |= *at <= now && here;
+        }
+    }
+    (held, unqueued)
+}
+
+/// Before the sandbox sleeps (drain): a report a child still holds until it is quiet (#217) is sent now instead, so it
+/// never keeps the sandbox awake, nor waits for a wake that may not come. True when one was.
+pub(super) fn flush_held(local: &Local) -> bool {
+    let (held, _) = holding(local);
+    if held {
+        FLUSH_BEFORE.store(now_ms(), std::sync::atomic::Ordering::Relaxed);
+        local.changed.send_modify(|_| {});
+    }
+    held
+}
+
+/// A report `flush_held` sent to a parent in this sandbox whose notice isn't queued yet.
+pub(super) fn unqueued(local: &Local) -> bool {
+    holding(local).1
+}
+
+/// A turn its parent hears of at once (a prompt's, or a self-started one that failed) is newer than the report its child
+/// still holds until quiet (#217): that one, and so every older one, is marked reported without a notice, so the
+/// parent's last word is the newest. Its text stays in the thread.
+pub(super) fn supersede(local: &mut Local, id: &str, ended: &Receipt) -> Result<()> {
+    let at_once = ended.command == "prompt" || (ended.command == "auto" && ended.error.is_some());
+    let Some(c) =
+        (local.sessions.get(id)).filter(|_| at_once && FINISHED.contains(&ended.state.as_str()))
+    else {
+        return Ok(());
+    };
+    let moot: Vec<String> = owed_by(local, c).map_or(vec![], |(owed, _)| {
+        (owed.into_iter())
+            .filter(|(r, _)| replied(r).is_some())
+            .map(|(r, _)| r.request_id.clone())
+            .collect()
+    });
+    for request in moot {
+        local.append(id, "parent_report", json!({"request_id":request}), None)?;
+    }
+    Ok(())
+}
+
+/// A child that tells its parent in this sandbox when its turns end.
+fn notifies(c: &Session) -> bool {
+    (c.receipts.values()).any(|r| r.command == "start" && r.input["notify"] == true)
+}
+
+/// Whether the parent has the notice for child `c`'s turn: delivered, or still being steered into the turn it targets,
+/// or none is owed since a newer turn's report covers it (`supersede`).
+fn notified(p: &Session, c: &Session, r: &Receipt) -> bool {
+    let (steer, queued) = notice_ids(&c.session_id, &r.request_id);
+    let legacy = legacy_notice_id(&c.session_id, &r.request_id);
+    // A steer whose turn ends first may still reach the agent, so it settles before any queued copy (#1579). Only one
+    // that failed, or whose agent was lost (its turn ended unknown, or no agent runs), falls back to the queue.
+    let lost = |s: &Receipt| {
+        let target = s.input["target_request_id"].as_str();
+        p.handle.is_none()
+            || target
+                .and_then(|t| p.receipts.get(t))
+                .is_some_and(|t| t.state.starts_with("unknown"))
+    };
+    let steered = |s: &Receipt| s.state == "completed" || (s.state == "accepted" && !lost(s));
+    c.reported.contains(&r.request_id)
+        || p.receipts.contains_key(&queued)
+        || p.receipts.contains_key(&legacy)
+        || p.receipts.get(&steer).is_some_and(steered)
+        || p.receipts
+            .get(&format!("{legacy}_steer"))
+            .is_some_and(steered)
+}
+
+/// Waits for a change, or until `due` (ms) when a held report falls due. False once nothing will change again.
+pub(super) async fn changed_or_due(changed: &mut watch::Receiver<u64>, due: Option<u64>) -> bool {
+    match due.filter(|at| *at != u64::MAX) {
+        Some(at) => {
+            let wait = Duration::from_millis(at.saturating_sub(now_ms()));
+            !matches!(
+                tokio::time::timeout(wait, changed.changed()).await,
+                Ok(Err(_))
+            )
+        }
+        None => changed.changed().await.is_ok(),
+    }
+}
+
 /// How much of a child's reply its parent's notice quotes, as for Local threads.
 pub(super) const NOTICE_REPLY_CHARS: usize = 4000;
 /// How much of a child's reply the journal keeps. The whole latest one sits in a file beside it (#280).
@@ -783,11 +952,7 @@ impl Manager {
     /// not reported: the parent stopped too, and the app decides what runs next.
     pub(super) fn watch_children(self: &Arc<Self>, local: &Local) {
         for child in local.sessions.values() {
-            if child
-                .receipts
-                .values()
-                .any(|r| r.command == "start" && r.input["notify"] == true)
-            {
+            if notifies(child) {
                 let cut = child
                     .receipts
                     .values()
@@ -831,7 +996,7 @@ impl Manager {
         let mut changed = local.changed.subscribe();
         tokio::spawn(async move {
             loop {
-                let due = {
+                let (due, held) = {
                     let local = manager.local.lock().unwrap();
                     let Some(c) = local.sessions.get(&child) else {
                         return;
@@ -846,39 +1011,18 @@ impl Manager {
                     if p.close_request.is_some() || p.state == SessionState::Closed {
                         return;
                     }
-                    let finished = c.receipts.values().find_map(|r| {
-                        if r.command != "prompt"
-                            || !FINISHED.contains(&r.state.as_str())
-                            || cut.contains(&r.request_id)
-                        {
-                            return None;
-                        }
-                        let (steer, queued) = notice_ids(&child, &r.request_id);
-                        let legacy = legacy_notice_id(&child, &r.request_id);
-                        let tried = p.receipts.get(&steer);
-                        // A steer whose turn ends first may still reach the agent, so it settles before any queued
-                        // copy (#1579). Only one that failed, or whose agent was lost (its turn ended unknown, or
-                        // no agent runs), falls back to the queue.
-                        let lost = |s: &Receipt| {
-                            let target = s.input["target_request_id"].as_str();
-                            p.handle.is_none()
-                                || target
-                                    .and_then(|t| p.receipts.get(t))
-                                    .is_some_and(|t| t.state.starts_with("unknown"))
-                        };
-                        let steered = |s: &Receipt| {
-                            s.state == "completed" || (s.state == "accepted" && !lost(s))
-                        };
-                        // Delivered, or still being steered.
-                        let settled = p.receipts.contains_key(&queued)
-                            || p.receipts.contains_key(&legacy)
-                            || tried.is_some_and(steered)
-                            || p.receipts
-                                .get(&format!("{legacy}_steer"))
-                                .is_some_and(steered);
-                        (!settled).then(|| (r, tried.is_none()))
+                    let now = now_ms();
+                    let owed = untold(c, |r| notified(p, c, r));
+                    let owed = owed.iter().filter(|(r, _)| !cut.contains(&r.request_id));
+                    let held = owed.clone().map(|(_, at)| *at).filter(|at| *at > now).min();
+                    let finished = owed.clone().find(|(_, at)| *at <= now).map(|(r, _)| {
+                        (
+                            *r,
+                            !p.receipts
+                                .contains_key(&notice_ids(&child, &r.request_id).0),
+                        )
                     });
-                    match finished {
+                    let due = match finished {
                         Some((r, steer)) => Some((
                             p.session_id.clone(),
                             r.request_id.clone(),
@@ -895,7 +1039,8 @@ impl Manager {
                             return;
                         }
                         None => None,
-                    }
+                    };
+                    (due, held)
                 };
                 if let Some((parent, request, state, error, reply, title, target)) = due {
                     let text = notice(&child, title, &state, error, reply);
@@ -919,7 +1064,7 @@ impl Manager {
                     }
                     tokio::time::sleep(Duration::from_secs(5)).await;
                 }
-                if manager.is_stopping() || changed.changed().await.is_err() {
+                if manager.is_stopping() || !changed_or_due(&mut changed, held).await {
                     return;
                 }
             }

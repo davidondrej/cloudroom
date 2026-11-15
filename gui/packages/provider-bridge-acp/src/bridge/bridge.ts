@@ -198,6 +198,8 @@ interface AcpThreadSession {
   cancelRequested: boolean;
   /** The agent's provider stream closed (#890); restart it before the next turn. */
   providerStreamClosed: boolean;
+  /** The live agent lost this session (#889); rebuild it before the next turn. */
+  sessionLost: boolean;
   loading: boolean;
   loadingSessionId: string | undefined;
   pendingLoadUsageUpdate: AcpUsageUpdate | undefined;
@@ -225,6 +227,9 @@ let runtimeRequestIdCounter = 0;
 let dynamicToolBridgePromise: Promise<AcpDynamicToolBridge> | null = null;
 
 const THREAD_STOP_CANCEL_TIMEOUT_MS = 4_000;
+/** An agent's own words for a session it no longer has (#889). */
+const LOST_SESSION_MESSAGE =
+  /^(?:Internal error: )?Session (?:\S+ )?not found/i;
 
 interface BridgeNotification {
   jsonrpc: "2.0";
@@ -1707,8 +1712,8 @@ type AcpSessionStartRequest =
       kind: "resume";
       params: AcpSessionParams;
       resumeProviderThreadId: string;
-      /** Closed-stream recovery (#890): must reload the session; aborts on Stop. */
-      recovery?: AbortSignal;
+      /** Restart after a lost session (#889) or closed stream (#890): aborts on Stop; `reloadOnly` never starts fresh. */
+      recovery?: { signal: AbortSignal; reloadOnly: boolean };
     }
   | {
       kind: "fork";
@@ -1771,7 +1776,7 @@ async function startAgentSession(
     ...permissionEnvForMode(params.permissionEnv, params.permissionMode),
   };
   await dialect.prepareLaunch?.(params.agent.command, childEnv);
-  if (request.kind === "resume" && request.recovery?.aborted) {
+  if (request.kind === "resume" && request.recovery?.signal.aborted) {
     throw new Error("Stopped before the agent restarted");
   }
   const connection = createAcpAgentConnection({
@@ -1829,6 +1834,7 @@ async function startAgentSession(
     promptRequestPending: false,
     cancelRequested: false,
     providerStreamClosed: false,
+    sessionLost: false,
     loading: false,
     loadingSessionId: undefined,
     pendingLoadUsageUpdate: undefined,
@@ -1921,7 +1927,7 @@ async function startAgentSession(
         try {
           opened = await open(request.resumeProviderThreadId);
         } catch (error) {
-          if (request.recovery) throw error;
+          if (request.recovery?.reloadOnly) throw error;
           console.error(`ACP session restore failed for ${request.resumeProviderThreadId}; starting a new session:`, error);
           emitStartNotification(ACP_WARNING_METHOD, {
             threadId: roomThreadId,
@@ -1990,7 +1996,7 @@ async function startAgentSession(
     if (
       sessionId === undefined &&
       request.kind === "resume" &&
-      request.recovery
+      request.recovery?.reloadOnly
     ) {
       throw new Error(`ACP agent "${agentLabel}" could not reload the session`);
     }
@@ -2091,26 +2097,27 @@ async function startAgentSession(
   }
 }
 
-const closedStreamRecoveries = new Map<string, AbortController>();
+const sessionRecoveries = new Map<string, AbortController>();
 
 /**
  * Restarts an agent whose provider stream closed (#890) and reloads its
- * session. Returns why the message must not be sent when Stop came first or
- * the reload failed; a failed reload keeps the session marked for a retry.
+ * session, or whose session was lost (#889) and reloads it or starts fresh.
+ * Returns why the message must not be sent when Stop came first or the
+ * restart failed; a failed restart keeps the session marked for a retry.
  */
-async function recoverClosedStream(
+async function recoverSession(
   old: AcpThreadSession,
   params: AcpSessionParams,
 ): Promise<AcpThreadSession | string> {
   const stop = new AbortController();
-  closedStreamRecoveries.set(old.bbThreadId, stop);
+  sessionRecoveries.set(old.bbThreadId, stop);
   try {
     await stopSession(old, { tree: true });
     const session = await startAgentSession({
       kind: "resume",
       params,
       resumeProviderThreadId: old.providerThreadId,
-      recovery: stop.signal,
+      recovery: { signal: stop.signal, reloadOnly: old.providerStreamClosed },
     });
     if (!stop.signal.aborted) return session;
     await stopSession(session);
@@ -2119,12 +2126,14 @@ async function recoverClosedStream(
       old.stopping = false;
       sessionsByRoomThreadId.set(old.bbThreadId, old);
       roomThreadIdByProviderThreadId.set(old.providerThreadId, old.bbThreadId);
-      console.error("ACP closed-stream recovery failed:", error);
-      return "The agent lost its connection and could not reload this conversation. Your message was not sent; send it again to retry.";
+      console.error("ACP session recovery failed:", error);
+      return old.providerStreamClosed
+        ? "The agent lost its connection and could not reload this conversation. Your message was not sent; send it again to retry."
+        : "The agent lost this session and could not restart. Your message was not sent; send it again to retry.";
     }
   } finally {
-    if (closedStreamRecoveries.get(old.bbThreadId) === stop) {
-      closedStreamRecoveries.delete(old.bbThreadId);
+    if (sessionRecoveries.get(old.bbThreadId) === stop) {
+      sessionRecoveries.delete(old.bbThreadId);
     }
   }
   return "Stopped before the agent restarted; your message was not sent.";
@@ -2391,17 +2400,37 @@ function runTurn(
         session.cancelRequested = false;
         if (!session.stopping && !session.connection.exited) {
           const message = error instanceof Error ? error.message : String(error);
+          const code =
+            error instanceof AcpAgentResponseError ? error.code : undefined;
           // Cursor keeps failing this way until its process restarts (#890).
           session.providerStreamClosed =
             session.supportsLoadSession &&
-            error instanceof AcpAgentResponseError &&
-            error.code === -32603 &&
+            code === -32603 &&
             message === "Internal error: WritableIterable is closed";
+          // A live agent that dropped the session fails every later prompt
+          // (#889). Needs a "not found" naming exactly this session (text or
+          // data.sessionId/uri): -32002 alone also means a file, which may
+          // sit in a folder named after the session.
+          const id = session.providerThreadId;
+          const data =
+            error instanceof AcpAgentResponseError ? error.data : undefined;
+          const dataNamesSession =
+            typeof data === "object" &&
+            data !== null &&
+            (("sessionId" in data && data.sessionId === id) ||
+              ("uri" in data && data.uri === id));
+          session.sessionLost =
+            error instanceof AcpAgentResponseError &&
+            (LOST_SESSION_MESSAGE.test(message) ||
+              /not found: (.*)$/i.exec(message)?.[1] === id ||
+              (/not found/i.test(message) && dataNamesSession));
           emitSessionError(
             session,
             session.providerStreamClosed
               ? `${message}. The agent lost its connection; your next message restarts it and reloads this conversation.`
-              : message,
+              : session.sessionLost
+                ? `${message}. The agent lost this session; your next message restarts it.`
+                : message,
           );
         }
         session.activePromptKind = null;
@@ -2961,8 +2990,10 @@ async function handleRequest(
         decodeLaunchSpec(params.options.providerOptions),
         params.options,
       );
-      if (session.providerStreamClosed) {
-        const recovered = await recoverClosedStream(session, construction);
+      if (session.providerStreamClosed || session.sessionLost) {
+        const closed = session.providerStreamClosed;
+        const previousProviderThreadId = session.providerThreadId;
+        const recovered = await recoverSession(session, construction);
         if (typeof recovered === "string") {
           sendError(request.id, -32000, recovered);
           return;
@@ -2971,8 +3002,10 @@ async function handleRequest(
         sendNotification(BRIDGE_NOTIFICATION_METHODS.sessionReplaced, {
           threadId: params.threadId,
           providerThreadId: session.providerThreadId,
-          reason: "The agent's connection closed; the ACP session was restarted and reloaded.",
-          contextLost: false,
+          reason: closed
+            ? "The agent's connection closed; the ACP session was restarted and reloaded."
+            : "The agent lost its session; the ACP session was restarted.",
+          contextLost: session.providerThreadId !== previousProviderThreadId,
         });
       } else if (switchesPermissionModeInPlace(session, construction)) {
         session.construction = construction;
@@ -3060,7 +3093,7 @@ async function handleRequest(
     }
 
     case "thread/stop": {
-      closedStreamRecoveries.get(request.params.threadId)?.abort();
+      sessionRecoveries.get(request.params.threadId)?.abort();
       const session = sessionsByRoomThreadId.get(request.params.threadId);
       if (session) {
         if (request.params.intent === "release") {
@@ -3100,7 +3133,7 @@ const threadStopRequestedSchema = z.object({
 function handleParsedMessage(parsed: unknown): void {
   const stopRequested = threadStopRequestedSchema.safeParse(parsed);
   if (stopRequested.success) {
-    closedStreamRecoveries.get(stopRequested.data.params.threadId)?.abort();
+    sessionRecoveries.get(stopRequested.data.params.threadId)?.abort();
     return;
   }
   const response = decodeBridgeJsonRpcResponse(parsed);

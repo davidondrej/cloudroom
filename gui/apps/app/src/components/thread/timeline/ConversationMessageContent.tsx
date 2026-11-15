@@ -648,11 +648,8 @@ function AssistantConversationMessage({
   );
   const hasDraft = text.includes("```draft");
   const draftMessage = useMemo(
-    () =>
-      hasDraft
-        ? { messageId: id, threadId, projectId: projectId ?? null, streaming }
-        : null,
-    [hasDraft, id, projectId, streaming, threadId],
+    () => (hasDraft ? { messageId: id, threadId, streaming } : null),
+    [hasDraft, id, streaming, threadId],
   );
   const liveMarkdown = useMemo(() => {
     const tail = streamingSplit?.tail ?? text;

@@ -8,6 +8,7 @@ import {
 } from "../machines/provider-orchestration.js";
 import {
   isThreadQueueAutoSendPaused,
+  listHiddenSourceThreads,
   listLiveThreadsInEnvironment,
   listNonDeletedChildThreads,
   listQueuedThreadMessages,
@@ -116,7 +117,7 @@ function archiveThreadWithLifecycleEffects(
     threadId: archivedThread.id,
   });
   if (isCloudThread(archivedThread)) {
-    if (args.fromWebsite) cloudroom(deps).detach(archivedThread.id);
+    if (args.fromWebsite) cloudroom(deps).archived(archivedThread.id);
     else cloudroom(deps).archive(archivedThread.id);
     // The stream stops here, so a turn still running never reaches the prune at its end.
     pruneThreadEventHistoryBestEffort(deps, {
@@ -239,6 +240,39 @@ export function listThreadWithDescendants<T extends Pick<Thread, "id">>(
     }
   }
   return threads;
+}
+
+/** An archive takes a thread's whole tree within moments; one archived on its own, long before or after, isn't part of it. */
+const ARCHIVED_TOGETHER_MS = 10 * 60_000;
+
+/** The archived threads and side chats under `root` that were archived with it (within 10 minutes), parents first. */
+export function listThreadsArchivedWith(
+  deps: Pick<AppDeps, "db">,
+  root: Pick<Thread, "id" | "archivedAt">,
+): ThreadRow[] {
+  const archivedAt = root.archivedAt;
+  if (archivedAt === null) return [];
+  const found: ThreadRow[] = [];
+  const seen = new Set([root.id]);
+  const pending = [root.id];
+  for (let id = pending.shift(); id !== undefined; id = pending.shift()) {
+    const under = [
+      ...listNonDeletedChildThreads(deps.db, { parentThreadId: id }),
+      ...listHiddenSourceThreads(deps.db, { sourceThreadId: id }),
+    ];
+    for (const thread of under) {
+      if (
+        seen.has(thread.id) ||
+        thread.archivedAt === null ||
+        Math.abs(thread.archivedAt - archivedAt) > ARCHIVED_TOGETHER_MS
+      )
+        continue;
+      seen.add(thread.id);
+      found.push(thread);
+      pending.push(thread.id);
+    }
+  }
+  return found;
 }
 
 /** A Cloud thread another computer or Core archived: this thread only, no cascade, and nothing goes back (#237). */

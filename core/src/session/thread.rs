@@ -6,7 +6,7 @@
 //! `thread fork` asks the app the same way to fork this thread into a new Cloud thread; without an answer there is no
 //! fork. Only the user forks to their Mac, from the app.
 //! `spawn --top-level` asks the website to start a top-level thread instead, with no link back (ADR 0267).
-use super::{Manager, relay};
+use super::{Manager, SessionState, relay};
 use crate::preview::Peer;
 use axum::{
     Json, Router,
@@ -994,7 +994,28 @@ async fn tell(
     let prompt = json!({"text":text});
     let request =
         random_key().map_err(|e| fail(StatusCode::SERVICE_UNAVAILABLE, &e.to_string()))?;
+    if under {
+        revive(&m, &id, &request, Some(&sender));
+    }
     deliver(&m, &id, &request, prompt, under, Some(&sender), queue).await
+}
+
+/// A tell from a thread that started this one first restarts its lost agent (a crash after its one automatic
+/// recovery) from its saved chat, as the app's message does (#154, #1629). Never one stopped (its queue paused) or
+/// archived, and never for a tell already steered or queued. `resume` checks that no agent runs, the chat is intact
+/// and, with `sender`, the tell's own ancestry, in the step that accepts it; a refusal leaves the tell refused as before.
+pub(super) fn revive(m: &Arc<Manager>, id: &str, request: &str, sender: Option<&str>) {
+    let local = m.local.lock().unwrap();
+    let lost = (local.sessions.get(id))
+        .is_some_and(|s| s.state == SessionState::ProcessLost && !s.archived && !s.queue_paused);
+    drop(local);
+    let sent = [request.to_owned(), format!("{request}_steer")]
+        .iter()
+        .any(|r| m.receipt(id, r).is_some());
+    if lost && !sent {
+        let wake = format!("{request}_wake");
+        let _ = m.command_from(id, wake, "resume", json!({}), false, sender);
+    }
 }
 
 pub(super) const NO_PARENT: &str = "This thread has no parent that `thread tell --parent` can reach. If another thread started it, Cloudroom passes it your reply when this turn ends.";
@@ -1257,12 +1278,16 @@ async fn spawn_cli(words: &[&str]) -> io::Result<i32> {
     }
     let mut body =
         json!({"prompt":prompt,"shared":words.contains(&"--shared-sandbox"),"top_level":top});
-    // A top-level start can outlast the agent's command timeout, so its request ID comes first: rerunning the
-    // command with it continues that start instead of making a second thread.
-    if top && flag(words, "--request-id").is_none() {
-        let key = random_key()?;
+    // A top-level start or a child in a sandbox of its own can outlast the agent's command timeout, so its request ID
+    // comes first: rerunning the command with it continues that start instead of making a second thread (#1668).
+    if let Some(key) = first_key(words)? {
+        let what = if top {
+            "a top-level thread"
+        } else {
+            "a child in a sandbox of its own"
+        };
         eprintln!(
-            "Starting a top-level thread. If this command times out, rerun it with --request-id {key}; it never starts twice."
+            "Starting {what}. If this command times out or prints no ID, rerun it with --request-id {key}; it never starts twice."
         );
         body["request_id"] = json!(key);
     }
@@ -1281,6 +1306,14 @@ async fn spawn_cli(words: &[&str]) -> io::Result<i32> {
     let answer = crate::mac::request(crate::mac::SOCKET, "POST", "/children", Some(body)).await?;
     println!("{answer}");
     Ok(0)
+}
+
+/// The request ID a spawn shows before it starts, unless the agent gave one or it shares this sandbox (a quick start).
+fn first_key(words: &[&str]) -> io::Result<Option<String>> {
+    if words.contains(&"--shared-sandbox") || flag(words, "--request-id").is_some() {
+        return Ok(None);
+    }
+    random_key().map(Some)
 }
 
 async fn fork_cli(words: &[&str]) -> io::Result<i32> {
@@ -1617,7 +1650,23 @@ pub async fn cli(args: &[String]) -> io::Result<i32> {
 
 #[cfg(test)]
 mod tests {
-    use super::{mention, missing_value, plain};
+    use super::{first_key, mention, missing_value, plain};
+
+    // #1668: an own-sandbox spawn printed nothing while it waited, and its request ID stayed inside Core, so a retry
+    // after the agent's command gave up started a second child. Its ID now comes first, like a top-level start's.
+    #[test]
+    fn a_slow_spawn_shows_its_request_id_first() {
+        for (words, shown) in [
+            (&["--prompt", "x"][..], true),
+            (&["--prompt", "x", "--top-level"], true),
+            (&["--prompt", "x", "--shared-sandbox"], false),
+            (&["--prompt", "x", "--request-id", "mine"], false),
+        ] {
+            let key = first_key(words).unwrap();
+            assert_eq!(key.is_some(), shown, "{words:?}");
+            assert!(key.is_none_or(|k| k.len() == 24), "{words:?}");
+        }
+    }
 
     #[test]
     fn flags_go_in_any_order_and_need_their_values() {

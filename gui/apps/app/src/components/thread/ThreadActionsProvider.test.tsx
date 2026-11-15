@@ -142,7 +142,10 @@ beforeEach(() => {
     archivedThreadIds: ["thr_parent", "thr_child"],
     ok: true,
   });
-  vi.mocked(sdk.threads.unarchive).mockResolvedValue({ ok: true });
+  vi.mocked(sdk.threads.unarchive).mockResolvedValue({
+    ok: true,
+    unarchivedThreadIds: [],
+  });
   vi.mocked(sdk.threads.childSummary).mockResolvedValue({
     nonDeletedChildCount: 1,
     runningThreadCount: 0,

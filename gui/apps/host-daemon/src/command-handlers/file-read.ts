@@ -227,8 +227,26 @@ async function resolveRootPathOrThrowMissingPath(
     if (isFsErrorWithCode(error, "ENOENT")) {
       throw createMissingTargetError(args.resultPath);
     }
-    throw error;
+    throw toPermissionDeniedOr(error);
   }
+}
+
+// macOS privacy checks fail with EPERM, and they can stop allowing a long-running app mid-session (#1127). Unix
+// permissions fail with EACCES, so those keep their own message.
+function toPermissionDeniedOr(error: unknown): unknown {
+  if (
+    !isFsErrorWithCode(error, "EPERM") &&
+    !isFsErrorWithCode(error, "EACCES")
+  ) {
+    return error;
+  }
+  const message =
+    process.platform === "darwin" && error.code === "EPERM"
+      ? "macOS blocked Cloudroom from reading this folder. Quit and reopen Cloudroom; if it keeps happening, check Cloudroom's access in System Settings > Privacy & Security."
+      : error.message;
+  return new CommandDispatchError("permission_denied", message, {
+    cause: error,
+  });
 }
 
 async function throwMissingTargetOrRethrow(
@@ -236,7 +254,7 @@ async function throwMissingTargetOrRethrow(
   error: unknown,
 ): Promise<never> {
   if (!isFsErrorWithCode(error, "ENOENT")) {
-    throw error;
+    throw toPermissionDeniedOr(error);
   }
 
   const rootPath = args.rootPath;

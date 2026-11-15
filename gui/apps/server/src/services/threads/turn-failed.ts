@@ -3,6 +3,7 @@ import {
   getLatestStoredRateLimitsEventForProvider,
   getLatestStoredThreadEventOfTypes,
   getThread,
+  getThreadExecutionOverride,
   listStoredTurnInputAcceptedRowsByClientRequestIds,
   listStoredTurnRejectedRowsByClientRequestIds,
   type DbConnection,
@@ -255,6 +256,40 @@ export function describeFailedTurn(
       providerError?.errorInfo ??
       doorRejectionErrorInfo(db, { threadId, failed }),
   };
+}
+
+/**
+ * Whether the thread's last turn hit its agent's plan limit and the limit still
+ * holds: the thread's next turn uses the same agent and model, and the provider
+ * reports a blocked window with a reset still ahead. Any turn that runs, as
+ * after a switch of account, ends it (#1723).
+ */
+export function isThreadAtPlanLimit(
+  db: DbConnection,
+  thread: Thread,
+  now = Date.now(),
+): boolean {
+  if (thread.status !== "error") return false;
+  const failed = loadFailedTurn(db, thread.id);
+  if (failed === null) return false;
+  const args = { threadId: thread.id, failed };
+  const errorInfo =
+    loadProviderError(db, args)?.errorInfo ?? doorRejectionErrorInfo(db, args);
+  if (errorInfo?.category !== "rate-limit") return false;
+  const model = failed.request.execution.model;
+  const override = getThreadExecutionOverride(db, thread.id)?.modelOverride;
+  if ((override ?? model) !== model) return false;
+  // Another agent has its own snapshot, so its switch ends the hold too.
+  const limits = latestRateLimits(db, thread);
+  return (
+    limits?.status === "blocked" &&
+    limits.windows.some(
+      (window) =>
+        window.status === "blocked" &&
+        window.resetsAtMs !== null &&
+        window.resetsAtMs > now,
+    )
+  );
 }
 
 function interruptionReason(

@@ -853,11 +853,13 @@ impl Manager {
         command: &str,
         input: &Value,
     ) -> Result<Option<Receipt>> {
-        // `plan_only` is guard metadata Core may add itself (an inherited resume), not the request's content.
+        // `plan_only` is guard metadata Core may add itself (an inherited resume), and `ended` when its turn ended
+        // (#217), not the request's content.
         let content = |input: &Value| {
             let mut input = input.clone();
             if let Some(fields) = input.as_object_mut() {
                 fields.remove("plan_only");
+                fields.remove("ended");
             }
             input
         };
@@ -1926,7 +1928,9 @@ impl Manager {
             if let Some(receipt) = Self::retry(session, &request, command, &input)? {
                 return Ok(receipt);
             }
-            if sender.is_some_and(|sender| children::may_tell(&local, sender, id).is_none()) {
+            // A tell's resume needs its sender above the target (#1629), checked as it is accepted.
+            let reach = sender.map(|sender| children::may_tell(&local, sender, id));
+            if reach.is_some_and(|r| r.is_none() || (command == "resume" && r == Some(false))) {
                 return Err(Error::Conflict(children::NOT_IN_TREE));
             }
             if !local.journal.writable() {
@@ -3184,7 +3188,8 @@ impl Manager {
                     let receipt = Receipt {
                         request_id: request.clone(),
                         command: "auto".into(),
-                        input: json!({}),
+                        // Its end reaches a parent (#217); older `auto` receipts lack this, so they never do.
+                        input: json!({"report":true}),
                         state: "running".into(),
                         model: None,
                         provider: None,
@@ -3221,6 +3226,7 @@ impl Manager {
                 request,
                 status,
                 mut error,
+                text,
             } => {
                 // Only a loop that will fire may promise a resume time.
                 if local.sessions[id].limit_resumes >= accounts::MAX_RESUMES {
@@ -3250,15 +3256,26 @@ impl Manager {
                                 || session.parent_thread().is_some())
                         {
                             // Saved before the turn completes, so `thread output` and the parent's notice still have
-                            // it once the child sleeps or Core restarts (#339).
-                            let text = handle.seen_text();
-                            children::save_reply(&self.config.state_dir, id, &request, &text);
-                            local.append(
-                                id,
-                                "child_reply",
-                                json!({"request_id":request,"text":children::capped_reply(&text)}),
-                                None,
-                            )?;
+                            // it once the child sleeps or Core restarts (#339). An empty one never pushes out a reply
+                            // still owed to the parent (#217).
+                            let replied = !text.trim().is_empty();
+                            if replied {
+                                children::save_reply(&self.config.state_dir, id, &request, &text);
+                                local.append(
+                                    id,
+                                    "child_reply",
+                                    json!({"request_id":request,"text":children::capped_reply(&text)}),
+                                    None,
+                                )?;
+                            }
+                            // A self-started turn's receipt keeps whether it replied, so its report never depends on
+                            // the few replies kept (#217).
+                            let session = local.sessions.get_mut(id).ok_or(Error::NotFound)?;
+                            if let Some(r) = session.receipts.get_mut(&request)
+                                && r.command == "auto"
+                            {
+                                r.input["replied"] = json!(replied);
+                            }
                         }
                         local.finish_receipt_with(id, &request, &status, error)?;
                     }

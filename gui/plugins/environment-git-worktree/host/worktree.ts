@@ -769,9 +769,6 @@ export async function createWorktree(
   });
 
   throwIfProvisionAborted(args.signal);
-  await ensureWorkspaceParentDirectory(args.targetPath);
-
-  throwIfProvisionAborted(args.signal);
   const reuseExistingBranch =
     args.branchMode === "reuse-existing" &&
     (await hasRef(args.sourcePath, `refs/heads/${args.branchName}`));
@@ -813,6 +810,8 @@ export async function createWorktree(
     ];
   }
 
+  // Only now: a failed fetch would leave this folder behind empty (#1689).
+  await ensureWorkspaceParentDirectory(args.targetPath);
   const worktreeStartedAt = Date.now();
   emitStep({
     onProgress: args.onProgress,

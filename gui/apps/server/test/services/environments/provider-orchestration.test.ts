@@ -883,6 +883,28 @@ describe("core environment orchestration", () => {
       );
     }));
 
+  it.each([
+    ["frees", null],
+    ["keeps", "/tmp/project"],
+  ] as const)(
+    "%s the folder when a project checkout attach fails or loses its host (#1366)",
+    async (_, claimPath) =>
+      withTestHarness(async (harness) => {
+        const fixture = setup(harness, {
+          id: "project-checkout",
+          create: async (context) => {
+            await context.experimental_claimPath("/tmp/project");
+            // A thrown error may leave the host's branch switch running.
+            if (claimPath !== null) throw new Error("Host is not connected");
+            return { status: "failed", message: "attach failed" };
+          },
+        });
+        fixture.ask();
+        await fixture.settled();
+        expect(fixture.row()).toMatchObject({ status: "error", claimPath });
+      }),
+  );
+
   it("refuses Windows network and device paths from a provider on a Windows host", async () =>
     withTestHarness(async (harness) => {
       const spellings = [

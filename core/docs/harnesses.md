@@ -156,7 +156,7 @@ A browser login can't run in a sandbox: Droid signs in with `FACTORY_API_KEY` fr
 
 `src/runtime/kimi.rs` runs Moonshot's `kimi acp` over the shared ACP protocol. Core discovers `kimi` in the agent account's `.local/bin` or `/usr/local/bin` once `~/.kimi-code` exists, and pins `KIMI_CODE_HOME` there, with auto-update and telemetry off. Sessions start in `auto` mode (full access, ADR 0045): every tool call is approved and Kimi decides instead of asking questions. The model and `thinking` level are session options; an effort the model does not offer is skipped. Kimi keeps sessions in `~/.kimi-code/sessions/<folder>/session_<uuid>/`; resume uses `session/resume`, which replays nothing, and Core stores only the ACP stream.
 
-Hosted sandboxes copy the Mac's `config.toml` and every token in `credentials/` (one per region: `kimi-code.json` for kimi.com, `kimi-code-env-<hash>.json` for kimi.ai) at wake, and save the sandbox's renewed copies before sleep. Kimi rotates refresh tokens, so the Mac and a sandbox may sign each other out (ADR 20261107-081737). Without a login, a start fails with a message to run `kimi login` on the Mac.
+Hosted sandboxes copy the Mac's `config.toml` and every token in `credentials/` (one per region: `kimi-code.json` for kimi.com, `kimi-code-env-<hash>.json` for kimi.ai) at wake, and save the sandbox's renewed copies before sleep. Kimi rotates refresh tokens, so the Mac and a sandbox may sign each other out (ADR 20261107-081737). Without a login, a start fails with a message to run `kimi login` on the user's computer (Mac, Windows, or Linux).
 
 ## Queue, completion and recovery
 

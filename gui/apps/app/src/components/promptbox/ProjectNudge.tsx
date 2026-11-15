@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { useAtomValue } from "jotai";
+import { atom, useAtom, useAtomValue } from "jotai";
 import { Icon } from "@cloudroom/shared-ui/icon";
 import { sdk } from "@/lib/sdk";
 import { createSyncedPreferenceAtom } from "@/lib/ui-preferences/synced-preference-atom";
@@ -9,23 +9,26 @@ export const projectNudgeConfidenceAtom = createSyncedPreferenceAtom("projectNud
 
 const MIN_WORDS = 5;
 const PAUSE_MS = 500;
+/** Off for the prompt being written. An atom, so leaving the composer and coming back to the draft keeps it off. */
+const dismissedAtom = atom(false);
 
 /** Another project the prompt looks like it belongs in (docs/scopes/jev-project-selection.md). It checks once typing pauses,
  *  never the same text twice, and keeps the last answer only while the text grows or shrinks from what it checked, so a
- *  paste that replaces the prompt hides a stale hint at once. */
+ *  paste that replaces the prompt hides a stale hint at once. Esc or picking a project by hand turns it off, with no more
+ *  checks, until the prompt is empty again (sent or cleared). */
 export function useProjectNudge(text: string, projectId: string | null | undefined) {
   const enabled = useAtomValue(projectNudgeEnabledAtom);
   const answers = useRef(new Map<string, string | null>());
   const [last, setLast] = useState<{ projectId: string; prompt: string; pick: string | null } | null>(null);
-  const [dismissed, setDismissed] = useState(false);
+  const [dismissed, setDismissed] = useAtom(dismissedAtom);
   const prompt = text.trim();
   const words = prompt ? prompt.split(/\s+/).length : 0;
   const key = projectId ? `${projectId}\n${prompt}` : "";
-  const ready = enabled !== false && !!projectId && words >= MIN_WORDS;
+  const ready = enabled !== false && !dismissed && !!projectId && words >= MIN_WORDS;
 
   useEffect(() => {
     if (!prompt) setDismissed(false);
-  }, [prompt]);
+  }, [prompt, setDismissed]);
 
   useEffect(() => {
     if (!ready || !projectId) return;
@@ -52,7 +55,6 @@ export function useProjectNudge(text: string, projectId: string | null | undefin
 
   const show =
     ready &&
-    !dismissed &&
     last?.projectId === projectId &&
     (prompt.startsWith(last.prompt) || last.prompt.startsWith(prompt));
   return { projectId: show ? (last?.pick ?? null) : null, dismiss: () => setDismissed(true) };

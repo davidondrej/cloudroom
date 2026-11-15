@@ -368,8 +368,12 @@ export const KNOWN_ACP_AGENTS: readonly AcpAgentDefinition[] = [
     icon: declaredIcon("kimi"),
     signInCommand: "kimi login",
     installUrl: "https://www.kimi.com/code/docs/en/kimi-code-cli/guides/getting-started",
-    installer: { scriptUrl: "https://code.kimi.com/kimi-code/install.sh" },
+    installer: {
+      scriptUrl: "https://code.kimi.com/kimi-code/install.sh",
+      powershellUrl: "https://code.kimi.com/kimi-code/install.ps1",
+    },
     visibility: "installed",
+    dialect: "kimi",
     fork: "tip",
     launch: {
       displayName: "Kimi Code",

@@ -324,7 +324,7 @@ export function projectRecords(
       if (!previous && ["prompt", "edit", "cancel", "reorder", "steer"].includes(receipt.command) && data.input) {
         tx.insert(cloudroomCommands).values({ id: receipt.request_id, threadId, command: receipt.command as "prompt" | "edit" | "cancel" | "reorder" | "steer", input: JSON.stringify(data.input), state: receipt.state, createdAt: record.timestamp_ms ?? 0 }).run();
       }
-      saveCommandState(tx, threadId, receipt.request_id, receipt.state);
+      saveCommandState(tx, threadId, receipt.request_id, receipt.state, { step: "core" });
       if (["failed", "unknown", "unknown_after_restart"].includes(receipt.state)) lostInstructions(tx, threadId, previous);
       if (receipt.command === "start" && receipt.state === "accepted" && object.parse(data.input).workspace) saveStatus(tx, threadId, "pending");
       if ((harness === "pi" || isAcpProvider(harness) || harness === "claude-code") && (receipt.command === "auto" || (previous && receipt.command === "prompt")) && FINISHED.includes(receipt.state) && saved.nativeId && turnStarted(tx, threadId, receipt.request_id)) {

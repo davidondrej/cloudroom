@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
-import { atom, useAtom, useAtomValue } from "jotai";
+import { atom, useAtom, useAtomValue, useSetAtom } from "jotai";
 import { atomWithStorage } from "jotai/utils";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
@@ -10,6 +10,7 @@ import { ClaudeConnectionButton, useClaudeConnection, useInstallPercent } from "
 import { openCodexConnection } from "@/components/CodexConnectionPanel";
 import { selectCloudForNewThreads } from "@/components/promptbox/NewThreadComposer";
 import { ImportChats } from "@/components/settings/ImportChats";
+import { useOwnCoreConnection } from "@/components/settings/SelfHostedCoreForm";
 import { RoomLogo } from "@/components/ui/cloudroom-logo";
 import { appToast } from "@/components/ui/app-toast";
 import { useCreateProject } from "@/hooks/mutations/project-mutations";
@@ -57,12 +58,15 @@ const PALETTE = {
 export function useSetupProgress() {
   const account = useCloudroomAccount();
   const accountId = account.data?.account?.id;
+  // A Core the user hosts, with no Cloudroom account: connecting it was step 1, and its server keeps its own GitHub login.
+  // Never true for account users, so their setup is unchanged.
+  const ownCore = account.data?.selfHosted === true && !account.data.account;
   const ready = account.data?.ready === true;
   const offline = Boolean(account.data?.account && !ready && account.data?.error);
-  const claude = useClaudeConnection({ target: "cloud" }, Boolean(accountId));
+  const claude = useClaudeConnection({ target: "cloud" }, Boolean(accountId) || ownCore);
   const codex = useQuery({
     queryKey: ["cloudroom-codex-auth", accountId],
-    enabled: Boolean(accountId) && ready,
+    enabled: (Boolean(accountId) || ownCore) && ready,
     queryFn: ({ signal }) => sdk.cloudroom.codexAuth(signal),
     retry: false,
     refetchInterval: (query) => (query.state.data?.state === "waiting" ? 1500 : false),
@@ -80,8 +84,8 @@ export function useSetupProgress() {
   const signedIn = useMacAgents(extra !== null).data?.includes(extra ?? "") === true;
   const other = provider && signedIn ? provider.id : null;
   const agents = { claude: claude.data?.state === "connected", codex: codex.data?.state === "connected", other, otherName: other && provider?.displayName };
-  const done = [Boolean(accountId), agents.claude || agents.codex || other !== null, github.data?.state === "connected"];
-  return { account, ready, offline, agents, codex, github, done, complete: done.every(Boolean), checking: account.isPending };
+  const done = [Boolean(accountId) || ownCore, agents.claude || agents.codex || other !== null, github.data?.state === "connected" || ownCore];
+  return { account, ownCore, ready, offline, agents, codex, github, done, complete: done.every(Boolean), checking: account.isPending };
 }
 
 export function Onboarding() {
@@ -111,6 +115,7 @@ function Setup({ locked, fresh, close: closeSetup }: { locked: boolean; fresh: b
   const progress = useSetupProgress();
   const close = () => closeSetup(progress.agents);
   const { done, account } = progress;
+  const [ownCoreForm, setOwnCoreForm] = useState(false);
   const [choices, setChoices] = useState({ macAccess: true, copyLogins: true });
   // Step 4's progress lives here, so going back a step keeps the Added ticks and Continue.
   const [added, setAdded] = useState<AddedFolder[]>([]);
@@ -118,8 +123,9 @@ function Setup({ locked, fresh, close: closeSetup }: { locked: boolean; fresh: b
   const saveMacAccess = useSetMacAccess();
   const saveCopyLogins = useSetCopyLogins();
   const leave = () => {
-    if (account.data?.account && account.data.macAccessSupported !== false && account.data.macAccess == null) saveMacAccess.mutate(choices.macAccess);
-    if (account.data?.account && account.data.copyLogins == null) saveCopyLogins.mutate(choices.copyLogins);
+    const saves = Boolean(account.data?.account) || progress.ownCore;
+    if (saves && account.data?.macAccessSupported !== false && account.data?.macAccess == null) saveMacAccess.mutate(choices.macAccess);
+    if (saves && account.data?.copyLogins == null) saveCopyLogins.mutate(choices.copyLogins);
     close();
   };
   useFirstAgentDefault(progress.agents);
@@ -215,7 +221,7 @@ function Setup({ locked, fresh, close: closeSetup }: { locked: boolean; fresh: b
                       {state === "done" ? <Icon name="Check" className="size-3.5" aria-label="Done" /> : `0${index + 1}`}
                     </span>
                     <span className="min-w-0">
-                      <strong className="block text-sm leading-tight font-semibold">{title}</strong>
+                      <strong className="block text-sm leading-tight font-semibold">{index === 0 && (progress.ownCore || (locked && ownCoreForm)) ? "Your own Core" : title}</strong>
                       <small className="mt-0.5 block truncate text-[12.5px] text-(--ob-muted)">{meta}</small>
                     </span>
                   </button>
@@ -225,8 +231,14 @@ function Setup({ locked, fresh, close: closeSetup }: { locked: boolean; fresh: b
           </ol>
         </aside>
         <main className="relative flex min-w-0 flex-1 overflow-y-auto px-6 pt-16 pb-8 md:px-[110px] md:py-10">
-          {!locked && (
-            <button type="button" onClick={() => { track(STEP_IDS[step] ?? "project", "closed"); leave(); }} className={cn("absolute top-5 right-6 flex items-center gap-1.5 text-[13px] text-(--ob-muted) hover:text-(--ob-ink)", MACOS_APP_REGION_NO_DRAG_CLASS)}>
+          {locked ? (
+            // Self-hosters need no account (docs/scopes/self-hosting.md); everyone else must sign in.
+            <button type="button" onClick={() => setOwnCoreForm(!ownCoreForm)} className={CORNER}>
+              <Icon name={ownCoreForm ? "ArrowLeft" : "Server"} className="size-3.5" aria-hidden />
+              {ownCoreForm ? "Sign in instead" : "Use my own Core"}
+            </button>
+          ) : (
+            <button type="button" onClick={() => { track(STEP_IDS[step] ?? "project", "closed"); leave(); }} className={CORNER}>
               Skip setup
               <Icon name="X" className="size-3" aria-hidden />
             </button>
@@ -234,7 +246,7 @@ function Setup({ locked, fresh, close: closeSetup }: { locked: boolean; fresh: b
           <div key={step} className={cn("my-auto w-full duration-300 animate-in fade-in-0 slide-in-from-bottom-1", step === 3 ? "max-w-[860px]" : "max-w-[600px]")}>
             {step === 1 && stamped ? <TickStamp key={`${claude}-${codex}`} /> : <RoomLogo className="mb-6 size-[72px] -rotate-[5deg]" />}
             <p className="font-serif text-base text-(--ob-muted) italic">Step {step + 1} of 4</p>
-            {step === 0 && <AccountStep email={account.data?.account?.email ?? null} signingIn={account.data?.signingIn === true} error={account.data?.signInError ?? null} next={next} fresh={fresh} />}
+            {step === 0 && (progress.ownCore ? <OwnCoreDone next={next} /> : locked && ownCoreForm ? <OwnCoreStep /> : <AccountStep email={account.data?.account?.email ?? null} signingIn={account.data?.signingIn === true} error={account.data?.signInError ?? null} next={next} fresh={fresh} />)}
             {step === 1 && <AgentStep progress={progress} next={next} stamped={stamped} left={countdown?.left ?? null} choices={choices} setChoices={setChoices} />}
             {step === 2 && <GithubStep progress={progress} next={next} />}
             {step === 3 && <ProjectStep close={leave} added={added} setAdded={setAdded} imported={imported} setImported={setImported} />}
@@ -274,9 +286,9 @@ function nextStep(done: boolean[], from: number) {
 }
 
 function doneMeta(index: number, progress: ReturnType<typeof useSetupProgress>) {
-  if (index === 0) return progress.account.data?.account?.email ?? "Signed in";
+  if (index === 0) return progress.account.data?.account?.email ?? (progress.ownCore ? "Connected" : "Signed in");
   if (index === 1) return [progress.agents.claude && "Claude Code", progress.agents.codex && "Codex", progress.agents.otherName].filter(Boolean).join(" + ");
-  return progress.github.data?.email ?? "Connected";
+  return progress.github.data?.email ?? (progress.ownCore ? "On your server" : "Connected");
 }
 
 function Heading({ lead, mark }: { lead: string; mark: string }) {
@@ -288,6 +300,7 @@ function Heading({ lead, mark }: { lead: string; mark: string }) {
   );
 }
 
+const CORNER = cn("absolute top-5 right-6 flex items-center gap-1.5 text-[13px] text-(--ob-muted) hover:text-(--ob-ink)", MACOS_APP_REGION_NO_DRAG_CLASS);
 const Note = ({ children }: { children: ReactNode }) => <p className="text-[13px] text-(--ob-muted)">{children}</p>;
 const LINK = "text-(--ob-ink) underline underline-offset-[3px] disabled:opacity-50";
 const QUIET_LINK = "underline decoration-(--ob-dash) underline-offset-[3px] hover:text-(--ob-ink) disabled:opacity-50";
@@ -429,6 +442,43 @@ function AccountStep({ email, signingIn, error, next, fresh }: { email: string |
   );
 }
 
+const FIELD = "h-11 w-full border border-(--ob-line) bg-(--ob-card) px-3.5 text-[14px] text-(--ob-ink) outline-none placeholder:text-(--ob-muted) focus:border-(--ob-ink)";
+
+/** Step 1 for self-hosters: connect the Core by URL and token. Setup stays open and moves on to the agents. */
+function OwnCoreStep() {
+  const [url, setUrl] = useState("");
+  const [token, setToken] = useState("");
+  const keepOpen = useSetAtom(openAtom);
+  const connect = useOwnCoreConnection(() => keepOpen(true));
+  const failure = connect.failure;
+  return (
+    <>
+      <Heading lead="Connect your own" mark="Core" />
+      <p className="mt-3 text-base text-(--ob-muted)">Use its address and the API token from /etc/cloudroom/core.env.</p>
+      <form className="mt-8 flex max-w-[460px] flex-col gap-3" onSubmit={(event) => { event.preventDefault(); connect.mutate({ url, token }); }}>
+        <input aria-label="Core URL" className={FIELD} placeholder="https://my-core.example.ts.net" value={url} onChange={(event) => setUrl(event.target.value)} autoComplete="off" spellCheck={false} />
+        <input aria-label="Core API token" type="password" className={FIELD} placeholder="API token" value={token} onChange={(event) => setToken(event.target.value)} autoComplete="off" />
+        <div className="mt-3 flex items-center gap-5">
+          <Cta type="submit" disabled={connect.isPending || !url.trim() || !token.trim()}>{connect.isPending ? "Connecting…" : <>Connect <Icon name="ArrowRight" aria-hidden /></>}</Cta>
+          {failure ? <p role="alert" className="text-[13px] text-(--ob-error)">{failure}</p> : <Note>No Cloudroom account needed.</Note>}
+        </div>
+      </form>
+    </>
+  );
+}
+
+function OwnCoreDone({ next }: { next: () => void }) {
+  return (
+    <>
+      <Heading lead="Connected to your" mark="Core" />
+      <div className="mt-8 flex items-center gap-5">
+        <Cta onClick={next}>Continue <Icon name="ArrowRight" aria-hidden /></Cta>
+        <Note>No Cloudroom account needed.</Note>
+      </div>
+    </>
+  );
+}
+
 type Choices = { macAccess: boolean; copyLogins: boolean };
 function AgentStep({ progress, next, stamped, left, choices, setChoices }: { progress: ReturnType<typeof useSetupProgress>; next: () => void; stamped: boolean; left: number | null; choices: Choices; setChoices: (choices: Choices) => void }) {
   const { account, agents, codex, ready, offline } = progress;
@@ -492,7 +542,7 @@ function AgentStep({ progress, next, stamped, left, choices, setChoices }: { pro
     if (codexState === "error" && codexWasWaiting.current && codexMessage) appToast.error(codexMessage);
     codexWasWaiting.current = codexState === "waiting";
   }, [codexState, codexMessage]);
-  const waiting = !account.data?.account ? "Log in first" : offline ? "Cloud unreachable" : !ready ? "Starting your cloud…" : null;
+  const waiting = progress.ownCore ? (ready ? null : "Your Core isn't reachable") : !account.data?.account ? "Log in first" : offline ? "Cloud unreachable" : !ready ? "Starting your cloud…" : null;
   const connectedLead = agents.claude && agents.codex ? "Agents" : agents.claude ? "Claude Code" : "Codex";
   const action = (connected: boolean, button: ReactNode) => (connected ? <Connected /> : waiting ? <Note>{waiting}</Note> : button);
   return (
@@ -662,6 +712,7 @@ function GithubStep({ progress, next }: { progress: ReturnType<typeof useSetupPr
   });
   const state = github.data?.state;
   const connected = state === "connected";
+  const onServer = progress.ownCore; // Never queries GitHub: its server has its own login.
   const code = state === "waiting" ? github.data?.user_code : null;
   const url = state === "waiting" ? github.data?.verification_url : null;
   const [left, setLeft] = useCountdown(Boolean(url), () => { if (url) openGithub(url); });
@@ -674,6 +725,7 @@ function GithubStep({ progress, next }: { progress: ReturnType<typeof useSetupPr
   };
   const detail = connected
     ? "Cloud agents can use your repos."
+    : onServer ? "Your Core uses the GitHub login set up on its server."
     : !account.data?.account ? "Log in first" : offline ? "Cloud unreachable" : !ready ? "Starting your cloud…" : `Not found on ${here}. You'll copy a code, then paste it on github.com.`;
   if (code) {
     return (
@@ -712,7 +764,7 @@ function GithubStep({ progress, next }: { progress: ReturnType<typeof useSetupPr
       </div>
       {offline && <CloudOffline />}
       <div className="mt-8 flex items-center gap-5">
-        {connected ? (
+        {connected || onServer ? (
           <Cta onClick={() => { track("github", "done"); next(); }}>Continue <Icon name="ArrowRight" aria-hidden /></Cta>
         ) : (
           <Cta disabled={!ready || connect.isPending} onClick={() => connect.mutate()}>
@@ -720,7 +772,7 @@ function GithubStep({ progress, next }: { progress: ReturnType<typeof useSetupPr
             {connect.isPending ? "Getting your code…" : "Connect GitHub"}
           </Cta>
         )}
-        {!connected && (
+        {!connected && !onServer && (
           <Note><button type="button" className={LINK} onClick={() => { track("github", "skipped"); next(); }}>Skip this step</button> if you only use public repos.</Note>
         )}
       </div>

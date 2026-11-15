@@ -484,7 +484,9 @@ export function createApp(
       await compressApiJson(context, next);
     });
   });
-  app.onError((error) => errorToResponse(error, deps.logger));
+  app.onError((error, context) =>
+    errorToResponse(error, deps.logger, context.req),
+  );
   app.get("/health", (context) =>
     context.json(
       deps.config.launchId === undefined

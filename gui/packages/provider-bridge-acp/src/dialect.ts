@@ -470,6 +470,13 @@ export const FX_ACP_DIALECT: AcpDialect = {
   isBusySession: (message) => message.includes("Session is busy"),
 };
 
+// Kimi ends a turn whose model request failed with a plain end_turn and logs the reason only to itself (#1721).
+export const KIMI_ACP_DIALECT: AcpDialect = {
+  id: "kimi",
+  emptyTurnError:
+    "Kimi Code ended the turn without replying. Kimi does this when its model request fails, such as hitting a plan limit, a network error or a server error. The reason is in Kimi's session log, in the .kimi-code/sessions folder in your home folder.",
+};
+
 const DIALECTS_BY_ID: ReadonlyMap<string, AcpDialect> = new Map([
   [CURSOR_ACP_DIALECT.id, CURSOR_ACP_DIALECT],
   [GROK_ACP_DIALECT.id, GROK_ACP_DIALECT],
@@ -477,6 +484,7 @@ const DIALECTS_BY_ID: ReadonlyMap<string, AcpDialect> = new Map([
   [OMP_ACP_DIALECT.id, OMP_ACP_DIALECT],
   [OPENCODE_ACP_DIALECT.id, OPENCODE_ACP_DIALECT],
   [OPENCLAW_ACP_DIALECT.id, OPENCLAW_ACP_DIALECT],
+  [KIMI_ACP_DIALECT.id, KIMI_ACP_DIALECT],
 ]);
 
 const DIALECT_IDS_BY_COMMAND: Readonly<Record<string, string>> = {
@@ -486,6 +494,7 @@ const DIALECT_IDS_BY_COMMAND: Readonly<Record<string, string>> = {
   omp: OMP_ACP_DIALECT.id,
   opencode: OPENCODE_ACP_DIALECT.id,
   openclaw: OPENCLAW_ACP_DIALECT.id,
+  kimi: KIMI_ACP_DIALECT.id,
 };
 
 export function resolveAcpDialect(launch: {

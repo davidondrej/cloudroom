@@ -130,19 +130,30 @@ permission. Settings → Notifications offers permission and test controls.
 `bb push-notifications test <web|desktop>` broadcasts a test to connected,
 permitted clients; it does not confirm OS display.
 
-The builtin Keep Awake plugin has one autosaving configuration page with an
-enable switch and an all-or-selected host picker. On selected macOS hosts it
-runs `/usr/bin/caffeinate -d -i -s -w <worker-pid>` while enabled, keeping the
-display and system awake while bb is running (`-s` applies on power only).
+The builtin Keep Awake plugin has one autosaving configuration page with a
+level picker and an all-or-selected host picker. Levels:
+
+- `off`: the computer sleeps as usual.
+- `working` (default): while a Local thread runs on a host, and for 10 minutes
+  after, macOS runs `/usr/bin/caffeinate -i -s -w <worker-pid>`. The screen can
+  still turn off. The plugin checks running threads on every thread status
+  change and once a minute.
+- `always`: `/usr/bin/caffeinate -d -i -s -w <worker-pid>` while Cloudroom runs,
+  so the screen stays on too.
+
+`-s` applies on power only. Linux helpers keep the screen on at both levels.
+Old saved settings upgrade once: the old switch's "on" becomes `always`, "off"
+becomes `working` (an earlier migration saved "off" for every install).
 Closing a laptop lid or choosing Sleep manually still sleeps the Mac. Configure it from an agent or
 terminal with:
 
 ```sh
-bb keep-awake status [--json]
-bb keep-awake enable [--json]
-bb keep-awake disable [--json]
-bb keep-awake hosts all
-bb keep-awake hosts <host-id>...
+room-cli keep-awake status [--json]
+room-cli keep-awake level <off|working|always> [--json]
+room-cli keep-awake enable [--json]    # same as: level always
+room-cli keep-awake disable [--json]   # same as: level off
+room-cli keep-awake hosts all
+room-cli keep-awake hosts <host-id>...
 ```
 
 The **Remove AI co-authors** toggle in Settings → Defaults defaults to on. Cloudroom
@@ -853,6 +864,9 @@ foreground client and no pairing step.
   signed in to this Mac can open a share. `unexpose` and `shares` use the same
   host resolution; their JSON rows include `hostId`, `hostName`, `port`, and
   `url`, and `shares --json` also includes the resolved `host`.
+- A shared app sees a loopback `Host` and no `X-Forwarded-Host`. Rails and
+  Django need a small dev-only setup to build share URLs and pass CSRF. The
+  `share-server-links` skill has the recipe.
 - Remote hosts from Settings → Machines get their own relay credential, sent as
   `x-bb-connect-machine`. The relay forwards their `/internal` and `/api/v1`
   calls as a machine and refuses host-management changes. Removing the machine

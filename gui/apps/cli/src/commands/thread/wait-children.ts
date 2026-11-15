@@ -85,6 +85,21 @@ export async function waitForChildren(
             `             Its next message has not started (paused or scheduled): room-cli thread queue list ${child.id}`,
           );
         }
+        if (child.state === "running") {
+          // A child whose provider went silent says so (#977).
+          const warning = await args.sdk.threads
+            .output({ threadId: child.id })
+            .then(
+              (output) => output.error,
+              () => null,
+            );
+          if (warning) {
+            console.log(
+              `             ${warning} (room-cli thread stop ${child.id})`,
+            );
+          }
+          continue;
+        }
         if (child.state !== "needs input") continue;
         // Name the exact next command: a blocked child otherwise waits for hours.
         const interactions = await args.sdk.threads.interactions.list({

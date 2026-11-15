@@ -353,7 +353,39 @@ pub async fn cli(args: &[String]) -> Result<i32, Error> {
             Ok(0)
         }
         Some("start") => {
-            ensure_desktop()?;
+            let socket = ensure_desktop()?;
+            // A running driver keeps an ended label, and only start_session revives it (#1597). Idempotent; on
+            // failure or after 5 s (a wedged driver), `start` still succeeds as before. No pipes, so a forked copy
+            // of `cua-driver call` can't hold `start` open; the unreaped child's PID is safe to kill.
+            let session = json!({ "session": SESSION }).to_string();
+            let child = desktop_env(&mut Command::new(DRIVER))
+                .args(["call", "--socket", &socket, "start_session", &session])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn();
+            if let Ok(mut child) = child {
+                let started = Instant::now();
+                let status = loop {
+                    match child.try_wait() {
+                        Ok(None) if started.elapsed() < Duration::from_secs(5) => {
+                            std::thread::sleep(Duration::from_millis(20))
+                        }
+                        Ok(None) => {
+                            let _ = child.kill();
+                            let _ = child.wait();
+                            break None;
+                        }
+                        Ok(Some(status)) => break Some(status),
+                        Err(_) => break None,
+                    }
+                };
+                if !status.is_some_and(|status| status.success()) {
+                    let note =
+                        b"Could not revive the computer-use session; calls may say it has ended.\n";
+                    let _ = std::io::Write::write_all(&mut std::io::stderr(), note);
+                }
+            }
             println!(
                 "{}",
                 serde_json::json!({ "running": true, "display": DISPLAY })

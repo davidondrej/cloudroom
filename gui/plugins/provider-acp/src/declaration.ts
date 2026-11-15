@@ -93,6 +93,9 @@ export function acpProviderDeclaration(
                 ? { npmPackage: agent.installer.npmPackage }
                 : {
                     scriptUrl: agent.installer.scriptUrl,
+                    ...(agent.installer.powershellUrl === undefined
+                      ? {}
+                      : { powershellUrl: agent.installer.powershellUrl }),
                     args: [...(agent.installer.args ?? [])],
                   },
           }),

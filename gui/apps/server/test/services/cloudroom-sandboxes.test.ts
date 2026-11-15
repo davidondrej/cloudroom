@@ -61,6 +61,7 @@ it("gives each cloud thread its own sandbox, wakes it only for work, and archive
     const input = await body(req);
     website.push({ action: input.action ?? input.name, thread: input.thread, project: input.project, auth: req.headers.authorization, title: input.title, project_name: input.project_name, session: input.session, harness: input.harness, model: input.model, parent: input.parent });
     if (req.url === "/api/desktop/logins") return json({ claude: false, codex: false, pi: false, github: false });
+    if (input.action === "threads") return json({ error: "Invalid sandbox request." }, 400);
     if (input.action === "awake") return json({ sandboxes: state === "awake" ? [{ thread: sandboxThread, origin: coreUrl, token: "t".repeat(64) }] : [] });
     if (input.action === "wake" && refusal) return json({ error: "Refused.", code: refusal }, 429);
     if (input.action === "wake") { state = "awake"; sandboxThread = input.thread; }

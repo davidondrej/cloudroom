@@ -99,6 +99,7 @@ function registerRemoteRuntimeFileResponder(
     hostId: string;
     sessionId: string;
     sharedSkills?: DiscoveredSkill[];
+    readErrorCode?: string;
   },
 ): HostRpcResponder {
   return registerHostRpcResponder(harness, {
@@ -127,7 +128,7 @@ function registerRemoteRuntimeFileResponder(
         if (content === undefined) {
           return {
             ok: false,
-            errorCode: "ENOENT",
+            errorCode: args.readErrorCode ?? "ENOENT",
             errorMessage: `Path does not exist: ${command.path}`,
           };
         }
@@ -1323,7 +1324,7 @@ describe("thread runtime config", () => {
     });
   });
 
-  it("treats a missing remote workspace .bb/AGENTS.md as null", async () => {
+  it("treats a missing or refused remote workspace .bb/AGENTS.md as null", async () => {
     await withTestHarness(async (harness) => {
       const { host: primary } = seedHostSession(harness.deps, {
         id: "host-runtime-missing-agents-primary",
@@ -1363,6 +1364,28 @@ describe("thread runtime config", () => {
       expect(runtimeConfig.instructions).not.toContain(
         "The following workspace instructions come from .bb/AGENTS.md:",
       );
+
+      const failReadsWith = (readErrorCode: string) =>
+        registerRemoteRuntimeFileResponder(harness, {
+          hostId: host.id,
+          sessionId: session.id,
+          files: new Map(),
+          readErrorCode,
+        });
+      const resolve = () =>
+        resolveThreadRuntimeCommandConfig(harness.deps, {
+          thread,
+          environment,
+          model: "test-model",
+        });
+      // The host refuses a symlinked workspace root; the message must still go out (#1764).
+      failReadsWith("invalid_path");
+      expect((await resolve()).instructions).toBe(runtimeConfig.instructions);
+      // A transport-style failure still throws, so dispatch can retry it.
+      failReadsWith("host_unavailable");
+      await expect(resolve()).rejects.toMatchObject({
+        body: { code: "host_unavailable" },
+      });
     });
   });
 

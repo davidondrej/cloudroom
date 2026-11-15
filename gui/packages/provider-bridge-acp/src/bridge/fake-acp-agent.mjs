@@ -67,6 +67,9 @@
  *                            → like Cursor (#890): the first launch (file not
  *                              yet written) fails every prompt after the first
  *                              with "WritableIterable is closed"
+ * - FAKE_ACP_CLOSED_STREAM_ERROR
+ *                            → JSON error object for those prompts instead;
+ *                              "{session}" becomes the prompt's session id
  * - FAKE_ACP_COMPACT_STOP_REASON
  *                            → stop reason returned for /compact
  */
@@ -439,11 +442,18 @@ async function handlePrompt(message) {
     send({
       jsonrpc: "2.0",
       id: message.id,
-      error: {
-        code: -32603,
-        message: "Internal error",
-        data: { details: "WritableIterable is closed" },
-      },
+      error: process.env.FAKE_ACP_CLOSED_STREAM_ERROR
+        ? JSON.parse(
+            process.env.FAKE_ACP_CLOSED_STREAM_ERROR.replaceAll(
+              "{session}",
+              message.params?.sessionId,
+            ),
+          )
+        : {
+            code: -32603,
+            message: "Internal error",
+            data: { details: "WritableIterable is closed" },
+          },
     });
     return;
   }

@@ -83,6 +83,7 @@ interface CodexEventTranslationState {
   injectedToolsByName: Map<string, CodexInjectedTool>;
   retryErrorsByTurnKey: Map<string, CodexRetryErrorContext>;
   lastTerminalErrorByThreadId: Map<string, CodexShownTerminalError>;
+  windowsSandboxWarned: boolean;
 }
 
 export function createCodexEventTranslationState(): CodexEventTranslationState {
@@ -91,6 +92,7 @@ export function createCodexEventTranslationState(): CodexEventTranslationState {
     injectedToolsByName: new Map(),
     retryErrorsByTurnKey: new Map(),
     lastTerminalErrorByThreadId: new Map(),
+    windowsSandboxWarned: false,
   };
 }
 
@@ -1203,6 +1205,77 @@ function hookProblemWarning(
   };
 }
 
+// Codex's Windows sandbox can fail its setup before a command starts, so every
+// command fails with "setup refresh had errors" (#1231). Warn once per thread
+// with the repair; the failed command shows as before.
+function windowsSandboxSetupWarning(
+  state: CodexEventTranslationState,
+  translation: Extract<CodexItemTranslationResult, { kind: "translated" }>,
+): ThreadDelta[] {
+  if (
+    process.platform !== "win32" ||
+    state.windowsSandboxWarned ||
+    translation.shape.type !== "command" ||
+    translation.status === "completed"
+  ) {
+    return [];
+  }
+  const line = translation.shape.aggregatedOutput
+    ?.split("\n")
+    .find((text) => text.includes("setup refresh had errors"));
+  if (line === undefined) return [];
+  state.windowsSandboxWarned = true;
+  return [
+    {
+      kind: "provider.warning",
+      category: "general",
+      summary: `Codex can't set up its command sandbox on this Windows computer (${line.trim()}). Update Codex, or switch this thread to Full Access.`,
+    },
+  ];
+}
+
+// Codex MCP errors can quote URLs, headers and rejected credentials, so a
+// warning shows only a fixed reason picked from the error, never its text.
+const MCP_STARTUP_REASONS: ReadonlyArray<readonly [RegExp, string]> = [
+  [/not logged in|reauthenticat/i, "It needs a sign-in."],
+  [
+    /\b40[13]\b|unauthori[sz]ed|forbidden|auth required|invalid (credential|api.?key|token)/i,
+    "It rejected the sign-in or key.",
+  ],
+  [/timed out|timeout/i, "It took too long to start."],
+  [
+    /os error 2\b|no such file|cannot find the file|program not found|not recognized as/i,
+    "Its command was not found.",
+  ],
+  [
+    /error sending request|connection refused|could not connect|dns error|failed to lookup/i,
+    "Codex could not reach it.",
+  ],
+  [
+    /connection closed|initialize response|handshak|exit/i,
+    "It stopped while starting.",
+  ],
+];
+
+// A server name can be a URL with a credential, so only plain names are shown.
+const SAFE_MCP_SERVER_NAME = /^[A-Za-z0-9_.-]{1,64}$/;
+
+export function codexMcpStartupReason(params: {
+  name?: unknown;
+  error?: unknown;
+  failureReason?: unknown;
+}): string {
+  const { name, error, failureReason } = params;
+  if (failureReason === "reauthenticationRequired")
+    return "It needs a sign-in.";
+  if (typeof error !== "string") return "Codex did not say why.";
+  // Codex quotes the name in its error, so `timeout-tools` is not a timeout.
+  const text =
+    typeof name === "string" && name ? error.replaceAll(name, "") : error;
+  const match = MCP_STARTUP_REASONS.find(([pattern]) => pattern.test(text));
+  return match?.[1] ?? "Codex did not say why.";
+}
+
 export function translateCodexEventToDeltas(
   event: ProviderRuntimeEvent,
   state: CodexEventTranslationState,
@@ -1381,6 +1454,7 @@ export function translateCodexEventToDeltas(
           presentation: translation.presentation,
           providerTurnId: handledEvent.params.turnId,
         },
+        ...windowsSandboxSetupWarning(state, translation),
       ];
     }
     case "item/agentMessage/delta":
@@ -1555,6 +1629,30 @@ export function translateCodexEventToDeltas(
           summary: handledEvent.params.message,
         },
       ];
+    case "mcpServer/startupStatus/updated": {
+      const { name, status } = handledEvent.params;
+      if (status !== "failed") return [];
+      const reason = codexMcpStartupReason(handledEvent.params);
+      const safe = typeof name === "string" && SAFE_MCP_SERVER_NAME.test(name);
+      const server = safe ? `MCP server ${name}` : "An MCP server";
+      const check = safe
+        ? `Check its setup with \`codex mcp get ${name}\` or sign in again with \`codex mcp login ${name}\``
+        : "See your servers with `codex mcp list`";
+      const fix =
+        name === "codex_apps"
+          ? ""
+          : ` ${check}. A new thread picks up the fix. With Codex 0.147 or newer, this thread retries it too, at most once a minute.`;
+      return [
+        {
+          kind: "provider.warning",
+          category: "general",
+          summary:
+            presentationTitle(`${server} did not start. ${reason}`) ??
+            `${server} did not start`,
+          details: `${reason} Run \`codex\` in a terminal to see the full error.${fix}`,
+        },
+      ];
+    }
     case "configWarning":
       return [
         {

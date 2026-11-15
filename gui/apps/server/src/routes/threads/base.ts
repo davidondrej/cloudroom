@@ -18,6 +18,7 @@ import type { Environment, Thread, ThreadListEntry } from "@cloudroom/domain";
 import { toEnvironmentResponse } from "../../services/environments/environment-response.js";
 import {
   threadIncludeOptionSchema,
+  THREAD_COUNT_ANY_PARENT,
   THREAD_COUNT_ROOT_PARENT,
   publicApiRoutes,
   typedRoutes,
@@ -237,13 +238,16 @@ export function registerThreadBaseRoutes(app: Hono, deps: AppDeps): void {
             parent:
               query.parentThreadId === THREAD_COUNT_ROOT_PARENT
                 ? { kind: "root" as const }
-                : {
-                    kind: "id" as const,
-                    parentThreadId: query.parentThreadId,
-                  },
+                : query.parentThreadId === THREAD_COUNT_ANY_PARENT
+                  ? { kind: "child" as const }
+                  : {
+                      kind: "id" as const,
+                      parentThreadId: query.parentThreadId,
+                    },
           }),
       ...(query.groupBy !== undefined ? { groupBy: query.groupBy } : {}),
       includeArchived: query.includeArchived === "true",
+      archivedOnly: query.archivedOnly === "true",
       includeHidden: query.includeHidden === "true",
     });
     const response: ThreadCountResponse = {
@@ -316,11 +320,16 @@ export function registerThreadBaseRoutes(app: Hono, deps: AppDeps): void {
       );
     }
     const limitPerGroup = parseSearchLimitPerGroup(query.limitPerGroup);
+    if (query.projectId) {
+      requirePublicProject(deps.db, query.projectId);
+    }
     return context.json(
       buildThreadSearchResponse(deps, {
         ...searchThreadsWithPendingInteractionState(deps.db, {
           query: searchQuery,
           limitPerGroup,
+          ...(query.projectId ? { projectId: query.projectId } : {}),
+          ...(query.hasParent ? { hasParent: query.hasParent === "true" } : {}),
         }),
       }) satisfies ThreadSearchResponse,
     );

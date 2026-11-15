@@ -419,6 +419,8 @@ export type ProjectCopyProgress = z.infer<typeof projectCopyProgressSchema>;
 
 export const threadPurposeSchema = z.object({
   text: z.string(),
+  /** The start of `text`: what the whole thread is for. Kept across replies; older notes have none. */
+  goal: z.string().optional(),
   percent: z.number().int().min(0).max(100),
   sourceSeq: z.number().int().nonnegative(),
   updatedAt: z.number(),

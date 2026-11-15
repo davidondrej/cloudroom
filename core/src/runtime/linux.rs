@@ -42,6 +42,7 @@ unset _cloudroom_parent _cloudroom_dir _cloudroom_x
 /// A container's `os.cpus()` lists every host CPU, and tools such as Next.js start a worker per CPU.
 const NODE_CPUS: &str = r#"const os = require('node:os'), cpus = os.cpus, usable = os.availableParallelism?.();
 if (usable) { os.cpus = () => cpus().slice(0, usable); require('node:module').syncBuiltinESMExports(); }
+require('./keys.cjs');
 "#;
 /// Like BASH_ENV, gives the Anthropic keys back once to Node that Claude starts without a shell, such as an MCP server,
 /// unless its own settings set one (#1340).
@@ -87,19 +88,18 @@ pub(crate) fn agent_env() -> &'static [(&'static str, String)] {
         }
         // The CPU limits apply only with a quota; the Anthropic keys come back with or without one (#1340).
         if helpers {
-            let node = if quota.is_some() {
-                vec!["cpus.cjs", "keys.cjs"]
-            } else {
-                vec!["keys.cjs"]
-            };
-            let node = node
-                .iter()
-                .map(|file| format!("--require {}", dir.join(file).display()));
-            env.push(("NODE_OPTIONS", node.collect::<Vec<_>>().join(" ")));
+            env.push(("NODE_OPTIONS", node_options(dir, quota.is_some())));
             env.push(("PYTHONPATH", dir.display().to_string()));
         }
         env
     })
+}
+
+/// One `--require`, since Next.js workers fold repeated ones into a single missing path (#1632): cpus.cjs loads
+/// keys.cjs itself, so the keys come back with or without a quota.
+fn node_options(dir: &Path, quota: bool) -> String {
+    let file = if quota { "cpus.cjs" } else { "keys.cjs" };
+    format!("--require {}", dir.join(file).display())
 }
 
 const HELPERS: [(&str, &str); 4] = [
@@ -830,6 +830,34 @@ bash -c 'printf %s "${ANTHROPIC_API_KEY-unset}"'"#;
             "{trace}"
         );
         let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn node_gets_one_preload_that_caps_cpus_and_restores_keys() {
+        // Next.js workers fold repeated `--require`s into one missing path, so Core passes one (#1632).
+        let dir = std::env::temp_dir().join(format!("node-preload-test-{}", std::process::id()));
+        write_helpers(&dir).unwrap();
+        let script = "const os = require('node:os'); process.stdout.write(`${os.cpus.toString().includes('usable')}|${process.env.ANTHROPIC_API_KEY}|${process.env.CLOUDROOM_APP_ANTHROPIC_API_KEY}`)";
+        for (quota, expected) in [(true, "true|app|undefined"), (false, "false|app|undefined")] {
+            let options = node_options(&dir, quota);
+            assert_eq!(options.matches("--require").count(), 1, "{options}");
+            let output = std::process::Command::new("node")
+                .args(["-e", script])
+                .env_clear()
+                .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+                .env("NODE_OPTIONS", options)
+                .env("CLAUDECODE", "1")
+                .env("CLOUDROOM_APP_ANTHROPIC_API_KEY", "app")
+                .output()
+                .unwrap();
+            assert_eq!(
+                String::from_utf8_lossy(&output.stdout),
+                expected,
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]

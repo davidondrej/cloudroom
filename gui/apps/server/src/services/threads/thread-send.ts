@@ -190,7 +190,11 @@ export function ensureThreadIsWritable(
   allowStopping = false,
 ): void {
   if (thread.archivedAt) {
-    throwThreadNotWritable(thread, "archived", "Thread is archived");
+    throwThreadNotWritable(
+      thread,
+      "archived",
+      `Thread ${thread.id} is archived (since ${new Date(thread.archivedAt).toISOString()}). Check the thread ID, or unarchive it first.`,
+    );
   }
   if (thread.status === "stopping" && !allowStopping) {
     throwThreadNotWritable(thread, "stopping", "Thread is stopping");
@@ -552,7 +556,7 @@ async function sendThreadMessageWithoutContextClear(
   }));
   const deferredFirstTurnContext = resolveDeferredFirstTurnContext(
     deps.db,
-    thread.id,
+    thread,
     args.retryOf?.requestId,
   );
   ({ input, inputGroups } = prependDeferredFirstTurnContext(
@@ -567,7 +571,8 @@ async function sendThreadMessageWithoutContextClear(
     if (deferredFirstTurnContext) {
       requireDeferredFirstTurnContextCurrent(tx, {
         requestSequence: deferredFirstTurnContext.requestSequence,
-        threadId: thread.id,
+        retryOfRequestId: args.retryOf?.requestId,
+        thread,
       });
     }
   };

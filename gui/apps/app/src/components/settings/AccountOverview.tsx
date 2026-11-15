@@ -82,11 +82,23 @@ function MembershipCard({ email, plan, login, usage }: { email: string; plan: st
         {extra > 0 ? null : <span className="opacity-65">of {count(usage.creditsLimit)}</span>}
       </p>
       <CreditsBar className="mt-2 h-1.5 bg-primary-foreground/15" plan={left} limit={usage.creditsLimit} extra={extra} extraTotal={usage.extraCreditsTotal ?? 0} planClassName="bg-primary-foreground" edgeClassName="border-primary" />
-      {extra > 0
-        ? <p className="mt-1.5 flex justify-between gap-3 text-2xs font-semibold tabular-nums"><span>{count(extra)} extra · used last</span><span className="opacity-65">{count(left)} of {count(usage.creditsLimit)} plan</span></p>
-        : <p className="mt-1.5 text-2xs opacity-65">{refillText(usage.resetsAt)}</p>}
+      <p className="mt-1.5 flex items-center justify-between gap-3 text-2xs tabular-nums">
+        {extra > 0
+          ? <><span className="font-semibold">{count(extra)} extra · used last</span><span className="ml-auto font-semibold opacity-65">{count(left)} of {count(usage.creditsLimit)} plan</span></>
+          : <span className="opacity-65">{refillText(usage.resetsAt)}</span>}
+        <SeeUsage />
+      </p>
     </div>}
   </div>;
+}
+
+/** Opens Analytics → Cloud Credits, which shows the threads that used the credits. */
+function SeeUsage() {
+  const navigate = useNavigate();
+  return <button type="button" onClick={() => navigate(`${getSettingsSectionRoutePath("analytics")}?tab=credits`)}
+    className="-my-1 inline-flex shrink-0 items-center gap-1 rounded-full bg-primary-foreground px-2.5 py-1 font-semibold text-primary hover:brightness-125">
+    See usage<Icon name="ArrowRight" className="size-3" aria-hidden />
+  </button>;
 }
 
 function ActionRow({ icon, title, detail, external, onClick }: { icon: IconName; title: string; detail: string; external?: boolean; onClick: () => void }) {

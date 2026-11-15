@@ -18,6 +18,7 @@ import {
 import { setPluginThreadEventEmitter } from "../../src/services/plugins/plugin-thread-events.js";
 import { applyLoggedThreadLifecycleEvent } from "../../src/services/threads/lifecycle-outcome.js";
 import { resolveDeferredFirstTurnContext } from "../../src/services/threads/deferred-first-turn-context.js";
+import { queueParentSystemMessage } from "../../src/services/threads/parent-system-messages.js";
 import { runQueuedMessageDispatch } from "../../src/services/threads/queued-message-dispatch.js";
 import { toThreadQueuedMessage } from "../../src/services/threads/thread-queued-messages.js";
 import { buildTurnFailedEvent } from "../../src/services/threads/turn-failed.js";
@@ -27,6 +28,7 @@ import {
   waitForQueuedCommand,
 } from "../helpers/commands.js";
 import { readJson } from "../helpers/json.js";
+import { textInput } from "../helpers/prompt-input.js";
 import {
   seedEnvironment,
   seedEvent,
@@ -430,6 +432,42 @@ describe("the turn.failed announcement", () => {
 
       failThread(harness, failing.id);
       expect(announced).toEqual([failing.id]);
+    });
+  });
+
+  it("holds child notices while the parent is at its plan limit, until it switches model (#1723)", async () => {
+    await withTestHarness(async (harness) => {
+      const { environment, thread } = seedFailableThread(harness, "host-1723");
+      seedRateLimitFailure(harness, {
+        environmentId: environment.id,
+        threadId: thread.id,
+        resetsAtMs: Date.now() + 7 * 24 * 3_600_000,
+      });
+      failThread(harness, thread.id);
+      for (const text of ["child 1 detached", "child 2 detached"]) {
+        await queueParentSystemMessage(harness.deps, {
+          input: textInput(text),
+          parentThreadId: thread.id,
+          systemMessageKind: "ownership-removed",
+          systemMessageSubject: null,
+        });
+      }
+      const sweep = () =>
+        runQueuedMessageDispatch(harness.deps, {
+          kind: "idle-recovery",
+          now: Date.now() + 60_000,
+        });
+      await sweep();
+      // Before, each notice woke the parent into the same refusal.
+      expect(turnRequests(harness, thread.id)).toHaveLength(1);
+      expect(queuedRows(harness, thread.id)).toHaveLength(2);
+
+      setThreadExecutionOverride(harness.db, {
+        threadId: thread.id,
+        modelOverride: "gpt-5-mini",
+      });
+      await sweep();
+      expect(turnRequests(harness, thread.id)).toHaveLength(2);
     });
   });
 });
@@ -966,7 +1004,7 @@ describe("retrying a failed turn", () => {
       });
       failThread(harness, thread.id);
 
-      expect(resolveDeferredFirstTurnContext(harness.db, thread.id)).toBeNull();
+      expect(resolveDeferredFirstTurnContext(harness.db, thread)).toBeNull();
     });
   });
 

@@ -2,6 +2,20 @@
 
 Also on [cloudroom.dev/changelog](https://www.cloudroom.dev/changelog).
 
+## 154
+
+Archived threads restore cleanly (2026-11-15)
+
+### Changes
+
+- The Archived threads page shows a Restored toast with an Open button, real totals, and a Retry when loading fails.
+- Restoring a thread can bring back its subagent threads too.
+- Self-hosters can connect their own Core right from setup, with no Cloudroom account.
+- Keep Awake has three levels and is on by default, only while agents work.
+- Thread notes now say what each thread is for, then where it stands.
+- With two Macs, Cloud threads follow the Mac you are using.
+- Selecting text in a draft shows a simple Copy button below it.
+
 ## 153
 
 See which chats need you (2026-11-13)

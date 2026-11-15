@@ -297,17 +297,25 @@ struct Drain {
 }
 /// Sandbox hosts call this before stopping the machine (see session::sleep).
 async fn drain(State(manager): State<Arc<Manager>>, Json(input): Json<Drain>) -> Json<Value> {
+    let started = std::time::Instant::now();
     let mut answer = manager.drain(input.hold);
+    // A report held until its child is quiet (#217) was just sent instead: once it is out, this same call drains, so
+    // it never keeps the sandbox awake. Not out within a few seconds, it refuses the drain, as a due report does.
+    if answer["reason"] == "report_held" {
+        manager.held_out(std::time::Duration::from_secs(4)).await;
+        answer = manager.drain(input.hold);
+        if answer["reason"] == "report_held" {
+            answer["reason"] = json!("report_pending");
+        }
+    }
     // The sandbox stops next: save what's pending first. Anything left stays in the journal for the next wake.
     if answer["drained"] == true {
         // Plan limits seen here reach the website before the sandbox stops (ADR 0292), alongside the history
         // flush and within its budget: the website gives the whole drain 10 s.
+        let left = |secs| std::time::Duration::from_secs(secs).saturating_sub(started.elapsed());
         let (sent, pending) = tokio::join!(
-            tokio::time::timeout(
-                std::time::Duration::from_secs(7),
-                manager.send_plan_reports()
-            ),
-            manager.flush_history(std::time::Duration::from_secs(8), false),
+            tokio::time::timeout(left(7), manager.send_plan_reports()),
+            manager.flush_history(left(8), false),
         );
         if sent.is_err() {
             manager.delay_plan_reports();
@@ -935,10 +943,12 @@ async fn health(State(manager): State<Arc<Manager>>) -> Json<Value> {
 }
 async fn start(
     State(manager): State<Arc<Manager>>,
+    headers: HeaderMap,
     Json(body): Json<Start>,
 ) -> Result<impl IntoResponse> {
     key(&body.request_id)?;
     manager.mac.expect();
+    manager.mac.note_using(&headers);
     if body.provider.as_ref().is_some_and(|p| {
         p.is_empty()
             || p.chars()
@@ -1214,9 +1224,11 @@ fn prompt_input(
 async fn prompt(
     State(manager): State<Arc<Manager>>,
     Path(id): Path<String>,
+    headers: HeaderMap,
     Json(body): Json<Prompt>,
 ) -> Result<impl IntoResponse> {
     key(&body.request_id)?;
+    manager.mac.note_using(&headers);
     let mut input = prompt_input(
         body.text,
         body.content,

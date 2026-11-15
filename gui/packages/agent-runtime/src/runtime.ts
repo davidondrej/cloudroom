@@ -286,8 +286,16 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
     options.turnStartWatchdog?.thresholdMs ?? 120_000;
   const turnStartStopAfterMs =
     options.turnStartWatchdog?.stopAfterMs ?? 10 * 60_000;
+  /** Open turns: when the provider last sent an event, and its running commands and tool calls (#977). */
+  const openTurnActivity = new Map<
+    string,
+    { lastEventMs: number; warned: boolean; runningItemIds: Set<string> }
+  >();
+  const turnSilenceThresholdMs =
+    options.turnSilenceWatchdog?.thresholdMs ?? 10 * 60_000;
   const turnStartWatchdogTimer = setInterval(() => {
     const nowMs = Date.now();
+    warnSilentTurns(nowMs);
     for (const [threadId, entry] of pendingTurnStarts) {
       const waitedMs = nowMs - entry.sinceMs;
       if (waitedMs >= turnStartStopAfterMs && !entry.stopping) {
@@ -432,6 +440,27 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
         `Failed to retire the provider after thread "${args.threadId}" session construction failed: ${shutdownError instanceof Error ? shutdownError.message : String(shutdownError)}`,
       );
     }
+  }
+
+  /**
+   * A thread that starts or resumes on another bridge process (its launch
+   * changed) first leaves the one hosting it. Otherwise that bridge's agent
+   * keeps the thread open where Stop can't reach it, and Codex refuses every
+   * resume with "already has an active writer" (#1717).
+   */
+  async function releaseThreadFromOtherProviderProcess(
+    threadId: string,
+    processKey: string,
+  ): Promise<void> {
+    const previous = threadRuntimeConfigs.get(threadId);
+    if (previous === undefined || previous.processKey === processKey) return;
+    let proc: ProviderProcess;
+    try {
+      proc = providerProcesses.requireProviderProcess(previous);
+    } catch {
+      return;
+    }
+    await abandonFailedSessionConstruction({ proc, threadId });
   }
 
   async function sendCommand<TResult>(args: {
@@ -849,6 +878,64 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
     if (event.type === "provider/error" && event.willRetry !== true) {
       pendingTurnStarts.delete(event.threadId);
       markHostedProviderSessionIdle(event.threadId);
+    }
+  }
+
+  function observeOpenTurnActivity(event: ThreadEvent): void {
+    if (turnState.getActiveTurnId(event.threadId) === null) {
+      openTurnActivity.delete(event.threadId);
+      return;
+    }
+    const entry = openTurnActivity.get(event.threadId) ?? {
+      lastEventMs: 0,
+      warned: false,
+      runningItemIds: new Set<string>(),
+    };
+    openTurnActivity.set(event.threadId, entry);
+    entry.lastEventMs = Date.now();
+    entry.warned = false;
+    if (
+      event.type === "item/started" &&
+      (event.item.type === "commandExecution" || event.item.type === "toolCall")
+    ) {
+      entry.runningItemIds.add(event.item.id);
+    } else if (event.type === "item/completed") {
+      entry.runningItemIds.delete(event.item.id);
+    }
+  }
+
+  /**
+   * Warns once per silence period when an open turn has sent nothing for the
+   * threshold (#977). Running commands, tool calls, pending requests, and
+   * background work are real waits, so they restart the clock. The turn is
+   * never ended here: a slow provider may still answer.
+   */
+  function warnSilentTurns(nowMs: number): void {
+    for (const [threadId, entry] of openTurnActivity) {
+      if (turnState.getActiveTurnId(threadId) === null) {
+        openTurnActivity.delete(threadId);
+        continue;
+      }
+      if (
+        entry.runningItemIds.size > 0 ||
+        toolCalls.hasThread(threadId) ||
+        interactiveRequests.hasThread(threadId) ||
+        backgroundWorkState.hasOpenThreadWork(threadId)
+      ) {
+        entry.lastEventMs = nowMs;
+        continue;
+      }
+      if (entry.warned || nowMs - entry.lastEventMs < turnSilenceThresholdMs) {
+        continue;
+      }
+      entry.warned = true;
+      options.onEvent({
+        type: "system/error",
+        threadId,
+        scope: { kind: "thread" },
+        code: "provider_turn_silent",
+        message: `The provider has sent nothing for ${Math.round(turnSilenceThresholdMs / 60_000)} minutes. It may be stalled. Stop the thread, then send the message again.`,
+      });
     }
   }
 
@@ -1280,6 +1367,7 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
         toolCalls.cancelThread(targetThreadId, normalizedEvent.scope.turnId);
       }
       turnState.observe(normalizedEvent);
+      observeOpenTurnActivity(normalizedEvent);
       backgroundWorkState.observe(normalizedEvent);
       observeProviderSessionIdleState(normalizedEvent);
       options.onEvent(normalizedEvent);
@@ -1571,6 +1659,7 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
             options: execOpts,
             providerId,
           });
+          await releaseThreadFromOtherProviderProcess(threadId, processKey);
           const resolvedEnvironment = resolveRuntimeThreadEnvironment({
             contributedEnv,
             environmentId,
@@ -1892,6 +1981,7 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
             options: execOpts,
             providerId,
           });
+          await releaseThreadFromOtherProviderProcess(threadId, processKey);
           const resolvedEnvironment = resolveRuntimeThreadEnvironment({
             contributedEnv,
             environmentId,
@@ -2671,6 +2761,7 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
       );
       idleProviderSessionSinceMsByThreadId.clear();
       pendingTurnStarts.clear();
+      openTurnActivity.clear();
       threadOperationCounts.clear();
       threadGoalState.clear();
       turnState.clear();

@@ -3,13 +3,13 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Keeps selected macOS, Linux and Windows hosts awake while Cloudroom is running.",
+  "description": "Keeps selected macOS, Linux and Windows hosts awake while agents work, or always.",
   "engines": {
     "bb": ">=0.0"
   },
   "bb": {
     "name": "Keep Awake",
-    "description": "Keeps selected macOS, Linux and Windows hosts awake while Cloudroom is running.",
+    "description": "Keeps selected macOS, Linux and Windows hosts awake while agents work, or always.",
     "branding": {
       "icon": "Coffee"
     },

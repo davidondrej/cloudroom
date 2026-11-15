@@ -956,6 +956,8 @@ describe("automation data access", () => {
   });
 
   it("starts overdue loops one a minute without delaying on-time ones (#609)", async () => {
+    vi.useFakeTimers({ toFake: ["performance"] });
+    onTestFinished(() => void vi.useRealTimers());
     const db = createTestDb();
     const now = 10 * 3_600_000;
     const overdue = Array.from({ length: 120 }, (_, i) => `auto_old_${i}`);
@@ -1016,21 +1018,31 @@ describe("automation data access", () => {
       listAutomationRuns(db, { automationId: id, limit: 5 }).length;
     const overdueStarted = () =>
       overdue.reduce((total, id) => total + runs(id), 0);
-    const sweep = (at: number) =>
-      sweepDueAutomations(room, db, {
+    // The spacing counts real elapsed time, so the wall clock (`at`) can step back after a wake (#1588).
+    const sweep = (at: number, elapsed: number) => {
+      vi.advanceTimersByTime(elapsed);
+      return sweepDueAutomations(room, db, {
         pluginDataDir: "/tmp",
         serverUrl: "http://127.0.0.1:38886",
         now: at,
       });
+    };
 
-    await sweep(now);
+    await sweep(now, 0);
     expect(runs("auto_on_time")).toBe(1);
     expect(runs("auto_slow")).toBe(2);
     expect(overdueStarted()).toBe(1);
-    await sweep(now + 30_000);
-    expect(overdueStarted()).toBe(1);
-    await sweep(now + 90_000);
-    expect(overdueStarted()).toBe(2);
+    for (const [at, elapsed, started] of [
+      [now + 30_000, 30_000, 1],
+      [now + 90_000, 60_000, 2],
+      [now + 60_000, 10_000, 2],
+      [now + 30_000, 50_000, 3],
+      // A Linux suspend pauses the monotonic clock: the wall clock's minute still frees the next one.
+      [now + 2 * 3_600_000, 0, 4],
+    ] as const) {
+      await sweep(at, elapsed);
+      expect(overdueStarted()).toBe(started);
+    }
   });
 
   // A failed loop thread can come back on its own: provider-retry re-runs a turn an app restart cut 5 s later (#887).
@@ -1755,6 +1767,7 @@ describe("automation CLI --script-file", () => {
       files: {
         read: async ({ hostId, path }: { hostId?: string; path: string }) => {
           reads.push({ hostId, path });
+          if (path.endsWith("stalled.md")) throw new Error("HTTP 504: Timed out waiting for command result");
           const content = await readFile(path, "utf8");
           return {
             path,
@@ -1990,6 +2003,19 @@ describe("automation CLI --script-file", () => {
       );
       expect(hostOnly.exitCode).toBe(1);
       expect(hostOnly.stderr).toContain("--host requires --script-file");
+
+      // An agent loop's path is on the caller's host, not the list's first one (#1757).
+      const agentPath =
+        "create --project proj_test --name path --in 30m --prompt hi --provider codex --model gpt-5 --environment /work --json".split(
+          " ",
+        );
+      const pathInThread = await t.cli.run(agentPath, { threadId: "thr_env" });
+      expect(
+        JSON.parse(pathInThread.stdout!).execution.environment.hostId,
+      ).toBe("host_laptop");
+      expect((await t.cli.run(agentPath, {})).stderr).toContain(
+        "More than one machine is connected",
+      );
     } finally {
       await t.cleanup();
     }
@@ -2015,6 +2041,16 @@ describe("automation CLI --script-file", () => {
         {},
       );
       expect(JSON.parse(updated.stdout!).execution).toMatchObject({ mode: "agent", prompt: update });
+      // A read the host never answered names the stage and says nothing was saved (#1653).
+      const stalled = await t.cli.run(
+        ["update", id, "--project", "proj_test", "--prompt-file", "stalled.md"],
+        { cwd: t.srcDir, threadId: "thr_env" },
+      );
+      expect(stalled.stderr).toBe(
+        "Could not read --prompt-file on host host_laptop, so nothing was saved and a retry is safe: HTTP 504: Timed out waiting for command result\n",
+      );
+      const shown = await t.cli.run(["show", id, "--project", "proj_test", "--json"], {});
+      expect(JSON.parse(shown.stdout!).execution).toMatchObject({ prompt: update });
       const both = await t.cli.run(
         ["update", id, "--project", "proj_test", "--prompt", "x", "--prompt-file", "u.md"],
         { cwd: t.srcDir },

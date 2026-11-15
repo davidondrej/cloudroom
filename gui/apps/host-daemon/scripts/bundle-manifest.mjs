@@ -25,6 +25,8 @@ export const ROOM_CLI_HASHBANG = [
 // The same for cmd.exe and PowerShell, from
 // <app>\resources\app.asar.unpacked\node_modules\bb-app\host-daemon\dist.
 // %* stays outside parentheses: a ")" in an argument would end the block.
+// When Windows won't start Cloudroom.exe, cmd.exe sets its error: 4551 for Smart App Control or
+// App Control, 1260 for a group policy. The CLI never exits with these, so run it on node (#1583).
 const APP_DIR = '"%~dp0..\\..\\..\\..\\..\\..\\';
 export const ROOM_CLI_CMD = [
   "@echo off",
@@ -32,12 +34,16 @@ export const ROOM_CLI_CMD = [
   'set "ROOM_CLI_APP="',
   `for %%e in (${APP_DIR}Cloudroom.exe" ${APP_DIR}Cloudroom Nightly.exe") do if not defined ROOM_CLI_APP if exist %%e set "ROOM_CLI_APP=%%~fe"`,
   "if defined ROOM_CLI_APP goto app",
+  ":node",
   'node "%~dp0room-cli" %*',
   "exit /b %ERRORLEVEL%",
   ":app",
   "set ELECTRON_RUN_AS_NODE=1",
   '"%ROOM_CLI_APP%" "%~dp0room-cli" %*',
-  "exit /b %ERRORLEVEL%",
+  "if %ERRORLEVEL% neq 4551 if %ERRORLEVEL% neq 1260 exit /b %ERRORLEVEL%",
+  "set ELECTRON_RUN_AS_NODE=",
+  ">&2 echo room-cli: Windows blocked Cloudroom.exe. Smart App Control or an IT policy can do this. Trying Node.js instead.",
+  "goto node",
   "",
 ].join("\r\n");
 

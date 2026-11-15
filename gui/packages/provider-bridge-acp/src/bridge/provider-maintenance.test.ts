@@ -6,6 +6,8 @@ import { describe, expect, it } from "vitest";
 import {
   CURSOR_ACP_MAINTENANCE,
   __testing,
+  acpInstallerCommand,
+  acpInstallerSchema,
   getAcpProviderHealth,
   getAcpProviderInstallationStatus,
 } from "./provider-maintenance.js";
@@ -186,4 +188,19 @@ describe("ACP provider maintenance", () => {
       }
     },
   );
+
+  it("runs Kimi's PowerShell installer on Windows, not the Unix script (#1696)", () => {
+    const installer = acpInstallerSchema.parse({
+      scriptUrl: "https://code.kimi.com/kimi-code/install.sh",
+      powershellUrl: "https://code.kimi.com/kimi-code/install.ps1",
+    });
+    const windows = acpInstallerCommand(installer, "win32");
+    expect(windows).toMatchObject({
+      command: "powershell.exe",
+      displayCommand: "irm https://code.kimi.com/kimi-code/install.ps1 | iex",
+    });
+    // Its failure path asks "Press Enter to exit"; nobody answers.
+    expect(windows.args).toContain("-NonInteractive");
+    expect(acpInstallerCommand(installer, "linux").command).toBe("sh");
+  });
 });

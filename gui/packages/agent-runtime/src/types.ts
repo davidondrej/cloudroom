@@ -70,6 +70,8 @@ export interface AgentRuntimeOptions {
     intervalMs?: number;
     stopAfterMs?: number;
   };
+  /** Checked on the turn-start watchdog's interval. */
+  turnSilenceWatchdog?: { thresholdMs?: number };
   rateLimitRetry?: { delaysMs?: readonly number[] };
   threadCreation?: { requestTimeoutMs?: number };
 

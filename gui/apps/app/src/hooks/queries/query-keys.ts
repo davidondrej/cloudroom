@@ -97,6 +97,8 @@ export interface ThreadListQueryFilters {
 interface ThreadSearchQueryFilters {
   query: ThreadSearchFilters["query"];
   limitPerGroup: NonNullable<ThreadSearchFilters["limitPerGroup"]>;
+  projectId?: ThreadSearchFilters["projectId"];
+  hasParent?: ThreadSearchFilters["hasParent"];
 }
 
 export type ArchivedThreadsKindFilter = "all" | "root" | "child";
@@ -694,6 +696,16 @@ export function archivedThreadsListQueryKey(
   filters: ArchivedThreadsListFilters,
 ): ArchivedThreadsListQueryKey {
   return [THREADS_QUERY_KEY, ARCHIVED_THREADS_LIST_KIND, filters];
+}
+
+/**
+ * Sits under the archived list's own key, so everything that refreshes that
+ * list (a mutation here, an archive elsewhere) refreshes its totals too.
+ */
+export function archivedThreadCountsQueryKey(
+  filters: ArchivedThreadsListFilters,
+) {
+  return [...archivedThreadsListQueryKey(filters), "count"] as const;
 }
 
 export function disabledThreadListQueryKey(

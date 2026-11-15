@@ -17,7 +17,7 @@ Agent mode flags:
 --service-tier <tier>          default or fast (update also accepts none to clear)
 --permission-mode <mode>       accept-edits, auto, or full
 --target-thread <id>           Reuse/re-prompt an existing thread
---environment <id-or-path>     Existing environment ID or unmanaged workspace path
+--environment <id-or-path>     Existing environment ID or unmanaged workspace path (on the thread's host, or --host)
 --new-environment <kind>       Create a new environment (worktree)
 --base-branch <branch>         Base branch for new managed worktrees
 ```

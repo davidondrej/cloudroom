@@ -144,6 +144,8 @@ const retriedChildThreadTurnItems =
   new WeakSet<ChildThreadTurnNotificationBatchItem>();
 /** The last turn each waiting child reported while background work ran (#862). */
 const waitingChildThreadNotifiedTurnIds = new Map<string, string>();
+/** Each child's last reported turn end, so a replay of it doesn't report again (#1671). */
+const reportedChildThreadTurnEnds = new Map<string, string>();
 
 function childThreadTurnStatusLabel(turnStatus: ThreadEventTurnStatus): string {
   switch (turnStatus) {
@@ -704,10 +706,25 @@ function scheduleChildThreadTurnNotificationBatchFlush(
   }, delayMs);
 }
 
+/**
+ * A daemon that lost the reply to its event post sends the same batch again,
+ * and the server stores and applies the turn's end each time (#1671).
+ */
+function isReplayedChildThreadTurnEnd(
+  args: QueueChildThreadTurnNotificationArgs,
+): boolean {
+  if (args.turnId === undefined) return false;
+  const key = `${args.turnId}:${args.turnStatus}`;
+  if (reportedChildThreadTurnEnds.get(args.childThread.id) === key) return true;
+  reportedChildThreadTurnEnds.set(args.childThread.id, key);
+  return false;
+}
+
 function queueChildThreadTurnNotificationBatchItem(
   deps: LoggedPendingInteractionWorkSessionDeps,
   args: QueueChildThreadTurnNotificationArgs,
 ): void {
+  if (isReplayedChildThreadTurnEnd(args)) return;
   const counts = getChildThreadRunningTaskCounts(deps, args);
   if (
     isRepeatedChildThreadWaitingUpdate(

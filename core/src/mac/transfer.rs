@@ -310,8 +310,28 @@ pub(super) async fn push(socket: &str, source: &str, target: &str) -> io::Result
             }
         }
     };
-    let to = String::from_utf8_lossy(&out);
-    println!("{}", json!({"copied":source,"to":last_line(&to)}));
+    let out = String::from_utf8_lossy(&out);
+    let to = last_line(&out);
+    let mut printed = json!({"copied":source,"to":to});
+    // Like cp, pushing `outputs` again to an existing `.../outputs` lands in `.../outputs/outputs`, so the files
+    // one level up keep their old bytes (#1292). Say so, since agents read that as a failed overwrite.
+    let folder = Path::new(to).parent().filter(|folder| {
+        Path::new(to).file_name() == Some(name)
+            && folder.file_name() == Some(name)
+            && parent
+                .join(name)
+                .symlink_metadata()
+                .is_ok_and(|m| m.is_dir())
+    });
+    if let Some(folder) = folder {
+        let parent = literal(&format!("{}/", folder.parent().unwrap_or(folder).display()));
+        eprintln!(
+            "Note: this went inside {}, so files directly in it were not replaced. To replace them, push to its parent folder: {parent}",
+            folder.display()
+        );
+        printed["nested"] = json!(true);
+    }
+    println!("{printed}");
     Ok(0)
 }
 

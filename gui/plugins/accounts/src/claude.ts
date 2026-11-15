@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { accessSync, constants, readFileSync, rmSync } from "node:fs";
+import { readFileSync, rmSync } from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -28,23 +28,8 @@ const YEAR_MS = 365 * 24 * 60 * 60_000;
 const LIMITS = "anthropic-ratelimit-unified";
 const windows = process.platform === "win32";
 
-function claudeBinary(): string | null {
-  if (windows) return findCliExecutable("claude");
-  const dirs = [
-    ...(process.env.PATH ?? "").split(path.delimiter),
-    path.join(os.homedir(), ".local/bin"),
-    "/opt/homebrew/bin",
-    "/usr/local/bin",
-  ];
-  for (const dir of dirs) {
-    const binary = path.join(dir, "claude");
-    try {
-      accessSync(binary, constants.X_OK);
-      return binary;
-    } catch {}
-  }
-  return null;
-}
+// The same lookup as Harness detection, so every install it finds (~/.npm-global/bin, #1686) works here too.
+const claudeBinary = () => findCliExecutable("claude");
 
 // A stray token or API key would win over the account's own login. No profile means the Mac's own login.
 export function profileEnv(profile?: string): NodeJS.ProcessEnv {

@@ -4,10 +4,10 @@
 //! takes it, and stays awake for it.
 use super::{
     Local, Manager, Session, SessionState,
-    children::{FINISHED, NOTICE_REPLY_CHARS, notice, notice_ids},
+    children::{NOTICE_REPLY_CHARS, changed_or_due, notice, notice_ids, untold},
     history::ApiError,
     thread::{
-        Failure, NO_PARENT, archive_under, deliver, fail, random_key, record, retire,
+        Failure, NO_PARENT, archive_under, deliver, fail, random_key, record, retire, revive,
         session_failure, start_error, starting, website_failure,
     },
 };
@@ -291,14 +291,9 @@ async fn receive(
         ));
     }
     let id = owner.unwrap_or(id);
-    let archived = m
-        .local
-        .lock()
-        .unwrap()
-        .sessions
-        .get(&id)
-        .map(|s| s.archived)
-        .ok_or_else(|| fail(StatusCode::NOT_FOUND, "Unknown session"))?;
+    if !m.local.lock().unwrap().sessions.contains_key(&id) {
+        return Err(fail(StatusCode::NOT_FOUND, "Unknown session"));
+    }
     let text = match input.action.as_str() {
         "tell" => input
             .text
@@ -338,14 +333,14 @@ async fn receive(
         "archive" => {
             retire(&m, &id)?;
             let kept = archive_under(&m, &id)?;
-            if !archived {
-                let _ = record(
-                    &m,
-                    &id,
-                    "archive",
-                    json!({"archived":true,"kept_live":kept,"wake":m.wake_id()}),
-                )?;
-            }
+            // Even when an older archive is recorded: a restore while the sandbox slept never reached this Core, so
+            // only a new record, reported with this wake, archives the thread again (#1634).
+            let _ = record(
+                &m,
+                &id,
+                "archive",
+                json!({"archived":true,"kept_live":kept,"wake":m.wake_id()}),
+            )?;
             // Archived, it sends no new reports, but one may be in flight, and an earlier session of this thread (say,
             // before a harness switch) may still send its own: the parent holds the archive against those.
             let local = m.local.lock().unwrap();
@@ -354,7 +349,11 @@ async fn receive(
                 .values()
                 .filter(|s| s.session_id == id || (!s.archived && s.parent_thread().is_some()));
             let late: Vec<String> = sending
-                .flat_map(|s| unreported(s).map(|r| notice_ids(&s.session_id, &r.request_id).1))
+                .flat_map(|s| {
+                    unreported(s)
+                        .into_iter()
+                        .map(|(r, _)| notice_ids(&s.session_id, &r.request_id).1)
+                })
                 .collect();
             drop(local);
             return Ok(Json(json!({"id":id,"state":"archived","late":late})));
@@ -371,6 +370,9 @@ async fn receive(
         prompt["sender_thread_id"] = json!(sender);
     }
     let queue = input.action == "tell" && request.ends_with(QUEUE);
+    if input.action == "tell" && from.is_none() {
+        revive(&m, &id, &request, None);
+    }
     let answer = deliver(&m, &id, &request, prompt, true, None, queue).await?;
     // A steer not yet confirmed may still fail; the sender retries, and a failed steer is then queued instead.
     let steering = m.receipt(&id, &format!("{request}_steer"));
@@ -413,25 +415,26 @@ fn unnamed_start(local: &Local) -> bool {
     })
 }
 
-/// A session's finished turns not yet reported to its parent in another sandbox.
-fn unreported(s: &super::Session) -> impl Iterator<Item = &super::Receipt> {
-    s.receipts.values().filter(|r| {
-        r.command == "prompt"
-            && FINISHED.contains(&r.state.as_str())
-            && !s.reported.contains(&r.request_id)
-    })
+/// A session's finished turns not yet reported to its parent in another sandbox, each with when it is due.
+fn unreported(s: &Session) -> Vec<(&super::Receipt, u64)> {
+    untold(s, |r| s.reported.contains(&r.request_id))
 }
 
-/// The first finished turn not yet reported, of a session whose parent runs in another sandbox. An archived one
-/// reports only the turn it archived itself in, so its parent hears how its task ended.
-fn next_report(local: &Local) -> Option<(String, String, Value)> {
+/// The turns a session whose parent runs in another sandbox still owes it, each with when it is due. An archived one
+/// owes only the turn it archived itself in, so its parent hears how its task ended.
+fn owed(s: &Session) -> impl Iterator<Item = (&super::Receipt, u64)> {
+    (unreported(s).into_iter())
+        .filter(move |(r, _)| !s.archived || s.archive_turn.as_ref() == Some(&r.request_id))
+}
+
+/// The first owed turn due by `now`, and its report.
+fn next_report(local: &Local, now: u64) -> Option<(String, String, Value)> {
     local
         .sessions
         .values()
         .filter(|s| s.parent_thread().is_some())
         .find_map(|s| {
-            let r = unreported(s)
-                .find(|r| !s.archived || s.archive_turn.as_ref() == Some(&r.request_id))?;
+            let (r, _) = owed(s).find(|(_, at)| *at <= now)?;
             let reply = s
                 .replies
                 .iter()
@@ -442,6 +445,15 @@ fn next_report(local: &Local) -> Option<(String, String, Value)> {
             let body = json!({"action":"report","request_id":queued,"state":r.state,"error":error,"reply":reply});
             Some((s.session_id.clone(), r.request_id.clone(), body))
         })
+}
+
+/// When the next owed turn falls due: a held one once its child is quiet, `u64::MAX` while it runs a turn.
+fn next_due(local: &Local) -> Option<u64> {
+    let parented = local
+        .sessions
+        .values()
+        .filter(|s| s.parent_thread().is_some());
+    parented.flat_map(|s| owed(s).map(|(_, at)| at)).min()
 }
 
 /// `thread list` also shows children in sandboxes of their own, at any depth, from the website's links (ADR 0256):
@@ -563,7 +575,8 @@ fn failed(now: bool) {
     };
 }
 
-/// A report still waits for the website, so the sandbox must not sleep yet, unless it has failed for a long time.
+/// A report still waits for the website, so the sandbox must not sleep yet, unless it has failed for a long time. One
+/// held until its child is quiet (#217) never keeps it awake: a drain sends it at once instead (`flush_held`).
 pub(super) fn report_pending(local: &Local) -> bool {
     let fresh = |failing: &Mutex<Option<Instant>>| {
         failing
@@ -571,7 +584,7 @@ pub(super) fn report_pending(local: &Local) -> bool {
             .unwrap()
             .is_none_or(|since| since.elapsed() < GIVE_UP_AWAKE)
     };
-    (next_report(local).is_some() && fresh(&FAILING_SINCE))
+    (next_report(local, crate::observability::now_ms()).is_some() && fresh(&FAILING_SINCE))
         || (next_thread_report(local).is_some() && fresh(&THREAD_FAILING_SINCE))
 }
 
@@ -875,9 +888,13 @@ impl Manager {
         tokio::spawn(async move {
             let mut wait = Duration::from_secs(5);
             while !manager.is_stopping() {
-                let due = next_report(&manager.local.lock().unwrap());
+                let (due, held) = {
+                    let local = manager.local.lock().unwrap();
+                    let now = crate::observability::now_ms();
+                    (next_report(&local, now), next_due(&local))
+                };
                 let Some((session, turn, body)) = due else {
-                    if changed.changed().await.is_err() {
+                    if !changed_or_due(&mut changed, held).await {
                         return;
                     }
                     continue;
@@ -1053,12 +1070,118 @@ mod tests {
         }
         drop(local);
         let mut local = Local::open(&dir).unwrap();
-        let (session, turn, _) = next_report(&local).unwrap();
+        let (session, turn, _) = next_report(&local, 0).unwrap();
         assert_eq!((session.as_str(), turn.as_str()), ("self", "p2"));
         local
             .append("self", "parent_report", json!({"request_id":"p2"}), None)
             .unwrap();
-        assert!(next_report(&local).is_none());
+        assert!(next_report(&local, u64::MAX).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #217: a turn the child's harness began itself reports at once if it failed. One that replied waits until the
+    /// child is quiet; then only the newest reports, also once later replies pushed it out of the cache and after a
+    /// restart, unless a newer prompt's answer went first. An empty one, or one from before the update (no `report`
+    /// mark), never does. Nothing reports twice, and reports go in the order their turns ended.
+    #[test]
+    fn a_child_reports_its_own_turns_once_when_quiet_but_not_empty_or_old_ones() {
+        let dir = std::env::temp_dir().join(format!("cloudroom-auto-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut local = Local::open(&dir).unwrap();
+        let start = json!({"request_id":"s","command":"start","state":"completed","input":{"parent_thread":"thr_p"}});
+        local.append("kid", "receipt", start, None).unwrap();
+        let turn = |local: &mut Local, id: &str, input: Value, error: Option<&str>, text: &str| {
+            if !text.is_empty() {
+                let reply = json!({"request_id":id,"text":text});
+                local.append("kid", "child_reply", reply, None).unwrap();
+            }
+            let command = if id.starts_with("auto") {
+                "auto"
+            } else {
+                "prompt"
+            };
+            let state = if error.is_some() {
+                "failed"
+            } else {
+                "completed"
+            };
+            let receipt = json!({"request_id":id,"command":command,"state":state,"input":input,"error":error});
+            local.append("kid", "receipt", receipt, None).unwrap();
+        };
+        let ended = |at: u64, replied: bool| json!({"report":true,"ended":at,"replied":replied});
+        let failed = json!({"report":true,"ended":2});
+        turn(&mut local, "p1", json!({"ended":1}), None, "");
+        turn(&mut local, "auto_old", json!({}), None, "old news");
+        turn(&mut local, "auto_failed", failed, Some("boom"), "");
+        turn(
+            &mut local,
+            "auto_check",
+            ended(3, true),
+            None,
+            "still running",
+        );
+        turn(
+            &mut local,
+            "auto_final",
+            ended(4, true),
+            None,
+            "Final report",
+        );
+        // An empty wake after it reports nothing, but the child isn't quiet until it ended.
+        turn(&mut local, "auto_empty", ended(5, false), None, "");
+        let mut sent = vec![];
+        let mut send = |local: &mut Local, now: u64| {
+            while let Some((_, turn, body)) = next_report(local, now) {
+                sent.push((
+                    turn.clone(),
+                    body["reply"].as_str().unwrap_or_default().to_owned(),
+                ));
+                let done = json!({"request_id":turn});
+                local.append("kid", "parent_report", done, None).unwrap();
+            }
+        };
+        let quiet = 5 + super::super::children::QUIET_MS;
+        send(&mut local, quiet - 1);
+        let waiting = owed(&local.sessions["kid"]).count();
+        assert_eq!(waiting, 1, "only the newest self-started turn waits");
+        send(&mut local, quiet);
+        turn(
+            &mut local,
+            "auto_later",
+            ended(6, true),
+            None,
+            "Done at last",
+        );
+        for n in 0..8 {
+            let reply = json!({"request_id":format!("other{n}"),"text":"x"});
+            local.append("kid", "child_reply", reply, None).unwrap();
+        }
+        for _ in 0..2 {
+            drop(local);
+            local = Local::open(&dir).unwrap();
+            send(&mut local, u64::MAX);
+        }
+        // A held one is moot once a newer prompt's answer ends: the parent hears only the answer.
+        turn(
+            &mut local,
+            "auto_moot",
+            ended(7, true),
+            None,
+            "still running",
+        );
+        let p2 = json!({"request_id":"p2","command":"prompt","state":"accepted","input":{}});
+        local.append("kid", "receipt", p2, None).unwrap();
+        local.finish_receipt("kid", "p2", "completed").unwrap();
+        send(&mut local, u64::MAX);
+        let sent: Vec<_> = sent.iter().map(|(t, r)| (t.as_str(), r.as_str())).collect();
+        let expected = [
+            ("p1", ""),
+            ("auto_failed", ""),
+            ("auto_final", "Final report"),
+            ("auto_later", ""),
+            ("p2", ""),
+        ];
+        assert_eq!(sent, expected);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

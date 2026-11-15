@@ -207,11 +207,21 @@ it("skips npm's claude.cmd when it runs the unfinished Claude stub (#1148)", () 
   ).toBe(join(native, "claude.exe"));
 });
 
-it("finds Grok in %USERPROFILE%\\.grok\\bin when it is not on PATH (#1256)", () => {
+it("finds Grok (#1256) and Cursor's .cmd shim (#1709) in their own folders off PATH", () => {
   const home = dir({});
   mkdirSync(join(home, ".grok", "bin"), { recursive: true });
   writeFileSync(join(home, ".grok", "bin", "grok.exe"), "", { mode: 0o755 });
   expect(
     findCliExecutable("grok", { PATH: "", USERPROFILE: home, PATHEXT: ".exe" }),
   ).toBe(join(home, ".grok", "bin", "grok.exe"));
+  const cursor = join(home, "Local App", "cursor-agent");
+  mkdirSync(cursor, { recursive: true });
+  writeFileSync(join(cursor, "cursor-agent.cmd"), "", { mode: 0o755 });
+  expect(
+    findCliExecutable("cursor-agent", {
+      PATH: "",
+      LOCALAPPDATA: join(home, "Local App"),
+      PATHEXT: ".exe;.cmd",
+    }),
+  ).toBe(join(cursor, "cursor-agent.cmd"));
 });

@@ -298,6 +298,8 @@ pub enum Event {
         request: String,
         status: String,
         error: Option<String>,
+        /// The turn's latest reply text as it ended, before a turn right after it can replace it (#217).
+        text: String,
     },
     Compacted {
         status: String,
@@ -371,6 +373,7 @@ impl Progress {
             request,
             status: status.into(),
             error,
+            text: self.last_text.clone(),
         })
     }
 }

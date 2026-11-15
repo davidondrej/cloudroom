@@ -82,6 +82,9 @@ describe("@cloudroom/templates", () => {
     // #1281: Cloud agents explain that a GH_TOKEN API key overrides the GitHub login.
     expect(cloud).toContain("a Cloud API key may be overriding the GitHub login.");
     expect(local).not.toContain("GH_TOKEN");
+    // #936: blobless Cloud clones get one batch fetch before history-wide reads.
+    expect(cloud).toContain(String.raw`[ -z "$ids" ] || printf '%s\n' "$ids" | GIT_TERMINAL_PROMPT=0 timeout 900 git -c fetch.negotiationAlgorithm=noop fetch -q --no-tags --recurse-submodules=no --no-write-fetch-head origin --stdin`);
+    expect(local).not.toContain("negotiationAlgorithm");
   });
 
   it("offers Mac access and Local computer use only off Windows", () => {
@@ -152,14 +155,12 @@ describe("@cloudroom/templates", () => {
     const bare = renderTemplate("generateThreadPurpose", variables);
     const full = renderTemplate("generateThreadPurpose", {
       ...variables,
-      previousPurpose: "Fixing login (50% done)",
+      previousPurpose: "Goal: Fixing login.\nPercent: 50",
       agentReply: "Use $& and {{title}}.",
     });
 
-    expect(bare.slice(bare.indexOf("Update it when"))).toBe(
+    expect(bare.slice(bare.indexOf("Thread name:"))).toBe(
       [
-        "Update it when the user changed direction.",
-        "",
         "Thread name: Fix login",
         "",
         "The user's first message:",
@@ -169,12 +170,14 @@ describe("@cloudroom/templates", () => {
         "- Login fails",
       ].join("\n"),
     );
-    expect(full.slice(full.indexOf("Update it when"))).toBe(
+    expect(full.slice(full.indexOf("Previous note:"))).toBe(
       [
-        "Update it when the user changed direction.",
-        "",
-        "Previous note (reuse its wording if the goal and state did not change):",
-        "Fixing login (50% done)",
+        "Previous note:",
+        "Goal: Fixing login.",
+        "Percent: 50",
+        "Keep the goal word for word.",
+        "Change it only when the user changed the main goal, or to the past tense once it is reached.",
+        "If the latest reply brought nothing new, keep the state word for word too.",
         "",
         "Thread name: Fix login",
         "",

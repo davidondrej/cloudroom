@@ -996,6 +996,8 @@ export class SandboxDirectory {
     this.warmed = null;
     this.copiedAt = 0;
     this.pulledAt = 0;
+    this.githubAt = 0;
+    this.githubRun = null;
     cloudClaude = null;
     this.configAt = 0;
     this.configDigest = "";
@@ -1084,9 +1086,9 @@ export class SandboxDirectory {
     if (known && (known.ok || Date.now() - known.at < 3_600_000)) return known.ok;
     if (Date.now() - this.threadsFailed < 60_000) return null;
     return this.threadsAsking ??= this.threads(`${new Date().toISOString()}~`).then(() => true, (error: unknown) => {
-      // A blip: no answer, a timeout, a busy or failing website, or a sign-in that just ended (the next one asks again).
-      // Any other answer means it doesn't list threads.
-      if (error instanceof CloudroomError && (error.status === null || error.status >= 500 || [408, 429].includes(error.status) || error.code === SIGNED_OUT)) {
+      // Only a website before #237 says no: it refuses the unknown `since` with a 400. Anything else is a blip asked again
+      // in a minute (#1655): no answer, a timeout, a busy website, an unreadable body, a proxy's page, a sign-in that ended.
+      if (!(error instanceof CloudroomError && error.status === 400)) {
         this.threadsFailed = Date.now();
         return null;
       }
@@ -1304,6 +1306,25 @@ export class SandboxDirectory {
     if (!force && Date.now() - this.copiedAt < RECHECK_MS) return Promise.resolve();
     this.copiedAt = Date.now();
     return this.withLogins(() => this.uploadMacLogins());
+  }
+
+  private githubAt = 0;
+  private githubRun: Promise<void> | null = null;
+  /** With "Auth my agents" off, GitHub still follows its own card in Settings, so a clone's login survives sleep (#1628).
+   *  It only fills a gap: a GitHub login Cloud holds, maybe another computer's or account's, is never replaced.
+   *  At most once a minute, and callers meanwhile wait for the running copy; Disconnect or another account skips it. */
+  copyMacGithubLogin(): Promise<void> {
+    if (this.githubRun) return this.githubRun;
+    if (Date.now() - this.githubAt < RECHECK_MS) return Promise.resolve();
+    this.githubAt = Date.now();
+    const run = this.githubRun = this.withLogins(async () => {
+      // Bound to the account it started under: a switch during the status check must not fill the new account's login.
+      const account = await this.account();
+      const token = account && !(await this.skipLogins()).has("github") ? await macGithubToken() : "";
+      // Once this app saved it, Cloud holds a login, so no status check is needed.
+      if (account && token && !this.uploaded.has("github") && !(await this.logins()).github) await this.putLogin("github", await sandboxGithubLogin(token), { account, signal: new AbortController().signal });
+    }).finally(() => { if (this.githubRun === run) this.githubRun = null; });
+    return run;
   }
 
   /** Sends this Mac's Codex login again, even unchanged: Cloud's copy may have died while this one still works.

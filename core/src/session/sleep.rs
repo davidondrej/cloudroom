@@ -271,6 +271,11 @@ impl Manager {
         if local.agent_counts().background > 0 {
             return json!({"drained":false,"reason":"background_jobs"});
         }
+        // Otherwise free to sleep: a report held until its child is quiet (#217) goes now; the API waits for it and
+        // drains again in the same call (`held_out`).
+        if super::children::flush_held(&local) {
+            return json!({"drained":false,"reason":"report_held"});
+        }
         local.draining = true;
         // The sandbox stops next, so its next start replays almost nothing.
         local.save_snapshot();
@@ -291,6 +296,17 @@ impl Manager {
             "pending_records": local.journal.last() - local.journal.saved(),
             "work": {"prompts": prompts, "failed": failed},
         })
+    }
+
+    /// Waits up to `wait` until the reports a drain sent instead of holding them (#217) are out.
+    pub async fn held_out(&self, wait: Duration) {
+        let mut changed = self.local.lock().unwrap().changed.subscribe();
+        let pending = || {
+            let local = self.local.lock().unwrap();
+            super::relay::report_pending(&local) || super::children::unqueued(&local)
+        };
+        let out = async { while pending() && changed.changed().await.is_ok() {} };
+        let _ = tokio::time::timeout(wait, out).await;
     }
 
     pub fn start_idle_sleeper(self: &Arc<Self>) {

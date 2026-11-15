@@ -40,6 +40,7 @@ import {
   getCachedThreadLists,
   iterateThreadListCacheEntries,
   restoreCachedThreadLists,
+  restoreThreadInCachedLists,
   type CachedThreadListSnapshot,
 } from "./thread-list-cache-data";
 import {
@@ -686,6 +687,35 @@ export function beginUnarchiveThreadTransaction({
     queryClient,
     threadId,
   });
+}
+
+/**
+ * A failed restore puts back only its own thread. The shared rollback restores
+ * every list as it was at click time, so the later of two failed restores
+ * removed the row the earlier one had just brought back. The sidebar never
+ * listed the archived thread, so nothing there changes.
+ */
+export function rollbackUnarchiveThreadTransaction({
+  queryClient,
+  threadId,
+  transaction,
+}: RollbackThreadListMutationTransactionArgs): void {
+  if (!transaction) {
+    return;
+  }
+  const previousThread = transaction.previousThread;
+  if (previousThread) {
+    queryClient.setQueryData<ThreadWithRuntime>(
+      threadQueryKey(threadId),
+      (thread) =>
+        thread && { ...thread, archivedAt: previousThread.archivedAt },
+    );
+  }
+  restoreThreadInCachedLists(
+    queryClient,
+    transaction.previousThreadLists,
+    threadId,
+  );
 }
 
 async function beginArchiveMatchingThreadsTransaction({

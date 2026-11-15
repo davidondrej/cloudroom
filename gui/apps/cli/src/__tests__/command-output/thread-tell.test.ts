@@ -136,6 +136,19 @@ describe("room-cli thread tell command output", () => {
         }),
       "Error: Cloudroom did not confirm the message, so it may already have been sent (HTTP 504: cloudroom: timed out waiting for the tunnel client).",
     ],
+    [
+      "may already have been sent after a server error, with its error ID (#1341)",
+      async () =>
+        new Response(
+          JSON.stringify({
+            code: "internal_error",
+            message: "Internal server error",
+            errorId: "ab12cd34",
+          }),
+          { status: 500 },
+        ),
+      "Error: Cloudroom did not confirm the message, so it may already have been sent (HTTP 500: Internal server error, error ID ab12cd34). Check `room-cli thread log thread-x`",
+    ],
   ])(
     "room-cli thread tell says a failed message %s",
     async (_, post, error) => {
@@ -177,6 +190,34 @@ describe("room-cli thread tell command output", () => {
     ).toMatchObject({ ok: false, unconfirmed: true, requestId });
     expect(String(vi.mocked(console.error).mock.calls[0]?.[0])).toContain(
       `--request-id ${requestId}`,
+    );
+  });
+
+  it("room-cli thread tell --json names the archived thread that refused it (#1276)", async () => {
+    const details = {
+      reason: "archived",
+      archivedAt: 1,
+      threadStatus: "idle",
+      threadId: "thread-x",
+    };
+    const message =
+      "Thread thread-x is archived (since 1970-01-01T00:00:00.001Z). Check the thread ID, or unarchive it first.";
+    stubTellApi({
+      "v1.threads.:id.send.$post": async () =>
+        new Response(
+          JSON.stringify({ code: "thread_not_writable", message, details }),
+          { status: 409 },
+        ),
+    });
+
+    await expect(
+      runCommand(["thread", "tell", "thread-x", "hi", "--json"], register),
+    ).rejects.toThrow("process.exit:1");
+    expect(
+      JSON.parse(String(vi.mocked(console.log).mock.calls[0]?.[0])),
+    ).toMatchObject({ ok: false, threadId: "thread-x", details });
+    expect(String(vi.mocked(console.error).mock.calls[0]?.[0])).toContain(
+      `HTTP 409: ${message}`,
     );
   });
 

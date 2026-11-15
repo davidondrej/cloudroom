@@ -23,4 +23,6 @@ export interface ThreadListFilters {
 export interface ThreadSearchFilters {
   query: string;
   limitPerGroup?: number;
+  projectId?: string;
+  hasParent?: boolean;
 }

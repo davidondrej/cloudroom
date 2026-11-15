@@ -44,20 +44,20 @@ The sidebar usage box's account chip switches accounts. Plugin RPCs:
 `accounts.list`, `accounts.use`, `accounts.move`, `accounts.remove`,
 `accounts.rename`.
 
-The builtin Keep Awake plugin prevents macOS idle sleep while Cloudroom is running.
-Its settings page lets you target all hosts or selected hosts. The CLI
-equivalents are:
+The builtin Keep Awake plugin prevents idle sleep. Its level is `off`, `working`
+(default: while a Local thread runs, plus 10 minutes), or `always` (screen on too,
+while Cloudroom runs). Its settings page also targets all hosts or selected hosts.
+The CLI equivalents are:
 
 ```
 room-cli keep-awake status [--json]
-room-cli keep-awake enable [--json]
-room-cli keep-awake disable [--json]
+room-cli keep-awake level <off|working|always> [--json]
 room-cli keep-awake hosts all
 room-cli keep-awake hosts <host-id>...
 ```
 
 It reconciles when the plugin starts, a host connects, its configuration
-changes, or a worker exits unexpectedly. Disabling the plugin disposes its host
+changes, a thread starts or stops, or a worker exits unexpectedly. Disabling the plugin disposes its host
 workers and their child processes.
 
 The builtin Provider retry plugin is enabled on fresh installations. It retries

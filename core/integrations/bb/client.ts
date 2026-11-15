@@ -330,6 +330,9 @@ export const UPLOAD_PART = 4 * 1024 * 1024;
 const VM_RUN_TIMEOUT = 5 * 60_000;
 
 export class CloudroomClient {
+  /** This Mac's helper device, sent with commands to Cores with `mac_device`: a sleeping Mac's pairing moves only to
+   *  the Mac using the thread (#608). */
+  macDevice?: string;
   #base: string;
   #token: string;
   #gateToken?: string;
@@ -433,8 +436,9 @@ export class CloudroomClient {
     return { code, stdout, stderr, truncated: truncated === true } as VmRunResult;
   }
 
-  async reportMac(report: { access: string; problem: string | null; unsupported?: boolean }): Promise<void> {
-    await this.#json("/v1/mac/helper", report);
+  /** True when an agent there couldn't reach this Mac, so the app should check its connection now (#608). */
+  async reportMac(report: { access: string; problem: string | null; unsupported?: boolean }): Promise<boolean> {
+    return (await this.#json("/v1/mac/helper", report)).check === true;
   }
 
   /** Every request's headers. Core never compresses, so they ask for no encoding (see `uncompressed`). */
@@ -453,6 +457,7 @@ export class CloudroomClient {
     body?: Json,
     signal?: AbortSignal,
     upload?: Upload,
+    headers: Record<string, string> = {},
   ): Promise<Response> {
     let response: Response;
     try {
@@ -465,6 +470,7 @@ export class CloudroomClient {
             : "application/json",
           ...(body === undefined ? {} : { "Content-Type": "application/json" }),
           ...(upload ? { "Content-Type": upload.contentType ?? "application/gzip", "Content-Length": String(upload.length) } : {}),
+          ...headers,
         },
         ...(upload ? { body: upload.body, duplex: "half" } : body === undefined ? {} : { body: JSON.stringify(body) }),
         redirect: "error",
@@ -505,6 +511,7 @@ export class CloudroomClient {
     signal?: AbortSignal,
     upload?: Upload,
     timeoutMs = this.#timeoutMs,
+    headers: Record<string, string> = {},
   ): Promise<Record<string, unknown>> {
     const timeout = AbortSignal.timeout(timeoutMs);
     const response = await this.#request(
@@ -512,6 +519,7 @@ export class CloudroomClient {
       body,
       signal ? AbortSignal.any([signal, timeout]) : timeout,
       upload,
+      headers,
     );
     if ((body !== undefined || upload) && response.status !== 202) {
       await response.body?.cancel();
@@ -546,7 +554,7 @@ export class CloudroomClient {
     sessionId?: string,
   ): Promise<Acceptance> {
     requestId(body.request_id);
-    const value = await this.#json(path, body);
+    const value = await this.#json(path, body, undefined, undefined, undefined, this.macDevice ? { "X-Cloudroom-Mac-Device": this.macDevice } : {});
     const accepted = {
       session_id: text(value.session_id),
       receipt: receipt(value.receipt),

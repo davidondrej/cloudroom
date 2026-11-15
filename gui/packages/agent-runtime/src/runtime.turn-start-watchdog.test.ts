@@ -135,4 +135,43 @@ describe("turn-start watchdog", () => {
       ),
     ).toBe(false);
   });
+
+  it.each([
+    { prompt: "hold_turn", warnings: 1 },
+    { prompt: "bg_task hold_turn", warnings: 0 },
+  ])("warns once when an open turn goes silent: $prompt", async (row) => {
+    const events: ThreadEvent[] = [];
+    runtime = createScriptedEchoRuntime({
+      runtime: {
+        workspacePath: tmpDir,
+        onEvent: (event) => events.push(event),
+        turnStartWatchdog: { intervalMs: 25 },
+        turnSilenceWatchdog: { thresholdMs: 100 },
+      },
+    });
+    await runtime.startThread({
+      environmentId: "env-1",
+      threadId: "t1",
+      projectId: "p1",
+      providerId: "fake",
+      options: fullRuntimeOptions,
+    });
+    await runtime.runTurn({
+      clientRequestId: "creq_222222222y",
+      threadId: "t1",
+      input: [promptTextInput({ text: row.prompt })],
+      options: fullRuntimeOptions,
+    });
+
+    await wait(400);
+    expect(
+      events.filter(
+        (event) =>
+          event.type === "system/error" &&
+          event.code === "provider_turn_silent",
+      ),
+    ).toHaveLength(row.warnings);
+    // The warning never ends the turn: a slow provider may still answer.
+    expect(runtime.getActiveTurnId("t1")).not.toBeNull();
+  });
 });

@@ -23,7 +23,13 @@ branch. Under the hood it's `git worktree add` plus some bookkeeping:
 - It gets its own branch so multiple threads can run in parallel.
 - It lives at
   `<BB_DATA_DIR>/plugins/environment-git-worktree/host-data/worktrees/<thread-id>/<repo-name>`
-  — for example, `~/.bb/plugins/environment-git-worktree/host-data/worktrees/thr_abc.../myrepo`.
+  — for example, `~/.gui-cloudroom/plugins/environment-git-worktree/host-data/worktrees/thr_abc.../myrepo`.
+  That path sits under a hidden (dot) folder. Tools that skip any path with a
+  dot folder in it can pass while checking nothing: `svelte-check` before
+  4.7.0 skips every `.svelte` file there without a `tsconfig.json` or
+  `jsconfig.json`, or with `--no-tsconfig`, `--incremental`, or `--tsgo`.
+  Upgrade to `svelte-check` 4.7.0 or later
+  ([upstream fix](https://github.com/sveltejs/language-tools/issues/3034)).
 - Once every thread using it is archived, Cloudroom saves its work to its
   branch and removes the folder. Unarchiving a thread or sending it a message
   brings the folder back at the same path. See Cleanup.

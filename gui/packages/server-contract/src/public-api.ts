@@ -104,6 +104,7 @@ import type {
   ThreadArchiveAllQuery,
   ThreadStopQuery,
   ThreadUnarchiveQuery,
+  ThreadUnarchiveResponse,
   EnvironmentActionApiError,
   EnvironmentActionRequest,
   EnvironmentActionResponse,
@@ -1496,7 +1497,7 @@ export const publicApiRoutes = {
       request: optionalQueryRequest<PathId, ThreadUnarchiveQuery>(
         threadUnarchiveQuerySchema,
       ),
-      response: jsonResponse<{ ok: true }>(),
+      response: jsonResponse<ThreadUnarchiveResponse>(),
     }),
     read: defineRoute({
       path: "/threads/:id/read",

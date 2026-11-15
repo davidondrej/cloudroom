@@ -5,6 +5,7 @@ import { randomUUID } from "node:crypto";
 import {
   createTerminalSession,
   getHost,
+  getSessionById,
   getTerminalSession,
   listTerminalSessions,
   updateTerminalSession,
@@ -729,6 +730,34 @@ export class TerminalSessionLifecycle {
       start,
     };
 
+    const silentS = await this.waitForSilentDaemon(daemonSession.id);
+    if (silentS !== null) {
+      const exited = updateTerminalById(this.options.db, startingSession.id, {
+        closeReason: "daemon-disconnect",
+        exitCode: null,
+        kind: "exit",
+      });
+      if (exited) {
+        this.notifyTerminalSessionChanged(exited);
+      }
+      throw new ApiError(
+        502,
+        "host_disconnected",
+        `${this.hostName(launchTarget.hostId)} has sent nothing for ${silentS} s, so its connection is stale. No terminal was opened. Check that it is awake and online, then try again.`,
+      );
+    }
+    // Closed while waiting, for example by a thread archive: never send it.
+    const current = getTerminalSession(this.options.db, {
+      kind: "terminal",
+      terminalId: startingSession.id,
+    });
+    if (!current || current.status === "exited") {
+      throw new ApiError(
+        409,
+        "terminal_open_cancelled",
+        "Terminal session was cancelled before it opened",
+      );
+    }
     const pendingOpenKey = terminalRpcKey(
       daemonSession.id,
       startingSession.id,
@@ -863,6 +892,32 @@ export class TerminalSessionLifecycle {
         );
       }
       throw error;
+    }
+  }
+
+  // Every daemon message renews its lease, and the daemon drops a socket after
+  // the same silence. An open sent past it waits out its timeout with its
+  // delivery unknown, so wait up to that timeout for the daemon to speak.
+  // Returns the silence in seconds if it never does (#1631).
+  private async waitForSilentDaemon(
+    daemonSessionId: string,
+  ): Promise<number | null> {
+    const deadline =
+      Date.now() +
+      (this.options.openTimeoutMs ?? DEFAULT_TERMINAL_OPEN_TIMEOUT_MS);
+    for (;;) {
+      const session = getSessionById(this.options.db, {
+        sessionId: daemonSessionId,
+      });
+      if (session?.status !== "active" || session.leaseExpiresAt > Date.now()) {
+        return null;
+      }
+      if (Date.now() >= deadline) {
+        return Math.round(
+          (Date.now() - session.leaseExpiresAt + session.leaseTimeoutMs) / 1000,
+        );
+      }
+      await new Promise((resolve) => setTimeout(resolve, 250));
     }
   }
 

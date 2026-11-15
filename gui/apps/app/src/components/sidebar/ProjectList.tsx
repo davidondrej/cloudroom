@@ -1598,7 +1598,7 @@ function ProjectListComponent({
         sectionId={sectionId}
         onNewThread={
           sectionId === "pinned"
-            ? openRootCompose
+            ? () => openRootCompose("pinned")
             : handleCreateProjectlessThread
         }
         open={openSidebarMenu === menuId}

@@ -1843,6 +1843,22 @@ describe("acp bridge", () => {
     expect(notifications("session/replaced")).toHaveLength(1);
   });
 
+  const lostSession = {
+    code: -32603,
+    message: "Internal error",
+    data: { details: "Session not found" },
+  };
+  // The ACP SDK's RequestError.sessionNotFound, used by Claude ACP.
+  const sdkSessionNotFound = {
+    code: -32002,
+    message: "Resource not found",
+    data: { sessionId: "{session}" },
+  };
+  const missingFile = {
+    code: -32002,
+    message: "Resource not found",
+    data: { details: "/tmp/{session}/notes.md" },
+  };
   it.each([
     {
       stop: undefined,
@@ -1858,9 +1874,49 @@ describe("acp bridge", () => {
       sent: ["one", "two"],
       launches: 1,
     },
+    // A live agent that lost the session reloads it, else starts fresh (#889).
+    {
+      failLoad: false,
+      error: lostSession,
+      sent: ["one", "two", "three"],
+      launches: 2,
+    },
+    {
+      failLoad: true,
+      error: lostSession,
+      sent: ["one", "two", "three"],
+      launches: 2,
+    },
+    {
+      failLoad: false,
+      error: sdkSessionNotFound,
+      sent: ["one", "two", "three"],
+      launches: 2,
+    },
+    {
+      stop: "thread/stop",
+      error: lostSession,
+      sent: ["one", "two"],
+      launches: 1,
+    },
+    {
+      stop: "thread/stopRequested",
+      error: lostSession,
+      sent: ["one", "two"],
+      launches: 1,
+    },
+    // A missing file (-32002) is not a lost session, even in a folder named
+    // after the session: the session is kept.
+    {
+      failLoad: false,
+      error: missingFile,
+      sent: ["one", "two", "three"],
+      launches: 1,
+    },
   ])(
-    "recovers a closed provider stream only by reloading it (#890): %o",
-    async ({ stop, failLoad, sent, launches }) => {
+    "restarts an agent whose stream closed (#890) or session was lost (#889): %o",
+    async ({ stop, failLoad, error, sent, launches }) => {
+      const kept = error === missingFile;
       const promptLog = join(workspaceDir, "prompts.log");
       const launchLog = join(workspaceDir, "launches.log");
       const { bbThreadId, providerThreadId } = await startThread({
@@ -1868,6 +1924,9 @@ describe("acp bridge", () => {
           FAKE_ACP_LOAD_SESSION: "1",
           ...(failLoad ? { FAKE_ACP_FAIL_LOAD: "1" } : {}),
           FAKE_ACP_CLOSED_STREAM_FILE: join(workspaceDir, "closed-stream"),
+          ...(error
+            ? { FAKE_ACP_CLOSED_STREAM_ERROR: JSON.stringify(error) }
+            : {}),
           FAKE_ACP_PROMPT_LOG: promptLog,
           FAKE_ACP_LAUNCH_LOG: launchLog,
         },
@@ -1882,9 +1941,9 @@ describe("acp bridge", () => {
       }
       expect(notifications("error").map((m) => m.params)).toEqual([
         expect.objectContaining({
-          message: expect.stringContaining(
-            "WritableIterable is closed. The agent lost",
-          ),
+          message: kept
+            ? `Resource not found: /tmp/${providerThreadId}/notes.md`
+            : expect.stringContaining(". The agent lost"),
         }),
       ]);
 
@@ -1909,15 +1968,20 @@ describe("acp bridge", () => {
       if (sent.length === 3) {
         expect(response.error).toBeUndefined();
         await waitFor(() => threadEventsOfType("turn/completed")[2], "three");
-        expect(agentMessageTexts()).toEqual(["echo:one", "echo:three"]);
+        expect(agentMessageTexts()).toEqual(
+          kept ? ["echo:one"] : ["echo:one", "echo:three"],
+        );
+        expect(notifications("session/replaced").map((m) => m.params)).toEqual(
+          kept ? [] : [expect.objectContaining({ contextLost: failLoad })],
+        );
       } else {
         expect(response.error?.message).toContain("message was not sent");
-      }
-      if (failLoad) {
-        // Still marked: the retry reloads again rather than starting fresh.
-        expect((await waitForResponse(send("three"))).error?.message).toContain(
-          "not sent",
-        );
+        if (failLoad) {
+          // Still marked: the retry reloads again rather than starting fresh.
+          expect(
+            (await waitForResponse(send("three"))).error?.message,
+          ).toContain("not sent");
+        }
       }
       expect(readFileSync(promptLog, "utf8").trim().split("\n")).toEqual(
         sent.map((t) => JSON.stringify(t)),

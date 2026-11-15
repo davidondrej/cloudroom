@@ -462,7 +462,11 @@ const DefaultNewThreadComposer = memo(function DefaultNewThreadComposer({
               <ProjectSelector
                 projects={project.projects}
                 value={project.value}
-                onChange={project.onChange}
+                onChange={(projectId) => {
+                  // A project picked by hand is on purpose, so the wrong-project hint stays off for this prompt.
+                  nudge.dismiss();
+                  project.onChange(projectId);
+                }}
                 allowNoProject={project.allowNoProject ?? false}
                 createProject={project.createProject}
                 disabled={project.disabled}

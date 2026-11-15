@@ -43,6 +43,17 @@ export async function acceptThreadSendRequest(
       },
     };
   }
+  // An archived target refuses it below; log both IDs so the next report can be traced (#1276).
+  if (args.thread.archivedAt !== null && args.payload.senderThreadId) {
+    deps.logger.warn(
+      {
+        threadId: args.thread.id,
+        senderThreadId: args.payload.senderThreadId,
+        archivedAt: args.thread.archivedAt,
+      },
+      "Agent message sent to an archived thread",
+    );
+  }
   if (isCloudThread(args.thread)) {
     const sentAt = Date.now();
     const response = await cloudroom(deps).send(args.thread, args.payload);

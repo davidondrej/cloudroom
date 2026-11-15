@@ -77,7 +77,7 @@ import {
   toThreadListEntryResponses,
   toThreadResponseFromThread,
 } from "../../services/threads/thread-runtime-display.js";
-import { archiveThreadAndChildren } from "../../services/threads/thread-archive.js";
+import { archiveThreadAndChildren, listThreadsArchivedWith } from "../../services/threads/thread-archive.js";
 import { unarchiveThreadKeepingOpenParent } from "../../services/threads/thread-ownership.js";
 import { cloudroom, isCloudThread } from "../../services/cloudroom/commands.js";
 import { teleports } from "../../services/cloudroom/teleport.js";
@@ -614,8 +614,11 @@ export function registerThreadActionRoutes(app: Hono, deps: AppDeps): void {
     return context.json({ ok: true, ...result });
   });
 
-  post(routes.unarchive, (context, query) => {
-    const thread = requirePublicThread(deps.db, context.req.param("id"));
+  /** One thread's restore, with everything that follows it. */
+  function unarchiveWithEffects(
+    thread: ReturnType<typeof requirePublicThread>,
+    keepParent: boolean,
+  ): void {
     // A worktree mid-removal would be deleted under the restored thread.
     if (
       !isCloudThread(thread) &&
@@ -632,7 +635,7 @@ export function registerThreadActionRoutes(app: Hono, deps: AppDeps): void {
     const unarchivedThread = unarchiveThreadKeepingOpenParent(
       deps,
       thread.id,
-      query.keepParent === "true",
+      keepParent,
     );
     if (unarchivedThread !== null) {
       if (isCloudThread(unarchivedThread)) void cloudroom(deps).restore(unarchivedThread.id).catch((error: unknown) => deps.logger.warn({ threadId: unarchivedThread.id, error: error instanceof Error ? error.message : String(error) }, "The thread's sandbox could not be restored"));
@@ -652,7 +655,24 @@ export function registerThreadActionRoutes(app: Hono, deps: AppDeps): void {
         thread,
       });
     }
-    return context.json({ ok: true });
+  }
+
+  post(routes.unarchive, (context, query) => {
+    const thread = requirePublicThread(deps.db, context.req.param("id"));
+    const archivedWith =
+      query.withChildren === "true" ? listThreadsArchivedWith(deps, thread) : [];
+    unarchiveWithEffects(thread, query.keepParent === "true");
+    const unarchivedThreadIds = [thread.id];
+    for (const child of archivedWith) {
+      // Its parent is open again, so it stays under it. One that can't come back never fails the others.
+      try {
+        unarchiveWithEffects(child, true);
+        unarchivedThreadIds.push(child.id);
+      } catch (error) {
+        deps.logger.warn({ threadId: child.id, error: error instanceof Error ? error.message : String(error) }, "A thread archived with its parent could not be restored");
+      }
+    }
+    return context.json({ ok: true, unarchivedThreadIds });
   });
 
   post(routes.read, (context) => {

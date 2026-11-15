@@ -185,6 +185,14 @@ export function remapDaemonFileRouteError(error: unknown): never {
       error.body.retryable,
     );
   }
+  if (error.body.code === "permission_denied") {
+    throw new ApiError(
+      403,
+      error.body.code,
+      error.body.message,
+      error.body.retryable,
+    );
+  }
   if (error.body.code === "file_too_large") {
     throw new ApiError(
       413,

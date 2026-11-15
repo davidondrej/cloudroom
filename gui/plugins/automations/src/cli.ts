@@ -351,21 +351,38 @@ function parseScriptEnv(
   return parsed.data;
 }
 
-async function resolveConnectedHostId(
+// A path or new worktree lives on one machine: --host, else the calling thread's, else the only connected one.
+// Never the host list's first entry, which bound a path to the wrong machine (#1757).
+async function resolveEnvironmentHostId(
   room: Pick<BbPluginApi, "sdk">,
+  ctx: Pick<PluginCliContext, "threadId">,
+  override: string | undefined,
 ): Promise<string> {
+  const hostId =
+    override !== undefined
+      ? await resolveScriptFileHostId(room, ctx, override)
+      : ctx.threadId !== undefined
+        ? await threadHostId(room, ctx.threadId)
+        : undefined;
+  if (hostId !== undefined) return hostId;
   const hosts = hostListSchema.parse(await room.sdk.hosts.list());
-  const host =
-    hosts.find((candidate) => candidate.connected === true) ??
-    hosts.find((candidate) => candidate.status === "connected") ??
-    hosts[0];
-  if (!host?.id) throw new Error("No connected host is available.");
-  return host.id;
+  const connected = hosts.filter(
+    (host) => host.connected === true || host.status === "connected",
+  );
+  const candidates = connected.length > 0 ? connected : hosts;
+  if (candidates.length > 1) {
+    throw new Error(
+      "More than one machine is connected, so pick the loop's: run this from a thread on it or pass --host <name-or-id>.",
+    );
+  }
+  if (!candidates[0]?.id) throw new Error("No connected host is available.");
+  return candidates[0].id;
 }
 
 async function buildAgentEnvironment(
   room: Pick<BbPluginApi, "sdk">,
   args: ParsedArgs,
+  ctx: Pick<PluginCliContext, "threadId">,
 ): Promise<AgentEnvironment> {
   const environment = flag(args, "environment")?.trim();
   const newEnvironment = flag(args, "new-environment")?.trim();
@@ -381,7 +398,7 @@ async function buildAgentEnvironment(
     }
     return {
       type: "host",
-      hostId: await resolveConnectedHostId(room),
+      hostId: await resolveEnvironmentHostId(room, ctx, flag(args, "host")),
       workspace: {
         type: "managed-worktree",
         baseBranch: baseBranch
@@ -394,7 +411,7 @@ async function buildAgentEnvironment(
   if (looksLikePath(environment)) {
     return {
       type: "host",
-      hostId: await resolveConnectedHostId(room),
+      hostId: await resolveEnvironmentHostId(room, ctx, flag(args, "host")),
       workspace: { type: "unmanaged", path: environment },
     };
   }
@@ -441,18 +458,23 @@ async function resolveScriptFileHostId(
     );
   }
   if (ctx.threadId === undefined) return undefined;
-  const thread = threadEnvironmentHostSchema.parse(
-    await room.sdk.threads.get({
-      threadId: ctx.threadId,
-      include: "environment",
-    }),
-  );
-  if (!thread.environment) {
+  const hostId = await threadHostId(room, ctx.threadId);
+  if (hostId === undefined) {
     throw new Error(
       `Thread ${ctx.threadId} has no environment, so the --script-file host cannot be resolved; pass --host <name-or-id>.`,
     );
   }
-  return thread.environment.hostId;
+  return hostId;
+}
+
+async function threadHostId(
+  room: Pick<BbPluginApi, "sdk">,
+  threadId: string,
+): Promise<string | undefined> {
+  const thread = threadEnvironmentHostSchema.parse(
+    await room.sdk.threads.get({ threadId, include: "environment" }),
+  );
+  return thread.environment?.hostId;
 }
 
 // Agents copy the short Claude ID from their system prompt (claude-opus-5-5),
@@ -514,10 +536,14 @@ async function readCliTextFile(
     path = resolve(ctx.cwd, file);
   }
   const hostId = await resolveScriptFileHostId(room, ctx, hostOverride);
-  const read = await room.sdk.files.read({
-    ...(hostId !== undefined ? { hostId } : {}),
-    path,
-  });
+  // Every caller reads before it writes, so a failed or timed-out read never saved anything (#1653).
+  const read = await room.sdk.files
+    .read({ ...(hostId !== undefined ? { hostId } : {}), path })
+    .catch((error: unknown) => {
+      throw new Error(
+        `Could not read ${flagName} on ${hostId === undefined ? "this Cloudroom's machine" : `host ${hostId}`}, so nothing was saved and a retry is safe: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    });
   if (read.contentEncoding !== "utf8") {
     throw new Error(`${flagName} is not UTF-8 text: ${path}`);
   }
@@ -590,7 +616,7 @@ async function buildExecution(
       );
     }
     validateAgentTargetOptions(args);
-    const environment = await buildAgentEnvironment(room, args);
+    const environment = await buildAgentEnvironment(room, args, ctx);
     const targetThreadId = flag(args, "target-thread");
     const reasoning = flag(args, "reasoning");
     const serviceTier = flag(args, "service-tier");
@@ -730,7 +756,7 @@ async function buildAgentExecutionUpdate(
   ) {
     update.target = {
       type: "environment",
-      environment: await buildAgentEnvironment(room, args),
+      environment: await buildAgentEnvironment(room, args, ctx),
     };
   }
   return update;
@@ -1027,6 +1053,7 @@ room-cli loop scan-progress --data JSON   Inside a Workflow scan: save its progr
 room-cli loop settings [--stop-at-limit on|off] [--fallback on|off]   Cloud loops wait while their agent is at its plan limit; loops at a Claude or Codex limit switch to the other (both on by default)
 
 --prompt-file <path> reads --prompt from a UTF-8 file on create and update. Use it for multiline prompts on Windows.
+A path --environment or --new-environment worktree runs on the calling thread's machine; --host <name-or-id> picks another.
 Priority is P1 (essential) to P4 (niche); loops start at P3, or at their template's.
 Cloud loops run on Cloudroom's servers, even while this Mac is off: every minute with a script, else at most every
 15 minutes. A --cron run starts a fresh Cloud thread in its own sandbox from that thread's project and agent;

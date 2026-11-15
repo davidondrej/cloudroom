@@ -33,6 +33,7 @@ import {
   rollbackReorderPinnedThreadTransaction,
   rollbackThreadListMutationTransaction,
   rollbackThreadReadStateTransaction,
+  rollbackUnarchiveThreadTransaction,
   type ThreadReadStateTransaction,
   settleArchiveThreadsTransaction,
   settleDeleteThreadTransaction,
@@ -381,16 +382,18 @@ export function useUnarchiveThread() {
     meta: {
       errorMessage: "Failed to unarchive thread.",
     },
-    mutationFn: async ({
+    mutationFn: ({
       id,
       keepParent,
-    }: ThreadMutationRequest & { keepParent?: boolean }) => {
-      await sdk.threads.unarchive({ threadId: id, keepParent });
-    },
+      withChildren,
+    }: ThreadMutationRequest & {
+      keepParent?: boolean;
+      withChildren?: boolean;
+    }) => sdk.threads.unarchive({ threadId: id, keepParent, withChildren }),
     onMutate: async ({ id }): Promise<ThreadListMutationTransaction> =>
       beginUnarchiveThreadTransaction({ queryClient, threadId: id }),
     onError: (_error, variables, context) => {
-      rollbackThreadListMutationTransaction({
+      rollbackUnarchiveThreadTransaction({
         queryClient,
         threadId: variables.id,
         transaction: context,

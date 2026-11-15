@@ -1,6 +1,20 @@
 import { createFakePluginHost } from "@get-bb/plugin-sdk/testing";
-import { describe, expect, it } from "vitest";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { Writable } from "node:stream";
+import { describe, expect, it, vi } from "vitest";
+import { assetFor } from "./driver.js";
+import { install } from "./host.js";
 import computerUsePlugin, { acceptFocusedWindow, decideGate } from "./server.js";
+
+const disk = vi.hoisted(() => ({ full: false }));
+vi.mock("node:fs", async (actual) => {
+  const fs = await actual<typeof import("node:fs")>();
+  const enospc = Object.assign(new Error("ENOSPC: no space left on device, write"), { code: "ENOSPC", syscall: "write" });
+  const full = () => new Writable({ write: (_chunk, _encoding, done) => done(enospc) });
+  return { ...fs, createWriteStream: ((...args) => (disk.full ? full() : fs.createWriteStream(...args))) as typeof fs.createWriteStream };
+});
 
 describe("decideGate", () => {
   it("asks about the app an action targets, and never lets input skip the question", () => {
@@ -141,4 +155,30 @@ it("tells the agent which browser route works when the driver wants an existing-
   await computerUsePlugin(fake.bb);
   const result = await fake.harness.runCli(["call", "get_browser_state", "{}"], { threadId: "thr_1" });
   expect(JSON.parse(result.stdout ?? "")).toEqual({ ...refusal, hint: expect.stringContaining("browser-harness") });
+});
+
+// #1242: GitHub's download sometimes answers 5xx; retry it, never skip the checksum.
+it.runIf(assetFor(process.platform, process.arch))("install retries GitHub's transient download failures", async () => {
+  const ok = () => new Response("not the driver");
+  const rows: [string, (() => Response)[], RegExp, number, boolean?][] = [
+    ["504 then 200", [() => new Response("", { status: 504 }), ok], /checksum/, 2],
+    ["network error then 200", [() => { throw new TypeError("fetch failed"); }, ok], /checksum/, 2],
+    ["persistent 504", Array(4).fill(() => new Response("", { status: 504 })), /HTTP 504\) after 4 tries.*GitHub/, 4],
+    ["404", [() => new Response("", { status: 404 })], /HTTP 404\)$/, 1],
+    ["disk full", [ok, ok], /^ENOSPC/, 1, true],
+  ];
+  const root = await mkdtemp(join(tmpdir(), "cua-install-"));
+  try {
+    for (const [name, replies, error, calls, full = false] of rows) {
+      disk.full = full;
+      const fetch = vi.fn(async () => replies[fetch.mock.calls.length - 1]!());
+      vi.stubGlobal("fetch", fetch);
+      await expect(install(join(root, "driver"), new AbortController().signal, [0, 0, 0]), name).rejects.toThrow(error);
+      expect(fetch, name).toHaveBeenCalledTimes(calls);
+    }
+  } finally {
+    disk.full = false;
+    vi.unstubAllGlobals();
+    await rm(root, { recursive: true, force: true });
+  }
 });

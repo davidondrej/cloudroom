@@ -4,7 +4,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   CommandDispatchError,
   type CommandOf,
@@ -217,6 +217,49 @@ describe("readHostFile (no ref — disk read)", () => {
     });
     expect(isExpectedCommandDispatchError(thrown)).toBe(true);
   });
+
+  it.each([
+    [
+      "darwin",
+      "EPERM",
+      "permission_denied",
+      "macOS blocked Cloudroom from reading this folder. Quit and reopen Cloudroom; if it keeps happening, check Cloudroom's access in System Settings > Privacy & Security.",
+    ],
+    ["linux", "EPERM", "permission_denied", "EPERM: denied"],
+    ["darwin", "EACCES", "permission_denied", "EACCES: denied"],
+    ["darwin", "EIO", "EIO", "EIO: denied"],
+  ])(
+    "maps a %s %s read failure to %s (#1127)",
+    async (platform, code, expectedCode, expectedMessage) => {
+      const dir = await makeTempDir("bb-host-files-denied-");
+      const platformDescriptor = Object.getOwnPropertyDescriptor(
+        process,
+        "platform",
+      )!;
+      Object.defineProperty(process, "platform", {
+        ...platformDescriptor,
+        value: platform,
+      });
+      const statSpy = vi
+        .spyOn(fs, "stat")
+        .mockRejectedValue(
+          Object.assign(new Error(`${code}: denied`), { code }),
+        );
+      try {
+        const thrown = await captureReadHostFileError({
+          type: "host.read_file",
+          path: path.join(dir, "notes.md"),
+        });
+        expect(thrown).toMatchObject({
+          code: expectedCode,
+          message: expectedMessage,
+        });
+      } finally {
+        statSpy.mockRestore();
+        Object.defineProperty(process, "platform", platformDescriptor);
+      }
+    },
+  );
 
   it("marks missing relative read roots as expected", async () => {
     const parentPath = await makeTempDir("bb-host-files-relative-root-");

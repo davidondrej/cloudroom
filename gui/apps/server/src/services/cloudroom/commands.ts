@@ -33,7 +33,7 @@ import { saveCloudImages } from "./teleport-local.js";
 import { cliPlace, reportAgentConnect, reportMacHelperDown, reportMacHelperProblem } from "./setup-telemetry.js";
 import { cloudSkills, copyLogins, copyMacGithub, copyMacLogin, importCodexLogin, importPiLogin, loginMarkers, macPiSetup, markLogin, setCopyMacLogin, setupSync, skillInCloud, stopSync, syncStatus } from "./sync.js";
 import { macClaudeSignedIn } from "./claude-token.js";
-import { helperRunning, macAccess, macAccessSupported, noteWake, previewsSetUp, setupPreviews, stopPreviews, previewStatus } from "./previews.js";
+import { checkPreviewsNow, helperDevice, helperRunning, macAccess, macAccessSupported, noteWake, previewsSetUp, setupPreviews, stopPreviews, previewStatus } from "./previews.js";
 import { GpuApprovals } from "./gpu.js";
 import { CloudSecrets } from "./secrets.js";
 import { CodexAccounts } from "./codex-accounts.js";
@@ -97,6 +97,7 @@ const capabilitiesSchema = z.object({
   queue_cancel: z.boolean().default(false),
   queue_reorder: z.boolean().default(false),
   resume_keep_paused: z.boolean().default(false),
+  mac_device: z.boolean().default(false),
   steer: z.boolean().default(false),
   rewind: z.boolean().default(false),
   fork: z.boolean().default(false),
@@ -576,7 +577,7 @@ class CloudroomService {
     if (!live && ["pending", "starting", "active", "stopping"].includes(row.status)) return true;
     const sandbox = sandboxThread(row.coreUrl);
     if (!live && sandbox && this.slept.get(row.threadId) === this.sandboxes.awakeChecks && !this.sandboxes.isAwake(sandbox)) {
-      if (sandbox === row.threadId && this.deps.hub.watching(row.threadId)) this.readHistory(row.threadId);
+      if (sandbox === row.threadId && this.deps.hub.watching(row.threadId)) void this.readHistory(row.threadId);
       return false;
     }
     if (sandbox && sandbox !== row.threadId && !row.parentThreadId && this.leftParent.get(row.threadId) !== row.sessionId) return true;
@@ -585,13 +586,17 @@ class CloudroomService {
   /** Session and cursor each opened thread's history was last read to, "reading" while one read runs, or when a
    *  failed read may be tried again. */
   private readonly histories = new Map<string, string>();
+  /** The read running per thread, so an archive's prune can wait for one already in flight. */
+  private readonly reads = new Map<string, Promise<void>>();
   /** An opened thread whose sandbox sleeps reads its history from the website, never waking it (#237). It's shown only:
-   *  the thread's state notes where its jobs stood, and the stream that follows starts there and acts on it. */
-  private readHistory(threadId: string): void {
+   *  the thread's state notes where its jobs stood, and the stream that follows starts there and acts on it. `again`
+   *  reads even past a read that reached this cursor (an archive's catch-up). */
+  private readHistory(threadId: string, again = false): Promise<void> {
     const saved = binding(this.deps.db, threadId), session = saved?.sessionId, at = `${session}:${saved?.cursor}`, last = this.histories.get(threadId);
-    if (!saved || !session || last === at || last === "reading" || (last?.startsWith("retry:") && Date.now() < Number(last.slice(6)))) return;
+    if (last === "reading") return this.reads.get(threadId) ?? Promise.resolve();
+    if (!saved || !session || (!again && last === at) || (last?.startsWith("retry:") && Date.now() < Number(last.slice(6)))) return Promise.resolve();
     this.histories.set(threadId, "reading");
-    void (async () => {
+    const read = (async () => {
       let reached = at;
       try {
         if (!await this.sandboxes.followsThreads().catch(() => false)) return;
@@ -613,8 +618,10 @@ class CloudroomService {
       } catch (error) {
         this.warn("A Cloud thread's history could not be read", error, { threadId });
         reached = `retry:${Date.now() + 10_000}`;
-      } finally { this.histories.set(threadId, reached); }
+      } finally { this.histories.set(threadId, reached); this.reads.delete(threadId); }
     })();
+    this.reads.set(threadId, read);
+    return read;
   }
   /** Whether any of the thread's history is shown here yet. */
   private shown(threadId: string): boolean {
@@ -677,8 +684,9 @@ class CloudroomService {
   private async endedElsewhere(threadId: string): Promise<void> {
     const tries = (this.cutOff.get(threadId) ?? 0) + 1;
     this.cutOff.set(threadId, tries);
-    const state = sandboxThread(binding(this.deps.db, threadId)?.coreUrl ?? "") === threadId ? await this.sandboxes.state(threadId).catch(() => "awake" as const) : null;
-    if (state === "archived") this.archiveRequest?.(threadId);
+    const asked = Date.now(), state = sandboxThread(binding(this.deps.db, threadId)?.coreUrl ?? "") === threadId ? await this.sandboxes.state(threadId).catch(() => "awake" as const) : null;
+    // Not while the user's own restore of it is on the way: the website still says archived until it takes that.
+    if (state === "archived" && !this.restoredSince(threadId, asked)) this.archiveRequest?.(threadId);
     if (state !== "awake" || tries >= 5) this.cutOff.delete(threadId);
   }
   private readonly switching = new Set<string>();
@@ -1200,7 +1208,9 @@ class CloudroomService {
   configure(raw: unknown, account?: CloudroomAccount, signal?: AbortSignal, websiteUrl?: string, sandboxToken?: string): Promise<void> {
     return this.changeConnection(async () => {
       signal?.throwIfAborted();
-      const connection = raw === null ? null : connectionSchema.parse(raw);
+      const parsed = raw === null ? null : connectionSchema.safeParse(raw);
+      if (parsed && !parsed.success) throw new ApiError(400, "invalid_request", "Enter the Core's full address and the API token from /etc/cloudroom/core.env.");
+      const connection = parsed?.data ?? null;
       if (!connection && !(sandboxToken && account)) throw new ApiError(400, "invalid_request", "A VM connection or cloud sandboxes are required.");
       if (connection) connection.url = new URL(connection.url).href.replace(/\/$/, "");
       if (connection?.projectId && !getProject(this.deps.db, connection.projectId)) throw new ApiError(404, "project_not_found", "Project not found");
@@ -1211,8 +1221,15 @@ class CloudroomService {
       if (connection && savedBindings.length && existing?.projectId && connection.projectId && existing.projectId !== connection.projectId) throw new ApiError(409, "cloudroom_project_in_use", "Existing legacy cloud threads keep their current project binding.");
       if (connection && !account) {
         const client = new CloudroomClient(connection);
-        this.lastCapabilities = await this.capabilities(client);
-        await client.ready();
+        try {
+          this.lastCapabilities = await this.capabilities(client);
+          await client.ready();
+        } catch (error) {
+          // The user typed these, so say what to fix instead of the client's internal error.
+          if (error instanceof CloudroomError && error.status === 401) throw new ApiError(400, "invalid_request", "Your Core refused the API token (authentication failed). Copy it again from /etc/cloudroom/core.env.");
+          if (error instanceof CloudroomConnectionError || (error instanceof DOMException && error.name === "AbortError")) throw new ApiError(400, "invalid_request", `Can't reach your Core at ${connection.url}. Check the address, and that Core is running.`);
+          throw error;
+        }
       }
       signal?.throwIfAborted();
       this.stop();
@@ -1375,6 +1392,7 @@ class CloudroomService {
 
   private macReports = new Map<string, { report: string; at: number }>();
   private macReportDue = 0;
+  private macCheckDue = 0;
   private async reportMacAccess(): Promise<void> {
     if (Date.now() < this.macReportDue) return;
     this.macReportDue = Date.now() + 15_000;
@@ -1390,7 +1408,12 @@ class CloudroomService {
       const id = `${url} ${token}`, last = sent.get(id);
       if (last && (last.at === Infinity || (last.report === key && Date.now() - last.at < 60_000))) { this.macReports.set(id, last); continue; }
       this.macReports.set(id, { report: key, at: Date.now() });
-      void new CloudroomClient({ url, token, timeoutMs: 5000 }).reportMac(report).catch((error: unknown) => {
+      void new CloudroomClient({ url, token, timeoutMs: 5000 }).reportMac(report).then(check => {
+        // An agent there couldn't reach this Mac: check now, as `room-cli cloud check` does, at most once a minute (#608).
+        if (!check || Date.now() < this.macCheckDue) return;
+        this.macCheckDue = Date.now() + 60_000;
+        void checkPreviewsNow(this.deps).catch(() => {});
+      }, (error: unknown) => {
         if (error instanceof CloudroomError && (error.status === 404 || error.status === 409)) this.macReports.set(id, { report: key, at: Infinity });
       });
     }
@@ -1554,9 +1577,11 @@ class CloudroomService {
     ]);
   }
 
-  /** Copies logins both ways when the user allowed it (ADRs 0130, 0175). Only the Mac → cloud copy is awaited. */
+  /** Copies logins both ways when the user allowed it (ADRs 0130, 0175). Only the Mac → cloud copy is awaited.
+   *  Without that, only GitHub, which its own card in Settings governs (#1628). */
   private async syncLogins(cloudChanged = false): Promise<void> {
-    if (!await this.sandboxMode() || await copyLogins(this.deps) !== true) return;
+    if (!await this.sandboxMode()) return;
+    if (await copyLogins(this.deps) !== true) return this.sandboxes.copyMacGithubLogin().catch(error => this.warn("GitHub login could not be copied to cloud sandboxes", error));
     void this.sandboxes.copyCloudLogins(cloudChanged).catch(error => this.warn("Cloud logins could not be copied to this Mac", error));
     await this.sandboxes.copyMacLogins().catch(error => this.warn("Logins could not be copied to cloud sandboxes", error));
   }
@@ -2481,7 +2506,7 @@ class CloudroomService {
     // A side chat's first message carries its quoted message, as on Local; a retry repeats what was sent.
     const seed = steer ? [] : previous?.command === "prompt"
       ? getLeadingAgentOnlyInput(z.array(promptInputSchema).catch([]).parse(JSON.parse(previous.input).content))
-      : resolveDeferredFirstTurnContext(this.deps.db, thread.id)?.input ?? [];
+      : resolveDeferredFirstTurnContext(this.deps.db, thread)?.input ?? [];
     if (seed.length && payload.input[0]?.visibility !== "agent-only") payload = { ...payload, input: [...seed, ...payload.input] };
     const reasoning = payload.reasoningLevel ?? (previous
       ? commandReasoning(previous.input) ?? saved.reasoning
@@ -2576,6 +2601,25 @@ class CloudroomService {
     await this.deliver(threadId);
   }
 
+  /** Archived here, or on the website (by another computer, its parent or its agent): the stream stops, maybe behind
+   *  (#1687), so a turn shown running ends, and the rest of its own sandbox's session is shown from the website's saved
+   *  history, where Core saves a child's last turn before its report reaches the parent (#1410). Never woken or acted on. */
+  archived(threadId: string): void {
+    // Only a turn still shown running is behind: one shown ended (idle, error) was seen to its end here.
+    const status = getThread(this.deps.db, threadId)?.status, behind = status === "active" || status === "stopping";
+    this.detach(threadId);
+    if (behind) saveStatus(this.deps.db, threadId, "idle");
+    const saved = binding(this.deps.db, threadId);
+    if (!behind || !saved?.cursor || sandboxThread(saved.coreUrl) !== threadId) return;
+    // At most 3 reads at once, so archiving many threads never sends a burst to the website.
+    const lane = this.archiveLane++ % this.archiveLanes.length;
+    this.archiveLanes[lane] = this.archiveLanes[lane]!.then(() => this.readHistory(threadId, true)).then(() => {
+      try { pruneThreadEventHistory(this.deps, { mode: "archived", threadId }); } catch (error) { this.warn("An archived Cloud thread's streamed pieces could not be cleared", error, { threadId }); }
+    });
+  }
+  private readonly archiveLanes = [Promise.resolve(), Promise.resolve(), Promise.resolve()];
+  private archiveLane = 0;
+
   archive(threadId: string): void {
     this.refusedSince.delete(threadId);
     const saved = binding(this.deps.db, threadId);
@@ -2583,8 +2627,7 @@ class CloudroomService {
     const sandbox = sandboxThread(saved.coreUrl);
     if (sandbox) {
       // Archive always wins (ADR 0112): the website stops the sandbox even mid-task, once no other thread runs in it.
-      this.detach(threadId);
-      if (["active", "stopping"].includes(getThread(this.deps.db, threadId)?.status ?? "")) saveStatus(this.deps.db, threadId, "idle");
+      this.archived(threadId);
       // Only an archive the website took can later be undone through it (cloud-sync.ts).
       if (!coreInUse(this.deps.db, saved.coreUrl)) void this.sandboxes.archive(sandbox).then(() => this.sync.archivedOnWebsite(sandbox, true), error => this.warn("The thread's sandbox could not be archived; it sleeps on its own", error, { threadId }));
       // Its other threads keep the sandbox open, so stop this thread's own agent: a stop, then a sleep, as on a VM.
@@ -2672,6 +2715,19 @@ class CloudroomService {
     });
   }
   private archiving: Promise<void> = Promise.resolve();
+
+  /** A project deleted here: its new-thread Cloud loops, homed under this computer's ID for it, pause (#1673), never
+   *  deleted. Archiving its threads pauses only same-thread loops, so these kept running with nothing to run in. */
+  async pauseProjectLoops(projectId: string): Promise<void> {
+    try {
+      const listed = z.object({ automations: z.array(z.object({ id: z.string(), enabled: z.boolean(), new_thread: z.boolean().optional(), project_id: z.string().nullable().optional() }).passthrough()) })
+        .safeParse(await this.sandboxes.automations({ action: "list" }));
+      if (!listed.success) return;
+      for (const loop of listed.data.automations) {
+        if (loop.enabled && loop.new_thread === true && loop.project_id === projectId) await this.sandboxes.automations({ action: "update", id: loop.id, enabled: false });
+      }
+    } catch (error) { this.warn("A deleted project's Cloud loops could not be paused", error, { projectId }); }
+  }
 
   /** Sends an archived thread's saved stop and sleep straight to its Core, without following its stream. An asleep
    *  sandbox runs nothing, so it is never woken for this. Unsent ones are dropped, so an unarchived thread never gets them. */
@@ -2766,12 +2822,21 @@ class CloudroomService {
   async restore(threadId: string): Promise<void> {
     const saved = binding(this.deps.db, threadId), sandbox = sandboxThread(saved?.coreUrl ?? "");
     if (!saved || !sandbox) return;
-    // Naming the session resumes only the loops its archive paused (#237); older websites take no session.
-    const session = sandbox === threadId && saved.sessionId && await this.sandboxes.followsThreads().catch(() => false) ? saved.sessionId : undefined;
-    await this.sandboxes.restore(sandbox, session);
+    // The website lists the thread archived until it takes this, up to ~90 s after a fresh archive.
+    this.restores.set(sandbox, Infinity);
+    try {
+      // Naming the session resumes only the loops its archive paused (#237); older websites take no session.
+      const session = sandbox === threadId && saved.sessionId && await this.sandboxes.followsThreads().catch(() => false) ? saved.sessionId : undefined;
+      await this.sandboxes.restore(sandbox, session);
+      this.restores.set(sandbox, Date.now());
+    } catch (error) { this.restores.delete(sandbox); throw error; }
     await this.sync.archivedOnWebsite(sandbox, false);
     if (sandbox !== threadId) void this.archiveShared(saved, false);
   }
+  /** Restores sent from here, by sandbox: when the website took each, `Infinity` until it does. */
+  private readonly restores = new Map<string, number>();
+  /** A list asked `at` is older than this computer's restore of the thread: its archived row is the past. */
+  restoredSince(threadId: string, at: number): boolean { return (this.restores.get(threadId) ?? 0) > at; }
 
   /** A shared child's archive lives in Core, so every computer sees it (#237). An asleep sandbox isn't woken for it. */
   private async archiveShared(saved: Binding, archived: boolean): Promise<void> {
@@ -3075,13 +3140,13 @@ class CloudroomService {
     await this.deliver(threadId);
   }
 
-  private failStart(threadId: string, message: string, cause?: unknown): void {
+  private failStart(threadId: string, message: string, cause?: unknown, step = "start"): void {
     // The raw cause (say, a vendor's 404 text) and how long after its creation the start failed, for late notices (#1076).
     this.warn("A cloud start failed", cause ?? message, { threadId, ageMs: Date.now() - (getThread(this.deps.db, threadId)?.createdAt ?? Date.now()) });
     // Cloud refused Codex's login: resend this Mac's working one before anyone has to click.
     if (cloudLoginProvider(message) === "codex" && authRequiredMessages.has(message)) this.healCodex();
     this.deps.db.transaction((tx) => {
-      saveCommandState(tx, threadId, `first_${threadId}`, "failed", { code: refusal(cause).code, message });
+      saveCommandState(tx, threadId, `first_${threadId}`, "failed", { code: refusal(cause).code, message, step });
       saveBinding(tx, threadId, { error: message });
       saveStatus(tx, threadId, "error");
       appendStartProgress(tx, threadId, [{ key: "error", text: message, status: "failed" }], "failed");
@@ -3104,7 +3169,7 @@ class CloudroomService {
     const initial = command(this.deps.db, `first_${threadId}`);
     const backgroundPreparation = initial && z.object({ backgroundPreparation: z.boolean().optional() }).parse(JSON.parse(initial.input)).backgroundPreparation;
     if (saved && !saved.sessionId && !backgroundPreparation && saved.error?.startsWith("Cloudroom rejected the request (HTTP 409)")) {
-      this.failStart(threadId, "This cloud start was rejected before the app update. Your prompt is saved. Retry explicitly when ready.");
+      this.failStart(threadId, "This cloud start was rejected before the app update. Your prompt is saved. Retry explicitly when ready.", undefined, "update");
     }
   }
 
@@ -3231,6 +3296,8 @@ class CloudroomService {
     const epoch = this.epoch;
     let deliveringCommand = false;
     let rejectedCommand = false;
+    // The step that failed, sent with a never-started prompt's failure (#1398).
+    let step = "wake";
     // A new thread's project copy waits until its first message is sent or fails (ADR 0160).
     let releaseCopy: (() => void) | undefined;
     let delivering: CloudroomClient | undefined;
@@ -3240,6 +3307,7 @@ class CloudroomService {
       const work = () => !bound.sessionId || unsentWork(this.deps.db, threadId) || (catchUp ||= this.catchUpForParent(bound));
       const client = await this.client(saved, work);
       delivering = client;
+      step = "capabilities";
       if (epoch !== this.epoch) return;
       if (saved.sessionId) {
         this.follow(saved, client);
@@ -3252,9 +3320,12 @@ class CloudroomService {
       const capabilities = cached ?? await this.capabilities(client);
       if (epoch !== this.epoch) return;
       if (!cached) await this.rememberCapabilities(capabilities, Boolean(sandbox));
+      // Tells the sandbox which Mac uses this thread, the only one a sleeping Mac's pairing may move to (#608).
+      if (sandbox && capabilities.mac_device) client.macDevice = await helperDevice(this.deps) ?? undefined;
       if (!saved.sessionId) {
         if (this.mustNotStart(threadId)) return;
         deliveringCommand = true;
+        step = "start";
         const harness = getThread(this.deps.db, threadId)?.providerId;
         if (!isCloudProvider(harness)) throw new ApiError(409, "cloudroom_harness", "Unsupported cloud harness; native execution is blocked.");
         this.progress(threadId, [cloudStep(Boolean(sandbox), "completed"), { key: "agent", text: `Starting ${HARNESS_NAMES[harness]}`, status: "started" }]);
@@ -3321,6 +3392,7 @@ class CloudroomService {
         const forkCode: StartStep[] = started.code ? [{ key: "fork", text: "Copying the source thread's code", status: "started" }] : [];
         this.progress(threadId, [{ key: "agent", status: "completed" }, ...files, ...forkCode], "completed");
         const firstSent = new Promise<void>(resolve => { releaseCopy = resolve; });
+        step = "workspace";
         // `room-cli files wait` holds the agent until the files, a fork's code, and its own sandbox's branch are ready
         // (ADR 0209). The mark lands before the first message: an unmarked folder with files reads as done, so an agent
         // could start mid-checkout (#816). A Git checkout already there (a project template) still gets its branch.
@@ -3361,6 +3433,7 @@ class CloudroomService {
       this.follow(saved, client);
       const harness = getThread(this.deps.db, threadId)?.providerId;
       const pendingCommands = commands(this.deps.db, threadId).filter((c) => c.state === "sending");
+      step = "deliver";
       for (const pending of pendingCommands) {
         if (epoch !== this.epoch) return;
         deliveringCommand = true;
@@ -3504,7 +3577,7 @@ class CloudroomService {
               this.keepModel(threadId, pending);
               continue;
             }
-            saveCommandState(this.deps.db, threadId, pending.id, "failed", refusal(error));
+            saveCommandState(this.deps.db, threadId, pending.id, "failed", { ...refusal(error), step });
             if (["edit", "cancel"].includes(pending.command) && error instanceof CloudroomError && /queued message is (no longer pending|already being sent)/.test(error.message)) continue;
             rejectedCommand = true;
           }
@@ -3530,7 +3603,7 @@ class CloudroomService {
       // Core's own 404 (a codeless "session not found") keeps its words; only a stale address gets the plain ones.
       const message = stale && !(error as Error).message.endsWith("session not found") ? unreachableSandbox : publicError(error);
       const permanent = error instanceof CloudroomError ? !error.retryable : error instanceof ApiError && error.status === 400;
-      if (!binding(this.deps.db, threadId)?.sessionId && permanent) this.failStart(threadId, message, error);
+      if (!binding(this.deps.db, threadId)?.sessionId && permanent) this.failStart(threadId, message, error, step);
       else if (((connectionFailure(error) || sandboxTransition(error)) && !rejectedCommand) || !deliveringCommand) this.setConnectionIssue(threadId, "delivery", error);
       else {
         saveBinding(this.deps.db, threadId, { error: message });

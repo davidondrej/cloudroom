@@ -72,6 +72,7 @@ interface ThreadUnarchiveCommandOptions {
   self?: boolean;
   json?: boolean;
   keepParent?: boolean;
+  withChildren?: boolean;
 }
 
 interface ThreadPinCommandOptions {
@@ -410,18 +411,30 @@ export function registerActionsCommands(
       "--keep-parent",
       "Keep the thread under its parent, even an archived one",
     )
+    .option(
+      "--with-children",
+      "Also unarchive the threads under it that were archived with it",
+    )
     .option("--json", "Print machine-readable JSON output")
     .action(
       action(
         async (id: string | undefined, opts: ThreadUnarchiveCommandOptions) => {
           const threadId = requireThreadIdOrSelf(id, opts);
           const sdk = createCliRoomSdk(getUrl());
-          await sdk.threads.unarchive({
+          const { unarchivedThreadIds } = await sdk.threads.unarchive({
             threadId,
             keepParent: opts.keepParent,
+            withChildren: opts.withChildren,
           });
-          if (outputJson(opts, { ok: true, threadId })) return;
-          console.log(`Thread ${threadId} unarchived`);
+          if (outputJson(opts, { ok: true, threadId, unarchivedThreadIds }))
+            return;
+          // An older app's server names none.
+          const others = (unarchivedThreadIds?.length ?? 1) - 1;
+          console.log(
+            others > 0
+              ? `Thread ${threadId} unarchived (${others} related thread${others === 1 ? "" : "s"} also unarchived)`
+              : `Thread ${threadId} unarchived`,
+          );
         },
       ),
     );
@@ -631,6 +644,19 @@ export function registerActionsCommands(
                 threadId: id,
                 ...(error.requestId ? { requestId: error.requestId } : {}),
                 error: error.message,
+              });
+            }
+            // Name the refused thread and why, such as since when it is archived (#1276).
+            if (
+              error instanceof BbHttpError &&
+              error.code === "thread_not_writable"
+            ) {
+              outputJson(opts, {
+                ok: false,
+                threadId: id,
+                code: error.code,
+                error: error.message,
+                details: (error.body as { details?: unknown } | null)?.details,
               });
             }
             throw error;
@@ -900,9 +926,15 @@ async function describeFailedSend(
     requestId === undefined
       ? ""
       : ` To resend it, run \`room-cli thread tell ${threadId}\` with the same message, options, and \`--request-id ${requestId}\`; Cloudroom won't add it twice.`;
+  // A 500's error ID finds its server log line (#1341).
+  const errorId =
+    error instanceof BbHttpError
+      ? (error.body as { errorId?: unknown } | null)?.errorId
+      : undefined;
+  const reason = `${getErrorMessage(error)}${typeof errorId === "string" ? `, error ID ${errorId}` : ""}`;
   // A sent message shows in the log, a queued one in the queue; `thread show` lists neither.
   return new UnconfirmedSendError(
-    `Cloudroom did not confirm the message, so it may already have been sent (${getErrorMessage(error)}). Check \`room-cli thread log ${threadId}\` and \`room-cli thread queue list ${threadId}\` before sending it again.${retry}`,
+    `Cloudroom did not confirm the message, so it may already have been sent (${reason}). Check \`room-cli thread log ${threadId}\` and \`room-cli thread queue list ${threadId}\` before sending it again.${retry}`,
     requestId,
   );
 }

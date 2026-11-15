@@ -5,10 +5,11 @@ import {
   getThread,
 } from "@cloudroom/db";
 import type { DbQueryConnection } from "@cloudroom/db";
-import type { PromptInput } from "@cloudroom/domain";
+import type { PromptInput, Thread } from "@cloudroom/domain";
 import { ApiError } from "../../errors.js";
 import { parseStoredTurnRequestEvent } from "./thread-events.js";
 import { pendingHarnessSwitchSeed } from "./thread-transcript.js";
+import { pendingWorktreeMoveNote } from "./thread-worktree-move.js";
 
 export interface DeferredFirstTurnContext {
   input: PromptInput[];
@@ -37,15 +38,17 @@ export function getLeadingAgentOnlyInput(input: PromptInput[]): PromptInput[] {
   );
 }
 
-/** Agent-only input the next turn must carry: the newest of a spawn/retry seed and a harness switch seed, unless context was cleared after it. */
+/** Agent-only input the next turn must carry: the newest of a spawn/retry seed and a harness switch seed, then a failed
+ *  worktree move's note, unless context was cleared after them. */
 export function resolveDeferredFirstTurnContext(
   db: DbQueryConnection,
-  threadId: string,
+  thread: Pick<Thread, "id" | "executionTarget">,
   retryOfRequestId?: string,
 ): DeferredFirstTurnContext | null {
+  const threadId = thread.id;
   const cleared =
     getLatestCompletedThreadContextClearSequence(db, { threadId }) ?? 0;
-  const context =
+  const newest =
     [spawnSeedContext(db, threadId), pendingHarnessSwitchSeed(db, threadId)]
       .filter(
         (context): context is DeferredFirstTurnContext =>
@@ -53,10 +56,29 @@ export function resolveDeferredFirstTurnContext(
       )
       .sort((a, b) => b.requestSequence - a.requestSequence)[0] ?? null;
   // A retry re-sends its failed request's input, which already holds what that request carried (#1153).
-  return retryOfRequestId !== undefined &&
-    context?.retryChainRequestId === retryOfRequestId
-    ? null
-    : context;
+  const seed =
+    retryOfRequestId !== undefined &&
+    newest?.retryChainRequestId === retryOfRequestId
+      ? null
+      : newest;
+  // Cloud threads can't move into a worktree, so they skip its lookup.
+  const note =
+    thread.executionTarget === "cloud"
+      ? null
+      : pendingWorktreeMoveNote(db, threadId, cleared);
+  // A failed request that carried the note already holds it, in its retry's input or in the seed saved from it.
+  const carried = note?.retryChainRequestId;
+  const move =
+    note &&
+    (carried === undefined ||
+      (carried !== retryOfRequestId && carried !== seed?.retryChainRequestId))
+      ? note
+      : null;
+  if (!seed || !move) return seed ?? move;
+  return {
+    input: [...seed.input, ...move.input],
+    requestSequence: Math.max(seed.requestSequence, move.requestSequence),
+  };
 }
 
 function spawnSeedContext(
@@ -135,9 +157,17 @@ export function prependDeferredFirstTurnContext(
 
 export function requireDeferredFirstTurnContextCurrent(
   db: DbQueryConnection,
-  args: { requestSequence: number; threadId: string },
+  args: {
+    requestSequence: number;
+    retryOfRequestId: string | undefined;
+    thread: Pick<Thread, "id" | "executionTarget">;
+  },
 ): void {
-  const current = resolveDeferredFirstTurnContext(db, args.threadId);
+  const current = resolveDeferredFirstTurnContext(
+    db,
+    args.thread,
+    args.retryOfRequestId,
+  );
   if (current?.requestSequence === args.requestSequence) {
     return;
   }

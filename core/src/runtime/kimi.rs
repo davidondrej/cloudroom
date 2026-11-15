@@ -20,7 +20,7 @@ pub(super) const KIMI: cursor::Flavor = cursor::Flavor {
 const SESSIONS: &str = "sessions";
 /// The efforts Local threads offer for Kimi (provider-acp reads its `thinking` option); Kimi offers some of them per model.
 pub const REASONING_LEVELS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
-const SIGNED_OUT: &str = "Kimi Code is signed out in Cloud. Sign in with `kimi login` on your Mac; Cloudroom copies that login to Cloud.";
+const SIGNED_OUT: &str = "Kimi Code is signed out in Cloud. Sign in with `kimi login` on your computer and turn on \"Auth my agents in the cloud automatically\" in Settings → Cloud environment; Cloudroom copies that login to Cloud when a sandbox wakes.";
 
 fn invalid(message: String) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message)

@@ -292,9 +292,9 @@ async function importAll(harness: TestAppHarness, hostId: string, wanted: Parame
 }
 
 async function sendFirstMessage(harness: TestAppHarness, threadId: string) {
-  const deferred = resolveDeferredFirstTurnContext(harness.deps.db, threadId);
-  const fork = pendingImportFork(harness.deps.db, threadId);
   const thread = getThread(harness.deps.db, threadId)!;
+  const deferred = resolveDeferredFirstTurnContext(harness.deps.db, thread);
+  const fork = pendingImportFork(harness.deps.db, threadId);
   await sendThreadMessage(harness.deps, {
     environment: getEnvironment(harness.deps.db, thread.environmentId!)!,
     payload: { input: textInput("What's next?"), mode: "start", model: "default", permissionMode: "full", reasoningLevel: "medium", serviceTier: "default" },

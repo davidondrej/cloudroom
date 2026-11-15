@@ -1,4 +1,15 @@
-import { and, asc, desc, eq, gt, isNull, lt, or, sql } from "drizzle-orm";
+import {
+  and,
+  asc,
+  desc,
+  eq,
+  gt,
+  inArray,
+  isNull,
+  lt,
+  or,
+  sql,
+} from "drizzle-orm";
 import {
   events,
   findStoredEventRow,
@@ -97,6 +108,26 @@ export function pendingHarnessSwitchSeed(
   db: DbQueryConnection,
   threadId: string,
 ): { input: PromptInput[]; requestSequence: number } | null {
+  const seed = latestOperationSeed(db, threadId, [
+    THREAD_HARNESS_SWITCH_OPERATION,
+    THREAD_IMPORT_OPERATION,
+  ]);
+  return seed &&
+    !findStoredEventRow(db, {
+      threadId,
+      type: "turn/started",
+      afterSequence: seed.requestSequence,
+    })
+    ? seed
+    : null;
+}
+
+/** The agent-only seed saved on the newest of these operations' events. */
+export function latestOperationSeed(
+  db: DbQueryConnection,
+  threadId: string,
+  operations: readonly string[],
+): { input: PromptInput[]; requestSequence: number } | null {
   const row = db
     .select({ sequence: events.sequence, data: events.data })
     .from(events)
@@ -104,21 +135,15 @@ export function pendingHarnessSwitchSeed(
       and(
         eq(events.threadId, threadId),
         eq(events.type, "system/operation"),
-        sql`json_extract(${events.data}, '$.operation') IN (${THREAD_HARNESS_SWITCH_OPERATION}, ${THREAD_IMPORT_OPERATION})`,
+        inArray(sql`json_extract(${events.data}, '$.operation')`, [
+          ...operations,
+        ]),
       ),
     )
     .orderBy(desc(events.sequence))
     .limit(1)
     .get();
-  if (
-    !row ||
-    findStoredEventRow(db, {
-      threadId,
-      type: "turn/started",
-      afterSequence: row.sequence,
-    })
-  )
-    return null;
+  if (!row) return null;
   const parsed = switchMetadataSchema.safeParse(
     (JSON.parse(row.data) as { metadata?: unknown }).metadata,
   );

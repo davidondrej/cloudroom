@@ -70,6 +70,7 @@ pub const FEATURES: &[&str] = &[
     "agent_limits",
     "plan_only",
     "loop_report",
+    "mac_device",
     "credits_usage",
 ];
 

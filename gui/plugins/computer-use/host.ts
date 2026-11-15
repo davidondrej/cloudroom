@@ -16,6 +16,7 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
+import { setTimeout as sleep } from "node:timers/promises";
 import { promisify } from "node:util";
 import {
   experimental_defineHostEntry,
@@ -66,17 +67,38 @@ async function sha256(path: string) {
     .digest("hex");
 }
 
-async function install(dir: string, signal: AbortSignal) {
+// GitHub's release download sometimes answers 5xx for a while (#1242). Other 4xx answers are final.
+async function download(url: string, archive: string, signal: AbortSignal, delays: number[]) {
+  let failure = "";
+  for (let attempt = 0; attempt <= delays.length; attempt++) {
+    if (attempt) await sleep(delays[attempt - 1], undefined, { signal });
+    let status = 0;
+    try {
+      const response = await fetch(url, { signal });
+      if (response.ok && response.body)
+        return await pipeline(Readable.fromWeb(response.body as never), createWriteStream(archive));
+      status = response.status;
+    } catch (error) {
+      // Network failures are TypeErrors; local file errors (ENOSPC, EACCES...) carry a syscall.
+      if (signal.aborted || (error as NodeJS.ErrnoException).syscall) throw error;
+    }
+    failure = status ? `HTTP ${status}` : "network error";
+    if (status && status < 500 && status !== 408 && status !== 429)
+      throw new Error(`Cua Driver download failed (${failure})`);
+  }
+  throw new Error(
+    `Cua Driver download failed (${failure}) after ${delays.length + 1} tries. GitHub's download server is having trouble; nothing was installed. Try again in a few minutes.`,
+  );
+}
+
+export async function install(dir: string, signal: AbortSignal, delays = [2_000, 5_000, 15_000]) {
   const asset = assetFor(process.platform, process.arch);
   if (!asset) throw new Error(`Computer use is not available on ${process.platform}-${process.arch}`);
   await mkdir(join(dir, ".."), { recursive: true });
   const stage = await mkdtemp(join(dir, "..", ".install-"));
   try {
     const archive = join(stage, "driver.tar.gz");
-    const response = await fetch(`${DRIVER.releaseUrl}/${asset.file}`, { signal });
-    if (!response.ok || !response.body)
-      throw new Error(`Cua Driver download failed (HTTP ${response.status})`);
-    await pipeline(Readable.fromWeb(response.body as never), createWriteStream(archive));
+    await download(`${DRIVER.releaseUrl}/${asset.file}`, archive, signal, delays);
     if ((await sha256(archive)) !== asset.sha256)
       throw new Error("Cua Driver download failed its checksum; nothing was installed");
     const extra = process.platform === "linux" ? ["wayland-helper"] : [];

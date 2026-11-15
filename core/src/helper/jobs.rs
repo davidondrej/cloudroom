@@ -569,6 +569,34 @@ struct Passwd {
     expire: i64,
 }
 
+/// This computer's name as the user knows it, as client.py's computer_name (#608).
+fn computer_name() -> String {
+    unsafe extern "C" {
+        fn gethostname(name: *mut c_char, length: usize) -> i32;
+    }
+    let scutil = cfg!(target_os = "macos")
+        .then(|| {
+            let output = std::process::Command::new("/usr/sbin/scutil")
+                .args(["--get", "ComputerName"])
+                .output()
+                .ok()?;
+            Some(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+        })
+        .flatten()
+        .filter(|name| !name.is_empty());
+    let name = scutil.unwrap_or_else(|| {
+        let mut buffer = [0 as c_char; 256];
+        let code = unsafe { gethostname(buffer.as_mut_ptr(), buffer.len() - 1) };
+        if code != 0 {
+            return String::new();
+        }
+        unsafe { CStr::from_ptr(buffer.as_ptr()) }
+            .to_string_lossy()
+            .into_owned()
+    });
+    name.chars().take(64).collect()
+}
+
 /// This user's login shell, as `pwd.getpwuid(os.getuid()).pw_shell`.
 fn login_shell() -> Option<String> {
     unsafe extern "C" {
@@ -788,6 +816,8 @@ struct Sandbox {
 pub(super) struct Jobs {
     shared: Arc<Shared>,
     folder: PathBuf,
+    /// This computer's name, sent with the job stream so `mac run` and `mac status` say which Mac runs commands (#608).
+    name: String,
     /// Read-only commands carry this helper's mark (from its folder, as its LaunchAgent label: a dev build's helper has
     /// another), this run's (`boot`), and their own (`read_only`).
     mark: String,
@@ -861,6 +891,7 @@ impl Jobs {
         };
         Jobs {
             folder: shared.folder.clone(),
+            name: computer_name(),
             mark,
             boot,
             contained: AtomicBool::new(false),
@@ -1062,8 +1093,10 @@ impl Jobs {
         opened: &mut bool,
     ) -> Result<()> {
         let url = format!(
-            "{}/v1/mac/jobs?device={device}&boot={}&fetch=true",
-            core.url, self.shared.boot
+            "{}/v1/mac/jobs?device={device}&boot={}&fetch=true&name={}",
+            core.url,
+            self.shared.boot,
+            quote_url(&self.name)
         );
         let mut request = self
             .shared

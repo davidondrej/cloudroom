@@ -19,8 +19,10 @@ import { describe, expect, it, vi } from "vitest";
 import { cloudroom } from "../../src/services/cloudroom/commands.js";
 import { setMacAccess } from "../../src/services/cloudroom/previews.js";
 import { validatePromptAttachmentReferences } from "../../src/services/projects/attachments.js";
+import { resolveDeferredFirstTurnContext } from "../../src/services/threads/deferred-first-turn-context.js";
 import { runQueuedMessageDispatch } from "../../src/services/threads/queued-message-dispatch.js";
 import { moveThreadToProject } from "../../src/services/threads/thread-move.js";
+import { requestThreadWorktreeMove } from "../../src/services/threads/thread-worktree-move.js";
 import {
   reportQueuedCommandSuccess,
   waitForQueuedCommand,
@@ -33,6 +35,7 @@ import {
   seedProjectWithSource,
   seedStoredEvent,
   seedThread,
+  seedTurnStarted,
 } from "../helpers/seed.js";
 import { withTestHarness, type TestAppHarness } from "../helpers/test-app.js";
 
@@ -361,6 +364,50 @@ describe("thread move", () => {
 
       expect(moveProject).not.toHaveBeenCalled();
       expect(refusedMoves(harness, thread.id)).toHaveLength(1);
+    });
+  });
+
+  it("tells the agent's next turn when its worktree move failed", async () => {
+    await withTestHarness(async (harness) => {
+      const { host } = seedHostSession(harness.deps);
+      const { project } = seedProjectWithSource(harness.deps, {
+        hostId: host.id,
+        path: "/tmp/not-a-checkout",
+      });
+      const environment = seedEnvironment(harness.deps, {
+        hostId: host.id,
+        projectId: project.id,
+        path: "/tmp/not-a-checkout",
+      });
+      const thread = seedThread(harness.deps, {
+        projectId: project.id,
+        environmentId: environment.id,
+        providerId: "claude-code",
+        status: "active",
+      });
+
+      requestThreadWorktreeMove(harness.deps, thread.id, []);
+      expect(resolveDeferredFirstTurnContext(harness.db, thread)).toBeNull();
+      harness.db
+        .update(threads)
+        .set({ status: "idle" })
+        .where(eq(threads.id, thread.id))
+        .run();
+      await runQueuedMessageDispatch(harness.deps, {
+        kind: "thread-ready",
+        threadId: thread.id,
+      });
+
+      expect(getThread(harness.db, thread.id)?.environmentId).toBe(
+        environment.id,
+      );
+      // A turn that never carried the note, like one the harness starts itself, leaves it pending.
+      seedTurnStarted(harness.deps, { threadId: thread.id, turnId: "bg-turn" });
+      const [note] = resolveDeferredFirstTurnContext(harness.db, thread)!.input;
+      expect(note).toMatchObject({ visibility: "agent-only" });
+      expect(note?.type === "text" && note.text).toContain(
+        "could not move this thread to a new worktree, so it still runs in /tmp/not-a-checkout",
+      );
     });
   });
 });

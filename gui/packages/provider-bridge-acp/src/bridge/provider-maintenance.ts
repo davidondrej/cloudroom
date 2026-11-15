@@ -143,10 +143,14 @@ export interface AcpMaintenanceDialect {
   readUsage(): Promise<ProviderUsageResult>;
 }
 
+const installerUrlSchema = z
+  .string()
+  .regex(/^https:\/\/[A-Za-z0-9.-]+(?:\/[A-Za-z0-9._~/-]*)?$/u);
+
 const acpScriptInstallerSchema = z.object({
-  scriptUrl: z
-    .string()
-    .regex(/^https:\/\/[A-Za-z0-9.-]+(?:\/[A-Za-z0-9._~/-]*)?$/u),
+  scriptUrl: installerUrlSchema,
+  /** Windows runs this PowerShell installer instead (#1696). */
+  powershellUrl: installerUrlSchema.optional(),
   args: z
     .array(z.string().regex(/^--?[A-Za-z0-9][A-Za-z0-9-]*$/u))
     .max(8)
@@ -167,9 +171,19 @@ type AcpInstaller = z.infer<typeof acpInstallerSchema>;
 
 export function acpInstallerCommand(
   installer: AcpInstaller,
+  platform: NodeJS.Platform = process.platform,
 ): ProviderInstallationCommand {
   if ("npmPackage" in installer) {
     return npmGlobalInstallCommand(installer.npmPackage);
+  }
+  if (platform === "win32" && installer.powershellUrl !== undefined) {
+    const command = downloadedInstallerCommand(installer.scriptUrl, {
+      platform,
+      powershellUrl: installer.powershellUrl,
+    });
+    // Kimi's install.ps1 waits on Read-Host after a failure, and nobody types
+    // into the install pty: without this, a failed install holds the lock.
+    return { ...command, args: ["-NonInteractive", ...command.args] };
   }
   const script = [
     'tmp=$(mktemp "${TMPDIR:-/tmp}/provider-installation.XXXXXX")',

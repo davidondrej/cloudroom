@@ -453,6 +453,9 @@ it:
    hung thread. After a much longer bound the runtime stops the thread, then
    fails the run (`provider_turn_start_failed`). A bridge `error`
    notification fails a pending start at once. `thread retry` resends it.
+   A started turn with no event for 10 minutes, and no running command, tool
+   call, pending request, or background work, gets one `provider_turn_silent`
+   warning per silence; the turn stays open (#977).
 5. `thread/stop` semantics follow its `intent`: `interrupt` settles the
    active turn as interrupted (the bridge emits the settling deltas —
    `turn.boundary { interrupted }` plus explicit closes for provider-owned

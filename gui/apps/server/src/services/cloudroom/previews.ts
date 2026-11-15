@@ -37,6 +37,12 @@ export async function noteWake(deps: Deps, thread: string): Promise<void> {
   await checkPreviewsNow(deps);
 }
 
+/** This Mac's helper device, the one that takes Mac jobs from cloud sandboxes, or null before setup. */
+export async function helperDevice(deps: Deps): Promise<string | null> {
+  const config = await readFile(join(folder(deps), "config.json"), "utf8").then(text => JSON.parse(text), () => null);
+  return typeof config?.device === "string" && /^[0-9a-f]{32}$/.test(config.device) ? config.device : null;
+}
+
 export async function checkPreviewsNow(deps: Deps): Promise<void> {
   await writeFile(join(folder(deps), "woke"), "").catch((error: NodeJS.ErrnoException) => {
     if (error.code !== "ENOENT") throw error;

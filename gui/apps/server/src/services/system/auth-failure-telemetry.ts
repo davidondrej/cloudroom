@@ -19,6 +19,8 @@ export interface CloudFailure {
   category: string;
   code?: string | null;
   message?: string | null;
+  /** The step a never-started prompt failed at (#1398). */
+  step?: string;
 }
 
 export function installAuthFailureTelemetry(next: Deps): () => void {
@@ -40,7 +42,7 @@ export function noteTurnFailed(threadId: string, cloud?: CloudFailure): void {
     // first one each app run also sends a snapshot with a network check.
     const refused = execution === "cloud_sandbox" && !failed?.errorInfo && cloud?.category.startsWith("prompt-") === true;
     if (refused) reportCloudFailure();
-    const refusal = refused ? { cloud_code: cloud?.code ?? null, local_logins: await localLogins(), default_agent: getAppSettings(current.db).defaultProviderId ?? "none" } : {};
+    const refusal = refused ? { cloud_code: cloud?.code ?? null, cloud_step: cloud?.step ?? null, local_logins: await localLogins(), default_agent: getAppSettings(current.db).defaultProviderId ?? "none" } : {};
     current.telemetry.capture({
       name: "turn_failed",
       properties: {

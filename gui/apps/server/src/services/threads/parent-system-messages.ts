@@ -56,6 +56,7 @@ import {
 import { requestQueuedMessageDispatch } from "./queued-message-dispatch.js";
 import { dispatchEnvironmentAndHost } from "./dispatch-hooks.js";
 import { captureQueueDeliveryProblem } from "./queue-drain-failure.js";
+import { isThreadAtPlanLimit } from "./turn-failed.js";
 import {
   createQueuedMessageAutoSendPausedError,
   isQueuedMessageAutoSendPausedError,
@@ -546,7 +547,8 @@ export async function queueParentSystemMessage(
   }
   const hasPendingInteraction =
     deps.pendingInteractions.hasPendingThreadInteraction(parentThread.id);
-  let heldByStop = false;
+  // A Stop or a plan limit holds the notice (#917, #1723).
+  let held = false;
   // Delivery throws only before it sends anything, so a notice that hit an
   // offline host or a transient fault stays queued instead of being lost: a
   // reconnect, the idle sweep, or the next turn end retries it (#917).
@@ -582,9 +584,8 @@ export async function queueParentSystemMessage(
       return delivered;
     } catch (error) {
       if (error instanceof UnsentParentSystemMessageError) throw error;
-      heldByStop = isQueuedMessageAutoSendPausedError(error);
-      failed =
-        !heldByStop && !(error instanceof ThreadContextClearInProgressError);
+      held = isQueuedMessageAutoSendPausedError(error);
+      failed = !held && !(error instanceof ThreadContextClearInProgressError);
       if (failed) {
         deps.logger.warn(
           { err: error, parentThreadId: parentThread.id },
@@ -626,7 +627,7 @@ export async function queueParentSystemMessage(
       childReport: args.childReport,
     },
   });
-  if (!hasPendingInteraction && !heldByStop && !failed) {
+  if (!hasPendingInteraction && !held && !failed) {
     requestQueuedMessageDispatch(deps, {
       kind: "thread-ready",
       threadId: parentThread.id,
@@ -652,6 +653,8 @@ interface DeliverParentSystemMessageArgs extends ParentSystemMessageTaxonomy {
  *
  * Every notice path ends here, so this is where a manual Stop holds them: the
  * parent stays stopped until the user sends a message or `queue send` (#821).
+ * A plan limit holds them the same way, so each one doesn't wake the parent
+ * into the same refusal (#1723).
  */
 export async function deliverParentSystemMessage(
   deps: LoggedPendingInteractionWorkSessionDeps,
@@ -671,7 +674,9 @@ async function deliverParentSystemMessageWithContextGuard(
   // waits for the stop to land instead of failing (#917).
   if (
     parentThread.status === "stopping" ||
-    (!args.sendNow && isThreadQueueAutoSendPaused(deps.db, parentThread.id))
+    (!args.sendNow &&
+      (isThreadQueueAutoSendPaused(deps.db, parentThread.id) ||
+        isThreadAtPlanLimit(deps.db, parentThread)))
   ) {
     throw createQueuedMessageAutoSendPausedError();
   }

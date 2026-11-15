@@ -3,14 +3,23 @@ import { cp, lstat, mkdir, realpath, rm } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { promisify } from "node:util";
+import { and, asc, desc, eq, gt, sql, type SQL } from "drizzle-orm";
 import {
   createEventId,
+  events,
+  findStoredEventRow,
   getEnvironment,
   getThread,
   updateThread,
+  type DbQueryConnection,
   type EnvironmentRow,
 } from "@cloudroom/db";
-import { PERSONAL_PROJECT_ID, threadScope, type Thread } from "@cloudroom/domain";
+import {
+  PERSONAL_PROJECT_ID,
+  threadScope,
+  type PromptInput,
+  type Thread,
+} from "@cloudroom/domain";
 import { ApiError } from "../../errors.js";
 import type { AppDeps } from "../../types.js";
 import { prepareLocalForkWorktree } from "../cloudroom/fork.js";
@@ -25,6 +34,7 @@ import { callEnvironmentWorkspaceStatusForWork } from "../environments/workspace
 import { runLiveHostCommand } from "../hosts/live-command.js";
 import { resolvePrimaryHostId } from "../hosts/primary-host.js";
 import { getEnvironmentProvider } from "../plugins/plugin-environment-provider-registry.js";
+import type { DeferredFirstTurnContext } from "./deferred-first-turn-context.js";
 import { requestQueuedMessageDispatch } from "./queued-message-dispatch.js";
 import { withThreadContextClearGuard } from "./thread-context-mutation-guard.js";
 import { buildEnvironmentProvisionCommand } from "./thread-create-helpers.js";
@@ -35,6 +45,7 @@ import {
 } from "./thread-environment-placement.js";
 import { appendThreadEvent } from "./thread-events.js";
 import { stopThreadForCurrentState } from "./thread-lifecycle.js";
+import { latestOperationSeed } from "./thread-transcript.js";
 
 // `room-cli thread worktree` moves a Local thread into a new Cloudroom-managed worktree. It keeps its ID and chat,
 // like a project move. The worktree starts from the thread's current commit when its turn ends. Other agents may
@@ -44,12 +55,54 @@ const exec = promisify(execFile);
 const OPERATION = "thread_worktree_move";
 const SETUP_TIMEOUT_MS = 20 * 60_000;
 const BUSY = "This thread is moving to a new worktree. Try again in a moment.";
+const TURN_STARTED = "turn_started_during_move";
 /** Agents checked to resume in the new folder. Pi resumes in its session's saved folder and would keep editing the old one. */
 const MOVABLE_PROVIDERS = new Set(["claude-code", "codex"]);
 
-/** Threads waiting for their turn to end, with the paths they carry, relative to their folder. */
-const pending = new Map<string, string[]>();
+/** Threads waiting for their turn to end: the paths they carry, relative to their folder, and the move's timeline entry. */
+interface Request {
+  carry: string[];
+  from: string;
+  operationId: string;
+}
+const pending = new Map<string, Request>();
 const moving = new Set<string>();
+
+const note = (
+  deps: AppDeps,
+  threadId: string,
+  request: Request,
+  status: "started" | "completed" | "failed",
+  message: string,
+  agentNote?: string,
+) =>
+  appendThreadEvent(deps, {
+    threadId,
+    environmentId: getThread(deps.db, threadId)?.environmentId ?? null,
+    type: "system/operation",
+    scope: threadScope(),
+    data: {
+      operation: OPERATION,
+      operationId: request.operationId,
+      status,
+      message,
+      // The agent never sees timeline events, so its next turn starts with this note (#1282).
+      ...(agentNote === undefined
+        ? {}
+        : {
+            metadata: {
+              seed: [
+                {
+                  type: "text",
+                  text: agentNote,
+                  mentions: [],
+                  visibility: "agent-only",
+                } satisfies PromptInput,
+              ],
+            },
+          }),
+    },
+  });
 
 export function requestThreadWorktreeMove(
   deps: AppDeps,
@@ -59,38 +112,129 @@ export function requestThreadWorktreeMove(
   const { thread, folder } = movable(deps, threadId, carry);
   for (const path of carry) carriedPath(folder.path, path);
   if (pending.has(thread.id) || moving.has(thread.id))
-    throw new ApiError(409, "thread_busy", "This thread is already moving to a new worktree.");
-  pending.set(thread.id, [...carry]);
-  if (settled(deps, thread)) void applyPendingThreadWorktreeMove(deps, thread.id);
+    throw new ApiError(
+      409,
+      "thread_busy",
+      "This thread is already moving to a new worktree.",
+    );
+  const request = {
+    carry: [...carry],
+    from: folder.path,
+    operationId: createEventId(),
+  };
+  pending.set(thread.id, request);
+  const now = settled(deps, thread);
+  // Saved now, so a restart that clears `pending` still tells the agent its move never ran.
+  note(
+    deps,
+    thread.id,
+    request,
+    "started",
+    now
+      ? "Moving this thread to a new worktree"
+      : "Moves to a new worktree when this turn ends",
+    `Cloudroom restarted before this thread's move to a new worktree finished, so it still runs in ${folder.path}. Run \`room-cli thread worktree\` again.`,
+  );
+  if (now) void applyPendingThreadWorktreeMove(deps, thread.id);
   return { previousPath: folder.path };
 }
 
+/** The note the agent's next turn must carry when its last move failed or never ran. Only a turn whose request carried
+ *  the note uses it up: one that started while the move hid it, or that the harness started itself, never saw it. A
+ *  context clear after the note drops it before any search, since no request will carry it. */
+export function pendingWorktreeMoveNote(
+  db: DbQueryConnection,
+  threadId: string,
+  clearedSequence: number,
+): DeferredFirstTurnContext | null {
+  if (pending.has(threadId) || moving.has(threadId)) return null;
+  const note = latestOperationSeed(db, threadId, [OPERATION]);
+  const text = note?.input[0]?.type === "text" ? note.input[0].text : null;
+  if (!note || text === null || note.requestSequence <= clearedSequence)
+    return null;
+  const carrier = (order: SQL) =>
+    db
+      .select({
+        sequence: events.sequence,
+        chain: sql<string>`coalesce(json_extract(${events.data}, '$.retryOfRequestId'), json_extract(${events.data}, '$.requestId'))`,
+      })
+      .from(events)
+      .where(
+        and(
+          eq(events.threadId, threadId),
+          eq(events.type, "client/turn/requested"),
+          gt(events.sequence, note.requestSequence),
+          sql`EXISTS (SELECT 1 FROM json_each(${events.data}, '$.input') WHERE json_extract(value, '$.text') = ${text})`,
+        ),
+      )
+      .orderBy(order)
+      .limit(1)
+      .get();
+  // The first carrier is normally the first request after the note, so a delivered note costs one parsed row.
+  const first = carrier(asc(events.sequence));
+  if (!first) return note;
+  if (
+    findStoredEventRow(db, {
+      threadId,
+      type: "turn/started",
+      afterSequence: first.sequence,
+    })
+  )
+    return null;
+  // Not delivered yet: every carrier since failed, and the newest one's retry chain already holds the note.
+  return {
+    ...note,
+    retryChainRequestId: (carrier(desc(events.sequence)) ?? first).chain,
+  };
+}
+
 /** Runs from the thread-ready hook, before queued messages, so they start in the new worktree. */
-export async function applyPendingThreadWorktreeMove(deps: AppDeps, threadId: string): Promise<void> {
-  const carry = pending.get(threadId);
+export async function applyPendingThreadWorktreeMove(
+  deps: AppDeps,
+  threadId: string,
+): Promise<void> {
+  const request = pending.get(threadId);
   const thread = getThread(deps.db, threadId);
-  if (carry === undefined || !thread || !settled(deps, thread)) return;
+  if (request === undefined || !thread || !settled(deps, thread)) return;
   pending.delete(threadId);
   moving.add(threadId);
-  const operationId = createEventId();
-  const note = (status: "started" | "completed" | "failed", message: string, environmentId = thread.environmentId) =>
-    appendThreadEvent(deps, {
-      threadId,
-      environmentId,
-      type: "system/operation",
-      scope: threadScope(),
-      data: { operation: OPERATION, operationId, status, message },
-    });
-  note("started", "Moving this thread to a new worktree");
   try {
     // Sends wait until the move ends, so no turn starts in the old folder; queued messages stay queued.
-    const { from, to } = await withThreadContextClearGuard(threadId, () => moveToNewWorktree(deps, threadId, carry), BUSY);
-    note("completed", `Moved from ${from} to a new worktree at ${to}.`, getThread(deps.db, threadId)?.environmentId ?? null);
+    const { from, to } = await withThreadContextClearGuard(
+      threadId,
+      () => moveToNewWorktree(deps, threadId, request.carry),
+      BUSY,
+    );
+    note(
+      deps,
+      threadId,
+      request,
+      "completed",
+      `Moved from ${from} to a new worktree at ${to}.`,
+    );
   } catch (error) {
     // Removes the new worktree if the thread never switched to it.
-    await cancelProviderEnvironmentCreation(deps, threadId).catch((cleanup: unknown) =>
-      deps.logger.warn({ threadId, error: cleanup }, "New worktree cleanup failed"));
-    note("failed", `Could not move to a new worktree: ${error instanceof Error ? error.message : String(error)}`);
+    await cancelProviderEnvironmentCreation(deps, threadId).catch(
+      (cleanup: unknown) =>
+        deps.logger.warn(
+          { threadId, error: cleanup },
+          "New worktree cleanup failed",
+        ),
+    );
+    // A turn the agent started itself during setup, e.g. when a background task ended: move when that turn ends.
+    if (error instanceof ApiError && error.body.code === TURN_STARTED)
+      pending.set(threadId, request);
+    else {
+      const reason = error instanceof Error ? error.message : String(error);
+      note(
+        deps,
+        threadId,
+        request,
+        "failed",
+        `Could not move to a new worktree: ${reason}`,
+        `Cloudroom could not move this thread to a new worktree, so it still runs in ${request.from}: ${reason.replace(/\.?$/u, ".")} Fix the cause and run \`room-cli thread worktree\` again, or tell the user.`,
+      );
+    }
   } finally {
     moving.delete(threadId);
     requestQueuedMessageDispatch(deps, { kind: "thread-ready", threadId });
@@ -141,7 +285,11 @@ async function moveToNewWorktree(deps: AppDeps, threadId: string, carry: readonl
   if (ready?.status !== "ready" || !ready.path) throw new Error(ready?.statusMessage ?? "The worktree setup did not finish.");
   const current = getThread(deps.db, threadId);
   if (!current || !settled(deps, current))
-    throw new ApiError(409, "thread_busy", "A new turn started before the worktree was ready. Run `room-cli thread worktree` again.");
+    throw new ApiError(
+      409,
+      TURN_STARTED,
+      "A new turn started before the worktree was ready.",
+    );
   // The agent restarts in the new folder on its next turn.
   await stopThreadForCurrentState(deps, current, folder);
   deps.db.transaction((tx) => {

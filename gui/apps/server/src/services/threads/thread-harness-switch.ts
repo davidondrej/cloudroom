@@ -219,7 +219,7 @@ async function resendAfterSwitch(
   };
   // Cloud adds the earlier conversation only to messages that don't start hidden.
   const seed = isCloudThread(thread)
-    ? (resolveDeferredFirstTurnContext(deps.db, threadId)?.input ?? [])
+    ? (resolveDeferredFirstTurnContext(deps.db, thread)?.input ?? [])
     : [];
   let settle: (error: Error | null) => void = () => {};
   const settled = new Promise<Error | null>((resolve) => (settle = resolve));

@@ -755,6 +755,14 @@ class RecoveryTests(unittest.TestCase):
             self.service.request("POST", "/v1/sessions/cr_tail2/relay", {"request_id": "parentarchive", "action": "archive"})
             wake = __import__("hashlib").sha256(self.env["CLOUDROOM_TOKEN"].encode()).hexdigest()[:16]
             self.wait(lambda: any(t.get("archived") and t["session"] == "cr_tail2" and t["wake"] == wake for t in api.threads), "relayed archive reported")
+            # The user restores it while its sandbox sleeps, which its Core never hears; a later wake's relayed archive
+            # still reaches the website, not only an "archived" answer (#1634).
+            self.service.stop()
+            self.env["CLOUDROOM_TOKEN"] = api.token = "fixture-token-" + "z" * 32
+            self.start()
+            self.service.request("POST", "/v1/sessions/cr_tail2/relay", {"request_id": "parentarchive2", "action": "archive"})
+            wake = __import__("hashlib").sha256(self.env["CLOUDROOM_TOKEN"].encode()).hexdigest()[:16]
+            self.wait(lambda: any(t.get("archived") and t["session"] == "cr_tail2" and t["wake"] == wake for t in api.threads), "archive after a restore reported")
         finally:
             api.close()
 
@@ -1039,6 +1047,46 @@ class RecoveryTests(unittest.TestCase):
         self.ready()
         self.assertTrue(self.status()["queue_paused"])
         self.assertEqual(self.status()["queue"], ["relay_report"])
+
+    def test_a_parent_tell_restarts_a_child_whose_agent_was_killed(self):
+        # #1629: a child killed twice (signal 9) stays lost, and its parent's tell got 409, which the website calls busy.
+        self.seed(); self.start(); self.ready()
+        pids = lambda: [r["data"]["pid"] for r in self.service.records("cr_seed") if r["kind"] == "harness" and r["data"]["pid"]]
+        def lose():  # SIGKILL until the one automatic recovery is spent.
+            while self.status()["state"] != "process_lost":
+                n = len(pids()); os.kill(pids()[-1], signal.SIGKILL)
+                self.wait(lambda: self.status()["state"] == "process_lost" or (len(pids()) > n and self.status()["state"] == "idle"), "lost or recovered")
+        relay = lambda key, text="hello", expected=200: self.service.request("POST", "/v1/sessions/cr_seed/relay", {"request_id": key, "action": "tell", "text": text}, expected)
+        # A tell steered into a running turn, then the agent is lost: its retry never restarts it.
+        self.prompt("running", "hold")
+        self.wait(lambda: self.status()["state"] == "running", "running turn")
+        relay("steered")
+        self.wait(lambda: self.status()["receipts"]["steered_steer"]["state"] == "completed", "steered tell")
+        lose(); launched = len(pids())
+        # Rows: (step, tell, its status, whether it restarts the agent).
+        for step, key, text, expected, restarts in [
+            (None, "steered", "hello", 200, False),
+            (None, "sibling", "[message from thread:thr_other]\n\nhello", 409, False),
+            (None, "parent_tell", "hello", 200, True),
+            (None, "parent_tell", "hello", 200, False),  # A retry restarts nothing more.
+            ("stop", "stopped", "hello", 409, False),
+            ("archive", "archived", "hello", 409, False),
+        ]:
+            if step == "stop":
+                self.service.request("POST", "/v1/sessions/cr_seed/stop", {"request_id": "user_stop"}, 202)
+                self.wait(lambda: self.status()["queue_paused"], "stopped"); lose()
+            if step == "archive":
+                self.service.request("POST", "/v1/sessions/cr_seed/resume", {"request_id": "user_resume"}, 202)
+                self.ready(); lose()
+                self.service.request("POST", "/v1/sessions/cr_seed/relay", {"request_id": "parent_archive", "action": "archive"})
+                self.wait(lambda: self.status()["archived"], "archived")
+            launched = len(pids())
+            relay(key, text, expected)
+            if restarts:
+                self.wait(lambda: self.status()["receipts"][key]["state"] == "completed", "tell after restart")
+            self.assertEqual(len(pids()), launched + restarts, key)
+        self.assertEqual(self.status()["native_id"], self.native)
+        self.assertEqual((self.repo / (self.native + ".requests")).read_text().splitlines(), ["running", "parent_tell"])
 
     def test_a_relayed_tell_keeps_the_sender_the_website_names(self):
         # #1369: a Cloud parent's tell to its own child showed as the user's message. Steered and queued alike.

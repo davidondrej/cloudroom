@@ -96,8 +96,13 @@ export function registerWaitCommand(
           result = await sdk.threads.wait(waitArgs);
         } catch (error) {
           if (error instanceof ThreadWaitTimeoutError) {
+            // A thread that went silent says so (#977).
+            const warning = await sdk.threads.output({ threadId }).then(
+              (output) => output.error,
+              () => null,
+            );
             throw new CliExitError(
-              error.message,
+              warning ? `${error.message}\n${warning}` : error.message,
               THREAD_WAIT_EXIT_CODE_TIMEOUT,
             );
           }

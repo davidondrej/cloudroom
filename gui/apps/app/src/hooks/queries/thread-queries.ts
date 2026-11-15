@@ -12,6 +12,7 @@ import { getMediaQuerySnapshot } from "@cloudroom/shared-ui/hooks/use-media-quer
 import type { PendingInteraction, ThreadListEntry } from "@cloudroom/domain";
 import type {
   PromptHistoryResponse,
+  ThreadCountResponse,
   ThreadQueuedMessageListResponse,
   ThreadListResponse,
   ThreadPendingInteractionsResponse,
@@ -26,7 +27,11 @@ import type {
   TimelineTurnSummaryDetailsResponse,
 } from "@cloudroom/server-contract";
 import { useDebouncedValue } from "../useDebouncedValue";
-import { applyTimelineDelta } from "@cloudroom/server-contract";
+import {
+  applyTimelineDelta,
+  THREAD_COUNT_ANY_PARENT,
+  THREAD_COUNT_ROOT_PARENT,
+} from "@cloudroom/server-contract";
 import type { ThreadListFilters } from "@cloudroom/client-core";
 import type { FilePreview } from "@cloudroom/client-core";
 import type { PathListOptions } from "@/lib/path-list-options";
@@ -65,6 +70,7 @@ import {
   RESUME_REFETCH_QUERY_POLICY,
 } from "./query-policies";
 import {
+  archivedThreadCountsQueryKey,
   archivedThreadsListQueryKey,
   disabledThreadListQueryKey,
   threadDetailBootstrapQueryKey,
@@ -176,6 +182,9 @@ interface UseThreadSearchArgs {
   active: boolean;
   limitPerGroup?: number;
   query: string;
+  /** The server applies both before it cuts the results to `limitPerGroup`. */
+  projectId?: string;
+  hasParent?: boolean;
 }
 
 export interface UseThreadSearchResult {
@@ -353,6 +362,37 @@ export function useArchivedThreads(
       return allPages.reduce((sum, page) => sum + page.length, 0);
     },
     enabled,
+    staleTime: THREAD_LIST_STALE_TIME_MS,
+  });
+}
+
+/** How many archived threads match the filters, in total and per project: the list itself is paged. */
+export function useArchivedThreadCounts(
+  filters: UseArchivedThreadsFilters,
+  options?: QueryOptions,
+) {
+  const { projectId, kind = "all" } = filters;
+  return useQuery<ThreadCountResponse>({
+    queryKey: archivedThreadCountsQueryKey({
+      ...(projectId ? { projectId } : {}),
+      ...(kind !== "all" ? { kind } : {}),
+    }),
+    queryFn: ({ signal }) =>
+      sdk.threads.count({
+        archivedOnly: true,
+        groupBy: "project",
+        ...(projectId ? { projectId } : {}),
+        ...(kind === "all"
+          ? {}
+          : {
+              parentThreadId:
+                kind === "root"
+                  ? THREAD_COUNT_ROOT_PARENT
+                  : THREAD_COUNT_ANY_PARENT,
+            }),
+        signal,
+      }),
+    enabled: options?.enabled ?? true,
     staleTime: THREAD_LIST_STALE_TIME_MS,
   });
 }
@@ -567,6 +607,8 @@ export function useThreadSearch({
   active,
   limitPerGroup = THREAD_SEARCH_LIMIT_PER_GROUP,
   query,
+  projectId,
+  hasParent,
 }: UseThreadSearchArgs): UseThreadSearchResult {
   const debouncedRawQuery = useDebouncedValue(query, THREAD_SEARCH_DEBOUNCE_MS);
   const trimmedQuery = query.trim();
@@ -577,11 +619,20 @@ export function useThreadSearch({
     active && liveQueryIsSearchable && trimmedQuery !== debouncedQuery;
   const enabled = active && liveQueryIsSearchable && hasSearchableQuery;
   const threadSearchQuery = useQuery<ThreadSearchResponse>({
-    queryKey: threadSearchQueryKey({ limitPerGroup, query: debouncedQuery }),
+    queryKey: threadSearchQueryKey({
+      limitPerGroup,
+      query: debouncedQuery,
+      ...(projectId === undefined ? {} : { projectId }),
+      ...(hasParent === undefined ? {} : { hasParent }),
+    }),
     queryFn: ({ signal }) =>
       sdk.threads.search({
         limitPerGroup: String(limitPerGroup),
         query: debouncedQuery,
+        ...(projectId === undefined ? {} : { projectId }),
+        ...(hasParent === undefined
+          ? {}
+          : { hasParent: hasParent ? ("true" as const) : ("false" as const) }),
         signal,
       }),
     enabled,

@@ -213,6 +213,25 @@ export function getTurnErrorText(
     .join(": ");
 }
 
+/** An open turn's silence warning (#977), while nothing has followed it. */
+export function getSilentTurnWarning(
+  db: DbConnection,
+  threadId: string,
+): string | null {
+  // The raw row: a large command log is never hydrated or parsed.
+  const [newest] = listStoredEventRowRecords(db, {
+    threadId,
+    order: "desc",
+    limit: 1,
+  });
+  if (newest?.type !== "system/error") return null;
+  const event = parseStoredEventRow(newest);
+  return event.type === "system/error" &&
+    event.data.code === "provider_turn_silent"
+    ? event.data.message
+    : null;
+}
+
 export function getLastThreadErrorMessage(
   db: DbConnection,
   threadId: string,

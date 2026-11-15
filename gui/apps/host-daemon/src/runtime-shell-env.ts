@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { constants as fsConstants } from "node:fs";
+import { existsSync, constants as fsConstants } from "node:fs";
 import fs from "node:fs/promises";
 import { basename, delimiter, resolve, win32 } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -22,6 +22,7 @@ interface PrepareRuntimeShellEnvOptions {
   /** Cloudroom's own agent tools, such as the browser-harness shim. */
   toolsDirectory?: string;
   powershellExecutionPolicy?: string | null;
+  platform?: NodeJS.Platform;
 }
 
 interface ResolveUserShellEnvOptions {
@@ -723,6 +724,14 @@ export function prepareRuntimeShellEnv(
   ) {
     shellEnv[POWERSHELL_EXECUTION_POLICY_VARIABLE] =
       options.powershellExecutionPolicy;
+  }
+  // PowerShell can't run the extensionless ROOM_CLI; this launcher can (#1052).
+  const roomCliCmd = `${roomExecutablePath}.cmd`;
+  if (
+    (options.platform ?? process.platform) === "win32" &&
+    existsSync(roomCliCmd)
+  ) {
+    shellEnv.ROOM_CLI_CMD = roomCliCmd;
   }
   return shellEnv;
 }

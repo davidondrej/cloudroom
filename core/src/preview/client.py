@@ -5,6 +5,7 @@ import base64
 import concurrent.futures
 import contextlib
 import errno
+import functools
 import http.client
 import hashlib
 import http.server
@@ -874,6 +875,18 @@ MAC_BOOT = uuid.uuid4().hex
 MAC_LINE = 2 * MAC_LIMIT + 1024 * 1024
 
 
+@functools.cache
+def computer_name():
+    """This computer's name as the user knows it, so `mac run` and `mac status` say which Mac runs commands (#608).
+    Looked up once, on the first job stream."""
+    with contextlib.suppress(OSError, subprocess.SubprocessError):
+        if sys.platform == 'darwin':
+            name = subprocess.run(['/usr/sbin/scutil', '--get', 'ComputerName'], capture_output=True, text=True, timeout=3).stdout.strip()
+            if name:
+                return name[:64]
+    return socket.gethostname()[:64]
+
+
 def mac_stdin(core, device, job):
     """A job's input, downloaded after confirming it, so a big push never holds up other jobs on the stream (#576).
     Older cores send it inside the job instead. None if it can't be downloaded or is over Core's 16 MiB limit."""
@@ -1251,7 +1264,8 @@ class MacJobs:
         delay = 2
         while core.key in self.wanted:
             try:
-                request = urllib.request.Request(core.url + '/v1/mac/jobs?device=' + device + '&boot=' + MAC_BOOT + '&fetch=true',
+                request = urllib.request.Request(core.url + '/v1/mac/jobs?device=' + device + '&boot=' + MAC_BOOT + '&fetch=true&name='
+                                                 + urllib.parse.quote(computer_name(), safe=''),
                                                  headers={**core.headers, 'Accept': 'text/event-stream'})
                 with NET['opener'].open(request, timeout=60) as stream:
                     delay, event = 2, None
@@ -1876,10 +1890,20 @@ def main():
             return
         config = private_json(folder / 'config.json')
         if not config.get('revoked', False):
-            # Best effort: a sleeping sandbox or an archived VM must never block sign-out.
-            for core in cores(config):
-                with contextlib.suppress(OSError, ValueError):
-                    core.request('/device/' + config['device'], method='DELETE')
+            # Best effort: a sleeping sandbox or an archived VM must never block sign-out. Ask 32 cores at a time, so
+            # open files stay far below macOS's 256, and stop waiting after 12 s, inside the app's 20 s (#1691).
+            path = '/device/' + config['device']
+            def revoke():
+                for core in pending:  # One shared iterator: each core is asked once.
+                    with contextlib.suppress(OSError, ValueError):
+                        core.request(path, method='DELETE')
+            deadline = time.monotonic() + 12
+            pending = iter(cores(config))
+            asks = [threading.Thread(target=revoke, daemon=True) for _ in range(32)]
+            for ask in asks:
+                ask.start()
+            for ask in asks:
+                ask.join(max(0, deadline - time.monotonic()))
             config['revoked'] = True
             save(folder / 'config.json', config)
         save(folder / 'status.json', {'state': 'offline', 'checkedAt': int(time.time() * 1000)})

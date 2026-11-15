@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
-import { Link } from "react-router-dom";
+import { useQueryClient } from "@tanstack/react-query";
+import { Link, useNavigate } from "react-router-dom";
 import type { ThreadListEntry } from "@cloudroom/domain";
 import { Button } from "@cloudroom/shared-ui/button";
 import {
@@ -13,22 +14,29 @@ import { Icon, type IconName } from "@cloudroom/shared-ui/icon";
 import { Input } from "@cloudroom/shared-ui/input";
 import { Pill } from "@cloudroom/shared-ui/pill";
 import { ThreadUnarchiveButton } from "@/components/thread/ThreadUnarchiveButton";
+import { appToast } from "@/components/ui/app-toast";
 import { useUnarchiveThread } from "@/hooks/mutations/thread-state-mutations";
 import {
   hasThreadSearchableQuery,
+  useArchivedThreadCounts,
   useArchivedThreads,
   useThreadSearch,
   type UseArchivedThreadsFilters,
 } from "@/hooks/queries/thread-queries";
 import { useHiddenProjects } from "@/hooks/queries/project-queries";
 import { useSidebarNavigation } from "@/hooks/queries/sidebar-navigation-query";
-import type { ArchivedThreadsKindFilter } from "@/hooks/queries/query-keys";
+import {
+  threadSearchQueryKeyPrefix,
+  type ArchivedThreadsKindFilter,
+} from "@/hooks/queries/query-keys";
 import { getThreadRoutePath } from "@/lib/route-paths";
 import { formatRelativeTime } from "@/lib/relative-time";
 import { getThreadDisplayTitle } from "@/lib/thread-title";
 
 const ALL_PROJECTS = "all";
 const ARCHIVED_THREAD_SEARCH_LIMIT = 50;
+/** As long as the Archived toast's Undo, so there is time to click Open. */
+const RESTORED_TOAST_DURATION_MS = 8_000;
 
 const KIND_OPTIONS: ReadonlyArray<{
   label: string;
@@ -86,39 +94,88 @@ function ArchiveFilterMenu<T extends string>({
   );
 }
 
-function filterArchivedThreadsBySearch(
-  threads: ThreadListEntry[],
-  search: string,
-): ThreadListEntry[] {
-  const normalizedSearch = search.trim().toLocaleLowerCase();
-  if (normalizedSearch.length === 0) return threads;
-  return threads.filter((thread) =>
-    getThreadDisplayTitle(thread)
-      .toLocaleLowerCase()
-      .includes(normalizedSearch),
-  );
+function threadCountLabel(count: number): string {
+  return `${count.toLocaleString()} ${count === 1 ? "thread" : "threads"}`;
 }
 
 export function ArchivedThreadsSettingsSection() {
+  const navigate = useNavigate();
+  const queryClient = useQueryClient();
   const [search, setSearch] = useState("");
   const [kind, setKind] = useState<ArchivedThreadsKindFilter>("all");
   const [projectId, setProjectId] = useState(ALL_PROJECTS);
   const sidebarNavigation = useSidebarNavigation();
   const hiddenProjects = useHiddenProjects().data;
   const searchIsActive = hasThreadSearchableQuery(search);
-  const archivedThreadsQuery = useArchivedThreads(
-    {
-      ...(projectId === ALL_PROJECTS ? {} : { projectId }),
-      kind,
-    } satisfies UseArchivedThreadsFilters,
-    { enabled: !searchIsActive },
-  );
+  const filters = {
+    ...(projectId === ALL_PROJECTS ? {} : { projectId }),
+    kind,
+  } satisfies UseArchivedThreadsFilters;
+  const archivedThreadsQuery = useArchivedThreads(filters, {
+    enabled: !searchIsActive,
+  });
+  // Real totals: the list is paged, so its row count is only what has loaded. A search shows its own matches.
+  const totalsQuery = useArchivedThreadCounts(filters, {
+    enabled: !searchIsActive,
+  });
+  const totals = searchIsActive ? undefined : totalsQuery.data;
+  // The server searches every archived thread and filters before its cap. Too short to search, the list stays whole:
+  // filtering only the rows loaded so far looked like a search and missed most threads.
   const threadSearch = useThreadSearch({
     active: searchIsActive,
     limitPerGroup: ARCHIVED_THREAD_SEARCH_LIMIT,
     query: search,
+    ...(projectId === ALL_PROJECTS ? {} : { projectId }),
+    ...(kind === "all" ? {} : { hasParent: kind === "child" }),
   });
-  const unarchiveThread = useUnarchiveThread();
+  const { mutateAsync: unarchive } = useUnarchiveThread();
+  // When each row was restored here. It hides at once, in the list and in search results alike, and every click keeps
+  // its own state. Archived again later (a newer archivedAt), the row shows again.
+  const [restoredAt, setRestoredAt] = useState<ReadonlyMap<string, number>>(
+    () => new Map(),
+  );
+  const restoreThread = (thread: ThreadListEntry) => {
+    const at = Date.now();
+    setRestoredAt((current) => new Map(current).set(thread.id, at));
+    // The threads archived with it come back with it, still under it, as the Archived toast's Undo does.
+    unarchive({ id: thread.id, withChildren: true }).then(
+      (result) => {
+        // An older server (this app viewing another computer's) names none.
+        const unarchivedThreadIds = result.unarchivedThreadIds ?? [thread.id];
+        const others = unarchivedThreadIds.length - 1;
+        if (others > 0)
+          setRestoredAt((current) => {
+            const next = new Map(current);
+            for (const id of unarchivedThreadIds) next.set(id, at);
+            return next;
+          });
+        appToast.success("Restored", {
+          compact: true,
+          duration: RESTORED_TOAST_DURATION_MS,
+          id: `thread-restored-${thread.id}`,
+          description:
+            getThreadDisplayTitle(thread) + (others > 0 ? ` +${others}` : ""),
+          action: {
+            label: "Open",
+            onClick: () =>
+              navigate(
+                getThreadRoutePath({
+                  projectId: thread.projectId,
+                  threadId: thread.id,
+                }),
+              ),
+          },
+        });
+      },
+      // The mutation shows the error; the row comes back.
+      () =>
+        setRestoredAt((current) => {
+          const next = new Map(current);
+          next.delete(thread.id);
+          return next;
+        }),
+    );
+  };
 
   const projects = useMemo(() => {
     if (!sidebarNavigation.data) return [];
@@ -148,24 +205,35 @@ export function ArchivedThreadsSettingsSection() {
       ? (threadSearch.data?.archived.results.map((result) => result.thread) ??
         [])
       : (archivedThreadsQuery.data?.pages ?? []).flat();
-    const filteredThreads = threads.filter(
+    return threads.filter(
       (thread) =>
         thread.archivedAt !== null &&
+        thread.archivedAt > (restoredAt.get(thread.id) ?? 0) &&
         (projectId === ALL_PROJECTS || thread.projectId === projectId) &&
         (kind === "all" ||
           (thread.parentThreadId !== null) === (kind === "child")),
     );
-    return searchIsActive
-      ? filteredThreads
-      : filterArchivedThreadsBySearch(filteredThreads, search);
   }, [
     archivedThreadsQuery.data,
     kind,
     projectId,
-    search,
+    restoredAt,
     searchIsActive,
     threadSearch.data,
   ]);
+  const totalByProject = useMemo(
+    () => new Map(totals?.groups?.map((group) => [group.key, group.count])),
+    [totals],
+  );
+  // More matches than the search returns, or more threads than have loaded.
+  const searchTotal = threadSearch.data?.archived.total ?? 0;
+  const shownOfTotal = searchIsActive
+    ? searchTotal > ARCHIVED_THREAD_SEARCH_LIMIT
+      ? `Showing the top ${ARCHIVED_THREAD_SEARCH_LIMIT} of ${searchTotal.toLocaleString()} matches. Narrow your search to see the rest.`
+      : null
+    : totals && totals.total > archivedThreads.length
+      ? `Showing ${archivedThreads.length.toLocaleString()} of ${threadCountLabel(totals.total)}`
+      : null;
 
   const groupedThreads = useMemo(() => {
     const groups = new Map<string, ThreadListEntry[]>();
@@ -187,6 +255,16 @@ export function ArchivedThreadsSettingsSection() {
     ? threadSearch.isDebouncing ||
       (threadSearch.isLoading && threadSearch.data === undefined)
     : archivedThreadsQuery.isPending;
+  // A failed load must not look like an empty archive. Rows already on screen stay.
+  const activeQuery = searchIsActive ? threadSearch : archivedThreadsQuery;
+  const loadFailed = activeQuery.isError && activeQuery.data === undefined;
+  const retryLoad = () =>
+    searchIsActive
+      ? void queryClient.refetchQueries({
+          queryKey: threadSearchQueryKeyPrefix(),
+          type: "active",
+        })
+      : void archivedThreadsQuery.refetch();
 
   return (
     <section className="space-y-5">
@@ -233,9 +311,22 @@ export function ArchivedThreadsSettingsSection() {
         <p className="py-8 text-center text-sm text-muted-foreground">
           Loading archived threads…
         </p>
+      ) : loadFailed ? (
+        <EmptyStatePanel className="space-y-3 py-8">
+          <p>Couldn't load archived threads.</p>
+          <Button
+            type="button"
+            variant="secondary"
+            className="h-7 px-2.5 text-xs font-normal"
+            disabled={activeQuery.isFetching}
+            onClick={retryLoad}
+          >
+            {activeQuery.isFetching ? "Retrying…" : "Retry"}
+          </Button>
+        </EmptyStatePanel>
       ) : archivedThreads.length === 0 ? (
         <EmptyStatePanel className="py-8">
-          {search.trim().length > 0
+          {searchIsActive
             ? "No archived threads match your search."
             : "No archived threads match these filters."}
         </EmptyStatePanel>
@@ -249,7 +340,12 @@ export function ArchivedThreadsSettingsSection() {
                   {projectNames.get(groupProjectId) ?? "Unknown project"}
                 </h3>
                 <span>
-                  {threads.length} {threads.length === 1 ? "thread" : "threads"}
+                  {threadCountLabel(
+                    Math.max(
+                      totalByProject.get(groupProjectId) ?? 0,
+                      threads.length,
+                    ),
+                  )}
                 </span>
               </div>
               <div className="divide-y divide-border overflow-hidden rounded-lg bg-surface-recessed">
@@ -287,13 +383,7 @@ export function ArchivedThreadsSettingsSection() {
                     </Link>
                     <ThreadUnarchiveButton
                       variant="secondary"
-                      isPending={
-                        unarchiveThread.isPending &&
-                        unarchiveThread.variables?.id === thread.id
-                      }
-                      onUnarchive={() =>
-                        unarchiveThread.mutate({ id: thread.id })
-                      }
+                      onUnarchive={() => restoreThread(thread)}
                     />
                   </div>
                 ))}
@@ -302,6 +392,12 @@ export function ArchivedThreadsSettingsSection() {
           ))}
         </div>
       )}
+
+      {shownOfTotal !== null && !loadFailed && !isInitialLoading ? (
+        <p className="text-center text-xs text-subtle-foreground">
+          {shownOfTotal}
+        </p>
+      ) : null}
 
       {!searchIsActive && archivedThreadsQuery.hasNextPage ? (
         <Button

@@ -39,8 +39,8 @@ export function useNewThreadPinCommand(isCreating: boolean) {
   );
 
   return useCallback(
-    (threadId: string) => {
-      if (!pinRequestedRef.current) return;
+    (threadId: string, pin = false) => {
+      if (!pinRequestedRef.current && !pin) return;
       pinRequestedRef.current = false;
       pinThread({ id: threadId });
     },

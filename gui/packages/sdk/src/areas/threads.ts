@@ -33,6 +33,7 @@ import type {
   PromptHistoryResponse,
   SendQueuedMessageResponse,
   ThreadArchiveAllResponse,
+  ThreadUnarchiveResponse,
   ThreadChildSummaryResponse,
   ThreadConversationOutlineResponse,
   ThreadCountGroupBy,
@@ -120,13 +121,15 @@ export interface ThreadSearchArgs extends ThreadSearchQuery {
  * many threads are running on this host" must never page rows through
  * `threads.list`, which would both cost memory and miscount past its limit.
  *
- * Every filter is genuinely absent by default. `parentThreadId` is
- * three-valued: omitted does not filter on parentage at all, the
- * `THREAD_COUNT_ROOT_PARENT` sentinel (`"none"`) counts root threads only, and
- * any other value counts that parent's children. Archived and deleted threads
- * are excluded by the route.
+ * Every filter is genuinely absent by default. `parentThreadId`: omitted does
+ * not filter on parentage at all, the `THREAD_COUNT_ROOT_PARENT` sentinel
+ * (`"none"`) counts root threads only, `THREAD_COUNT_ANY_PARENT` (`"any"`)
+ * counts child threads only, and any other value counts that parent's
+ * children. Deleted threads are never counted, and archived ones only with
+ * `archivedOnly`, which counts nothing else.
  */
 export interface ThreadCountArgs {
+  archivedOnly?: boolean;
   groupBy?: ThreadCountGroupBy;
   hostId?: string;
   parentThreadId?: string;
@@ -207,7 +210,7 @@ export type ThreadEditMessageResult = EditMessageResponse;
 export type ThreadStopResult = { ok: true; cancelledRetries: number };
 export type ThreadCompactResult = { ok: true };
 export type ThreadBannerActionResult = { ok: true };
-export type ThreadUnarchiveResult = { ok: true };
+export type ThreadUnarchiveResult = ThreadUnarchiveResponse;
 export type ThreadArchiveAllResult = ThreadArchiveAllResponse;
 export type ThreadReadStateResult = ThreadResponse;
 export type ThreadPinOrderResult = ThreadListResponse;
@@ -329,6 +332,8 @@ export interface ThreadArchiveAllArgs extends ThreadActionArgs {
 
 export interface ThreadUnarchiveArgs extends ThreadActionArgs {
   keepParent?: boolean;
+  /** Also restore the threads under it that were archived with it. */
+  withChildren?: boolean;
 }
 
 export interface ThreadGoalSetArgs extends ThreadActionArgs {
@@ -704,6 +709,7 @@ function countQuery(args: ThreadCountArgs | undefined): ThreadCountQuery {
       ? {}
       : { parentThreadId: args.parentThreadId }),
     ...(args?.groupBy === undefined ? {} : { groupBy: args.groupBy }),
+    ...(args?.archivedOnly ? { archivedOnly: "true" as const } : {}),
   };
 }
 
@@ -819,6 +825,8 @@ function searchQuery(args: ThreadSearchArgs): ThreadSearchQuery {
   return {
     limitPerGroup: args.limitPerGroup,
     query: args.query,
+    ...(args.projectId === undefined ? {} : { projectId: args.projectId }),
+    ...(args.hasParent === undefined ? {} : { hasParent: args.hasParent }),
   };
 }
 
@@ -1522,13 +1530,21 @@ export function createThreadsArea(args: CreateSdkAreaArgs): ThreadsArea {
       );
     },
     async unarchive(input) {
-      await transport.readVoid(
+      return transport.readJson(
         transport.api.v1.threads[":id"].unarchive.$post({
           param: { id: input.threadId },
-          ...(input.keepParent ? { query: { keepParent: "true" } } : {}),
+          ...(input.keepParent || input.withChildren
+            ? {
+                query: {
+                  ...(input.keepParent ? { keepParent: "true" as const } : {}),
+                  ...(input.withChildren
+                    ? { withChildren: "true" as const }
+                    : {}),
+                },
+              }
+            : {}),
         }),
       );
-      return { ok: true };
     },
     async unpin(input) {
       return transport.readJson(

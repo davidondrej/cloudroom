@@ -378,6 +378,26 @@ describe("codex process topology", () => {
     expect(topology.bridgeExits).toEqual([{ expected: true }]);
   }, 30_000);
 
+  it("ends the old bridge's app-server when a thread starts again on a new bridge (#1717)", async () => {
+    const topology = createCodexTopologyRuntime();
+    const { runtime } = topology;
+    await startCodexThread(runtime, "t1");
+    await expect(
+      runtime.startThread({
+        bridgeLaunch: topology.launch("codex-v2"),
+        environmentId: "env-1",
+        projectId: "p1",
+        providerId: "codex",
+        threadId: "t1",
+        options: fullRuntimeOptions,
+        fork: { sourceProviderThreadId: "archived-staged-edit" },
+      }),
+    ).rejects.toThrow(/archived/);
+    // The old app-server would keep Codex's writer lock where Stop can't reach.
+    expect(topology.exited()).toBe(topology.spawned());
+    expect(runtime.listRunningProviders()).toEqual([]);
+  }, 30_000);
+
   it("sweeps every app-server child when the bridge dies unexpectedly", async () => {
     const topology = createCodexTopologyRuntime();
     const { runtime } = topology;

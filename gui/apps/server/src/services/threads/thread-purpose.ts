@@ -1,3 +1,5 @@
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { renderTemplate } from "@cloudroom/templates";
 import {
   THREAD_PURPOSE_CLAUDE_MODEL,
@@ -5,10 +7,12 @@ import {
 } from "@cloudroom/domain";
 import {
   events,
+  getEnvironment,
   getThread,
   setThreadPurpose,
   type DbConnection,
 } from "@cloudroom/db";
+import type { ThreadPurpose } from "@cloudroom/domain";
 import { Type } from "@earendil-works/pi-ai";
 import { and, asc, desc, eq, sql } from "drizzle-orm";
 import type { CommandResultSideEffectsDeps } from "../../internal/command-result-side-effects.js";
@@ -19,7 +23,10 @@ import {
 import { macClaudeSignedIn } from "../cloudroom/claude-token.js";
 import { hasMacCodexLogin } from "../cloudroom/sandboxes.js";
 import { providerLoginEnvironment } from "../hosts/host-environment.js";
-import { readPrimaryHostIdFromDataDir } from "../hosts/primary-host.js";
+import {
+  readPrimaryHostIdFromDataDir,
+  resolvePrimaryHostId,
+} from "../hosts/primary-host.js";
 import { runtimeErrorLogFields } from "../lib/error-log-fields.js";
 import { readUiPreferences } from "../system/ui-preferences.js";
 import { getLastThreadOutput } from "./thread-data.js";
@@ -28,12 +35,16 @@ import { cloudTurnsElsewhere } from "../plugins/plugin-thread-events.js";
 const MAX_MESSAGE_LENGTH = 600;
 const MAX_REPLY_LENGTH = 2_000;
 const RECENT_MESSAGES = 4;
+const MAX_GOAL_LENGTH = 60;
+const GIT_FACTS_TIMEOUT_MS = 10_000;
+const exec = promisify(execFile);
 const MAX_PURPOSE_LENGTH = 110;
 const LOGIN_CHECK_MS = 5 * 60_000;
 const PERCENT_STAGES = [10, 25, 50, 75, 90, 100];
 
 const purposeSchema = Type.Object({
-  purpose: Type.String(),
+  goal: Type.String(),
+  state: Type.String(),
   percent: Type.Number(),
 });
 
@@ -188,6 +199,85 @@ export function clip(text: string, max: number): string {
   return clean.length <= max ? clean : `${clean.slice(0, max - 3)}...`;
 }
 
+/** A long reply keeps its start and its end, where the question to the user usually sits. */
+export function clipEnds(text: string, max: number): string {
+  const clean = clip(text, Number.MAX_SAFE_INTEGER);
+  if (clean.length <= max) return clean;
+  const head = Math.floor(max * 0.4);
+  return `${clean.slice(0, head)} ... ${clean.slice(head + 5 - max)}`;
+}
+
+function previousNote(previous: ThreadPurpose): string {
+  const note = previous.goal
+    ? [
+        `Goal: ${previous.goal}`,
+        `State: ${previous.text.slice(previous.goal.length).trim()}`,
+      ]
+    : [`Note: ${previous.text}`];
+  return [...note, `Percent: ${previous.percent}`].join("\n");
+}
+
+/**
+ * Uncommitted changes, and commits no remote branch has. Pushed to main or to the thread's own branch
+ * both count as pushed. Without a remote, the commit count says nothing, so it is left out.
+ */
+export async function readGitFacts(path: string): Promise<string> {
+  // --no-optional-locks: never take the index lock the agent's own Git may need.
+  const git = (...args: string[]) =>
+    exec("git", ["--no-optional-locks", "-C", path, ...args], {
+      timeout: GIT_FACTS_TIMEOUT_MS,
+    }).then(({ stdout }) => stdout.trim());
+  const [status, remotes] = await Promise.all([
+    git("status", "--porcelain"),
+    git("remote"),
+  ]);
+  const unpushed = remotes
+    ? await git("rev-list", "--count", "HEAD", "--not", "--remotes")
+    : null;
+  return [
+    `- Uncommitted changes: ${status ? "yes" : "no"}`,
+    ...(unpushed === null ? [] : [`- Commits not on GitHub yet: ${unpushed}`]),
+  ].join("\n");
+}
+
+/** The real Git state of the thread's folder, so the percent is not guessed from the reply. */
+async function gitFacts(
+  deps: CommandResultSideEffectsDeps,
+  environmentId: string | null,
+): Promise<string> {
+  const environment = environmentId
+    ? getEnvironment(deps.db, environmentId)
+    : null;
+  // Only the thread's own worktree on this computer: a shared checkout also holds other threads'
+  // changes, and another computer's folders are out of reach.
+  if (
+    !environment?.isWorktree ||
+    environment.status !== "ready" ||
+    !environment.path ||
+    environment.hostId !== resolvePrimaryHostId(deps)
+  ) {
+    return "";
+  }
+  try {
+    return await readGitFacts(environment.path);
+  } catch (error) {
+    deps.logger.warn(
+      { environmentId, ...runtimeErrorLogFields(deps.config, error) },
+      "Thread purpose Git facts failed",
+    );
+    return "";
+  }
+}
+
+const cleanPart = (part: string) =>
+  part
+    .trim()
+    // Only quotes around the whole text go: a note may end on a quoted word.
+    .replace(/^(["'`])([\s\S]*)\1$/u, "$2")
+    .replace(/\btriag(?:e|ed|ing)\b/giu, (word) =>
+      word[0] === "T" ? "Looking into" : "looking into",
+    );
+
 function requestText(data: string): string {
   try {
     const input: unknown = JSON.parse(data)?.input;
@@ -255,11 +345,10 @@ async function writePurpose(
   if (!models) return;
   const previous = thread.purpose;
   const prompt = renderTemplate("generateThreadPurpose", {
-    agentReply: agentReply ? clip(agentReply, MAX_REPLY_LENGTH) : "",
+    agentReply: agentReply ? clipEnds(agentReply, MAX_REPLY_LENGTH) : "",
     firstMessage: first,
-    previousPurpose: previous
-      ? `${previous.text} (${previous.percent}% done)`
-      : "",
+    gitFacts: sourceSeq > 0 ? await gitFacts(deps, thread.environmentId) : "",
+    previousPurpose: previous ? previousNote(previous) : "",
     recentMessages: (recent.length > 0 ? recent : [first])
       .map((text) => `- ${text}`)
       .join("\n"),
@@ -279,15 +368,10 @@ async function writePurpose(
     schema: purposeSchema,
     timeoutMs: INFERENCE_POLICY.threadPurpose.timeoutMs,
   });
+  const said = result ? clip(cleanPart(result.goal), MAX_GOAL_LENGTH) : "";
+  const goal = said && !/[.!?]$/u.test(said) ? `${said}.` : said;
   const text = result
-    ? clip(
-        result.purpose
-          .replace(/^["'`]+|["'`]+$/gu, "")
-          .replace(/\btriag(?:e|ed|ing)\b/giu, (word) =>
-            word[0] === "T" ? "Looking into" : "looking into",
-          ),
-        MAX_PURPOSE_LENGTH,
-      )
+    ? clip(`${goal} ${cleanPart(result.state)}`, MAX_PURPOSE_LENGTH)
     : "";
   if (
     !result ||
@@ -301,6 +385,7 @@ async function writePurpose(
   if (latest.purpose && latest.purpose.sourceSeq > sourceSeq) return;
   setThreadPurpose(deps.db, deps.hub, threadId, {
     text,
+    ...(goal && text.startsWith(goal) ? { goal } : {}),
     percent: PERCENT_STAGES.reduce((best, stage) =>
       Math.abs(stage - result.percent) < Math.abs(best - result.percent)
         ? stage

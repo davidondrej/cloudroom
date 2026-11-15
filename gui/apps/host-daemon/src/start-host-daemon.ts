@@ -9,7 +9,7 @@ import {
 } from "@cloudroom/host-watcher";
 import { createLogger } from "@cloudroom/logger";
 import { createHostDaemonApp } from "./app.js";
-import { installBrowserHarnessShim } from "./browser-harness.js";
+import { createBrowserHarnessShimInstaller } from "./browser-harness.js";
 import {
   readHostAuthState,
   resolveServerUrl,
@@ -158,11 +158,8 @@ export async function startHostDaemon(
       }),
     );
     const hostWatcher = createHostWatcher();
-    const toolsDirectory = await installBrowserHarnessShim(dataDir).catch(
-      (error: unknown) => {
-        logger.warn({ error }, "Could not write the browser-harness shim");
-        return undefined;
-      },
+    const installShim = createBrowserHarnessShimInstaller(dataDir, (error) =>
+      logger.warn({ error }, "Could not write the browser-harness shim"),
     );
     const resolveUserShellEnv = createUserShellEnvResolver();
     let powershellExecutionPolicy: string | null = null;
@@ -186,7 +183,7 @@ export async function startHostDaemon(
         inheritedPath: userShellEnv?.PATH ?? process.env.PATH,
         powershellExecutionPolicy,
         serverUrl: machineAuthProxy?.serverUrl ?? serverUrl,
-        toolsDirectory,
+        toolsDirectory: await installShim(),
       });
     };
     const runtimeShellEnv = await resolveRuntimeShellEnv();

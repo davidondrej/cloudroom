@@ -342,7 +342,7 @@ pub(super) struct Protocol {
     responses: Vec<Value>,
     closing: bool,
     tools: BTreeMap<String, Value>,
-    terminal: Option<(String, String, Option<String>)>,
+    terminal: Option<Event>,
     message: u64,
     text: String,
     thinking: String,
@@ -673,7 +673,12 @@ impl Adapter for Protocol {
                 if let Some(request) = state.request.clone() {
                     events.extend(state.started());
                     state.finished = true;
-                    self.terminal = Some((request, status.into(), error));
+                    self.terminal = Some(Event::Finished {
+                        request,
+                        status: status.into(),
+                        error,
+                        text: state.last_text.clone(),
+                    });
                 }
             }
         }
@@ -724,13 +729,7 @@ impl Adapter for Protocol {
         self.responses.clone()
     }
     fn capture(&mut self) -> io::Result<Vec<Event>> {
-        Ok((self.terminal.take().into_iter())
-            .map(|(request, status, error)| Event::Finished {
-                request,
-                status,
-                error,
-            })
-            .collect())
+        Ok(self.terminal.take().into_iter().collect())
     }
     fn capture_pending(&self) -> bool {
         self.terminal.is_some()

@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { prepareCodexGuard } from "@get-bb/plugin-sdk/internal/command-guard";
 import {
+  isRecord,
   isStandaloneBuiltinCompactCommand,
   approvalInteractionOutcomeSchema,
   type DynamicTool,
@@ -53,6 +54,8 @@ import {
   experimental_defineProviderBridge,
   experimental_findBrokenCliLink as findBrokenCliLink,
   experimental_findCliExecutable as findCliExecutable,
+  experimental_compareVersions as compareVersions,
+  experimental_versionFrom as versionFrom,
   type ProviderRecoveryHint,
 } from "@get-bb/plugin-sdk/provider-bridge";
 import { z } from "zod";
@@ -66,6 +69,7 @@ import {
   extractCodexMacOsPermissionRequest,
   type CodexMacOsPermissionRequest,
 } from "../interactive-requests.js";
+import { codexMcpStartupReason } from "../delta-translation.js";
 import { parseModelsResponse } from "../models.js";
 import { macOsPermissionPresentation } from "../presentation.js";
 import {
@@ -320,6 +324,13 @@ const CHILD_REQUEST_TIMEOUT_MS = 60_000;
 // error, which names the step that hung, beat the runtime's generic timeout.
 const THREAD_CREATION_BUDGET_MS = 110_000;
 const MANAGED_REQUIREMENTS_TIMEOUT_MS = 3_000;
+// A broken MCP server slows each retry, so retry it at most once a minute.
+const MCP_RELOAD_INTERVAL_MS = 60_000;
+// Before 0.146.0, config/mcpServer/reload sent Op::RefreshMcpServers, which
+// reconnects every MCP server. From 0.146.0 it keeps healthy connections and
+// restarts only failed or changed ones (openai/codex #35204, #35213). On
+// 0.146.x the next turn still waits a hung server's full startup timeout.
+const CODEX_MCP_RELOAD_MINIMUM_VERSION = "0.147.0";
 const INTERRUPT_SETTLEMENT_TIMEOUT_MS = 5_000;
 const CODEX_ARCHIVED_SESSION_ERROR_PATTERN =
   /\b(?:session|thread)\s+\S+\s+is archived\b/i;
@@ -485,6 +496,12 @@ interface CodexBridgeSession {
   identityAnnounced: boolean;
   pendingPreIdentityDeltas: ThreadDelta[];
   rebuildBeforeNextTurnReason: string | null;
+  /** Failed MCP servers and the reason last shown for each (#1045). */
+  mcpFailures: Map<string, string>;
+  /** Codex reported a failed MCP server since the last reload. */
+  mcpRetryPending: boolean;
+  /** Infinity when this Codex's reload would reset healthy MCP servers. */
+  nextMcpReloadAt: number;
   closing: boolean;
   previousChildExit: Promise<void> | null;
   releasePromise: Promise<void> | null;
@@ -698,6 +715,20 @@ function handleChildNotification(
     const parsed = codexThreadStartedNotificationSchema.safeParse(params);
     if (parsed.success) {
       announceSessionIdentity(session, parsed.data.thread.id);
+    }
+  }
+  if (
+    method === "mcpServer/startupStatus/updated" &&
+    isRecord(params) &&
+    typeof params.name === "string"
+  ) {
+    // Show each MCP failure once per session, again only if its reason changes.
+    if (params.status === "ready") session.mcpFailures.delete(params.name);
+    if (params.status === "failed") {
+      session.mcpRetryPending = true;
+      const reason = codexMcpStartupReason(params);
+      if (session.mcpFailures.get(params.name) === reason) return;
+      session.mcpFailures.set(params.name, reason);
     }
   }
   const deltas = session.translator.translateEvent(
@@ -927,11 +958,12 @@ function spawnChildConnection(callbacks: {
 
 const ignoredChildResultSchema = z.unknown();
 
+/** Returns the running Codex version from its user agent, e.g. "bb/0.167.1 (...)". */
 async function initializeChild(
   connection: CodexAppServerConnection,
   postInitializeRequests?: readonly ProviderPostInitializeRequest[],
-): Promise<void> {
-  await connection.request({
+): Promise<string | null> {
+  const initialized = await connection.request({
     method: "initialize",
     params: CODEX_INITIALIZE_PARAMS,
     resultSchema: ignoredChildResultSchema,
@@ -962,6 +994,9 @@ async function initializeChild(
       timeoutMs: CHILD_REQUEST_TIMEOUT_MS,
     });
   }
+  return isRecord(initialized) && typeof initialized.userAgent === "string"
+    ? versionFrom(initialized.userAgent)
+    : null;
 }
 
 const codexThreadIdentityResultSchema = z
@@ -1077,6 +1112,9 @@ async function constructThreadSession(
     identityAnnounced: false,
     pendingPreIdentityDeltas: [],
     rebuildBeforeNextTurnReason: null,
+    mcpFailures: new Map(),
+    mcpRetryPending: false,
+    nextMcpReloadAt: 0,
     closing: false,
     previousChildExit: null,
     releasePromise: null,
@@ -1116,7 +1154,16 @@ async function constructThreadSession(
     spawned = connection;
     session.connection = connection;
 
-    await initializeChild(connection, translator.buildPostInitializeRequests());
+    const codexVersion = await initializeChild(
+      connection,
+      translator.buildPostInitializeRequests(),
+    );
+    if (
+      codexVersion === null ||
+      compareVersions(codexVersion, CODEX_MCP_RELOAD_MINIMUM_VERSION) < 0
+    ) {
+      session.nextMcpReloadAt = Number.POSITIVE_INFINITY;
+    }
     await signInCloudroomAccount(connection, decoded.sessionOptions.envVars);
     const commandGuardEnabled =
       args.options.providerOptions?.commandGuardEnabled !== false;
@@ -1313,6 +1360,9 @@ function registerResumableSession(session: CodexBridgeSession): void {
     identityAnnounced: session.identityAnnounced,
     pendingPreIdentityDeltas: [],
     rebuildBeforeNextTurnReason: null,
+    mcpFailures: new Map(),
+    mcpRetryPending: false,
+    nextMcpReloadAt: 0,
     closing: false,
     previousChildExit: null,
     releasePromise: null,
@@ -1615,6 +1665,23 @@ async function handleTurnStart(
         ),
         options: decoded.sessionOptions,
       });
+      if (session.mcpRetryPending && Date.now() >= session.nextMcpReloadAt) {
+        // Codex keeps a failed MCP server down for the thread. Reloading makes
+        // this turn retry it, so a sign-in or config fix takes effect. A server
+        // that is gone after the reload reports nothing, so retries stop.
+        session.mcpRetryPending = false;
+        session.nextMcpReloadAt = Date.now() + MCP_RELOAD_INTERVAL_MS;
+        await connection
+          .request({
+            method: "config/mcpServer/reload",
+            params: undefined,
+            resultSchema: ignoredChildResultSchema,
+            timeoutMs: MANAGED_REQUIREMENTS_TIMEOUT_MS,
+          })
+          .catch(() => {
+            session.mcpRetryPending = true;
+          });
+      }
       const result = await connection.request({
         method: "turn/start",
         params: {

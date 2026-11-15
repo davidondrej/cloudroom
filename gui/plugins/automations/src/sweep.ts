@@ -30,7 +30,9 @@ const DUE_AUTOMATION_BATCH_SIZE = 100;
 export const SWEEP_INTERVAL_MS = 10_000;
 export const OVERDUE_MS = 2 * 60_000;
 export const OVERDUE_SPACING_MS = 60_000;
-const lastOverdueStart = new WeakMap<Db, number>();
+// Wall and monotonic time of the last overdue start: a minute on either clock frees the next one, so a wall clock that
+// steps back can't hold missed loops (#1588), and a monotonic clock paused by a Linux suspend can't either.
+const lastOverdueStart = new WeakMap<Db, { wall: number; mono: number }>();
 export const RECOVERY_WAIT_MS = 6 * 60 * 60_000;
 const busyThreadSchema = z
   .object({ status: z.enum(["starting", "active"]), archivedAt: z.null(), deletedAt: z.null() })
@@ -258,8 +260,11 @@ export async function sweepDueAutomations(
   if (due.length === 0) return;
   const projectIds = await liveProjectIds(room);
   const agentHostsAvailable = await hasConnectedHost(room);
+  const last = lastOverdueStart.get(db);
   let overdueStarted =
-    now - (lastOverdueStart.get(db) ?? -Infinity) < OVERDUE_SPACING_MS;
+    last !== undefined &&
+    now - last.wall < OVERDUE_SPACING_MS &&
+    performance.now() - last.mono < OVERDUE_SPACING_MS;
   for (const automation of due) {
     const nextRunAt = automation.nextRunAt ?? now;
     const overdue =
@@ -291,7 +296,10 @@ export async function sweepDueAutomations(
       });
       if (overdue && started) {
         overdueStarted = true;
-        lastOverdueStart.set(db, now + Date.now() - startedAt);
+        lastOverdueStart.set(db, {
+          wall: now + Date.now() - startedAt,
+          mono: performance.now(),
+        });
       }
     } catch (error) {
       room.log.error(

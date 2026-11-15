@@ -349,10 +349,15 @@ export function registerShowCommand(
                   .catch(() => null)
               : null,
           ]);
+        // An active thread's error is a stall warning (#977); if that lookup fails, show still prints.
         const output =
-          thread.status === "error" ? await sdk.threads.output({ threadId }) : idleOutput;
-        const lastError = thread.status === "error" ? (output?.error ?? null) : null;
-        const lastInterruption = output?.interruption ?? null;
+          thread.status === "error"
+            ? await sdk.threads.output({ threadId })
+            : thread.status === "active"
+              ? await sdk.threads.output({ threadId }).catch(() => null)
+              : idleOutput;
+        const lastError = thread.status === "idle" ? null : (output?.error ?? null);
+        const lastInterruption = thread.status === "active" ? null : (output?.interruption ?? null);
 
         if (opts.json) {
           const environment = await getEnvironment();
@@ -365,7 +370,7 @@ export function registerShowCommand(
               fetchedPullRequest,
             ),
             pendingTodos,
-            ...(thread.status === "error" ? { lastError } : {}),
+            ...(thread.status === "error" || lastError ? { lastError } : {}),
             ...(lastInterruption ? { lastInterruption } : {}),
           };
           if (fetchedWorkStatus !== undefined) {
@@ -385,7 +390,7 @@ export function registerShowCommand(
         // An errored thread prints its own error below.
         const cloudNote = cloudIssueText(cloud && thread.status === "error" ? { ...cloud, error: null } : cloud);
         printThreadStatus(statusPayload, execution, environmentInfo, fetchedPullRequest, cloudNote);
-        if (lastError) console.log(`  Error: ${lastError}`);
+        if (lastError) console.log(`  ${thread.status === "error" ? "Error" : "Warning"}: ${lastError}`);
         if (lastInterruption) console.log(`  Interrupted: ${describeThreadInterruption(lastInterruption)}`);
 
         printPendingTodos(pendingTodos);

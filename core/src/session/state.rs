@@ -335,13 +335,21 @@ impl Local {
         if error.is_some() {
             receipt.error = error;
         }
+        // A turn its parent hears of keeps when it ended, after any other of its turns, also within a millisecond: the
+        // parent's reports keep the order the turns ended in, and a self-started one says when the child went quiet (#217).
+        if matches!(receipt.command.as_str(), "prompt" | "auto") {
+            let last = (self.sessions[id].receipts.values())
+                .filter_map(|r| r.input["ended"].as_u64())
+                .max();
+            receipt.input["ended"] = json!(now_ms().max(last.map_or(0, |at| at + 1)));
+        }
         self.append(
             id,
             "receipt",
-            serde_json::to_value(receipt).map_err(io::Error::other)?,
+            serde_json::to_value(&receipt).map_err(io::Error::other)?,
             None,
         )?;
-        Ok(())
+        super::children::supersede(self, id, &receipt)
     }
 
     pub(super) fn fail_pending(&mut self, id: &str) -> Result<()> {

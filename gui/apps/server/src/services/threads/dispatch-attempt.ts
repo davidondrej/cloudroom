@@ -1,4 +1,7 @@
-import { requestQueuedMachineReadiness } from "./queued-message-dispatch.js";
+import {
+  requestQueuedMachineReadiness,
+  requestQueuedMessageDispatch,
+} from "./queued-message-dispatch.js";
 import {
   cancelPreparingMachinePause,
   isMachineWaitingForExecution,
@@ -302,16 +305,40 @@ export function attemptDispatch(
   args: DispatchAttemptArgs,
 ): Promise<DispatchAttemptOutcome> {
   requireNativeThread(args.thread);
-  return runDispatchAttempt(deps, args, { thread: false, host: false });
+  return runDispatchAttempt(deps, args, {
+    thread: false,
+    host: false,
+    error: false,
+  });
 }
 
-/** Re-decisions one attempt has used: one per cause, never more. */
+/**
+ * Re-decisions one attempt has used: one per cause, never more. `error` is a
+ * second thread change that lands on `error`, which a send restarts.
+ */
 interface Reattempts {
   thread: boolean;
   host: boolean;
+  error: boolean;
 }
 
 import { teleportBlocked } from "../cloudroom/store.js";
+
+function ensureLocalDispatchAllowed(
+  deps: Pick<LoggedPendingInteractionWorkSessionDeps, "db">,
+  threadId: string,
+): void {
+  if (
+    teleportBlocked(deps.db, threadId) ||
+    getThread(deps.db, threadId)?.executionTarget === "cloud"
+  ) {
+    throw new ApiError(
+      409,
+      "teleport_in_progress",
+      "Local dispatch is blocked during or after Teleport.",
+    );
+  }
+}
 
 async function runDispatchAttempt(
   deps: LoggedPendingInteractionWorkSessionDeps,
@@ -319,7 +346,7 @@ async function runDispatchAttempt(
   reattempted: Reattempts,
 ): Promise<DispatchAttemptOutcome> {
   const { payload, thread } = args;
-  if (teleportBlocked(deps.db, thread.id) || getThread(deps.db, thread.id)?.executionTarget === "cloud") throw new ApiError(409, "teleport_in_progress", "Local dispatch is blocked during or after Teleport.");
+  ensureLocalDispatchAllowed(deps, thread.id);
   // A stopping thread is writable HERE and nowhere upstream: the checkpoint
   // below turns it into a core wait, which is a truthful "not yet" the row can
   // recover from, rather than the 409 that used to make a stop a dead end for
@@ -397,6 +424,73 @@ async function runDispatchAttempt(
     return { kind: "queued", entry };
   };
 
+  // A child can't wake a parent the user stopped: its message waits with the
+  // parent's held notices until the user sends or `queue send`s (#821).
+  const holdChildOfStoppedParent = (): DispatchAttemptOutcome | null => {
+    if (
+      claimed !== null ||
+      senderThreadId === null ||
+      getThread(deps.db, senderThreadId)?.parentThreadId !== thread.id ||
+      !isThreadQueueAutoSendPaused(deps.db, thread.id)
+    ) {
+      return null;
+    }
+    const held = waitOn({ kind: "thread-busy" }, null);
+    return held.kind === "queued"
+      ? { ...held, entry: { ...held.entry, pausedByStop: true } }
+      : held;
+  };
+
+  // A busy thread can change again under its one re-decision (#1341): then
+  // the message follows the live thread instead of failing. A sender still
+  // listening restarts a failed thread, as a fresh send would.
+  const reattempt = async (
+    current: Thread | null,
+    cause: keyof Reattempts = "thread",
+  ): Promise<DispatchAttemptOutcome> => {
+    if (current === null || !reattempted[cause]) {
+      return reattemptDispatchForThreadChange(
+        deps,
+        args,
+        current,
+        reattempted,
+        cause,
+      );
+    }
+    ensureLocalDispatchAllowed(deps, thread.id);
+    ensureThreadIsWritable(current, true);
+    if (
+      current.status === "error" &&
+      args.source.kind === "inline" &&
+      !reattempted.error
+    ) {
+      return reattemptDispatchForThreadChange(
+        deps,
+        args,
+        current,
+        reattempted,
+        "error",
+      );
+    }
+    if (current.status === "stopping") {
+      return (
+        holdChildOfStoppedParent() ??
+        waitOn(
+          { kind: respectManualStopPause ? "thread-busy" : "stopping" },
+          null,
+        )
+      );
+    }
+    const outcome = waitOn({ kind: "thread-busy" }, null);
+    if (current.status === "idle") {
+      requestQueuedMessageDispatch(deps, {
+        kind: "thread-ready",
+        threadId: thread.id,
+      });
+    }
+    return outcome;
+  };
+
   // --- 1. plugin policy ---------------------------------------------------
 
   const admitted: { value: PendingThreadAdmission | null } = {
@@ -417,19 +511,9 @@ async function runDispatchAttempt(
       return;
     }
 
-    // A child can't wake a parent the user stopped: its message waits with the
-    // parent's held notices until the user sends or `queue send`s (#821).
-    if (
-      claimed === null &&
-      senderThreadId !== null &&
-      getThread(deps.db, senderThreadId)?.parentThreadId === thread.id &&
-      isThreadQueueAutoSendPaused(deps.db, thread.id)
-    ) {
-      const held = waitOn({ kind: "thread-busy" }, null);
-      continued.outcome =
-        held.kind === "queued"
-          ? { ...held, entry: { ...held.entry, pausedByStop: true } }
-          : held;
+    const held = holdChildOfStoppedParent();
+    if (held !== null) {
+      continued.outcome = held;
       return;
     }
 
@@ -643,12 +727,7 @@ async function runDispatchAttempt(
     return continued.outcome;
   }
   if (continued.reattemptThread !== null) {
-    return reattemptDispatchForThreadChange(
-      deps,
-      args,
-      continued.reattemptThread,
-      reattempted,
-    );
+    return reattempt(continued.reattemptThread);
   }
 
   // --- 2. dispatch --------------------------------------------------------
@@ -663,7 +742,7 @@ async function runDispatchAttempt(
       // for a thread that is gone. Reporting a dispatch here would tell the
       // caller their message went when it went nowhere.
       const current = getThread(deps.db, thread.id);
-      return reattemptDispatchForThreadChange(deps, args, current, reattempted);
+      return reattempt(current);
     }
     await launchAdmittedThread(deps, admission);
     return { kind: "dispatched" };
@@ -681,7 +760,7 @@ async function runDispatchAttempt(
     afterWait.deletedAt !== thread.deletedAt ||
     afterWait.environmentId !== thread.environmentId
   ) {
-    return reattemptDispatchForThreadChange(deps, args, afterWait, reattempted);
+    return reattempt(afterWait);
   }
   let saving = false;
   try {
@@ -714,13 +793,7 @@ async function runDispatchAttempt(
     // for its reconnect, and one already back gets it now.
     if (!saving && isHostUnavailableApiError(error)) {
       if (!reattempted.host) {
-        return reattemptDispatchForThreadChange(
-          deps,
-          args,
-          getThread(deps.db, thread.id),
-          reattempted,
-          "host",
-        );
+        return reattempt(getThread(deps.db, thread.id), "host");
       }
       // A drain keeps its row, so only a listening sender hears "not queued".
       if (args.source.kind !== "inline") throw error;
@@ -737,12 +810,7 @@ async function runDispatchAttempt(
     if (!(error instanceof DispatchThreadStatusChangedError)) {
       throw error;
     }
-    return reattemptDispatchForThreadChange(
-      deps,
-      args,
-      getThread(deps.db, thread.id),
-      reattempted,
-    );
+    return reattempt(getThread(deps.db, thread.id));
   }
   if (claimed !== null) {
     settleQueueRowDispatched({ row: claimed });
@@ -761,13 +829,6 @@ function reattemptDispatchForThreadChange(
 ): Promise<DispatchAttemptOutcome> {
   if (thread === null) {
     throw new ApiError(404, "thread_not_found", "Thread not found");
-  }
-  if (reattempted[cause]) {
-    throw new ApiError(
-      500,
-      "internal_error",
-      `Thread ${thread.id} changed twice under one dispatch attempt`,
-    );
   }
   return runDispatchAttempt(
     deps,
@@ -949,13 +1010,14 @@ function undeliveredStartInput(
   tx: DbTransaction,
   threadId: string,
 ): PromptInput[] {
-  if (getThread(tx, threadId)?.status !== "error") return [];
+  const thread = getThread(tx, threadId);
+  if (thread?.status !== "error") return [];
   const request = readThreadProvisionContext(tx, threadId)?.request;
   if (request?.carryInput !== true || request.inputCancelled) return [];
   const input = (
     request.input.length > 0
       ? request.input
-      : (resolveDeferredFirstTurnContext(tx, threadId)?.input ?? [])
+      : (resolveDeferredFirstTurnContext(tx, thread)?.input ?? [])
   ).filter(
     (block) => block.type !== "text" || block.text !== UNDELIVERED_START_NOTE,
   );

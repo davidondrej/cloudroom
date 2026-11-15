@@ -6,7 +6,12 @@ import { readPrimaryHostIdFromDataDir } from "../hosts/primary-host.js";
 import { findHostDataDir } from "../lib/entity-lookup.js";
 import { updateThread } from "@cloudroom/db";
 import { assertEnvironmentPathAvailable } from "./path-admission.js";
-import { restoreWorktreeWork, saveWorktreeWork } from "./worktree-work.js";
+import {
+  markRemovalStarted,
+  restoreWorktreeWork,
+  saveWorktreeWork,
+  savedBeforeRemoval,
+} from "./worktree-work.js";
 import { saveThreadProvisionContext } from "../threads/thread-startup-store.js";
 import {
   refreshAttachedEnvironmentBranch,
@@ -373,6 +378,12 @@ async function runCreate(
 ): Promise<void> {
   const signal = outerSignal;
   const flavor = getHostPathFlavorForHost(deps, context.host.id);
+  // Project checkout's cleanup never touches the folder, so a failed attach
+  // must not keep other threads out of it until archive or retry (#1366).
+  // Only a returned failure is final: a thrown one, like a dropped host
+  // connection, may leave a branch switch running, so it keeps the claim.
+  const releaseFailedClaim =
+    record.provider.id === DEFAULT_ENVIRONMENT_PROVIDER_ID.projectCheckout;
   let changed = false;
   mutateProvisioning(deps, provisioning, ["creating"], (row) => {
     row.hostId = context.host.id;
@@ -527,6 +538,7 @@ async function runCreate(
         } else {
           row.status = "error";
           row.statusMessage = result.message;
+          if (releaseFailedClaim) row.claimPath = null;
         }
       },
     );
@@ -711,13 +723,19 @@ async function runRemove(
   const automatic = !explicitRemovals.has(environmentId) && local;
   const park =
     automatic && environmentHasRestorableThreads(deps.db, environmentId);
-  const keep = (retireAt: number | null) =>
+  // Holds the saved HEAD while the folder is being removed, so a retry after
+  // a cut-off removal doesn't commit the files it already deleted (#1068).
+  const removing = `${worktreeNotesDir(deps, environmentId)}.removing`;
+  const clearRemoving = () => rm(removing, { force: true }).catch(() => {});
+  const keep = (retireAt: number | null) => {
+    void clearRemoving();
     writeEnvironment(deps, environmentId, {
       status: "ready",
       teardownStatus: null,
       teardownMessage: null,
       retireAt,
     });
+  };
   // Last guards, before the hook and again before the folder goes (#1284):
   // never remove a folder a live thread or another environment still uses.
   const refused = () => {
@@ -758,20 +776,36 @@ async function runRemove(
           signal,
         });
       }
-      if (automatic && existsSync(row.path!)) {
+      const resumed =
+        automatic &&
+        (await savedBeforeRemoval(
+          row.path!,
+          removing,
+          worktreeNotesDir(deps, environmentId),
+        ));
+      if (resumed) writeEnvironment(deps, environmentId, { branchName: resumed });
+      else if (automatic && existsSync(row.path!)) {
         const branchName = await saveWorktreeWork(
           row.path!,
           worktreeNotesDir(deps, environmentId),
           `cloudroom/saved-${environmentId}`,
+          (deletedFiles) =>
+            deps.logger.warn(
+              { environmentId, deletedFiles },
+              "Worktree kept: its changes delete too many tracked files to save automatically",
+            ),
         );
         if (branchName === null) {
           keep(Date.now() + WORK_RECHECK_MS);
           return;
         }
-        // Recorded before the folder goes: a retry can't save it again.
+        // Recorded before the folder goes. A retry after a cut-off removal
+        // reuses it above; the mass-deletion check keeps other half-deleted folders.
         writeEnvironment(deps, environmentId, { branchName });
       }
       if (refused()) return;
+      if (automatic && existsSync(row.path!))
+        await markRemovalStarted(row.path!, removing).catch(() => {});
       const invocation = await invokeEnvironmentProvider(
         record,
         "environment remove",
@@ -805,6 +839,7 @@ async function runRemove(
         return;
       }
       explicitRemovals.delete(environmentId);
+      await clearRemoving();
       if (park) {
         writeEnvironment(deps, environmentId, {
           status: "ready",

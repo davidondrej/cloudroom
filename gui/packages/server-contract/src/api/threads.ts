@@ -657,8 +657,19 @@ export type ThreadChildSummaryResponse = z.infer<
 
 export const threadUnarchiveQuerySchema = z.object({
   keepParent: z.enum(["true", "false"]).optional(),
+  /** Also restore the threads under it that were archived with it, still under it. */
+  withChildren: z.enum(["true", "false"]).optional(),
 });
 export type ThreadUnarchiveQuery = z.infer<typeof threadUnarchiveQuerySchema>;
+
+export const threadUnarchiveResponseSchema = z.object({
+  ok: z.literal(true),
+  /** The thread itself first, then any threads restored with it. */
+  unarchivedThreadIds: z.array(z.string()),
+});
+export type ThreadUnarchiveResponse = z.infer<
+  typeof threadUnarchiveResponseSchema
+>;
 
 export const deleteThreadRequestSchema = z.object({
   childThreadsConfirmed: z.boolean(),
@@ -906,13 +917,15 @@ export type ThreadCountGroupBy = z.infer<typeof threadCountGroupBySchema>;
  * Filters for `GET /threads/count`. Every value is a string because this is a
  * query string; the route parses them once at the boundary.
  *
- * `parentThreadId` is deliberately three-valued and unambiguous: omitted means
- * "do not filter on parentage", the literal `"none"` means root threads only
- * (`parent_thread_id IS NULL`), and any other value is that parent's id. An
- * empty string would have been ambiguous with an omitted parameter, and a
- * thread id can never be `"none"` (ids are prefixed `thr_`).
+ * `parentThreadId` is deliberately unambiguous: omitted means "do not filter on
+ * parentage", the literal `"none"` means root threads only
+ * (`parent_thread_id IS NULL`), the literal `"any"` means child threads only,
+ * and any other value is that parent's id. An empty string would have been
+ * ambiguous with an omitted parameter, and a thread id can never be `"none"`
+ * or `"any"` (ids are prefixed `thr_`).
  */
 export const THREAD_COUNT_ROOT_PARENT = "none";
+export const THREAD_COUNT_ANY_PARENT = "any";
 
 export const threadCountQuerySchema = z.object({
   status: threadStatusSchema.optional(),
@@ -923,6 +936,8 @@ export const threadCountQuerySchema = z.object({
   groupBy: threadCountGroupBySchema.optional(),
   /** Count archived threads too; omitted/false excludes them (deleted always are). */
   includeArchived: z.enum(["true", "false"]).optional(),
+  /** Count archived threads only; wins over `includeArchived`. */
+  archivedOnly: z.enum(["true", "false"]).optional(),
   /** Count hidden threads too; omitted/false counts visible threads only. */
   includeHidden: z.enum(["true", "false"]).optional(),
 });
@@ -981,6 +996,10 @@ export type ThreadRunningResponse = z.infer<typeof threadRunningResponseSchema>;
 export const threadSearchQuerySchema = z.object({
   query: z.string().trim().min(2),
   limitPerGroup: z.string().regex(/^\d+$/).optional(),
+  /** Search one project only. Applied before `limitPerGroup`, like `hasParent`. */
+  projectId: z.string().min(1).optional(),
+  /** "true" for child threads only, "false" for root threads only. */
+  hasParent: z.enum(["true", "false"]).optional(),
 });
 export type ThreadSearchQuery = z.infer<typeof threadSearchQuerySchema>;
 

@@ -166,7 +166,7 @@ export function unstartedTurn(db: DbQueryConnection, threadId: string): Command 
   return turn?.command === "prompt" && (turn.state === "sending" || turn.state === "accepted") ? turn : null;
 }
 
-/** `refusal`: why Cloud refused a failed prompt, for its `turn_failed` event. */
+/** `refusal`: why Cloud refused a failed prompt, and at which step, for its `turn_failed` event. */
 export function saveCommandState(db: DbQueryConnection, threadId: string, id: string, state: string, refusal?: Omit<CloudFailure, "category">): void {
   const unstarted = unstartedTurn(db, threadId)?.id === id;
   db.update(cloudroomCommands).set({ state }).where(and(eq(cloudroomCommands.id, id), eq(cloudroomCommands.threadId, threadId))).run();

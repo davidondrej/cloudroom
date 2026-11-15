@@ -532,7 +532,7 @@ describe("startup queue waits", () => {
         ).rejects.toMatchObject({
           body: {
             code: "thread_not_writable",
-            details: { reason },
+            details: { reason, threadId: thread.id },
           },
           status: 409,
         });

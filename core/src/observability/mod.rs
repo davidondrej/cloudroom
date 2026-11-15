@@ -377,13 +377,15 @@ impl Observability {
                         status,
                         duration_ms,
                     } = &record.signal
-                        && (*method == "GET"
+                        && ((*method == "GET"
                             || (*method == "POST"
                                 && matches!(
                                     route.as_str(),
                                     "/v1/sync" | "/v1/previews/device" | "/v1/previews/report"
                                 )))
-                        && (200..400).contains(status)
+                            && (200..400).contains(status)
+                            // `mac status` checks the Mac with a job Core never keeps, so its confirm gets 404 (#608).
+                            || (*method == "POST" && route == "/v1/mac/results/{id}" && *status == 404))
                         && *duration_ms < SLOW_API_MS
                     {
                         let summary = summaries

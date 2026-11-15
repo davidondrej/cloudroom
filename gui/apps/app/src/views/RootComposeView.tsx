@@ -580,11 +580,13 @@ export function RootComposeView() {
         navigateToThreadAfterCreate,
       });
       const { sendAt, ...requestFields } = request;
+      // The Pinned header's "New thread" pins the thread instead of filing it in a section.
+      const pinNewThread = rootComposeSectionId === "pinned";
       const createRequest =
         forkSeed === null
           ? {
               ...requestFields,
-              ...(rootComposeSectionId
+              ...(rootComposeSectionId && !pinNewThread
                 ? { sectionId: rootComposeSectionId }
                 : {}),
             }
@@ -634,7 +636,7 @@ export function RootComposeView() {
                 ...(sendAt === undefined ? {} : { sendAt }),
               },
         );
-        pinIfRequested(thread.id);
+        pinIfRequested(thread.id, pinNewThread);
         setLastCreatedThreadId(thread.id);
         setForkSeed(null);
         setRootComposeSectionId(null);
