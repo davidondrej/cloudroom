@@ -16,7 +16,10 @@ import type {
   EditMessageMutationRequest,
   SendThreadMessageMutationRequest,
 } from "./mutation-request-types";
-import { waitForThreadReasoningSave } from "./thread-state-mutations";
+import {
+  THREAD_STOP_MUTATION_KEY,
+  waitForThreadExecutionSave,
+} from "./thread-state-mutations";
 import {
   applyCreateThreadResult,
   applyQueuedMessageCreateResult,
@@ -179,7 +182,7 @@ export function useSendThreadMessage() {
       pluginSubmission,
       executionInputSources,
     }: SendThreadMessageMutationRequest) => {
-      await waitForThreadReasoningSave(queryClient, id);
+      await waitForThreadExecutionSave(queryClient, id);
       return await sdk.threads.send({
         threadId: id,
         ...(requestId ? { requestId } : {}),
@@ -261,7 +264,7 @@ export function useCreateThreadQueuedMessage() {
       executionInputSources,
       hardQueue,
     }: CreateThreadQueuedMessageMutationRequest): Promise<ThreadQueuedMessage> => {
-      await waitForThreadReasoningSave(queryClient, id);
+      await waitForThreadExecutionSave(queryClient, id);
       return sdk.threads.queuedMessages.create({
         threadId: id,
         input,
@@ -455,6 +458,7 @@ export function useStopThread() {
   const queryClient = useQueryClient();
 
   return useMutation({
+    mutationKey: THREAD_STOP_MUTATION_KEY,
     meta: {
       errorMessage: "Failed to stop thread.",
       lifecycleOperation: "stop_thread",

@@ -4,6 +4,7 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  renameSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -783,6 +784,7 @@ async function constructPiThreadSession(
   providerThreadId: string,
   params: PiSessionParams,
 ): Promise<ThreadSession> {
+  repointRemovedSessionCwd(providerThreadId, params.cwd);
   const sessionSerial = nextSessionSerial();
   const sessionOptions = await buildSessionOptions({
     params,
@@ -901,6 +903,27 @@ async function handleThreadConstruction(
 function resumedSessionMissingCwd(providerThreadId: string): string | null {
   const cwd = persistedSessionCwd(providerThreadId);
   return cwd !== null && !existsSync(cwd) ? cwd : null;
+}
+
+// Pi refuses to open a session whose saved cwd is gone (its worktree was
+// removed after the thread moved), so point the session header at the new cwd.
+function repointRemovedSessionCwd(providerThreadId: string, cwd: string): void {
+  if (resumedSessionMissingCwd(providerThreadId) === null || !existsSync(cwd)) {
+    return;
+  }
+  const sessionFile = resolvePiSessionFilePath({
+    env: process.env,
+    threadId: providerThreadId,
+  });
+  const text = readFileSync(sessionFile, "utf8");
+  const end = text.indexOf("\n");
+  const header = JSON.parse(end === -1 ? text : text.slice(0, end)) as object;
+  const temp = `${sessionFile}.${process.pid}.tmp`;
+  writeFileSync(
+    temp,
+    JSON.stringify({ ...header, cwd }) + (end === -1 ? "" : text.slice(end)),
+  );
+  renameSync(temp, sessionFile);
 }
 
 function usablePersistedSessionCwd(providerThreadId: string): string | null {

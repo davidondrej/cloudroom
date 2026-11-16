@@ -363,9 +363,16 @@ case "${CLAUDE_ENV_FILE:+hook}|$ANTHROPIC_AUTH_TOKEN|$ANTHROPIC_API_KEY|$CLAUDE_
         .await
         .unwrap();
     // Removing the app key restarts an idle agent that started with it.
-    let (handle, _events) =
-        runtime::Handle::spawn_guarded(&config, runtime::Kind::Claude, None, false, false, None)
-            .unwrap();
+    let (handle, _events) = runtime::Handle::spawn_guarded(
+        &config,
+        runtime::Kind::Claude,
+        None,
+        false,
+        false,
+        None,
+        Vec::new(),
+    )
+    .unwrap();
     fs::write(state.join("environment"), "").unwrap();
     assert!(handle.login_changed(&config));
     handle.request_shutdown();
@@ -388,9 +395,16 @@ async fn internal_claude_probes_skip_user_hooks_but_sessions_keep_them() {
     config.harnesses.insert(runtime::Kind::Claude, profile);
     let _ = runtime::models(&config, runtime::Kind::Claude).await;
     let _ = runtime::probe(&config, runtime::Kind::Claude, "haiku", None).await;
-    let (_handle, mut events) =
-        runtime::Handle::spawn_guarded(&config, runtime::Kind::Claude, None, false, false, None)
-            .unwrap();
+    let (_handle, mut events) = runtime::Handle::spawn_guarded(
+        &config,
+        runtime::Kind::Claude,
+        None,
+        false,
+        false,
+        None,
+        Vec::new(),
+    )
+    .unwrap();
     while !matches!(
         events.recv().await,
         Some(runtime::Event::Exited { .. }) | None

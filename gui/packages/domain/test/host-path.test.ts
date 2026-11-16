@@ -92,9 +92,13 @@ describe("host-path", () => {
   });
 
   it("drops the trailing periods and spaces Windows ignores", () => {
-    expect(areHostPathsEqual("C:\\worktrees\\owned.", "c:/WORKTREES/owned")).toBe(true);
+    expect(
+      areHostPathsEqual("C:\\worktrees\\owned.", "c:/WORKTREES/owned"),
+    ).toBe(true);
     expect(areHostPathsEqual("C:\\src\\repo ", "C:\\src\\repo")).toBe(true);
-    expect(normalizeHostPath("C:\\worktrees\\owned.\\sub")).toBe("C:\\worktrees\\owned\\sub");
+    expect(normalizeHostPath("C:\\worktrees\\owned.\\sub")).toBe(
+      "C:\\worktrees\\owned\\sub",
+    );
     expect(
       isHostPathWithin({
         rootPath: "C:\\worktrees\\owned",
@@ -102,6 +106,13 @@ describe("host-path", () => {
       }),
     ).toBe(true);
     expect(normalizeHostPath("C:\\a\\...\\b")).toBe("C:\\a\\...\\b");
+    expect(normalizeHostPath("C:\\a \\.")).toBe("C:\\a");
+    expect(
+      isHostPathWithin({
+        rootPath: "C:\\a",
+        candidatePath: "C:\\a \\b",
+      }),
+    ).toBe(false);
     expect(normalizeHostPath("/home/me/repo.")).toBe("/home/me/repo.");
   });
 

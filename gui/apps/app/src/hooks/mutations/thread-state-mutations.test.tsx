@@ -24,7 +24,9 @@ import {
 import {
   useMoveThreadToSection,
   useUnpinAndMoveThread,
+  THREAD_STOP_MUTATION_KEY,
   useUpdateThread,
+  waitForThreadExecutionSave,
 } from "./thread-state-mutations";
 
 vi.mock("@/lib/sdk", () => ({
@@ -96,6 +98,79 @@ afterEach(() => {
 });
 
 describe("thread state mutations", () => {
+  it.each([
+    ["sends after a model switch succeeds", true],
+    ["drops the send when the model switch fails", false],
+  ] as const)("%s", async (_name, succeeds) => {
+    const { queryClient, wrapper } = createQueryClientTestHarness();
+    let finishSwitch: () => void = () => {};
+    vi.mocked(sdk.threads.update).mockImplementation(
+      () =>
+        new Promise<ThreadResponse>((resolve, reject) => {
+          finishSwitch = () =>
+            succeeds
+              ? resolve(makeThreadResponse({ providerId: "claude-code" }))
+              : reject(new Error("switch failed"));
+        }),
+    );
+    const { result } = renderHook(
+      () => useUpdateThread({ threadId: "thread-1" }),
+      { wrapper },
+    );
+    act(() => {
+      result.current.mutate({
+        id: "thread-1",
+        providerId: "claude-code",
+        model: "claude-opus-5",
+      });
+    });
+    await waitFor(() => expect(queryClient.isMutating()).toBe(1));
+
+    const settled = vi.fn();
+    const send = waitForThreadExecutionSave(queryClient, "thread-1").then(
+      () => settled("sent"),
+      (error: Error) => settled(error.message),
+    );
+    await Promise.resolve();
+    expect(settled).not.toHaveBeenCalled();
+
+    act(() => finishSwitch());
+    await send;
+    expect(settled).toHaveBeenCalledWith(
+      succeeds ? "sent" : "The model switch failed, so this message wasn't sent.",
+    );
+    // Another thread never waits for this switch.
+    await expect(
+      waitForThreadExecutionSave(queryClient, "thread-2"),
+    ).resolves.toBeUndefined();
+  });
+
+  it("drops a send waiting for a switch when the user presses Stop", async () => {
+    const { queryClient, wrapper } = createQueryClientTestHarness();
+    vi.mocked(sdk.threads.update).mockImplementation(
+      () => new Promise<ThreadResponse>(() => {}),
+    );
+    const { result } = renderHook(
+      () => useUpdateThread({ threadId: "thread-1" }),
+      { wrapper },
+    );
+    act(() => {
+      result.current.mutate({ id: "thread-1", model: "claude-opus-5" });
+    });
+    await waitFor(() => expect(queryClient.isMutating()).toBe(1));
+    const send = waitForThreadExecutionSave(queryClient, "thread-1");
+
+    void queryClient
+      .getMutationCache()
+      .build(queryClient, {
+        mutationKey: THREAD_STOP_MUTATION_KEY,
+        mutationFn: async () => {},
+      })
+      .execute("thread-1");
+
+    await expect(send).rejects.toThrow("Stopped before it was sent.");
+  });
+
   it.each([
     ["leaves the current section unchanged", null, "sec_work", 0, 0],
     ["moves an unpinned thread to Threads", null, null, 0, 1],

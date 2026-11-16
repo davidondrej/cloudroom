@@ -1,10 +1,13 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import { existsSync, readFileSync, statSync } from "node:fs";
+import path from "node:path";
 import { PassThrough, Writable, type Readable } from "node:stream";
 import {
   experimental_isProviderBridgeRecording,
   experimental_killPortableProcess,
   experimental_readBoundedLines,
   experimental_recordProviderChildIo,
+  experimental_resolveWindowsCommandFile,
   experimental_spawnPortableProcess,
   sanitizeInheritedChildProcessEnv,
   withoutBridgeRuntimeEnv,
@@ -86,6 +89,85 @@ export function resolvePiLaunch(env: NodeJS.ProcessEnv): {
   return { command, args: parsed };
 }
 
+const MANAGED_PI_CMD_LINE = '"%node%" "%~dp0pi-launcher.js" %*';
+const PI_NODE_LINE =
+  'IF EXIST "%LOCALAPPDATA%\\pi-node\\current\\node.exe" SET "node=%LOCALAPPDATA%\\pi-node\\current\\node.exe"';
+
+function readText(file: string): string {
+  return readFileSync(file, "utf8").replace(/^\uFEFF/u, "");
+}
+
+/**
+ * Pi's own Windows installer makes `pi.cmd` run `pi-launcher.js`, which
+ * restarts the CLI with `stdio: "inherit"`. cmd.exe and that launcher both drop
+ * fds 3 and 4, which the bridge extension needs, so start the CLI the launcher
+ * would start. Anything unexpected returns null and keeps today's launch.
+ */
+export function resolveManagedWindowsPi(
+  cwd: string,
+  env: NodeJS.ProcessEnv,
+): { command: string; args: string[]; env: NodeJS.ProcessEnv } | null {
+  try {
+    const shim = experimental_resolveWindowsCommandFile({
+      command: "pi",
+      cwd,
+      env,
+    });
+    if (!shim || path.basename(shim).toLowerCase() !== "pi.cmd") return null;
+    const cmd = readText(shim);
+    if (!cmd.split(/\r?\n/u).includes(MANAGED_PI_CMD_LINE)) return null;
+    const root = path.join(path.dirname(path.dirname(shim)), "install");
+    const marker = JSON.parse(
+      readText(path.join(root, "managed-install.json")),
+    );
+    if (
+      marker?.kind !== "pi-managed-install" ||
+      marker.layout !== "releases-v1"
+    )
+      return null;
+    const version = readText(path.join(root, "current-version")).trim();
+    if (!/^[0-9A-Za-z._+-]+$/u.test(version) || /^\.+$/u.test(version))
+      return null;
+    const pkg = path.join(
+      root,
+      "releases",
+      version,
+      "node_modules",
+      "@earendil-works",
+      "pi-coding-agent",
+    );
+    const bin: unknown = JSON.parse(readText(path.join(pkg, "package.json")))
+      .bin?.pi;
+    if (typeof bin !== "string") return null;
+    const cli = path.resolve(pkg, bin);
+    const inside = path.relative(pkg, cli);
+    if (
+      inside.startsWith("..") ||
+      path.isAbsolute(inside) ||
+      !statSync(cli).isFile()
+    )
+      return null;
+    const piNode = path.join(
+      env.LOCALAPPDATA ?? "",
+      "pi-node",
+      "current",
+      "node.exe",
+    );
+    const node =
+      env.LOCALAPPDATA && cmd.includes(PI_NODE_LINE) && existsSync(piNode)
+        ? piNode
+        : experimental_resolveWindowsCommandFile({ command: "node", cwd, env });
+    if (!node || !/\.exe$/iu.test(node)) return null;
+    return {
+      command: node,
+      args: [cli],
+      env: { ...env, PI_MANAGED_INSTALL_ROOT: root },
+    };
+  } catch {
+    return null;
+  }
+}
+
 export function buildPiChildEnv(
   overrides: Record<string, string>,
 ): NodeJS.ProcessEnv {
@@ -117,13 +199,17 @@ export class PiRpcChild {
       resolveSettledExit = resolve;
     });
     const launch = resolvePiLaunch(process.env);
+    const managed =
+      process.platform === "win32" && !process.env[PI_BRIDGE_COMMAND_ENV]
+        ? resolveManagedWindowsPi(args.cwd, args.env)
+        : null;
     this.child =
       process.platform === "win32"
         ? experimental_spawnPortableProcess({
-            command: launch.command,
-            args: [...launch.args, ...args.args],
+            command: managed?.command ?? launch.command,
+            args: [...(managed?.args ?? launch.args), ...args.args],
             cwd: args.cwd,
-            env: args.env,
+            env: managed?.env ?? args.env,
             stdio: ["pipe", "pipe", "pipe", "pipe", "pipe"],
             windowsHide: true,
           })

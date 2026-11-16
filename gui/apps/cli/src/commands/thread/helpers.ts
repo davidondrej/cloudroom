@@ -165,8 +165,8 @@ export function parseThreadWaitTimeoutSeconds(
   value: string | undefined,
 ): number {
   if (value === undefined) return DEFAULT_THREAD_WAIT_TIMEOUT_SECONDS;
-  const parsed = Number.parseFloat(value);
-  if (!Number.isFinite(parsed) || parsed < 0) {
+  const parsed = Number(value);
+  if (value.trim() === "" || !Number.isFinite(parsed) || parsed < 0) {
     throw new Error("Timeout must be a non-negative number of seconds.");
   }
   return parsed;
@@ -176,8 +176,8 @@ export function parseThreadWaitPollIntervalMs(
   value: string | undefined,
 ): number {
   if (value === undefined) return DEFAULT_THREAD_WAIT_POLL_INTERVAL_MS;
-  const parsed = Number.parseInt(value, 10);
-  if (!Number.isFinite(parsed) || parsed < 1) {
+  const parsed = Number(value);
+  if (value.trim() === "" || !Number.isInteger(parsed) || parsed < 1) {
     throw new Error(
       "Poll interval must be a positive integer number of milliseconds.",
     );

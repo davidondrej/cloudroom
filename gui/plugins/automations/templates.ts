@@ -33,8 +33,9 @@ export interface LoopTemplate {
   model: string;
   reasoningLevel: ReasoningLevel;
   prompt: string;
-  /** What one run uses, for the usage estimate (docs/scopes/loops.md): the average of our own runs, 2026-11-13, in
-   *  tokens weighted like `weightedTokens`. Unset without at least 5 runs on the template's agent. */
+  /** What one run uses, for the usage estimate (docs/scopes/loops.md), until the website has enough runs from every
+   *  account to say: the average of our own runs, 2026-11-13, in tokens weighted like `weightedTokens`. Unset without
+   *  at least 5 runs on the template's agent. */
   tokensPerRun?: number;
   /** Mac only: Cloud threads only see their own subagents, not the project's threads (#549). */
   localOnly?: true;

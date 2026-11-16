@@ -84,13 +84,15 @@ pub struct Receipt {
     pub error: Option<String>,
 }
 
-/// A start's provider, command guard, co-author stripping, system prompt and parent thread in another sandbox.
+/// A start's provider, command guard, co-author stripping, system prompt, parent thread in another sandbox, and the
+/// app's thread and project IDs.
 type StartOptions = (
     Option<String>,
     Option<bool>,
     Option<bool>,
     Option<String>,
     Option<String>,
+    (Option<String>, Option<String>),
 );
 
 /// A child start the website drives (ADR 20261104-015709): the request it
@@ -258,6 +260,10 @@ pub struct Session {
     // The running totals of the last `usage` reading (tokens.rs).
     #[serde(skip)]
     tokens: tokens::Tokens,
+    // Those totals when the running turn began, so a loop run reports only what its own turn used. None when unknown:
+    // after a restart, or when a copied-in history's totals were not counted yet.
+    #[serde(skip)]
+    turn_tokens: Option<tokens::Tokens>,
     // A copied-in history (teleport, move, rewind): Codex and Pi bring back its old totals, so the next reading only
     // sets the base.
     #[serde(skip)]
@@ -318,6 +324,34 @@ impl Session {
             .find(|r| r.command == "start")
             .and_then(|r| r.input["system_prompt"].as_str())
             .map(str::to_owned)
+    }
+
+    /// The app's project ID from the start. A shared child or side chat inherits it, but not the thread ID (#199).
+    fn project_id(&self) -> Option<&str> {
+        self.receipts
+            .values()
+            .find(|r| r.command == "start")
+            .and_then(|r| r.input["project_id"].as_str())
+    }
+
+    /// The app's thread ID from the start, which an agent switch or project move keeps (#199).
+    fn thread_id(&self) -> Option<&str> {
+        self.receipts
+            .values()
+            .find(|r| r.command == "start")
+            .and_then(|r| r.input["thread_id"].as_str())
+    }
+
+    /// `ROOM_THREAD_ID` and `ROOM_PROJECT_ID` for the agent's shells, from the app's IDs at start (#199).
+    fn room_env(&self) -> runtime::RoomEnv {
+        let start = self.receipts.values().find(|r| r.command == "start");
+        [
+            ("ROOM_THREAD_ID", "thread_id"),
+            ("ROOM_PROJECT_ID", "project_id"),
+        ]
+        .into_iter()
+        .filter_map(|(name, key)| Some((name, start?.input[key].as_str()?.to_owned())))
+        .collect()
     }
 
     /// The app's thread this session reports its turns to, when that parent runs in another sandbox (relay.rs).
@@ -476,10 +510,22 @@ pub struct Manager {
     report_retry: Mutex<(u64, u64)>,
 }
 
+/// Why a turn the last Core run left open ended: its exit status from the supervisor, else nothing guessed.
+fn restart_reason(status: Option<&str>) -> String {
+    let how = match status.and_then(|s| s.parse::<u32>().ok()) {
+        Some(n @ 129..=192) => format!(" after signal {}", n - 128),
+        Some(n @ 1..=128) => format!(" after exit status {n}"),
+        _ => String::new(),
+    };
+    format!("Cloudroom restarted{how} while this ran; its result is unknown.")
+}
+
 impl Manager {
     pub fn open(config: Config) -> io::Result<Arc<Self>> {
         let mut local = Local::open(&config.state_dir)?;
         local.browser_owner = config.storage.as_ref().map(|p| p.agent_uid);
+        // A turn still open here was cut off by an exit without cleanup. The supervisor passes that exit (#1763).
+        let restarted = restart_reason(std::env::var("CLOUDROOM_PREVIOUS_EXIT").ok().as_deref());
         // Resume conversations, not uncertain actions. An interrupted resume attempt
         // is left failed instead of creating a service-restart recovery loop.
         for session in local.sessions.values().cloned().collect::<Vec<_>>() {
@@ -516,6 +562,10 @@ impl Manager {
                         "unknown_after_restart"
                     }
                     .into();
+                    // Top-level threads only, never a self-started turn: a child's errors reach its parent's notices.
+                    if !queued && receipt.command != "auto" && session.parent_session.is_none() {
+                        receipt.error.get_or_insert_with(|| restarted.clone());
+                    }
                     local.append(
                         &session.session_id,
                         "receipt",
@@ -847,25 +897,29 @@ impl Manager {
         json!({"status":status,"message":message})
     }
 
+    /// A request's content, as retries compare it. `plan_only` is guard metadata Core may add itself (an inherited
+    /// resume), and `ended` when its turn ended (#217), not the request's content. The thread and project IDs aren't
+    /// either: a retry may add or drop them as the sender learns what Core knows (#199).
+    fn content(input: &Value) -> Value {
+        let mut input = input.clone();
+        if let Some(fields) = input.as_object_mut() {
+            for key in ["plan_only", "ended", "thread_id", "project_id"] {
+                fields.remove(key);
+            }
+        }
+        input
+    }
+
     fn retry(
         session: &Session,
         request: &str,
         command: &str,
         input: &Value,
     ) -> Result<Option<Receipt>> {
-        // `plan_only` is guard metadata Core may add itself (an inherited resume), and `ended` when its turn ended
-        // (#217), not the request's content.
-        let content = |input: &Value| {
-            let mut input = input.clone();
-            if let Some(fields) = input.as_object_mut() {
-                fields.remove("plan_only");
-                fields.remove("ended");
-            }
-            input
-        };
         match session.receipts.get(request) {
             Some(receipt)
-                if receipt.command != command || content(&receipt.input) != content(input) =>
+                if receipt.command != command
+                    || Self::content(&receipt.input) != Self::content(input) =>
             {
                 Err(Error::Conflict("request_id already has different content"))
             }
@@ -1002,7 +1056,14 @@ impl Manager {
         model: Option<String>,
         reasoning: Option<String>,
         (workspace, workspace_name): (Option<String>, Option<String>),
-        (provider, command_guard_enabled, strip_ai_co_authors, system_prompt, parent_thread): StartOptions,
+        (
+            provider,
+            command_guard_enabled,
+            strip_ai_co_authors,
+            system_prompt,
+            parent_thread,
+            (thread_id, project_id),
+        ): StartOptions,
     ) -> Result<(String, Receipt)> {
         let id = format!("cr_{request}");
         let kind = harness
@@ -1034,6 +1095,17 @@ impl Manager {
                 return Err(Error::Conflict("invalid parent_thread"));
             }
             input["parent_thread"] = json!(parent);
+        }
+        if let Some(thread) = &thread_id {
+            if !relay::thread_id(thread) {
+                return Err(Error::Conflict("invalid thread_id"));
+            }
+            input["thread_id"] = json!(thread);
+        }
+        if let Some(project) = &project_id {
+            crate::workspace::valid_id(project)
+                .map_err(|_| Error::Conflict("invalid project_id"))?;
+            input["project_id"] = json!(project);
         }
         if let Some(model) = &model {
             input["model"] = json!(model);
@@ -1102,7 +1174,7 @@ impl Manager {
             }
             let receipt =
                 receipt.ok_or(Error::Conflict("saved session has no matching receipt"))?;
-            if receipt.input != input {
+            if Self::content(&receipt.input) != Self::content(&input) {
                 return Err(Error::Conflict("request_id already has different content"));
             }
             return Ok((id, receipt));
@@ -1185,6 +1257,7 @@ impl Manager {
             Option<String>,
         ),
         (workspace, workspace_name): (Option<String>, Option<String>),
+        (thread_id, project_id): (Option<String>, Option<String>),
     ) -> Result<(String, Receipt, bool)> {
         let id = format!("cr_{request}");
         let existing = self
@@ -1228,12 +1301,21 @@ impl Manager {
                     "wait until this thread's child agents finish, then switch",
                 ));
             }
+            // The thread keeps its IDs unless the app names them. A project move into another folder keeps only the
+            // thread's, so the agent never gets the old project's ID (#199).
+            let moved = workspace
+                .as_ref()
+                .is_some_and(|w| s.workspace.as_ref().is_none_or(|old| old.id != *w));
             let options = (
                 provider,
                 Some(s.command_guard_enabled()),
                 Some(s.strip_ai_co_authors()),
                 s.system_prompt(),
                 s.parent_thread().map(str::to_owned),
+                (
+                    thread_id.or_else(|| s.thread_id().map(str::to_owned)),
+                    project_id.or_else(|| s.project_id().filter(|_| !moved).map(str::to_owned)),
+                ),
             );
             let old = (
                 s.harness,
@@ -1785,14 +1867,15 @@ impl Manager {
                 let command_guard_enabled = session.command_guard_enabled();
                 let strip_ai_co_authors = session.strip_ai_co_authors();
                 let system_prompt = session.system_prompt();
+                let room_env = session.room_env();
                 failure_reason = "The side chat's source conversation could not be copied";
                 fork = children::fork_history(&local, &id, &request)?;
                 failure_reason = "Harness initialization failed; inspect native history and protected local harness diagnostics for this session";
                 // Claim before spawning: a crash after this point must not repeat uncertain execution.
                 local.append(&id, "state", json!({"state":SessionState::Starting}), None)?;
                 let (handle, events) = match &fork {
-                    Some(fork) => runtime::Handle::spawn_fork(&config, kind, fork, command_guard_enabled, strip_ai_co_authors, system_prompt)?,
-                    None => runtime::Handle::spawn_guarded(&config, kind, None, command_guard_enabled, strip_ai_co_authors, system_prompt)?,
+                    Some(fork) => runtime::Handle::spawn_fork(&config, kind, fork, command_guard_enabled, strip_ai_co_authors, system_prompt, room_env)?,
+                    None => runtime::Handle::spawn_guarded(&config, kind, None, command_guard_enabled, strip_ai_co_authors, system_prompt, room_env)?,
                 };
                 let handle = handle.with_reasoning(reasoning);
                 let pid = handle.pid();
@@ -2369,6 +2452,9 @@ impl Manager {
     /// Record the start of a queued or immediate turn; dequeues the request. A paused browser resumes first (#610).
     fn begin_turn(&self, local: &mut Local, id: &str, request: &str) -> io::Result<()> {
         local.browser_turn();
+        if let Some(session) = local.sessions.get_mut(id) {
+            session.turn_tokens = (!session.tokens_restored).then_some(session.tokens);
+        }
         local.append(
             id,
             "state",
@@ -2730,27 +2816,45 @@ impl Manager {
         local.sessions.get_mut(id).unwrap().switched_mid_turn = false;
     }
 
-    fn snapshot_usage(self: Arc<Self>, id: String, handle: runtime::Handle) {
+    /// Reads the harness's usage and saves it. `run` is a loop run whose turn just ended: the website then gets what
+    /// that turn used, for the loops' usage estimates (ADR 20261111-222523). Sent once; a lost one only leaves that run
+    /// out of the estimates.
+    fn snapshot_usage(
+        self: Arc<Self>,
+        id: String,
+        handle: runtime::Handle,
+        run: Option<tokens::Run>,
+    ) {
         tokio::spawn(async move {
             let Ok(Some(usage)) = handle.usage().await else {
                 return;
             };
-            let mut local = self.local.lock().unwrap();
-            if !local.sessions.get(&id).is_some_and(|session| {
-                session
-                    .handle
-                    .as_ref()
-                    .is_some_and(|current| current.same_process(&handle))
-            }) {
-                return;
+            let report = {
+                let mut local = self.local.lock().unwrap();
+                if !local.sessions.get(&id).is_some_and(|session| {
+                    session
+                        .handle
+                        .as_ref()
+                        .is_some_and(|current| current.same_process(&handle))
+                }) {
+                    return;
+                }
+                if usage["sessionId"]
+                    .as_str()
+                    .is_some_and(|native| local.sessions[&id].native_id.as_deref() != Some(native))
+                {
+                    return;
+                }
+                self.append_usage(&mut local, &id, usage);
+                let session = &local.sessions[&id];
+                run.and_then(|run| {
+                    let spent = run.spent(session.tokens)?;
+                    Some(spent.report(&run, &id, session.harness, session.model.as_deref()))
+                })
+            };
+            if let (Some(report), Some(api)) = (report, &self.history.api) {
+                let _ = api.post("automation", &report).await;
             }
-            if usage["sessionId"]
-                .as_str()
-                .is_some_and(|native| local.sessions[&id].native_id.as_deref() != Some(native))
-            {
-                return;
-            }
-            self.append_usage(&mut local, &id, usage);
         });
     }
 
@@ -2947,6 +3051,7 @@ impl Manager {
                     local.sessions[&id].command_guard_enabled(),
                     local.sessions[&id].strip_ai_co_authors(),
                     local.sessions[&id].system_prompt(),
+                    local.sessions[&id].room_env(),
                 )?;
                 local.sessions.get_mut(&id).unwrap().handle = Some(handle.clone());
                 local.append(&id, "harness", json!({"pid":handle.pid()}), None)?;
@@ -3167,7 +3272,8 @@ impl Manager {
                             .error = Some("Context compaction failed; see native history".into());
                     }
                     local.finish_receipt(id, &request, status)?;
-                    self.clone().snapshot_usage(id.to_owned(), handle.clone());
+                    self.clone()
+                        .snapshot_usage(id.to_owned(), handle.clone(), None);
                     self.advance(&mut local, id, false);
                 }
             }
@@ -3248,7 +3354,20 @@ impl Manager {
                     if let Some(checkpoint) = checkpoint {
                         let _ = local.append(id, "checkpoint", checkpoint, None);
                     }
-                    self.clone().snapshot_usage(id.to_owned(), handle.clone());
+                    // A loop run reports what its own turn used. Not when unsure: its start's totals are unknown, or a
+                    // queued prompt starts at once and its tokens could blur with this turn's.
+                    let session = local.sessions.get_mut(id).ok_or(Error::NotFound)?;
+                    let run = session
+                        .turn_tokens
+                        .take()
+                        .filter(|_| tokens::loop_run(&request) && session.queue.is_empty())
+                        .map(|base| tokens::Run {
+                            request: request.clone(),
+                            base,
+                            completed: status == "completed",
+                        });
+                    self.clone()
+                        .snapshot_usage(id.to_owned(), handle.clone(), run);
                     if let Some(request) = local.sessions[id].current_request.clone() {
                         let session = local.sessions.get(id).ok_or(Error::NotFound)?;
                         if status == "completed"

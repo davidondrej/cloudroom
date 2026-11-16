@@ -333,7 +333,7 @@ const MCP_RELOAD_INTERVAL_MS = 60_000;
 const CODEX_MCP_RELOAD_MINIMUM_VERSION = "0.147.0";
 const INTERRUPT_SETTLEMENT_TIMEOUT_MS = 5_000;
 const CODEX_ARCHIVED_SESSION_ERROR_PATTERN =
-  /\b(?:session|thread)\s+\S+\s+is archived\b/i;
+  /\b(?:session|thread)\s+(\S+)\s+is archived\b/i;
 const CODEX_ALREADY_ARCHIVED_ERROR_PATTERN =
   /\bno rollout found for thread id\b/i;
 const CODEX_NOT_ARCHIVED_ERROR_PATTERN =
@@ -379,10 +379,16 @@ function classifyTerminalAccountError(
   return null;
 }
 
+/** Codex thread ids Codex refused as archived; unarchive repairs them (#1808). */
+const codexArchivedRefusals = new Set<string>();
+
 function archivedSessionHint(message: string): ProviderRecoveryHint | null {
-  return CODEX_ARCHIVED_SESSION_ERROR_PATTERN.test(message)
-    ? { kind: "sessionArchived", message, retryable: true }
-    : null;
+  const archived = CODEX_ARCHIVED_SESSION_ERROR_PATTERN.exec(message);
+  if (archived?.[1] === undefined) {
+    return null;
+  }
+  codexArchivedRefusals.add(archived[1]);
+  return { kind: "sessionArchived", message, retryable: true };
 }
 
 /**
@@ -2070,13 +2076,34 @@ async function sendMaintenanceRequestWithRetries(
   connection: CodexAppServerConnection,
   request: { method: string; params: Record<string, unknown> },
 ): Promise<void> {
-  const sendOnce = (): Promise<unknown> =>
+  const sendOnce = (method = request.method): Promise<unknown> =>
     connection.request({
-      method: request.method,
+      method,
       params: request.params,
       resultSchema: ignoredChildResultSchema,
       timeoutMs: CHILD_REQUEST_TIMEOUT_MS,
     });
+  if (request.method === "thread/unarchive") {
+    const threadId = String(request.params.threadId);
+    try {
+      await sendOnce();
+    } catch (error) {
+      // Codex refused this thread as archived, yet finds no archived rollout:
+      // its state DB still marks the active rollout archived, so even
+      // `codex unarchive` fails (#1808). Archiving it first puts both in step.
+      if (
+        !codexArchivedRefusals.has(threadId) ||
+        !(error instanceof Error) ||
+        !CODEX_NOT_ARCHIVED_ERROR_PATTERN.test(error.message)
+      ) {
+        throw error;
+      }
+      await sendOnce("thread/archive");
+      await sendOnce();
+    }
+    codexArchivedRefusals.delete(threadId);
+    return;
+  }
   if (request.method !== "thread/name/set") {
     await sendOnce();
     return;

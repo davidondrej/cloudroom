@@ -149,6 +149,14 @@ export const DEFAULT_APP_KEYBINDINGS: AppDefaultKeybindings = [
       desktopOnly: true,
     },
   ),
+  // Cmd+F also opens search. Listed before Cmd+K so hints keep showing Cmd+K.
+  // The embedded browser keeps Cmd+F for find in page.
+  binding(
+    "thread.search",
+    "f",
+    { mod: true },
+    { all: ["mainSurface"], none: ["modalOpen", "browserFocus"] },
+  ),
   binding("thread.search", "k", { mod: true }, mainWithoutModal),
   binding("thread.rename", "d", { mod: true, shift: true }, mainWithoutModal),
   binding("thread.pin", "g", { mod: true }, mainWithoutModal),

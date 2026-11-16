@@ -43,40 +43,63 @@ function newFolder(): ArchiveFolder {
   return { folders: new Map(), files: [], fileCount: 0, size: 0 };
 }
 
-function sumFolder(folder: ArchiveFolder): void {
-  folder.fileCount = folder.files.length;
-  folder.size = folder.files.reduce((total, file) => total + file.size, 0);
-  for (const child of folder.folders.values()) {
-    sumFolder(child);
-    folder.fileCount += child.fileCount;
-    folder.size += child.size;
+function sumFolder(root: ArchiveFolder): void {
+  const folders = [root];
+  for (let index = 0; index < folders.length; index += 1) {
+    for (const child of folders[index]?.folders.values() ?? [])
+      folders.push(child);
+  }
+  for (let index = folders.length - 1; index >= 0; index -= 1) {
+    const folder = folders[index];
+    if (!folder) continue;
+    folder.fileCount = folder.files.length;
+    folder.size = folder.files.reduce((total, file) => total + file.size, 0);
+    for (const child of folder.folders.values()) {
+      folder.fileCount += child.fileCount;
+      folder.size += child.size;
+    }
   }
 }
 
-function listFolder(
-  folder: ArchiveFolder,
-  depth: number,
-  lines: ListingLine[],
-): void {
-  const indent = "  ".repeat(depth);
-  for (const [name, child] of [...folder.folders].sort(([a], [b]) =>
-    byName.compare(a, b),
-  )) {
-    lines.push({
-      label: `${indent}${name}/`,
-      fileCount: child.fileCount,
-      size: child.size,
-    });
-    listFolder(child, depth + 1, lines);
-  }
-  for (const file of [...folder.files].sort((a, b) =>
-    byName.compare(a.name, b.name),
-  )) {
-    lines.push({
-      label: `${indent}${file.name}`,
-      fileCount: null,
-      size: file.size,
-    });
+function* listFolder(root: ArchiveFolder): Generator<ListingLine> {
+  const stack: (
+    | { folder: ArchiveFolder; depth: number }
+    | { line: ListingLine }
+  )[] = [{ folder: root, depth: 0 }];
+  while (stack.length > 0) {
+    const next = stack.pop();
+    if (!next) break;
+    if ("line" in next) {
+      yield next.line;
+      continue;
+    }
+    const { folder, depth } = next;
+    const indent = "  ".repeat(depth);
+    const files = [...folder.files].sort((a, b) =>
+      byName.compare(a.name, b.name),
+    );
+    for (const file of files.reverse()) {
+      stack.push({
+        line: {
+          label: `${indent}${file.name}`,
+          fileCount: null,
+          size: file.size,
+        },
+      });
+    }
+    const folders = [...folder.folders].sort(([a], [b]) =>
+      byName.compare(a, b),
+    );
+    for (const [name, child] of folders.reverse()) {
+      stack.push({ folder: child, depth: depth + 1 });
+      stack.push({
+        line: {
+          label: `${indent}${name}/`,
+          fileCount: child.fileCount,
+          size: child.size,
+        },
+      });
+    }
   }
 }
 
@@ -105,28 +128,26 @@ export function archivePreview(
   }
   sumFolder(root);
   const lines: ListingLine[] = [];
-  listFolder(root, 0, lines);
-  const width =
-    Math.min(
-      MAX_LABEL_WIDTH,
-      Math.max(0, ...lines.map((line) => line.label.length)),
-    ) + 2;
-  const text = lines
-    .slice(0, MAX_LISTED_LINES)
-    .map((line) =>
-      [
-        line.label.padEnd(width),
-        (line.fileCount === null
-          ? ""
-          : plural(line.fileCount, "file")
-        ).padStart(11),
-        formatFileSize(line.size).padStart(10),
-      ]
-        .join("")
-        .trimEnd(),
-    );
-  if (lines.length > MAX_LISTED_LINES)
-    text.push(`… ${plural(lines.length - MAX_LISTED_LINES, "more line")}`);
+  let omittedLines = 0;
+  let maxLabelLength = 0;
+  for (const line of listFolder(root)) {
+    maxLabelLength = Math.max(maxLabelLength, line.label.length);
+    if (lines.length < MAX_LISTED_LINES) lines.push(line);
+    else omittedLines += 1;
+  }
+  const width = Math.min(MAX_LABEL_WIDTH, maxLabelLength) + 2;
+  const text = lines.map((line) =>
+    [
+      line.label.padEnd(width),
+      (line.fileCount === null ? "" : plural(line.fileCount, "file")).padStart(
+        11,
+      ),
+      formatFileSize(line.size).padStart(10),
+    ]
+      .join("")
+      .trimEnd(),
+  );
+  if (omittedLines > 0) text.push(`… ${plural(omittedLines, "more line")}`);
   if (truncated) text.push("… Only the first 50 MB of this archive was read.");
   return {
     label: "What's inside",

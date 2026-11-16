@@ -9,6 +9,7 @@ import { usePierreStrictModeRecoveryOptions } from "@/lib/pierre-strict-mode-rec
 import {
   buildFileDiffPatchText,
   buildDiffDomSelectionText,
+  buildDiffLineCopyText,
   buildDiffLineSelectionText,
 } from "@/components/git-diff/git-diff-patch-text";
 import { enrichGitDiffFileForContext } from "@/components/git-diff/git-diff-parsing";
@@ -70,6 +71,15 @@ function RoomDiff({
       }),
     [resolvedFile, view],
   );
+  const buildCopyText = useCallback(
+    (range: SelectedLineRange) =>
+      buildDiffLineCopyText({
+        displayStyle: view,
+        fileDiff: resolvedFile,
+        range,
+      }),
+    [resolvedFile, view],
+  );
   const buildFallbackSelectionText = useCallback(
     ({
       containerElement,
@@ -81,6 +91,7 @@ function RoomDiff({
     [resolvedFile],
   );
   const lineSelectionActions = usePierreLineSelectionActions({
+    buildCopyText,
     buildFallbackSelectionText,
     buildSelectionText,
     containerRef,

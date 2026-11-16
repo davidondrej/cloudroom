@@ -23,10 +23,13 @@ const ACP_SERVICE_TIERS = [
 
 const DEFAULT_FORK = "none" as const;
 
-// Grok reports a signed-out CLI as auth_required (#1160): the picker offers its
-// login, then restarts discovery once the user signed in.
+// Grok (#1160) and Cursor report a signed-out CLI as auth_required: the picker
+// offers its login, then restarts discovery once the user signed in.
 function offersSignIn(agent: AcpAgentDefinition): boolean {
-  return agent.dialect === "grok" && agent.signInCommand !== undefined;
+  return (
+    (agent.dialect === "grok" || agent.dialect === "cursor") &&
+    agent.signInCommand !== undefined
+  );
 }
 
 function acpStrings(agent: AcpAgentDefinition): PluginProviderStrings {

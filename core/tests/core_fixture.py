@@ -119,7 +119,7 @@ def codex():
                 if text == "no-reply":
                     Path("no-reply").touch()
                     continue
-                if text in ("delay", "limit-delay"):
+                if text in ("delay", "limit-delay") or text.startswith("delay "):
                     while not Path("release").exists():
                         time.sleep(.02)
                 turn = str(uuid.uuid4())
@@ -157,6 +157,11 @@ def codex():
                     event("turn/completed", turn={"id": turn, "status": "completed"})
                 else:
                     event("item/agentMessage/delta", turnId=turn, itemId="text", delta="hello")
+                    if text.endswith("spend"):
+                        # Codex's running totals, which grow each turn: its input counts the cache reads.
+                        n = sum(1 for line in path.open() if "spend" in line)
+                        total = {"inputTokens": 1000 * n, "cachedInputTokens": 400 * n, "outputTokens": 50 * n, "totalTokens": 1050 * n}
+                        event("thread/tokenUsage/updated", tokenUsage={"total": total, "last": total, "modelContextWindow": 200000})
                     event("turn/completed", turn={"id": turn, "status": "completed"})
                 if text == "goal":
                     # Codex continues an active goal on its own: a turn nobody requested.
@@ -706,7 +711,8 @@ class RecoveryTests(unittest.TestCase):
             self.service.request("POST", "/v1/sessions/cr_seed/close", {"request_id": "c1", "freeze": "move2"}, 409)
             self.service.request("POST", "/v1/sessions/cr_seed/freeze", {"request_id": "move1", "release": True})
             # The switch: the website takes it, the old session closes, the new one has the history and its note.
-            answer = self.service.request("POST", "/v1/sessions", {"request_id": "next", "continue_from": "cr_seed", "harness": "codex"}, 202)
+            # The app names the thread's IDs, here for a session that started without them (#199).
+            answer = self.service.request("POST", "/v1/sessions", {"request_id": "next", "continue_from": "cr_seed", "harness": "codex", "thread_id": "thr_fixture", "project_id": "proj_a"}, 202)
             self.assertEqual((answer["session_id"], answer["pending"]), ("cr_next", False))
             self.assertEqual([t["continue"]["session"] for t in api.threads if "continue" in t], ["cr_next"])
             self.wait(lambda: self.status()["state"] == "closed", "old session closed")
@@ -740,9 +746,12 @@ class RecoveryTests(unittest.TestCase):
             # Two switches in a row: the note's inline tail stays within its 8 KB, the file keeps the long message.
             self.service.request("POST", "/v1/sessions/cr_next/prompts", {"request_id": "app_0123456789ab_long", "text": "y" * 12000}, 202)
             self.wait(lambda: self.service.session("cr_next")["receipts"]["app_0123456789ab_long"]["state"] == "completed", "long turn")
-            for source, target in [("cr_next", "tail1"), ("cr_tail1", "tail2")]:
+            # An agent switch keeps the thread's IDs; a project move takes the destination project's (#199).
+            for source, target, move in [("cr_next", "tail1", {}), ("cr_tail1", "tail2", {"workspace": "proj_b", "project_id": "proj_b"})]:
                 api.row_session = source
-                self.service.request("POST", "/v1/sessions", {"request_id": target, "continue_from": source, "harness": "codex"}, 202)
+                self.service.request("POST", "/v1/sessions", {"request_id": target, "continue_from": source, "harness": "codex", **move}, 202)
+            ids = lambda s: [self.service.session("cr_" + s)["receipts"][s]["input"].get(k) for k in ("thread_id", "project_id")]
+            self.assertEqual([ids("next"), ids("tail1"), ids("tail2")], [["thr_fixture", "proj_a"], ["thr_fixture", "proj_a"], ["thr_fixture", "proj_b"]])
             note = (self.state / "notes" / "cr_tail2").read_text()
             self.assertLess(len(note), 8000 + 1000)
             self.assertIn("y" * 12000, Path(self.service.session("cr_tail2")["continued"]["history"]).read_text())
@@ -787,6 +796,39 @@ class RecoveryTests(unittest.TestCase):
             records = self.service.records("cr_next")
             self.assertEqual(records[-1]["kind"], "unarchive")
             self.assertFalse(any(r["kind"] == "archive" for r in records))
+        finally:
+            api.close()
+
+    def test_a_loop_run_sends_what_its_own_turn_used(self):
+        # ADR 20261111-222523: only a loop run's own turn, and nothing when unsure.
+        from fake_api import FakeApi
+        api = FakeApi(self.env["CLOUDROOM_TOKEN"], self.env["CLOUDROOM_STORE"])
+        try:
+            self.env.pop("CLOUDROOM_LOCAL_HISTORY", None); self.env.update(api.env())
+            self.seed(); self.start(); self.ready()
+            sent = lambda: [a for a in api.automations if a.get("action") == "tokens"]
+            done = lambda key: self.wait(lambda: self.status()["receipts"][key]["state"] == "completed", key + " completed")
+            run = lambda n: "auto_" + "ab" * 16 + f"_{n}"
+            # A person's turn reports nothing; the loop run after it reports only its own turn.
+            self.prompt("p1", "spend"); done("p1")
+            self.prompt(run(1), "spend"); done(run(1))
+            self.wait(lambda: len(sent()) == 1, "tokens sent")
+            self.assertEqual(sent()[0], {"action": "tokens", "request": run(1), "session": "cr_seed", "tokens": {
+                "harness": "codex", "model": sent()[0]["tokens"]["model"], "completed": True, "input": 600, "output": 50, "cacheRead": 400, "cacheWrite": 0}})
+            # A fresh thread's prompt adds _p. A run that spent nothing, or a name that only looks like a run, sends nothing.
+            self.prompt(run(2) + "_p", "spend"); done(run(2) + "_p")
+            self.wait(lambda: len(sent()) == 2, "second tokens sent")
+            self.assertEqual(sent()[1]["request"], run(2) + "_p")
+            self.prompt(run(3), "hello"); done(run(3))
+            self.prompt("auto_nothex_4", "spend"); done("auto_nothex_4")
+            # A prompt queued behind a loop run starts at once, so that run sends nothing rather than a blurred count.
+            (self.repo / "release").unlink(missing_ok=True)
+            self.prompt(run(5), "delay spend")
+            self.wait(lambda: self.status()["current_request"] == run(5), "loop run running")
+            self.prompt("p6", "spend")
+            (self.repo / "release").touch()
+            done(run(5)); done("p6"); time.sleep(.5)
+            self.assertEqual(len(sent()), 2)
         finally:
             api.close()
 
@@ -1010,6 +1052,29 @@ class RecoveryTests(unittest.TestCase):
         self.service.stop(); self.start()
         self.assertEqual(self.status()["state"], "closed")
         self.assertEqual(self.status()["queue"], [])
+
+    def test_a_turn_a_killed_core_cut_off_says_why(self):
+        # #1763: the supervisor passes the killed run's exit status; without one the reason stays neutral.
+        self.seed(); self.start(); self.ready()
+        for key, status, why in [("plain", None, "Cloudroom restarted while"), ("killed", "137", "Cloudroom restarted after signal 9 while"),
+                                 ("exited", "1", "Cloudroom restarted after exit status 1 while"), ("junk", "x", "Cloudroom restarted while")]:
+            self.prompt(key, "no-reply")
+            self.wait(lambda: (self.repo / "no-reply").exists(), key)
+            (self.repo / "no-reply").unlink()
+            self.service.stop(crash=True)
+            self.env.pop("CLOUDROOM_PREVIOUS_EXIT", None)
+            if status: self.env["CLOUDROOM_PREVIOUS_EXIT"] = status
+            self.start(); self.ready()
+            receipt = self.status()["receipts"][key]
+            self.assertEqual(receipt["state"], "unknown_after_restart")
+            self.assertEqual(receipt.get("error"), why + " this ran; its result is unknown.")
+        # A child's cut-off turn keeps main's receipt (no error), so its parent's notice stays neutral.
+        self.service.request("POST", "/v1/sessions", {"request_id": "kid", "parent_session": "cr_seed", "prompt": "hold"}, 202)
+        child = lambda: self.service.session("cr_child_kid")
+        self.wait(lambda: child()["state"] == "running", "running child")
+        self.service.stop(crash=True); self.env["CLOUDROOM_PREVIOUS_EXIT"] = "137"; self.start(); self.ready()
+        self.wait(lambda: child()["receipts"]["task_kid"]["state"] == "unknown_after_restart", "cut child turn")
+        self.assertNotIn("error", child()["receipts"]["task_kid"])
 
     def test_manual_stop_keeps_queue_paused_across_restart_until_resume(self):
         self.seed(); self.start(); self.ready()

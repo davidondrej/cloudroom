@@ -137,7 +137,8 @@ level picker and an all-or-selected host picker. Levels:
 - `working` (default): while a Local thread runs on a host, and for 10 minutes
   after, macOS runs `/usr/bin/caffeinate -i -s -w <worker-pid>`. The screen can
   still turn off. The plugin checks running threads on every thread status
-  change and once a minute.
+  change and once a minute. A thread waiting over an hour on a question or
+  approval stops counting. If the check fails, awake hosts stay awake.
 - `always`: `/usr/bin/caffeinate -d -i -s -w <worker-pid>` while Cloudroom runs,
   so the screen stays on too.
 
@@ -347,7 +348,7 @@ delayed shortcut badges without disabling any shortcuts.
 | --------- | ----------------------------------------- | --------------------------------- | ------------------------ |
 | Palette   | Quick palette                             | `Mod+Shift+P`                     | All clients              |
 | Threads   | New thread                                | `Mod+N` / `Mod+Shift+O`           | Desktop / web            |
-| Threads   | Search threads                            | `Mod+K`                           | All clients              |
+| Threads   | Search threads                            | `Mod+K` / `Mod+F`                 | All clients              |
 | Threads   | Rename focused thread                     | Unassigned                        | Thread view              |
 | Threads   | Archive focused thread                    | `Mod+W`                           | Thread view              |
 | Threads   | Previous / next thread                    | Surface defaults above            | Desktop / web            |

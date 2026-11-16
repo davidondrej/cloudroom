@@ -1,4 +1,5 @@
 import {
+  Fragment,
   useEffect,
   useMemo,
   useRef,
@@ -7,21 +8,18 @@ import {
 } from "react";
 import { flushSync } from "react-dom";
 import * as PopoverPrimitive from "@radix-ui/react-popover";
-import { Icon, type IconName } from "@cloudroom/shared-ui/icon";
 import { preventOverlayTriggerSelection } from "@cloudroom/shared-ui/overlay-trigger";
 import { usePortalScopeProps } from "@/lib/portal-scope";
-import { PluginIcon, pluginIconName } from "@/components/plugin/PluginIcon";
+import { copyToClipboardWithToast } from "@/lib/clipboard";
 import type { MessageProseSelection } from "./SelectableMessageProse.js";
 import type { ThreadTimelinePluginMessageAction } from "./types.js";
 
 const SELECTION_ACTION_BUTTON_CLASS =
-  "inline-flex cursor-pointer items-center gap-1 rounded px-1.5 py-0.5 text-xs text-foreground transition-colors hover:bg-surface-recessed focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring select-none max-md:pointer-coarse:min-h-7 max-md:pointer-coarse:px-2 max-md:pointer-coarse:py-1";
+  "inline-flex cursor-pointer items-center px-2.5 py-1.5 text-xs text-foreground transition-colors hover:bg-surface-recessed focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring select-none max-md:pointer-coarse:min-h-8 max-md:pointer-coarse:px-3";
 const SELECTION_MENU_CONTENT_CLASS =
-  "z-50 flex w-auto items-center gap-0.5 rounded-md border bg-popover p-0.5 text-popover-foreground shadow-md outline-none data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95";
+  "z-50 flex w-auto items-stretch overflow-hidden rounded-md border bg-popover text-popover-foreground shadow-md outline-none data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95";
 
 interface SelectionAction {
-  icon: IconName;
-  plugin?: { pluginId: string | null; icon: string | null };
   key?: string;
   label: string;
   onSelect: (selection: MessageProseSelection) => void;
@@ -79,27 +77,6 @@ function ActionButton({
         activate();
       }}
     >
-      {action.plugin ? (
-        action.plugin.pluginId === null ? (
-          <Icon
-            name={pluginIconName(action.plugin.icon)}
-            className="size-3.5 text-muted-foreground"
-            aria-hidden="true"
-          />
-        ) : (
-          <PluginIcon
-            pluginId={action.plugin.pluginId}
-            icon={action.plugin.icon}
-            className="size-3.5 text-muted-foreground"
-          />
-        )
-      ) : (
-        <Icon
-          name={action.icon}
-          className="size-3.5 text-muted-foreground"
-          aria-hidden="true"
-        />
-      )}
       {action.label}
     </button>
   );
@@ -152,25 +129,28 @@ export function TimelineSelectionMenu({
     ...(onAddToChat
       ? [
           {
-            icon: "ArrowTurnDown" as const,
             label: "Reply",
             onSelect: (currentSelection: MessageProseSelection) =>
               onAddToChat(currentSelection.text),
           },
         ]
       : []),
-    ...(onFork
-      ? [{ icon: "Fork" as const, label: "Fork", onSelect: onFork }]
-      : []),
+    ...(onFork ? [{ label: "Fork", onSelect: onFork }] : []),
     ...pluginActions.map((action) => ({
-      icon: "MessageSquarePlus" as const,
-      plugin: { pluginId: action.pluginId, icon: action.icon },
       key: action.key,
       label: action.label,
       onSelect: () => action.onSelect(),
     })),
   ];
   if (actions.length === 0) return null;
+  // Copy joins the other actions; it never opens the menu on its own.
+  actions.push({
+    label: "Copy",
+    onSelect: (currentSelection) =>
+      void copyToClipboardWithToast(
+        currentSelection.copyText ?? currentSelection.text,
+      ),
+  });
 
   return (
     <PopoverPrimitive.Root
@@ -193,19 +173,16 @@ export function TimelineSelectionMenu({
           onCloseAutoFocus={(event) => event.preventDefault()}
         >
           {actions.map((action, index) => (
-            <div key={action.key ?? action.label} className="flex items-center">
+            <Fragment key={action.key ?? action.label}>
               {index > 0 ? (
-                <span
-                  aria-hidden="true"
-                  className="mx-0.5 h-4 w-px bg-border"
-                />
+                <span aria-hidden="true" className="w-px shrink-0 bg-border" />
               ) : null}
               <ActionButton
                 action={action}
                 onDismiss={onDismiss}
                 selection={selection}
               />
-            </div>
+            </Fragment>
           ))}
         </PopoverPrimitive.Content>
       </PopoverPrimitive.Portal>

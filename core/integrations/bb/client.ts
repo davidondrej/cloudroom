@@ -16,6 +16,7 @@ export type TeleportManifest = {
   request_id: string; harness: Harness; native_id: string; model: string; provider: string | null; reasoning: string | null;
   workspace: string; workspace_name: string; files: TeleportFile[]; handoff: string;
   service_tier?: string | null; command_guard_enabled?: boolean; strip_ai_co_authors?: boolean; system_prompt?: string;
+  thread_id?: string; project_id?: string;
   queued: (string | { text: string; reasoning?: string; service_tier?: string })[];
   /** A fork starts idle with no handoff; its first message is a `rewind` with `fork`. */
   fork?: boolean;
@@ -153,6 +154,30 @@ export class CloudroomConnectionError extends CloudroomError {
       "ECONNRESET", "ECONNREFUSED", "ETIMEDOUT", "ENOTFOUND", "EAI_AGAIN",
       "UND_ERR_SOCKET", "UND_ERR_CONNECT_TIMEOUT", "UND_ERR_HEADERS_TIMEOUT", "UND_ERR_BODY_TIMEOUT",
     ].includes(code) ? code : null;
+  }
+}
+
+/** Cores before `room_ids` refuse a thread or project ID as an unknown field, before doing anything, so the request
+ *  goes again once without them (#199). */
+async function withoutIds<
+  B extends { thread_id?: string; project_id?: string },
+  T,
+>(body: B, send: (body: B) => Promise<T>): Promise<T> {
+  try {
+    return await send(body);
+  } catch (error) {
+    if (
+      !(
+        error instanceof CloudroomError &&
+        error.status === 422 &&
+        /unknown field `(thread_id|project_id)`/.test(error.message)
+      )
+    )
+      throw error;
+    const rest = { ...body };
+    delete rest.thread_id;
+    delete rest.project_id;
+    return await send(rest);
   }
 }
 
@@ -373,7 +398,7 @@ export class CloudroomClient {
   }
 
   async prepareTeleport(manifest: TeleportManifest): Promise<TeleportStatus> {
-    return await this.#json("/v1/teleports", manifest) as unknown as TeleportStatus;
+    return await withoutIds(manifest, body => this.#json("/v1/teleports", body)) as unknown as TeleportStatus;
   }
   /** Ask the VM to run the same Claude Code version as this Mac (ADR 0133). It switches only while no Claude session runs. */
   async matchClaudeVersion(version: string): Promise<{ state: "current" | "updating" | "waiting" | "failed"; installed?: string; target: string; error?: string | null }> {
@@ -648,18 +673,18 @@ export class CloudroomClient {
     }
   }
 
-  start(id: string, harness: Harness = "codex", options: { model?: string; reasoning?: string; workspace?: string; workspace_name?: string; provider?: string; command_guard_enabled?: boolean; strip_ai_co_authors?: boolean; system_prompt?: string; parent_session?: string; parent_thread?: string; prompt?: string; title?: string; fork?: { session: string; fresh?: boolean; before?: string; last_turn_id?: string }; continue_from?: string } = {}) {
+  start(id: string, harness: Harness = "codex", options: { model?: string; reasoning?: string; workspace?: string; workspace_name?: string; provider?: string; command_guard_enabled?: boolean; strip_ai_co_authors?: boolean; system_prompt?: string; parent_session?: string; parent_thread?: string; thread_id?: string; project_id?: string; prompt?: string; title?: string; fork?: { session: string; fresh?: boolean; before?: string; last_turn_id?: string }; continue_from?: string } = {}) {
     if (harness !== "codex" && harness !== "pi" && harness !== "cursor" && harness !== "claude-code" && harness !== "fx" && harness !== "opencode" && harness !== "hermes" && harness !== "devin" && harness !== "droid" && harness !== "kimi" && harness !== "openclaw")
       throw new CloudroomError("Unsupported Cloudroom harness");
-    return this.#command("/v1/sessions", "start", { request_id: id, harness, ...options });
+    return withoutIds({ request_id: id, harness, ...options }, body => this.#command("/v1/sessions", "start", body));
   }
 
   /** An agent switch or project move through Core (`cloud_threads`, #237): a new session that continues `from` with Core's
    *  own history. `pending`: the website hasn't confirmed it yet; Core keeps trying. */
-  async continueSession(id: string, harness: Harness, from: string, options: { model?: string; reasoning?: string; workspace?: string; workspace_name?: string; provider?: string } = {}): Promise<Acceptance & { pending: boolean }> {
+  async continueSession(id: string, harness: Harness, from: string, options: { model?: string; reasoning?: string; workspace?: string; workspace_name?: string; provider?: string; thread_id?: string; project_id?: string } = {}): Promise<Acceptance & { pending: boolean }> {
     requestId(id);
     // Core answers within about 2 minutes: up to 60 s for the new agent to start, then 60 s for the website.
-    const value = await this.#json("/v1/sessions", { request_id: id, harness, continue_from: from, ...options }, undefined, undefined, 150_000);
+    const value = await withoutIds({ request_id: id, harness, continue_from: from, ...options }, body => this.#json("/v1/sessions", body, undefined, undefined, 150_000));
     const accepted = { session_id: text(value.session_id), receipt: receipt(value.receipt), saving: json(value.saving), pending: value.pending === true };
     if (accepted.receipt.request_id !== id || accepted.receipt.command !== "start") throw new CloudroomError("Cloudroom acceptance does not match the command");
     return accepted;

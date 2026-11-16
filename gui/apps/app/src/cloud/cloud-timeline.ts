@@ -207,7 +207,7 @@ export class CloudThreadEvents {
         });
       }
       if (
-        ["failed", "unknown"].includes(text(data.state)) &&
+        ["failed", "unknown", "unknown_after_restart"].includes(text(data.state)) &&
         text(data.error)
       ) {
         out.push({

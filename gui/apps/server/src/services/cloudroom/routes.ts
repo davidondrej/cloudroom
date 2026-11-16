@@ -29,7 +29,7 @@ import { copyToMac, openOnMac, teleportingToLocal, teleportToLocal } from "./tel
 import { cloudEnvironmentRequestSchema, macCodexLogin, macMcpServers, macSkills, macVariables, sandboxThread, startMacCodexLogin, type CloudEnvironmentRequest } from "./sandboxes.js";
 import { CloudroomError } from "./client.js";
 import { projectLoopSettings } from "./project-loops.js";
-import { tokenUsageSince } from "./loop-usage.js";
+import { recentCloudRuns, tokenUsageSince, weightedRun, type CloudRun } from "./loop-usage.js";
 import { macClis } from "./clis.js";
 import { deepSearch } from "./deep-search.js";
 import { finishMcpSignIn, isRemoteMcp, startMcpSignIn } from "./mcp-login.js";
@@ -343,7 +343,7 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: Plugin
   // Cloud automations (ADR 0212): the website stores and runs them, so they keep running while this Mac is off.
   // A child Cloud thread shares its parent's sandbox, so the website gets the parent and the child's own session.
   app.post("/api/v1/cloudroom/account/automations", async (context) => {
-    const input = z.object({ action: z.enum(["list", "create", "update", "run", "runs", "history", "delete", "hook", "unhook", "events", "ack", "settings", "report", "reports"]), thread: z.string().min(1).max(64).optional(), project: z.string().min(1).max(64).optional() }).passthrough().parse(await context.req.json());
+    const input = z.object({ action: z.enum(["list", "create", "update", "run", "runs", "history", "delete", "hook", "unhook", "events", "ack", "settings", "report", "reports", "averages"]), thread: z.string().min(1).max(64).optional(), project: z.string().min(1).max(64).optional() }).passthrough().parse(await context.req.json());
     let body: Record<string, unknown> = input;
     // A fresh-thread loop made from a project needs no thread: this Mac sends the project's settings (ADR 20261101-004659).
     // From a Local thread, with no Cloud thread to re-prompt, it is made from that thread's project.
@@ -365,15 +365,23 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: Plugin
       const session = binding(deps.db, thread.id)?.sessionId;
       body = { ...input, thread: root.id, ...(session ? { session } : {}) };
     }
-    return context.json(await cloudroom(deps).sandboxes.automations(body).catch((error: unknown) => {
+    const answer = await cloudroom(deps).sandboxes.automations(body).catch((error: unknown) => {
       const status = error instanceof CloudroomError ? error.status : null;
       throw new ApiError(status === 404 || status === 429 ? status : status ? 400 : 503, "cloud_automation", error instanceof Error ? error.message : String(error));
-    }));
+    });
+    // Usage estimates: what loops with these names usually use, weighted here like every other token count.
+    if (input.action === "averages") {
+      const averages = (answer as { averages?: (CloudRun & { name: string; runs: number; accounts: number })[] } | null)?.averages ?? [];
+      return context.json({ averages: averages.map((average) => ({ name: average.name, harness: average.harness, runs: average.runs, accounts: average.accounts, tokens: weightedRun(average) })) });
+    }
+    return context.json(answer);
   });
   // Loop usage estimates (docs/scopes/loops.md): tokens the Loops plugin's runs used, and all of the provider's.
   app.post("/api/v1/cloudroom/account/token-usage", async (context) => {
     const input = z.object({ providerId: z.string().min(1).max(100), threadIds: z.array(z.string().min(1).max(64)).max(500), threadsSince: z.number().int().nonnegative(), totalSince: z.number().int().nonnegative() }).parse(await context.req.json());
-    return context.json(tokenUsageSince(deps.db, input));
+    const sandboxes = cloudroom(deps).sandboxes, account = await sandboxes.account().catch(() => null);
+    const cloud = await recentCloudRuns(account && `${account.website} ${account.userId}`, () => sandboxes.automations({ action: "tokens", since: 0 }));
+    return context.json(tokenUsageSince(deps.db, input, cloud));
   });
   // Organizations (docs/scopes/organizations.md): the Organization plugin's requests, passed to the website as this account.
   app.post("/api/v1/cloudroom/account/org", async (context) => {
@@ -589,6 +597,7 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: Plugin
   });
   app.get("/api/v1/cloudroom/mac/codex-login", context => context.json(macCodexStatus(macCodexLogin())));
   app.get("/api/v1/cloudroom/mac/agents", async context => context.json({ agents: await macSignedInAgents() }));
+  app.post("/api/v1/cloudroom/mac/logins", async context => { await cloudroom(deps).copyLoginsNow(); return context.json({ ok: true }); });
   app.get("/api/v1/cloudroom/account/github", async context => context.json(await githubAuth(deps)));
   app.get("/api/v1/cloudroom/account/github/account", async context => context.json(await githubAccount(deps)));
   app.post("/api/v1/cloudroom/account/github/disconnect", async context => { await disconnectGithub(deps); return context.json({ ok: true }); });

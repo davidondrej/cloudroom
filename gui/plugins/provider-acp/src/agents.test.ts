@@ -292,7 +292,7 @@ describe("acpProviderDeclaration", () => {
       "max",
     ]);
     expect(cursor.experimental_visibility).toBeUndefined();
-    expect(cursor.strings?.signInCommand).toBeUndefined();
+    expect(cursor.strings?.signInCommand).toBe("cursor-agent login");
     expect(cursor.experimental_modelDiscoveryRestart).toBe(true);
     expect(cursor.maintenance?.usage).toBe(true);
     expect(cursor.maintenance?.installation).toBe(true);

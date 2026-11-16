@@ -4031,6 +4031,18 @@ describe("PromptBoxInternal prompt actions", () => {
     expect(onAttachFiles).toHaveBeenCalledWith([image]);
   });
 
+  it("pastes deeply nested clipboard html without overflowing the stack", async () => {
+    const { changes, promptBoxRef } = renderPromptBox("");
+    const depth = 2_000;
+
+    await focusPromptEnd(promptBoxRef);
+    pasteClipboard({
+      html: `${"<div>".repeat(depth)}deep${"</div>".repeat(depth)}`,
+    });
+
+    await waitFor(() => expect(latestValue(changes)).toBe("deep"));
+  });
+
   it("preserves blockquote structure when pasting copied blockquote html", async () => {
     const { changes, promptBoxRef } = renderPromptBox("");
 

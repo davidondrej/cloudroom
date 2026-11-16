@@ -264,7 +264,9 @@ export function parseToolCallLifecycleEvent(
     const callId = decoded.item.id;
     if (!callId) return null;
     const toolName = decoded.item.tool;
-    const serverPrefix = decoded.item.server ? `${decoded.item.server}:` : "";
+    // Bridges tag Cloudroom plugin tools with server "bb"; keep that stored marker but never show it.
+    const server = decoded.item.server;
+    const serverPrefix = server && server !== "bb" ? `${server}:` : "";
     const fullToolName = `${serverPrefix}${toolName}`;
     const parsedArgs = decoded.item.arguments ?? null;
 

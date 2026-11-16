@@ -226,11 +226,18 @@ pub async fn probe(
 }
 
 pub async fn models(config: &Config, kind: Kind) -> (io::Result<Vec<Model>>, Option<Event>) {
-    let (handle, mut events) =
-        match Handle::spawn_inner(config, kind, None, (true, true), None, None, true) {
-            Ok(spawned) => spawned,
-            Err(error) => return (Err(error), None),
-        };
+    let (handle, mut events) = match Handle::spawn_inner(
+        config,
+        kind,
+        None,
+        (true, true),
+        (None, Vec::new()),
+        None,
+        true,
+    ) {
+        Ok(spawned) => spawned,
+        Err(error) => return (Err(error), None),
+    };
     let drain = tokio::spawn(async move {
         while let Some(event) = events.recv().await {
             if matches!(event, Event::Exited { .. }) {
@@ -409,6 +416,9 @@ trait Adapter: Send {
     }
 }
 
+/// `ROOM_THREAD_ID` and `ROOM_PROJECT_ID` for the agent's shells, the names Local uses (#199).
+pub type RoomEnv = Vec<(&'static str, String)>;
+
 /// A Git 2.54+ config hook that drops AI agent Co-authored-by lines from commit messages and says so on stderr.
 /// With a session folder, it strips only real repositories (#811): the session's own (any worktree, submodule, or
 /// git dir layout), `/repos/<name>`, or `<session>/<name>` when the session folder is no repository. Throwaway
@@ -466,6 +476,7 @@ pub struct Handle {
     command_guard_enabled: bool,
     strip_ai_co_authors: bool,
     system_prompt: Option<String>,
+    room_env: RoomEnv,
     controls: Arc<tokio::sync::Mutex<()>>,
     /// Claude's login when it started; it reads the login only then.
     login: Option<u64>,
@@ -478,7 +489,7 @@ impl Handle {
         kind: Kind,
         resume: Option<Resume>,
     ) -> io::Result<(Self, mpsc::Receiver<Event>)> {
-        Self::spawn_guarded(config, kind, resume, true, true, None)
+        Self::spawn_guarded(config, kind, resume, true, true, None, Vec::new())
     }
 
     pub fn spawn_guarded(
@@ -488,13 +499,14 @@ impl Handle {
         command_guard_enabled: bool,
         strip_ai_co_authors: bool,
         system_prompt: Option<String>,
+        room_env: RoomEnv,
     ) -> io::Result<(Self, mpsc::Receiver<Event>)> {
         Self::spawn_inner(
             config,
             kind,
             resume,
             (command_guard_enabled, strip_ai_co_authors),
-            system_prompt,
+            (system_prompt, room_env),
             None,
             false,
         )
@@ -508,6 +520,7 @@ impl Handle {
         command_guard_enabled: bool,
         strip_ai_co_authors: bool,
         system_prompt: Option<String>,
+        room_env: RoomEnv,
     ) -> io::Result<(Self, mpsc::Receiver<Event>)> {
         if kind != Kind::Claude {
             return Self::spawn_guarded(
@@ -517,6 +530,7 @@ impl Handle {
                 command_guard_enabled,
                 strip_ai_co_authors,
                 system_prompt,
+                room_env,
             );
         }
         let profile = config
@@ -535,7 +549,7 @@ impl Handle {
             kind,
             resume,
             (command_guard_enabled, strip_ai_co_authors),
-            system_prompt,
+            (system_prompt, room_env),
             Some(&at),
             false,
         )
@@ -546,7 +560,7 @@ impl Handle {
         kind: Kind,
         resume: Option<Resume>,
         (command_guard_enabled, strip_ai_co_authors): (bool, bool),
-        system_prompt: Option<String>,
+        (system_prompt, room_env): (Option<String>, RoomEnv),
         fork: Option<&str>,
         probe: bool,
     ) -> io::Result<(Self, mpsc::Receiver<Event>)> {
@@ -699,6 +713,13 @@ impl Handle {
         if strip_ai_co_authors {
             strip_ai_co_authors_env(&mut command, Some(&config.repository));
         }
+        // Without Core's own ID, one the user saved in their Cloud environment would name the wrong thread or project.
+        for name in ["ROOM_THREAD_ID", "ROOM_PROJECT_ID"] {
+            match room_env.iter().find(|(own, _)| *own == name) {
+                Some((_, value)) => command.env(name, value),
+                None => command.env_remove(name),
+            };
+        }
         let (process, events) = process::Process::spawn(config, command, adapter)?;
         let live_model = Arc::new(Mutex::new(profile.model.clone()));
         Ok((
@@ -717,6 +738,7 @@ impl Handle {
                 command_guard_enabled,
                 strip_ai_co_authors,
                 system_prompt,
+                room_env,
                 controls: Arc::new(tokio::sync::Mutex::new(())),
                 login,
                 mcp_login,
@@ -959,7 +981,7 @@ impl Handle {
             self.kind,
             Some(saved),
             (self.command_guard_enabled, self.strip_ai_co_authors),
-            self.system_prompt.clone(),
+            (self.system_prompt.clone(), self.room_env.clone()),
             Some(&parent),
             false,
         )

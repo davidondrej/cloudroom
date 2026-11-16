@@ -155,7 +155,9 @@ const modelListFailOnceMarkerPath = script?.modelListFailOnceMarkerPath ?? null;
  * child the bridge spawns from one script. The real app-server keeps archive
  * state on disk (the rollout moves to an archived dir), so an archive seen by
  * one child must refuse a resume in the next — the bridge kills a thread's
- * child on archive and resumes on a fresh one.
+ * child on archive and resumes on a fresh one. A `stale:<id>` entry is a
+ * rollout Codex's state DB still marks archived although the file is active:
+ * resume refuses it, unarchive finds nothing, and archive clears it (#1808).
  */
 const archiveStatePath = script?.archiveStatePath ?? null;
 /**
@@ -404,7 +406,8 @@ async function handleRequest(message) {
       // an `archived-` provider-thread-id prefix to trigger it.
       if (
         String(params.threadId).startsWith("archived-") ||
-        isThreadArchived(params.threadId)
+        isThreadArchived(params.threadId) ||
+        isThreadArchived(`stale:${params.threadId}`)
       ) {
         respondError(
           id,
@@ -572,6 +575,7 @@ async function handleRequest(message) {
         );
         return;
       }
+      setThreadArchived(`stale:${params.threadId}`, false);
       setThreadArchived(params.threadId, true);
       respond(id, {});
       return;

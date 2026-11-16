@@ -8,7 +8,18 @@ import {
   DEFAULT_TERMINAL_COLS,
   DEFAULT_TERMINAL_ROWS,
 } from "@/components/thread/terminal/useThreadTerminalController";
+import { fetchWithAppSurface } from "@/lib/app-surface";
 import { sdk } from "@/lib/sdk";
+
+// A login that just ended may be new: copy it to Cloud now, not at this computer's
+// next wake (#1708). An older server answers 404, which changes nothing.
+function copyLoginsToCloud(): void {
+  void fetchWithAppSurface("/api/v1/cloudroom/mac/logins", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: "{}",
+  }).catch(() => undefined);
+}
 
 function closeTerminal(terminalId: string | null): void {
   if (terminalId === null) return;
@@ -57,6 +68,7 @@ export function useProviderLogin(hostId: string | null, onDone: () => void) {
     closeTerminal(terminalId.current);
     terminalId.current = null;
     setSession(null);
+    copyLoginsToCloud();
     onDone();
   };
 
@@ -87,7 +99,10 @@ export function useProviderLogin(hostId: string | null, onDone: () => void) {
               session={session}
               onSessionChange={(next) => {
                 setSession(next);
-                if (next.status === "exited") onDone();
+                if (next.status === "exited") {
+                  copyLoginsToCloud();
+                  onDone();
+                }
               }}
             />
           ) : null}

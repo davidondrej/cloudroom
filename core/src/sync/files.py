@@ -248,7 +248,9 @@ class Tree:
                             raise ValueError('invalid native header')
                         digest.update(line); count += len(line)
                         header = json.loads(line)
-                        metadata = header if native['harness'] == 'pi' else header.get('payload', {})
+                        metadata = header if native['harness'] == 'pi' else header.get('payload', {}) if isinstance(header, dict) else None
+                        if not isinstance(metadata, dict):
+                            raise ValueError('invalid native header')
                         expected = native['id']
                         if lineage:
                             owner = re.fullmatch(r'rollout-[0-9T-]{19}-([0-9a-f-]{36})(_[0-9a-f-]{36})?\.jsonl', lineage)
@@ -263,6 +265,8 @@ class Tree:
                         if lineage:
                             output.write(line)
                         else:
+                            if not isinstance(native['cwd'], str):
+                                raise ValueError('invalid native destination')
                             source, roots, posix = metadata.get('cwd'), metadata.get('runtime_workspace_roots'), native['cwd'].startswith('/')
                             metadata['cwd'] = native['cwd']
                             metadata.pop('dynamic_tools', None)

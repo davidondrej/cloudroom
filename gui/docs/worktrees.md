@@ -150,8 +150,10 @@ worktree it made and removes the ones nothing is using:
   same path from that branch. Saved changes come back uncommitted, `private/`
   comes back, and `.worktreeinclude` files are copied again. Dependencies and
   build output are not kept, so reinstall them.
+  Unarchiving while the folder is still being removed waits for that
+  (up to 20 s), then rebuilds it. If the removal failed, unarchive waits
+  for its retry a minute later.
 - Deleting the last thread removes the worktree for good. The branch stays.
-  A thread can't be restored while its worktree is being removed.
 - Worktrees on other machines ("Run threads here") are removed 3 days after
   their last thread is archived, without saving first.
 - Settings shows how much disk worktrees use. Below 10 GB free, the app warns.

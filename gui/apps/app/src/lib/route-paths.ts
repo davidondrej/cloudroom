@@ -155,7 +155,11 @@ export function resolveRouteHref({
     return null;
   }
 
-  if (url.origin !== currentOrigin || !isRoutePath({ path: url.pathname })) {
+  if (
+    url.origin !== currentOrigin ||
+    url.pathname.startsWith("//") ||
+    !isRoutePath({ path: url.pathname })
+  ) {
     return null;
   }
 

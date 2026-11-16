@@ -18,7 +18,7 @@ const FRONTMATTER_DELIMITER = "---";
 const FRONTMATTER_PATTERN = /^\uFEFF?---([\s\S]*?)(?:\r?\n---|$)/u;
 
 const MAX_SCAN_DEPTH = 24;
-const MAX_SCAN_ENTRY_COUNT = 1_000;
+export const MAX_SCAN_ENTRY_COUNT = 5_000;
 
 interface CommandScanRootBase {
   namePrefix: string;
@@ -62,6 +62,7 @@ interface ScanRootArgs {
 
 interface ScanBudget {
   remainingEntries: number;
+  visitedDirs: Set<string>;
 }
 
 interface SkillDirectoryCheckArgs {
@@ -89,6 +90,10 @@ interface SkillFileMatch {
   frontmatter: ParsedFrontmatter;
   linked: boolean;
   name: string;
+}
+
+function newScanBudget(): ScanBudget {
+  return { remainingEntries: MAX_SCAN_ENTRY_COUNT, visitedDirs: new Set() };
 }
 
 function sortDirentsByName(left: Dirent, right: Dirent): number {
@@ -338,6 +343,60 @@ async function resolveRecursiveRootPath(
     : null;
 }
 
+interface SkillTreeFile {
+  filePath: string;
+  linked: boolean;
+}
+
+// A skill folder's own files are resources, not skills, so the walk stops at
+// SKILL.md. Otherwise big skills (or synced copies) use up the shared budget
+// and silently drop every skill that sorts after them.
+async function walkSkillTree(args: {
+  budget: ScanBudget;
+  currentPath: string;
+  depth: number;
+  followSymlinks: boolean;
+  linked: boolean;
+  matchedFiles: SkillTreeFile[];
+}): Promise<void> {
+  if (args.depth > MAX_SCAN_DEPTH || args.budget.remainingEntries === 0) {
+    return;
+  }
+  const realPath = await fs.realpath(args.currentPath).catch(() => null);
+  if (realPath === null || args.budget.visitedDirs.has(realPath)) {
+    return;
+  }
+  args.budget.visitedDirs.add(realPath);
+  const entries = await readDirEntries(args.currentPath, args.budget);
+  if (entries === null) {
+    return;
+  }
+  if (
+    entries.some((entry) => entry.name === SKILL_FILE_NAME && entry.isFile())
+  ) {
+    args.matchedFiles.push({
+      filePath: path.join(args.currentPath, SKILL_FILE_NAME),
+      linked: args.linked,
+    });
+    return;
+  }
+  for (const entry of entries) {
+    const entryPath = path.join(args.currentPath, entry.name);
+    const linkedDir =
+      entry.isSymbolicLink() &&
+      args.followSymlinks &&
+      ((await fs.stat(entryPath).catch(() => null))?.isDirectory() ?? false);
+    if (entry.isDirectory() || linkedDir) {
+      await walkSkillTree({
+        ...args,
+        currentPath: entryPath,
+        depth: args.depth + 1,
+        linked: args.linked || linkedDir,
+      });
+    }
+  }
+}
+
 async function scanRecursiveSkillRootFiles(
   root: CommandScanDirectoryRoot,
   budget: ScanBudget,
@@ -346,24 +405,24 @@ async function scanRecursiveSkillRootFiles(
   if (rootPath === null) {
     return [];
   }
-  const matchedFiles: string[] = [];
-  await walkMarkdownTree({
+  const matchedFiles: SkillTreeFile[] = [];
+  await walkSkillTree({
     budget,
     currentPath: rootPath,
     depth: 0,
+    followSymlinks: canFollowSkillSymlink(root),
+    linked: await isSymbolicLinkPath(root.rootPath),
     matchedFiles,
-    matches: (entry) => entry.name === SKILL_FILE_NAME,
   });
-  const linked = await isSymbolicLinkPath(root.rootPath);
   return Promise.all(
-    matchedFiles.map(async (physicalFilePath) => ({
+    matchedFiles.map(async (match) => ({
       filePath: path.join(
         root.rootPath,
-        path.relative(rootPath, physicalFilePath),
+        path.relative(rootPath, match.filePath),
       ),
-      frontmatter: await parseFrontmatter(physicalFilePath),
-      linked,
-      name: path.basename(path.dirname(physicalFilePath)),
+      frontmatter: await parseFrontmatter(match.filePath),
+      linked: match.linked,
+      name: path.basename(path.dirname(match.filePath)),
     })),
   );
 }
@@ -491,7 +550,7 @@ export async function discoverProviderCommands(
   args: DiscoverProviderCommandsArgs,
 ): Promise<HostProviderCommand[]> {
   const records: HostProviderCommand[] = [];
-  const budget = { remainingEntries: MAX_SCAN_ENTRY_COUNT };
+  const budget = newScanBudget();
   for (const root of args.roots) {
     records.push(...(await scanRoot({ budget, root })));
   }
@@ -537,7 +596,7 @@ export async function discoverSkills(
   args: DiscoverSkillsArgs,
 ): Promise<DiscoveredSkill[]> {
   const records: DiscoveredSkill[] = [];
-  const budget = { remainingEntries: MAX_SCAN_ENTRY_COUNT };
+  const budget = newScanBudget();
   for (const root of args.roots) {
     for (const match of await scanSkillFiles({ budget, root })) {
       records.push(await buildSkillRecord(root, match));

@@ -72,6 +72,7 @@ pub const FEATURES: &[&str] = &[
     "loop_report",
     "mac_device",
     "credits_usage",
+    "room_ids",
 ];
 
 pub async fn serve(mut config: config::Config) -> Result<(), Box<dyn std::error::Error>> {

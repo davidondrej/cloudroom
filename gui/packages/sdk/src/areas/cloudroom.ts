@@ -188,6 +188,9 @@ export type CloudAutomationRequest =
   | { action: "run" | "delete" | "hook"; id: string }
   // A cloud loop's run threads from the last 7 days, for its usage estimate (docs/scopes/loops.md).
   | { action: "runs"; id: string }
+  // What a completed run of each template usually uses, across accounts (docs/scopes/loops.md). A template with too few
+  // accounts is left out. Older websites refuse it.
+  | { action: "averages" }
   // A cloud loop's newest run records (ADR 0298), for `room-cli loop runs ID`.
   | { action: "history"; id: string; limit?: number }
   // Loops → Review (ADR 0298): the reports of these Local runs and of the Cloud runs that started these threads (this
@@ -201,7 +204,7 @@ export type CloudAutomationRequest =
   | { action: "settings"; stop_at_limit?: boolean; fallback?: boolean }
   // Loop run records (ADR 0298): a Local loop run's `room-cli loop report`, saved with Cloud runs.
   | { action: "report"; local: string; run: string; thread: string; name: string; started_at: string; outcome: string; confidence: string; reason: string; actions: string[] };
-export type CloudAutomationResponse = { automations?: CloudAutomation[]; automation?: CloudAutomation; ok?: boolean; url?: string; batches?: CloudHookBatch[]; recheck_ms?: number; stop_at_limit?: boolean; fallback?: boolean; runs?: string[]; history?: CloudLoopRun[]; reported?: boolean; reports?: { request: string; thread_id: string; outcome: string; reason: string | null }[] };
+export type CloudAutomationResponse = { automations?: CloudAutomation[]; automation?: CloudAutomation; ok?: boolean; url?: string; batches?: CloudHookBatch[]; recheck_ms?: number; stop_at_limit?: boolean; fallback?: boolean; runs?: string[]; history?: CloudLoopRun[]; reported?: boolean; reports?: { request: string; thread_id: string; outcome: string; reason: string | null }[]; averages?: { name: string; harness: string; runs: number; accounts: number; tokens: number }[] };
 /** Weighted tokens the listed threads used since `threadsSince`, and all of the provider's threads since `totalSince`. */
 export type TokenUsageRequest = { providerId: string; threadIds: string[]; threadsSince: number; totalSince: number };
 export type TokenUsageResponse = { total: number; threads: Record<string, number> };

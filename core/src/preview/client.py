@@ -270,7 +270,13 @@ def cores(config):
                 uuid.UUID(account)
                 credential = base64.b64encode((account + ':' + token).encode()).decode()
                 listed = control(website(config, connection) + '/api/desktop/sandboxes', {'action': 'awake'}, 'POST', {'Authorization': 'Basic ' + credential})
-                AWAKE['list'] = [(entry['origin'], entry['token'], entry.get('thread')) for entry in listed['sandboxes']]
+                parsed = []
+                for entry in listed['sandboxes']:
+                    origin, secret, thread = entry['origin'], entry['token'], entry.get('thread')
+                    if not isinstance(origin, str) or not isinstance(secret, str) or not (thread is None or isinstance(thread, str)):
+                        raise ValueError('Invalid sandbox list entry')
+                    parsed.append((origin, secret, thread))
+                AWAKE['list'] = parsed
                 PROBLEMS.pop('sandboxes', None)
                 AWAKE['blocked'] = 0
             except (OSError, ValueError, KeyError, TypeError) as error:

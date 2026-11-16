@@ -39,11 +39,14 @@ it("gives each cloud thread its own sandbox, wakes it only for work, and archive
   const prompts: string[] = [];
   let state: "new" | "awake" | "asleep" | "archived" = "new";
   let refusal: string | null = null;
+  let coreDown: "502" | "storage" | null = null;
   let sandboxThread = "";
   let coreUrl = "";
   const coreServer = createServer(async (req, res) => {
     const json = (value: unknown, status = 200) => { res.writeHead(status, { "Content-Type": "application/json" }); res.end(JSON.stringify(value)); };
     core.push({ path: req.url!, auth: req.headers.authorization });
+    if (coreDown === "502") return json({ error: "upstream unreachable" }, 502);
+    if (coreDown === "storage") return json({ error: "storage unsafe; new execution is blocked", code: "storage_blocked" }, 409);
     if (req.url === "/v1/health") return json({});
     if (req.url === "/v1/ready") return json({ ready: true });
     if (req.url === "/v1/capabilities") return json({ version: 1, repository: "/code", stop: true, resume: true, launch_settings: true, workspaces: true, direct_workspaces: true, command_guard: true, harnesses: [{ id: "codex", model: "test-model" }] });
@@ -63,6 +66,8 @@ it("gives each cloud thread its own sandbox, wakes it only for work, and archive
     if (req.url === "/api/desktop/logins") return json({ claude: false, codex: false, pi: false, github: false });
     if (input.action === "threads") return json({ error: "Invalid sandbox request." }, 400);
     if (input.action === "awake") return json({ sandboxes: state === "awake" ? [{ thread: sandboxThread, origin: coreUrl, token: "t".repeat(64) }] : [] });
+    if (input.action === "wake" && refusal === "drop") return req.socket.destroy();
+    if (input.action === "wake" && refusal === "502") return json({ error: "Upstream unreachable." }, 502);
     if (input.action === "wake" && refusal) return json({ error: "Refused.", code: refusal }, 429);
     if (input.action === "wake") { state = "awake"; sandboxThread = input.thread; }
     if (input.action === "archive") state = "archived";
@@ -129,16 +134,42 @@ it("gives each cloud thread its own sandbox, wakes it only for work, and archive
     // The app tags each prompt with its install (#237); these name them by the rest.
     const commandState = (id: string) => harness.deps.db.select().from(cloudroomCommands).all().find(item => item.id.replace(/^app_[a-f0-9]{12}_/, "") === id)?.state;
     const skipBackoff = () => (service.sandboxes as unknown as { backoff: Map<string, unknown> }).backoff.clear();
-    let refusedAt = wakes();
-    expect((await request(`/threads/${thread.id}/send`, { requestId: "over-limit", mode: "auto", input: [{ type: "text", text: "Not now", mentions: [] }] })).status).toBe(200);
-    await waitFor(() => wakes() > refusedAt, "refused wake");
-    // A 429 that isn't a plan limit, like a repair, may come after the sandbox started: Stop still fails, cancelling nothing.
-    expect((await request(`/threads/${thread.id}/stop`, {})).status).toBe(503);
-    expect(commandState("over-limit")).toBe("sending");
+    // Behind a website 502, out of reach, or awake with its Core not answering (#1699): Stop is saved and says so (its
+    // agent may run), and the message never goes out. A refusal is an answer: a repair may come after the sandbox
+    // started, and a Core blocking new work keeps it, so Stop fails as before, cancelling nothing.
+    const asleep = (wake: string | null) => () => { refusal = wake; coreDown = null; state = "asleep"; service.sandboxes.forget(thread.id); };
+    const unreachable: [string, () => void, string, string, boolean, number][] = [
+      ["sandbox_repairing", asleep("sandbox_repairing"), "sandbox_repairing", "sending", false, 0],
+      ["storage_blocked", () => { refusal = null; coreDown = "storage"; }, "storage_blocked", "sending", false, 1],
+      ["502", asleep("502"), "cloudroom_stop_pending", "cancelled", true, 1],
+      ["drop", asleep("drop"), "cloudroom_stop_pending", "cancelled", true, 1],
+      ["core-down", () => { refusal = null; coreDown = "502"; }, "cloudroom_stop_pending", "cancelled", true, 1],
+    ];
+    const held = () => harness.deps.db.select().from(cloudroomCommands).all().filter(item => item.command === "stop" && item.state === "sending").length;
+    for (const [failure, fail, code, message, paused, holds] of unreachable) {
+      fail();
+      skipBackoff();
+      const before = core.length, attempts = wakes();
+      const sent = await request(`/threads/${thread.id}/send`, { requestId: `unreachable-${failure}`, mode: "auto", input: [{ type: "text", text: "Not now", mentions: [] }] });
+      expect(sent.status, `${failure}: ${await sent.clone().text()}`).toBe(200);
+      await waitFor(() => coreDown ? core.length > before : wakes() > attempts, `${failure}: failed delivery`);
+      skipBackoff();
+      const holding = held();
+      const stopped = await request(`/threads/${thread.id}/stop`, {});
+      expect([stopped.status, (await stopped.json()).code, commandState(`unreachable-${failure}`), Boolean(binding(harness.deps.db, thread.id)?.queuePaused), held()], failure)
+        .toEqual([503, code, message, paused, holding + holds]);
+    }
+    // The repair's message was the current turn, which Core may already have had: it was kept, and goes out as before.
+    coreDown = null;
+    await waitFor(() => commandState("unreachable-sandbox_repairing") === "accepted", "kept turn delivered");
+    state = "asleep";
+    service.sandboxes.forget(thread.id);
+    await waitFor(() => getThread(harness.deps.db, thread.id)?.status === "idle", "asleep again");
     // Free's spent daily budget: Stop works without a wake, and the message never goes out.
     refusal = "cloud_budget_limit";
-    refusedAt = wakes();
+    let refusedAt = wakes();
     skipBackoff();
+    expect((await request(`/threads/${thread.id}/send`, { requestId: "over-limit", mode: "auto", input: [{ type: "text", text: "Not now", mentions: [] }] })).status).toBe(200);
     await waitFor(() => wakes() > refusedAt, "refused for the budget");
     harness.deps.db.insert(cloudroomCommands).values({ id: "edit-queued", threadId: thread.id, command: "edit", input: JSON.stringify({ target_request_id: harness.deps.db.select().from(cloudroomCommands).all().find(item => item.id.endsWith("_over-limit"))!.id, expected_revision: 1, text: "Not now, edited" }), createdAt: Date.now() + 1 }).run();
     // A delivery is preparing to wake the sandbox for the message, copying logins first, when Stop lands. Every login is
@@ -181,7 +212,9 @@ it("gives each cloud thread its own sandbox, wakes it only for work, and archive
     const paths = core.map(call => call.path);
     expect(paths.indexOf("/v1/sessions/cr_one/stop")).toBeGreaterThan(-1);
     expect(paths.indexOf("/v1/sessions/cr_one/stop")).toBeLessThan(paths.lastIndexOf("/v1/sessions/cr_one/prompts"));
-    expect(prompts.some(id => id.endsWith("_over-limit"))).toBe(false);
+    expect(prompts.some(id => /_(over-limit|unreachable-(storage_blocked|502|drop|core-down))$/.test(id))).toBe(false);
+    // This Core can't scope a stop to its turn, so the ones held while unreachable never go out.
+    expect(harness.deps.db.select().from(cloudroomCommands).all().filter(item => item.command === "stop" && JSON.parse(item.input).guarded).map(item => item.state)).toEqual(["cancelled", "cancelled"]);
     expect(paths.filter(path => /\/(rewind|goal)$/.test(path))).toEqual([]);
 
     // Archive goes to the website, which stops the sandbox even mid-task, so the thread stops showing as running.

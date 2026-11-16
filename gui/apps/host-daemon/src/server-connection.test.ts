@@ -545,33 +545,52 @@ describe("ServerConnection", () => {
     }
   });
 
-  it("closes the connection when a terminal websocket send throws", async () => {
-    const { connection, webSocket } = createConnectionFixture();
-    try {
-      await connection.start();
-      const socket = webSocket.sockets[0];
-      if (!socket) {
-        throw new Error("Expected test socket");
+  it.each([
+    ["send-failed", false, 1],
+    ["terminal-backpressure", true, 1],
+    ["send-failed", false, 3],
+  ] as const)(
+    "reconnects after a growing delay instead of closing for good on %s (backed up: %s, failures: %i)",
+    async (reason, backedUp, failures) => {
+      vi.useFakeTimers();
+      const { connection, webSocket } = createConnectionFixture();
+      try {
+        await connection.start();
+        const socket = webSocket.sockets[0];
+        if (!socket) {
+          throw new Error("Expected test socket");
+        }
+        if (backedUp) {
+          webSocket.setBufferedAmount(socket, 2 * 1024 * 1024);
+        } else {
+          vi.mocked(socket.send).mockImplementation(() => {
+            throw new Error("send failed");
+          });
+        }
+        const dataBase64 = Buffer.alloc(48 * 1024).toString("base64");
+        let seq = 0;
+        for (let failure = 0; failure < failures; failure += 1) {
+          while (
+            seq < 1_000 * (failure + 1) &&
+            connection.sendMessage({
+              type: "terminal.output",
+              terminalId: "term-1",
+              chunk: { seq: seq++, dataBase64 },
+            })
+          ) {}
+          expect(socket.close).toHaveBeenLastCalledWith(1013, reason);
+          await vi.advanceTimersByTimeAsync(1_000 * 2 ** failure - 1);
+          expect(socket.reconnect).toHaveBeenCalledTimes(failure);
+          await vi.advanceTimersByTimeAsync(1);
+          expect(socket.reconnect).toHaveBeenLastCalledWith(1013, reason);
+          expect(socket.reconnect).toHaveBeenCalledTimes(failure + 1);
+          expect(connection.sessionId).not.toBeNull();
+        }
+      } finally {
+        await connection.shutdown();
       }
-      vi.mocked(socket.send).mockImplementation(() => {
-        throw new Error("send failed");
-      });
-
-      expect(
-        connection.sendMessage({
-          type: "terminal.output",
-          terminalId: "term-1",
-          chunk: {
-            seq: 0,
-            dataBase64: Buffer.from("hello").toString("base64"),
-          },
-        }),
-      ).toBe(false);
-      expect(socket.close).toHaveBeenCalledWith(1013, "send-failed");
-    } finally {
-      await connection.shutdown();
-    }
-  });
+    },
+  );
 
   it("rejects a malformed host RPC command without disconnecting", async () => {
     const { connection, logger, setSession, webSocket } =

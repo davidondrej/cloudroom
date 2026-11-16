@@ -5,7 +5,7 @@
 
 use crate::runtime::Kind;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 
 /// `input` is new input: never the cache reads (`cached`) or writes.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -35,6 +35,13 @@ impl Tokens {
         })
     }
 
+    /// What a loop run's turn used, as the website saves it on the run's row (ADR 20261111-222523).
+    pub fn report(self, run: &Run, session: &str, harness: Kind, model: Option<&str>) -> Value {
+        json!({"action":"tokens","request":run.request,"session":session,"tokens":{
+            "harness":harness,"model":model,"completed":run.completed,
+            "input":self.input,"output":self.output,"cacheRead":self.cached,"cacheWrite":self.cache_write}})
+    }
+
     /// Spent between the `last` saved totals and these.
     pub fn since(self, last: Self) -> Self {
         let base = if self.output >= last.output {
@@ -49,4 +56,33 @@ impl Tokens {
             output: self.output - base.output,
         }
     }
+}
+
+/// A loop run's turn that just ended: its prompt, the session's totals when the turn began, and whether it completed.
+pub(crate) struct Run {
+    pub request: String,
+    pub base: Tokens,
+    pub completed: bool,
+}
+
+impl Run {
+    /// What the turn used, given the totals now. None when unsure: the count restarted (a new harness process).
+    pub fn spent(&self, now: Tokens) -> Option<Tokens> {
+        let spent = now.since(self.base);
+        (now.output >= self.base.output && spent != Tokens::default()).then_some(spent)
+    }
+}
+
+/// Whether `request` is a loop run's prompt. The website names a run `auto_<loop>_<due>`, and a fresh thread's prompt
+/// adds `_p`.
+pub(crate) fn loop_run(request: &str) -> bool {
+    let run = request.strip_suffix("_p").unwrap_or(request);
+    run.strip_prefix("auto_")
+        .and_then(|rest| rest.split_once('_'))
+        .is_some_and(|(id, due)| {
+            id.len() == 32
+                && id.bytes().all(|b| b.is_ascii_hexdigit())
+                && !due.is_empty()
+                && due.bytes().all(|b| b.is_ascii_digit())
+        })
 }

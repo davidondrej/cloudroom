@@ -162,6 +162,25 @@ class ControlTests(unittest.TestCase):
         url = f'http://127.0.0.1:{server.server_address[1]}/api/desktop/sandboxes'
         self.assertEqual(preview.control(url, {'action': 'awake'}, 'POST', {}), {'echo': {'action': 'awake'}})
 
+    def test_malformed_sandbox_entries_do_not_crash_the_helper(self):
+        account = str(uuid.uuid4())
+        with tempfile.TemporaryDirectory() as folder, mock.patch.dict(preview.AWAKE, {
+                'at': 0.0, 'checked': 0.0, 'key': None, 'list': [], 'blocked': 0}), \
+                mock.patch.dict(preview.PROBLEMS, {}, clear=True):
+            connection = Path(folder) / 'connection.json'
+            connection.write_text(json.dumps({'account': {'id': account}, 'sandboxToken': 'sandbox-token', 'url': ''}))
+            connection.chmod(0o600)
+            config = {'connectionFile': str(connection), 'binding': ['', account], 'ownThreads': True}
+            malformed = [
+                {'origin': 1, 'token': 'token', 'thread': 'thr_test'},
+                {'origin': 'http://127.0.0.1:9', 'token': 1, 'thread': 'thr_test'},
+                {'origin': 'http://127.0.0.1:9', 'token': 'token', 'thread': []},
+            ]
+            for entry in malformed:
+                with self.subTest(entry=entry), mock.patch.object(preview, 'control', return_value={'sandboxes': [entry]}):
+                    preview.AWAKE.update(at=0.0, key=None)
+                    self.assertEqual(preview.cores(config), [])
+
 
 class UpstreamTimeoutTests(unittest.TestCase):
     @unittest.skipIf(sys.platform == 'win32', 'Unix sockets')

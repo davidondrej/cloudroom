@@ -37,13 +37,23 @@ function collapseSegments(rawSegments: string[]): string[] {
 
 function windowsSegments(rest: string): string[] {
   const raw = rest.split(WINDOWS_SEPARATOR_PATTERN);
-  return collapseSegments(
+  const segments = collapseSegments(
     raw.map((segment, index) => {
       if (segment === "." || segment === "..") return segment;
       if (index === raw.length - 1) return segment.replace(/[. ]+$/u, "");
       return /[^.]\.$/u.test(segment) ? segment.slice(0, -1) : segment;
     }),
   );
+  while (segments.length > 0) {
+    const lastIndex = segments.length - 1;
+    const normalizedLast = segments[lastIndex]?.replace(/[. ]+$/u, "") ?? "";
+    if (normalizedLast) {
+      segments[lastIndex] = normalizedLast;
+      break;
+    }
+    segments.pop();
+  }
+  return segments;
 }
 
 function parseHostPath(

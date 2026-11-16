@@ -113,16 +113,22 @@ export async function cloudLoopUsage(sdk: Sdk, id: string, crons: string[]): Pro
 const MIN_WEEK_PERCENT = 3;
 const templateUsages = { at: 0, usage: {} as TemplateUsage };
 
-/** Each template's rough share of the weekly limit on its own schedule: its measured tokens per run, at what a token
- *  costs this account (the weekly % over the provider's tokens since the reset). Templates it can't price are left out. */
+/** Each template's rough share of the weekly limit on its own schedule: the tokens a run of it usually uses, at what a
+ *  token costs this account (the weekly % over the provider's tokens since the reset). A run's tokens come from every
+ *  account's runs of the template, which the website averages, else from our own measured `tokensPerRun`. Templates it
+ *  can't price are left out. */
 export async function templateUsage(sdk: Sdk): Promise<TemplateUsage> {
   const now = Date.now();
   if (now - templateUsages.at < 10 * 60_000) return templateUsages.usage;
+  // A failed read isn't kept: the next look asks again, so an estimate from a website that came back is never 10 minutes late.
+  const answer = await sdk.cloudroom.automations({ action: "averages" }).catch(() => null);
+  const averages = answer?.averages ?? [];
   const percentPerToken = new Map<string, number | null>();
   const usage: TemplateUsage = {};
   for (const template of LOOP_TEMPLATES) {
     const limit = LIMIT_NAMES[template.providerId];
-    if (!limit || !template.tokensPerRun) continue;
+    const tokensPerRun = averages.find((average) => average.name === template.name && average.harness === template.providerId)?.tokens ?? template.tokensPerRun;
+    if (!limit || !tokensPerRun) continue;
     if (!percentPerToken.has(template.providerId)) {
       const week = await weeklyLimit(sdk, template.providerId);
       const total =
@@ -133,9 +139,9 @@ export async function templateUsage(sdk: Sdk): Promise<TemplateUsage> {
     }
     const rate = percentPerToken.get(template.providerId);
     if (rate == null) continue;
-    usage[template.id] = { limit, percent: template.tokensPerRun * runsBetween(template.cron, "UTC", now, now + WEEK_MS) * rate };
+    usage[template.id] = { limit, percent: tokensPerRun * runsBetween(template.cron, "UTC", now, now + WEEK_MS) * rate };
   }
-  templateUsages.at = now;
+  if (answer) templateUsages.at = now;
   templateUsages.usage = usage;
   return usage;
 }

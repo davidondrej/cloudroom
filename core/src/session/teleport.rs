@@ -74,6 +74,11 @@ pub struct Manifest {
     pub strip_ai_co_authors: Option<bool>,
     #[serde(default)]
     pub system_prompt: Option<String>,
+    /// The app's IDs for the thread and its project, exported to the agent's shells (#199).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
     pub workspace: String,
     pub workspace_name: String,
     pub files: Vec<Entry>,
@@ -156,6 +161,11 @@ fn validate(manifest: &Manifest) -> Result<()> {
             .system_prompt
             .as_ref()
             .is_some_and(|p| p.trim().is_empty() || p.len() > 32768 || p.contains('\0'))
+        || manifest
+            .thread_id
+            .as_deref()
+            .is_some_and(|t| !super::relay::thread_id(t))
+        || manifest.project_id.as_deref().is_some_and(|p| !valid_id(p))
         || manifest.queued.iter().any(|prompt| {
             prompt.input()["text"]
                 .as_str()
@@ -838,7 +848,7 @@ impl Manager {
         let receipt = Receipt {
             request_id: id.into(),
             command: "start".into(),
-            input: json!({"harness":manifest.harness,"reasoning":manifest.reasoning,"teleport":id,"fork":manifest.fork,"command_guard_enabled":manifest.command_guard_enabled,"strip_ai_co_authors":manifest.strip_ai_co_authors,"system_prompt":manifest.system_prompt}),
+            input: json!({"harness":manifest.harness,"reasoning":manifest.reasoning,"teleport":id,"fork":manifest.fork,"command_guard_enabled":manifest.command_guard_enabled,"strip_ai_co_authors":manifest.strip_ai_co_authors,"system_prompt":manifest.system_prompt,"thread_id":manifest.thread_id,"project_id":manifest.project_id}),
             state: "completed".into(),
             model: Some(manifest.model.clone()),
             provider: manifest.provider.clone(),

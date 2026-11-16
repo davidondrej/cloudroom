@@ -319,50 +319,59 @@ it.skipIf(!supported)(
   },
 );
 
-it.skipIf(!supported)(
-  "mac-approve not-found asks the user to click Allow instead of retrying (#1295)",
-  async () => {
-    // 0.1.13 sees only English Google Chrome sheets on the current Space, yet
-    // told agents to run mac-approve again, so they looped.
-    const root = mkdtempSync(join(tmpdir(), "browser-harness-"));
-    roots.push(root);
-    const bin = await installBrowserHarnessShim(root);
-    const venv = join(root, "browser-harness", "0.1.13");
-    const pkg = join(venv, "lib", "python3.12", "site-packages");
-    mkdirSync(join(venv, "bin"), { recursive: true });
-    mkdirSync(join(pkg, "browser_harness"), { recursive: true });
-    writeFileSync(join(venv, ".ready"), "");
-    writeFileSync(join(venv, "bin", "browser-harness"), "#!/bin/sh\n");
-    chmodSync(join(venv, "bin", "browser-harness"), 0o755);
-    // 0.1.13's not-found return, verbatim.
-    writeFileSync(
-      join(pkg, "browser_harness", "macos.py"),
-      "def not_found():\n" +
-        "        return (\n" +
-        '            "not-found",\n' +
-        '            "retry the browser command and run `browser-harness mac-approve` when the prompt appears",\n' +
-        "        )\n",
-    );
-    for (const _ of [1, 2]) {
-      const run = spawnSync(join(bin ?? "", "browser-harness"), [], {
-        env: { ...process.env, BU_NAME: "test" },
-      });
-      expect(run.status).toBe(0);
-    }
+// 0.1.13 messages that sent agents the wrong way: mac-approve sees only English Google Chrome sheets on the
+// current Space, yet said to run it again (#1295); Chrome rejects at once while it has no window, yet the
+// message named no fix, so every retry failed the same way (#1702). Each source is 0.1.13's, verbatim.
+it.skipIf(!supported).each([
+  [
+    "mac-approve not-found asks the user to click Allow instead of retrying (#1295)",
+    "macos.py",
+    "def f():\n" +
+      "        return (\n" +
+      '            "not-found",\n' +
+      '            "retry the browser command and run `browser-harness mac-approve` when the prompt appears",\n' +
+      "        )\n",
+    "not-found|the Allow sheet was not found here: it can be on another Space or desktop, in another language, or in a browser other than Google Chrome. Do not run mac-approve again. Ask the user to switch to the browser and click Allow; the waiting browser command then continues. If they see no prompt, retry the browser command once",
+  ],
+  [
+    "an approval that ended asks the user to open a Chrome window (#1702)",
+    "admin.py",
+    "def f():\n" +
+      "                return (\n" +
+      '                    "permission-blocked: the pending Chrome connection ended before approval; "\n' +
+      '                    "browser-harness did not retry or create another connection."\n' +
+      "                ,)\n",
+    "permission-blocked: the pending Chrome connection ended before approval; browser-harness did not retry or create another connection. Chrome rejects the connection at once, with no popup, when it has no open browser window. Ask the user to open a Chrome window and confirm, then retry once; they click Allow on the popup that appears. Do not retry before they confirm.",
+  ],
+])("%s", async (_name, file, source, expected) => {
+  const root = mkdtempSync(join(tmpdir(), "browser-harness-"));
+  roots.push(root);
+  const bin = await installBrowserHarnessShim(root);
+  const venv = join(root, "browser-harness", "0.1.13");
+  const pkg = join(venv, "lib", "python3.12", "site-packages");
+  mkdirSync(join(venv, "bin"), { recursive: true });
+  mkdirSync(join(pkg, "browser_harness"), { recursive: true });
+  writeFileSync(join(venv, ".ready"), "");
+  writeFileSync(join(venv, "bin", "browser-harness"), "#!/bin/sh\n");
+  chmodSync(join(venv, "bin", "browser-harness"), 0o755);
+  writeFileSync(join(pkg, "browser_harness", file), source);
+  for (const _ of [1, 2]) {
+    const run = spawnSync(join(bin ?? "", "browser-harness"), [], {
+      env: { ...process.env, BU_NAME: "test" },
+    });
+    expect(run.status).toBe(0);
+  }
 
-    const result = spawnSync(
-      "python3",
-      [
-        "-c",
-        "from browser_harness.macos import not_found; print(*not_found(), sep='|')",
-      ],
-      { encoding: "utf8", env: { ...process.env, PYTHONPATH: pkg } },
-    );
-    expect(result.stdout).toBe(
-      "not-found|the Allow sheet was not found here: it can be on another Space or desktop, in another language, or in a browser other than Google Chrome. Do not run mac-approve again. Ask the user to switch to the browser and click Allow; the waiting browser command then continues. If they see no prompt, retry the browser command once\n",
-    );
-  },
-);
+  const result = spawnSync(
+    "python3",
+    [
+      "-c",
+      `from browser_harness.${file.slice(0, -3)} import f; print(*f(), sep='|')`,
+    ],
+    { encoding: "utf8", env: { ...process.env, PYTHONPATH: pkg } },
+  );
+  expect(result.stdout).toBe(`${expected}\n`);
+});
 
 it.skipIf(!supported)(
   "a timeout names a JS dialog open on the agent's tab (#1233)",

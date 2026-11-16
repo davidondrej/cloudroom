@@ -19,6 +19,8 @@ export interface DraftMessage {
   messageId: string;
   threadId: string;
   streaming: boolean;
+  /** Quotes selected draft text into the composer, like Reply in the chat selection menu. */
+  onAddToChat?: (text: string) => void;
 }
 
 const DraftMessageContext = createContext<DraftMessage | null>(null);
@@ -127,27 +129,32 @@ function ActionButton({
   );
 }
 
-/** Copies the selected text. Keyed by the selection, so a new selection starts fresh. */
-function SelectionCopy({
+const SELECTION_BUTTON_CLASS =
+  "flex cursor-pointer items-center gap-1 rounded-md px-2 py-1 text-foreground transition-colors hover:bg-state-hover";
+
+/** Copy and Reply for the selected text. Keyed by the selection, so a new selection starts fresh. */
+function SelectionMenu({
   text,
   top,
   left,
+  onAddToChat,
 }: {
   text: string;
   top: number;
   left: number;
+  onAddToChat?: () => void;
 }) {
   const { copied, copy } = useClipboardCopy({ text, resetMs: 1500 });
   return (
     <div
-      className="absolute z-20 rounded-lg border border-foreground/10 bg-popover p-0.5 text-[12px] shadow-lg"
+      className="absolute z-20 flex items-center gap-0.5 rounded-lg border border-foreground/10 bg-popover p-0.5 text-[12px] shadow-lg"
       style={{ top, left }}
     >
       <button
         type="button"
         onMouseDown={(event) => event.preventDefault()}
         onClick={() => void copy()}
-        className="flex cursor-pointer items-center gap-1 rounded-md px-2 py-1 text-foreground transition-colors hover:bg-state-hover"
+        className={SELECTION_BUTTON_CLASS}
       >
         <Icon
           name={copied ? "Check" : "Copy"}
@@ -158,6 +165,23 @@ function SelectionCopy({
         />
         {copied ? "Copied" : "Copy"}
       </button>
+      {onAddToChat ? (
+        <>
+          <span aria-hidden="true" className="h-4 w-px bg-border" />
+          <button
+            type="button"
+            onMouseDown={(event) => event.preventDefault()}
+            onClick={onAddToChat}
+            className={SELECTION_BUTTON_CLASS}
+          >
+            <Icon
+              name="ArrowTurnDown"
+              className="size-3.5 text-muted-foreground"
+            />
+            Reply
+          </button>
+        </>
+      ) : null}
     </div>
   );
 }
@@ -275,7 +299,7 @@ export function DraftEditor({
       end,
       text: selectedText,
       bottom: box.bottom - frame.top,
-      left: Math.max(8, Math.min(box.left - frame.left, frame.width - 96)),
+      left: Math.max(8, Math.min(box.left - frame.left, frame.width - 160)),
     });
   }, [setSelected]);
 
@@ -350,11 +374,20 @@ export function DraftEditor({
         </ActionButton>
       </div>
       {selected !== null ? (
-        <SelectionCopy
+        <SelectionMenu
           key={`${selected.start}:${selected.end}`}
           text={selected.text}
           top={selected.bottom + 6}
           left={selected.left}
+          onAddToChat={
+            message.onAddToChat
+              ? () => {
+                  message.onAddToChat?.(selected.text);
+                  window.getSelection()?.removeAllRanges();
+                  setSelected(null);
+                }
+              : undefined
+          }
         />
       ) : null}
     </div>

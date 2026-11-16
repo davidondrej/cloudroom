@@ -80,7 +80,6 @@ import {
   useEnvironmentTerminals,
   useTerminals,
 } from "@/hooks/queries/thread-terminal-queries";
-import { takeTerminalStartRequest } from "@/lib/terminal-start-request";
 import { useEnvironment } from "@/hooks/queries/environment-queries";
 import { useHostProviderCliStatus } from "@/hooks/queries/system-queries";
 import {
@@ -1545,20 +1544,17 @@ function RootComposeSurface({
       return;
     }
     const newTab = createNewTabFixedPanelTab();
-    const startRequest = takeTerminalStartRequest();
     const createTerminal =
       rootPanelTerminalTarget.kind === "environment"
         ? createEnvironmentTerminalMutation.mutateAsync({
             environmentId: rootPanelTerminalTarget.environmentId,
             cols: DEFAULT_TERMINAL_COLS,
             rows: DEFAULT_TERMINAL_ROWS,
-            ...startRequest,
           })
         : createHostPathTerminalMutation.mutateAsync({
             cols: DEFAULT_TERMINAL_COLS,
             rows: DEFAULT_TERMINAL_ROWS,
             target: rootPanelTerminalTarget,
-            ...startRequest,
           });
     void createTerminal
       .then((session) => {

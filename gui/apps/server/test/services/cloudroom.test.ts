@@ -595,7 +595,7 @@ it.each([true, false, null])("starts without copying local files or waiting for 
     if (!available) return json({}, 503);
     paths.push(req.url ?? "");
     if (req.url === "/v1/health") return json({});
-    if (req.url === "/v1/capabilities") return json({ version: 1, repository: "/code/test", stop: true, resume: true, launch_settings: true, workspaces: true, direct_workspaces: direct, command_guard: true, sync: true, harnesses: [{ id:"codex", model:"test-model" }] });
+    if (req.url === "/v1/capabilities") return json({ version: 1, repository: "/code/test", stop: true, resume: true, launch_settings: true, workspaces: true, direct_workspaces: direct, command_guard: true, sync: true, room_ids: true, harnesses: [{ id:"codex", model:"test-model" }] });
     if (req.url === "/v1/ready") return json({ ready: true });
     if (req.url?.includes("/stream?")) { res.writeHead(200, { "Content-Type": "text/event-stream" }); res.write(": connected\n\n"); return; }
     let body = "";
@@ -604,7 +604,7 @@ it.each([true, false, null])("starts without copying local files or waiting for 
     const input = JSON.parse(body || "{}");
     if (req.url === "/v1/sessions") {
       starts++;
-      expect(input).toMatchObject({ workspace: workspace.id, workspace_name: expect.any(String) });
+      expect(input).toMatchObject({ workspace: workspace.id, workspace_name: expect.any(String), thread_id: expect.stringMatching(/^thr_/), project_id: project.id });
       return json({session_id:"cr_waiting",receipt:{request_id:input.request_id, command:"start", input, state:"accepted"}, saving:{}}, 202);
     }
     if (req.url === "/v1/sessions/cr_waiting/prompts") return json({session_id:"cr_waiting",receipt:{request_id:input.request_id,command:"prompt",input,state:"accepted"},saving:{}},202);
@@ -1735,6 +1735,39 @@ it.each([
   } finally {
     service.stop(); await website.close(); await harness.cleanup();
     process.env.PATH = env.PATH; process.env.HOME = env.HOME;
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+// A Cloud parent's child wakes on the website, so a sign-in in Settings must reach Cloud then, not at this Mac's next
+// wake, even when a wake just copied the logins (#1708). Only Kimi is read here: every other login is skipped.
+it.each([
+  { case: "signed in after a wake's copy", copyLogins: true, removed: false, kimi: true },
+  { case: "Auth my agents off", copyLogins: false, removed: false, kimi: false },
+  { case: "agent removed in Settings", copyLogins: true, removed: true, kimi: false },
+])("a finished Settings sign-in copies the login to Cloud: $case", async ({ copyLogins, removed, kimi }) => {
+  const home = await mkdtemp(join(tmpdir(), "cloudroom-kimi-"));
+  const saved = process.env.KIMI_CODE_HOME;
+  process.env.KIMI_CODE_HOME = home;
+  const harness = await createTestAppHarness();
+  const service = cloudroom(harness.deps);
+  const website = await fakeLoginsWebsite();
+  (service.sandboxes as { account: () => Promise<unknown> }).account = async () => website.account;
+  (service as unknown as { sandboxMode: () => Promise<boolean> }).sandboxMode = async () => true;
+  const rules = service.sandboxes.skipLogins;
+  service.sandboxes.skipLogins = async () => new Set([...await rules(), "codex", "pi", "opencode", "hermes", "devin", "openclaw", "cursor", "github"]);
+  try {
+    await sync.setCopyLogins(harness.deps, copyLogins);
+    if (removed) await sync.markLogin(harness.deps, "kimi", "blocked");
+    await (service as unknown as { syncLogins: () => Promise<void> }).syncLogins();
+    await mkdir(join(home, "credentials"));
+    await writeFile(join(home, "config.toml"), 'default_model = "fake"\n');
+    await writeFile(join(home, "credentials", "kimi-code.json"), '{"access_token":"fake"}');
+    expect((await harness.app.request("/api/v1/cloudroom/mac/logins", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" })).status).toBe(200);
+    expect(website.logins.has("kimi")).toBe(kimi);
+  } finally {
+    service.stop(); await website.close(); await harness.cleanup();
+    if (saved === undefined) delete process.env.KIMI_CODE_HOME; else process.env.KIMI_CODE_HOME = saved;
     await rm(home, { recursive: true, force: true });
   }
 });

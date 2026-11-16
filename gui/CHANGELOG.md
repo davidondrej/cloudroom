@@ -2,6 +2,20 @@
 
 Also on [cloudroom.dev/changelog](https://www.cloudroom.dev/changelog).
 
+## 155
+
+Copy from any selection (2026-11-16)
+
+### Changes
+
+- Selecting text shows a simpler menu with Reply, Side chat, and Copy, in chats and drafts.
+- Copy keeps exactly what you selected, whitespace included.
+- Cmd+F opens search, same as Cmd+K.
+- Cursor has a Sign in button in the model picker, and Reload really checks again.
+- After a Cloud sandbox restarts, your next message no longer gets stuck.
+- Restoring a thread right after archiving it now works.
+- A new scroll-to-bottom button with a smooth hover.
+
 ## 154
 
 Archived threads restore cleanly (2026-11-15)

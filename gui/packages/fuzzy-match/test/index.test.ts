@@ -6,6 +6,18 @@ import {
 } from "../src/index.js";
 
 describe("fuzzyMatchPaths", () => {
+  it("keeps positions stable across identical searches", () => {
+    const args = {
+      items: ["\n\naa>", "\ud800aaaaaaaa/aa"],
+      query: "\n>",
+      getPath: (path: string) => path,
+      limit: 1,
+    };
+
+    const first = fuzzyMatchPaths(args);
+    expect(fuzzyMatchPaths(args)).toEqual(first);
+  });
+
   it("returns the first limited paths for an empty query", () => {
     const paths = ["src/a.ts", "src/b.ts", "src/c.ts"];
 

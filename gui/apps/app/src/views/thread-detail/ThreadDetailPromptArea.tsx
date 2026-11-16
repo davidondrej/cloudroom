@@ -23,7 +23,7 @@ import {
   type RefObject,
 } from "react";
 import { createPortal } from "react-dom";
-import { useIsMutating, useQueryClient } from "@tanstack/react-query";
+import { useIsMutating, useMutationState, useQueryClient } from "@tanstack/react-query";
 import { Icon, type IconName } from "@cloudroom/shared-ui/icon";
 import { PromptStackCard } from "@/components/promptbox/banner/PromptStackCard";
 import { CloudDiskNotice, CloudUsageLimitNotice, ContinueFromCopyButton } from "@/components/CloudUsageLimitNotice";
@@ -57,6 +57,7 @@ import type {
   SendMessageRequest,
   ThreadTimelineResponse,
   TimelineWorkflowWorkRow,
+  UpdateThreadRequest,
 } from "@cloudroom/server-contract";
 import type { ExperimentalComposerSubmitOptions } from "@get-bb/plugin-sdk";
 import type { ChildThreadPendingAttention } from "@/hooks/queries/child-thread-pending-interactions";
@@ -475,11 +476,16 @@ export function ThreadDetailPromptArea({
   }, [cloudWorkspace.data, cloudWorkspace.isError]);
   const cloudConnection = useCloudroomConnection();
   const setCloudReasoning = useSetCloudReasoning(thread.id);
-  const cloudReasoning = (setCloudReasoning.isPending ? setCloudReasoning.variables : undefined) ?? cloudState.data?.reasoning ?? "medium";
   const { mutate: updateExecution } = useUpdateThread({
     threadId: thread.id,
     errorMessage: "Failed to save thread execution settings.",
   });
+  // The model or agent being switched to: shown and sent at once while the switch finishes in the background.
+  // Read from the shared mutation cache, so a reopened thread still sees a switch started before.
+  const pendingSwitch = useMutationState({
+    filters: { mutationKey: ["thread-update", thread.id], exact: true, status: "pending" },
+    select: (mutation) => mutation.state.variables as UpdateThreadRequest | undefined,
+  }).filter((variables) => typeof variables?.model === "string").at(-1);
   const saveReasoning = useUpdateThread({
     threadId: thread.id,
     errorMessage: "Failed to save thread execution settings.",
@@ -487,6 +493,8 @@ export function ThreadDetailPromptArea({
   });
   const isExecutionUpdatePending =
     useIsMutating({ mutationKey: ["thread-update", thread.id] }) > 0;
+  const cloudReasoning = pendingSwitch?.reasoningLevel ?? (setCloudReasoning.isPending ? setCloudReasoning.variables : undefined) ?? cloudState.data?.reasoning ?? "medium";
+  const cloudModel = pendingSwitch?.model ?? cloudState.data?.model;
   const retryCloudStart = useRetryCloudStart(thread.id);
   const defaultExecutionOptionsQuery = useThreadDefaultExecutionOptions(
     thread.id,
@@ -758,7 +766,7 @@ export function ThreadDetailPromptArea({
       return parsed.success ? [{ value: parsed.data, label: reasoningLevelLabel(parsed.data, undefined) }] : [];
     }).sort((a, b) => reasoningLevelSchema.options.indexOf(a.value) - reasoningLevelSchema.options.indexOf(b.value));
   }, [cloudConnection.data, cloudReasoning, cloudState.data?.model, thread.providerId]);
-  const cloudFastSupported = isCloud && cloudServiceTierSupported(cloudConnection.data, thread.providerId);
+  const cloudFastSupported = isCloud && cloudServiceTierSupported(cloudConnection.data, pendingSwitch?.providerId ?? thread.providerId);
   const cloudProviderOptions = useMemo(() => providerOptions.filter((option) => cloudCanRunHarness(option.value)), [providerOptions]);
   const cloudSteerSupported = isCloud && cloudFeatureSupported(cloudConnection.data, thread.providerId, "steer");
   const fallbackIdentity = modelFallback
@@ -771,12 +779,14 @@ export function ThreadDetailPromptArea({
     selectedProviderId === thread.providerId &&
     modelFallback !== null &&
     overriddenFallbackIdentity !== fallbackIdentity;
-  const effectiveSelectedModel = isFallbackModelActive
-    ? modelFallback.fallbackModel
-    : (activeModel?.model ?? selectedModel);
+  const effectiveSelectedModel =
+    pendingSwitch?.model ??
+    (isFallbackModelActive
+      ? modelFallback.fallbackModel
+      : (activeModel?.model ?? selectedModel));
   const followUpReasoningLevel = isCloud
     ? cloudReasoning
-    : resolveModelReasoningLevel(
+    : pendingSwitch?.reasoningLevel ?? resolveModelReasoningLevel(
         activeModel,
         (saveReasoning.isPending
           ? saveReasoning.variables?.reasoningLevel
@@ -831,18 +841,21 @@ export function ThreadDetailPromptArea({
       const cloudLevels = isCloud ? cloudReasoningLevels(cloudConnection.data, selection.providerId, selection.model) : [];
       const supported = reasoningLevelSchema.options.filter((option) => cloudLevels.includes(option));
       const next = { ...selection, reasoningLevel: supported.length > 0 ? reconcileReasoningLevel(followUpReasoningLevel, supported) : level };
+      const previous = { providerId: thread.providerId, model: effectiveSelectedModel, reasoningLevel: followUpReasoningLevel };
+      // Show the pick at once; the composer stays open and sends wait for the switch (waitForThreadExecutionSave).
+      setProviderModelReasoning(next);
       updateExecution(
         { id: thread.id, ...next },
         {
           onSuccess: () => {
             if (fallbackIdentity !== null) setOverriddenFallbackIdentity(fallbackIdentity);
-            setProviderModelReasoning(next);
             void queryClient.invalidateQueries({ queryKey: ["cloudroom-thread", thread.id] });
           },
+          onError: () => setProviderModelReasoning(previous),
         },
       );
     },
-    [cloudConnection.data, cloudState.data?.model, fallbackIdentity, followUpReasoningLevel, handleModelChange, isCloud, queryClient, setProviderModelReasoning, thread.id, thread.providerId, updateExecution],
+    [cloudConnection.data, cloudState.data?.model, effectiveSelectedModel, fallbackIdentity, followUpReasoningLevel, handleModelChange, isCloud, queryClient, setProviderModelReasoning, thread.id, thread.providerId, updateExecution],
   );
   const { typeaheadConfig, promptActions } = useComposerTypeahead({
     projectId: thread.projectId,
@@ -903,7 +916,6 @@ export function ThreadDetailPromptArea({
     queuedMessageActionPending ||
     isFollowUpShortcutSending;
   const isFollowUpSubmitting =
-    isExecutionUpdatePending ||
     sendMessage.isPending ||
     createQueuedMessage.isPending ||
     isFollowUpShortcutSending;
@@ -1016,11 +1028,11 @@ export function ThreadDetailPromptArea({
     const submittedDraft = currentPromptDraft;
     const draftEdits = withDraftEdits(thread.id, currentPromptDraftInput);
     const submittedInput = draftEdits.input;
-    if (!cloudState.data || submittedInput.length === 0 || movingToLocal) return;
+    if (!cloudModel || submittedInput.length === 0 || movingToLocal) return;
     const request = {
       id: thread.id,
       input: submittedInput,
-      model: cloudState.data.model,
+      model: cloudModel,
       reasoningLevel: cloudReasoning,
       permissionMode: "full" as const,
       serviceTier: cloudFastSupported && serviceTier ? serviceTier : "default" as const,
@@ -1035,10 +1047,9 @@ export function ThreadDetailPromptArea({
       promptDraft.restoreIfEmpty(submittedDraft);
       showMutationErrorToast({ error, fallbackMessage: "Cloud message was not confirmed", lifecycleOperation: "send_message" });
     }
-  }, [cloudFastSupported, cloudReasoning, cloudState.data, currentPromptDraft, currentPromptDraftInput, movingToLocal, promptDraft, sendMessage, serviceTier, thread.id, thread.status]);
+  }, [cloudFastSupported, cloudModel, cloudReasoning, currentPromptDraft, currentPromptDraftInput, movingToLocal, promptDraft, sendMessage, serviceTier, thread.id, thread.status]);
 
   const handleSend = useCallback(async () => {
-    if (isExecutionUpdatePending) return;
     const submittedDraft = currentPromptDraft;
     if (isCloud) {
       await sendCloudDraft(false);
@@ -1090,7 +1101,6 @@ export function ThreadDetailPromptArea({
       });
     }
   }, [
-    isExecutionUpdatePending,
     isCloud,
     sendCloudDraft,
     createQueuedMessage,
@@ -1105,7 +1115,6 @@ export function ThreadDetailPromptArea({
     runtimeDisplayStatus,
   ]);
   const handleHardQueue = useCallback(async () => {
-    if (isExecutionUpdatePending) return;
     const submittedDraft = currentPromptDraft;
     const draftEdits = withDraftEdits(thread.id, currentPromptDraftInput);
     const request = buildCreateQueuedFollowUpRequest({
@@ -1132,7 +1141,6 @@ export function ThreadDetailPromptArea({
     currentPromptDraft,
     currentPromptDraftInput,
     followUpExecutionSelection,
-    isExecutionUpdatePending,
     promptDraft,
     dismissBottomAttachmentFailures,
     thread.id,
@@ -1145,10 +1153,8 @@ export function ThreadDetailPromptArea({
       if (movingToLocal) {
         throw new Error("Wait for Teleport to Local to finish.");
       }
-      if (isDefaultExecutionOptionsLoading || isExecutionUpdatePending) {
-        throw new Error(
-          "This thread's execution settings are still loading or saving.",
-        );
+      if (isDefaultExecutionOptionsLoading) {
+        throw new Error("This thread's execution settings are still loading.");
       }
       const submittedDraft = promptDraft.getCurrent();
       const draftEdits = withDraftEdits(
@@ -1191,7 +1197,6 @@ export function ThreadDetailPromptArea({
     [
       followUpExecutionSelection,
       isDefaultExecutionOptionsLoading,
-      isExecutionUpdatePending,
       movingToLocal,
       promptDraft,
       sendMessage,
@@ -1486,6 +1491,7 @@ export function ThreadDetailPromptArea({
     !isDefaultExecutionOptionsLoading &&
     !isAttachingSentMessageFiles &&
     !isFollowUpSubmitting &&
+    !isExecutionUpdatePending &&
     !isQueueMutationPending &&
     !sentMessageEdit.isSubmitting &&
     queuedMessages.length === 0 &&
@@ -1524,7 +1530,7 @@ export function ThreadDetailPromptArea({
           : { environmentId: thread.environmentId },
       provider: {
         options: providerOptions,
-        selectedId: selectedProviderId,
+        selectedId: pendingSwitch?.providerId ?? selectedProviderId,
         hasMultiple: hasMultipleProviders,
       },
       model: {
@@ -1570,6 +1576,7 @@ export function ThreadDetailPromptArea({
       reasoningOptions,
       isExecutionUpdatePending,
       handleReasoningChange,
+      pendingSwitch?.providerId,
       selectedModel,
       selectedProviderId,
       serviceTier,
@@ -2105,6 +2112,7 @@ export function ThreadDetailPromptArea({
               submitMode.kind === "blocked" ||
               runtimeDisplayStatus === "waiting-for-host" ||
               isFollowUpSubmitting ||
+              isExecutionUpdatePending ||
               isQueueMutationPending ||
               movingToLocal
             }
@@ -2134,6 +2142,7 @@ export function ThreadDetailPromptArea({
       handleUnarchiveCurrentThread,
       environmentGoneStatus,
       isFollowUpSubmitting,
+      isExecutionUpdatePending,
       isUnarchiveCurrentThreadPending,
       isQueueMutationPending,
       movingToLocal,
@@ -2275,8 +2284,8 @@ export function ThreadDetailPromptArea({
       contextWindowNote={thread.providerId === "acp-cursor" ? "Cursor doesn't report token usage, so this is an estimate." : undefined}
       execution={isCloud ? {
         ...bottomExecutionConfig,
-        provider: { ...bottomExecutionConfig.provider, selectedId: thread.providerId, options: cloudProviderOptions, hasMultiple: cloudProviderOptions.length > 1 },
-        model: { ...bottomExecutionConfig.model, active: cloudState.data ? { model: cloudState.data.model } : null, isLoading: !cloudState.data, options: [...modelOptions, ...moreModelOptions], moreOptions: [], loadFailed: false, loadError: null, onChange: (model: string) => handleSelectModel({ providerId: thread.providerId, model }) },
+        provider: { ...bottomExecutionConfig.provider, selectedId: pendingSwitch?.providerId ?? thread.providerId, options: cloudProviderOptions, hasMultiple: cloudProviderOptions.length > 1 },
+        model: { ...bottomExecutionConfig.model, active: cloudModel ? { model: cloudModel } : null, isLoading: !cloudModel, options: [...modelOptions, ...moreModelOptions], moreOptions: [], loadFailed: false, loadError: null, onChange: (model: string) => handleSelectModel({ providerId: thread.providerId, model }) },
         reasoning: { ...bottomExecutionConfig.reasoning, value: cloudReasoning, options: cloudFollowUpReasoningOptions, onChange: handleReasoningChange },
         serviceTier: { ...bottomExecutionConfig.serviceTier, value: cloudFastSupported ? serviceTier : "default", supported: cloudFastSupported },
       } : bottomExecutionConfig}

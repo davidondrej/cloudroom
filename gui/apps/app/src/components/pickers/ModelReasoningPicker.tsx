@@ -78,7 +78,12 @@ import {
 } from "@cloudroom/shared-ui/option-display";
 import { type PickerOption } from "./OptionPicker";
 import { PickerLoadingRows } from "./PickerLoadingRows";
-import { ModelUnavailable } from "./ModelUnavailable";
+import {
+  ModelUnavailable,
+  restartProviderModels,
+  useRoutedHostId,
+} from "./ModelUnavailable";
+import { useProviderLogin } from "@/components/settings/ProviderLoginButton";
 import type { ModelPickerOption } from "./model-picker-option";
 import { searchPickerOptions } from "./picker-search";
 import { useResetPickerScroll } from "./useResetPickerScroll";
@@ -341,6 +346,20 @@ export function ModelReasoningPicker({
     (onSelectedProviderChange !== undefined || onSelectModel !== undefined) &&
     providerOptions.length > 1;
   const queryClient = useQueryClient();
+  // Signs in on the machine that checks models (in a Cloud thread, this Mac),
+  // then reloads them. It lives here because the popover closes for its drawer.
+  const loginProviderId = useRef<string | null>(null);
+  const providerLogin = useProviderLogin(
+    useRoutedHostId(providerRouting, open),
+    () => {
+      if (loginProviderId.current === null) return;
+      void restartProviderModels(
+        queryClient,
+        loginProviderId.current,
+        providerRouting,
+      ).catch(() => undefined);
+    },
+  );
   const prefetchRoutingEnvironmentId = providerRouting?.environmentId;
   const prefetchRoutingHostId = providerRouting?.hostId;
   const siblingIdsKey = providerOptions
@@ -1007,6 +1026,7 @@ export function ModelReasoningPicker({
       )}
     >
       {modelPart}
+      {providerLogin.drawer}
       {showEffortControl ? (
         <>
           <span aria-hidden className="h-4 w-px shrink-0 bg-border" />
@@ -1275,7 +1295,17 @@ export function ModelReasoningPicker({
                           : { installUrl: activeProvider.installUrl })}
                         {...(activeProvider?.signInCommand === undefined
                           ? {}
-                          : { signInCommand: activeProvider.signInCommand })}
+                          : {
+                              signInCommand: activeProvider.signInCommand,
+                              onSignIn: () => {
+                                setOpen(false);
+                                loginProviderId.current = activeProviderId;
+                                providerLogin.start(
+                                  activeProvider.signInCommand!,
+                                  activeProviderLabel,
+                                );
+                              },
+                            })}
                         {...(activeProvider?.signInHint === undefined
                           ? {}
                           : { signInHint: activeProvider.signInHint })}

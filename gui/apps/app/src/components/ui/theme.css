@@ -1088,6 +1088,16 @@
   }
 }
 
+@keyframes scroll-bottom-bob {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-1.5px);
+  }
+}
+
 @keyframes shine-mask {
   0% {
     -webkit-mask-position: 200% 0%;

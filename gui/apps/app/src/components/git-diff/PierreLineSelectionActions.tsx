@@ -31,6 +31,8 @@ interface UsePierreLineSelectionActionsArgs {
     range: SelectedLineRange;
   }) => string | null;
   buildSelectionText: (range: SelectedLineRange) => string | null;
+  /** Plain selected lines for Copy, without the chat context in `buildSelectionText`. */
+  buildCopyText?: (range: SelectedLineRange) => string | null;
   containerRef: RefObject<HTMLElement | null>;
   enabled: boolean;
   onSelectionAddToChat?: (text: string) => void;
@@ -61,10 +63,12 @@ function fallbackAnchorPoint(
 function buildMenuSelection({
   anchor,
   containerElement,
+  copyText,
   text,
 }: {
   anchor: SelectionAnchor | null;
   containerElement: HTMLElement | null;
+  copyText: string | null;
   text: string;
 }): MessageProseSelection | null {
   const trimmedText = text.trim();
@@ -76,6 +80,7 @@ function buildMenuSelection({
   const anchorPoint = selectionAnchor.point;
   return {
     text: trimmedText,
+    ...(copyText === null ? {} : { copyText }),
     rect: new DOMRect(anchorPoint.x, anchorPoint.y, 0, 0),
     anchorPoint,
     anchorSide: selectionAnchor.side,
@@ -262,6 +267,7 @@ function anchorSideFromSelectionStart({
 }
 
 export function usePierreLineSelectionActions({
+  buildCopyText,
   buildFallbackSelectionText,
   buildSelectionText,
   containerRef,
@@ -475,6 +481,7 @@ export function usePierreLineSelectionActions({
       const selection = buildMenuSelection({
         anchor,
         containerElement,
+        copyText: buildCopyText?.(range) ?? null,
         text: selectionText,
       });
       if (selection === null) {
@@ -491,7 +498,13 @@ export function usePierreLineSelectionActions({
       setPreviewRange(range);
       setActiveSelection(selection);
     },
-    [buildFallbackSelectionText, buildSelectionText, containerRef, enabled],
+    [
+      buildCopyText,
+      buildFallbackSelectionText,
+      buildSelectionText,
+      containerRef,
+      enabled,
+    ],
   );
 
   const handleLineSelectionStart = useCallback(

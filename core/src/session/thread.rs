@@ -884,6 +884,21 @@ async fn working(
     Ok(Json(json!({"working":working})))
 }
 
+/// Marks the children `thread wait` saw at work with `"waited": true` and returns how many. Nothing is left out.
+fn mark_waited(answer: &mut Value, waited: &[String]) -> usize {
+    let list = answer["children"].as_array_mut().into_iter().flatten();
+    let mut marked = 0;
+    for child in list.filter(|c| {
+        c["id"]
+            .as_str()
+            .is_some_and(|id| waited.iter().any(|w| w == id))
+    }) {
+        child["waited"] = json!(true);
+        marked += 1;
+    }
+    marked
+}
+
 #[derive(Deserialize)]
 struct OutputQuery {
     #[serde(default)]
@@ -1444,7 +1459,7 @@ pub async fn cli(args: &[String]) -> io::Result<i32> {
             };
             call("GET", path, None).await?
         }
-        // One blocking call instead of a wake-up per child. It prints the same list as `thread list`.
+        // One blocking call instead of a wake-up per child. It prints the same list as `thread list`, marked.
         "wait" => {
             if !matches!(own(&[], &["--children"]).as_deref(), Ok([])) {
                 eprintln!(
@@ -1455,11 +1470,18 @@ pub async fn cli(args: &[String]) -> io::Result<i32> {
             let end = Instant::now() + CHILD_WAIT;
             // Children in sandboxes of their own that stopped without telling Core: it would count them forever.
             let mut gone: Vec<String> = Vec::new();
+            // Every child this wait saw at work, marked in the list it prints (#1752).
+            let mut waited: Vec<String> = Vec::new();
             let mut tick = 0;
             let working = loop {
                 let answer = call("GET", "/working", None).await?;
                 let ids = answer["working"].as_array().into_iter().flatten();
                 let mut ids: Vec<&str> = ids.filter_map(Value::as_str).collect();
+                for id in &ids {
+                    if !waited.iter().any(|w| w == id) {
+                        waited.push(id.to_string());
+                    }
+                }
                 ids.retain(|id| !gone.iter().any(|g| g == id));
                 tick += 1;
                 // Every 20 seconds the website has the last word: its sandbox died, sleeps, or the user archived it.
@@ -1486,6 +1508,15 @@ pub async fn cli(args: &[String]) -> io::Result<i32> {
                 tokio::time::sleep(Duration::from_secs(2)).await;
             };
             let mut answer = call("GET", "/children", None).await?;
+            // The list holds every open child, also idle ones from earlier sessions: say which it waited on.
+            let marked = mark_waited(&mut answer, &waited);
+            if marked > 0 {
+                let total = answer["children"].as_array().map_or(0, Vec::len);
+                answer["summary"] = json!(format!(
+                    "Waited on {marked} child threads (\"waited\": true); {} others were not seen working.",
+                    total - marked
+                ));
+            }
             if working > 0 {
                 answer["wait"] = json!(format!(
                     "{working} child threads are still working. Run the command again to keep waiting."
@@ -1650,7 +1681,8 @@ pub async fn cli(args: &[String]) -> io::Result<i32> {
 
 #[cfg(test)]
 mod tests {
-    use super::{first_key, mention, missing_value, plain};
+    use super::{first_key, mark_waited, mention, missing_value, plain};
+    use serde_json::json;
 
     // #1668: an own-sandbox spawn printed nothing while it waited, and its request ID stayed inside Core, so a retry
     // after the agent's command gave up started a second child. Its ID now comes first, like a top-level start's.
@@ -1695,5 +1727,25 @@ mod tests {
         assert_eq!(mention("@thread:cr_child_9"), "cr_child_9");
         assert_eq!(mention("@thread:thr_a b"), "@thread:thr_a b");
         assert_eq!(mention("thr_ab"), "thr_ab");
+    }
+
+    // #1752: `thread wait` prints every open child, also idle ones from the thread's earlier sessions, so it marks the
+    // ones it saw at work. Nothing is left out.
+    #[test]
+    fn thread_wait_marks_the_children_it_waited_on() {
+        let list = || json!({"children":[{"id":"cr_child_a"},{"id":"thr_old"},{"id":"thr_new"}]});
+        for (waited, marked) in [
+            (&["cr_child_a", "thr_new"][..], &[true, false, true][..]),
+            (&["thr_gone"], &[false, false, false]),
+            (&[], &[false, false, false]),
+        ] {
+            let mut answer = list();
+            let waited: Vec<String> = waited.iter().map(|w| w.to_string()).collect();
+            let count = marked.iter().filter(|m| **m).count();
+            assert_eq!(mark_waited(&mut answer, &waited), count);
+            let children = answer["children"].as_array().unwrap();
+            let shown: Vec<bool> = children.iter().map(|c| c["waited"] == true).collect();
+            assert_eq!((children.len(), &shown[..]), (3, marked));
+        }
     }
 }

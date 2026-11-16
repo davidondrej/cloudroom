@@ -717,8 +717,9 @@ async function runRemove(
   // Automatic local removals save the worktree's work to its branch after the
   // teardown hook, right before the folder is deleted. While an archived Local
   // thread can still come back, the environment is parked instead of
-  // destroyed: the row stays and the folder is rebuilt on demand. Restore is
-  // refused while teardown runs; the live-thread check is a last guard.
+  // destroyed: the row stays and the folder is rebuilt on demand. Unarchive
+  // waits for teardown to end and stays refused if it failed; the live-thread
+  // check is a last guard.
   const local = isLocalWorktree(deps, row);
   const automatic = !explicitRemovals.has(environmentId) && local;
   const park =

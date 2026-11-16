@@ -72,19 +72,66 @@ interface UpdateThreadMutationOptions {
   reasoning?: boolean;
 }
 
-export function waitForThreadReasoningSave(
+export const THREAD_STOP_MUTATION_KEY = ["thread-stop"];
+
+/**
+ * A send waits for the thread's pending reasoning, model, or agent save, so a pick never blocks the composer.
+ * It fails when a model or agent switch it waited for failed (the message would go to the wrong model),
+ * or when the user pressed Stop meanwhile: the message shows as running, so Stop must drop it.
+ */
+export function waitForThreadExecutionSave(
   queryClient: QueryClient,
   threadId: string,
 ): Promise<void> {
-  const filters = { mutationKey: threadReasoningSaveKey(threadId) };
-  return new Promise((resolve) => {
-    if (queryClient.isMutating(filters) === 0) return resolve();
-    const unsubscribe = queryClient.getMutationCache().subscribe(() => {
-      if (queryClient.isMutating(filters) > 0) return;
+  const keys = [threadReasoningSaveKey(threadId), threadUpdateKey(threadId)];
+  const cache = queryClient.getMutationCache();
+  const watched = keys.flatMap((mutationKey) =>
+    cache.findAll({ mutationKey, exact: true, status: "pending" }),
+  );
+  if (watched.length === 0) return Promise.resolve();
+  const waitingSince = Date.now();
+  const stopped = () =>
+    cache
+      .findAll({ mutationKey: THREAD_STOP_MUTATION_KEY, exact: true })
+      .some(
+        (mutation) =>
+          mutation.state.variables === threadId &&
+          mutation.state.submittedAt >= waitingSince,
+      );
+  return new Promise((resolve, reject) => {
+    let unsubscribe = () => {};
+    const settle = () => {
+      if (stopped()) {
+        unsubscribe();
+        reject(new Error("Stopped before it was sent."));
+        return;
+      }
+      if (watched.some((mutation) => mutation.state.status === "pending"))
+        return;
       unsubscribe();
-      resolve();
-    });
+      const switchFailed = watched.some((mutation) => {
+        const variables = mutation.state.variables as
+          | UpdateThreadRequest
+          | undefined;
+        return (
+          mutation.state.status === "error" &&
+          (variables?.model !== undefined ||
+            variables?.providerId !== undefined)
+        );
+      });
+      if (switchFailed) {
+        reject(new Error("The model switch failed, so this message wasn't sent."));
+      } else {
+        resolve();
+      }
+    };
+    unsubscribe = cache.subscribe(settle);
+    settle();
   });
+}
+
+function threadUpdateKey(threadId: string | undefined) {
+  return ["thread-update", threadId];
 }
 
 interface ArchiveThreadAndChildrenMutationRequest {
@@ -113,7 +160,7 @@ export function useUpdateThread(options?: UpdateThreadMutationOptions) {
     mutationKey:
       options?.reasoning && options.threadId
         ? threadReasoningSaveKey(options.threadId)
-        : ["thread-update", options?.threadId],
+        : threadUpdateKey(options?.threadId),
     ...(options?.threadId
       ? { scope: { id: `thread-update:${options.threadId}` } }
       : {}),

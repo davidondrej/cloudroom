@@ -1,3 +1,4 @@
+import { setTimeout as sleep } from "node:timers/promises";
 import { refreshProviderRetirement, restoreParkedWorktree } from "../../services/environments/environment-engine.js";
 import {
   deleteQueuedThreadMessage,
@@ -614,23 +615,37 @@ export function registerThreadActionRoutes(app: Hono, deps: AppDeps): void {
     return context.json({ ok: true, ...result });
   });
 
-  /** One thread's restore, with everything that follows it. */
-  function unarchiveWithEffects(
+  /** Waits, only reading, while a Local worktree is being removed. Returns why the thread can't come back yet, or null. */
+  async function worktreeRemovalBlock(
     thread: ReturnType<typeof requirePublicThread>,
+    deadline: number,
+  ): Promise<string | null> {
+    const environmentId = thread.environmentId;
+    if (isCloudThread(thread) || environmentId === null) return null;
+    const status = () => getEnvironment(deps.db, environmentId)?.teardownStatus;
+    while (status() === "running" && Date.now() < deadline) await sleep(250);
+    const final = status();
+    if (final === "running")
+      return "This thread's worktree is still being removed. Try again in a moment.";
+    // A failed removal may have deleted the folder already; its retry parks it.
+    if (final === "failed")
+      return "This thread's worktree couldn't be removed. Cloudroom retries every minute, so try again after that.";
+    return null;
+  }
+
+  /** One thread's restore, with everything that follows it. */
+  async function unarchiveWithEffects(
+    archived: ReturnType<typeof requirePublicThread>,
     keepParent: boolean,
-  ): void {
-    // A worktree mid-removal would be deleted under the restored thread.
-    if (
-      !isCloudThread(thread) &&
-      thread.environmentId !== null &&
-      getEnvironment(deps.db, thread.environmentId)?.teardownStatus ===
-        "running"
-    )
-      throw new ApiError(
-        409,
-        "environment_removing",
-        "This thread's worktree is being removed. Try again in a few seconds.",
-      );
+    deadline: number,
+  ): Promise<void> {
+    // A worktree mid-removal would be deleted under the restored thread, so
+    // wait for it to park; the restore below rebuilds it.
+    const blocked = await worktreeRemovalBlock(archived, deadline);
+    if (blocked !== null)
+      throw new ApiError(409, "environment_removing", blocked);
+    // Read again: it may have been deleted during the wait.
+    const thread = requirePublicThread(deps.db, archived.id);
     const providerThreadId = getLastProviderThreadId(deps, thread.id);
     const unarchivedThread = unarchiveThreadKeepingOpenParent(
       deps,
@@ -657,16 +672,18 @@ export function registerThreadActionRoutes(app: Hono, deps: AppDeps): void {
     }
   }
 
-  post(routes.unarchive, (context, query) => {
+  post(routes.unarchive, async (context, query) => {
     const thread = requirePublicThread(deps.db, context.req.param("id"));
     const archivedWith =
       query.withChildren === "true" ? listThreadsArchivedWith(deps, thread) : [];
-    unarchiveWithEffects(thread, query.keepParent === "true");
+    // One deadline for the whole request, under the remote relay's 30 s.
+    const deadline = Date.now() + 20_000;
+    await unarchiveWithEffects(thread, query.keepParent === "true", deadline);
     const unarchivedThreadIds = [thread.id];
     for (const child of archivedWith) {
       // Its parent is open again, so it stays under it. One that can't come back never fails the others.
       try {
-        unarchiveWithEffects(child, true);
+        await unarchiveWithEffects(child, true, deadline);
         unarchivedThreadIds.push(child.id);
       } catch (error) {
         deps.logger.warn({ threadId: child.id, error: error instanceof Error ? error.message : String(error) }, "A thread archived with its parent could not be restored");

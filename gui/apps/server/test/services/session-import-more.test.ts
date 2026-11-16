@@ -245,12 +245,13 @@ async function conductorFixtures() {
   session.run("s7", "w1", "claude", null, "Untitled", 0);
   db.close();
 
-  const chat = (title: string | null, messages: object[]) => JSON.stringify({ title, created_at: "2026-10-04T03:00:00.000Z", archived_at: null, agent: "claude", model: "opus-5-5-1m", workspace: "Cloud", messages });
+  const chat = (title: string | null, messages: unknown[]) => JSON.stringify({ title, created_at: "2026-10-04T03:00:00.000Z", archived_at: null, agent: "claude", model: "opus-5-5-1m", workspace: "Cloud", messages });
   const agent = (at: number, content: object) => ({ role: "agent", sender: null, created_at: `2026-10-04T03:00:0${at}.000Z`, content });
   const user = (at: number, sender: string, text: string, attachments: string[] = []) => ({ role: "user", sender, created_at: `2026-10-04T03:00:0${at}.000Z`, content: { text, attachments } });
   await writeFile(join(exportDir, "user.json"), JSON.stringify({ name: "Maty", email: "maty@example.com" }));
   await writeFile(join(exportDir, "Cloud_ab12", "workspace.json"), JSON.stringify({ name: "Cloud", repo_url: "https://github.com/acme/repo", organization: "Acme" }));
   await writeFile(join(exportDir, "Cloud_ab12", `2026-10-04_Check_the_sandbox_${ids.cloud}.json`), chat("Check the sandbox", [
+    null,
     user(0, "Maty", "@⟦shot (1).png⟧(.context%2Fattachments%2Fassets%2Fa1%2Fshot%20(1).png) Check the sandbox", ["Cloud_ab12/attachments/chat/18fc3eb2_shot (1).png", "Cloud_ab12/attachments/chat/c8e843cd_logs.txt"]),
     agent(1, { type: "system", subtype: "init", cwd: "/home/vercel-sandbox/repo", session_id: ids.cloud }),
     agent(2, { type: "assistant", message: { model: "claude-opus-5-5", content: [{ type: "thinking", thinking: "THINKING_TEXT", signature: "sig" }, { type: "tool_use", id: "toolu_done", name: "Bash", input: { command: "uname -a" } }] } }),
@@ -389,6 +390,23 @@ describe("Pi, Hermes, and T3 Code chat import", () => {
     });
   }, 60_000);
 
+  it("ignores null Codex message content parts", async () => {
+    const root = await mkdtemp(join(tmpdir(), "import-codex-null-"));
+    const codexDir = join(root, "codex", "sessions");
+    await mkdir(codexDir, { recursive: true });
+    for (const [name, value] of [["PI_CODING_AGENT_DIR", "pi"], ["HERMES_HOME", "hermes"], ["CLAUDE_CONFIG_DIR", "claude"], ["CODEX_HOME", "codex"], ["T3CODE_HOME", "t3"]]) {
+      vi.stubEnv(name!, join(root, value!));
+    }
+    const id = "0199a000-0000-7000-8000-00000000000e";
+    await writeFile(join(codexDir, `rollout-2026-10-01T10-00-00-${id}.jsonl`), [
+      { type: "session_meta", payload: { id, cwd: root, source: "cli", originator: "codex_cli_rs" } },
+      { type: "event_msg", payload: { type: "item_completed", item: { type: "UserMessage", content: [null, { text: "Keep this message" }] } } },
+    ].map((line) => JSON.stringify(line)).join("\n"));
+    await withTestHarness(async (harness) => {
+      expect(await listNativeSessions(harness.deps)).toEqual([{ harness: "codex", id, title: "Keep this message", cwd: root, updatedAt: expect.any(Number) }]);
+    });
+  });
+
   it("imports T3 Code chats: forks Claude Code and Codex, hands other agents the text, and hides duplicates", async () => {
     const { project, worktree, ids } = await t3Fixtures();
     await withTestHarness(async (harness) => {
@@ -526,6 +544,23 @@ describe("Pi, Hermes, and T3 Code chat import", () => {
       expect([getThread(harness.deps.db, threadId)!.providerId, pendingImportFork(harness.deps.db, threadId)]).toEqual([provider, fork]);
       expect(threadMessages(harness.deps.db, threadId).length).toBe(2);
       expect(getLastExecutionOptions(harness.deps, threadId)?.model).toBe(model);
+    });
+  }, 60_000);
+
+  it("skips null Conductor messages and handles unmatched mentions in linear time", async () => {
+    const root = await mkdtemp(join(tmpdir(), "import-conductor-malformed-"));
+    const workspace = join(root, "Workspace_ab12");
+    await mkdir(workspace, { recursive: true });
+    await writeFile(join(root, "user.json"), "{}");
+    await writeFile(join(workspace, "workspace.json"), "{}");
+    const id = "c0ffee00-0000-4000-8000-000000000012";
+    const text = "@⟦".repeat(100_000);
+    await writeFile(join(workspace, `chat_${id}.json`), JSON.stringify({ messages: [null, { role: "user", created_at: "2026-10-04T03:00:00.000Z", content: { text } }] }));
+    await withTestHarness(async (harness) => {
+      const started = performance.now();
+      const sessions = await listConductorExport(harness.deps, root);
+      expect(sessions.map((session) => [session.id, session.title])).toEqual([[id, `${text.slice(0, 77)}…`]]);
+      expect(performance.now() - started).toBeLessThan(2_000);
     });
   }, 60_000);
 

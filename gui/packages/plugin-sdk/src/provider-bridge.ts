@@ -285,6 +285,9 @@ export {
  */
 export { spawnPortableProcess as experimental_spawnPortableProcess } from "@cloudroom/process-utils";
 
+/** The file `experimental_spawnPortableProcess` would start for a command on Windows; `undefined` elsewhere. */
+export { resolveWindowsCommandFile as experimental_resolveWindowsCommandFile } from "@cloudroom/process-utils";
+
 /**
  * Runs a provider CLI to completion and returns its output, like a promisified
  * `execFile`. On Windows it starts the command the way

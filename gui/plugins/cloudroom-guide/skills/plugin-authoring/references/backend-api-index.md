@@ -321,6 +321,9 @@ Read the installed declarations for exact current signatures.
 
 ## `@get-bb/plugin-sdk/ai-services`
 
+Cloudroom-only: the npm package that `room-cli plugin new` pins lacks this
+subpath. Define the contract in your host entry (backend-cli-agents.md).
+
 - `experimental_aiInferenceCompleteInputSchema`
 - `experimental_aiInferenceCompleteOutputSchema`
 - `experimental_aiServiceErrorCodeSchema`

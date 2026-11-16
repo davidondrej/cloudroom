@@ -7,6 +7,8 @@ const RETRY_MIN_MS = 1_000;
 const RETRY_MAX_MS = 30_000;
 /** "While agents work" keeps a machine awake this long after its last running thread, to bridge back-to-back runs. */
 const GRACE_MS = 10 * 60_000;
+/** A thread waiting this long on a question or approval stops keeping its machine awake. */
+const WAITING_LIMIT_MS = 60 * 60_000;
 /** Catches missed thread events and ends grace periods. */
 const POLL_MS = 60_000;
 /** Lets a burst of thread status changes settle into one check. */
@@ -91,19 +93,37 @@ export default async function keepAwakePlugin(room: BbPluginApi): Promise<void> 
     return (awakeUntil.get(id) ?? 0) > Date.now() ? "awake" : "off";
   }
 
+  /** Whether a thread has waited on a question or approval for too long. If unsure, it still counts as working. */
+  async function waitedTooLong(threadId: string, signal: AbortSignal): Promise<boolean> {
+    try {
+      const open = await room.sdk.threads.interactions.list({ threadId, signal });
+      return open.some((interaction) => Date.now() - interaction.createdAt > WAITING_LIMIT_MS);
+    } catch {
+      return false;
+    }
+  }
+
   /** Note which machines run threads now, and apply when that set changes. Cloud threads have no host. */
   async function checkAgents(): Promise<void> {
     const running = signal;
     if (running === null || running.aborted) return;
+    const now = Date.now();
     try {
-      const threads = await room.sdk.threads.listRunning({ signal: running });
-      const now = Date.now();
-      for (const { hostId } of threads) if (hostId !== null) awakeUntil.set(hostId, now + GRACE_MS);
+      const local = (await room.sdk.threads.listRunning({ signal: running })).flatMap(({ id, hostId }) =>
+        hostId === null ? [] : [{ id, hostId }],
+      );
+      const waiting = await Promise.all(local.map(({ id }) => waitedTooLong(id, running)));
+      local.forEach(({ hostId }, i) => {
+        if (!waiting[i]) awakeUntil.set(hostId, now + GRACE_MS);
+      });
     } catch (error) {
+      // Blind to running threads: keep awake machines awake rather than let one sleep mid-task.
+      for (const id of awakeUntil.keys()) awakeUntil.set(id, now + GRACE_MS);
       const reason = error instanceof Error ? error.message : String(error);
       if (!running.aborted) room.log.warn(`Could not list running threads: ${reason}`);
+      return;
     }
-    for (const [id, until] of awakeUntil) if (until <= Date.now()) awakeUntil.delete(id);
+    for (const [id, until] of awakeUntil) if (until <= now) awakeUntil.delete(id);
     const next = [...awakeUntil.keys()].sort().join();
     if (next === working) return;
     working = next;

@@ -1,7 +1,18 @@
 import { COMPUTER } from "@cloudroom/domain";
 import { randomUUID } from "node:crypto";
 import { isAbsolute, join } from "node:path";
-import { and, asc, desc, eq, inArray, isNull, like, sql } from "drizzle-orm";
+import {
+  and,
+  asc,
+  desc,
+  eq,
+  exists,
+  inArray,
+  isNull,
+  like,
+  ne,
+  sql,
+} from "drizzle-orm";
 import {
   cloudroomThreads,
   cloudroomCommands,
@@ -60,6 +71,7 @@ interface State {
     nativeId: string;
     harness: Harness;
     environmentId: string;
+    optional?: boolean;
   }[];
   attachments: string[];
   queuedIds: string[];
@@ -250,6 +262,40 @@ class Teleport {
         if (child.executionTarget !== "cloud") all.push(child);
         else if (blocksTeleport(this.deps, child)) throw openCloudChild(child);
       }
+    // Archived children the agent ever worked in: any item besides the user's own messages, in one read.
+    const archived = all.flatMap((source) =>
+      source.archivedAt ? [source.id] : [],
+    );
+    const worked = new Set(
+      archived.length
+        ? this.deps.db
+            .select({ id: threads.id })
+            .from(threads)
+            .where(
+              and(
+                inArray(threads.id, archived),
+                // EXISTS stops at each child's first item instead of reading its whole history.
+                exists(
+                  this.deps.db
+                    .select({ one: sql`1` })
+                    .from(events)
+                    .where(
+                      and(
+                        eq(events.threadId, threads.id),
+                        inArray(events.type, [
+                          "item/started",
+                          "item/completed",
+                        ]),
+                        ne(events.itemKind, "userMessage"),
+                      ),
+                    ),
+                ),
+              ),
+            )
+            .all()
+            .map((row) => row.id)
+        : [],
+    );
     const sessions = all.flatMap((source) => {
       const env = source.environmentId
         ? getEnvironment(this.deps.db, source.environmentId)
@@ -266,6 +312,10 @@ class Teleport {
             nativeId,
             harness: harnessOf(source.providerId)!,
             environmentId: env.id,
+            // An archived child that never started may have saved no conversation; the host then leaves it out (#1767).
+            ...(source.archivedAt && !worked.has(source.id)
+              ? { optional: true }
+              : {}),
           },
         ];
       if (source.id !== thread.id && source.archivedAt) return [];
@@ -986,6 +1036,10 @@ class Teleport {
             : {}),
           ...(capability.system_prompt === true
             ? { system_prompt: cloudroomSystemPrompt(this.deps.db, "cloud") }
+            : {}),
+          // Core gives the agent's shells ROOM_THREAD_ID and ROOM_PROJECT_ID, like Local (#199).
+          ...(capability.room_ids === true
+            ? { thread_id: thread.id, project_id: thread.projectId }
             : {}),
           workspace: `bb_${thread.projectId}`,
           workspace_name:

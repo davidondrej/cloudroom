@@ -84,7 +84,7 @@ export function CreditsWavePlot({ wave, range }: { wave: CreditsWave; range: Ran
   return (
     <WavePlot
       points={points.map((point, i) => ({ value: point.credits, top: layers
-        ? layers.map((layer) => ({ name: layer.name, value: layer.values[i]!, color: layer.color })).filter((layer) => layer.value > 0)
+        ? layers.map((layer) => ({ name: layer.name, value: layer.values[i]!, color: layer.color })).filter((layer) => Math.round(layer.value) > 0)
         : point.top.map((thread) => ({ name: thread.name, value: thread.credits })) }))}
       sigma={range === "7d" ? 1.6 : range === "24h" ? 1 : 0.8}
       format={n}

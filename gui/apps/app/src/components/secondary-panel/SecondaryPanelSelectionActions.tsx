@@ -69,7 +69,8 @@ function readSelectionWithinPanel({
     return null;
   }
 
-  const text = selection.toString().trim();
+  const copyText = selection.toString();
+  const text = copyText.trim();
   if (text.length === 0) {
     return null;
   }
@@ -85,7 +86,7 @@ function readSelectionWithinPanel({
     (selectionAnchor === null
       ? node.getBoundingClientRect()
       : new DOMRect(selectionAnchor.point.x, selectionAnchor.point.y, 0, 0));
-  const nextSelection: MessageProseSelection = { text, rect };
+  const nextSelection: MessageProseSelection = { text, copyText, rect };
   if (selectionAnchor !== null) {
     nextSelection.anchorPoint = selectionAnchor.point;
     nextSelection.anchorSide = selectionAnchor.side;

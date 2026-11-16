@@ -125,7 +125,6 @@ import {
   useCreateThreadTerminal,
   useThreadTerminals,
 } from "@/hooks/queries/thread-terminal-queries";
-import { takeTerminalStartRequest } from "@/lib/terminal-start-request";
 import {
   findEnvironmentDisplayProvider,
   getEnvironmentSummaryChrome,
@@ -1853,7 +1852,6 @@ function ThreadDetailViewInternal(props: ThreadRoutePathArgs) {
         threadId,
         cols: DEFAULT_TERMINAL_COLS,
         rows: DEFAULT_TERMINAL_ROWS,
-        ...takeTerminalStartRequest(),
       })
       .then((session) => {
         closeTab(newTab.id);

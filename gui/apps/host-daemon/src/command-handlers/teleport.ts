@@ -82,7 +82,9 @@ async function nativePath(
   harness: string,
   threadId: string,
   nativeId: string,
-): Promise<string> {
+  optional = false,
+): Promise<string | null> {
+  let found: string[] = [];
   if (harness === "pi") {
     const root = resolve(
       process.env.BB_PI_BRIDGE_SESSION_DIR ||
@@ -95,15 +97,16 @@ async function nativePath(
           (s) => s.isFile(),
           () => false,
         )
-      )
-        return path;
+      ) {
+        found = [path];
+        break;
+      }
     }
   } else if (harness === "claude-code") {
     const root = join(
       process.env.CLAUDE_CONFIG_DIR || join(homedir(), ".claude"),
       "projects",
     );
-    const found: string[] = [];
     for (const entry of await readdir(root, { withFileTypes: true }).catch(
       () => [],
     )) {
@@ -117,7 +120,6 @@ async function nativePath(
       )
         found.push(path);
     }
-    if (found.length === 1) return found[0]!;
   } else if (harness === "cursor") {
     const path = join(
       homedir(),
@@ -133,13 +135,13 @@ async function nativePath(
         () => false,
       ))
     )
-      return path;
+      found = [path];
   } else {
-    const found = await codexRollouts((name) =>
-      name.endsWith(`-${nativeId}.jsonl`),
-    );
-    if (found.length === 1) return found[0]!;
+    found = await codexRollouts((name) => name.endsWith(`-${nativeId}.jsonl`));
   }
+  if (found.length === 1) return found[0]!;
+  // An archived child that never started saved no conversation; there is nothing to lose (#1767).
+  if (!found.length && optional) return null;
   throw new Error(
     `Saved ${harness} conversation is unavailable for ${threadId}; local history was not changed`,
   );
@@ -316,7 +318,18 @@ async function runCapture(
     const opencode = session.harness === "opencode";
     const source = opencode
       ? await exportOpenCode(session.nativeId, root, workspace, options)
-      : await nativePath(session.harness, session.threadId, session.nativeId);
+      : await nativePath(
+          session.harness,
+          session.threadId,
+          session.nativeId,
+          session.optional === true && session.threadId !== command.threadId,
+        );
+    if (!source) {
+      capture.omitted.push(
+        `${session.threadId}'s conversation (archived child that never started; it saved none)`,
+      );
+      continue;
+    }
     const info = await lstat(source);
     if (!info.isFile() || info.size > HOST_ARTIFACT_MAX_BYTES)
       throw new Error("Native history exceeds the bounded capture size");

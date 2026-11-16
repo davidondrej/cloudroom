@@ -2055,6 +2055,36 @@ describe("ThreadDetailPromptArea", () => {
     expect(mocks.createThreadMutateAsync).not.toHaveBeenCalled();
   });
 
+  it("shows a switch still running from before the thread was reopened", () => {
+    void testQueryClient
+      .getMutationCache()
+      .build(testQueryClient, {
+        mutationKey: ["thread-update", "thr_1"],
+        mutationFn: () => new Promise(() => {}),
+      })
+      .execute({ id: "thr_1", providerId: "claude-code", model: "claude-fable-5" });
+
+    renderPromptArea();
+
+    expect(screen.getByTestId("selected-model").textContent).toBe("claude-fable-5");
+  });
+
+  it("shows the switched model at once and restores the old one if the switch fails", () => {
+    renderPromptArea();
+    expect(screen.getByTestId("selected-model").textContent).toBe("gpt-5");
+
+    fireEvent.click(screen.getByRole("button", { name: "Switch harness" }));
+
+    // The server hasn't answered yet: the picker already shows the new agent.
+    expect(screen.getByTestId("selected-model").textContent).toBe("claude-opus-5");
+    const [, callbacks] = mocks.updateThreadMutate.mock.calls[0] as [
+      unknown,
+      { onError: () => void },
+    ];
+    act(() => callbacks.onError());
+    expect(screen.getByTestId("selected-model").textContent).toBe("gpt-5");
+  });
+
   it.each([
     { current: "low", supported: ["low", "medium", "high"], expected: "low" },
     { current: "xhigh", supported: ["low", "medium", "high"], expected: "high" },

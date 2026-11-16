@@ -316,25 +316,40 @@ export function buildFileDiffPatchText(fileDiff: ParsedGitDiffFile): string {
   });
 }
 
-export function buildDiffLineSelectionText({
-  displayStyle,
-  fileDiff,
-  range,
-}: {
+interface DiffLineSelectionArgs {
   displayStyle: DiffPatchDisplayStyle;
   fileDiff: ParsedGitDiffFile;
   range: SelectedLineRange;
-}): string | null {
-  const patchLines = collectDiffPatchLines(fileDiff);
-  const selectedLines = getSelectedDiffPatchLines({
+}
+
+function getSelectedFileDiffLines({
+  displayStyle,
+  fileDiff,
+  range,
+}: DiffLineSelectionArgs) {
+  return getSelectedDiffPatchLines({
     displayStyle,
-    patchLines,
+    patchLines: collectDiffPatchLines(fileDiff),
     range,
   });
-  if (selectedLines.length === 0) {
-    return null;
-  }
-  return buildUnifiedDiffPatchText({ fileDiff, lines: selectedLines });
+}
+
+/** A mini patch of the selected lines: chat context for Reply. */
+export function buildDiffLineSelectionText(
+  args: DiffLineSelectionArgs,
+): string | null {
+  const lines = getSelectedFileDiffLines(args);
+  return lines.length === 0
+    ? null
+    : buildUnifiedDiffPatchText({ fileDiff: args.fileDiff, lines });
+}
+
+/** The selected lines as shown, without patch headers or +/- markers: for Copy. */
+export function buildDiffLineCopyText(
+  args: DiffLineSelectionArgs,
+): string | null {
+  const lines = getSelectedFileDiffLines(args);
+  return lines.length === 0 ? null : lines.map((line) => line.text).join("\n");
 }
 
 export function getDiffShadowRoots(containerElement: HTMLElement | null) {

@@ -220,6 +220,7 @@ describe("@cloudroom/templates", () => {
       "\\{{title}}",
       "{{#each items}}x{{/each}}",
       "{{#if title}}\nx\n{{else}}\ny\n{{/if}}",
+      "{{#if title}}\n".repeat(50_000),
     ];
     for (const body of bodies) {
       vi.resetModules();

@@ -2,6 +2,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -440,8 +441,9 @@ it("resumes at bb's requested cwd when the session header's cwd was removed", as
   mkdirSync(sessionDir, { recursive: true });
   const ghostCwd = join(harness.workspaceDir, "worktree-removed");
   expect(existsSync(ghostCwd)).toBe(false);
+  const sessionFile = join(sessionDir, "thr-resume-missing-cwd.jsonl");
   writeFileSync(
-    join(sessionDir, "thr-resume-missing-cwd.jsonl"),
+    sessionFile,
     `${JSON.stringify({ type: "session", version: 3, id: "sess-missing-cwd", timestamp: "2026-01-01T00:00:00.000Z", cwd: ghostCwd })}\n`,
   );
 
@@ -455,6 +457,9 @@ it("resumes at bb's requested cwd when the session header's cwd was removed", as
   });
   expect(resumed.error, JSON.stringify(resumed)).toBeUndefined();
   expect(resumed.result).toMatchObject({ providerThreadId: threadId });
+  // Real pi exits when the header's cwd is gone, so the bridge repoints it.
+  const header = JSON.parse(readFileSync(sessionFile, "utf8").split("\n", 1)[0]!);
+  expect(header).toMatchObject({ id: "sess-missing-cwd", cwd: harness.workspaceDir });
 
   turnStart(threadId, '/tool bash {"command":"pwd"}', "creq_rsm2345678");
   await harness.waitForDelta(threadId, (d) => d.kind === "item.close");

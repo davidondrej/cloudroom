@@ -401,7 +401,7 @@ export async function conductorExport(deps: AppDeps, input: string): Promise<{ s
       for (const file of await readdir(dir, { withFileTypes: true })) {
         const id = file.isFile() ? EXPORT_CHAT.exec(file.name)?.[1] : undefined;
         const chat = id ? await readExportJson(join(dir, file.name)) : null;
-        const messages: Line[] = Array.isArray(chat?.messages) ? chat.messages : [];
+        const messages = exportMessages(chat);
         const first = messages.map((message) => (message.role === "user" ? exportUserText(message, null) : null)).find(Boolean);
         const updatedAt = conductorTime(messages.at(-1)?.created_at) ?? conductorTime(chat?.created_at);
         if (!id || !first || updatedAt === null) continue;
@@ -424,10 +424,15 @@ export async function conductorExport(deps: AppDeps, input: string): Promise<{ s
 async function conductorExportEvents(file: string): Promise<ConductorEvent[]> {
   const chat = await readExportJson(file);
   const owner = (await readExportJson(join(dirname(dirname(file)), "user.json")))?.name;
-  const messages: Line[] = Array.isArray(chat?.messages) ? chat.messages : [];
+  const messages = exportMessages(chat);
   return messages.map((message) => message.role === "user"
     ? { at: conductorTime(message.created_at), user: exportUserText(message, owner), agent: null }
     : { at: conductorTime(message.created_at), user: null, agent: message.content && typeof message.content === "object" ? message.content : null });
+}
+
+function exportMessages(chat: Line | null): Line[] {
+  const messages = Array.isArray(chat?.messages) ? chat.messages : [];
+  return messages.filter((message: unknown): message is Line => message !== null && typeof message === "object" && !Array.isArray(message));
 }
 
 function conductorTurns(rows: ConductorEvent[]): Turn[] {
@@ -465,7 +470,7 @@ function conductorUserText(content: unknown): string | null {
   return text && conductorMentions(text);
 }
 
-const conductorMentions = (text: string) => text.replace(/@⟦([^⟧]*)⟧\((?:[^()]|\([^()]*\))*\)/g, "@$1");
+const conductorMentions = (text: string) => text.replace(/@⟦((?:(?!@⟦)[^⟧])*)⟧\((?:[^()]|\([^()]*\))*\)/g, "@$1");
 
 function conductorTime(value: unknown): number | null {
   if (typeof value !== "string") return null;

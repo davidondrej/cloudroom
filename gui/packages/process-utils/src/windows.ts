@@ -111,6 +111,19 @@ const NPM_SHIM_HEAD =
 const NPM_NODE_SHIM_PROG =
   '\r\nIF EXIST "%dp0%\\node.exe" (\r\n  SET "_prog=%dp0%\\node.exe"\r\n) ELSE (\r\n  SET "_prog=node"\r\n  SET PATHEXT=%PATHEXT:;.JS;=;%\r\n)\r\n\r\nendLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  ';
 
+/** The file a portable spawn of `command` starts on Windows, found the way cross-spawn finds it. */
+export function resolveWindowsCommandFile(request: {
+  command: string;
+  cwd?: string;
+  env?: NodeJS.ProcessEnv;
+}): string | undefined {
+  if (process.platform !== "win32") return undefined;
+  return parseCrossSpawnCommand(request.command, [], {
+    cwd: request.cwd,
+    env: request.env && normalizeWindowsEnv(request.env),
+  }).file;
+}
+
 export function resolveWindowsShim(request: {
   command: string;
   args: string[];
@@ -119,10 +132,7 @@ export function resolveWindowsShim(request: {
 }): { command: string; args: string[] } {
   const unchanged = { command: request.command, args: request.args };
   if (process.platform !== "win32") return unchanged;
-  const shim = parseCrossSpawnCommand(request.command, request.args, {
-    cwd: request.cwd,
-    env: request.env,
-  }).file;
+  const shim = resolveWindowsCommandFile(request);
   if (shim === undefined || !/\.cmd$/iu.test(shim)) return unchanged;
   let source = "";
   try {

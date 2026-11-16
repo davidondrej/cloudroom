@@ -45,6 +45,9 @@ impl Manager {
         if let Some(system_prompt) = session.system_prompt() {
             input["system_prompt"] = json!(system_prompt);
         }
+        if let Some(project) = session.project_id() {
+            input["project_id"] = json!(project);
+        }
         if let Some(existing) = local.sessions.get(&id) {
             Self::retry(existing, &start_id, "start", &input)?
                 .ok_or(Error::Conflict("child identity conflict"))?;
@@ -701,6 +704,9 @@ impl Manager {
             if let Some(system_prompt) = p.system_prompt() {
                 input["system_prompt"] = json!(system_prompt);
             }
+            if let Some(project) = p.project_id() {
+                input["project_id"] = json!(project);
+            }
             if let Some(existing) = local.sessions.get(&id) {
                 return Self::retry(existing, &start_id, "start", &input)?
                     .map(|r| (id.clone(), r))
@@ -881,6 +887,9 @@ impl Manager {
             }
             if let Some(system_prompt) = s.system_prompt() {
                 input["system_prompt"] = json!(system_prompt);
+            }
+            if let Some(project) = s.project_id() {
+                input["project_id"] = json!(project);
             }
             if let Some(existing) = local.sessions.get(&id) {
                 return Self::retry(existing, &request, "start", &input)?

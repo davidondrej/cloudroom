@@ -30,7 +30,6 @@ import {
 import type { PickerOption } from "./OptionPicker";
 import type { ProviderPickerOption } from "./model-brand-prefix";
 import type { ModelPickerOption } from "./model-picker-option";
-import { takeTerminalStartRequest } from "@/lib/terminal-start-request";
 
 type CapturedCommandHandler = (invocation: {
   target: EventTarget | null;
@@ -44,6 +43,19 @@ vi.mock("@/lib/sdk", () => ({
   sdk: {
     system: { executionOptions: vi.fn() },
     providers: { restartModelDiscovery: vi.fn() },
+  },
+}));
+
+const providerLogin = vi.hoisted(() => ({
+  hostId: null as string | null,
+  onDone: () => {},
+  start: vi.fn(),
+}));
+vi.mock("@/components/settings/ProviderLoginButton", () => ({
+  useProviderLogin: (hostId: string | null, onDone: () => void) => {
+    providerLogin.hostId = hostId;
+    providerLogin.onDone = onDone;
+    return { start: providerLogin.start, starting: false, drawer: null };
   },
 }));
 
@@ -449,40 +461,39 @@ describe("ModelReasoningPicker", () => {
         modelOptions: [],
         modelValue: "",
         pickerReasoningOptions: [],
+        providerRouting: { hostId: "host_pi" },
       });
       fireEvent.click(
         screen.getByRole("button", { name: "Provider and model" }),
       );
     };
 
-    it("runs the provider's sign-in command in a new terminal", () => {
-      const started: unknown[] = [];
+    it("runs the provider's login on the machine that checks its models", () => {
       openEmptyPiPicker();
-      commandHandlers.set("terminal.open", () => {
-        started.push(takeTerminalStartRequest());
-        return true;
-      });
 
-      expect(screen.getByText("Sign in to a provider for Pi.")).not.toBeNull();
+      expect(screen.getByText("Connect Pi in 2 steps")).not.toBeNull();
       expect(
         screen.getByText("pi", { selector: "code" }).parentElement?.textContent,
       ).toBe("Run pi, type /login, and pick a provider.");
       fireEvent.click(screen.getByRole("button", { name: "Sign in to Pi" }));
 
-      expect(started).toEqual([
-        { start: { mode: "command", command: "pi" }, title: "Sign in to Pi" },
-      ]);
-      expect(takeTerminalStartRequest()).toEqual({});
+      expect(providerLogin.hostId).toBe("host_pi");
+      expect(providerLogin.start).toHaveBeenCalledWith("pi", "Pi");
     });
 
-    it("tells the user to run the command when no terminal can open", () => {
+    it("reloads models on that machine when the login ends", async () => {
+      vi.mocked(sdk.providers.restartModelDiscovery).mockResolvedValue(
+        executionOptions({ models: [] }),
+      );
       openEmptyPiPicker();
       fireEvent.click(screen.getByRole("button", { name: "Sign in to Pi" }));
 
-      expect(
-        screen.getByText("pi", { selector: "code" }).parentElement?.textContent,
-      ).toBe("Could not open a terminal here. Run pi in your own terminal.");
-      expect(sdk.providers.restartModelDiscovery).not.toHaveBeenCalled();
+      await act(async () => providerLogin.onDone());
+
+      expect(sdk.providers.restartModelDiscovery).toHaveBeenCalledWith({
+        providerId: "pi",
+        hostId: "host_pi",
+      });
     });
 
     it("reloads models when the picker reopens after sign-in", async () => {
@@ -494,22 +505,22 @@ describe("ModelReasoningPicker", () => {
         }),
       );
       openEmptyPiPicker();
-      commandHandlers.set("terminal.open", () => true);
       fireEvent.click(screen.getByRole("button", { name: "Sign in to Pi" }));
       expect(sdk.providers.restartModelDiscovery).not.toHaveBeenCalled();
-      const trigger = screen.getByRole("button", {
-        name: "Provider and model",
-        hidden: true,
-      });
-      fireEvent.click(trigger);
+      // Sign in closes the picker so the login drawer is in front.
       expect(
         screen.queryByRole("button", { name: "Sign in to Pi" }),
       ).toBeNull();
 
-      await act(async () => fireEvent.click(trigger));
+      await act(async () =>
+        fireEvent.click(
+          screen.getByRole("button", { name: "Provider and model", hidden: true }),
+        ),
+      );
 
       expect(sdk.providers.restartModelDiscovery).toHaveBeenCalledWith({
         providerId: "pi",
+        hostId: "host_pi",
       });
     });
   });

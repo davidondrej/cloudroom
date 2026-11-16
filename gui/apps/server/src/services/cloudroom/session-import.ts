@@ -283,7 +283,7 @@ function codexMessage(line: Line, type: "UserMessage" | "AgentMessage", format: 
     : line.type === "event_msg" && line.payload?.type === "item_completed" && line.payload.item?.type === type ? line.payload.item : null;
   if (!Array.isArray(item?.content)) return null;
   const context = (text: string) => response && type === "UserMessage" && CODEX_CONTEXT.test(text.trim());
-  const text = item.content.map((part: Line) => typeof part.text === "string" && !context(part.text) ? part.text : "").join("\n").trim();
+  const text = item.content.map((part: Line) => typeof part?.text === "string" && !context(part.text) ? part.text : "").join("\n").trim();
   // Plan mode wraps the whole plan reply in one tag pair.
   return (type === "AgentMessage" ? text.replace(/^<proposed_plan>((?:(?!<\/?proposed_plan>)[\s\S])*)<\/proposed_plan>$/, "$1").trim() : text) || null;
 }
