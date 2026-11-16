@@ -29,6 +29,7 @@ import { PromptStackCard } from "@/components/promptbox/banner/PromptStackCard";
 import { CloudDiskNotice, CloudUsageLimitNotice, ContinueFromCopyButton } from "@/components/CloudUsageLimitNotice";
 import { VpsThreadNotice } from "@/components/VpsThreadNotice";
 import type { PromptMentionLinkResolver } from "@/components/promptbox/editor/prompt-mention-link";
+import type { ThreadContextWindowActions } from "@/components/thread/timeline";
 import {
   getFollowUpPromptPlaceholder,
   getCompactFollowUpPromptPlaceholder,
@@ -119,8 +120,10 @@ import {
   useCancelThreadPlan,
   useClearThreadGoal,
   useSetThreadGoalStatus,
+  useCompactThread,
   useStopThread,
 } from "@/hooks/mutations/thread-runtime-mutations";
+import { useFreshThread } from "@/hooks/useFreshThread";
 import {
   useUnarchiveThread,
   useUpdateThread,
@@ -659,39 +662,6 @@ export function ThreadDetailPromptArea({
   );
   const [expandedBannerSection, setExpandedBannerSection] =
     useState<ThreadPromptContextBannerExpandedSection | null>(null);
-  const pullRequestSection =
-    useMemo<ThreadPromptPullRequestSection | null>(() => {
-      if (!pullRequest) {
-        return null;
-      }
-      const actions =
-        onPullRequestReady ||
-        onPullRequestMerge ||
-        onPullRequestDraft ||
-        isEnvironmentActionPending
-          ? {
-              isPending: isEnvironmentActionPending,
-              ...(onPullRequestReady
-                ? { onMarkReady: onPullRequestReady }
-                : {}),
-              ...(onPullRequestMerge ? { onMerge: onPullRequestMerge } : {}),
-              ...(onPullRequestDraft
-                ? { onConvertToDraft: onPullRequestDraft }
-                : {}),
-              ...(onPullRequestMerge
-                ? { selectedMergeMethod: pullRequestMergeMethod }
-                : {}),
-            }
-          : undefined;
-      return actions ? { pullRequest, actions } : { pullRequest };
-    }, [
-      isEnvironmentActionPending,
-      onPullRequestDraft,
-      onPullRequestMerge,
-      onPullRequestReady,
-      pullRequest,
-      pullRequestMergeMethod,
-    ]);
   const [isGoalExpanded, setIsGoalExpanded] = useState(false);
   const [isTodoExpanded, setIsTodoExpanded] = useState(false);
   const [isPromptModeExpanded, setIsPromptModeExpanded] = useState(false);
@@ -1023,6 +993,55 @@ export function ThreadDetailPromptArea({
     serviceTier,
     supportsServiceTier,
   ]);
+  const compactThread = useCompactThread();
+  const freshThread = useFreshThread({
+    thread,
+    providerId: pendingSwitch?.providerId ?? thread.providerId,
+    execution: followUpExecutionSelection,
+  });
+  // Cloud asks Core whether the agent can compact. A fresh thread reuses this
+  // thread's folder, which only Local threads can share. A child stays put:
+  // its parent waits for a report from this thread.
+  const canCompact =
+    isCloud ||
+    providers.find((provider) => provider.id === thread.providerId)
+      ?.capabilities.supportsManualCompaction === true;
+  const canStartFreshThread =
+    !isCloud &&
+    thread.parentThreadId === null &&
+    onCreateNewThreadInEnvironment !== undefined;
+  const { mutate: compactThreadMutate } = compactThread;
+  const { start: startFreshThread } = freshThread;
+  const contextWindowActions = useMemo<ThreadContextWindowActions | undefined>(
+    () =>
+      shouldHideComposer
+        ? undefined
+        : {
+            onCompact: canCompact
+              ? () => compactThreadMutate(thread.id)
+              : undefined,
+            onFreshThread: canStartFreshThread
+              ? () => void startFreshThread()
+              : undefined,
+            pending: compactThread.isPending
+              ? "compact"
+              : freshThread.isPending
+                ? "fresh"
+                : null,
+            working: thread.status !== "idle" && thread.status !== "error",
+          },
+    [
+      canCompact,
+      canStartFreshThread,
+      compactThread.isPending,
+      compactThreadMutate,
+      freshThread.isPending,
+      shouldHideComposer,
+      startFreshThread,
+      thread.id,
+      thread.status,
+    ],
+  );
 
   const sendCloudDraft = useCallback(async (steer: boolean) => {
     const submittedDraft = currentPromptDraft;
@@ -1114,6 +1133,93 @@ export function ThreadDetailPromptArea({
     thread.id,
     runtimeDisplayStatus,
   ]);
+  // "Fix checks" / "Address review": the same send as Enter, with the banner's prompt instead of the draft.
+  const handlePullRequestFix = useCallback(
+    async (text: string) => {
+      const input: PromptInput[] = [{ type: "text", text, mentions: [] }];
+      const isQueuingMessage = shouldQueueFollowUpMessage(runtimeDisplayStatus);
+      try {
+        if (isCloud) {
+          if (!cloudModel || movingToLocal) return;
+          await sendMessage.mutateAsync({
+            id: thread.id,
+            input,
+            model: cloudModel,
+            reasoningLevel: cloudReasoning,
+            permissionMode: "full",
+            serviceTier:
+              cloudFastSupported && serviceTier ? serviceTier : "default",
+            mode: "queue-if-active",
+            requestId: crypto.randomUUID(),
+          });
+        } else if (isQueuingMessage) {
+          const request = buildCreateQueuedFollowUpRequest({
+            threadId: thread.id,
+            input,
+            execution: followUpExecutionSelection,
+          });
+          if (request) await createQueuedMessage.mutateAsync(request);
+        } else {
+          const request = buildAutoFollowUpRequest({
+            threadId: thread.id,
+            input,
+            execution: followUpExecutionSelection,
+          });
+          if (request) await sendMessage.mutateAsync(request);
+        }
+      } catch (error) {
+        showMutationErrorToast({
+          error,
+          fallbackMessage: isQueuingMessage
+            ? "Failed to queue message"
+            : "Failed to send message",
+          lifecycleOperation: isQueuingMessage ? "queue_message" : "send_message",
+        });
+      }
+    },
+    [
+      cloudFastSupported,
+      cloudModel,
+      cloudReasoning,
+      createQueuedMessage,
+      followUpExecutionSelection,
+      isCloud,
+      movingToLocal,
+      runtimeDisplayStatus,
+      sendMessage,
+      serviceTier,
+      thread.id,
+    ],
+  );
+  const pullRequestSection =
+    useMemo<ThreadPromptPullRequestSection | null>(() => {
+      if (!pullRequest) {
+        return null;
+      }
+      return {
+        pullRequest,
+        actions: {
+          isPending: isEnvironmentActionPending,
+          onFix: handlePullRequestFix,
+          ...(onPullRequestReady ? { onMarkReady: onPullRequestReady } : {}),
+          ...(onPullRequestMerge ? { onMerge: onPullRequestMerge } : {}),
+          ...(onPullRequestDraft
+            ? { onConvertToDraft: onPullRequestDraft }
+            : {}),
+          ...(onPullRequestMerge
+            ? { selectedMergeMethod: pullRequestMergeMethod }
+            : {}),
+        },
+      };
+    }, [
+      handlePullRequestFix,
+      isEnvironmentActionPending,
+      onPullRequestDraft,
+      onPullRequestMerge,
+      onPullRequestReady,
+      pullRequest,
+      pullRequestMergeMethod,
+    ]);
   const handleHardQueue = useCallback(async () => {
     const submittedDraft = currentPromptDraft;
     const draftEdits = withDraftEdits(thread.id, currentPromptDraftInput);
@@ -2282,6 +2388,7 @@ export function ThreadDetailPromptArea({
       environmentSummary={environmentSummary}
       contextWindowUsage={contextWindowUsage ?? null}
       contextWindowNote={thread.providerId === "acp-cursor" ? "Cursor doesn't report token usage, so this is an estimate." : undefined}
+      contextWindowActions={contextWindowActions}
       execution={isCloud ? {
         ...bottomExecutionConfig,
         provider: { ...bottomExecutionConfig.provider, selectedId: pendingSwitch?.providerId ?? thread.providerId, options: cloudProviderOptions, hasMultiple: cloudProviderOptions.length > 1 },

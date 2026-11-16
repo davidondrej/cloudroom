@@ -42,6 +42,7 @@ import {
   type UsageWindow,
 } from "./src/contract.js";
 import { limitedThreads } from "./src/limited-threads.js";
+import { accountTelemetry, errorCode, type AddKind } from "./src/telemetry.js";
 import { prepareProfile, releaseProfile, startMcpSync } from "./src/profile.js";
 import { SignInAgainError, type Secret, type SignedIn } from "./src/tokens.js";
 
@@ -85,6 +86,9 @@ type Adding = {
   account?: Awaited<ReturnType<typeof profileAccount>>;
   url?: string;
   busy?: boolean;
+  // For telemetry: which add this is, and when it started.
+  kind: AddKind;
+  startedAt: number;
 };
 type Usage = {
   windows: UsageWindow[];
@@ -116,6 +120,7 @@ const bars = (windows: UsageWindow[] = []) =>
 
 export default async function plugin(room: BbPluginApi) {
   const kv = room.storage.kv;
+  const telemetry = accountTelemetry(room);
   const secretsDir = path.join(
     room.server.experimental_dataDir,
     "plugins",
@@ -301,6 +306,8 @@ export default async function plugin(room: BbPluginApi) {
     );
   let codexInUse = LOCAL;
   let codexAccounts = 0;
+  // Codex accounts are known once the website's list was read (the usage box reads it).
+  let codexListed = false;
 
   // `connect` marks the user adding, picking, or moving an account, which connects Claude again (ADR 0327).
   const changed = async (connect = false) => {
@@ -527,7 +534,20 @@ export default async function plugin(room: BbPluginApi) {
                 previous?.at && previous.windows.length ? previous : undefined,
               );
       if (!read || gone()) return;
-      usage.set(account.id, { ...read, error: null, signInAgain: false, at: Date.now() });
+      // The reply check reads only 5h and 7d. A model's limit it left out keeps its last reading until it resets.
+      const kept = (previous?.windows ?? []).filter(
+        (window) =>
+          window.model &&
+          (window.resetsAt ?? 0) > Date.now() &&
+          !read.windows.some((next) => next.label === window.label),
+      );
+      usage.set(account.id, {
+        ...read,
+        windows: [...read.windows, ...kept],
+        error: null,
+        signInAgain: false,
+        at: Date.now(),
+      });
     } catch (error) {
       if (idle || gone()) return;
       usage.set(account.id, {
@@ -580,10 +600,26 @@ export default async function plugin(room: BbPluginApi) {
       );
     }
   };
+  // Added accounts per agent ("This Mac" not counted), for the daily `accounts_snapshot`. Codex is null until the
+  // website's list was read.
+  const snapshot = () => {
+    const added = (provider: Ordered) =>
+      accounts.filter((account) => account.provider === provider).length;
+    const kind = (id: string) => (id === LOCAL ? "this_mac" : "added");
+    return {
+      claude: added("claude-code"),
+      codex: codexListed ? codexAccounts : null,
+      cursor: added("acp-cursor"),
+      claude_in_use: kind(current("claude-code")),
+      codex_in_use: codexListed ? kind(codexInUse) : null,
+      cursor_in_use: kind(current("acp-cursor")),
+    };
+  };
   // A token Cloud hasn't confirmed yet is retried every few minutes, and at start.
   let ticks = 0;
   const timer = setInterval(() => {
     background(refreshAll());
+    background(telemetry.daily(snapshot));
     if (++ticks % IDLE_USAGE_TICKS === 0) background(refreshIdle());
     if (cloudStale) void followInCloud(false);
   }, USAGE_EVERY_MS);
@@ -749,6 +785,7 @@ export default async function plugin(room: BbPluginApi) {
     const selected = list.accounts.find((account) => account.inUse);
     codexInUse = selected?.id ?? LOCAL;
     codexAccounts = list.accounts.length;
+    codexListed = true;
     codexResumed = noteInUse("codex", codexInUse);
     background(refreshCodexLocal());
     const email = await localCodexEmail();
@@ -922,50 +959,141 @@ export default async function plugin(room: BbPluginApi) {
     await changed();
   };
 
+  // The Mac's own login already runs Local threads: Cloud only needs its one-year token.
+  const startClaude = async (
+    input: { mac?: boolean | undefined; id?: string | undefined } | null,
+    add: Pick<Adding, "kind" | "startedAt">,
+  ) => {
+    if (input?.mac) {
+      if (!(await refreshMac()))
+        throw new Error("Sign in to Claude Code on this Mac first: run `claude`.");
+      const started = await claudeLogin.start();
+      adding.set(started.sessionId, {
+        login: started.sessionId,
+        replace: null,
+        mac: true,
+        ...add,
+      });
+      return started;
+    }
+    const replace = input?.id ? stored(input.id) : null;
+    const profile = randomUUID();
+    try {
+      await prepareProfile(profilePath(profile));
+      const started = await claudeLogin.start(profilePath(profile));
+      adding.set(started.sessionId, {
+        login: started.sessionId,
+        profile,
+        replace,
+        mac: false,
+        ...add,
+      });
+      return started;
+    } catch (error) {
+      void dropProfile(profile);
+      throw error;
+    }
+  };
+  // Codex sign-ins in progress, for telemetry. The website keeps the sign-in itself.
+  const codexAdds = new Map<string, Pick<Adding, "kind" | "startedAt">>();
+
+  // Picks the account every thread uses. `following` is Cloud's follow, still running unless `cloud` waited for it; none
+  // for Codex, whose website switches Cloud in the same call.
+  const useAccount = async (
+    provider: Provider,
+    id: string,
+    cloud: boolean | undefined,
+    threadId: string | undefined,
+  ): Promise<{ following: Promise<string | null> | null }> => {
+    delete limits[`${provider}:${id}`];
+    // The thread it was picked from continues too: the user asked, even after a Stop or a limit this plugin
+    // never noted.
+    if (threadId)
+      await limited.record(
+        threadId,
+        provider,
+        limited.account(threadId) ?? current(provider),
+      );
+    if (provider === "codex") {
+      inUse.codex ??= codexInUse;
+      await codex({ action: "use", id: id === LOCAL ? null : id });
+      await kv.set("limits:v1", limits);
+      await codexResumed;
+      return { following: null };
+    }
+    if (provider === "claude-code" && id === LOCAL) {
+      if (!(await refreshMac()))
+        throw new Error(
+          "Sign in to Claude Code on this Mac first: run `claude`.",
+        );
+      if (macNeedsCloud()) throw new Error(MAC_NEEDS_CLOUD);
+    }
+    // This Mac without a Cursor login would leave Cloud on the previous account.
+    if (provider === "acp-cursor" && id === LOCAL) {
+      cursorLocal = { email: await localCursorEmail(), at: Date.now() };
+      if (!cursorLocal.email)
+        throw new Error(
+          "Sign in to Cursor on this Mac first: run `cursor-agent login`.",
+        );
+    }
+    move(id, 0, provider);
+    const follow = await changed(true);
+    const following = provider === "acp-cursor" ? follow.cursor : follow.cloud;
+    const account = accounts.find((entry) => entry.id === id);
+    if (account) background(refreshUsage(account, true));
+    await follow.resumed;
+    const failed = cloud ? await following : null;
+    if (failed) throw new Error(`Cloud didn't switch accounts: ${failed}`);
+    return { following };
+  };
+
   room.rpc.register(
     accountsRpcContract,
     {
       "accounts.list": ({ provider }) => views(provider),
-      "accounts.use": async ({ provider, id, cloud, threadId }) => {
-        delete limits[`${provider}:${id}`];
-        // The thread it was picked from continues too: the user asked, even after a Stop or a limit this plugin
-        // never noted.
-        if (threadId)
-          await limited.record(
-            threadId,
-            provider,
-            limited.account(threadId) ?? current(provider),
+      "accounts.use": async ({ provider, id, cloud, threadId, where }) => {
+        const startedAt = Date.now();
+        // Read before the switch changes them.
+        const before = {
+          provider,
+          where: where ?? null,
+          to: id === LOCAL ? ("this_mac" as const) : ("added" as const),
+          accounts:
+            provider === "codex" ? codexAccounts + 1 : ids(provider).length,
+          target_at_limit: limitedUntil(provider, id) !== null,
+          waiting_threads:
+            limited.waiting(provider) +
+            (threadId && limited.account(threadId) === undefined ? 1 : 0),
+        };
+        const cloudMoves =
+          provider === "claude-code"
+            ? (id !== (cloudPending ?? inCloud) || cloudStale) &&
+              (id !== LOCAL || macCloudReady())
+            : provider === "acp-cursor" && id !== cursorInCloud;
+        let picked: Awaited<ReturnType<typeof useAccount>>;
+        try {
+          picked = await useAccount(provider, id, cloud, threadId);
+        } catch (error) {
+          telemetry.switched({
+            ...before,
+            outcome: "failed",
+            code: errorCode(error),
+            ms: Date.now() - startedAt,
+          });
+          throw error;
+        }
+        telemetry.switched({
+          ...before,
+          outcome: "ok",
+          code: null,
+          ms: Date.now() - startedAt,
+        });
+        if (picked.following && cloudMoves)
+          void picked.following.then(
+            (failed) => telemetry.cloudSwitched(provider, startedAt, failed),
+            (error: unknown) =>
+              telemetry.cloudSwitched(provider, startedAt, error ?? "failed"),
           );
-        if (provider === "codex") {
-          inUse.codex ??= codexInUse;
-          await codex({ action: "use", id: id === LOCAL ? null : id });
-          await kv.set("limits:v1", limits);
-          await codexResumed;
-          return null;
-        }
-        if (provider === "claude-code" && id === LOCAL) {
-          if (!(await refreshMac()))
-            throw new Error(
-              "Sign in to Claude Code on this Mac first: run `claude`.",
-            );
-          if (macNeedsCloud()) throw new Error(MAC_NEEDS_CLOUD);
-        }
-        // This Mac without a Cursor login would leave Cloud on the previous account.
-        if (provider === "acp-cursor" && id === LOCAL) {
-          cursorLocal = { email: await localCursorEmail(), at: Date.now() };
-          if (!cursorLocal.email)
-            throw new Error(
-              "Sign in to Cursor on this Mac first: run `cursor-agent login`.",
-            );
-        }
-        move(id, 0, provider);
-        const follow = await changed(true);
-        const following = provider === "acp-cursor" ? follow.cursor : follow.cloud;
-        const account = accounts.find((entry) => entry.id === id);
-        if (account) background(refreshUsage(account, true));
-        await follow.resumed;
-        const failed = cloud ? await following : null;
-        if (failed) throw new Error(`Cloud didn't switch accounts: ${failed}`);
         return null;
       },
       "accounts.move": async ({ provider, id, direction }) => {
@@ -1063,34 +1191,17 @@ export default async function plugin(room: BbPluginApi) {
         return null;
       },
       "claude.start": async (input) => {
-        // The Mac's own login already runs Local threads: Cloud only needs its one-year token.
-        if (input?.mac) {
-          if (!(await refreshMac()))
-            throw new Error(
-              "Sign in to Claude Code on this Mac first: run `claude`.",
-            );
-          const started = await claudeLogin.start();
-          adding.set(started.sessionId, {
-            login: started.sessionId,
-            replace: null,
-            mac: true,
-          });
-          return started;
-        }
-        const replace = input?.id ? stored(input.id) : null;
-        const profile = randomUUID();
+        const add = {
+          kind: (input?.mac ? "approve_mac" : input?.id ? "sign_in_again" : "new") as AddKind,
+          startedAt: Date.now(),
+        };
+        // The Mac's own login needs only the one-year token; any other account starts with its full login.
+        const step = input?.mac ? "token" : "login";
+        telemetry.add("claude-code", add, "started", step);
         try {
-          await prepareProfile(profilePath(profile));
-          const started = await claudeLogin.start(profilePath(profile));
-          adding.set(started.sessionId, {
-            login: started.sessionId,
-            profile,
-            replace,
-            mac: false,
-          });
-          return started;
+          return await startClaude(input, add);
         } catch (error) {
-          void dropProfile(profile);
+          telemetry.add("claude-code", add, "failed", step, error);
           throw error;
         }
       },
@@ -1115,6 +1226,7 @@ export default async function plugin(room: BbPluginApi) {
           if (state.mac) {
             adding.delete(sessionId);
             await saveMac(result);
+            telemetry.add("claude-code", state, "done", "token");
             return { status: "complete" as const, message: null, authorizeUrl: null };
           }
           if (!state.account) {
@@ -1122,12 +1234,21 @@ export default async function plugin(room: BbPluginApi) {
             const next = await claudeLogin.start();
             state.login = next.sessionId;
             state.url = next.authorizeUrl;
+            telemetry.add("claude-code", state, "step_done", "login");
             return { ...pending, authorizeUrl: next.authorizeUrl };
           }
           adding.delete(sessionId);
           await save(state, result);
+          telemetry.add("claude-code", state, "done", "token");
           return { status: "complete" as const, message: null, authorizeUrl: null };
         } catch (error) {
+          telemetry.add(
+            "claude-code",
+            state,
+            "failed",
+            state.mac || state.account ? "token" : "login",
+            error,
+          );
           adding.delete(sessionId);
           if (state.profile) void dropProfile(state.profile);
           return {
@@ -1139,18 +1260,47 @@ export default async function plugin(room: BbPluginApi) {
           state.busy = false;
         }
       },
+      // Cursor's one step is the key, so it sends no `started`.
       "cursor.add": async ({ apiKey }) => {
-        await addCursor(apiKey);
+        const add = { kind: "new" as const, startedAt: Date.now() };
+        try {
+          await addCursor(apiKey);
+        } catch (error) {
+          telemetry.add("acp-cursor", add, "failed", "key", error);
+          throw error;
+        }
+        telemetry.add("acp-cursor", add, "done", "key");
         return null;
       },
-      "codex.start": async () =>
-        codexStartSchema.parse(
-          await room.sdk.cloudroom.codexAccounts({ action: "start" }),
-        ),
+      "codex.start": async () => {
+        const add = { kind: "new" as const, startedAt: Date.now() };
+        telemetry.add("codex", add, "started", "device");
+        try {
+          const started = codexStartSchema.parse(
+            await room.sdk.cloudroom.codexAccounts({ action: "start" }),
+          );
+          codexAdds.set(started.sessionId, add);
+          return started;
+        } catch (error) {
+          telemetry.add("codex", add, "failed", "device", error);
+          throw error;
+        }
+      },
       "codex.poll": async ({ sessionId }) => {
         const polled = codexPollSchema.parse(
           await room.sdk.cloudroom.codexAccounts({ action: "poll", sessionId }),
         );
+        const add = codexAdds.get(sessionId);
+        if (add && polled.status !== "pending") {
+          codexAdds.delete(sessionId);
+          telemetry.add(
+            "codex",
+            add,
+            polled.status === "complete" ? "done" : "failed",
+            "device",
+            polled.message,
+          );
+        }
         if (polled.status === "complete")
           room.realtime.publish(ACCOUNTS_CHANGED, {});
         return polled;

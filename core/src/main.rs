@@ -1,4 +1,5 @@
 /// The same layout as the Local CLI's help (ADR 20261110-235800).
+#[cfg(unix)]
 const HELP: &str = "Usage: room-cli [command]
 
 Cloudroom CLI in a Cloud thread: this thread, its children, and this sandbox
@@ -19,6 +20,24 @@ Commands:
 
 Add --help to any command. Other threads, projects, settings and plugins live in the Cloudroom app on the user's computer: see the room-cli skill.";
 
+/// Windows has only `cloudroom git`: the app's Git panel (see lib.rs).
+#[cfg(windows)]
+fn main() {
+    let args: Vec<String> = std::env::args_os()
+        .skip(1)
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect();
+    match args.first().map(String::as_str) {
+        Some("git") => std::process::exit(cloudroom::git::cli(&args[1..])),
+        Some("--version") => println!("cloudroom {} ({})", cloudroom::VERSION, cloudroom::COMMIT),
+        _ => {
+            eprintln!("On Windows, this build has only `cloudroom git`.");
+            std::process::exit(2);
+        }
+    }
+}
+
+#[cfg(unix)]
 #[tokio::main(worker_threads = 2)]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // `std::env::args()` panics on an argument that isn't UTF-8 (#705).
@@ -42,6 +61,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if args.first().map(String::as_str) == Some("--features") {
         println!("{}", cloudroom::FEATURES.join("\n"));
         return Ok(());
+    }
+    if args.first().map(String::as_str) == Some("git") {
+        std::process::exit(cloudroom::git::cli(&args[1..]));
     }
     if args.first().map(String::as_str) == Some("helper") {
         if let Err(error) = cloudroom::helper::cli(&args[1..]).await {

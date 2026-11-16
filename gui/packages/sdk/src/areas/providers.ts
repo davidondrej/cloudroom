@@ -16,6 +16,8 @@ export type ProviderHostRoutingArgs =
 
 export type ProviderListArgs = ProviderHostRoutingArgs & {
   capability?: SystemProvidersQuery["capability"];
+  /** Just this registered provider, without checking any host. */
+  providerId?: string;
   signal?: AbortSignal;
 };
 export type ProviderInstallableArgs = ProviderHostRoutingArgs & {
@@ -54,6 +56,7 @@ export function createProvidersArea(args: CreateSdkAreaArgs): ProvidersArea {
               capability: input.capability,
               environmentId: input.environmentId,
               hostId: input.hostId,
+              providerId: input.providerId,
             },
           },
           ...signalRequestArgs(input.signal),

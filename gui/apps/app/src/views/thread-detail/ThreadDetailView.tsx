@@ -2865,6 +2865,7 @@ function ThreadDetailViewInternal(props: ThreadRoutePathArgs) {
           <ThreadShareButton threadId={thread.id} />
         </>
       }
+      isCloudThread={thread.executionTarget === "cloud"}
       threadId={thread.id}
       threadPurpose={thread.purpose ?? null}
       threadTitle={threadTitle}

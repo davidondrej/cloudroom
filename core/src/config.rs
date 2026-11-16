@@ -87,6 +87,7 @@ impl Config {
             "droid" => Kind::Droid,
             "kimi" => Kind::Kimi,
             "openclaw" => Kind::OpenClaw,
+            "agent-zero" => Kind::AgentZero,
             _ => return Err(io::Error::other("unsupported CLOUDROOM_HARNESS")),
         };
         let account_home: PathBuf = required("CLOUDROOM_ACCOUNT_HOME")?.into();
@@ -157,6 +158,8 @@ impl Config {
             (Kind::Devin, "devin", ".local/share/devin"),
             (Kind::Droid, "droid", ".factory"),
             (Kind::Kimi, "kimi", ".kimi-code"),
+            // Agent Zero's bridge; the agent itself is the user's own server (ADR 20261116-153548).
+            (Kind::AgentZero, "a0", ".agent-zero"),
         ] {
             let home = account_home.join(home);
             let binary = [

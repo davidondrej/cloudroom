@@ -56,7 +56,10 @@ import { useIsCompactViewport } from "@cloudroom/shared-ui/hooks/use-compact-vie
 import { usePointerCoarse } from "@cloudroom/shared-ui/hooks/use-pointer-coarse";
 import { ThreadTimelineScrollToBottomButton } from "@/views/thread-detail/ThreadTimelineScrollToBottomButton";
 import { useOptionalPaneContext } from "@/views/thread-detail/PaneContext";
-import { ThreadContextWindowIndicator } from "@/components/thread/timeline";
+import {
+  ThreadContextWindowIndicator,
+  type ThreadContextWindowActions,
+} from "@/components/thread/timeline";
 import { PROMPT_STACK_TRACK_CLASS } from "@/components/promptbox/banner/PromptStackCard";
 
 type PromptBoxWithScrollAnchorProps = ComponentProps<
@@ -155,6 +158,7 @@ export interface FollowUpPromptBoxProps {
   environmentSummary: ReactNode | null;
   contextWindowUsage: ContextWindowUsage | null;
   contextWindowNote?: string | undefined;
+  contextWindowActions?: ThreadContextWindowActions | undefined;
   execution: ExecutionControlsProps;
   permission: ExecutionPermissionConfig;
   executionReadOnly?: boolean;
@@ -228,6 +232,7 @@ function FollowUpPromptBoxWithComposer({
   environmentSummary,
   contextWindowUsage,
   contextWindowNote,
+  contextWindowActions,
   execution,
   permission,
   executionReadOnly,
@@ -782,6 +787,7 @@ function FollowUpPromptBoxWithComposer({
               <ThreadContextWindowIndicator
                 usage={contextWindowUsage}
                 note={contextWindowNote}
+                actions={contextWindowActions}
               />
             ) : null}
           </div>

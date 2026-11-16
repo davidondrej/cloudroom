@@ -17,7 +17,7 @@ export type TelemetryExecution = "local" | "cloud_sandbox" | "cloud_vm";
 /** The desktop app's first-run setup funnel: which step people see, act on, finish, skip, or leave. */
 export const SETUP_STEPS = ["account", "agent", "github", "project", "first_agent"] as const;
 export const SETUP_ACTIONS = ["viewed", "started", "done", "skipped", "closed", "detected", "waitlist"] as const;
-export const SETUP_AGENTS = ["pi", "opencode", "cursor", "hermes", "grok", "devin", "droid", "kimi", "fx", "openclaw"] as const;
+export const SETUP_AGENTS = ["pi", "opencode", "cursor", "hermes", "grok", "devin", "droid", "kimi", "antigravity", "fx", "openclaw", "agent-zero"] as const;
 export const SETUP_DETAILS = ["github", "google", "email", "claude", "codex", "both", "none", "existing", "found", "folder", "recent_folder", "bb_import", "chat_import", "auto", "manual", "cloud", "local", "blocked", "failed", ...SETUP_AGENTS] as const;
 
 export type TelemetryValue = string | number | boolean | null;
@@ -132,10 +132,19 @@ export type TelemetryEvent =
         cloud_code?: string | null; local_logins?: string; default_agent?: string;
       };
     }
+  /** A thread a plan limit stopped runs again (plan-limit-telemetry.ts): how long it waited, and what got it going. */
+  | {
+      name: "plan_limit_resolved";
+      properties: { provider: string; execution: TelemetryExecution; is_child_thread: boolean; how: "account_switch" | "agent_switch" | "retry" | "user"; blocked_ms: number };
+    }
+  /** The plan-limit card showed, once per limit per app run. Its clicks are `account_switch` (`where: limit_card`) and `harness_switched` (`resend`). */
+  | { name: "limit_card"; properties: { provider: string; execution: TelemetryExecution; can_switch_account: boolean; other_agents: number } }
   | { name: "upgrade_prompt"; properties: { where: (typeof UPGRADE_PROMPTS)[number]; action: "viewed" | "clicked" } }
   | { name: "activation_step"; properties: { step: ActivationStep; action: "clicked" | "done" | "hidden" } }
   | { name: "starter_prompt"; properties: { starter: StarterPrompt } }
   | { name: "popup"; properties: { popup: Popup; action: "viewed" | "closed" | PopupDetail } }
+  /** A card at the top right (docs/scopes/corner-cards.md). `viewed`: a new showing started. `key` names the showing; `variant` is its design. */
+  | { name: "corner"; properties: { card: CornerCard; key: string; action: "viewed" | CornerAnswer; variant?: string } }
   /** Monthly Wrapped (docs/scopes/wrapped.md): the top-right card and the Story it opens. `month` is `2026-10`. */
   | { name: "wrapped"; properties: { month: string; action: (typeof WRAPPED_ACTIONS)[number] } }
   | { name: "prompt_suggestion"; properties: { action: "shown" | "accepted"; provider: string } }
@@ -159,6 +168,11 @@ export const POPUPS = ["credits", "star", "install", "star_card", "cloud_card"] 
 export type Popup = (typeof POPUPS)[number];
 export const POPUP_DETAILS = ["starred", "opened", "already", "migrated"] as const;
 export type PopupDetail = (typeof POPUP_DETAILS)[number];
+/** The cards at the top right, as the app's corner module lists them (packages/shared-ui/src/lib/corner.ts). */
+export const CORNER_CARDS = ["invite", "checklist", "wrapped", "scan", "partner"] as const;
+export type CornerCard = (typeof CORNER_CARDS)[number];
+export const CORNER_ANSWERS = ["opened", "closed"] as const;
+export type CornerAnswer = (typeof CORNER_ANSWERS)[number];
 const PLANS = ["free", "pro", "super", "ultra"];
 
 export type PluginTelemetryProperties = Record<string, TelemetryValue>;

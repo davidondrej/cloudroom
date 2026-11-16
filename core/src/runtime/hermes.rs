@@ -16,6 +16,7 @@ pub(super) const HERMES: cursor::Flavor = cursor::Flavor {
     replay: false,
     explain_stops: true,
     empty_turn: None,
+    cumulative_text: false,
 };
 const DATABASE: &str = "state.db";
 /// The efforts Local threads offer for Hermes (provider-acp).

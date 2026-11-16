@@ -1033,6 +1033,8 @@ describe("environment providers are asked inside provisioning", () => {
       expect(queued.command).toMatchObject({
         path: producedPath,
         setupScriptTimeoutMs: 15 * 60 * 1_000,
+        // Setup reads hooks from Git where the environment branched off this base.
+        hookBaseBranch: "origin/main",
       });
 
       await reportQueuedCommandSuccess(harness, queued, {
@@ -1044,6 +1046,43 @@ describe("environment providers are asked inside provisioning", () => {
       });
       await vi.waitFor(() => {
         expect(getEnvironment(harness.db, environmentId)?.status).toBe("ready");
+      });
+    });
+  });
+
+  it("sends no setup for a personal workspace, which has no repository to read hooks from", async () => {
+    await withTestHarness(async (harness) => {
+      const { host, project, session } = seedTargetFixture(
+        harness,
+        "host-target-personal-setup",
+      );
+      registerTestHostRpcCapture(harness, {
+        hostId: host.id,
+        sessionId: session.id,
+      });
+      installTarget({
+        id: "personal-workspace",
+        provision: () => ({
+          action: "ready",
+          environment: {
+            type: "host",
+            hostId: host.id,
+            ownsPath: true,
+            path: "/tmp/environment-providers-personal",
+          },
+        }),
+      });
+      await createTargetThread(harness, {
+        projectId: project.id,
+        environmentProviderId: "personal-workspace",
+      });
+      const queued = await waitForQueuedCommand(
+        harness,
+        (candidate) => candidate.command.type === "environment.attach",
+      );
+      expect(queued.command).toMatchObject({
+        type: "environment.attach",
+        setupScriptTimeoutMs: null,
       });
     });
   });

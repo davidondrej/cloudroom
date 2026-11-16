@@ -249,7 +249,8 @@ impl Manager {
                 | runtime::Kind::Devin
                 | runtime::Kind::Droid
                 | runtime::Kind::Kimi
-                | runtime::Kind::OpenClaw => {
+                | runtime::Kind::OpenClaw
+                | runtime::Kind::AgentZero => {
                     let capabilities = runtime::cursor::capabilities(*kind);
                     for (key, value) in capabilities.as_object().unwrap() {
                         harness[key] = value.clone();
@@ -261,6 +262,7 @@ impl Manager {
                         runtime::Kind::Droid => runtime::DROID_REASONING_LEVELS,
                         runtime::Kind::Kimi => runtime::KIMI_REASONING_LEVELS,
                         runtime::Kind::OpenClaw => runtime::OPENCLAW_REASONING_LEVELS,
+                        runtime::Kind::AgentZero => runtime::AGENT_ZERO_REASONING_LEVELS,
                         _ => runtime::PI_REASONING_LEVELS,
                     });
                     // Cursor and OpenCode open images from the attached path; fx gets them inline.
@@ -356,6 +358,7 @@ impl Manager {
                     | runtime::Kind::Droid
                     | runtime::Kind::Kimi
                     | runtime::Kind::OpenClaw
+                    | runtime::Kind::AgentZero
             ) && session.reasoning.as_deref() != Some(reasoning)
             {
                 return Err(Error::Conflict("invalid reasoning effort"));
@@ -380,6 +383,7 @@ impl Manager {
             runtime::Kind::Droid => runtime::DROID_REASONING_LEVELS.contains(&reasoning),
             runtime::Kind::Kimi => runtime::KIMI_REASONING_LEVELS.contains(&reasoning),
             runtime::Kind::OpenClaw => runtime::OPENCLAW_REASONING_LEVELS.contains(&reasoning),
+            runtime::Kind::AgentZero => runtime::AGENT_ZERO_REASONING_LEVELS.contains(&reasoning),
         };
         if !supported {
             return Err(Error::Conflict("invalid reasoning effort"));

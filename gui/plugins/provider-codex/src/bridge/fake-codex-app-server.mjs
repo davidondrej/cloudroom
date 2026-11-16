@@ -364,6 +364,7 @@ async function handleRequest(message) {
       });
       return;
     case "account/rateLimits/read":
+      if (script?.rateLimits === "hang") return;
       respond(id, { rateLimits: {} });
       return;
     case "model/list":

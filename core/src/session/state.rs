@@ -361,6 +361,10 @@ impl Local {
         for request in self.sessions[id].queue.clone() {
             self.finish_receipt_with(id, &request, "failed", cause.map(str::to_owned))?;
         }
+        // A compaction waiting for an agent that won't come back never holds the session.
+        if let Some(request) = self.sessions[id].compact_request.clone() {
+            self.finish_receipt_with(id, &request, "failed", cause.map(str::to_owned))?;
+        }
         Ok(())
     }
 
@@ -544,7 +548,12 @@ impl Local {
                     if receipt.state == "accepted"
                         && !session.receipts.contains_key(&receipt.request_id)
                     {
-                        session.queue.push(receipt.request_id.clone());
+                        // A compaction's follow-up (`first`) runs right after it, before older messages.
+                        if receipt.input["first"] == true {
+                            session.queue.insert(0, receipt.request_id.clone());
+                        } else {
+                            session.queue.push(receipt.request_id.clone());
+                        }
                         session.recovery_attempted = false; // A new user request permits one recovery.
                         session.usage_limited = false;
                         session.usage_resets_ms = None;

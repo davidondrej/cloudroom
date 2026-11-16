@@ -4,6 +4,7 @@ import { cloudroomCommands, cloudroomThreads, deleteThreadEventSuffixInTransacti
 import { and, desc, eq } from "drizzle-orm";
 import { appendThreadEventsInTransaction, appendThreadProvisioningEventInTransaction } from "../threads/thread-events.js";
 import { markCustomInstructionsLost } from "../threads/custom-instructions.js";
+import { CORE_PLAN_LIMIT, LIMIT_RESUME } from "../system/plan-limit-telemetry.js";
 import { LEGACY_CODEX_GOAL_EXTENSION_KIND, THREAD_ACCOUNT_SWITCH_OPERATION, cloudDeltaEvent, cloudItemEvent, codexItemEvent, isStreamDeltaEvent, joinStreamDeltas, reasoningLevelSchema, threadEventSchema, threadScope, turnScope, encodeClientTurnRequestIdNumber, type ProvisioningTranscriptEntry, type SystemThreadProvisioningStatus, type ThreadEvent, type ThreadEventTurnStatus } from "@cloudroom/domain";
 import { z } from "zod";
 import { cloudAccountSwitch } from "./account-switches.js";
@@ -14,10 +15,10 @@ import { binding, command, coreFailure, queuedPrompts, saveBinding, saveCommandS
 const object = z.record(z.string(), z.unknown());
 const nativeFrame = z.object({ method: z.string(), params: object.optional() });
 // GUI provider ID → cloud core harness ID.
-export const CLOUD_HARNESSES = { codex: "codex", pi: "pi", "claude-code": "claude-code", "acp-cursor": "cursor", "acp-fx": "fx", "acp-opencode": "opencode", "acp-hermes-agent": "hermes", "acp-devin": "devin", "acp-droid": "droid", "acp-kimi": "kimi", "acp-openclaw": "openclaw" } as const;
+export const CLOUD_HARNESSES = { codex: "codex", pi: "pi", "claude-code": "claude-code", "acp-cursor": "cursor", "acp-fx": "fx", "acp-opencode": "opencode", "acp-hermes-agent": "hermes", "acp-devin": "devin", "acp-droid": "droid", "acp-kimi": "kimi", "acp-openclaw": "openclaw", "acp-agent-zero": "agent-zero" } as const;
 export type CloudProvider = keyof typeof CLOUD_HARNESSES;
 export const isCloudProvider = (id: string | undefined): id is CloudProvider => id !== undefined && Object.hasOwn(CLOUD_HARNESSES, id);
-export const HARNESS_NAMES: Record<CloudProvider, string> = { codex: "Codex", pi: "Pi", "claude-code": "Claude Code", "acp-cursor": "Cursor", "acp-fx": "fx", "acp-opencode": "opencode", "acp-hermes-agent": "Hermes Agent", "acp-devin": "Devin", "acp-droid": "Droid", "acp-kimi": "Kimi Code", "acp-openclaw": "OpenClaw" };
+export const HARNESS_NAMES: Record<CloudProvider, string> = { codex: "Codex", pi: "Pi", "claude-code": "Claude Code", "acp-cursor": "Cursor", "acp-fx": "fx", "acp-opencode": "opencode", "acp-hermes-agent": "Hermes Agent", "acp-devin": "Devin", "acp-droid": "Droid", "acp-kimi": "Kimi Code", "acp-openclaw": "OpenClaw", "acp-agent-zero": "Agent Zero" };
 export const isAcpProvider = (id: string | undefined): id is Extract<CloudProvider, `acp-${string}`> => isCloudProvider(id) && id.startsWith("acp-");
 const FINISHED = ["completed", "failed", "interrupted", "unknown", "unknown_after_restart"];
 /** A message that failed or was cancelled may never have reached the agent. If it carried the custom instructions, the next one must. */
@@ -80,9 +81,6 @@ function childNotice(db: DbQueryConnection, saved: Binding, request: Command, te
   };
 }
 
-// Core's plan-limit error (PLAN_LIMIT in core/src/runtime/mod.rs), and the website loop that resumes after one.
-const CORE_PLAN_LIMIT = "plan limit (not Cloudroom's)";
-const LIMIT_RESUME = /^\[Cloudroom automation "Resume after .+ plan limit/;
 
 /** A plan-limit continuation after a Cloud account switch (ADR 0117): the limit row then shows the switch in one line
  *  (ADR 20261107-082837). Core sends its own "keep working" only after a switch, even for a limit hit later on the old
@@ -448,7 +446,7 @@ export function projectRecords(
         const waiting = status !== "error" && status !== "stopping" && !saved.queuePaused && unstartedTurn(tx, threadId);
         // A wake restarts an idle thread's agent (`resuming`) with nothing to run: it stays idle, so its row neither spins nor jumps up.
         const wake = state === "resuming" && !waiting && getThread(tx, threadId)?.status === "idle";
-        if (!wake) saveStatus(tx, threadId, waiting ? "active" : status, status === "error" ? coreFailure(state, data) : undefined);
+        if (!wake) saveStatus(tx, threadId, waiting ? "active" : status, status === "error" ? coreFailure(state, data) : undefined, record.timestamp_ms);
       }
       if (status === "error") emit({
         type: "system/error", scope: threadScope(), threadId,

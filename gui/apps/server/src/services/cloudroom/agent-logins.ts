@@ -21,6 +21,7 @@ const AGENTS: Record<string, { login: Exclude<SandboxLogin, "mcp" | "github">; s
   "acp-devin": { login: "devin" },
   "acp-kimi": { login: "kimi" },
   "acp-openclaw": { login: "openclaw" },
+  "acp-agent-zero": { login: "agent-zero" },
   "acp-cursor": { login: "cursor" },
 };
 

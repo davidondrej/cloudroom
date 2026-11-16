@@ -42,7 +42,7 @@ const signInGroupAtom = atomWithStorage<"auto" | "manual" | "auto_done" | null>(
 const STEPS = ["Sign in", "Connect an agent", "Connect GitHub", "Import your work"];
 const STEP_IDS = ["account", "agent", "github", "project"] as const;
 type SetupStepId = (typeof STEP_IDS)[number];
-type SetupDetail = "claude" | "codex" | "both" | "none" | "existing" | "found" | "folder" | "recent_folder" | "bb_import" | "chat_import" | "pi" | "opencode" | "cursor" | "hermes" | "grok" | "devin" | "droid" | "kimi" | "fx" | "openclaw" | "auto" | "manual";
+type SetupDetail = "claude" | "codex" | "both" | "none" | "existing" | "found" | "folder" | "recent_folder" | "bb_import" | "chat_import" | "pi" | "opencode" | "cursor" | "hermes" | "grok" | "devin" | "droid" | "kimi" | "antigravity" | "fx" | "openclaw" | "agent-zero" | "auto" | "manual";
 const agentDetail = (id: string) => id.replace(/^acp-/, "").replace(/-agent$/, "") as SetupDetail;
 function track(step: SetupStepId, action: "viewed" | "started" | "done" | "skipped" | "closed" | "detected", detail: SetupDetail | null = null, agents?: SetupDetail[]) {
   void fetchWithAppSurface("/api/v1/cloudroom/setup-step", {
@@ -93,12 +93,13 @@ export function Onboarding() {
   const [open, setOpen] = useAtom(openAtom);
   const projects = useSidebarNavigation().data?.projects;
   const account = useCloudroomAccount();
-  const locked = account.isSuccess && !account.data.account && !account.data.selfHosted;
+  // No account and no Core of their own. Setup never locks: the app works without sign-in (ADR 20261116-210853).
+  const signedOut = account.isSuccess && !account.data.account && !account.data.selfHosted;
   // Only the desktop app opens setup by itself: "skipped" is saved per browser, so phones and other browsers would see it again.
   const firstRun = !dismissed && getRoomDesktopInfo() !== null && projects !== undefined && projects.length === 0;
   // Stay open once shown: adding a folder or importing chats creates projects, which would otherwise end the first run mid-step.
   useEffect(() => { if (firstRun) setOpen(true); }, [firstRun, setOpen]);
-  const visible = locked || open || firstRun;
+  const visible = open || firstRun;
   // Started here, not in Setup: this component stays mounted after setup closes, so the new thread can still open.
   const startFirstAgent = useStartFirstAgent();
   if (!visible) return null;
@@ -108,10 +109,10 @@ export function Onboarding() {
     setDismissed(true);
     setOpen(false);
   };
-  return <Setup locked={locked} fresh={projects?.length === 0} close={close} />;
+  return <Setup signedOut={signedOut} fresh={projects?.length === 0} close={close} />;
 }
 
-function Setup({ locked, fresh, close: closeSetup }: { locked: boolean; fresh: boolean; close: (agents: { claude: boolean; codex: boolean }) => void }) {
+function Setup({ signedOut, fresh, close: closeSetup }: { signedOut: boolean; fresh: boolean; close: (agents: { claude: boolean; codex: boolean }) => void }) {
   const progress = useSetupProgress();
   const close = () => closeSetup(progress.agents);
   const { done, account } = progress;
@@ -132,6 +133,7 @@ function Setup({ locked, fresh, close: closeSetup }: { locked: boolean; fresh: b
   const first = done.findIndex((isDone) => !isDone);
   const [picked, setPicked] = useState<number | null>(null);
   const step = picked ?? (first === -1 ? 3 : first);
+  const skip = () => { track(STEP_IDS[step] ?? "project", "closed"); leave(); };
   const next = () => setPicked(nextStep(done, step));
   const signedIn = done[0];
   const wasSignedIn = useRef(signedIn);
@@ -221,7 +223,7 @@ function Setup({ locked, fresh, close: closeSetup }: { locked: boolean; fresh: b
                       {state === "done" ? <Icon name="Check" className="size-3.5" aria-label="Done" /> : `0${index + 1}`}
                     </span>
                     <span className="min-w-0">
-                      <strong className="block text-sm leading-tight font-semibold">{index === 0 && (progress.ownCore || (locked && ownCoreForm)) ? "Your own Core" : title}</strong>
+                      <strong className="block text-sm leading-tight font-semibold">{index === 0 && (progress.ownCore || (signedOut && ownCoreForm)) ? "Your own Core" : title}</strong>
                       <small className="mt-0.5 block truncate text-[12.5px] text-(--ob-muted)">{meta}</small>
                     </span>
                   </button>
@@ -231,14 +233,14 @@ function Setup({ locked, fresh, close: closeSetup }: { locked: boolean; fresh: b
           </ol>
         </aside>
         <main className="relative flex min-w-0 flex-1 overflow-y-auto px-6 pt-16 pb-8 md:px-[110px] md:py-10">
-          {locked ? (
-            // Self-hosters need no account (docs/scopes/self-hosting.md); everyone else must sign in.
+          {signedOut && step === 0 ? (
+            // Self-hosters need no account (docs/scopes/self-hosting.md). The step itself offers "Use without an account".
             <button type="button" onClick={() => setOwnCoreForm(!ownCoreForm)} className={CORNER}>
               <Icon name={ownCoreForm ? "ArrowLeft" : "Server"} className="size-3.5" aria-hidden />
               {ownCoreForm ? "Sign in instead" : "Use my own Core"}
             </button>
           ) : (
-            <button type="button" onClick={() => { track(STEP_IDS[step] ?? "project", "closed"); leave(); }} className={CORNER}>
+            <button type="button" onClick={skip} className={CORNER}>
               Skip setup
               <Icon name="X" className="size-3" aria-hidden />
             </button>
@@ -246,7 +248,7 @@ function Setup({ locked, fresh, close: closeSetup }: { locked: boolean; fresh: b
           <div key={step} className={cn("my-auto w-full duration-300 animate-in fade-in-0 slide-in-from-bottom-1", step === 3 ? "max-w-[860px]" : "max-w-[600px]")}>
             {step === 1 && stamped ? <TickStamp key={`${claude}-${codex}`} /> : <RoomLogo className="mb-6 size-[72px] -rotate-[5deg]" />}
             <p className="font-serif text-base text-(--ob-muted) italic">Step {step + 1} of 4</p>
-            {step === 0 && (progress.ownCore ? <OwnCoreDone next={next} /> : locked && ownCoreForm ? <OwnCoreStep /> : <AccountStep email={account.data?.account?.email ?? null} signingIn={account.data?.signingIn === true} error={account.data?.signInError ?? null} next={next} fresh={fresh} />)}
+            {step === 0 && (progress.ownCore ? <OwnCoreDone next={next} /> : signedOut && ownCoreForm ? <OwnCoreStep /> : <AccountStep email={account.data?.account?.email ?? null} signingIn={account.data?.signingIn === true} error={account.data?.signInError ?? null} next={next} fresh={fresh} skip={signedOut ? skip : null} />)}
             {step === 1 && <AgentStep progress={progress} next={next} stamped={stamped} left={countdown?.left ?? null} choices={choices} setChoices={setChoices} />}
             {step === 2 && <GithubStep progress={progress} next={next} />}
             {step === 3 && <ProjectStep close={leave} added={added} setAdded={setAdded} imported={imported} setImported={setImported} />}
@@ -384,7 +386,8 @@ function CopyLink({ url }: { url: string }) {
 }
 
 const SIGN_IN_COUNTDOWN = 3;
-function AccountStep({ email, signingIn, error, next, fresh }: { email: string | null; signingIn: boolean; error: string | null; next: () => void; fresh: boolean }) {
+/** `skip` closes setup with no account: the app works without sign-in (ADR 20261116-210853). */
+function AccountStep({ email, signingIn, error, next, fresh, skip }: { email: string | null; signingIn: boolean; error: string | null; next: () => void; fresh: boolean; skip: (() => void) | null }) {
   const signIn = useCloudroomSignIn();
   const busy = signingIn || signIn.isPending;
   const [group, setGroup] = useAtom(signInGroupAtom);
@@ -424,6 +427,7 @@ function AccountStep({ email, signingIn, error, next, fresh }: { email: string |
             <Cta onClick={openNow}>Opening your browser in {left}…</Cta>
             <Note>
               <button type="button" className={LINK} onClick={openNow}>Open now</button> · <button type="button" className={LINK} onClick={cancel}>Cancel</button>
+              {skip && <> · <button type="button" className={LINK} onClick={skip}>Use without an account</button></>}
             </Note>
           </div>
           <CountdownBar seconds={SIGN_IN_COUNTDOWN} />
@@ -433,7 +437,10 @@ function AccountStep({ email, signingIn, error, next, fresh }: { email: string |
         <>
           <p className="mt-3 text-base text-(--ob-muted)">Use the account you made on cloudroom.dev.</p>
           <div className="mt-8 flex flex-col items-start gap-4">
-            <Cta onClick={() => start()}>Sign in with browser <Icon name="ArrowRight" aria-hidden /></Cta>
+            <div className="flex flex-wrap items-center gap-3">
+              <Cta onClick={() => start()}>Sign in with browser <Icon name="ArrowRight" aria-hidden /></Cta>
+              {skip && <button type="button" onClick={skip} className="inline-flex h-12 items-center justify-center border border-(--ob-ink) px-7 text-[15.5px] font-semibold text-(--ob-ink) transition-colors hover:bg-(--ob-card)">Use without an account</button>}
+            </div>
             {error ? <p role="alert" className="text-[13px] text-(--ob-error)">{error}</p> : <Note>Already signed in there? You come right back.</Note>}
           </div>
         </>

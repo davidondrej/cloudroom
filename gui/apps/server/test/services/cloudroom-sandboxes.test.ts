@@ -10,7 +10,7 @@ import { binding, command, saveStatus } from "../../src/services/cloudroom/store
 import { setCopyLogins, setCopyMacGithub } from "../../src/services/cloudroom/sync.js";
 import { createTestAppHarness } from "../helpers/test-app.js";
 import { PERSONAL_PROJECT_ID } from "@cloudroom/domain";
-import { seedHostSession, seedProjectWithSource } from "../helpers/seed.js";
+import { seedEnvironment, seedHostSession, seedProjectWithSource, seedThread, seedThreadRuntimeState } from "../helpers/seed.js";
 import { cloudroomCommands, cloudroomThreads, createThread, getThread, setProjectGitRemoteUrlIfMissing, threads } from "@cloudroom/db";
 import { eq } from "drizzle-orm";
 
@@ -174,7 +174,7 @@ it("gives each cloud thread its own sandbox, wakes it only for work, and archive
     harness.deps.db.insert(cloudroomCommands).values({ id: "edit-queued", threadId: thread.id, command: "edit", input: JSON.stringify({ target_request_id: harness.deps.db.select().from(cloudroomCommands).all().find(item => item.id.endsWith("_over-limit"))!.id, expected_revision: 1, text: "Not now, edited" }), createdAt: Date.now() + 1 }).run();
     // A delivery is preparing to wake the sandbox for the message, copying logins first, when Stop lands. Every login is
     // skipped, so no real one is read.
-    const allLogins = new Set(["codex", "pi", "opencode", "hermes", "devin", "kimi", "openclaw", "cursor", "github"]);
+    const allLogins = new Set(["codex", "pi", "opencode", "hermes", "devin", "kimi", "openclaw", "agent-zero", "cursor", "github"]);
     let releaseLogins: (() => void) | null = null;
     service.sandboxes.skipLogins = () => releaseLogins ? Promise.resolve(allLogins) : new Promise(resolve => { releaseLogins = () => resolve(allLogins); });
     await setCopyLogins(harness.deps, true);
@@ -940,6 +940,53 @@ it("a saved message that meets a sandbox already gone (404) wakes it again inste
   } finally {
     service.stop();
     coreServer.close(); websiteServer.close();
+  }
+}, 20_000);
+
+it("a Teleport check whose cached sandbox address stopped answering wakes it again and checks once more (#1840)", async () => {
+  const harness = await createTestAppHarness();
+  const { host } = seedHostSession(harness.deps);
+  const { project } = seedProjectWithSource(harness.deps, { hostId: host.id });
+  const environment = seedEnvironment(harness.deps, { hostId: host.id, projectId: project.id });
+  const thread = seedThread(harness.deps, { projectId: project.id, environmentId: environment.id });
+  seedThreadRuntimeState(harness.deps, { threadId: thread.id, environmentId: environment.id, providerThreadId: "native-1", model: "test-model" });
+  const service = cloudroom(harness.deps);
+  // The relay in front of a VPS sandbox, then a hosted one: what the old address answers once the sandbox slept or its Core stopped.
+  const answers: [number, string][] = [[502, "cloudroom: tunnel client aborted: Error: connect ECONNREFUSED 127.0.0.1:20042"], [404, "{}"]];
+  let [status, text] = answers[0]!, asleep = false, wakeHelps = true, wakes = 0, checks = 0;
+  const relay = createServer((req, res) => {
+    if (asleep) { res.writeHead(status, { "Content-Type": "text/plain" }); return void res.end(text); }
+    if (req.url === "/v1/teleports/check") checks++;
+    res.writeHead(202, { "Content-Type": "application/json" }); res.end(JSON.stringify({ ok: true }));
+  });
+  const relayUrl = await listen(relay);
+  const websiteServer = createServer(async (req, res) => {
+    const input = await body(req);
+    res.writeHead(200, { "Content-Type": "application/json" });
+    if (req.url === "/api/desktop/logins") return res.end(JSON.stringify({ claude: false, codex: false, pi: false, github: false }));
+    if (input.action === "awake") return res.end(JSON.stringify({ sandboxes: [], recheck_ms: 60_000 }));
+    if (input.action === "wake") { wakes++; asleep &&= !wakeHelps; }
+    res.end(JSON.stringify({ thread: input.thread, state: "awake", generation: wakes, issue: null, origin: relayUrl, token: "t".repeat(64) }));
+  });
+  const websiteUrl = await listen(websiteServer);
+  const check = () => harness.app.request(`/api/v1/cloudroom/threads/${thread.id}/teleport`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "check" }) });
+  try {
+    await service.configure(null, { id: "11111111-1111-4111-8111-111111111111", email: "sandbox@example.com" }, undefined, websiteUrl, "a".repeat(64));
+    expect((await check()).status).toBe(200);
+    expect({ wakes, checks }).toEqual({ wakes: 1, checks: 1 });
+    for (const [i, answer] of answers.entries()) {
+      [status, text] = answer; asleep = true;
+      const response = await check();
+      expect({ status: response.status, wakes, checks }, await response.text()).toEqual({ status: 200, wakes: i + 2, checks: i + 2 });
+    }
+    // A sandbox that stays unreachable is woken once, not again and again: the check fails as before.
+    asleep = true; wakeHelps = false;
+    const failed = await check();
+    expect({ status: failed.status, wakes }).toEqual({ status: 409, wakes: 4 });
+    expect(await failed.text()).toContain("Teleport would not start.");
+  } finally {
+    service.stop();
+    relay.close(); websiteServer.close();
   }
 }, 20_000);
 

@@ -4,6 +4,7 @@ import { rm } from "node:fs/promises";
 import { join } from "node:path";
 import { captureDesktopBrowserPage } from "./desktop-browser-capture.js";
 import {
+  BaseWindow,
   BrowserWindow,
   Menu,
   WebContentsView,
@@ -214,6 +215,7 @@ export interface DesktopBrowserHostWindow {
   contentView: DesktopBrowserHostContentView;
   getContentBounds(): DesktopBrowserHostContentBounds;
   isDestroyed(): boolean;
+  isMinimized?(): boolean;
   webContents: DesktopBrowserHostWebContents;
 }
 
@@ -838,7 +840,31 @@ export function createDesktopBrowserViewManager(
       activeFindRequestId: null,
     };
     wireWebContents(args.hostWindow, args.tabId, entry);
-    args.hostWindow.contentView.addChildView(view);
+    let stage: BaseWindow | null = null;
+    if (process.platform === "win32" && args.hostWindow.isMinimized?.()) {
+      // Windows never paints a view first added to a minimized window, so every screenshot
+      // of it times out (#1771). Showing it once in a never-shown window fixes that for good.
+      try {
+        stage = new BaseWindow({ show: false });
+        stage.contentView.addChildView(view);
+        view.setBounds({
+          x: 0,
+          y: 0,
+          width: Math.max(1, args.desiredBounds.width),
+          height: Math.max(1, args.desiredBounds.height),
+        });
+        view.setVisible(true);
+        view.setVisible(false);
+      } catch {}
+    }
+    try {
+      args.hostWindow.contentView.addChildView(view);
+    } catch (error) {
+      if (!view.webContents.isDestroyed()) view.webContents.close();
+      throw error;
+    } finally {
+      stage?.destroy();
+    }
     entries.set(browserViewKey(args.hostWindow, args.tabId), entry);
     return entry;
   }

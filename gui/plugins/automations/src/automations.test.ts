@@ -2021,6 +2021,32 @@ describe("automation CLI --script-file", () => {
     }
   });
 
+  it("--agent, repeated, saves agents that take turns; one --agent ends them", async () => {
+    const t = await setup();
+    const base = ["--project", "proj_test", "--json"];
+    try {
+      const created = await t.cli.run(
+        ["create", ...base, "--name", "turns", "--in", "30m", "--prompt", "p", "--agent", "codex,gpt-5,high", "--agent", "codex,gpt-6.1-sol"],
+        {},
+      );
+      expect(created.stderr ?? "").toBe("");
+      const { id, execution } = JSON.parse(created.stdout!);
+      expect(execution).toMatchObject({
+        providerId: "codex",
+        model: "gpt-5",
+        reasoningLevel: "high",
+        agents: [{ providerId: "codex", model: "gpt-5", reasoningLevel: "high" }, { providerId: "codex", model: "gpt-6.1-sol" }],
+      });
+      const one = await t.cli.run(["update", id, ...base, "--agent", "codex,gpt-6.1-sol,low"], {});
+      expect(JSON.parse(one.stdout!).execution).toMatchObject({ model: "gpt-6.1-sol", reasoningLevel: "low" });
+      expect(JSON.parse(one.stdout!).execution.agents).toBeUndefined();
+      expect((await t.cli.run(["update", id, ...base, "--agent", "codex"], {})).stderr).toContain("use PROVIDER,MODEL[,REASONING]");
+      expect((await t.cli.run(["update", id, ...base, "--agent", "codex,gpt-5", "--model", "x"], {})).stderr).toContain("not both");
+    } finally {
+      await t.cleanup();
+    }
+  });
+
   it("--prompt-file keeps option-like and multiline text as the agent prompt (#974)", async () => {
     const t = await setup();
     const prompt = "--script=echo review-only\r\n---\ntitle: x\n---\n\"q\" & | ^ %PATH%\n";
@@ -2402,7 +2428,7 @@ describe("loop fallback", () => {
     const automation = {
       lastRunStatus: "failed",
       lastRunThreadId: null,
-    } as unknown as Parameters<typeof loopAgent>[1];
+    } as unknown as Parameters<typeof loopAgent>[2];
     const execution = {
       mode: "agent",
       providerId: "claude-code",
@@ -2413,9 +2439,33 @@ describe("loop fallback", () => {
         hostId: "host-mac",
         workspace: { type: "personal" },
       },
-    } as unknown as Parameters<typeof loopAgent>[2];
+    } as unknown as Parameters<typeof loopAgent>[3];
+    // A plan limit skips the run (ADR 0344), and only that skip checks usage like a failed run (#1807).
+    const db = createTestDb();
+    const skipped = {
+      ...createScheduledAutomation(db, 1),
+      lastRunStatus: "skipped",
+    } as typeof automation;
+    const skip = (now: number, skipReason: string) =>
+      closeAutomationRun(db, {
+        runId: createManualRun(db, {
+          automationId: skipped.id,
+          runMode: "agent",
+          now,
+        }).run.id,
+        status: "skipped",
+        skipReason,
+        now,
+      });
+    skip(1, "stopped");
+    const usageLimits = vi.spyOn(sdk.system!, "usageLimits");
+    expect(await loopAgent(sdk, db, skipped, execution)).toMatchObject({
+      providerId: "claude-code",
+    });
+    expect(usageLimits).not.toHaveBeenCalled();
+    skip(2, "plan limit: weekly");
 
-    expect(await loopAgent(sdk, automation, execution)).toMatchObject({
+    expect(await loopAgent(sdk, db, skipped, execution)).toMatchObject({
       providerId: "claude-code",
     });
     // Only Codex is checked, with a bounded wait, so an unrelated slow agent can't hold the loop.
@@ -2436,15 +2486,93 @@ describe("loop fallback", () => {
           signal.addEventListener("abort", () => reject(signal.reason));
         }),
     );
-    expect(await loopAgent(sdk, automation, execution)).toMatchObject({
+    expect(await loopAgent(sdk, db, automation, execution)).toMatchObject({
       providerId: "claude-code",
     });
     expect(timeout).toHaveBeenCalledWith(5_000);
     timeout.mockRestore();
-    expect(await loopAgent(sdk, automation, execution)).toMatchObject({
+    // Switching Stops the last run's idle or failed thread, cancelling its retries, as after a failed run.
+    let status = "active";
+    sdk.threads.get = async () => ({ status, dispatchingMessageCount: 0 });
+    const stop = vi.fn(async () => ({}));
+    sdk.threads.stop = stop;
+    const last = { ...automation, lastRunThreadId: "thr_last" };
+    // A busy thread may already run a retry, so the loop keeps its agent this run.
+    expect(await loopAgent(sdk, db, last, execution)).toMatchObject({
+      providerId: "claude-code",
+    });
+    status = "error";
+    // A webhook run's retry holds its own events, so the switch leaves it.
+    const webhook = { ...last, triggerType: "webhook" as const };
+    expect(await loopAgent(sdk, db, webhook, execution)).toMatchObject({
+      providerId: "codex",
+    });
+    expect(stop).not.toHaveBeenCalled();
+    expect(await loopAgent(sdk, db, last, execution)).toMatchObject({
       providerId: "codex",
       model: "gpt-6-astra",
     });
+    expect(stop).toHaveBeenCalledWith({ threadId: "thr_last" });
+    // An unknown reset ends the 10-minute memory, but a loop that switched keeps checking, so it doesn't go back (#1807).
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(Date.now() + 3_600_000);
+    const succeeded = { ...automation, lastRunStatus: "succeeded" as const };
+    expect(await loopAgent(sdk, db, succeeded, execution)).toMatchObject({
+      providerId: "codex",
+    });
+    // Turning the Switch off applies to a loop that already switched too.
+    sdk.cloudroom = { automations: async () => ({ fallback: false }) } as never;
+    expect(await loopAgent(sdk, db, succeeded, execution)).toMatchObject({
+      providerId: "claude-code",
+    });
+    vi.useRealTimers();
+  });
+
+  it("gives each run the next of a loop's agents, past one at its plan limit or not ready", async () => {
+    const fable = { providerId: "claude-code", model: "claude-fable-5-2", reasoningLevel: "xhigh" as const };
+    const gemini = { providerId: "acp-cursor", model: "gemini-4-carbon", reasoningLevel: "high" as const };
+    let claudeFull = false;
+    const sdk = {
+      system: {
+        usageLimits: async ({ providerId }: { providerId: string }) => ({
+          [providerId]: {
+            status: "ok",
+            windows: [{ label: "Weekly limit", usedPercent: providerId === "claude-code" && claudeFull ? 100 : 10, resetsAt: null }],
+          },
+        }),
+        providerStates: async ({ providerId }: { providerId: string }) => ({ providers: [{ providerId, status: "ready" }] }),
+      },
+      threads: {},
+    } as unknown as FallbackSdk;
+    const execution = {
+      mode: "agent",
+      providerId: "claude-code",
+      model: "claude-fable-5-2",
+      reasoningLevel: "xhigh",
+      agents: [fable, gemini],
+      environment: { type: "host", hostId: "host-mac", workspace: { type: "personal" } },
+    } as unknown as Parameters<typeof loopAgent>[3];
+    const db = createTestDb();
+    // Runs get the loop as it was before they count, so the first run sees 0.
+    const run = (runCount: number) =>
+      loopAgent(sdk, db, { runCount, lastRunStatus: "succeeded" } as Parameters<typeof loopAgent>[2], execution);
+    expect([await run(0), await run(1), await run(2)]).toEqual([fable, gemini, fable]);
+    // A failed last run is stopped before the next agent takes over, so its retries never redo the work.
+    let stopped = true;
+    const stop = vi.fn(async () => (stopped ? {} : Promise.reject(new Error("busy"))));
+    sdk.threads = { get: async () => ({ status: "error", dispatchingMessageCount: 0 }), stop } as never;
+    const afterFailure = { runCount: 1, lastRunStatus: "failed", lastRunThreadId: "thr_last", triggerType: "schedule" } as Parameters<typeof loopAgent>[2];
+    expect(await loopAgent(sdk, db, afterFailure, execution)).toEqual(gemini);
+    expect(stop).toHaveBeenCalledWith({ threadId: "thr_last" });
+    // If it can't be stopped, this run stays on the last run's agent.
+    stopped = false;
+    expect(await loopAgent(sdk, db, afterFailure, execution)).toEqual(fable);
+    // Usage is read again after its one-minute cache.
+    claudeFull = true;
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(Date.now() + 120_000);
+    expect(await run(0)).toEqual(gemini);
+    vi.useRealTimers();
   });
 });
 

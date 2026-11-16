@@ -24,6 +24,7 @@ import { runQueuedMessageDispatch } from "../../src/services/threads/queued-mess
 import { moveThreadToProject } from "../../src/services/threads/thread-move.js";
 import { requestThreadWorktreeMove } from "../../src/services/threads/thread-worktree-move.js";
 import {
+  reportQueuedCommandError,
   reportQueuedCommandSuccess,
   waitForQueuedCommand,
 } from "../helpers/commands.js";
@@ -413,6 +414,55 @@ describe("thread move", () => {
 });
 
 describe("thread worktree", () => {
+  it("reads the new worktree's hooks from the source's base, not from the thread's own commit", async () => {
+    await withTestHarness(async (harness) => {
+      seedPrimaryHost(harness.deps, seedHostSession(harness.deps, { id: "host-primary" }).host.id);
+      const { host } = seedHostSession(harness.deps, { id: "host-move-hooks" });
+      const { project } = seedProjectWithSource(harness.deps, { hostId: host.id, path: "/tmp/move-hooks-checkout" });
+      const folder = seedEnvironment(harness.deps, {
+        hostId: host.id,
+        projectId: project.id,
+        path: "/tmp/move-hooks-checkout",
+        mergeBaseBranch: "origin/main",
+      });
+      const thread = seedThread(harness.deps, { projectId: project.id, environmentId: folder.id });
+      // The moved worktree starts from (and compares against) the thread's own commit, which its agent may have made.
+      installFakeGitWorktreeProvider(() => ({
+        action: "ready",
+        environment: { type: "host", hostId: host.id, path: "/tmp/move-hooks-worktree", ownsPath: true, mergeBaseBranch: "abc123" },
+      }));
+      expect(
+        (
+          await harness.app.request(`/api/v1/threads/${thread.id}/worktree`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ carry: [] }),
+          })
+        ).status,
+      ).toBe(200);
+      const status = await waitForQueuedCommand(
+        harness,
+        ({ command }) => command.type === "workspace.status" && command.environmentId === folder.id,
+      );
+      await reportQueuedCommandSuccess(harness, status, {
+        outcome: "available",
+        workspaceStatus: {
+          workingTree: { insertions: 0, deletions: 0, lineStatsComplete: true, files: [], hasUncommittedChanges: false, state: "clean" },
+          branch: { currentBranch: "room/t", defaultBranch: "main" },
+          checkout: { kind: "branch", branchName: "room/t", headSha: "abc123" },
+          mergeBase: null,
+        },
+      });
+      const attach = await waitForQueuedCommand(
+        harness,
+        ({ command }) => command.type === "environment.attach" && command.path === "/tmp/move-hooks-worktree",
+        5_000,
+      );
+      expect(attach.command).toMatchObject({ setupScriptTimeoutMs: 15 * 60 * 1000, hookBaseBranch: "origin/main" });
+      await reportQueuedCommandError(harness, attach, { errorCode: "setup_script_failed", errorMessage: "stop here" });
+    });
+  });
+
   it("moves a thread on another computer only without --carry, reading HEAD on that computer (#1572)", async () => {
     await withTestHarness(async (harness) => {
       const worktrees = installFakeGitWorktreeProvider(() => ({ action: "reject", message: "stop here" }));

@@ -7,8 +7,8 @@ use super::{
     children::{NOTICE_REPLY_CHARS, changed_or_due, notice, notice_ids, untold},
     history::ApiError,
     thread::{
-        Failure, NO_PARENT, archive_under, deliver, fail, random_key, record, retire, revive,
-        session_failure, start_error, starting, website_failure,
+        Failure, NO_PARENT, archive_under, compact_note, deliver, fail, random_key, record, retire,
+        revive, session_failure, start_error, starting, website_failure,
     },
 };
 use axum::{
@@ -220,6 +220,42 @@ pub(super) async fn command(
     Ok(Json(answer))
 }
 
+/// `thread compact` on a child in a sandbox of its own, through the website only: older apps refuse it as a
+/// `child_command`.
+pub(super) async fn compact(
+    m: &Manager,
+    caller: &str,
+    id: &str,
+    then: Option<&str>,
+) -> Result<Json<Value>, Failure> {
+    // A session sharing this sandbox reaches through the website as its thread: only its own children.
+    let foreign = (m.local.lock().unwrap().sessions.get(caller))
+        .is_some_and(|s| s.parent_session.is_some() && !s.child_states.contains_key(id));
+    if foreign {
+        return Err(fail(
+            StatusCode::FORBIDDEN,
+            "Only the thread that started this child can compact it.",
+        ));
+    }
+    let Some(api) = m.history.api.as_ref() else {
+        return Err(fail(
+            StatusCode::CONFLICT,
+            "Cloudroom's website is unavailable, so this child can't be compacted.",
+        ));
+    };
+    let key = random_key().map_err(|e| fail(StatusCode::SERVICE_UNAVAILABLE, &e.to_string()))?;
+    let body =
+        json!({"action":"compact","thread":id,"text":then,"request_id":format!("relay_{key}")});
+    let mut answer = (api.post_waking("relay", &body).await)
+        .map_err(|error| website_failure(error, "reach the child"))?;
+    // `thread wait --children` waits for its follow-up turn, which reports back like any other.
+    if then.is_some() {
+        note_child(m, caller, id, "running", &Value::Null);
+    }
+    answer["id"] = json!(id);
+    Ok(Json(answer))
+}
+
 /// The app applies it to a child the caller started, whenever it next reads the caller's thread.
 fn via_app(
     m: &Manager,
@@ -328,6 +364,16 @@ async fn receive(
                 let _ = m.command(&id, format!("{request}_sleep"), "sleep", sleep);
             }
             return Ok(Json(json!({"id":id,"state":receipt.state})));
+        }
+        // From its parent's `thread compact`: now, or once the running turn ends, then its follow-up.
+        "compact" => {
+            let then = input.text.as_deref();
+            if then.is_some_and(|t| t.len() > super::MAX_PROMPT) {
+                return Err(bad("invalid text"));
+            }
+            let receipt = (m.compact_then(&id, request, then)).map_err(session_failure)?;
+            let note = compact_note(&receipt);
+            return Ok(Json(json!({"id":id,"state":receipt.state,"note":note})));
         }
         // Like `thread archive --self`: the app archives it whenever it next reads the thread.
         "archive" => {

@@ -85,6 +85,9 @@ describe("@cloudroom/templates", () => {
     // #936: blobless Cloud clones get one batch fetch before history-wide reads.
     expect(cloud).toContain(String.raw`[ -z "$ids" ] || printf '%s\n' "$ids" | GIT_TERMINAL_PROMPT=0 timeout 900 git -c fetch.negotiationAlgorithm=noop fetch -q --no-tags --recurse-submodules=no --no-write-fetch-head origin --stdin`);
     expect(local).not.toContain("negotiationAlgorithm");
+    // #1739: Codex can SIGTERM a plain retained server; Cloud agents start servers with a TTY or detached.
+    expect(cloud).toContain("setsid nohup <cmd> > /tmp/<name>.log 2>&1 < /dev/null &");
+    expect(local).not.toContain("setsid nohup");
   });
 
   it("offers Mac access and Local computer use only off Windows", () => {

@@ -34,7 +34,7 @@ function openScript(request: Location & { path: string }): string {
     `line=${quote(request.lineNumber === null ? "" : String(request.lineNumber))}`,
     `column=${quote(request.columnNumber === null ? "" : String(request.columnNumber))}`,
     'if [ -d "$target" ]; then cd "$target" || exit; exec "${SHELL:-/bin/sh}"; fi',
-    'if [ -f "$target" ]; then dir=$(dirname "$target") || exit; file=$(basename "$target") || exit; cd "$dir" || exit',
+    'if [ -f "$target" ]; then dir=$(dirname "$target") || exit; file=./$(basename "$target") || exit; cd "$dir" || exit',
     EDITOR_SCRIPT,
     'exec "${SHELL:-/bin/sh}"',
     "fi",

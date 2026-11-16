@@ -10,6 +10,7 @@ use std::{
     time::Duration,
 };
 use tokio::{process::Command, sync::mpsc};
+mod agent_zero;
 pub(crate) mod auth;
 mod claude;
 pub(crate) mod claude_auth;
@@ -58,6 +59,8 @@ pub enum Kind {
     Kimi,
     #[serde(rename = "openclaw")]
     OpenClaw,
+    #[serde(rename = "agent-zero")]
+    AgentZero,
 }
 impl Kind {
     /// A harness as Core or the app names it: `cursor` or `acp-cursor`, `hermes` or `acp-hermes-agent`.
@@ -141,6 +144,7 @@ pub const PI_REASONING_LEVELS: &[&str] = &["none", "minimal", "low", "medium", "
 pub fn pi_reasoning_accepted(level: &str) -> bool {
     level == "max" || PI_REASONING_LEVELS.contains(&level)
 }
+pub use agent_zero::REASONING_LEVELS as AGENT_ZERO_REASONING_LEVELS;
 pub use devin::REASONING_LEVELS as DEVIN_REASONING_LEVELS;
 pub use droid::REASONING_LEVELS as DROID_REASONING_LEVELS;
 pub use hermes::REASONING_LEVELS as HERMES_REASONING_LEVELS;
@@ -678,6 +682,16 @@ impl Handle {
                 None,
                 None,
             ),
+            Kind::AgentZero => (
+                agent_zero::command(config, &profile)?,
+                Box::new(cursor::Protocol::new(
+                    &profile,
+                    resume.as_ref(),
+                    agent_zero::AGENT_ZERO,
+                )),
+                None,
+                None,
+            ),
             Kind::OpenClaw => (
                 openclaw::command(config, &profile)?,
                 Box::new(cursor::Protocol::new(
@@ -816,6 +830,7 @@ impl Handle {
                 | Kind::Droid
                 | Kind::Kimi
                 | Kind::OpenClaw
+                | Kind::AgentZero
         ) {
             return cursor::capabilities(self.kind);
         }
@@ -838,6 +853,7 @@ impl Handle {
             Kind::Droid => droid::start(&startup).await,
             Kind::Kimi => kimi::start(&startup).await,
             Kind::OpenClaw => openclaw::start(&startup).await,
+            Kind::AgentZero => agent_zero::start(&startup).await,
         }
     }
     /// Starts a `spawn_fork` harness and returns the side chat's new native ID.
@@ -882,7 +898,8 @@ impl Handle {
             | Kind::Devin
             | Kind::Droid
             | Kind::Kimi
-            | Kind::OpenClaw => cursor::send(self, request, input)
+            | Kind::OpenClaw
+            | Kind::AgentZero => cursor::send(self, request, input)
                 .await
                 .map(|()| Vec::new()),
             Kind::Fx => fx::send(self, request, input).await.map(|()| Vec::new()),
@@ -906,7 +923,8 @@ impl Handle {
             | Kind::Devin
             | Kind::Droid
             | Kind::Kimi
-            | Kind::OpenClaw => cursor::steer(self, request, text).await,
+            | Kind::OpenClaw
+            | Kind::AgentZero => cursor::steer(self, request, text).await,
             Kind::Fx => fx::steer(self, request, text).await,
         }
     }
@@ -922,7 +940,8 @@ impl Handle {
             | Kind::Devin
             | Kind::Droid
             | Kind::Kimi
-            | Kind::OpenClaw => Err(io::Error::new(
+            | Kind::OpenClaw
+            | Kind::AgentZero => Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "ACP compaction is not supported",
             )),
@@ -952,7 +971,8 @@ impl Handle {
             | Kind::Devin
             | Kind::Droid
             | Kind::Kimi
-            | Kind::OpenClaw => Err(io::Error::new(
+            | Kind::OpenClaw
+            | Kind::AgentZero => Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "ACP rewind is not supported",
             )),
@@ -1042,7 +1062,8 @@ impl Handle {
             | Kind::Devin
             | Kind::Droid
             | Kind::Kimi
-            | Kind::OpenClaw => Ok(None),
+            | Kind::OpenClaw
+            | Kind::AgentZero => Ok(None),
         }
     }
     pub async fn interrupt(&self, request: &str) -> io::Result<()> {
@@ -1064,7 +1085,8 @@ impl Handle {
             | Kind::Devin
             | Kind::Droid
             | Kind::Kimi
-            | Kind::OpenClaw => cursor::interrupt(self, state).await,
+            | Kind::OpenClaw
+            | Kind::AgentZero => cursor::interrupt(self, state).await,
         }
     }
     pub async fn system_message(&self, text: &str) -> io::Result<()> {
@@ -1079,7 +1101,8 @@ impl Handle {
             | Kind::Devin
             | Kind::Droid
             | Kind::Kimi
-            | Kind::OpenClaw => Err(io::Error::new(
+            | Kind::OpenClaw
+            | Kind::AgentZero => Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 "ACP context-only notices are unavailable",
             )),
@@ -1126,6 +1149,7 @@ pub fn check_resume_history(
         Kind::Droid => return droid::validate(profile, saved, identity),
         Kind::Kimi => return kimi::validate(profile, saved, identity),
         Kind::OpenClaw => return openclaw::validate(profile, saved, identity),
+        Kind::AgentZero => return agent_zero::validate(profile, saved, identity),
         _ => {}
     }
     let file = files::open(
@@ -1171,6 +1195,9 @@ pub fn recover_records(
         Kind::Kimi => kimi::validate(profile, saved, policy.map(|p| (p.agent_uid, p.agent_gid))),
         Kind::OpenClaw => {
             openclaw::validate(profile, saved, policy.map(|p| (p.agent_uid, p.agent_gid)))
+        }
+        Kind::AgentZero => {
+            agent_zero::validate(profile, saved, policy.map(|p| (p.agent_uid, p.agent_gid)))
         }
         Kind::Codex => codex::recover(
             profile,
@@ -1241,7 +1268,8 @@ pub fn checkpoint(
         | Kind::Devin
         | Kind::Droid
         | Kind::Kimi
-        | Kind::OpenClaw => Err(io::Error::other("ACP stream has no native records")),
+        | Kind::OpenClaw
+        | Kind::AgentZero => Err(io::Error::other("ACP stream has no native records")),
     }
 }
 

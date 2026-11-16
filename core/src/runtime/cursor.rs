@@ -33,6 +33,8 @@ pub(super) struct Flavor {
     pub explain_stops: bool,
     /// Fails a turn the agent ended without any output, with this reason.
     pub empty_turn: Option<&'static str>,
+    /// Each message chunk repeats the whole message so far (Agent Zero).
+    pub cumulative_text: bool,
 }
 pub(super) const CURSOR: Flavor = Flavor {
     harness: "cursor",
@@ -44,6 +46,7 @@ pub(super) const CURSOR: Flavor = Flavor {
     replay: true,
     explain_stops: true,
     empty_turn: None,
+    cumulative_text: false,
 };
 
 /// Cursor's own words when the account's usage is used up (its PRO_USER_USAGE_LIMIT-style errors). Not its short
@@ -63,8 +66,9 @@ fn cursor_plan_limit(message: &str) -> bool {
 }
 
 pub(crate) fn capabilities(kind: Kind) -> Value {
+    // Agent Zero can't take a prompt right after a cancel, so its follow-ups queue instead of steering.
     json!({"resume":true,"interrupt":true,"system_notice":false,"interactive_dialogs":false,
-        "steer":true,"compact":false,"rewind":false,"attachments":true,
+        "steer":kind != Kind::AgentZero,"compact":false,"rewind":false,"attachments":true,
         "service_tier":kind.fast(),"subagents":false,"usage":false,"command_guard":false})
 }
 
@@ -186,11 +190,18 @@ pub(super) async fn send(handle: &Handle, request: &str, input: &Value) -> io::R
 
 /// Cloudroom's rules for the agent: plain-chat questions and the Cloudroom system prompt.
 pub(super) fn instructions(handle: &Handle) -> String {
-    match &handle.system_prompt {
+    let rules = match &handle.system_prompt {
         Some(system_prompt) => {
             format!("{PLAIN_CHAT}\n\n[Cloudroom system prompt]\n{system_prompt}")
         }
         None => PLAIN_CHAT.to_owned(),
+    };
+    match handle.kind {
+        Kind::AgentZero => format!(
+            "{}\n\n{rules}",
+            super::agent_zero::workspace(&handle.repository)
+        ),
+        _ => rules,
     }
 }
 
@@ -515,26 +526,41 @@ impl Adapter for Protocol {
             match kind {
                 "agent_message_chunk" | "agent_thought_chunk" if !notice => {
                     let thinking = kind == "agent_thought_chunk";
-                    let item_type = if thinking {
-                        "reasoning"
+                    // Keep only what is new; a chunk that doesn't continue the message starts the next one.
+                    let text = if self.flavor.cumulative_text && !thinking {
+                        match text.strip_prefix(self.text.as_str()) {
+                            Some(rest) => rest,
+                            None => {
+                                self.finish_message(state, &mut events);
+                                text
+                            }
+                        }
                     } else {
-                        "agentMessage"
+                        text
                     };
-                    let item_id = format!("{}:{}:{}", self.flavor.harness, self.message, item_type);
-                    let empty = if thinking {
-                        self.thinking.is_empty()
-                    } else {
-                        self.text.is_empty()
-                    };
-                    if empty {
-                        events.push(self.record("item_started", json!({"harness":self.flavor.harness,"request_id":state.request,"item_id":item_id,"item_type":item_type})));
+                    if !text.is_empty() {
+                        let item_type = if thinking {
+                            "reasoning"
+                        } else {
+                            "agentMessage"
+                        };
+                        let item_id =
+                            format!("{}:{}:{}", self.flavor.harness, self.message, item_type);
+                        let empty = if thinking {
+                            self.thinking.is_empty()
+                        } else {
+                            self.text.is_empty()
+                        };
+                        if empty {
+                            events.push(self.record("item_started", json!({"harness":self.flavor.harness,"request_id":state.request,"item_id":item_id,"item_type":item_type})));
+                        }
+                        if thinking {
+                            self.thinking.push_str(text);
+                        } else {
+                            self.text.push_str(text);
+                        }
+                        events.push(self.record(if thinking { "thinking_delta" } else { "text_delta" }, json!({"harness":self.flavor.harness,"request_id":state.request,"item_id":item_id,"delta":text})));
                     }
-                    if thinking {
-                        self.thinking.push_str(text);
-                    } else {
-                        self.text.push_str(text);
-                    }
-                    events.push(self.record(if thinking { "thinking_delta" } else { "text_delta" }, json!({"harness":self.flavor.harness,"request_id":state.request,"item_id":item_id,"delta":text})));
                 }
                 "tool_call" | "tool_call_update" => {
                     if kind == "tool_call" {

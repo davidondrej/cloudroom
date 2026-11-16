@@ -31,7 +31,7 @@ sendAt?, reason? })`.
   cancels pending automatic retries. On an idle Local thread it then also ends
   what the agent left running, as archive does; stopping a running turn never
   does. The command is idempotent and preserves thread history.
-- Use `room-cli thread compact <id>` to send the built-in `/compact` command to an idle or errored thread. Completion or failure appears in the timeline. Provider support varies; consult its skill and reported capabilities.
+- Use `room-cli thread compact <id>` (or `--self`) to compact a thread's context. A busy thread compacts once its turn ends. Its next message is a follow-up saying whether compaction worked (by default, keep going; `--then TEXT` or `--no-then`). After `--self`, end your turn. Completion or failure appears in the timeline. Codex, Claude Code and Pi support it everywhere; OpenCode and omp on Local only.
 - Use `room-cli thread clear <id>` on an idle or failed thread to reset its active
   timeline and model context in place while keeping the same Cloudroom thread,
   workspace, durable event history, and sticky execution settings.

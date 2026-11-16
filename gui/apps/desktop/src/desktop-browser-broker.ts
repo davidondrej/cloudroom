@@ -205,6 +205,13 @@ export function createDesktopBrowserBroker(args: {
     return tab;
   }
 
+  /** Personal tabs carry the user's logins: agents may never capture or control them. */
+  function requireAutomationTab(tab: DesktopBrowserNativeTab) {
+    if (tab.profile.kind !== "automation")
+      throw new Error("Agents cannot capture or control personal browser tabs");
+    return tab;
+  }
+
   function reveal(
     instance: InstanceEntry,
     threadId: string,
@@ -420,6 +427,9 @@ export function createDesktopBrowserBroker(args: {
       if (command.type === "desktop.browser.import_cookies") {
         if (!args.browserImport)
           throw new Error("Browser cookie import is unavailable");
+        // An agent-owned profile must never receive the user's logins.
+        if (command.profile.kind !== "personal")
+          throw new Error("Cookies can only be imported into the personal browser");
         return args.browserImport.importCookies(
           {
             sourceId: command.sourceId,
@@ -466,7 +476,9 @@ export function createDesktopBrowserBroker(args: {
           return { ok: true };
         }
         case "desktop.browser.capture_tab": {
-          const tab = requireTab(instance, command.threadId, command.tabId);
+          const tab = requireAutomationTab(
+            requireTab(instance, command.threadId, command.tabId),
+          );
           const capture = await args.manager.captureTab({
             ...scope,
             tabId: tab.tabId,
@@ -492,7 +504,9 @@ export function createDesktopBrowserBroker(args: {
             throw new Error("Browser lease must expire within one hour");
           const tabs = new Map<string, string>();
           for (const tabId of command.tabIds) {
-            const tab = requireTab(instance, command.threadId, tabId);
+            const tab = requireAutomationTab(
+              requireTab(instance, command.threadId, tabId),
+            );
             if (controlFor(instance, tabId))
               throw new Error("Browser tab already has a controller");
             tabs.set(tabId, tab.generation);

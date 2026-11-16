@@ -3,7 +3,9 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -445,6 +447,7 @@ it("resumes at bb's requested cwd when the session header's cwd was removed", as
   writeFileSync(
     sessionFile,
     `${JSON.stringify({ type: "session", version: 3, id: "sess-missing-cwd", timestamp: "2026-01-01T00:00:00.000Z", cwd: ghostCwd })}\n`,
+    { mode: 0o600 },
   );
 
   const threadId = "thr-resume-missing-cwd";
@@ -460,6 +463,11 @@ it("resumes at bb's requested cwd when the session header's cwd was removed", as
   // Real pi exits when the header's cwd is gone, so the bridge repoints it.
   const header = JSON.parse(readFileSync(sessionFile, "utf8").split("\n", 1)[0]!);
   expect(header).toMatchObject({ id: "sess-missing-cwd", cwd: harness.workspaceDir });
+  // The transcript stays private, and no temp file is left behind.
+  if (process.platform !== "win32") {
+    expect(statSync(sessionFile).mode & 0o777).toBe(0o600);
+  }
+  expect(readdirSync(sessionDir).filter((f) => f.endsWith(".tmp"))).toEqual([]);
 
   turnStart(threadId, '/tool bash {"command":"pwd"}', "creq_rsm2345678");
   await harness.waitForDelta(threadId, (d) => d.kind === "item.close");

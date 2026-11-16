@@ -226,7 +226,7 @@ export async function executeAgentRun(
         args.events,
       ),
       title: args.automation.name,
-      ...(await loopAgent(room.sdk, args.automation, args.execution)),
+      ...(await loopAgent(room.sdk, db, args.automation, args.execution)),
       permissionMode: args.execution.permissionMode,
     };
     let spawned: unknown;

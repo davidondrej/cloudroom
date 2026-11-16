@@ -9,6 +9,7 @@ import { and, desc, eq, inArray, isNull } from "drizzle-orm";
 import {
   cloudroomCommands,
   cloudroomThreads,
+  createEventId,
   createQueuedThreadMessageInTransaction,
   findProjectEnvironmentByHostPath,
   getEnvironment,
@@ -19,7 +20,7 @@ import {
   threadPluginMetadata,
   threads,
 } from "@cloudroom/db";
-import { getHostPathComparisonKey, PERSONAL_PROJECT_ID, type PromptInput, type TeleportLocalStep, type Thread, COMPUTER } from "@cloudroom/domain";
+import { getHostPathComparisonKey, PERSONAL_PROJECT_ID, THREAD_TELEPORT_LOCAL_OPERATION, threadScope, type PromptInput, type TeleportLocalStep, type Thread, COMPUTER } from "@cloudroom/domain";
 import { folderOpenerCommand, tarCommand } from "@cloudroom/process-utils";
 import type { CreateThreadEnvironmentArgs } from "@cloudroom/server-contract";
 import type { AppDeps } from "../../types.js";
@@ -28,7 +29,7 @@ import { resolvePrimaryHostId } from "../hosts/primary-host.js";
 import { runLiveHostCommand } from "../hosts/live-command.js";
 import { workspaceContextFromPath } from "../environments/workspace-command-target.js";
 import { provisionUnmanagedEnvironmentForPath } from "../threads/thread-environment-directory.js";
-import { getLastProviderThreadId } from "../threads/thread-events.js";
+import { appendThreadEventInTransaction, getLastProviderThreadId } from "../threads/thread-events.js";
 import type { ThreadForkPoint } from "../threads/thread-fork-history.js";
 import { worktreeProviderInputs } from "../threads/thread-environment-placement.js";
 import { ensureProjectCheckoutForThread } from "../projects/project-source-setup.js";
@@ -133,9 +134,10 @@ async function run(deps: AppDeps, threadId: string, step: (value: TeleportLocalS
   const cloud = await client.sessionWorkspace(saved.sessionId);
   const lineage = harness === "codex" ? await codexLineage(client, vmPath) : [];
   const allowed = allowance();
+  const local = { branch: await git(environment.path, ["branch", "--show-current"]), head: await git(environment.path, ["rev-parse", "HEAD"]) };
   const [session, changes, parents] = await Promise.all([
     download(client, vmPath, allowed),
-    cloudChanges(client, cloud.path, await git(environment.path, ["rev-parse", "HEAD"]), thread.createdAt, allowed),
+    cloudChanges(client, cloud.path, local.head, thread.createdAt, allowed),
     downloadEach(client, lineage, allowed),
   ]);
   step("copying");
@@ -147,7 +149,8 @@ async function run(deps: AppDeps, threadId: string, step: (value: TeleportLocalS
   for (const [index, path] of lineage.entries()) await installNative("codex", "", path, parents[index]!, environment.path, inUse);
   if (harness === "acp-opencode") await importOpenCode(deps, threadId, environment, nativeId, session);
   else await installNative(harness, nativeId, vmPath, session, environment.path);
-  const conflicts = await applyChanges(environment.path, changes.archive, randomUUID(), changes.base);
+  const aside = randomUUID();
+  const kept = await applyChanges(environment.path, changes.archive, aside, changes.base);
   // The freeze still holds and nothing new was queued, so nothing sent meanwhile is lost.
   await frozen?.check();
   step("switching");
@@ -170,6 +173,11 @@ async function run(deps: AppDeps, threadId: string, step: (value: TeleportLocalS
     tx.delete(cloudroomThreads).where(eq(cloudroomThreads.threadId, threadId)).run();
     tx.delete(threadPluginMetadata).where(and(eq(threadPluginMetadata.threadId, threadId), inArray(threadPluginMetadata.pluginId, ["cloudroom.teleport", "cloudroom.project-copy"]))).run();
     tx.update(threads).set({ executionTarget: "local", environmentId: environment.id, status: "idle", updatedAt: Date.now() }).where(eq(threads.id, threadId)).run();
+    // The agent's next turn, a queued one too, starts with this note (#1818).
+    appendThreadEventInTransaction(tx, {
+      threadId, environmentId: environment.id, type: "system/operation", scope: threadScope(),
+      data: { operation: THREAD_TELEPORT_LOCAL_OPERATION, operationId: createEventId(), status: "completed", message: "Moved to Local", metadata: { seed: [handoffNote(cloud, local, kept, aside)] } },
+    });
   });
   hub.flushInto(deps.hub);
   cloudroom(deps).detach(threadId);
@@ -180,7 +188,32 @@ async function run(deps: AppDeps, threadId: string, step: (value: TeleportLocalS
   void markLocal(deps, threadId, saved.sessionId);
   await client.close(saved.sessionId, randomUUID(), frozen?.id).catch((error: unknown) =>
     deps.logger.warn({ threadId, error }, "Cloud session did not close after Teleport to Local"));
-  return { conflicts };
+  return { conflicts: kept.length };
+}
+
+/** What the resumed agent can't see for itself after Teleport to Local. */
+function handoffNote(cloud: { branch: string | null; head: string | null }, local: { branch: string | null; head: string | null }, kept: string[], aside: string): PromptInput {
+  const at = ({ branch, head }: typeof cloud) => [branch?.trim() && `branch ${branch.trim()}`, head?.trim() && `commit ${head.trim().slice(0, 12)}`].filter(Boolean).join(", ");
+  const lines = [
+    "[Teleport to Local]",
+    `The user moved this thread from Cloud to their ${computer}.`,
+    "Background jobs, servers, and tools installed in Cloud did not move.",
+    "Cloud deletions were not applied here.",
+    // Only Git knows ignored files; a folder without it copies every file changed since the thread started.
+    cloud.head && "Git-ignored files (build output, .env) were not copied.",
+    at(cloud) && `Cloud: ${at(cloud)}.`,
+    at(local) && `Here: ${at(local)}.`,
+    "Cloudroom copied the Cloud changes here as uncommitted edits.",
+    "They may include earlier Cloud commits.",
+    "Review them before committing.",
+    ...kept.length ? [
+      "These files also changed here, so they kept the local version:",
+      ...kept.slice(0, 20).map((path) => `- ${path}`),
+      ...kept.length > 20 ? [`- and ${kept.length - 20} more`] : [],
+      `Their Cloud versions are in .cloudroom/teleport/${aside}/.`,
+    ] : [],
+  ];
+  return { type: "text", text: lines.filter(Boolean).join("\n"), mentions: [], visibility: "agent-only" };
 }
 
 /** Its Cloud subagents report each turn through the website, which would keep sending them to the Cloud session closed
@@ -271,7 +304,7 @@ async function landLocalForkCode(deps: AppDeps, client: CloudroomClient, source:
     : checkout;
   if (path) {
     const changes = await cloudChanges(client, cloudPath, await git(path, ["rev-parse", "HEAD"]), source.createdAt);
-    const conflicts = await applyChanges(path, changes.archive, id, changes.base);
+    const conflicts = (await applyChanges(path, changes.archive, id, changes.base)).length;
     return { environment: requested, note: `Cloudroom copied the files the Cloud thread changed into this folder.${conflicts ? ` ${conflicts} of them also changed here, so the Cloud copies are in .cloudroom/teleport/${id}/.` : ""}` };
   }
   const personal = source.projectId === PERSONAL_PROJECT_ID || (requested.type === "host" && requested.workspace.type === "personal")
@@ -569,8 +602,9 @@ export async function cloudChanges(client: CloudroomClient, workspace: string, l
 
 const copying = new Map<string, Promise<unknown>>();
 
-/** One Teleport or Fork copy per project at a time, so another copy can't add a link between a check and a write. */
-export async function applyChanges(root: string, archive: Buffer, id: string, base: string | null): Promise<number> {
+/** One Teleport or Fork copy per project at a time, so another copy can't add a link between a check and a write.
+ *  Returns the files that kept the Mac's version, whose cloud copies went to `.cloudroom/teleport/<id>/`. */
+export async function applyChanges(root: string, archive: Buffer, id: string, base: string | null): Promise<string[]> {
   const real = await realpath(root);
   const key = getHostPathComparisonKey(real) ?? real;
   const run = (copying.get(key) ?? Promise.resolve()).catch(() => {}).then(() => copyChanges(root, real, archive, id, base));
@@ -583,7 +617,7 @@ export async function applyChanges(root: string, archive: Buffer, id: string, ba
   }
 }
 
-async function copyChanges(root: string, real: string, archive: Buffer, id: string, base: string | null): Promise<number> {
+async function copyChanges(root: string, real: string, archive: Buffer, id: string, base: string | null): Promise<string[]> {
   const aside = join(root, ".cloudroom", "teleport", id);
   if (!(await inside(real, join(aside, "file"))))
     throw new ApiError(409, "teleport_unavailable", "This project's .cloudroom folder points outside the project. The thread stays in Cloud.");
@@ -608,7 +642,7 @@ async function copyChanges(root: string, real: string, archive: Buffer, id: stri
         throw new ApiError(409, "teleport_unavailable", `The cloud files ${other} and ${paths[index]} are the same file on this ${process.platform === "win32" ? "PC" : COMPUTER}. Rename one in the cloud, then try again. The thread stays in Cloud.`);
       first.set(key, paths[index]!);
     }
-    let conflicts = 0;
+    const kept: string[] = [];
     for (const [index, path] of paths.entries()) {
       const incoming = join(staged, path);
       let target = join(root, path);
@@ -617,14 +651,14 @@ async function copyChanges(root: string, real: string, archive: Buffer, id: stri
       const replace = !existing || (dirtyKeys !== null && !dirtyKeys.has(keys[index]!) && !existing.isSymbolicLink());
       if (!replace || !(await inside(real, target))) {
         target = join(aside, path);
-        conflicts++;
+        kept.push(path);
         if (!(await inside(real, target)))
           throw new ApiError(409, "teleport_unavailable", `The cloud file ${path} would land outside this project. The thread stays in Cloud.`);
       }
       await mkdir(dirname(target), { recursive: true });
       await cp(incoming, target, { force: true, verbatimSymlinks: true });
     }
-    return conflicts;
+    return kept;
   } finally {
     await rm(folder, { recursive: true, force: true });
   }

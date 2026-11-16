@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import type { CSSProperties, ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
 import type { CloudroomStatus } from "@cloudroom/sdk/browser";
@@ -7,8 +7,8 @@ import { Icon, type IconName } from "@cloudroom/shared-ui/icon";
 import { cn } from "@cloudroom/shared-ui/lib/utils";
 import { useClaudeConnection } from "@/components/ClaudeConnection";
 import { useCloudLogin } from "@/components/CodexConnectionPanel";
-import { InviteTicketCard } from "@/components/InviteOffer";
 import { CreditsBar, refillText } from "@/components/CloudQueue";
+import { PARTNER_URL } from "@/components/PartnerCard";
 import { RoomLogo } from "@/components/ui/cloudroom-logo";
 import { SETTINGS_CARD_CLASS, SETTINGS_CARD_ROW_CLASS } from "@/components/ui/settings-section";
 import { useCloudroomAccount } from "@/hooks/queries/cloudroom-queries";
@@ -22,6 +22,8 @@ type PlanUsage = NonNullable<CloudroomStatus["planUsage"]>;
 const BILLING_URL = "https://www.cloudroom.dev/billing";
 const TILE_CLASS = "grid size-8 shrink-0 place-items-center rounded-lg bg-foreground/8";
 const openBilling = () => openUrlInExternalBrowser(BILLING_URL);
+/** The cheque's paper, like the invite tickets'. */
+const PAPER: CSSProperties = { backgroundColor: "#f3ecdb", backgroundImage: "repeating-linear-gradient(90deg, transparent 0 22px, rgba(120,100,60,.05) 22px 23px)" };
 const count = (value: number) => Math.floor(value).toLocaleString("en-US");
 
 export function StatusPill({ ok, title, children }: { ok: boolean; title?: string; children: ReactNode }) {
@@ -51,13 +53,13 @@ export function AccountOverview({ email, onSignOut }: { email: string; onSignOut
         <ActionRow icon="LogOut" title="Sign out" detail="Cloud agents keep running" onClick={onSignOut} />
       </div>
     </div>
-    <div className="grid gap-4 sm:grid-cols-2">
+    <div className="grid gap-4 sm:grid-cols-[minmax(0,1fr)_minmax(0,1.45fr)]">
       <ConnectedCard rows={[
         ["GitHub", <span className={cn(TILE_CLASS, "text-foreground")}><Icon name="Github" className="size-4" aria-hidden /></span>, github],
         ["Claude Code", <AgentLogo id="claude-code" />, claude],
         ["Codex", <AgentLogo id="codex" />, codex],
       ]} />
-      <InviteTicketCard />
+      <PartnerCheque email={email} />
     </div>
   </>;
 }
@@ -110,6 +112,28 @@ function ActionRow({ icon, title, detail, external, onClick }: { icon: IconName;
     </span>
     <Icon name={external ? "ExternalLink" : "ChevronRight"} className="size-3.5 shrink-0 text-muted-foreground" aria-hidden />
   </button>;
+}
+
+/** The affiliate program, as a cheque made out to the member (David, 2026-11-16). Always shown, to every account: it
+ *  is the program's home in the app. The button opens the page where people apply. */
+function PartnerCheque({ email }: { email: string }) {
+  return <div data-testid="account-partner-cheque" className="flex overflow-hidden rounded-2xl text-[#1c1a15]" style={PAPER}>
+    <div className="flex min-w-0 flex-1 flex-col px-5 py-4">
+      <p className="font-mono text-[10px] font-semibold tracking-[0.2em] text-[#7d735f] uppercase">Partner program · Pay to</p>
+      <p className="mt-3 truncate border-b-[1.5px] border-[#1c1a15]/35 pb-2 font-serif text-[22px] leading-none tracking-[-0.02em]">{email}</p>
+      <p className="mt-2 text-[13px] text-[#6f6655]">of every plan payment your link brings.</p>
+      <div className="mt-auto flex pt-3">
+        <button type="button" onClick={() => openUrlInExternalBrowser(PARTNER_URL)}
+          className="flex h-8 items-center gap-1.5 rounded-md bg-[#1c1a15] px-3 text-xs font-semibold text-[#f3ecdb] hover:brightness-125">
+          Become a partner<Icon name="ArrowUpRight" className="size-3.5" aria-hidden />
+        </button>
+      </div>
+    </div>
+    <div className="flex w-[124px] shrink-0 flex-col items-center justify-center border-l-2 border-dashed border-[#b9ad8f] bg-[#e9dfc6]">
+      <p className="font-serif text-[54px] leading-none font-semibold tracking-[-0.04em]">40<span className="text-[32px]">%</span></p>
+      <p className="mt-2 -rotate-[4deg] border-2 border-[#1c1a15] bg-[#bfff00] px-2 py-0.5 font-mono text-[10px] font-bold tracking-[0.18em]">FOR LIFE</p>
+    </div>
+  </div>;
 }
 
 function ConnectedCard({ rows }: { rows: [string, ReactNode, string | undefined][] }) {

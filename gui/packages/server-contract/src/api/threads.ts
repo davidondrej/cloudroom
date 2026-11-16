@@ -859,6 +859,12 @@ export type ThreadPaneActionResponse = z.infer<
   typeof threadPaneActionResponseSchema
 >;
 
+/** `room-cli thread compact`: a busy thread compacts once its turn ends; `then` is sent next, so the agent keeps going. */
+export const threadCompactRequestSchema = z
+  .object({ then: z.string().trim().min(1).max(262_144).optional() })
+  .default({});
+export type ThreadCompactRequest = z.infer<typeof threadCompactRequestSchema>;
+
 /** `room-cli thread stop`: an idle thread's agent also ends what it left running (#607). */
 export const threadStopQuerySchema = z.object({
   endProcesses: z.enum(["true", "false"]).optional(),

@@ -2677,6 +2677,40 @@ describe("codex account rate-limit translation", () => {
     });
   });
 
+  it.each([
+    ["applies and announces a late seed when Codex sent nothing yet", false],
+    ["ignores a late seed once Codex sent its own update", true],
+  ] as const)("%s (#1816)", (_name, codexUpdatedFirst) => {
+    const harness = createHarness();
+    const [rateLimitRead] = harness.translator.buildPostInitializeRequests();
+    const update = () =>
+      harness.translate({
+        jsonrpc: "2.0",
+        method: "account/rateLimits/updated",
+        params: { rateLimits: { primary: { usedPercent: 25, resetsAt: 1 } } },
+      });
+    if (codexUpdatedFirst) update();
+    rateLimitRead?.onResult({
+      rateLimits: {
+        limitId: "codex",
+        secondary: {
+          usedPercent: 100,
+          windowDurationMins: 10_080,
+          resetsAt: 2,
+        },
+      },
+    });
+    const late = harness.translator.takeLateSeedDeltas();
+    if (codexUpdatedFirst) {
+      expect(late).toEqual([]);
+      expect(update()[0]).toMatchObject({ rateLimits: { status: "allowed" } });
+    } else {
+      expect(late).toMatchObject([
+        { kind: "provider.rateLimits", rateLimits: { status: "blocked" } },
+      ]);
+    }
+  });
+
   it("hydrates Codex rate limits before merging truly sparse rolling updates", () => {
     const harness = createHarness();
     const requests = harness.translator.buildPostInitializeRequests();

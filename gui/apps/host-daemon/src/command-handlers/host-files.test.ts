@@ -12,6 +12,7 @@ import {
 } from "../command-dispatch-support.js";
 import {
   browseHostDirectory,
+  isWindowsNetworkPath,
   normalizeWindowsDrivePath,
   readHostFile,
   readHostFileMetadata,
@@ -302,6 +303,17 @@ it.each([
   ["darwin", "/C:/Users/x.png", "/C:/Users/x.png"],
 ] as const)("normalizeWindowsDrivePath on %s: %s", (platform, input, output) => {
   expect(normalizeWindowsDrivePath(input, platform)).toBe(output);
+});
+
+it.each([
+  ["win32", "/\\attacker.example\\share\\x.png", true],
+  ["win32", "\\\\attacker.example\\share\\x.png", true],
+  ["win32", "\\\\?\\UNC\\attacker.example\\share\\x.png", true],
+  ["win32", "C:\\Users\\x.png", false],
+  ["win32", "/C:/Users/x.png", false],
+  ["darwin", "/\\attacker.example\\share\\x.png", false],
+] as const)("isWindowsNetworkPath on %s: %s", (platform, input, refused) => {
+  expect(isWindowsNetworkPath(input, platform)).toBe(refused);
 });
 
 describe("readHostFileMetadata", () => {

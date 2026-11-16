@@ -47,6 +47,7 @@ import {
 } from "./provider-installation-gate.js";
 import type { FetchSkillTree } from "./skill-trees.js";
 import { userExecutableProcessOptions } from "./user-executable-env.js";
+import { captureEnvironmentHookScripts } from "./environment-hook-scripts.js";
 import { runSetupScript } from "./environment-lifecycle-script.js";
 import { runInSerialLane } from "./serial-lane.js";
 
@@ -164,6 +165,10 @@ export interface EnsureEnvironmentArgs {
   injectedSkillSources?: readonly HostDaemonInjectedSkillSource[];
   setupScriptTimeoutMs?: number | null;
   setupContributedEnv?: readonly HostDaemonContributedEnvEntry[];
+  /** Hooks are read from Git at the merge base of HEAD and this branch; null is the default branch. */
+  hookBaseBranch?: string | null;
+  /** Where the hooks read for this environment are saved; the daemon's data folder by default. */
+  hookDataDir?: string;
   targetThreadId?: string;
   workspacePath?: string;
   provision?: ProvisionWorkspaceArgs;
@@ -1227,8 +1232,24 @@ export class RuntimeManager {
     }
 
     if (args.setupScriptTimeoutMs != null) {
+      const dataDir = args.hookDataDir ?? this.options.dataDir;
+      if (dataDir === undefined)
+        throw new Error("Environment setup needs the host data folder");
+      // First setup of a provider-owned folder, before any agent runs in it:
+      // the hooks are read from Git now, and only these copies ever run.
+      const scripts = await captureEnvironmentHookScripts({
+        dataDir,
+        environmentId: args.environmentId,
+        workspacePath: provision.path,
+        baseBranch: args.hookBaseBranch ?? null,
+        shellPath: this.getShellEnv().PATH,
+        signal: args.provisionSignal,
+        onProgress: provision.onProgress,
+      });
       await runSetupScript({
         workspacePath: provision.path,
+        script: scripts.setup,
+        dataDir,
         timeoutMs: args.setupScriptTimeoutMs,
         contributedEnv: args.setupContributedEnv,
         shellPath: this.getShellEnv().PATH,

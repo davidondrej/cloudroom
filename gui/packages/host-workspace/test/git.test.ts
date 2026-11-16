@@ -9,15 +9,10 @@ import {
   fetchRemoteBranches,
   getCheckoutRef,
   getWorkspaceGitOperation,
-  parseNameStatusEntries,
-  parseNumstatEntriesZ,
   parsePorcelainEntries,
   readDefaultBranchRefs,
   readGitBlob,
   runGit,
-  runGitWithNullRecordLimit,
-  runShellPipeline,
-  summarizeNumstat,
 } from "../src/git.js";
 
 const tempDirs: string[] = [];
@@ -128,107 +123,6 @@ afterEach(async () => {
       .splice(0)
       .map((dir) => fs.rm(dir, { recursive: true, force: true })),
   );
-});
-
-describe("runShellPipeline", () => {
-  it("scrubs inherited bb runtime env vars and node mode", async () => {
-    const repoPath = await initEmptyRepo();
-    vi.stubEnv("BB_DATA_DIR", "/tmp/leaked-bb-data");
-    vi.stubEnv("NODE_ENV", "development");
-    vi.stubEnv("OPENAI_API_KEY", "external-secret");
-
-    const result = await runShellPipeline(
-      `printf '%s|%s|%s' "\${BB_DATA_DIR-missing}" "\${NODE_ENV-missing}" "\${OPENAI_API_KEY-missing}"`,
-      [],
-      { cwd: repoPath },
-    );
-
-    expect(result.stdout).toBe("missing|missing|external-secret");
-  });
-});
-
-describe("runGitWithNullRecordLimit", () => {
-  it("stops an untracked path listing at the requested complete-record count", async () => {
-    const repoPath = await initEmptyRepo();
-    await Promise.all(
-      Array.from({ length: 8 }, (_unused, index) =>
-        fs.writeFile(path.join(repoPath, `file-${index}.txt`), `${index}\n`),
-      ),
-    );
-
-    const result = await runGitWithNullRecordLimit(
-      ["ls-files", "--others", "--exclude-standard", "-z"],
-      { cwd: repoPath },
-      "single",
-      3,
-    );
-
-    expect(result.recordLimitReached).toBe(true);
-    expect(result.recordCount).toBe(3);
-    expect(result.stdout.split("\0").filter(Boolean)).toHaveLength(3);
-  });
-
-  it("keeps rename records complete when stopping name-status output", async () => {
-    const repoPath = await initReadGitBlobRepo();
-    await runGit(["mv", "README.md", "RENAMED.md"], { cwd: repoPath });
-    await fs.writeFile(path.join(repoPath, "docs", "index.md"), "changed\n");
-    await fs.rm(path.join(repoPath, "large.txt"));
-
-    const result = await runGitWithNullRecordLimit(
-      ["diff", "--name-status", "-M", "-z", "HEAD"],
-      { cwd: repoPath },
-      "name-status",
-      2,
-    );
-
-    expect(result.recordLimitReached).toBe(true);
-    expect(result.recordCount).toBe(2);
-    expect(parseNameStatusEntries(result.stdout)).toHaveLength(2);
-  });
-
-  it("keeps rename records complete when stopping numstat output", async () => {
-    const repoPath = await initReadGitBlobRepo();
-    await runGit(["mv", "README.md", "RENAMED.md"], { cwd: repoPath });
-    await fs.writeFile(path.join(repoPath, "RENAMED.md"), "hello\nmore\n");
-    await fs.writeFile(path.join(repoPath, "docs", "index.md"), "changed\n");
-    await fs.rm(path.join(repoPath, "large.txt"));
-
-    const result = await runGitWithNullRecordLimit(
-      ["diff", "--numstat", "-M", "-z", "HEAD"],
-      { cwd: repoPath },
-      "numstat",
-      2,
-    );
-
-    expect(result.recordLimitReached).toBe(true);
-    expect(result.recordCount).toBe(2);
-    expect(parseNumstatEntriesZ(result.stdout)).toHaveLength(2);
-    expect(parseNumstatEntriesZ(result.stdout)).toContainEqual({
-      path: "RENAMED.md",
-      insertions: 1,
-      deletions: 0,
-    });
-  });
-
-  it("does not confuse a regular numstat path ending in a tab with a rename", async () => {
-    const repoPath = await initReadGitBlobRepo();
-    const unusualPath = "trailing-tab\t";
-    await fs.writeFile(path.join(repoPath, unusualPath), "one\n");
-    await runGit(["add", unusualPath], { cwd: repoPath });
-
-    const result = await runGitWithNullRecordLimit(
-      ["diff", "--cached", "--numstat", "-z", "HEAD"],
-      { cwd: repoPath },
-      "numstat",
-      1,
-    );
-
-    expect(result.recordLimitReached).toBe(true);
-    expect(result.recordCount).toBe(1);
-    expect(parseNumstatEntriesZ(result.stdout)).toEqual([
-      { path: unusualPath, insertions: 1, deletions: 0 },
-    ]);
-  });
 });
 
 describe("detectGitRepoKind", () => {
@@ -425,20 +319,6 @@ describe("command timeouts", () => {
     });
   });
 
-  it("classifies shell pipeline timeouts as hard failures when allowFailure is true", async () => {
-    const repoPath = await initEmptyRepo();
-
-    await expect(
-      runShellPipeline("sleep 5", [], {
-        cwd: repoPath,
-        allowFailure: true,
-        timeoutMs: 10,
-      }),
-    ).rejects.toMatchObject({
-      code: "shell_pipeline_timeout",
-      name: "WorkspaceError",
-    });
-  });
 });
 
 describe("fetchRemoteBranches", () => {
@@ -468,7 +348,7 @@ describe("fetchRemoteBranches", () => {
 });
 
 describe("user-shell Git resolution", () => {
-  it("uses the resolved shell PATH for Git commands and Git pipelines", async () => {
+  it("uses the resolved shell PATH for Git commands", async () => {
     const workspacePath = await fs.mkdtemp(
       path.join(os.tmpdir(), "bb-git-shell-path-workspace-"),
     );
@@ -482,12 +362,6 @@ describe("user-shell Git resolution", () => {
 
     await expect(
       runGit(["--version"], { cwd: workspacePath, shellPath: binPath }),
-    ).resolves.toMatchObject({ stdout: "user-shell-git\n" });
-    await expect(
-      runShellPipeline("git --version", [], {
-        cwd: workspacePath,
-        shellPath: binPath,
-      }),
     ).resolves.toMatchObject({ stdout: "user-shell-git\n" });
   });
 });
@@ -619,109 +493,3 @@ describe("parsePorcelainEntries", () => {
   });
 });
 
-describe("parseNameStatusEntries", () => {
-  it("parses add, modify, and delete entries", () => {
-    const output = [
-      "A",
-      "src/new.ts",
-      "M",
-      "src/existing.ts",
-      "D",
-      "src/old.ts",
-      "",
-    ].join("\0");
-    expect(parseNameStatusEntries(output)).toEqual([
-      { path: "src/new.ts", status: "A" },
-      { path: "src/existing.ts", status: "M" },
-      { path: "src/old.ts", status: "D" },
-    ]);
-  });
-
-  it("takes the new path for rename and copy entries", () => {
-    const output = [
-      "R100",
-      "src/old.ts",
-      "src/new.ts",
-      "C75",
-      "src/base.ts",
-      "src/copy.ts",
-      "",
-    ].join("\0");
-    expect(parseNameStatusEntries(output)).toEqual([
-      { path: "src/new.ts", status: "R" },
-      { path: "src/copy.ts", status: "C" },
-    ]);
-  });
-
-  it("preserves single-letter status with no similarity score", () => {
-    const output = ["T", "src/link.ts", ""].join("\0");
-    expect(parseNameStatusEntries(output)).toEqual([
-      { path: "src/link.ts", status: "T" },
-    ]);
-  });
-
-  it("interleaves regular and rename entries correctly", () => {
-    const output = [
-      "M",
-      "src/a.ts",
-      "R090",
-      "src/b-old.ts",
-      "src/b-new.ts",
-      "A",
-      "src/c.ts",
-      "",
-    ].join("\0");
-    expect(parseNameStatusEntries(output)).toEqual([
-      { path: "src/a.ts", status: "M" },
-      { path: "src/b-new.ts", status: "R" },
-      { path: "src/c.ts", status: "A" },
-    ]);
-  });
-
-  it("returns empty array for empty input", () => {
-    expect(parseNameStatusEntries("")).toEqual([]);
-  });
-
-  it("skips truncated trailing entries without throwing", () => {
-    expect(parseNameStatusEntries("M\0")).toEqual([]);
-    expect(parseNameStatusEntries("R100\0src/old.ts\0")).toEqual([]);
-  });
-});
-
-describe("summarizeNumstat", () => {
-  it("totals changed files, insertions, and deletions", () => {
-    expect(
-      summarizeNumstat(
-        ["10\t4\tREADME.md", "-\t-\tbinary.dat", "2\t0\tsrc/app.ts"].join("\n"),
-      ),
-    ).toEqual({
-      changedFiles: 3,
-      insertions: 12,
-      deletions: 4,
-    });
-  });
-});
-
-describe("parseNumstatEntriesZ", () => {
-  it("parses normal and binary entries from NUL-delimited output", () => {
-    const output =
-      "10\t4\tREADME.md\0" + "-\t-\tbinary.dat\0" + "2\t0\tsrc/app.ts\0";
-    expect(parseNumstatEntriesZ(output)).toEqual([
-      { path: "README.md", insertions: 10, deletions: 4 },
-      { path: "binary.dat", insertions: null, deletions: null },
-      { path: "src/app.ts", insertions: 2, deletions: 0 },
-    ]);
-  });
-
-  it("takes the new path for rename entries", () => {
-    const output = "3\t1\t\0src/old.ts\0src/new.ts\0" + "5\t2\tsrc/app.ts\0";
-    expect(parseNumstatEntriesZ(output)).toEqual([
-      { path: "src/new.ts", insertions: 3, deletions: 1 },
-      { path: "src/app.ts", insertions: 5, deletions: 2 },
-    ]);
-  });
-
-  it("returns an empty array for empty input", () => {
-    expect(parseNumstatEntriesZ("")).toEqual([]);
-  });
-});

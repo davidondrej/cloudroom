@@ -139,16 +139,26 @@ export function requestThreadWorktreeMove(
   return { previousPath: folder.path };
 }
 
-/** The note the agent's next turn must carry when its last move failed or never ran. Only a turn whose request carried
- *  the note uses it up: one that started while the move hid it, or that the harness started itself, never saw it. A
- *  context clear after the note drops it before any search, since no request will carry it. */
+/** The note the agent's next turn must carry when its last move failed or never ran. */
 export function pendingWorktreeMoveNote(
   db: DbQueryConnection,
   threadId: string,
   clearedSequence: number,
 ): DeferredFirstTurnContext | null {
   if (pending.has(threadId) || moving.has(threadId)) return null;
-  const note = latestOperationSeed(db, threadId, [OPERATION]);
+  return pendingOperationNote(db, threadId, clearedSequence, OPERATION);
+}
+
+/** The note saved on this operation's newest event, until a turn delivers it. Only a turn whose request carried the
+ *  note uses it up: one that started while a move hid it, or that the harness started itself, never saw it. A
+ *  context clear after the note drops it before any search, since no request will carry it. */
+export function pendingOperationNote(
+  db: DbQueryConnection,
+  threadId: string,
+  clearedSequence: number,
+  operation: string,
+): DeferredFirstTurnContext | null {
+  const note = latestOperationSeed(db, threadId, [operation]);
   const text = note?.input[0]?.type === "text" ? note.input[0].text : null;
   if (!note || text === null || note.requestSequence <= clearedSequence)
     return null;
@@ -278,6 +288,9 @@ async function moveToNewWorktree(deps: AppDeps, threadId: string, carry: readonl
         initiator: null,
         path: created.path!,
         setupScriptTimeoutMs: ENVIRONMENT_HOOK_TIMEOUT_MS,
+        // Hooks come from where the source branched off its base: the new worktree starts from the thread's own
+        // commit, which an agent may have made, and its carried files are uncommitted.
+        hookBaseBranch: folder.mergeBaseBranch,
       }),
       timeoutMs: SETUP_TIMEOUT_MS,
     });

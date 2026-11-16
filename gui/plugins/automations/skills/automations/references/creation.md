@@ -14,6 +14,8 @@ Agent mode flags:
 --provider <id>                Provider ID
 --model <model>                Model ID
 --reasoning <level>            none, low, medium, high, xhigh, ultracode, max, or ultra
+--agent <provider,model[,level]> Repeat 2-8 times: agents that take turns, one per run, in
+                               order; one that can't run is skipped. Replaces the three above
 --service-tier <tier>          default or fast (update also accepts none to clear)
 --permission-mode <mode>       accept-edits, auto, or full
 --target-thread <id>           Reuse/re-prompt an existing thread

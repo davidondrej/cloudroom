@@ -2,6 +2,20 @@
 
 Also on [cloudroom.dev/changelog](https://www.cloudroom.dev/changelog).
 
+## 156
+
+Start fresh when context fills up (2026-11-16)
+
+### Changes
+
+- A new context card shows how full a thread is, with Compact and Fresh thread buttons.
+- The Git panel runs on a new engine, the same for Local and Cloud threads.
+- Loops can take turns between agents, and switch to your other agent when one hits its limit.
+- When Cloud is down, a clear "Cloud is paused" banner shows, and Local threads keep working.
+- The app works without an account: setup has a "Use without an account" button.
+- An agent whose login expired gets a one-click Sign in button in the usage popup.
+- Security fixes.
+
 ## 155
 
 Copy from any selection (2026-11-16)

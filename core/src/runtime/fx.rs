@@ -15,6 +15,7 @@ pub(super) const FX: cursor::Flavor = cursor::Flavor {
     replay: false,
     explain_stops: true,
     empty_turn: None,
+    cumulative_text: false,
 };
 
 pub(super) fn command(config: &Config, profile: &HarnessConfig) -> io::Result<Command> {
@@ -145,14 +146,33 @@ pub(super) async fn steer(handle: &Handle, request: &str, text: &str) -> io::Res
         .await
 }
 
-/// Whether the session keeps Cloudroom's instructions. fx saves them with the session.
+/// Whether the session keeps Cloudroom's instructions. fx saves them with the session: older fx as a file, fx 0.0.16
+/// as a `client_prompt` line in its log.
 fn instructed(home: &Path, id: &str) -> bool {
-    valid_id(id)
-        && home
-            .join("sessions")
-            .join(id)
-            .join("client/system-prompt.txt")
-            .is_file()
+    if !valid_id(id) {
+        return false;
+    }
+    if home
+        .join("sessions")
+        .join(id)
+        .join("client/system-prompt.txt")
+        .is_file()
+    {
+        return true;
+    }
+    let Ok(log) = std::fs::File::open(v2_log(home, id)) else {
+        return false;
+    };
+    io::BufRead::lines(io::BufReader::new(log))
+        .map_while(Result::ok)
+        .filter(|line| line.contains("\"client_prompt\""))
+        .filter_map(|line| serde_json::from_str::<Value>(&line).ok())
+        .any(|line| line["kind"] == "set" && line["key"] == "client_prompt")
+}
+
+/// fx 0.0.16 keeps each session as a log in `sessions/v2/<id>/`, and moves an older one there when it loads it.
+fn v2_log(home: &Path, id: &str) -> std::path::PathBuf {
+    home.join("sessions/v2").join(id).join("log.jsonl")
 }
 
 fn offers(session: &Value, option: &str, value: &str) -> bool {
@@ -185,18 +205,43 @@ pub(super) fn validate(
     identity: super::files::Identity,
 ) -> io::Result<()> {
     let root = profile.home.join("sessions");
+    // The saved path stays the older layout's, whichever layout fx uses now.
     if !valid_id(&saved.id) || saved.path != (FX.native_path)(&profile.home, &saved.id) {
         return Err(io::Error::other(
             "fx native path does not match its session",
         ));
     }
-    let file = super::files::open(&root, &saved.path, identity)?;
-    let value: Value =
-        serde_json::from_reader(io::Read::take(file, super::process::MAX_LINE as u64))?;
-    if value["id"] != saved.id.as_str() {
-        return Err(io::Error::other("Unsupported fx native metadata"));
-    }
-    Ok(())
+    let limit = super::process::MAX_LINE as u64;
+    // fx 0.0.16: the log's first line creates the session.
+    let v2 =
+        super::files::open(&root, &v2_log(&profile.home, &saved.id), identity).and_then(|file| {
+            let mut first = String::new();
+            io::BufRead::read_line(
+                &mut io::BufReader::new(io::Read::take(file, limit)),
+                &mut first,
+            )?;
+            let value: Value = serde_json::from_str(&first)?;
+            if value["kind"] != "session_created" || value["id"] != saved.id.as_str() {
+                return Err(io::Error::other("Unsupported fx native metadata"));
+            }
+            Ok(())
+        });
+    let Err(v2) = v2 else { return Ok(()) };
+    let v1 = super::files::open(&root, &saved.path, identity).and_then(|file| {
+        let value: Value = serde_json::from_reader(io::Read::take(file, limit))?;
+        if value["id"] != saved.id.as_str() {
+            return Err(io::Error::other("Unsupported fx native metadata"));
+        }
+        Ok(())
+    });
+    // Missing in both layouts stays NotFound; otherwise the layout that exists says what is wrong.
+    v1.map_err(|v1| {
+        if v1.kind() == io::ErrorKind::NotFound {
+            v2
+        } else {
+            v1
+        }
+    })
 }
 
 /// fx's own rule for session IDs: letters, digits, `.`, `_` and `-`, never `.`, `..` or `v2`.

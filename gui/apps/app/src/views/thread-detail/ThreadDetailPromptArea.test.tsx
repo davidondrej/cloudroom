@@ -643,7 +643,12 @@ vi.mock("@/hooks/mutations/project-mutations", () => ({
   }),
 }));
 
+vi.mock("@/hooks/useFreshThread", () => ({
+  useFreshThread: () => ({ isPending: false, start: vi.fn() }),
+}));
+
 vi.mock("@/hooks/mutations/thread-runtime-mutations", () => ({
+  useCompactThread: () => ({ isPending: false, mutate: vi.fn() }),
   useCancelThreadPlan: () => ({
     isPending: false,
     mutate: mocks.cancelThreadPlanMutate,

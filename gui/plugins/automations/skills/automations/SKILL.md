@@ -30,6 +30,8 @@ room-cli loop create --cloud --thread <cloudThreadId> --same-thread --name "..."
 room-cli loop list --cloud [--thread <cloudThreadId>]
 ```
 
+One loop can take turns between agents: repeat `--agent provider,model[,level]` (2-8 times) instead of `--provider`/`--model`/`--reasoning`, on `create` or `update`, Local or Cloud. Each run gets the next agent; one that can't run is skipped for the next.
+
 `list --project <id>` also shows that project's Cloud loops; `list --cloud` shows them for every project.
 
 Webhooks (ADR 0262): `--webhook` instead of `--cron`/`--at`/`--in` makes a loop that runs when its secret URL gets a POST, Local or Cloud. Create prints the URL once (the website keeps only its hash); `room-cli loop hook <id>` replaces it. Each run gets the requests that arrived since the last one, batched, inside `<webhook_events>` as data; a script-mode Local loop reads them from the file in `ROOM_LOOP_EVENTS`. Cloud runs start within seconds; this computer checks for Local ones about once a minute, and they wait on the website while it is off. A Local webhook loop an agent creates starts paused, and only a person can turn it on in the Loops panel, since anyone with the URL can prompt an agent on this computer. Cloud webhook loops take no script yet, and `run` doesn't apply: send a POST to test one. Give the user the URL and tell them to keep it secret.

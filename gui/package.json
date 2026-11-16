@@ -73,6 +73,7 @@
       ]
     },
     "overrides": {
+      "markdown-it": "14.3.3",
       "zod": "4.3.6",
       "dompurify": "^3.4.17",
       "prosemirror-view": "^1.42.3",

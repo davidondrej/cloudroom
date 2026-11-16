@@ -45,6 +45,7 @@ import { PaneMaximizeButton } from "./PaneMaximizeButton";
 interface ThreadDetailHeaderProps {
   actionsMenu: ReactNode;
   childPillLabel: "child" | "side chat" | null;
+  isCloudThread?: boolean;
   isSecondaryPanelOpen: boolean;
   onClosePane?: () => void;
   onToggleSecondaryPanel: () => void;
@@ -59,6 +60,7 @@ interface ThreadDetailHeaderProps {
 export function ThreadDetailHeader({
   actionsMenu,
   childPillLabel,
+  isCloudThread = false,
   isSecondaryPanelOpen,
   onClosePane,
   onToggleSecondaryPanel,
@@ -129,7 +131,10 @@ export function ThreadDetailHeader({
           isSplitPaneHeader && isFocused && CONTEXT_SELECTION_SURFACE_CLASS,
         )}
       >
-        <ThreadPurposeHoverCard purpose={isEditing ? null : threadPurpose}>
+        <ThreadPurposeHoverCard
+          purpose={isEditing ? null : threadPurpose}
+          cloudThreadId={isCloudThread ? threadId : null}
+        >
           <p
             className={cn(
               "relative min-w-0 text-xs font-normal text-foreground/70 transition-colors",

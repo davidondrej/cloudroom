@@ -39,7 +39,8 @@ it("shows identity/offline status and signs out locally without a machine creati
   vi.mocked(sdk.cloudroom.status).mockResolvedValue({ ...signedOut, account: { id: "account", email: "member@example.invalid" }, error: "VM is offline" });
   vi.mocked(sdk.cloudroom.logout).mockImplementation(async () => { vi.mocked(sdk.cloudroom.status).mockResolvedValue(signedOut); });
   mount();
-  expect(await screen.findByText("member@example.invalid")).toBeDefined();
+  // The membership card, and the partner cheque made out to the member.
+  expect(await screen.findAllByText("member@example.invalid")).toHaveLength(2);
   expect(screen.getByText("VM is offline")).toBeDefined();
   expect(screen.queryByRole("button", { name: "Add a machine" })).toBeNull();
   fireEvent.click(screen.getByRole("button", { name: "Sign out" }));

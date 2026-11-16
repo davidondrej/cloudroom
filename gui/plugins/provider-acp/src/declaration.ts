@@ -23,11 +23,13 @@ const ACP_SERVICE_TIERS = [
 
 const DEFAULT_FORK = "none" as const;
 
-// Grok (#1160) and Cursor report a signed-out CLI as auth_required: the picker
-// offers its login, then restarts discovery once the user signed in.
+// Grok (#1160), Cursor and Antigravity report a signed-out CLI as auth_required:
+// the picker offers its login, then restarts discovery once the user signed in.
+const SIGN_IN_DIALECTS = new Set(["grok", "cursor", "antigravity"]);
 function offersSignIn(agent: AcpAgentDefinition): boolean {
   return (
-    (agent.dialect === "grok" || agent.dialect === "cursor") &&
+    agent.dialect !== undefined &&
+    SIGN_IN_DIALECTS.has(agent.dialect) &&
     agent.signInCommand !== undefined
   );
 }
@@ -120,7 +122,9 @@ export function acpProviderDeclaration(
     capabilities: {
       ...ACP_BASE_CAPABILITIES,
       fork: agent.fork ?? DEFAULT_FORK,
-      permissionModes: [...ACP_BASE_CAPABILITIES.permissionModes],
+      permissionModes: [
+        ...(agent.permissionModes ?? ACP_BASE_CAPABILITIES.permissionModes),
+      ],
       ...(agent.supportsManualCompaction === true
         ? { supportsManualCompaction: true }
         : {}),

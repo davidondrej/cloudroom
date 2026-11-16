@@ -248,6 +248,12 @@ function automationAgents(
 ): readonly AutomationAgentSummary[] {
   const { execution } = automation;
   if (execution.mode === "script") return scriptAgents ?? [];
+  if (execution.agents)
+    return execution.agents.map((agent) => ({
+      providerId: agent.providerId,
+      model: agent.model,
+      reasoningLevel: agent.reasoningLevel ?? null,
+    }));
   return [
     {
       providerId: execution.providerId,
@@ -1132,13 +1138,15 @@ export function CloudAutomationRow({
       }
       agent={
         <AutomationAgentLine
-          agents={[
-            automation.agent ?? {
-              providerId: null,
-              model: null,
-              reasoningLevel: null,
-            },
-          ]}
+          agents={
+            automation.agents ?? [
+              automation.agent ?? {
+                providerId: null,
+                model: null,
+                reasoningLevel: null,
+              },
+            ]
+          }
           providers={providers}
           compact
           quiet

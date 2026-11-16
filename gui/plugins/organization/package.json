@@ -25,6 +25,7 @@
     "prepare:bundled": "bb-plugin-build prepare-bundled"
   },
   "dependencies": {
+    "@cloudroom/shared-ui": "workspace:*",
     "zod": "^4.3.6"
   },
   "devDependencies": {

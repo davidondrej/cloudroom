@@ -33,6 +33,19 @@ const COPY_TAR: &str = if cfg!(target_os = "macos") {
 } else {
     "tar"
 };
+// Permissions in octal, one line per path, through links. On macOS its own stat, even when PATH puts GNU's first.
+const COPY_MODE: &str = if cfg!(target_os = "macos") {
+    "/usr/bin/stat -Lf %OLp"
+} else {
+    "stat -Lc %a"
+};
+// Long listings through links, where an access control list (ACL) shows as a + after the mode. On macOS a @ for extended
+// attributes hides that +, so also its entries, each on its own line.
+const COPY_ACL: &str = if cfg!(target_os = "macos") {
+    "/bin/ls -ldeL"
+} else {
+    "ls -ldL"
+};
 const SIGTERM: i32 = 15;
 const SIGKILL: i32 = 9;
 
@@ -418,11 +431,38 @@ pub(super) fn copy_command(
     command += r#"[ $(( $(find "$x/i" -mindepth 1 -maxdepth 1 -print0 | tr -dc '\000' | wc -c) )) = 1 ]; }; "#;
     command += r#"then echo "The copy held other files, so nothing was copied" >&2; c=1; fi; "#;
     command += "if [ $c = 0 ]; then ";
-    // Into a folder: a new item moves in. Otherwise it is packed whole first, so a failure changes nothing there.
+    // The sandbox makes every file private, so its modes never count (#1066). New files and folders get this Mac's own
+    // (its umask), and executables stay executable. Any failed stat or chmod fails the push before it places anything.
+    command += r#"[ -L "$x/i/$n" ] || chmod -R '=rwX' "$x/i/$n" || { clean; exit 1; }; "#;
+    // A hard-linked file that replaces one here first gets its own copy, so its modes can't reach a linked file.
+    command += r#"find "$x/i/$n" -type f -links +1 -exec sh -c 'h=$1/h p=$2 t=$3; shift 3; for f; do d=$t${f#"$p"}; "#;
+    command += r#"[ ! -e "$d" ] || { cp -p -- "$f" "$h" && mv -f -- "$h" "$f"; } || exit; done' sh "$x" "$x/i/$n" "$to" {} + "#;
+    // A file that replaces one here, even through a link, gets its modes, so it is never more readable. The owner can
+    // always read, and an executable runs wherever readable. One stat for each batch, then one chmod per mode for the
+    // files whose mode changes. One with an ACL stops the push, named: the new file would drop it, and its group bits,
+    // which on Linux show the ACL's mask, would let its whole group read it. One listing for each batch.
+    command += r#"|| { clean; exit 1; }; find "$x/i/$n" -type f -exec sh -c 'x=$1 p=$2 t=$3 e="^.{10}[+]|^ [0-9]+: "; shift 3; for f; do d=$t${f#"$p"}; "#;
+    command += &format!(
+        r#"if [ -f "$d" ]; then printf "%s\0" "$d" >&3; else d=$f; fi; printf "%s\0" "$d" "$f"; done 3>"$x/r" | xargs -0 {COPY_MODE} >"$x/s" || exit; "#
+    );
+    command += &format!(
+        r#"[ ! -s "$x/r" ] || {{ xargs -0 {COPY_ACL} <"$x/r" >"$x/a" || exit; ! grep -Eq "$e" "$x/a" || for f; do d=$t${{f#"$p"}}; "#
+    );
+    command += &format!(
+        r#"[ -f "$d" ] && {COPY_ACL} "$d" | grep -Eq "$e" && {{ printf "%s has an access control list (ACL) that replacing it would drop, so nothing was copied\n" "$d" >&2; exit 1; }}; done; }}; "#
+    );
+    command += r#"for f; do read -r m && read -r o || exit; "#;
+    command += r#"m=$((0$m & 0777 | 0400)); [ -x "$f" ] && m=$((m | (m & 0444) >> 2)); [ $m = $((0$o)) ] || printf "%s\0" "$f" >>"$x/m$m"; "#;
+    command += r#"done <"$x/s"; for g in "$x"/m*; do [ -f "$g" ] || break; xargs -0 chmod "$(printf %o "${g#"$x"/m}")" <"$g" || exit; done; rm -f "$x"/m*' "#;
+    command += r#"sh "$x" "$x/i/$n" "$to" {} + || { clean; exit 1; }; "#;
+    // Into a folder: a new item moves in. Otherwise it is packed whole first, so a failure changes nothing there, and
+    // unpacked with exactly its modes, under umask 0 in a subshell, so the login shell's exit hooks keep the user's. A
+    // push never changes a folder already there, sticky and setgid bits included: bsdtar (macOS, some Linux) leaves it as
+    // is without -p and ignores TAR_OPTIONS; GNU tar does only with both of these options.
     if inside {
         command += r#"{ [ ! -e "$to" ] && [ ! -L "$to" ] && mv -- "$x/i/$n" "$to" 2>/dev/null; } || { (cd -- "$x/i" && "#;
         command += &format!(
-            r#"COPYFILE_DISABLE=1 {COPY_TAR} --no-xattrs -cf ../p.tar -- "$n") && {COPY_TAR} -xf "$x/p.tar" -C "$b"; }}; "#
+            r#"COPYFILE_DISABLE=1 {COPY_TAR} --no-xattrs -cf ../p.tar -- "$n") && (umask 0 && TAR_OPTIONS="--no-overwrite-dir -p" {COPY_TAR} -xf "$x/p.tar" -C "$b"); }}; "#
         );
     } else {
         command += &format!(r#"{taken} && mv -- "$x/i/$n" "$to"; "#);

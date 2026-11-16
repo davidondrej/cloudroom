@@ -67,10 +67,11 @@ async function othersCanChange(path: string): Promise<boolean> {
   }
 }
 
-// `.cloudroom-tmp` in a data folder, given at its real path. Synchronous, so
-// ensureDataTempDir's callers can make their folder and start in one step.
-function ownTempDir(realDataDir: string): string {
-  const base = join(realDataDir, ".cloudroom-tmp");
+// `name` (`.cloudroom-tmp`, `environment-hooks`) in a data folder, given at its
+// real path. Synchronous, so ensureDataTempDir's callers can make their folder
+// and start in one step.
+function ownPrivateDir(realDataDir: string, name: string): string {
+  const base = join(realDataDir, name);
   if (process.platform === "win32") {
     // Windows has no owner or mode bits to check. The data folder is in the
     // user's profile, which only this account and administrators can write.
@@ -80,7 +81,7 @@ function ownTempDir(realDataDir: string): string {
     }
     return base;
   }
-  // `.cloudroom-tmp` must be a real, owner-only folder this account owns.
+  // It must be a real, owner-only folder this account owns.
   try {
     mkdirSync(base, { mode: 0o700 });
   } catch (error) {
@@ -113,7 +114,7 @@ async function privateDataTempDir(dataDir: string): Promise<string> {
       `Another account can change ${realDataDir} or a folder above it. Make these folders writable only by you.`,
     );
   }
-  return ownTempDir(realDataDir);
+  return ownPrivateDir(realDataDir, ".cloudroom-tmp");
 }
 
 /** Makes a plugin process's temp folder in its data folder, never in the OS temp folder. */
@@ -140,7 +141,16 @@ export async function createPluginProcessTempDir(args: {
  * folder above it.
  */
 export function ensureDataTempDir(dataDir: string): string {
+  return ensureDataPrivateDir(dataDir, ".cloudroom-tmp");
+}
+
+/**
+ * `<dataDir>/<name>`: an owner-only folder for files Cloudroom keeps and later
+ * runs outside any sandbox, such as an environment's saved lifecycle hooks.
+ * The same rules as `.cloudroom-tmp` above apply.
+ */
+export function ensureDataPrivateDir(dataDir: string, name: string): string {
   mkdirSync(dataDir, { recursive: true });
   // The native call, like fs/promises realpath above: the same path everywhere.
-  return ownTempDir(realpathSync.native(dataDir));
+  return ownPrivateDir(realpathSync.native(dataDir), name);
 }

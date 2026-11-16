@@ -103,7 +103,7 @@ export function usePlanLimitAgents(threadId: string) {
       }),
     ),
   });
-  const { usage } = useSystemProviderUsageLimits({
+  const { usage, isLoading: usageLoading } = useSystemProviderUsageLimits({
     providerIds: [providerId, ...others.map((provider) => provider.id)],
     enabled: Boolean(thread),
   });
@@ -179,6 +179,12 @@ export function usePlanLimitAgents(threadId: string) {
       : null,
     selfResetsAt: resetOf(providerId, currentModel),
     agents,
+    // The agent list, the thread's model, every agent's models, and usage: before then, `agents` can be short.
+    agentsLoaded:
+      current.isFetched &&
+      (isCloud ? cloud.isFetched : local.isFetched) &&
+      !usageLoading &&
+      catalogs.every((query) => !query.isPending),
     primary: agents.find((agent) => agent.resetsAt === null) ?? null,
   };
 }

@@ -73,6 +73,7 @@ import {
 import {
   applyLoggedThreadLifecycleEvent,
   applyLoggedThreadLifecycleEventInTransaction,
+  isFirstFailureReportSinceStatusChange,
 } from "./lifecycle-outcome.js";
 import { buildThreadStatusChangeMetadata } from "./thread-runtime-display.js";
 import {
@@ -895,13 +896,16 @@ function settleThreadCommandFailure(
   if (isParentNotifiableChildThread(thread)) {
     const parentThreadId = thread.parentThreadId;
     postCommitActions.push({
-      run: (deps) =>
-        queueChildThreadTurnNotificationBestEffort(deps, {
+      // Checked after commit, so a rolled-back failure never counts as told.
+      run: async (deps) => {
+        if (!isFirstFailureReportSinceStatusChange(thread.id)) return;
+        await queueChildThreadTurnNotificationBestEffort(deps, {
           childThread: thread,
           failureReason: args.report.errorMessage,
           parentThreadId,
           turnStatus: "failed",
-        }),
+        });
+      },
     });
   }
   return { postCommitActions };

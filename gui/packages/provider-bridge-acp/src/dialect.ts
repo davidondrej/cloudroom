@@ -4,6 +4,7 @@ import { basename } from "node:path";
 import { z } from "zod";
 import type { AcpContextEstimateTuning } from "./context-estimate.js";
 import {
+  ANTIGRAVITY_ACP_MAINTENANCE,
   CURSOR_ACP_MAINTENANCE,
   type AcpMaintenanceDialect,
 } from "./bridge/provider-maintenance.js";
@@ -79,6 +80,16 @@ export interface AcpDialect {
   steerMeta?: string;
   resumeSession?: boolean;
   systemPromptLimit?: number;
+  // Instructions the agent needs about the thread's folder, sent with the first prompt.
+  workspaceInstructions?(cwd: string): string;
+  // Each message chunk repeats the whole message so far.
+  cumulativeText?: boolean;
+  // Cancelling leaves the agent unable to take the next prompt, so a steer waits for the turn to end.
+  steerWaits?: boolean;
+  // Its commands run in process groups of their own, so Stop kills every process it started.
+  stopEndsCommands?: boolean;
+  // It answers a prompt before sending the reply's last text; the turn stays open this long for it.
+  lateTextMs?: number;
   isBusySession?(message: string): boolean;
   maintenance?: AcpMaintenanceDialect;
   contextEstimate?: AcpContextEstimateTuning;
@@ -477,6 +488,24 @@ export const KIMI_ACP_DIALECT: AcpDialect = {
     "Kimi Code ended the turn without replying. Kimi does this when its model request fails, such as hitting a plan limit, a network error or a server error. The reason is in Kimi's session log, in the .kimi-code/sessions folder in your home folder.",
 };
 
+// A signed-out `agy acp` answers session/new with "Authentication required", so the picker offers `agy acp --login`.
+export const ANTIGRAVITY_ACP_DIALECT: AcpDialect = {
+  id: "antigravity",
+  maintenance: ANTIGRAVITY_ACP_MAINTENANCE,
+};
+
+// Agent Zero runs on its own server and reaches the thread's folder only through its `a0` bridge's host tools, which
+// it uses only when told to (ADR 20261116-153548). Core sends Cloud threads the same words (runtime/agent_zero.rs).
+export const AGENT_ZERO_ACP_DIALECT: AcpDialect = {
+  id: "agent-zero",
+  workspaceInstructions: (cwd) =>
+    `You run through the A0 CLI. The user's project folder is ${cwd} on the A0 CLI host. Do all file work and run every command there, with code_execution_remote and text_editor_remote. Never use code_execution_tool or your own server's files for this project.`,
+  cumulativeText: true,
+  steerWaits: true,
+  stopEndsCommands: true,
+  lateTextMs: 500,
+};
+
 const DIALECTS_BY_ID: ReadonlyMap<string, AcpDialect> = new Map([
   [CURSOR_ACP_DIALECT.id, CURSOR_ACP_DIALECT],
   [GROK_ACP_DIALECT.id, GROK_ACP_DIALECT],
@@ -485,6 +514,8 @@ const DIALECTS_BY_ID: ReadonlyMap<string, AcpDialect> = new Map([
   [OPENCODE_ACP_DIALECT.id, OPENCODE_ACP_DIALECT],
   [OPENCLAW_ACP_DIALECT.id, OPENCLAW_ACP_DIALECT],
   [KIMI_ACP_DIALECT.id, KIMI_ACP_DIALECT],
+  [ANTIGRAVITY_ACP_DIALECT.id, ANTIGRAVITY_ACP_DIALECT],
+  [AGENT_ZERO_ACP_DIALECT.id, AGENT_ZERO_ACP_DIALECT],
 ]);
 
 const DIALECT_IDS_BY_COMMAND: Readonly<Record<string, string>> = {
@@ -495,6 +526,8 @@ const DIALECT_IDS_BY_COMMAND: Readonly<Record<string, string>> = {
   opencode: OPENCODE_ACP_DIALECT.id,
   openclaw: OPENCLAW_ACP_DIALECT.id,
   kimi: KIMI_ACP_DIALECT.id,
+  agy: ANTIGRAVITY_ACP_DIALECT.id,
+  a0: AGENT_ZERO_ACP_DIALECT.id,
 };
 
 export function resolveAcpDialect(launch: {

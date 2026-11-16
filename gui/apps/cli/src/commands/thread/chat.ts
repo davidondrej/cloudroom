@@ -101,13 +101,19 @@ async function runChat(threadId: string, getUrl: () => string): Promise<void> {
     }
   };
 
-  const thread = await sdk.threads.get({ threadId });
-  const where = thread.executionTarget === "cloud" ? "Cloud" : "Local";
-  console.log(
-    `${thread.title ?? thread.titleFallback ?? threadId} (${where}, ${thread.providerId})\n${HELP}`,
-  );
-  let busy = BUSY_STATUSES.has(thread.status);
-  await printTimeline(!busy);
+  let busy: boolean;
+  try {
+    const thread = await sdk.threads.get({ threadId });
+    const where = thread.executionTarget === "cloud" ? "Cloud" : "Local";
+    console.log(
+      `${thread.title ?? thread.titleFallback ?? threadId} (${where}, ${thread.providerId})\n${HELP}`,
+    );
+    busy = BUSY_STATUSES.has(thread.status);
+    await printTimeline(!busy);
+  } catch (error) {
+    rl.close(); // An open stdin would keep the failed command alive (#1815).
+    throw error;
+  }
 
   let closed = false;
   let approvalId: string | null = null;

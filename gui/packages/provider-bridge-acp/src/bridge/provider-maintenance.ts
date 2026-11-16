@@ -139,7 +139,8 @@ export interface AcpMaintenanceDialect {
   installer(): ProviderInstallationCommand;
   /** The newest released version, when the agent publishes one. */
   latestVersion?(): Promise<string | null>;
-  readAccount(): Promise<{ email: string | null } | null>;
+  /** `command` is the agent's resolved executable, for agents asked through their own CLI. */
+  readAccount(command: string): Promise<{ email: string | null } | null>;
   readUsage(): Promise<ProviderUsageResult>;
 }
 
@@ -281,7 +282,8 @@ export async function getAcpProviderHealth(
       statusMessage: "The ACP provider has no launch command.",
     });
   }
-  if ((await resolveExecutablePath(command)) === null) {
+  const executable = await resolveExecutablePath(command);
+  if (executable === null) {
     return healthResult({ target, status: "not_installed" });
   }
   const version = await readAcpCliVersion(command);
@@ -301,7 +303,7 @@ export async function getAcpProviderHealth(
     });
   }
   try {
-    const account = await maintenance.readAccount();
+    const account = await maintenance.readAccount(executable);
     return healthResult({
       target,
       status: account === null ? "unauthenticated" : "ready",
@@ -609,6 +611,55 @@ async function readCursorUsage(): Promise<ProviderUsageResult> {
     };
   }
 }
+
+const ANTIGRAVITY_ACCOUNT_TTL_MS = 60_000;
+let antigravityAccount: {
+  command: string;
+  signedIn: boolean;
+  expiresAt: number;
+} | null = null;
+
+/** agy keeps its sign-in in the OS keyring, so ask agy itself: signed out, `agy models` says "Please sign in" and
+ *  exits 1. It asks Google for the list, so the answer is kept a minute. Any other failure is not a signed-out CLI. */
+async function readAntigravityAccount(
+  command: string,
+): Promise<{ email: string | null } | null> {
+  if (
+    antigravityAccount?.command === command &&
+    antigravityAccount.expiresAt > Date.now()
+  ) {
+    return antigravityAccount.signedIn ? { email: null } : null;
+  }
+  const signedIn = await execFileAsync(command, ["models"], {
+    timeout: USAGE_FETCH_TIMEOUT_MS,
+    env: { ...process.env, AGY_CLI_DISABLE_AUTO_UPDATE: "1" },
+  }).then(
+    () => true,
+    (error: { stdout?: string; stderr?: string }) => {
+      if (/please sign in/iu.test(`${error.stdout ?? ""}${error.stderr ?? ""}`))
+        return false;
+      throw error;
+    },
+  );
+  antigravityAccount = {
+    command,
+    signedIn,
+    expiresAt: Date.now() + ANTIGRAVITY_ACCOUNT_TTL_MS,
+  };
+  return signedIn ? { email: null } : null;
+}
+
+export const ANTIGRAVITY_ACP_MAINTENANCE: AcpMaintenanceDialect = {
+  loginCommand: "agy acp --login",
+  installer: () =>
+    acpInstallerCommand({
+      scriptUrl: "https://antigravity.google/cli/install.sh",
+      powershellUrl: "https://antigravity.google/cli/install.ps1",
+      args: [],
+    }),
+  readAccount: readAntigravityAccount,
+  readUsage: () => Promise.resolve({ supported: false }),
+};
 
 export const __testing = {
   buildProviderInstallationRun: buildAcpProviderInstallationRun,

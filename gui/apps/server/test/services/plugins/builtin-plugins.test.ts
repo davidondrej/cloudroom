@@ -282,6 +282,7 @@ describe("builtin plugin reconciliation", () => {
       ["inline-vis", "AppWindow"],
       ["gpu", "Zap"],
       ["keep-awake", "Coffee"],
+      ["repo-sync", "GitMerge"],
       ["machine-ssh", "Terminal"],
       ["monaco-editor", "Code"],
       ["pdf-preview", "FileText"],

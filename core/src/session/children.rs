@@ -139,7 +139,7 @@ impl Manager {
 }
 
 /// Harnesses a child sharing its parent's sandbox may run. Cursor and fx children run in sandboxes of their own.
-const CHILD_HARNESSES: [runtime::Kind; 9] = [
+const CHILD_HARNESSES: [runtime::Kind; 10] = [
     runtime::Kind::Codex,
     runtime::Kind::Claude,
     runtime::Kind::Pi,
@@ -149,6 +149,7 @@ const CHILD_HARNESSES: [runtime::Kind; 9] = [
     runtime::Kind::Droid,
     runtime::Kind::Kimi,
     runtime::Kind::OpenClaw,
+    runtime::Kind::AgentZero,
 ];
 pub(super) const FINISHED: [&str; 5] = [
     "completed",
@@ -529,7 +530,7 @@ fn legacy_notice_id(child: &str, request: &str) -> String {
 
 /// A thread as `room-cli thread list`, `show` and `status` print it.
 fn item(c: &Session) -> Value {
-    let busy = c.current_request.is_some() || c.has_work();
+    let busy = c.current_request.is_some() || c.has_work() || c.compacting;
     json!({"id":c.session_id,"title":title(c),"harness":c.harness,"model":c.model,"state":c.state,"status":status(c.state.name(), busy),"busy":busy,"error":c.failure.clone().or_else(|| c.last_prompt_error.clone()),"archived":c.archived,"parent":c.parent_session})
 }
 
@@ -650,7 +651,7 @@ impl Manager {
             let kind = spawn.harness.unwrap_or(p.harness);
             if !CHILD_HARNESSES.contains(&kind) {
                 return Err(Error::Conflict(
-                    "Only codex, claude-code, pi, opencode, hermes, devin, droid, kimi and openclaw children can share this sandbox. Omit --shared-sandbox to start it in a sandbox of its own.",
+                    "Only codex, claude-code, pi, opencode, hermes, devin, droid, kimi, openclaw and agent-zero children can share this sandbox. Omit --shared-sandbox to start it in a sandbox of its own.",
                 ));
             }
             let same = kind == p.harness;

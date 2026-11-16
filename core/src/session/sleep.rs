@@ -271,6 +271,10 @@ impl Manager {
         if local.agent_counts().background > 0 {
             return json!({"drained":false,"reason":"background_jobs"});
         }
+        // A RepoSync check finishes its Git work before the GitHub login is wiped and the sandbox stops.
+        if self.repo_sync.running() {
+            return json!({"drained":false,"reason":"repo_sync"});
+        }
         // Otherwise free to sleep: a report held until its child is quiet (#217) goes now; the API waits for it and
         // drains again in the same call (`held_out`).
         if super::children::flush_held(&local) {
@@ -307,6 +311,34 @@ impl Manager {
         };
         let out = async { while pending() && changed.changed().await.is_ok() {} };
         let _ = tokio::time::timeout(wait, out).await;
+    }
+
+    /// RepoSync (workspace/repo_sync.rs) checks every few seconds and when a turn ends. A check counts as running from
+    /// under this lock, so a drain that begins later waits for it, and a draining sandbox starts none.
+    pub fn start_repo_sync(self: &Arc<Self>) {
+        let manager = self.clone();
+        tokio::spawn(async move {
+            while !manager.is_stopping() {
+                manager.repo_sync.wait().await;
+                let repos = crate::workspace::repo_sync::RepoSync::repos();
+                if repos.is_empty() {
+                    continue;
+                }
+                let (running, targets) = {
+                    let local = manager.local.lock().unwrap();
+                    if local.draining {
+                        continue;
+                    }
+                    (manager.repo_sync.start(), repo_targets(&local))
+                };
+                let notices = manager.repo_sync.check(&repos, targets).await;
+                drop(running);
+                for (i, (session, text)) in notices.into_iter().enumerate() {
+                    let request = format!("notice_reposync_{:x}_{i}", now_ms());
+                    let _ = manager.command(&session, request, "prompt", json!({"text": text}));
+                }
+            }
+        });
     }
 
     pub fn start_idle_sleeper(self: &Arc<Self>) {
@@ -374,6 +406,17 @@ impl Manager {
             .sessions
             .get(id)
             .is_some_and(|s| s.harness != runtime::Kind::Codex)
+    }
+
+    /// Agent Zero refuses the next prompt after a cancel and its commands outlive it, so the app's Stop frees it too: the
+    /// next message starts a fresh bridge, and freeing ends the commands it ran (ADR 20261116-153548).
+    pub(crate) fn stop_frees(&self, id: &str) -> bool {
+        self.local
+            .lock()
+            .unwrap()
+            .sessions
+            .get(id)
+            .is_some_and(|s| s.harness == runtime::Kind::AgentZero)
     }
 
     /// Archive and `thread stop` ask for sleep. It applies once any running turn or interrupt settles.
@@ -444,6 +487,52 @@ impl Manager {
         }
         Ok(())
     }
+}
+
+/// Each live session's folder, with a session to tell about problems (not an archived one) and whether any agent there
+/// is mid-turn, and the repos cloned into `/repos`: any agent may edit those, so they wait for every agent here and
+/// tell any live thread.
+fn repo_targets(local: &Local) -> Vec<crate::workspace::repo_sync::Target> {
+    use crate::workspace::repo_sync::Target;
+    let mut targets: Vec<Target> = Vec::new();
+    let (mut any_busy, mut any_tell) = (false, None);
+    let live = local
+        .sessions
+        .values()
+        .filter(|s| s.state != SessionState::Closed);
+    for s in live {
+        let tell = (!s.archived).then(|| s.session_id.clone());
+        any_busy |= s.busy();
+        any_tell = any_tell.or(tell.clone());
+        let Some(path) = s
+            .workspace
+            .as_ref()
+            .and_then(|w| w.path.canonicalize().ok())
+        else {
+            continue;
+        };
+        match targets.iter_mut().find(|t| t.path == path) {
+            Some(t) => (t.tell, t.busy) = (t.tell.take().or(tell), t.busy || s.busy()),
+            None => targets.push(Target {
+                path,
+                tell,
+                busy: s.busy(),
+                shared: false,
+            }),
+        }
+    }
+    for entry in std::fs::read_dir("/repos").into_iter().flatten().flatten() {
+        let path = entry.path();
+        if path.is_dir() && !targets.iter().any(|t| t.path == path) {
+            targets.push(Target {
+                path,
+                tell: any_tell.clone(),
+                busy: any_busy,
+                shared: true,
+            });
+        }
+    }
+    targets
 }
 
 #[cfg(test)]

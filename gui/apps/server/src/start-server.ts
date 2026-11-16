@@ -42,6 +42,7 @@ import { installTitleRecheck } from "./services/threads/title-recheck.js";
 import { installThreadPurpose } from "./services/threads/thread-purpose.js";
 import { installProjectSummaries } from "./services/cloudroom/project-nudge.js";
 import { installAuthFailureTelemetry } from "./services/system/auth-failure-telemetry.js";
+import { installPlanLimitTelemetry } from "./services/system/plan-limit-telemetry.js";
 import { createTelemetryService } from "./services/system/telemetry.js";
 import { TerminalSessionLifecycle } from "./services/terminals/terminal-session-lifecycle.js";
 import { createLifecycleDedupers } from "./lifecycle-dedupers.js";
@@ -248,6 +249,7 @@ export async function runServer(serverConfig: ServerConfig): Promise<void> {
   });
   const stopFirstResponseTelemetry = installFirstResponseTelemetry({ db, hub, telemetry }, (threadId, at) => cloud.sandboxes.wokeSince(threadId, at), (threadId, at) => cloud.sandboxes.startupSince(threadId, at));
   const stopAuthFailureTelemetry = installAuthFailureTelemetry({ db, logger, telemetry });
+  const stopPlanLimitTelemetry = installPlanLimitTelemetry({ db, telemetry, dataDir: runtimeConfig.dataDir, logger });
   const stopTokenTelemetry = installTokenTelemetry({ db, telemetry, dataDir: runtimeConfig.dataDir, logger });
 
   const sweepDeps = {
@@ -350,6 +352,7 @@ export async function runServer(serverConfig: ServerConfig): Promise<void> {
       cloud.stop();
       stopFirstResponseTelemetry();
       stopAuthFailureTelemetry();
+      stopPlanLimitTelemetry();
       stopTokenTelemetry();
       stopTitleRecheck();
       stopThreadPurpose();

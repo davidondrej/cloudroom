@@ -545,6 +545,10 @@ impl IntoResponse for session::Error {
         let (status, error) = match self {
             Self::NotFound => (StatusCode::NOT_FOUND, "session not found"),
             Self::Conflict(message) => (StatusCode::CONFLICT, message),
+            Self::Refused(message) => {
+                let body = json!({"error": message, "code": "request_rejected"});
+                return (StatusCode::CONFLICT, Json(body)).into_response();
+            }
             Self::Effort(_) => {
                 let body = json!({"error": self.message(), "code": "invalid_reasoning_effort"});
                 return (StatusCode::CONFLICT, Json(body)).into_response();
@@ -618,6 +622,14 @@ impl IntoResponse for session::Error {
 
 type Result<T> = std::result::Result<T, session::Error>;
 
+/// `then` is sent once compaction ends (`compact_after_turn`).
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Compact {
+    request_id: String,
+    #[serde(default)]
+    then: Option<String>,
+}
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RequestId {
@@ -825,7 +837,16 @@ async fn stop(
             ));
         }
     }
-    let receipt = manager.command(&id, body.request_id, "stop", json!({}))?;
+    let receipt = manager.command(&id, body.request_id.clone(), "stop", json!({}))?;
+    if manager.stop_frees(&id) {
+        let base = &body.request_id[..body.request_id.len().min(59)];
+        let _ = manager.command(
+            &id,
+            format!("{base}_free"),
+            "sleep",
+            json!({"end_jobs":true}),
+        );
+    }
     Ok(accepted(&manager, &id, receipt))
 }
 
@@ -1414,10 +1435,19 @@ async fn goal(
 async fn compact(
     State(manager): State<Arc<Manager>>,
     Path(id): Path<String>,
-    Json(body): Json<RequestId>,
+    Json(body): Json<Compact>,
 ) -> Result<impl IntoResponse> {
     key(&body.request_id)?;
-    let receipt = manager.command(&id, body.request_id, "compact", json!({}))?;
+    if body
+        .then
+        .as_ref()
+        .is_some_and(|text| text.len() > session::MAX_PROMPT)
+    {
+        return Err(session::Error::Conflict(
+            "then must be at most 262144 bytes",
+        ));
+    }
+    let receipt = manager.compact_then(&id, body.request_id, body.then.as_deref())?;
     Ok(accepted(&manager, &id, receipt))
 }
 

@@ -485,6 +485,14 @@ export function useStopThread() {
   });
 }
 
+/** Compacts now, or right after the turn a busy agent is on. */
+export function useCompactThread() {
+  return useMutation({
+    meta: { errorMessage: "Failed to compact the thread." },
+    mutationFn: (threadId: string) => sdk.threads.compact({ threadId }),
+  });
+}
+
 export function useCancelThreadPlan() {
   const queryClient = useQueryClient();
 

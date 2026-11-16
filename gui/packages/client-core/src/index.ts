@@ -17,6 +17,7 @@ export * from "./sidebar/neighbor-reorder.js";
 
 export * from "./prompt/create-resource-prompts.js";
 export * from "./prompt/automation-prompt.js";
+export * from "./prompt/fresh-thread-request.js";
 export * from "./prompt/prompt-draft.js";
 export * from "./prompt/follow-up-submit-mode.js";
 export * from "./prompt/threadDetailPromptSubmission.js";

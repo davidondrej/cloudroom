@@ -45,6 +45,7 @@ import {
 } from "./overview-view";
 import { PERSONAL_PROJECT_ID } from "./lib/format-schedule";
 import { loopsChanged, PausedLoopsLabel } from "./paused-notice";
+import { ScanCard } from "./scan-card";
 import { failurePause } from "./lib/paused.js";
 import type { LoopTemplate } from "./templates";
 import type {
@@ -721,6 +722,16 @@ function localLoop(automation: AutomationResponse): LoopDialogLoop {
           ...(execution.serviceTier ? { serviceTier: execution.serviceTier } : {}),
         }
       : null,
+    ...(agent && execution.agents
+      ? {
+          agents: execution.agents.map((each) => ({
+            providerId: each.providerId,
+            model: each.model,
+            reasoningLevel: each.reasoningLevel ?? "medium",
+            ...(each.serviceTier ? { serviceTier: each.serviceTier } : {}),
+          })),
+        }
+      : {}),
     agentEditable: true,
     ...(agent
       ? { agentRouting: providerModelRouting(execution.environment) }
@@ -790,6 +801,15 @@ function LocalLoopDialog({
       agent.reasoningLevel = changes.agent.reasoningLevel;
       agent.serviceTier = changes.agent.serviceTier ?? null;
     }
+    if (changes.agents !== undefined)
+      agent.agents = changes.agents.map((each) => ({
+        providerId: each.providerId,
+        model: each.model,
+        ...(each.reasoningLevel ? { reasoningLevel: each.reasoningLevel } : {}),
+        ...(each.serviceTier && each.serviceTier !== "default"
+          ? { serviceTier: each.serviceTier }
+          : {}),
+      }));
     try {
       await rpc.call("automations_update", {
         ...route,
@@ -1014,4 +1034,5 @@ export default definePluginApp((app) => {
     component: AutomationsPanel,
     experimental_sidebarLabel: PausedLoopsLabel,
   });
+  app.slots.experimental_appOverlay({ id: "scan-card", component: ScanCard });
 });

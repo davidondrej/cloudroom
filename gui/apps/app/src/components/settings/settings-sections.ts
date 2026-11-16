@@ -134,7 +134,7 @@ export const SETTINGS_NAV_GROUPS: readonly SettingsNavGroup[] = [
     icon: "Cloud",
     id: "cloud",
     label: "Cloud",
-    members: [section("cloud-environment"), section("auto-delete")],
+    members: [section("cloud-environment"), plugin("repo-sync", "RepoSync"), section("auto-delete")],
   },
   {
     icon: "Laptop",

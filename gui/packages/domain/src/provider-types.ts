@@ -46,6 +46,8 @@ const providerCapabilitiesSchema = z.object({
   supportsNativeUserQuestion: z.boolean(),
   supportsFork: z.boolean(),
   supportsSessionRewind: z.boolean(),
+  /** Local only: the agent takes a manual `/compact`. Cloud asks Core. */
+  supportsManualCompaction: z.boolean().optional(),
   permissionModes: z.array(permissionModeSchema).min(1),
   modelCatalogScope: providerModelCatalogScopeSchema,
 });

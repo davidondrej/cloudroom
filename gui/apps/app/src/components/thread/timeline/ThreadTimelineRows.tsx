@@ -1605,6 +1605,8 @@ function TimelineRowView({
   if (row.id === latestPlanLimitRowId) {
     return (
       <PlanLimitRow
+        rowId={row.id}
+        rowAt={row.createdAt}
         threadId={row.threadId}
         switched={planLimitSwitch}
         className={timelineRowHorizontalPaddingClassName(horizontalPadding)}

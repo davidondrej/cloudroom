@@ -1,5 +1,8 @@
 import { z } from "zod";
-import type { PluginProviderReasoningLevel } from "@get-bb/plugin-sdk";
+import type {
+  PluginProviderCapabilities,
+  PluginProviderReasoningLevel,
+} from "@get-bb/plugin-sdk";
 import { experimental_acpLaunchSpecSchema } from "@get-bb/plugin-sdk/provider-bridge/acp";
 import type { AcpLaunchSpec } from "@get-bb/plugin-sdk/provider-bridge/acp";
 import type { AcpNativeRootsResolver } from "./native-roots/resolver.js";
@@ -28,6 +31,8 @@ export interface AcpAgentDefinition {
   supportsManualCompaction?: boolean;
   fork?: "none" | "tip";
   reasoningLevels?: readonly PluginProviderReasoningLevel[];
+  /** Only the modes the agent itself enforces. Omitted = Manual and Full access. */
+  permissionModes?: PluginProviderCapabilities["permissionModes"];
   providerUsage?: boolean;
   providerInstallation?: boolean;
   installer?:
@@ -100,6 +105,9 @@ export function customAcpAgentDefinition(
     ...(shipped?.nativeRootsResolver === undefined
       ? {}
       : { nativeRootsResolver: shipped.nativeRootsResolver }),
+    ...(shipped?.permissionModes === undefined
+      ? {}
+      : { permissionModes: shipped.permissionModes }),
     visibility: "always",
     fork: "none",
     supportsManualCompaction: agent.supportsManualCompaction,

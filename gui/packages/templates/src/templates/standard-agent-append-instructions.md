@@ -88,6 +88,8 @@ You are working inside Cloudroom, an IDE for managing coding agents in projects,
 - Run the full suite once, at the end.
 - Background jobs keep the sandbox awake for 2 hours, then stop.
 - Make long jobs resumable.
+- Start long-running servers (dev servers, APIs) with `tty: true` or detached: `setsid nohup <cmd> > /tmp/<name>.log 2>&1 < /dev/null &`.
+- Otherwise Codex can stop them with exit code 143 (openai/codex#46702).
 - Before you finish, stop servers, watchers, and tabs nobody needs.
 - Warn the user before long training runs or renders.
 - There is no GPU.

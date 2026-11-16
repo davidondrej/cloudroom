@@ -171,6 +171,7 @@ const WORKSPACE_CHROME_HEIGHT = 29;
 const WORKSPACE_ROW_HEIGHT = 40;
 const TYPEAHEAD_MENU_GAP = 8;
 const SURFACE_DRAG_THRESHOLD = 72;
+const FOLLOW_NEWEST_SCROLL_MS = 520;
 type QueueSurfaceMode = "collapsed" | "drawer" | "workspace";
 
 function getDrawerHeight({
@@ -1388,6 +1389,37 @@ export function QueuedMessagesList({
       cancelled = true;
     };
   }, [inlineEditorActive, queuedMessages.length]);
+
+  // The drawer shows only the first rows, so glide to each new message at the
+  // bottom. Waits for a collapsed queue to open first.
+  const followNewestRef = useRef(false);
+  const followCountRef = useRef(queuedMessages.length);
+  useEffect(() => {
+    if (queuedMessages.length > followCountRef.current) {
+      followNewestRef.current = !inlineEditorActive;
+    }
+    followCountRef.current = queuedMessages.length;
+    const scroll = scrollRef.current;
+    if (!followNewestRef.current || mode === "collapsed" || !scroll) return;
+    followNewestRef.current = false;
+    const reduceMotion = window.matchMedia?.(
+      "(prefers-reduced-motion: reduce)",
+    ).matches;
+    const from = scroll.scrollTop;
+    let start: number | null = null;
+    let frame = 0;
+    const step = (now: number) => {
+      start ??= now;
+      const t = reduceMotion
+        ? 1
+        : Math.min(1, (now - start) / FOLLOW_NEWEST_SCROLL_MS);
+      const to = scroll.scrollHeight - scroll.clientHeight;
+      scroll.scrollTop = from + (to - from) * (1 - (1 - t) ** 4);
+      if (t < 1) frame = requestAnimationFrame(step);
+    };
+    frame = requestAnimationFrame(step);
+    return () => cancelAnimationFrame(frame);
+  }, [inlineEditorActive, mode, queuedMessages.length, scrollRef]);
 
   const openWorkspace = useCallback(() => {
     setMode("workspace");

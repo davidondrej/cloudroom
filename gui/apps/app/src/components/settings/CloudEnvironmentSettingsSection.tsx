@@ -16,6 +16,9 @@ import { openUrlInExternalBrowser } from "@/lib/url-open-routing";
 import { formatRelativeTime } from "@/lib/relative-time";
 import { MAC_MCP_KEY, useMcpSignIn } from "@/components/CloudMcpSignIn";
 import { useThisComputer } from "@/hooks/useHostDaemon";
+import { usePluginList } from "@/hooks/queries/plugin-settings-queries";
+import { getPluginConfigurationRoutePath, getPluginDetailRoutePath } from "@/lib/route-paths";
+import { Link } from "react-router-dom";
 
 const ENVIRONMENT_KEY = ["cloudroom-environment"];
 const SKILLS_KEY = ["cloudroom-cloud-skills"];
@@ -63,7 +66,7 @@ export function CloudEnvironmentSettingsSection() {
       ) : (
         <>
           <CopyLoginsCard />
-          <GithubCard />
+          <GithubCard synced={data.repoSync.filter((row) => row.on).length} />
           <SkillsCard />
           <McpCard inCloud={data.mcp} onSaved={saved} />
           <VariablesCard environment={data} busy={update.isPending} onChange={(change) => update.mutateAsync(change)} onImported={saved} />
@@ -116,8 +119,9 @@ function CopyLoginsCard() {
   );
 }
 
-/** The GitHub account cloud agents clone and push as. Separate from how the user signs in to Cloudroom. */
-function GithubCard() {
+/** The GitHub account cloud agents clone and push as. Separate from how the user signs in to Cloudroom. `synced` counts
+ *  RepoSync's repos that are on: they keep syncing with the plugin off, so this card always says so. */
+function GithubCard({ synced }: { synced: number }) {
   const queryClient = useQueryClient();
   const requestId = useRef<string | null>(null);
   const status = useQuery({
@@ -189,7 +193,22 @@ function GithubCard() {
         )}
         {problem && <p role="alert" className="text-xs text-destructive-text">{problem}</p>}
       </div>
+      <RepoSyncLine synced={synced} />
     </Card>
+  );
+}
+
+/** Where RepoSync is found: its tab when the plugin is on, else its plugin page to turn it on (docs/scopes/repo-sync.md). */
+function RepoSyncLine({ synced }: { synced: number }) {
+  const plugins = usePluginList({ enabled: true });
+  const on = plugins.data?.plugins.some((plugin) => plugin.id === "repo-sync" && plugin.enabled) ?? false;
+  return (
+    <div className="flex items-center justify-between gap-3 border-t border-border bg-surface-recessed/40 px-4 py-2 text-xs text-subtle-foreground">
+      <span>{synced ? <><span className="text-foreground">RepoSync</span> pushes {synced} {synced === 1 ? "repo" : "repos"} to GitHub automatically</> : "Push cloud work to GitHub automatically with RepoSync"}</span>
+      <Link to={on ? getPluginConfigurationRoutePath({ pluginId: "repo-sync" }) : getPluginDetailRoutePath({ pluginId: "repo-sync" })} className="shrink-0 text-foreground underline-offset-2 hover:underline">
+        {on ? "Open RepoSync" : "Turn on"}
+      </Link>
+    </div>
   );
 }
 

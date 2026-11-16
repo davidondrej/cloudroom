@@ -29,8 +29,9 @@ room-cli thread update --self [--title TITLE] [--reasoning-level LEVEL]
 room-cli thread archive --self
 room-cli thread move --self --project PROJECT
 room-cli thread stop --self
-room-cli thread spawn --provider codex|claude-code|cursor|pi|opencode|hermes|devin|droid|kimi|fx|openclaw [--model MODEL] [--reasoning-level LEVEL] [--service-tier default|fast] [--title TITLE] [--shared-sandbox|--top-level] --prompt TEXT|--prompt-file PATH
-room-cli thread fork [--provider codex|claude-code|cursor|pi|opencode|hermes|devin|droid|kimi|fx|openclaw] [--model MODEL] [--reasoning-level LEVEL] [--title TITLE] --prompt TEXT|--prompt-file PATH
+room-cli thread compact --self|CHILD_ID [--then TEXT|--no-then]
+room-cli thread spawn --provider codex|claude-code|cursor|pi|opencode|hermes|devin|droid|kimi|fx|openclaw|agent-zero [--model MODEL] [--reasoning-level LEVEL] [--service-tier default|fast] [--title TITLE] [--shared-sandbox|--top-level] --prompt TEXT|--prompt-file PATH
+room-cli thread fork [--provider codex|claude-code|cursor|pi|opencode|hermes|devin|droid|kimi|fx|openclaw|agent-zero] [--model MODEL] [--reasoning-level LEVEL] [--title TITLE] --prompt TEXT|--prompt-file PATH
 room-cli thread list [--include-archived]
 room-cli thread wait --children
 room-cli thread output CHILD_ID [--all]
@@ -39,9 +40,9 @@ room-cli thread tell THREAD_ID|--parent [--mode queue|steer|auto] TEXT|--message
 room-cli thread stop CHILD_ID
 room-cli thread archive CHILD_ID...
 Flags go in any order.";
-const ABOUT: &str = "Shows, renames, archives, moves or changes the effort of this cloud thread, or starts, checks, stops and archives its child threads. --top-level starts a top-level thread instead of a child, only when the user asks for one.";
+const ABOUT: &str = "Shows, renames, archives, moves, compacts or changes the effort of this cloud thread, or starts, checks, compacts, stops and archives its child threads. `compact` waits for a running turn to end, then sends the --then message (by default, keep going). --top-level starts a top-level thread instead of a child, only when the user asks for one.";
 /// `room-cli thread` commands only the app on the user's computer has.
-const LOCAL_ONLY: [&str; 28] = [
+const LOCAL_ONLY: [&str; 27] = [
     "count",
     "context",
     "open",
@@ -60,7 +61,6 @@ const LOCAL_ONLY: [&str; 28] = [
     "delete",
     "edit-message",
     "retry",
-    "compact",
     "clear",
     "cancel-plan",
     "clear-goal",
@@ -71,6 +71,8 @@ const LOCAL_ONLY: [&str; 28] = [
     "interactions",
     "worktree",
 ];
+/// `thread compact`'s follow-up unless `--then` or `--no-then`. The Local CLI sends the same.
+const COMPACT_THEN: &str = "Keep going with your task. If it's done, say what we should do next.";
 const SPAWN_NOTE: &str = "Started in this sandbox and folder. Keep working: Cloudroom sends you a message each time it finishes a turn.";
 const OWN_NOTE: &str = "Started in its own sandbox with a copy of your code (commits and uncommitted changes, without gitignored files or dependencies; nested Git repos arrive empty or without history), on its own branch. It doesn't see your later edits; share work through Git. Use this ID with tell, stop and archive. Keep working: Cloudroom sends you a message each time it finishes a turn.";
 /// What `thread tell` answers once its message is steered, unconfirmed or queued: for a subagent, which reports back,
@@ -208,6 +210,14 @@ pub struct Effort {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct Compact {
+    /// The message sent once compaction ends; none with `--no-then`.
+    #[serde(default)]
+    then: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Tell {
     text: String,
     /// `--mode queue`: wait for a running turn to end instead of joining it.
@@ -237,6 +247,8 @@ pub(crate) fn agent_routes() -> Router<Arc<Manager>> {
         .route("/children/{id}/messages", post(tell))
         .route("/children/{id}/stop", post(stop_child))
         .route("/children/{id}/archive", post(archive_child))
+        .route("/compact", post(compact_self))
+        .route("/children/{id}/compact", post(compact_child))
         .merge(super::info::agent_routes())
 }
 
@@ -392,7 +404,9 @@ pub(super) fn retire(m: &Arc<Manager>, id: &str) -> Result<(), Failure> {
 pub(super) fn session_failure(error: super::Error) -> Failure {
     let status = match error {
         super::Error::NotFound => StatusCode::NOT_FOUND,
-        super::Error::Conflict(_) | super::Error::Effort(_) => StatusCode::CONFLICT,
+        super::Error::Conflict(_) | super::Error::Refused(_) | super::Error::Effort(_) => {
+            StatusCode::CONFLICT
+        }
         super::Error::Storage(_) => StatusCode::SERVICE_UNAVAILABLE,
     };
     fail(status, &error.message())
@@ -666,7 +680,7 @@ fn check_start(
     provider
         .map(|p| {
             crate::runtime::Kind::named(p).ok_or_else(|| {
-                bad("Use --provider codex, claude-code, cursor, pi, opencode, hermes, devin, droid, kimi, fx or openclaw")
+                bad("Use --provider codex, claude-code, cursor, pi, opencode, hermes, devin, droid, kimi, fx, openclaw or agent-zero")
             })
         })
         .transpose()
@@ -1178,6 +1192,61 @@ async fn archive_child(
     )
 }
 
+/// `room-cli thread compact --self`: compacts this thread once its turn ends, then sends `then`.
+async fn compact_self(
+    State(m): State<Arc<Manager>>,
+    ConnectInfo(peer): ConnectInfo<Peer>,
+    Json(input): Json<Compact>,
+) -> Result<Json<Value>, Failure> {
+    let session = caller(&m, peer, "thread compact")?;
+    compact(&m, &session, input.then.as_deref())
+}
+
+/// `room-cli thread compact CHILD_ID`: a child in its own sandbox goes through the website, like `thread stop`.
+async fn compact_child(
+    State(m): State<Arc<Manager>>,
+    ConnectInfo(peer): ConnectInfo<Peer>,
+    Path(id): Path<String>,
+    Json(input): Json<Compact>,
+) -> Result<Json<Value>, Failure> {
+    let parent = caller(&m, peer, "thread compact")?;
+    if relay::thread_id(&id) {
+        return relay::compact(&m, &parent, &id, input.then.as_deref()).await;
+    }
+    m.own_child(&parent, &id).map_err(session_failure)?;
+    compact(&m, &id, input.then.as_deref())
+}
+
+fn compact(m: &Arc<Manager>, id: &str, then: Option<&str>) -> Result<Json<Value>, Failure> {
+    if then.is_some_and(|text| text.len() > super::MAX_PROMPT) {
+        return Err(fail(
+            StatusCode::CONFLICT,
+            "Use a --then message of up to 262144 bytes",
+        ));
+    }
+    let request =
+        random_key().map_err(|e| fail(StatusCode::SERVICE_UNAVAILABLE, &e.to_string()))?;
+    let receipt = m.compact_then(id, request, then).map_err(session_failure)?;
+    Ok(Json(
+        json!({"id":id,"state":receipt.state,"note":compact_note(&receipt)}),
+    ))
+}
+
+/// What `thread compact` tells the agent, here and through the relay.
+pub(super) fn compact_note(receipt: &super::Receipt) -> String {
+    let when = if receipt.input["waiting"] == true {
+        "Compacts once the agent is free (its running turn ends, or it wakes). If this is your own thread, end your turn now."
+    } else {
+        "Compacting now."
+    };
+    let then = if receipt.input["then"].is_string() {
+        " Then it gets the --then message, saying whether compaction worked."
+    } else {
+        ""
+    };
+    format!("{when}{then}")
+}
+
 /// Flag value after `name`, for `room-cli thread spawn`.
 fn flag<'a>(words: &[&'a str], name: &str) -> Option<&'a str> {
     words
@@ -1218,8 +1287,9 @@ const FORK_VALUES: [&str; 8] = [
 /// A flag that needs a value and has none, or has another option right after it: `--title --self`.
 fn missing_value<'a>(words: &[&'a str]) -> Option<&'a str> {
     let option = |word: &str| word.starts_with("--") && !word.contains(' ');
-    let takes_value =
-        |word: &str| SPAWN_VALUES.contains(&word) || matches!(word, "--message-file" | "--mode");
+    let takes_value = |word: &str| {
+        SPAWN_VALUES.contains(&word) || matches!(word, "--message-file" | "--mode" | "--then")
+    };
     (0..words.len())
         .find(|&i| takes_value(words[i]) && words.get(i + 1).is_none_or(|next| option(next)))
         .map(|i| words[i])
@@ -1659,6 +1729,23 @@ pub async fn cli(args: &[String]) -> io::Result<i32> {
             }
             _ => return usage(),
         },
+        "compact" => {
+            let ids = match own(&["--then"], &["--self", "--no-then"]) {
+                Ok(ids) => ids,
+                Err(code) => return Ok(code),
+            };
+            let then = match (flag(rest, "--then"), rest.contains(&"--no-then")) {
+                (Some(_), true) => return usage(),
+                (then, false) => Some(then.unwrap_or(COMPACT_THEN)),
+                (None, true) => None,
+            };
+            let path = match (rest.contains(&"--self"), ids.as_slice()) {
+                (true, []) => "/compact".to_owned(),
+                (false, [id]) => format!("/children/{id}/compact"),
+                _ => return usage(),
+            };
+            call("POST", &path, Some(json!({"then":then}))).await?
+        }
         "stop" => match (rest.contains(&"--self"), own(&[], &["--self"])) {
             (_, Err(code)) => return Ok(code),
             (true, Ok(ids)) if ids.is_empty() => {

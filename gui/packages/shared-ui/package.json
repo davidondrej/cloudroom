@@ -244,6 +244,11 @@
       "types": "./src/lib/utils.ts",
       "default": "./src/lib/utils.ts"
     },
+    "./lib/corner": {
+      "source": "./src/lib/corner.ts",
+      "types": "./src/lib/corner.ts",
+      "default": "./src/lib/corner.ts"
+    },
     "./lib/privacy-mode": {
       "source": "./src/lib/privacy-mode.ts",
       "types": "./src/lib/privacy-mode.ts",

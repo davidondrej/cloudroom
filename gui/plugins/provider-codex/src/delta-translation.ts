@@ -80,6 +80,8 @@ interface CodexShownTerminalError {
 
 interface CodexEventTranslationState {
   rateLimitsByLimitId: Map<string, CodexRateLimitSnapshot>;
+  /** Codex sent account/rateLimits/updated; a later startup read is stale. */
+  codexSentRateLimits: boolean;
   injectedToolsByName: Map<string, CodexInjectedTool>;
   retryErrorsByTurnKey: Map<string, CodexRetryErrorContext>;
   lastTerminalErrorByThreadId: Map<string, CodexShownTerminalError>;
@@ -89,6 +91,7 @@ interface CodexEventTranslationState {
 export function createCodexEventTranslationState(): CodexEventTranslationState {
   return {
     rateLimitsByLimitId: new Map(),
+    codexSentRateLimits: false,
     injectedToolsByName: new Map(),
     retryErrorsByTurnKey: new Map(),
     lastTerminalErrorByThreadId: new Map(),
@@ -286,6 +289,25 @@ type CodexRateLimitCandidate = {
   nonResettableBlock: boolean;
   rateLimits: ProviderRateLimitState;
 };
+
+/** The usual rate-limit event for the current state, worst bucket first. */
+export function codexRateLimitsDelta(
+  state: CodexEventTranslationState,
+): ThreadDelta[] {
+  let worst: ProviderRateLimitState | undefined;
+  for (const limitId of state.rateLimitsByLimitId.keys()) {
+    const rateLimits = normalizeCodexRateLimits(state, limitId);
+    if (
+      worst === undefined ||
+      rateLimitStatusRank(rateLimits.status) > rateLimitStatusRank(worst.status)
+    ) {
+      worst = rateLimits;
+    }
+  }
+  return worst === undefined
+    ? []
+    : [{ kind: "provider.rateLimits", rateLimits: worst }];
+}
 
 function normalizeCodexRateLimits(
   state: CodexEventTranslationState,
@@ -1311,6 +1333,7 @@ export function translateCodexEventToDeltas(
   const handledEvent: CodexHandledEvent = parsed.data;
   switch (handledEvent.method) {
     case "account/rateLimits/updated": {
+      state.codexSentRateLimits = true;
       const rateLimits = applyCodexRateLimitUpdate(
         state,
         handledEvent.params.rateLimits,

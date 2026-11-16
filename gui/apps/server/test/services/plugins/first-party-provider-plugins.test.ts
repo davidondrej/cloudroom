@@ -201,6 +201,32 @@ const FIRST_PARTY_PROVIDER_DECLARATIONS = [
     visibility: "installed",
     hasLogo: true,
   },
+  {
+    builtinName: "provider-acp",
+    pluginId: "provider-acp",
+    providerId: "acp-antigravity",
+    displayName: "Antigravity",
+    supportsThreadArchive: false,
+    supportsThreadRename: false,
+    fork: "tip",
+    supportsManualCompaction: false,
+    supportsUsage: false,
+    visibility: "installed",
+    hasLogo: true,
+  },
+  {
+    builtinName: "provider-acp",
+    pluginId: "provider-acp",
+    providerId: "acp-agent-zero",
+    displayName: "Agent Zero",
+    supportsThreadArchive: false,
+    supportsThreadRename: false,
+    fork: "none",
+    supportsManualCompaction: false,
+    supportsUsage: false,
+    visibility: "installed",
+    hasLogo: true,
+  },
 ] as const;
 
 const PROVIDER_IDS = FIRST_PARTY_PROVIDER_DECLARATIONS.map(
@@ -357,6 +383,7 @@ describe("first-party provider plugins", () => {
             permissionModes: ["accept-edits", "auto", "full"],
             supportsFork: true,
             supportsSessionRewind: true,
+            supportsManualCompaction: true,
             modelCatalogScope: "host",
           },
           composerActions: [skills, plan, goal],
@@ -378,6 +405,7 @@ describe("first-party provider plugins", () => {
             permissionModes: ["accept-edits", "auto", "full"],
             supportsFork: true,
             supportsSessionRewind: true,
+            supportsManualCompaction: true,
             modelCatalogScope: "host",
           },
           composerActions: [skills, plan],
@@ -396,6 +424,7 @@ describe("first-party provider plugins", () => {
             permissionModes: ["full"],
             supportsFork: true,
             supportsSessionRewind: true,
+            supportsManualCompaction: true,
             modelCatalogScope: "workspace",
           },
           composerActions: [skills],
@@ -414,6 +443,7 @@ describe("first-party provider plugins", () => {
             permissionModes: ["accept-edits", "full"],
             supportsFork: false,
             supportsSessionRewind: false,
+            supportsManualCompaction: false,
             modelCatalogScope: "host",
           },
           composerActions: [skills],
@@ -472,6 +502,8 @@ describe("first-party provider plugins", () => {
           "acp-kilo",
           "acp-cline",
           "acp-kimi",
+          "acp-antigravity",
+          "acp-agent-zero",
         ]);
         const infos = await listSystemProviderInfos(harness.deps, {});
         expect(infos.find((info) => info.id === "pi")).toBeUndefined();

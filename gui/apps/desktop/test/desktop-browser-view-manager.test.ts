@@ -637,6 +637,7 @@ const electronMock = vi.hoisted(() => {
 
   class FakeWebContentsView {
     public readonly boundsCalls: RoomDesktopBrowserViewBounds[] = [];
+    public readonly visibleCalls: boolean[] = [];
     public readonly webContents: FakeWebContents;
     public visible = false;
 
@@ -652,7 +653,23 @@ const electronMock = vi.hoisted(() => {
     }
 
     setVisible(visible: boolean): void {
+      this.visibleCalls.push(visible);
       this.visible = visible;
+    }
+  }
+
+  const baseWindows: FakeBaseWindow[] = [];
+  class FakeBaseWindow {
+    public readonly added: FakeWebContentsView[] = [];
+    public readonly contentView = {
+      addChildView: (view: FakeWebContentsView) => this.added.push(view),
+    };
+    public destroyed = false;
+    constructor(public readonly options: unknown) {
+      baseWindows.push(this);
+    }
+    destroy(): void {
+      this.destroyed = true;
     }
   }
 
@@ -733,6 +750,8 @@ const electronMock = vi.hoisted(() => {
   const fakeWindows: FakeBrowserWindow[] = [];
 
   return {
+    baseWindows,
+    FakeBaseWindow,
     fakeCapturedImage,
     fakeSessions,
     fakeViews,
@@ -765,6 +784,7 @@ const electronMock = vi.hoisted(() => {
 });
 
 vi.mock("electron", () => ({
+  BaseWindow: electronMock.FakeBaseWindow,
   BrowserWindow: electronMock.FakeBrowserWindow,
   WebContentsView: electronMock.FakeWebContentsView,
   session: electronMock.session,
@@ -834,6 +854,7 @@ beforeEach(() => {
   electronMock.fakeSessions.length = 0;
   electronMock.fakeViews.length = 0;
   electronMock.fakeWindows.length = 0;
+  electronMock.baseWindows.length = 0;
 });
 
 async function settlePendingCaptures(
@@ -904,6 +925,8 @@ function requireFakeView(
 function createRendererRecoveryFixture(
   webContentsId: number,
   threadId = "thread-1",
+  // Agents can only lease automation tabs; personal tabs are user-attached.
+  profile: "personal" | "automation" = "personal",
 ) {
   const manager = createDesktopBrowserViewManager({
     partition: "persist:test",
@@ -912,13 +935,19 @@ function createRendererRecoveryFixture(
     contentBounds: { width: 700, height: 450 },
     webContentsId,
   });
-  attachBrowserTab({
-    manager,
-    hostWindow,
+  const tab = {
     threadId,
     tabId: "browser:a",
     url: "https://example.com/original",
-  });
+  };
+  if (profile === "automation")
+    manager.createTab({
+      hostWindow,
+      ...tab,
+      profile: { kind: "automation", id: "agent" },
+      viewport: { width: 500, height: 350 },
+    });
+  else attachBrowserTab({ manager, hostWindow, ...tab });
   return { manager, hostWindow, view: requireFakeView(0) };
 }
 
@@ -1427,6 +1456,7 @@ describe("DesktopBrowserViewManager", () => {
       const { manager, hostWindow } = createRendererRecoveryFixture(
         91,
         threadId,
+        "automation",
       );
       const broker = createDesktopBrowserBroker({
         manager,
@@ -1720,7 +1750,11 @@ describe("DesktopBrowserViewManager", () => {
   });
 
   it("revokes native debugger control synchronously on takeover and fences reconnect generations", async () => {
-    const { manager, hostWindow, view } = createRendererRecoveryFixture(91);
+    const { manager, hostWindow, view } = createRendererRecoveryFixture(
+      91,
+      "thread-1",
+      "automation",
+    );
     const broker = createDesktopBrowserBroker({
       manager,
       product: "Chrome/test",
@@ -1994,6 +2028,63 @@ describe("DesktopBrowserViewManager", () => {
     await settlePendingCaptures(view);
     await rejected;
   });
+
+  it.each([
+    { platform: "win32", minimized: true, visible: true, staged: true },
+    { platform: "win32", minimized: false, visible: false, staged: false },
+    { platform: "win32", minimized: false, visible: true, staged: false },
+    { platform: "darwin", minimized: true, visible: false, staged: false },
+  ])(
+    "shows a tab created in a minimized window once in a never-shown window on Windows only (#1771): %o",
+    ({ platform, minimized, visible, staged }) => {
+      const realPlatform = Object.getOwnPropertyDescriptor(process, "platform");
+      Object.defineProperty(process, "platform", { value: platform });
+      try {
+        const manager = createDesktopBrowserViewManager();
+        const hostWindow = Object.assign(
+          new FakeHostWindow({
+            contentBounds: { width: 0, height: 0 },
+            webContentsId: 91,
+          }),
+          { isMinimized: () => minimized, isVisible: () => visible },
+        );
+        manager.createTab({
+          hostWindow,
+          tabId: "automation:a",
+          threadId: "thread-1",
+          url: "about:blank",
+          profile: { kind: "automation", id: "profile-1" },
+          viewport: { width: 640, height: 400 },
+        });
+        const view = requireFakeView(0);
+        expect(
+          electronMock.baseWindows.map((stage) => ({
+            options: stage.options,
+            added: stage.added,
+            destroyed: stage.destroyed,
+          })),
+        ).toEqual(
+          staged
+            ? [{ options: { show: false }, added: [view], destroyed: true }]
+            : [],
+        );
+        expect(view.visibleCalls.slice(0, 2)).toEqual(
+          staged ? [true, false] : [false],
+        );
+        expect(view.boundsCalls[0]).toEqual({
+          x: 0,
+          y: 0,
+          width: staged ? 640 : 0,
+          height: staged ? 400 : 0,
+        });
+        expect(hostWindow.contentView.addedViews).toEqual([view]);
+        expect(view.visible).toBe(false);
+      } finally {
+        if (realPlatform)
+          Object.defineProperty(process, "platform", realPlatform);
+      }
+    },
+  );
 
   it("initiates a new blank page load before announcing the automation target", () => {
     const manager = createDesktopBrowserViewManager();

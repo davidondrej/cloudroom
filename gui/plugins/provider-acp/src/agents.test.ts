@@ -266,6 +266,13 @@ describe("acpProviderDeclaration", () => {
     expect(byId.get("acp-cursor")?.capabilities.supportsManualCompaction).toBe(
       false,
     );
+    expect(byId.get("acp-opencode")?.capabilities.permissionModes).toEqual([
+      "full",
+    ]);
+    expect(byId.get("acp-cursor")?.capabilities.permissionModes).toEqual([
+      "accept-edits",
+      "full",
+    ]);
   });
 
   it("keeps each agent's own reasoning ladder and installed-only visibility", () => {

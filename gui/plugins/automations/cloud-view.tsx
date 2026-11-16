@@ -31,6 +31,8 @@ export type CloudAutomation = {
   prompt?: string;
   new_thread?: boolean;
   agent?: AutomationAgentSummary | null;
+  /** Two or more agents that take turns, in order; `agent` is the first. */
+  agents?: AutomationAgentSummary[];
   project_id?: string | null;
   /** P1-P4; missing until the website's 0094 update. */
   priority?: number;
@@ -43,6 +45,8 @@ export type CloudAutomationChanges = {
   harness?: string;
   model?: string;
   reasoning?: string;
+  /** Two or more agents that take turns, one per run. */
+  agents?: { harness: string; model: string; reasoning?: string }[];
   secrets?: string[];
 };
 export type CloudAutomationActions = {

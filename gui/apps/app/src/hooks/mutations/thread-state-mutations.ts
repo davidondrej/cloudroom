@@ -136,6 +136,8 @@ function threadUpdateKey(threadId: string | undefined) {
 
 interface ArchiveThreadAndChildrenMutationRequest {
   id: string;
+  /** Default true: running children are stopped and archived too. False keeps them open. */
+  includeLive?: boolean;
 }
 
 interface DeleteThreadMutationRequest {
@@ -402,12 +404,14 @@ export function useArchiveThreadAndChildren() {
     },
     mutationFn: ({
       id,
+      includeLive = true,
     }: ArchiveThreadAndChildrenMutationRequest): Promise<ThreadArchiveAllResponse> =>
-      sdk.threads.archiveAll({ threadId: id, includeLive: true }),
-    onMutate: async ({ id }): Promise<ArchiveThreadsTransaction> =>
+      sdk.threads.archiveAll({ threadId: id, includeLive }),
+    onMutate: async ({ id, includeLive }): Promise<ArchiveThreadsTransaction> =>
       beginArchiveThreadAndChildrenTransaction({
         queryClient,
         threadId: id,
+        includeLive,
       }),
     onError: (_error, _variables, context) => {
       rollbackArchiveThreadsTransaction({ queryClient, transaction: context });

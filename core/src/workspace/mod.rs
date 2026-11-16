@@ -1,4 +1,5 @@
 pub mod files;
+pub mod repo_sync;
 pub mod storage;
 
 use axum::body::Body;

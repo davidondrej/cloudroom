@@ -173,7 +173,7 @@ class Teleport {
   ) {
     const harness = harnessOf(providerId)!;
     const separator = execution.model.indexOf("/");
-    const result = await (
+    const check = async () => (
       await cloudroom(this.deps).teleportClient(threadId)
     ).checkTeleport({
       harness,
@@ -183,6 +183,11 @@ class Teleport {
           : execution.model,
       reasoning: execution.reasoning,
       service_tier: execution.serviceTier,
+    });
+    // The check changes nothing, so a sandbox found asleep at its saved address is woken and checked once more (#1840).
+    const result = await check().catch((error: unknown) => {
+      if (!cloudroom(this.deps).forgetTeleportSandbox(threadId, error)) throw error;
+      return check();
     });
     if (!result.ok)
       throw new ApiError(

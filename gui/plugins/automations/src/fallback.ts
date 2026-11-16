@@ -1,6 +1,6 @@
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import { MODEL_LEVELS } from "@cloudroom/domain";
-import type { AutomationRow } from "./data.js";
+import { listAutomationRuns, type AutomationRow, type Db } from "./data.js";
 import type {
   AutomationExecution,
   ReasoningLevel,
@@ -31,12 +31,24 @@ const OTHER_PROVIDER: Record<string, string> = {
 const CODEX_EFFORTS: ReasoningLevel[] = ["low", "medium", "high", "xhigh"];
 const USAGE_CACHE_MS = 60_000;
 const LIMIT_SUSPECT_MS = 10 * 60_000;
+const SETTING_CACHE_MS = 10 * 60_000;
 const CAN_RUN_TIMEOUT_MS = 5_000;
 const usageCache = new Map<
   string,
-  { at: number; windows: { usedPercent: number; model?: unknown }[] | null }
+  {
+    at: number;
+    windows:
+      | { usedPercent: number; resetsAt: string | null; model?: unknown }[]
+      | null;
+  }
 >();
+// A provider seen at its limit stays suspect until the full window resets, or 10 minutes when the reset is unknown (#1807).
 const limitedUntil = new Map<string, number>();
+// Loops whose last run switched: the next one checks usage again, so an unknown reset can't send it back early.
+const switched = new Set<string>();
+// The Switch setting is on the website: one read, shared while it runs, serves every loop on this Mac for 10 minutes,
+// so a change either way applies within 10 minutes.
+let setting: { at: number; on: Promise<boolean> } | null = null;
 
 async function safely<T>(
   call: () => Promise<T> | undefined,
@@ -83,14 +95,21 @@ async function atLimit(
     usageCache.set(providerId, { at: Date.now(), windows });
   }
   if (windows === null) return null;
-  const full = windows.some(
+  const full = windows.filter(
     (window) =>
       window.usedPercent >= 100 &&
       (typeof window.model !== "string" ||
         model.toLowerCase().includes(window.model)),
   );
-  if (full) limitedUntil.set(providerId, Date.now() + LIMIT_SUSPECT_MS);
-  return full;
+  if (full.length)
+    limitedUntil.set(
+      providerId,
+      Math.max(
+        Date.now() + LIMIT_SUSPECT_MS,
+        ...full.map((window) => Date.parse(window.resetsAt ?? "") || 0),
+      ),
+    );
+  return full.length > 0;
 }
 
 // Usage shows without a CLI (a Mac with only a Cloud login), so only a provider ready on the loop's host takes over.
@@ -120,18 +139,74 @@ async function canRun(
   );
 }
 
-async function fallbackOn(sdk: FallbackSdk): Promise<boolean> {
-  const settings = await safely(() =>
-    sdk.cloudroom?.automations({ action: "settings" }),
+function fallbackOn(sdk: FallbackSdk): Promise<boolean> {
+  if (setting && Date.now() - setting.at < SETTING_CACHE_MS) return setting.on;
+  const read = {
+    at: Date.now(),
+    on: safely(() => sdk.cloudroom?.automations({ action: "settings" })).then(
+      (settings) => {
+        // A failed read isn't kept, so the next run reads again.
+        if (!settings && setting === read) setting = null;
+        return settings?.fallback !== false;
+      },
+    ),
+  };
+  setting = read;
+  return read.on;
+}
+
+// run.ts skips a run its plan limit stopped (ADR 0344). The newest run is this one, still running.
+function limitSkipped(db: Db, automationId: string): boolean {
+  return (
+    listAutomationRuns(db, { automationId, limit: 2 })
+      .find((run) => run.status !== "running")
+      ?.skipReason?.startsWith("plan limit:") === true
   );
-  return settings?.fallback !== false;
+}
+
+/** A loop with several agents gives each run the next one (docs/scopes/loops.md), past any at its plan limit or not
+ *  ready where the loop runs, unless all are. The run count is read before this run counts (a manual run never does). */
+async function nextAgent(
+  sdk: FallbackSdk,
+  automation: AutomationRow,
+  execution: AgentExecution & { agents: LoopAgent[] },
+): Promise<LoopAgent> {
+  const { agents } = execution;
+  const turn = automation.runCount;
+  const order = agents.map((_, index) => agents[(turn + index) % agents.length]!);
+  for (const agent of order) {
+    if (
+      (await atLimit(sdk, agent.providerId, agent.model, false)) !== true &&
+      (await canRun(sdk, agent.providerId, execution.environment))
+    )
+      return agent;
+  }
+  return order[0]!;
 }
 
 export async function loopAgent(
   sdk: FallbackSdk,
+  db: Db,
   automation: AutomationRow,
   execution: AgentExecution,
 ): Promise<LoopAgent> {
+  // A plan-limit skip counts as a failed run here, or a limit that never fails a run would never switch (#1807).
+  const failed =
+    automation.lastRunStatus === "failed" ||
+    (automation.lastRunStatus === "skipped" && limitSkipped(db, automation.id));
+  // Agents that take turns skip to their next one instead of falling back. A failed last run's retries would redo its
+  // work on its own agent, so Stop cancels them first, as below; if it can't, this run stays on the last run's agent.
+  if (execution.agents && execution.agents.length > 1) {
+    const { agents } = execution;
+    if (
+      failed &&
+      automation.triggerType !== "webhook" &&
+      automation.lastRunThreadId &&
+      !(await stopLastRun(sdk, automation.lastRunThreadId))
+    )
+      return agents[(automation.runCount + agents.length - 1) % agents.length]!;
+    return nextAgent(sdk, automation, { ...execution, agents });
+  }
   const own: LoopAgent = {
     providerId: execution.providerId,
     model: execution.model,
@@ -140,9 +215,10 @@ export async function loopAgent(
       ? {}
       : { serviceTier: execution.serviceTier }),
   };
-  const failed = automation.lastRunStatus === "failed";
   const suspect =
-    failed || (limitedUntil.get(execution.providerId) ?? 0) > Date.now();
+    switched.delete(automation.id) ||
+    failed ||
+    (limitedUntil.get(execution.providerId) ?? 0) > Date.now();
   if (
     !OTHER_PROVIDER[execution.providerId] ||
     !suspect ||
@@ -150,19 +226,39 @@ export async function loopAgent(
   )
     return own;
   const other = sameLevelAgent(execution);
+  // Local checks first: the setting is read only when the other provider could take over.
   if (
     (await atLimit(sdk, other.providerId, other.model, false)) !== false ||
-    !(await fallbackOn(sdk)) ||
-    !(await canRun(sdk, other.providerId, execution.environment))
+    !(await canRun(sdk, other.providerId, execution.environment)) ||
+    !(await fallbackOn(sdk))
   )
     return own;
-  const lastThreadId = automation.lastRunThreadId;
-  const last =
-    failed && lastThreadId
-      ? await safely(() => sdk.threads.get?.({ threadId: lastThreadId }))
-      : null;
-  const lastStatus = (last as { status?: unknown } | null)?.status;
-  if (lastThreadId && (lastStatus === "error" || lastStatus === "idle"))
-    await safely(() => sdk.threads.stop?.({ threadId: lastThreadId }));
+  // A webhook run's retry carries its own events, which the website no longer has: it stays, as on Cloud loops.
+  if (
+    failed &&
+    automation.triggerType !== "webhook" &&
+    automation.lastRunThreadId &&
+    !(await stopLastRun(sdk, automation.lastRunThreadId))
+  )
+    return own;
+  switched.add(automation.id);
   return other;
+}
+
+// The last run's retries would redo its work on the limited provider. As after a failed run, Stop cancels them all,
+// claimed or not, and pauses what the user queued there (#1807). A busy thread may already run one: then, or with a
+// message mid-dispatch or a failed read or Stop, the loop leaves the thread and keeps its provider this run.
+async function stopLastRun(
+  sdk: FallbackSdk,
+  threadId: string,
+): Promise<boolean> {
+  const thread = (await safely(() => sdk.threads.get?.({ threadId }))) as {
+    status?: unknown;
+    dispatchingMessageCount?: unknown;
+  } | null;
+  return (
+    (thread?.status === "idle" || thread?.status === "error") &&
+    thread.dispatchingMessageCount === 0 &&
+    (await safely(() => sdk.threads.stop?.({ threadId }))) !== null
+  );
 }

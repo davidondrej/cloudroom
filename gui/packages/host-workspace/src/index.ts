@@ -1,8 +1,8 @@
 export { provisionWorkspace } from "./provision.js";
+export { coreGitTarget } from "./core-git.js";
 export type { HostWorkspace, ProvisionWorkspaceArgs } from "./provision.js";
 
-export type { PullRequestActionOptions } from "./workspace.js";
-export { formatShortstat, resolveWorkspaceFileStatusKind, resolveWorkspaceState } from "./workspace.js";
+export type { PullRequestActionOptions } from "./provision.js";
 export { withGitRefMutationLock } from "bb-environment-provider-host/process-local-lock";
 
 export {
@@ -17,8 +17,6 @@ export {
   getGitCommonDir,
   hasUncommittedChanges,
   listBranchRefsWithDefaults,
-  parseNameStatusSourceEntries,
-  parseNumstatEntriesZ,
   parsePorcelainEntries,
   readDefaultBranchRefs,
   readGitBlob,

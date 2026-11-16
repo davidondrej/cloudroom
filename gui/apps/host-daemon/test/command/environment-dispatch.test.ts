@@ -5,6 +5,7 @@ import { dispatchCommand } from "../../src/command-dispatch.js";
 import type { EventSinkInput } from "../../src/event-sink.js";
 import {
   cleanupTempDirs,
+  commitHooks,
   createFakeRuntime,
   createFakeWorkspace,
   createHarness,
@@ -59,10 +60,7 @@ describe("environment command dispatch", () => {
     const harness = createHarness({ workspacePath: "/tmp/provider-owned" });
     const sourcePath = await makeTempDir("bb-dispatch-provider-owned-");
     const markerPath = `${sourcePath}/setup-marker`;
-    await fs.writeFile(
-      `${sourcePath}/.bb-env-setup.sh`,
-      `printf '%s' \"$SETUP_VALUE\" > '${markerPath}'\n`,
-    );
+    await commitHooks(sourcePath, { setup: `printf '%s' \"$SETUP_VALUE\" > '${markerPath}'\n` });
     const emittedEvents: EventSinkInput[] = [];
 
     await dispatchCommand(
@@ -86,6 +84,7 @@ describe("environment command dispatch", () => {
       },
       makeDispatchOptions({
         runtimeManager: harness.manager,
+        dataDir: await makeTempDir("bb-dispatch-provider-owned-data-"),
         eventSink: {
           emit: (event) => emittedEvents.push(event),
           flush: async () => undefined,
@@ -109,10 +108,7 @@ describe("environment command dispatch", () => {
   it("fails attachment when the setup script fails", async () => {
     const harness = createHarness({ workspacePath: "/tmp/setup-failure" });
     const sourcePath = await makeTempDir("bb-dispatch-setup-failure-");
-    await fs.writeFile(
-      `${sourcePath}/.bb-env-setup.sh`,
-      "printf 'script diagnostic\\n'\nexit 7\n",
-    );
+    await commitHooks(sourcePath, { setup: "printf 'script diagnostic\\n'\nexit 7\n" });
 
     await expect(
       dispatchCommand(
@@ -124,7 +120,9 @@ describe("environment command dispatch", () => {
           path: sourcePath,
           setupScriptTimeoutMs: 10_000,
         },
-        harness.dispatchOptions(),
+        harness.dispatchOptions({
+          dataDir: await makeTempDir("bb-dispatch-setup-failure-data-"),
+        }),
       ),
     ).rejects.toThrow("failed with exit code 7");
     expect(harness.provisions).toEqual([]);
@@ -492,10 +490,7 @@ describe("environment command dispatch", () => {
 it("cancels setup with contributions even when another attach is waiting", async () => {
   const sourcePath = await makeTempDir("bb-setup-env-cancel-");
   const harness = createHarness({ workspacePath: sourcePath });
-  await fs.writeFile(
-    `${sourcePath}/.bb-env-setup.sh`,
-    'printf "%s" "$SETUP_VALUE" > started\nsleep 120\nprintf unsafe > after-cancel\n',
-  );
+  await commitHooks(sourcePath, { setup: 'printf "%s" "$SETUP_VALUE" > started\nsleep 120\nprintf unsafe > after-cancel\n' });
   const command = {
     type: "environment.attach" as const,
     contributedEnv: [
@@ -511,7 +506,9 @@ it("cancels setup with contributions even when another attach is waiting", async
     path: sourcePath,
     setupScriptTimeoutMs: 5000,
   };
-  const options = harness.dispatchOptions();
+  const options = harness.dispatchOptions({
+    dataDir: await makeTempDir("bb-setup-env-cancel-data-"),
+  });
   const first = dispatchCommand(command, options);
   const second = dispatchCommand(command, options);
   const settled = Promise.allSettled([first, second]);

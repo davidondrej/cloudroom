@@ -75,6 +75,7 @@ import {
   type GroupedPrompt,
   type PromptWithGroups,
 } from "./deferred-first-turn-context.js";
+import { takesInstructions } from "./custom-instructions.js";
 import { firstAgentTag } from "../system/first-agent.js";
 import { noteMessageSent } from "../system/first-response-telemetry.js";
 import type { TelemetryEvent } from "../system/telemetry.js";
@@ -554,10 +555,12 @@ async function sendThreadMessageWithoutContextClear(
     input,
     ...(inputGroups !== undefined ? { inputGroups } : {}),
   }));
+  const isCommand = !takesInstructions(input);
   const deferredFirstTurnContext = resolveDeferredFirstTurnContext(
     deps.db,
     thread,
     args.retryOf?.requestId,
+    isCommand,
   );
   ({ input, inputGroups } = prependDeferredFirstTurnContext(
     { input, ...(inputGroups !== undefined ? { inputGroups } : {}) },
@@ -570,6 +573,7 @@ async function sendThreadMessageWithoutContextClear(
     args.beforeAppendInTransaction?.({ tx, requestId });
     if (deferredFirstTurnContext) {
       requireDeferredFirstTurnContextCurrent(tx, {
+        command: isCommand,
         requestSequence: deferredFirstTurnContext.requestSequence,
         retryOfRequestId: args.retryOf?.requestId,
         thread,

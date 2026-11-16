@@ -47,6 +47,8 @@ const INSTALLED_ONLY_PROVIDER_IDS = [
   "acp-kilo",
   "acp-cline",
   "acp-kimi",
+  "acp-antigravity",
+  "acp-agent-zero",
 ] as const;
 
 function registerInstalledOnlyProviderFixtures(harness: TestAppHarness): void {

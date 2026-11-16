@@ -108,7 +108,7 @@ export function carriesCustomInstructions(input: readonly PromptInput[]): boolea
 }
 
 /** Commands and empty messages never reach the agent as a message, so they carry no instructions. */
-function takesInstructions(input: PromptInput[]): boolean {
+export function takesInstructions(input: PromptInput[]): boolean {
   return input.length > 0 &&
     !isStandaloneBuiltinCompactCommand(input) &&
     !isStandaloneBuiltinClearCommand(input) &&

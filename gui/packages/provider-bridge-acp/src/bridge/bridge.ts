@@ -1827,7 +1827,7 @@ async function startAgentSession(
       permissionMode: params.permissionMode,
       workspaceWriteRoots: params.workspaceWriteRoots,
     },
-    pendingInstructions: params.instructions,
+    pendingInstructions: [params.instructions, dialect.workspaceInstructions?.(params.cwd)].filter(Boolean).join("\n\n") || undefined,
     activePromptKind: null,
     compactionAgentMessage: "",
     queuedInputs: [],
@@ -2168,7 +2168,9 @@ async function stopSession(
   }
   settleInterruptedPrompt(session);
 
-  const exited = session.connection.kill(killOptions);
+  const exited = session.connection.kill(
+    session.dialect.stopEndsCommands ? { ...killOptions, descendants: true } : killOptions,
+  );
   removeSession(session);
   await Promise.all([exited, releaseCursorMcpApproval(session)]);
 }
@@ -2274,6 +2276,7 @@ function sessionSystemPrompt(
 
 function requestSteerCancel(session: AcpThreadSession): void {
   if (
+    session.dialect.steerWaits === true ||
     session.stopping ||
     session.cancelRequested ||
     !session.promptRequestPending ||
@@ -2382,6 +2385,8 @@ function runTurn(
           requestSteerCancel(session);
         }
         const result = await promptResult;
+        const lateText = session.dialect.lateTextMs;
+        if (lateText !== undefined) await new Promise((resolve) => setTimeout(resolve, lateText));
         stopReason = result.stopReason;
         for (
           let joined = session.joinedSteers.shift();

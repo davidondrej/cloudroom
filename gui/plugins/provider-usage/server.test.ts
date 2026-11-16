@@ -267,6 +267,15 @@ it("keeps an unconfigured shared group without hosts or measurement requests", a
 });
 
 it("collapses known account observations per machine, preserves unknown identities, and normalizes display labels", async () => {
+  // "other" has no native usage: a lookup by ID names it, never a full list.
+  const listProviders = vi.fn(
+    async (args?: { capability?: string; providerId?: string }) =>
+      args?.providerId === "other"
+        ? [{ id: "other", displayName: "Other", logoUrl: "/other.svg" }]
+        : args?.capability
+          ? [{ id: "codex", displayName: "Codex", logoUrl: "/codex.svg" }]
+          : [],
+  );
   const { bb, harness } = createFakePluginHost({
     sdk: {
       system: { config: async () => ({ primaryHostId: null }) },
@@ -275,7 +284,7 @@ it("collapses known account observations per machine, preserves unknown identiti
           makeHostResponse({ id: "host", status: "connected" }),
         ],
       },
-      providers: { list: async () => [] },
+      providers: { list: listProviders },
       plugins: {
         experimental_discoverRpc: async () => [
           { pluginId: "adapter", displayName: "Adapter" },
@@ -344,13 +353,23 @@ it("collapses known account observations per machine, preserves unknown identiti
                 windows: [{ label: "Weekly limit", usedPercent: 42 }],
               },
             },
-            { id: "adapter:unknown", usage: null },
+            {
+              id: "adapter:unknown",
+              displayName: "Other",
+              logoUrl: "/other.svg",
+              usage: null,
+            },
             { id: "custom:unknown", usage: null },
           ],
         },
       ],
     });
     expect(JSON.stringify(snapshot)).not.toContain("81");
+    expect(
+      listProviders.mock.calls.filter(
+        ([args]) => !args?.capability && !args?.providerId,
+      ),
+    ).toHaveLength(0);
   } finally {
     await harness.lifecycle.dispose();
   }

@@ -353,14 +353,11 @@ export async function acquireDesktopBrowserControl(
         "desktop_tab_scope",
         "A requested tab does not belong to this thread",
       );
-    if (
-      !input.allowPersonal &&
-      selected.some((tab) => tab?.profile.kind === "personal")
-    )
+    if (selected.some((tab) => tab?.profile.kind === "personal"))
       throw new ApiError(
         403,
-        "desktop_personal_handoff_required",
-        "Controlling a personal tab requires an explicit handoff",
+        "desktop_personal_tab",
+        "Agents cannot control personal browser tabs",
       );
     if (!entry.active)
       throw new ApiError(
@@ -505,7 +502,7 @@ export async function importDesktopBrowserCookies(
       generation: input.generation,
       sourceId: input.sourceId,
       sourceProfileDirectory: input.sourceProfileDirectory,
-      profile: input.profile,
+      profile: { kind: "personal" },
     },
   });
 }

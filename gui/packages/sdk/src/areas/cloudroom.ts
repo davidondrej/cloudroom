@@ -47,6 +47,8 @@ export interface CloudroomStatus {
   signInError: string | null;
   /** The account's place in the cloud queue, or a blocked region: new Cloud threads wait. Null when it may start them. */
   cloudQueue?: { position: number; total: number; regionBlocked: boolean } | null;
+  /** The website's database can't answer (an outage or planned work): Cloud waits and Local works. Missing from older servers. */
+  cloudPaused?: boolean;
   /** The account's plan (free, pro, super, ultra) from the website's mode check; null while billing is off or unknown. */
   plan?: string | null;
   /** The account's Cloud Credits this credit period and when they refill (`resetsAt`, ADR 20261108-142517): Free's sidebar
@@ -90,6 +92,10 @@ export interface CloudEnvironment {
   repos: string[];
   /** MCP servers copied from this Mac into every sandbox, by name. */
   mcp: string[];
+  /** Repos RepoSync commits and pushes to `branch`, `every` seconds after edits stop (docs/scopes/repo-sync.md). */
+  repoSync: CloudRepoSync[];
+  /** A repo's branches, default first; only answered to `githubBranches`. */
+  branches?: string[];
   /** The account's GitHub repos, newest first; only answered to `githubRepos`. */
   available?: string[];
   /** Last push time of each `available` repo, in ms. */
@@ -106,7 +112,10 @@ export interface CloudEnvironment {
 export type RepoSuggestion =
   | { source: "mac"; name: string; path: string; updatedAt: number }
   | { source: "github"; name: string; repo: string; updatedAt: number | null };
+export type CloudRepoSync = { repo: string; branch: string; every: number; on: boolean };
 export type CloudEnvironmentChange =
+  | { action: "repoSync"; repo: string; on?: boolean; branch?: string; every?: number; remove?: boolean }
+  | { action: "githubBranches"; repo: string }
   | { action: "set"; variables: Record<string, string> }
   | { action: "remove"; name: string }
   | { action: "setup"; setup: string }
@@ -155,13 +164,18 @@ export interface CloudAutomation {
   url?: string;
   /** A fresh-thread loop's own agent (app provider ID; null model is the agent's default). Null for same-thread loops,
    *  which use their thread's, or until its settings are saved. Missing from older websites. */
-  agent?: { provider: string; model: string | null; reasoning: string | null } | null;
+  agent?: CloudLoopAgent | null;
+  /** A loop's agents when it has two or more, in turn order: each run takes the next (docs/scopes/loops.md). `agent` is
+   *  the first. Missing from older websites. */
+  agents?: CloudLoopAgent[];
   /** P1-P4 (docs/scopes/loops.md). Missing until the website's 0094 update. */
   priority?: number;
   /** The API keys a fresh-thread loop's runs get, and `.env` for the project's .env files (ADR 0342); null for all of
    *  them. Missing until the website's 0103 update. */
   secrets?: string[] | null;
 }
+/** A Cloud loop's agent: the app's provider ID; a null model is the agent's default. */
+export type CloudLoopAgent = { provider: string; model: string | null; reasoning: string | null };
 /** One Cloud loop run's record (ADR 0298): what its agent reported, or null fields while it runs or never reported. */
 export interface CloudLoopRun {
   thread_id: string;
@@ -173,7 +187,7 @@ export interface CloudLoopRun {
   actions: string[] | null;
 }
 /** `harness` is Core's harness name or the app's provider ID; only fresh-thread loops pick an agent. */
-export type CloudAutomationFields = { name?: string; prompt?: string; cron?: string | null; timezone?: string; run_at?: string | null; enabled?: boolean; script?: string | null; new_thread?: boolean; webhook?: true; harness?: string; model?: string; reasoning?: string; priority?: number; secrets?: string[] | null };
+export type CloudAutomationFields = { name?: string; prompt?: string; cron?: string | null; timezone?: string; run_at?: string | null; enabled?: boolean; script?: string | null; new_thread?: boolean; webhook?: true; harness?: string; model?: string; reasoning?: string; agents?: { harness: string; model: string; reasoning?: string }[]; priority?: number; secrets?: string[] | null };
 /** Webhook events the website holds for one Local webhook loop on this Mac (ADR 0262). Ack the batch once its run starts. */
 export interface CloudHookBatch {
   local: string;

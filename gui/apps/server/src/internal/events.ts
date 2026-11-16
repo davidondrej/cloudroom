@@ -51,6 +51,7 @@ import {
 } from "../services/lib/error-log-fields.js";
 import { applyLoggedThreadLifecycleEvent } from "../services/threads/lifecycle-outcome.js";
 import { applyTurnCompletedEvent } from "./turn-completed-events.js";
+import { settleCompactFollowUp } from "../services/threads/compact-follow-up.js";
 import { forgetLostBackgroundTask } from "./session-owner-side-effects.js";
 import {
   getInactiveSessionLogFields,
@@ -447,6 +448,17 @@ async function applyEventEffects(
           ...event,
           threadId: entry.threadId,
         });
+        // `room-cli thread compact`'s follow-up says how the compaction went, and runs next even after a failure.
+        const followUp =
+          turnCompleted.isRootTurnCompletion &&
+          settleCompactFollowUp(deps, {
+            threadId: entry.threadId,
+            turnId,
+            status: event.status,
+            ...(event.status === "failed" && event.error !== undefined
+              ? { error: event.error.message }
+              : {}),
+          });
         if (
           turnCompleted.thread &&
           turnCompleted.isRootTurnCompletion &&
@@ -471,7 +483,7 @@ async function applyEventEffects(
             });
           }
         }
-        if (turnCompleted.nextStatus === "idle") {
+        if (turnCompleted.nextStatus === "idle" || followUp) {
           followUps.push({
             kind: "queued-message-dispatch",
             wake: { kind: "thread-ready", threadId: entry.threadId },

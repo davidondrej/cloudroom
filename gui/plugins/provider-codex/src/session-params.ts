@@ -134,6 +134,7 @@ type GitHeadState =
 interface CodexInstructionSource {
   approvalPolicy?: AskForApproval;
   instructionMode: "append" | "replace";
+  platform?: NodeJS.Platform;
   options: {
     instructions?: string;
     permissionScope?: CodexSessionOptions["permissionScope"];
@@ -155,6 +156,11 @@ const CODEX_PLAIN_CHAT =
 const CODEX_READ_ONLY_GIT =
   "Your sandbox keeps .agents and .codex read-only. git switch, checkout, reset, merge, pull or stash can leave old files there even with exit 0, so run them with escalation. Record git status --porcelain first. After a sandboxed command, preserve pre-existing edits and staged changes, inspect .agents and .codex against that command's intended result, and fix only verified stale files before committing. For merge, pull or stash recovery, do not restore from HEAD or clean; that can discard intended changes. If the intended state is unclear, stop and tell the user.";
 
+// #1805. Codex's Windows sandbox grants itself read access to the user profile
+// in the background, minutes after the first command, so room-cli can't be found yet.
+const CODEX_WINDOWS_ROOM_CLI =
+  "On Windows, Codex's sandbox can take minutes to get read access to Cloudroom's install folder. If room-cli or room-cli.cmd is \"not recognized\" inside the sandbox, rerun the same command with escalation instead of retrying or giving up.";
+
 // #1456. With approval "never" (Full Access), Codex rejects any command that a
 // prompt rule matches (user, project or managed .rules), and the model can't ask.
 const CODEX_NEVER_ASKS =
@@ -167,6 +173,10 @@ export function resolveCodexInstructionOverrides(
     CODEX_PLAIN_CHAT,
     ...(command.options.permissionScope === "workspace"
       ? [CODEX_READ_ONLY_GIT]
+      : []),
+    ...(command.options.permissionScope === "workspace" &&
+    (command.platform ?? process.platform) === "win32"
+      ? [CODEX_WINDOWS_ROOM_CLI]
       : []),
     ...(command.approvalPolicy === "never" ? [CODEX_NEVER_ASKS] : []),
   ].join("\n\n");

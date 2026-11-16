@@ -843,6 +843,25 @@ describe("resolveCodexInstructionOverrides", () => {
     }
   });
 
+  it("tells only Windows workspace threads to escalate an unfound room-cli (#1805)", () => {
+    const developerInstructions = (
+      platform: NodeJS.Platform,
+      permissionScope: "workspace" | "full",
+    ) =>
+      resolveCodexInstructionOverrides({
+        instructionMode: "append",
+        platform,
+        options: { permissionScope },
+      }).developerInstructions;
+    expect(developerInstructions("win32", "workspace")).toContain(
+      "room-cli.cmd is \"not recognized\"",
+    );
+    expect(developerInstructions("win32", "full")).not.toContain("room-cli");
+    expect(developerInstructions("darwin", "workspace")).not.toContain(
+      "room-cli",
+    );
+  });
+
   it("tells only never-asking sessions how to get past a prompt rule (#1456)", () => {
     const developerInstructions = (
       options: typeof FULL_OPTIONS | typeof WORKSPACE_ASK_OPTIONS,

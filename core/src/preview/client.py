@@ -496,6 +496,7 @@ class Relay:
     def __init__(self, core, port, device, path):
         self.core, self.port, self.device, self.stopped = core, port, device, False
         self.down = False  # Core found nothing listening on the port, as after a sleep.
+        self.refused = False  # An HTTP answer other than 101 or Core's 409, as from the relay in front of a VPS (#1798).
         self.stderr = io.BytesIO()
         self.path, self.listener = path, None
         if WINDOWS:
@@ -522,7 +523,7 @@ class Relay:
         return local
 
     def open(self):
-        self.down = False  # Only this attempt's answer counts, never an older one's.
+        self.down = self.refused = False  # Only this attempt's answer counts, never an older one's.
         # Some sandbox proxies relay bytes only after a WebSocket handshake; cores before 0.1.35 know only cloudroom-tunnel.
         try:
             return self.connect('websocket')
@@ -544,6 +545,7 @@ class Relay:
                 raise OSError('Preview tunnel closed')
             head += chunk
         status, rest = head.split(b'\r\n', 1)[0].split(), head.split(b'\r\n\r\n', 1)[1]
+        self.refused = status[1:2] not in ([b'101'], [b'409'])
         if len(status) >= 2 and status[1] == b'400':
             remote.close()
             raise PermissionError('Preview tunnel protocol refused')
@@ -1000,6 +1002,11 @@ def deliver(post, result):
 
 # A push's own tar. macOS's bsdtar refuses `..` and writing through symlinks, even when the user's PATH puts GNU tar first.
 COPY_TAR = '/usr/bin/tar' if sys.platform == 'darwin' else 'tar'
+# Permissions in octal, one line per path, through links. On macOS its own stat, even when PATH puts GNU's first.
+COPY_MODE = '/usr/bin/stat -Lf %OLp' if sys.platform == 'darwin' else 'stat -Lc %a'
+# Long listings through links, where an access control list (ACL) shows as a + after the mode. On macOS a @ for extended
+# attributes hides that +, so also its entries, each on its own line.
+COPY_ACL = '/bin/ls -ldeL' if sys.platform == 'darwin' else 'ls -ldL'
 # Where read-only commands may write (READ_ONLY), so agents can swap paths there without asking.
 TEMP_FOLDERS = ('/private/tmp', '/private/var/folders')
 
@@ -1041,9 +1048,32 @@ def copy_command(copy):
             '[ $(( $(find "$x/i" -mindepth 1 -maxdepth 1 -print0 | tr -dc \'\\000\' | wc -c) )) = 1 ]; }; '
             'then echo "The copy held other files, so nothing was copied" >&2; c=1; fi; '
             'if [ $c = 0 ]; then '
-            # Into a folder: a new item moves in. Otherwise it is packed whole first, so a failure changes nothing there.
+            # The sandbox makes every file private, so its modes never count (#1066). New files and folders get this Mac's
+            # own (its umask), and executables stay executable. Any failed stat or chmod fails the push before it places
+            # anything.
+            '[ -L "$x/i/$n" ] || chmod -R \'=rwX\' "$x/i/$n" || { clean; exit 1; }; '
+            # A hard-linked file that replaces one here first gets its own copy, so its modes can't reach a linked file.
+            'find "$x/i/$n" -type f -links +1 -exec sh -c \'h=$1/h p=$2 t=$3; shift 3; for f; do d=$t${f#"$p"}; '
+            '[ ! -e "$d" ] || { cp -p -- "$f" "$h" && mv -f -- "$h" "$f"; } || exit; done\' sh "$x" "$x/i/$n" "$to" {} + '
+            # A file that replaces one here, even through a link, gets its modes, so it is never more readable. The owner
+            # can always read, and an executable runs wherever readable. One stat for each batch, then one chmod per mode for
+            # the files whose mode changes. One with an ACL stops the push, named: the new file would drop it, and its group
+            # bits, which on Linux show the ACL's mask, would let its whole group read it. One listing for each batch.
+            '|| { clean; exit 1; }; find "$x/i/$n" -type f -exec sh -c \'x=$1 p=$2 t=$3 e="^.{10}[+]|^ [0-9]+: "; shift 3; for f; do d=$t${f#"$p"}; '
+            f'if [ -f "$d" ]; then printf "%s\\0" "$d" >&3; else d=$f; fi; printf "%s\\0" "$d" "$f"; done 3>"$x/r" | xargs -0 {COPY_MODE} >"$x/s" || exit; '
+            f'[ ! -s "$x/r" ] || {{ xargs -0 {COPY_ACL} <"$x/r" >"$x/a" || exit; ! grep -Eq "$e" "$x/a" || for f; do d=$t${{f#"$p"}}; '
+            f'[ -f "$d" ] && {COPY_ACL} "$d" | grep -Eq "$e" && {{ printf "%s has an access control list (ACL) that replacing it would drop, so nothing was copied\\n" "$d" >&2; exit 1; }}; done; }}; '
+            'for f; do read -r m && read -r o || exit; '
+            'm=$((0$m & 0777 | 0400)); [ -x "$f" ] && m=$((m | (m & 0444) >> 2)); [ $m = $((0$o)) ] || printf "%s\\0" "$f" >>"$x/m$m"; '
+            'done <"$x/s"; for g in "$x"/m*; do [ -f "$g" ] || break; xargs -0 chmod "$(printf %o "${g#"$x"/m}")" <"$g" || exit; done; rm -f "$x"/m*\' '
+            'sh "$x" "$x/i/$n" "$to" {} + || { clean; exit 1; }; '
+            # Into a folder: a new item moves in. Otherwise it is packed whole first, so a failure changes nothing there, and
+            # unpacked with exactly its modes, under umask 0 in a subshell, so the login shell's exit hooks keep the user's. A
+            # push never changes a folder already there, sticky and setgid bits included: bsdtar (macOS, some Linux) leaves it
+            # as is without -p and ignores TAR_OPTIONS; GNU tar does only with both of these options.
             + (f'{{ [ ! -e "$to" ] && [ ! -L "$to" ] && mv -- "$x/i/$n" "$to" 2>/dev/null; }} || {{ (cd -- "$x/i" && '
-               f'COPYFILE_DISABLE=1 {COPY_TAR} --no-xattrs -cf ../p.tar -- "$n") && {COPY_TAR} -xf "$x/p.tar" -C "$b"; }}; ' if inside else
+               f'COPYFILE_DISABLE=1 {COPY_TAR} --no-xattrs -cf ../p.tar -- "$n") && '
+               f'(umask 0 && TAR_OPTIONS="--no-overwrite-dir -p" {COPY_TAR} -xf "$x/p.tar" -C "$b"); }}; ' if inside else
                f'{taken} && mv -- "$x/i/$n" "$to"; ')
             + """c=$?; fi; clean; [ $c != 0 ] || printf '%s\\n' "$to"; exit $c"""), place, inside, temp
 
@@ -1575,7 +1605,8 @@ def run(folder):
                         ready = tunnel.healthy()
                         error = None
                         if not ready:
-                            if tunnel.process.poll() is not None:
+                            # The tunnel itself was turned away, so this says nothing about the app (#1798).
+                            if tunnel.process.poll() is not None or getattr(tunnel.process, 'refused', False):
                                 error = 'Tunnel unavailable' if tunnel.relay else 'SSH connection unavailable'
                             elif reachable(tunnel.socket_path):
                                 error = 'Cloud HTTP server unavailable'

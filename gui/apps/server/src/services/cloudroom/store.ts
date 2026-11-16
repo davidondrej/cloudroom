@@ -3,6 +3,7 @@ import { cloudroomCommands, cloudroomThreads, statusTransitionNeedsAttention, th
 import type { ProjectCopyProgress, TeleportLocalStep } from "@cloudroom/domain";
 import { cloudTurnsElsewhere, emitPluginThreadStatusEntered } from "../plugins/plugin-thread-events.js";
 import { noteTurnFailed, type CloudFailure } from "../system/auth-failure-telemetry.js";
+import { CORE_PLAN_LIMIT, notePlanLimit, notePlanLimitEnded, notePlanLimitStatus } from "../system/plan-limit-telemetry.js";
 
 export type TeleportProgress = {
   id: string; owner: string; phase: "checking" | "stopping" | "uploading" | "running" | "complete" | "cancelled" | "error" | "cancelling";
@@ -195,8 +196,9 @@ export function effectivePrompt(db: DbQueryConnection, threadId: string, id: str
 export const showingEarlier = new Set<string>();
 
 /** A status change is new activity only as on Local: a turn ended, or anything failed (a start that never ran needs the user too).
- *  A wake (starting, then idle) or a stop moves nothing in the sidebar and shows no unread dot. */
-export function saveStatus(db: DbQueryConnection, threadId: string, status: typeof threads.$inferSelect["status"], cloud?: CloudFailure): void {
+ *  A wake (starting, then idle) or a stop moves nothing in the sidebar and shows no unread dot. `at`: Core's time for the
+ *  change, which may be long before the app saw it (the Mac slept). */
+export function saveStatus(db: DbQueryConnection, threadId: string, status: typeof threads.$inferSelect["status"], cloud?: CloudFailure, at?: number): void {
   const before = db.select({ status: threads.status }).from(threads).where(eq(threads.id, threadId)).get();
   if (!before || before.status === status) return;
   const now = Date.now(), attention = status === "error" || statusTransitionNeedsAttention({ currentStatus: before.status, newStatus: status });
@@ -204,5 +206,10 @@ export function saveStatus(db: DbQueryConnection, threadId: string, status: type
     .where(and(eq(threads.id, threadId), eq(threads.status, before.status))).returning().get();
   if (!thread || showingEarlier.has(thread.id)) return;
   emitPluginThreadStatusEntered(thread);
-  if (thread.status === "error" && !cloudTurnsElsewhere.has(thread.id)) noteTurnFailed(thread.id, cloud);
+  notePlanLimitStatus(thread.id, thread.status, at);
+  if (thread.status !== "error" || cloudTurnsElsewhere.has(thread.id)) return;
+  // Noted now, by Core's reason and clock: a catch-up after the Mac slept replays the limit and its resume together.
+  if (cloud?.message?.includes(CORE_PLAN_LIMIT)) notePlanLimit(thread.id, { provider: thread.providerId, execution: "cloud_sandbox", child: thread.parentThreadId !== null }, at);
+  else notePlanLimitEnded(thread.id);
+  noteTurnFailed(thread.id, cloud);
 }

@@ -37,7 +37,7 @@ it("Teleport to Local never overwrites Mac work and never writes into .git", asy
     const archive = join(temp, "changes.tgz");
     execFileSync("tar", ["-czf", archive, "-C", cloud, ...files]);
 
-    expect(await applyChanges(root, readFileSync(archive), "run", base)).toBe(2);
+    expect(await applyChanges(root, readFileSync(archive), "run", base)).toEqual(["main.txt", "wip.txt"]);
     expect([read("main.txt"), read("wip.txt"), read("clean.txt"), read("new.txt")]).toEqual(["mac", "mac", "cloud", "cloud"]);
     expect([read(".cloudroom/teleport/run/main.txt"), read(".cloudroom/teleport/run/wip.txt")]).toEqual(["cloud", "cloud"]);
     expect(existsSync(join(root, ".git/hooks/pre-commit"))).toBe(false);
@@ -210,7 +210,7 @@ it.skipIf(process.platform !== "linux")("A folder link round-trips to Mac and Li
     await symlink("docs", join(workspace, "docs-link"));
 
     const changes = await cloudChanges(localCloud(home), workspace, null, Date.now());
-    expect(await applyChanges(mac, changes.archive, "run", null)).toBe(0);
+    expect(await applyChanges(mac, changes.archive, "run", null)).toEqual([]);
     expect(readlinkSync(join(mac, "docs-link"))).toBe("docs");
     expect(readFileSync(join(mac, "docs-link", "a.md"), "utf8")).toBe("a\n");
 
@@ -244,7 +244,7 @@ it.skipIf(process.platform !== "linux")("A Windows Teleport refuses a link out o
     Object.defineProperty(process, "platform", platform);
     const mac = join(home, "mac");
     await mkdir(mac);
-    expect(await applyChanges(mac, changes.archive, "run", null)).toBe(0);
+    expect(await applyChanges(mac, changes.archive, "run", null)).toEqual([]);
     expect(readFileSync(join(mac, "inside.md"), "utf8")).toBe("a\n");
   } finally {
     Object.defineProperty(process, "platform", platform);
@@ -279,7 +279,7 @@ it("Teleport to Local never overwrites a dirty file it reaches by another spelli
     writeFileSync(join(root, "src", "Foo.ts"), "mac");
 
     const incoming = windows ? "src/foo.ts" : "alias/Foo.ts";
-    expect(await applyChanges(root, pack(join(temp, "one.tgz"), { [incoming]: "cloud" }), "run", base)).toBe(1);
+    expect(await applyChanges(root, pack(join(temp, "one.tgz"), { [incoming]: "cloud" }), "run", base)).toHaveLength(1);
     expect(readFileSync(join(root, "src", "Foo.ts"), "utf8")).toBe("mac");
     expect(readFileSync(join(root, ".cloudroom", "teleport", "run", incoming), "utf8")).toBe("cloud");
 
@@ -303,7 +303,7 @@ it.skipIf(process.platform === "win32")("Teleport to Local ignores a cloud .clou
     const archive = join(temp, "changes.tgz");
     execFileSync(tarCommand(), ["-czf", archive, "-C", cloud, "././.cloudroom", "a.txt"]);
 
-    expect(await applyChanges(root, readFileSync(archive), "run", null)).toBe(1);
+    expect(await applyChanges(root, readFileSync(archive), "run", null)).toHaveLength(1);
     expect(readdirSync(outside)).toEqual([]);
     expect(readFileSync(join(root, "a.txt"), "utf8")).toBe("mac");
     expect(readFileSync(join(root, ".cloudroom", "teleport", "run", "a.txt"), "utf8")).toBe("cloud");

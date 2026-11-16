@@ -309,7 +309,7 @@ export default function providerUsagePlugin(room: BbPluginApi): void {
   };
   const readUsage = async (request: UsageRequest): Promise<UsageSnapshot> => {
     const hostId = request.machineIds?.find((id) => !id.startsWith("source:"));
-    const [hosts, sources, providers, config] = await Promise.all([
+    const [hosts, sources, usageProviders, config] = await Promise.all([
       room.sdk.hosts
         .list()
         .then((hosts) => hosts.filter((host) => host.type !== "ephemeral")),
@@ -360,6 +360,28 @@ export default function providerUsagePlugin(room: BbPluginApi): void {
         }),
       );
     }
+    // A source may report a provider without native usage (Kimi). Look up
+    // just its name and icon: the registry answers without checking any host.
+    const others = [
+      ...new Set(
+        [...inventories.values()].flatMap((source) =>
+          source.resources.map((resource) => resource.providerId),
+        ),
+      ),
+    ].filter((id) => !usageProviders.some((provider) => provider.id === id));
+    const providers = [
+      ...usageProviders,
+      ...(
+        await Promise.all(
+          others.map((providerId) =>
+            room.sdk.providers
+              .list({ providerId })
+              .then((list) => list.filter((item) => item.id === providerId))
+              .catch(() => []),
+          ),
+        )
+      ).flat(),
+    ];
     const keys = new Set(
       [...inventories.values()].flatMap((source) =>
         source.resources.map((resource) => keyOf(source.pluginId, resource.id)),

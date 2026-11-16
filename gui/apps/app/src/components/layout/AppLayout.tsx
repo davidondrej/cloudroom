@@ -32,6 +32,8 @@ import { AppBreadcrumbs } from "./AppBreadcrumbs";
 import { DesktopUpdateBanner, GitForWindowsBanner } from "./DesktopUpdateBanner";
 import { LowDiskBanner } from "./LowDiskBanner";
 import { CloudLoginBanner } from "./CloudLoginBanner";
+import { ProviderLoginListener } from "@/components/settings/ProviderLoginButton";
+import { CloudPausedBanner } from "./CloudPausedBanner";
 import { OtherMacStatus } from "./OtherMacStatus";
 import { resourceRouteLabelAtom } from "./resourceRouteLabelAtom";
 import { AppPageHeader, HEADER_ICON_BUTTON_CLASS } from "./AppPageHeader";
@@ -834,10 +836,12 @@ export function AppLayout({ children }: AppLayoutProps) {
                   <GitForWindowsBanner />
                   <DesktopUpdateBanner />
                   <LowDiskBanner />
+                  <CloudPausedBanner />
                   <CloudLoginBanner
                     threadId={threadId ?? null}
                     onLoops={pluginPanelMatch?.params.pluginId === "automations"}
                   />
+                  <ProviderLoginListener />
                   <main className="flex min-h-0 flex-1 flex-col p-4 md:p-5">
                     {children}
                   </main>

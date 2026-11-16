@@ -40,12 +40,13 @@ import { emitPluginThreadUnarchived } from "../plugins/plugin-thread-events.js";
 import { assertValidParentThread } from "../threads/thread-parent.js";
 import { queueChildThreadTurnNotificationBestEffort } from "../threads/child-thread-notifications.js";
 import { reportBug } from "./bug-reports.js";
+import { threadCredits } from "./thread-credits.js";
 import { continueShare, shareClicked, shareThread, stopSharing, threadShare } from "./shares.js";
 import { connectAccount, registerConnect } from "./connect-relay.js";
 import { getGateAuthKind } from "../../request-context.js";
 import { noteActiveMinute, timeInApp } from "./time-in-app.js";
 import { starPrompt, starRepo } from "./star-prompt.js";
-import { cardsLeft, popupState, recordChecklistHide, recordPopup } from "./popups.js";
+import { cardsLeft, popupState, recordChecklistHide, recordCorner, recordPopup } from "./popups.js";
 import { activation } from "./activation.js";
 import { disconnectGithub, githubAccount, githubAuth } from "./github-login.js";
 import { addGithubRepo, githubBranches, macRepoSuggestions, repoSuggestions } from "./repo-suggestions.js";
@@ -54,7 +55,7 @@ import { promptSuggestion, promptSuggestionEvent } from "../threads/prompt-sugge
 import { readUiPreferences } from "../system/ui-preferences.js";
 import { readWrapped } from "../system/wrapped.js";
 import { forgetCloudAccountSwitch, noteCloudAccountSwitch } from "./account-switches.js";
-import { ACTIVATION_STEPS, CLOUD_CHOICE_ACTIONS, CLOUD_CHOICE_REASONS, POPUP_DETAILS, POPUPS, SETUP_ACTIONS, SETUP_AGENTS, SETUP_DETAILS, SETUP_STEPS, SHARE_CLICKS, STARTER_PROMPTS, UPGRADE_PROMPTS, WRAPPED_ACTIONS } from "../system/telemetry.js";
+import { ACTIVATION_STEPS, CLOUD_CHOICE_ACTIONS, CLOUD_CHOICE_REASONS, CORNER_ANSWERS, CORNER_CARDS, POPUP_DETAILS, POPUPS, SETUP_ACTIONS, SETUP_AGENTS, SETUP_DETAILS, SETUP_STEPS, SHARE_CLICKS, STARTER_PROMPTS, UPGRADE_PROMPTS, WRAPPED_ACTIONS } from "../system/telemetry.js";
 
 const SAFE_SETTINGS_SEARCH = /^(?=.{2,40}$)\p{L}+(?: \p{L}+){0,3}$/u;
 // A Cloud loop run's request (auto_<loop>_<due>), the website's name for the run that starts its thread.
@@ -232,6 +233,12 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: Plugin
     const input = z.object({ popup: z.enum(POPUPS), event: z.enum(["shown", "closed"]), detail: z.enum(POPUP_DETAILS).optional() }).strict().parse(await context.req.json());
     return context.json({ ok: await recordPopup(deps, input.popup, input.event, input.detail) });
   });
+  // The cards at the top right (docs/scopes/corner-cards.md): claims a showing, or saves the user's answer.
+  app.post("/api/v1/cloudroom/corner", async (context) => {
+    const input = z.object({ card: z.enum(CORNER_CARDS), key: z.string().max(80), event: z.enum(["shown", ...CORNER_ANSWERS]), variant: z.string().regex(/^[a-z0-9_-]{1,24}$/).optional() })
+      .strict().parse(await context.req.json());
+    return context.json({ ok: await recordCorner(deps, input.card, input.key, input.event, input.variant) });
+  });
   app.get("/api/v1/cloudroom/star-prompt", async (context) => context.json(await starPrompt(deps)));
   app.post("/api/v1/cloudroom/star-prompt", async (context) => {
     z.object({}).strict().parse(await context.req.json());
@@ -283,6 +290,24 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: Plugin
     }
     return context.json({ ok: true });
   });
+  const viewedLimitCards = new Set<string>();
+  app.post("/api/v1/cloudroom/limit-card", async (context) => {
+    const parsed = z.object({
+      key: z.string().min(1).max(200),
+      provider: z.string().min(1).max(100),
+      execution: z.enum(["local", "cloud_sandbox"]),
+      can_switch_account: z.boolean(),
+      other_agents: z.number().int().min(0).max(100),
+    }).strict().safeParse(await context.req.json().catch(() => null));
+    if (!parsed.success) throw new ApiError(400, "invalid_limit_card", "Invalid limit card.");
+    const { key, ...properties } = parsed.data;
+    if (!viewedLimitCards.has(key)) {
+      if (viewedLimitCards.size >= 1_000) viewedLimitCards.clear();
+      viewedLimitCards.add(key);
+      deps.telemetry.capture({ name: "limit_card", properties });
+    }
+    return context.json({ ok: true });
+  });
   const sentCloudChoices = new Set<string>();
   app.post("/api/v1/cloudroom/cloud-choice", async (context) => {
     const parsed = z.object({ action: z.enum(CLOUD_CHOICE_ACTIONS), reason: z.enum(CLOUD_CHOICE_REASONS).nullable() }).strict().safeParse(await context.req.json().catch(() => null));
@@ -300,6 +325,7 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: Plugin
   });
   app.get("/api/v1/cloudroom/account/invites", async (context) => context.json(await cloudroom(deps).sandboxes.invites("list")));
   app.get("/api/v1/cloudroom/account/usage-wave", async (context) => context.json({ wave: await cloudroom(deps).sandboxes.usageWave() }));
+  app.get("/api/v1/cloudroom/threads/:id/credits", async (context) => context.json(await threadCredits(deps, context.req.param("id"))));
   app.post("/api/v1/cloudroom/account/invites", async (context) => {
     z.object({}).strict().parse(await context.req.json());
     return context.json(await cloudroom(deps).sandboxes.invites("create"));

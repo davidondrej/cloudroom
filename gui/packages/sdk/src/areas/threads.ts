@@ -325,6 +325,11 @@ export interface ThreadStopArgs extends ThreadActionArgs {
   endProcesses?: boolean;
 }
 
+export interface ThreadCompactArgs extends ThreadActionArgs {
+  /** Sent once compaction ends, so the agent keeps going. */
+  then?: string;
+}
+
 export interface ThreadArchiveAllArgs extends ThreadActionArgs {
   /** Also archive running children. Without it, live children stay open. */
   includeLive?: boolean;
@@ -597,7 +602,7 @@ export interface ThreadsArea {
   archive(args: ThreadActionArgs): Promise<ThreadArchiveResult>;
   archiveAll(args: ThreadArchiveAllArgs): Promise<ThreadArchiveAllResult>;
   childSummary(args: ThreadStatusArgs): Promise<ThreadChildSummaryResult>;
-  compact(args: ThreadActionArgs): Promise<ThreadCompactResult>;
+  compact(args: ThreadCompactArgs): Promise<ThreadCompactResult>;
   cancelPlan(args: ThreadActionArgs): Promise<ThreadBannerActionResult>;
   clearContext(args: ThreadActionArgs): Promise<ThreadBannerActionResult>;
   clearGoal(args: ThreadActionArgs): Promise<ThreadBannerActionResult>;
@@ -1417,6 +1422,7 @@ export function createThreadsArea(args: CreateSdkAreaArgs): ThreadsArea {
       await transport.readVoid(
         transport.api.v1.threads[":id"].compact.$post({
           param: { id: input.threadId },
+          json: input.then === undefined ? {} : { then: input.then },
         }),
       );
       return { ok: true };

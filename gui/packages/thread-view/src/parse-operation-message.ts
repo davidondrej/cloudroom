@@ -11,6 +11,7 @@ import {
   THREAD_ACCOUNT_SWITCH_OPERATION,
   THREAD_HARNESS_SWITCH_OPERATION,
   THREAD_IMPORT_OPERATION,
+  THREAD_TELEPORT_LOCAL_OPERATION,
   isApprovalInteractionLifecycle,
   isUserQuestionInteractionLifecycle,
   ownershipChangeOperationMetadataSchema,
@@ -583,6 +584,7 @@ export function parseOperationMessage(
       decoded.operation === THREAD_HARNESS_SWITCH_OPERATION ||
       decoded.operation === THREAD_ACCOUNT_SWITCH_OPERATION ||
       decoded.operation === THREAD_IMPORT_OPERATION ||
+      decoded.operation === THREAD_TELEPORT_LOCAL_OPERATION ||
       // Cloud disk notices show as one live card above the composer instead.
       STORAGE_OPERATIONS.has(decoded.operation)
     ) {

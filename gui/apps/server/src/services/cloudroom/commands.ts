@@ -37,7 +37,7 @@ import { checkPreviewsNow, helperDevice, helperRunning, macAccess, macAccessSupp
 import { GpuApprovals } from "./gpu.js";
 import { CloudSecrets } from "./secrets.js";
 import { CodexAccounts } from "./codex-accounts.js";
-import { BUDGET_LIMIT, cancelMacCodexLogin, hasMacCodexLogin, macCodexDigest, macCodexLogin, macCodexLoginExpired, cursorKeyRejected, macCursorLogin, revokeDesktopToken, startMacCodexLogin, CLOUD_REGION, SANDBOX_PREFIX, SandboxAsleep, SandboxDirectory, sandboxThread, startRefused, type AutomationRun, type SandboxProject, type SandboxTrigger, type SandboxWakeTrigger } from "./sandboxes.js";
+import { BUDGET_LIMIT, cancelMacCodexLogin, hasMacCodexLogin, macCodexDigest, macCodexLogin, macCodexLoginExpired, cursorKeyRejected, macCursorLogin, revokeDesktopToken, startMacCodexLogin, CLOUD_REGION, cloudPausedError, SANDBOX_PREFIX, SandboxAsleep, SandboxDirectory, sandboxThread, startRefused, type AutomationRun, type SandboxProject, type SandboxTrigger, type SandboxWakeTrigger } from "./sandboxes.js";
 import type { AppDeps, LoggedWorkSessionDeps } from "../../types.js";
 import { markMinutesSent, unsentMinutes } from "./time-in-app.js";
 import { cloudTurnsElsewhere, emitPluginThreadCreated } from "../plugins/plugin-thread-events.js";
@@ -106,6 +106,7 @@ const capabilitiesSchema = z.object({
   attachments: z.boolean().default(false),
   upload_parts: z.boolean().default(false),
   compact: z.boolean().default(false),
+  compact_after_turn: z.boolean().default(false),
   goal: z.boolean().default(false),
   usage: z.boolean().default(false),
   credits_usage: z.boolean().default(false),
@@ -456,7 +457,9 @@ const unreachableSandbox = "Its cloud sandbox could not be reached, even after w
 function connectionFailure(error: unknown): boolean {
   return error instanceof CloudroomConnectionError
     || (error instanceof DOMException && error.name === "AbortError")
-    || (error instanceof CloudroomError && error.status !== null && (error.status >= 500 || error.status === 408 || error.status === 429));
+    || (error instanceof CloudroomError && error.status !== null && (error.status >= 500 || error.status === 408 || error.status === 429))
+    // A paused Cloud (the website's database is down or being upgraded) comes back by itself: wait, never a red error.
+    || cloudPausedError(error);
 }
 
 /** Nothing answered (#1699): a lost connection, a time-out, or a 5xx without a refusal code. A code, a 429 or a
@@ -539,6 +542,15 @@ class CloudroomService {
   private readonly teleportUrls = new Map<string, string>();
   /** The core a thread's teleport picked, saved as its binding. */
   teleportUrl(threadId: string): string { return this.teleportUrls.get(threadId) ?? ""; }
+  /** A teleport's sandbox that slept or lost its Core keeps its saved address here: a hosted one then answers 404 or
+   *  410, a VPS one a relay 502 (#1840). Forgets that address so the next client asks the website, which wakes it and
+   *  restarts its Core. False when the error isn't one of those, or the teleport isn't going to a sandbox. */
+  forgetTeleportSandbox(threadId: string, error: unknown): boolean {
+    const sandbox = sandboxThread(this.teleportUrls.get(threadId) ?? "");
+    if (!sandbox || !(staleSandboxAddress(error) || (error instanceof CloudroomError && noAnswer(error)))) return false;
+    this.sandboxes.forget(sandbox);
+    return true;
+  }
   async teleportClient(threadId?: string, trigger?: SandboxWakeTrigger): Promise<CloudroomClient> {
     const existing = threadId ? binding(this.deps.db, threadId) : null;
     const sandbox = existing ? sandboxThread(existing.coreUrl) : threadId && await this.newThreadsInSandboxes() ? threadId : null;
@@ -1523,7 +1535,7 @@ class CloudroomService {
           model: capabilities?.harnesses.find((h) => h.id === "codex")?.model ?? null,
           steer: capabilities?.steer ?? false, rewind: capabilities?.rewind ?? false, attachments: capabilities?.attachments ?? false,
           compact: capabilities?.compact ?? false, queue_edit: capabilities?.queue_edit ?? false, queue_cancel: capabilities?.queue_cancel ?? false,
-          queue_reorder: capabilities?.queue_reorder ?? false, error: null, cloudQueue: this.sandboxes.cloudQueue(), usedCloud: lastCloudAt !== null, lastCloudAt, recentThreads,
+          queue_reorder: capabilities?.queue_reorder ?? false, error: null, cloudQueue: this.sandboxes.cloudQueue(), cloudPaused: this.sandboxes.cloudPaused(), usedCloud: lastCloudAt !== null, lastCloudAt, recentThreads,
           plan: this.sandboxes.currentPlan(), planUsage: this.sandboxes.planUsage(),
         };
       }
@@ -2078,7 +2090,7 @@ class CloudroomService {
     const project = getProject(this.deps.db, request.projectId);
     if (!project) throw new ApiError(404, "project_not_found", "Project not found");
     if (!isCloudProvider(request.providerId) || (!fork && (request.originKind || request.sourceThreadId)) || request.sendAt || request.pluginSubmission || (request.environment.type !== "project-default" && !codeFrom))
-      throw new ApiError(400, "cloudroom_unsupported", "Cloud supports new Codex, Pi, Cursor, fx, opencode, Hermes Agent, Devin, Droid, Kimi Code, OpenClaw and Claude Code threads in a cloud folder. Forks, scheduling and native machine targets are not supported.");
+      throw new ApiError(400, "cloudroom_unsupported", "Cloud supports new Codex, Pi, Cursor, fx, opencode, Hermes Agent, Devin, Droid, Kimi Code, OpenClaw, Agent Zero and Claude Code threads in a cloud folder. Forks, scheduling and native machine targets are not supported.");
     if (request.permissionMode && request.permissionMode !== "full") throw new ApiError(400, "cloudroom_unsupported", "Cloud uses the full permission mode; restricted modes are not supported.");
     if (request.startedOnBehalfOf || request.sourceSeqEnd !== undefined) throw new ApiError(400, "cloudroom_unsupported", "Cloud continuation and delegated starts are not enabled.");
     // A new sandbox starts on first delivery, so check against the last known capabilities.
@@ -2716,7 +2728,9 @@ class CloudroomService {
         const sessions = new Map((await client.listSessions()).sessions.map((session) => [session.session_id, session]));
         for (const item of saved) {
           const session = sessions.get(item.sessionId!);
-          if (session && (session.current_request || WORKING.includes(session.state))) running.push(item.threadId);
+          // A wake restarts an idle agent (`resuming`) with nothing to run: that is not work, as in its sidebar row.
+          const waking = session?.state === "resuming" && !session.current_request && !session.queued;
+          if (session && !waking && (session.current_request || WORKING.includes(session.state))) running.push(item.threadId);
         }
       } catch (error) { fresh = false; if (!(error instanceof SandboxAsleep)) this.warn("A Cloud thread's state could not be read", error, { threadId: saved[0]!.threadId }); }
     }
@@ -3089,13 +3103,20 @@ class CloudroomService {
     return { ok: true, delivery: "queued", queuedMessage: { ...queued, pausedByStop: false } };
   }
 
-  async compact(thread: Thread) {
+  /** A newer Core (`compact_after_turn`) compacts a busy thread once its turn ends, then sends `then`, saying how it went. */
+  async compact(thread: Thread, then?: string) {
+    if (teleportBlocked(this.deps.db, thread.id)) throw new ApiError(409, "teleport_in_progress", "Compaction is disabled until Teleport finishes.");
     const saved = binding(this.deps.db, thread.id);
     if (!saved?.sessionId) throw new ApiError(409, "cloudroom_missing_binding", "Cloud session is unavailable");
+    await this.requireOwnThread(saved);
+    if (!["idle", "error", "active"].includes(thread.status)) throw new ApiError(409, "invalid_request", `Context can't be compacted while the thread is ${thread.status}.`);
     const capabilities = await this.capabilities(await this.client(saved));
     if (!feature(capabilities, "compact") || harnessProfile(capabilities, thread.providerId)?.compact === false) throw new ApiError(409, "cloudroom_unsupported", "Cloud compaction is not enabled for this harness.");
-    if (thread.status !== "idle" && thread.status !== "error") throw new ApiError(409, "invalid_request", "Context can only be compacted while the thread is idle or errored");
-    this.enqueue(thread.id, randomUUID(), "compact", {});
+    if (!feature(capabilities, "compact_after_turn")) {
+      if (thread.status === "active") throw new ApiError(409, "cloudroom_update", "Update the cloud core to compact a thread while it works. Until then, compact it once it is idle.");
+      if (then) throw new ApiError(409, "cloudroom_update", "Update the cloud core to send a follow-up after compaction, or use --no-then.");
+    }
+    this.enqueue(thread.id, randomUUID(), "compact", then ? { then } : {});
     await this.deliverWhenAwake(thread.id);
   }
 
@@ -3592,7 +3613,7 @@ class CloudroomService {
             const text = [prepareCloudInstructionInput(parsed, parsed.customInstructions, cloudPromptLimit(capabilities)).text, ...uploaded.map((file) => `[Attached ${file.kind}: ${file.path}]`)].join("\n");
             accepted = await client.steer(sessionId, pending.id, parsed.target_request_id, text);
           } else if (pending.command === "compact") {
-            accepted = await client.compact(sessionId, pending.id);
+            accepted = await client.compact(sessionId, pending.id, z.object({ then: z.string().optional() }).parse(JSON.parse(pending.input)).then);
           } else if (pending.command === "goal") {
             accepted = await client.goal(sessionId, pending.id, JSON.parse(pending.input));
           } else if (pending.command === "rewind") {
@@ -4424,7 +4445,8 @@ class CloudroomService {
       // A stale sandbox address is looked up again on the next try, so it reconnects instead of showing a dead thread.
       reconnecting: phase !== "replay" && (connectionFailure(error) || sandboxTransition(error) || Boolean(sandboxThread(binding(this.deps.db, threadId)?.coreUrl ?? "")) && staleSandboxAddress(error)),
     };
-    if (previous && !previous.reconnecting && issue?.reconnecting) return;
+    // A paused Cloud is the one calm answer that replaces an earlier red error: that error came from the same outage.
+    if (previous && !previous.reconnecting && issue?.reconnecting && !cloudPausedError(error)) return;
     if (previous?.message === issue?.message && previous?.reconnecting === issue?.reconnecting) return;
     if (issue) issues[phase] = issue;
     else delete issues[phase];

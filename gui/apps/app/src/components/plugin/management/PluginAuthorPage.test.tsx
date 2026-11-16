@@ -163,13 +163,13 @@ describe("PluginAuthorPage", () => {
     await screen.findByRole("heading", { name: /^Pat Lee/u });
     const headerContainer = screen
       .getByRole("link", { name: "Browse plugins" })
-      .closest(".max-w-3xl");
+      .closest(".max-w-5xl");
     const toolbarContainer = screen
       .getByRole("textbox", { name: "Search plugins" })
-      .closest(".max-w-3xl");
+      .closest(".max-w-5xl");
     const gridContainer = screen
       .getByRole("button", { name: "Open Alpha details" })
-      .closest(".max-w-3xl");
+      .closest(".max-w-5xl");
     for (const container of [
       headerContainer,
       toolbarContainer,

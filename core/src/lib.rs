@@ -1,15 +1,30 @@
+// Only `git` (the app's Git panel) builds on Windows; everything else needs Unix.
+#[cfg(unix)]
 pub mod api;
+#[cfg(unix)]
 pub mod computer_use;
+#[cfg(unix)]
 pub mod config;
+pub mod git;
+#[cfg(unix)]
 pub mod gpu;
+#[cfg(unix)]
 pub mod helper;
+#[cfg(unix)]
 pub mod mac;
+#[cfg(unix)]
 mod observability;
+#[cfg(unix)]
 pub mod preview;
+#[cfg(unix)]
 pub mod runtime;
+#[cfg(unix)]
 pub mod secrets;
+#[cfg(unix)]
 pub mod session;
+#[cfg(unix)]
 pub mod sync;
+#[cfg(unix)]
 pub mod workspace;
 
 /// Bumped by `tools/release-core.py` on every release (ADR 0120).
@@ -57,6 +72,8 @@ pub const FEATURES: &[&str] = &[
     "attachments",
     "upload_parts",
     "compact",
+    // `thread compact` waits for a running turn to end, then queues its follow-up.
+    "compact_after_turn",
     "goal",
     "usage",
     "subagents",
@@ -75,6 +92,7 @@ pub const FEATURES: &[&str] = &[
     "room_ids",
 ];
 
+#[cfg(unix)]
 pub async fn serve(mut config: config::Config) -> Result<(), Box<dyn std::error::Error>> {
     use std::{future::IntoFuture, time::Duration};
     config.account_home = config.account_home.canonicalize()?;
@@ -99,6 +117,7 @@ pub async fn serve(mut config: config::Config) -> Result<(), Box<dyn std::error:
     manager.start_limit_resumer();
     manager.start_uploader();
     manager.start_auth_monitor();
+    manager.start_repo_sync();
     eprintln!("Cloudroom listening on {}", listener.local_addr()?);
     let shutdown = manager.clone();
     let mut changed = manager.subscribe();

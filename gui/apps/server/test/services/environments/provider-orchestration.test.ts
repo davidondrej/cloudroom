@@ -443,6 +443,7 @@ describe("core environment orchestration", () => {
     async (ownsPath) =>
       withTestHarness(async (harness) => {
         const order: string[] = [];
+        const hookEnvironmentIds: string[] = [];
         const fixture = setup(harness, {
           policy: { retireGraceMs: 0 },
           create: async () => {
@@ -461,6 +462,7 @@ describe("core environment orchestration", () => {
             expect(command.timeoutMs).toBe(15 * 60 * 1000);
             expect(command.path).toBe("/tmp/hooks");
             order.push(command.kind);
+            hookEnvironmentIds.push(command.environmentId);
           },
         });
         fixture.ask();
@@ -474,8 +476,37 @@ describe("core environment orchestration", () => {
         expect(order).toEqual(
           ownsPath ? ["create", "teardown", "remove"] : ["create", "remove"],
         );
+        // The daemon runs only the hooks it saved for this environment.
+        expect(hookEnvironmentIds).toEqual(ownsPath ? [environmentId] : []);
       }),
   );
+
+  it("runs no teardown hook for a personal workspace, which has no repository to read hooks from", async () =>
+    withTestHarness(async (harness) => {
+      const hooks = vi.fn(async () => {});
+      const remove = vi.fn(async () => ({ status: "removed" as const }));
+      const fixture = setup(harness, {
+        id: "personal-workspace",
+        policy: { retireGraceMs: 0 },
+        create: async () => ({
+          status: "created",
+          path: "/tmp/personal",
+          ownsPath: true,
+        }),
+        remove,
+      });
+      registerTestHostRpcCapture(harness.deps, {
+        hostId: fixture.host.id,
+        sessionId: fixture.session.id,
+        onEnvironmentHook: hooks,
+      });
+      fixture.ask();
+      await fixture.settled();
+      const environmentId = fixture.attach();
+      await sweepProviderEnvironment(harness.deps, environmentId);
+      expect(remove).toHaveBeenCalledOnce();
+      expect(hooks).not.toHaveBeenCalled();
+    }));
 
   it("reports teardown transport failure and still removes the environment", async () =>
     withTestHarness(async (harness) => {

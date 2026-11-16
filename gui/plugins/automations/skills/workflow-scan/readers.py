@@ -9,6 +9,9 @@ and each spawn and wait saves progress for the scan's progress card (room-cli lo
                                           or archived reader once; prints "done" (and writes DIR/lines.txt, without chat IDs
                                           that are not in a reader's slice) or "running N/M"
   readers.py archive DIR               -> archives every reader thread
+
+Other scans reuse it (the Cyber scan): SCAN_READER_PROMPT, SCAN_TITLE and SCAN_READER_REASONING, set on spawn, replace
+this folder's reader.md, "Workflow scan" and "low". They are saved in readers.json, so wait restarts readers the same way.
 """
 import glob, hashlib, json, os, re, shutil, subprocess, sys, time
 
@@ -60,7 +63,7 @@ def report(d, state, stage):
 
 
 def start(d, state, n):
-    prompt = open(os.path.join(HERE, "reader.md"), encoding="utf-8").read() + open(os.path.join(d, "slices", f"slice-{n}.txt"), encoding="utf-8").read()
+    prompt = open(state.get("prompt") or os.path.join(HERE, "reader.md"), encoding="utf-8").read() + open(os.path.join(d, "slices", f"slice-{n}.txt"), encoding="utf-8").read()
     prompt_args = ["--prompt", prompt]
     if WIN:  # too long for ROOM_CLI_ARGV (32K); room-cli reads the file back as UTF-8
         prompt_args = ["--prompt-file", os.path.join(d, "slices", f"prompt-{n}.txt")]
@@ -70,14 +73,16 @@ def start(d, state, n):
     tries = state["readers"].get(n, {}).get("tries", 0) + 1
     request = f"scan-{hashlib.sha1(os.path.abspath(d).encode()).hexdigest()[:12]}-{n}-{tries}"
     thread = room("thread", "spawn", *parent, "--request-id", request, "--visibility", "hidden", "--project", PROJECT, "--machine", "cloud", "--provider", state["provider"],
-                  "--model", state["model"], "--reasoning-level", "low", "--title", f"Workflow scan · reader {n}", *prompt_args)
+                  "--model", state["model"], "--reasoning-level", state.get("reasoning") or "low", "--title", f"{state.get('title') or 'Workflow scan'} · reader {n}", *prompt_args)
     state["readers"][n] = {"id": thread["id"], "tries": tries}
     state["all"].append(thread["id"])
 
 
 def spawn(d, provider, model):
     started = os.path.exists(os.path.join(d, "readers.json"))
-    state = load(d) if started else {"provider": provider, "model": model, "readers": {}, "all": []}
+    state = load(d) if started else {"provider": provider, "model": model, "readers": {}, "all": [],
+                                     "prompt": os.environ.get("SCAN_READER_PROMPT"), "title": os.environ.get("SCAN_TITLE"),
+                                     "reasoning": os.environ.get("SCAN_READER_REASONING")}
     for path in sorted(glob.glob(os.path.join(d, "slices", "slice-*.txt"))):
         n = os.path.basename(path)[6:-4]
         if n not in state["readers"]:
@@ -117,6 +122,17 @@ def drop_invented(output, ids):
     return "\n".join(kept).strip(), len(invented)
 
 
+def heading(d, state, n):
+    """Other scans' answers name what they read (their slice's first line), so the lead knows which repo a finding is
+    from. Workflow scan lines already carry chat IDs, so they get none."""
+    if not state.get("title"):
+        return ""
+    try:
+        return "### " + open(os.path.join(d, "slices", f"slice-{n}.txt"), encoding="utf-8").readline().strip() + "\n"
+    except OSError:
+        return f"### reader {n}\n"
+
+
 def wait(d, limit=540):
     state, end = load(d), time.time() + limit
     while True:
@@ -136,7 +152,7 @@ def wait(d, limit=540):
         report(d, state, "patterns" if done == len(state["readers"]) else "reading")
         if done == len(state["readers"]):
             with open(os.path.join(d, "lines.txt"), "w", encoding="utf-8") as f:
-                f.write("\n\n".join(r["output"] for r in state["readers"].values() if r["output"]))
+                f.write("\n\n".join(heading(d, state, n) + r["output"] for n, r in state["readers"].items() if r["output"]))
             failed = [n for n, r in state["readers"].items() if not r["output"]]
             invented = [f"{n} ({r['invented']})" for n, r in state["readers"].items() if r.get("invented")]
             return print("done" + (f", no output from readers {', '.join(failed)}" if failed else "")

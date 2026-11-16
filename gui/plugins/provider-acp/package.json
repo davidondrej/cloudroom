@@ -29,7 +29,9 @@
         "droid": "./icons/droid.svg",
         "kilo": "./icons/kilo.svg",
         "cline": "./icons/cline.svg",
-        "kimi": "./icons/kimi.svg"
+        "kimi": "./icons/kimi.svg",
+        "antigravity": "./icons/antigravity.svg",
+        "agent-zero": "./icons/agent-zero.svg"
       }
     },
     "server": "./server.ts",

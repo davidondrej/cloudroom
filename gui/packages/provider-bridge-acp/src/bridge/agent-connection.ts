@@ -1,4 +1,4 @@
-import { spawn, type ChildProcess } from "node:child_process";
+import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { createInterface } from "node:readline";
 import {
   experimental_recordProviderChildIo,
@@ -49,7 +49,7 @@ export interface AcpAgentConnection {
   notify(method: string, params: unknown): void;
   /** Stops the agent; settles once it has exited. */
   /** `tree` also ends the agent's descendants on Windows, where SIGTERM reaches only the root. */
-  kill(options?: { tree?: boolean }): Promise<void>;
+  kill(options?: { tree?: boolean; descendants?: boolean }): Promise<void>;
   readonly exited: boolean;
 }
 
@@ -388,6 +388,9 @@ export function createAcpAgentConnection(
       }, KILL_ESCALATION_MS);
       escalation.unref();
       void exit.then(() => clearTimeout(escalation));
+      if (killOptions?.descendants && process.platform !== "win32" && child.pid) {
+        killDescendants(child.pid);
+      }
       if (killOptions?.tree && process.platform === "win32" && child.pid) {
         void terminateWindowsProcessTrees([child.pid]);
       } else {
@@ -396,6 +399,34 @@ export function createAcpAgentConnection(
       return exit;
     },
   };
+}
+
+/** Kills every process `pid` started, found through `ps` before any dies: an agent's shells may run in process
+ *  groups of their own (Agent Zero's), which a signal to the agent never reaches. */
+function killDescendants(pid: number): void {
+  let table: string;
+  try {
+    table = execFileSync("ps", ["-A", "-o", "pid=,ppid="], { encoding: "utf8", timeout: 2_000 });
+  } catch {
+    return;
+  }
+  const children = new Map<number, number[]>();
+  for (const line of table.split("\n")) {
+    const [child, parent] = line.trim().split(/\s+/).map(Number);
+    if (child && parent) children.set(parent, [...(children.get(parent) ?? []), child]);
+  }
+  for (const stack = [pid], seen = new Set(stack); stack.length > 0; ) {
+    for (const child of children.get(stack.pop()!) ?? []) {
+      if (seen.has(child)) continue;
+      seen.add(child);
+      stack.push(child);
+      try {
+        process.kill(child, "SIGKILL");
+      } catch {
+        // Already gone.
+      }
+    }
+  }
 }
 
 function acpClientCapabilities(

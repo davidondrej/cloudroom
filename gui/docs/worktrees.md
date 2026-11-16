@@ -63,7 +63,9 @@ into a new managed worktree, starting from its current commit. It keeps its ID
 and chat; the move happens when its current turn ends, and messages wait until
 it finishes. Uncommitted files stay behind unless the agent names them with
 `--carry`, since other agents may share the checkout. Carried files land before
-`.bb-env-setup.sh` runs. Claude Code and Codex threads only for now: Pi resumes
+`.bb-env-setup.sh` runs, so it can read them. The hooks themselves come from
+where the thread branched off its base branch, not from its commits or carried
+files (see below). Claude Code and Codex threads only for now: Pi resumes
 in its old folder. To fork into a new thread instead, use
 `room-cli thread fork --new-environment worktree`.
 
@@ -107,12 +109,31 @@ Contract:
 
 ## Run setup with `.bb-env-setup.sh`
 
-Drop a file named `.bb-env-setup.sh` at the root of your project. If bb finds
-one after an environment provider creates a path it owns (`ownsPath: true`), bb
-runs the script inside that path before handing the thread to the agent. Core
-owns this policy for every provider. Attaching a project checkout or personal
-workspace (`ownsPath: false`) does not run either hook. Provider-specific
-preparation, including `.worktreeinclude` copying, finishes before setup starts.
+Commit a file named `.bb-env-setup.sh` at the root of your project. After an
+environment provider creates a path it owns (`ownsPath: true`), bb runs it there
+before handing the thread to the agent. Core owns this policy for every
+provider. Attaching a project checkout (`ownsPath: false`) or a personal
+workspace does not run either hook. Provider-specific preparation, including
+`.worktreeinclude` copying, finishes before setup starts.
+
+Hooks run outside every sandbox, and a sandboxed agent can change any file in
+its folder. So bb never runs the copy in the folder:
+
+- At the environment's first setup, before any agent runs there, bb reads
+  `.bb-env-setup.sh` and `.bb-env-teardown.sh` from Git, as committed where the
+  environment branched off its base branch, and saves both in its data folder.
+  Only these copies ever run.
+- For a new worktree that is its start commit. For a fork or a move it is where
+  the source branched off its base branch, so the source's uncommitted files,
+  its agent's commits, carried files and `.worktreeinclude` copies never count.
+  A base that names no branch here falls back to the default branch.
+- So a hook added or edited only in a thread's worktree, or committed only on
+  its branch, does not run. Commit it to the base branch. An edit made after an
+  environment was set up applies to new environments, not that one; the
+  provisioning transcript says when the folder's copy differs.
+- This protects which script runs. A hook that runs other files from the folder
+  (`./scripts/setup.sh`, `source`, `pnpm install` reading `package.json`
+  scripts) runs whatever is there, so keep teardown self-contained.
 
 Use it for anything the agent will need in a fresh checkout — install
 dependencies, sync local state, generate tokens, etc. To bring local files in
@@ -127,7 +148,10 @@ pnpm install
 
 Contract:
 
-- The script runs with `env bash`, working directory set to the new worktree.
+- The script runs like `bash ./.bb-env-setup.sh` from the root of the new
+  worktree: the working directory is that root, and `$0` and `BASH_SOURCE` are
+  `./.bb-env-setup.sh`, so `dirname "$0"` gives the root until the script
+  changes directory. Save `$PWD` at the top if you need the root later.
 - stdin is closed. stdout and stderr stream into the thread's provisioning
   transcript in the app.
 - A non-zero exit, a signal, or a timeout (15 minutes) fails provisioning and
@@ -174,7 +198,9 @@ move your own shells out of the worktree first if you want to keep them.
 
 Commit a file named `.bb-env-teardown.sh` at the project root when setup
 creates resources outside the worktree. For example, the script can remove a
-database, a proxy registration, a container, or a port reservation.
+database, a proxy registration, a container, or a port reservation. bb runs the
+copy it saved at the environment's first setup (see above), never the one in
+the worktree.
 
 ```bash
 #!/usr/bin/env bash
@@ -187,8 +213,11 @@ Contract:
 
 - bb runs the script before calling a provider to remove a path it owns,
   including cleanup after failed setup. Attached paths do not run it.
-- bb runs `env bash .bb-env-teardown.sh` from the worktree before it removes
-  the worktree, so the script can read tracked and generated files.
+- bb runs the saved script like `bash ./.bb-env-teardown.sh` from the
+  worktree root before it removes the worktree, so the script can read tracked
+  and generated files.
+- An environment set up before bb saved hooks from Git has no saved copy: its
+  teardown is skipped, and the server log says so.
 - stdin is closed. bb records stdout and stderr in the server lifecycle logs.
 - The script gets a separate 15-minute timeout.
 - A non-zero exit, a signal, or a timeout reports a failure. It never stops bb
@@ -214,8 +243,9 @@ A few quick checks:
    invalid base branch, conflicting branch name) show up there with the exact
    git error.
 2. If `.bb-env-setup.sh` doesn't seem to run, make sure it's committed to
-   the branch you're working from. A file that exists only in the working
-   copy of your main checkout won't appear in the new worktree.
+   the base branch the worktree starts from. A file that exists only in the
+   working copy of your main checkout, or only on a thread's branch, doesn't
+   run. The provisioning transcript says when it skipped or replaced one.
 3. If your setup script hangs, remember stdin is closed. Anything that
    prompts for input will time out at 15 minutes.
 4. Run `bash .bb-env-setup.sh` manually in a clean clone to verify it works
@@ -227,7 +257,8 @@ A few quick checks:
 
 Core applies the same setup and teardown policy when a project checkout is freshly
 cloned onto a new machine and the environment provider reports that it owns the
-checkout. `.bb-env-setup.sh` must succeed before the environment is ready.
+checkout. The hooks come from Git where the checkout's HEAD meets its default
+branch. `.bb-env-setup.sh` must succeed before the environment is ready.
 `.bb-env-teardown.sh` runs before removal with its own 15-minute timeout; a failure
 is reported but does not prevent removal. A user-maintained checkout attached to
 BB remains unowned and runs neither hook.

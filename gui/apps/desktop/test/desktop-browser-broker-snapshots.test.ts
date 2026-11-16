@@ -30,7 +30,7 @@ function nativeTab(tabId: string, threadId: string): DesktopBrowserNativeTab {
     canGoForward: false,
     errorText: null,
     generation: "tab-generation",
-    profile: { kind: "personal" },
+    profile: { kind: "automation", id: "agent" },
     presentation: "reveal",
   };
 }

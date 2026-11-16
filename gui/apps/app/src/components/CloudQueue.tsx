@@ -116,7 +116,7 @@ export function PlanCard() {
           : <div className="h-1 overflow-hidden rounded-full bg-foreground/10"><div className={cn("h-full rounded-full", low ? "bg-warning" : "bg-primary")} style={{ width: `${share(used, limit) * 100}%` }} /></div>}
       </div>
       <div className="mt-3 flex justify-end">
-        <Button type="button" size="sm" className="h-7 gap-1 px-2.5 text-xs" onClick={() => openUpgrade("plan_card")}>Upgrade to Pro<Icon name="ArrowRight" aria-hidden /></Button>
+        <Button type="button" size="sm" className="h-7 gap-1 px-2.5 text-xs" onClick={() => openUpgrade("plan_card")}>Get more credits<Icon name="ArrowRight" aria-hidden /></Button>
       </div>
     </section>
   );

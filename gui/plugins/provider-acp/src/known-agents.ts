@@ -94,6 +94,9 @@ export const KNOWN_ACP_AGENTS: readonly AcpAgentDefinition[] = [
     installer: { scriptUrl: "https://opencode.ai/install" },
     visibility: "installed",
     dialect: "opencode",
+    // A repo's opencode.json and plugins outrank any ceiling we set, so Manual
+    // would not hold (security sweep 9, 2026-11-16).
+    permissionModes: ["full"],
     supportsManualCompaction: true,
     fork: "tip",
     launch: {
@@ -385,6 +388,66 @@ export const KNOWN_ACP_AGENTS: readonly AcpAgentDefinition[] = [
         user: plainRoots([".kimi-code/skills", ".agents/skills"]),
         project: ancestorRoots([".kimi-code/skills", ".agents/skills"]),
       },
+    },
+  },
+  {
+    id: "acp-antigravity",
+    displayName: "Antigravity",
+    icon: declaredIcon("antigravity"),
+    // Signs in by pasting a code from Google's page, so it also works in a terminal with no browser.
+    signInCommand: "agy acp --login",
+    installUrl: "https://antigravity.google/docs/getting-started",
+    installer: {
+      scriptUrl: "https://antigravity.google/cli/install.sh",
+      powershellUrl: "https://antigravity.google/cli/install.ps1",
+    },
+    // `agy acp` was added in 1.5.0.
+    minimumVersion: "1.5.0",
+    visibility: "installed",
+    dialect: "antigravity",
+    fork: "tip",
+    launch: {
+      displayName: "Antigravity",
+      command: "agy",
+      args: ["acp"],
+      env: {},
+      permissionCli: {
+        full: ["--dangerously-skip-permissions"],
+        insertAfterArgs: 1,
+      },
+      // The CLI reads ~/.gemini/config/skills plus its own two; projects use .agents/skills up to the repository root.
+      nativeSkillRoots: {
+        user: plainRoots([
+          ".gemini/config/skills",
+          ".gemini/antigravity-cli/skills",
+          ".gemini/skills",
+        ]),
+        project: ancestorRoots([".agents/skills"]),
+      },
+    },
+  },
+  {
+    // Agent Zero itself runs on its own server, usually Docker; `a0 acp` bridges to it and runs its file edits and
+    // commands in the thread's folder (ADR 20261116-153548). Its model is the server's own setting.
+    id: "acp-agent-zero",
+    displayName: "Agent Zero",
+    icon: declaredIcon("agent-zero"),
+    signInCommand: "a0",
+    installUrl: "https://github.com/agent0ai/a0-connector",
+    installer: {
+      scriptUrl: "https://raw.githubusercontent.com/agent0ai/a0-connector/main/install.sh",
+      powershellUrl: "https://raw.githubusercontent.com/agent0ai/a0-connector/main/install.ps1",
+    },
+    visibility: "installed",
+    dialect: "agent-zero",
+    fork: "none",
+    // `a0` runs commands without asking, so only Full is honest.
+    permissionModes: ["full"],
+    launch: {
+      displayName: "Agent Zero",
+      command: "a0",
+      args: ["acp"],
+      env: {},
     },
   },
 ];

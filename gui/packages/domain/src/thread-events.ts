@@ -239,6 +239,8 @@ export const THREAD_HARNESS_SWITCH_OPERATION = "harness_switch";
 /** Another account of the same agent continued a turn its plan limit stopped (ADR 20261107-082836). Hidden; the limit row shows it. */
 export const THREAD_ACCOUNT_SWITCH_OPERATION = "account_switch";
 export const THREAD_IMPORT_OPERATION = "import";
+/** Teleport moved the thread from Cloud to this computer. Hidden; its seed tells the next turn what moved (#1818). */
+export const THREAD_TELEPORT_LOCAL_OPERATION = "teleport_local";
 
 export const systemOperationEventDataSchema = z.object({
   operation: z.string(),

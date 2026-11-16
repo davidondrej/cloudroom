@@ -1,17 +1,17 @@
-import { useEffect, type ReactNode } from "react";
+import type { ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { atom, useAtom, useAtomValue, useSetAtom } from "jotai";
+import { useAtom, useAtomValue } from "jotai";
 import { matchPath, useLocation, useNavigate } from "react-router-dom";
 import { HoverCard, HoverCardContent, HoverCardTrigger } from "@cloudroom/shared-ui/hover-card";
 import { Icon } from "@cloudroom/shared-ui/icon";
 import { Switch } from "@cloudroom/shared-ui/switch";
+import { useCorner } from "@cloudroom/shared-ui/lib/corner";
 import { cn } from "@cloudroom/shared-ui/lib/utils";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@cloudroom/shared-ui/tooltip";
 import { SettingsWithControl } from "@/components/ui/settings-section";
 import { useCloudroomAccount } from "@/hooks/queries/cloudroom-queries";
 import { createBooleanPreferenceAtom } from "@/lib/browser-storage";
 import { useChecklistHides, useHiddenUntil } from "@/lib/popups";
-import { useIsNativeBrowserViewShown } from "@/hooks/useBrowserDimmingModal";
 import { fetchWithAppSurface } from "@/lib/app-surface";
 import { getPluginConfigurationRoutePath, getRootComposeRoutePath, LEGACY_PROJECT_COMPOSE_ROUTE_PATH } from "@/lib/route-paths";
 import { selectCloudForNewThreads } from "@/components/promptbox/NewThreadComposer";
@@ -121,39 +121,32 @@ export function StarterPrompts({ onPick, fallback }: { onPick: (prompt: string) 
   );
 }
 
-/** True while the checklist is on screen, so the Wrapped card, which uses the same corner, waits its turn. */
-export const checklistShownAtom = atom(false);
-function Shown() {
-  const set = useSetAtom(checklistShownAtom);
-  useEffect(() => { set(true); return () => set(false); }, [set]);
-  return null;
-}
-
-/** Where a card in the top right corner starts: under the header, or below the new-thread composer so it never covers it. */
-export function useCornerTop(): string {
+/** Where a card in the top right corner starts, in pixels: under the header, or below the new-thread composer so it never covers it. */
+export function useCornerTop(): number {
   const { pathname } = useLocation();
   const composing = pathname === getRootComposeRoutePath() || matchPath(LEGACY_PROJECT_COMPOSE_ROUTE_PATH, pathname) !== null;
   const startersShown = useStartersShown(useActivation());
-  return !composing ? "top-[52px]" : startersShown ? "top-[350px]" : "top-[260px]";
+  return !composing ? 52 : startersShown ? 350 : 260;
 }
 
 export function ActivationChecklist() {
   const navigate = useNavigate();
   const hidden = useHiddenUntil(HIDDEN_KEY);
-  const nativeBrowserShown = useIsNativeBrowserViewShown();
-  const top = useCornerTop();
   const data = useActivation();
   const plan = useCloudroomAccount().data?.plan;
   const paid = Boolean(plan && plan !== "free");
   const [hides, saveHides] = useChecklistHides();
-  if (!data || hidden.hidden || nativeBrowserShown || data.started >= RETIRED_AT || (paid && (hides === null || hides >= 2))) return null;
+  const next = data && STEPS.find((step) => !data.steps[step.id]);
+  const wanted = data !== undefined && next !== undefined && !hidden.hidden && data.started < RETIRED_AT && !(paid && (hides === null || hides >= 2));
+  // The corner module (docs/scopes/corner-cards.md) decides whether it shows: it comes before the promo cards.
+  const corner = useCorner("checklist", wanted ? "" : null);
+  if (!data || !next || !corner) return null;
   const done = STEPS.filter((step) => data.steps[step.id]).length;
-  const next = STEPS.find((step) => !data.steps[step.id]);
-  if (!next) return null;
   const report = (step: Step, action: "clicked" | "hidden") =>
     fetchWithAppSurface("/api/v1/cloudroom/activation", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ step, action }) })
       .then((response) => response.json() as Promise<{ hides?: number | null }>).catch(() => ({ hides: null }));
   const hide = () => {
+    corner.answer("closed");
     hidden.hideFor((paid ? HIDES[0] : hideFor(hides)).ms);
     void report(next.id, "hidden").then(({ hides: saved }) => { if (typeof saved === "number") saveHides(saved); });
   };
@@ -166,8 +159,7 @@ export function ActivationChecklist() {
     });
   };
   return (
-    <section aria-label="Get started" className={cn("fixed right-5 z-40", top, "w-[320px] overflow-hidden rounded-[14px] border border-foreground/10 bg-surface-raised-solid shadow-[0_24px_60px_rgba(0,0,0,.45),0_4px_14px_rgba(0,0,0,.25)] max-md:hidden")}>
-      <Shown />
+    <section aria-label="Get started" style={corner.style} className={cn(corner.className, "w-[320px] overflow-hidden rounded-[14px] border border-foreground/10 bg-surface-raised-solid shadow-[0_24px_60px_rgba(0,0,0,.45),0_4px_14px_rgba(0,0,0,.25)]")}>
       <div className="px-4 pt-4 pb-3">
         <div className="flex items-baseline">
           <p className="text-sm font-semibold text-foreground">Get started</p>

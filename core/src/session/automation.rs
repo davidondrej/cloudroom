@@ -17,12 +17,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{io, sync::Arc};
 
-const USAGE: &str = "room-cli loop create --name NAME --prompt TEXT|--prompt-file PATH (--cron 'MIN HOUR DAY MONTH WEEKDAY' [--timezone ZONE] | --at ISO_TIME | --in 30m | --webhook) [--new-thread|--same-thread] [--script TEXT|--script-file PATH] [--provider P] [--model M] [--reasoning LEVEL] [--priority 1-4] [--secrets KEY,.env|none|all]
+const USAGE: &str = "room-cli loop create --name NAME --prompt TEXT|--prompt-file PATH (--cron 'MIN HOUR DAY MONTH WEEKDAY' [--timezone ZONE] | --at ISO_TIME | --in 30m | --webhook) [--new-thread|--same-thread] [--script TEXT|--script-file PATH] [--provider P] [--model M] [--reasoning LEVEL] [--agent P,M[,LEVEL]]... [--priority 1-4] [--secrets KEY,.env|none|all] [--parent THREAD|none]
 room-cli loop list
-room-cli loop update ID [--name NAME] [--priority 1-4] [--prompt TEXT] [--cron EXPR [--timezone ZONE] | --at ISO_TIME | --in 30m] [--script TEXT|--script-file PATH] [--provider P] [--model M] [--reasoning LEVEL] [--secrets KEY,.env|none|all]
+room-cli loop update ID [--name NAME] [--priority 1-4] [--prompt TEXT] [--cron EXPR [--timezone ZONE] | --at ISO_TIME | --in 30m] [--script TEXT|--script-file PATH] [--provider P] [--model M] [--reasoning LEVEL] [--agent P,M[,LEVEL]]... [--secrets KEY,.env|none|all] [--parent THREAD|none]
 room-cli loop pause|resume|run|delete|hook ID
 room-cli loop report --outcome done|acted|needs-you|failed --confidence high|medium|low --reason TEXT [--action TEXT]...
-A loop runs on a schedule even while the user's Mac is off (`room-cli automation` is the same command): every minute with a script, else at most every 15 minutes. A --webhook loop runs when its secret URL gets a POST instead: create prints the URL once, `hook ID` replaces it, and each run gets the requests that arrived as data. Each --cron run starts a fresh Cloud thread in its own sandbox, from this thread's project and agent; --same-thread re-prompts this thread instead. A one-time --at/--in run re-prompts this thread; --new-thread gives it a fresh one. A fresh-thread automation saves this thread's settings, so it keeps running after this thread is archived. Its runs use this thread's agent unless --provider, --model, or --reasoning picks another (fresh-thread loops only); `list` shows every loop on the account, with each one's project_id and agent, and `update` changes the agent. --priority is P1 (essential) to P4 (niche); loops start at P3. --secrets picks the only API keys (names from Settings → Cloud environment) a fresh-thread loop's runs and script get, plus .env for the project's .env files: pick just what the prompt and script need, like --secrets SENTRY_TOKEN,.env, or none. Without it a loop gets all of them; `list` shows each loop's secrets (null: all). A script runs first (60 s), in the automation's own sandbox with fresh threads, else in this one: no output skips the run (exit 0 or 1; other exit codes fail it, and 3 failures in a row pause it), and its output is added to the prompt. Cloudroom fills in the next run within a minute; check `list` for it or an error. Inside a loop run, `report` records what the run did, why, and how sure it was (ADR 0298): a --reason of up to 500 characters and up to 10 --action values of up to 200 characters each, like --action \"merged #419\": group related changes, as the run's transcript keeps the details.";
+A loop runs on a schedule even while the user's Mac is off (`room-cli automation` is the same command): every minute with a script, else at most every 15 minutes. A --webhook loop runs when its secret URL gets a POST instead: create prints the URL once, `hook ID` replaces it, and each run gets the requests that arrived as data. Each --cron run starts a fresh Cloud thread in its own sandbox, from this thread's project and agent; --same-thread re-prompts this thread instead. A one-time --at/--in run re-prompts this thread; --new-thread gives it a fresh one. A fresh-thread automation saves this thread's settings, so it keeps running after this thread is archived. Its runs use this thread's agent unless --provider, --model, or --reasoning picks another (fresh-thread loops only); `list` shows every loop on the account, with each one's project_id and agent, and `update` changes the agent. --agent, given 2 to 8 times, makes agents that take turns: each run gets the next one in order, and one Cloud can't run (a plan limit, a login, a model) is skipped for the next; one --agent ends the turns. --priority is P1 (essential) to P4 (niche); loops start at P3. --secrets picks the only API keys (names from Settings → Cloud environment) a fresh-thread loop's runs and script get, plus .env for the project's .env files: pick just what the prompt and script need, like --secrets SENTRY_TOKEN,.env, or none. Without it a loop gets all of them; `list` shows each loop's secrets (null: all). --parent picks a manager for a fresh-thread loop: an open Cloud thread in its project that each run starts under, so it can steer and archive them and they can `thread tell --parent` it; `none` clears it. A run whose manager is archived or gone starts top-level. A script runs first (60 s), in the automation's own sandbox with fresh threads, else in this one: no output skips the run (exit 0 or 1; other exit codes fail it, and 3 failures in a row pause it), and its output is added to the prompt. Cloudroom fills in the next run within a minute; check `list` for it or an error. Inside a loop run, `report` records what the run did, why, and how sure it was (ADR 0298): a --reason of up to 500 characters and up to 10 --action values of up to 200 characters each, like --action \"merged #419\": group related changes, as the run's transcript keeps the details.";
 const MAX_PROMPT: usize = 32_000;
 
 #[derive(Deserialize, Serialize)]
@@ -55,11 +55,17 @@ pub struct Body {
     model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     reasoning: Option<String>,
+    // Agents that take turns, one per run (docs/scopes/loops.md); the website checks each harness.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    agents: Option<Vec<LoopAgent>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     priority: Option<u8>,
     // ADR 0342: comma-separated key names and `.env`, or `none` or `all`; the website checks the names.
     #[serde(skip_serializing_if = "Option::is_none")]
     secrets: Option<String>,
+    // #1239: a fresh-thread loop's manager thread, or `none`; the website checks it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    parent: Option<String>,
     // `report` (ADR 0298): the website checks the values; Core keeps out the oversized and malformed.
     #[serde(skip_serializing_if = "Option::is_none")]
     outcome: Option<String>,
@@ -69,6 +75,15 @@ pub struct Body {
     reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     actions: Option<Vec<String>>,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct LoopAgent {
+    harness: String,
+    model: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning: Option<String>,
 }
 
 /// Served on the agent-only socket that `room-cli mac` also uses.
@@ -114,6 +129,7 @@ async fn automation(
 /// harness starts at medium (Pi at its own level), as the website's `withAgent` saves it. What can't be checked here
 /// (a harness not set up, no model list) is left to the run.
 async fn check_agent(m: &Arc<Manager>, session: &str, input: &Body) -> Result<(), Failure> {
+    // Agents that take turns are checked by their runs: one Cloud can't run is skipped for the next.
     let picked = input.harness.is_some() || input.model.is_some() || input.reasoning.is_some();
     if !picked || !matches!(input.action.as_str(), "create" | "update") {
         return Ok(());
@@ -231,19 +247,29 @@ fn check(input: &Body) -> Result<(), Failure> {
         return bad("Use a 5-field cron: minute hour day month weekday");
     }
     // As `thread spawn` checks them; the website checks the harness.
-    if input
-        .model
-        .as_ref()
-        .is_some_and(|m| m.is_empty() || m.len() > 256 || m.chars().any(char::is_control))
-    {
+    let bad_model = |m: &String| m.is_empty() || m.len() > 256 || m.chars().any(char::is_control);
+    let bad_reasoning =
+        |r: &String| r.is_empty() || r.len() > 64 || !r.bytes().all(|b| b.is_ascii_lowercase());
+    if input.model.as_ref().is_some_and(bad_model) {
         return bad("invalid model");
     }
-    if input
-        .reasoning
-        .as_ref()
-        .is_some_and(|r| r.is_empty() || r.len() > 64 || !r.bytes().all(|b| b.is_ascii_lowercase()))
-    {
+    if input.reasoning.as_ref().is_some_and(bad_reasoning) {
         return bad("invalid reasoning level");
+    }
+    if let Some(agents) = &input.agents {
+        if input.harness.is_some() || input.model.is_some() || input.reasoning.is_some() {
+            return bad("Use --agent or --provider/--model/--reasoning, not both");
+        }
+        if agents.is_empty() || agents.len() > 8 {
+            return bad("Give a loop 1 to 8 agents");
+        }
+        if agents.iter().any(|a| {
+            a.harness.is_empty()
+                || bad_model(&a.model)
+                || a.reasoning.as_ref().is_some_and(bad_reasoning)
+        }) {
+            return bad("invalid --agent: use PROVIDER,MODEL[,LEVEL]");
+        }
     }
     if input.webhook.is_some() && input.script.is_some() {
         return bad("A webhook loop has no script yet");
@@ -411,10 +437,40 @@ pub async fn cli(args: &[String]) -> io::Result<i32> {
                 ("--reasoning-level", "reasoning"),
                 ("--reasoning", "reasoning"),
                 ("--secrets", "secrets"),
+                ("--parent", "parent"),
             ] {
                 if let Some(value) = flag(&words, name) {
                     body[key] = json!(value);
                 }
+            }
+            let agents: Vec<&str> = words
+                .windows(2)
+                .filter(|pair| pair[0] == "--agent")
+                .map(|pair| pair[1])
+                .collect();
+            if !agents.is_empty() {
+                let mut list = Vec::new();
+                for value in agents {
+                    let parts: Vec<&str> = value.split(',').map(str::trim).collect();
+                    let [harness, model, rest @ ..] = parts.as_slice() else {
+                        eprintln!(
+                            "Use --agent PROVIDER,MODEL[,LEVEL], like claude-code,claude-fable-5-2,xhigh."
+                        );
+                        return Ok(2);
+                    };
+                    if harness.is_empty() || model.is_empty() || rest.len() > 1 {
+                        eprintln!(
+                            "Use --agent PROVIDER,MODEL[,LEVEL], like claude-code,claude-fable-5-2,xhigh."
+                        );
+                        return Ok(2);
+                    }
+                    let mut agent = json!({"harness": harness, "model": model});
+                    if let Some(level) = rest.first().filter(|l| !l.is_empty()) {
+                        agent["reasoning"] = json!(level);
+                    }
+                    list.push(agent);
+                }
+                body["agents"] = json!(list);
             }
             if let Some(value) = flag(&words, "--priority") {
                 let Some(level) = value

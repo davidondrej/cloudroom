@@ -16,6 +16,7 @@
     "test": "vitest run --config vitest.config.ts"
   },
   "dependencies": {
+    "@cloudroom/domain": "workspace:*",
     "@cloudroom/host-daemon-contract": "workspace:*",
     "@cloudroom/process-utils": "workspace:*",
     "zod": "4.3.6"

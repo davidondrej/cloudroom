@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { definePluginApp, experimental_Icon as Icon, Markdown, useBbNavigate, useRealtime, useRpc } from "@get-bb/plugin-sdk/app";
+import { useCorner } from "@cloudroom/shared-ui/lib/corner";
 import { STATE_CHANNEL, type OrgMessage, type orgRpcContract, type OrgState, type SharedThread } from "./contract.js";
 import { button, errorText, primary, SettingsTab } from "./settings.js";
 
@@ -166,13 +167,18 @@ function InvitePopup() {
   const [view, setView] = useOrg();
   const [busy, setBusy] = useState(false);
   const invite = view?.state?.invites[0];
-  if (!invite) return null;
+  // The corner module (docs/scopes/corner-cards.md) places it: an invite comes before every other card there.
+  const corner = useCorner("invite", invite?.orgId ?? null);
+  if (!invite || !corner) return null;
   const answer = async (accept: boolean) => {
     setBusy(true);
-    try { setView(await rpc.call("invite", { orgId: invite.orgId, accept })); } finally { setBusy(false); }
+    try {
+      setView(await rpc.call("invite", { orgId: invite.orgId, accept }));
+      corner.answer(accept ? "opened" : "closed");
+    } finally { setBusy(false); }
   };
   return (
-    <div className="fixed right-4 top-14 z-50 w-80 space-y-3 rounded-xl border border-border bg-surface-raised p-4 shadow-lg">
+    <div style={corner.style} className={`${corner.className} w-80 space-y-3 rounded-xl border border-border bg-surface-raised-solid p-4 shadow-lg`}>
       <p className="text-sm">You're invited to join <b>{invite.name}</b> on Cloudroom. Your team shares agent instructions and Cloud threads.</p>
       <div className="flex justify-end gap-2">
         <button type="button" className={button} disabled={busy} onClick={() => void answer(false)}>Decline</button>

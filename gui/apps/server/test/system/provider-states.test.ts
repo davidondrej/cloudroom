@@ -39,6 +39,8 @@ const INSTALLED_ONLY_PROVIDER_IDS = new Set([
   "acp-kilo",
   "acp-cline",
   "acp-kimi",
+  "acp-antigravity",
+  "acp-agent-zero",
 ]);
 
 function healthForInstalledOnlyProvider(

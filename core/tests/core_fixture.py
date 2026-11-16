@@ -78,6 +78,9 @@ def codex():
                     {"model": "basic", "supportedReasoningEfforts": [{"reasoningEffort": "high"}]},
                 ], "nextCursor": None}
             elif method == "thread/start":
+                if params["model"] == "start-fails":
+                    send({"id": message["id"], "error": {"code": -32602, "message": "model start-fails is unavailable\nsign in again"}})
+                    continue
                 with path.open("a") as file:
                     file.write(json.dumps({"fixture": "launch", "reasoning": params.get("config", {}).get("model_reasoning_effort")}) + "\n")
                 slow_exit = params["model"] == "slow-exit"
@@ -200,6 +203,8 @@ def codex():
                     event("turn/completed", turn={"id": turn, "status": "completed"})
                     time.sleep(.3)
             elif method == "thread/compact/start":
+                with Path(native + ".requests").open("a") as audit:
+                    audit.write("/compact\n")
                 mode = Path('compact-mode').read_text() if Path('compact-mode').exists() else 'legacy'
                 if mode == 'reject':
                     send({'id': message['id'], 'error': {'code': -32602, 'message': 'compact rejected'}})
@@ -743,6 +748,10 @@ class RecoveryTests(unittest.TestCase):
             self.service.request("POST", "/v1/sessions", {"request_id": "copyfail", "continue_from": "cr_next", "harness": "codex"}, 409)
             self.wait(lambda: self.service.session("cr_copyfail")["state"] == "closed", "candidate closed after a failed copy")
             self.assertIsNone(self.service.session("cr_next").get("continuing"))
+            # An agent that fails to start says why, as one line; the thread stays as it was (#1802).
+            refused = self.service.request("POST", "/v1/sessions", {"request_id": "startfail", "continue_from": "cr_next", "harness": "codex", "model": "start-fails"}, 409)
+            self.assertRegex(refused["error"], r"^the new agent couldn't start in Cloud, so this thread wasn't changed: Harness initialization failed\b.*start-fails is unavailable sign in again")
+            self.assertIsNone(self.service.session("cr_next").get("continuing"))
             # Two switches in a row: the note's inline tail stays within its 8 KB, the file keeps the long message.
             self.service.request("POST", "/v1/sessions/cr_next/prompts", {"request_id": "app_0123456789ab_long", "text": "y" * 12000}, 202)
             self.wait(lambda: self.service.session("cr_next")["receipts"]["app_0123456789ab_long"]["state"] == "completed", "long turn")
@@ -1095,6 +1104,49 @@ class RecoveryTests(unittest.TestCase):
         self.assertFalse(self.status()["queue_paused"])
         self.service.request("POST", "/v1/sessions/cr_seed/resume", {"request_id": "resume"}, 202)
         self.assertEqual((self.repo / (self.native + ".requests")).read_text().splitlines(), ["running", "queued"])
+
+    def compact(self, text="keep going"):
+        body = {"request_id": "relay_compact", "action": "compact", "text": text}
+        return self.service.request("POST", "/v1/sessions/cr_seed/relay", body)
+
+    def turns(self):
+        rollout = Path(self.env["CLOUDROOM_CODEX_HOME"]) / "sessions" / (self.native + ".jsonl")
+        return [json.loads(line)["text"] for line in rollout.read_text().splitlines() if '"fixture": "turn"' in line]
+
+    def test_a_compaction_asked_for_mid_turn_runs_after_it_then_its_follow_up(self):
+        # `room-cli thread compact --self`: once the turn ends it compacts, then its follow-up goes before older messages.
+        self.seed(); self.start(); self.ready()
+        self.prompt("running", "delay")
+        self.wait(lambda: self.status()["current_request"] == "running", "running turn")
+        self.prompt("queued", "hello")
+        self.assertEqual(self.compact()["state"], "accepted")
+        (self.repo / "release").touch()
+        self.wait(lambda: self.status()["receipts"]["queued"]["state"] == "completed", "queue after compaction")
+        self.assertEqual(self.status()["receipts"]["relay_compact"]["state"], "completed")
+        self.assertEqual((self.repo / (self.native + ".requests")).read_text().splitlines(),
+                         ["running", "/compact", "relay_compact_then", "queued"])
+        self.assertEqual(self.turns()[-2], "Your context was compacted.\n\nkeep going")
+
+    def test_a_failed_compaction_still_sends_an_honest_follow_up(self):
+        self.seed(); self.start(); self.ready()
+        (self.repo / "compact-mode").write_text("reject")
+        self.compact()
+        self.wait(lambda: self.status()["receipts"].get("relay_compact_then", {}).get("state") == "completed", "follow-up")
+        self.assertIn(self.status()["receipts"]["relay_compact"]["state"], ["failed", "unknown"])
+        self.assertTrue(self.turns()[-1].startswith("Context compaction failed: "), self.turns()[-1])
+        self.assertTrue(self.turns()[-1].endswith("Your context is unchanged.\n\nkeep going"))
+
+    def test_a_stop_drops_a_waiting_compaction_and_its_follow_up(self):
+        self.seed(); self.start(); self.ready()
+        self.prompt("running", "hold")
+        self.wait(lambda: self.status()["state"] == "running", "running turn")
+        self.compact()
+        self.service.request("POST", "/v1/sessions/cr_seed/stop", {"request_id": "stop"}, 202)
+        self.wait(lambda: self.status()["receipts"]["relay_compact"]["state"] == "interrupted", "cancelled compaction")
+        self.ready()
+        self.assertNotIn("relay_compact_then", self.status()["receipts"])
+        self.assertEqual(self.status()["queue"], [])
+        self.assertNotIn("/compact", (self.repo / (self.native + ".requests")).read_text().splitlines())
 
     def test_a_tell_during_a_stop_waits_paused_once(self):
         # #982: a child's tell while its parent's Stop was landing was refused, so the report was lost.

@@ -161,10 +161,12 @@ function useLoopUsage(
   return usage;
 }
 
-function cloudAgentValue(
-  automation: CloudAutomation,
+/** Most agents a loop takes turns between (MAX_LOOP_AGENTS in src/rpc-types.ts, kept out of the frontend bundle). */
+const MAX_LOOP_AGENTS = 8;
+
+function pickerValue(
+  agent: CloudAutomation["agent"],
 ): ExperimentalProviderModelPickerValue | null {
-  const agent = automation.agent;
   if (!agent?.providerId || !agent.model) return null;
   return {
     providerId: agent.providerId,
@@ -174,10 +176,22 @@ function cloudAgentValue(
   };
 }
 
+/** A Cloud loop's agents that take turns, when it has two or more and all are known. */
+function cloudAgentValues(
+  automation: CloudAutomation,
+): ExperimentalProviderModelPickerValue[] | undefined {
+  const values = automation.agents?.map(pickerValue);
+  return values && values.length > 1 && values.every((value) => value !== null)
+    ? (values as ExperimentalProviderModelPickerValue[])
+    : undefined;
+}
+
 export type LoopDialogChanges = {
   prompt?: string;
   cron?: string;
   agent?: ExperimentalProviderModelPickerValue;
+  /** Two or more agents that take turns, one per run; a single one is `agent`. */
+  agents?: ExperimentalProviderModelPickerValue[];
   secrets?: string[];
 };
 
@@ -192,6 +206,8 @@ export type LoopDialogLoop = {
   timezone: string;
   webhook: boolean;
   agent: ExperimentalProviderModelPickerValue | null;
+  /** Two or more agents that take turns; `agent` is the first. */
+  agents?: ExperimentalProviderModelPickerValue[];
   agentEditable: boolean;
   agentRouting?: ExperimentalProviderModelPickerRouting;
   runsOn: string;
@@ -448,7 +464,18 @@ export function LoopDialog({
   ) => sameAgent(a, b, !loop.cloud);
   const [prompt, setPrompt] = useDraft(loop.prompt ?? "", Object.is);
   const [cron, setCron] = useDraft(loop.cron, Object.is);
-  const [agent, setAgent] = useDraft(loop.agent, sameAgentValue);
+  const sameAgents = (
+    a: ExperimentalProviderModelPickerValue[] | null,
+    b: ExperimentalProviderModelPickerValue[] | null,
+  ) =>
+    a === null || b === null
+      ? a === b
+      : a.length === b.length &&
+        a.every((value, index) => sameAgentValue(value, b[index]!));
+  const [agents, setAgents] = useDraft(
+    loop.agents ?? (loop.agent ? [loop.agent] : null),
+    sameAgents,
+  );
   const [secrets, setSecrets] = useDraft(
     "picked" in loop.secrets ? loop.secrets.picked : null,
     sameSecrets,
@@ -480,6 +507,14 @@ export function LoopDialog({
 
   const apply = (changes: LoopDialogChanges, undo: () => void) =>
     void onSave(changes).then((saved) => saved || undo());
+  // One agent is the loop's agent; two or more take turns, one per run, in this order.
+  const saveAgents = (next: ExperimentalProviderModelPickerValue[]) => {
+    const previous = agents;
+    setAgents(next);
+    apply(next.length > 1 ? { agents: next } : { agent: next[0]! }, () =>
+      setAgents(previous),
+    );
+  };
 
   const savePrompt = async () => {
     if (!promptDirty || trimmed.length === 0 || savingPrompt) return;
@@ -711,25 +746,63 @@ export function LoopDialog({
                   </Select>
                 )}
               </SettingRow>
-              <SettingRow label="Agent">
-                {agent === null ? (
+              <SettingRow label={agents && agents.length > 1 ? "Agents" : "Agent"}>
+                {agents === null ? (
                   <ReadOnlyValue>Set by the loop</ReadOnlyValue>
                 ) : (
-                  <div className="flex h-8 min-w-0 items-center rounded-md px-1 hover:bg-state-hover">
-                    <ProviderModelPicker
-                      value={agent}
-                      onChange={(value) => {
-                        const previous = agent;
-                        setAgent(value);
-                        apply({ agent: value }, () => setAgent(previous));
-                      }}
-                      {...(loop.agentRouting === undefined
-                        ? {}
-                        : { routing: loop.agentRouting })}
-                      allowProviderChange
-                      disabled={!loop.agentEditable}
-                      className="h-6 max-w-full"
-                    />
+                  <div className="flex min-w-0 flex-col">
+                    {agents.map((value, index) => (
+                      <div
+                        key={index}
+                        className="group flex h-8 min-w-0 items-center gap-1 rounded-md px-1 hover:bg-state-hover"
+                      >
+                        <ProviderModelPicker
+                          value={value}
+                          onChange={(next) =>
+                            saveAgents(
+                              agents.map((each, at) => (at === index ? next : each)),
+                            )
+                          }
+                          {...(loop.agentRouting === undefined
+                            ? {}
+                            : { routing: loop.agentRouting })}
+                          allowProviderChange
+                          disabled={!loop.agentEditable}
+                          className="h-6 max-w-full"
+                        />
+                        {agents.length > 1 && (
+                          <span className="ml-auto flex shrink-0 items-center gap-1">
+                            {loop.runs % agents.length === index && (
+                              <span className="text-xs text-muted-foreground/70">
+                                next
+                              </span>
+                            )}
+                            {loop.agentEditable && (
+                              <button
+                                type="button"
+                                aria-label="Remove this agent"
+                                className="rounded p-0.5 text-muted-foreground opacity-0 hover:text-foreground group-hover:opacity-100 focus-visible:opacity-100"
+                                onClick={() =>
+                                  saveAgents(agents.filter((_, at) => at !== index))
+                                }
+                              >
+                                <Icon name="X" className="size-3.5" aria-hidden />
+                              </button>
+                            )}
+                          </span>
+                        )}
+                      </div>
+                    ))}
+                    {loop.agentEditable && agents.length < MAX_LOOP_AGENTS && (
+                      <button
+                        type="button"
+                        className="flex h-7 items-center gap-1.5 rounded-md px-1 text-xs text-muted-foreground hover:bg-state-hover hover:text-foreground"
+                        onClick={() => saveAgents([...agents, agents[agents.length - 1]!])}
+                      >
+                        <Icon name="Plus" className="size-3.5" aria-hidden />
+                        {agents.length > 1 ? "Add agent" : "Add agent to take turns"}
+                      </button>
+                    )}
                   </div>
                 )}
               </SettingRow>
@@ -854,7 +927,10 @@ export function CloudLoopDialog({
       cron: automation.cron,
       timezone: automation.timezone,
       webhook: isCloudWebhook(automation),
-      agent: cloudAgentValue(automation),
+      agent: pickerValue(automation.agent),
+      ...(cloudAgentValues(automation)
+        ? { agents: cloudAgentValues(automation) }
+        : {}),
       agentEditable: automation.new_thread === true,
       runsOn: automation.new_thread
         ? "Cloud · new thread each run"
@@ -891,6 +967,12 @@ export function CloudLoopDialog({
         if (changes.cron !== undefined) cloudChanges.cron = changes.cron;
         if (changes.secrets !== undefined)
           cloudChanges.secrets = changes.secrets;
+        if (changes.agents !== undefined)
+          cloudChanges.agents = changes.agents.map((agent) => ({
+            harness: agent.providerId,
+            model: agent.model,
+            ...(agent.reasoningLevel ? { reasoning: agent.reasoningLevel } : {}),
+          }));
         if (changes.agent !== undefined) {
           cloudChanges.harness = changes.agent.providerId;
           cloudChanges.model = changes.agent.model;

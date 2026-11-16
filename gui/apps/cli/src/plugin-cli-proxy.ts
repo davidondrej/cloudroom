@@ -411,13 +411,22 @@ function getPluginCliDispatcher(): Dispatcher {
 
 // process.exit() with fetch sockets still open can abort Node on Windows (libuv
 // UV_HANDLE_CLOSING, #828): close them and let Node exit; the timer only guards a hang.
-export async function exitWhenIdle(code: number): Promise<void> {
+// `abortRequests`: a failed command drops its other requests, as process.exit() did (#1815).
+export async function exitWhenIdle(
+  code: number,
+  abortRequests = false,
+): Promise<void> {
   process.exitCode = code;
   setTimeout(() => process.exit(code), 5000).unref();
   const dispatchers = [pluginCliDispatcher, getGlobalDispatcher()];
   pluginCliDispatcher = undefined;
+  if (abortRequests) process.on("unhandledRejection", () => {});
   await Promise.all(
-    dispatchers.map((dispatcher) => dispatcher?.close().catch(() => {})),
+    dispatchers.map((dispatcher) =>
+      (abortRequests ? dispatcher?.destroy() : dispatcher?.close())?.catch(
+        () => {},
+      ),
+    ),
   );
 }
 

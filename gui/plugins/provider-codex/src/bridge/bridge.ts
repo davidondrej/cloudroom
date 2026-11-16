@@ -324,6 +324,9 @@ const CHILD_REQUEST_TIMEOUT_MS = 60_000;
 // error, which names the step that hung, beat the runtime's generic timeout.
 const THREAD_CREATION_BUDGET_MS = 110_000;
 const MANAGED_REQUIREMENTS_TIMEOUT_MS = 3_000;
+// Optional startup reads (rate limits) go to the network. When it is slow they
+// must not hold thread/resume past the runtime's 30 s timeout (#1816).
+const OPTIONAL_POST_INITIALIZE_WAIT_MS = 5_000;
 // A broken MCP server slows each retry, so retry it at most once a minute.
 const MCP_RELOAD_INTERVAL_MS = 60_000;
 // Before 0.146.0, config/mcpServer/reload sent Op::RefreshMcpServers, which
@@ -968,6 +971,7 @@ const ignoredChildResultSchema = z.unknown();
 async function initializeChild(
   connection: CodexAppServerConnection,
   postInitializeRequests?: readonly ProviderPostInitializeRequest[],
+  onLateResult?: () => void,
 ): Promise<string | null> {
   const initialized = await connection.request({
     method: "initialize",
@@ -976,21 +980,34 @@ async function initializeChild(
     timeoutMs: CHILD_REQUEST_TIMEOUT_MS,
   });
   for (const request of postInitializeRequests ?? []) {
-    try {
-      const result = await connection.request({
+    let late = false;
+    const applied = connection
+      .request({
         method: request.plan.method,
         ...("params" in request.plan && request.plan.params !== undefined
           ? { params: request.plan.params }
           : {}),
         resultSchema: ignoredChildResultSchema,
         timeoutMs: CHILD_REQUEST_TIMEOUT_MS,
+      })
+      .then((result) => {
+        request.onResult(result);
+        if (late) onLateResult?.();
       });
-      request.onResult(result);
-    } catch (error) {
-      if (request.required) {
-        throw error;
-      }
+    if (request.required) {
+      await applied;
+      continue;
     }
+    // Stop waiting, not reading: a later reply still applies (#1816).
+    let timer: NodeJS.Timeout | undefined;
+    await Promise.race([
+      applied.catch(() => undefined),
+      new Promise((resolve) => {
+        timer = setTimeout(resolve, OPTIONAL_POST_INITIALIZE_WAIT_MS);
+      }),
+    ]);
+    clearTimeout(timer);
+    late = true;
   }
   if (configuredSkillExtraRoots !== null) {
     await connection.request({
@@ -1163,6 +1180,10 @@ async function constructThreadSession(
     const codexVersion = await initializeChild(
       connection,
       translator.buildPostInitializeRequests(),
+      () => {
+        if (currentSession(args.threadId, serial) !== session) return;
+        sendThreadDeltas(session, translator.takeLateSeedDeltas());
+      },
     );
     if (
       codexVersion === null ||

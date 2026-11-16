@@ -4,6 +4,7 @@ import {
   deleteQueuedThreadMessage,
   getEnvironment,
   getQueuedThreadMessage,
+  getThread,
   listActiveVisiblePinnedThreadRootsWithPendingInteractionState,
   pinThread,
   reorderPinnedThread,
@@ -71,7 +72,13 @@ import {
 import {
   appendThreadInterruptedEventInTransaction,
   getLastProviderThreadId,
+  isManualCompactionActive,
 } from "../../services/threads/thread-events.js";
+import {
+  hasQueuedCompaction,
+  holdCompactFollowUp,
+  queueFirst,
+} from "../../services/threads/compact-follow-up.js";
 import { stopThreadForCurrentState } from "../../services/threads/thread-lifecycle.js";
 import {
   getThreadPromptBannerActivity,
@@ -141,15 +148,17 @@ async function requireGoalSupport(
   }
 }
 
+/**
+ * `room-cli thread compact`: an idle thread compacts now, a busy one first thing after its turn, so an agent can
+ * compact itself. `then` runs right after it, saying how it went (compact-follow-up.ts; Core does this for Cloud).
+ */
 async function compactThreadContext(
   deps: AppDeps,
   thread: Thread,
+  then?: string,
 ): Promise<void> {
-  if (isCloudThread(thread)) {
-    await cloudroom(deps).compact(thread);
-    return;
-  }
   ensureThreadIsWritable(thread);
+  if (isCloudThread(thread)) return cloudroom(deps).compact(thread, then);
   if (!deps.providerRegistry.supportsManualCompaction(thread.providerId)) {
     throw new ApiError(
       409,
@@ -157,24 +166,30 @@ async function compactThreadContext(
       `Provider "${thread.providerId}" does not support manual context compaction`,
     );
   }
-  if (thread.status !== "idle" && thread.status !== "error") {
-    throw new ApiError(
-      409,
-      "invalid_request",
-      "Context can only be compacted while the thread is idle or errored",
-    );
+  if (!["idle", "error", "active"].includes(thread.status)) {
+    throw new ApiError(409, "invalid_request", `Context can't be compacted while the thread is ${thread.status}`);
   }
-
-  const environment = await requireThreadCommandEnvironment(deps, { thread });
-  await sendThreadMessage(deps, {
-    environment,
-    payload: {
-      input: createStandaloneBuiltinCompactCommandInput(),
-      mode: "start",
-    },
-    thread,
-    trigger: "user",
-  });
+  if (isManualCompactionActive(deps, thread) || hasQueuedCompaction(deps, thread.id)) {
+    throw new ApiError(409, "invalid_request", "This thread is already compacting or has a compaction queued");
+  }
+  const input = createStandaloneBuiltinCompactCommandInput();
+  const first: string[] = [];
+  if (thread.status === "active") {
+    const sent = await acceptThreadSendRequest(deps, { thread, payload: { input, mode: "queue-if-active" } });
+    if (sent.delivery === "queued") first.push(sent.queuedMessage.id);
+  } else {
+    const environment = await requireThreadCommandEnvironment(deps, { thread });
+    await sendThreadMessage(deps, { environment, payload: { input, mode: "start" }, thread, trigger: "user" });
+  }
+  if (then !== undefined) {
+    const followUp = await createQueuedMessageForThread(deps, {
+      thread: getThread(deps.db, thread.id) ?? thread,
+      payload: { input: [{ type: "text", text: then, mentions: [] }] },
+    });
+    holdCompactFollowUp(thread.id, followUp.id);
+    first.push(followUp.id);
+  }
+  queueFirst(deps, thread.id, first);
 }
 
 function buildActivePinnedThreadRootListResponse(
@@ -385,9 +400,9 @@ export function registerThreadActionRoutes(app: Hono, deps: AppDeps): void {
     return context.json({ ok: true, cancelledRetries });
   });
 
-  post(routes.compact, async (context) => {
+  post(routes.compact, async (context, payload) => {
     const thread = requirePublicThread(deps.db, context.req.param("id"));
-    await compactThreadContext(deps, thread);
+    await compactThreadContext(deps, thread, payload.then);
     return context.json({ ok: true });
   });
 

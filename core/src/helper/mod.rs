@@ -914,6 +914,8 @@ impl Previews {
                 let error = match () {
                     _ if ready => None,
                     _ if !alive => Some(if info.relay { "Tunnel unavailable" } else { "SSH connection unavailable" }),
+                    // The tunnel itself was turned away, so this says nothing about the app (#1798).
+                    _ if info.refused() => Some("Tunnel unavailable"),
                     _ if info.reachable() => Some("Cloud HTTP server unavailable"),
                     _ => None,
                 };

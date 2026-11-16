@@ -16,6 +16,8 @@ import { Wrapped } from "./components/Wrapped";
 import { MoveToApplicationsPrompt } from "./components/MoveToApplicationsPrompt";
 import { CreditsExplainer } from "./components/CloudQueue";
 import { ActivationChecklist } from "./components/ActivationChecklist";
+import { CornerHost } from "./components/CornerHost";
+import { PartnerCard } from "./components/PartnerCard";
 import { SharedThreadOpener } from "./components/SharedThreadOpener";
 import { InstallAppSheet } from "./components/InstallAppSheet";
 import { AuthCallbackView } from "./views/AuthCallbackView";
@@ -450,6 +452,7 @@ export function App() {
                 <Route path="*" element={<AppRoutes />} />
               </Routes>
               <ProviderCliInstallLogDialogHost />
+              <CornerHost />
               <ActivationChecklist />
               <Onboarding />
               <MoveToApplicationsPrompt />
@@ -457,6 +460,7 @@ export function App() {
               <CreditsExplainer />
               <StarPrompt />
               <Wrapped />
+              <PartnerCard />
               <SharedThreadOpener />
               <InstallAppSheet />
               <CloudroomAccountPanels />

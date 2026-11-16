@@ -347,6 +347,16 @@ function retireGraceMs(
   return isLocalWorktree(deps, row) ? 0 : REMOTE_WORKTREE_GRACE_MS;
 }
 
+/** Setup and teardown hooks run for a folder the provider owns, except a
+ *  personal workspace: it has no repository to read committed hooks from. */
+function runsLifecycleHooks(row: EnvironmentRow): boolean {
+  return (
+    row.providerOwnsPath &&
+    row.environmentProviderId !==
+      DEFAULT_ENVIRONMENT_PROVIDER_ID.personalWorkspace
+  );
+}
+
 function worktreeNotesDir(
   deps: Pick<Deps, "config">,
   environmentId: string,
@@ -759,9 +769,10 @@ async function runRemove(
   await withHostCleanup(deps, row.hostId, async () => {
     try {
       if (refused()) return;
-      if (row.providerOwnsPath && row.hostId !== null && row.path !== null) {
+      if (runsLifecycleHooks(row) && row.hostId !== null && row.path !== null) {
         await runEnvironmentHook(deps, {
           id: `environment:${environmentId}:${row.environmentProviderInstanceKey}:teardown`,
+          environmentId,
           hostId: row.hostId,
           path: row.path,
           kind: "teardown",
@@ -1861,9 +1872,10 @@ function recoverEnvironmentProvisionRequest(
           provisioningId: context.state.provisioningId,
         },
         path: environment.path,
-        setupScriptTimeoutMs: environment.providerOwnsPath
+        setupScriptTimeoutMs: runsLifecycleHooks(environment)
           ? ENVIRONMENT_HOOK_TIMEOUT_MS
           : null,
+        hookBaseBranch: environment.mergeBaseBranch,
       }),
     };
   }

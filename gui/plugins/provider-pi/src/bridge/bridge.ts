@@ -6,6 +6,7 @@ import {
   readFileSync,
   renameSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { randomUUID } from "node:crypto";
@@ -918,12 +919,19 @@ function repointRemovedSessionCwd(providerThreadId: string, cwd: string): void {
   const text = readFileSync(sessionFile, "utf8");
   const end = text.indexOf("\n");
   const header = JSON.parse(end === -1 ? text : text.slice(0, end)) as object;
-  const temp = `${sessionFile}.${process.pid}.tmp`;
-  writeFileSync(
-    temp,
-    JSON.stringify({ ...header, cwd }) + (end === -1 ? "" : text.slice(end)),
-  );
-  renameSync(temp, sessionFile);
+  const temp = `${sessionFile}.${randomUUID()}.tmp`;
+  try {
+    // Keep the transcript's own mode: a private one must stay private.
+    writeFileSync(
+      temp,
+      JSON.stringify({ ...header, cwd }) + (end === -1 ? "" : text.slice(end)),
+      { flag: "wx", mode: statSync(sessionFile).mode & 0o777 },
+    );
+    renameSync(temp, sessionFile);
+  } catch (error) {
+    rmSync(temp, { force: true });
+    throw error;
+  }
 }
 
 function usablePersistedSessionCwd(providerThreadId: string): string | null {

@@ -5,7 +5,7 @@ export type Json =
   | string
   | Json[]
   | { [key: string]: Json };
-export type Harness = "codex" | "pi" | "cursor" | "claude-code" | "fx" | "opencode" | "hermes" | "devin" | "droid" | "kimi" | "openclaw";
+export type Harness = "codex" | "pi" | "cursor" | "claude-code" | "fx" | "opencode" | "hermes" | "devin" | "droid" | "kimi" | "openclaw" | "agent-zero";
 export type CodexAuthStatus = {
   state: "missing" | "waiting" | "connected" | "limited" | "unavailable" | "error" | "expired";
   email: string | null; plan: string | null; message: string | null;
@@ -674,7 +674,7 @@ export class CloudroomClient {
   }
 
   start(id: string, harness: Harness = "codex", options: { model?: string; reasoning?: string; workspace?: string; workspace_name?: string; provider?: string; command_guard_enabled?: boolean; strip_ai_co_authors?: boolean; system_prompt?: string; parent_session?: string; parent_thread?: string; thread_id?: string; project_id?: string; prompt?: string; title?: string; fork?: { session: string; fresh?: boolean; before?: string; last_turn_id?: string }; continue_from?: string } = {}) {
-    if (harness !== "codex" && harness !== "pi" && harness !== "cursor" && harness !== "claude-code" && harness !== "fx" && harness !== "opencode" && harness !== "hermes" && harness !== "devin" && harness !== "droid" && harness !== "kimi" && harness !== "openclaw")
+    if (harness !== "codex" && harness !== "pi" && harness !== "cursor" && harness !== "claude-code" && harness !== "fx" && harness !== "opencode" && harness !== "hermes" && harness !== "devin" && harness !== "droid" && harness !== "kimi" && harness !== "openclaw" && harness !== "agent-zero")
       throw new CloudroomError("Unsupported Cloudroom harness");
     return withoutIds({ request_id: id, harness, ...options }, body => this.#command("/v1/sessions", "start", body));
   }
@@ -777,8 +777,9 @@ export class CloudroomClient {
     );
   }
 
-  compact(sessionId: string, id: string) {
-    return this.#command(`${sessionPath(sessionId)}/compact`, "compact", { request_id: id }, sessionId);
+  /** `then` (Cores with `compact_after_turn`) is sent once compaction ends, saying how it went. */
+  compact(sessionId: string, id: string, then?: string) {
+    return this.#command(`${sessionPath(sessionId)}/compact`, "compact", { request_id: id, ...(then ? { then } : {}) }, sessionId);
   }
 
   /** The user's goal control: pause or resume (`status`), replace the `objective`, or `clear`. */
@@ -944,7 +945,7 @@ export class CloudroomClient {
     );
     if (
       value.session_id !== sessionId ||
-      (value.harness !== "codex" && value.harness !== "pi" && value.harness !== "cursor" && value.harness !== "claude-code" && value.harness !== "fx" && value.harness !== "opencode" && value.harness !== "hermes" && value.harness !== "devin" && value.harness !== "droid" && value.harness !== "kimi" && value.harness !== "openclaw")
+      (value.harness !== "codex" && value.harness !== "pi" && value.harness !== "cursor" && value.harness !== "claude-code" && value.harness !== "fx" && value.harness !== "opencode" && value.harness !== "hermes" && value.harness !== "devin" && value.harness !== "droid" && value.harness !== "kimi" && value.harness !== "openclaw" && value.harness !== "agent-zero")
     ) {
       throw new CloudroomError(
         "Cloudroom session mismatch or unsupported harness",

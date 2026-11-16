@@ -54,52 +54,50 @@ function windowLabel(label: string): string {
   return label
     .replace("Five-hour limit", "5h")
     .replace("Weekly limit", "7d")
+    .replace("Weekly · ", "7d ")
     .replace("Weekly", "7d")
     .replace("Plan usage", "Plan")
     .replace("On-demand spend", "Spend");
 }
 
-// `resetsAt` adds a second line with the limit's reset. Undefined: no bar in this row has one, so the row stays one line.
-function Meter({
-  label,
-  usedPercent,
-  resetsAt,
-}: {
-  label: string;
-  usedPercent: number;
-  resetsAt?: number | null;
-}) {
-  const hot = usedPercent >= 90;
+// One line of an account's limits. `usedPercent` is null for a limit that was not read: it is unknown, not 0%.
+type Limit = { label: string; usedPercent: number | null; resetsAt: number | null };
+
+// The line: the limit's name, bar, percent used, and the time until it resets.
+function Meter({ label, usedPercent, resetsAt }: Limit) {
+  const used = usedPercent ?? 0;
+  const hot = used >= 90;
   return (
-    <div className="w-32 text-xs tabular-nums text-subtle-foreground">
-      <div className="flex items-center gap-2">
-        <span className="min-w-5">{windowLabel(label)}</span>
-        <span className="h-[3px] flex-1 overflow-hidden rounded-full bg-border">
-          <span
-            className={cn("block h-full", hot ? "bg-warning-text" : "bg-muted-foreground")}
-            style={{ width: `${Math.min(100, usedPercent)}%` }}
-          />
-        </span>
-        <span className={cn("w-8 text-right", hot && "text-warning-text")}>
-          {Math.round(usedPercent)}%
-        </span>
-      </div>
-      {resetsAt === undefined ? null : resetsAt === null ? (
-        <div aria-hidden>&nbsp;</div>
-      ) : (
-        <div
-          className="whitespace-nowrap text-right"
-          title={new Date(resetsAt).toLocaleString(undefined, {
-            weekday: "short",
-            month: "short",
-            day: "numeric",
-            hour: "numeric",
-            minute: "2-digit",
-          })}
-        >
-          Resets in {until(resetsAt)}
-        </div>
-      )}
+    <div className="contents">
+      <span>{windowLabel(label)}</span>
+      <span className="h-[3px] overflow-hidden rounded-full bg-border">
+        <span
+          className={cn("block h-full", hot ? "bg-warning-text" : "bg-muted-foreground")}
+          style={{ width: `${Math.min(100, used)}%` }}
+        />
+      </span>
+      <span
+        className={cn("text-right", hot && "text-warning-text")}
+        title={usedPercent === null ? "Not read yet" : undefined}
+      >
+        {usedPercent === null ? "–" : `${Math.round(used)}%`}
+      </span>
+      <span
+        className="whitespace-nowrap pl-1 text-subtle-foreground/75"
+        title={
+          resetsAt === null
+            ? undefined
+            : `Resets ${new Date(resetsAt).toLocaleString(undefined, {
+                weekday: "short",
+                month: "short",
+                day: "numeric",
+                hour: "numeric",
+                minute: "2-digit",
+              })}`
+        }
+      >
+        {resetsAt === null ? null : until(resetsAt)}
+      </span>
     </div>
   );
 }
@@ -112,6 +110,7 @@ function fallbackName(account: AccountView, index: number): string {
 
 function AccountRow({
   account: loaded,
+  limits,
   index,
   picking,
   locked,
@@ -121,6 +120,8 @@ function AccountRow({
   onSignInAgain,
 }: {
   account: AccountView;
+  // The limits every row of this agent shows, in order, each as it looks when the account doesn't report it.
+  limits: Limit[];
   index: number;
   // This row is being switched to.
   picking: boolean;
@@ -145,13 +146,19 @@ function AccountRow({
         : window,
     ),
   };
-  // The page shows two bars. Each says when it resets, so "Resets in" alone shows only for a limit they don't show:
-  // one on a hidden bar, or one that lasts longer than the full bar shown.
-  const shown = account.windows.slice(0, 2);
-  const resets = shown.some((window) => window.resetsAt !== null);
+  // Every limit gets its own line, with the time until it resets. A limit this account doesn't report shows empty,
+  // so every row has the same lines. An account with no usage read shows none.
+  // "Resets in" alone shows only for a limit that lasts longer than every full bar.
+  const shown: Limit[] =
+    account.windows.length === 0
+      ? []
+      : limits.map(
+          (empty) =>
+            account.windows.find((window) => window.label === empty.label) ?? empty,
+        );
   const full = shown.some(
     (window) =>
-      Math.round(window.usedPercent) >= 100 &&
+      Math.round(window.usedPercent ?? 0) >= 100 &&
       window.resetsAt !== null &&
       window.resetsAt >= (account.limitedUntil ?? 0) - 60_000,
   );
@@ -284,14 +291,18 @@ function AccountRow({
             Resets in {until(account.limitedUntil)}
           </span>
         ) : null}
-        {shown.map((window) => (
-          <Meter
-            key={window.label}
-            label={window.label}
-            usedPercent={window.usedPercent}
-            resetsAt={resets ? window.resetsAt : undefined}
-          />
-        ))}
+        {shown.length > 0 ? (
+          <div className="grid grid-cols-[auto_6rem_2rem_3.25rem] items-center gap-x-2 text-xs leading-[18px] tabular-nums text-subtle-foreground">
+            {shown.map((window) => (
+              <Meter
+                key={window.label}
+                label={window.label}
+                usedPercent={window.usedPercent}
+                resetsAt={window.resetsAt}
+              />
+            ))}
+          </div>
+        ) : null}
         {account.inUse && account.needsSignIn ? (
           <Button variant="outline" size="sm" onClick={onUse}>
             Approve for Cloud
@@ -582,7 +593,7 @@ function AccountsSection({ provider, name }: { provider: Provider; name: string 
     setSwitched(null);
     setError(null);
     try {
-      await rpc.call("accounts.use", { provider, id });
+      await rpc.call("accounts.use", { provider, id, where: "settings" });
       setAccounts(await rpc.call("accounts.list", { provider }));
       setSwitched(name);
     } catch (cause) {
@@ -638,6 +649,22 @@ function AccountsSection({ provider, name }: { provider: Provider; name: string 
   }, [loaded, provider]);
 
   const count = accounts?.filter((account) => account.id !== LOCAL).length ?? 0;
+  // Every account shows the same limits, so the lines match from row to row.
+  // Claude leaves out 5h and 7d while they have no use, so those show 0%. Any other limit an account leaves out
+  // was not read (the reply check can't read a model's limit): it shows as unknown.
+  const unused = provider === "claude-code" ? ["Five-hour limit", "Weekly limit"] : [];
+  const limits: Limit[] = [
+    ...new Set([
+      ...unused,
+      ...(accounts ?? []).flatMap((account) =>
+        account.windows.map((window) => window.label),
+      ),
+    ]),
+  ].map((label) => ({
+    label,
+    usedPercent: unused.includes(label) ? 0 : null,
+    resetsAt: null,
+  }));
   return (
     <section ref={section} className="space-y-2">
       <div className="flex items-center gap-2 pl-0.5">
@@ -698,6 +725,7 @@ function AccountsSection({ provider, name }: { provider: Provider; name: string 
               <AccountRow
                 key={account.id}
                 account={account}
+                limits={limits}
                 index={index}
                 picking={account.id === picking}
                 locked={picking !== null}

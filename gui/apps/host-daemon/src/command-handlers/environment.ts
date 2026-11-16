@@ -45,6 +45,8 @@ export async function provisionEnvironment(
       provision: toProvisionWorkspaceOptions(command, onProgress),
       setupScriptTimeoutMs: command.setupScriptTimeoutMs,
       setupContributedEnv: command.contributedEnv,
+      hookBaseBranch: command.hookBaseBranch ?? null,
+      hookDataDir: options.dataDir,
     });
 
     const [branchName, resolvedDefaultBranch] = await Promise.all([

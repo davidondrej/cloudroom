@@ -662,6 +662,8 @@ const environmentHookRunCommandSchema = z
     contributedEnv: z.array(hostDaemonContributedEnvEntrySchema).default([]),
     resumeOnly: z.boolean().default(false),
     operationId: z.string().min(1),
+    // Names the hooks saved at this environment's first setup: the only ones that run.
+    environmentId: z.string().min(1),
     path: z.string().min(1),
     kind: z.enum(["setup", "teardown"]),
     timeoutMs: z.number().int().positive().max(MAX_NODE_TIMER_DELAY_MS),
@@ -959,6 +961,9 @@ const unmanagedEnvironmentProvisionCommandSchema =
     .extend({
       path: z.string().min(1),
       setupScriptTimeoutMs: z.number().int().positive().nullable(),
+      // Lifecycle hooks are read from Git at the merge base of HEAD and this
+      // branch (the default branch when null), never from the folder's files.
+      hookBaseBranch: gitBranchNameSchema.nullable().optional(),
       contributedEnv: z.array(hostDaemonContributedEnvEntrySchema),
     })
     .strict();

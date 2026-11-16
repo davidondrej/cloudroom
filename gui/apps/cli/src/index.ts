@@ -53,7 +53,15 @@ function createCommandGroupDeps(
   };
 }
 
+// Plugin commands load undici 7, which needs a global File (Node.js 20+). Older Node,
+// e.g. `node "$ROOM_CLI"`, threw and printed the minified bundle (#1800).
+const hasUndiciRuntime = typeof globalThis.File === "function";
+
 async function exitWhenIdle(code: number): Promise<void> {
+  if (!hasUndiciRuntime) {
+    process.exitCode = code;
+    return;
+  }
   await (await import("./plugin-cli-proxy.js")).exitWhenIdle(code);
 }
 
@@ -183,6 +191,12 @@ Quick start:
 }
 
 main().catch(async (err) => {
-  console.error(err.message);
+  console.error(
+    !hasUndiciRuntime &&
+      err instanceof ReferenceError &&
+      /\bFile is not defined\b/u.test(err.message)
+      ? `room-cli: this command needs Node.js 22 or newer, but this is Node.js ${process.version}. Run room-cli itself, not with node, so it uses Cloudroom's own runtime.`
+      : err.message,
+  );
   await exitWhenIdle(1);
 });

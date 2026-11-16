@@ -103,6 +103,7 @@ import type {
   DeleteThreadRequest,
   ThreadArchiveAllQuery,
   ThreadStopQuery,
+  ThreadCompactRequest,
   ThreadUnarchiveQuery,
   ThreadUnarchiveResponse,
   EnvironmentActionApiError,
@@ -314,6 +315,7 @@ import {
   deleteThreadRequestSchema,
   threadArchiveAllQuerySchema,
   threadStopQuerySchema,
+  threadCompactRequestSchema,
   threadUnarchiveQuerySchema,
   environmentActionRequestSchema,
   environmentDiffBranchesQuerySchema,
@@ -1355,7 +1357,9 @@ export const publicApiRoutes = {
     compact: defineRoute({
       path: "/threads/:id/compact",
       method: "post",
-      request: noRequest<PathId>(),
+      request: jsonRequest<PathId, ThreadCompactRequest>(
+        threadCompactRequestSchema,
+      ),
       response: jsonResponse<{ ok: true }>(),
     }),
     clearContext: defineRoute({

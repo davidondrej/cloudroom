@@ -178,6 +178,8 @@ export function createAcpDeltaTranslator(
   const injectedToolBindings = new Map<string, AcpInjectedTool>();
   const pendingInjectedCalls = new Map<string, AcpInjectedTool[]>();
   const turnErrors = new Map<string, string>();
+  // The message so far, for agents whose chunks repeat it (`cumulativeText`).
+  const messageSoFar = new Map<string, string>();
 
   function callKey(
     context: AcpDeltaTranslationContext | undefined,
@@ -460,6 +462,7 @@ export function createAcpDeltaTranslator(
   }
 
   function closeAssistantStream(): ThreadDelta {
+    messageSoFar.clear();
     return {
       kind: "item.textClose",
       key: { channel: ASSISTANT_STREAM_KEY },
@@ -618,13 +621,22 @@ export function createAcpDeltaTranslator(
         if (turnError !== undefined) {
           turnErrors.set(context?.threadId ?? "", turnError);
         }
+        // A chunk that doesn't continue the message so far starts a new one. Closing a message forgets it.
+        const thread = context?.threadId ?? "";
+        const sofar = messageSoFar.get(thread);
+        const continues = sofar !== undefined && text.startsWith(sofar);
+        const restart = dialect.cumulativeText && sofar !== undefined && !continues ? [closeAssistantStream()] : [];
+        if (dialect.cumulativeText) messageSoFar.set(thread, text);
+        const delta = dialect.cumulativeText && continues ? text.slice(sofar.length) : text;
+        if (delta === "") return [];
         return [
           closeThoughtStream(),
+          ...restart,
           {
             kind: "item.textDelta",
             key: { channel: ASSISTANT_STREAM_KEY },
             channel: "agentMessage",
-            text: turnError ?? text,
+            text: turnError ?? delta,
             noTurnFallback: noTurnFallbackFor(rawEvent),
           },
         ];
@@ -840,6 +852,7 @@ export function createAcpDeltaTranslator(
     const status = turnStatusForStopReason(stopReason);
     const turnError = turnErrors.get(context?.threadId ?? "");
     turnErrors.delete(context?.threadId ?? "");
+    messageSoFar.delete(context?.threadId ?? "");
     return [
       ...flushOpenTurnWork(context, itemStatusForTurnStatus(status)),
       {

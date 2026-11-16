@@ -106,6 +106,13 @@ interface ThreadActionOptions {
   json?: boolean;
 }
 
+/** `room-cli thread compact`'s follow-up unless `--then` or `--no-then`. Cloud's CLI (core/src/session/thread.rs) sends the same. */
+const COMPACT_THEN = "Keep going with your task. If it's done, say what we should do next.";
+
+interface ThreadCompactCommandOptions extends ThreadActionOptions {
+  then?: string | false;
+}
+
 interface ThreadRetryCommandOptions {
   self?: boolean;
   json?: boolean;
@@ -700,18 +707,42 @@ export function registerActionsCommands(
       ),
     );
 
+  parent
+    .command("compact [id]")
+    .description(
+      "Compact a thread's context now, or once its running turn ends, then send a follow-up so the agent keeps going",
+    )
+    .option("--self", "Target the current thread (from ROOM_THREAD_ID)")
+    .option("--then <text>", "Follow-up message after compaction (default: keep going)")
+    .option("--no-then", "Send no follow-up message")
+    .option("--json", "Print machine-readable JSON output")
+    .action(
+      action(async (id: string | undefined, opts: ThreadCompactCommandOptions, command: Command) => {
+        let root = command;
+        while (root.parent) root = root.parent;
+        const raw = (root as Command & { rawArgs?: string[] }).rawArgs ?? [];
+        if (raw.includes("--no-then") && raw.some((word) => word === "--then" || word.startsWith("--then="))) {
+          throw new Error("Choose only one of --then and --no-then.");
+        }
+        if (typeof opts.then === "string" && !opts.then.trim()) {
+          throw new Error("--then needs a message. To send none, use --no-then.");
+        }
+        const threadId = requireThreadIdOrSelf(id, opts);
+        const then = opts.then === false ? undefined : (opts.then ?? COMPACT_THEN);
+        await createCliRoomSdk(getUrl()).threads.compact({ threadId, ...(then ? { then } : {}) });
+        if (outputJson(opts, { ok: true, threadId })) return;
+        console.log(
+          `Thread ${threadId} compacts now, or once its running turn ends${then ? ". Then it gets the follow-up, saying whether compaction worked" : ""}. If it is your own thread, end your turn now.`,
+        );
+      }),
+    );
+
   for (const { name, description, method, done } of [
     {
       name: "stop",
       description: "Stop work and release the loaded agent runtime",
       method: "stop",
       done: "stopped",
-    },
-    {
-      name: "compact",
-      description: "Request compaction of an idle or errored thread's context",
-      method: "compact",
-      done: "context compaction requested",
     },
     {
       name: "clear",

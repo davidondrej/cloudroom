@@ -231,6 +231,34 @@ class UpstreamTimeoutTests(unittest.TestCase):
                         self.assertTrue(served.wait(3), 'the relay stopped accepting')
                     relay.terminate()
 
+    def test_tunnel_refused_before_core_is_not_blamed_on_the_app(self):
+        # #1798: the relay in front of a user's VPS answers the upgrade with 400, then a plain 200, so the report must
+        # say "Tunnel unavailable", not "Cloud HTTP server unavailable". Core's own 409 still means the app is down.
+        rows = [({'websocket': 400, 'cloudroom-tunnel': 200}, True, False),
+                ({'websocket': 409}, False, True),
+                ({'websocket': 101}, False, False)]
+        for answers, refused, down in rows:
+            with self.subTest(answers=answers), socket.create_server(('127.0.0.1', 0)) as listener, \
+                    tempfile.TemporaryDirectory(prefix='cr-preview-') as folder:
+                def answer():
+                    for _ in answers:
+                        client, _ = listener.accept()
+                        with client:
+                            head = client.recv(4096).decode()
+                            code = answers[head.split('Upgrade: ', 1)[1].split('\r\n', 1)[0]]
+                            client.sendall(f'HTTP/1.1 {code} X\r\nContent-Length: 0\r\n\r\n'.encode())
+                threading.Thread(target=answer, daemon=True).start()
+                core = SimpleNamespace(url=f'http://127.0.0.1:{listener.getsockname()[1]}', headers={})
+                relay = preview.Relay(core, 3000, 'device', Path(folder) / 'relay.sock')
+                try:
+                    if 101 in answers.values():
+                        relay.open()[0].close()
+                    else:
+                        self.assertRaises(OSError, relay.open)
+                    self.assertEqual((relay.refused, relay.down), (refused, down))
+                finally:
+                    relay.terminate()
+
 
 @unittest.skipUnless(sys.platform == 'win32', 'Windows helper lifecycle')
 class WindowsLifecycleTests(unittest.TestCase):
@@ -587,6 +615,7 @@ class MacJobTests(unittest.TestCase):
                     info.size = len(data or b'')
                     tar.addfile(info, io.BytesIO(data or b''))
             return buffer.getvalue()
+        self.addCleanup(os.umask, os.umask(0o022))  # The Mac's own modes for new files (#1066).
         with tempfile.TemporaryDirectory() as folder:
             folder = Path(os.path.realpath(folder))
             home, outside = folder / 'home', folder / 'outside'
@@ -619,32 +648,51 @@ class MacJobTests(unittest.TestCase):
                 self.assertFalse((folder / 'ran').exists() or (home / 'Library/LaunchAgents/x.plist').exists() or (home / 'notes.txt').exists())
                 # Into the home folder, again (a file replaces), under a new name, and that name again.
                 self.assertEqual(push(archive(('notes.txt', b'one')), 'notes.txt', '~')[:2], (0, f'{home}/notes.txt'))
-                self.assertEqual(push(archive(('notes.txt', b'two')), 'notes.txt', '~')[:2], (0, f'{home}/notes.txt'))
-                self.assertEqual(push(archive(('notes.txt', b'one')), 'notes.txt', '~/new.txt')[:2], (0, f'{home}/new.txt'))
+                self.assertEqual(push(archive(('notes.txt', b'two', 0o700)), 'notes.txt', '~')[:2], (0, f'{home}/notes.txt'))
+                self.assertEqual(push(archive(('notes.txt', b'one', 0o700)), 'notes.txt', '~/new.txt')[:2], (0, f'{home}/new.txt'))
                 self.assertIn('already exists', push(archive(('notes.txt', b'two')), 'notes.txt', '~/new.txt')[2])
                 self.assertEqual([(home / name).read_text() for name in ('notes.txt', 'new.txt')], ['two', 'one'])
+                # Built private and executable in the sandbox, over a 644 file and new.
+                self.assertEqual([(home / name).stat().st_mode & 0o777 for name in ('notes.txt', 'new.txt')], [0o755, 0o755])
                 # A relative place starts at home, not the job's folder; a link in the place is resolved; and a link where the
                 # item lands is replaced, never followed.
                 self.assertEqual(push(archive(('r.txt', b'r')), 'r.txt', 'rel/')[:2], (0, f'{home}/rel/r.txt'))
                 self.assertEqual(push(archive(('r.txt', b'r')), 'r.txt', '~/link')[:2], (0, f'{home}/real/r.txt'))
+                (outside / 'victim').chmod(0o600)
                 self.assertEqual(push(archive(('v.txt', b'new')), 'v.txt', '~')[0], 0)
                 self.assertEqual(((outside / 'victim').read_text(), (home / 'v.txt').is_symlink()), ('victim', False))
+                self.assertEqual((home / 'v.txt').stat().st_mode & 0o777, 0o600)  # No more readable than the linked file.
                 # A folder merges, as cp does, also from a copy staged in pieces, whose staging is removed.
                 (home / 'proj').mkdir()
                 for name, text in (('keep', 'keep'), ('a', 'old')):
                     (home / 'proj' / name).write_text(text)
+                (home / 'proj/a').chmod(0o600)
+                (home / 'proj').chmod(0o1744)
                 staged = Path('/tmp/cloudroom.' + uuid.uuid4().hex)
                 staged.mkdir()
-                data = archive(('proj', None), ('proj/a', b'new'), ('proj/b', b'b'))
+                data = archive(('proj', None), ('proj/a', b'new'), ('proj/b', b'b', 0o600))
                 (staged / '00000').write_bytes(data[:50])
                 (staged / '00001').write_bytes(data[50:])
                 self.assertEqual(push(b'', 'proj', '~/', str(staged))[:2], (0, f'{home}/proj'))
                 self.assertEqual({path.name: path.read_text() for path in (home / 'proj').iterdir()}, {'a': 'new', 'b': 'b', 'keep': 'keep'})
+                # A replaced file keeps its private modes; a new one gets the Mac's, not the sandbox's; the folder keeps all.
+                self.assertEqual([(home / 'proj' / name).stat().st_mode & 0o7777 for name in ('a', 'b', '')], [0o600, 0o644, 0o1744])
                 self.assertFalse(staged.exists())
-                # A merge that can't pack every file fails and changes nothing (root can read any file).
-                if os.geteuid():
-                    self.assertNotEqual(push(archive(('proj', None), ('proj/a', b'newer'), ('proj/b', b'x', 0)), 'proj', '~')[0], 0)
-                    self.assertEqual((home / 'proj/a').read_text(), 'new')
+                # Also when one hard-linked file replaces both, so the private one can't turn public through the link.
+                self.assertEqual(push(archive(('proj', None), ('proj/b', b'new'), ('proj/a', b'', (tarfile.LNKTYPE, 'proj/b'))), 'proj', '~')[0], 0)
+                self.assertEqual([(home / 'proj' / name).stat().st_mode & 0o777 for name in ('a', 'b')], [0o600, 0o644])
+                # A file with an ACL is never replaced: the new file would drop it, and on Linux would let its group read it.
+                (home / 'proj/c').write_text('c')
+                acl = ['/bin/chmod', '+a', 'everyone deny delete'] if sys.platform == 'darwin' else ['setfacl', '-m', f'u:{os.getuid()}:r']
+                if shutil.which(acl[0]) and not subprocess.run([*acl, home / 'proj/c'], capture_output=True).returncode:
+                    self.assertIn('/proj/c has an access control list', push(archive(('proj', None), ('proj/a', b'newer'), ('proj/c', b'x')), 'proj', '~')[2])
+                    self.assertEqual([(home / 'proj' / name).read_text() for name in ('a', 'c')], ['new', 'c'])
+                # A merge that can't set every mode fails and changes nothing.
+                (folder / 'bin').mkdir()
+                (folder / 'bin/chmod').write_text('#!/bin/sh\n[ "$1" = -R ] || exec /bin/chmod "$@"; exit 1\n')
+                (folder / 'bin/chmod').chmod(0o755)
+                self.assertNotEqual(push(archive(('proj', None), ('proj/a', b'newer'), ('proj/b', b'x')), 'proj', '~')[0], 0)
+                self.assertEqual((home / 'proj/a').read_text(), 'new')
                 # A name or place the Mac can't use is refused.
                 for name, to in (('a/b', '~'), ('..', '~'), ('x', '~/missing/..'), ('x', '')):
                     self.assertEqual(push(b'', name, to)[0], 126)

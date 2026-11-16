@@ -10,6 +10,7 @@ import type { HostDaemonContributedEnvEntry } from "@cloudroom/host-daemon-contr
 import { cursorAuthFile, execPortableFile, findCliExecutable, killPortableProcess, spawnPortableProcess, tarCommand, userEnvironmentEntries } from "@cloudroom/process-utils";
 import { rawThreadIdSchema, reasoningLevelSchema, COMPUTER, type ThreadCreateOrigin } from "@cloudroom/domain";
 import { z } from "zod";
+import { threadCreditMinutesSchema } from "./thread-credits.js";
 import type { WorkSessionDeps } from "../../types.js";
 import { requirePrimaryHostId } from "../hosts/primary-host.js";
 import { hasSupportedFrontmatterDelimiter, parseFrontmatter } from "../skills/injected-skills.js";
@@ -63,7 +64,7 @@ export type SandboxTrigger = "app_launch" | "app_activity" | "composer" | "threa
 export type SandboxWakeTrigger = Extract<SandboxTrigger, "thread_typing" | "thread_view" | "teleport_local">;
 type FirstWake = { target?: "vps" | "cloud"; launch?: ThreadCreateOrigin; launcher?: string };
 /** Logins the website keeps for every sandbox of an account (ADR 0145). */
-export type SandboxLogin = "claude" | "codex" | "pi" | "github" | "cursor" | "opencode" | "mcp" | "hermes" | "devin" | "kimi" | "openclaw";
+export type SandboxLogin = "claude" | "codex" | "pi" | "github" | "cursor" | "opencode" | "mcp" | "hermes" | "devin" | "kimi" | "openclaw" | "agent-zero";
 /** GitHub projects also name their repository and cloud folder, so the website can build a template. */
 export type SandboxProject = { id: string; repository: string | null; folder: string };
 const RECHECK_MS = 60_000;
@@ -87,7 +88,10 @@ const OUTAGE_CHOICE = "sandbox_outage";
 export const CLOUD_REGION = "cloud_region";
 /** A wake the website holds until the sandbox's server can take it (web/lib/sandboxes.ts): restarting, restoring,
  *  repairing, full, or an outage. The thread shows the website's words as a notice, never an error, and tries again each minute. */
-const WAIT_CODES = new Set(["sandbox_restarting", "sandbox_restoring", "sandbox_repairing", "sandbox_full", OUTAGE_CHOICE]);
+/** The website's database can't answer: an outage, or planned work like a Postgres upgrade (web/lib/model.ts). */
+const CLOUD_PAUSED = "cloud_paused";
+export const cloudPausedError = (error: unknown) => error instanceof CloudroomError && error.code === CLOUD_PAUSED;
+const WAIT_CODES = new Set(["sandbox_restarting", "sandbox_restoring", "sandbox_repairing", "sandbox_full", OUTAGE_CHOICE, CLOUD_PAUSED]);
 /** The website no longer has this sign-in's token: it was signed out there, or the password was reset. */
 const SIGNED_OUT = "desktop_signed_out";
 export const startRefused = (error: unknown): error is CloudroomError & { code: string } => error instanceof CloudroomError && [USAGE_LIMIT, AGENT_LIMIT, CLOUD_QUEUE, CLOUD_REGION].includes(error.code ?? "");
@@ -324,6 +328,25 @@ export async function macKimiLogin(): Promise<string | null> {
   return JSON.stringify({ config, credentials });
 }
 
+/** A server only this computer or its network reaches: localhost, Docker's host name, or a private address. */
+const localAgentZero = (host: string) => /^(https?:\/\/)?([^@/]*@)?(localhost|[^/:]*\.localhost|[^/:]*\.local|host\.docker\.internal|127\.|0\.0\.0\.0|\[::1?\]|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|169\.254\.)/i.test(host);
+
+/** This computer's `a0` login for Cloud (ADR 20261116-153548): the Agent Zero server in ~/.agent-zero/.env, else the
+ *  only remote one `a0` has a session for, with that session's cookies. A named local server travels too, so Cloud
+ *  stops using an older one and Core explains why it can't reach it. The rest of `a0`'s settings stays here. */
+export async function macAgentZeroLogin(): Promise<string | null> {
+  const home = join(homedir(), ".agent-zero");
+  const [env, saved] = await Promise.all([readFile(join(home, ".env"), "utf8").catch(() => ""), readFile(join(home, "session_cookies.json"), "utf8").catch(() => "")]);
+  let sessions: Record<string, unknown> = {};
+  try { const hosts = (JSON.parse(saved) as { hosts?: unknown }).hosts; if (hosts && typeof hosts === "object" && !Array.isArray(hosts)) sessions = hosts as Record<string, unknown>; } catch { /* no sessions */ }
+  const named = [...env.matchAll(/^\s*(?:export\s+)?AGENT_ZERO_HOST\s*=\s*["']?([^"'\s#]+)/gm)].at(-1)?.[1]?.replace(/\/+$/, "");
+  const remote = Object.keys(sessions).filter(host => !localAgentZero(host));
+  const host = named ?? (remote.length === 1 ? remote[0] : undefined);
+  if (!host) return null;
+  const cookies = Array.isArray(sessions[host]) ? sessions[host] : undefined;
+  return JSON.stringify({ host, ...(cookies ? { cookies } : {}) });
+}
+
 /** This computer's Devin CLI login file, or null when Devin is signed out here. */
 export async function macDevinLogin(): Promise<string | null> {
   const path = join(process.env.XDG_DATA_HOME || join(homedir(), ".local/share"), "devin", "credentials.toml");
@@ -425,6 +448,8 @@ const environmentSchema = z.object({
   variables: z.array(z.object({ name: z.string(), hint: z.string() })), setup: z.string(),
   repos: z.array(z.string()).default([]), mcp: z.array(z.string()).default([]), available: z.array(z.string()).optional(), pushed: z.record(z.string(), z.number()).optional(), ids: z.record(z.string(), z.number()).optional(), login: z.string().optional(),
   loops: z.record(z.string(), z.number()).optional(),
+  repoSync: z.array(z.object({ repo: z.string(), branch: z.string(), every: z.number(), on: z.boolean() })).default([]),
+  branches: z.array(z.string()).optional(),
 });
 export type CloudEnvironment = z.infer<typeof environmentSchema>;
 export const cloudEnvironmentRequestSchema = z.discriminatedUnion("action", [
@@ -435,6 +460,9 @@ export const cloudEnvironmentRequestSchema = z.discriminatedUnion("action", [
   z.object({ action: z.literal("addRepo"), repo: z.string().min(1) }),
   z.object({ action: z.literal("removeRepo"), repo: z.string().min(1) }),
   z.object({ action: z.literal("githubRepos") }),
+  // RepoSync (docs/scopes/repo-sync.md): one repo's row, and the branches its picker offers.
+  z.object({ action: z.literal("repoSync"), repo: z.string().min(1), on: z.boolean().optional(), branch: z.string().min(1).optional(), every: z.number().optional(), remove: z.boolean().optional() }),
+  z.object({ action: z.literal("githubBranches"), repo: z.string().min(1) }),
 ]);
 /** One MCP server in Claude Code's format, as the website stores it for sandboxes. */
 export type McpServer = { type: "stdio"; command: string; args: string[]; env: Record<string, string> } | { type: "http" | "sse"; url: string; headers: Record<string, string> };
@@ -626,10 +654,19 @@ export class SandboxDirectory {
       // Refused for the cloud queue or the region: ask again soon, so the composer shows the right card.
       if (code === CLOUD_QUEUE || code === CLOUD_REGION) this.mode = null;
       if (code === SIGNED_OUT) this.onSignedOut(account.token);
+      // A 4xx (say, "This account is not enabled") means the database answered: Cloud is back, whatever the answer.
+      if (code === CLOUD_PAUSED) this.pausedAnswers += 1;
+      else if (response.status < 500) this.pausedAnswers = 0;
       throw new CloudroomError(message, response.status >= 500 ? null : response.status, code);
     }
+    this.pausedAnswers = 0;
     return value;
   }
+
+  private pausedAnswers = 0;
+  /** The website said its database can't answer, twice in a row with no real answer between: one failed
+   *  query is a blip, not a pause. The minute mode check keeps asking, so this clears within a minute of Cloud's return. */
+  cloudPaused(): boolean { return this.pausedAnswers >= 2; }
 
   private limit: { on: boolean; at: number } | null = null;
   private checkingLimit = false;
@@ -825,7 +862,7 @@ export class SandboxDirectory {
         const delay = quick ? 2_000 : moving ? 5_000 : Math.min(Math.max(previous?.delay ?? 0, 2_500) * 2, wait ? 60_000 : 300_000);
         // Out of Cloud Credits: wait until the minute mode check sees credits again (checkMode clears it), not every 5 minutes.
         const held = error instanceof CloudroomError && error.code === USAGE_LIMIT;
-        this.backoff.set(thread, { until: held ? Infinity : Date.now() + delay, delay, tries, refusal: error instanceof CloudroomError && error.status !== null ? error : null });
+        this.backoff.set(thread, { until: held ? Infinity : Date.now() + delay, delay, tries, refusal: error instanceof CloudroomError && (error.status !== null || wait) ? error : null });
         throw error;
       }).finally(() => this.wakes.delete(thread));
       this.wakes.set(thread, pending);
@@ -947,6 +984,11 @@ export class SandboxDirectory {
     return z.object({ wave: z.unknown() }).parse(await this.call({ action: "usage_wave" })).wave ?? null;
   }
 
+  /** One Cloud thread's billed credits and its sandbox's CPU per minute, for the purpose card. Asked when it opens. */
+  async threadCredits(thread: string) {
+    return threadCreditMinutesSchema.parse(await this.call({ action: "thread_credits", thread }));
+  }
+
   /** What the account's cloud offers, read by the website from a running spare or sandbox. Null until one runs. */
   async capabilities(): Promise<unknown> {
     return z.object({ capabilities: z.unknown() }).parse(await this.call({ action: "capabilities" })).capabilities ?? null;
@@ -983,6 +1025,7 @@ export class SandboxDirectory {
     this.awakeIssue = null;
     this.awakeCheck = null;
     this.backoff.clear();
+    this.pausedAnswers = 0;
     this.uploaded.clear();
     this.mode = null;
     this.limit = null;
@@ -1269,7 +1312,7 @@ export class SandboxDirectory {
   /** Which logins the website holds for this account's sandboxes. */
   async logins(): Promise<Record<SandboxLogin, boolean>> {
     // Missing names mean an older website that cannot hold that login yet.
-    return z.object({ claude: z.boolean(), codex: z.boolean(), pi: z.boolean(), github: z.boolean(), cursor: z.boolean().default(false), opencode: z.boolean().default(false), mcp: z.boolean().default(false), hermes: z.boolean().default(false), devin: z.boolean().default(false), kimi: z.boolean().default(false), openclaw: z.boolean().default(false) }).parse(await this.call({ action: "status" }, "logins"));
+    return z.object({ claude: z.boolean(), codex: z.boolean(), pi: z.boolean(), github: z.boolean(), cursor: z.boolean().default(false), opencode: z.boolean().default(false), mcp: z.boolean().default(false), hermes: z.boolean().default(false), devin: z.boolean().default(false), kimi: z.boolean().default(false), openclaw: z.boolean().default(false), "agent-zero": z.boolean().default(false) }).parse(await this.call({ action: "status" }, "logins"));
   }
 
   /** Who the account's GitHub login belongs to, or null when GitHub or an older website can't tell. */
@@ -1300,7 +1343,7 @@ export class SandboxDirectory {
 
   private copiedAt = 0;
   get loginsCopied(): boolean { return this.copiedAt > 0; }
-  /** Copies this Mac's Codex, Pi, opencode, Hermes, Devin, Kimi Code, OpenClaw, Cursor, and GitHub logins when the user allowed it (ADRs 0128, 0130).
+  /** Copies this Mac's Codex, Pi, opencode, Hermes, Devin, Kimi Code, OpenClaw, Agent Zero, Cursor, and GitHub logins when the user allowed it (ADRs 0128, 0130).
    *  At most once a minute, unless the user just clicked Connect. */
   copyMacLogins(force = false): Promise<void> {
     if (!force && Date.now() - this.copiedAt < RECHECK_MS) return Promise.resolve();
@@ -1347,7 +1390,7 @@ export class SandboxDirectory {
     const files = [["codex", codexAuthPath()], ["pi", join(piHome, "auth.json")]] as const;
     // One failed login never stops the others; all failures are reported together.
     const failed: string[] = [];
-    const save = (name: "codex" | "pi" | "opencode" | "hermes" | "devin" | "kimi" | "openclaw" | "cursor" | "github", value: string) => this.putLogin(name, value).catch((error: unknown) => { failed.push(`${name}: ${error instanceof Error ? error.message : String(error)}`); });
+    const save = (name: "codex" | "pi" | "opencode" | "hermes" | "devin" | "kimi" | "openclaw" | "agent-zero" | "cursor" | "github", value: string) => this.putLogin(name, value).catch((error: unknown) => { failed.push(`${name}: ${error instanceof Error ? error.message : String(error)}`); });
     for (const [name, path] of files) {
       if (skip.has(name)) continue;
       const value = await readFile(path, "utf8").catch(() => null);
@@ -1355,7 +1398,7 @@ export class SandboxDirectory {
       try { JSON.parse(value); } catch { continue; }
       await save(name, value);
     }
-    const copy = async (name: "opencode" | "hermes" | "devin" | "kimi" | "openclaw" | "cursor", read: () => Promise<string | null>) => {
+    const copy = async (name: "opencode" | "hermes" | "devin" | "kimi" | "openclaw" | "agent-zero" | "cursor", read: () => Promise<string | null>) => {
       if (skip.has(name)) return;
       const value = await read().catch((error: unknown) => { failed.push(`${name}: ${error instanceof Error ? error.message : String(error)}`); return null; });
       if (value) await save(name, value);
@@ -1365,6 +1408,7 @@ export class SandboxDirectory {
     await copy("devin", macDevinLogin);
     await copy("kimi", macKimiLogin);
     await copy("openclaw", macOpenclawLogin);
+    await copy("agent-zero", macAgentZeroLogin);
     await copy("cursor", macCursorLogin);
     const githubToken = skip.has("github") ? "" : await macGithubToken();
     if (githubToken) await save("github", await sandboxGithubLogin(githubToken));

@@ -720,10 +720,12 @@ for (const command of [
   "sudo -- rm -rf /",
   "command -- rm -rf /",
   "mke2fs /dev/sda",
+  "room-cli mac run 'rm -rf ~'",
+  "room-cli mac run \"diskutil eraseDisk APFS X disk2\"",
 ]) {
   if (checkCommand(command) === null) throw new Error(`Allowed dangerous command: ${command}`);
 }
-for (const command of ["command -v mkfs", "command -V mke2fs", "sudo " + "-- ".repeat(26) + "true"]) {
+for (const command of ["command -v mkfs", "command -V mke2fs", "rg -F \"mac run 'diskutil eraseDisk\" docs", "sudo " + "-- ".repeat(26) + "true"]) {
   const started = performance.now();
   if (checkCommand(command) !== null) throw new Error(`Blocked safe command: ${command}`);
   if (performance.now() - started > 1000) throw new Error(`Slow check: ${command}`);

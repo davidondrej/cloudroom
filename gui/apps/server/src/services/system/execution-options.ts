@@ -277,6 +277,12 @@ export async function listSystemProviderInfos(
   deps: LoggedWorkSessionDeps,
   query: ListSystemProviderInfosRequest = {},
 ): Promise<ProviderInfo[]> {
+  // One provider's name and icon: no install check, no settings read.
+  if (query.providerId !== undefined) {
+    await deps.providerRegistry.whenProviderRegistered(query.providerId);
+    const one = deps.providerRegistry.get(query.providerId)?.info;
+    return one ? [one] : [];
+  }
   await deps.providerRegistry.whenRegistrationsSettled();
   return await resolveSystemProviderInfosPlan(deps, query).providersPromise;
 }

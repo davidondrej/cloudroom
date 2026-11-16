@@ -415,6 +415,8 @@ impl Session {
 pub enum Error {
     NotFound,
     Conflict(&'static str),
+    /// A 409 whose text names its cause, such as the saved reason a new agent didn't start (#1802).
+    Refused(String),
     /// A refused effort, with the levels the model takes (`invalid_reasoning_effort`).
     Effort(String),
     /// Carries the underlying cause so API clients can see why storage failed.
@@ -426,6 +428,7 @@ impl Error {
         match self {
             Self::NotFound => "session not found".into(),
             Self::Conflict(message) => (*message).into(),
+            Self::Refused(message) => message.clone(),
             Self::Effort(message) => format!("invalid reasoning effort: {message}"),
             // A locked journal or a write that found no space: the only way in is `vm run` (#211).
             Self::Storage(detail)
@@ -483,6 +486,7 @@ pub struct Manager {
     pub(crate) storage: Arc<Guard>,
     pub(crate) workspaces: crate::workspace::Workspaces,
     pub(crate) sync: crate::sync::Sync,
+    pub(crate) repo_sync: crate::workspace::repo_sync::RepoSync,
     pub(crate) previews: Arc<crate::preview::Previews>,
     pub(crate) terminals: runtime::terminal::Terminals,
     pub(crate) mac: crate::mac::Mac,
@@ -607,17 +611,19 @@ impl Manager {
                     },
                 )
             {
+                let reason = format!("native history missing, changed or unreadable: {error}");
                 local.append(
                     &session.session_id,
                     "native_history_unavailable",
-                    json!({"reason":format!("native history missing, changed or unreadable: {error}")}),
+                    json!({"reason":reason}),
                     None,
                 )?;
                 if session.can_resume() {
+                    // The reason goes with the state too: apps show a lost session's reason, not this record.
                     local.append(
                         &session.session_id,
                         "state",
-                        json!({"state":SessionState::ProcessLost}),
+                        json!({"state":SessionState::ProcessLost,"reason":format!("The agent's saved conversation could not be reopened, so this thread can't continue ({reason}).")}),
                         None,
                     )?;
                     local
@@ -629,6 +635,7 @@ impl Manager {
         local.save_snapshot();
         let workspaces = crate::workspace::Workspaces::open(&config)?;
         let sync = crate::sync::Sync::open(&config)?;
+        let repo_sync = crate::workspace::repo_sync::RepoSync::new(&config);
         let previews = crate::preview::Previews::open(&config)?;
         let history = history::History::new(&config)?;
         let plan = accounts::PlanState::load(&config.state_dir);
@@ -647,6 +654,7 @@ impl Manager {
             storage,
             workspaces,
             sync,
+            repo_sync,
             teleports: teleport::Transfers::default(),
             previews,
             terminals: Default::default(),
@@ -903,7 +911,7 @@ impl Manager {
     fn content(input: &Value) -> Value {
         let mut input = input.clone();
         if let Some(fields) = input.as_object_mut() {
-            for key in ["plan_only", "ended", "thread_id", "project_id"] {
+            for key in ["plan_only", "ended", "thread_id", "project_id", "waiting"] {
                 fields.remove(key);
             }
         }
@@ -1042,6 +1050,7 @@ impl Manager {
             runtime::Kind::Droid => runtime::DROID_REASONING_LEVELS.contains(&reasoning),
             runtime::Kind::Kimi => runtime::KIMI_REASONING_LEVELS.contains(&reasoning),
             runtime::Kind::OpenClaw => runtime::OPENCLAW_REASONING_LEVELS.contains(&reasoning),
+            runtime::Kind::AgentZero => runtime::AGENT_ZERO_REASONING_LEVELS.contains(&reasoning),
         };
         if !supported {
             return Err(Error::Conflict("invalid reasoning effort"));
@@ -1472,17 +1481,24 @@ impl Manager {
             let failure = match state {
                 Some(SessionState::Idle) => break,
                 Some(SessionState::Failed | SessionState::ProcessLost | SessionState::Closed)
-                | None => "the new agent couldn't start in Cloud, so this thread wasn't changed",
-                _ if Instant::now() > deadline => {
-                    "the new agent didn't start within a minute, so this thread wasn't changed"
+                | None => {
+                    let failure =
+                        "the new agent couldn't start in Cloud, so this thread wasn't changed";
+                    match self.start_failure(&id) {
+                        Some(why) => Error::Refused(format!("{failure}: {why}")),
+                        None => Error::Conflict(failure),
+                    }
                 }
+                _ if Instant::now() > deadline => Error::Conflict(
+                    "the new agent didn't start within a minute, so this thread wasn't changed",
+                ),
                 _ => {
                     tokio::time::sleep(Duration::from_millis(250)).await;
                     continue;
                 }
             };
             self.settle_continue(&from, &id, false);
-            return Err(Error::Conflict(failure));
+            return Err(failure);
         }
         let pending = self
             .finish_continue(from.clone(), id.clone(), CONTINUE_WAIT)
@@ -1491,6 +1507,25 @@ impl Manager {
             self.keep_finishing(from, id);
         }
         Ok(pending)
+    }
+
+    /// Why a session didn't start, as its start receipt saved it (launch): one line, capped, as the website's #1821.
+    fn start_failure(&self, id: &str) -> Option<String> {
+        let local = self.local.lock().unwrap();
+        let receipts = &local.sessions.get(id)?.receipts;
+        let start = receipts
+            .values()
+            .find(|r| r.command == "start" && r.state == "failed")?;
+        let parts = start
+            .error
+            .as_deref()?
+            .split(char::is_control)
+            .map(str::trim);
+        let why = parts
+            .filter(|p| !p.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ");
+        (!why.is_empty()).then(|| why.chars().take(1000).collect())
     }
 
     /// Hands the website the new session, then closes the old one (#237). The website applies it once, and a retry
@@ -1866,7 +1901,7 @@ impl Manager {
                 let (kind, reasoning) = (session.harness, session.reasoning.clone());
                 let command_guard_enabled = session.command_guard_enabled();
                 let strip_ai_co_authors = session.strip_ai_co_authors();
-                let system_prompt = session.system_prompt();
+                let system_prompt = crate::workspace::repo_sync::RepoSync::prompt(&config.repository, session.system_prompt());
                 let room_env = session.room_env();
                 failure_reason = "The side chat's source conversation could not be copied";
                 fork = children::fork_history(&local, &id, &request)?;
@@ -1970,6 +2005,69 @@ impl Manager {
         self.command_held(id, request, command, input, false)
     }
 
+    /// `room-cli thread compact`: compacts now, or once the agent is free (its turn ends, or it wakes). `then` is
+    /// sent when compaction ends, first in line, saying how it went (`end_compaction`), so the agent keeps going.
+    pub(crate) fn compact_then(
+        self: &Arc<Self>,
+        id: &str,
+        request: String,
+        then: Option<&str>,
+    ) -> Result<Receipt> {
+        let input = match then.filter(|text| !text.trim().is_empty()) {
+            Some(text) => json!({"then":text}),
+            None => json!({}),
+        };
+        self.command(id, request, "compact", input)
+    }
+
+    /// Ends a compaction. Its follow-up (`then`) goes first in the queue with how it went, unless a stop ended it.
+    fn end_compaction(
+        &self,
+        local: &mut Local,
+        id: &str,
+        request: &str,
+        state: &str,
+        reason: Option<String>,
+    ) -> Result<()> {
+        local.finish_receipt_with(id, request, state, reason.clone())?;
+        let compact = &local.sessions[id].receipts[request];
+        let follow = format!("{request}_then");
+        let Some(then) = compact.input["then"].as_str() else {
+            return Ok(());
+        };
+        if state == "interrupted" || local.sessions[id].receipts.contains_key(&follow) {
+            return Ok(());
+        }
+        let outcome = match (state, reason) {
+            ("completed", _) => "Your context was compacted.".to_owned(),
+            (_, Some(reason)) => {
+                format!("Context compaction failed: {reason}. Your context is unchanged.")
+            }
+            _ => "Context compaction failed. Your context is unchanged.".to_owned(),
+        };
+        let mut input = json!({"text":format!("{outcome}\n\n{then}"),"first":true});
+        if compact.input["plan_only"] == true {
+            input["plan_only"] = json!(true);
+        }
+        let receipt = Receipt {
+            request_id: follow,
+            command: "prompt".into(),
+            input,
+            state: "accepted".into(),
+            model: None,
+            provider: None,
+            workspace: None,
+            error: None,
+        };
+        local.append(
+            id,
+            "receipt",
+            serde_json::to_value(&receipt).map_err(io::Error::other)?,
+            None,
+        )?;
+        Ok(())
+    }
+
     /// `held`: a related thread's message, which may join a queue that a landing Stop already paused. It waits there
     /// for the user, as in Local threads (docs/scopes/queue.md, #982).
     pub(crate) fn command_held(
@@ -2059,7 +2157,7 @@ impl Manager {
                 return Err(Error::Conflict("service is draining"));
             }
             // The app retries this answer until the harness is back.
-            if matches!(command, "compact" | "rewind" | "goal")
+            if matches!(command, "rewind" | "goal")
                 && matches!(
                     session.state,
                     SessionState::Sleeping | SessionState::Resuming
@@ -2188,17 +2286,29 @@ impl Manager {
             }
             if command == "compact" {
                 if session.compacting {
-                    return Err(Error::Conflict("compaction is already running"));
+                    return Err(Error::Conflict("compaction is already running or waiting"));
                 }
-                if session.current_request.is_some()
-                    || !matches!(session.state, SessionState::Idle | SessionState::Failed)
-                {
+                let asleep = matches!(
+                    session.state,
+                    SessionState::Sleeping | SessionState::Resuming
+                );
+                // During a turn (say, the agent compacting itself) or asleep, it waits until the agent is free
+                // (`advance`).
+                let waiting = session.current_request.is_some() || asleep;
+                if !waiting && !matches!(session.state, SessionState::Idle | SessionState::Failed) {
                     return Err(Error::Conflict(
-                        "context can only be compacted while the thread is idle",
+                        "context can only be compacted while the thread is idle, working or asleep",
                     ));
                 }
-                if !session.ready || handle.is_none() {
+                if !waiting && (!session.ready || handle.is_none()) {
                     return Err(Error::Conflict("harness is not ready for compaction"));
+                }
+                if waiting {
+                    input["waiting"] = json!(true);
+                }
+                // Asked for in a loop run that must not spend extra credits, its follow-up stays guarded (ADR 0292).
+                if session.current_request.is_some() && session.guarded_turn {
+                    input["plan_only"] = json!(true);
                 }
             }
             if command == "goal" && (!session.ready || handle.is_none()) {
@@ -2332,6 +2442,12 @@ impl Manager {
                         .to_owned(),
                     request.clone(),
                 ),
+                "compact" if input["waiting"] == true => {
+                    if local.sessions[id].state == SessionState::Sleeping {
+                        self.schedule_resume(&mut local, id, false)?;
+                    }
+                    Next::None
+                }
                 "compact" => {
                     local.append(id, "state", json!({"state":SessionState::Running}), None)?;
                     Next::Compact(handle.expect("validated compact harness"), request.clone())
@@ -2598,22 +2714,14 @@ impl Manager {
             {
                 return;
             }
-            if let Err(error) = &result
-                && let Some(receipt) = local
-                    .sessions
-                    .get_mut(&id)
-                    .and_then(|session| session.receipts.get_mut(&request))
-                && !matches!(
-                    receipt.state.as_str(),
-                    "completed" | "failed" | "interrupted"
-                )
-            {
-                receipt.error = Some(error.to_string());
+            let reason = result.as_ref().err().map(ToString::to_string);
+            if state == "delivered" {
+                let _ = local.finish_receipt(&id, &request, state);
+                return;
             }
-            let _ = local.finish_receipt(&id, &request, state);
-            if state == "failed" {
-                self.advance(&mut local, &id, false);
-            }
+            // Refused or lost, the agent moves on: its follow-up says so (`end_compaction`).
+            let _ = self.end_compaction(&mut local, &id, &request, state, reason);
+            self.advance(&mut local, &id, false);
         });
     }
 
@@ -2728,6 +2836,9 @@ impl Manager {
     /// out a pending interrupt, or return to idle. `turn_ended` bypasses the active
     /// turn guard when the just-finished turn is the reason for advancing.
     fn advance(self: &Arc<Self>, local: &mut Local, id: &str, turn_ended: bool) {
+        if turn_ended && let Some(workspace) = &local.sessions[id].workspace {
+            self.repo_sync.nudge(&workspace.path);
+        }
         if local.sessions[id].state == SessionState::Sleeping {
             let _ = self.wake(local, id);
             return;
@@ -2752,6 +2863,37 @@ impl Manager {
             );
             return;
         }
+        // Agent Zero refuses the next prompt after a cancel and its commands outlive it: once its Stop settles, the
+        // freeing that Stop asked for (`stop_frees`) runs first, so queued work wakes a fresh bridge (ADR 20261116-153548).
+        if session.harness == runtime::Kind::AgentZero
+            && session.sleep_pending()
+            && session.can_resume()
+        {
+            self.release(local, id);
+            return;
+        }
+        // A waiting compaction runs now, before queued messages. A stop cancels it, and so does a loop run's guard
+        // once extra credits pay (ADR 0292).
+        let waiting = (session.compact_request.clone()).filter(|request| {
+            session
+                .receipts
+                .get(request)
+                .is_some_and(|r| r.state == "accepted" && r.input["waiting"] == true)
+        });
+        if let Some(request) = waiting {
+            let guarded = session.receipts[&request].input["plan_only"] == true;
+            let paused = self.storage.blocks() || session.storage_paused || session.queue_paused;
+            if paused || session.handle.is_none() || (guarded && self.on_credits(session.harness)) {
+                let _ = self.end_compaction(local, id, &request, "interrupted", None);
+            } else {
+                let handle = session.handle.clone().unwrap();
+                let _ = local.finish_receipt(id, &request, "running");
+                let _ = local.append(id, "state", json!({"state":SessionState::Running}), None);
+                self.clone().compact(id.to_owned(), request, handle);
+                return;
+            }
+        }
+        let session = &local.sessions[id];
         if self.storage.blocks()
             || session.storage_paused
             || session.queue_paused
@@ -3050,7 +3192,10 @@ impl Manager {
                     Some(saved),
                     local.sessions[&id].command_guard_enabled(),
                     local.sessions[&id].strip_ai_co_authors(),
-                    local.sessions[&id].system_prompt(),
+                    crate::workspace::repo_sync::RepoSync::prompt(
+                        &config.repository,
+                        local.sessions[&id].system_prompt(),
+                    ),
                     local.sessions[&id].room_env(),
                 )?;
                 local.sessions.get_mut(&id).unwrap().handle = Some(handle.clone());
@@ -3271,7 +3416,7 @@ impl Manager {
                             .unwrap()
                             .error = Some("Context compaction failed; see native history".into());
                     }
-                    local.finish_receipt(id, &request, status)?;
+                    self.end_compaction(&mut local, id, &request, status, None)?;
                     self.clone()
                         .snapshot_usage(id.to_owned(), handle.clone(), None);
                     self.advance(&mut local, id, false);
@@ -3507,6 +3652,11 @@ impl Manager {
                 }
                 for request in interrupts {
                     local.finish_receipt(id, &request, "unknown_after_restart")?;
+                }
+                // A compaction running, or waiting for this turn, ends with the agent, so it never holds the queue.
+                if let Some(request) = local.sessions[id].compact_request.clone() {
+                    let reason = Some("the agent stopped".to_owned());
+                    self.end_compaction(&mut local, id, &request, "unknown_after_restart", reason)?;
                 }
                 if cleaned_up {
                     local.append(id, "harness", json!({"pid":null}), None)?;

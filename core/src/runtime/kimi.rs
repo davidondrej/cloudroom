@@ -16,6 +16,7 @@ pub(super) const KIMI: cursor::Flavor = cursor::Flavor {
     replay: false,
     explain_stops: true,
     empty_turn: None,
+    cumulative_text: false,
 };
 const SESSIONS: &str = "sessions";
 /// The efforts Local threads offer for Kimi (provider-acp reads its `thinking` option); Kimi offers some of them per model.

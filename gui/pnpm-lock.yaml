@@ -5,6 +5,7 @@ settings:
   excludeLinksFromLockfile: false
 
 overrides:
+  markdown-it: 14.3.3
   zod: 4.3.6
   dompurify: ^3.4.17
   prosemirror-view: ^1.42.3
@@ -752,8 +753,8 @@ importers:
         specifier: ^3.0.2
         version: 3.0.2
       npm:
-        specifier: 11.16.0
-        version: 11.16.0
+        specifier: 11.21.2
+        version: 11.21.2
       pino:
         specifier: ^9.6.0
         version: 9.14.0
@@ -1038,8 +1039,8 @@ importers:
         specifier: 1.2.0-beta.15
         version: 1.2.0-beta.15
       npm:
-        specifier: 11.16.0
-        version: 11.16.0
+        specifier: 11.21.2
+        version: 11.21.2
       picocolors:
         specifier: ^1.1.1
         version: 1.1.1
@@ -1167,6 +1168,9 @@ importers:
       bb-plugin-push-notifications:
         specifier: workspace:*
         version: link:../../plugins/push-notifications
+      bb-plugin-repo-sync:
+        specifier: workspace:*
+        version: link:../../plugins/repo-sync
       bb-plugin-scheduled-send:
         specifier: workspace:*
         version: link:../../plugins/scheduled-send
@@ -1531,6 +1535,9 @@ importers:
 
   packages/local-open-targets:
     dependencies:
+      '@cloudroom/domain':
+        specifier: workspace:*
+        version: link:../domain
       '@cloudroom/host-daemon-contract':
         specifier: workspace:*
         version: link:../host-daemon-contract
@@ -1640,8 +1647,8 @@ importers:
         specifier: workspace:*
         version: link:../plugin-sdk
       npm:
-        specifier: 11.16.0
-        version: 11.16.0
+        specifier: 11.21.2
+        version: 11.21.2
       saxes:
         specifier: ^6.0.0
         version: 6.0.0
@@ -3175,6 +3182,9 @@ importers:
 
   plugins/organization:
     dependencies:
+      '@cloudroom/shared-ui':
+        specifier: workspace:*
+        version: link:../../packages/shared-ui
       zod:
         specifier: 4.3.6
         version: 4.3.6
@@ -3574,6 +3584,37 @@ importers:
       react-dom:
         specifier: ^19.0.0
         version: 19.2.4(react@19.2.4)
+      typescript:
+        specifier: npm:@typescript/typescript6@^6.0.2
+        version: '@typescript/typescript6@6.0.2'
+      vitest:
+        specifier: ^4.1.1
+        version: 4.1.12(@opentelemetry/api@1.9.1)(@types/node@22.19.10)(jsdom@29.0.1(@noble/hashes@2.4.0))(msw@2.12.14(@types/node@22.19.10)(@typescript/typescript6@6.0.2))(vite@8.0.12(@types/node@22.19.10)(esbuild@0.28.1)(jiti@2.7.0)(terser@5.50.0)(tsx@4.23.1)(yaml@2.9.0))
+
+  plugins/repo-sync:
+    dependencies:
+      '@cloudroom/shared-ui':
+        specifier: workspace:*
+        version: link:../../packages/shared-ui
+      zod:
+        specifier: 4.3.6
+        version: 4.3.6
+    devDependencies:
+      '@cloudroom/plugin-build':
+        specifier: workspace:*
+        version: link:../../packages/plugin-build
+      '@get-bb/plugin-sdk':
+        specifier: workspace:*
+        version: link:../../packages/plugin-sdk
+      '@types/node':
+        specifier: ^22.0.0
+        version: 22.19.10
+      '@types/react':
+        specifier: ^19.0.0
+        version: 19.2.13
+      react:
+        specifier: ^19.0.0
+        version: 19.2.4
       typescript:
         specifier: npm:@typescript/typescript6@^6.0.2
         version: '@typescript/typescript6@6.0.2'
@@ -9856,8 +9897,8 @@ packages:
   markdown-it-task-lists@2.1.1:
     resolution: {integrity: sha512-TxFAc76Jnhb2OUu+n3yz9RMu4CwGfaT788br6HhEDlvWfdeJcLUsxk1Hgw2yJio0OXsxv7pyIPmvECY7bMbluA==}
 
-  markdown-it@14.3.0:
-    resolution: {integrity: sha512-RCEsPjR+sr0x+AuYp601tKTkgFG4YEPLCzHST3cQ/fhlJkqAkz1L2/Qbp1j9qw5SBwQHFBoW8+hoN5xssOF0Tw==}
+  markdown-it@14.3.3:
+    resolution: {integrity: sha512-L//tDAkjTjJCU6pBUSBTgs3Kg4InVaZuUZog/b6V12UKhcDQ7S78877ibbCanRExwPuYP1CZD7Gd2dxSy1GXRg==}
     hasBin: true
 
   markdown-table@3.0.4:
@@ -10198,8 +10239,8 @@ packages:
     resolution: {integrity: sha512-DlL+XwOy3NxAQ8xuC0okPgK46iuVNAK01YN7RueYBqqFeGsBjV9XmCAzAdgt+667bCl5kPh9EqKKDwnaPG1I7A==}
     engines: {node: '>=10'}
 
-  npm@11.16.0:
-    resolution: {integrity: sha512-A74XL8OxmcegZDMWPkWb5bEQppg8HdYwW3rBD2sPoS4UQHVajfaxBkqyzLeJ3wR0kZ+5xoTjItxXaF7eIXUsyw==}
+  npm@11.21.2:
+    resolution: {integrity: sha512-7HPApk+AflMUavSseL1Pm6CnYqMIHk53x+KmuhqmTDqPkjPMgxIpTPcTqsE91EKNw4gFBJV9fnXiSdGm1DXq9A==}
     engines: {node: ^20.17.0 || >=22.9.0}
     hasBin: true
     bundledDependencies:
@@ -17455,7 +17496,7 @@ snapshots:
 
   markdown-it-task-lists@2.1.1: {}
 
-  markdown-it@14.3.0:
+  markdown-it@14.3.3:
     dependencies:
       argparse: 2.0.1
       entities: 4.5.0
@@ -18082,7 +18123,7 @@ snapshots:
 
   normalize-url@6.1.0: {}
 
-  npm@11.16.0: {}
+  npm@11.21.2: {}
 
   object-assign@4.1.1: {}
 
@@ -18441,7 +18482,7 @@ snapshots:
   prosemirror-markdown@1.13.5:
     dependencies:
       '@types/markdown-it': 14.1.2
-      markdown-it: 14.3.0
+      markdown-it: 14.3.3
       prosemirror-model: 1.25.12
 
   prosemirror-menu@1.3.2:
@@ -19312,7 +19353,7 @@ snapshots:
     dependencies:
       '@tiptap/core': 2.27.2(@tiptap/pm@2.27.2)
       '@types/markdown-it': 13.0.9
-      markdown-it: 14.3.0
+      markdown-it: 14.3.3
       markdown-it-task-lists: 2.1.1
       prosemirror-markdown: 1.13.5
 

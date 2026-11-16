@@ -50,6 +50,8 @@ pub(super) struct Info {
     stopped: AtomicBool,
     /// Core found nothing listening on the port, as after a sleep.
     down: AtomicBool,
+    /// An HTTP answer other than 101 or Core's 409, as from the relay in front of a VPS (#1798).
+    refused: AtomicBool,
 }
 
 pub(super) struct Tunnel {
@@ -116,6 +118,7 @@ impl Tunnel {
             direct: shared.direct.clone(),
             stopped: AtomicBool::new(false),
             down: AtomicBool::new(false),
+            refused: AtomicBool::new(false),
         });
         let listeners = listeners
             .into_iter()
@@ -643,6 +646,7 @@ impl Info {
             ));
         }
         self.down.store(false, Ordering::SeqCst); // Only this attempt's answer counts, never an older one's.
+        self.refused.store(false, Ordering::SeqCst);
         // Some sandbox proxies relay bytes only after a WebSocket handshake; cores before 0.1.35 know only cloudroom-tunnel.
         match self.connect("websocket").await {
             Err(Some(400)) => self.connect("cloudroom-tunnel").await,
@@ -671,6 +675,8 @@ impl Info {
             .map_err(|_| None)?
             .map_err(|_| None)?;
         let status = response.status().as_u16();
+        self.refused
+            .store(status != 101 && status != 409, Ordering::SeqCst);
         if status == 400 {
             return Err(Some(400));
         }
@@ -679,6 +685,11 @@ impl Info {
             return Err(Some(status));
         }
         Ok(Box::new(response.upgrade().await.map_err(|_| None)?))
+    }
+
+    /// The last tunnel attempt got an HTTP answer other than 101 or Core's 409.
+    pub(super) fn refused(&self) -> bool {
+        self.refused.load(Ordering::SeqCst)
     }
 
     /// The browser-facing proxy answers on every loopback for this preview's generation.
@@ -741,6 +752,7 @@ pub(super) async fn test_proxy(
         direct: reqwest::Client::new(),
         stopped: AtomicBool::new(false),
         down: AtomicBool::new(false),
+        refused: AtomicBool::new(false),
     });
     let tasks = listeners
         .into_iter()

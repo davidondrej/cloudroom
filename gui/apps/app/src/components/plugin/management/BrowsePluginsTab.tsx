@@ -39,9 +39,11 @@ import {
 } from "./plugin-browse-discovery";
 import { pluginRowSignal } from "./plugin-status";
 import { CatalogEntryIconChip, PluginLogoChip } from "./plugin-ui";
+import { PluginsFeatured } from "./PluginsFeatured";
 
+// As wide as the Skills page: the featured bento needs the room.
 export const PLUGINS_LIST_BAND_CLASSES =
-  "mx-auto w-full max-w-3xl px-4 md:px-5";
+  "mx-auto w-full max-w-5xl px-4 md:px-5";
 export const PLUGINS_LIST_SCROLL_CONTENT_CLASS = "[&>div]:block!";
 
 type OpenPlugin = (pluginId: string, trigger: HTMLButtonElement) => void;
@@ -150,6 +152,14 @@ export function BrowsePluginsTab({
             The plugin catalog is not available. Showing installed plugins.
           </p>
         ) : null}
+        {filter === "all" && query === "" ? (
+          <PluginsFeatured
+            rows={rows}
+            groups={groups}
+            onInstall={onInstall}
+            onOpenPlugin={onOpenPlugin}
+          />
+        ) : null}
         {content}
       </div>
     </ResourceCollectionViewport>
@@ -234,7 +244,11 @@ export function PluginRowGroups({
     <>
       <div className="space-y-5" data-testid="plugin-list">
         {groups.map((group) => (
-          <section key={group.key} aria-label={group.label}>
+          <section
+            key={group.key}
+            aria-label={group.label}
+            className="scroll-mt-3"
+          >
             <h2 className="px-3 pb-1.5 text-2xs font-semibold uppercase tracking-wider text-muted-foreground">
               {group.label}
             </h2>

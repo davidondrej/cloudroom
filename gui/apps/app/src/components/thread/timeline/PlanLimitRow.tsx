@@ -29,6 +29,7 @@ import { usePlanLimitAgents, type PlanLimitAgent } from "./plan-limit-agents";
 import {
   atLimit,
   nextAccount,
+  reportLimitCardViewed,
   switchAccount,
   usePlanLimitAccounts,
 } from "./plan-limit-accounts";
@@ -45,21 +46,29 @@ type PlanLimitAccountSwitch = NonNullable<
   TimelineNonOperationSystemRow["planLimitAccountSwitch"]
 >;
 
+/** Only a recent limit's card counts as seen: an old thread opened again after a restart would count it twice. */
+const CARD_VIEW_MS = 24 * 60 * 60_000;
 /** A switch whose new agent never got going (say its message is still queued) stops showing as in progress. */
 const SWITCH_STALE_MS = 3 * 60_000;
 
 /** A plan limit stopped the last turn: switch to another account of the same agent, or continue on another agent (ADR 0211 switch, then resend). */
 export function PlanLimitRow({
+  rowId,
+  rowAt,
   threadId,
   switched,
   className,
 }: {
+  /** The limit's timeline row: its card counts as viewed once per app run. */
+  rowId: string;
+  /** When the limit stopped the turn (ms). */
+  rowAt: number;
   threadId: string;
   /** The thread already moved to another agent with resend: the card shows it picking up. */
   switched?: PlanLimitSwitch | undefined;
   className?: string;
 }) {
-  const { thread, model, self, selfResetsAt, agents, primary } =
+  const { thread, model, self, selfResetsAt, agents, agentsLoaded, primary } =
     usePlanLimitAgents(threadId);
   const accounts = usePlanLimitAccounts(thread?.providerId ?? "");
   const queryClient = useQueryClient();
@@ -88,8 +97,24 @@ export function PlanLimitRow({
     const timer = setTimeout(() => setBusy(null), 60_000);
     return () => clearTimeout(timer);
   }, [busy, pending]);
-  if (!thread) return null;
   const stopped = status === "idle" || status === "error";
+  const shown =
+    !!thread && stopped && !switching && !switched;
+  const provider = thread?.providerId ?? "";
+  const execution =
+    thread?.executionTarget === "cloud" ? "cloud_sandbox" : "local";
+  useEffect(() => {
+    if (!shown || !accounts.loaded || !agentsLoaded) return;
+    if (Date.now() - rowAt > CARD_VIEW_MS) return;
+    reportLimitCardViewed({
+      key: rowId,
+      provider,
+      execution,
+      can_switch_account: accounts.others.length > 0,
+      other_agents: agents.length,
+    });
+  }, [shown, accounts.loaded, agentsLoaded, rowId, rowAt, provider, execution, accounts.others.length, agents.length]);
+  if (!thread) return null;
   if (switching || switched) {
     if (switched && stopped && now - switched.at > SWITCH_STALE_MS) {
       return <PlanLimitSwitchedRow switched={switched} className={className} />;

@@ -23,10 +23,12 @@ import { PERSONAL_PROJECT_ID } from "@cloudroom/domain";
 import { defineRpcContract, type BbPluginApi } from "@get-bb/plugin-sdk";
 import type { AutomationService } from "./service.js";
 import type { Db } from "./data.js";
+import type { TrackScan } from "./rpc-types.js";
 import { cloudLoopUsage, localLoopUsage, templateUsage } from "./usage.js";
 import { agentSessions, agentSessionsSchema } from "./agent-sessions.js";
 import {
   forgetCloud,
+  newestLoopAt,
   pausedCloud,
   pausedLocal,
   pausedLoopSchema,
@@ -59,6 +61,9 @@ const cloudTemplateInputSchema = z
     priority: loopPrioritySchema,
   })
   .strict();
+
+/** Which scan to start; null is the Workflow scan (older apps send null). */
+const scanStartInputSchema = z.object({ kind: z.enum(["workflow", "cyber"]) }).strict().nullable();
 
 export const automationRpcContract = defineRpcContract({
   automations_overview: {
@@ -158,8 +163,16 @@ export const automationRpcContract = defineRpcContract({
     output: agentSessionsSchema,
   },
   scans_start: {
-    input: z.null(),
+    input: scanStartInputSchema,
     output: z.object({ threadId: z.string() }).strict(),
+  },
+  scans_upgrade_clicked: {
+    input: z.null(),
+    output: z.null(),
+  },
+  scans_card: {
+    input: z.null(),
+    output: z.object({ show: z.boolean() }).strict(),
   },
 });
 
@@ -191,7 +204,7 @@ async function cloudThreadAgent(
 
 async function withCloudAgents(threads: Sdk["threads"], result: unknown) {
   const { automations = [] } = result as {
-    automations?: (Pick<CloudAutomation, "thread_id" | "agent"> & {
+    automations?: (Pick<CloudAutomation, "thread_id" | "agent" | "agents"> & {
       project_id?: string | null;
     })[];
   };
@@ -200,6 +213,11 @@ async function withCloudAgents(threads: Sdk["threads"], result: unknown) {
     // A fresh-thread loop's own saved agent; otherwise its thread's, which it uses. Its project is its thread's, or the website's once that thread is deleted.
     automations: await Promise.all(
       automations.map(async (automation) => {
+        const summary = (agent: NonNullable<CloudAutomation["agent"]>) => ({
+          providerId: agent.provider,
+          model: agent.model,
+          reasoningLevel: agent.reasoning,
+        });
         // A project loop's home is its project (no thread hosts it).
         const home = automation.thread_id.startsWith("proj_") ? automation.thread_id : null;
         const thread = home
@@ -212,12 +230,12 @@ async function withCloudAgents(threads: Sdk["threads"], result: unknown) {
             (thread && "projectId" in thread
               ? thread.projectId
               : (automation.project_id ?? null)),
+          // A loop with several agents lists them in turn order.
+          ...(automation.agents?.length
+            ? { agents: automation.agents.map(summary) }
+            : {}),
           agent: automation.agent
-            ? {
-                providerId: automation.agent.provider,
-                model: automation.agent.model,
-                reasoningLevel: automation.agent.reasoning,
-              }
+            ? summary(automation.agent)
             : thread
               ? await cloudThreadAgent(threads, thread)
               : null,
@@ -230,10 +248,33 @@ async function withCloudAgents(threads: Sdk["threads"], result: unknown) {
 const connected = (auth: { state: string } | null) =>
   auth?.state === "connected" || auth?.state === "limited";
 
+type Kv = BbPluginApi["storage"]["kv"];
+const SCAN_TITLE = "Workflow scan";
+const LAST_SCAN_KEY = "scans.lastStartedAt";
+/** The top-right Scan card wants to show when no scan started on this computer for this long (docs/scopes/corner-cards.md). */
+const SCAN_CARD_DAYS = 45;
+/** And when no new loop was created for this long: someone who just made a loop needs no nudge (David, 2026-11-16). */
+const NO_NEW_LOOP_DAYS = 10;
+
+/** When the last Workflow scan started on this computer, or 0. A scan from before this was saved is found once, by its thread. */
+async function lastScanAt(sdk: Sdk, kv: Kv, pluginId: string): Promise<number> {
+  const saved = await kv.get<number>(LAST_SCAN_KEY).catch(() => undefined);
+  if (typeof saved === "number") return saved;
+  const threads = z
+    .array(z.object({ title: z.string().nullable(), createdAt: z.number() }).passthrough())
+    .catch([])
+    .parse(await sdk.threads.list({ projectId: PERSONAL_PROJECT_ID, originPluginId: pluginId, sort: "created", limit: 50 }).catch(() => []));
+  const found = threads.find((thread) => thread.title === SCAN_TITLE)?.createdAt ?? 0;
+  await kv.set(LAST_SCAN_KEY, found).catch(() => {});
+  return found;
+}
+
 export function createRpcHandlers(
   service: AutomationService,
   sdk?: Sdk,
   db?: Db,
+  trackScan: TrackScan = () => {},
+  scans?: { kv: Kv; pluginId: string },
 ) {
   return {
     async automations_usage(input: z.output<typeof loopUsageInputSchema>) {
@@ -291,13 +332,26 @@ export function createRpcHandlers(
         priority: input.priority,
       });
     },
-    scans_agent_sessions() {
-      return agentSessions();
+    // The Scans tab asks for these once each time it opens.
+    async scans_agent_sessions() {
+      const sessions = await agentSessions();
+      trackScan("viewed", {
+        agents: sessions.agents.length,
+        sessions: sessions.agents.reduce((sum, agent) => sum + agent.sessions, 0),
+      });
+      return sessions;
     },
-    async scans_start() {
+    scans_upgrade_clicked() {
+      trackScan("upgrade_clicked");
+      return null;
+    },
+    async scans_start(input: z.output<typeof scanStartInputSchema>) {
       if (!sdk) throw new Error("Scans are unavailable.");
+      const kind = input?.kind ?? "workflow";
+      const cyber = kind === "cyber";
       const plan = (await sdk.cloudroom.status().catch(() => null))?.plan;
       if (!plan || plan === "free") {
+        trackScan("start_failed", { reason: plan ? "free" : "no_plan", kind });
         throw new Error(
           "Scans need a paid plan. Upgrade at https://www.cloudroom.dev/billing",
         );
@@ -310,20 +364,39 @@ export function createRpcHandlers(
         !connected(claude) && connected(codex)
           ? { providerId: "codex", model: "gpt-6.1-sol" }
           : { providerId: "claude-code", model: "claude-opus-5-5" };
-      const thread = z.object({ id: z.string() }).passthrough().parse(
-        await sdk.threads.spawn({
+      const spawned = await sdk.threads.spawn({
           projectId: PERSONAL_PROJECT_ID,
           executionTarget: "local",
           environment: { type: "project-default" },
           ...lead,
           reasoningLevel: "xhigh",
-          title: "Workflow scan",
-          prompt: "Scan my workflow. Follow the workflow-scan skill.",
-          pluginMetadata: { workflowScan: { stage: "finding" } },
-        }),
-      );
+          title: cyber ? "Cyber scan" : SCAN_TITLE,
+          prompt: cyber
+            ? "Run a cyber scan of my computer and active repos. Follow the cyber-scan skill."
+            : "Scan my workflow. Follow the workflow-scan skill.",
+          // Both scans share the progress card's metadata; `kind` picks the Cyber scan's labels.
+          pluginMetadata: { workflowScan: cyber ? { stage: "finding", kind } : { stage: "finding" } },
+        }).catch((error: unknown) => {
+          trackScan("start_failed", { reason: "spawn", kind });
+          throw error;
+        });
+      const thread = z.object({ id: z.string() }).passthrough().parse(spawned);
+      trackScan("started", { lead: lead.providerId, kind });
       await sdk.threads.pin({ threadId: thread.id }).catch(() => null);
+      if (!cyber) await scans?.kv.set(LAST_SCAN_KEY, Date.now()).catch(() => {});
       return { threadId: thread.id };
+    },
+    /** Whether the top-right Scan card wants to show: signed in, on any plan, no scan started here in the last
+     *  45 days, and no new loop (Local or Cloud) in the last 10 days. Free plans see it too: the Scans tab then
+     *  asks them to upgrade (David, 2026-11-16). Unknown Cloud loops count as a no. */
+    async scans_card() {
+      if (!sdk || !scans || !db) return { show: false };
+      const plan = (await sdk.cloudroom.status().catch(() => null))?.plan;
+      if (!plan) return { show: false };
+      const now = Date.now(), day = 86_400_000;
+      if (now - (await lastScanAt(sdk, scans.kv, scans.pluginId)) <= SCAN_CARD_DAYS * day) return { show: false };
+      const newest = await newestLoopAt(db, sdk.cloudroom, now);
+      return { show: newest !== null && now - newest > NO_NEW_LOOP_DAYS * day };
     },
     async account_plan() {
       const status = await sdk?.cloudroom.status().catch(() => null);

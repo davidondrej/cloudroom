@@ -3,6 +3,7 @@ import { isReviewThread, migrations } from "./data.js";
 import { ingestLegacyImport } from "./legacy-import.js";
 import { pluginDataDirFromDb } from "./path.js";
 import { automationRpcContract, createRpcHandlers } from "./rpc.js";
+import type { TrackScan } from "./rpc-types.js";
 import {
   closeAutomationRunForSettledThread,
   disableAutomationsForDeletedThreadEvent,
@@ -35,11 +36,13 @@ export default async function plugin(room: BbPluginApi) {
     serverUrl: resolveServerUrl(),
   });
 
+  const trackScan: TrackScan = (action, properties = {}) =>
+    room.experimental_telemetry.capture("workflow_scan", { action, ...properties });
   room.rpc.register(
     automationRpcContract,
-    createRpcHandlers(service, room.sdk, db),
+    createRpcHandlers(service, room.sdk, db, trackScan, { kv: room.storage.kv, pluginId: room.pluginId }),
   );
-  registerAutomationCli({ bb: room, service });
+  registerAutomationCli({ bb: room, service, trackScan });
 
   const reviewChanged = (threadId: string) => {
     if (isReviewThread(db, threadId)) {

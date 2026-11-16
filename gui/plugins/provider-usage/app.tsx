@@ -466,6 +466,10 @@ async function signInMacCodex(onInstall: (since: number | null) => void): Promis
   if (status.state === "error") throw new Error(status.message ?? "Codex sign-in failed.");
 }
 
+/** "sign in" next to the note, styled like "+ buy more" in grey (David, 2026-11-16). */
+const SIGN_IN_CLASS =
+  "shrink-0 border border-subtle-foreground/70 px-1.5 leading-5 text-sidebar-foreground tabular-nums hover:bg-sidebar-accent disabled:opacity-60";
+
 /** Sign in instead of "run `codex` in a terminal" (ADR 20261111-123959). */
 function CodexSignIn({ label, onSignedIn }: { label: string; onSignedIn: () => void }) {
   const [state, setState] = useState<"idle" | "waiting" | "error">("idle");
@@ -481,18 +485,43 @@ function CodexSignIn({ label, onSignedIn }: { label: string; onSignedIn: () => v
   };
   return (
     <div>
-      <div className="flex items-center justify-between gap-2">
+      <div className="flex items-center gap-2">
         <UsageNote>{installing !== null ? "installing codex" : state === "waiting" ? "finish in your browser" : label}</UsageNote>
-        <Button type="button" size="sm" className="h-6 px-2.5 text-xs tabular-nums" disabled={state === "waiting"} onClick={signIn}>
-          {installing !== null ? `Installing ${installing}%` : state === "waiting" ? "Waiting…" : "Sign in"}
-        </Button>
+        <button type="button" className={SIGN_IN_CLASS} disabled={state === "waiting"} onClick={signIn}>
+          {installing !== null ? `installing ${installing}%` : state === "waiting" ? "waiting…" : "sign in"}
+        </button>
       </div>
       {state === "error" ? <p role="alert" className="text-destructive">{error}</p> : null}
     </div>
   );
 }
 
-function ProviderUsageBody({ provider, onCodexSignedIn }: { provider: UsageProvider; onCodexSignedIn?: () => void }) {
+/** Other agents sign in with their own login command in the app's login terminal, like the model picker. */
+function TerminalSignIn({ label, providerId, signIn }: { label: string; providerId: string; signIn: UsageSignIn }) {
+  return (
+    <div className="flex items-center gap-2">
+      <UsageNote>{label}</UsageNote>
+      <button
+        type="button"
+        className={SIGN_IN_CLASS}
+        onClick={() =>
+          window.dispatchEvent(
+            new CustomEvent("cloudroom:provider-login", {
+              detail: { providerId, hostId: signIn.hostId, onDone: signIn.onSignedIn },
+            }),
+          )
+        }
+      >
+        sign in
+      </button>
+    </div>
+  );
+}
+
+/** Sign-in runs on the computer running Cloudroom, so other machines and stored accounts keep their hint. */
+type UsageSignIn = { hostId: string; onSignedIn: () => void };
+
+function ProviderUsageBody({ provider, signIn }: { provider: UsageProvider; signIn?: UsageSignIn | undefined }) {
   const usage = provider.usage;
   if (usage === null) return <UsageNote>Usage not reported.</UsageNote>;
   switch (usage.status) {
@@ -520,8 +549,9 @@ function ProviderUsageBody({ provider, onCodexSignedIn }: { provider: UsageProvi
     case "unauthenticated":
     case "expired": {
       const label = usage.status === "expired" ? "session expired" : "signed out";
-      if (provider.providerId === "codex" && onCodexSignedIn)
-        return <CodexSignIn label={label} onSignedIn={onCodexSignedIn} />;
+      if (signIn && provider.providerId === "codex")
+        return <CodexSignIn label={label} onSignedIn={signIn.onSignedIn} />;
+      if (signIn) return <TerminalSignIn label={label} providerId={provider.providerId} signIn={signIn} />;
       return <UsageNote>{usage.status === "expired" ? provider.expiredHint : provider.signInHint}</UsageNote>;
     }
     case "error":
@@ -595,6 +625,7 @@ function AccountChip({
       body: JSON.stringify({
         provider: account.providerId,
         id: account.accountId,
+        where: "usage_box",
       }),
     }).catch(() => undefined);
     refresh();
@@ -1038,18 +1069,19 @@ export function ProviderUsageStatusContent({
                     ) : (
                       <ProviderUsageBody
                         provider={account}
-                        onCodexSignedIn={
-                          // Sign in runs on the computer running Cloudroom, so another machine keeps its hint.
+                        signIn={
                           !activeMachine?.primary ||
                           (account.accountId && account.accountId !== "local")
                             ? undefined
-                            : () =>
-                                void refreshUsage({
-                                  force: true,
-                                  machineIds:
-                                    activeMachineId === null ? null : [activeMachineId],
-                                  maxAgeMs: 0,
-                                })
+                            : {
+                                hostId: activeMachine.id,
+                                onSignedIn: () =>
+                                  void refreshUsage({
+                                    force: true,
+                                    machineIds: [activeMachine.id],
+                                    maxAgeMs: 0,
+                                  }),
+                              }
                         }
                       />
                     )}

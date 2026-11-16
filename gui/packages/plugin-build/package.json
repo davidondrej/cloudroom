@@ -21,7 +21,7 @@
     "@cloudroom/domain": "workspace:*",
     "@cloudroom/process-utils": "workspace:*",
     "@get-bb/plugin-sdk": "workspace:*",
-    "npm": "11.16.0",
+    "npm": "11.21.2",
     "saxes": "^6.0.0"
   },
   "devDependencies": {

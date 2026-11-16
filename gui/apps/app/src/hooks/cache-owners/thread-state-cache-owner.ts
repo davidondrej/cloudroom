@@ -121,6 +121,8 @@ interface RollbackPinnedThreadOrderTransactionArgs {
 interface ArchiveThreadAndChildrenTransactionArgs {
   queryClient: QueryClient;
   threadId: string;
+  /** False: the server keeps running children open, so only this thread leaves the sidebar now. */
+  includeLive?: boolean;
 }
 
 interface ArchiveMatchingThreadsTransactionArgs {
@@ -762,14 +764,17 @@ async function beginArchiveMatchingThreadsTransaction({
 export async function beginArchiveThreadAndChildrenTransaction({
   queryClient,
   threadId,
+  includeLive = true,
 }: ArchiveThreadAndChildrenTransactionArgs): Promise<ArchiveThreadsTransaction> {
   await queryClient.cancelQueries({ queryKey: threadsQueryKey() });
   await cancelSidebarNavigation(queryClient);
   const threadIds = new Set([
     threadId,
-    ...getCachedLiveThreadDescendants(queryClient, threadId).map(
-      (thread) => thread.id,
-    ),
+    ...(includeLive
+      ? getCachedLiveThreadDescendants(queryClient, threadId).map(
+          (thread) => thread.id,
+        )
+      : []),
   ]);
   return beginArchiveMatchingThreadsTransaction({
     matchesThread: (thread) => threadIds.has(thread.id),

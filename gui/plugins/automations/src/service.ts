@@ -439,6 +439,21 @@ function encodeRunCursor(startedAt: number, id: string): string {
   return Buffer.from(`${startedAt}:${id}`, "utf8").toString("base64url");
 }
 
+/** Each agent of a loop that takes turns must be available where the loop runs, with the loop's permission mode and
+ *  its own reasoning level. */
+async function checkLoopAgents(
+  bb: Parameters<typeof resolvePermissionMode>[0],
+  execution: AutomationExecution,
+): Promise<void> {
+  if (execution.mode !== "agent") return;
+  const routing = providerRoutingForEnvironment(execution.environment);
+  for (const agent of execution.agents ?? []) {
+    await resolvePermissionMode(bb, agent.providerId, execution.permissionMode, routing);
+    if (agent.reasoningLevel !== undefined)
+      await requireReasoningLevel(bb, agent.providerId, agent.reasoningLevel, routing);
+  }
+}
+
 function applyAgentExecutionUpdate(
   execution: AutomationExecution,
   update: AgentExecutionUpdate,
@@ -468,6 +483,22 @@ function applyAgentExecutionUpdate(
   } else if (update.serviceTier !== undefined) {
     next.serviceTier = update.serviceTier;
   }
+  // A new list starts with its first agent; one agent, or a change to the agent alone, ends the turns.
+  const [first, ...rest] = update.agents ?? [];
+  if (first !== undefined) {
+    Object.assign(next, { providerId: first.providerId, model: first.model, reasoningLevel: first.reasoningLevel ?? "medium" });
+    if (first.serviceTier === undefined) delete next.serviceTier;
+    else next.serviceTier = first.serviceTier;
+  }
+  if (rest.length > 0) next.agents = update.agents;
+  else if (
+    first !== undefined ||
+    update.providerId !== undefined ||
+    update.model !== undefined ||
+    update.reasoningLevel !== undefined ||
+    update.serviceTier !== undefined
+  )
+    delete next.agents;
   if (update.target === undefined) return next;
   if (update.target.type === "target-thread") {
     return { ...next, targetThreadId: update.target.threadId };
@@ -695,6 +726,7 @@ export function createAutomationService(args: {
       const now = Date.now();
       validateTrigger(payload.trigger, now);
       assertNotRecursiveCreation(db, payload.createdByThreadId);
+      await checkLoopAgents(bb, payload.execution);
       if (payload.execution.mode === "agent") {
         await resolvePermissionMode(
           bb,
@@ -807,6 +839,7 @@ export function createAutomationService(args: {
           : null;
       }
       if (input.execution !== undefined) {
+        await checkLoopAgents(bb, input.execution);
         if (input.execution.mode === "agent") {
           await resolvePermissionMode(
             bb,
@@ -862,6 +895,8 @@ export function createAutomationService(args: {
             providerRoutingForEnvironment(updatedExecution.environment),
           );
         }
+        if (input.agent.agents !== undefined)
+          await checkLoopAgents(bb, { ...updatedExecution, agents: input.agent.agents });
         patch.execution = updatedExecution;
       }
       if (patch.execution !== undefined)

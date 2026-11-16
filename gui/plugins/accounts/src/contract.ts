@@ -34,6 +34,9 @@ export const accountViewSchema = z.object({
 export type AccountView = z.infer<typeof accountViewSchema>;
 
 const target = z.object({ provider: providerSchema, id: z.string().min(1) });
+// Where an account was picked, for telemetry: Settings → Agents → Accounts, the usage box, or a plan-limit card.
+export const switchWhereSchema = z.enum(["settings", "usage_box", "limit_card"]);
+export type SwitchWhere = z.infer<typeof switchWhereSchema>;
 const ok = z.null();
 const poll = z.object({ sessionId: z.string() });
 const polled = z.object({
@@ -54,6 +57,7 @@ export const accountsRpcContract = defineRpcContract({
     input: target.extend({
       cloud: z.boolean().optional(),
       threadId: z.string().min(1).optional(),
+      where: switchWhereSchema.optional(),
     }),
     output: ok,
   },

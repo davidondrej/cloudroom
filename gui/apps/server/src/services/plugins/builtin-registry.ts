@@ -96,6 +96,12 @@ export const BUILTIN_PLUGINS = [
     pluginId: "plugin-api-tester",
     defaultEnabled: false,
   },
+  // RepoSync (docs/scopes/repo-sync.md): off until the user turns it on.
+  {
+    name: "repo-sync",
+    pluginId: "repo-sync",
+    defaultEnabled: false,
+  },
   {
     name: "inline-vis",
     pluginId: "inline-vis",

@@ -81,10 +81,12 @@ const systemProviderHostQueryFields = {
   environmentId: z.string().min(1),
 } as const;
 
+// `providerId` returns just that registered provider, without checking any host.
 export const systemProvidersQuerySchema = z
   .object({
     ...systemProviderHostQueryFields,
     capability: z.enum(["usage"]),
+    providerId: z.string().min(1),
   })
   .partial()
   .superRefine(rejectMultipleWorkspaceSelectors);

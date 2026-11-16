@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 /** Best-effort accident prevention for catastrophic shell commands, not a sandbox. Never block logins or credential copies. */
 export function checkCommand(command) {
   if (typeof command !== "string") throw new Error("Invalid shell command");
-  const start = String.raw`(?:^|[;&|()\n])\s*(?:(?:sudo|command|exec)(?:\s+-(?![vV]\s)[^\s]+)*\s+)*(?:/(?:[^\s/]+/)*|)(?:`;
+  const start = String.raw`(?:^|[;&|()\n]|(?:^|[;&|()\n])\s*(?:\w+=\S*\s+)*(?:[^\s;&|()]*\/)?(?:room-cli|cloudroom)\s+mac\s+run(?:\s+--?\w+)*\s+['"])\s*(?:(?:sudo|command|exec)(?:\s+-(?![vV]\s)[^\s]+)*\s+)*(?:/(?:[^\s/]+/)*|)(?:`;
   const end = String.raw`)(?=\s|$)`;
   const home = String.raw`(?:/+(?:\*)?|~/?(?:\*)?|\$(?:HOME|\{HOME\})/?(?:\*)?|/(?:Users|home)(?:/[^/\s"']+)?/?(?:\*)?|/root/?(?:\*)?)`;
   const rules = [
